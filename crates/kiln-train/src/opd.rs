@@ -134,9 +134,25 @@ impl Default for StableOpdMode {
 /// for each prompt, runs the teacher over each, computes per-token
 /// reverse KL, and turns each completion into an importance-sampling
 /// step.
+///
+/// `teacher_extra_messages`, when present, are **prepended only on the
+/// teacher's side** of the OPD step. The student rolls out from
+/// `messages` alone; the teacher computes its logprobs as if it had
+/// also seen `teacher_extra_messages` — typically a few pristine
+/// examples, an expanded schema, a style guide, or anti-pattern
+/// call-outs. The asymmetry sharpens the teacher's distribution at
+/// rollout positions, giving reverse-KL a tighter target. Critical for
+/// self-distillation, where teacher == student weights and the
+/// asymmetric prefix is the only source of gradient signal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpdPrompt {
     pub messages: Vec<ChatMessage>,
+    /// Asymmetric teacher-only context. Empty = symmetric (default).
+    /// When non-empty, the teacher's logprobs are computed against
+    /// `teacher_extra_messages ++ messages ++ rollout` while the
+    /// student still rolls out from `messages` alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub teacher_extra_messages: Vec<ChatMessage>,
 }
 
 /// Reference to a new-knowledge dataset for [`DistillRefreshRequest`].
@@ -582,7 +598,10 @@ impl Default for OpdConfig {
 /// function owns the per-rollout teacher query + KL math.
 #[derive(Debug)]
 pub struct OpdStepInputs<'a> {
-    /// Full tokenized rollout (prompt + completion).
+    /// Full tokenized rollout (prompt + completion). Used for the
+    /// student-side hidden state alignment, the label_mask, and as the
+    /// teacher query token sequence *unless* `teacher_tokens` is set
+    /// (asymmetric teacher conditioning).
     pub tokens: &'a [u32],
     /// Positions in `tokens` that contribute to the loss. Typically the
     /// completion's assistant-token positions. The OPD-loss kernel
@@ -599,7 +618,8 @@ pub struct OpdStepInputs<'a> {
     /// Frozen LM head weights, shape `[H, V]`. Matches the layout used
     /// by `kiln-flce-kernel` and `kiln-model::forward::embed_tokens_t`.
     pub head_t: &'a Tensor,
-    /// Teacher source. Queried for top-K logprobs at `active_positions`.
+    /// Teacher source. Queried for top-K logprobs at `active_positions`
+    /// (or `teacher_active_positions` if set).
     pub teacher: Arc<dyn LogitSource>,
     /// Loss granularity (§3.1).
     pub loss: OpdLossGranularity,
@@ -609,6 +629,20 @@ pub struct OpdStepInputs<'a> {
     /// Chunk size along the active-token axis for the kernel. Falls
     /// back to `DEFAULT_CHUNK_SIZE` (= 4096) when 0.
     pub chunk_size: usize,
+    /// Optional asymmetric teacher token sequence. When `Some`, this is
+    /// what's sent to `teacher.fetch_logprobs`; `tokens` continues to
+    /// drive the student-side state. Typical shape:
+    /// `teacher_prefix_tokens ++ tokens` — i.e. the same rollout, but
+    /// preceded by privileged context only the teacher sees. Length
+    /// must match the longest active position in `teacher_active_positions`.
+    pub teacher_tokens: Option<&'a [u32]>,
+    /// Active positions in `teacher_tokens`'s frame. Pair-wise aligned
+    /// with `active_positions` — position `i` in the loss kernel reads
+    /// student logits at `active_positions[i]` (within `tokens`) and
+    /// teacher logprobs at `teacher_active_positions[i]` (within
+    /// `teacher_tokens`). Required when `teacher_tokens` is set; ignored
+    /// otherwise.
+    pub teacher_active_positions: Option<&'a [usize]>,
 }
 
 /// Output of one OPD step's loss computation.
@@ -661,7 +695,38 @@ pub fn opd_step_loss(inputs: OpdStepInputs<'_>) -> Result<OpdStepOutputs> {
         loss,
         top_k,
         chunk_size,
+        teacher_tokens,
+        teacher_active_positions,
     } = inputs;
+
+    // Pair-wise alignment check for asymmetric teacher conditioning.
+    if let (Some(t_tok), Some(t_act)) = (teacher_tokens, teacher_active_positions) {
+        if t_act.len() != active_positions.len() {
+            return Err(anyhow!(
+                "opd_step_loss: teacher_active_positions.len() ({}) != active_positions.len() ({})",
+                t_act.len(),
+                active_positions.len()
+            ));
+        }
+        for &p in t_act {
+            if p >= t_tok.len() {
+                return Err(anyhow!(
+                    "opd_step_loss: teacher active position {} out of range for teacher_tokens.len() {}",
+                    p,
+                    t_tok.len()
+                ));
+            }
+        }
+    } else if teacher_tokens.is_some() ^ teacher_active_positions.is_some() {
+        return Err(anyhow!(
+            "opd_step_loss: teacher_tokens and teacher_active_positions must be set together"
+        ));
+    }
+    let (query_tokens, query_positions): (&[u32], &[usize]) =
+        match (teacher_tokens, teacher_active_positions) {
+            (Some(t), Some(a)) => (t, a),
+            _ => (tokens, active_positions),
+        };
 
     if active_positions.is_empty() {
         return Err(anyhow!(
@@ -699,7 +764,7 @@ pub fn opd_step_loss(inputs: OpdStepInputs<'_>) -> Result<OpdStepOutputs> {
         _ => Some(resolved_top_k),
     };
     let batch = teacher
-        .fetch_logprobs(tokens, active_positions, request_top_k)
+        .fetch_logprobs(query_tokens, query_positions, request_top_k)
         .with_context(|| {
             format!(
                 "fetch_logprobs from teacher {:?} for {} positions",
@@ -779,6 +844,8 @@ pub fn opd_step_loss_simple(
         loss,
         top_k,
         chunk_size: DEFAULT_CHUNK_SIZE,
+        teacher_tokens: None,
+        teacher_active_positions: None,
     })
 }
 
@@ -1791,6 +1858,77 @@ pub fn opd_train(
         );
     }
 
+    // §20 teacher-side conditioning: per-prompt asymmetric teacher
+    // prefix tokens. Empty Vec for prompts without `teacher_extra_messages`.
+    //
+    // When non-empty, the teacher's query at training time uses
+    // `teacher_prefix_tokens ++ student_input_ids` while the student
+    // still rolls out from `student_input_ids` alone. The teacher's
+    // distribution is sharper because it saw the privileged context;
+    // the student's gradient pulls toward that sharper distribution
+    // without ever seeing the prefix itself.
+    let teacher_prefix_tokens: Vec<Vec<u32>> = prompts
+        .iter()
+        .map(|p| {
+            if p.teacher_extra_messages.is_empty() {
+                return Vec::new();
+            }
+            // Render extra messages alone; the result is the leading
+            // tokens that get prepended to the student's view on the
+            // teacher's side. We rely on apply_chat_template_full to
+            // emit role markers correctly; no add_generation_prompt
+            // because the student's own prompt provides that.
+            let extras: Vec<CoreChatMessage> = p
+                .teacher_extra_messages
+                .iter()
+                .map(|m| CoreChatMessage {
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                    ..Default::default()
+                })
+                .collect();
+            // Render the extras WITHOUT add_generation_prompt — we
+            // are not asking the teacher to start generating after the
+            // prefix; the student's own prompt provides that boundary.
+            // The default ChatTemplateOptions omits add_generation_prompt,
+            // which most chat templates treat as `false`.
+            let opts = ChatTemplateOptions {
+                template_kwargs: serde_json::Map::from_iter([
+                    (
+                        "enable_thinking".to_string(),
+                        serde_json::Value::Bool(false),
+                    ),
+                    (
+                        "add_generation_prompt".to_string(),
+                        serde_json::Value::Bool(false),
+                    ),
+                ]),
+            };
+            let text = tokenizer
+                .apply_chat_template_full_with_options(
+                    extras.as_slice(),
+                    None, // tools
+                    None, // tool_choice
+                    opts,
+                )
+                .ok()
+                .unwrap_or_default();
+            tokenizer.encode(&text).unwrap_or_default()
+        })
+        .collect();
+    let any_asymmetric = teacher_prefix_tokens.iter().any(|v| !v.is_empty());
+    if any_asymmetric {
+        let avg_extra: usize = teacher_prefix_tokens.iter().map(|v| v.len()).sum::<usize>()
+            / teacher_prefix_tokens.len().max(1);
+        let n_with_extra = teacher_prefix_tokens.iter().filter(|v| !v.is_empty()).count();
+        tracing::info!(
+            n_prompts_with_teacher_extra = n_with_extra,
+            avg_teacher_extra_tokens = avg_extra,
+            "opd_train: asymmetric teacher conditioning ACTIVE — \
+             teacher sees additional context the student does not. §20"
+        );
+    }
+
     for epoch in 0..epochs {
         for (prompt_idx, (orig_input_ids, label_mask)) in tokenized.iter().enumerate() {
             // Build the rollout prompt from the pre-rendered chat-template
@@ -1913,6 +2051,35 @@ pub fn opd_train(
                     weights,
                     model_config,
                 )?;
+                // §20 asymmetric teacher conditioning: if this prompt
+                // declared `teacher_extra_messages`, build a separate
+                // token sequence for the teacher with the privileged
+                // prefix prepended. Active positions shift by the
+                // prefix length. The student's view (input_ids,
+                // active_positions, student_hidden) stays unchanged.
+                let teacher_prefix: &[u32] = &teacher_prefix_tokens[prompt_idx];
+                let (teacher_full_tokens_owned, teacher_shifted_positions): (Vec<u32>, Vec<usize>) =
+                    if teacher_prefix.is_empty() {
+                        (Vec::new(), Vec::new())
+                    } else {
+                        let mut t = Vec::with_capacity(teacher_prefix.len() + input_ids.len());
+                        t.extend_from_slice(teacher_prefix);
+                        t.extend_from_slice(input_ids);
+                        let pos: Vec<usize> = active_positions
+                            .iter()
+                            .map(|p| p + teacher_prefix.len())
+                            .collect();
+                        (t, pos)
+                    };
+                let (teacher_tokens_opt, teacher_active_opt): (Option<&[u32]>, Option<&[usize]>) =
+                    if teacher_prefix.is_empty() {
+                        (None, None)
+                    } else {
+                        (
+                            Some(teacher_full_tokens_owned.as_slice()),
+                            Some(teacher_shifted_positions.as_slice()),
+                        )
+                    };
                 let out = opd_step_loss(OpdStepInputs {
                     tokens: input_ids,
                     active_positions: &active_positions,
@@ -1922,6 +2089,8 @@ pub fn opd_train(
                     loss: config.loss,
                     top_k: config.top_k,
                     chunk_size: 0,
+                    teacher_tokens: teacher_tokens_opt,
+                    teacher_active_positions: teacher_active_opt,
                 })?;
                 let loss_val = out.mean_kl.to_scalar::<f32>()? as f64;
                 let active_count = out.active_count;
@@ -2176,6 +2345,111 @@ mod tests {
     }
 
     #[test]
+    fn opd_step_loss_asymmetric_teacher_pairs_by_index() -> Result<()> {
+        // Verify that when teacher_tokens / teacher_active_positions are
+        // set, the kernel queries the teacher at the SHIFTED positions
+        // and pairs them back to the student's active positions by index.
+        let device = Device::Cpu;
+        let vocab_size = 16usize;
+        let hidden_size = 8usize;
+        let top_k = 4usize;
+        let student_seq_len = 10usize;
+        let teacher_prefix_len = 5usize;
+        let teacher_seq_len = teacher_prefix_len + student_seq_len;
+
+        let student_hidden_vec: Vec<f32> = (0..1 * student_seq_len * hidden_size)
+            .map(|i| ((i * 13 + 7) % 1000) as f32 / 1000.0)
+            .collect();
+        let student_hidden =
+            Tensor::from_vec(student_hidden_vec, (1, student_seq_len, hidden_size), &device)?;
+        let head_vec: Vec<f32> = (0..hidden_size * vocab_size)
+            .map(|i| ((i * 11 + 5) % 1000) as f32 / 1000.0)
+            .collect();
+        let head_t = Tensor::from_vec(head_vec, (hidden_size, vocab_size), &device)?;
+
+        let student_tokens: Vec<u32> = (0..student_seq_len)
+            .map(|i| ((i * 7 + 3) % vocab_size) as u32)
+            .collect();
+        let active_positions = vec![6, 8]; // two completion positions
+
+        let teacher_tokens: Vec<u32> = {
+            let mut v = Vec::with_capacity(teacher_seq_len);
+            for i in 0..teacher_prefix_len {
+                v.push(((i * 17 + 1) % vocab_size) as u32);
+            }
+            v.extend_from_slice(&student_tokens);
+            v
+        };
+        let teacher_active: Vec<usize> = active_positions
+            .iter()
+            .map(|&p| p + teacher_prefix_len)
+            .collect();
+
+        // Build a fixture teacher keyed off the *teacher* tokens. The
+        // OPD kernel must hand the fixture the teacher_tokens (not the
+        // student tokens) and the SHIFTED positions for the lookup to
+        // succeed — that's the asymmetric path under test.
+        let mut fixture = FixtureLogitSource::uniform_topk("asym-test", vocab_size, top_k);
+        let h = FixtureLogitSource::hash_tokens(&teacher_tokens);
+        for &pos in &teacher_active {
+            let idx: Vec<u32> = (0..top_k as u32)
+                .map(|k| (pos as u32 * 5 + k * 11) % vocab_size as u32)
+                .collect();
+            let lp: Vec<f32> = (0..top_k)
+                .map(|k| -((pos + 1) as f32).ln() - (k as f32) * 0.3)
+                .collect();
+            fixture.insert(h, pos, idx, lp);
+        }
+        let teacher: Arc<dyn LogitSource> = Arc::new(fixture);
+
+        let out = opd_step_loss(OpdStepInputs {
+            tokens: &student_tokens,
+            active_positions: &active_positions,
+            student_hidden: &student_hidden,
+            head_t: &head_t,
+            teacher: teacher.clone(),
+            loss: OpdLossGranularity::TeacherTopK,
+            top_k,
+            chunk_size: 0,
+            teacher_tokens: Some(&teacher_tokens),
+            teacher_active_positions: Some(&teacher_active),
+        })?;
+
+        // Two active positions → two per-position KL values.
+        let per_pos: Vec<f32> = out.per_position_kl.to_vec1()?;
+        assert_eq!(per_pos.len(), 2);
+        // All non-negative.
+        for (i, k) in per_pos.iter().enumerate() {
+            assert!(*k >= -1e-5, "per_position_kl[{i}] = {k} went negative");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn opd_step_loss_rejects_mismatched_asymmetric_lengths() {
+        let device = Device::Cpu;
+        let student_hidden = Tensor::zeros((1, 4, 8), DType::F32, &device).unwrap();
+        let head_t = Tensor::zeros((8, 16), DType::F32, &device).unwrap();
+        let fixture = FixtureLogitSource::uniform_topk("test", 16, 4);
+        let teacher: Arc<dyn LogitSource> = Arc::new(fixture);
+        // teacher_active_positions has 1 entry but active_positions has 2.
+        let err = opd_step_loss(OpdStepInputs {
+            tokens: &[1, 2, 3, 4],
+            active_positions: &[1, 2],
+            student_hidden: &student_hidden,
+            head_t: &head_t,
+            teacher,
+            loss: OpdLossGranularity::TeacherTopK,
+            top_k: 4,
+            chunk_size: 0,
+            teacher_tokens: Some(&[1, 2, 3, 4, 5, 6]),
+            teacher_active_positions: Some(&[3]),
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("teacher_active_positions"));
+    }
+
+    #[test]
     fn opd_request_round_trips_through_serde() {
         let req = OpdRequest {
             prompts: vec![OpdPrompt {
@@ -2183,6 +2457,7 @@ mod tests {
                     role: "user".into(),
                     content: "Evaluate ∫_0^∞ e^{-x^2} dx".into(),
                 }],
+                teacher_extra_messages: vec![],
             }],
             dataset_path: None,
             teacher: "qwen3.6-27b@local".into(),

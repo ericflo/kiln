@@ -1473,7 +1473,10 @@ fn derive_source_prompts(
                     })
                     .collect();
                 if !chat.is_empty() {
-                    out.push(kiln_train::opd::OpdPrompt { messages: chat });
+                    out.push(kiln_train::opd::OpdPrompt {
+                        messages: chat,
+                        teacher_extra_messages: vec![],
+                    });
                 }
             }
         }
@@ -1650,6 +1653,7 @@ fn canonical_domain_seed_prompts(domain: &str) -> Vec<kiln_train::opd::OpdPrompt
                 role: "user".into(),
                 content: (*p).into(),
             }],
+            teacher_extra_messages: vec![],
         })
         .collect()
 }

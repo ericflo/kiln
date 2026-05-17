@@ -1239,6 +1239,7 @@ mod tests {
                     role: "user".into(),
                     content: "Solve 5x + 7 = 22".into(),
                 }],
+                teacher_extra_messages: vec![],
             }],
             dataset_path: None,
             teacher: "qwen3.6-27b@local".into(),

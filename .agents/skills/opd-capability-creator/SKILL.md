@@ -298,6 +298,8 @@ These are the **only** families. Don't invent new ones until you've exhausted th
 
 **H8 — Prompt pruning.** Remove prompts where the student already saturates (baseline composite on that prompt = 1.0). They contribute no useful gradient. Useful late in a session when efficient signal matters more than coverage.
 
+**H9 — Teacher-side conditioning** (§20). Set `OpdPrompt.teacher_extra_messages` to give the teacher privileged context (few-shot exemplars, expanded schema, anti-pattern call-outs) the student never sees. The teacher's distribution sharpens; reverse-KL pulls the student toward it. Required for self-distillation; powerful for sharp-format capabilities.
+
 **Sequencing.** First 4 iterations should usually be: H1, H1 (one more epoch step), H2 or H3 (broaden), triangulation back to H1 with the broader prompt set. After that, follow the data.
 
 ---
@@ -575,7 +577,47 @@ That is the entire skill. Everything else above is the discipline that makes the
 
 ---
 
-## 20. Rubric calibration (Phase 0 gate)
+## 20. Teacher-side conditioning (asymmetric prompts)
+
+Reverse-KL doesn't require teacher and student to see the same prompt.
+Give the teacher privileged context the student never sees — its
+distribution sharpens, and the student is pulled toward that sharper
+target. For self-distillation (teacher == student weights) the
+asymmetry is the *only* gradient signal; without it KL ≡ 0.
+
+**Kiln support.** Set `OpdPrompt.teacher_extra_messages` to a non-empty
+`Vec<ChatMessage>`. The student rolls out from `messages`; the
+teacher's `fetch_logprobs` sees `teacher_extra_messages ++ messages ++
+rollout` with positions shifted by the prefix length. Backward-compat:
+empty Vec (the default) = symmetric, same as before.
+
+**What to put in `teacher_extra_messages`.**
+
+| Content | Effect |
+|---------|--------|
+| 2–5 pristine few-shot examples | Teacher distribution near-deterministic on the right shape. |
+| Full schema / type spec | Teacher behaves as if it knew the long schema; student inherits the behaviour from the short version. |
+| Worked-example chain-of-thought | Teacher has done the work; favours the right final token. |
+| Anti-pattern call-outs ("never X") | Teacher mass on bad tokens drops; student's mass drops with it. |
+| Strict style guide ("JSON only, no fences") | Format distribution tightens dramatically. |
+
+**Hypothesis family.** Track as **H9 — Teacher-side conditioning** when
+you run ablations. The hypothesis variable is the *asymmetry*, not the
+few-shot — same content on both sides wastes the lever.
+
+**When to reach for it.**
+- Baseline composite < 0.5 and student rollouts rarely land near the
+  teacher's preferred shape (asymmetric prefix gives "follow along"
+  supervision).
+- Sharp format constraint (JSON, fenced code, strict line shape) —
+  pristine examples push teacher mass onto format-compliant tokens.
+- Persistent >90% skip rate on a structured-output capability — sharper
+  teacher distributions reduce skips indirectly.
+- Self-distillation, full stop.
+
+---
+
+## 21. Rubric calibration (Phase 0 gate)
 
 Rubrics fail silently. A regex too narrow, a similarity metric that
 penalises paraphrase, a length penalty with the wrong band — these

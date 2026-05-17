@@ -18,6 +18,27 @@
 //!   --epochs 1 --rank 8 --alpha 16 --lr 1e-4 \
 //!   --top-k 8 --temperature 1.0 --top-p 0.9 --max-tokens 256
 //! ```
+//!
+//! ## Asymmetric teacher conditioning (§20 of opd-capability-creator skill)
+//!
+//! Each JSONL line is an `OpdPrompt`. To give the teacher privileged
+//! context the student never sees, add a `teacher_extra_messages` array:
+//!
+//! ```jsonl
+//! {"messages":[
+//!   {"role":"system","content":"You emit JSON tool calls only."},
+//!   {"role":"user","content":"List files in src/"}
+//! ],
+//!  "teacher_extra_messages":[
+//!   {"role":"system","content":"Few-shot exemplars (visible only to the teacher):\n\nUser: List Python files recursively.\nAssistant: {\"directory\":\"src\",\"recursive\":true,\"pattern\":\"*.py\"}\n\nUser: ..."}
+//!  ]}
+//! ```
+//!
+//! The student rolls out from `messages` alone; the teacher computes
+//! logprobs as if `teacher_extra_messages ++ messages ++ rollout` were
+//! the full sequence. Useful for sharp-format capabilities, self-
+//! distillation (teacher == student), and reducing skip rate on
+//! structured-output tasks.
 
 use anyhow::Result;
 
