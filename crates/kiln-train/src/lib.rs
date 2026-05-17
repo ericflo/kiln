@@ -444,6 +444,20 @@ pub struct GrpoConfig {
     /// snapshot of the LoRA-applied policy.
     #[serde(default)]
     pub reference_policy: ReferencePolicy,
+    /// Phase 3c — selective-KL entropy regulation. When `Some(q)`, only
+    /// tokens whose proxy entropy (defined as `-policy_log_prob` for the
+    /// selected token) is at or above the `q`-quantile across the active
+    /// tokens contribute to the KL penalty. This is a cheap approximation
+    /// of the Cui et al. "high-entropy minority tokens drive effective RL"
+    /// finding (arXiv:2506.01939): the full Clip-Cov / KL-Cov estimators
+    /// require per-token vocab covariance, which doubles the analytic tail
+    /// cost; selecting by negative chosen log-prob instead requires no
+    /// extra forward work since policy log-probs are already materialized
+    /// for the IS ratio. Typical values: `0.8` (apply KL on top-20% tokens
+    /// by uncertainty), `None` = full-token KL (historical behavior).
+    /// Only meaningful when `kl_estimator != None`.
+    #[serde(default)]
+    pub entropy_aware_kl_quantile: Option<f32>,
     #[serde(default = "default_rank")]
     pub lora_rank: usize,
     #[serde(default = "default_alpha")]
@@ -504,6 +518,7 @@ impl Default for GrpoConfig {
             dynamic_sampling: default_dynamic_sampling(),
             is_level: IsLevel::default(),
             reference_policy: ReferencePolicy::default(),
+            entropy_aware_kl_quantile: None,
             lora_rank: default_rank(),
             lora_alpha: default_alpha(),
             base_adapter: None,
