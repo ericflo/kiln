@@ -45,7 +45,7 @@ jobs:
           cp -r docs/site/. _site/
           mkdir -p _site/assets
           cp assets/logo.png _site/assets/logo.png
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
