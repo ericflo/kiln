@@ -1,0 +1,49 @@
+{
+  "slug": "tool-call-arg-fidelity",
+  "base_model_path": "/workspace/kiln/Qwen3.5-4B",
+  "kiln_server_url": "http://localhost:8420",
+  "teacher": {
+    "url": "http://localhost:8002",
+    "served_name": "qwen3.6-27b-awq",
+    "max_logprobs": 64,
+    "gpu_memory_utilization": 0.45
+  },
+  "training_defaults": {
+    "rank": 16,
+    "alpha": 32,
+    "lr": 0.0001,
+    "epochs": 6,
+    "samples_per_prompt": 1,
+    "max_tokens": 384,
+    "top_k": 8,
+    "temperature": 1.0,
+    "top_p": 0.9,
+    "streaming_prefill": true
+  },
+  "budget": {
+    "max_iterations": 12,
+    "max_prompt_tokens": 650
+  },
+  "rubric": {
+    "sub_scores": [
+      {
+        "name": "parses",
+        "weight": 0.1
+      },
+      {
+        "name": "required_fields",
+        "weight": 0.4
+      },
+      {
+        "name": "type_correctness",
+        "weight": 0.3
+      },
+      {
+        "name": "no_extra_fields",
+        "weight": 0.2
+      }
+    ],
+    "composite_formula": "0.10*parses+0.40*required_fields+0.30*type_correctness+0.20*no_extra_fields",
+    "direction": "higher_is_better"
+  }
+}

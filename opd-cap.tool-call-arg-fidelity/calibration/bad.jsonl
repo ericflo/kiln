@@ -1,0 +1,3 @@
+{"schema":{"required":["path"],"types":{"path":"string","offset":"integer","limit":"integer"},"allowed":["path","offset","limit"]},"response":"{\"offset\": \"100\", \"ignore_errors\": true, \"unknown_arg\": 42}"}
+{"schema":{"required":["command"],"types":{"command":"string","timeout":"integer","background":"boolean"},"allowed":["command","timeout","background"]},"response":"I'll run the command for you: ls -la"}
+{"schema":{"required":["url","method"],"types":{"url":"string","method":"string","headers":"object","body":"string","timeout":"integer"},"allowed":["url","method","headers","body","timeout"]},"response":"{ \"random_field\": null, \"other\": \"foo\","}
