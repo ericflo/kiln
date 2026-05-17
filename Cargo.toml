@@ -108,7 +108,7 @@ kiln-vulkan-kernel = { path = "crates/kiln-vulkan-kernel" }
 rand = "0.10"
 
 # Hashing (replay_hash chain for LoRA lineage)
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Data-parallel iteration
 rayon = "1"
