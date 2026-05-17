@@ -1247,6 +1247,25 @@ pub fn grpo_train(
 
         let pb = make_step_progress(total_steps, "grpo training");
 
+        // Phase 3b: maintain an EMA-snapshot LoRA when
+        // `ReferencePolicy::Ema` is configured. Initialized eagerly to a
+        // deepcopy of the (post-init, pre-train) LoRA so the very first
+        // group's reference forward already runs against a frozen snapshot
+        // rather than the live policy.
+        let mut ema_ref_state = match &config.reference_policy {
+            ReferencePolicy::Ema { decay, refresh_every } => {
+                let snapshot = lora_snapshot_capture_or_blend(&params, None, *decay)
+                    .context("initial EMA reference snapshot")?;
+                Some(EmaReferenceState {
+                    snapshot,
+                    groups_since_refresh: 0,
+                    refresh_every: (*refresh_every).max(1),
+                    decay: *decay,
+                })
+            }
+            _ => None,
+        };
+
         for (group_idx, tgroup) in tokenized_groups.iter().enumerate() {
             let num_completions = tgroup.completions.len();
             let avg_group_loss = train_tokenized_grpo_group(
@@ -1259,9 +1278,27 @@ pub fn grpo_train(
                 segments.as_deref(),
                 &device,
                 opt_state.as_mut(),
+                ema_ref_state.as_ref().map(|s| &s.snapshot),
             )?;
             last_loss = avg_group_loss;
             global_step += 1;
+
+            // Phase 3b: refresh the EMA reference every `refresh_every` groups.
+            if let Some(state) = ema_ref_state.as_mut() {
+                state.groups_since_refresh += 1;
+                if state.groups_since_refresh >= state.refresh_every {
+                    state.snapshot =
+                        lora_snapshot_capture_or_blend(&params, Some(&state.snapshot), state.decay)
+                            .context("EMA reference snapshot refresh")?;
+                    state.groups_since_refresh = 0;
+                    tracing::debug!(
+                        group = group_idx + 1,
+                        refresh_every = state.refresh_every,
+                        decay = state.decay,
+                        "GRPO EMA reference snapshot refreshed"
+                    );
+                }
+            }
 
             // Periodic adapter checkpoint
             if let Some(interval) = config.checkpoint_interval {
@@ -1450,6 +1487,24 @@ pub fn grpo_train_jsonl(
         let mut processed_completions = 0usize;
         let mut last_loss = 0.0;
 
+        // Phase 3b: maintain an EMA-snapshot LoRA when
+        // `ReferencePolicy::Ema` is configured (see `grpo_train` for the
+        // identical pattern; streaming JSONL just iterates one group at a
+        // time).
+        let mut ema_ref_state = match &config.reference_policy {
+            ReferencePolicy::Ema { decay, refresh_every } => {
+                let snapshot = lora_snapshot_capture_or_blend(&params, None, *decay)
+                    .context("initial EMA reference snapshot")?;
+                Some(EmaReferenceState {
+                    snapshot,
+                    groups_since_refresh: 0,
+                    refresh_every: (*refresh_every).max(1),
+                    decay: *decay,
+                })
+            }
+            _ => None,
+        };
+
         loop {
             line.clear();
             let read = reader.read_line(&mut line).with_context(|| {
@@ -1509,12 +1564,30 @@ pub fn grpo_train_jsonl(
                 segments.as_deref(),
                 &device,
                 opt_state.as_mut(),
+                ema_ref_state.as_ref().map(|s| &s.snapshot),
             )?;
             anyhow::ensure!(
                 avg_group_loss.is_finite(),
                 "grpo_train_jsonl: non-finite loss {avg_group_loss} at group {processed_groups}"
             );
             last_loss = avg_group_loss;
+
+            // Phase 3b: refresh the EMA reference every `refresh_every` groups.
+            if let Some(state) = ema_ref_state.as_mut() {
+                state.groups_since_refresh += 1;
+                if state.groups_since_refresh >= state.refresh_every {
+                    state.snapshot =
+                        lora_snapshot_capture_or_blend(&params, Some(&state.snapshot), state.decay)
+                            .context("EMA reference snapshot refresh")?;
+                    state.groups_since_refresh = 0;
+                    tracing::debug!(
+                        group = processed_groups,
+                        refresh_every = state.refresh_every,
+                        decay = state.decay,
+                        "streamed GRPO EMA reference snapshot refreshed"
+                    );
+                }
+            }
 
             let (step, total_steps, progress) = jsonl_byte_progress(total_bytes, bytes_read);
             if let Some(ref cb) = progress_cb {
@@ -1639,6 +1712,7 @@ fn jsonl_byte_progress(total_bytes: u64, offset: u64) -> (usize, usize, f32) {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn train_tokenized_grpo_group(
     backend: &dyn BackendRuntime,
     tgroup: &TokenizedGrpoGroup,
@@ -1649,16 +1723,12 @@ fn train_tokenized_grpo_group(
     segments: Option<&[(usize, usize)]>,
     device: &Device,
     opt_state: Option<&mut OptimizerState>,
+    // Phase 3b: optional EMA-snapshot LoRA used as the reference policy when
+    // `config.reference_policy == ReferencePolicy::Ema`. None means the
+    // reference forward runs without any LoRA (base model — historical
+    // `BasePerStep`) or is skipped entirely (`ReferencePolicy::None`).
+    ema_ref_lora: Option<&LoraWeights>,
 ) -> Result<f64> {
-    // Phase 2 reference-policy gate: Ema is reserved for a follow-up that
-    // wires snapshot capture + refresh through the training loop. None and
-    // BasePerStep work today.
-    if let ReferencePolicy::Ema { .. } = config.reference_policy {
-        anyhow::bail!(
-            "ReferencePolicy::Ema is not yet implemented; use BasePerStep \
-             (default) or None"
-        );
-    }
     let skip_reference = matches!(config.reference_policy, ReferencePolicy::None);
 
     let advantages = compute_advantages(&tgroup.rewards, config.advantage_mode);
@@ -1705,13 +1775,16 @@ fn train_tokenized_grpo_group(
             Tensor::zeros(num_active, DType::F32, device)?.detach()
         } else {
             let mut ref_linear_state = LinearAttentionState::new(model_config, device)?;
+            // BasePerStep (None ema_ref_lora) → base model (no LoRA).
+            // Ema (Some(snapshot)) → frozen snapshot of the LoRA from a
+            // prior training point.
             let ref_hidden = model_forward_no_head(
                 backend,
                 &comp.input_ids,
                 weights,
                 model_config,
                 Some(&mut ref_linear_state),
-                None,
+                ema_ref_lora,
             )
             .context("GRPO reference forward pass")?;
             selected_log_probs_from_normed_hidden_chunked(
@@ -1910,6 +1983,140 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
 /// Compute group-normalized advantages from rewards.
 ///
 /// advantage_i = (reward_i - mean(rewards)) / (std(rewards) + 1e-8)
+/// Deep-copy a tensor so the result's backing storage is independent of the
+/// input's (which may be a [`Var`]'s storage that subsequent optimizer steps
+/// can replace). Goes via host-side `f32` round-trip; restores the original
+/// dtype on the way out.
+///
+/// Used by [`lora_snapshot_capture_or_blend`] to materialize a reference
+/// LoRA that won't silently track future policy updates.
+fn deepcopy_tensor_for_snapshot(t: &Tensor) -> Result<Tensor> {
+    let device = t.device();
+    let dtype = t.dtype();
+    let shape = t.shape().clone();
+    let host: Vec<f32> = t
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_device(&Device::Cpu)?
+        .to_vec1::<f32>()
+        .context("snapshot: read tensor to host f32 vec")?;
+    let rebuilt = Tensor::from_vec(host, shape, device)?;
+    if dtype == DType::F32 {
+        Ok(rebuilt.detach())
+    } else {
+        Ok(rebuilt.to_dtype(dtype)?.detach())
+    }
+}
+
+/// EMA blend two tensors: `new = decay * old + (1 - decay) * current`. The
+/// result has the same dtype as `old` and is independent of either input's
+/// storage (the affine + add chain materializes a fresh tensor).
+fn ema_blend_tensor(old: &Tensor, current: &Tensor, decay: f32) -> Result<Tensor> {
+    let dtype = old.dtype();
+    let a = old.to_dtype(DType::F32)?.affine(decay as f64, 0.0)?;
+    let b = current.to_dtype(DType::F32)?.affine((1.0 - decay) as f64, 0.0)?;
+    let blended = (a + b)?;
+    let out = if dtype == DType::F32 {
+        blended
+    } else {
+        blended.to_dtype(dtype)?
+    };
+    Ok(out.detach())
+}
+
+/// Per-projection helper used by [`lora_snapshot_capture_or_blend`]. Given a
+/// current trainable Var pair and an optional prior snapshot projection,
+/// produces a fresh `LoraProjectionWeights` whose tensors are EMA-blended
+/// from the snapshot toward the current params (or a pure deepcopy of
+/// current if no prior snapshot exists).
+fn snapshot_projection(
+    cur: &Option<(Var, Var)>,
+    prior: Option<&LoraProjectionWeights>,
+    decay: f32,
+) -> Result<Option<LoraProjectionWeights>> {
+    let Some((cur_a, cur_b)) = cur else {
+        return Ok(None);
+    };
+    let cur_a_t = cur_a.as_tensor();
+    let cur_b_t = cur_b.as_tensor();
+    let (a, b) = match prior {
+        Some(prior) => (
+            ema_blend_tensor(&prior.a, cur_a_t, decay)?,
+            ema_blend_tensor(&prior.b, cur_b_t, decay)?,
+        ),
+        None => (
+            deepcopy_tensor_for_snapshot(cur_a_t)?,
+            deepcopy_tensor_for_snapshot(cur_b_t)?,
+        ),
+    };
+    Ok(Some(LoraProjectionWeights { a, b }))
+}
+
+/// Capture an EMA snapshot of the current LoRA params, blending with a prior
+/// snapshot if provided.
+///
+/// * `prior = None`: a fresh deepcopy of `current` becomes the snapshot.
+/// * `prior = Some(snap)`: returns `decay * snap + (1 - decay) * current`,
+///   blended per-tensor.
+///
+/// Returned `LoraWeights` is fully owned (no aliasing of `current`'s Var
+/// storage) and safe to pass as the reference into `model_forward_no_head`
+/// across subsequent optimizer steps on `current`.
+///
+/// Used by [`ReferencePolicy::Ema`] in `grpo_train` and `grpo_train_jsonl`.
+fn lora_snapshot_capture_or_blend(
+    current: &TrainableLoraParams,
+    prior: Option<&LoraWeights>,
+    decay: f32,
+) -> Result<LoraWeights> {
+    let layers = current
+        .layers
+        .iter()
+        .enumerate()
+        .map(|(layer_idx, lp)| {
+            let snap_layer = prior.and_then(|p| p.layers.get(layer_idx));
+            // For each named projection, blend or deepcopy.
+            let mk = |which: fn(&LoraLayerWeights) -> Option<&LoraProjectionWeights>,
+                      cur: &Option<(Var, Var)>|
+             -> Result<Option<LoraProjectionWeights>> {
+                snapshot_projection(cur, snap_layer.and_then(which), decay)
+            };
+            Ok::<LoraLayerWeights, anyhow::Error>(LoraLayerWeights {
+                q_proj: mk(|l| l.q_proj.as_ref(), &lp.q_proj)?,
+                k_proj: mk(|l| l.k_proj.as_ref(), &lp.k_proj)?,
+                v_proj: mk(|l| l.v_proj.as_ref(), &lp.v_proj)?,
+                o_proj: mk(|l| l.o_proj.as_ref(), &lp.o_proj)?,
+                in_proj_qkv: mk(|l| l.in_proj_qkv.as_ref(), &lp.in_proj_qkv)?,
+                in_proj_z: mk(|l| l.in_proj_z.as_ref(), &lp.in_proj_z)?,
+                gdn_out_proj: mk(|l| l.gdn_out_proj.as_ref(), &lp.gdn_out_proj)?,
+                gate_proj: mk(|l| l.gate_proj.as_ref(), &lp.gate_proj)?,
+                up_proj: mk(|l| l.up_proj.as_ref(), &lp.up_proj)?,
+                down_proj: mk(|l| l.down_proj.as_ref(), &lp.down_proj)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(LoraWeights {
+        layers,
+        rank: current.rank,
+        alpha: current.alpha,
+        scale: current.scale,
+    })
+}
+
+/// State threaded through a GRPO run to support `ReferencePolicy::Ema`.
+///
+/// Captures the most recent snapshot of the LoRA params and the number of
+/// completed groups since the last refresh. When `groups_since_refresh
+/// >= refresh_every`, the outer caller calls
+/// [`lora_snapshot_capture_or_blend`] with the current params and decay,
+/// then resets the counter.
+struct EmaReferenceState {
+    snapshot: LoraWeights,
+    groups_since_refresh: usize,
+    refresh_every: usize,
+    decay: f32,
+}
+
 /// Returns true when every completion in `group` carries the same reward.
 /// Such a group produces a uniformly-zero advantage vector under any of the
 /// supported [`AdvantageMode`]s and contributes no policy-gradient signal,
@@ -2729,6 +2936,23 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
     let kl_coeff = loss_params.kl_coeff;
     let normalizer = loss_params.loss_normalizer;
 
+    // Phase 3c — selective-KL: compute a per-instance threshold from the
+    // policy log-probs (proxy entropy = `-policy_log_prob`) so KL only
+    // fires on the high-uncertainty tokens.
+    let kl_threshold: Option<f64> = loss_params.entropy_aware_kl_quantile.and_then(|q| {
+        if !q.is_finite() || !(0.0..1.0).contains(&q) {
+            return None;
+        }
+        let mut neg_logps: Vec<f64> = policy_values.iter().map(|p| -(*p as f64)).collect();
+        if neg_logps.is_empty() {
+            return None;
+        }
+        neg_logps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx =
+            ((q as f64) * (neg_logps.len() - 1) as f64).round() as usize;
+        Some(neg_logps[idx.min(neg_logps.len() - 1)])
+    });
+
     // REINFORCE short-circuit (ReferencePolicy::None): no IS ratio, no KL.
     // Loss per token = -advantage; gradient w.r.t. log π_θ per token =
     // -advantage. We still need to produce a gradient w.r.t. `hidden` so
@@ -2781,7 +3005,7 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
         // None = 0. The derivative w.r.t. log policy log-prob (= log_ratio
         // for the same active token) is: K1 -> 1, K3 -> -exp(-log_ratio) + 1,
         // None -> 0.
-        let (kl_term, d_kl) = match loss_params.kl_estimator {
+        let (mut kl_term, mut d_kl) = match loss_params.kl_estimator {
             KlEstimator::None => (0.0, 0.0),
             KlEstimator::K1 => (log_ratio, 1.0),
             KlEstimator::K3 => {
@@ -2789,6 +3013,16 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
                 (neg_exp - 1.0 + log_ratio, 1.0 - neg_exp)
             }
         };
+
+        // Phase 3c — selective KL gating: zero out KL on tokens below the
+        // proxy-entropy threshold.
+        if let Some(thr) = kl_threshold {
+            let proxy_entropy = -(policy as f64);
+            if proxy_entropy < thr {
+                kl_term = 0.0;
+                d_kl = 0.0;
+            }
+        }
 
         let (per_token_surrogate, d_surrogate) = match loss_params.is_level {
             IsLevel::Token => {
@@ -6825,6 +7059,12 @@ pub(crate) struct GrpoLossParams {
     /// `reference_policy == ReferencePolicy::None`. The KL contribution is
     /// also forced off in that case (`kl_estimator = None`).
     pub reinforce: bool,
+    /// Phase 3c — entropy-aware KL quantile. `None` = full-token KL; when
+    /// `Some(q)`, tokens whose `-policy_log_prob` is below the q-quantile
+    /// across this loss-instance's active tokens get zero KL contribution
+    /// (and zero KL gradient). Approximates the Cui et al. selective-KL
+    /// idea (arXiv:2506.01939).
+    pub entropy_aware_kl_quantile: Option<f32>,
 }
 
 impl GrpoLossParams {
@@ -6839,6 +7079,14 @@ impl GrpoLossParams {
         } else {
             config.kl_estimator
         };
+        // Entropy-aware KL only makes sense when KL is actually being
+        // applied; gate it off otherwise so the quantile compute doesn't
+        // run for nothing.
+        let entropy_aware_kl_quantile = if matches!(kl_estimator, KlEstimator::None) {
+            None
+        } else {
+            config.entropy_aware_kl_quantile
+        };
         Self {
             advantage,
             clip_low,
@@ -6848,6 +7096,7 @@ impl GrpoLossParams {
             loss_normalizer,
             is_level: config.is_level,
             reinforce,
+            entropy_aware_kl_quantile,
         }
     }
 }
@@ -6904,7 +7153,7 @@ fn grpo_loss(
     let hi_val = 1.0 + params.clip_high;
 
     // Per-token KL term selected by KlEstimator (shared across IS levels).
-    let kl_penalty = match params.kl_estimator {
+    let kl_penalty_raw = match params.kl_estimator {
         KlEstimator::None => Tensor::zeros(ratio.shape(), DType::F32, device)?,
         KlEstimator::K1 => log_ratio.affine(params.kl_coeff, 0.0)?,
         KlEstimator::K3 => {
@@ -6912,6 +7161,30 @@ fn grpo_loss(
             let term = (neg_log_ratio.exp()?.affine(1.0, -1.0)? + &log_ratio)?;
             term.affine(params.kl_coeff, 0.0)?
         }
+    };
+    // Phase 3c — selective KL gating: zero KL on tokens below the proxy-entropy threshold.
+    let kl_penalty = if let Some(q) = params.entropy_aware_kl_quantile {
+        if q.is_finite() && (0.0..1.0).contains(&q) {
+            // CPU-side quantile from policy_log_probs.
+            let plp_host: Vec<f32> = policy_log_probs
+                .flatten_all()?
+                .to_device(&Device::Cpu)?
+                .to_vec1::<f32>()?;
+            let mut neg = plp_host.iter().map(|p| -(*p as f64)).collect::<Vec<_>>();
+            neg.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let idx = ((q as f64) * (neg.len().saturating_sub(1)) as f64).round() as usize;
+            let thr = neg[idx.min(neg.len().saturating_sub(1))];
+            let mask_host: Vec<f32> = plp_host
+                .iter()
+                .map(|p| if -(*p as f64) >= thr { 1.0 } else { 0.0 })
+                .collect();
+            let mask = Tensor::from_vec(mask_host, ratio.shape(), device)?.to_dtype(DType::F32)?;
+            (&kl_penalty_raw * &mask)?
+        } else {
+            kl_penalty_raw
+        }
+    } else {
+        kl_penalty_raw
     };
 
     let neg_surrogate = match params.is_level {
@@ -7505,6 +7778,7 @@ mod tests {
             loss_normalizer: 1.0 / num_active as f64,
             is_level: IsLevel::Token,
             reinforce: false,
+            entropy_aware_kl_quantile: None,
         };
         let new_loss = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
 
@@ -7543,6 +7817,7 @@ mod tests {
             loss_normalizer: 1.0 / num_active as f64,
             is_level: IsLevel::Token,
             reinforce: false,
+            entropy_aware_kl_quantile: None,
         };
         let none_loss = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
 
@@ -7582,6 +7857,7 @@ mod tests {
             loss_normalizer: 1.0 / 3.0,
             is_level: IsLevel::Token,
             reinforce: false,
+            entropy_aware_kl_quantile: None,
         };
         let loss = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
         assert!(loss >= 0.0, "K3 per-token KL must be non-negative; got {loss}");
@@ -7609,6 +7885,7 @@ mod tests {
             loss_normalizer: 1.0 / 3.0,
             is_level: IsLevel::Token,
             reinforce: false,
+            entropy_aware_kl_quantile: None,
         };
         let tight = grpo_loss(&policy, &reference, make(0.2), &device)?.to_scalar::<f32>()?;
         let wide = grpo_loss(&policy, &reference, make(0.5), &device)?.to_scalar::<f32>()?;
@@ -7637,6 +7914,7 @@ mod tests {
             loss_normalizer: 1.0 / 3.0,
             is_level: IsLevel::Token,
             reinforce: false,
+            entropy_aware_kl_quantile: None,
         };
         let half_norm = GrpoLossParams {
             loss_normalizer: 1.0 / 6.0,
@@ -7648,6 +7926,221 @@ mod tests {
             (l_full - 2.0 * l_half).abs() < 5e-6,
             "scaling normalizer by 1/2 should halve the loss: l_full={l_full} l_half={l_half}"
         );
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 3c — selective-KL entropy regulation tests
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn entropy_aware_kl_gates_only_low_entropy_tokens() -> Result<()> {
+        // Confident tokens: policy log-prob ≈ -0.05 (-log_prob ≈ 0.05).
+        // Uncertain tokens: policy log-prob ≈ -3.0 (-log_prob ≈ 3.0).
+        // Reference is the same for all → log_ratio matches policy_log_prob
+        // up to a constant offset. Choosing all same-sign log_ratios makes
+        // the math easy to verify.
+        let device = Device::Cpu;
+        let policy = Tensor::new(&[-0.05_f32, -3.0, -2.5, -0.10], &device)?;
+        let reference = Tensor::new(&[0.0_f32, 0.0, 0.0, 0.0], &device)?; // log_ratio = policy
+        let base = GrpoLossParams {
+            advantage: 0.0,            // isolate KL
+            clip_low: 0.2,
+            clip_high: 0.2,
+            kl_coeff: 1.0,             // identity scaling
+            kl_estimator: KlEstimator::K1,
+            loss_normalizer: 1.0 / 4.0,
+            is_level: IsLevel::Token,
+            reinforce: false,
+            entropy_aware_kl_quantile: None,
+        };
+        let full = grpo_loss(&policy, &reference, base, &device)?.to_scalar::<f32>()?;
+        let selective = grpo_loss(
+            &policy,
+            &reference,
+            GrpoLossParams {
+                entropy_aware_kl_quantile: Some(0.5),
+                ..base
+            },
+            &device,
+        )?
+        .to_scalar::<f32>()?;
+        // Full KL = mean of log_ratios = (-0.05 - 3.0 - 2.5 - 0.10) / 4 = -1.4125.
+        let expected_full = -1.4125_f32;
+        // Selective: only the two uncertain tokens contribute.
+        //   log_ratio values [-3.0, -2.5] → sum / 4 = -1.375.
+        let expected_selective = -1.375_f32;
+        assert!(
+            (full - expected_full).abs() < 1e-4,
+            "full KL drift: got {full} want {expected_full}"
+        );
+        assert!(
+            (selective - expected_selective).abs() < 1e-4,
+            "selective KL drift: got {selective} want {expected_selective}"
+        );
+        // Selective magnitude < full magnitude in this setup (we dropped
+        // small-magnitude contributions, retained the large ones).
+        assert!(
+            selective.abs() < full.abs(),
+            "selective should drop small confident-token contributions: full={full} selective={selective}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn entropy_aware_kl_zero_quantile_matches_full_kl() -> Result<()> {
+        let device = Device::Cpu;
+        let policy = Tensor::new(&[-0.5_f32, -2.0, -1.4], &device)?;
+        let reference = Tensor::new(&[-1.0_f32, -1.0, -1.0], &device)?;
+        let base = GrpoLossParams {
+            advantage: 0.3,
+            clip_low: 0.2,
+            clip_high: 0.2,
+            kl_coeff: 0.1,
+            kl_estimator: KlEstimator::K1,
+            loss_normalizer: 1.0 / 3.0,
+            is_level: IsLevel::Token,
+            reinforce: false,
+            entropy_aware_kl_quantile: None,
+        };
+        let with_none = grpo_loss(&policy, &reference, base, &device)?.to_scalar::<f32>()?;
+        let with_zero = grpo_loss(
+            &policy,
+            &reference,
+            GrpoLossParams {
+                entropy_aware_kl_quantile: Some(0.0),
+                ..base
+            },
+            &device,
+        )?
+        .to_scalar::<f32>()?;
+        // q=0 should keep every token's KL term, matching full KL up to
+        // floating-point ordering.
+        assert!(
+            (with_none - with_zero).abs() < 5e-6,
+            "q=0 should match full KL: full={with_none} q0={with_zero}"
+        );
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 3b — EMA reference snapshot unit tests
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn deepcopy_tensor_for_snapshot_is_independent_of_source() -> Result<()> {
+        let device = Device::Cpu;
+        // Vars are how the trainer stores LoRA; mutate the Var afterward and
+        // confirm the snapshot doesn't see the mutation.
+        let src = Var::from_tensor(&Tensor::new(&[1.0_f32, 2.0, 3.0], &device)?)?;
+        let snapshot = deepcopy_tensor_for_snapshot(src.as_tensor())?;
+        src.set(&Tensor::new(&[10.0_f32, 20.0, 30.0], &device)?)?;
+        let snap_vals = snapshot.to_vec1::<f32>()?;
+        assert_eq!(snap_vals, vec![1.0, 2.0, 3.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn ema_blend_tensor_matches_manual_formula() -> Result<()> {
+        let device = Device::Cpu;
+        let old = Tensor::new(&[1.0_f32, 2.0, 4.0], &device)?;
+        let current = Tensor::new(&[2.0_f32, 4.0, 8.0], &device)?;
+        let decay = 0.25_f32;
+        let blended = ema_blend_tensor(&old, &current, decay)?;
+        let got = blended.to_vec1::<f32>()?;
+        // decay * old + (1 - decay) * current = 0.25*[1,2,4] + 0.75*[2,4,8]
+        // = [0.25,0.5,1.0] + [1.5,3.0,6.0] = [1.75, 3.5, 7.0]
+        for (g, e) in got.iter().zip([1.75_f32, 3.5, 7.0].iter()) {
+            assert!((g - e).abs() < 1e-5, "blend drift: got {g} want {e}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ema_blend_with_decay_one_returns_old() -> Result<()> {
+        let device = Device::Cpu;
+        let old = Tensor::new(&[3.0_f32, 5.0], &device)?;
+        let current = Tensor::new(&[7.0_f32, 11.0], &device)?;
+        let blended = ema_blend_tensor(&old, &current, 1.0)?;
+        let got = blended.to_vec1::<f32>()?;
+        assert!((got[0] - 3.0).abs() < 1e-5);
+        assert!((got[1] - 5.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn ema_blend_with_decay_zero_returns_current() -> Result<()> {
+        let device = Device::Cpu;
+        let old = Tensor::new(&[3.0_f32, 5.0], &device)?;
+        let current = Tensor::new(&[7.0_f32, 11.0], &device)?;
+        let blended = ema_blend_tensor(&old, &current, 0.0)?;
+        let got = blended.to_vec1::<f32>()?;
+        assert!((got[0] - 7.0).abs() < 1e-5);
+        assert!((got[1] - 11.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn lora_snapshot_initial_capture_is_independent_of_future_updates() -> Result<()> {
+        // Build a minimal TrainableLoraParams with one layer carrying a single
+        // q_proj. Snapshot it. Mutate the Vars in place. Verify the snapshot
+        // still holds the original values.
+        let device = Device::Cpu;
+        let a_var = Var::from_tensor(&Tensor::new(&[[0.5_f32, 0.25]], &device)?)?;
+        let b_var = Var::from_tensor(&Tensor::new(&[[1.0_f32], [2.0]], &device)?)?;
+        let layer = TrainableLoraLayerParams {
+            q_proj: Some((a_var.clone(), b_var.clone())),
+            ..Default::default()
+        };
+        let params = TrainableLoraParams {
+            layers: vec![layer],
+            rank: 1,
+            alpha: 2.0,
+            scale: 2.0,
+        };
+
+        let snapshot = lora_snapshot_capture_or_blend(&params, None, 0.0)?;
+        // Mutate the underlying Vars.
+        a_var.set(&Tensor::new(&[[100.0_f32, 200.0]], &device)?)?;
+        b_var.set(&Tensor::new(&[[300.0_f32], [400.0]], &device)?)?;
+
+        let snap_layer = &snapshot.layers[0];
+        let snap_q = snap_layer.q_proj.as_ref().expect("q_proj snapshot");
+        let snap_a = snap_q.a.flatten_all()?.to_vec1::<f32>()?;
+        let snap_b = snap_q.b.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(snap_a, vec![0.5, 0.25]);
+        assert_eq!(snap_b, vec![1.0, 2.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn lora_snapshot_blend_with_prior_applies_decay() -> Result<()> {
+        let device = Device::Cpu;
+        let a_var = Var::from_tensor(&Tensor::new(&[[1.0_f32]], &device)?)?;
+        let b_var = Var::from_tensor(&Tensor::new(&[[1.0_f32]], &device)?)?;
+        let layer = TrainableLoraLayerParams {
+            q_proj: Some((a_var.clone(), b_var.clone())),
+            ..Default::default()
+        };
+        let params = TrainableLoraParams {
+            layers: vec![layer],
+            rank: 1,
+            alpha: 1.0,
+            scale: 1.0,
+        };
+
+        // Initial snapshot at A=1, B=1.
+        let snap0 = lora_snapshot_capture_or_blend(&params, None, 0.5)?;
+        // Advance the params: A=10, B=10.
+        a_var.set(&Tensor::new(&[[10.0_f32]], &device)?)?;
+        b_var.set(&Tensor::new(&[[10.0_f32]], &device)?)?;
+        // Blend with decay=0.5 → 0.5*old + 0.5*current = 0.5*1 + 0.5*10 = 5.5.
+        let snap1 = lora_snapshot_capture_or_blend(&params, Some(&snap0), 0.5)?;
+        let q = snap1.layers[0].q_proj.as_ref().unwrap();
+        let a = q.a.flatten_all()?.to_vec1::<f32>()?;
+        let b = q.b.flatten_all()?.to_vec1::<f32>()?;
+        assert!((a[0] - 5.5).abs() < 1e-5, "blended A = {a:?}");
+        assert!((b[0] - 5.5).abs() < 1e-5, "blended B = {b:?}");
         Ok(())
     }
 
@@ -7673,6 +8166,7 @@ mod tests {
             loss_normalizer: 1.0 / num_active as f64,
             is_level: IsLevel::Sequence,
             reinforce: false,
+            entropy_aware_kl_quantile: None,
         };
         let loss = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
 
@@ -7726,6 +8220,7 @@ mod tests {
             loss_normalizer: 1.0 / n as f64,
             is_level: IsLevel::Cispo,
             reinforce: false,
+            entropy_aware_kl_quantile: None,
         };
         let got = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
 
@@ -7765,6 +8260,7 @@ mod tests {
             loss_normalizer: 1.0 / n as f64,
             is_level: IsLevel::Token,
             reinforce: true,
+            entropy_aware_kl_quantile: None,
         };
         let loss = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
         let expected = -advantage as f32; // sum of -A * n / n = -A
@@ -7831,6 +8327,7 @@ mod tests {
                 loss_normalizer: 1.0 / active as f64,
                 is_level,
                 reinforce: false,
+                entropy_aware_kl_quantile: None,
             };
             let (loss_val, _grad) = analytic_grpo_tail_loss_grad_pre_final_norm(
                 &hidden,
@@ -7892,6 +8389,7 @@ mod tests {
             loss_normalizer: 1.0 / active as f64,
             is_level: IsLevel::Token,
             reinforce: true,
+            entropy_aware_kl_quantile: None,
         };
         let (loss_val, _grad) = analytic_grpo_tail_loss_grad_pre_final_norm(
             &hidden,
@@ -9048,6 +9546,7 @@ mod tests {
             loss_normalizer: 1.0 / num_active as f64,
             is_level: IsLevel::Token,
             reinforce: false,
+            entropy_aware_kl_quantile: None,
         };
         let loss = grpo_loss(&policy_log_probs, &ref_log_probs, loss_params, &device)?;
         let loss_std = loss.to_scalar::<f32>()? as f64;

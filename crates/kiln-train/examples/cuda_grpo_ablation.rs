@@ -56,6 +56,14 @@ enum Mode {
     /// Phase 1 + ReferencePolicy::None (skip reference forward, REINFORCE
     /// with group-relative advantages).
     Phase1Reinforce,
+    /// Phase 1 + ReferencePolicy::Ema (refresh every 8 groups, decay 0.0).
+    Phase3Ema,
+    /// Phase 1 + ReferencePolicy::Ema(decay=0.9, refresh=8) (slow-moving).
+    Phase3EmaSlow,
+    /// Phase 1 + selective KL (entropy_aware_kl_quantile = 0.8).
+    Phase3KlCov,
+    /// Phase 1 + EMA(decay=0, refresh=8) + selective KL (q=0.8).
+    Phase3EmaKlCov,
 }
 
 #[cfg(feature = "cuda")]
@@ -67,6 +75,10 @@ impl Mode {
             "phase1_gspo" | "gspo" => Ok(Self::Phase1Gspo),
             "phase1_cispo" | "cispo" => Ok(Self::Phase1Cispo),
             "phase1_reinforce" | "reinforce" => Ok(Self::Phase1Reinforce),
+            "phase3_ema" | "ema" => Ok(Self::Phase3Ema),
+            "phase3_ema_slow" | "ema_slow" => Ok(Self::Phase3EmaSlow),
+            "phase3_kl_cov" | "kl_cov" => Ok(Self::Phase3KlCov),
+            "phase3_ema_kl_cov" | "ema_kl_cov" => Ok(Self::Phase3EmaKlCov),
             other => anyhow::bail!(
                 "unknown --mode {other}; expected one of: baseline, phase1, phase1_gspo, \
                  phase1_cispo, phase1_reinforce"
@@ -81,6 +93,10 @@ impl Mode {
             Self::Phase1Gspo => "phase1_gspo",
             Self::Phase1Cispo => "phase1_cispo",
             Self::Phase1Reinforce => "phase1_reinforce",
+            Self::Phase3Ema => "phase3_ema",
+            Self::Phase3EmaSlow => "phase3_ema_slow",
+            Self::Phase3KlCov => "phase3_kl_cov",
+            Self::Phase3EmaKlCov => "phase3_ema_kl_cov",
         }
     }
 
@@ -123,6 +139,56 @@ impl Mode {
                 clip_eps_high: Some(0.28),
                 dynamic_sampling: true,
                 reference_policy: ReferencePolicy::None,
+                ..base
+            },
+            Self::Phase3Ema => GrpoConfig {
+                advantage_mode: AdvantageMode::DrGrpo,
+                loss_aggregation: LossAggregation::TokenLevel,
+                clip_epsilon: 0.20,
+                clip_eps_high: Some(0.28),
+                kl_estimator: KlEstimator::K1,
+                dynamic_sampling: true,
+                reference_policy: ReferencePolicy::Ema {
+                    decay: 0.0,
+                    refresh_every: 8,
+                },
+                ..base
+            },
+            Self::Phase3EmaSlow => GrpoConfig {
+                advantage_mode: AdvantageMode::DrGrpo,
+                loss_aggregation: LossAggregation::TokenLevel,
+                clip_epsilon: 0.20,
+                clip_eps_high: Some(0.28),
+                kl_estimator: KlEstimator::K1,
+                dynamic_sampling: true,
+                reference_policy: ReferencePolicy::Ema {
+                    decay: 0.9,
+                    refresh_every: 8,
+                },
+                ..base
+            },
+            Self::Phase3KlCov => GrpoConfig {
+                advantage_mode: AdvantageMode::DrGrpo,
+                loss_aggregation: LossAggregation::TokenLevel,
+                clip_epsilon: 0.20,
+                clip_eps_high: Some(0.28),
+                kl_estimator: KlEstimator::K1,
+                dynamic_sampling: true,
+                entropy_aware_kl_quantile: Some(0.8),
+                ..base
+            },
+            Self::Phase3EmaKlCov => GrpoConfig {
+                advantage_mode: AdvantageMode::DrGrpo,
+                loss_aggregation: LossAggregation::TokenLevel,
+                clip_epsilon: 0.20,
+                clip_eps_high: Some(0.28),
+                kl_estimator: KlEstimator::K1,
+                dynamic_sampling: true,
+                reference_policy: ReferencePolicy::Ema {
+                    decay: 0.0,
+                    refresh_every: 8,
+                },
+                entropy_aware_kl_quantile: Some(0.8),
                 ..base
             },
         }
