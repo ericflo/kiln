@@ -2223,10 +2223,47 @@ fn train_tokenized_grpo_group(
                 device,
             )?;
 
-            let loss = grpo_loss(&policy_log_probs, &ref_log_probs, loss_params, device)?;
+            let grpo_loss_val = grpo_loss(&policy_log_probs, &ref_log_probs, loss_params, device)?;
+
+            // ECHO env-CE term. When config.loss.echo is None, when
+            // env_mask is all-false (legacy single-turn rollouts), or
+            // when total_obs_len is 0, this contributes exactly nothing.
+            //
+            // Implementation: reuse token_log_probs with env_mask as
+            // the position selector. Returns log p(x_t) at env
+            // positions; CE = -sum(log p) / |O| (paper §3.1, where |O|
+            // is total_obs_len). We rescale by env_count/|O| to convert
+            // from sum-over-active to paper-normalized mean.
+            let loss = if let Some(echo_cfg) = &config.loss.echo {
+                let env_count = comp
+                    .env_mask
+                    .get(1..)
+                    .map_or(0, |m| m.iter().filter(|&&v| v).count());
+                if env_count > 0 && comp.total_obs_len > 0 {
+                    let env_log_probs = token_log_probs(
+                        &policy_logits,
+                        &comp.input_ids,
+                        &comp.env_mask,
+                        device,
+                    )?;
+                    // sum(log p) over env positions
+                    let env_log_prob_sum = env_log_probs.sum_all()?;
+                    // mean_ce = -sum / |O| (paper §3.1 normalization)
+                    let inv_obs_len = -(1.0 / comp.total_obs_len as f64);
+                    let echo_mean_ce = env_log_prob_sum.affine(inv_obs_len, 0.0)?;
+                    // Total loss = L_grpo + λ · L_envCE
+                    let echo_scaled = echo_mean_ce.affine(echo_cfg.lambda, 0.0)?;
+                    grpo_loss_val.add(&echo_scaled)?
+                } else {
+                    grpo_loss_val
+                }
+            } else {
+                grpo_loss_val
+            };
+
             loss_val = loss.to_scalar::<f32>()? as f64;
 
-            let grads = loss.backward().context("GRPO backward pass")?;
+            let grads = loss.backward().context("GRPO+ECHO backward pass")?;
             if token_level {
                 let vars = params.all_vars();
                 accumulate_grads(&mut group_accum, &grads, &vars)?;
