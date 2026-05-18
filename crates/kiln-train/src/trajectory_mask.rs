@@ -787,4 +787,118 @@ mod tests {
         ];
         assert_eq!(count_supervised_segments(&traj), 2);
     }
+
+    /// Real Qwen3.5-4B tokenizer + chat template fixture. Skipped on CI
+    /// when KILN_QWEN_TOKENIZER_PATH isn't set (so this test only runs on
+    /// pods where the model is staged at /workspace/qwen3.5-4b/).
+    ///
+    /// Verifies that the byte-search masking strategy correctly handles
+    /// the *real* Qwen tool_response wrapper, not just my synthetic
+    /// fixture template. This is the load-bearing test for the S2 risk
+    /// flagged in docs/plans/echo-integration-plan.md §6.1
+    /// (Tool-result delimiter mismatch with the active chat template).
+    #[test]
+    fn build_masks_against_real_qwen_tokenizer() -> anyhow::Result<()> {
+        let tokenizer_path = match std::env::var("KILN_QWEN_TOKENIZER_PATH") {
+            Ok(v) => v,
+            Err(_) => match std::path::Path::new("/workspace/qwen3.5-4b/tokenizer.json")
+                .exists()
+            {
+                true => "/workspace/qwen3.5-4b/tokenizer.json".to_string(),
+                false => {
+                    eprintln!(
+                        "skipping build_masks_against_real_qwen_tokenizer — \
+                         KILN_QWEN_TOKENIZER_PATH not set and \
+                         /workspace/qwen3.5-4b/tokenizer.json doesn't exist"
+                    );
+                    return Ok(());
+                }
+            },
+        };
+        let chat_template_path = std::path::Path::new(&tokenizer_path)
+            .parent()
+            .unwrap()
+            .join("chat_template.jinja");
+
+        let bytes = std::fs::read(&tokenizer_path)?;
+        let tok = KilnTokenizer::from_bytes(&bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let tok = if chat_template_path.exists() {
+            let template = std::fs::read_to_string(&chat_template_path)?;
+            tok.with_chat_template(template)
+        } else {
+            tok
+        };
+
+        // A realistic agentic trajectory: user asks → assistant tool_call
+        // → tool result → assistant final.
+        use crate::ChatMessage;
+        let prompt = vec![ChatMessage {
+            role: "user".into(),
+            content: "List files in /tmp".into(),
+        }];
+        let traj = vec![
+            TurnSegment {
+                role: "assistant".into(),
+                content: "<tool_call>{\"name\":\"bash\",\"arguments\":{\"cmd\":\"ls /tmp\"}}</tool_call>".into(),
+                kind: TurnKind::Action,
+                tool_call_id: None,
+                warning_prefix_len: None,
+            },
+            TurnSegment {
+                role: "tool".into(),
+                content: "file1.txt\nfile2.txt\n".into(),
+                kind: TurnKind::Observation,
+                tool_call_id: None,
+                warning_prefix_len: None,
+            },
+            TurnSegment {
+                role: "assistant".into(),
+                content: "Found two files: file1.txt and file2.txt.".into(),
+                kind: TurnKind::Action,
+                tool_call_id: None,
+                warning_prefix_len: None,
+            },
+        ];
+
+        let result =
+            build_masks_from_trajectory(&traj, &prompt, &tok, &MaskConfig::default())?;
+
+        // Three supervised segments expected: 2 Action + 1 Observation.
+        // If the masker missed the Qwen tool_response wrapper, the
+        // Observation segment would be absent here and the count would
+        // be 2 instead.
+        assert_eq!(
+            result.segment_spans.len(),
+            3,
+            "expected 3 supervised segments (2 Action + 1 Observation); got {} — \
+             likely the tool_response wrapper search missed Qwen's actual layout. \
+             segment_spans = {:?}",
+            result.segment_spans.len(),
+            result.segment_spans,
+        );
+
+        // Disjointness: a token can't be both Action and Observation.
+        result.assert_masks_disjoint()?;
+
+        // Both masks must have at least one true bit.
+        let n_action = result.action_mask.iter().filter(|&&b| b).count();
+        let n_env = result.env_mask.iter().filter(|&&b| b).count();
+        assert!(
+            n_action >= 5,
+            "expected at least 5 action tokens (covers both assistant turns); got {n_action}"
+        );
+        assert!(
+            n_env >= 3,
+            "expected at least 3 env tokens (covers 'file1.txt\\nfile2.txt\\n'); got {n_env}"
+        );
+
+        // Sanity: the env span covers tokens we can decode back to bytes
+        // close to "file1.txt" — confirms the byte-search located the
+        // right region of the rendered text.
+        // (Skipping the actual decode check here because the Qwen
+        // tokenizer's BPE merges produce non-trivial token boundaries
+        // that don't decompose cleanly; the count + disjointness checks
+        // above are the load-bearing assertions.)
+        Ok(())
+    }
 }
