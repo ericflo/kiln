@@ -705,46 +705,6 @@ fn normalized_chat_template_kwargs_for_cache(
     chat_template_kwargs.filter(|kwargs| !kwargs.is_empty())
 }
 
-fn chat_template_kwargs_enable_thinking_is_set(
-    chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> bool {
-    chat_template_kwargs
-        .and_then(|kwargs| kwargs.get("enable_thinking"))
-        .is_some()
-}
-
-fn tools_request_defaults_to_non_thinking(
-    normalized_tools: Option<&[serde_json::Value]>,
-    normalized_tool_choice: Option<&serde_json::Value>,
-    chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> bool {
-    normalized_tools.is_some()
-        && !matches!(
-            normalized_tool_choice.and_then(|value| value.as_str()),
-            Some("none")
-        )
-        && !chat_template_kwargs_enable_thinking_is_set(chat_template_kwargs)
-}
-
-fn effective_chat_template_kwargs_for_cache<'a>(
-    normalized_tools: Option<&[serde_json::Value]>,
-    normalized_tool_choice: Option<&serde_json::Value>,
-    chat_template_kwargs: Option<&'a serde_json::Map<String, serde_json::Value>>,
-) -> Option<Cow<'a, serde_json::Map<String, serde_json::Value>>> {
-    let normalized = normalized_chat_template_kwargs_for_cache(chat_template_kwargs);
-    if !tools_request_defaults_to_non_thinking(normalized_tools, normalized_tool_choice, normalized)
-    {
-        return normalized.map(Cow::Borrowed);
-    }
-
-    let mut kwargs = normalized.cloned().unwrap_or_default();
-    kwargs.insert(
-        "enable_thinking".to_string(),
-        serde_json::Value::Bool(false),
-    );
-    Some(Cow::Owned(kwargs))
-}
-
 fn normalized_tool_choice_option_for_synthetic_request(
     tools: Option<&[serde_json::Value]>,
     tool_choice: Option<&serde_json::Value>,
@@ -823,18 +783,14 @@ pub(crate) fn render_prompt_text(
 ) -> Result<String, ApiError> {
     let normalized_tools = normalized_tools_for_cache(tools);
     let normalized_tool_choice = normalized_tool_choice_for_cache(normalized_tools, tool_choice);
-    let normalized_chat_template_kwargs = effective_chat_template_kwargs_for_cache(
-        normalized_tools,
-        normalized_tool_choice,
-        chat_template_kwargs,
-    );
-    let normalized_chat_template_kwargs_ref = normalized_chat_template_kwargs.as_deref();
+    let normalized_chat_template_kwargs =
+        normalized_chat_template_kwargs_for_cache(chat_template_kwargs);
     let message_keys = message_cache_keys(messages);
     let key = serde_json::to_string(&RenderedPromptCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
-        chat_template_kwargs: normalized_chat_template_kwargs_ref,
+        chat_template_kwargs: normalized_chat_template_kwargs,
     })
     .map_err(|err| ApiError::internal(format!("failed to key rendered prompt cache: {err}")))?;
 
@@ -843,8 +799,7 @@ pub(crate) fn render_prompt_text(
     }
 
     let chat_messages: Vec<ChatMessage> = messages.iter().map(message_to_chat).collect();
-    let chat_template_options =
-        chat_template_options_from_kwargs(normalized_chat_template_kwargs_ref);
+    let chat_template_options = chat_template_options_from_kwargs(normalized_chat_template_kwargs);
     let prompt_text = state
         .tokenizer
         .apply_chat_template_full_with_options(
@@ -1000,19 +955,15 @@ fn deterministic_chat_request_cache_key_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
-    let normalized_chat_template_kwargs = effective_chat_template_kwargs_for_cache(
-        normalized_tools,
-        normalized_tool_choice,
-        req.chat_template_kwargs.as_ref(),
-    );
-    let normalized_chat_template_kwargs_ref = normalized_chat_template_kwargs.as_deref();
+    let normalized_chat_template_kwargs =
+        normalized_chat_template_kwargs_for_cache(req.chat_template_kwargs.as_ref());
     let message_keys = message_cache_keys(&req.messages);
 
     serde_json::to_string(&DeterministicChatRequestCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
-        chat_template_kwargs: normalized_chat_template_kwargs_ref,
+        chat_template_kwargs: normalized_chat_template_kwargs,
         temperature_bits,
         max_tokens: sampling.max_tokens,
         stop,
@@ -1057,19 +1008,15 @@ fn deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
-    let normalized_chat_template_kwargs = effective_chat_template_kwargs_for_cache(
-        normalized_tools,
-        normalized_tool_choice,
-        req.chat_template_kwargs.as_ref(),
-    );
-    let normalized_chat_template_kwargs_ref = normalized_chat_template_kwargs.as_deref();
+    let normalized_chat_template_kwargs =
+        normalized_chat_template_kwargs_for_cache(req.chat_template_kwargs.as_ref());
     let message_keys = message_cache_keys(&req.messages);
 
     serde_json::to_string(&DeterministicChatRequestCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
-        chat_template_kwargs: normalized_chat_template_kwargs_ref,
+        chat_template_kwargs: normalized_chat_template_kwargs,
         temperature_bits,
         max_tokens,
         stop,
@@ -1118,19 +1065,15 @@ fn deterministic_chat_choices_cache_key_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
-    let normalized_chat_template_kwargs = effective_chat_template_kwargs_for_cache(
-        normalized_tools,
-        normalized_tool_choice,
-        req.chat_template_kwargs.as_ref(),
-    );
-    let normalized_chat_template_kwargs_ref = normalized_chat_template_kwargs.as_deref();
+    let normalized_chat_template_kwargs =
+        normalized_chat_template_kwargs_for_cache(req.chat_template_kwargs.as_ref());
     let message_keys = message_cache_keys(&req.messages);
 
     serde_json::to_string(&DeterministicChatChoicesCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
-        chat_template_kwargs: normalized_chat_template_kwargs_ref,
+        chat_template_kwargs: normalized_chat_template_kwargs,
         n: n_per,
         temperature_bits,
         max_tokens: sampling.max_tokens,
@@ -1199,18 +1142,14 @@ fn deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
-    let normalized_chat_template_kwargs = effective_chat_template_kwargs_for_cache(
-        normalized_tools,
-        normalized_tool_choice,
-        req.chat_template_kwargs.as_ref(),
-    );
-    let normalized_chat_template_kwargs_ref = normalized_chat_template_kwargs.as_deref();
+    let normalized_chat_template_kwargs =
+        normalized_chat_template_kwargs_for_cache(req.chat_template_kwargs.as_ref());
 
     serde_json::to_string(&DeterministicChatChoicesCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
-        chat_template_kwargs: normalized_chat_template_kwargs_ref,
+        chat_template_kwargs: normalized_chat_template_kwargs,
         n: n_per,
         temperature_bits,
         max_tokens,
@@ -1271,18 +1210,14 @@ fn deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
-    let normalized_chat_template_kwargs = effective_chat_template_kwargs_for_cache(
-        normalized_tools,
-        normalized_tool_choice,
-        req.chat_template_kwargs.as_ref(),
-    );
-    let normalized_chat_template_kwargs_ref = normalized_chat_template_kwargs.as_deref();
+    let normalized_chat_template_kwargs =
+        normalized_chat_template_kwargs_for_cache(req.chat_template_kwargs.as_ref());
 
     serde_json::to_string(&DeterministicChatRequestCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
-        chat_template_kwargs: normalized_chat_template_kwargs_ref,
+        chat_template_kwargs: normalized_chat_template_kwargs,
         temperature_bits,
         max_tokens,
         stop,
@@ -5324,12 +5259,8 @@ fn deterministic_batch_cache_key_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
-    let normalized_chat_template_kwargs = effective_chat_template_kwargs_for_cache(
-        normalized_tools,
-        normalized_tool_choice,
-        req.chat_template_kwargs.as_ref(),
-    );
-    let normalized_chat_template_kwargs_ref = normalized_chat_template_kwargs.as_deref();
+    let normalized_chat_template_kwargs =
+        normalized_chat_template_kwargs_for_cache(req.chat_template_kwargs.as_ref());
 
     let key = DeterministicBatchCacheKeyWire {
         prompts: req
@@ -5339,7 +5270,7 @@ fn deterministic_batch_cache_key_with_vocab_size(
             .collect(),
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
-        chat_template_kwargs: normalized_chat_template_kwargs_ref,
+        chat_template_kwargs: normalized_chat_template_kwargs,
         n: req.n.unwrap_or(1),
         temperature_bits,
         max_tokens,
@@ -7256,7 +7187,7 @@ mod tests {
     }
 
     #[test]
-    fn qwen35_tool_requests_default_to_non_thinking() {
+    fn qwen35_tool_requests_keep_template_default_thinking() {
         let json = r#"{
             "model": "Qwen/Qwen3.5-4B",
             "messages": [
@@ -7285,90 +7216,66 @@ mod tests {
         let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
         let normalized_tool_choice =
             normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
-        let effective_kwargs = effective_chat_template_kwargs_for_cache(
-            normalized_tools,
-            normalized_tool_choice,
-            req.chat_template_kwargs.as_ref(),
-        );
+        let normalized_chat_template_kwargs =
+            normalized_chat_template_kwargs_for_cache(req.chat_template_kwargs.as_ref());
 
         let prompt = tok
             .apply_chat_template_full_with_options(
                 &chat_messages,
                 normalized_tools,
                 normalized_tool_choice,
-                chat_template_options_from_kwargs(effective_kwargs.as_deref()),
+                chat_template_options_from_kwargs(normalized_chat_template_kwargs),
             )
             .expect("Qwen3.5 tools prompt should render");
 
         assert!(
-            prompt.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"),
-            "tool requests should default to pre-closed thinking: {prompt:?}"
+            prompt.ends_with("<|im_start|>assistant\n<think>\n"),
+            "tool requests should use Qwen's template default thinking mode: {prompt:?}"
         );
         assert!(
-            !prompt_starts_in_reasoning(&prompt),
-            "tool requests should stream tool XML as content, not reasoning_content"
+            prompt_starts_in_reasoning(&prompt),
+            "default tool requests should still split generated text as reasoning_content"
         );
     }
 
     #[test]
-    fn qwen35_tool_requests_honor_explicit_thinking_choices() {
+    fn qwen35_tool_requests_honor_explicit_disable_thinking() {
+        let req = parse_request(
+            r#"{
+                "messages":[{"role":"user","content":"List files."}],
+                "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],
+                "chat_template_kwargs":{"enable_thinking":false},
+                "temperature":0.0,
+                "max_tokens":12
+            }"#,
+        );
         let template =
             include_str!("../../../kiln-core/test_fixtures/qwen35_4b_chat_template.jinja");
         let tok = crate::api::test_tokenizer().with_chat_template(template.to_string());
+        let chat_messages: Vec<ChatMessage> = req.messages.iter().map(message_to_chat).collect();
+        let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
+        let normalized_tool_choice =
+            normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
+        let normalized_chat_template_kwargs =
+            normalized_chat_template_kwargs_for_cache(req.chat_template_kwargs.as_ref());
 
-        for (name, body, expected_suffix) in [
-            (
-                "explicit true",
-                r#"{
-                    "messages":[{"role":"user","content":"List files."}],
-                    "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],
-                    "chat_template_kwargs":{"enable_thinking":true},
-                    "temperature":0.0,
-                    "max_tokens":12
-                }"#,
-                "<|im_start|>assistant\n<think>\n",
-            ),
-            (
-                "tool_choice none",
-                r#"{
-                    "messages":[{"role":"user","content":"Say hi."}],
-                    "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],
-                    "tool_choice":"none",
-                    "temperature":0.0,
-                    "max_tokens":12
-                }"#,
-                "<|im_start|>assistant\n<think>\n",
-            ),
-        ] {
-            let req = parse_request(body);
-            let chat_messages: Vec<ChatMessage> =
-                req.messages.iter().map(message_to_chat).collect();
-            let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
-            let normalized_tool_choice =
-                normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
-            let effective_kwargs = effective_chat_template_kwargs_for_cache(
+        let prompt = tok
+            .apply_chat_template_full_with_options(
+                &chat_messages,
                 normalized_tools,
                 normalized_tool_choice,
-                req.chat_template_kwargs.as_ref(),
-            );
+                chat_template_options_from_kwargs(normalized_chat_template_kwargs),
+            )
+            .expect("Qwen3.5 explicit non-thinking tools prompt should render");
 
-            let prompt = tok
-                .apply_chat_template_full_with_options(
-                    &chat_messages,
-                    normalized_tools,
-                    normalized_tool_choice,
-                    chat_template_options_from_kwargs(effective_kwargs.as_deref()),
-                )
-                .unwrap_or_else(|err| panic!("{name} should render: {err}"));
-            assert!(
-                prompt.ends_with(expected_suffix),
-                "{name} should preserve the open reasoning block: {prompt:?}"
-            );
-            assert!(
-                prompt_starts_in_reasoning(&prompt),
-                "{name} should still split generated text as reasoning_content"
-            );
-        }
+        assert!(
+            prompt.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"),
+            "explicit enable_thinking=false should pre-close thinking: {prompt:?}"
+        );
+        assert!(
+            !prompt_starts_in_reasoning(&prompt),
+            "explicit enable_thinking=false should stream generated text as content"
+        );
     }
 
     #[test]
@@ -8998,7 +8905,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_chat_request_cache_key_normalizes_tool_default_non_thinking() {
+    fn deterministic_chat_request_cache_key_keeps_tool_template_kwargs_explicit() {
         let sampling = SamplingParams {
             temperature: 0.0,
             max_tokens: 4,
@@ -9014,15 +8921,15 @@ mod tests {
             r#"{"messages":[{"role":"user","content":"same tool default kwargs"}],"temperature":0.0,"max_tokens":4,"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],"tool_choice":"auto","chat_template_kwargs":{"enable_thinking":true}}"#,
         );
 
-        assert_eq!(
-            deterministic_chat_request_cache_key(&omitted_kwargs, &sampling).unwrap(),
-            deterministic_chat_request_cache_key(&explicit_no_think, &sampling).unwrap(),
-            "tool requests should cache the omitted kwargs shape as explicit enable_thinking=false"
-        );
         assert_ne!(
             deterministic_chat_request_cache_key(&omitted_kwargs, &sampling).unwrap(),
+            deterministic_chat_request_cache_key(&explicit_no_think, &sampling).unwrap(),
+            "tool requests must not reinterpret omitted kwargs as enable_thinking=false"
+        );
+        assert_ne!(
+            deterministic_chat_request_cache_key(&explicit_no_think, &sampling).unwrap(),
             deterministic_chat_request_cache_key(&explicit_think, &sampling).unwrap(),
-            "explicit enable_thinking=true must keep a separate cache entry"
+            "explicit enable_thinking values must keep separate cache entries"
         );
     }
 
@@ -9545,7 +9452,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_batch_cache_key_normalizes_tool_default_non_thinking() {
+    fn deterministic_batch_cache_key_keeps_tool_template_kwargs_explicit() {
         let omitted_kwargs = parse_batch_request(
             r#"{"prompts":[[{"role":"user","content":"same batch tool default kwargs"}]],"n":2,"temperature":0.0,"max_tokens":4,"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],"tool_choice":"auto"}"#,
         );
@@ -9556,15 +9463,15 @@ mod tests {
             r#"{"prompts":[[{"role":"user","content":"same batch tool default kwargs"}]],"n":2,"temperature":0.0,"max_tokens":4,"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],"tool_choice":"auto","chat_template_kwargs":{"enable_thinking":true}}"#,
         );
 
-        assert_eq!(
-            deterministic_batch_cache_key(&omitted_kwargs, 2),
-            deterministic_batch_cache_key(&explicit_no_think, 2),
-            "batch tool requests should cache omitted kwargs as explicit enable_thinking=false"
-        );
         assert_ne!(
             deterministic_batch_cache_key(&omitted_kwargs, 2),
+            deterministic_batch_cache_key(&explicit_no_think, 2),
+            "batch tool requests must not reinterpret omitted kwargs as enable_thinking=false"
+        );
+        assert_ne!(
+            deterministic_batch_cache_key(&explicit_no_think, 2),
             deterministic_batch_cache_key(&explicit_think, 2),
-            "explicit batch enable_thinking=true must keep a separate cache entry"
+            "explicit batch enable_thinking values must keep separate cache entries"
         );
     }
 

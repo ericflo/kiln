@@ -274,7 +274,7 @@ curl http://localhost:8420/v1/train/status
 pi -p "Use the bash tool to run: pwd"
 ```
 
-Kiln accepts Qwen3.5's native XML tool-call generations internally, but OpenAI-compatible clients receive normal `tool_calls` in both streaming and non-streaming responses. Tool-enabled requests default to Qwen's non-thinking template mode so pi does not accumulate hidden reasoning in long terminal sessions; callers can opt back into thinking with `chat_template_kwargs: {"enable_thinking": true}`. pi should execute the tool call instead of printing raw `<tool_call>` XML.
+Kiln accepts Qwen3.5's native XML tool-call generations internally, but OpenAI-compatible clients receive normal `tool_calls` in both streaming and non-streaming responses. pi should execute the tool call instead of printing raw `<tool_call>` XML.
 
 See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including Desktop App setup, source builds, GRPO, adapter management, Docker, and systemd setup. If setup stalls on binary downloads, CUDA/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, start with the [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html). For tools-bearing workloads on older pinned releases, see [QUICKSTART.md §9.2](QUICKSTART.md#92-troubleshooting-older-release-long-prefill-timeouts) for the legacy `workers=1` / request-timeout troubleshooting note ([#664](https://github.com/ericflo/kiln/issues/664)).
 
