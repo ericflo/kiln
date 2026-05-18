@@ -166,18 +166,34 @@ Counter to intuition, scaling training data within a single epoch
 - iter 2 (20 tasks, 8 effective groups after dynamic_sampling) → 0.919
 - iter 3 (40 tasks, 19 effective groups, same lr) → 0.845
 - iter 5 (11 strong-signal groups, same lr) → 0.899
+- iter 8 (11 strong-signal groups, **2 epochs**, same lr) → **0.750**
 
-The pattern: more groups at the same lr means more optimizer steps in
-one epoch, which overshoots. Reducing lr (iter 4: 5e-6) partially
-recovered the loss but didn't reach iter 2.
+The pattern: more total optimizer updates at the same lr means
+overshoot — whether the extra updates come from more groups (iter 3)
+or more epochs (iter 8). Iter 8 is the cleanest demonstration: same
+data as iter 5, but doubled epochs, and composite fell -0.149 from
+0.899 to 0.750. Reducing lr (iter 4: 5e-6) partially recovered the
+loss but didn't reach iter 2.
+
+**Over-training has a behavioural signature that isn't in the loss
+curve.** Iter 8's training loss was monotone and clean, but on eval
+the model thrashed: mean wall-clock blew up 3× (19.86s → 56.45s) and
+five eval tasks that iter 5 had recovered went to timeout-zero. The
+adapter learned to "verify excessively, call more tools" — the
+opposite of what the tool_call_efficiency sub-score was supposed to
+shape. **Always watch eval wall-clock alongside composite**; a
+silent wall-clock blow-up is the canary for "GRPO over-confidence."
 
 **Heuristics for sizing training sets:**
 
 - Start with ~10-15 *effective* (post-dynamic_sampling) groups for
-  the first iter. Add more only if loss has clearly plateaued
-  *and* eval composite isn't improving.
+  the first iter at a single epoch. Add more only if loss has
+  clearly plateaued *and* eval composite isn't improving.
 - If you 2× the training data, also halve lr — otherwise you've
   doubled the effective gradient step count per pass.
+- **Default to 1 epoch on strong-signal-filtered data.** If you
+  want more updates, add weak-signal regularization groups *or*
+  halve lr; do not just double epochs over the filtered set.
 - Strong-signal filtering (`var > 0.05`) is a cheap way to make a
   bigger raw rollout pool produce a smaller, more focused training
   set without losing data quality.
@@ -481,7 +497,7 @@ stop and look at what the rollouts are actually doing.
 | **H10 — Longer rollouts** | Increase `max_tokens` (rollout) | When rollouts are truncating mid-answer (`truncation_rate > 0.10`). |
 | **H11 — More generations** | Increase `num_generations` (8 → 16) | When you can afford the VRAM and `group_variance` is too noisy for stable advantages. Quadratic memory cost. |
 | **H12 — Strong-signal filter** | Roll out a *wider* task pool, then KEEP only groups with `within-group variance > 0.05` for training | When you've hit "more data hurts" (iter N > iter N−1 with more tasks). Filtering removes degenerate + near-saturated groups in one pass. In pi-doctest cap, this recovered most of iter 3's regression without overshooting back to iter 2's lucky-sample number. |
-| **H13 — Two-epoch on filtered data** | Concatenate the filtered JSONL with itself (or use higher epochs in the trainer when supported) | When iter at H12 still underperforms target; you want more gradient updates without expanding the data. Watch loss curve — if it goes more positive on the 2nd epoch, you're overtraining. |
+| **H13 — Two-epoch on filtered data** | Concatenate the filtered JSONL with itself (or use higher epochs in the trainer when supported) | When iter at H12 still underperforms target; you want more gradient updates without expanding the data. **Empirically risky:** in pi-doctest cap, 2 epochs on iter 5's filtered data regressed composite −0.149 (0.899 → 0.750) with no warning in the loss curve — the signature was eval wall-clock 3× blow-up. Halve lr if you must try this, and **always compare against the 1-epoch baseline before shipping**. |
 | **H14 — Multi-seed average** | Re-run the best recipe with 2-3 different rollout seeds; ensemble or average the adapters | When single-iter results show high variance (Δ composite > 0.05 across re-runs). The honest result is the mean, not the max. |
 
 Always start at H1. **Never combine two hypotheses in a single iter.**
@@ -657,6 +673,14 @@ A composite uplift driven by a sub-score that's a Goodhart shortcut is
 **not** a real lift. Cap-#3 closeout: `length_band` lifted +29.7pp
 while `entity_recall` (the *target*) was flat — the composite went up
 but the adapter learned the wrong thing.
+
+**Also watch eval wall-clock per rollout.** A jump of 2× or more, even
+when composite is flat or up, is a behavioural-regression canary:
+the adapter is generating more tokens / calling more tools to reach
+the same answer. In pi-doctest iter 8, wall-clock blew up 19.86s →
+56.45s (+184%) at the same time composite collapsed −0.149 — but a
+quieter run might show wall-clock blow-up without an obvious composite
+regression. Treat wall-clock as a first-class regression metric.
 
 ---
 
