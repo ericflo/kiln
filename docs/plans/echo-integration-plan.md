@@ -496,15 +496,58 @@ This is the OPD plan's §10 self-distillation loop with ECHO added as the third 
 2. **Phase 1**: ECHO improves pi-doctest composite by ≥+0.10 over GRPO at 3-seed-verified variance. Proves the technique inside our infra.
 3. **Phase 2**: holdout dynamics CE drops ≥30% (ECHO vs GRPO) AND pass-rate strictly improves on the new pi-tb-lite cap. Proves the mechanism, not just the number.
 
-**Risks flagged up front:**
+### §6.1 Risk register
 
-- **Tool-result chat template stability.** Per `kiln-polish-prerequisites.md` #5, there's no firsthand verification that pi's session JSONL records the raw `<tool_call>` XML vs the OpenAI-normalized form. Phase 0's first task is to verify this on a real pi session and document it. If pi normalizes, we need to invert the normalization at parse time. Half-day blocker if it's an issue.
-- **The composite reward / ECHO interaction.** Paper uses binary outcome rewards. The pi-doctest uses a 4-component composite. ECHO doesn't care what the policy-gradient term is — it's a separate auxiliary CE — so zero interaction is the expectation, but the way to be sure is to run Phase 1 with both binary-outcome and composite, and only ship if both improve. Cheap to do.
-- **Vulkan-path coverage.** The VK trainer is its own substantial file (`vk_train.rs`, 4,610 lines). The kernel-side coverage is already there (FLCE Phase B on VK), but the dispatcher / call site in `vk_native_grpo_train` and `vk_native_grpo_train_jsonl` needs the same wiring as the CUDA path. Mechanical work (it's the same `fused_linear_cross_entropy_dispatch_with_provider` call) but won't claim done until we've actually run a smoke test on the Vulkan path. Probably ~1 day of work in Phase 1.
-- **Trajectory token-byte alignment.** Tokenizer offsets across chat templates with embedded `<tool_call>` XML can be subtle (special tokens, leading whitespace). The `apply_chat_template_with_token_offsets` extension has to be tested with the actual templates we run, not just toy strings. Phase 0 unit tests have to include real pi-session fixtures.
-- **OPD branch merge state.** The big naming refactor in Phase 3 has interaction with OPD's existing `lib.rs` types. Coordinate with the OPD branch (or whichever lands first) to avoid two rounds of rename churn. If the OPD branch is months from main, land the rename on this branch and OPD rebases. If OPD is close to main, wait one round.
+Itemized, with severity (S1 = blocker, S2 = significant, S3 = minor) and the phase that owns the mitigation. Each entry: symptom → cause → mitigation → fallback.
 
-**What we ship even if ECHO underperforms:** the masking primitive (Phase 0) is independently valuable — the agentic-grpo skill explicitly flags it as a known gap. So even in the worst case where ECHO doesn't reproduce, we ship a strict improvement to the agentic-GRPO foundation. The downside is bounded.
+**S1 — Checkpointed-path analytic-tail refactor regresses GRPO loss numerics.**
+*Phase 1.* The existing `analytic_grpo_tail_loss_grad_pre_final_norm` is a fused analytic backward through final-RMSNorm + LM head + GRPO surrogate. Folding ECHO in means computing two analytic gradients and linearly combining them inside the same vocab-chunk loop. A bug in the per-chunk gradient accumulation would produce subtly wrong (but plausible-looking) loss values. Mitigation: a pure-numerical-equivalence test that compares the new `analytic_grpo_echo_tail_loss_grad_pre_final_norm` at `echo_lambda=0.0` against the old function — must be bit-equal on at least three real fixtures. Fallback if it can't be made bit-equal: leave the checkpointed path on GRPO-only at first, ship ECHO via the uncheckpointed path only, validate the technique works on small contexts before tackling the checkpointed path's complexity.
+
+**S1 — Vulkan-path forward/backward graph divergence.**
+*Phase 1.* `vk_train.rs` runs on `VkTensor` with a hand-rolled backward graph. ECHO's `vk_echo_env_ce` must hook into the same backward graph the existing GRPO loss uses, OR it must build its own backward path that the optimizer step consumes. The seam is at the `grpo_active_rows_and_labels` call sites (`vk_train.rs:3623, 3959`). Mitigation: read the existing VK GRPO backward path carefully (it's in the same file); model `vk_echo_env_ce` after it; unit-test by running a single GRPO step with `echo_lambda=0.0` and asserting bit-equality to the pre-ECHO commit. Fallback: VK behind a feature flag while CUDA/Metal ship first; one extra release cycle for VK parity.
+
+**S2 — Mask boundary drift on tool-call XML.**
+*Phase 0.* The Qwen chat template renders an assistant `toolCall` block as `<tool_call>{"name":...,"arguments":...}</tool_call>` text. The tokenizer may or may not assign these as special tokens depending on the tokenizer version. If `<tool_call>` and `</tool_call>` are single special tokens, they live at the boundary of action_mask=true / action_mask=false (still inside the assistant `<|im_start|>assistant\n...<|im_end|>` block) and there's no boundary issue. If they tokenize as multi-token strings, the boundary is exactly where you'd expect. Mitigation: a Phase 0 unit test that loads the actual Qwen3.5-4B tokenizer config the kiln repo ships and dumps token IDs at the boundary, then pins those IDs in the test. Fallback: a regex-based span-finder that ignores tokenizer specials and trusts byte ranges (already what `label_mask_from_rendered_assistant_spans` does — it's byte-search).
+
+**S2 — Tool-result delimiter mismatch with the active chat template.**
+*Phase 0.* The plan assumes Qwen3.5-4B's chat template renders tool results as `<|im_start|>tool\n...<|im_end|>` blocks. If it actually uses a different convention (`<|im_start|>user\n<tool_response>...</tool_response><|im_end|>` is one alternative), `build_masks_from_trajectory`'s span-search misses them entirely and `env_mask` is all false. Mitigation: a Phase 0 fixture test that pulls a real Qwen3.5-4B-rendered conversation with a tool turn and inspects the literal byte boundaries. The fixture goes in `crates/kiln-train/tests/fixtures/qwen35_4b_tool_result.txt`. Fallback: `MaskConfig` already carries a role→delimiter map; the test informs the default values for the actual template.
+
+**S2 — Composite-reward / ECHO interaction.**
+*Phase 1.* The paper uses binary outcome rewards. The pi-doctest cap uses a 4-component composite (outcome × tool_call_efficiency × tested_before_done × format_compliance). ECHO's auxiliary CE term is independent of the reward signal — it adds gradient on env-positions only — so the math says there's no interaction. Mitigation: validate both rewards in the Phase 1 ablation (binary-outcome-only and full composite), both must show ≥+0.10 composite uplift. Fallback if only one improves: ship ECHO with the regime that works; document the boundary; investigate why the failing regime fails.
+
+**S2 — Auto-anneal isn't auto-annealing.**
+*Phase 1.* Paper §3.3 claims λ=0.05 self-anneals: `L_env` falls fast as the model learns terminal structure, so `λ · L_env / L_grpo` shrinks naturally without a schedule. If this doesn't happen on our setup (e.g. because our terminal outputs are more random than the paper's), the auxiliary term keeps pulling and the policy objective degrades around λ=0.05. Mitigation: `lambda_effective` diagnostic stream from §3.6 catches this. If `λ · L_env / L_grpo > 0.5` for >100 steps, the auto-anneal is broken. Fallback: explicit cosine-decay schedule on λ, applied after a fixed step count. New `EchoConfig::lambda_schedule` field.
+
+**S2 — Long-observation FLCE memory blowup.**
+*Phase 1.* Today's GRPO sets `chunk_size = DEFAULT_CHUNK_SIZE = 4096`. Pi sessions with large stdout/file-read tool results can produce observations of 10K+ tokens. The FLCE kernel chunks along the active-token dimension, so the chunk size needs to scale with `|env_mask|`, not just `|action_mask|`. Mitigation: confirm the FLCE kernel chunks along active rows (Phase A and Phase B both do, per audit). Wire ECHO's chunk_size through `EchoStepInputs` and default to the same `DEFAULT_CHUNK_SIZE`. Fallback: if peak VRAM goes up under ECHO, drop chunk_size dynamically based on `(num_active_action + num_active_env)`.
+
+**S2 — Auto-detected reproducibility receipts get stale.**
+*Phase 2.* The paper's §5.2 dynamics-holdout test requires a stronger teacher model (Qwen3-32B). On laptop/prosumer kiln deployments this is not available. The receipt would then be empty on small setups, which is fine — but we should make the absence explicit. Mitigation: receipt carries `env_token_ce_holdout: Option<TeacherTrajectoryReceipt>`. None when no teacher available. Fallback: when None, the diagnostic falls back to `env_token_ce_training` (which is what the model is fitting on; less informative but always available).
+
+**S3 — Old wire payloads with `seed` or other forward-compatible extensions break.**
+*Phase 0.* Serde aliasing on `groups → agentic_groups` is straightforward, but if the old payload has additional fields kiln didn't strictly enforce (e.g. an experimental `seed` field that was being ignored), the new schema might accept those silently — or might `#[serde(deny_unknown_fields)]` reject them. Mitigation: explicitly `#[serde(default)]` everything; do not add `deny_unknown_fields`. The audit confirms `GrpoRequest` today has `#[serde(default)]` on every optional field, so this pattern continues.
+
+**S3 — Composed adapter cache misses on the new schema.**
+*Phase 0.* Kiln's adapter composition cache (server-side) keys on the request JSON. Renaming `groups → agentic_groups` changes the hash. Mitigation: not a real issue — the cache is for inference-time adapter merging, not training payloads. Confirmed by reading `crates/kiln-server/src/api/completions.rs::synthesize_composed_adapter`. Skip.
+
+**S3 — Old capabilities (sft/, opd/) emit JSONL files referenced by GrpoConfig fields.**
+*Phase 0.* Some existing capability scripts may write `"config": {...GrpoConfig fields...}` JSONL. The serde alias on the struct rename keeps these working, but the warning `#[deprecated]` annotation will appear in build output. Mitigation: confirm no `kiln-server` doctest or smoke test calls a deprecated path that produces a build warning at `cargo build --workspace`. Add an explicit `#[allow(deprecated)]` on the alias use site if needed.
+
+**S3 — `cuda_grpo_ablation` Mode::apply now needs to set `loss.echo`.**
+*Phase 1.* The existing `Mode` enum has modes like `phase1`, `phase1_gspo`, `phase1_cispo`, `phase3_ema`, etc. — each applies a config patch. ECHO is on by default, but if any mode currently disables a path ECHO touches (e.g. a `no-ref-policy` mode), the interaction could surface as an unexpected loss term. Mitigation: extend `Mode` test coverage so each mode runs one forward+backward step and asserts the loss is finite. Already most modes have this.
+
+**S3 — OPD branch merge state.**
+*Phase 3 (and onwards).* The OPD branch's `lib.rs` types may conflict with the Phase 0 rename. Mitigation: coordinate with whoever holds the OPD branch — likely best to land Phase 0 first since it's a strict refactor, then OPD rebases onto the new names. Fallback: cherry-pick the rename onto the OPD branch and merge OPD second.
+
+### §6.2 What we ship even if ECHO underperforms
+
+The masking primitive (Phase 0) is independently valuable — the agentic-grpo skill explicitly flags it as a known gap (`kiln-polish-prerequisites.md` §1). Even in the worst case where ECHO doesn't reproduce the paper:
+
+- Phase 0 ships a strict improvement to the agentic-GRPO foundation (multi-turn rollouts no longer leak gradient through tool-result tokens).
+- The `Trajectory` schema is the right canonical shape for any future per-token signal — OPD's agentic path, SCoRe earliest-error weighting (OPD plan §10.4 B), TIP tool-call token reweighting (§10.4 C), all need this same primitive.
+- The naming refactor unifies vocabulary across SFT (label_mask) / GRPO (action_mask) / ECHO (env_mask) / OPD (active_positions) — a strict readability win even if no new loss term ever ships.
+
+The downside is bounded. The upside is the paper's headline number on our actual deployment.
 
 ---
 
