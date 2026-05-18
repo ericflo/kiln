@@ -528,3 +528,154 @@ Three decisions, answered 2026-05-18:
 - Phase 3 — ~3–4 days. Verifier-free demo cap + docs + long-form grand-plan companion.
 
 Total: ~3 weeks of focused work to fully native ECHO, with usable intermediate checkpoints throughout. Phase 0 is the biggest single PR (it carries the whole rename); Phases 1–3 are surgical.
+
+---
+
+## Appendix A — Phase 0 migration map
+
+Concrete checklist of every file the Phase 0 PR touches. Numbers from `grep -rn` audits on this branch (2026-05-18).
+
+### A.1 Type renames (the core)
+
+**Where the old types are defined** (single source of truth): `crates/kiln-train/src/lib.rs:201–232`. Three structs: `ScoredCompletion`, `GrpoGroup`, `GrpoRequest`. Renames + deprecated aliases:
+
+```rust
+// crates/kiln-train/src/lib.rs — new
+
+pub use kiln_core::trajectory::{TurnKind, TurnSegment, ScoredRollout, AgenticGroup};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgenticRequest {
+    #[serde(default, alias = "groups")]
+    pub agentic_groups: Vec<AgenticGroup>,
+    #[serde(default)]
+    pub dataset_path: Option<String>,
+    #[serde(default)]
+    pub config: AgenticConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_eval: Option<kiln_eval::PostEvalConfig>,
+}
+
+// Deprecated aliases — keep for one release cycle.
+#[deprecated(since = "x.y.z", note = "renamed to AgenticGroup")]
+pub type GrpoGroup = AgenticGroup;
+#[deprecated(since = "x.y.z", note = "renamed to ScoredRollout")]
+pub type ScoredCompletion = ScoredRollout;
+#[deprecated(since = "x.y.z", note = "renamed to AgenticRequest")]
+pub type GrpoRequest = AgenticRequest;
+#[deprecated(since = "x.y.z", note = "renamed to AgenticConfig")]
+pub type GrpoConfig = AgenticConfig;
+```
+
+**Serde back-compat:** old wire payloads keep deserializing because:
+
+- `AgenticRequest` accepts `groups` as an alias for `agentic_groups` (the renamed field).
+- `ScoredRollout { trajectory, reward, text }` accepts the legacy single-string `text` form — when `trajectory` is missing, a one-segment `Action` trajectory is synthesized at deserialize time.
+- `AgenticGroup` accepts `completions` as an alias for `rollouts`.
+
+This means no JSON payload that works today stops working tomorrow.
+
+### A.2 Rust file-by-file changes (Phase 0)
+
+Counted on this branch:
+
+| File | `GrpoGroup` refs | `completion_mask` refs | `GrpoConfig` refs | Change |
+| --- | ---: | ---: | ---: | --- |
+| `crates/kiln-train/src/trainer.rs` | 12 | 30 | many | Rename types; rename `tokenize_grpo_group → tokenize_agentic_group`; switch `.completion_mask` to `.action_mask`; replace logic that builds the mask with `build_masks_from_trajectory`. |
+| `crates/kiln-train/src/vk_train.rs` | 13 | 9 | many | Same rename pattern; rename `tokenize_vk_grpo_group → tokenize_vk_agentic_group`; switch `grpo_active_rows_and_labels(...)` to take `action_mask` instead of `completion_mask`. |
+| `crates/kiln-train/src/lib.rs` | 3 | 0 | many | Re-export trajectory types from `kiln-core`; add deprecated aliases. |
+| `crates/kiln-train/src/opd.rs` | refs `GrpoConfig` | 0 | refs | Update any `GrpoConfig` references to `AgenticConfig`. |
+| `crates/kiln-train/examples/cuda_grpo_ablation.rs` | refs | 0 | refs | Update Mode::apply and CLI to use new type names. |
+| `crates/kiln-train/examples/cuda_grpo_behavioral_eval.rs` | 4 | 0 | refs | Mechanical rename. |
+| `crates/kiln-server/src/api/training.rs` | 5 | 0 | refs | Accept both `groups` (alias) and `agentic_groups`; route handler unchanged below the body parse. |
+| `crates/kiln-server/src/training_queue.rs` | refs | 0 | refs | `QueuedJob::Grpo` becomes `QueuedJob::Agentic` (deprecated alias kept). |
+| `crates/kiln-server/src/training_preflight.rs` | 3 | 0 | refs | Mechanical rename. |
+| `crates/kiln-server/src/api/eval.rs` | refs | 0 | 0 | Mechanical rename if any. |
+| `crates/kiln-server/src/api/pit_of_success.rs` | refs | 0 | refs | Mechanical rename. |
+| `crates/kiln-server/src/eval/datasets.rs` | refs | 0 | 0 | Mechanical rename if any. |
+| `crates/kiln-server/tests/training_queue_cap.rs` | refs | 0 | refs | Mechanical rename + add a backward-compat test on the legacy `groups` field. |
+| `crates/kiln-server/tests/training_tracked_cap.rs` | refs | 0 | refs | Mechanical rename. |
+| `crates/kiln-eval/examples/doctest_cross_check.rs` | 2 | 0 | 0 | Mechanical rename. |
+| `crates/kiln-eval/src/suite.rs` | refs | 0 | 0 | Mechanical rename if it references training types. |
+
+**Total: 15 Rust files touched.** Of these, only `trainer.rs`, `vk_train.rs`, and `lib.rs` have substantive logic changes (mask plumbing). The remaining 12 are pure mechanical renames.
+
+### A.3 New crate modules
+
+- `crates/kiln-core/src/trajectory.rs` — `TurnKind`, `TurnSegment`, `ScoredRollout`, `AgenticGroup`.
+- `crates/kiln-core/src/lib.rs` — export `pub mod trajectory; pub use trajectory::*;`.
+- `crates/kiln-train/src/trajectory_mask.rs` — `MaskConfig`, `MaskedRollout`, `build_masks_from_trajectory`.
+- `crates/kiln-train/src/lib.rs` — `mod trajectory_mask;` and re-exports.
+
+### A.4 Capability + Python changes (Phase 0)
+
+- `capabilities/agentic-grpo/lib/pi_trajectory.py` — **new file**. Lifted from `capabilities/agentic-grpo/pi-doctest/rollout.py::parse_transcript` (line 85–98) and `rollout.py:280–318`. Returns the canonical `{"trajectory": [{"role", "content", "kind"}, ...]}` schema.
+- `capabilities/agentic-grpo/pi-doctest/rollout.py` — migrated to emit `agentic_groups` / `rollouts` / `trajectory` instead of `groups` / `completions` / `text`. The `parse_transcript` function moves into the shared lib.
+- `capabilities/agentic-grpo/pi-doctest/kiln-polish-prerequisites.md` — strike-through the §1 gap (the masking primitive is now done); keep #2–#5 entries that are still open.
+
+### A.5 Doc changes (Phase 0)
+
+- `ARCHITECTURE.md` — §Training Pipeline / §GRPO subsection (around line 435). Update the schema example block to show the new agentic shape; keep the old shape in a `<details>` block labeled "Legacy single-turn schema."
+- `CHANGELOG.md` — one Phase 0 entry under "Unreleased": "Renamed `GrpoGroup → AgenticGroup`, `ScoredCompletion → ScoredRollout` (with deprecated aliases for one cycle). Multi-turn trajectory schema lands as the canonical shape. `kiln-polish-prerequisites.md` §1 closed."
+- `docs/site/demo/SCRIPTS.md` — update any sample JSON request bodies.
+
+### A.6 Phase 0 acceptance tests (concrete)
+
+In `crates/kiln-train/tests/trajectory_mask_test.rs` (new):
+
+```rust
+#[test]
+fn build_masks_from_trajectory_four_turn_pi_session() {
+    // Fixture: a real Qwen3.5-4B pi session with user → assistant
+    // (tool_call) → tool → assistant (final text) — 4 turns.
+    let traj = vec![
+        TurnSegment { role: "user".into(), content: "Solve x^2 = 4".into(), kind: TurnKind::Context, ..Default::default() },
+        TurnSegment { role: "assistant".into(), content: "<tool_call>{\"name\":\"calc\",\"arguments\":{\"expr\":\"sqrt(4)\"}}</tool_call>".into(), kind: TurnKind::Action, ..Default::default() },
+        TurnSegment { role: "tool".into(), content: "2".into(), kind: TurnKind::Observation, ..Default::default() },
+        TurnSegment { role: "assistant".into(), content: "x = ±2".into(), kind: TurnKind::Action, ..Default::default() },
+    ];
+    let result = build_masks_from_trajectory(&traj, &[], &tokenizer, &MaskConfig::default()).unwrap();
+    // The action_mask must be true exactly on tokens inside the two assistant blocks.
+    // The env_mask must be true exactly on tokens inside the tool block.
+    // The two masks must be disjoint everywhere.
+    for i in 0..result.action_mask.len() {
+        assert!(!(result.action_mask[i] && result.env_mask[i]),
+                "action_mask and env_mask overlap at token {i}");
+    }
+    // Span boundary assertions (token ranges from the fixture):
+    assert_action_mask_spans(&result.action_mask, &[(13, 35), (42, 50)]);  // illustrative
+    assert_env_mask_spans(&result.env_mask, &[(38, 41)]);                  // illustrative
+}
+
+#[test]
+fn legacy_scored_completion_text_round_trips_through_scored_rollout() {
+    // A legacy JSON payload deserializes into AgenticGroup with a one-segment Action trajectory.
+    let json = r#"{ "groups": [{ "messages": [...], "completions": [{ "text": "foo", "reward": 1.0 }] }] }"#;
+    let req: AgenticRequest = serde_json::from_str(json).unwrap();
+    assert_eq!(req.agentic_groups.len(), 1);
+    assert_eq!(req.agentic_groups[0].rollouts.len(), 1);
+    assert_eq!(req.agentic_groups[0].rollouts[0].trajectory.len(), 1);
+    assert_eq!(req.agentic_groups[0].rollouts[0].trajectory[0].kind, TurnKind::Action);
+}
+
+#[test]
+fn pi_doctest_iter5_replay_reproduces_within_tolerance() {
+    // The headline validation gate: re-run iter-5 strong-signal recipe end-to-end with the
+    // refactored types and assert composite within ±0.005 of the published 0.8958.
+    let composite = run_pi_doctest_replay(/* iter_5_strong_signal_config */);
+    assert!((composite - 0.8958).abs() < 0.005,
+            "iter-5 replay produced {composite}; expected 0.8958 ± 0.005");
+}
+```
+
+These are the concrete acceptance tests that turn the validation gate from prose into code.
+
+### A.7 What Phase 0 explicitly does NOT do
+
+- **No new loss term.** ECHO's loss math lands in Phase 1. Phase 0 just gives ECHO somewhere to put `env_mask` when it arrives.
+- **No `echo` field on `LossConfig`.** `LossConfig` doesn't exist yet — Phase 1 introduces it. Phase 0 keeps the existing `GrpoConfig`/`AgenticConfig` field layout intact.
+- **No new capabilities.** `pi-terminal-bench-lite` and `pi-script-fixup` are Phase 2 / Phase 3.
+- **No skill rewrites.** Skill files get one-line `kiln-polish-prerequisites.md` cross-reference updates only; the substantive ECHO sections land in Phase 2.
+- **No `analytic_grpo_echo_tail_loss_grad_pre_final_norm`.** That's Phase 1's work too. The existing `analytic_grpo_tail_loss_grad_pre_final_norm` keeps using `completion_mask` (now wired as `action_mask`) and computes identical loss values.
+
+The discipline: Phase 0 is a pure-refactor PR that ships a strict no-op on training behavior. The validation gate is *exactly* "iter-5 reproduces within ±0.005" because that's the only thing Phase 0 should prove.
