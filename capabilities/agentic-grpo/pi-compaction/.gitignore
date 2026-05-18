@@ -1,0 +1,14 @@
+# Datasets contain real production conversation tool-result text which
+# may include API keys, tokens, ssh keys, etc. Build locally with
+# `python3 build_corpus.py` — never commit.
+datasets/*.tasks.jsonl
+datasets/*.rollouts.jsonl
+
+# Rollout output dirs (transient)
+iter*-rollouts/
+iter*-eval/
+iter*-adapter/
+
+# Local scratch
+__pycache__/
+*.log

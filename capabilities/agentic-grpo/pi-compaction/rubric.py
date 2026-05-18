@@ -88,7 +88,8 @@ W_OUTCOME = 0.20
 
 # Outcome gate thresholds
 GATE_FORMAT_MIN = 0.5
-GATE_CONTENT_MIN = 0.2
+GATE_CONTENT_MIN = 0.30
+GATE_FAITHFULNESS_PATHS_MIN = 0.7  # if summary cites paths not in source, gate fails
 GATE_FLOOR = 0.10  # if gate fails, composite floors at floor * (f+c+faith)/3
 
 
@@ -328,7 +329,13 @@ def _extract_file_block(text: str, tag: str) -> set[str]:
 
 
 def score_content(response: str, ground_truth: dict[str, Any]) -> dict[str, float]:
-    """Content recall sub-scores. ground_truth carries pre-extracted facts."""
+    """Content recall sub-scores. ground_truth carries pre-extracted facts.
+
+    Weighted average: sub-scores whose corresponding GT category is *empty*
+    contribute neither to the numerator nor denominator (rather than
+    trivially scoring 1.0, which inflates content.score for hallucinated
+    responses that happen to fall into an empty-GT bucket).
+    """
     first_user_goal = ground_truth.get("first_user_goal", "") or ""
     source_paths = set(ground_truth.get("source_paths") or [])
     modified_paths = set(ground_truth.get("modified_paths") or [])
@@ -339,40 +346,57 @@ def score_content(response: str, ground_truth: dict[str, Any]) -> dict[str, floa
     goal_section = _extract_section_body(response, "## Goal")
     summary_no_file_blocks = re.sub(r"<(?:read|modified)-files>.*?</(?:read|modified)-files>", "", response, flags=re.DOTALL)
 
-    # Goal recall: source-language overlap on goal section.
+    # Goal recall always counts (every task has a first user message).
     goal_recall = _word_recall(first_user_goal, goal_section)
 
-    # File path recall: across the whole summary text.
-    path_recall = _path_set_recall(source_paths, summary_no_file_blocks)
+    # File path recall and identifier recall — always count.
+    path_recall = _path_set_recall(source_paths, summary_no_file_blocks) if source_paths else None
+    ident_recall = _identifier_set_recall(source_identifiers, summary_no_file_blocks) if source_identifiers else None
+    err_recall = _error_recall(source_errors, summary_no_file_blocks) if source_errors else None
 
-    # Identifier recall.
-    ident_recall = _identifier_set_recall(source_identifiers, summary_no_file_blocks)
-
-    # Error recall: must appear somewhere in summary text (most naturally in Blocked or Critical Context).
-    err_recall = _error_recall(source_errors, summary_no_file_blocks)
-
-    # File block correctness.
     read_block = _extract_file_block(response, "read-files")
     modified_block = _extract_file_block(response, "modified-files")
 
-    if read_only_paths:
-        read_block_recall = len(read_block & read_only_paths) / len(read_only_paths)
-    else:
-        read_block_recall = 1.0
-    if modified_paths:
-        modified_block_recall = len(modified_block & modified_paths) / len(modified_paths)
-    else:
-        modified_block_recall = 1.0
+    read_block_recall = (
+        len(read_block & read_only_paths) / len(read_only_paths) if read_only_paths else None
+    )
+    modified_block_recall = (
+        len(modified_block & modified_paths) / len(modified_paths) if modified_paths else None
+    )
 
-    out = {
-        "content.first_user_goal_recall": goal_recall,
-        "content.file_paths_recall": path_recall,
-        "content.identifier_recall": ident_recall,
-        "content.error_recall": err_recall,
-        "content.read_file_block_correctness": read_block_recall,
-        "content.modified_file_block_correctness": modified_block_recall,
-    }
-    out["content.score"] = sum(out.values()) / len(out)
+    # Build the weighted average over present sub-scores only.
+    weighted: list[tuple[str, float]] = [
+        ("content.first_user_goal_recall", goal_recall),
+    ]
+    for name, val in [
+        ("content.file_paths_recall", path_recall),
+        ("content.identifier_recall", ident_recall),
+        ("content.error_recall", err_recall),
+        ("content.read_file_block_correctness", read_block_recall),
+        ("content.modified_file_block_correctness", modified_block_recall),
+    ]:
+        if val is not None:
+            weighted.append((name, val))
+
+    if weighted:
+        content_score = sum(v for _, v in weighted) / len(weighted)
+    else:
+        content_score = 0.0
+
+    out: dict[str, float] = {name: val for name, val in weighted}
+    # Surface the trivially-1.0 cases explicitly as "N/A" diagnostic-only.
+    for name, val, present in [
+        ("content.file_paths_recall", path_recall, source_paths),
+        ("content.identifier_recall", ident_recall, source_identifiers),
+        ("content.error_recall", err_recall, source_errors),
+        ("content.read_file_block_correctness", read_block_recall, read_only_paths),
+        ("content.modified_file_block_correctness", modified_block_recall, modified_paths),
+    ]:
+        if name not in out:
+            # Empty-GT category: not included in averaged content score, but
+            # surface in diagnostics so downstream analysis can see the shape.
+            out[f"_diag.{name}_na"] = 1.0
+    out["content.score"] = content_score
     return out
 
 
@@ -575,8 +599,16 @@ def score_rollout(response: str, source: str, ground_truth: dict[str, Any]) -> d
     comp_score = comp["compression.score"]
     cont_score = cont["continuability.score"]
 
-    # Outcome gate: pass if format AND content meet floor.
-    outcome_pass = format_score >= GATE_FORMAT_MIN and content_score >= GATE_CONTENT_MIN
+    # Outcome gate: pass requires
+    #   1. format >= 0.5 (legible pi format)
+    #   2. content >= 0.30 (actually preserves source facts)
+    #   3. faithfulness.file_paths_in_source >= 0.7 (no path hallucination)
+    paths_faithful = faith.get("faithfulness.file_paths_in_source", 1.0)
+    outcome_pass = (
+        format_score >= GATE_FORMAT_MIN
+        and content_score >= GATE_CONTENT_MIN
+        and paths_faithful >= GATE_FAITHFULNESS_PATHS_MIN
+    )
     outcome = 1.0 if outcome_pass else 0.0
 
     if outcome_pass:

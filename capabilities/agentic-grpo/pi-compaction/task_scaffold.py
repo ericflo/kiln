@@ -137,6 +137,55 @@ def _format_tool_call_args(args: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Cross-agent tool-name normalisation
+#
+# Pi serializes tool calls with lowercase names: read, write, edit, bash.
+# Claude Code uses Capitalised names: Read, Write, Edit, Bash, Glob, Grep,
+# Bash, TodoWrite, etc. To make the rollout input *look like real pi* even
+# when sourced from a Claude Code session, we normalize.
+# ---------------------------------------------------------------------------
+
+PI_TOOL_NAME_MAP = {
+    "Read": "read",
+    "Write": "write",
+    "Edit": "edit",
+    "MultiEdit": "edit",
+    "str_replace_based_edit_tool": "edit",
+    "Bash": "bash",
+    "Shell": "bash",
+    "Glob": "glob",
+    "Grep": "grep",
+    "WebFetch": "fetch",
+    "WebSearch": "search",
+    "NotebookEdit": "edit",
+    "TodoWrite": "todo",
+    "Task": "task",
+}
+
+PI_ARG_KEY_MAP = {
+    "file_path": "path",
+    "filePath": "path",
+    "filename": "path",
+    "abs_path": "path",
+    "command": "cmd",
+    "pattern": "pattern",
+}
+
+
+def _normalize_tool_call(name: str, input_args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Map Claude Code tool names and arg keys onto pi's canonical names."""
+    pi_name = PI_TOOL_NAME_MAP.get(name, name.lower())
+    pi_args: dict[str, Any] = {}
+    for k, v in (input_args or {}).items():
+        pi_k = PI_ARG_KEY_MAP.get(k, k)
+        pi_args[pi_k] = v
+    return pi_name, pi_args
+
+
+SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL | re.IGNORECASE)
+
+
 def serialize_conversation(anthropic_messages: list[dict[str, Any]]) -> str:
     """Mirror pi's `serializeConversation(messages)` from utils.ts.
 
@@ -169,10 +218,10 @@ def serialize_conversation(anthropic_messages: list[dict[str, Any]]) -> str:
             if texts:
                 parts.append(f"[Assistant]: {chr(10).join(texts)}")
             if tool_uses:
-                call_strs = [
-                    f"{tu['name']}({_format_tool_call_args(tu['input'])})"
-                    for tu in tool_uses
-                ]
+                call_strs = []
+                for tu in tool_uses:
+                    pi_name, pi_args = _normalize_tool_call(tu["name"], tu["input"])
+                    call_strs.append(f"{pi_name}({_format_tool_call_args(pi_args)})")
                 parts.append(f"[Assistant tool calls]: {'; '.join(call_strs)}")
         # other roles: tool, system — usually not in `messages` array here
     return "\n\n".join(parts)
@@ -196,24 +245,45 @@ def build_rollout_messages(anthropic_messages: list[dict[str, Any]]) -> list[dic
 # Ground-truth extraction (single source of truth for the rubric)
 # ============================================================================
 
+def _strip_system_reminders(text: str) -> str:
+    """Remove `<system-reminder>...</system-reminder>` blocks from user text."""
+    return SYSTEM_REMINDER_RE.sub("", text).strip()
+
+
 def _first_user_text(messages: list[dict[str, Any]]) -> str:
+    """Return the first *real* user message — system-reminder noise stripped.
+
+    Claude Code injects a `<system-reminder>` block on the first user message
+    carrying boilerplate context (date, env, instructions). The user's actual
+    question follows. We strip the reminder and return what's left.
+    """
     for m in messages:
         if m.get("role") != "user":
             continue
         content = m.get("content", "")
         if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
+            cleaned = _strip_system_reminders(content)
+            if cleaned:
+                return cleaned
+        elif isinstance(content, list):
+            text_parts: list[str] = []
             for b in content:
                 if isinstance(b, dict) and b.get("type") == "text":
-                    t = b.get("text", "").strip()
+                    t = b.get("text", "")
                     if t:
-                        return t
+                        text_parts.append(t)
+            joined = _strip_system_reminders("\n".join(text_parts))
+            if joined:
+                return joined
     return ""
 
 
 def _walk_tool_calls(messages: list[dict[str, Any]]) -> tuple[set[str], set[str], set[str]]:
-    """Walk tool_use blocks, classify file ops by tool name into (read, modified, all_paths)."""
+    """Walk tool_use blocks, classify file ops by tool name into (read_only, modified, all_paths).
+
+    Handles both pi-canonical names (`read`/`write`/`edit`) and Claude Code
+    capitalised names (`Read`/`Write`/`Edit`/`MultiEdit`) after normalisation.
+    """
     read_paths: set[str] = set()
     write_paths: set[str] = set()
     edit_paths: set[str] = set()
@@ -227,22 +297,17 @@ def _walk_tool_calls(messages: list[dict[str, Any]]) -> tuple[set[str], set[str]
         for b in content:
             if not isinstance(b, dict) or b.get("type") != "tool_use":
                 continue
-            tool_name = b.get("name", "")
-            tool_input = b.get("input", {}) or {}
-            # pi's tool names are exactly these (camelCase variants too)
-            path = (
-                tool_input.get("path")
-                or tool_input.get("file")
-                or tool_input.get("filename")
-                or ""
-            )
+            raw_name = b.get("name", "")
+            raw_input = b.get("input", {}) or {}
+            pi_name, pi_args = _normalize_tool_call(raw_name, raw_input)
+            path = pi_args.get("path") or pi_args.get("file") or ""
             if isinstance(path, str) and path:
                 all_paths.add(path)
-                if tool_name == "read":
+                if pi_name == "read":
                     read_paths.add(path)
-                elif tool_name == "write":
+                elif pi_name == "write":
                     write_paths.add(path)
-                elif tool_name == "edit":
+                elif pi_name == "edit":
                     edit_paths.add(path)
     modified = write_paths | edit_paths
     read_only = read_paths - modified

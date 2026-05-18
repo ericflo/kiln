@@ -1,6 +1,15 @@
 """Sample long real conversations from trajectories.db, materialize as
 compaction tasks, and split into train / eval JSONLs.
 
+**Security note.** The trajectories.db carries real production
+tool-result text. Tool results occasionally include leaked secrets
+(RunPod API keys, GitHub PATs, OAuth tokens, etc.) that the agent
+echoed into a shell. This script scrubs known secret prefixes from
+`source_text` and `source_messages.tool_result` blocks before writing
+the JSONL. The resulting `datasets/*.tasks.jsonl` is kept under
+`.gitignore` so it never lands on GitHub — even with the scrubber,
+treat it as sensitive and rebuild locally per session.
+
 Each line in the output is a single task ready for the rollout harness:
 
     {
@@ -32,12 +41,74 @@ import argparse
 import json
 import os
 import random
+import re
 import sqlite3
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import task_scaffold
+
+
+# Known secret-ish patterns we mask before persisting the corpus.
+SECRET_PATTERNS = [
+    # RunPod API key
+    (re.compile(r"rpa_[A-Za-z0-9]{30,}"), "rpa_<REDACTED>"),
+    # GitHub Personal Access Token (classic + fine-grained)
+    (re.compile(r"ghp_[A-Za-z0-9]{30,}"), "ghp_<REDACTED>"),
+    (re.compile(r"github_pat_[A-Za-z0-9_]{30,}"), "github_pat_<REDACTED>"),
+    (re.compile(r"gho_[A-Za-z0-9]{30,}"), "gho_<REDACTED>"),
+    (re.compile(r"ghs_[A-Za-z0-9]{30,}"), "ghs_<REDACTED>"),
+    (re.compile(r"ghu_[A-Za-z0-9]{30,}"), "ghu_<REDACTED>"),
+    # OpenAI keys
+    (re.compile(r"sk-(?:proj-)?[A-Za-z0-9_-]{30,}"), "sk-<REDACTED>"),
+    # Anthropic keys
+    (re.compile(r"sk-ant-[A-Za-z0-9_-]{30,}"), "sk-ant-<REDACTED>"),
+    # Generic Bearer tokens that look key-like
+    (re.compile(r"Bearer\s+[A-Za-z0-9_\-.]{30,}"), "Bearer <REDACTED>"),
+    # AWS access key + secret (heuristic)
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "AKIA<REDACTED>"),
+    # Generic 40+ char hex digest assigned to a TOKEN/KEY/SECRET var
+    (re.compile(r"(?i)(token|secret|key|password)\s*[:=]\s*['\"]?[A-Fa-f0-9]{32,}['\"]?"),
+     r"\1=<REDACTED>"),
+]
+
+
+def scrub_secrets(text: str) -> str:
+    if not text:
+        return text
+    for pat, repl in SECRET_PATTERNS:
+        text = pat.sub(repl, text)
+    return text
+
+
+def scrub_messages(messages: list[dict]) -> list[dict]:
+    """Scrub secret patterns out of tool-result content (the main leak surface)."""
+    out: list[dict] = []
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list):
+            new_content = []
+            for b in content:
+                if isinstance(b, dict):
+                    bc = b.get("content")
+                    if isinstance(bc, str):
+                        b = {**b, "content": scrub_secrets(bc)}
+                    elif isinstance(bc, list):
+                        b = {**b, "content": [
+                            {**sub, "text": scrub_secrets(sub.get("text", ""))}
+                            if isinstance(sub, dict) and "text" in sub else sub
+                            for sub in bc
+                        ]}
+                    if b.get("type") == "text" and "text" in b:
+                        b = {**b, "text": scrub_secrets(b["text"])}
+                new_content.append(b)
+            out.append({**m, "content": new_content})
+        elif isinstance(content, str):
+            out.append({**m, "content": scrub_secrets(content)})
+        else:
+            out.append(m)
+    return out
 
 
 DEFAULT_DB = os.environ.get(
@@ -53,10 +124,16 @@ STRATA = [
 
 
 def sample_turn_ids(conn: sqlite3.Connection, n_per_stratum: int, split: str, seed: int) -> list[str]:
-    """Sample turn IDs from each stratum + split."""
+    """Sample turn IDs from each stratum + split.
+
+    Uses idx_turns_split + idx_turns_token_stats (avoid ORDER BY RANDOM on
+    the 38 GB table — full table scan would take ages). We use a LIMIT
+    over-fetch then python-side shuffle for randomness.
+    """
     random.seed(seed)
     out: list[str] = []
     for name, lo, hi in STRATA:
+        # Two-step: first collect IDs at the index level (fast), then shuffle.
         rows = conn.execute(
             """
             SELECT id FROM turns
@@ -65,10 +142,9 @@ def sample_turn_ids(conn: sqlite3.Connection, n_per_stratum: int, split: str, se
               AND num_tools >= 3
               AND num_input_messages >= 20
               AND model LIKE 'claude-%'
-            ORDER BY RANDOM()
             LIMIT ?
             """,
-            (split, lo, hi, n_per_stratum * 3),  # over-fetch, then sample
+            (split, lo, hi, n_per_stratum * 20),
         ).fetchall()
         ids = [r[0] for r in rows]
         random.shuffle(ids)
@@ -108,6 +184,9 @@ def materialize_task(turn: dict, task_id: str) -> dict | None:
     roles = {m.get("role") for m in msgs}
     if "user" not in roles or "assistant" not in roles:
         return None
+
+    # Scrub secrets BEFORE serialization so the source_text is clean too.
+    msgs = scrub_messages(msgs)
 
     serialized = task_scaffold.serialize_conversation(msgs)
     if len(serialized) < 4_000:  # too short to need compaction
