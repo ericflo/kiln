@@ -1,40 +1,65 @@
-"""Reward function for pi-doctest.
+"""Reward function for pi-doctest — v1, multi-component.
 
-Signature:
-  score_rollout(transcript: list[dict], workdir: str, task: dict) -> dict
+v0 (rubric.py) used outcome alone. The Phase 0 baseline finding (see
+capability.jsonl iter 0) showed `outcome` saturates at ~1.0 for the
+4B base model even when the agentic process is wasteful (e.g.
+task_0011 ran 16 bash calls including 7 redundant `python -m doctest`
+invocations before timing out at 120s, but `solution.py` ended up
+correct — so outcome=1.0).
 
-`transcript` is the pi session JSONL parsed line-by-line (each event a
-dict). `workdir` is the path where pi ran. `task` is the task spec.
+v1 keeps `outcome` as a hard-floor (we don't reward incorrect
+solutions) but moves most of the weight onto agentic sub-scores:
 
-Returns: {
-  'outcome': float in [0, 1],
-  'composite': float in [0, 1],
-  '_doctest_summary': dict,  # diagnostic — not used in training
-}
+  outcome:                0.40   (hard floor — required for any signal)
+  tool_call_efficiency:   0.30   (TARGET — clear signal across wall_clock variance)
+  tested_before_done:     0.20   (probably partially saturated, still useful)
+  format_compliance:      0.10   (saturated 1.0 in practice)
 
-For v0 the composite is just `outcome`. Iter 2+ will add
-tested_before_done, tool_call_efficiency, format_compliance.
+Composite = sum(weight × sub_score).
 
-Verification: re-runs `python3 -m doctest -v <workdir>/solution.py`
-inside a 5s timeout subprocess. The pi session may have already run
-it; we re-run for hermeticity (the verifier owns scoring, the model
-owns trying).
+Importantly: composite IS multiplied by outcome, not summed with it.
+A solution that doesn't pass doctests gets composite=0 regardless of
+how efficient the agentic process was. This is the "no reward hacking
+via empty solution" guard the §0 adversarial review demanded.
+
+Effective composite = outcome × (0.30·tool_call_efficiency
+                                 + 0.20·tested_before_done
+                                 + 0.10·format_compliance
+                                 + 0.40)
+
+Range: [0, 1]. When outcome=1.0 and all sub-scores=1.0, composite=1.0.
+When outcome=0.0, composite=0.0.
 """
 
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
 
+# Re-export the helpers from the v0 module (now archived as
+# rubric_v0_outcome_only.py).
+sys.path.insert(0, str(Path(__file__).parent))
+from rubric_v0_outcome_only import (  # type: ignore
+    _iter_messages,
+    _tool_calls_in,
+    _tested_before_done,
+    _tool_call_efficiency,
+    _format_compliance,
+)
+
 
 def score_rollout(transcript: list, workdir: str, task: dict) -> dict:
+    # Outcome: re-runs doctest on the final workdir state.
     solution = Path(workdir) / "solution.py"
     if not solution.exists():
-        return {"outcome": 0.0, "composite": 0.0,
-                "_doctest_summary": {"reason": "no solution.py"}}
-
-    # Run doctests in a subprocess. Use python3 -m doctest -v, parse output.
+        return {
+            "outcome": 0.0,
+            "tool_call_efficiency": 0.0,
+            "tested_before_done": 0.0,
+            "format_compliance": 0.0,
+            "composite": 0.0,
+            "_reason": "no solution.py",
+        }
     try:
         proc = subprocess.run(
             ["python3", "-I", "-m", "doctest", "-v", str(solution)],
@@ -42,132 +67,37 @@ def score_rollout(transcript: list, workdir: str, task: dict) -> dict:
             cwd=workdir,
         )
     except subprocess.TimeoutExpired:
-        return {"outcome": 0.0, "composite": 0.0,
-                "_doctest_summary": {"reason": "doctest timed out"}}
-    except Exception as e:
-        return {"outcome": 0.0, "composite": 0.0,
-                "_doctest_summary": {"reason": f"doctest run error: {e}"}}
+        outcome_val = 0.0
+        proc = None
+    else:
+        tried = (proc.stdout or "").count("Trying:")
+        failed = (proc.stdout or "").count("Failed example:")
+        outcome_val = max(0.0, (tried - failed) / tried) if tried > 0 else 0.0
 
-    stdout = proc.stdout or ""
-    stderr = proc.stderr or ""
+    tbd = _tested_before_done(transcript)
+    tce = _tool_call_efficiency(transcript, expected=4)
+    fc = _format_compliance(transcript)
 
-    # doctest -v output ends with lines like:
-    #   N items had no tests:
-    #   M items passed all tests:
-    #      K tests in <name>
-    #   X items had failures:
-    #      Y of K tests in <name>
-    # Total: Z tests in W items.
-    # We compute: passed / total, where total is the number of doctests in
-    # the input docstring. If "***Test Failed***" appears or any "FAIL"
-    # line is present in stdout, those count against passed.
-
-    # Parse "Trying ..." and "Expecting ..." / "ok" / "FAIL" pairs.
-    # Each "Trying:" is one doctest; followed by either "ok" or "***********..."
-    tried = stdout.count("Trying:")
-    if tried == 0:
-        # No doctests in the file. Either the function had no doctests
-        # (task malformed) or solution.py is empty/broken.
-        return {"outcome": 0.0, "composite": 0.0,
-                "_doctest_summary": {"reason": "no doctests run",
-                                     "exit_code": proc.returncode,
-                                     "stderr_head": stderr[:300]}}
-    # Count failures via the "Failed example:" header.
-    failed = stdout.count("Failed example:")
-    passed = max(0, tried - failed)
-    outcome = passed / tried
+    agentic = 0.30 * tce + 0.20 * tbd + 0.10 * fc + 0.40
+    composite = outcome_val * agentic
 
     return {
-        "outcome": outcome,
-        "composite": outcome,
-        "_doctest_summary": {
-            "tried": tried,
-            "passed": passed,
-            "failed": failed,
-            "exit_code": proc.returncode,
-        },
+        "outcome": outcome_val,
+        "tool_call_efficiency": tce,
+        "tested_before_done": tbd,
+        "format_compliance": fc,
+        "composite": composite,
+        "_n_tool_calls": sum(
+            len(_tool_calls_in(m))
+            for _, m in _iter_messages(transcript)
+            if m.get("role") == "assistant"
+        ),
     }
 
 
-# Iter 2+ — sub-scores that quantify agentic behavior. Kept here as a
-# reference so the rubric extension is one diff away.
-
-def _count_assistant_turns_with_tool_call(transcript: list, tool_name: str) -> int:
-    n = 0
-    for ev in transcript:
-        msgs = ev.get("messages") or []
-        for m in msgs:
-            if m.get("role") != "assistant":
-                continue
-            for tc in (ev.get("tool_calls") or []):
-                if tc.get("name") == tool_name:
-                    n += 1
-    return n
-
-
-def _tested_before_done(transcript: list) -> float:
-    """1.0 iff a successful bash call to doctest appears in the transcript
-    BEFORE the final assistant turn."""
-    last_bash_at_idx = None
-    final_assistant_idx = None
-    for i, ev in enumerate(transcript):
-        tc = ev.get("tool_calls") or []
-        for c in tc:
-            if c.get("name") in ("bash", "shell"):
-                cmd = json.dumps(c.get("arguments") or c.get("input") or {})
-                if "doctest" in cmd:
-                    last_bash_at_idx = i
-        msgs = ev.get("messages") or []
-        for m in msgs:
-            if m.get("role") == "assistant":
-                final_assistant_idx = i
-    if last_bash_at_idx is None or final_assistant_idx is None:
-        return 0.0
-    return 1.0 if last_bash_at_idx < final_assistant_idx else 0.5
-
-
-def _tool_call_efficiency(transcript: list, expected: int = 4) -> float:
-    """1.0 if num_tool_calls <= expected, decaying to 0.0 at 3× expected."""
-    n = sum(len(ev.get("tool_calls") or []) for ev in transcript)
-    if n <= expected:
-        return 1.0
-    if n >= 3 * expected:
-        return 0.0
-    return max(0.0, 1.0 - (n - expected) / (2 * expected))
-
-
-def _format_compliance(transcript: list) -> float:
-    """Fraction of assistant turns whose tool_calls list (if any) all
-    parse as well-formed (have `name` and JSON-serializable arguments).
-    """
-    total = 0
-    ok = 0
-    for ev in transcript:
-        tcs = ev.get("tool_calls") or []
-        for tc in tcs:
-            total += 1
-            if not isinstance(tc, dict):
-                continue
-            if not isinstance(tc.get("name"), str):
-                continue
-            args = tc.get("arguments") if "arguments" in tc else tc.get("input")
-            if args is None:
-                ok += 1
-                continue
-            try:
-                json.dumps(args)
-                ok += 1
-            except Exception:
-                pass
-    if total == 0:
-        return 0.0
-    return ok / total
-
-
-# CLI for manual scoring during development.
 if __name__ == "__main__":
     if len(sys.argv) != 4:
-        print("usage: rubric.py <transcript.jsonl> <workdir> <task.json>",
+        print("usage: rubric_v1.py <transcript.jsonl> <workdir> <task.json>",
               file=sys.stderr)
         sys.exit(2)
     transcript = []

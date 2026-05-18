@@ -54,22 +54,42 @@ the multi-turn assistant-token-masking gap in kiln-train (see
   `tool_calls: [{name, ...}]` on the assistant turn that emits them.
 - Turn budget per session: 8 turns (cap at 8 to bound wall-clock).
 
-## Reward function (v0 — single component, will add anti-shortcuts at iter 2+)
+## Reward function (v1 — multi-component, adopted after iter 0 baseline)
 
 | Sub-score | Weight | What it measures | What it CANNOT be cheated by |
 |-----------|--------|-------------------|-----------------------------|
-| `outcome` | 1.00 | Doctest pass-rate after pi exits. Fraction of `>>>` lines in the original docstring that match `python3 -m doctest -v solution.py` PASS lines. | Empty `solution.py` (no doctests run → 0.0). |
+| `outcome` | hard floor | Doctest pass-rate via subprocess `python3 -m doctest -v solution.py` on the final workdir. | Empty `solution.py` (no doctests run → 0.0). |
+| `tool_call_efficiency` | 0.30 | `1 - clip((n_tool_calls - 4) / 8, 0, 1)`. 1.0 when ≤4 tool calls; 0.0 at ≥12. | Empty session (no tool calls at all returns 1.0 but `outcome` will catch it). |
+| `tested_before_done` | 0.20 | 1.0 iff a `bash` tool call mentioning `doctest` appears before the final assistant turn. | Saying "DONE" without testing → 0.0. |
+| `format_compliance` | 0.10 | Fraction of `toolCall` blocks with well-formed `name` + JSON-serializable `arguments`. | Malformed XML blocks → 0.0 per block. |
 
-Composite = `outcome`. Direction: higher is better.
+**Composite = `outcome × (0.30·tool_call_efficiency + 0.20·tested_before_done + 0.10·format_compliance + 0.40)`**
 
-**Iter 2+ planned reward shape:**
+Range: [0, 1]. Outcome multiplies the agentic component so an incorrect
+solution gets composite=0 regardless of how clean the agentic process
+was. This is the "no-empty-solution-cheating" guard required by §0.
 
-| Sub-score | Weight |
-|-----------|--------|
-| `outcome` | 0.60 |
-| `tested_before_done` | 0.15 |
-| `tool_call_efficiency` | 0.15 |
-| `format_compliance` | 0.10 |
+**v0 rubric (single-component `outcome` only) was retired** after iter 0
+because baseline composite hit 0.958 — the §0 "rubric too lax" zone.
+The 4B base model is genuinely competent at humaneval-style tasks; the
+real headroom is in agentic *efficiency*, not correctness. See iter 0
+in `capability.jsonl` for the closeout.
+
+### Headroom (v1 rubric, measured iter 0 baseline)
+
+| metric | value |
+|--------|-------|
+| baseline composite (mean over 24 eval tasks) | **0.8854** |
+| headroom remaining | 0.1146 |
+| group-variance stdev (composite) | 0.218 |
+| group-variance stdev (tool_call_efficiency) | **0.358** (target sub-score) |
+| group-variance stdev (outcome) | 0.200 (driven by 1 task fail) |
+| group-variance stdev (tested_before_done) | 0.100 |
+| group-variance stdev (format_compliance) | 0.000 |
+| mean wall-clock per rollout | 25.4 s |
+| tool-call count distribution | 14 efficient (3-4 calls), 5 moderate (5-9), 4 wasteful (13-27), 1 outcome-fail |
+
+The cap is in the healthy headroom band. **Target sub-score: `tool_call_efficiency`** — has the most movable mass.
 
 ### Adversarial design (§0)
 
@@ -139,7 +159,8 @@ documents intent for reviewers.)
 
 | Iter | Slug | Family | Composite | Δ | Status | Notes |
 |------|------|--------|-----------|---|--------|-------|
-| 0    | baseline | — | TBD | — | — | base model, no adapter |
+| 0    | baseline-v0-outcome-only | baseline | 0.958 (v0 rubric) | — | infra-fail | v0 outcome-only rubric saturated at >=0.95; retired. |
+| 0    | baseline-v1              | baseline | 0.885 (v1 rubric) | — | kept       | Multi-component rubric, in healthy headroom band. Target = tool_call_efficiency (stdev 0.358). |
 
 ## Kiln-polish prerequisites
 

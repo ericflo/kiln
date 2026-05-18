@@ -270,19 +270,42 @@ def main():
             ]
             completions = []
             for r in rolls:
-                # v0 placeholder: concat all assistant content from the
-                # transcript into one synthetic assistant turn. See
-                # kiln-polish-prerequisites.md #1 for the proper fix.
+                # v0 placeholder: extract assistant text/thinking blocks
+                # from the pi session JSONL and concatenate. Multiple
+                # assistant turns are joined with the literal sentinel
+                # `<TURN_BREAK>`. See kiln-polish-prerequisites.md #1
+                # for the proper per-turn-mask fix.
                 tr = parse_transcript(Path(r["transcript_path"])) if r.get("transcript_path") else []
-                assistant_texts = []
+                turns = []
                 for ev in tr:
-                    for m in (ev.get("messages") or []):
-                        if m.get("role") == "assistant" and isinstance(
-                            m.get("content"), str
-                        ):
-                            assistant_texts.append(m["content"])
+                    if ev.get("type") != "message":
+                        continue
+                    msg = ev.get("message") or {}
+                    if msg.get("role") != "assistant":
+                        continue
+                    parts = []
+                    for b in (msg.get("content") or []):
+                        if not isinstance(b, dict):
+                            continue
+                        bt = b.get("type")
+                        if bt == "text" and isinstance(b.get("text"), str):
+                            parts.append(b["text"])
+                        elif bt == "thinking" and isinstance(b.get("thinking"), str):
+                            # Wrap in Qwen-style think tags so the chat template
+                            # round-trip is closer to what the model emitted.
+                            parts.append(f"<think>{b['thinking']}</think>")
+                        elif bt == "toolCall":
+                            name = b.get("name", "")
+                            inp = json.dumps(b.get("input", {}))
+                            parts.append(
+                                f"<tool_call>"
+                                f'{{"name": "{name}", "arguments": {inp}}}'
+                                f"</tool_call>"
+                            )
+                    if parts:
+                        turns.append("".join(parts))
                 completions.append({
-                    "text": "\n\n".join(assistant_texts) or "(empty)",
+                    "text": "<TURN_BREAK>".join(turns) or "(empty)",
                     "reward": r["reward"],
                 })
             groups.append({"messages": messages, "completions": completions})
