@@ -80,35 +80,43 @@ def score_fence_pair(response: str, **_kw) -> float:
 
 # Language-detection heuristics: simple, robust.
 _LANG_MARKERS: dict[str, list[str]] = {
-    "python": ["def ", "import ", "from ", "print(", "self.", "lambda ", "class ", "elif "],
-    "javascript": ["function ", "const ", "let ", "var ", "=>", "console.log", "document.", "window."],
-    "typescript": ["interface ", "type ", "as ", ": string", ": number", ": boolean", "import ", "export "],
-    "rust": ["fn ", "let ", "mut ", "->", "impl ", "::", "pub ", "use "],
-    "go": ["func ", "package ", "import ", ":=", "fmt.", "var "],
+    # Each marker is intended to be a strong-ish signal for that language.
+    # Weak generic patterns (bare `{`, `}`, `:`) are kept out; they hit
+    # too many languages and degrade detector accuracy.
+    "python": ["def ", "import ", "from ", "print(", "self.", "lambda ", "class ", "elif ", "True", "False", "None"],
+    "javascript": ["function ", "const ", "let ", "=>", "console.log", "document.", "window.", "var ", ".slice(", ".map(", ".filter(", ".reduce("],
+    "typescript": ["interface ", "type ", ": string", ": number", ": boolean", "string[]", "number[]"],
+    "rust": ["fn ", "let mut", "->", "impl ", "::", "pub fn", "use ", "Vec<", "Option<", "Result<", "&mut ", "&str", "f64", "i32", "i64", "u32", "u64", "struct "],
+    "go": ["func ", "package ", ":=", "fmt.Println", "fmt.Printf"],
     "java": ["public class", "public static void", "System.out", "import java"],
-    "c": ["#include", "int main", "printf(", "return 0;", "void "],
-    "cpp": ["#include", "std::", "int main", "namespace ", "::", "cout <<"],
-    "bash": ["#!/", "echo ", "$(", "${", "if [", "for ", "while ", "fi", "done"],
-    "sh": ["#!/", "echo ", "$(", "${", "if [", "for ", "while ", "fi", "done"],
-    "sql": ["SELECT ", "FROM ", "WHERE ", "INSERT ", "UPDATE ", "DELETE ", "CREATE TABLE"],
-    "html": ["<html", "<div", "<body", "<script", "<head", "<!DOCTYPE"],
+    "c": ["#include", "int main", "printf(", "scanf(", "return 0;", "void ", "char *", "char* ", "int ", "long ", "size_t"],
+    "cpp": ["#include", "std::", "int main", "namespace ", "cout <<", "cin >>", "::"],
+    "bash": ["#!/bin/bash", "#!/bin/sh", "echo ", "$(", "${", "if [", "for ", "while ", "fi", "done", "find ", "grep ", "awk ", "sed ", "chmod ", "chown ", "mkdir ", "ls ", "wc ", "cat "],
+    "sh": ["#!/bin/sh", "echo ", "$(", "${", "if [", "for ", "while ", "fi", "done"],
+    "sql": ["SELECT ", "FROM ", "WHERE ", "INSERT INTO", "UPDATE ", "DELETE FROM", "CREATE TABLE", "JOIN "],
+    "html": ["<html", "<div", "<body", "<script", "<head", "<!DOCTYPE", "<button", "<a "],
     "css": ["color:", "margin:", "padding:", "display:", "px;", "border:", "background:"],
-    # JSON detection deliberately tight — bare {}/,: appear in almost every
-    # language. Require quoted-key patterns and value tokens.
-    "json": ['":', '":"', '": ', '": [', '": {', "}\n", '],\n'],
-    "yaml": ["---\n", ": ", "\n- ", "true\n", "false\n"],
-    "ruby": ["def ", "end", "puts ", "@", "do |", "require ", "elsif "],
+    # JSON: require quoted-key patterns (bare {}/,: appear in any language)
+    "json": ['":', '":"', '": ', '": [', '": {'],
+    "yaml": ["---\n", "\n- "],
+    "ruby": ["def ", " end\n", "puts ", "@", "do |", "elsif "],
 }
 
 
 def _detect_language(code: str) -> str | None:
-    """Heuristic — pick the language whose markers score highest."""
+    """Heuristic — pick the language whose markers score highest.
+
+    Requires at least 2 marker matches to return a result; with only
+    1 weak match (e.g. a single `: ` matching YAML's loose pattern)
+    the detector returns None (ambiguous) rather than confidently
+    misclassifying. None lets the syntax check and tag-match drive
+    the decision.
+    """
     if not code or not code.strip():
         return None
-    code_lower = code  # markers are case-sensitive
     best: tuple[str, int] | None = None
     for lang, markers in _LANG_MARKERS.items():
-        score = sum(1 for m in markers if m in code_lower)
+        score = sum(1 for m in markers if m in code)
         if score == 0:
             continue
         if best is None or score > best[1]:
@@ -216,7 +224,10 @@ def _validate_rustlike(code: str) -> bool:
     """Rough: must have balanced braces, must have at least one Rust-y keyword."""
     if not _validate_javascript_like(code):  # balanced braces
         return False
-    return any(k in code for k in ["fn ", "let ", "->", "::", "impl ", "pub "])
+    return any(k in code for k in [
+        "fn ", "let ", "->", "::", "impl ", "pub ", "struct ", "enum ",
+        "Vec<", "Option<", "Result<", "&mut ", "&str", "f64", "i32", "u32",
+    ])
 
 
 def score_code_parses(response: str, expected_language: str = "", **_kw) -> float:

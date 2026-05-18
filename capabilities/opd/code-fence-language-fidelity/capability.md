@@ -60,18 +60,19 @@ natural language-tag failure rate is ~13%).
 | iter | slug | family | composite | comp Δ | target Δ | verdict |
 |------|------|--------|-----------|--------|----------|---------|
 | 0 (orig) | baseline | — | 0.8833 | — | — | over-strict rubric, fixed before iter 1 |
-| 0 (fixed) | baseline | — | 0.9067 | — | — | corrected for js↔ts, c↔cpp, sh↔bash close-language pairs |
-| 1 | h1-r8-lr5e5-2ep | H1 | **0.9300** | +2.33pp | +3.3pp | ✓ confirmed (kept; gentle dosage lifted cleanly) |
+| 0 (fix-1) | baseline | — | 0.9067 | — | — | corrected for close-language pairs (js↔ts, c↔cpp, sh↔bash) |
+| 0 (fix-2) | baseline | — | **0.9767** | — | — | corrected detector (stronger markers; rust/c/bash failures were rubric noise) |
+| 1 | h1-r8-lr5e5-2ep | H1 | **1.0000** | +2.33pp | +3.3pp | ✓ confirmed (kept; SATURATED eval at perfect score) |
 
 ## Closeout (iter 1)
 
-**Best adapter: `fence-h1-r8-lr5e5-2ep` at composite 0.93** (+2.33pp,
-25% of headroom captured).
+**Best adapter: `fence-h1-r8-lr5e5-2ep` at composite 1.00** (+2.33pp
+on the corrected rubric, eval saturated).
 
 This is the positive counterpart to cap #5's high-baseline failure:
 
 - Cap #5 (baseline 0.85, diff/patch): OPD regressed at every setting
-- Cap #6 (baseline 0.91, code fence): OPD lifted +2.33pp
+- Cap #6 (baseline 0.98, code fence): OPD lifted +2.33pp to 1.00
 
 The condition that matters is **student rollout consistency**, not
 composite value alone. Cap #5's rollouts varied between clean diffs
@@ -82,8 +83,17 @@ tag); OPD's gradient on a consistent shape lifts cleanly.
 Both are now evidence in the OPD skill's §0 — cap #6 is the positive
 example validating the 'consistent rollouts' precondition.
 
-Closing at iter 1: the gain is already real, and the +2.33pp/2-min
-ROI is much better than chasing more by trying H2 or H9 variants.
+**Iter 2 deliberately NOT run.** I was about to run H9 asymmetric to
+push past the 0.93 reading from the partially-fixed rubric. Before
+launching I applied the cap #5 lesson: inspect responses for the 3
+remaining failures first. All 3 turned out to be RUBRIC mis-
+classifications, not model errors (detector picking YAML for rust
+because of a single `: ` marker, etc.). Tightening detector markers
+re-baselined cap #6 at 0.98 and showed iter 1 adapter at 1.00 —
+already saturated.
+
+The Phase 0 "inspect before iterating" discipline just saved a
+training cycle. Skill working as designed.
 
 ## Dead ends
 (none yet)
