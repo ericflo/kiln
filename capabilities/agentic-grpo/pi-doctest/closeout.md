@@ -173,10 +173,16 @@ kiln gaps surfaced during this cap. Highlights:
 
 ## Final adapter location
 
-`/workspace/qwen3.5-4b/adapters/pi-doctest-iter5/adapter_model.safetensors`
-(61 MB, rank-16 LoRA on q_proj/k_proj/v_proj/o_proj + gate/up/down).
+- **On RunPod H100 pod (until next pod recycle):**
+  `/workspace/qwen3.5-4b/adapters/pi-doctest-iter5/adapter_model.safetensors`
+  (61 MB, rank-16 LoRA on q_proj/k_proj/v_proj/o_proj + gate/up/down).
+  Symlinked at `/tmp/iter5-adapter/pi-doctest-iter5/`.
 
-Symlinked at `/tmp/iter5-adapter/pi-doctest-iter5/`.
+- **Backed up to B2 (private bucket):**
+  `b2://clouderic/kiln/pi-doctest/pi-doctest-iter5-20260518.tgz`
+  - SHA-256: `e460107bb49995fdf898e4c8863f98e5fd992e80b6bd4350b41f104b23997db2`
+  - Size: 46,996,359 bytes (47 MB, gzipped tar of the adapter dir)
+  - To restore: `b2 file download b2://clouderic/kiln/pi-doctest/pi-doctest-iter5-20260518.tgz iter5.tgz && tar xzf iter5.tgz`
 
 ## Pod cost summary
 
