@@ -495,8 +495,18 @@ fn assistant_output_from_cached_parts(
     req: &ChatCompletionRequest,
     content: String,
     reasoning_content: Option<String>,
+    tool_calls: Option<Vec<serde_json::Value>>,
     finish_reason: String,
 ) -> AssistantOutputParts {
+    if let Some(tool_calls) = tool_calls.filter(|calls| !calls.is_empty()) {
+        return AssistantOutputParts {
+            content,
+            reasoning_content,
+            tool_calls: Some(tool_calls),
+            finish_reason: "tool_calls".to_string(),
+        };
+    }
+
     assistant_output_from_split_parts(req, reasoning_content, content, &finish_reason)
 }
 
@@ -695,6 +705,46 @@ fn normalized_chat_template_kwargs_for_cache(
     chat_template_kwargs.filter(|kwargs| !kwargs.is_empty())
 }
 
+fn chat_template_kwargs_enable_thinking_is_set(
+    chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    chat_template_kwargs
+        .and_then(|kwargs| kwargs.get("enable_thinking"))
+        .is_some()
+}
+
+fn tools_request_defaults_to_non_thinking(
+    normalized_tools: Option<&[serde_json::Value]>,
+    normalized_tool_choice: Option<&serde_json::Value>,
+    chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    normalized_tools.is_some()
+        && !matches!(
+            normalized_tool_choice.and_then(|value| value.as_str()),
+            Some("none")
+        )
+        && !chat_template_kwargs_enable_thinking_is_set(chat_template_kwargs)
+}
+
+fn effective_chat_template_kwargs_for_cache<'a>(
+    normalized_tools: Option<&[serde_json::Value]>,
+    normalized_tool_choice: Option<&serde_json::Value>,
+    chat_template_kwargs: Option<&'a serde_json::Map<String, serde_json::Value>>,
+) -> Option<Cow<'a, serde_json::Map<String, serde_json::Value>>> {
+    let normalized = normalized_chat_template_kwargs_for_cache(chat_template_kwargs);
+    if !tools_request_defaults_to_non_thinking(normalized_tools, normalized_tool_choice, normalized)
+    {
+        return normalized.map(Cow::Borrowed);
+    }
+
+    let mut kwargs = normalized.cloned().unwrap_or_default();
+    kwargs.insert(
+        "enable_thinking".to_string(),
+        serde_json::Value::Bool(false),
+    );
+    Some(Cow::Owned(kwargs))
+}
+
 fn normalized_tool_choice_option_for_synthetic_request(
     tools: Option<&[serde_json::Value]>,
     tool_choice: Option<&serde_json::Value>,
@@ -773,14 +823,18 @@ pub(crate) fn render_prompt_text(
 ) -> Result<String, ApiError> {
     let normalized_tools = normalized_tools_for_cache(tools);
     let normalized_tool_choice = normalized_tool_choice_for_cache(normalized_tools, tool_choice);
-    let normalized_chat_template_kwargs =
-        normalized_chat_template_kwargs_for_cache(chat_template_kwargs);
+    let normalized_chat_template_kwargs = effective_chat_template_kwargs_for_cache(
+        normalized_tools,
+        normalized_tool_choice,
+        chat_template_kwargs,
+    );
+    let normalized_chat_template_kwargs_ref = normalized_chat_template_kwargs.as_deref();
     let message_keys = message_cache_keys(messages);
     let key = serde_json::to_string(&RenderedPromptCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
-        chat_template_kwargs: normalized_chat_template_kwargs,
+        chat_template_kwargs: normalized_chat_template_kwargs_ref,
     })
     .map_err(|err| ApiError::internal(format!("failed to key rendered prompt cache: {err}")))?;
 
@@ -789,7 +843,8 @@ pub(crate) fn render_prompt_text(
     }
 
     let chat_messages: Vec<ChatMessage> = messages.iter().map(message_to_chat).collect();
-    let chat_template_options = chat_template_options_from_kwargs(normalized_chat_template_kwargs);
+    let chat_template_options =
+        chat_template_options_from_kwargs(normalized_chat_template_kwargs_ref);
     let prompt_text = state
         .tokenizer
         .apply_chat_template_full_with_options(
@@ -945,15 +1000,19 @@ fn deterministic_chat_request_cache_key_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
-    let normalized_chat_template_kwargs =
-        normalized_chat_template_kwargs_for_cache(req.chat_template_kwargs.as_ref());
+    let normalized_chat_template_kwargs = effective_chat_template_kwargs_for_cache(
+        normalized_tools,
+        normalized_tool_choice,
+        req.chat_template_kwargs.as_ref(),
+    );
+    let normalized_chat_template_kwargs_ref = normalized_chat_template_kwargs.as_deref();
     let message_keys = message_cache_keys(&req.messages);
 
     serde_json::to_string(&DeterministicChatRequestCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
-        chat_template_kwargs: normalized_chat_template_kwargs,
+        chat_template_kwargs: normalized_chat_template_kwargs_ref,
         temperature_bits,
         max_tokens: sampling.max_tokens,
         stop,
@@ -998,15 +1057,19 @@ fn deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
-    let normalized_chat_template_kwargs =
-        normalized_chat_template_kwargs_for_cache(req.chat_template_kwargs.as_ref());
+    let normalized_chat_template_kwargs = effective_chat_template_kwargs_for_cache(
+        normalized_tools,
+        normalized_tool_choice,
+        req.chat_template_kwargs.as_ref(),
+    );
+    let normalized_chat_template_kwargs_ref = normalized_chat_template_kwargs.as_deref();
     let message_keys = message_cache_keys(&req.messages);
 
     serde_json::to_string(&DeterministicChatRequestCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
-        chat_template_kwargs: normalized_chat_template_kwargs,
+        chat_template_kwargs: normalized_chat_template_kwargs_ref,
         temperature_bits,
         max_tokens,
         stop,
@@ -1055,15 +1118,19 @@ fn deterministic_chat_choices_cache_key_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
-    let normalized_chat_template_kwargs =
-        normalized_chat_template_kwargs_for_cache(req.chat_template_kwargs.as_ref());
+    let normalized_chat_template_kwargs = effective_chat_template_kwargs_for_cache(
+        normalized_tools,
+        normalized_tool_choice,
+        req.chat_template_kwargs.as_ref(),
+    );
+    let normalized_chat_template_kwargs_ref = normalized_chat_template_kwargs.as_deref();
     let message_keys = message_cache_keys(&req.messages);
 
     serde_json::to_string(&DeterministicChatChoicesCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
-        chat_template_kwargs: normalized_chat_template_kwargs,
+        chat_template_kwargs: normalized_chat_template_kwargs_ref,
         n: n_per,
         temperature_bits,
         max_tokens: sampling.max_tokens,
@@ -1132,14 +1199,18 @@ fn deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
+    let normalized_chat_template_kwargs = effective_chat_template_kwargs_for_cache(
+        normalized_tools,
+        normalized_tool_choice,
+        req.chat_template_kwargs.as_ref(),
+    );
+    let normalized_chat_template_kwargs_ref = normalized_chat_template_kwargs.as_deref();
 
     serde_json::to_string(&DeterministicChatChoicesCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
-        chat_template_kwargs: normalized_chat_template_kwargs_for_cache(
-            req.chat_template_kwargs.as_ref(),
-        ),
+        chat_template_kwargs: normalized_chat_template_kwargs_ref,
         n: n_per,
         temperature_bits,
         max_tokens,
@@ -1200,14 +1271,18 @@ fn deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
+    let normalized_chat_template_kwargs = effective_chat_template_kwargs_for_cache(
+        normalized_tools,
+        normalized_tool_choice,
+        req.chat_template_kwargs.as_ref(),
+    );
+    let normalized_chat_template_kwargs_ref = normalized_chat_template_kwargs.as_deref();
 
     serde_json::to_string(&DeterministicChatRequestCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
-        chat_template_kwargs: normalized_chat_template_kwargs_for_cache(
-            req.chat_template_kwargs.as_ref(),
-        ),
+        chat_template_kwargs: normalized_chat_template_kwargs_ref,
         temperature_bits,
         max_tokens,
         stop,
@@ -1357,19 +1432,12 @@ fn chat_request_cache_value_from_choice(
     prompt_tokens: usize,
     choice: &Choice,
 ) -> DeterministicChatRequestCacheValue {
-    debug_assert!(
-        choice
-            .message
-            .tool_calls
-            .as_ref()
-            .map_or(true, |calls| calls.is_empty()),
-        "tool-call choices should not be cached as text-only completions"
-    );
     DeterministicChatRequestCacheValue {
         prompt_tokens,
         completion: DeterministicCompletionCacheValue {
             text: choice.message.content.clone(),
             reasoning_content: choice.message.reasoning_content.clone(),
+            tool_calls: choice.message.tool_calls.clone(),
             finish_reason: choice.finish_reason.clone(),
             completion_tokens: choice.completion_tokens,
         },
@@ -1385,16 +1453,6 @@ fn store_chat_request_cache_from_chat_choices_response(
     if chat_request_max_tokens(req) != 0 || req.adapter.is_some() || req.adapters.is_some() {
         return Ok(());
     }
-    if resp.choices.iter().any(|choice| {
-        choice
-            .message
-            .tool_calls
-            .as_ref()
-            .map_or(false, |calls| !calls.is_empty())
-    }) {
-        return Ok(());
-    }
-
     let mut entries = Vec::with_capacity(resp.choices.len());
     let mut seen_keys = std::collections::HashSet::new();
     for choice in &resp.choices {
@@ -1457,22 +1515,13 @@ async fn zero_chat_choices_response_from_request_cache_hit(
 fn chat_choices_cache_value_from_response(
     resp: &ChatCompletionResponse,
 ) -> Option<DeterministicChatChoicesCacheValue> {
-    if resp.choices.iter().any(|choice| {
-        choice
-            .message
-            .tool_calls
-            .as_ref()
-            .map_or(false, |calls| !calls.is_empty())
-    }) {
-        return None;
-    }
-
     let completions = resp
         .choices
         .iter()
         .map(|choice| DeterministicCompletionCacheValue {
             text: choice.message.content.clone(),
             reasoning_content: choice.message.reasoning_content.clone(),
+            tool_calls: choice.message.tool_calls.clone(),
             finish_reason: choice.finish_reason.clone(),
             completion_tokens: choice.completion_tokens,
         })
@@ -1503,6 +1552,7 @@ fn response_from_cached_completion(
         req,
         cached.text,
         cached.reasoning_content,
+        cached.tool_calls,
         cached.finish_reason,
     );
     let preview_source = cached_output.preview_source();
@@ -1568,6 +1618,7 @@ fn response_from_cached_chat_choices(
                 req,
                 completion.text,
                 completion.reasoning_content,
+                completion.tool_calls,
                 completion.finish_reason,
             );
             (completion_tokens, output)
@@ -1648,6 +1699,7 @@ fn streaming_response_from_cached_completion(
         req,
         cached.text,
         cached.reasoning_content,
+        cached.tool_calls,
         cached.finish_reason,
     );
     let preview_source = cached_output.preview_source();
@@ -1802,6 +1854,7 @@ fn empty_chat_completion_response(
         DeterministicCompletionCacheValue {
             text: String::new(),
             reasoning_content: None,
+            tool_calls: None,
             finish_reason: "length".to_string(),
             completion_tokens: 0,
         },
@@ -1822,6 +1875,7 @@ fn empty_chat_completion_streaming_response(
         DeterministicCompletionCacheValue {
             text: String::new(),
             reasoning_content: None,
+            tool_calls: None,
             finish_reason: "length".to_string(),
             completion_tokens: 0,
         },
@@ -1832,17 +1886,10 @@ fn cache_value_from_response(
     resp: &ChatCompletionResponse,
 ) -> Option<DeterministicCompletionCacheValue> {
     let choice = resp.choices.first()?;
-    if choice
-        .message
-        .tool_calls
-        .as_ref()
-        .map_or(false, |calls| !calls.is_empty())
-    {
-        return None;
-    }
     Some(DeterministicCompletionCacheValue {
         text: choice.message.content.clone(),
         reasoning_content: choice.message.reasoning_content.clone(),
+        tool_calls: choice.message.tool_calls.clone(),
         finish_reason: choice.finish_reason.clone(),
         completion_tokens: resp.usage.completion_tokens,
     })
@@ -2699,6 +2746,7 @@ async fn chat_completions_inner(
             completion: DeterministicCompletionCacheValue {
                 text: String::new(),
                 reasoning_content: None,
+                tool_calls: None,
                 finish_reason: "length".to_string(),
                 completion_tokens: 0,
             },
@@ -4749,28 +4797,30 @@ async fn generate_real_streaming(
                                     )
                                     .await;
                                 let _ = tx.send(Event::default().data("[DONE]")).await;
-                                if assistant_output.tool_calls.is_none() {
-                                    let cache_value = DeterministicCompletionCacheValue {
-                                        text: assistant_output.content.clone(),
-                                        reasoning_content: assistant_output.reasoning_content.clone(),
-                                        finish_reason: finish.clone(),
-                                        completion_tokens: completion_token_count as usize,
-                                    };
-                                    if let Some(key) = completion_cache_key.clone() {
-                                        completion_cache.lock().unwrap().insert_complete_value(
-                                            key,
-                                            cache_value.clone(),
-                                        );
-                                    }
-                                    let chat_cache_value = DeterministicChatRequestCacheValue {
-                                        prompt_tokens: prompt_token_count,
-                                        completion: cache_value,
-                                    };
-                                    if let Some(owner) = chat_request_cache_owner.take() {
-                                        owner.complete(chat_cache_value);
-                                    } else if let Some(key) = chat_request_cache_key.clone() {
-                                        chat_request_cache.lock().unwrap().insert(key, chat_cache_value);
-                                    }
+                                let cache_value = DeterministicCompletionCacheValue {
+                                    text: assistant_output.content.clone(),
+                                    reasoning_content: assistant_output.reasoning_content.clone(),
+                                    tool_calls: assistant_output.tool_calls.clone(),
+                                    finish_reason: finish.clone(),
+                                    completion_tokens: completion_token_count as usize,
+                                };
+                                if let Some(key) = completion_cache_key.clone() {
+                                    completion_cache
+                                        .lock()
+                                        .unwrap()
+                                        .insert_complete_value(key, cache_value.clone());
+                                }
+                                let chat_cache_value = DeterministicChatRequestCacheValue {
+                                    prompt_tokens: prompt_token_count,
+                                    completion: cache_value,
+                                };
+                                if let Some(owner) = chat_request_cache_owner.take() {
+                                    owner.complete(chat_cache_value);
+                                } else if let Some(key) = chat_request_cache_key.clone() {
+                                    chat_request_cache
+                                        .lock()
+                                        .unwrap()
+                                        .insert(key, chat_cache_value);
                                 }
                                 record(
                                     finish,
@@ -5274,6 +5324,12 @@ fn deterministic_batch_cache_key_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
+    let normalized_chat_template_kwargs = effective_chat_template_kwargs_for_cache(
+        normalized_tools,
+        normalized_tool_choice,
+        req.chat_template_kwargs.as_ref(),
+    );
+    let normalized_chat_template_kwargs_ref = normalized_chat_template_kwargs.as_deref();
 
     let key = DeterministicBatchCacheKeyWire {
         prompts: req
@@ -5283,9 +5339,7 @@ fn deterministic_batch_cache_key_with_vocab_size(
             .collect(),
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
-        chat_template_kwargs: normalized_chat_template_kwargs_for_cache(
-            req.chat_template_kwargs.as_ref(),
-        ),
+        chat_template_kwargs: normalized_chat_template_kwargs_ref,
         n: req.n.unwrap_or(1),
         temperature_bits,
         max_tokens,
@@ -5609,18 +5663,12 @@ fn cache_value_from_batch_response(resp: &BatchCompletionResponse) -> Determinis
 fn chat_request_cache_value_from_batch_item(
     item: &BatchCompletionItem,
 ) -> Option<DeterministicChatRequestCacheValue> {
-    if item
-        .tool_calls
-        .as_ref()
-        .map_or(false, |calls| !calls.is_empty())
-    {
-        return None;
-    }
     Some(DeterministicChatRequestCacheValue {
         prompt_tokens: item.usage.prompt_tokens,
         completion: DeterministicCompletionCacheValue {
             text: item.text.clone(),
             reasoning_content: item.reasoning_content.clone(),
+            tool_calls: item.tool_calls.clone(),
             finish_reason: item.finish_reason.clone(),
             completion_tokens: item.usage.completion_tokens,
         },
@@ -5702,14 +5750,6 @@ fn chat_choices_cache_value_from_batch_items(
             return None;
         }
     }
-    if items.iter().any(|item| {
-        item.tool_calls
-            .as_ref()
-            .map_or(false, |calls| !calls.is_empty())
-    }) {
-        return None;
-    }
-
     let prompt_tokens = items.first()?.usage.prompt_tokens;
     if items
         .iter()
@@ -5724,6 +5764,7 @@ fn chat_choices_cache_value_from_batch_items(
             .map(|item| DeterministicCompletionCacheValue {
                 text: item.text.clone(),
                 reasoning_content: item.reasoning_content.clone(),
+                tool_calls: item.tool_calls.clone(),
                 finish_reason: item.finish_reason.clone(),
                 completion_tokens: item.usage.completion_tokens,
             })
@@ -6359,6 +6400,7 @@ async fn generate_multi_chat_response(
             DeterministicCompletionCacheValue {
                 text: String::new(),
                 reasoning_content: None,
+                tool_calls: None,
                 finish_reason: "length".to_string(),
                 completion_tokens: 0,
             },
@@ -7214,6 +7256,122 @@ mod tests {
     }
 
     #[test]
+    fn qwen35_tool_requests_default_to_non_thinking() {
+        let json = r#"{
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [
+                {"role": "user", "content": "List files."}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"]
+                    }
+                }
+            }],
+            "tool_choice": "auto",
+            "temperature": 0.0,
+            "max_tokens": 12
+        }"#;
+        let req = parse_request(json);
+        let template =
+            include_str!("../../../kiln-core/test_fixtures/qwen35_4b_chat_template.jinja");
+        let tok = crate::api::test_tokenizer().with_chat_template(template.to_string());
+        let chat_messages: Vec<ChatMessage> = req.messages.iter().map(message_to_chat).collect();
+        let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
+        let normalized_tool_choice =
+            normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
+        let effective_kwargs = effective_chat_template_kwargs_for_cache(
+            normalized_tools,
+            normalized_tool_choice,
+            req.chat_template_kwargs.as_ref(),
+        );
+
+        let prompt = tok
+            .apply_chat_template_full_with_options(
+                &chat_messages,
+                normalized_tools,
+                normalized_tool_choice,
+                chat_template_options_from_kwargs(effective_kwargs.as_deref()),
+            )
+            .expect("Qwen3.5 tools prompt should render");
+
+        assert!(
+            prompt.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"),
+            "tool requests should default to pre-closed thinking: {prompt:?}"
+        );
+        assert!(
+            !prompt_starts_in_reasoning(&prompt),
+            "tool requests should stream tool XML as content, not reasoning_content"
+        );
+    }
+
+    #[test]
+    fn qwen35_tool_requests_honor_explicit_thinking_choices() {
+        let template =
+            include_str!("../../../kiln-core/test_fixtures/qwen35_4b_chat_template.jinja");
+        let tok = crate::api::test_tokenizer().with_chat_template(template.to_string());
+
+        for (name, body, expected_suffix) in [
+            (
+                "explicit true",
+                r#"{
+                    "messages":[{"role":"user","content":"List files."}],
+                    "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],
+                    "chat_template_kwargs":{"enable_thinking":true},
+                    "temperature":0.0,
+                    "max_tokens":12
+                }"#,
+                "<|im_start|>assistant\n<think>\n",
+            ),
+            (
+                "tool_choice none",
+                r#"{
+                    "messages":[{"role":"user","content":"Say hi."}],
+                    "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],
+                    "tool_choice":"none",
+                    "temperature":0.0,
+                    "max_tokens":12
+                }"#,
+                "<|im_start|>assistant\n<think>\n",
+            ),
+        ] {
+            let req = parse_request(body);
+            let chat_messages: Vec<ChatMessage> =
+                req.messages.iter().map(message_to_chat).collect();
+            let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
+            let normalized_tool_choice =
+                normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
+            let effective_kwargs = effective_chat_template_kwargs_for_cache(
+                normalized_tools,
+                normalized_tool_choice,
+                req.chat_template_kwargs.as_ref(),
+            );
+
+            let prompt = tok
+                .apply_chat_template_full_with_options(
+                    &chat_messages,
+                    normalized_tools,
+                    normalized_tool_choice,
+                    chat_template_options_from_kwargs(effective_kwargs.as_deref()),
+                )
+                .unwrap_or_else(|err| panic!("{name} should render: {err}"));
+            assert!(
+                prompt.ends_with(expected_suffix),
+                "{name} should preserve the open reasoning block: {prompt:?}"
+            );
+            assert!(
+                prompt_starts_in_reasoning(&prompt),
+                "{name} should still split generated text as reasoning_content"
+            );
+        }
+    }
+
+    #[test]
     fn qwen35_no_think_text_is_not_a_control_flag() {
         let json = r#"{
             "model": "Qwen/Qwen3.5-4B",
@@ -7480,7 +7638,12 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_responses_are_not_stored_in_text_only_caches() {
+    fn tool_call_responses_round_trip_through_chat_caches() {
+        let tool_calls = vec![serde_json::json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
+        })];
         let resp = ChatCompletionResponse {
             id: "chatcmpl-test".to_string(),
             object: "chat.completion",
@@ -7492,11 +7655,7 @@ mod tests {
                     role: "assistant".to_string(),
                     content: String::new(),
                     reasoning_content: None,
-                    tool_calls: Some(vec![serde_json::json!({
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
-                    })]),
+                    tool_calls: Some(tool_calls.clone()),
                     name: None,
                     tool_call_id: None,
                 },
@@ -7510,9 +7669,29 @@ mod tests {
             },
         };
 
-        assert!(cache_value_from_response(&resp).is_none());
-        assert!(chat_request_cache_value_from_response(&resp).is_none());
-        assert!(chat_choices_cache_value_from_response(&resp).is_none());
+        assert_eq!(
+            cache_value_from_response(&resp)
+                .unwrap()
+                .tool_calls
+                .as_ref(),
+            Some(&tool_calls)
+        );
+        assert_eq!(
+            chat_request_cache_value_from_response(&resp)
+                .unwrap()
+                .completion
+                .tool_calls
+                .as_ref(),
+            Some(&tool_calls)
+        );
+        assert_eq!(
+            chat_choices_cache_value_from_response(&resp)
+                .unwrap()
+                .completions[0]
+                .tool_calls
+                .as_ref(),
+            Some(&tool_calls)
+        );
     }
 
     #[test]
@@ -7604,17 +7783,18 @@ mod tests {
     }
 
     #[test]
-    fn batch_tool_call_items_are_not_stored_in_text_only_chat_caches() {
+    fn batch_tool_call_items_round_trip_through_chat_caches() {
+        let tool_calls = vec![serde_json::json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
+        })];
         let item = BatchCompletionItem {
             prompt_index: 0,
             completion_index: 0,
             text: String::new(),
             reasoning_content: None,
-            tool_calls: Some(vec![serde_json::json!({
-                "id": "call_1",
-                "type": "function",
-                "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
-            })]),
+            tool_calls: Some(tool_calls.clone()),
             finish_reason: "tool_calls".to_string(),
             usage: Usage {
                 prompt_tokens: 4,
@@ -7623,8 +7803,22 @@ mod tests {
             },
         };
 
-        assert!(chat_request_cache_value_from_batch_item(&item).is_none());
-        assert!(chat_choices_cache_value_from_batch_items(vec![&item], 1).is_none());
+        assert_eq!(
+            chat_request_cache_value_from_batch_item(&item)
+                .unwrap()
+                .completion
+                .tool_calls
+                .as_ref(),
+            Some(&tool_calls)
+        );
+        assert_eq!(
+            chat_choices_cache_value_from_batch_items(vec![&item], 1)
+                .unwrap()
+                .completions[0]
+                .tool_calls
+                .as_ref(),
+            Some(&tool_calls)
+        );
     }
 
     #[test]
@@ -8804,6 +8998,35 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_chat_request_cache_key_normalizes_tool_default_non_thinking() {
+        let sampling = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 4,
+            ..Default::default()
+        };
+        let omitted_kwargs = parse_request(
+            r#"{"messages":[{"role":"user","content":"same tool default kwargs"}],"temperature":0.0,"max_tokens":4,"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],"tool_choice":"auto"}"#,
+        );
+        let explicit_no_think = parse_request(
+            r#"{"messages":[{"role":"user","content":"same tool default kwargs"}],"temperature":0.0,"max_tokens":4,"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],"tool_choice":"auto","chat_template_kwargs":{"enable_thinking":false}}"#,
+        );
+        let explicit_think = parse_request(
+            r#"{"messages":[{"role":"user","content":"same tool default kwargs"}],"temperature":0.0,"max_tokens":4,"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],"tool_choice":"auto","chat_template_kwargs":{"enable_thinking":true}}"#,
+        );
+
+        assert_eq!(
+            deterministic_chat_request_cache_key(&omitted_kwargs, &sampling).unwrap(),
+            deterministic_chat_request_cache_key(&explicit_no_think, &sampling).unwrap(),
+            "tool requests should cache the omitted kwargs shape as explicit enable_thinking=false"
+        );
+        assert_ne!(
+            deterministic_chat_request_cache_key(&omitted_kwargs, &sampling).unwrap(),
+            deterministic_chat_request_cache_key(&explicit_think, &sampling).unwrap(),
+            "explicit enable_thinking=true must keep a separate cache entry"
+        );
+    }
+
+    #[test]
     fn deterministic_chat_request_cache_key_normalizes_empty_tools() {
         let sampling = SamplingParams {
             temperature: 0.0,
@@ -9318,6 +9541,30 @@ mod tests {
             deterministic_batch_cache_key(&default_req, 2),
             deterministic_batch_cache_key(&no_think, 2),
             "template kwargs change rendered prompts and must split batch-cache entries"
+        );
+    }
+
+    #[test]
+    fn deterministic_batch_cache_key_normalizes_tool_default_non_thinking() {
+        let omitted_kwargs = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"same batch tool default kwargs"}]],"n":2,"temperature":0.0,"max_tokens":4,"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],"tool_choice":"auto"}"#,
+        );
+        let explicit_no_think = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"same batch tool default kwargs"}]],"n":2,"temperature":0.0,"max_tokens":4,"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],"tool_choice":"auto","chat_template_kwargs":{"enable_thinking":false}}"#,
+        );
+        let explicit_think = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"same batch tool default kwargs"}]],"n":2,"temperature":0.0,"max_tokens":4,"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],"tool_choice":"auto","chat_template_kwargs":{"enable_thinking":true}}"#,
+        );
+
+        assert_eq!(
+            deterministic_batch_cache_key(&omitted_kwargs, 2),
+            deterministic_batch_cache_key(&explicit_no_think, 2),
+            "batch tool requests should cache omitted kwargs as explicit enable_thinking=false"
+        );
+        assert_ne!(
+            deterministic_batch_cache_key(&omitted_kwargs, 2),
+            deterministic_batch_cache_key(&explicit_think, 2),
+            "explicit batch enable_thinking=true must keep a separate cache entry"
         );
     }
 
@@ -12161,6 +12408,7 @@ mod tests {
                 DeterministicCompletionCacheValue {
                     text: "cached lower-layer stream".to_string(),
                     reasoning_content: None,
+                    tool_calls: None,
                     finish_reason: "stop".to_string(),
                     completion_tokens: 3,
                 },

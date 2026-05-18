@@ -349,6 +349,7 @@ pub struct DeterministicCompletionCacheKey {
 pub struct DeterministicCompletionCacheValue {
     pub text: String,
     pub reasoning_content: Option<String>,
+    pub tool_calls: Option<Vec<serde_json::Value>>,
     pub finish_reason: String,
     pub completion_tokens: usize,
 }
@@ -2318,6 +2319,7 @@ mod tests {
         let value = DeterministicCompletionCacheValue {
             text: "cached".to_string(),
             reasoning_content: None,
+            tool_calls: None,
             finish_reason: "length".to_string(),
             completion_tokens: 4,
         };
@@ -2408,6 +2410,7 @@ mod tests {
             completion: DeterministicCompletionCacheValue {
                 text: "cached".to_string(),
                 reasoning_content: None,
+                tool_calls: None,
                 finish_reason: "length".to_string(),
                 completion_tokens: 4,
             },
@@ -2452,12 +2455,14 @@ mod tests {
                 DeterministicCompletionCacheValue {
                     text: "first".to_string(),
                     reasoning_content: Some("think first".to_string()),
+                    tool_calls: None,
                     finish_reason: "length".to_string(),
                     completion_tokens: 4,
                 },
                 DeterministicCompletionCacheValue {
                     text: "second".to_string(),
                     reasoning_content: None,
+                    tool_calls: None,
                     finish_reason: "stop".to_string(),
                     completion_tokens: 2,
                 },

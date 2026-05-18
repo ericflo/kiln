@@ -233,7 +233,7 @@ If you use [pi](https://github.com/earendil-works/pi) as your terminal agent, ru
 ./target/release/kiln pi-setup --kiln-url http://office-kiln:8420
 ```
 
-The configured pi model id is `qwen-3.5-4b-kiln`, with `api: "openai-completions"` and `baseUrl: "http://.../v1"`. Kiln normalizes Qwen3.5 XML tool-call generations into OpenAI `tool_calls` for both streaming and non-streaming responses, so pi executes tools instead of printing raw `<tool_call>` blocks.
+The configured pi model id is `qwen-3.5-4b-kiln`, with `api: "openai-completions"` and `baseUrl: "http://.../v1"`. Kiln normalizes Qwen3.5 XML tool-call generations into OpenAI `tool_calls` for both streaming and non-streaming responses, so pi executes tools instead of printing raw `<tool_call>` blocks. Tool-enabled requests default to Qwen's non-thinking template mode to keep terminal-agent transcripts compact; send `chat_template_kwargs: {"enable_thinking": true}` if you explicitly want reasoning content.
 
 ## 5. Open the Browser Dashboard
 

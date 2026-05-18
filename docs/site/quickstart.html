@@ -468,7 +468,7 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
       <p class="label mb-2">Agent setup</p>
       <h2 class="text-2xl font-semibold tracking-tight mb-4">Point pi at Kiln without clobbering pi config</h2>
       <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">
-        After the server is healthy, <code>kiln pi-setup</code> adds Kiln as pi's <code>kiln-local</code> provider and sets <code>qwen-3.5-4b-kiln</code> as the default model. It backs up existing <code>models.json</code> and <code>settings.json</code>, then merges the Kiln entries while preserving other providers and settings.
+        After the server is healthy, <code>kiln pi-setup</code> adds Kiln as pi's <code>kiln-local</code> provider and sets <code>qwen-3.5-4b-kiln</code> as the default model. It backs up existing <code>models.json</code> and <code>settings.json</code>, then merges the Kiln entries while preserving other providers and settings. Tool-enabled requests use Qwen's non-thinking template mode by default so pi sessions do not grow with hidden reasoning.
       </p>
       <div class="grid lg:grid-cols-3 gap-4">
         <div class="card p-5">

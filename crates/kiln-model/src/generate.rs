@@ -22,20 +22,19 @@ use crate::backend::{self, BackendRuntime};
 use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
+use crate::forward::lm_head_sample_backend_decode_if;
 use crate::forward::{
-    GpuWeights, LinearAttentionState, model_forward,
-    model_forward_paged, model_forward_paged_batched_decode_hidden,
-    model_forward_paged_decode_contiguous_batch_greedy, model_forward_paged_last_token,
-    model_forward_paged_last_token_greedy, model_forward_paged_last_token_with_last_hidden,
-    model_forward_paged_next_token_greedy, model_forward_paged_streaming,
-    model_forward_paged_streaming_last_token_with_last_hidden,
+    GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
+    model_forward_paged_batched_decode_hidden, model_forward_paged_decode_contiguous_batch_greedy,
+    model_forward_paged_last_token, model_forward_paged_last_token_greedy,
+    model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
+    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
     model_forward_paged_streaming_with_progress, streaming_prefill_enabled_for,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
 use crate::packed_weight_registry::GpuPackedWeightRegistry;
 use crate::paged_kv_cache::PagedKvCache;
-use crate::forward::lm_head_sample_backend_decode_if;
 use crate::sampling::{greedy_sample, sample_step, sample_with_full_params};
 use crate::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
@@ -280,8 +279,7 @@ static PAGED_BATCHED_DECODE_STATE_NEXT_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
 pub(crate) fn next_paged_batched_decode_state_id() -> u64 {
-    PAGED_BATCHED_DECODE_STATE_NEXT_ID
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    PAGED_BATCHED_DECODE_STATE_NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 fn decode_buffer_max_batch() -> usize {
@@ -1788,10 +1786,25 @@ impl ModelRunner {
         };
 
         let cached_prefix = cached_prefix.filter(|prefix| {
-            prefix.cached_tokens > 0
-                && prefix.cached_tokens < prompt_tokens.len()
-                && prefix.cached_tokens % block_size == 0
-                && prefix.block_ids.len() == prefix.cached_tokens / block_size
+            if prefix.cached_tokens == 0 || prefix.cached_tokens > prompt_tokens.len() {
+                return false;
+            }
+
+            let exact_candidate = prefix.cached_tokens == prompt_tokens.len();
+            let expected_blocks = if exact_candidate {
+                Self::blocks_needed(prefix.cached_tokens, block_size)
+            } else {
+                prefix.cached_tokens / block_size
+            };
+            let block_shape_valid = prefix.block_ids.len() == expected_blocks;
+            let partial_hit = prefix.cached_tokens < prompt_tokens.len()
+                && prefix.cached_tokens % block_size == 0;
+            let exact_hit = prefix.cached_tokens == prompt_tokens.len()
+                && prefix.next_token.as_ref().is_some_and(|next| match next {
+                    PagedPrefixNextToken::Logits(_) => true,
+                    PagedPrefixNextToken::GreedyToken(_) => params.is_effectively_greedy(),
+                });
+            block_shape_valid && (partial_hit || exact_hit)
         });
 
         let cached_blocks = cached_prefix
@@ -2195,14 +2208,43 @@ impl ModelRunner {
         allocated_blocks: Vec<u32>,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedDecodeState> {
-        let cached_tokens = cached_prefix
-            .as_ref()
-            .map(|prefix| prefix.cached_tokens)
-            .unwrap_or(0);
-        let mut linear_state = match cached_prefix {
-            Some(prefix) => prefix.linear_state,
-            None => self.new_linear_state()?,
+        let (cached_tokens, exact_next_token, mut linear_state) = match cached_prefix {
+            Some(prefix) => {
+                let exact_next_token = if prefix.cached_tokens == prompt_tokens.len() {
+                    prefix.next_token
+                } else {
+                    None
+                };
+                (prefix.cached_tokens, exact_next_token, prefix.linear_state)
+            }
+            None => (0, None, self.new_linear_state()?),
         };
+
+        if let Some(next_token) = exact_next_token {
+            let next_token = match next_token {
+                PagedPrefixNextToken::Logits(logits) => sample_first_decode_token(&logits, params)?,
+                PagedPrefixNextToken::GreedyToken(token) => {
+                    anyhow::ensure!(
+                        params.is_effectively_greedy(),
+                        "greedy cached first token cannot serve non-greedy sampling"
+                    );
+                    token
+                }
+            };
+            return Ok(PagedBatchedDecodeState {
+                block_table,
+                linear_state,
+                seq_len: prompt_tokens.len(),
+                next_token,
+                generated_tokens: Vec::new(),
+                step_seed: params.seed,
+                registration: None,
+                allocated_blocks,
+                prefill_duration: std::time::Duration::ZERO,
+                decode_duration: std::time::Duration::ZERO,
+                id: next_paged_batched_decode_state_id(),
+            });
+        }
 
         let prefill_tokens = &prompt_tokens[cached_tokens..];
         anyhow::ensure!(
@@ -2249,18 +2291,14 @@ impl ModelRunner {
         };
         let prefill_duration = prefill_start.elapsed();
 
-        let next_token = if params.temperature == 0.0 {
-            greedy_sample(&logits)?
-        } else {
-            sample_step(&logits, params, params.seed, &[])?
-        };
+        let next_token = sample_first_decode_token(&logits, params)?;
 
         let registration = self.completed_prompt_registration(
             prompt_tokens,
             &block_table,
             &linear_state,
             block_size,
-            None,
+            Some(PagedPrefixNextToken::Logits(logits.clone())),
         )?;
 
         Ok(PagedBatchedDecodeState {
@@ -2838,7 +2876,12 @@ impl ModelRunner {
                 .lock()
                 .map_err(|e| anyhow::anyhow!("failed to lock batched state cache: {e}"))?;
             let id_match = match (row_ids, cache_guard.as_ref()) {
-                (Some(ids), Some(CachedBatchedState { row_ids: cached, .. })) => cached == ids,
+                (
+                    Some(ids),
+                    Some(CachedBatchedState {
+                        row_ids: cached, ..
+                    }),
+                ) => cached == ids,
                 _ => false,
             };
             if id_match {
@@ -2856,7 +2899,8 @@ impl ModelRunner {
                     linear_states.iter().map(|state| &**state).collect();
                 let state = LinearAttentionState::from_batch_rows(&state_refs)?;
                 if all_rows_resident {
-                    state.assemble_gdn_recurrent_resident_batch_rows(&*self.backend, &state_refs)?;
+                    state
+                        .assemble_gdn_recurrent_resident_batch_rows(&*self.backend, &state_refs)?;
                 }
                 Some(state)
             }
@@ -2864,7 +2908,11 @@ impl ModelRunner {
             None
         };
         if batched_state_cache_hit {
-            finish_decode_batcher_stage_profile("batch_state_assemble_cache_hit", batch, stage_start);
+            finish_decode_batcher_stage_profile(
+                "batch_state_assemble_cache_hit",
+                batch,
+                stage_start,
+            );
         } else {
             finish_decode_batcher_stage_profile("batch_state_assemble", batch, stage_start);
         }
@@ -7338,6 +7386,78 @@ mod tests {
             .unwrap();
 
         assert_eq!(streamed_tokens, first.output.token_ids);
+        Ok(())
+    }
+
+    #[test]
+    fn batched_exact_prefix_cache_hit_skips_prefill() -> Result<()> {
+        let config = tiny_config();
+        let device = Device::Cpu;
+        let weights = tiny_weights(&config, &device);
+        let tokenizer = test_tokenizer();
+
+        let runner = ModelRunner::new(weights, tokenizer, config.clone());
+        let block_size = 4;
+        let num_blocks = 16;
+        let block_manager = Mutex::new(BlockManager::new(num_blocks, block_size));
+        let paged_cache = PagedKvCache::new(
+            config.num_full_attention_layers,
+            num_blocks,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            candle_core::DType::F32,
+            &device,
+        )?;
+        let params = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 3,
+            ..Default::default()
+        };
+        let prompt = [1, 2, 3];
+
+        let first = runner.prepare_paged_batched_decode_with_prefix_cache(
+            &prompt,
+            &params,
+            &block_manager,
+            &paged_cache,
+            None,
+            None,
+        )?;
+        let registration = first
+            .registration
+            .expect("batched prefill should register an exact cache entry");
+        assert!(
+            registration.next_token.is_some(),
+            "batched exact prompt reuse needs the saved first-token source"
+        );
+
+        let retained_blocks = registration.block_ids.clone();
+        let blocks_to_free: Vec<u32> = first
+            .allocated_blocks
+            .into_iter()
+            .filter(|block_id| !retained_blocks.contains(block_id))
+            .collect();
+        block_manager.lock().unwrap().free_all(&blocks_to_free);
+
+        let cached_prefix = PagedPrefixReuse {
+            cached_tokens: registration.prompt_tokens.len(),
+            block_ids: registration.block_ids,
+            linear_state: registration.linear_state,
+            next_token: registration.next_token,
+        };
+        let second = runner.prepare_paged_batched_decode_with_prefix_cache(
+            &prompt,
+            &params,
+            &block_manager,
+            &paged_cache,
+            Some(cached_prefix),
+            None,
+        )?;
+
+        assert_eq!(second.prefill_duration, std::time::Duration::ZERO);
+        assert_eq!(second.next_token, first.next_token);
+        assert!(second.registration.is_none());
         Ok(())
     }
 
