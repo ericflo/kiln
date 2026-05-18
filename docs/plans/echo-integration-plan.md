@@ -1356,3 +1356,337 @@ def _stringify_content(content) -> str:
 ```
 
 These eight code blocks are the load-bearing pieces of the plan. Phase 0 implements B.1, B.2, B.8 + the deprecated-alias type renames. Phase 1 implements B.3, B.4, B.5, B.6, B.7.
+
+---
+
+## Appendix C — Acceptance tests for Phases 1, 2, 3
+
+Phase 0's tests are in §A.6. These are the gates for the subsequent phases.
+
+### C.1 Phase 1 — ECHO kernel hookup acceptance
+
+In `crates/kiln-train/tests/echo_loss_test.rs` (new):
+
+```rust
+/// echo_lambda=0.0 produces bit-identical loss to the pre-ECHO commit.
+#[test]
+fn echo_step_loss_disabled_is_no_op() -> Result<()> {
+    let inputs = fixture_grpo_inputs();
+    let pre_echo_loss = run_grpo_pre_echo(&inputs)?;
+    let post_echo_loss = run_grpo_with_echo(&inputs, /* lambda */ 0.0)?;
+    assert!((pre_echo_loss - post_echo_loss).abs() < 1e-7,
+            "echo_lambda=0.0 must be bit-equivalent to pre-ECHO; got {pre_echo_loss} vs {post_echo_loss}");
+    Ok(())
+}
+
+/// echo_step_loss at lambda=0.05 produces a positive auxiliary contribution
+/// for a fixture rollout with non-empty env_mask.
+#[test]
+fn echo_step_loss_contributes_when_env_mask_populated() -> Result<()> {
+    let inputs = fixture_rollout_with_tool_results();    // env_mask has ≥ 8 true positions
+    let echo_out = echo::echo_step_loss(echo::EchoStepInputs::from_fixture(&inputs))?;
+    assert!(echo_out.env_count >= 8);
+    let mean_ce = echo_out.mean_ce.to_scalar::<f32>()?;
+    assert!(mean_ce > 0.0 && mean_ce < 10.0,
+            "mean_ce must be a sensible CE value; got {mean_ce}");
+    Ok(())
+}
+
+/// Length normalization is by |O| (total observation length), not by |O'|
+/// (env_token count). Verifies paper §3.1.
+#[test]
+fn echo_step_loss_normalizes_by_total_obs_len() -> Result<()> {
+    let inputs_short = fixture_with_total_obs_len(64);
+    let inputs_long  = fixture_with_total_obs_len(512);   // same per-token CE, longer rollout
+    let short = echo::echo_step_loss(EchoStepInputs::from(&inputs_short))?.mean_ce.to_scalar::<f32>()?;
+    let long  = echo::echo_step_loss(EchoStepInputs::from(&inputs_long))?.mean_ce.to_scalar::<f32>()?;
+    // Long rollout's mean_ce should be ~8x smaller because |O| is 8x larger.
+    let ratio = short / long.max(1e-9);
+    assert!((ratio - 8.0).abs() < 0.5, "expected ~8x ratio, got {ratio}");
+    Ok(())
+}
+
+/// The checkpointed-path analytic-tail ECHO variant produces bit-equivalent
+/// loss to the uncheckpointed path on the same inputs. Pins the S1 risk
+/// (analytic-tail refactor regresses GRPO numerics).
+#[test]
+fn analytic_grpo_echo_tail_matches_uncheckpointed_path() -> Result<()> {
+    let inputs = fixture_with_segments();
+    let unchk = run_uncheckpointed_grpo_echo(&inputs, /* lambda */ 0.05)?;
+    let chk   = run_checkpointed_grpo_echo(&inputs, /* lambda */ 0.05)?;
+    assert!((unchk - chk).abs() < 1e-4,
+            "checkpointed vs uncheckpointed must match within 1e-4; got {unchk} vs {chk}");
+    Ok(())
+}
+
+/// VK-path ECHO contribution is non-zero and matches the candle path
+/// within tolerance (modulo VK precision).
+#[test]
+#[cfg(feature = "vulkan")]
+fn vk_echo_step_matches_candle_within_tolerance() -> Result<()> {
+    let inputs = fixture_grpo_inputs_with_env_mask();
+    let candle = run_candle_grpo_echo(&inputs)?;
+    let vk     = run_vk_grpo_echo(&inputs)?;
+    assert!((candle - vk).abs() < 1e-2,
+            "VK and candle should match within 1e-2; got {candle} vs {vk}");
+    Ok(())
+}
+```
+
+In `capabilities/agentic-grpo/pi-doctest/runs/phase1-paired/`:
+
+```bash
+# Phase 1 ship gate: paired runs, 3 seeds each.
+# Pass when (mean_echo - mean_grpo) >= 0.10 AND seed_std_echo < 0.02.
+
+for seed in 3141592653 2718281828 1414213562; do
+    # GRPO-only run (--no-echo)
+    cuda_grpo_ablation --data ... --mode phase1 --no-echo --seed $seed \
+        --output runs/phase1-paired/grpo-seed-$seed
+    # ECHO run (default)
+    cuda_grpo_ablation --data ... --mode phase1 --echo-lambda 0.05 --seed $seed \
+        --output runs/phase1-paired/echo-seed-$seed
+done
+
+python evaluate_pair.py --seeds 3141592653,2718281828,1414213562 \
+    --check delta_composite_mean_ge=0.10 \
+    --check echo_seed_std_lt=0.02 \
+    --check binary_outcome_also_improves=true
+# Exits 0 if all gates pass; non-zero with diagnostic if any fail.
+```
+
+### C.2 Phase 2 — paper reproduction in `pi-terminal-bench-lite`
+
+In `capabilities/agentic-grpo/pi-terminal-bench-lite/calibration/dynamics_holdout_test.py` (new):
+
+```python
+"""Paper §5.2 dynamics-holdout test.
+
+Generate trajectories from a stronger teacher (Qwen3-32B or strongest
+available on the pod), then measure env-token cross-entropy on Base,
+GRPO, and ECHO checkpoints. ECHO must reduce CE by ≥30%."""
+
+import json
+from pathlib import Path
+
+TEACHER_MODEL_ID = "qwen3-32b-kiln"      # or strongest available
+TARGET_CE_REDUCTION_PCT = 30.0
+
+
+def test_dynamics_holdout_ce_drops_with_echo():
+    teacher_traj_path = generate_or_cache_teacher_trajectories(TEACHER_MODEL_ID)
+
+    ce_base = measure_env_token_ce(adapter="base", traj=teacher_traj_path)
+    ce_grpo = measure_env_token_ce(adapter="grpo-final", traj=teacher_traj_path)
+    ce_echo = measure_env_token_ce(adapter="echo-final", traj=teacher_traj_path)
+
+    # GRPO alone should barely move the needle (paper §5.2).
+    grpo_drop_pct = 100.0 * (ce_base - ce_grpo) / ce_base
+    assert grpo_drop_pct < 15.0, \
+        f"GRPO-only env CE drop should be small ({grpo_drop_pct:.1f}% < 15%); something is off"
+
+    # ECHO should drop CE substantially.
+    echo_drop_pct = 100.0 * (ce_base - ce_echo) / ce_base
+    assert echo_drop_pct >= TARGET_CE_REDUCTION_PCT, \
+        f"ECHO env CE drop is {echo_drop_pct:.1f}%; need ≥{TARGET_CE_REDUCTION_PCT}%"
+
+    # ECHO should outperform GRPO on the holdout pass rate.
+    pass_grpo = measure_pass_rate(adapter="grpo-final", suite="tblite-holdout")
+    pass_echo = measure_pass_rate(adapter="echo-final", suite="tblite-holdout")
+    assert pass_echo > pass_grpo, \
+        f"ECHO pass rate {pass_echo:.3f} must strictly beat GRPO {pass_grpo:.3f}"
+
+    # Write the receipt.
+    receipt = {
+        "teacher_model": TEACHER_MODEL_ID,
+        "ce_base": ce_base, "ce_grpo": ce_grpo, "ce_echo": ce_echo,
+        "grpo_drop_pct": grpo_drop_pct, "echo_drop_pct": echo_drop_pct,
+        "pass_grpo": pass_grpo, "pass_echo": pass_echo,
+    }
+    Path("dynamics_holdout_receipt.json").write_text(json.dumps(receipt, indent=2))
+
+
+def measure_env_token_ce(adapter: str, traj: Path) -> float:
+    """Roll out a frozen `adapter` against the trajectory and compute the
+    mean per-token cross-entropy on env-positions only. Returns nats."""
+    ...  # implementation: call kiln server with the trajectory, extract
+         # env-position log probs from /v1/completions with logprobs=true,
+         # average.
+```
+
+### C.3 Phase 3 — verifier-free env-only adaptation
+
+In `capabilities/agentic-grpo/pi-script-fixup/run_verifier_free.sh`:
+
+```bash
+#!/bin/bash
+# Phase 3 demonstration: take the strongest Phase 2 ECHO checkpoint,
+# mask the GRPO term, train only on env CE for 100 steps. Expect:
+#   - val100: +3.8 pp     (paper §5.5)
+#   - PyTerm (OOD, filtered): +10.0 pp
+#   - ITD (OOD, filtered): +5.2 pp
+
+set -e
+
+CHECKPOINT="/workspace/adapters/echo-phase2-final"
+OUTPUT="/workspace/adapters/echo-verifier-free"
+
+cuda_grpo_ablation \
+    --data /workspace/pyterm-train.filtered.jsonl \
+    --model /workspace/qwen3.5-4b \
+    --base-adapter "$CHECKPOINT" \
+    --output "$OUTPUT" \
+    --mode phase1 \
+    --echo-lambda 0.05 \
+    --no-policy-loss \
+    --steps 100
+
+# Pass rates on the three eval sets.
+for eval_set in val100 pyterm itd; do
+    python -m kiln_eval \
+        --adapter "$OUTPUT" \
+        --suite "$eval_set-eval" \
+        --report verifier-free-results-$eval_set.json
+done
+
+python check_verifier_free_gates.py \
+    --val100-delta-pp-min 3.0 \
+    --pyterm-delta-pp-min 8.0 \
+    --itd-delta-pp-min 4.0
+```
+
+`--no-policy-loss` is a new flag landed in Phase 3 that disables the GRPO surrogate; it's the implementation of `L = L_env(Observations)` from paper §5.5.
+
+### C.4 Smoke tests that gate every PR in the series
+
+In `.github/workflows/echo-ci-gates.yml` (new):
+
+```yaml
+name: echo-integration-gates
+on:
+  pull_request:
+    paths:
+      - 'crates/kiln-train/**'
+      - 'crates/kiln-core/src/trajectory.rs'
+      - 'docs/papers/echo/**'
+
+jobs:
+  trajectory-mask-fixture-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test -p kiln-train --test trajectory_mask_test
+
+  echo-loss-bit-equivalence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test -p kiln-train --test echo_loss_test echo_step_loss_disabled_is_no_op
+
+  pi-doctest-iter5-replay-smoke:
+    runs-on: self-hosted-gpu-a100
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash capabilities/agentic-grpo/pi-doctest/run_iter5_replay_smoke.sh
+```
+
+These are the no-pass-no-merge gates. The longer Phase 1/2 evaluations run on pod via manual triggers; CI catches the bit-equivalence and fixture tests cheaply on every PR.
+
+---
+
+## Appendix D — How a capability author experiences ECHO
+
+The killer-workflow narrative (analog of OPD plan §7).
+
+### D.1 The day-one experience: ECHO is on, nobody had to know
+
+A capability author writes a new agentic-GRPO cap on top of pi. They follow the agentic-grpo skill, write their rubric, their task scaffold, their oracle. They never type the word "ECHO."
+
+```bash
+# 1. Capability author runs the standard agentic-GRPO workflow.
+cd capabilities/agentic-grpo/my-new-cap
+./capability.oracle.sh ""                       # baseline eval
+python rollout.py train --num-tasks 30 ...      # gather GrpoGroups
+./run_iter1.sh                                  # train
+
+# What just happened that they didn't have to know about:
+#   - rollout.py emitted agentic_groups with full trajectory schema
+#     (Action segments for assistant turns, Observation for tool results)
+#   - run_iter1.sh's cuda_grpo_ablation ran with --echo-lambda 0.05 by default
+#   - The training loop computed L = L_grpo + 0.05 * L_envCE
+#   - Diagnostics streamed env_token_ce; this is in the training log
+#   - The receipt records {echo: {lambda: 0.05, env_ce_initial: X, env_ce_final: Y}}
+```
+
+The cap author doesn't see any new knobs in `capability.config.json`. The default `training_phase1_defaults` block is unchanged. They get the ECHO uplift transparently.
+
+### D.2 The opt-out experience: when ECHO is wrong for the cap
+
+Some caps have single-turn rollouts — no tool calls, no environment observations. ECHO is a no-op there (env_mask is all-false), so leaving it on is fine. But sometimes a cap author wants to compare ECHO-on vs ECHO-off as a hypothesis:
+
+```bash
+# Hypothesis H_no_echo: "ECHO hurts when reward is dense and per-turn."
+./run_iter_no_echo.sh         # same as run_iter1.sh but with --no-echo
+
+# Check the verdict — three-seed verification per agentic-grpo skill discipline.
+```
+
+The skill captures this as a first-class hypothesis family (no, the *removal* of ECHO is the hypothesis, since ECHO is the default).
+
+### D.3 The "diff between pre-ECHO and post-ECHO cap" experience
+
+A capability author looking at the existing pi-doctest cap and a new ECHO-native cap sees these diffs:
+
+**Unchanged:**
+
+- `capability.md` design doc structure (rubric, headroom, adversarial design).
+- `rubric.py` reward function — unchanged.
+- `task_scaffold.py` — unchanged.
+- `capability.oracle.sh` — unchanged.
+- `run_iter1.sh` — unchanged at the call-site level (the `cuda_grpo_ablation` flags are the same).
+- The hypothesis loop, the verdict gate, the iter table, the 3-seed-verification discipline — all unchanged.
+
+**New / changed:**
+
+- `rollout.py` calls `from agentic_grpo_lib.pi_trajectory import parse_pi_session` and writes the `agentic_groups` shape. (For the pi-doctest cap, the migration is mechanical — drop in the import, replace the assistant-concatenation loop with the canonical parse_pi_session call.)
+- `capability.jsonl` iters gain three new fields: `env_token_ce_initial`, `env_token_ce_final`, `env_ce_drop_pct`. Visible in the iter table.
+- The agentic-grpo skill's "Group statistics watch" section gains `env_token_ce` as a first-class diagnostic.
+
+**Total cognitive load for the cap author:** roughly nothing. ECHO is a quality improvement that ships under the hood. The only thing they explicitly engage with is the new diagnostic in `capability.jsonl` and the agentic-grpo skill's note that ECHO is on by default.
+
+### D.4 The "I'm building a new agentic cap from scratch" experience
+
+The five steps, in order, taken by a capability author building the third agentic cap (after pi-doctest and pi-terminal-bench-lite):
+
+```bash
+# 1. Generate the scaffold from the skill template.
+kiln cap new --skill agentic-grpo my-third-cap
+# Generated files include rollout.py that imports pi_trajectory.py;
+# capability.config.json with ECHO defaults (lambda=0.05); the agentic
+# eval harness; the rubric stub; the calibration scaffold.
+
+cd capabilities/agentic-grpo/my-third-cap
+
+# 2. Customize the rubric, task scaffold, and corpus builder.
+# (Author writes domain-specific logic. No ECHO-specific code.)
+$EDITOR rubric.py task_scaffold.py build_corpus.py
+python build_corpus.py
+python calibration/sanity.py   # rubric sanity gate (3 good / 3 bad)
+
+# 3. Pi-smoke (mandatory before iter 1, per agentic-grpo §17).
+bash pi-smoke.sh    # validates pi can talk to kiln, write workdirs, etc.
+
+# 4. Baseline eval.
+./capability.oracle.sh ""
+# baseline composite: 0.42  (illustrative)
+
+# 5. Iter 1 — default ECHO recipe.
+./run_iter1.sh
+# Training streams env_token_ce → ~5.6 nats → ~0.3 nats over 200 steps,
+# then drops below 0.1 (the auto-anneal regime). Composite goes from
+# 0.42 → 0.58, with the receipt recording the dynamics-holdout numbers.
+```
+
+The author never explicitly opted into ECHO. They built a cap, followed the skill, and got a model that's measurably better at predicting terminal dynamics — and via that, measurably better at the task.
+
+**That is what "ECHO feels like it was the design from the beginning" means in practice.**
