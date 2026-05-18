@@ -679,3 +679,637 @@ These are the concrete acceptance tests that turn the validation gate from prose
 - **No `analytic_grpo_echo_tail_loss_grad_pre_final_norm`.** That's Phase 1's work too. The existing `analytic_grpo_tail_loss_grad_pre_final_norm` keeps using `completion_mask` (now wired as `action_mask`) and computes identical loss values.
 
 The discipline: Phase 0 is a pure-refactor PR that ships a strict no-op on training behavior. The validation gate is *exactly* "iter-5 reproduces within ±0.005" because that's the only thing Phase 0 should prove.
+
+---
+
+## Appendix B — Concrete API sketches for the load-bearing pieces
+
+These are not just shape sketches; they're the API I'd start with on day one of Phase 0 and Phase 1.
+
+### B.1 `crates/kiln-core/src/trajectory.rs` (Phase 0)
+
+```rust
+//! Canonical trajectory schema for agentic rollouts.
+//!
+//! A trajectory is an ordered sequence of TurnSegments. Each segment belongs
+//! to a Context (prompt), Action (assistant generation, target of policy
+//! gradient), or Observation (tool result / environment, target of ECHO's
+//! env-CE). The trajectory is the unit of training data; ScoredRollout
+//! attaches a reward.
+
+use serde::{Deserialize, Serialize};
+use crate::tokenizer::ChatMessage;
+
+/// What kind of supervision applies to tokens inside this segment.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnKind {
+    /// System / user / non-trainable scaffolding. No gradient.
+    #[default]
+    Context,
+    /// Assistant-generated tokens. Target of policy gradient (and OPD).
+    Action,
+    /// Tool result / environment-observation tokens. Target of ECHO's env-CE.
+    Observation,
+}
+
+/// One semantic turn in a trajectory.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TurnSegment {
+    /// Chat role: "system" | "user" | "assistant" | "tool" (extensible).
+    pub role: String,
+    /// The raw content the model saw or emitted, before chat-template
+    /// formatting. For tool-call turns this includes the <tool_call> XML.
+    pub content: String,
+    /// What kind of supervision applies inside this segment.
+    pub kind: TurnKind,
+    /// Optional tool-call correlation ID (paired with the corresponding
+    /// Observation segment when available). Informational; not used by
+    /// mask building.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Bytes at the start of this segment's content that are harness
+    /// warnings (e.g. "WARNINGS:\n- bad tool call format\n"). Excluded
+    /// from env_mask when MaskConfig.warning_filter is true. Paper §3.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning_prefix_len: Option<usize>,
+}
+
+/// One scored rollout in a group.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ScoredRollout {
+    /// Canonical multi-turn structure.
+    #[serde(default)]
+    pub trajectory: Vec<TurnSegment>,
+    /// Outcome reward (paper convention: binary 0/1; kiln convention:
+    /// continuous composite [0, 1]).
+    pub reward: f64,
+    /// Legacy single-string completion text. When `trajectory` is empty
+    /// and `text` is present, deserialization synthesizes a one-segment
+    /// Action trajectory from `text`. New emitters should populate
+    /// `trajectory` directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+impl ScoredRollout {
+    /// Synthesize a legacy text-only payload into a one-segment trajectory.
+    /// Called automatically by the deserializer; here exposed for tests.
+    pub fn ensure_trajectory(&mut self) {
+        if self.trajectory.is_empty() {
+            if let Some(text) = self.text.take() {
+                self.trajectory.push(TurnSegment {
+                    role: "assistant".into(),
+                    content: text,
+                    kind: TurnKind::Action,
+                    tool_call_id: None,
+                    warning_prefix_len: None,
+                });
+            }
+        }
+    }
+}
+
+/// A group of rollouts sharing a prompt. (Group-relative advantage is
+/// computed within this set.)
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AgenticGroup {
+    /// The prompt seen by every rollout in this group (system + user).
+    pub messages: Vec<ChatMessage>,
+    /// Multiple scored rollouts from the same prompt.
+    #[serde(alias = "completions")]    // legacy field name; one-cycle compat
+    pub rollouts: Vec<ScoredRollout>,
+}
+```
+
+### B.2 `crates/kiln-train/src/trajectory_mask.rs` (Phase 0)
+
+```rust
+//! Build (input_ids, action_mask, env_mask) from a trajectory.
+//!
+//! Generalizes label_mask_from_rendered_assistant_spans (trainer.rs:2423)
+//! to cover both assistant (Action) and tool (Observation) roles, with
+//! a paper §3.2 warning-prefix exclusion for env spans.
+
+use anyhow::{Context, Result};
+use kiln_core::tokenizer::{ChatMessage, KilnTokenizer};
+use kiln_core::trajectory::{TurnKind, TurnSegment};
+
+#[derive(Clone, Debug)]
+pub struct MaskConfig {
+    /// Whether to strip the harness "WARNINGS:\n- ..." prefix from env_mask.
+    /// Paper §3.2: warning tokens memorize in ~60 steps and provide no
+    /// useful gradient. Default: true.
+    pub warning_filter: bool,
+    /// EnvOnly (default; paper recommendation) — env_mask covers only
+    /// the tool-output bytes. FullObs (debug) — env_mask covers the full
+    /// observation including warnings.
+    pub env_mask_mode: EnvMaskMode,
+}
+
+impl Default for MaskConfig {
+    fn default() -> Self {
+        Self {
+            warning_filter: true,
+            env_mask_mode: EnvMaskMode::EnvOnly,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EnvMaskMode {
+    #[default]
+    EnvOnly,
+    FullObs,
+}
+
+#[derive(Clone, Debug)]
+pub struct MaskedRollout {
+    pub input_ids: Vec<u32>,
+    /// True at positions the model generated (Action segments).
+    pub action_mask: Vec<bool>,
+    /// True at positions the environment produced (Observation segments).
+    pub env_mask: Vec<bool>,
+    /// Per-segment token span (token_start_inclusive, token_end_exclusive,
+    /// kind). Useful for diagnostics and per-segment loss attribution.
+    pub segment_spans: Vec<(usize, usize, TurnKind)>,
+}
+
+pub fn build_masks_from_trajectory(
+    trajectory: &[TurnSegment],
+    prompt_messages: &[ChatMessage],
+    tokenizer: &KilnTokenizer,
+    cfg: &MaskConfig,
+) -> Result<MaskedRollout> {
+    // 1. Compose prompt + trajectory into a single ChatMessage list.
+    // 2. apply_chat_template(full_messages) → full_text
+    // 3. encode_with_offsets(full_text) → (input_ids, byte_offsets)
+    // 4. For each Action / Observation segment, find its rendered byte range
+    //    via the same delimiter-finding logic SFT uses
+    //    (label_mask_from_rendered_assistant_spans pattern).
+    // 5. Apply warning_filter to Observation segments: advance the start
+    //    of the byte range by segment.warning_prefix_len if set.
+    // 6. Mark action_mask[tok] = true / env_mask[tok] = true for tokens
+    //    whose offsets overlap the corresponding spans.
+    // 7. Sanity-check disjointness (action_mask[t] && env_mask[t] is a bug).
+    todo!("Phase 0 implementation")
+}
+
+/// Fallback when delimiter-finding fails to account for all segments;
+/// re-tokenize cumulative prefixes to determine each segment's exact
+/// token boundaries. Mirrors label_mask_by_prefix_tokenization
+/// (trainer.rs:2475).
+fn build_masks_by_prefix_tokenization(/* ... */) -> Result<MaskedRollout> {
+    todo!()
+}
+```
+
+### B.3 `crates/kiln-train/src/echo.rs` (Phase 1)
+
+```rust
+//! ECHO (Environment Cross-entropy Hybrid Objective) — paper:
+//! docs/papers/echo/echo_paper.md
+//!
+//! Adds a length-normalized cross-entropy loss on env-observation tokens
+//! to the standard GRPO policy-gradient loss on action tokens. Shares
+//! the same forward pass; differs only in which mask gathers the logits.
+
+use anyhow::{Context, Result};
+use candle_core::{Device, Tensor};
+use kiln_flce_kernel::{
+    DEFAULT_CHUNK_SIZE, FlceProvider, fused_linear_cross_entropy_dispatch_with_provider,
+};
+
+#[derive(Clone, Debug)]
+pub struct EchoConfig {
+    /// Mixing coefficient for the env-CE term. Paper §3.3 default: 0.05.
+    /// Productive range: 0.01–0.05. ≥0.1 risks degrading the policy
+    /// objective; 0.2 collapses to predictable-output rollouts.
+    pub lambda: f64,
+    /// What positions in observations contribute to env_mask. EnvOnly
+    /// (default) excludes the harness warning prefix; FullObs is debug.
+    pub env_mask_mode: EnvMaskMode,
+    /// Whether to strip the harness warning prefix from observation
+    /// spans (paper §3.2). Default: true.
+    pub warning_filter: bool,
+}
+
+impl Default for EchoConfig {
+    fn default() -> Self {
+        Self {
+            lambda: 0.05,
+            env_mask_mode: EnvMaskMode::EnvOnly,
+            warning_filter: true,
+        }
+    }
+}
+
+pub use crate::trajectory_mask::EnvMaskMode;
+
+/// Inputs to the ECHO loss term. Mirrors OpdStepInputs (opd.rs:693).
+pub struct EchoStepInputs<'a> {
+    pub tokens: &'a [u32],
+    /// Token positions where loss applies. Must be inside `tokens`.
+    pub env_positions: &'a [usize],
+    /// Post-final-RMSNorm hidden states from the policy forward.
+    /// [1, T, H]. Same tensor the policy forward already produced.
+    pub student_hidden: &'a Tensor,
+    /// LM head weight transposed. [H, V]. Same head_t the FLCE kernel
+    /// expects.
+    pub head_t: &'a Tensor,
+    /// Total observation length |O|, for paper §3.1 length normalization.
+    /// (NOT the count of env positions; the full observation span.)
+    pub total_obs_len: usize,
+    pub chunk_size: usize,
+    /// Optional FLCE matmul provider (Vulkan / accelerator-specific).
+    pub provider: Option<FlceProvider>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EchoStepOutputs {
+    pub per_position_ce: Tensor,
+    pub mean_ce: Tensor,
+    pub env_count: usize,
+}
+
+/// Compute the env-CE loss term. The returned tensor is autograd-tracked
+/// off `student_hidden`'s parents (LoRA Vars), so .backward() flows
+/// gradients into the LoRA parameters.
+pub fn echo_step_loss(inputs: EchoStepInputs<'_>) -> Result<EchoStepOutputs> {
+    let EchoStepInputs {
+        tokens,
+        env_positions,
+        student_hidden,
+        head_t,
+        total_obs_len,
+        chunk_size,
+        provider,
+    } = inputs;
+
+    anyhow::ensure!(!env_positions.is_empty(),
+        "echo_step_loss called with no env positions — caller should short-circuit");
+
+    // Build the label mask from env_positions.
+    let seq_len = tokens.len();
+    let mut env_mask = vec![false; seq_len];
+    for &p in env_positions {
+        anyhow::ensure!(p < seq_len,
+            "env position {} out of range for seq_len {}", p, seq_len);
+        env_mask[p] = true;
+    }
+
+    // Single call into the existing FLCE kernel with env_mask.
+    let chunk = if chunk_size == 0 { DEFAULT_CHUNK_SIZE } else { chunk_size };
+    let device = student_hidden.device();
+    let raw_ce_sum = fused_linear_cross_entropy_dispatch_with_provider(
+        student_hidden,
+        head_t,
+        tokens,
+        &env_mask,
+        device,
+        chunk,
+        provider,
+    )
+    .context("FLCE dispatch for ECHO env-CE")?;
+
+    // The kernel returns a scalar that is the sum of CE values divided
+    // by the number of active positions. We want length-normalization
+    // by total_obs_len (paper §3.1), so rescale:
+    //   mean_ce = raw_ce_sum * (env_positions.len() / total_obs_len)
+    // This makes the env-CE term auto-anneal as the model learns terminal
+    // structure (raw_ce_sum drops, env_count usually stable).
+    let env_count = env_positions.len() as f64;
+    let scale = env_count / total_obs_len.max(1) as f64;
+    let mean_ce = (raw_ce_sum * scale)?;
+
+    // For diagnostics: also compute the per-position CE for the
+    // env_token_ce_per_step diagnostic stream.
+    let per_position_ce = compute_per_position_ce(student_hidden, head_t, tokens, &env_mask, chunk, provider)?;
+
+    Ok(EchoStepOutputs {
+        per_position_ce,
+        mean_ce,
+        env_count: env_positions.len(),
+    })
+}
+
+fn compute_per_position_ce(/* ... */) -> Result<Tensor> {
+    // Sibling of opd_top_k_reverse_kl_phase_a_per_position, but with
+    // standard cross-entropy instead of reverse-KL. Used only for
+    // diagnostics; not on the main loss path.
+    todo!()
+}
+```
+
+### B.4 `LossConfig` (Phase 1)
+
+```rust
+// crates/kiln-train/src/lib.rs — added in Phase 1
+
+/// Composition of per-token training objectives. Each branch contributes
+/// to L_total = L_policy + λ_echo · L_envCE + λ_opd · L_revKL where
+/// inactive branches contribute zero.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LossConfig {
+    /// Action-token policy-gradient term. Identical knobs to today's
+    /// GRPO: clip_eps, kl_coeff, kl_estimator, advantage_mode, is_level,
+    /// reference_policy, etc.
+    #[serde(default)]
+    pub policy: PolicyLossConfig,
+
+    /// Observation-token cross-entropy (paper: Shrivastava et al. 2026).
+    /// Default: Some(EchoConfig::default()) with lambda=0.05. Set to
+    /// None to opt out.
+    #[serde(default = "default_echo_some")]
+    pub echo: Option<EchoConfig>,
+
+    /// Action-token reverse-KL to a teacher (OPD; Lu 2025). Default: None.
+    /// Wired in by the OPD branch rebase; LossConfig holds the field so
+    /// the composition is structural.
+    #[serde(default)]
+    pub opd: Option<OpdAuxConfig>,
+}
+
+fn default_echo_some() -> Option<EchoConfig> {
+    Some(EchoConfig::default())
+}
+
+impl LossConfig {
+    pub fn echo_lambda(&self) -> f64 {
+        self.echo.as_ref().map(|c| c.lambda).unwrap_or(0.0)
+    }
+    pub fn opd_lambda(&self) -> f64 {
+        self.opd.as_ref().map(|c| c.lambda).unwrap_or(0.0)
+    }
+}
+
+// AgenticConfig (renamed from GrpoConfig in Phase 0) gains:
+pub struct AgenticConfig {
+    /* existing fields — learning_rate, kl_coeff, clip_epsilon, etc. */
+    #[serde(default)]
+    pub loss: LossConfig,
+}
+```
+
+### B.5 The uncheckpointed-path diff (Phase 1, `trainer.rs` around line 1848)
+
+```rust
+// Before:
+let policy_log_probs = token_log_probs(&policy_logits, &comp.input_ids, &comp.action_mask, device)?;
+let loss = grpo_loss(&policy_log_probs, &ref_log_probs, loss_params, device)?;
+loss_val = loss.to_scalar::<f32>()? as f64;
+let grads = loss.backward().context("GRPO backward pass")?;
+
+// After:
+let policy_log_probs = token_log_probs(&policy_logits, &comp.input_ids, &comp.action_mask, device)?;
+let policy_loss = grpo_loss(&policy_log_probs, &ref_log_probs, loss_params, device)?;
+
+let total_loss = if let Some(echo_cfg) = &config.loss.echo {
+    let env_positions: Vec<usize> = comp.env_mask.iter().enumerate()
+        .filter_map(|(i, &m)| if m { Some(i) } else { None }).collect();
+    if env_positions.is_empty() {
+        policy_loss
+    } else {
+        // Extract hidden_pre_head from policy_logits if available; otherwise
+        // re-run model_forward_no_head. Plumbing detail.
+        let echo_out = echo::echo_step_loss(echo::EchoStepInputs {
+            tokens: &comp.input_ids,
+            env_positions: &env_positions,
+            student_hidden: &policy_hidden_pre_head,
+            head_t: &weights.embed_tokens_t,
+            total_obs_len: comp.total_obs_len,
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            provider: None,
+        })?;
+        let scaled = echo_out.mean_ce.affine(echo_cfg.lambda, 0.0)?;
+        policy_loss.add(&scaled)?
+    }
+} else {
+    policy_loss
+};
+
+loss_val = total_loss.to_scalar::<f32>()? as f64;
+let grads = total_loss.backward().context("GRPO+ECHO backward pass")?;
+```
+
+**Plumbing note:** the current `train_tokenized_grpo_group` discards the pre-head hidden after `model_forward` produces logits. Phase 1 needs to keep `policy_hidden_pre_head` alive so `echo_step_loss` can call FLCE on it. Two options: (a) refactor to call `model_forward_no_head` then apply head separately; (b) keep a fork of the existing path. Option (a) is the cleaner long-term fix and what OPD's existing code already does — pattern-match on `opd.rs::opd_step_loss`'s `student_hidden` plumbing.
+
+### B.6 The checkpointed-path change (Phase 1, `trainer.rs` around line 7434)
+
+```rust
+// Before:
+let (loss_val, mut upstream_grad) = analytic_grpo_tail_loss_grad_pre_final_norm(
+    &final_hidden,
+    &weights.final_norm,
+    &weights.embed_tokens_t,
+    input_ids,
+    completion_mask,      // becomes action_mask after Phase 0
+    ref_log_probs,
+    loss_params,
+    model_config.rms_norm_eps,
+    DEFAULT_CHUNK_SIZE,
+)?;
+
+// After:
+let (loss_val, mut upstream_grad) = analytic_grpo_echo_tail_loss_grad_pre_final_norm(
+    &final_hidden,
+    &weights.final_norm,
+    &weights.embed_tokens_t,
+    input_ids,
+    action_mask,
+    env_mask,             // NEW
+    ref_log_probs,
+    loss_params,
+    echo_lambda,          // NEW (0.0 disables the ECHO term)
+    total_obs_len,        // NEW
+    model_config.rms_norm_eps,
+    DEFAULT_CHUNK_SIZE,
+)?;
+```
+
+The new `analytic_grpo_echo_tail_loss_grad_pre_final_norm` walks vocab chunks the same way the existing function does, but adds, for each chunk: a separate gather over `env_mask[t] && t in chunk` positions, computes the per-position CE analytically (`logp = logit - log_sum_exp`; `ce_t = -logp[input_ids[t+1]]`), and accumulates both `env_ce_sum` and `d(env_ce_sum) / d(final_hidden)` per chunk. Returns `(loss_val_total, upstream_grad_total) = (loss_grpo + λ_echo · loss_env_ce, upstream_grpo + λ_echo · upstream_env_ce)`.
+
+The chunked vocab matmul is shared between the GRPO and ECHO computations — memory cost is zero additional intermediates above what the existing function already pays.
+
+### B.7 Vulkan-path implementation (Phase 1, `vk_train.rs`)
+
+```rust
+// New helper next to grpo_active_rows_and_labels (vk_train.rs:181).
+fn echo_env_active_rows_and_labels(
+    input_ids: &[u32],
+    env_mask: &[bool],
+) -> Result<(Vec<u32>, Vec<u32>)> {
+    // Same pattern as grpo_active_rows_and_labels: shift by 1 (next-token
+    // prediction), return (active_rows, labels) where each active_row
+    // is a position in the policy_logits that we'll gather, and labels[i]
+    // is input_ids[active_rows[i]+1].
+    anyhow::ensure!(input_ids.len() == env_mask.len(),
+        "input_ids/env_mask length mismatch");
+    let active_rows: Vec<u32> = env_mask[1..].iter().enumerate()
+        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None }).collect();
+    let labels: Vec<u32> = active_rows.iter()
+        .map(|&i| input_ids[i as usize + 1]).collect();
+    Ok((active_rows, labels))
+}
+
+// Inside vk_native_grpo_train at the call site (vk_train.rs:3623 / 3959),
+// after the existing GRPO loss computation:
+let echo_loss_vk: Option<VkTensor> = if let Some(echo_cfg) = config.loss.echo.as_ref() {
+    let (env_rows, env_labels) = echo_env_active_rows_and_labels(&comp.input_ids, &comp.env_mask)?;
+    if env_rows.is_empty() {
+        None
+    } else {
+        // Gather hidden rows at env positions, run head matmul, log-softmax,
+        // gather labels, mean (length-normalized by total_obs_len).
+        Some(vk_echo_env_ce(
+            &final_hidden_vk,
+            &head_t_vk,
+            &env_rows,
+            &env_labels,
+            comp.total_obs_len,
+            &mut vk_state,
+        )?)
+    }
+} else {
+    None
+};
+
+// Fold into total VK loss with scaling by echo_cfg.lambda.
+```
+
+The full implementation of `vk_echo_env_ce` follows the same VkTensor pattern as `vk_native_grpo_train`'s existing loss computation — log-softmax, gather, mean — and is roughly 50–80 lines of VkTensor ops. Estimated half-day of work.
+
+### B.8 `pi_trajectory.py` (Phase 0, shared Python lib)
+
+```python
+"""Parse pi session JSONL into the canonical kiln Trajectory schema.
+
+The pi session format (verified against capabilities/agentic-grpo/pi-doctest/rollout.py
+on 2026-05-18):
+
+  {"type": "message", "message": {
+       "role": "system" | "user" | "assistant" | "tool",
+       "content": [{
+           "type": "text" | "thinking" | "toolCall" | "toolResult",
+           ...role-specific fields...
+       }]
+  }}
+
+This module emits {"trajectory": [{"role", "content", "kind", ...}, ...]}.
+"""
+
+from pathlib import Path
+import json
+from typing import Iterator
+
+ASSISTANT_BLOCK_RENDERERS = {
+    "text": lambda b: b.get("text", ""),
+    "thinking": lambda b: f"<think>{b.get('thinking', '')}</think>",
+    "toolCall": lambda b: (
+        f'<tool_call>{{"name": "{b.get("name", "")}", '
+        f'"arguments": {json.dumps(b.get("input", {}))}}}</tool_call>'
+    ),
+}
+
+
+def parse_pi_session(session_path: Path) -> list[dict]:
+    """Parse a pi session JSONL file into kiln Trajectory segments.
+
+    Returns a list of TurnSegment dicts:
+        [{"role", "content", "kind", "tool_call_id"?, "warning_prefix_len"?}, ...]
+
+    System / user turns are TurnKind=context.
+    Assistant turns are TurnKind=action (content rendered as Qwen XML).
+    Tool-result turns are TurnKind=observation (content is the raw output).
+    """
+    segments: list[dict] = []
+    for event in _iter_events(session_path):
+        if event.get("type") != "message":
+            continue
+        msg = event.get("message") or {}
+        role = msg.get("role")
+        content = msg.get("content")
+
+        if role in ("system", "user"):
+            text = _stringify_content(content)
+            segments.append({"role": role, "content": text, "kind": "context"})
+
+        elif role == "assistant":
+            text = _render_assistant_blocks(content or [])
+            if text:
+                segments.append({"role": role, "content": text, "kind": "action"})
+
+        elif role == "tool":
+            text = _render_tool_blocks(content or [])
+            tool_call_id = _extract_tool_call_id(content or [])
+            warning_prefix_len = _detect_warning_prefix(text)
+            segments.append({
+                "role": role,
+                "content": text,
+                "kind": "observation",
+                "tool_call_id": tool_call_id,
+                "warning_prefix_len": warning_prefix_len,
+            })
+
+    return segments
+
+
+def _iter_events(path: Path) -> Iterator[dict]:
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
+def _render_assistant_blocks(blocks: list) -> str:
+    parts = []
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        renderer = ASSISTANT_BLOCK_RENDERERS.get(b.get("type"))
+        if renderer:
+            parts.append(renderer(b))
+    return "".join(parts)
+
+
+def _render_tool_blocks(blocks: list) -> str:
+    parts = []
+    for b in blocks:
+        if isinstance(b, dict) and b.get("type") == "toolResult":
+            parts.append(str(b.get("content", "")))
+    return "".join(parts)
+
+
+def _extract_tool_call_id(blocks: list) -> str | None:
+    for b in blocks:
+        if isinstance(b, dict) and b.get("type") == "toolResult":
+            return b.get("toolCallId") or b.get("tool_call_id")
+    return None
+
+
+def _detect_warning_prefix(text: str) -> int | None:
+    """Detect the 'WARNINGS:\n- ...' prefix harness emits when a tool
+    call fails parsing. Returns the byte length of the prefix (so the
+    masker can advance past it), or None if no warning prefix."""
+    if text.startswith("WARNINGS:\n"):
+        # Find the first non-warning content (typically <command_output>).
+        idx = text.find("<command_output>")
+        return idx if idx > 0 else len("WARNINGS:\n")
+    return None
+
+
+def _stringify_content(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        # Flatten list-of-blocks for system/user (rare).
+        return "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
+    return str(content) if content is not None else ""
+```
+
+These eight code blocks are the load-bearing pieces of the plan. Phase 0 implements B.1, B.2, B.8 + the deprecated-alias type renames. Phase 1 implements B.3, B.4, B.5, B.6, B.7.
