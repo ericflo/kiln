@@ -3,8 +3,28 @@
 > *Make environment-token cross-entropy a first-class loss term across the kiln agentic-RL stack — on by default, native everywhere, composed cleanly with OPD.*
 
 **Status:** Draft. Branch `use-breakthrough-echo-grpo-technique-throughout`. The reference docs for the technique live at `docs/papers/echo/` (paper + blog).
-**Authors:** Synthesised by Claude (Opus 4.7) from the ECHO paper (Shrivastava, Awadallah, Papailiopoulos — MSR AI Frontiers, 2026), the OPD grand plan, the agentic-grpo skill, and a deep read of the GRPO training stack as it exists on this branch.
+**Authors:** Synthesised by Claude (Opus 4.7) from the ECHO paper (Shrivastava, Awadallah, Papailiopoulos — MSR AI Frontiers, 2026), the OPD grand plan, the agentic-grpo skill, and a direct read of the GRPO training stack as it exists on this branch.
 **Date:** 2026-05-18.
+
+---
+
+## Contents
+
+- [TL;DR](#tldr)
+- [§0 What we know after exploring (the load-bearing facts)](#0-what-we-know-after-exploring-the-load-bearing-facts)
+  - [§0.1 Empirical findings (after the code audit)](#01-empirical-findings-after-the-code-audit)
+- [§1 The framing: ECHO is what completes the agentic loop](#1-the-framing-echo-is-what-completes-the-agentic-loop)
+- [§2 The big naming refactor (the "from day one" piece)](#2-the-big-naming-refactor-the-from-day-one-piece)
+- [§3 The five architectural pillars](#3-the-five-architectural-pillars)
+- [§4 The user-facing surface](#4-the-user-facing-surface)
+- [§5 The phased rollout](#5-the-phased-rollout)
+- [§6 Validation strategy + the things to flag now](#6-validation-strategy--the-things-to-flag-now)
+- [§7 Decisions (resolved)](#7-decisions-resolved)
+- [§8 Effort estimate](#8-effort-estimate)
+- [Appendix A — Phase 0 migration map](#appendix-a--phase-0-migration-map) (15 Rust files, type renames, tests as code)
+- [Appendix B — Concrete API sketches for the load-bearing pieces](#appendix-b--concrete-api-sketches-for-the-load-bearing-pieces) (B.1 trajectory, B.2 trajectory_mask, B.3 echo, B.4 LossConfig, B.5 uncheckpointed diff, B.6 checkpointed diff, B.7 Vulkan, B.8 pi_trajectory.py)
+- [Appendix C — Acceptance tests for Phases 1, 2, 3](#appendix-c--acceptance-tests-for-phases-1-2-3)
+- [Appendix D — How a capability author experiences ECHO](#appendix-d--how-a-capability-author-experiences-echo)
 
 ---
 
@@ -12,7 +32,18 @@
 
 ECHO isn't an add-on to GRPO — it's the natural completion of the **agentic** training stack kiln was already moving toward. The OPD grand plan (`docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md` §10) already names the agentic loop as kiln's primary deployment shape, already requires multi-turn per-turn token masking, and already discusses tool-result tokens as "inputs the model didn't generate." ECHO takes the third step that plan leaves implicit: **those tool-result tokens aren't just inputs to mask out — they're a dense supervision target.** Mask out of the policy-gradient objective, mask *into* an auxiliary cross-entropy objective, share the same forward pass.
 
-So the integration is less "bolt ECHO onto GRPO" and more "complete the masking primitive the agentic plan needs anyway, and turn it on by default." Once the mask-pair is plumbed through, the loss change is a few dozen lines per backend (and the kernel already exists in `kiln-flce-kernel` with CUDA / Vulkan / Metal / CPU coverage — that's the reason this is feasible at the timescale we'd want).
+So the integration is less "bolt ECHO onto GRPO" and more "complete the masking primitive the agentic plan needs anyway, and turn it on by default." The loss-term implementation is two code surfaces (CUDA/CPU/Metal share `trainer.rs`; Vulkan-native is separate in `vk_train.rs`) and roughly two new modules (`kiln-core::trajectory` and `kiln-train::echo`); the kernel work the candle path needs is already in `kiln-flce-kernel`, and the VK path is ~50–80 lines of VkTensor ops. The phased plan that follows lands ECHO natively across all backends in ~3 weeks of focused work.
+
+### What you get when this lands
+
+| | Today | After Phase 1 | After Phase 2 | After Phase 3 |
+| --- | --- | --- | --- | --- |
+| Agentic rollout schema | flat text, no role/turn structure | trajectory (Action / Observation / Context) | same | same |
+| Multi-turn gradient leakage | yes (tool tokens get policy-gradient) | no | no | no |
+| ECHO env-CE loss | none | on by default at λ=0.05 | proven on TBLite-style holdout | proven verifier-free in §5.5 demo |
+| Backend coverage | n/a | CUDA, CPU, Metal (`trainer.rs`) + Vulkan (`vk_train.rs`) | same | same |
+| OPD composition | n/a | structural slot reserved (`LossConfig.opd`) | same | wired when OPD branch rebases (Phase 4) |
+| User-facing surface | new `agentic_groups` request shape; legacy `groups` still works | + `--echo-lambda` CLI flag | + 2nd cap with the headline receipt | + verifier-free demo cap + `docs/ECHO_GUIDE.md` |
 
 ---
 
@@ -81,44 +112,34 @@ This is the change that does most of the "feels like the design from the beginni
 - `env_mask: Vec<bool>` — true at observation positions; targets of env-CE.
 - (The legacy `completion_mask` becomes the union `action_mask | env_mask` and is kept around only as a compatibility shim during the deprecation window.)
 
-The shape, in the core crate with a clean Serde schema:
+The shape, in the core crate with a clean Serde schema (introductory sketch; full version in §B.1):
 
 ```rust
 // crates/kiln-core/src/trajectory.rs  (new file)
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "snake_case")]
 pub enum TurnKind { Context, Action, Observation }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TurnSegment {
-    pub role: String,          // "system" | "user" | "assistant" | "tool"
+    pub role: String,                       // "system" | "user" | "assistant" | "tool"
     pub content: String,
-    pub kind: TurnKind,        // Action | Observation | Context
-    #[serde(default)]
+    pub kind: TurnKind,
     pub tool_call_id: Option<String>,
-    #[serde(default)]
-    pub warning_prefix_len: Option<usize>, // bytes of harness warning to exclude from env_mask
+    pub warning_prefix_len: Option<usize>,  // bytes of harness warning excluded from env_mask
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ScoredRollout {
-    /// Authoritative representation.
-    pub trajectory: Vec<TurnSegment>,
+    pub trajectory: Vec<TurnSegment>,       // canonical multi-turn shape
     pub reward: f64,
-    /// Legacy fallback. Populated automatically from `trajectory` on serialize.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
+    pub text: Option<String>,               // legacy fallback; synthesized to a 1-segment Action trajectory on deserialize
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AgenticGroup {
     pub messages: Vec<ChatMessage>,
-    pub rollouts: Vec<ScoredRollout>,
+    pub rollouts: Vec<ScoredRollout>,       // serde aliases "completions"
 }
 ```
 
-And then `GrpoGroup` / `ScoredCompletion` become *deprecated aliases* (with `#[serde(alias)]`) that convert into `AgenticGroup` / `ScoredRollout` on load. **Old payloads keep working; new ones get the masks for free.** The "from day one" feel comes from the new shape being the canonical one in code, with the old form reduced to a footnote in serde.
+`GrpoGroup` / `ScoredCompletion` become *deprecated aliases* (with `#[serde(alias)]`) that convert into `AgenticGroup` / `ScoredRollout` on load. **Old payloads keep working; new ones get the masks for free.** The "from day one" feel comes from the new shape being the canonical one in code, with the old form reduced to a footnote in serde.
 
 This same naming refactor flows into:
 
@@ -386,8 +407,8 @@ Long-term we add an explicit `/v1/train/agentic` alias to signal the canonical p
 
 **Core schema (new crate module):**
 
-- `crates/kiln-core/src/trajectory.rs` — new module exporting `TurnKind`, `TurnSegment`, `ScoredRollout`, `AgenticGroup` from §2.
-- Tokenizer extension: `apply_chat_template_with_token_offsets` returning `(input_ids, Vec<(byte_start, byte_end)>)` for clean segment→token mapping.
+- `crates/kiln-core/src/trajectory.rs` — new module exporting `TurnKind`, `TurnSegment`, `ScoredRollout`, `AgenticGroup` from §2 (full definition in §B.1).
+- **No new tokenizer methods required.** The audit found `tokenizer.apply_chat_template(...)` + `tokenizer.encode_with_offsets(...)` already exist (verified at `trainer.rs:1924, 2348`), which gives the segment→token mapping `build_masks_from_trajectory` needs.
 
 **Masking primitive:**
 
@@ -417,7 +438,7 @@ Long-term we add an explicit `/v1/train/agentic` alias to signal the canonical p
 - Backward-compat test: deserialize a payload using the old field names (`completions: [{text, reward}]`) and assert it round-trips through `AgenticGroup` correctly.
 - Real pi-session fixture in `crates/kiln-train/tests/fixtures/` to catch chat-template byte-offset edge cases (the `<tool_call>` XML / OpenAI-normalized question from `kiln-polish-prerequisites.md` #5 gets resolved here).
 
-**Validation gate:** existing pi-doctest replay (iter-5 strong-signal recipe) reproduces composite within ±0.005 of the published number on both CUDA and Vulkan paths. If it doesn't, the masking refactor has a bug. This is a 30-minute pod run.
+**Validation gate:** existing pi-doctest replay (iter-5 strong-signal recipe) reproduces composite within ±0.005 of the published 0.8958 on the CUDA path the original iter-5 ran on. (The iter-5 receipt is CUDA-only; Vulkan parity for pi-doctest specifically is a Phase 1 smoke, not a Phase 0 gate.) For the Vulkan path Phase 0 ships a unit-level smoke: one GRPO step on a fixture trajectory must produce a finite loss whose value matches the pre-rename commit bit-for-bit (i.e. the rename is a pure refactor on VK too). If either gate fails, the masking refactor has a bug. The CUDA replay is a 30-minute pod run; the VK smoke is a `cargo test --features vulkan` run.
 
 ### Phase 1 — ECHO kernel hookup + explicit OPD composition (1 PR, the core)
 
@@ -425,7 +446,8 @@ ECHO becomes the default, and `LossConfig` is shaped so OPD's eventual rebase on
 
 **The ECHO term:**
 
-- `crates/kiln-train/src/echo.rs` — new module, `echo_env_ce` function (§3.1). One call into `kiln-flce-kernel::fused_linear_cross_entropy_dispatch_with_provider` with `env_mask` as the label mask, length-normalized by `|O|` per paper §3.1.
+- `crates/kiln-train/src/echo.rs` — new module, `echo_step_loss` function (§3.1, full sketch in §B.3). For the candle path (CUDA/CPU/Metal), the body is one call into `kiln-flce-kernel::fused_linear_cross_entropy_dispatch_with_provider` with `env_mask` as the label mask, length-normalized by `|O|` per paper §3.1. For the Vulkan-native path, a sibling `vk_echo_env_ce` (§B.7) lives in `vk_train.rs` and uses VkTensor ops — `vk_train.rs` does not import `kiln-flce-kernel`, so the two paths are parallel implementations of the same math.
+- For the checkpointed path: a new `analytic_grpo_echo_tail_loss_grad_pre_final_norm` function folds the env-CE term into the existing analytic backward (§B.6). Memory cost: zero additional intermediates above the existing vocab-chunk loop.
 
 **The `LossConfig` shape (OPD composition baked in):**
 
