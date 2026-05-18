@@ -56,15 +56,47 @@ failure mode the 4B exhibits). Will confirm via baseline.
 ## Hypothesis log
 | iter | slug | family | composite | comp Δ | target Δ | verdict |
 |------|------|--------|-----------|--------|----------|---------|
-|      |      |        |           |        |          |         |
+| 0 | baseline | — | 0.8509 | — | — | required_fields=0.700 = target |
+| 1 | h1-r16-6ep | H1 | **0.8939** | +4.30pp | +16.67pp | ✓ confirmed (kept; best for this capability) |
+| 2 | h9-asym | H9 | — | — | — | ? killed mid-run, no adapter (pre-checkpoint) |
+| 3 | h9-asym-ckpt | H9 | 0.7917 (best ckpt) / 0.343 (final) | -10.22pp | — | ✗ falsified (EOS collapse from over-training) |
 
 ## Dead ends
-(none yet)
+- max_tokens=128 rollout budget on a structured-output capability — too
+  narrow; OPD finds nothing useful to do (cap #3 lesson; applied here
+  upfront with max_tokens=384).
+- H9 asymmetric at 6-epoch dosage on this prompt set: over-shoots into
+  EOS collapse. Mechanism is real (skip 93.6% → 0%) but produces a
+  worse adapter than symmetric. Future H9 here would need fewer
+  effective steps and/or a softer teacher prefix.
 
 ## Open questions
-- Does rollout-max_tokens=384 eliminate the 97% skip-rate ceiling that
-  plagued capability #2, or is the structured-output issue tighter than
-  that?
+- Does H9-short (2 epochs, ~52 steps) land near iter 1 or near ckpt-75?
+  Ckpt-75 of iter 3 scored 0.792 at roughly equivalent training amount.
+- Would a strict-only-JSON `parses` (no best-effort extraction) make
+  the EOS collapse hit the floor faster and protect iter 1's score?
+  (rubric Goodhart hole identified in iter 3 verdict; logged to
+  kiln-polish.)
+
+## Closeout (iter 3)
+Best kept adapter: **iter 1 `toolcall-h1-r16-6ep`, composite 0.8939**
+(+4.30pp vs baseline). Three meta-wins worth more than the +4.30pp:
+
+1. **Asymmetric teacher conditioning** shipped as
+   `OpdPrompt.teacher_extra_messages` (commits `46087c4e`, `626f03b2`).
+   First real-world use confirmed the mechanism (skip 93.6%→0%) and
+   surfaced its known failure mode (EOS collapse from over-training).
+2. **Periodic OPD checkpointing** shipped as
+   `OpdConfig.checkpoint_interval` (commit `96774c99`). First real use
+   saved 6 intermediate adapters; the best of them (ckpt-75 = 0.792)
+   is what we eval against, not the catastrophic final (0.343).
+3. **EOS-collapse failure mode characterised** — the OPD paper
+   literature's "flawed prefix trap" observed concretely. Mitigation
+   directions logged to kiln-polish.
+
+Moving to capability #5 (diff/patch fluency) with the eval-anti-shortcut
+lesson applied upfront — strict parses, no best-effort credit for
+"valid content followed by garbage."
 
 ## Checkpoints
 (every 3rd iter)
