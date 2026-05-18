@@ -10238,6 +10238,7 @@ mod tests {
             loss_params,
             &segments,
             &device,
+            None, // ECHO disabled — this test pins checkpointed vs standard GRPO parity
         )?;
 
         let loss_diff = (loss_std - loss_ckpt).abs();
