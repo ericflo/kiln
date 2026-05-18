@@ -44,33 +44,34 @@ PI_BIN = os.environ.get("PI_BIN", "pi")
 
 
 def kiln_active_adapter(url: str, adapter: str | None) -> None:
-    """POST to kiln to set the active adapter. Empty / None = base model."""
-    body = json.dumps({"name": adapter or ""}).encode()
+    """Set kiln's active adapter via POST /v1/adapters/load (or unload).
+    Empty / None = base model (unload)."""
+    if not adapter:
+        # Unload — revert to base.
+        req = urllib.request.Request(
+            f"{url}/v1/adapters/unload",
+            data=b"",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                r.read()
+        except urllib.error.HTTPError as e:
+            # If no adapter was loaded, unload may 4xx — that's fine.
+            if e.code < 500:
+                return
+            raise
+        return
+    body = json.dumps({"name": adapter}).encode()
     req = urllib.request.Request(
-        f"{url}/v1/active_adapter",
+        f"{url}/v1/adapters/load",
         data=body,
         method="POST",
         headers={"Content-Type": "application/json"},
     )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            r.read()
-    except Exception as e:
-        # Endpoint name may differ in this kiln build. Try alternates.
-        for alt in ("/v1/adapter/active", "/v1/adapters/active"):
-            try:
-                req = urllib.request.Request(
-                    f"{url}{alt}",
-                    data=body,
-                    method="POST",
-                    headers={"Content-Type": "application/json"},
-                )
-                with urllib.request.urlopen(req, timeout=10) as r:
-                    r.read()
-                return
-            except Exception:
-                continue
-        raise RuntimeError(f"failed to switch adapter to {adapter!r}: {e}")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        r.read()
 
 
 def latest_session_jsonl(session_dir: Path) -> Path | None:
