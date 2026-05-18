@@ -11195,6 +11195,198 @@ mod tests {
         Ok(())
     }
 
+    /// ECHO checkpointed-path acceptance: the analytic_grpo_tail's ECHO
+    /// branch must produce a finite loss whose absolute value differs
+    /// from the GRPO-only loss when env_mask has active positions.
+    /// This is the load-bearing test for the Phase 1 follow-up that
+    /// landed in the analytic tail.
+    #[test]
+    fn test_echo_checkpointed_analytic_tail_contributes() -> Result<()> {
+        let device = Device::Cpu;
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device)?;
+        let final_norm_weight = weights.final_norm.clone();
+        let head_t = weights.embed_tokens_t.clone();
+
+        // Synthetic 8-token sequence. Action positions {2, 3, 5}.
+        // Env positions {4, 6}. Disjoint per trajectory_mask invariant.
+        let input_ids: Vec<u32> = vec![1u32, 5, 10, 3, 7, 2, 8, 15];
+        let action_mask = vec![false, false, true, true, false, true, false, false];
+        let env_mask = vec![false, false, false, false, true, false, true, false];
+        let total_obs_len = 2usize; // |O|
+
+        // Build a small hidden tensor.
+        let hidden_data: Vec<f32> = (0..(input_ids.len() * config.hidden_size))
+            .map(|i| ((i as f32) * 0.01).sin())
+            .collect();
+        let hidden = Tensor::from_vec(
+            hidden_data,
+            (1, input_ids.len(), config.hidden_size),
+            &device,
+        )?
+        .to_dtype(DType::F32)?;
+
+        // ref_log_probs at action positions (3 entries).
+        let ref_log_probs = Tensor::from_vec(
+            vec![-2.0f32, -1.5, -2.5],
+            3,
+            &device,
+        )?;
+
+        let params = GrpoLossParams {
+            advantage: 1.0,
+            clip_low: 0.2,
+            clip_high: 0.2,
+            kl_coeff: 0.0,
+            kl_estimator: KlEstimator::None,
+            loss_normalizer: 1.0 / 3.0,
+            is_level: IsLevel::Token,
+            reinforce: false,
+            entropy_aware_kl_quantile: None,
+        };
+
+        // Path A: GRPO only (no ECHO).
+        let (loss_grpo, _grad_grpo) = analytic_grpo_tail_loss_grad_pre_final_norm(
+            &hidden,
+            &final_norm_weight,
+            &head_t,
+            &input_ids,
+            &action_mask,
+            &ref_log_probs,
+            params,
+            1e-6,
+            4,
+            None,
+        )?;
+
+        // Path B: GRPO + ECHO at λ=0.05.
+        let echo_params = EchoTailParams {
+            env_mask: &env_mask,
+            total_obs_len,
+            lambda: 0.05,
+        };
+        let (loss_with_echo, _grad_with_echo) = analytic_grpo_tail_loss_grad_pre_final_norm(
+            &hidden,
+            &final_norm_weight,
+            &head_t,
+            &input_ids,
+            &action_mask,
+            &ref_log_probs,
+            params,
+            1e-6,
+            4,
+            Some(echo_params),
+        )?;
+
+        // Both should be finite.
+        assert!(
+            loss_grpo.is_finite(),
+            "GRPO-only loss not finite: {loss_grpo}"
+        );
+        assert!(
+            loss_with_echo.is_finite(),
+            "GRPO+ECHO loss not finite: {loss_with_echo}"
+        );
+
+        // ECHO contribution = -λ/|O| · Σ log p_θ at env positions.
+        // log p_θ is bounded above by 0, so env_log_prob_sum ≤ 0, so the
+        // ECHO contribution = -λ · sum / |O| ≥ 0. Adding it to loss_grpo
+        // produces a strictly LARGER loss (in the sign convention
+        // loss_with_echo = loss_grpo + λ/|O| * Σ(-log p)).
+        assert!(
+            loss_with_echo > loss_grpo,
+            "ECHO should increase total loss (env-CE is positive): \
+             grpo={loss_grpo}, with_echo={loss_with_echo}"
+        );
+
+        // ECHO contribution should be a sensible magnitude (each log p is
+        // O(-log(vocab_size)) ≈ -log(32) ≈ -3.5; with λ=0.05, |O|=2 and
+        // 2 env positions, the upper bound is ~0.05 * 2 * 3.5 / 2 ≈ 0.175).
+        let echo_contribution = loss_with_echo - loss_grpo;
+        assert!(
+            (0.0..1.0).contains(&echo_contribution),
+            "ECHO contribution {echo_contribution} outside expected range [0, 1)"
+        );
+
+        Ok(())
+    }
+
+    /// ECHO + checkpointed path round-trip: the new EchoTailParams
+    /// argument threads through checkpointed_grpo_forward_backward
+    /// correctly and produces a finite loss whose magnitude depends on
+    /// λ_echo. The end-to-end test_echo_end_to_end_grpo_with_trajectory_rollouts
+    /// runs the same path but via the higher-level train_tokenized_grpo_group.
+    #[test]
+    fn test_echo_checkpointed_forward_backward_threads_echo_params() -> Result<()> {
+        let device = Device::Cpu;
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device)?;
+        let backend = backend::for_device(&device);
+
+        let input_ids: Vec<u32> = vec![1u32, 5, 10, 3, 7, 2, 8, 15];
+        let action_mask = vec![false, false, true, true, false, true, false, false];
+        let env_mask = vec![false, false, false, false, true, false, true, false];
+        let total_obs_len = 2usize;
+        let ref_log_probs = Tensor::from_vec(vec![-2.0f32, -1.5, -2.5], 3, &device)?;
+
+        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
+        let segments = compute_segment_boundaries(config.num_layers, 2);
+        let loss_params = GrpoLossParams {
+            advantage: 1.0,
+            clip_low: 0.2,
+            clip_high: 0.2,
+            kl_coeff: 0.0,
+            kl_estimator: KlEstimator::None,
+            loss_normalizer: 1.0 / 3.0,
+            is_level: IsLevel::Token,
+            reinforce: false,
+            entropy_aware_kl_quantile: None,
+        };
+
+        // ECHO disabled → original behaviour.
+        let (loss_off, _grads_off) = checkpointed_grpo_forward_backward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &action_mask,
+            &ref_log_probs,
+            loss_params,
+            &segments,
+            &device,
+            None,
+        )?;
+        assert!(loss_off.is_finite(), "ECHO-off loss not finite: {loss_off}");
+
+        // ECHO enabled at λ=0.05.
+        let params2 = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
+        let (loss_on, _grads_on) = checkpointed_grpo_forward_backward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params2,
+            &action_mask,
+            &ref_log_probs,
+            loss_params,
+            &segments,
+            &device,
+            Some(EchoTailParams {
+                env_mask: &env_mask,
+                total_obs_len,
+                lambda: 0.05,
+            }),
+        )?;
+        assert!(loss_on.is_finite(), "ECHO-on loss not finite: {loss_on}");
+        assert_ne!(
+            loss_off, loss_on,
+            "ECHO should change the checkpointed loss when env_mask is active"
+        );
+
+        Ok(())
+    }
+
     /// Build a tokenizer with a Qwen-shaped chat template for the ECHO
     /// end-to-end test. Mirrors the qwen_shaped_tokenizer in trajectory_mask
     /// but uses the trainer's tiny_config vocab size so input_ids fit.
