@@ -1685,15 +1685,11 @@ pub fn grpo_train_jsonl(
 ///
 /// Carries two parallel masks:
 /// - `action_mask` — true at policy-gradient target positions (assistant
-///   tokens). Identical to the legacy `completion_mask` when the rollout
-///   has no trajectory.
+///   tokens). Equivalent to the pre-ECHO `completion_mask` for legacy
+///   single-turn rollouts.
 /// - `env_mask` — true at environment-observation target positions (tool
 ///   results). All-false when the rollout has no trajectory or when the
-///   trajectory is single-turn Action-only.
-///
-/// The legacy `completion_mask` field is retained as an alias of
-/// `action_mask` so the existing 30+ references compile unchanged; new
-/// ECHO-aware paths read `action_mask` and `env_mask`.
+///   trajectory is single-turn Action-only. ECHO's env-CE consumes this.
 struct TokenizedGrpoCompletion {
     /// Full input_ids: prompt + completion tokens.
     input_ids: Vec<u32>,
@@ -1708,9 +1704,6 @@ struct TokenizedGrpoCompletion {
     /// in the ECHO term. Counts every Observation token regardless of the
     /// warning_filter trim — `env_mask` may be a strict subset of |O|.
     total_obs_len: usize,
-    /// Legacy alias of `action_mask`. Kept so existing call sites that
-    /// read `.completion_mask` compile unchanged during the migration.
-    completion_mask: Vec<bool>,
 }
 
 /// A tokenized GRPO group ready for training.
@@ -2088,12 +2081,12 @@ fn train_tokenized_grpo_group(
     let mut opt_state = opt_state;
 
     // Active token counts per completion (matches the next-token-shift convention
-    // used by token_log_probs and the analytic tail: completion_mask[1..]).
+    // used by token_log_probs and the analytic tail: action_mask[1..]).
     let per_comp_active: Vec<usize> = tgroup
         .completions
         .iter()
         .map(|c| {
-            c.completion_mask
+            c.action_mask
                 .get(1..)
                 .map_or(0, |m| m.iter().filter(|&&v| v).count())
         })
@@ -2176,7 +2169,7 @@ fn train_tokenized_grpo_group(
                 &ref_hidden,
                 &weights.embed_tokens_t,
                 &comp.input_ids,
-                &comp.completion_mask,
+                &comp.action_mask,
                 DEFAULT_CHUNK_SIZE,
             )?
             .detach()
@@ -2190,7 +2183,7 @@ fn train_tokenized_grpo_group(
                 weights,
                 model_config,
                 params,
-                &comp.completion_mask,
+                &comp.action_mask,
                 &ref_log_probs,
                 loss_params,
                 segs,
@@ -2226,7 +2219,7 @@ fn train_tokenized_grpo_group(
             let policy_log_probs = token_log_probs(
                 &policy_logits,
                 &comp.input_ids,
-                &comp.completion_mask,
+                &comp.action_mask,
                 device,
             )?;
 
@@ -2401,13 +2394,11 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
                 env_mask,
                 segment_spans: _,
             } = masked;
-            let completion_mask = action_mask.clone();
             completions.push(TokenizedGrpoCompletion {
                 input_ids,
                 action_mask,
                 env_mask,
                 total_obs_len,
-                completion_mask,
             });
             rewards.push(reward);
             continue;
@@ -2425,14 +2416,12 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
             action_mask[i] = true;
         }
         let env_mask = vec![false; full_ids.len()];
-        let completion_mask = action_mask.clone();
 
         completions.push(TokenizedGrpoCompletion {
             input_ids: full_ids,
             action_mask,
             env_mask,
             total_obs_len: 0,
-            completion_mask,
         });
         rewards.push(reward);
     }

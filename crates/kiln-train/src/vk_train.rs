@@ -64,9 +64,6 @@ struct TokenizedVkGrpoCompletion {
     env_mask: Vec<bool>,
     /// Total observation length |O| for paper §3.1 length normalization.
     total_obs_len: usize,
-    /// Legacy alias of `action_mask`. Kept so existing call sites that
-    /// read `.completion_mask` compile unchanged during the migration.
-    completion_mask: Vec<bool>,
 }
 
 struct TokenizedVkGrpoGroup {
@@ -153,13 +150,11 @@ fn tokenize_vk_grpo_group(
                 env_mask,
                 segment_spans: _,
             } = masked;
-            let completion_mask = action_mask.clone();
             completions.push(TokenizedVkGrpoCompletion {
                 input_ids,
                 action_mask,
                 env_mask,
                 total_obs_len,
-                completion_mask,
             });
             continue;
         }
@@ -176,13 +171,11 @@ fn tokenize_vk_grpo_group(
             *slot = true;
         }
         let env_mask = vec![false; full_ids.len()];
-        let completion_mask = action_mask.clone();
         completions.push(TokenizedVkGrpoCompletion {
             input_ids: full_ids,
             action_mask,
             env_mask,
             total_obs_len: 0,
-            completion_mask,
         });
     }
 
@@ -327,7 +320,7 @@ fn grpo_group_needs_prefix_reference(group: &TokenizedVkGrpoGroup) -> bool {
     let completions_in_group = group.completions.len();
     group.completions.iter().any(|completion| {
         let active_labels = completion
-            .completion_mask
+            .action_mask
             .get(1..)
             .unwrap_or(&[])
             .iter()
@@ -3677,7 +3670,7 @@ pub fn vk_native_grpo_train(
         for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
             optimizer_step += 1;
             let (active_rows, labels) =
-                grpo_active_rows_and_labels(&comp.input_ids, &comp.completion_mask)?;
+                grpo_active_rows_and_labels(&comp.input_ids, &comp.action_mask)?;
             ensure_grpo_completion_scoring_layout(tgroup.prompt_ids.len(), &active_rows)?;
             let (ref_log_probs, _reference_path) = vk_grpo_reference_log_probs_dynamic(
                 &vk_weights,
@@ -4013,7 +4006,7 @@ pub fn vk_native_grpo_train_jsonl(
         for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
             optimizer_step += 1;
             let (active_rows, labels) =
-                grpo_active_rows_and_labels(&comp.input_ids, &comp.completion_mask)?;
+                grpo_active_rows_and_labels(&comp.input_ids, &comp.action_mask)?;
             ensure_grpo_completion_scoring_layout(tgroup.prompt_ids.len(), &active_rows)?;
             let completed_before = comp_idx.saturating_mul(2);
             let progress_offset = line_start.saturating_add(
