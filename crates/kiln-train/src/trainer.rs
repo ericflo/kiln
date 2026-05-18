@@ -11015,6 +11015,18 @@ mod tests {
                 assert!(comp.total_obs_len > 0, "total_obs_len > 0");
             }
 
+            // Disable the shared-prefix optimization for this smoke test —
+            // the trajectory rollouts here are synthetic byte sequences and
+            // the legacy per-completion ref path is sufficient to validate
+            // ECHO wiring. The shared-prefix path gets its own integration
+            // coverage on real pi-doctest data.
+            // SAFETY: env-var manipulation is process-global; this test
+            // serializes on ENV_LOCK in production but the smoke test is
+            // a single-threaded cargo test invocation here.
+            unsafe {
+                std::env::set_var("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", "1");
+            }
+
             let mut params =
                 TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
             let loss = train_tokenized_grpo_group(
