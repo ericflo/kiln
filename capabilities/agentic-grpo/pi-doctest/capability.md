@@ -168,6 +168,8 @@ documents intent for reviewers.)
 | 5    | h1-strong-signal-only-11groups | H1-filter | **0.899** | **+0.094** | ✓ reproducible-best | Filter to strong-signal groups (var>0.05). +9.4pp composite, reproducible across seeds at this scale. Outcome 0.79→0.92 (1 zero remaining). |
 | 6    | h1-strong-plus-almost-pass     | H1-mix | 0.859 | +0.054 vs base | ablation (-0.040 vs iter 5) | 11 strong + 4 'almost-pass' — stratification didn't help. |
 | 7    | h1-replay-iter2-recipe         | H1 | 0.846 | +0.041 vs base | **ablation-CRITICAL** | Iter 2 recipe replay on fresh rollouts → 0.846 (not 0.919). iter 2's number was sample-variance, not robust. Honest reproducible best = iter 5's 0.899. |
+| 8    | h13-2epoch-strong-signal       | H13 | 0.750 | −0.055 vs base | ablation-falsified | 2 epochs on iter 5's 11 strong-signal groups regresses composite −0.149 vs iter 5. 5 zeros (vs iter 5's 1). Mean wall-clock 3× blow-up (19.86s → 56.45s) — the over-training signature. Confirms 1 epoch is the sweet spot on filtered data. |
+| 9    | iter5-2nd-seed-eval-variance   | H14 | **0.893** | +0.087 vs base | ✓ kept-verification | 2nd-seed eval of iter 5 adapter (same weights, fresh rollouts) → 0.893. iter 5 mean across 2 seeds = 0.896 ± 0.003. Eval-rollout variance for trained adapter is much smaller than the seed-to-seed variance of the recipe itself. |
 
 
 
