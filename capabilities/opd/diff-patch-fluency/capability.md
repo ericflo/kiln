@@ -85,46 +85,59 @@ applying-but-not-quite-right diffs (wrong line replaced, etc.).
 | 0 (orig) | baseline | — | 0.1883 | — | — | (wrong — over-strict rubric rejected fenced diffs) |
 | 0 (fixed) | baseline | — | **0.8500** | — | — | (corrected; rubric now accepts ```diff fenced output) |
 | 1 | h1-r16-2ep | H1 | 0.0983 | -75.2pp | — | ✗ CATASTROPHIC (8 noisy steps destroyed the LoRA) |
+| 2 | h1-r8-lr5e5-2ep-spp2 | H1 | 0.5217 (best ckpt) | -32.8pp | — | ✗ falsified (gentle settings avoided catastrophe but still regressed) |
 
 ## Dead ends
 - H1 r16 2 epochs with mis-measured baseline → catastrophic LoRA
-  collapse. The training itself isn't the dead-end; the upstream
-  eval-design failure that made an aggressive gradient signal seem
-  warranted is the dead end.
+  collapse (-75pp).
+- H1 r8 lr5e-5 spp2 with corrected baseline → still regression (-33pp).
+  Demonstrates that gentler dosage doesn't fix the underlying problem.
+- **The underlying problem: OPD has a high-baseline failure mode when
+  student-teacher rollout overlap is variable.** At baseline 0.85,
+  some student rollouts match teacher (OPD = no-op); some are
+  malformed (OPD locks in malformedness, regression). Settings can't
+  fix this asymmetry. Documented in skill §0 ("Where OPD shines").
 
 ## Open questions
-- With baseline now 0.85 and headroom only 0.15, is OPD worth running
-  at all on this capability? The 4B is already quite good at diffs.
-  A perfect-ceiling adapter would lift composite by at most 0.15pp.
+- Could H6 (off-policy SFT cold-start on teacher rollouts) narrow
+  the overlap gap enough for OPD to refine afterward? Out of scope
+  this session (requires teacher-rollout generation pipeline).
 
-## Closeout (iter 1)
+## Closeout (iter 2)
 
-**Capability retired here. Best kept artifact: the eval-design lesson.**
+**Best 'adapter' for this capability: NO ADAPTER.** The base 4B at
+composite 0.85 is the ceiling reachable without a different training
+paradigm. Two OPD iterations confirmed this:
 
-Two iterations:
-- iter 0 baseline (orig rubric): 0.1883 — *wrong* (rubric too strict)
-- iter 0 baseline (fixed rubric): 0.8500 — *the real baseline*
-- iter 1: 0.0983 — catastrophic LoRA, OPD destroyed a 0.85 model
+- iter 1 (r16 lr1e-4): catastrophic 0.10
+- iter 2 (r8 lr5e-5 spp2): gentler but still regressed to 0.52
 
-The valuable artifact is the symmetric of cap #1's mistake:
+Both confirm the §0 high-baseline failure mode finding: OPD on a
+0.85 baseline with variable rollout quality can only regress.
 
-- **Cap #1** baseline 0.99: rubric too LAX (model already passes; eval
-  too easy). Skill §0 warns about this. Prior session abandoned cap
-  #1 — wrong call; correct disposition was "harden the rubric and re-
-  baseline."
-- **Cap #5** baseline 0.19 (initial): rubric too STRICT (model produces
-  valid diffs in fenced format; rubric rejects them). Inspecting 5
-  responses showed the 4B is actually competent. Correcting the rubric
-  jumped baseline to 0.85. The capability is mostly solved; OPD is
-  borderline-interesting given the small remaining headroom.
+Three rich findings from this capability, more valuable than any
+adapter:
 
-The skill needs §0 to warn about BOTH directions of eval-design failure:
-- baseline ≥ 0.95: too lax. Inspect responses; harden rubric.
-- baseline < 0.30 on a capability the 4B *should* have some seed-form
-  ability at: too strict. Inspect responses; loosen rubric (without
-  re-opening Goodhart holes).
+1. **Eval-design failure goes BOTH directions.** Cap #1 baseline
+   0.99 (rubric too lax); cap #5 baseline 0.19 (rubric too strict).
+   Corrected rubric jumped cap #5 baseline from 0.19 → 0.85.
+   Skill §0 + Phase 0 step 8 now warn about both directions.
 
-Both lessons are now backported to the skill (this session).
+2. **OPD has a high-baseline failure mode** (the deep finding).
+   At baseline > 0.80 with variable rollout quality, OPD regresses
+   regardless of settings. Skill §0 "Where OPD shines" now reflects
+   this with an explicit upper bound (0.80, not 0.95) and a sharper
+   condition (consistent rollout quality, not just composite value).
+
+3. **Trust the data — don't retire prematurely.** My first instinct
+   was to retire cap #5 after the rubric fix at "baseline 0.85,
+   headroom 0.15." The user correctly pointed out this was the cap
+   #1 mistake replayed. Iter 2 produced the real finding (high-
+   baseline failure mode). The retire-after-rubric-fix would have
+   shipped the wrong meta-lesson.
+
+If we ship a cap #5 adapter, it's the base model (no LoRA). The
+real value is the findings backported to the skill.
 
 ## Wall-time budget per iter
 **≤ 2 hours.** Per the cap #4 lesson: hypothesis-author must

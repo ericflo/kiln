@@ -37,14 +37,16 @@ You produce **independent** OPD adapters from the base. Each is an attempt: a pr
 OPD bridges a *distribution gap*. The student already has the capability in some form; the teacher has it in better form; OPD trains the student to match the teacher at states the student actually visits.
 
 OPD helps when:
-- baseline composite is in `(0.4, 0.95)`
+- baseline composite is in `(0.4, 0.80)` — see the upper-bound caveat below
 - at least one sub-score has visible headroom
 - the student already produces text in roughly the right shape (it can fail at the capability, but it should at least *try*)
+- **student rollouts are consistently in-distribution** — most of the student's sampled rollouts look like coherent attempts at the capability, not a mix of "correct" and "malformed"
 
 OPD does **not** help when:
 - the student needs fundamentally new knowledge (use SFT or pretraining)
 - the rubric is already saturated (no headroom to capture)
 - the student samples in distributions the teacher considers junk (no overlap → no gradient signal — see §8 on student-teacher overlap)
+- **baseline > 0.80 with VARIABLE rollout quality.** This is the high-baseline failure mode (cap #5): at high baseline, some student rollouts match the teacher (OPD step ≈ no-op) and some are the failure-tail's malformed outputs. Reverse-KL makes the student MORE confident in WHATEVER it sampled, including the malformed rollouts. The asymmetry kills you: good-rollout steps don't help (already correct), bad-rollout steps actively regress. Cap #5 baseline 0.85 → iter 1 r16 lr1e-4 catastrophic 0.10 → iter 2 r8 lr5e-5 spp2 still regressed to 0.52 best-of-checkpoints. **Gentler settings cannot fix it; the right tool is SFT (H6 cold-start on teacher rollouts) or accepting the baseline as the ceiling.**
 
 ### The eval is the spec — and you wrote it
 
