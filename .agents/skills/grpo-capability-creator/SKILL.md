@@ -130,6 +130,75 @@ If `composite_headroom < 0.05`, no GRPO gradient is going to find
 anything. If `group_var_baseline < 0.01`, dynamic sampling will drop
 every group. In either case: stop and fix the rubric or the prompts.
 
+### Single-seed GRPO is high-variance — don't ship single numbers
+
+A single-seed GRPO iter at the scale described in this skill (20-40
+training prompts × 4 generations × 1 epoch) has **composite stdev of
+≥0.05** across rollout seeds. Two identical recipes — same training
+prompts, same lr, same code — produced 0.92 and 0.85 in successive
+runs (pi-doctest cap iter 2 vs iter 7). The difference was solely the
+stochastic rollout draw.
+
+**Implications for the verdict gate:**
+
+- **Never declare a >+0.05 composite lift "won" from a single iter.**
+  Re-run with at least one different seed before claiming victory.
+- A single-iter regression of −0.05 to −0.10 is plausibly noise. Don't
+  retire a hypothesis on one number.
+- The "real" composite of an adapter is best estimated as a mean over
+  3+ eval runs (eval is also stochastic at T>0) AND 3+ rollout seeds
+  during training.
+- When pod time is tight and you can only run one iter, **commit the
+  number with a noise disclaimer** rather than headlining it. The
+  reproducible-best is the result that holds across 2+ seeds, not the
+  lucky single sample.
+
+**Operational implication.** Plan iter compute budget as `N_seeds × 1
+iter cost`, not `1 iter cost`. For pi-doctest at 80 rollouts × ~30s
+on H100, one iter is ~45 min wall-clock — so 3 seeds = ~2.5 hours.
+Budget accordingly.
+
+### Training-set size has a sweet spot — more isn't always better
+
+Counter to intuition, scaling training data within a single epoch
+*hurt* the pi-doctest cap at our hyperparameter setting:
+
+- iter 2 (20 tasks, 8 effective groups after dynamic_sampling) → 0.919
+- iter 3 (40 tasks, 19 effective groups, same lr) → 0.845
+- iter 5 (11 strong-signal groups, same lr) → 0.899
+
+The pattern: more groups at the same lr means more optimizer steps in
+one epoch, which overshoots. Reducing lr (iter 4: 5e-6) partially
+recovered the loss but didn't reach iter 2.
+
+**Heuristics for sizing training sets:**
+
+- Start with ~10-15 *effective* (post-dynamic_sampling) groups for
+  the first iter. Add more only if loss has clearly plateaued
+  *and* eval composite isn't improving.
+- If you 2× the training data, also halve lr — otherwise you've
+  doubled the effective gradient step count per pass.
+- Strong-signal filtering (`var > 0.05`) is a cheap way to make a
+  bigger raw rollout pool produce a smaller, more focused training
+  set without losing data quality.
+
+### When the goal says "extremely improved," budget for variance
+
+If the user wants "extremely improved" and you have any flexibility on
+compute, plan to run:
+
+1. A first iter to find a working recipe (this is the noisy single
+   sample).
+2. 2-3 seed replications of that recipe to estimate true mean +
+   variance.
+3. The HONEST claim is the mean over replications, NOT the best
+   single sample.
+
+In our session, iter 2 looked like +11.4pp but replication showed
++5-9pp is the real range. The skill expectation: **+5-10pp composite
+on a narrow agentic cap is a successful GRPO outcome**. Single-iter
+results outside this range are suspect.
+
 ---
 
 ## 1. Information firewall (non-negotiable)
@@ -411,10 +480,19 @@ stop and look at what the rollouts are actually doing.
 | **H9 — Sampling temperature** | Raise rollout temperature (0.9 → 1.2) | When `group_variance` is too tight; exploration too narrow. |
 | **H10 — Longer rollouts** | Increase `max_tokens` (rollout) | When rollouts are truncating mid-answer (`truncation_rate > 0.10`). |
 | **H11 — More generations** | Increase `num_generations` (8 → 16) | When you can afford the VRAM and `group_variance` is too noisy for stable advantages. Quadratic memory cost. |
+| **H12 — Strong-signal filter** | Roll out a *wider* task pool, then KEEP only groups with `within-group variance > 0.05` for training | When you've hit "more data hurts" (iter N > iter N−1 with more tasks). Filtering removes degenerate + near-saturated groups in one pass. In pi-doctest cap, this recovered most of iter 3's regression without overshooting back to iter 2's lucky-sample number. |
+| **H13 — Two-epoch on filtered data** | Concatenate the filtered JSONL with itself (or use higher epochs in the trainer when supported) | When iter at H12 still underperforms target; you want more gradient updates without expanding the data. Watch loss curve — if it goes more positive on the 2nd epoch, you're overtraining. |
+| **H14 — Multi-seed average** | Re-run the best recipe with 2-3 different rollout seeds; ensemble or average the adapters | When single-iter results show high variance (Δ composite > 0.05 across re-runs). The honest result is the mean, not the max. |
 
 Always start at H1. **Never combine two hypotheses in a single iter.**
 The iteration log loses signal — you can't tell which lever moved the
 score.
+
+**Sequencing for narrow agentic caps** (pi-doctest pattern): H1 → H12
+(if H1 saw too few effective groups OR if H1 ran on a small task set
+that yielded only a few useful groups) → H13 (cheap second pass) →
+H14 (verify with seeds). H2-H11 are situational based on the
+observed failure modes during inspection.
 
 ---
 
@@ -586,14 +664,17 @@ but the adapter learned the wrong thing.
 
 Stop the cap when **any** of:
 
-- Composite lift ≥ +0.10 over baseline, with no regression > 0.05 →
-  ship the adapter.
+- Composite lift ≥ +0.10 over baseline, **VERIFIED ACROSS AT LEAST 2
+  SEEDS**, with no per-task regression > 0.05 → ship the adapter.
+  (A single-seed +0.10 lift is suspect — see §0 single-seed variance.)
 - 5 consecutive iters with no composite improvement → retire the cap;
   write a closeout lesson.
 - A reward-function edit became necessary mid-session (rubric-design
   failure) → that's a Phase 0 redo; retire the cap, ship a new
   capability with the corrected rubric.
-- Memory / time budget hit → close out with whatever you have.
+- Memory / time budget hit → close out with whatever you have, lead
+  with the most reproducible single-seed result you've measured (not
+  the best lucky outlier).
 
 ---
 
