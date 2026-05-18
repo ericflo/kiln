@@ -24,6 +24,7 @@ pub(crate) mod json_validity;
 pub mod llm_judge;
 pub(crate) mod multiple_choice;
 pub(crate) mod numeric;
+pub mod python_doctest;
 pub(crate) mod regex_match;
 pub(crate) mod tool_call;
 
@@ -137,6 +138,23 @@ pub enum Scorer {
         #[serde(default)]
         style: CodeStyle,
     },
+    /// Python doctest scorer: executes the model's completion against the
+    /// `>>>` doctest assertions embedded in the prompt's user message.
+    /// The score is the fraction of doctests that pass; the outcome is
+    /// `Pass` only when every doctest matches.
+    ///
+    /// This is the "real" verifier for the humaneval / python-algo
+    /// datasets — every other built-in scorer is text-similarity based.
+    /// Requires `python3` on PATH (overridable via `python_bin` or the
+    /// `KILN_DOCTEST_PYTHON` env var); each completion runs in an
+    /// `python3 -I -S` isolated subprocess with a wall-clock timeout
+    /// (default 5 s).
+    PythonDoctest {
+        #[serde(default = "default_doctest_timeout")]
+        timeout_seconds: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        python_bin: Option<String>,
+    },
     /// Composite: every sub-scorer must pass for the outcome to be Pass.
     /// Score is the mean of sub-scores. Use this for "JSON valid AND
     /// numeric answer correct" kinds of metrics.
@@ -154,6 +172,9 @@ fn is_false(b: &bool) -> bool {
 fn default_choices() -> Vec<String> {
     vec!["A".into(), "B".into(), "C".into(), "D".into()]
 }
+fn default_doctest_timeout() -> f32 {
+    python_doctest::DEFAULT_TIMEOUT_SECONDS
+}
 
 impl Scorer {
     /// Stable label used in metric breakdowns. Borrowed from the variant name
@@ -169,6 +190,7 @@ impl Scorer {
             Scorer::LlmJudge { .. } => "llm_judge",
             Scorer::ToolCall { .. } => "tool_call",
             Scorer::Code { .. } => "code",
+            Scorer::PythonDoctest { .. } => "python_doctest",
             Scorer::All { .. } => "all",
             Scorer::Any { .. } => "any",
         }
@@ -309,6 +331,13 @@ pub fn score_completion(
         )?,
         Scorer::Code { language, style } => {
             code::score(example, answer_for_scorer, language.as_deref(), style)?
+        }
+        Scorer::PythonDoctest {
+            timeout_seconds,
+            python_bin,
+        } => {
+            let bin = python_doctest::resolve_python_bin(python_bin.as_deref());
+            python_doctest::score(example, answer_for_scorer, *timeout_seconds, &bin)?
         }
         Scorer::All { scorers } => {
             if scorers.is_empty() {

@@ -20,3 +20,4 @@ rand_core = "0.10"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+anyhow = { workspace = true }

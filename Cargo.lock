@@ -1792,6 +1792,7 @@ dependencies = [
 name = "kiln-eval"
 version = "0.2.16"
 dependencies = [
+ "anyhow",
  "chrono",
  "rand 0.10.1",
  "rand_core 0.10.1",
