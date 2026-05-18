@@ -410,6 +410,32 @@ Trade-offs:
 
 The teacher serves at a URL (typically `http://localhost:8002`). kiln's `RemoteTeacher` queries it.
 
+### Required launch flags
+
+```bash
+python3 -m vllm.entrypoints.openai.api_server \
+  --model <path/to/teacher> \
+  --served-model-name <alias> \
+  --port 8002 \
+  --max-model-len 4096 \
+  --max-logprobs 64 \
+  --enforce-eager \
+  --gpu-memory-utilization 0.45 \
+  --enable-prefix-caching        # ← critical for OPD
+```
+
+**`--enable-prefix-caching` is the one to never forget.** vLLM 0.17's
+default is *off* in some configs (we verified mid-session: a 6h13m
+asymmetric run had `enable_prefix_caching=False` and `Prefix cache hit
+rate: 0.0%` the entire time). With it on, the same teacher prefix
+queried across epochs hits the cache. Measured ~54% latency reduction
+on the OPD-shape `prompt_logprobs=K` query when the prefix is reused.
+A symmetric OPD step that was 24s drops a bit (less benefit — short
+prompts cache fewer tokens); an asymmetric OPD step that was 144s
+drops to ~110s. Real win for any session > 1 epoch.
+
+`templates/teacher-up.sh` ships with the recommended flags.
+
 ### Health check (mandatory before training)
 
 1. Teacher responds to a sample prompt with a coherent answer (not gibberish). Spot-check by hand.
