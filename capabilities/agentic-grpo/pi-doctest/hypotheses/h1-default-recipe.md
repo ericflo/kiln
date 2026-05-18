@@ -71,10 +71,90 @@ right next step is landing the fix to `tokenize_grpo_group` (see
 
 ## Verdict
 
-*Filled in Phase 5, after eval lands.*
+**? inconclusive — partial signal in target direction, no composite lift.**
+
+| metric | baseline | iter 1 | Δ |
+|---|---|---|---|
+| composite (eval set, n=24) | 0.8854 | 0.8880 | **+0.0026** (flat) |
+| outcome | 0.9583 | 0.9583 | 0.0000 (held) |
+| **tool_call_efficiency** | 0.7448 | 0.7552 | **+0.0104** (target moved) |
+| tested_before_done | 0.9792 | 1.0000 | +0.0208 |
+| format_compliance | 1.0000 | 1.0000 | 0.0000 (saturated) |
+| mean n_tool_calls | 6.83 | **5.63** | **−1.21 (−18%)** |
+| mean wall_clock_s | 25.4 | 31.5 | +6.1 (wrong direction) |
+
+Per-task: 6 better, 5 worse, 13 same.
+
+**Falsification check:**
+- ✗ composite lift ≥+0.04 — failed (got +0.0026)
+- ✓ outcome held ≥0.91 — passed (held 0.9583)
+- ✓ mean tool-call count decreased — passed (−18%)
+- ✓ tool_call_efficiency stdev preserved — passed (no mode collapse)
+
+The hypothesis was partially confirmed: the target sub-score moved
+right, the operationally-meaningful metric (mean tool-call count)
+dropped 18%. But composite stayed flat because the adapter learned to
+be *more* careful on previously-easy tasks (regressing them) while
+becoming more efficient on previously-wasteful ones (gaining them).
+Net wash.
 
 ## Inspected rollouts (Phase 5 requirement)
 
-*Three excerpts from the eval rollouts pasted here after iter 1
-completes — to verify the model is doing what we hoped, not gaming
-the rubric.*
+### Win — task_0005 (rolling_max-ish)
+Baseline: 13 tool calls, score 0.70. Iter 1: 6 tool calls, score 0.93.
+The model went from a debug-loop on first failure to a straight
+read→edit→bash→DONE.
+
+### Win — task_0020
+Baseline: 9 tool calls (some redundant `cat solution.py`), score 0.81.
+Iter 1: 4 tool calls, score 1.00. Clean.
+
+### Regression — task_0013
+Baseline: 3 tool calls (read→edit→DONE), score 1.00. Iter 1: 9 tool
+calls, score 0.81. The adapter introduced an extra inspect+retry cycle
+on a task that didn't need one — the model is now sometimes
+over-verifying, classic over-correction from a small training set.
+
+### Regression — task_0022
+Same shape: baseline 3 → iter 1 9 tool calls. The training distribution
+(3 medium-hard tasks with wasteful baseline behavior) didn't include
+enough easy-task examples, so the model didn't learn that "already
+efficient → don't add more checks."
+
+## Disposition
+
+**Status: kept-with-caveat.** Training pipeline closes end-to-end. The
+target sub-score moved in the right direction. The result is NOT a
+ship — but it is real evidence that the loop produces signal.
+
+## Caveats / known biases this iter carried
+
+1. **3-group training set** (intended 30, cut to 3 by wall-clock
+   budget). Biased toward already-wasteful tasks. Adapter
+   over-corrected on easy ones.
+2. **Multi-turn token-masking bias** — kiln-train treated tool-result
+   tokens as model-emitted. The IS clip likely masked most of the
+   spurious gradient but we can't quantify how much.
+3. **Single eval generation** (temperature 0.0 deterministic). pass@4
+   diversity not measured.
+4. **Adapter-routing via proxy** — kiln-server auto-unloads global
+   active adapter ~1s after POST /v1/adapters/load. Workaround: 5KB
+   Python proxy (`/tmp/kiln-adapter-proxy.py`) injects `adapter`
+   field into every chat-completion body. Needs a kiln-server fix
+   (separate kiln-polish issue).
+
+## Next iter (H2 candidate)
+
+Given the partial-signal result, two paths:
+
+**Path A — scale up.** Train on 12-15 groups with stratified sampling
+(4 easy + 4 medium + 4 hard) to cover the task distribution. Same H1
+recipe.
+
+**Path B — fix masking first.** Land the per-turn assistant-token
+masking PR in kiln-train. Then redo iter 1 with proper gradient
+attribution. This is more disciplined per the skill but blocks
+forward progress.
+
+Recommendation: Path A first (cheap), Path B if A also produces only
+partial signal.

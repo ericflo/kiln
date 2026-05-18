@@ -174,7 +174,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tasks", required=True)
     ap.add_argument("--out-dir", required=True)
-    ap.add_argument("--adapter", default="")
+    ap.add_argument("--adapter", default="",
+                    help="If 'current', skip the kiln-side switch and use whatever "
+                         "adapter is already active. Otherwise switch to this name.")
     ap.add_argument("--num-generations", type=int, default=4)
     ap.add_argument("--mode", choices=["train", "eval"], default="train")
     ap.add_argument("--kiln-url", default=os.environ.get("KILN_URL", "http://localhost:8420"))
@@ -205,14 +207,18 @@ def main():
     print(f"loaded {len(tasks)} tasks; num_generations={args.num_generations} "
           f"adapter={args.adapter or '(base)'} mode={args.mode}", flush=True)
 
-    # Set active adapter.
-    try:
-        kiln_active_adapter(args.kiln_url, args.adapter or None)
-        print(f"set kiln active adapter to {args.adapter or '(base)'}",
-              flush=True)
-    except Exception as e:
-        print(f"WARN: failed to switch adapter ({e}); proceeding with whatever "
-              f"adapter kiln-server currently has active", flush=True)
+    # Set active adapter. `--adapter current` skips the switch.
+    if args.adapter == "current":
+        print(f"using currently-loaded kiln adapter (no switch)", flush=True)
+    else:
+        try:
+            kiln_active_adapter(args.kiln_url, args.adapter or None)
+            print(f"set kiln active adapter to {args.adapter or '(base)'}",
+                  flush=True)
+        except Exception as e:
+            print(f"WARN: failed to switch adapter ({e}); proceeding with "
+                  f"whatever adapter kiln-server currently has active",
+                  flush=True)
 
     started = time.time()
     records: list[dict] = []
