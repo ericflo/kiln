@@ -558,13 +558,26 @@ def score_continuability(response: str, ground_truth: dict[str, Any]) -> dict[st
     else:
         count_band = max(0.0, 1.0 - (n - 6) * 0.2)
 
+    # In-progress section must be non-empty and concrete (not "(none)" or "continue the task").
+    in_progress = _extract_section_body(response, "### In Progress")
+    in_progress_meaningful = 0.0
+    if in_progress:
+        ip_low = in_progress.lower()
+        if "(none)" not in ip_low and "continue the task" not in ip_low and "no current work" not in ip_low:
+            # Must reference something concrete.
+            if any(ref and ref in ip_low for ref in referable if len(ref) >= 4):
+                in_progress_meaningful = 1.0
+            else:
+                in_progress_meaningful = 0.4  # at least non-empty
+
     out = {
         "continuability.next_steps_present": present,
         "continuability.next_steps_concrete": concrete,
         "continuability.count_in_band": count_band,
+        "continuability.in_progress_meaningful": in_progress_meaningful,
         "_diag.next_steps_count": float(n),
     }
-    out["continuability.score"] = (present + concrete + count_band) / 3
+    out["continuability.score"] = (present + concrete + count_band + in_progress_meaningful) / 4
     return out
 
 

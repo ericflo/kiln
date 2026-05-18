@@ -61,8 +61,13 @@ def progress_section(gt: dict[str, Any]) -> str:
         done_lines.append("- [x] Initial exploration of source files")
 
     in_progress_lines = []
+    idents = gt.get("source_identifiers") or []
     if modified:
         in_progress_lines.append(f"- [ ] Continue editing `{modified[0]}`")
+    elif read_only:
+        in_progress_lines.append(f"- [ ] Reviewing `{read_only[0]}` to inform the next change")
+    elif idents:
+        in_progress_lines.append(f"- [ ] Investigating `{idents[0]}` and surrounding code")
     else:
         in_progress_lines.append("- [ ] Continue the task")
 
