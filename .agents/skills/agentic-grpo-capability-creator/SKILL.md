@@ -656,28 +656,7 @@ step 3.
    `--max-wall-clock-s` flag in pi or wrap pi in a `timeout`-shaped
    helper.
 
-6. **H100 (SM90) needs two env-flag workarounds as of kiln main 2026-05-18.**
-   The fused GDN gates kernel (`kiln_gdn_gates_bf16`) compiles and
-   functions correctly in isolation on H100 (verified with
-   `gates_bench`), but fails in production code paths
-   (paged-decode inference + training reference-forward) with
-   `kiln_gdn_gates_bf16 failed with status 500`. PR #1050 cleared
-   `cudaGetLastError` before the launch, which silenced the
-   "first-request" form of the symptom, but the production paths
-   still trip something stream/context-related that single-launch
-   benches don't. Workaround: `KILN_DISABLE_FUSED_GDN_GATES=1` for
-   both `kiln serve` and `cuda_grpo_ablation`.
-   
-   The batching engine also fails on H100 with
-   `batched-engine prefill forward pass failed` for every request.
-   Workaround: `KILN_BATCHING_ENGINE=0`.
-   
-   Combined env for H100:
-   `KILN_MODEL_PATH=... KILN_BATCHING_ENGINE=0 KILN_DISABLE_FUSED_GDN_GATES=1 kiln serve`
-   
-   Both are no-ops on A6000 / A100. Track in kiln-polish.jsonl.
-
-7. **Pod hibernation loses artifacts.** RunPod pods can hibernate
+6. **Pod hibernation loses artifacts.** RunPod pods can hibernate
    mid-iter (we lost iter 2's adapter when the pool reaped the pod
    that was running it). **Push adapter files to B2 or copy them
    locally as soon as they're trained**, before the next rollout
@@ -685,19 +664,19 @@ step 3.
    hibernation is fine — but rollouts cost real wall-clock and
    should not need to be re-run.
 
+7. **Adapter dir defaults to `model_path/adapters/`.** Not
+   `/workspace/kiln/adapters/`. When training writes adapters to
+   `/tmp/...`, symlink them into `$KILN_MODEL_PATH/adapters/` before
+   calling `POST /v1/adapters/load`. Otherwise the endpoint 404s
+   with "adapter not found" even though the file exists.
+
 8. **Kiln serve grabs all VRAM.** When you switch from rollouts to
    training, `pkill -9 -f "kiln serve"` before launching
    `cuda_grpo_ablation` — otherwise training OOMs at model-load.
    The training process loads its own model copy and won't share
    VRAM with the running server.
 
-9. **Adapter dir defaults to `model_path/adapters/`.** Not
-   `/workspace/kiln/adapters/`. When training writes adapters to
-   `/tmp/...`, symlink them into `$KILN_MODEL_PATH/adapters/` before
-   calling `POST /v1/adapters/load`. Otherwise the endpoint 404s
-   with "adapter not found" even though the file exists.
-
-10. **Pi `--session-dir` is per-rollout.** Use a unique
+9. **Pi `--session-dir` is per-rollout.** Use a unique
     `--session-dir` per rollout (or per `pi -p` invocation) so two
     concurrent rollouts don't clobber each other's session files.
     `pi 0.75.x` defaults to `~/.pi/agent/sessions/<workdir-encoded>/`
