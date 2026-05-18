@@ -14,14 +14,16 @@
 //!
 //! ## Backwards compatibility
 //!
-//! The legacy `ScoredCompletion { text: String, reward: f64 }` and
-//! `GrpoGroup { messages, completions }` payloads continue to deserialize.
-//! `ScoredRollout` accepts the legacy `text` field via `#[serde(alias)]` and
-//! falls back to a one-segment [`TurnKind::Action`] trajectory when only
-//! `text` is supplied. `AgenticGroup::rollouts` accepts `completions` as a
-//! serde alias.
+//! Legacy `ScoredCompletion { text: String, reward: f64 }` payloads continue
+//! to deserialize because `ScoredRollout` shares those field names. The new
+//! optional `trajectory` field is populated only by trajectory-aware
+//! emitters; when empty, the rollout behaves exactly like the pre-ECHO
+//! single-string completion.
 //!
-//! New emitters should populate `trajectory` directly.
+//! `ScoredCompletion` and `GrpoGroup` remain valid type names via
+//! `pub type` aliases in `crate::lib`, so call sites that reference them
+//! don't need to change. The renames are deliberately *additive*: the same
+//! struct, the same field names, plus an optional `trajectory` field.
 
 use serde::{Deserialize, Serialize};
 
@@ -70,9 +72,10 @@ pub struct TurnSegment {
     pub tool_call_id: Option<String>,
     /// Bytes at the start of this segment's content that are harness
     /// warnings (e.g. `"WARNINGS:\n- bad tool call format\n"`). Excluded
-    /// from `env_mask` when [`MaskConfig::warning_filter`] is true.
-    /// Paper §3.2: warnings memorize in ~60 steps and stop providing useful
-    /// gradient, while terminal-output tokens continue to teach.
+    /// from `env_mask` when
+    /// [`MaskConfig::warning_filter`] is true. Paper §3.2: warnings memorize
+    /// in ~60 steps and stop providing useful gradient, while terminal-output
+    /// tokens continue to teach.
     ///
     /// [`MaskConfig::warning_filter`]: crate::trajectory_mask::MaskConfig::warning_filter
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,8 +83,9 @@ pub struct TurnSegment {
 }
 
 impl TurnSegment {
-    /// Convenience: build a one-shot [`TurnKind::Action`] segment for a
-    /// single-turn rollout (the legacy `text` shape).
+    /// Build a one-segment [`TurnKind::Action`] trajectory from a legacy
+    /// `text` string. Used internally to bridge the legacy single-string
+    /// completion form into the trajectory schema.
     pub fn legacy_action(text: String) -> Self {
         Self {
             role: "assistant".to_string(),
@@ -95,66 +99,120 @@ impl TurnSegment {
 
 /// One scored rollout in a group.
 ///
-/// In the canonical (new) form, [`Self::trajectory`] is populated and
-/// [`Self::text`] is `None`. The legacy single-string form is supported via
-/// the `text` field; deserialize-time logic synthesizes a one-segment
-/// [`TurnKind::Action`] trajectory in [`Self::ensure_trajectory`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `text` is the legacy single-string completion text — populated for every
+/// rollout, even when `trajectory` is set, so all existing `.text` field
+/// access continues to work bit-identically. `reward` is the outcome reward
+/// (paper convention: binary 0/1; kiln convention: continuous composite in
+/// `[0, 1]`). `trajectory` is the optional canonical multi-turn shape: when
+/// non-empty, the trajectory-aware mask builder (and ECHO) consume it; when
+/// empty, the rollout is treated as a single-turn legacy completion.
+///
+/// New emitters should populate both `text` (for compatibility) and
+/// `trajectory` (for ECHO). The plain-text `.text` of a multi-turn rollout
+/// is conventionally a `<TURN_BREAK>`-joined flattening of the Action
+/// segments, matching today's `rollout.py` output.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScoredRollout {
-    /// Canonical multi-turn structure.
-    #[serde(default)]
-    pub trajectory: Vec<TurnSegment>,
-    /// Outcome reward (paper convention: binary 0/1; kiln convention:
-    /// continuous composite in `[0, 1]`).
+    /// Legacy single-string completion text. Always populated, even when
+    /// `trajectory` is set, so call sites that read `.text` keep working.
+    pub text: String,
+    /// Outcome reward.
     pub reward: f64,
-    /// Legacy single-string completion text. When `trajectory` is empty and
-    /// `text` is present, the rollout is treated as a one-segment Action
-    /// trajectory. New emitters should populate `trajectory` directly.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
+    /// Optional canonical multi-turn structure. When non-empty, ECHO and the
+    /// trajectory-aware masking primitive consume this; the `text` field is
+    /// informational/legacy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trajectory: Vec<TurnSegment>,
 }
 
 impl ScoredRollout {
-    /// Synthesize a legacy text-only payload into a one-segment Action
-    /// trajectory. Idempotent — does nothing if `trajectory` is already
-    /// populated.
-    pub fn ensure_trajectory(&mut self) {
-        if self.trajectory.is_empty() {
-            if let Some(text) = self.text.take() {
-                self.trajectory.push(TurnSegment::legacy_action(text));
-            }
+    /// Construct from the legacy `(text, reward)` shape — no trajectory.
+    pub fn legacy(text: String, reward: f64) -> Self {
+        Self {
+            text,
+            reward,
+            trajectory: Vec::new(),
         }
     }
 
-    /// Convenience constructor for the legacy single-string form.
-    pub fn legacy(text: String, reward: f64) -> Self {
+    /// Construct from a trajectory; populates `text` with a
+    /// `<TURN_BREAK>`-joined flattening of the Action segments to match
+    /// today's `rollout.py` output.
+    pub fn from_trajectory(trajectory: Vec<TurnSegment>, reward: f64) -> Self {
+        let text = flatten_action_segments(&trajectory);
         Self {
-            trajectory: vec![TurnSegment::legacy_action(text)],
+            text,
             reward,
-            text: None,
+            trajectory,
         }
     }
+
+    /// True when this rollout carries a multi-turn trajectory ECHO can use.
+    pub fn has_trajectory(&self) -> bool {
+        !self.trajectory.is_empty()
+    }
+
+    /// Borrow the canonical trajectory if present; otherwise synthesize a
+    /// one-segment Action trajectory from `text` for use by the masking
+    /// primitive.
+    ///
+    /// Returns a `Cow` so the synthesized trajectory doesn't permanently
+    /// mutate the rollout — callers that want to mutate should call
+    /// [`Self::ensure_trajectory`] explicitly.
+    pub fn effective_trajectory(&self) -> std::borrow::Cow<'_, [TurnSegment]> {
+        if self.trajectory.is_empty() {
+            std::borrow::Cow::Owned(vec![TurnSegment::legacy_action(self.text.clone())])
+        } else {
+            std::borrow::Cow::Borrowed(&self.trajectory)
+        }
+    }
+
+    /// Mutate this rollout so `trajectory` is populated. Idempotent.
+    pub fn ensure_trajectory(&mut self) {
+        if self.trajectory.is_empty() {
+            self.trajectory
+                .push(TurnSegment::legacy_action(self.text.clone()));
+        }
+    }
+}
+
+fn flatten_action_segments(trajectory: &[TurnSegment]) -> String {
+    let actions: Vec<&str> = trajectory
+        .iter()
+        .filter(|seg| matches!(seg.kind, TurnKind::Action))
+        .map(|seg| seg.content.as_str())
+        .collect();
+    actions.join("<TURN_BREAK>")
 }
 
 /// A group of rollouts sharing a prompt. Group-relative advantage is computed
 /// within this set.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The field name `completions` is preserved for backwards compatibility with
+/// the pre-ECHO `GrpoGroup` shape; serde additionally accepts `rollouts` as
+/// an alias so canonical forward-looking JSON also deserializes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgenticGroup {
     /// Prompt seen by every rollout in this group (system + user).
     pub messages: Vec<ChatMessage>,
-    /// Multiple scored rollouts from the same prompt. Accepts the legacy
-    /// field name `completions` via serde alias.
-    #[serde(alias = "completions")]
-    pub rollouts: Vec<ScoredRollout>,
+    /// Multiple scored rollouts from the same prompt. Accepts canonical
+    /// `rollouts` as a serde alias so new payloads can use either name.
+    #[serde(alias = "rollouts")]
+    pub completions: Vec<ScoredRollout>,
 }
 
 impl AgenticGroup {
-    /// Materialize legacy single-string completions into Action trajectories
-    /// across every rollout in this group. Idempotent.
+    /// Ensure every rollout in the group has a populated `trajectory`. Used
+    /// internally when the new mask-builder path is selected.
     pub fn ensure_trajectories(&mut self) {
-        for rollout in &mut self.rollouts {
+        for rollout in &mut self.completions {
             rollout.ensure_trajectory();
         }
+    }
+
+    /// True when at least one rollout carries a multi-turn trajectory.
+    pub fn has_any_trajectory(&self) -> bool {
+        self.completions.iter().any(ScoredRollout::has_trajectory)
     }
 }
 
@@ -165,37 +223,34 @@ mod tests {
     #[test]
     fn legacy_scored_completion_text_round_trips() {
         let json = r#"{ "text": "the assistant said this", "reward": 0.85 }"#;
-        let mut rollout: ScoredRollout = serde_json::from_str(json).unwrap();
+        let rollout: ScoredRollout = serde_json::from_str(json).unwrap();
         assert_eq!(rollout.reward, 0.85);
+        assert_eq!(rollout.text, "the assistant said this");
         assert!(rollout.trajectory.is_empty());
-        assert_eq!(rollout.text.as_deref(), Some("the assistant said this"));
-
-        rollout.ensure_trajectory();
-        assert_eq!(rollout.trajectory.len(), 1);
-        assert_eq!(rollout.trajectory[0].role, "assistant");
-        assert_eq!(rollout.trajectory[0].content, "the assistant said this");
-        assert_eq!(rollout.trajectory[0].kind, TurnKind::Action);
-        assert!(rollout.text.is_none());
+        assert!(!rollout.has_trajectory());
     }
 
     #[test]
-    fn canonical_trajectory_form_deserializes_unchanged() {
+    fn canonical_trajectory_form_deserializes_with_text_and_trajectory() {
         let json = r#"{
+            "text": "I will read the file<TURN_BREAK>The contents are X",
+            "reward": 1.0,
             "trajectory": [
                 {"role": "assistant", "content": "I will read the file", "kind": "action"},
-                {"role": "tool", "content": "file contents here", "kind": "observation"}
-            ],
-            "reward": 1.0
+                {"role": "tool", "content": "file contents here", "kind": "observation"},
+                {"role": "assistant", "content": "The contents are X", "kind": "action"}
+            ]
         }"#;
         let rollout: ScoredRollout = serde_json::from_str(json).unwrap();
-        assert_eq!(rollout.trajectory.len(), 2);
+        assert_eq!(rollout.trajectory.len(), 3);
         assert_eq!(rollout.trajectory[0].kind, TurnKind::Action);
         assert_eq!(rollout.trajectory[1].kind, TurnKind::Observation);
         assert_eq!(rollout.reward, 1.0);
+        assert!(rollout.has_trajectory());
     }
 
     #[test]
-    fn agentic_group_accepts_legacy_completions_alias() {
+    fn agentic_group_accepts_legacy_completions_field_name() {
         let json = r#"{
             "messages": [{"role": "user", "content": "hello"}],
             "completions": [
@@ -203,27 +258,28 @@ mod tests {
                 {"text": "hello!", "reward": 0.9}
             ]
         }"#;
-        let mut group: AgenticGroup = serde_json::from_str(json).unwrap();
-        assert_eq!(group.rollouts.len(), 2);
-        assert!(group.rollouts[0].trajectory.is_empty());
-
-        group.ensure_trajectories();
-        assert_eq!(group.rollouts[0].trajectory.len(), 1);
-        assert_eq!(group.rollouts[0].trajectory[0].kind, TurnKind::Action);
-        assert_eq!(group.rollouts[1].trajectory[0].content, "hello!");
+        let group: AgenticGroup = serde_json::from_str(json).unwrap();
+        assert_eq!(group.completions.len(), 2);
+        assert_eq!(group.completions[0].text, "hi there");
+        assert!(!group.has_any_trajectory());
     }
 
     #[test]
-    fn agentic_group_accepts_canonical_rollouts_field() {
+    fn agentic_group_accepts_canonical_rollouts_alias() {
         let json = r#"{
             "messages": [{"role": "user", "content": "x"}],
             "rollouts": [
-                {"trajectory": [{"role":"assistant","content":"y","kind":"action"}], "reward": 1.0}
+                {
+                    "text": "y",
+                    "reward": 1.0,
+                    "trajectory": [{"role":"assistant","content":"y","kind":"action"}]
+                }
             ]
         }"#;
         let group: AgenticGroup = serde_json::from_str(json).unwrap();
-        assert_eq!(group.rollouts.len(), 1);
-        assert_eq!(group.rollouts[0].trajectory[0].content, "y");
+        assert_eq!(group.completions.len(), 1);
+        assert_eq!(group.completions[0].text, "y");
+        assert!(group.has_any_trajectory());
     }
 
     #[test]
@@ -266,18 +322,69 @@ mod tests {
     #[test]
     fn ensure_trajectory_is_idempotent() {
         let mut rollout = ScoredRollout::legacy("hi".to_string(), 1.0);
-        let trajectory_len_before = rollout.trajectory.len();
+        assert!(rollout.trajectory.is_empty());
         rollout.ensure_trajectory();
         rollout.ensure_trajectory();
-        assert_eq!(rollout.trajectory.len(), trajectory_len_before);
+        assert_eq!(rollout.trajectory.len(), 1);
+        assert_eq!(rollout.trajectory[0].content, "hi");
+        assert_eq!(rollout.trajectory[0].kind, TurnKind::Action);
     }
 
     #[test]
     fn legacy_completion_with_zero_reward_round_trips() {
         let json = r#"{ "text": "garbage", "reward": 0.0 }"#;
-        let mut rollout: ScoredRollout = serde_json::from_str(json).unwrap();
-        rollout.ensure_trajectory();
+        let rollout: ScoredRollout = serde_json::from_str(json).unwrap();
         assert_eq!(rollout.reward, 0.0);
-        assert_eq!(rollout.trajectory[0].content, "garbage");
+        assert_eq!(rollout.text, "garbage");
+    }
+
+    #[test]
+    fn effective_trajectory_synthesizes_from_text_when_empty() {
+        let rollout = ScoredRollout::legacy("only text".to_string(), 1.0);
+        let traj = rollout.effective_trajectory();
+        assert_eq!(traj.len(), 1);
+        assert_eq!(traj[0].kind, TurnKind::Action);
+        assert_eq!(traj[0].content, "only text");
+        // Original rollout untouched.
+        assert!(rollout.trajectory.is_empty());
+    }
+
+    #[test]
+    fn from_trajectory_flattens_action_segments_to_text() {
+        let traj = vec![
+            TurnSegment {
+                role: "assistant".into(),
+                content: "first".into(),
+                kind: TurnKind::Action,
+                tool_call_id: None,
+                warning_prefix_len: None,
+            },
+            TurnSegment {
+                role: "tool".into(),
+                content: "ignored env output".into(),
+                kind: TurnKind::Observation,
+                tool_call_id: None,
+                warning_prefix_len: None,
+            },
+            TurnSegment {
+                role: "assistant".into(),
+                content: "second".into(),
+                kind: TurnKind::Action,
+                tool_call_id: None,
+                warning_prefix_len: None,
+            },
+        ];
+        let rollout = ScoredRollout::from_trajectory(traj, 0.5);
+        assert_eq!(rollout.text, "first<TURN_BREAK>second");
+        assert_eq!(rollout.trajectory.len(), 3);
+        assert_eq!(rollout.reward, 0.5);
+    }
+
+    #[test]
+    fn scored_rollout_default_is_empty() {
+        let r = ScoredRollout::default();
+        assert_eq!(r.text, "");
+        assert_eq!(r.reward, 0.0);
+        assert!(r.trajectory.is_empty());
     }
 }

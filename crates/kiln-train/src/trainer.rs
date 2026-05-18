@@ -8071,6 +8071,7 @@ mod tests {
                 .map(|r| crate::ScoredCompletion {
                     text: "x".to_string(),
                     reward: *r,
+                    ..Default::default()
                 })
                 .collect(),
         };

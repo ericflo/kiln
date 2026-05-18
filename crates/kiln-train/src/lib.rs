@@ -200,21 +200,23 @@ impl Default for SftConfig {
     }
 }
 
-/// A scored completion for GRPO training.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScoredCompletion {
-    pub text: String,
-    pub reward: f64,
-}
+// ScoredCompletion and GrpoGroup are now re-exports of the canonical
+// trajectory-aware types defined in `crate::trajectory`. The old field
+// shape (`{text, reward}` / `{messages, completions}`) is preserved
+// byte-identical, plus an optional `trajectory` field on each rollout
+// that ECHO consumes. Legacy callers see no field-name change.
+//
+// See `docs/plans/echo-integration-plan.md` §2 and §B.1 for the design.
 
-/// A group of completions for one prompt (GRPO operates on groups).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GrpoGroup {
-    /// The prompt that generated these completions.
-    pub messages: Vec<ChatMessage>,
-    /// Multiple completions with their rewards.
-    pub completions: Vec<ScoredCompletion>,
-}
+pub use crate::trajectory::{
+    AgenticGroup, ScoredRollout, TurnKind, TurnSegment,
+};
+
+/// Legacy alias for [`ScoredRollout`]. Use the canonical name in new code.
+pub type ScoredCompletion = ScoredRollout;
+
+/// Legacy alias for [`AgenticGroup`]. Use the canonical name in new code.
+pub type GrpoGroup = AgenticGroup;
 
 /// Request to run a GRPO training step.
 #[derive(Debug, Clone, Serialize, Deserialize)]

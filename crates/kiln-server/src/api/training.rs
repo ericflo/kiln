@@ -1185,6 +1185,7 @@ mod tests {
             completions: vec![ScoredCompletion {
                 text: "completion".to_string(),
                 reward: 1.0,
+                ..Default::default()
             }],
         }
     }
