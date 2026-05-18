@@ -7,6 +7,7 @@
 #[cfg(feature = "cuda")]
 pub mod cuda_train;
 pub mod diagnostics;
+pub mod echo;
 pub mod logit_cache;
 pub mod logit_source;
 pub mod opd;
