@@ -170,6 +170,8 @@ documents intent for reviewers.)
 | 7    | h1-replay-iter2-recipe         | H1 | 0.846 | +0.041 vs base | **ablation-CRITICAL** | Iter 2 recipe replay on fresh rollouts → 0.846 (not 0.919). iter 2's number was sample-variance, not robust. Honest reproducible best = iter 5's 0.899. |
 | 8    | h13-2epoch-strong-signal       | H13 | 0.750 | −0.055 vs base | ablation-falsified | 2 epochs on iter 5's 11 strong-signal groups regresses composite −0.149 vs iter 5. 5 zeros (vs iter 5's 1). Mean wall-clock 3× blow-up (19.86s → 56.45s) — the over-training signature. Confirms 1 epoch is the sweet spot on filtered data. |
 | 9    | iter5-2nd-seed-eval-variance   | H14 | **0.893** | +0.087 vs base | ✓ kept-verification | 2nd-seed eval of iter 5 adapter (same weights, fresh rollouts) → 0.893. iter 5 mean across 2 seeds = 0.896 ± 0.003. Eval-rollout variance for trained adapter is much smaller than the seed-to-seed variance of the recipe itself. |
+| 9b   | base-2nd-seed-eval-variance    | H14 | 0.902 | — (calibration) | ✓ calibration | Base eval-rollout variance is σ≈0.048 — much larger than iter 5's 0.003. Reframes the headline +9.4pp single-seed result to a 2-seed-mean +4.2pp. |
+| 10   | h12-fresh-rollouts-training-seed | H14 | **0.896** | +0.091 vs base | ✓ kept-verification-recipe-level | Recipe-level reproducibility test: fresh rollouts on same 12 strong-signal tasks, retrain GRPO, eval. Result 0.8958 — virtually identical to iter 5 family mean. iter 5 family across 3 seeds: 0.8958 ± 0.0032. The H12 recipe is robust at BOTH eval-seed and training-seed levels. |
 
 
 
