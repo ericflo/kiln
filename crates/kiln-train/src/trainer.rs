@@ -7931,6 +7931,10 @@ fn grpo_loss(
 /// the final boundary with an analytic GRPO tail gradient, then walk segments
 /// backward with gradient injection. This preserves full-sequence context and
 /// propagates downstream gradients into every LoRA segment.
+// Optional `echo: Option<EchoTailParams>` last param. When `Some`, the
+// analytic tail folds the env-CE term into the same vocab-chunk
+// forward+backward loop so the checkpointed GRPO path applies ECHO too
+// (Phase 1 follow-up of docs/plans/echo-integration-plan.md).
 #[allow(clippy::too_many_arguments)]
 fn checkpointed_grpo_forward_backward<'echo>(
     backend: &dyn BackendRuntime,
@@ -7943,10 +7947,6 @@ fn checkpointed_grpo_forward_backward<'echo>(
     loss_params: GrpoLossParams,
     segments: &[(usize, usize)],
     device: &Device,
-    /// Optional ECHO env-CE inputs. When `Some`, the analytic tail folds the
-    /// env-CE term into the same vocab-chunk forward+backward loop so the
-    /// checkpointed GRPO path applies ECHO too (Phase 1 follow-up of
-    /// docs/plans/echo-integration-plan.md).
     echo: Option<EchoTailParams<'echo>>,
 ) -> Result<(f64, HashMap<candle_core::TensorId, Tensor>)> {
     let num_segments = segments.len();
