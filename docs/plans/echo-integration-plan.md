@@ -134,62 +134,110 @@ The principle: the old single-mask shape is the *special case* (`env_mask` is al
 
 Numbered to mirror the OPD grand plan's §3, with file-and-line touch points so the scope is sanity-checkable.
 
-### 3.1 — `kiln-train::echo` — the loss term and its dispatcher
+### 3.1 — `kiln-train::echo` — the loss term, in two flavors
 
-**Where:** new module `crates/kiln-train/src/echo.rs`, sibling to `opd.rs`. It owns nothing big — it's a small surface, intentionally:
+**Where:** new module `crates/kiln-train/src/echo.rs`, sibling to `opd.rs`. The shape mirrors `opd_step_loss` (`opd.rs:693`) deliberately — same signature shape, same return shape, so `LossConfig { policy, echo, opd }` composes structurally:
 
 ```rust
 pub struct EchoConfig {
-    pub lambda: f64,                  // default 0.05
+    pub lambda: f64,                  // default 0.05 (paper §3.3)
     pub env_mask_mode: EnvMaskMode,   // EnvOnly (default) | FullObs (debug-only)
     pub warning_filter: bool,         // default true; strip harness warning prefix
 }
 
-pub enum EnvMaskMode { EnvOnly, FullObs }
+#[derive(Default)]
+pub enum EnvMaskMode { #[default] EnvOnly, FullObs }
 
-/// Compute the auxiliary cross-entropy loss term over env-positions.
-/// Reuses the same `(hidden, head_t)` activations as the GRPO forward.
-pub fn echo_env_ce(
-    hidden: &Tensor,           // [1, T, H] post-final-RMSNorm
-    head_t: &Tensor,           // [H, V]
-    input_ids: &[u32],
-    env_mask: &[bool],
-    device: &Device,
-) -> Result<Tensor>            // scalar; length-normalized by |O|, not |O'|, per paper §3.1
+pub struct EchoStepInputs<'a> {
+    pub tokens: &'a [u32],
+    pub env_positions: &'a [usize],   // analog of OPD's active_positions
+    pub student_hidden: &'a Tensor,   // [1, T, H] post-final-RMSNorm
+    pub head_t: &'a Tensor,           // [H, V]
+    pub total_obs_len: usize,         // |O| for length normalization per paper §3.1
+    pub chunk_size: usize,
+}
+
+pub struct EchoStepOutputs {
+    pub per_position_ce: Tensor,
+    pub mean_ce: Tensor,
+    pub env_count: usize,
+}
+
+pub fn echo_step_loss(inputs: EchoStepInputs<'_>) -> Result<EchoStepOutputs>;
 ```
 
-The body is one call into `fused_linear_cross_entropy_dispatch` from `kiln-flce-kernel` with `env_mask` as the label mask. Length-normalization by `|O|` (full observation length) not `|O'|` (env-tokens-only count) is the paper's choice (§3.1) and is one division at the end. That's it.
+For the **uncheckpointed path** (`trainer.rs:1830–1851`), the implementation is straightforward: call `fused_linear_cross_entropy_dispatch` from `kiln-flce-kernel` with `env_mask` as the label mask, then divide by `|O|` (paper §3.1 length normalization). The kernel already supports CUDA Phase B (`CustomOp1`), Metal Phase B (`CustomOp1`), and CPU Phase A. **One new line in `train_tokenized_grpo_group`** — `let loss = policy_loss + cfg.echo_lambda * echo_step_loss(...)?.mean_ce + ...;` — and the existing `loss.backward()` does the rest.
 
-**Why this is "free":**
+For the **checkpointed path** (`trainer.rs:7270 checkpointed_grpo_forward_backward`), it's harder. Today's flow:
 
-- `hidden` is already on device — it's exactly the tensor SFT/GRPO already build for the policy forward.
-- The dispatcher already covers all four backends. CUDA & Metal: Phase B `CustomOp1`. Vulkan: Phase B `CustomOp1`. CPU: Phase A. **Zero per-backend kernel work.**
-- The same `KILN_USE_FLCE`, `KILN_CUDA_FLCE`, `KILN_VULKAN_FLCE` toggles already control the kernel; ECHO inherits them.
+```
+final_hidden ─► analytic_grpo_tail_loss_grad_pre_final_norm
+                  ├── compute loss_val (GRPO surrogate + KL)
+                  └── compute upstream_grad = d(loss) / d(final_hidden)
+                                                          │
+                                                          ▼
+              [back through 32 layers via per-segment recompute + backward]
+```
 
-**Where it's called:** in `train_tokenized_grpo_group` after the existing `grpo_loss` call (`trainer.rs:1848`). One new line, one addition to the scalar loss, one config field check.
+The analytic tail materializes logits chunk-wise (via the same `head_t` matmul FLCE does), computes the GRPO surrogate analytically, and returns the gradient wrt `final_hidden`. For ECHO we need a sibling **`analytic_grpo_echo_tail_loss_grad_pre_final_norm`** that:
 
-For the Vulkan-native streaming path (`vk_train.rs:3471 vk_native_grpo_train` and `vk_train.rs:3749 vk_native_grpo_train_jsonl`), the same hook lands after the existing `grpo_active_rows_and_labels` call (`vk_train.rs:3623, 3959`). VK's `fused_linear_cross_entropy_dispatch_with_provider` path (with the VK matmul provider — `kiln-flce-kernel/src/lib.rs:141`) is what ECHO uses there.
+1. Computes the GRPO surrogate analytically on `action_mask` positions (same as today).
+2. Computes the env-CE analytically on `env_mask` positions (new — but the math is just `-log p(input_ids[t+1] | logits[t])` summed and normalized).
+3. Returns `(loss_total, upstream_grad_total)` where `upstream_grad_total = upstream_grad_grpo + λ · upstream_grad_env_ce`.
+
+Both gradients are wrt `final_hidden`, so a linear combination is exact. Implementation: extend the existing analytic tail with two extra arguments (`env_mask: &[bool]`, `echo_lambda: f64`) and add the env-CE math inside the same vocab-chunk loop. Memory cost: zero additional intermediates — the env-CE per-chunk contribution overlaps with the existing per-chunk GRPO contribution.
+
+**Why this is still ~"free":**
+
+- `student_hidden` is already on device — it's exactly the tensor the existing analytic tail already takes.
+- The vocab-chunk matmul (`head_t` × `hidden_chunk`) is amortized across action and env masks; the env-CE term piggybacks on the same logit chunks.
+- Backward through the per-segment recompute is unchanged — `upstream_grad` shape is identical, just numerically different.
+- Same FLCE toggles (`KILN_USE_FLCE`, `KILN_CUDA_FLCE`, `KILN_VULKAN_FLCE`) apply.
+
+**For Vulkan-native** (`vk_train.rs::vk_native_grpo_train`, `vk_train.rs:3471`), the implementation is separate because `vk_train.rs` runs on `VkTensor`, not candle `Tensor`, and **does not import `kiln-flce-kernel`** (verified — `grep -n kiln_flce_kernel crates/kiln-train/src/vk_train.rs` returns nothing). The math is the same — log-softmax of the env-position logits, gather the target tokens, mean over `|O|` — but it's expressed via VK shader dispatches. This lands as a new `vk_train::echo_step_vk` function next to `grpo_active_rows_and_labels` (`vk_train.rs:181`). Treat as ~half a day of focused VK work in Phase 1; the algorithm is simple and reuses existing VK matmul / softmax dispatches.
 
 ### 3.2 — The masking layer — `kiln-train::trajectory_mask`
 
 **Where:** new module `crates/kiln-train/src/trajectory_mask.rs`. Hosts the function that takes a `Trajectory` + tokenizer and emits `(input_ids, action_mask, env_mask)`.
 
-This module is the *foundation* — both the existing multi-turn agentic-GRPO need and ECHO depend on it. It generalizes `label_mask_from_rendered_assistant_spans` (`trainer.rs:2423`) from one mask to two.
+This module is the *foundation* — both the existing multi-turn agentic-GRPO need and ECHO depend on it. It generalizes `label_mask_from_rendered_assistant_spans` (`trainer.rs:2423–2457`) from one role to multiple.
 
 ```rust
+pub struct MaskConfig {
+    pub warning_filter: bool,
+    pub env_mask_mode: EnvMaskMode,
+}
+
+pub struct MaskedRollout {
+    pub input_ids: Vec<u32>,
+    pub action_mask: Vec<bool>,
+    pub env_mask: Vec<bool>,
+    pub segment_spans: Vec<(usize, usize, TurnKind)>,   // (token_start, token_end, kind) per segment
+}
+
 pub fn build_masks_from_trajectory(
     trajectory: &[TurnSegment],
     prompt_messages: &[ChatMessage],
     tokenizer: &KilnTokenizer,
-    cfg: &MaskConfig,           // warning_filter, env_mask_mode
-) -> Result<MaskedRollout>      // { input_ids, action_mask, env_mask, segment_spans }
+    cfg: &MaskConfig,
+) -> Result<MaskedRollout>;
 ```
 
-Internally: render the full conversation with `apply_chat_template` once, walk each `TurnSegment` to find its rendered byte range (using the same delimiter-finding logic SFT already uses, just generalized to all four roles), map byte ranges to token spans via the tokenizer's `encode_with_offsets`, then fill the two masks. **The harness warning prefix exclusion** (paper §3.2 — warnings memorize in ~60 steps) is a span tweak: for each `Observation` segment with a non-None `warning_prefix_len`, advance the start of its env_mask span by that many bytes.
+**The implementation reuses the existing tokenizer methods.** `apply_chat_template` and `tokenizer.encode_with_offsets` both exist today (verified in `trainer.rs:1924, 2348`). The flow:
 
-We need one tokenizer enhancement to make this clean: `apply_chat_template_with_token_offsets` returning `(input_ids, Vec<(byte_start, byte_end)>)` so the segment→token mapping is exact. The polish-prerequisites doc already calls this out.
+1. Concatenate `prompt_messages + trajectory` into one `Vec<ChatMessage>`.
+2. `tokenizer.apply_chat_template(full_messages)` → `full_text: String`.
+3. `tokenizer.encode_with_offsets(&full_text)` → `(input_ids, offsets: Vec<(usize, usize)>)`.
+4. For each `Action` segment, find its rendered byte range by looking for `<|im_start|>assistant\n…<|im_end|>` blocks in `full_text` (the existing `label_mask_from_rendered_assistant_spans` byte-search logic, generalized over role).
+5. For each `Observation` segment, find its rendered byte range by looking for `<|im_start|>tool\n…<|im_end|>` blocks (or whatever the active chat template uses for tool roles — verified in a Phase 0 fixture test).
+6. Mark `action_mask[token]` true for every token whose `offsets[token]` overlaps an Action span, and `env_mask[token]` true for every token whose `offsets[token]` overlaps an Observation span.
+7. The `warning_filter` (paper §3.2) trims the `env_mask` span: for each Observation segment with a non-None `warning_prefix_len`, advance the byte start by that many bytes before computing the overlap.
 
-Then **`tokenize_grpo_group` becomes a thin shim**: it calls `build_masks_from_trajectory` and packages the result. The single-string legacy path produces a `Trajectory` with one big `Action` segment, and behavior is identical to today.
+**Fallback path.** Mirror the existing SFT fallback (`label_mask_by_prefix_tokenization`, `trainer.rs:2475`): when the byte-search approach can't account for all expected role spans, re-tokenize cumulative prefixes to find each segment's exact token boundaries. This handles edge cases (custom chat templates, embedded XML, escape sequences) the same way SFT already does.
+
+Then **`tokenize_grpo_group` becomes a thin shim** that calls `build_masks_from_trajectory` and packages the result. The single-string legacy path produces a `Trajectory` with one big `Action` segment, and behavior is identical to today. **No new tokenizer methods needed** — the audit found `encode_with_offsets` already exists.
+
+**Open empirical question (resolved during Phase 0 fixture test).** Does the active chat template use `<|im_start|>tool\n` for tool-result blocks, or a different special-token pair? The plan handles both: `MaskConfig` carries the role→delimiter mapping, defaulting to `<|im_start|>{role}\n…<|im_end|>` for ChatML-style templates (which Qwen3 uses). A unit test on a real pi-session fixture in `crates/kiln-train/tests/fixtures/` pins the actual delimiters.
 
 ### 3.3 — `pi`-side trajectory capture — `capabilities/agentic-grpo/lib/`
 
@@ -254,7 +302,25 @@ CLI flags on `cuda_grpo_ablation` (`crates/kiln-train/examples/cuda_grpo_ablatio
 
 Env-var overrides for experimentation: `KILN_ECHO_LAMBDA`, `KILN_ECHO_ENABLED`, `KILN_ECHO_ENV_MASK_MODE`. Same convention as `KILN_USE_FLCE` and friends.
 
-### 3.5 — The diagnostic + receipt updates — `kiln-train::diagnostics`
+### 3.5 — Backend coverage — what lives where
+
+Verified by audit:
+
+| Backend | Training path | ECHO touch points |
+| --- | --- | --- |
+| **CUDA** | `crates/kiln-train/src/trainer.rs::grpo_train` (with `BackendRuntime::CudaBackend` selected) | uncheckpointed loss (line 1848) + checkpointed analytic tail (line 7434) |
+| **CPU** | `trainer.rs::grpo_train` (with `BackendRuntime::CpuBackend`) | same as CUDA (Phase A FLCE fallback) |
+| **Metal** | `trainer.rs::grpo_train` (with `BackendRuntime::MetalBackend`) | same as CUDA (Metal Phase B FLCE) |
+| **Vulkan-native** | `vk_train.rs::vk_native_grpo_train` and `vk_native_grpo_train_jsonl` | independent loss path on `VkTensor`; not via `kiln-flce-kernel` |
+
+The CUDA / CPU / Metal triple is **one set of edits** in `trainer.rs` (no per-backend gating; candle `Device` dispatches naturally). Vulkan-native is genuinely separate code in `vk_train.rs` because it uses `VkTensor` and a hand-rolled backward graph instead of candle autograd. So the ECHO implementation has exactly two code surfaces:
+
+1. **`trainer.rs`** — covers CUDA, CPU, Metal. The new module `crates/kiln-train/src/echo.rs` provides `echo_step_loss` (used by the uncheckpointed path) and `analytic_grpo_echo_tail_loss_grad_pre_final_norm` (used by the checkpointed path).
+2. **`vk_train.rs`** — covers Vulkan. A new function `echo_step_vk` next to `grpo_active_rows_and_labels` (`vk_train.rs:181`) computes the env-CE term using VK matmul + log-softmax dispatches and folds it into the existing loss aggregation at the `grpo_active_rows_and_labels` call sites (`vk_train.rs:3623, 3959`).
+
+There's no `metal_train.rs` and there isn't going to be one — the OPD plan §5 explicitly notes the Vulkan/Metal split is about kernel availability, and Metal training shares `trainer.rs` because candle's Metal device + the existing FLCE Phase B Metal path handle the loss math. **ECHO inherits this for free.**
+
+### 3.6 — The diagnostic + receipt updates — `kiln-train::diagnostics`
 
 **Where:** existing `crates/kiln-train/src/diagnostics.rs` (56KB). Add three streams:
 
