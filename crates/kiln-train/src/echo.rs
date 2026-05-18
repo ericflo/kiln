@@ -99,6 +99,7 @@ pub struct EchoStepInputs<'a> {
 /// total loss as `λ_echo · mean_ce`. `env_count` is the number of active
 /// env-positions that contributed (i.e. `|O'|` after warning_filter
 /// trimming) — used for diagnostics + the `lambda_effective` stream.
+#[derive(Debug)]
 pub struct EchoStepOutputs {
     /// The scalar env-CE loss term, paper §3.1 normalization applied:
     ///
