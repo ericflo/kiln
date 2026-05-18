@@ -115,6 +115,11 @@ def arg_flags(attrs: str, field_name: str) -> set[str]:
         if explicit_long:
             long_name = explicit_long.group(1)
         flags.add(f"--{long_name}")
+        for alias in re.findall(r'\b(?:alias|visible_alias)\s*=\s*"([^"]+)"', attrs):
+            flags.add(f"--{alias}")
+        for alias_list in re.findall(r'\b(?:aliases|visible_aliases)\s*=\s*&?\s*\[([^\]]*)\]', attrs):
+            for alias in re.findall(r'"([^"]+)"', alias_list):
+                flags.add(f"--{alias}")
     if "short" in attrs:
         short_name = field_name[0]
         explicit_short = re.search(r"short\s*=\s*'([^']+)'", attrs)
