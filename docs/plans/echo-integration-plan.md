@@ -380,7 +380,7 @@ Long-term we add an explicit `/v1/train/agentic` alias to signal the canonical p
   - **§4 Hypothesis families** gains a top-of-the-list note: "**ECHO is the default loss** (λ=0.05). H_no_echo (`--no-echo`) is the comparison hypothesis, not the other way around." Below that, the existing H1–H14 unchanged; ECHO composes with all of them.
   - **§7 Group statistics watch** gains `env_token_ce` and `env_token_ce_holdout` as first-class diagnostics.
 - `.agents/skills/grpo-capability-creator/SKILL.md` (single-turn) gains the same defaults but is the no-op case: in single-turn caps, every rollout has zero observation tokens, ECHO contributes 0, behavior is identical to today. The skill explicitly notes this so capability authors don't get confused: "if your rollouts are single-turn, ECHO is a no-op for you; you can leave the default on."
-- `.agents/skills/opd-capability-creator/SKILL.md` gains a half-page §8 "ECHO + OPD composition" with the formula `L = L_grpo + λ_opd · L_revKL + λ_echo · L_envCE`. Both contribute via the same FLCE-kernel path; both auto-anneal.
+- `.agents/skills/opd-capability-creator/SKILL.md` gains a half-page §8 "ECHO + OPD composition" with the formula `L = L_grpo + λ_opd · L_revKL + λ_echo · L_envCE`. Both terms reuse the same policy forward pass (just different masks gather different positions); OPD computes its term via `kiln-opd-loss-kernel`, ECHO via `kiln-flce-kernel`; both feed analytic gradients back through the same `student_hidden`; both auto-anneal as the relevant supervision signal stabilizes.
 
 ### 4.3 — The capability suite
 
@@ -514,9 +514,9 @@ This is the OPD plan's §10 self-distillation loop with ECHO added as the third 
 
 **The non-negotiable gates** (each phase has to pass to merge):
 
-1. **Phase 0**: pi-doctest iter-5 reproduces composite within ±0.005 with action-mask-only behavior. Proves the refactor didn't break GRPO.
-2. **Phase 1**: ECHO improves pi-doctest composite by ≥+0.10 over GRPO at 3-seed-verified variance. Proves the technique inside our infra.
-3. **Phase 2**: holdout dynamics CE drops ≥30% (ECHO vs GRPO) AND pass-rate strictly improves on the new pi-tb-lite cap. Proves the mechanism, not just the number.
+1. **Phase 0**: pi-doctest iter-5 replay reproduces composite within ±0.005 on the CUDA path; a VK unit smoke produces bit-equivalent loss to the pre-rename commit on a fixture rollout. Proves the refactor didn't break GRPO on either backend surface.
+2. **Phase 1**: ECHO improves pi-doctest composite by ≥+0.10 over GRPO at 3-seed-verified variance (std under 0.02), and the same uplift reproduces under binary-outcome reward (paper regime) as well as the existing composite reward. Vulkan smoke confirms VK ECHO is bit-equivalent at λ=0 and produces a finite loss at λ=0.05. Proves the technique inside our infra and across backends.
+3. **Phase 2**: holdout dynamics CE drops ≥30% (ECHO vs GRPO) AND pass-rate strictly improves on the new `pi-terminal-bench-lite` cap. Proves the mechanism, not just the number.
 
 ### §6.1 Risk register
 
@@ -587,7 +587,7 @@ Three decisions, answered 2026-05-18:
 
 ## §8 Effort estimate
 
-- Phase 0 — ~4–5 days. Larger scope now (full rename + masking primitive + shared Python lib + server route alias) but everything in its final shape from the start. Behind clean validation gate (pi-doctest reproduction within ±0.005 on CUDA + Vulkan).
+- Phase 0 — ~4–5 days. Larger scope now (full rename + masking primitive + shared Python lib + server route alias) but everything in its final shape from the start. Behind clean validation gate (pi-doctest iter-5 replay within ±0.005 on CUDA + VK unit-smoke bit-equivalence).
 - Phase 1 — ~2–3 days. Behind 3-seed-verified +0.10 composite gate + binary-outcome control + Vulkan smoke.
 - Phase 2 — ~1 week. New `pi-terminal-bench-lite` cap + dynamics-holdout test + skill updates.
 - Phase 3 — ~3–4 days. Verifier-free demo cap + docs + long-form grand-plan companion.
