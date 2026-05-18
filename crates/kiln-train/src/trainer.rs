@@ -10883,6 +10883,7 @@ mod tests {
         // (mix of Action and Observation segments). The tiny tokenizer
         // doesn't have a real chat template, so we hand-build the chat
         // template inline via a chat-template-shaped tokenizer below.
+        use crate::ScoredRollout;
         use crate::trajectory::{TurnKind, TurnSegment};
 
         let traj_a = vec![
