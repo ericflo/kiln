@@ -1,5 +1,67 @@
 # Kiln Server Changelog
 
+## Unreleased — ECHO: agentic multi-turn GRPO loss term
+
+Wires the ECHO technique (Shrivastava, Awadallah, Papailiopoulos — MSR
+AI Frontiers, 2026) into kiln's GRPO training stack. ECHO adds a
+length-normalized cross-entropy loss on environment-observation tokens
+to the standard policy-gradient loss on action tokens — same forward
+pass, different mask. Headline paper result: doubles TerminalBench-2.0
+pass@1 at 8B (2.7% → 5.2%) and 14B (5.2% → 10.8%).
+
+See `docs/papers/echo/` (paper + blog conversion) and
+`docs/plans/echo-integration-plan.md` for the full design.
+
+### Added
+- Canonical trajectory schema in `kiln-train::trajectory`: `TurnKind`,
+  `TurnSegment`, `ScoredRollout`, `AgenticGroup`. `ScoredCompletion`
+  and `GrpoGroup` remain valid as `pub type` aliases for the new
+  types; their existing field names (`text`, `reward`, `completions`,
+  `messages`) are preserved so legacy callers compile unchanged.
+- Masking primitive in `kiln-train::trajectory_mask`:
+  `build_masks_from_trajectory(trajectory, prompt_messages, tokenizer,
+  &MaskConfig) -> MaskedRollout`. Emits separate `action_mask`
+  (policy-gradient targets), `env_mask` (ECHO env-CE targets), and
+  per-segment token spans. Handles Qwen's `<tool_response>` wrapper
+  for tool-role segments. Paper §3.2 warning-prefix exclusion via
+  `MaskConfig::warning_filter` (on by default).
+- `kiln-train::echo::echo_step_loss` — the env-CE loss term. Mirrors
+  `opd_step_loss`'s signature so `LossConfig { policy, echo, opd }`
+  composes structurally. Calls `kiln-flce-kernel`'s
+  `fused_linear_cross_entropy_dispatch` under the hood, with the
+  paper §3.1 `|O'|/|O|` rescale for length normalization.
+- `LossConfig` on `GrpoConfig`: `echo: Some(EchoConfig::default())`
+  is on by default at λ=0.05. `opd: None` reserved for OPD branch
+  rebase. Set `loss.echo = None` (or `--no-echo` on CLI) to opt out.
+- `cuda_grpo_ablation` CLI flags: `--echo-lambda <f64>`, `--no-echo`,
+  `--opd-lambda <f64>` (placeholder).
+- Shared Python lib `capabilities/agentic-grpo/lib/pi_trajectory.py`
+  that converts pi session JSONL into the canonical trajectory schema
+  (with warning-prefix detection).
+- `pi-doctest/rollout.py` migrated to emit the new trajectory shape
+  via `pi_trajectory.build_scored_rollout`.
+- `kiln-polish-prerequisites.md` §1 — multi-turn assistant-token
+  masking — now ✅ RESOLVED. The gap that blocked agentic-GRPO
+  multi-turn training since pi-doctest v0 is closed.
+
+### Behaviour for legacy single-turn rollouts
+- When a rollout has no `trajectory` field (only the legacy `text`
+  string), behaviour is bit-identical to the pre-ECHO loss math:
+  `env_mask` is all-false, `total_obs_len` is 0, the ECHO branch
+  short-circuits at zero cost. The default `loss.echo =
+  Some(EchoConfig)` is safe for legacy callers.
+
+### Known limitations (Phase 1 follow-ups)
+- ECHO is wired only into the **uncheckpointed** candle GRPO loss
+  path. When `KILN_GRAD_CHECKPOINT_SEGMENTS` enables segment
+  recompute (long contexts), the analytic-tail
+  `analytic_grpo_tail_loss_grad_pre_final_norm` does not yet fold
+  the env-CE term. The trainer logs a `tracing::warn!` when this
+  combination is detected so users notice immediately.
+- The Vulkan-native trainer (`vk_train::vk_native_grpo_train`)
+  carries the new `action_mask` / `env_mask` fields but does not
+  yet apply the ECHO term.
+
 ## kiln-v0.2.16 — 2026-05-15 — Phase 11 evals as a first-class peer of training
 
 Adds an end-to-end eval system: pluggable scorers, dataset → suite synthesis, post-training auto-eval, head-to-head adapter comparison, and the local A/B judgment flywheel. The whole loop runs on the same single-GPU binary; no frontier-LLM call is ever required.

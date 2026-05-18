@@ -2218,6 +2218,30 @@ fn train_tokenized_grpo_group(
 
         let loss_val;
         if let Some(segs) = segments {
+            // ECHO is not yet wired into the analytic checkpointed tail
+            // (analytic_grpo_tail_loss_grad_pre_final_norm). If a caller
+            // enabled ECHO but selected the checkpointed path (long
+            // contexts, low VRAM), warn loudly that env-CE is being
+            // skipped. Phase 1 follow-up: fold env-CE into the analytic
+            // tail. See docs/plans/echo-integration-plan.md §3.1.
+            if config.loss.echo_lambda() != 0.0 {
+                let env_count = comp
+                    .env_mask
+                    .get(1..)
+                    .map_or(0, |m| m.iter().filter(|&&v| v).count());
+                if env_count > 0 {
+                    tracing::warn!(
+                        env_count,
+                        total_obs_len = comp.total_obs_len,
+                        echo_lambda = config.loss.echo_lambda(),
+                        "checkpointed GRPO path: ECHO env-CE skipped \
+                         (analytic tail does not yet fold the env-CE \
+                         term). Use the uncheckpointed path (smaller \
+                         contexts or KILN_NO_GRAD_CHECKPOINT=1) to apply \
+                         ECHO. Phase 1 follow-up."
+                    );
+                }
+            }
             let (lv, accumulated_grads) = checkpointed_grpo_forward_backward(
                 backend,
                 &comp.input_ids,
