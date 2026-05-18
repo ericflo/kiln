@@ -1606,6 +1606,22 @@ impl ModelRunner {
         (num_tokens + block_size - 1) / block_size
     }
 
+    /// Initial block capacity for the batching engine.
+    ///
+    /// Batched decode can grow its per-request block table as generation crosses
+    /// block boundaries, so it should not reserve `prompt + max_tokens` up front.
+    /// Large OpenAI-compatible clients commonly send very high `max_tokens`;
+    /// making the decode block table that large turns every token into a
+    /// long-context operation even when the model stops after a tool call.
+    fn initial_batched_decode_blocks_needed(
+        prompt_tokens: usize,
+        max_tokens: usize,
+        block_size: usize,
+    ) -> usize {
+        let initial_tokens = prompt_tokens.saturating_add(usize::from(max_tokens > 0));
+        Self::blocks_needed(initial_tokens, block_size)
+    }
+
     /// Generate text from a prompt using paged KV cache backed by a BlockManager.
     ///
     /// This is the memory-efficient path: blocks are allocated on demand from the
@@ -1812,8 +1828,11 @@ impl ModelRunner {
             .map(|prefix| prefix.block_ids.as_slice())
             .unwrap_or(&[]);
 
-        let max_total = prompt_tokens.len() + params.max_tokens;
-        let total_blocks = Self::blocks_needed(max_total, block_size);
+        let total_blocks = Self::initial_batched_decode_blocks_needed(
+            prompt_tokens.len(),
+            params.max_tokens,
+            block_size,
+        );
         let additional_blocks_needed = total_blocks.saturating_sub(cached_blocks.len());
         let allocated_blocks = {
             let mut bm_guard = lock_block_manager(block_manager)?;
@@ -7459,6 +7478,25 @@ mod tests {
         assert_eq!(second.next_token, first.next_token);
         assert!(second.registration.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn batched_initial_decode_capacity_does_not_reserve_max_tokens() {
+        let prompt_tokens = 7_498;
+        let block_size = 16;
+
+        assert_eq!(
+            ModelRunner::initial_batched_decode_blocks_needed(prompt_tokens, 32_768, block_size),
+            ModelRunner::blocks_needed(prompt_tokens + 1, block_size)
+        );
+        assert_eq!(
+            ModelRunner::initial_batched_decode_blocks_needed(prompt_tokens, 0, block_size),
+            ModelRunner::blocks_needed(prompt_tokens, block_size)
+        );
+        assert!(
+            ModelRunner::initial_batched_decode_blocks_needed(prompt_tokens, 32_768, block_size)
+                < ModelRunner::blocks_needed(prompt_tokens + 32_768, block_size)
+        );
     }
 
     #[test]

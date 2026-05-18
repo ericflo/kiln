@@ -28,6 +28,10 @@ const DEFAULT_ENGINE_CHANNEL: usize = 1024;
 const DEFAULT_RESPONSE_CHANNEL: usize = 64;
 const DEFAULT_MAX_DECODE_BATCH: usize = 8;
 
+fn blocks_needed_for_tokens(num_tokens: usize, block_size: usize) -> usize {
+    num_tokens.div_ceil(block_size)
+}
+
 /// Resolve the actor's `max_decode_batch` from the environment, falling back
 /// to [`DEFAULT_MAX_DECODE_BATCH`] when `KILN_MAX_DECODE_BATCH` is unset or
 /// cannot be parsed as a positive integer. The actor caps `active.len()` at
@@ -235,6 +239,60 @@ impl RealDecodeForward {
             bm_guard.free_all(&blocks_to_free);
         }
     }
+
+    fn grow_ready_decode_slots(&self, slots: &mut [&mut DecodeSlot]) -> Result<()> {
+        let block_size = self
+            .block_manager
+            .lock()
+            .map_err(|e| anyhow::anyhow!("failed to lock block manager: {e}"))?
+            .block_size();
+
+        let missing_by_slot: Vec<usize> = slots
+            .iter()
+            .map(|slot| match slot {
+                DecodeSlot::Real {
+                    state,
+                    first_token_pending: false,
+                    ..
+                } => {
+                    let required_blocks =
+                        blocks_needed_for_tokens(state.seq_len.saturating_add(1), block_size);
+                    required_blocks.saturating_sub(state.block_table.blocks.len())
+                }
+                _ => 0,
+            })
+            .collect();
+        let total_missing: usize = missing_by_slot.iter().sum();
+        if total_missing == 0 {
+            return Ok(());
+        }
+
+        let allocated_blocks = {
+            let mut bm_guard = self
+                .block_manager
+                .lock()
+                .map_err(|e| anyhow::anyhow!("failed to lock block manager: {e}"))?;
+            bm_guard
+                .allocate(total_missing)
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+        };
+
+        let mut cursor = 0;
+        for (slot, missing) in slots.iter_mut().zip(missing_by_slot) {
+            if missing == 0 {
+                continue;
+            }
+            let new_blocks = &allocated_blocks[cursor..cursor + missing];
+            cursor += missing;
+            let DecodeSlot::Real { state, .. } = &mut **slot else {
+                unreachable!("missing block count is only set for real decode slots");
+            };
+            state.block_table.blocks.extend(new_blocks.iter().copied());
+            state.allocated_blocks.extend(new_blocks.iter().copied());
+        }
+
+        Ok(())
+    }
 }
 
 impl DecodeForward for RealDecodeForward {
@@ -288,6 +346,7 @@ impl DecodeForward for RealDecodeForward {
         slots: &mut [&mut DecodeSlot],
         sampling: &[SamplingParams],
     ) -> Result<Vec<TokenId>> {
+        self.grow_ready_decode_slots(slots)?;
         let mut output = vec![0; slots.len()];
         let (decode_indices, decode_params) =
             collect_ready_decode_indices(slots, sampling, &mut output)?;
@@ -955,6 +1014,14 @@ mod tests {
             adapter: None,
             first_token_pending,
         }
+    }
+
+    #[test]
+    fn decode_capacity_block_count_rounds_up() {
+        assert_eq!(blocks_needed_for_tokens(0, 16), 0);
+        assert_eq!(blocks_needed_for_tokens(1, 16), 1);
+        assert_eq!(blocks_needed_for_tokens(16, 16), 1);
+        assert_eq!(blocks_needed_for_tokens(17, 16), 2);
     }
 
     #[test]
