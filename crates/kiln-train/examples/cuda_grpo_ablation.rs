@@ -222,6 +222,15 @@ struct Args {
     lora_alpha: f32,
     learning_rate: f64,
     seed: u64,
+    /// ECHO lambda override. None = leave the LossConfig default (0.05).
+    echo_lambda: Option<f64>,
+    /// Disable ECHO entirely. Sets `loss.echo = None` so the auxiliary
+    /// env-CE term is not added. Useful for ablation runs.
+    no_echo: bool,
+    /// Placeholder for OPD lambda override — accepted at the CLI so caps
+    /// can pass `--opd-lambda` without the parser bailing, but not yet
+    /// wired into the loss (OPD branch rebases on top of ECHO).
+    opd_lambda: Option<f64>,
 }
 
 #[cfg(feature = "cuda")]
@@ -237,6 +246,9 @@ impl Args {
         let mut lora_alpha = 16.0f32;
         let mut learning_rate = 1e-5f64;
         let mut seed = 0x6752_504f_u64;
+        let mut echo_lambda: Option<f64> = None;
+        let mut no_echo = false;
+        let mut opd_lambda: Option<f64> = None;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -286,17 +298,47 @@ impl Args {
                         .parse()
                         .context("--seed must be a u64")?
                 }
+                "--echo-lambda" => {
+                    echo_lambda = Some(
+                        args.next()
+                            .context("--echo-lambda needs a value")?
+                            .parse()
+                            .context("--echo-lambda must be a float (typical: 0.05)")?,
+                    )
+                }
+                "--no-echo" => no_echo = true,
+                "--opd-lambda" => {
+                    opd_lambda = Some(
+                        args.next()
+                            .context("--opd-lambda needs a value")?
+                            .parse()
+                            .context("--opd-lambda must be a float")?,
+                    )
+                }
                 "--help" | "-h" => {
                     println!(
                         "cuda_grpo_ablation --data <jsonl> --model <dir> [--output <dir>] \
                          [--adapter <name>] --mode <baseline|phase1|phase1_gspo|phase1_cispo|\
-                         phase1_reinforce> [--max-groups N] [--rank N] [--alpha F] [--lr F] \
-                         [--seed N]"
+                         phase1_reinforce|...> [--max-groups N] [--rank N] [--alpha F] \
+                         [--lr F] [--seed N] [--echo-lambda F | --no-echo] [--opd-lambda F]\n\
+                         \n\
+                         ECHO flags (Phase 1, paper §3.3):\n\
+                         \  --echo-lambda <f64>    Override the env-CE coefficient. Default \
+                         from LossConfig::default() = 0.05.\n\
+                         \  --no-echo              Disable ECHO entirely (sets loss.echo = None).\n\
+                         \  --opd-lambda <f64>     Reserved for OPD branch rebase; accepted\n\
+                         \                          here so cap scripts don't fail to parse.\n\
+                         \                          Currently ignored — OPD wiring lands in\n\
+                         \                          the OPD merge."
                     );
                     std::process::exit(0);
                 }
                 other => anyhow::bail!("unexpected argument: {other}"),
             }
+        }
+
+        if no_echo && echo_lambda.is_some() {
+            anyhow::bail!("--no-echo and --echo-lambda are mutually exclusive");
         }
 
         Ok(Args {
@@ -310,6 +352,9 @@ impl Args {
             lora_alpha,
             learning_rate,
             seed,
+            echo_lambda,
+            no_echo,
+            opd_lambda,
         })
     }
 }
@@ -412,11 +457,38 @@ fn main() -> Result<()> {
         optimizer: Optimizer::default(),
         ..GrpoConfig::default()
     };
-    let config = args.mode.apply(base);
+    let mut config = args.mode.apply(base);
+
+    // ECHO knob overrides — applied AFTER the mode patch so cap scripts can
+    // pin a specific lambda without depending on a mode that sets it.
+    if args.no_echo {
+        config.loss.echo = None;
+    } else if let Some(lambda) = args.echo_lambda {
+        config.loss.echo = Some(kiln_train::EchoConfig {
+            lambda,
+            ..kiln_train::EchoConfig::default()
+        });
+    }
+    if let Some(_opd_lambda) = args.opd_lambda {
+        // Reserved for OPD branch rebase. Accept the flag but don't fire —
+        // the loss path doesn't read config.loss.opd yet (see lib.rs
+        // LossConfig design notes).
+        eprintln!(
+            "warning: --opd-lambda accepted but OPD loss not yet wired; \
+             ignoring (lambda={_opd_lambda})"
+        );
+    }
+
+    let echo_lambda_str = config
+        .loss
+        .echo
+        .as_ref()
+        .map(|c| format!("{}", c.lambda))
+        .unwrap_or_else(|| "off".to_string());
     println!(
         "config mode={} advantage_mode={:?} loss_aggregation={:?} clip=({},{:?}) \
          kl_estimator={:?} dynamic_sampling={} is_level={:?} reference_policy={:?} \
-         lr={} rank={} alpha={} seed={}",
+         lr={} rank={} alpha={} seed={} echo_lambda={}",
         args.mode.as_str(),
         config.advantage_mode,
         config.loss_aggregation,
@@ -430,6 +502,7 @@ fn main() -> Result<()> {
         config.lora_rank,
         config.lora_alpha,
         args.seed,
+        echo_lambda_str,
     );
 
     let stop = Arc::new(AtomicBool::new(false));
