@@ -165,6 +165,8 @@ documents intent for reviewers.)
 | 2    | h1-default-recipe-h100-20tasks | H1 | 0.919 | **+0.113** | ✓ kept-ship | 20 train tasks × 4 gens on H100. Outcome 0.83→1.00 (perfect). 4 baseline-failing tasks recovered. Wall-clock −23%. |
 | 3    | h1-default-recipe-h100-40tasks | H1 | 0.845 | +0.040 vs base | ablation (-0.073 vs iter 2) | 40 tasks at lr=1e-5 = overtraining. Fixed task_0017 but lost task_0002/_0011. Net regression. |
 | 4    | h1-lower-lr-5e-6-40tasks       | H1-lr | 0.873 | +0.068 vs base | ablation (-0.046 vs iter 2) | Lower lr reduced overtraining but didn't recover iter 2's level. The 20-task sweet spot is real. |
+| 5    | h1-strong-signal-only-11groups | H1-filter | 0.899 | +0.094 vs base | ablation (-0.020 vs iter 2) | Filter to strong-signal groups only. Beats iter 3/4 but under iter 2 — pure-strong training lacks the 'almost-pass' regularization iter 2 had. |
+
 
 
 
