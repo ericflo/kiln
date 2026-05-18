@@ -80,6 +80,7 @@ const expectedQuickstartSections = [
   { label: 'prerequisites', terms: ['prerequisites'] },
   { label: 'start server', terms: ['run the server', 'kiln serve'] },
   { label: 'test inference', terms: ['send chat', '/v1/chat/completions'] },
+  { label: 'pi agent setup', terms: ['configure pi', 'kiln pi-setup', 'qwen-3.5-4b-kiln'] },
   { label: 'open UI', terms: ['open the ui', '/ui'] },
   { label: 'first inference checkpoint', terms: ['first inference checkpoint'] },
   { label: 'SFT next step', terms: ['sft corrections', '/v1/train/sft'] },
@@ -208,6 +209,7 @@ const expectedCliSections = [
   { label: 'serve/start-server path', terms: ['start serving qwen3.5-4b', 'kiln_model_path', 'kiln serve'] },
   { label: 'no-subcommand serve path', terms: ['running kiln with no subcommand starts the server'] },
   { label: 'health/readiness path', terms: ['check server readiness', 'kiln health'] },
+  { label: 'pi setup path', terms: ['pi integration', 'kiln pi-setup', 'qwen-3.5-4b-kiln'] },
   { label: 'SFT/GRPO training path', terms: ['submit sft and grpo jobs', 'kiln train sft', 'kiln train grpo'] },
   { label: 'SFT payload shape', terms: ['sft reads jsonl', 'one chat correction example per line', 'messages array'] },
   { label: 'GRPO payload shape', terms: ['grpo reads one json request/batch', 'groups', 'messages', 'candidate completions', 'text', 'reward scores'] },
@@ -221,6 +223,7 @@ const expectedCliSections = [
 const expectedCliCodeExamples = [
   { label: 'serve command', terms: ['kiln_model_path=./qwen3.5-4b', 'kiln serve'] },
   { label: 'health commands', terms: ['kiln health', 'kiln health --json'] },
+  { label: 'pi setup command', terms: ['kiln pi-setup', '--kiln-url http://office-kiln:8420'] },
   { label: 'SFT training command', terms: ['kiln train sft', '--file corrections.jsonl', '--adapter support-bot'] },
   { label: 'GRPO training command', terms: ['kiln train grpo', '--file grpo-batch.json', '--adapter support-bot'] },
   { label: 'training status command', terms: ['kiln train status'] },

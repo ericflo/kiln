@@ -69,6 +69,7 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 ## Features
 
 - **OpenAI-compatible API** — drop in as a local replacement. SSE streaming, chat completions, tool use formatting.
+- **pi integration** — `kiln pi-setup` backs up and merges `~/.pi/agent/models.json` + `settings.json`, then points pi at Kiln as an OpenAI-compatible tool-calling backend.
 - **SFT training** over HTTP — submit examples, model updates in seconds via LoRA hot-swap.
 - **GRPO training** over HTTP — submit scored completions for reinforcement learning. You control the reward function.
 - **First-class evals** over HTTP — register suites, run them against any adapter, drill into per-example outcomes. Auto-detect picks the right scorer per example (`numeric_tolerance`, `multiple_choice`, `json_validity`, `regex`, `contains`, `tool_call`, `code`, `llm_judge`, `all`/`any` composites).
@@ -259,6 +260,21 @@ curl http://localhost:8420/v1/train/sft \
 # Check training
 curl http://localhost:8420/v1/train/status
 ```
+
+**Optional: use Kiln as pi's local agent model.** With the server running on `localhost:8420`, `kiln pi-setup` adds a `kiln-local` provider to pi without deleting your other providers or settings. Existing files are backed up first as `models.json.bak-<timestamp>` and `settings.json.bak-<timestamp>`.
+
+```bash
+# Local server
+./kiln pi-setup
+
+# Remote office/server box
+./kiln pi-setup --kiln-url http://office-kiln:8420
+
+# pi now uses model qwen-3.5-4b-kiln through http://.../v1
+pi -p "Use the bash tool to run: pwd"
+```
+
+Kiln accepts Qwen3.5's native XML tool-call generations internally, but OpenAI-compatible clients receive normal `tool_calls` in both streaming and non-streaming responses. pi should execute the tool call instead of printing raw `<tool_call>` XML.
 
 See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including Desktop App setup, source builds, GRPO, adapter management, Docker, and systemd setup. If setup stalls on binary downloads, CUDA/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, start with the [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html). For tools-bearing workloads on older pinned releases, see [QUICKSTART.md §9.2](QUICKSTART.md#92-troubleshooting-older-release-long-prefill-timeouts) for the legacy `workers=1` / request-timeout troubleshooting note ([#664](https://github.com/ericflo/kiln/issues/664)).
 

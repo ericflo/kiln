@@ -195,7 +195,7 @@
 
   <section>
     <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
-      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">CLI Reference &middot; serve &middot; train &middot; adapters</span>
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">CLI Reference &middot; serve &middot; pi-setup &middot; train &middot; adapters</span>
       <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">Run Kiln from the terminal.</h1>
       <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
         Use the CLI when you want a headless server, repeatable scripts, or quick diagnostics against a running Kiln instance. These examples assume a running Kiln server backed by <code>Qwen/Qwen3.5-4B</code>; see <a href="quickstart.html">Quickstart</a> for setup and model download details. If you want visual status, adapter controls, or training monitoring, open <code>http://127.0.0.1:8420/ui</code> instead.
@@ -203,6 +203,7 @@
       <div class="mt-8 flex flex-wrap gap-3">
         <a href="#serve" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Start the server</a>
         <a href="#health" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Check health</a>
+        <a href="#pi-setup" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Configure pi</a>
         <a href="#training" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Submit training</a>
         <a href="#adapters" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Manage adapters</a>
       </div>
@@ -233,6 +234,12 @@ kiln health --json</code></pre>
 <pre class="text-xs"><code>kiln train sft --file corrections.jsonl --adapter support-bot
 kiln train grpo --file grpo-batch.json --adapter support-bot
 kiln train status</code></pre>
+          </div>
+          <div>
+            <h3 class="font-semibold mb-2">Point pi at Kiln</h3>
+            <p class="mb-3" style="color: var(--fg-dim);">Back up and merge pi's models/settings files so pi uses the running Kiln server.</p>
+<pre class="text-xs"><code>kiln pi-setup
+kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
           </div>
           <div>
             <h3 class="font-semibold mb-2">Manage adapters</h3>
@@ -301,6 +308,32 @@ kiln health --url http://localhost:8420</code></pre>
   | python3 -m json.tool</code></pre>
         </div>
       </div>
+    </div>
+  </section>
+
+  <section id="pi-setup" class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-12">
+      <p class="label mb-2">pi integration</p>
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Merge Kiln into pi's provider config</h2>
+      <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">
+        <code>kiln pi-setup</code> updates pi's OpenAI-compatible provider config without replacing the whole file. It writes a <code>kiln-local</code> provider with <code>baseUrl</code> ending in <code>/v1</code>, <code>api: "openai-completions"</code>, and model id <code>qwen-3.5-4b-kiln</code>. It also preserves existing <code>settings.json</code> keys while setting pi's default provider and model to Kiln.
+      </p>
+      <div class="grid lg:grid-cols-2 gap-6">
+        <div class="card p-6">
+          <h3 class="font-semibold mb-2">Local setup</h3>
+<pre class="text-sm"><code>kiln pi-setup
+pi -p "Use the bash tool to run: pwd"</code></pre>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">Existing <code>models.json</code> and <code>settings.json</code> are copied to timestamped <code>.bak-...</code> files before the merge.</p>
+        </div>
+        <div class="card p-6">
+          <h3 class="font-semibold mb-2">Remote server</h3>
+<pre class="text-sm"><code>kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>--kiln-url</code> is an alias for <code>--url</code>. If the URL omits <code>/v1</code>, Kiln appends it for pi.</p>
+        </div>
+      </div>
+      <p class="text-sm mt-4" style="color: var(--fg-mute);">
+        Tool-calling clients receive OpenAI <code>tool_calls</code> even when Qwen3.5 internally emits its native XML tool-call form, so pi executes the tool instead of showing raw XML.
+      </p>
     </div>
   </section>
 
