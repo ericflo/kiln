@@ -482,6 +482,11 @@ pub struct GrpoConfig {
     /// Optimizer selection — see `SftConfig::optimizer`.
     #[serde(default)]
     pub optimizer: Optimizer,
+    /// Composition of per-token training objectives. ECHO is on by default
+    /// (paper §3.3 λ=0.05); OPD's slot is reserved but empty until the OPD
+    /// branch rebases. See `LossConfig` for the full design.
+    #[serde(default)]
+    pub loss: LossConfig,
 }
 
 fn default_grpo_lr() -> f64 {
@@ -495,6 +500,141 @@ fn default_clip_eps() -> f64 {
 }
 fn default_dynamic_sampling() -> bool {
     true
+}
+
+// ---- ECHO + LossConfig ----------------------------------------------------
+//
+// `LossConfig` composes three loss objectives that share one forward pass:
+//
+//   L_total = L_policy(actions)              [the GRPO surrogate]
+//           + λ_echo · L_envCE(observations) [paper: Shrivastava 2026]
+//           + λ_opd  · L_revKL(actions)      [paper: Lu 2025; wired in OPD merge]
+//
+// `LossConfig::default()` enables ECHO at λ=0.05 (paper §3.3 default).
+// `opd` is a placeholder None until the OPD branch rebases on top; its
+// shape is reserved here so the composition stays orthogonal.
+//
+// For legacy single-string rollouts (`scored.has_trajectory() == false`)
+// the env_mask is empty and ECHO contributes exactly 0 — bit-identical
+// to the pre-ECHO loss. ECHO only fires when a rollout carries
+// observation segments. This is what makes "ECHO on by default" safe.
+
+/// What positions in an observation segment contribute to the env_mask.
+///
+/// Paper §3.2: terminal warning prefixes memorize within ~60 steps and stop
+/// providing useful gradient. `EnvOnly` (default) strips the harness
+/// warning prefix from each Observation; `FullObs` (debug only) covers
+/// the full observation including warnings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvMaskMode {
+    #[default]
+    EnvOnly,
+    FullObs,
+}
+
+/// Configuration for ECHO — the auxiliary environment cross-entropy loss
+/// on tool/observation tokens. See
+/// `docs/papers/echo/echo_paper.md` and `docs/plans/echo-integration-plan.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EchoConfig {
+    /// Mixing coefficient for the env-CE term: `L_total = L_policy + λ · L_envCE`.
+    /// Paper §3.3 default: 0.05. Productive range: 0.01–0.05. ≥0.1 risks
+    /// degrading the policy objective; 0.2 collapses to predictable-output
+    /// rollouts (mode collapse).
+    #[serde(default = "default_echo_lambda")]
+    pub lambda: f64,
+    /// Env_only (default) strips the harness warning prefix. FullObs (debug)
+    /// covers the full observation including warnings.
+    #[serde(default)]
+    pub env_mask_mode: EnvMaskMode,
+    /// Whether the trajectory_mask's warning_filter is on. Defaults to true.
+    /// Set to false for debugging or for environments whose tool output
+    /// never includes a `WARNINGS:` prefix.
+    #[serde(default = "default_warning_filter")]
+    pub warning_filter: bool,
+}
+
+fn default_echo_lambda() -> f64 {
+    0.05
+}
+fn default_warning_filter() -> bool {
+    true
+}
+fn default_echo_some() -> Option<EchoConfig> {
+    Some(EchoConfig::default())
+}
+
+impl Default for EchoConfig {
+    fn default() -> Self {
+        Self {
+            lambda: default_echo_lambda(),
+            env_mask_mode: EnvMaskMode::default(),
+            warning_filter: default_warning_filter(),
+        }
+    }
+}
+
+/// Placeholder for OPD's auxiliary term on the LossConfig — populated when
+/// the OPD branch rebases on top of this work. The fields here mirror
+/// `kiln_train::opd::OpdConfig`'s most relevant knobs; the exact shape will
+/// be reconciled during the OPD merge. Default: None.
+///
+/// Reserving this slot now means `L = L_policy + λ_echo · L_envCE +
+/// λ_opd · L_revKL` is structurally encoded in the type system, so OPD
+/// composition is mechanical when its branch lands.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpdAuxConfig {
+    #[serde(default)]
+    pub lambda: f64,
+}
+
+/// Composition of per-token training objectives. Each branch contributes to
+/// `L_total = L_policy + λ_echo · L_envCE + λ_opd · L_revKL` where inactive
+/// branches contribute zero.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LossConfig {
+    /// Action-token policy-gradient term — knobs already on GrpoConfig
+    /// (clip_eps, kl_coeff, kl_estimator, advantage_mode, is_level,
+    /// reference_policy, etc.). LossConfig doesn't duplicate them; the
+    /// trainer reads them from the surrounding GrpoConfig.
+    ///
+    /// Observation-token cross-entropy (paper: Shrivastava et al. 2026).
+    /// Default: `Some(EchoConfig::default())` with λ=0.05. Set to None to
+    /// opt out. Even when Some, ECHO contributes exactly 0 to the loss for
+    /// rollouts whose `env_mask` is empty (i.e. legacy single-turn) — so
+    /// "ECHO on by default" is safe for existing GRPO callers.
+    #[serde(default = "default_echo_some")]
+    pub echo: Option<EchoConfig>,
+    /// Action-token reverse-KL to a teacher (OPD; Lu 2025). Default: None.
+    /// Wired in by the OPD branch rebase; LossConfig holds the field so the
+    /// composition is structurally orthogonal.
+    #[serde(default)]
+    pub opd: Option<OpdAuxConfig>,
+}
+
+impl Default for LossConfig {
+    fn default() -> Self {
+        Self {
+            echo: default_echo_some(),
+            opd: None,
+        }
+    }
+}
+
+impl LossConfig {
+    /// Lambda for the ECHO term, or 0.0 if ECHO is disabled.
+    pub fn echo_lambda(&self) -> f64 {
+        self.echo.as_ref().map(|c| c.lambda).unwrap_or(0.0)
+    }
+    /// Lambda for the OPD auxiliary term, or 0.0 if OPD is disabled.
+    pub fn opd_lambda(&self) -> f64 {
+        self.opd.as_ref().map(|c| c.lambda).unwrap_or(0.0)
+    }
+    /// True when the ECHO term is configured to be applied.
+    pub fn echo_enabled(&self) -> bool {
+        self.echo.is_some() && self.echo_lambda() != 0.0
+    }
 }
 
 impl GrpoConfig {
@@ -531,6 +671,7 @@ impl Default for GrpoConfig {
             checkpoint_interval: None,
             seed: None,
             optimizer: Optimizer::default(),
+            loss: LossConfig::default(),
         }
     }
 }
