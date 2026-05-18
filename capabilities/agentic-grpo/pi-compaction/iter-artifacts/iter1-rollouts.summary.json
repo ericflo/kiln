@@ -1,0 +1,14 @@
+{
+  "mode": "train",
+  "adapter": "current",
+  "n_tasks": 12,
+  "n_rollouts": 48,
+  "n_generations": 4,
+  "mean_composite": 0.4941235273974254,
+  "p50_composite": 0.701434492641932,
+  "rollouts_nonzero": 48,
+  "rollouts_zero": 0,
+  "mean_wall_clock_s": 32.103706593314804,
+  "wall_clock_s_total": 1540.9779164791107,
+  "grpo_groups_written": 12
+}
