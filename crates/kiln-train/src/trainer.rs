@@ -25,6 +25,7 @@ use kiln_flce_kernel::{
     fused_linear_cross_entropy_dispatch_with_provider,
 };
 use kiln_model::backend::{self, BackendRuntime};
+use kiln_core::block::BlockTable;
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
     gdn_attention_in_projections, gdn_attention_input_norm, gdn_attention_residual_block,
@@ -34,10 +35,12 @@ use kiln_model::forward::{
     gqa_attention_output_projection, gqa_attention_pre_o, gqa_attention_pre_o_chunked_prefill,
     gqa_attention_prepare_prefill, gqa_attention_q_gate_prefill, model_forward,
     model_forward_embed, model_forward_final_norm, model_forward_head, model_forward_no_head,
-    model_forward_segment, rms_norm, streaming_prefill_enabled_for, streaming_tile_tokens_for,
-    swiglu_ffn, transformer_mlp_down_from_gated, transformer_mlp_gated_hidden,
+    model_forward_paged_normed_hidden, model_forward_segment, rms_norm,
+    streaming_prefill_enabled_for, streaming_tile_tokens_for, swiglu_ffn,
+    transformer_mlp_down_from_gated, transformer_mlp_gated_hidden,
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
+use kiln_model::paged_kv_cache::PagedKvCache;
 
 use crate::replay::{
     self, BaseModel, Lineage, OutcomeRecord, OutcomeStatus, ParentLora, ReplayKind, ReplayLog,
@@ -1711,6 +1714,331 @@ fn jsonl_byte_progress(total_bytes: u64, offset: u64) -> (usize, usize, f32) {
     (step, total_steps, progress)
 }
 
+/// Page size used by the GRPO shared-prompt-prefix paged cache. Matches the
+/// production server / bench setting so the same FA fast paths fire.
+const GRPO_REF_PAGED_BLOCK_SIZE: usize = 16;
+
+/// Compute the reference-policy log probs for every completion in a GRPO
+/// group, sharing the prompt-prefix forward across all completions.
+///
+/// All completions in a GRPO group share an identical prompt prefix
+/// (tokenize_grpo_group computes `prompt_ids` once and reuses it). The legacy
+/// path ran `model_forward_no_head` over `[prompt | completion]` once per
+/// completion (4× per group at default settings), redoing the
+/// O(prompt_len²) full-attention and O(prompt_len) GDN work each time.
+///
+/// This helper runs the prompt forward exactly once via the paged path,
+/// snapshots the GDN linear state at `prompt_len`, then forwards only each
+/// completion's tokens with `start_pos == prompt_len`. The paged cache
+/// transparently feeds the prompt's K/V into the full-attention layers as
+/// "prefix history", so FlashAttention prefill-with-prefix runs at
+/// O(comp_len × prompt_len) instead of O(prompt_len²) per completion. The
+/// GDN linear state is restored from the post-prompt snapshot before each
+/// completion so its recurrent state starts from the correct point.
+///
+/// The shared-prefix path requires no gradient (this is the reference
+/// forward), so the paged inference kernels are used directly. Total
+/// reference-forward attention work drops from `n_comp × (P + C)²` to
+/// `P² + n_comp × C × (P + C)` — roughly a `n_comp×` speedup when
+/// `C << P`, which is the production regime for pi-compaction.
+///
+/// All returned log-prob tensors are detached (the ratio computation in
+/// `grpo_loss` only needs the policy side to track gradients).
+fn compute_ref_log_probs_shared_prefix(
+    backend: &dyn BackendRuntime,
+    tgroup: &TokenizedGrpoGroup,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    ema_ref_lora: Option<&LoraWeights>,
+    device: &Device,
+) -> Result<Vec<Tensor>> {
+    if tgroup.completions.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Derive prompt_len from the first completion's mask. tokenize_grpo_group
+    // sets mask[i] = (i >= prompt_len), so prompt_len is the first true index.
+    let first = &tgroup.completions[0];
+    let prompt_len = first
+        .completion_mask
+        .iter()
+        .position(|&m| m)
+        .with_context(|| "GRPO completion has no completion tokens (mask is all false)")?;
+    if prompt_len < 1 {
+        anyhow::bail!(
+            "GRPO shared-prefix ref forward requires prompt_len >= 1, got {prompt_len}"
+        );
+    }
+
+    // Validate the prefix invariant — every completion must share the same
+    // prompt prefix or the shared-prefix path is unsound.
+    for (idx, comp) in tgroup.completions.iter().enumerate() {
+        let comp_prompt_len = comp
+            .completion_mask
+            .iter()
+            .position(|&m| m)
+            .with_context(|| format!("completion {idx} has no completion tokens"))?;
+        anyhow::ensure!(
+            comp_prompt_len == prompt_len,
+            "GRPO completions have different prompt lengths ({prompt_len} vs {comp_prompt_len} for completion {idx})"
+        );
+        anyhow::ensure!(
+            comp.input_ids.len() >= prompt_len,
+            "completion {idx} input_ids shorter than prompt_len {prompt_len}"
+        );
+        anyhow::ensure!(
+            comp.input_ids[..prompt_len] == first.input_ids[..prompt_len],
+            "completion {idx} prompt token ids differ from completion 0",
+        );
+    }
+
+    let prompt_ids: &[u32] = &first.input_ids[..prompt_len];
+    let max_total = tgroup
+        .completions
+        .iter()
+        .map(|c| c.input_ids.len())
+        .max()
+        .unwrap_or(prompt_len)
+        .max(prompt_len);
+
+    let dtype = match model_config.dtype {
+        kiln_core::config::DType::BF16 => DType::BF16,
+        kiln_core::config::DType::FP16 => DType::F16,
+        kiln_core::config::DType::FP32 => DType::F32,
+    };
+
+    let num_blocks =
+        (max_total + GRPO_REF_PAGED_BLOCK_SIZE - 1) / GRPO_REF_PAGED_BLOCK_SIZE;
+    let paged_cache = PagedKvCache::new(
+        model_config.num_full_attention_layers,
+        num_blocks,
+        GRPO_REF_PAGED_BLOCK_SIZE,
+        model_config.num_kv_heads,
+        model_config.head_dim,
+        dtype,
+        device,
+    )
+    .context("GRPO shared-prefix: build PagedKvCache")?;
+    let mut block_table = BlockTable::new();
+    for i in 0..num_blocks as u32 {
+        block_table.push(i);
+    }
+
+    let mut linear_state = LinearAttentionState::new(model_config, device)
+        .context("GRPO shared-prefix: build LinearAttentionState")?;
+
+    // Phase 1: prompt forward — populates the paged cache for positions
+    // [0..prompt_len) and advances the GDN linear state past the prompt.
+    let prompt_hidden = model_forward_paged_normed_hidden(
+        backend,
+        prompt_ids,
+        weights,
+        model_config,
+        &paged_cache,
+        &block_table,
+        0,
+        Some(&mut linear_state),
+        ema_ref_lora,
+    )
+    .context("GRPO shared-prefix: prompt forward")?;
+
+    // The position that predicts the first completion token (input_ids[prompt_len])
+    // is prompt_len - 1. Capture its normed hidden state as a detached, stable
+    // owning tensor so the rest of the prompt_hidden allocation can be freed.
+    let last_prompt_hidden = prompt_hidden
+        .narrow(1, prompt_len - 1, 1)
+        .context("GRPO shared-prefix: narrow last prompt hidden")?
+        .contiguous()
+        .context("GRPO shared-prefix: contiguous last prompt hidden")?
+        .detach();
+    drop(prompt_hidden);
+
+    // Snapshot the GDN linear state at end-of-prompt so each completion can
+    // restore from this point before running its own forward.
+    let linear_snap = linear_state
+        .snapshot()
+        .context("GRPO shared-prefix: snapshot linear state")?;
+
+    let mut ref_log_probs_per_comp = Vec::with_capacity(tgroup.completions.len());
+    for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
+        let full_len = comp.input_ids.len();
+        let comp_len = full_len - prompt_len;
+        if comp_len == 0 {
+            // No completion tokens — placeholder zero tensor matches the legacy
+            // path's behaviour for empty active completions.
+            ref_log_probs_per_comp.push(Tensor::zeros(1, DType::F32, device)?.detach());
+            continue;
+        }
+
+        // Restore GDN state to end-of-prompt. The paged-cache full-attn K/V
+        // for positions [0..prompt_len) is preserved (writes only target
+        // start_pos..start_pos+seq_len, never the prefix), so the cache is
+        // implicitly reset by passing start_pos = prompt_len. Each completion
+        // overwrites the cache slots at [prompt_len..prompt_len+comp_len), but
+        // that region is throw-away — we never read another completion's K/V.
+        linear_state
+            .restore_from(&linear_snap)
+            .with_context(|| format!("GRPO shared-prefix: restore linear state for completion {comp_idx}"))?;
+
+        let completion_ids = &comp.input_ids[prompt_len..];
+
+        let comp_hidden = model_forward_paged_normed_hidden(
+            backend,
+            completion_ids,
+            weights,
+            model_config,
+            &paged_cache,
+            &block_table,
+            prompt_len,
+            Some(&mut linear_state),
+            ema_ref_lora,
+        )
+        .with_context(|| format!("GRPO shared-prefix: completion {comp_idx} forward"))?;
+
+        // Build the "active hidden" tensor: aligned with the completion tokens
+        // we want to compute log-probs for. Following the legacy convention in
+        // `selected_log_probs_from_normed_hidden_chunked`, hidden[i] is the
+        // normed pre-LM-head state that predicts the token at position i+1.
+        //
+        //   active_hidden[0]            = last prompt hidden (predicts input_ids[prompt_len])
+        //   active_hidden[1..comp_len]  = comp_hidden[0..comp_len-1]
+        //                                 (predicts input_ids[prompt_len+1..full_len])
+        //
+        // Shape: [1, comp_len, hidden_size]. comp_hidden[comp_len-1] is dropped
+        // because there's no token after the last completion token to predict.
+        let active_hidden = if comp_len == 1 {
+            last_prompt_hidden.clone()
+        } else {
+            let comp_prefix = comp_hidden
+                .narrow(1, 0, comp_len - 1)
+                .with_context(|| format!("GRPO shared-prefix: narrow comp prefix completion {comp_idx}"))?;
+            Tensor::cat(&[&last_prompt_hidden, &comp_prefix], 1)
+                .with_context(|| format!("GRPO shared-prefix: concat active hidden completion {comp_idx}"))?
+        };
+        drop(comp_hidden);
+
+        let log_probs = chunked_log_probs_for_completion(
+            &active_hidden,
+            &weights.embed_tokens_t,
+            completion_ids,
+            DEFAULT_CHUNK_SIZE,
+            device,
+        )
+        .with_context(|| format!("GRPO shared-prefix: chunked log-probs completion {comp_idx}"))?;
+
+        ref_log_probs_per_comp.push(log_probs.detach());
+    }
+
+    Ok(ref_log_probs_per_comp)
+}
+
+/// Compute per-target-token log probs from a pre-shifted normed-hidden tensor.
+///
+/// `active_hidden` is `[1, n_targets, hidden_size]` and is assumed to be the
+/// post-final-RMSNorm hidden state at exactly the positions that need a
+/// log-prob (one row per target token). `target_ids` is the actual token id
+/// each row predicts. This is the chunked-softmax core that
+/// [`selected_log_probs_from_normed_hidden_chunked`] also uses, but without
+/// the position-selection / shift bookkeeping (the caller has already aligned
+/// rows with targets).
+fn chunked_log_probs_for_completion(
+    active_hidden: &Tensor,
+    head_t: &Tensor,
+    target_ids: &[u32],
+    chunk_size: usize,
+    device: &Device,
+) -> Result<Tensor> {
+    let n_targets = target_ids.len();
+    if n_targets == 0 {
+        return Tensor::zeros(1, DType::F32, device).map_err(Into::into);
+    }
+    if chunk_size == 0 {
+        anyhow::bail!("chunked_log_probs_for_completion chunk_size must be > 0");
+    }
+
+    let dims = active_hidden.dims();
+    if dims.len() != 3 || dims[0] != 1 || dims[1] != n_targets {
+        anyhow::bail!(
+            "active_hidden must have shape [1, n_targets={n_targets}, hidden_size], got {:?}",
+            dims
+        );
+    }
+    let hidden_size = dims[2];
+    if head_t.dims().len() != 2 || head_t.dims()[0] != hidden_size {
+        anyhow::bail!(
+            "head_t must have shape [hidden_size, vocab_size], got {:?}",
+            head_t.dims()
+        );
+    }
+
+    let hidden_2d = active_hidden
+        .squeeze(0)?
+        .to_dtype(DType::F32)?;
+    let head_t_f32 = head_t.to_dtype(DType::F32)?;
+    let vocab_size = head_t_f32.dim(1)?;
+    if vocab_size == 0 {
+        anyhow::bail!("head_t vocab dimension is zero");
+    }
+
+    let mut running_max: Option<Tensor> = None;
+    let mut running_sumexp: Option<Tensor> = None;
+    let mut correct_logits: Option<Tensor> = None;
+    let mut chunk_start = 0usize;
+    while chunk_start < vocab_size {
+        let chunk_len = chunk_size.min(vocab_size - chunk_start);
+        let chunk_end = chunk_start + chunk_len;
+        {
+            let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
+            let logits_chunk = hidden_2d.matmul(&head_chunk)?;
+            let chunk_max = logits_chunk.max_keepdim(candle_core::D::Minus1)?;
+            let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
+                (None, None) => {
+                    let shifted =
+                        (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    (chunk_max.detach(), chunk_sumexp.detach())
+                }
+                (Some(prev_max), Some(prev_sumexp)) => {
+                    let new_max = prev_max.maximum(&chunk_max)?;
+                    let prev_scale = (prev_max - &new_max)?.exp()?;
+                    let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
+                    let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    let new_sumexp = (scaled_prev + chunk_sumexp)?;
+                    (new_max.detach(), new_sumexp.detach())
+                }
+                _ => unreachable!("running max/sumexp are set together"),
+            };
+            running_max = Some(new_max);
+            running_sumexp = Some(new_sumexp);
+
+            let mut one_hot_data = vec![0.0f32; n_targets * chunk_len];
+            for (row_idx, &label) in target_ids.iter().enumerate() {
+                let label = label as usize;
+                if label >= chunk_start && label < chunk_end {
+                    one_hot_data[row_idx * chunk_len + (label - chunk_start)] = 1.0;
+                } else if label >= vocab_size {
+                    anyhow::bail!("label {label} is outside vocab size {vocab_size}");
+                }
+            }
+            let one_hot = Tensor::from_vec(one_hot_data, (n_targets, chunk_len), device)?;
+            let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(candle_core::D::Minus1)?;
+            correct_logits = Some(match correct_logits.as_ref() {
+                Some(prev) => (prev + chunk_correct)?.detach(),
+                None => chunk_correct.detach(),
+            });
+        }
+        synchronize_metal_tail_chunk(device, "synchronize chunked_log_probs_for_completion")?;
+        chunk_start = chunk_end;
+    }
+
+    let running_max = running_max.context("vocab_size was zero")?;
+    let running_sumexp = running_sumexp.context("vocab_size was zero")?;
+    let correct_logits = correct_logits.context("vocab_size was zero")?;
+    let log_sum_exp = (running_max + running_sumexp.log()?)?;
+    Ok((correct_logits - log_sum_exp)?.squeeze(1)?)
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn train_tokenized_grpo_group(
@@ -1754,6 +2082,37 @@ fn train_tokenized_grpo_group(
     let token_level = matches!(config.loss_aggregation, LossAggregation::TokenLevel);
     let mut group_accum: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
 
+    // Shared-prefix optimization: when the reference policy is active and the
+    // group has more than one completion, run the prompt forward exactly once
+    // (paged path) and reuse its K/V + GDN state across all completions. The
+    // legacy per-completion `model_forward_no_head` loop is kept as the
+    // fallback below when (a) reference is skipped, or (b) the group has a
+    // single completion (no sharing to be had), or (c) the shared-prefix path
+    // is explicitly disabled.
+    let use_shared_prefix = !skip_reference
+        && tgroup.completions.len() > 1
+        && !kiln_core::env_flag::env_flag("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", false);
+    let shared_prefix_log_probs: Option<Vec<Tensor>> = if use_shared_prefix {
+        let started = Instant::now();
+        let log_probs = compute_ref_log_probs_shared_prefix(
+            backend,
+            tgroup,
+            weights,
+            model_config,
+            ema_ref_lora,
+            device,
+        )
+        .context("GRPO shared-prefix reference forward")?;
+        tracing::debug!(
+            n_completions = tgroup.completions.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "GRPO shared-prefix ref forward complete"
+        );
+        Some(log_probs)
+    } else {
+        None
+    };
+
     for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
         let num_active = per_comp_active[comp_idx];
         if num_active == 0 {
@@ -1773,6 +2132,8 @@ fn train_tokenized_grpo_group(
             // GrpoLossParams::reinforce. The placeholder zero tensor is
             // never inspected by the math when reinforce = true.
             Tensor::zeros(num_active, DType::F32, device)?.detach()
+        } else if let Some(shared) = shared_prefix_log_probs.as_ref() {
+            shared[comp_idx].clone()
         } else {
             let mut ref_linear_state = LinearAttentionState::new(model_config, device)?;
             // BasePerStep (None ema_ref_lora) → base model (no LoRA).

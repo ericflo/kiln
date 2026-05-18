@@ -13754,6 +13754,53 @@ pub fn model_forward_paged(
     Ok(logits.expect("LmHeadMode::Full always produces logits"))
 }
 
+/// Paged-KV forward pass that returns the post-final-RMSNorm hidden state at
+/// every position, skipping the LM head matmul entirely.
+///
+/// Used by the GRPO reference-forward path that shares the prompt's K/V across
+/// all completions in a group: forward the prompt once with `start_pos == 0`,
+/// snapshot the linear state, then forward each completion's tokens with
+/// `start_pos == prompt_len` so the paged cache's prompt K/V is reused for
+/// cross-attention. The returned hidden state feeds
+/// `chunked_log_probs_for_completion` directly (avoids the full LM head over
+/// every position when only completion log-probs are needed).
+///
+/// Returns hidden tensor with shape `[1, seq_len, hidden_size]`.
+pub fn model_forward_paged_normed_hidden(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    let (_logits, hidden, _token) = model_forward_paged_inner(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        None,
+        None,
+        #[cfg(feature = "cuda")]
+        None,
+        LmHeadMode::HiddenOnly,
+    )?;
+    let hidden = hidden.expect("LmHeadMode::HiddenOnly always returns hidden");
+    let normed = {
+        kiln_nvtx::range!(c"kiln/final_norm");
+        rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?
+    };
+    Ok(normed)
+}
+
 /// Paged-KV forward pass for generation prefill when only the next-token
 /// distribution is needed.
 ///
