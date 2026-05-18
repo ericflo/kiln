@@ -427,6 +427,78 @@ def extract_ground_truth(anthropic_messages: list[dict[str, Any]]) -> dict[str, 
             if len(errors) >= 20:
                 break
 
+    # Recent-tail facts: the last few turns are the most load-bearing — pi
+    # will literally pick up from these. Boost their visibility in the
+    # ground truth so the rubric can check recency separately.
+    recent_paths: list[str] = []
+    recent_identifiers: list[str] = []
+    recent_msgs = anthropic_messages[-6:]  # last 6 messages ≈ last 2-3 turns
+    rseen_paths: set[str] = set()
+    rseen_idents: set[str] = set()
+    for m in recent_msgs:
+        if m.get("role") == "assistant":
+            for b in (m.get("content") or []) if isinstance(m.get("content"), list) else []:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "tool_use":
+                    raw_name = b.get("name", "")
+                    raw_input = b.get("input", {}) or {}
+                    pi_name, pi_args = _normalize_tool_call(raw_name, raw_input)
+                    path = pi_args.get("path") or pi_args.get("file") or ""
+                    if isinstance(path, str) and path and path not in rseen_paths:
+                        recent_paths.append(path)
+                        rseen_paths.add(path)
+        elif m.get("role") == "user":
+            for b in (m.get("content") or []) if isinstance(m.get("content"), list) else []:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    tc = b.get("content", "")
+                    if isinstance(tc, list):
+                        tc = "\n".join(sub.get("text", "") if isinstance(sub, dict) else str(sub) for sub in tc)
+                    text = str(tc)
+                    for pm in PATH_RE.finditer(text):
+                        p = pm.group(0).rstrip(".,;:!?)]}")
+                        if "://" in p:
+                            continue
+                        if not ("/" in p or "." in p):
+                            continue
+                        if 4 <= len(p) <= 200 and p not in rseen_paths:
+                            recent_paths.append(p)
+                            rseen_paths.add(p)
+                    for im in IDENT_RE.finditer(text[:5000]):  # first 5KB of each tool result
+                        ident = im.group(1)
+                        if ident.lower() in COMMON_WORDS:
+                            continue
+                        if len(ident) < 5:
+                            continue
+                        if ident not in rseen_idents:
+                            recent_identifiers.append(ident)
+                            rseen_idents.add(ident)
+
+    # Cap recent lists
+    recent_paths = recent_paths[:15]
+    recent_identifiers = recent_identifiers[:15]
+
+    # Last assistant tool calls — pi will literally resume from these.
+    last_actions: list[str] = []
+    for m in reversed(anthropic_messages):
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                raw_name = b.get("name", "")
+                raw_input = b.get("input", {}) or {}
+                pi_name, pi_args = _normalize_tool_call(raw_name, raw_input)
+                args_brief = ", ".join(
+                    f"{k}={json.dumps(v)[:60]}" for k, v in pi_args.items()
+                )
+                last_actions.append(f"{pi_name}({args_brief})")
+        if last_actions:
+            break  # we only want the last assistant message with tool calls
+    last_actions = last_actions[:5]
+
     return {
         "first_user_goal": first_user_goal[:4000],  # cap to avoid mega payloads
         "source_paths": sorted(source_paths),
@@ -434,6 +506,9 @@ def extract_ground_truth(anthropic_messages: list[dict[str, Any]]) -> dict[str, 
         "read_only_paths": sorted(read_only),
         "source_identifiers": source_identifiers,
         "source_errors": errors,
+        "recent_paths": recent_paths,
+        "recent_identifiers": recent_identifiers,
+        "last_actions": last_actions,
     }
 
 

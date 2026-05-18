@@ -364,6 +364,44 @@ def score_content(response: str, ground_truth: dict[str, Any]) -> dict[str, floa
         len(modified_block & modified_paths) / len(modified_paths) if modified_paths else None
     )
 
+    # Recency-weighted recall — the last few turns are the most load-bearing.
+    # pi will literally pick up from these. Heavily reward summaries that
+    # preserve recent file paths / identifiers.
+    recent_paths_gt = set(ground_truth.get("recent_paths") or [])
+    recent_idents_gt = set(ground_truth.get("recent_identifiers") or [])
+    recent_path_recall = (
+        _path_set_recall(recent_paths_gt, summary_no_file_blocks) if recent_paths_gt else None
+    )
+    recent_ident_recall = (
+        _identifier_set_recall(recent_idents_gt, summary_no_file_blocks) if recent_idents_gt else None
+    )
+
+    # Last-action tool-call preservation
+    last_actions = ground_truth.get("last_actions") or []
+    if last_actions:
+        # Each last action mentions a tool name + maybe a path. Extract the
+        # path/identifier from the action arg string and check it's mentioned
+        # somewhere in the summary (Progress.InProgress or Next Steps ideally).
+        hit = 0
+        for action in last_actions:
+            # extract first quoted-string arg
+            m = re.search(r"path=\"([^\"]+)\"", action)
+            if m:
+                target = m.group(1)
+                base = target.rsplit("/", 1)[-1]
+                if target.lower() in summary_no_file_blocks.lower() or (
+                    len(base) >= 4 and base.lower() in summary_no_file_blocks.lower()
+                ):
+                    hit += 1
+                    continue
+            # else require the tool-name to appear (cheap fallback)
+            tool_name = action.split("(", 1)[0]
+            if len(tool_name) >= 3 and tool_name.lower() in summary_no_file_blocks.lower():
+                hit += 1
+        last_actions_recall = hit / len(last_actions)
+    else:
+        last_actions_recall = None
+
     # Build the weighted average over present sub-scores only.
     weighted: list[tuple[str, float]] = [
         ("content.first_user_goal_recall", goal_recall),
@@ -374,6 +412,9 @@ def score_content(response: str, ground_truth: dict[str, Any]) -> dict[str, floa
         ("content.error_recall", err_recall),
         ("content.read_file_block_correctness", read_block_recall),
         ("content.modified_file_block_correctness", modified_block_recall),
+        ("content.recent_paths_recall", recent_path_recall),
+        ("content.recent_identifiers_recall", recent_ident_recall),
+        ("content.last_actions_recall", last_actions_recall),
     ]:
         if val is not None:
             weighted.append((name, val))
