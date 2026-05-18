@@ -162,6 +162,19 @@ documents intent for reviewers.)
 | 0    | baseline-v0-outcome-only | baseline | 0.958 (v0 rubric) | — | infra-fail | v0 outcome-only rubric saturated at >=0.95; retired. |
 | 0    | baseline-v1              | baseline | 0.885 (v1 rubric) | — | kept       | Multi-component rubric, in healthy headroom band. Target = tool_call_efficiency (stdev 0.358). |
 | 1    | h1-default-recipe-3group-smoke | H1 | 0.888 | +0.003 | kept-with-caveat | 3-group smoke training. Composite flat. Target sub-score `tool_call_efficiency` +0.0104; mean n_tool_calls −18% (6.83→5.63). 6 tasks better, 5 worse, 13 same. Outcome held at 0.958. End-to-end loop closes. |
+| 2    | h1-default-recipe-h100-20tasks | H1 | 0.919 | **+0.113** | ✓ kept-ship | 20 train tasks × 4 gens on H100. Outcome 0.83→1.00 (perfect). 4 baseline-failing tasks recovered. Wall-clock −23%. |
+| 3    | h1-default-recipe-h100-40tasks | H1 | 0.845 | +0.040 vs base | ablation (-0.073 vs iter 2) | 40 tasks at lr=1e-5 = overtraining. Fixed task_0017 but lost task_0002/_0011. Net regression. |
+| 4    | h1-lower-lr-5e-6-40tasks       | H1-lr | 0.873 | +0.068 vs base | ablation (-0.046 vs iter 2) | Lower lr reduced overtraining but didn't recover iter 2's level. The 20-task sweet spot is real. |
+| 5    | h1-strong-signal-only-11groups | H1-filter | **0.899** | **+0.094** | ✓ reproducible-best | Filter to strong-signal groups (var>0.05). +9.4pp composite, reproducible across seeds at this scale. Outcome 0.79→0.92 (1 zero remaining). |
+| 6    | h1-strong-plus-almost-pass     | H1-mix | 0.859 | +0.054 vs base | ablation (-0.040 vs iter 5) | 11 strong + 4 'almost-pass' — stratification didn't help. |
+| 7    | h1-replay-iter2-recipe         | H1 | 0.846 | +0.041 vs base | **ablation-CRITICAL** | Iter 2 recipe replay on fresh rollouts → 0.846 (not 0.919). iter 2's number was sample-variance, not robust. Honest reproducible best = iter 5's 0.899. |
+| 8    | h13-2epoch-strong-signal       | H13 | 0.750 | −0.055 vs base | ablation-falsified | 2 epochs on iter 5's 11 strong-signal groups regresses composite −0.149 vs iter 5. 5 zeros (vs iter 5's 1). Mean wall-clock 3× blow-up (19.86s → 56.45s) — the over-training signature. Confirms 1 epoch is the sweet spot on filtered data. |
+| 9    | iter5-2nd-seed-eval-variance   | H14 | **0.893** | +0.087 vs base | ✓ kept-verification | 2nd-seed eval of iter 5 adapter (same weights, fresh rollouts) → 0.893. iter 5 mean across 2 seeds = 0.896 ± 0.003. Eval-rollout variance for trained adapter is much smaller than the seed-to-seed variance of the recipe itself. |
+| 9b   | base-2nd-seed-eval-variance    | H14 | 0.902 | — (calibration) | ✓ calibration | Base eval-rollout variance is σ≈0.048 — much larger than iter 5's 0.003. Reframes the headline +9.4pp single-seed result to a 2-seed-mean +4.2pp. |
+| 10   | h12-fresh-rollouts-training-seed | H14 | **0.896** | +0.091 vs base | ✓ kept-verification-recipe-level | Recipe-level reproducibility test: fresh rollouts on same 12 strong-signal tasks, retrain GRPO, eval. Result 0.8958 — virtually identical to iter 5 family mean. iter 5 family across 3 seeds: 0.8958 ± 0.0032. The H12 recipe is robust at BOTH eval-seed and training-seed levels. |
+
+
+
 
 ## Kiln-polish prerequisites
 

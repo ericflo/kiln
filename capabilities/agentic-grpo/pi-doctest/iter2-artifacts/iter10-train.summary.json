@@ -1,0 +1,10 @@
+{
+  "mode": "train",
+  "adapter": "",
+  "n_tasks": 12,
+  "n_rollouts": 48,
+  "n_generations": 4,
+  "mean_composite": 0.5794270833333334,
+  "mean_within_group_variance": 0.07357177734374999,
+  "groups_written": 12
+}

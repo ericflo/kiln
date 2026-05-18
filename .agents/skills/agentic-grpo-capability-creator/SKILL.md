@@ -656,4 +656,30 @@ step 3.
    `--max-wall-clock-s` flag in pi or wrap pi in a `timeout`-shaped
    helper.
 
+6. **Pod hibernation loses artifacts.** RunPod pods can hibernate
+   mid-iter (we lost iter 2's adapter when the pool reaped the pod
+   that was running it). **Push adapter files to B2 or copy them
+   locally as soon as they're trained**, before the next rollout
+   pass. The training is fast (~5 min); recomputing it after a
+   hibernation is fine — but rollouts cost real wall-clock and
+   should not need to be re-run.
+
+7. **Adapter dir defaults to `model_path/adapters/`.** Not
+   `/workspace/kiln/adapters/`. When training writes adapters to
+   `/tmp/...`, symlink them into `$KILN_MODEL_PATH/adapters/` before
+   calling `POST /v1/adapters/load`. Otherwise the endpoint 404s
+   with "adapter not found" even though the file exists.
+
+8. **Kiln serve grabs all VRAM.** When you switch from rollouts to
+   training, `pkill -9 -f "kiln serve"` before launching
+   `cuda_grpo_ablation` — otherwise training OOMs at model-load.
+   The training process loads its own model copy and won't share
+   VRAM with the running server.
+
+9. **Pi `--session-dir` is per-rollout.** Use a unique
+    `--session-dir` per rollout (or per `pi -p` invocation) so two
+    concurrent rollouts don't clobber each other's session files.
+    `pi 0.75.x` defaults to `~/.pi/agent/sessions/<workdir-encoded>/`
+    which collides if two rollouts use the same workdir.
+
 Anything you hit during the cap goes to `kiln-polish.jsonl`.

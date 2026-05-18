@@ -1,0 +1,15 @@
+{
+  "mode": "eval",
+  "adapter": "",
+  "n_tasks": 24,
+  "n_rollouts": 24,
+  "n_generations": 1,
+  "mean_composite": 0.8052083333333333,
+  "p50_composite": 1.0,
+  "p05_composite": 0.0,
+  "p95_composite": 1.0,
+  "mean_wall_clock_s": 31.364791125059128,
+  "rollouts_nonzero": 20,
+  "rollouts_zero": 4,
+  "wall_clock_s_total": 753.6193151473999
+}
