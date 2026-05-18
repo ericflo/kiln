@@ -307,7 +307,9 @@ fn byte_search_strategy(
             (content_start, content_end_abs, advance)
         };
 
-        // Apply warning_filter for Observation segments.
+        // Apply warning_filter for Observation segments. `effective_start`
+        // is where the env_mask is allowed to begin; `content_start` is the
+        // full semantic span start (used by segment_spans and by total_obs_len).
         let effective_start = match seg.kind {
             TurnKind::Observation if cfg.warning_filter => {
                 let trim = seg.warning_prefix_len.unwrap_or(0);
@@ -316,34 +318,53 @@ fn byte_search_strategy(
             _ => content_start,
         };
 
-        // Mark the tokens overlapping [effective_start, content_end_abs).
-        let mut span_token_start = seq_len;
-        let mut span_token_end = 0usize;
+        // The mask span — what gets marked in action_mask / env_mask —
+        // depends on env_mask_mode for Observation segments. EnvOnly
+        // (default) respects warning_filter; FullObs (debug) covers the
+        // full content including warnings.
+        let mask_span_lo = match seg.kind {
+            TurnKind::Observation if cfg.env_mask_mode == EnvMaskMode::FullObs => content_start,
+            _ => effective_start,
+        };
+
         let target_mask: &mut [bool] = match seg.kind {
             TurnKind::Action => action_mask,
             TurnKind::Observation => env_mask,
             TurnKind::Context => unreachable!("filtered above"),
         };
-        let span_lo = match seg.kind {
-            TurnKind::Observation if cfg.env_mask_mode == EnvMaskMode::FullObs => content_start,
-            _ => effective_start,
-        };
+
+        // First pass: mark target_mask over [mask_span_lo, content_end_abs).
         for (idx, &(tok_start, tok_end)) in offsets.iter().enumerate() {
             if idx >= seq_len || tok_start == tok_end {
                 continue;
             }
-            if tok_start < content_end_abs && tok_end > span_lo {
+            if tok_start < content_end_abs && tok_end > mask_span_lo {
                 target_mask[idx] = true;
-                if idx < span_token_start {
-                    span_token_start = idx;
+            }
+        }
+
+        // Second pass: compute the FULL semantic token span for this segment
+        // (covering the entire content range, *not* the warning-filtered
+        // subset). segment_spans drives total_obs_len() which is |O| for
+        // paper §3.1 length normalization — must equal the full observation
+        // length regardless of warning_filter.
+        let mut full_span_start = seq_len;
+        let mut full_span_end = 0usize;
+        for (idx, &(tok_start, tok_end)) in offsets.iter().enumerate() {
+            if idx >= seq_len || tok_start == tok_end {
+                continue;
+            }
+            if tok_start < content_end_abs && tok_end > content_start {
+                if idx < full_span_start {
+                    full_span_start = idx;
                 }
-                if idx + 1 > span_token_end {
-                    span_token_end = idx + 1;
+                if idx + 1 > full_span_end {
+                    full_span_end = idx + 1;
                 }
             }
         }
-        if span_token_end > span_token_start {
-            segment_spans.push((span_token_start, span_token_end, seg.kind));
+        if full_span_end > full_span_start {
+            segment_spans.push((full_span_start, full_span_end, seg.kind));
         }
 
         cursor = advance_to;
