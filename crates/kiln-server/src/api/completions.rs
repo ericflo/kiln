@@ -376,6 +376,10 @@ async fn emit_or_buffer_reasoning_chunk(
     content_buf: &mut String,
     buffer_content: bool,
 ) -> bool {
+    if tx.is_closed() {
+        return false;
+    }
+
     if !buffer_content {
         return emit_reasoning_chunk(
             tx,
@@ -417,7 +421,7 @@ async fn emit_or_buffer_reasoning_chunk(
         }
         content_buf.push_str(&text);
     }
-    true
+    !tx.is_closed()
 }
 
 /// Non-streaming variant: split a fully-generated response text into
@@ -3598,7 +3602,28 @@ async fn generate_real_batched_streaming(
             let mut timed_out = false;
 
             loop {
+                if tx.is_closed() {
+                    cancel.cancel();
+                    let _ = batching_engine.cancel(request_id).await;
+                    record(
+                        "client_disconnect".to_string(),
+                        &completion_buf,
+                        completion_token_count,
+                    );
+                    return;
+                }
+
                 tokio::select! {
+                    _ = tx.closed() => {
+                        cancel.cancel();
+                        let _ = batching_engine.cancel(request_id).await;
+                        record(
+                            "client_disconnect".to_string(),
+                            &completion_buf,
+                            completion_token_count,
+                        );
+                        return;
+                    }
                     event = events.recv() => {
                         match event {
                             Some(EngineEvent::Token(token)) => {
@@ -4536,6 +4561,15 @@ async fn generate_real_streaming(
             let deadline = tokio::time::Instant::now() + timeout;
 
             loop {
+                if tx.is_closed() {
+                    record(
+                        "client_disconnect".to_string(),
+                        &completion_buf,
+                        completion_token_count,
+                    );
+                    return;
+                }
+
                 let rx_inner = match maybe_rx.take() {
                     Some(r) => r,
                     None => break,
@@ -4548,6 +4582,14 @@ async fn generate_real_streaming(
                 });
 
                 tokio::select! {
+                    _ = tx.closed() => {
+                        record(
+                            "client_disconnect".to_string(),
+                            &completion_buf,
+                            completion_token_count,
+                        );
+                        return;
+                    }
                     join_result = recv_handle => {
                         match join_result {
                             Ok((rx_back, Ok(StreamEvent::Token(token)))) => {
@@ -7404,6 +7446,37 @@ mod tests {
         assert_eq!(output.content, "");
         assert_eq!(output.reasoning_content.as_deref(), Some("Need a command."));
         assert!(output.tool_calls.is_some());
+    }
+
+    #[tokio::test]
+    async fn buffered_tool_stream_detects_closed_client_without_sending() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        let mut completion_preview_buf = String::new();
+        let mut reasoning_buf = String::new();
+        let mut content_buf = String::new();
+
+        let ok = emit_or_buffer_reasoning_chunk(
+            &tx,
+            "chatcmpl-test",
+            0,
+            "kiln-test",
+            ReasoningChunk {
+                reasoning: None,
+                content: Some("<tool_call>".to_string()),
+            },
+            &mut completion_preview_buf,
+            &mut reasoning_buf,
+            &mut content_buf,
+            true,
+        )
+        .await;
+
+        assert!(
+            !ok,
+            "buffered tool-call content must still notice dropped SSE clients"
+        );
+        assert!(content_buf.is_empty());
     }
 
     #[test]

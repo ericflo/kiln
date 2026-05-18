@@ -549,50 +549,66 @@ fn find_first_tool_call_object(text: &str) -> Option<serde_json::Value> {
         // short window or this is some other JSON.
         let lookahead_end = bytes.len().min(i + 384);
         let head = &text[i..lookahead_end];
-        if !(head.contains("\"name\"")
-            || head.contains("\"function\"")
-            || head.contains("\"tool_call\"")
-            || head.contains("\"tool_calls\""))
-        {
+        if !looks_tool_call_json_head(head) {
             i += 1;
             continue;
         }
-        // Brace-balanced extraction. JSON-aware: ignore braces inside
-        // strings.
-        let mut depth = 0i64;
-        let mut in_str = false;
-        let mut esc = false;
-        for j in i..bytes.len() {
-            let c = bytes[j];
-            if esc {
-                esc = false;
-                continue;
-            }
-            if in_str {
-                match c {
-                    b'\\' => esc = true,
-                    b'"' => in_str = false,
-                    _ => {}
-                }
-                continue;
-            }
+
+        let Some(end) = find_json_object_end(text, i) else {
+            // A tool-shaped opening brace without a matching close means
+            // every later brace is syntactically inside this malformed
+            // object. Stop instead of rescanning the same suffix from each
+            // nested brace.
+            break;
+        };
+        let body = &text[i..=end];
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+            return Some(v);
+        }
+        i = end + 1;
+    }
+    None
+}
+
+fn looks_tool_call_json_head(head: &str) -> bool {
+    head.contains("\"tool_calls\"")
+        || head.contains("\"tool_call\"")
+        || head.contains("\"function\"")
+        || (head.contains("\"name\"")
+            && (head.contains("\"arguments\"")
+                || head.contains("\"input\"")
+                || head.contains("\"parameters\"")))
+}
+
+fn find_json_object_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0i64;
+    let mut in_str = false;
+    let mut esc = false;
+    for (j, c) in bytes.iter().copied().enumerate().skip(start) {
+        if esc {
+            esc = false;
+            continue;
+        }
+        if in_str {
             match c {
-                b'"' => in_str = true,
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        let body = &text[i..=j];
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-                            return Some(v);
-                        }
-                        break;
-                    }
-                }
+                b'\\' => esc = true,
+                b'"' => in_str = false,
                 _ => {}
             }
+            continue;
         }
-        i += 1;
+        match c {
+            b'"' => in_str = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+            _ => {}
+        }
     }
     None
 }
@@ -846,6 +862,16 @@ mod tests {
         let raw = "Let me search.\n{\"name\":\"search\",\"arguments\":{\"q\":\"x\"}}\nok";
         let call = extract_first_tool_call(raw).unwrap();
         assert_eq!(call.name, "search");
+    }
+
+    #[test]
+    fn extract_inline_json_scan_handles_unclosed_tool_like_prefix() {
+        let mut raw = String::from("prefix {\"name\":\"search\",\"arguments\":{");
+        for _ in 0..20_000 {
+            raw.push_str("{\"name\":\"nested\",\"arguments\":{");
+        }
+
+        assert!(extract_tool_calls(&raw).is_empty());
     }
 
     #[test]
