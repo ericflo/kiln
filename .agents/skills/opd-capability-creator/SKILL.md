@@ -56,17 +56,19 @@ You cannot fix a flawed rubric with hyperparameters. A perfect epoch curve at pe
 
 #### What "rubric-driven failure" looks like
 
-Three real examples from prior sessions on this skill — and the disposition each warranted:
+Four real examples from prior sessions on this skill — and the disposition each warranted:
 
 - *Faithful code summarization (cap #1):* baseline composite was 0.99. The headroom gate fired and the session moved on. **That was the wrong call.** A 0.99 baseline is not a "saturated capability" signal — it is a **"your eval is too easy"** signal. The 4B is not perfect at code summarization; the rubric was. The right disposition was to treat the result as an eval-design failure: go back, harden the rubric (more demanding sub-scores), harden the eval set (more difficult prompts), and re-baseline. If the redesigned eval still scores ~0.99, the capability really is saturated; if it drops to (0.4, 0.95), OPD is back in scope.
 
-  **A saturated rubric means the rubric isn't measuring the capability faithfully.** Real capabilities have failure modes; a rubric that doesn't catch any of them is wrong. Treat baseline ≥ 0.95 as a Phase 0 failure that demands eval redesign, not abandonment.
+- *Diff/patch fluency (cap #5):* baseline composite was 0.19. **That was also wrong, in the opposite direction.** A 0.19 baseline on a capability the 4B should have some seed-form ability at is a **"your eval is too strict"** signal. Inspection showed the 4B produces valid diffs wrapped in ```` ```diff ```` fenced code blocks — the natural LLM output convention. The original rubric rejected anything that wasn't a bare diff. Correcting the rubric to accept fenced output jumped the baseline from 0.19 to 0.85. Iter 1, trained against the over-strict rubric with aggressive gradient signal, catastrophically destroyed the LoRA (composite 0.10).
+
+  **Eval-design failure goes BOTH directions.** Baseline ≥ 0.95 = rubric too lax; baseline < 0.30 on a capability the 4B should partially have = rubric too strict. In both cases the right move is **inspect 3–5 base-model responses BEFORE writing iter 1**, not "trust the score and start training." A baseline that surprises you in either direction is a signal to look.
 
 - *Transcript compaction (cap #3, iter 1):* composite rose +3.17pp with the proven recipe — but the *target* sub-score `entity_recall` was FLAT. The lift came from `length_band` (+29.7pp), a confound. The adapter learned "compress more" rather than "include more entities" because that was the cheapest way to move composite. The rubric *allowed* this trade by including `length_band` with positive weight. Mitigation in iter 2 took an extra cycle.
 
 - *Tool-call argument fidelity (cap #4, iter 1):* `required_fields` jumped +16.67pp — biggest single-iter win across the session — but `parses` (-6.7pp) and `type_correctness` (-5.6pp) regressed because the model learned "include more keys" without learning "shape correctly." Net composite up, but the adapter sometimes emitted tool-RESULT-shaped JSON instead of tool-CALL-shaped JSON. The rubric weighted *presence* heavily, *shape* lightly, and was silent on the call-vs-result distinction entirely.
 
-In all three cases the eval was the limiting factor, not OPD. The model perfectly satisfied the contract it was given — including the saturated case where the contract was so loose that the base model already met it.
+In all four cases the eval was the limiting factor, not OPD. The model perfectly satisfied the contract it was given — including the saturated case where the contract was so loose that the base model already met it, and the over-strict case where the contract rejected the model's natural output convention.
 
 #### Adversarial design — answer before training
 
@@ -248,7 +250,12 @@ Updated AFTER each iter's verdict is written.>
 5. **Stand up the teacher** (§6). Health-check it.
 6. **Run baseline.** `./capability.oracle.sh ""` — log it as iter 0, slug `baseline`. Record ALL sub-scores.
 7. **Headroom analysis.** Run `headroom.py`. Pick the target sub-score (the one with the most movable weight).
-8. **Saturation check — redesign if hit.** If baseline composite ≥ 0.95 OR total headroom < 0.05, this is **NOT a "capability is saturated, move on" signal — it is an "eval is too easy" signal.** Real capabilities have failure modes; a rubric that catches none of them is wrong. Action: (a) inspect 3–5 base-model responses on your training prompts to confirm the model is *actually* perfect (it almost never is); (b) harden the rubric — add stricter sub-scores, tighten thresholds, add the anti-shortcut sub-scores you named in step 3; (c) harden the eval set — add harder prompts that probe known 4B failure modes; (d) rerun baseline. Only abandon the capability if a hardened eval still scores ≥0.95 with manual inspection confirming the responses are genuinely perfect. *Cap #1 (faithful-code-summarization) hit this and was incorrectly abandoned in the prior session — should have been treated as an eval-design failure.*
+8. **Baseline sanity check — eval-design failure goes both ways.** Inspect the baseline composite:
+   - **≥ 0.95 OR total headroom < 0.05**: rubric too LAX. NOT "capability solved, move on" — *"your eval is too easy."* Action: inspect 3–5 base-model responses to confirm the model is genuinely perfect (it almost never is); harden the rubric (stricter sub-scores, tighter thresholds, wire in the anti-shortcut sub-scores from step 3); harden the eval set with harder prompts; rerun baseline. *Cap #1 hit this and was incorrectly abandoned in the prior session.*
+   - **< 0.30 on a capability the 4B should partially have**: rubric too STRICT. *"Your eval is rejecting the model's natural output."* Action: inspect 3–5 base-model responses BEFORE training. The 4B is probably doing fine but the rubric is mis-measuring. Loosen the rubric *without re-opening Goodhart holes* (e.g. accept fenced code blocks but require the closing fence with no trailing content). *Cap #5 hit this — original baseline 0.19 was the rubric rejecting fenced diffs; corrected rubric showed actual baseline 0.85.*
+   - **In (0.30, 0.95)**: healthy. Proceed.
+
+   The unifying rule: **a baseline that surprises you in either direction is a signal to inspect responses, not to start training.** Iter 1 against a mis-measured baseline almost always destroys the LoRA — see cap #5 iter 1 (composite 0.10 from the catastrophic noisy-gradient response to a mis-measured 0.19 baseline that was actually 0.85).
 9. **Tiny-smoke** (§18) — 5-prompt training, no scoring. Confirms infra is up.
 10. **Commit intake.**
 

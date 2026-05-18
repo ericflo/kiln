@@ -65,38 +65,71 @@ No remaining shortcut paths score > 0.80. The rubric's worst-case
 cheap-path floor is 0.50–0.70, leaving 0.30–0.50 of composite that
 genuinely requires the capability.
 
-## Baseline (filled by headroom.py after iter 0)
+## Baseline (corrected after rubric fix)
 | Sub-score | Weight | Baseline | Headroom (w×(1−b)) |
 |-----------|--------|----------|---------------------|
-|           |        |          |                     |
-| **Total** |        |          | **<sum>**           |
+| strict_format | 0.10 | 1.0000 | 0.0000 |
+| applies_cleanly | 0.40 | 0.8667 | 0.0533 |
+| target_intent_captured | 0.30 | 0.7667 | 0.0700 |
+| minimal_changes | 0.20 | 0.8667 | 0.0267 |
+| **Total** | | **0.8500** | **0.1500** |
 
 ## Target sub-score
-**`applies_cleanly`** (expected: largest headroom; the dominant
-failure mode is malformed hunks). Will confirm after baseline.
+**`target_intent_captured`** (47% of movable headroom). The 4B's
+diff-emission is mostly correct; the failure mode is producing
+applying-but-not-quite-right diffs (wrong line replaced, etc.).
 
 ## Hypothesis log
 | iter | slug | family | composite | comp Δ | target Δ | verdict |
 |------|------|--------|-----------|--------|----------|---------|
-|      |      |        |           |        |          |         |
+| 0 (orig) | baseline | — | 0.1883 | — | — | (wrong — over-strict rubric rejected fenced diffs) |
+| 0 (fixed) | baseline | — | **0.8500** | — | — | (corrected; rubric now accepts ```diff fenced output) |
+| 1 | h1-r16-2ep | H1 | 0.0983 | -75.2pp | — | ✗ CATASTROPHIC (8 noisy steps destroyed the LoRA) |
 
 ## Dead ends
-(none yet)
+- H1 r16 2 epochs with mis-measured baseline → catastrophic LoRA
+  collapse. The training itself isn't the dead-end; the upstream
+  eval-design failure that made an aggressive gradient signal seem
+  warranted is the dead end.
 
 ## Open questions
-- Can `target_intent_captured` be measured without LLM-as-judge? A
-  keyword-presence check is brittle but doesn't add another inference
-  call to the eval. **Decision will be made when designing oracle.sh.**
-- Should asymmetric H9 be tried EARLY this time, dosed at 2 epochs
-  rather than 6? The cap #4 lesson says H9 over-shoots at 6 epochs;
-  2 might land in the sweet spot.
+- With baseline now 0.85 and headroom only 0.15, is OPD worth running
+  at all on this capability? The 4B is already quite good at diffs.
+  A perfect-ceiling adapter would lift composite by at most 0.15pp.
+
+## Closeout (iter 1)
+
+**Capability retired here. Best kept artifact: the eval-design lesson.**
+
+Two iterations:
+- iter 0 baseline (orig rubric): 0.1883 — *wrong* (rubric too strict)
+- iter 0 baseline (fixed rubric): 0.8500 — *the real baseline*
+- iter 1: 0.0983 — catastrophic LoRA, OPD destroyed a 0.85 model
+
+The valuable artifact is the symmetric of cap #1's mistake:
+
+- **Cap #1** baseline 0.99: rubric too LAX (model already passes; eval
+  too easy). Skill §0 warns about this. Prior session abandoned cap
+  #1 — wrong call; correct disposition was "harden the rubric and re-
+  baseline."
+- **Cap #5** baseline 0.19 (initial): rubric too STRICT (model produces
+  valid diffs in fenced format; rubric rejects them). Inspecting 5
+  responses showed the 4B is actually competent. Correcting the rubric
+  jumped baseline to 0.85. The capability is mostly solved; OPD is
+  borderline-interesting given the small remaining headroom.
+
+The skill needs §0 to warn about BOTH directions of eval-design failure:
+- baseline ≥ 0.95: too lax. Inspect responses; harden rubric.
+- baseline < 0.30 on a capability the 4B *should* have some seed-form
+  ability at: too strict. Inspect responses; loosen rubric (without
+  re-opening Goodhart holes).
+
+Both lessons are now backported to the skill (this session).
 
 ## Wall-time budget per iter
 **≤ 2 hours.** Per the cap #4 lesson: hypothesis-author must
-explicitly budget. With 26 prompts × 1 sample × N epochs × ~150s/step
-(asymmetric pace), 2 epochs ≈ 2h, 6 epochs ≈ 6h. We target 2h
-sessions to keep iteration fast; longer runs only when an iter
-budget is explicitly approved.
+explicitly budget. With 24 prompts × 1 sample × N epochs × ~150s/step
+(asymmetric pace), 2 epochs ≈ 2h, 6 epochs ≈ 6h.
 
 ## Checkpoints
 (every 3rd iter)

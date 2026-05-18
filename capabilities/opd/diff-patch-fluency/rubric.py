@@ -45,13 +45,61 @@ _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", re.MULTILINE)
 # strict_format — response is ONLY a unified diff
 # ---------------------------------------------------------------------------
 
+def _strip_diff_fence(s: str) -> str | None:
+    """Accept a single common LLM convention: a fenced code block
+    ```diff\\n<diff>\\n``` (with optional trailing whitespace/newlines
+    after the closing fence). Returns the inner diff if the response
+    is a fenced diff with NO content past the closing fence. Returns
+    None otherwise.
+
+    Critically, we reject "fenced diff + prose" — that's the cap #4
+    EOS-collapse Goodhart hole."""
+    s = s.strip()
+    if not s.startswith("```"):
+        return None
+    # Find the opening fence end (after ```diff\n or ```\n)
+    nl = s.find("\n")
+    if nl < 0:
+        return None
+    open_line = s[:nl].strip()
+    if open_line not in ("```diff", "```patch", "```"):
+        return None
+    body_and_after = s[nl + 1:]
+    # Find the closing fence — must be on its own line.
+    close = body_and_after.find("\n```")
+    if close < 0:
+        # Maybe the response ends with ``` (no preceding newline) — rare
+        if body_and_after.rstrip().endswith("```"):
+            return body_and_after.rstrip()[:-3].rstrip("\n")
+        return None
+    inner = body_and_after[:close]
+    tail = body_and_after[close + 4:]  # past the closing ```
+    if tail.strip():  # any non-whitespace after closing fence = prose = reject
+        return None
+    return inner
+
+
 def score_strict_format(response: str, **_kw) -> float:
-    """1.0 if response is ONLY a unified diff (no prose pre/post),
-    0.0 otherwise. The mid-grade 0.5 is reserved for "diff plus a
-    single trailing newline" — common LLM output and acceptable."""
+    """1.0 if response is a clean unified diff (with or without a
+    surrounding code fence), 0.0 otherwise.
+
+    Accepts:
+    - Bare diff: `--- a/foo\\n+++ b/foo\\n@@ ...`
+    - Fenced diff: ` ```diff\\n--- a/foo\\n... \\n``` ` (with only
+      whitespace after the closing fence).
+
+    Rejects:
+    - Prose preamble ("Here's the patch:\\n```diff\\n...```")
+    - Trailing prose after the diff or closing fence
+    - Repeated diffs / no closing fence (the cap #4 EOS-collapse mode)
+    """
     if not response or not response.strip():
         return 0.0
     s = response.strip()
+    # Try fence-wrapped first (the common LLM convention).
+    inner = _strip_diff_fence(s)
+    if inner is not None:
+        s = inner.strip()
     # Must start with a diff header
     if not (s.startswith("---") or s.startswith("diff --git")):
         return 0.0
@@ -59,12 +107,9 @@ def score_strict_format(response: str, **_kw) -> float:
     if not _HUNK_RE.search(s):
         return 0.0
     # Trailing garbage check: after the last hunk's final line, only
-    # whitespace is allowed. We approximate this by requiring the
-    # response to NOT contain prose markers AFTER the last @@.
+    # diff-body-shaped lines (space/+/-/\\) or empty allowed.
     last_hunk = list(_HUNK_RE.finditer(s))[-1]
     tail = s[last_hunk.end():]
-    # Lines starting with space, +, -, \ (no newline at end) or empty
-    # are allowed. Anything else = prose = format violation.
     for line in tail.split("\n"):
         if not line:
             continue
@@ -80,20 +125,20 @@ def score_strict_format(response: str, **_kw) -> float:
 
 def score_applies_cleanly(response: str, source: str = "", source_path: str = "src/target.txt", **_kw) -> float:
     """Run `patch --dry-run -p0` on the source + response. Returns 1.0
-    if patch succeeds, 0.0 otherwise."""
+    if patch succeeds, 0.0 otherwise. Strips fenced code-block wrapper
+    if present so `patch` sees raw diff text."""
     if not response or not response.strip():
         return 0.0
+    diff_text = _strip_diff_fence(response.strip())
+    if diff_text is None:
+        diff_text = response
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
-        # Materialize source at the expected path.
         target = tmpdir / source_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(source)
-        # Write the patch to a file.
         patch_path = tmpdir / "candidate.patch"
-        patch_path.write_text(response if response.endswith("\n") else response + "\n")
-        # Try a few -p strip values; `patch` is forgiving but we
-        # mostly care about -p0 / -p1 (the model may emit `a/X` or `X`).
+        patch_path.write_text(diff_text if diff_text.endswith("\n") else diff_text + "\n")
         for strip in ("0", "1"):
             r = subprocess.run(
                 ["patch", "--dry-run", f"-p{strip}", "-i", str(patch_path)],
@@ -112,14 +157,18 @@ def score_applies_cleanly(response: str, source: str = "", source_path: str = "s
 # ---------------------------------------------------------------------------
 
 def _apply_patch(source: str, response: str, source_path: str) -> str | None:
-    """Apply the patch; return post-patch content or None on failure."""
+    """Apply the patch; return post-patch content or None on failure.
+    Strips fenced code-block wrapper if present."""
+    diff_text = _strip_diff_fence(response.strip()) if response else None
+    if diff_text is None:
+        diff_text = response or ""
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
         target = tmpdir / source_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(source)
         patch_path = tmpdir / "candidate.patch"
-        patch_path.write_text(response if response.endswith("\n") else response + "\n")
+        patch_path.write_text(diff_text if diff_text.endswith("\n") else diff_text + "\n")
         for strip in ("0", "1"):
             r = subprocess.run(
                 ["patch", f"-p{strip}", "-i", str(patch_path), "--no-backup-if-mismatch"],
