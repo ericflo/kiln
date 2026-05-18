@@ -10955,6 +10955,9 @@ mod tests {
             grpo_cfg.lora_rank = 4;
             grpo_cfg.lora_alpha = 8.0;
             grpo_cfg.learning_rate = 0.01;
+            // Use SGD so we don't need a separate OptimizerState (AdamW
+            // requires per-Var moment buffers).
+            grpo_cfg.optimizer = Optimizer::Sgd;
             grpo_cfg.loss.echo = if echo_enabled {
                 Some(crate::EchoConfig::default())
             } else {
