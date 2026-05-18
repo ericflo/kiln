@@ -8,6 +8,7 @@ use axum::{
     routing::get,
 };
 
+use crate::batching_engine::BatchingEngineSnapshot;
 use crate::metrics::SnapshotGauges;
 use crate::state::{AppState, ModelBackend};
 use kiln_train::TrainingState;
@@ -22,6 +23,8 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         prefix_cache,
         decode_batcher_enabled,
         decode_batcher,
+        batching_engine_enabled,
+        batching_engine,
     ) = match state.backend.as_ref() {
         ModelBackend::Mock { scheduler, .. } => {
             let sched = scheduler.lock().await;
@@ -34,28 +37,43 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 sched.prefix_cache_stats(),
                 false,
                 kiln_model::DecodeBatcherStats::default(),
+                false,
+                BatchingEngineSnapshot::default(),
             )
         }
         ModelBackend::Real {
             block_manager,
             prefix_cache,
+            batching_engine,
             decode_batcher,
             ..
         } => {
-            let bm = block_manager.lock().unwrap();
-            let prefix_cache = prefix_cache.lock().unwrap().stats();
+            let (blocks_used, blocks_total) = {
+                let bm = block_manager.lock().unwrap();
+                (bm.num_used(), bm.num_blocks())
+            };
+            let prefix_cache = {
+                let cache = prefix_cache.lock().unwrap();
+                cache.stats()
+            };
             let batcher_stats = decode_batcher
                 .as_ref()
                 .map(|batcher| batcher.stats())
                 .unwrap_or_default();
+            let batching_engine_snapshot = match batching_engine {
+                Some(engine) => engine.snapshot().await.unwrap_or_default(),
+                None => BatchingEngineSnapshot::default(),
+            };
             (
                 0,
                 0,
-                bm.num_used(),
-                bm.num_blocks(),
+                blocks_used,
+                blocks_total,
                 prefix_cache,
                 decode_batcher.is_some(),
                 batcher_stats,
+                batching_engine.is_some(),
+                batching_engine_snapshot,
             )
         }
     };
@@ -97,6 +115,8 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         prompt_token_cache_entries,
         decode_batcher_enabled,
         decode_batcher,
+        batching_engine_enabled,
+        batching_engine,
         training_active,
         active_adapter,
     };

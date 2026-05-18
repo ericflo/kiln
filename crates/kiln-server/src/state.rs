@@ -880,6 +880,13 @@ impl RealPrefixCache {
             && prompt_tokens.len() >= self.min_register_tokens
     }
 
+    pub fn can_register_strict_prefix_len(&self, prompt_len: usize) -> bool {
+        self.is_enabled()
+            && prompt_len >= self.min_register_tokens
+            && self.block_size > 0
+            && prompt_len % self.block_size == 0
+    }
+
     pub fn should_lookup_prompt(&self, prompt_tokens: &[TokenId]) -> bool {
         self.should_register_prompt(prompt_tokens)
     }
