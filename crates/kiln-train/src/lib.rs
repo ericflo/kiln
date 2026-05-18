@@ -15,6 +15,7 @@ pub mod remote_teacher;
 pub mod replay;
 pub mod trainer;
 pub mod trajectory;
+pub mod trajectory_mask;
 #[cfg(feature = "vulkan")]
 pub mod vk_train;
 
