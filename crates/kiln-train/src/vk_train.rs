@@ -56,6 +56,16 @@ struct TokenizedSftExample {
 
 struct TokenizedVkGrpoCompletion {
     input_ids: Vec<u32>,
+    /// Mask of policy-gradient target positions (assistant turns).
+    action_mask: Vec<bool>,
+    /// Mask of ECHO env-CE target positions (tool-result turns).
+    /// All-false for legacy single-turn rollouts. Used by Phase 1's
+    /// vk_echo_env_ce; ignored on the GRPO-only path.
+    env_mask: Vec<bool>,
+    /// Total observation length |O| for paper §3.1 length normalization.
+    total_obs_len: usize,
+    /// Legacy alias of `action_mask`. Kept so existing call sites that
+    /// read `.completion_mask` compile unchanged during the migration.
     completion_mask: Vec<bool>,
 }
 
@@ -93,14 +103,34 @@ fn tokenize_vk_grpo_group(
 
     let mut rewards = Vec::with_capacity(group.completions.len());
     let mut full_message_batches = Vec::with_capacity(group.completions.len());
+
+    // Trajectory-aware path: when a rollout has a populated trajectory,
+    // build action/env masks via build_masks_from_trajectory. Otherwise
+    // fall back to the legacy single-string "true after the prompt"
+    // path. Parallel to the candle path in trainer.rs::tokenize_grpo_group.
+    let mut prebuilt: Vec<Option<crate::trajectory_mask::MaskedRollout>> =
+        Vec::with_capacity(group.completions.len());
+    let mask_cfg = crate::trajectory_mask::MaskConfig::default();
     for scored in &group.completions {
-        let mut full_messages = prompt_messages.clone();
-        full_messages.push(kiln_core::tokenizer::ChatMessage {
-            role: "assistant".to_string(),
-            content: scored.text.clone(),
-            ..Default::default()
-        });
-        full_message_batches.push(full_messages);
+        if scored.has_trajectory() {
+            let masked = crate::trajectory_mask::build_masks_from_trajectory(
+                &scored.trajectory,
+                &group.messages,
+                tokenizer,
+                &mask_cfg,
+            )?;
+            prebuilt.push(Some(masked));
+            full_message_batches.push(prompt_messages.clone());
+        } else {
+            let mut full_messages = prompt_messages.clone();
+            full_messages.push(kiln_core::tokenizer::ChatMessage {
+                role: "assistant".to_string(),
+                content: scored.text.clone(),
+                ..Default::default()
+            });
+            full_message_batches.push(full_messages);
+            prebuilt.push(None);
+        }
         rewards.push(scored.reward);
     }
 
@@ -111,7 +141,29 @@ fn tokenize_vk_grpo_group(
         .encode_batch(&full_texts)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut completions = Vec::with_capacity(full_id_batches.len());
-    for full_ids in full_id_batches {
+    for (full_ids, pre) in full_id_batches.into_iter().zip(prebuilt.into_iter()) {
+        if let Some(masked) = pre {
+            if masked.input_ids.len() < 2 {
+                bail!("GRPO trajectory completion tokenized to fewer than 2 tokens");
+            }
+            let total_obs_len = masked.total_obs_len();
+            let crate::trajectory_mask::MaskedRollout {
+                input_ids,
+                action_mask,
+                env_mask,
+                segment_spans: _,
+            } = masked;
+            let completion_mask = action_mask.clone();
+            completions.push(TokenizedVkGrpoCompletion {
+                input_ids,
+                action_mask,
+                env_mask,
+                total_obs_len,
+                completion_mask,
+            });
+            continue;
+        }
+
         if full_ids.len() < 2 {
             bail!("GRPO completion tokenized to fewer than 2 tokens");
         }
@@ -119,13 +171,18 @@ fn tokenize_vk_grpo_group(
             full_ids.len() >= prompt_ids.len() && full_ids[..prompt_ids.len()] == prompt_ids[..],
             "GRPO completion tokenization did not preserve prompt prefix"
         );
-        let mut mask = vec![false; full_ids.len()];
-        for slot in mask.iter_mut().skip(prompt_ids.len()) {
+        let mut action_mask = vec![false; full_ids.len()];
+        for slot in action_mask.iter_mut().skip(prompt_ids.len()) {
             *slot = true;
         }
+        let env_mask = vec![false; full_ids.len()];
+        let completion_mask = action_mask.clone();
         completions.push(TokenizedVkGrpoCompletion {
             input_ids: full_ids,
-            completion_mask: mask,
+            action_mask,
+            env_mask,
+            total_obs_len: 0,
+            completion_mask,
         });
     }
 

@@ -1682,10 +1682,34 @@ pub fn grpo_train_jsonl(
 }
 
 /// Tokenized data for a single completion within a GRPO group.
+///
+/// Carries two parallel masks:
+/// - `action_mask` — true at policy-gradient target positions (assistant
+///   tokens). Identical to the legacy `completion_mask` when the rollout
+///   has no trajectory.
+/// - `env_mask` — true at environment-observation target positions (tool
+///   results). All-false when the rollout has no trajectory or when the
+///   trajectory is single-turn Action-only.
+///
+/// The legacy `completion_mask` field is retained as an alias of
+/// `action_mask` so the existing 30+ references compile unchanged; new
+/// ECHO-aware paths read `action_mask` and `env_mask`.
 struct TokenizedGrpoCompletion {
     /// Full input_ids: prompt + completion tokens.
     input_ids: Vec<u32>,
-    /// Mask indicating which tokens are completion (true = completion token).
+    /// Mask of positions the model generated (assistant turns).
+    /// Targets of the GRPO policy-gradient objective.
+    action_mask: Vec<bool>,
+    /// Mask of positions the environment produced (tool-result turns).
+    /// Targets of ECHO's env-CE auxiliary loss. All-false for legacy
+    /// single-turn rollouts.
+    env_mask: Vec<bool>,
+    /// Total observation length |O| for paper §3.1 length normalization
+    /// in the ECHO term. Counts every Observation token regardless of the
+    /// warning_filter trim — `env_mask` may be a strict subset of |O|.
+    total_obs_len: usize,
+    /// Legacy alias of `action_mask`. Kept so existing call sites that
+    /// read `.completion_mask` compile unchanged during the migration.
     completion_mask: Vec<bool>,
 }
 
@@ -2273,6 +2297,17 @@ fn merge_grad_maps(
 }
 
 /// Tokenize a GRPO group: prompt messages + each completion text.
+///
+/// When a rollout carries a populated `trajectory` field, this routes
+/// through `crate::trajectory_mask::build_masks_from_trajectory` so the
+/// resulting `TokenizedGrpoCompletion` carries proper `action_mask` and
+/// `env_mask` separations. ECHO consumes both masks; the legacy GRPO
+/// policy-gradient path consumes `action_mask` (aliased to
+/// `completion_mask` for back-compat).
+///
+/// When a rollout has no trajectory (legacy single-string `text` only),
+/// behaviour is bit-identical to the pre-ECHO path: `action_mask` is "true
+/// after the prompt" and `env_mask` is all-false.
 fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<TokenizedGrpoGroup> {
     if group.completions.is_empty() {
         anyhow::bail!("GRPO group has no completions");
@@ -2280,7 +2315,10 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
 
     let prompt_messages = to_core_messages(&group.messages);
 
-    // Tokenize the prompt (without any assistant response)
+    // Tokenize the prompt (without any assistant response). Used by the
+    // legacy single-string path to find where the completion begins; the
+    // trajectory-aware path computes its own boundaries via the mask
+    // builder so it doesn't need this.
     let prompt_text = tokenizer
         .apply_chat_template(&prompt_messages)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -2291,16 +2329,43 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
     let mut raw_rewards = Vec::with_capacity(group.completions.len());
     let mut full_message_batches = Vec::with_capacity(group.completions.len());
 
-    for scored in &group.completions {
-        // Build full conversation: prompt + assistant completion
-        let mut full_messages = prompt_messages.clone();
-        full_messages.push(kiln_core::tokenizer::ChatMessage {
-            role: "assistant".to_string(),
-            content: scored.text.clone(),
-            ..Default::default()
-        });
+    // Pre-built per-completion (input_ids, action_mask, env_mask,
+    // total_obs_len) for the trajectory-aware path, indexed parallel to
+    // `full_message_batches`. `None` means "use the legacy single-string
+    // path for this rollout".
+    let mut prebuilt: Vec<Option<crate::trajectory_mask::MaskedRollout>> =
+        Vec::with_capacity(group.completions.len());
 
-        full_message_batches.push(full_messages);
+    let mask_cfg = crate::trajectory_mask::MaskConfig::default();
+    for scored in &group.completions {
+        if scored.has_trajectory() {
+            // Trajectory-aware path: build masks from the explicit
+            // segment structure. The MaskedRollout is the canonical
+            // output; full_message_batches gets a stub so the indices
+            // stay aligned with `full_id_batches` below.
+            let masked = crate::trajectory_mask::build_masks_from_trajectory(
+                &scored.trajectory,
+                &group.messages,
+                tokenizer,
+                &mask_cfg,
+            )?;
+            prebuilt.push(Some(masked));
+            // Placeholder; not used when prebuilt is Some.
+            full_message_batches.push(prompt_messages.clone());
+        } else {
+            // Legacy single-string path: assemble [prompt + assistant
+            // completion] and tokenize as one chat batch (cheap because
+            // we batch all completions in one apply_chat_template_batch
+            // call).
+            let mut full_messages = prompt_messages.clone();
+            full_messages.push(kiln_core::tokenizer::ChatMessage {
+                role: "assistant".to_string(),
+                content: scored.text.clone(),
+                ..Default::default()
+            });
+            full_message_batches.push(full_messages);
+            prebuilt.push(None);
+        }
         raw_rewards.push(scored.reward);
     }
 
@@ -2312,21 +2377,62 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut completions = Vec::with_capacity(full_id_batches.len());
     let mut rewards = Vec::with_capacity(full_id_batches.len());
-    for (full_ids, reward) in full_id_batches.into_iter().zip(raw_rewards.into_iter()) {
+    for ((full_ids, reward), pre) in full_id_batches
+        .into_iter()
+        .zip(raw_rewards.into_iter())
+        .zip(prebuilt.into_iter())
+    {
+        // Trajectory-aware path: prebuilt MaskedRollout overrides the
+        // batch-tokenized full_ids. The mask builder rendered the
+        // conversation itself, so its input_ids are authoritative for
+        // the trajectory case.
+        if let Some(masked) = pre {
+            if masked.input_ids.len() < 2 {
+                tracing::warn!(
+                    "skipping trajectory completion: too short ({} tokens)",
+                    masked.input_ids.len()
+                );
+                continue;
+            }
+            let total_obs_len = masked.total_obs_len();
+            let crate::trajectory_mask::MaskedRollout {
+                input_ids,
+                action_mask,
+                env_mask,
+                segment_spans: _,
+            } = masked;
+            let completion_mask = action_mask.clone();
+            completions.push(TokenizedGrpoCompletion {
+                input_ids,
+                action_mask,
+                env_mask,
+                total_obs_len,
+                completion_mask,
+            });
+            rewards.push(reward);
+            continue;
+        }
+
         if full_ids.len() < 2 {
             tracing::warn!("skipping completion: too short ({} tokens)", full_ids.len());
             continue;
         }
 
-        // Completion mask: tokens after the prompt are completion tokens
-        let mut mask = vec![false; full_ids.len()];
+        // Legacy single-string path: tokens after the prompt are
+        // action tokens; there are no observation tokens.
+        let mut action_mask = vec![false; full_ids.len()];
         for i in prompt_ids.len()..full_ids.len() {
-            mask[i] = true;
+            action_mask[i] = true;
         }
+        let env_mask = vec![false; full_ids.len()];
+        let completion_mask = action_mask.clone();
 
         completions.push(TokenizedGrpoCompletion {
             input_ids: full_ids,
-            completion_mask: mask,
+            action_mask,
+            env_mask,
+            total_obs_len: 0,
+            completion_mask,
         });
         rewards.push(reward);
     }
