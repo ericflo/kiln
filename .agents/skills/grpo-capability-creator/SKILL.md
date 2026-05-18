@@ -134,15 +134,35 @@ every group. In either case: stop and fix the rubric or the prompts.
 
 A single-seed GRPO iter at the scale described in this skill (20-40
 training prompts × 4 generations × 1 epoch) has **composite stdev of
-≥0.05** across rollout seeds. Two identical recipes — same training
+≥0.05** across **training-rollout** seeds (the rollouts that became
+the GRPO training data). Two identical recipes — same training
 prompts, same lr, same code — produced 0.92 and 0.85 in successive
 runs (pi-doctest cap iter 2 vs iter 7). The difference was solely the
 stochastic rollout draw.
+
+**Eval-rollout** seeds add a smaller layer of variance on top: in
+pi-doctest, evaluating the *same iter 5 adapter weights* against the
+same 24-task held-out set with different eval rollouts produced 0.8990
+and 0.8927 — stdev 0.003. So:
+
+- **Training-rollout variance** is the big one (±0.04-0.05). It
+  determines whether your recipe is reproducible.
+- **Eval-rollout variance** is small (±0.005-0.01). It just bounds
+  how precisely you can read a fixed adapter.
+
+When you're trying to attribute "did this recipe work" or "was this
+iter lucky," the relevant seed is the training-rollout seed. Iter 5
+of pi-doctest is the example: two eval seeds give 0.89 ± 0.003 —
+robust eval; but to ship it as +9pp uplift the strict bar is also
+a training-seed replication that reproduces ≥0.85 (not yet done at
+the time of writing; iter 5 ships on the eval-seed verification +
+the H12 filter's structural argument for stability).
 
 **Implications for the verdict gate:**
 
 - **Never declare a >+0.05 composite lift "won" from a single iter.**
   Re-run with at least one different seed before claiming victory.
+  Prefer training-seed replication; eval-seed is the cheaper fallback.
 - A single-iter regression of −0.05 to −0.10 is plausibly noise. Don't
   retire a hypothesis on one number.
 - The "real" composite of an adapter is best estimated as a mean over
