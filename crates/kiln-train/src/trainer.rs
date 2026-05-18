@@ -1773,14 +1773,18 @@ fn compute_ref_log_probs_shared_prefix(
         return Ok(Vec::new());
     }
 
-    // Derive prompt_len from the first completion's mask. tokenize_grpo_group
-    // sets mask[i] = (i >= prompt_len), so prompt_len is the first true index.
+    // Derive prompt_len from the first completion's action_mask.
+    // tokenize_grpo_group sets action_mask[i] = (i >= prompt_len) on the
+    // legacy single-string path; on the trajectory-aware path the first
+    // true index is the start of the first Action segment, which is
+    // exactly where the prompt ends and assistant generation begins —
+    // same semantics for shared-prefix routing.
     let first = &tgroup.completions[0];
     let prompt_len = first
-        .completion_mask
+        .action_mask
         .iter()
         .position(|&m| m)
-        .with_context(|| "GRPO completion has no completion tokens (mask is all false)")?;
+        .with_context(|| "GRPO completion has no action tokens (action_mask is all false)")?;
     if prompt_len < 1 {
         anyhow::bail!(
             "GRPO shared-prefix ref forward requires prompt_len >= 1, got {prompt_len}"
@@ -1791,10 +1795,10 @@ fn compute_ref_log_probs_shared_prefix(
     // prompt prefix or the shared-prefix path is unsound.
     for (idx, comp) in tgroup.completions.iter().enumerate() {
         let comp_prompt_len = comp
-            .completion_mask
+            .action_mask
             .iter()
             .position(|&m| m)
-            .with_context(|| format!("completion {idx} has no completion tokens"))?;
+            .with_context(|| format!("completion {idx} has no action tokens"))?;
         anyhow::ensure!(
             comp_prompt_len == prompt_len,
             "GRPO completions have different prompt lengths ({prompt_len} vs {comp_prompt_len} for completion {idx})"
@@ -2150,7 +2154,44 @@ fn train_tokenized_grpo_group(
             // never inspected by the math when reinforce = true.
             Tensor::zeros(num_active, DType::F32, device)?.detach()
         } else if let Some(shared) = shared_prefix_log_probs.as_ref() {
-            shared[comp_idx].clone()
+            // The shared-prefix output is one log-prob per completion-span
+            // position (predicting input_ids[prompt_len + i] for
+            // i in 0..comp_len). For trajectory-aware rollouts that
+            // include Observation segments, we need only the Action
+            // positions to match policy_log_probs's shape; for legacy
+            // single-turn rollouts the action_mask is true at every
+            // completion-span position and this filter is a no-op.
+            let span = &shared[comp_idx];
+            let comp_prompt_len = comp
+                .action_mask
+                .iter()
+                .position(|&m| m)
+                .with_context(|| {
+                    format!(
+                        "completion {comp_idx} has no action tokens (action_mask all false)"
+                    )
+                })?;
+            let active_indices: Vec<u32> = (0..span.dim(0)?)
+                .filter(|&i| {
+                    comp.action_mask
+                        .get(comp_prompt_len + i)
+                        .copied()
+                        .unwrap_or(false)
+                })
+                .map(|i| i as u32)
+                .collect();
+            if active_indices.len() == span.dim(0)? {
+                // Legacy fast-path: every span position is active. No need
+                // to allocate an indices tensor or do an index_select.
+                span.clone()
+            } else if active_indices.is_empty() {
+                // Defensive: shouldn't happen (num_active > 0 was checked
+                // above), but handle it cleanly.
+                Tensor::zeros(num_active, DType::F32, device)?.detach()
+            } else {
+                let indices = Tensor::new(active_indices.as_slice(), device)?;
+                span.index_select(&indices, 0)?.detach()
+            }
         } else {
             let mut ref_linear_state = LinearAttentionState::new(model_config, device)?;
             // BasePerStep (None ema_ref_lora) → base model (no LoRA).
