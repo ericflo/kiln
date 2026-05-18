@@ -8,6 +8,8 @@ use kiln_scheduler::PrefixCacheStats;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::batching_engine::BatchingEngineSnapshot;
+
 const LATENCY_BUCKETS_SECONDS: [f64; 13] = [
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
 ];
@@ -486,6 +488,120 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_enabled Whether the real-model batching engine actor is enabled.\n");
+        out.push_str("# TYPE kiln_batching_engine_enabled gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_enabled {}",
+                if gauges.batching_engine_enabled { 1 } else { 0 }
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_queue_depth Requests waiting inside the real-model batching engine.\n");
+        out.push_str("# TYPE kiln_batching_engine_queue_depth gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_queue_depth {}",
+                gauges.batching_engine.queue_depth
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_active_decode Requests currently active inside the real-model batching engine.\n");
+        out.push_str("# TYPE kiln_batching_engine_active_decode gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_active_decode {}",
+                gauges.batching_engine.active_decode
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_last_batch_size Last decode batch size selected by the real-model batching engine.\n");
+        out.push_str("# TYPE kiln_batching_engine_last_batch_size gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_last_batch_size {}",
+                gauges.batching_engine.last_batch_size
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_last_forward_ms Last decode forward wall time in milliseconds.\n");
+        out.push_str("# TYPE kiln_batching_engine_last_forward_ms gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_last_forward_ms {:.6}",
+                gauges.batching_engine.last_forward_ms
+            ),
+        );
+
+        out.push_str(
+            "# HELP kiln_batching_engine_last_prefill_ms Last prefill wall time in milliseconds.\n",
+        );
+        out.push_str("# TYPE kiln_batching_engine_last_prefill_ms gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_last_prefill_ms {:.6}",
+                gauges.batching_engine.last_prefill_ms
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_decode_tokens_total Decode tokens emitted by the real-model batching engine.\n");
+        out.push_str("# TYPE kiln_batching_engine_decode_tokens_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_decode_tokens_total {}",
+                gauges.batching_engine.total_decode_tokens
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_prefill_tokens_total Prompt tokens prefilled by the real-model batching engine.\n");
+        out.push_str("# TYPE kiln_batching_engine_prefill_tokens_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_prefill_tokens_total {}",
+                gauges.batching_engine.total_prefill_tokens
+            ),
+        );
+
+        out.push_str(
+            "# HELP kiln_batching_engine_errors_total Real-model batching engine errors.\n",
+        );
+        out.push_str("# TYPE kiln_batching_engine_errors_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_errors_total {}",
+                gauges.batching_engine.total_errors
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_prefix_deferred_waiting Queued requests currently held back because an active same-adapter request can become their reusable strict prefix.\n");
+        out.push_str("# TYPE kiln_batching_engine_prefix_deferred_waiting gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_prefix_deferred_waiting {}",
+                gauges.batching_engine.prefix_deferred_waiting
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_prefix_admission_deferrals_total Prefix-aware admission deferral observations in the real-model batching engine.\n");
+        out.push_str("# TYPE kiln_batching_engine_prefix_admission_deferrals_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_prefix_admission_deferrals_total {}",
+                gauges.batching_engine.prefix_admission_deferrals
+            ),
+        );
+
         // --- Scheduler ---
         out.push_str("# HELP kiln_scheduler_waiting Requests waiting to be scheduled.\n");
         out.push_str("# TYPE kiln_scheduler_waiting gauge\n");
@@ -809,6 +925,8 @@ pub struct SnapshotGauges {
     pub prompt_token_cache_entries: usize,
     pub decode_batcher_enabled: bool,
     pub decode_batcher: DecodeBatcherStats,
+    pub batching_engine_enabled: bool,
+    pub batching_engine: BatchingEngineSnapshot,
     pub training_active: u8,
     pub active_adapter: Option<String>,
 }
@@ -942,6 +1060,20 @@ mod tests {
                 runner_busy_jobs: 1,
                 failed_jobs: 0,
             },
+            batching_engine_enabled: true,
+            batching_engine: BatchingEngineSnapshot {
+                queue_depth: 2,
+                active_decode: 3,
+                last_batch_size: 3,
+                last_forward_ms: 12.5,
+                last_prefill_ms: 250.0,
+                total_decode_tokens: 128,
+                total_prefill_tokens: 8192,
+                total_errors: 1,
+                prefix_deferred_waiting: 1,
+                prefix_admission_deferrals: 4,
+                ..BatchingEngineSnapshot::default()
+            },
             training_active: 0,
             active_adapter: Some("my-adapter".to_string()),
         };
@@ -977,6 +1109,17 @@ mod tests {
         assert!(output.contains("kiln_prompt_token_cache_lookups_total{result=\"hit\"} 5"));
         assert!(output.contains("kiln_prompt_token_cache_lookups_total{result=\"miss\"} 2"));
         assert!(output.contains("kiln_prompt_token_cache_entries 4"));
+        assert!(output.contains("kiln_batching_engine_enabled 1"));
+        assert!(output.contains("kiln_batching_engine_queue_depth 2"));
+        assert!(output.contains("kiln_batching_engine_active_decode 3"));
+        assert!(output.contains("kiln_batching_engine_last_batch_size 3"));
+        assert!(output.contains("kiln_batching_engine_last_forward_ms 12.500000"));
+        assert!(output.contains("kiln_batching_engine_last_prefill_ms 250.000000"));
+        assert!(output.contains("kiln_batching_engine_decode_tokens_total 128"));
+        assert!(output.contains("kiln_batching_engine_prefill_tokens_total 8192"));
+        assert!(output.contains("kiln_batching_engine_errors_total 1"));
+        assert!(output.contains("kiln_batching_engine_prefix_deferred_waiting 1"));
+        assert!(output.contains("kiln_batching_engine_prefix_admission_deferrals_total 4"));
         assert!(output.contains("kiln_active_adapter{name=\"my-adapter\"} 1"));
         assert!(output.contains(r#"kiln_request_duration_seconds_bucket{le="0.5"} 1"#));
         assert!(output.contains(r#"kiln_request_duration_seconds_bucket{le="+Inf"} 1"#));
@@ -1014,6 +1157,8 @@ mod tests {
             prompt_token_cache_entries: 0,
             decode_batcher_enabled: false,
             decode_batcher: DecodeBatcherStats::default(),
+            batching_engine_enabled: false,
+            batching_engine: BatchingEngineSnapshot::default(),
             training_active: 0,
             active_adapter: None,
         };

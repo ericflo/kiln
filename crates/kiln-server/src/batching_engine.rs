@@ -27,6 +27,7 @@ use crate::state::{GpuCoordinationLock, RealPrefixCache};
 const DEFAULT_ENGINE_CHANNEL: usize = 1024;
 const DEFAULT_RESPONSE_CHANNEL: usize = 64;
 const DEFAULT_MAX_DECODE_BATCH: usize = 8;
+const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
 
 fn blocks_needed_for_tokens(num_tokens: usize, block_size: usize) -> usize {
     num_tokens.div_ceil(block_size)
@@ -44,6 +45,16 @@ fn env_max_decode_batch() -> usize {
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(DEFAULT_MAX_DECODE_BATCH)
+}
+
+fn env_prefix_aware_admission() -> bool {
+    match std::env::var("KILN_BATCH_PREFIX_AWARE_ADMISSION") {
+        Ok(raw) => !matches!(
+            raw.trim(),
+            "0" | "false" | "FALSE" | "off" | "OFF" | "no" | "NO"
+        ),
+        Err(_) => DEFAULT_PREFIX_AWARE_ADMISSION,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +98,8 @@ pub struct BatchingEngineSnapshot {
     pub total_prefill_tokens: u64,
     pub total_errors: u64,
     pub adapter_groups_waiting: usize,
+    pub prefix_deferred_waiting: usize,
+    pub prefix_admission_deferrals: u64,
 }
 
 pub enum DecodeSlot {
@@ -140,6 +153,9 @@ fn collect_ready_decode_indices(
 
 pub trait DecodeForward: Send + Sync + 'static {
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot>;
+    fn can_reuse_as_strict_prefix(&self, _prompt_token_len: usize) -> bool {
+        false
+    }
     fn forward_decode(
         &self,
         slots: &mut [&mut DecodeSlot],
@@ -296,6 +312,13 @@ impl RealDecodeForward {
 }
 
 impl DecodeForward for RealDecodeForward {
+    fn can_reuse_as_strict_prefix(&self, prompt_token_len: usize) -> bool {
+        self.prefix_cache
+            .lock()
+            .map(|cache| cache.can_register_strict_prefix_len(prompt_token_len))
+            .unwrap_or(false)
+    }
+
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
         let _gpu_guard = self.gpu_lock.read().unwrap();
         let hit = {
@@ -492,8 +515,21 @@ impl BatchingEngineHandle {
     }
 
     pub fn start_with_options(forward: Arc<dyn DecodeForward>, max_decode_batch: usize) -> Self {
+        Self::start_with_policy(
+            forward,
+            max_decode_batch.max(1),
+            env_prefix_aware_admission(),
+        )
+    }
+
+    fn start_with_policy(
+        forward: Arc<dyn DecodeForward>,
+        max_decode_batch: usize,
+        prefix_aware_admission: bool,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
-        let actor = BatchingEngineActor::new(rx, forward, max_decode_batch.max(1));
+        let actor =
+            BatchingEngineActor::new(rx, forward, max_decode_batch.max(1), prefix_aware_admission);
         thread::Builder::new()
             .name("kiln-batching-engine".to_string())
             .spawn(move || actor.run())
@@ -586,6 +622,7 @@ struct BatchingEngineActor {
     accepting: bool,
     stopped: bool,
     max_decode_batch: usize,
+    prefix_aware_admission: bool,
     snapshot: BatchingEngineSnapshot,
 }
 
@@ -594,6 +631,7 @@ impl BatchingEngineActor {
         rx: mpsc::Receiver<EngineCommand>,
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,
+        prefix_aware_admission: bool,
     ) -> Self {
         Self {
             rx,
@@ -603,6 +641,7 @@ impl BatchingEngineActor {
             accepting: true,
             stopped: false,
             max_decode_batch,
+            prefix_aware_admission,
             snapshot: BatchingEngineSnapshot {
                 accepting: true,
                 ..BatchingEngineSnapshot::default()
@@ -704,10 +743,25 @@ impl BatchingEngineActor {
     }
 
     fn admit_waiting(&mut self) {
-        while self.active.len() < self.max_decode_batch {
-            let Some(queued) = self.waiting.pop_front() else {
+        while self.active.len() < self.max_decode_batch && !self.waiting.is_empty() {
+            let Some(waiting_idx) = self
+                .waiting
+                .iter()
+                .position(|queued| !self.should_defer_for_active_prefix(queued))
+            else {
+                self.snapshot.prefix_admission_deferrals =
+                    self.snapshot.prefix_admission_deferrals.saturating_add(
+                        self.waiting
+                            .iter()
+                            .filter(|queued| self.should_defer_for_active_prefix(queued))
+                            .count() as u64,
+                    );
                 break;
             };
+            let queued = self
+                .waiting
+                .remove(waiting_idx)
+                .expect("waiting index selected from VecDeque");
             let started = Instant::now();
             match self.forward.prepare_request(&queued.req) {
                 Ok(slot) => {
@@ -727,6 +781,22 @@ impl BatchingEngineActor {
                 }
             }
         }
+        self.refresh_snapshot();
+    }
+
+    fn should_defer_for_active_prefix(&self, queued: &QueuedRequest) -> bool {
+        self.prefix_aware_admission
+            && self.active.iter().any(|active| {
+                active.req.adapter == queued.req.adapter
+                    && active.req.prompt_tokens.len() < queued.req.prompt_tokens.len()
+                    && queued
+                        .req
+                        .prompt_tokens
+                        .starts_with(&active.req.prompt_tokens)
+                    && self
+                        .forward
+                        .can_reuse_as_strict_prefix(active.req.prompt_tokens.len())
+            })
     }
 
     fn run_decode_batch(&mut self) {
@@ -904,6 +974,11 @@ impl BatchingEngineActor {
         self.snapshot.queue_depth = self.waiting.len();
         self.snapshot.active_decode = self.active.len();
         self.snapshot.adapter_groups_waiting = usize::from(!self.waiting.is_empty());
+        self.snapshot.prefix_deferred_waiting = self
+            .waiting
+            .iter()
+            .filter(|queued| self.should_defer_for_active_prefix(queued))
+            .count();
     }
 }
 
@@ -917,9 +992,14 @@ mod tests {
     #[derive(Default)]
     struct MockForward {
         calls: StdMutex<Vec<Vec<TokenId>>>,
+        reusable_prefixes: bool,
     }
 
     impl DecodeForward for MockForward {
+        fn can_reuse_as_strict_prefix(&self, prompt_token_len: usize) -> bool {
+            self.reusable_prefixes && prompt_token_len > 0
+        }
+
         fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
             Ok(DecodeSlot::Mock {
                 next_token: req.prompt_tokens.last().copied().unwrap_or_default(),
@@ -980,9 +1060,13 @@ mod tests {
     }
 
     fn request(prompt_last: TokenId, max_tokens: usize) -> EngineRequest {
+        request_with_tokens(vec![1, prompt_last], max_tokens)
+    }
+
+    fn request_with_tokens(prompt_tokens: Vec<TokenId>, max_tokens: usize) -> EngineRequest {
         EngineRequest {
             request_id: Uuid::new_v4(),
-            prompt_tokens: vec![1, prompt_last],
+            prompt_tokens,
             sampling: SamplingParams {
                 max_tokens,
                 ..SamplingParams::default()
@@ -1109,6 +1193,48 @@ mod tests {
 
         let calls = forward.calls.lock().unwrap().clone();
         assert_eq!(calls, vec![vec![101, 202]]);
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prefix_aware_admission_defers_strict_descendants_but_admits_independent_rows() {
+        let forward = Arc::new(MockForward {
+            reusable_prefixes: true,
+            ..MockForward::default()
+        });
+        let handle = BatchingEngineHandle::start_with_policy(forward.clone(), 8, true);
+
+        let mut prefix_rx = handle
+            .enqueue(request_with_tokens(vec![1, 2], 1))
+            .await
+            .unwrap();
+        let mut descendant_rx = handle
+            .enqueue(request_with_tokens(vec![1, 2, 3], 1))
+            .await
+            .unwrap();
+        let mut independent_rx = handle
+            .enqueue(request_with_tokens(vec![9, 9], 1))
+            .await
+            .unwrap();
+
+        assert_eq!(prefix_rx.recv().await, Some(EngineEvent::Token(12)));
+        assert!(matches!(
+            prefix_rx.recv().await,
+            Some(EngineEvent::Done { .. })
+        ));
+        assert_eq!(independent_rx.recv().await, Some(EngineEvent::Token(19)));
+        assert!(matches!(
+            independent_rx.recv().await,
+            Some(EngineEvent::Done { .. })
+        ));
+        assert_eq!(descendant_rx.recv().await, Some(EngineEvent::Token(13)));
+        assert!(matches!(
+            descendant_rx.recv().await,
+            Some(EngineEvent::Done { .. })
+        ));
+
+        let calls = forward.calls.lock().unwrap().clone();
+        assert_eq!(calls, vec![vec![2, 9], vec![3]]);
         handle.stop().await.unwrap();
     }
 
