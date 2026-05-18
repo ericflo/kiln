@@ -1,0 +1,16 @@
+{
+  "mode": "train",
+  "adapter": "",
+  "n_tasks": 20,
+  "n_rollouts": 80,
+  "n_generations": 4,
+  "mean_composite": 0.7262890625,
+  "p50_composite": 1.0,
+  "p05_composite": 0.0,
+  "p95_composite": 1.0,
+  "mean_wall_clock_s": 57.9621561050415,
+  "rollouts_nonzero": 60,
+  "rollouts_zero": 20,
+  "wall_clock_s_total": 2330.7752890586853,
+  "mean_within_group_variance": 0.030259368896484375
+}
