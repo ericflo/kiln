@@ -44,6 +44,8 @@ use crate::state::{
 const PROMPT_PREVIEW_MAX_CHARS: usize = 120;
 /// Max characters retained in the completion preview for the recent-requests panel.
 const COMPLETION_PREVIEW_MAX_CHARS: usize = 200;
+const QWEN_TOOL_CALL_OPEN_TAG: &str = "<tool_call>";
+const QWEN_TOOL_CALL_CLOSE_TAG: &str = "</tool_call>";
 
 fn observe_post_prefill_vram(memory_budget: &std::sync::Arc<crate::state::GpuMemoryBudget>) {
     if let Some(bytes) = kiln_core::vram::detect_used_vram_bytes() {
@@ -465,6 +467,20 @@ impl AssistantOutputParts {
     }
 }
 
+struct PrefillProgressGuard(CancelHandle);
+
+impl PrefillProgressGuard {
+    fn new(cancel: CancelHandle) -> Self {
+        Self(cancel)
+    }
+}
+
+impl Drop for PrefillProgressGuard {
+    fn drop(&mut self) {
+        self.0.clear_prefill_progress();
+    }
+}
+
 fn tool_call_parsing_allowed(
     tools: Option<&[serde_json::Value]>,
     tool_choice: Option<&serde_json::Value>,
@@ -568,7 +584,7 @@ fn assistant_output_from_split_parts_with_tool_parsing(
 }
 
 fn content_before_qwen_tool_call(text: &str) -> Option<String> {
-    let idx = text.find("<tool_call>")?;
+    let idx = text.find(QWEN_TOOL_CALL_OPEN_TAG)?;
     Some(text[..idx].trim_end().to_string())
 }
 
@@ -576,18 +592,18 @@ fn strip_qwen_tool_call_blocks(text: &str) -> String {
     let mut out = String::new();
     let mut cursor = 0usize;
     while cursor < text.len() {
-        let Some(open_rel) = text[cursor..].find("<tool_call>") else {
+        let Some(open_rel) = text[cursor..].find(QWEN_TOOL_CALL_OPEN_TAG) else {
             out.push_str(&text[cursor..]);
             break;
         };
         let open_abs = cursor + open_rel;
         out.push_str(&text[cursor..open_abs]);
-        let body_start = open_abs + "<tool_call>".len();
-        let Some(close_rel) = text[body_start..].find("</tool_call>") else {
+        let body_start = open_abs + QWEN_TOOL_CALL_OPEN_TAG.len();
+        let Some(close_rel) = text[body_start..].find(QWEN_TOOL_CALL_CLOSE_TAG) else {
             out.push_str(&text[open_abs..]);
             break;
         };
-        cursor = body_start + close_rel + "</tool_call>".len();
+        cursor = body_start + close_rel + QWEN_TOOL_CALL_CLOSE_TAG.len();
     }
     out.trim_end().to_string()
 }
@@ -1295,6 +1311,20 @@ fn normalized_stop_for_cache(stop: &[String]) -> Vec<String> {
 
 fn normalized_stop_for_generation(stop: Option<&[String]>) -> Vec<String> {
     stop.map(normalized_stop_for_cache).unwrap_or_default()
+}
+
+fn stop_sequences_for_chat_generation(req: &ChatCompletionRequest) -> Vec<String> {
+    let mut stop = normalized_stop_for_generation(req.stop.as_deref());
+    if request_allows_tool_call_parsing(req)
+        && !stop.iter().any(|value| {
+            value.is_empty()
+                || value.as_str() == QWEN_TOOL_CALL_CLOSE_TAG
+                || QWEN_TOOL_CALL_CLOSE_TAG.contains(value.as_str())
+        })
+    {
+        stop.push(QWEN_TOOL_CALL_CLOSE_TAG.to_string());
+    }
+    stop
 }
 
 fn normalized_stop_option_for_synthetic_request(stop: Option<&[String]>) -> Option<Vec<String>> {
@@ -3510,6 +3540,7 @@ async fn generate_real_batched_streaming(
         let id = completion_id.clone();
         let model = model.clone();
         async move {
+            let _prefill_progress_guard = PrefillProgressGuard::new(cancel.clone());
             let mut events = events;
             let mut completion_buf = String::new();
             let mut reasoning_buf = String::new();
@@ -5348,7 +5379,7 @@ fn batch_response_from_cached_chat_choices(
                 completion_index,
                 text: completion.text,
                 reasoning_content: completion.reasoning_content,
-                tool_calls: None,
+                tool_calls: completion.tool_calls,
                 finish_reason: completion.finish_reason,
                 usage: Usage {
                     prompt_tokens: prompt_tokens_per_choice,
@@ -5406,7 +5437,7 @@ fn batch_response_from_cached_chat_choice_groups(
                 completion_index,
                 text: completion.text,
                 reasoning_content: completion.reasoning_content,
-                tool_calls: None,
+                tool_calls: completion.tool_calls,
                 finish_reason: completion.finish_reason,
                 usage: Usage {
                     prompt_tokens: cached.prompt_tokens,
@@ -5457,7 +5488,7 @@ fn batch_response_from_cached_chat_requests(
                 completion_index: 0,
                 text: completion.text,
                 reasoning_content: completion.reasoning_content,
-                tool_calls: None,
+                tool_calls: completion.tool_calls,
                 finish_reason: completion.finish_reason,
                 usage: Usage {
                     prompt_tokens: cached.prompt_tokens,
@@ -6495,7 +6526,7 @@ fn sampling_params_for_chat_request(req: &ChatCompletionRequest) -> SamplingPara
         base.repetition_penalty = rp;
     }
     base.max_tokens = chat_request_max_tokens(req);
-    base.stop = normalized_stop_for_generation(req.stop.as_deref());
+    base.stop = stop_sequences_for_chat_generation(req);
     base.seed = req.seed;
     base
 }
@@ -7465,6 +7496,58 @@ mod tests {
     }
 
     #[test]
+    fn tool_requests_stop_generation_at_qwen_tool_call_close() {
+        let req = parse_request(
+            r#"{
+                "messages":[{"role":"user","content":"list files"}],
+                "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],
+                "stop":["omega","alpha","omega"]
+            }"#,
+        );
+        let sampling = sampling_params_for_chat_request(&req);
+
+        assert_eq!(
+            sampling.stop,
+            vec![
+                "alpha".to_string(),
+                "omega".to_string(),
+                QWEN_TOOL_CALL_CLOSE_TAG.to_string(),
+            ],
+            "tools-capable requests should stop as soon as a complete Qwen XML tool call is generated"
+        );
+    }
+
+    #[test]
+    fn qwen_tool_stop_is_not_added_when_tools_are_disabled() {
+        let tool_choice_none = parse_request(
+            r#"{
+                "messages":[{"role":"user","content":"say hi"}],
+                "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],
+                "tool_choice":"none"
+            }"#,
+        );
+        assert!(
+            !sampling_params_for_chat_request(&tool_choice_none)
+                .stop
+                .contains(&QWEN_TOOL_CALL_CLOSE_TAG.to_string()),
+            "tool_choice=none should keep model output text-shaped"
+        );
+
+        let explicit_shorter_stop = parse_request(
+            r#"{
+                "messages":[{"role":"user","content":"say hi"}],
+                "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],
+                "stop":"tool_call"
+            }"#,
+        );
+        assert_eq!(
+            sampling_params_for_chat_request(&explicit_shorter_stop).stop,
+            vec!["tool_call".to_string()],
+            "user-supplied stops that would fire inside the close tag should remain authoritative"
+        );
+    }
+
+    #[test]
     fn qwen_xml_tool_call_after_reasoning_is_not_leaked_as_content() {
         let req = parse_request(
             r#"{
@@ -7597,6 +7680,56 @@ mod tests {
                 .completions[0]
                 .tool_calls
                 .as_ref(),
+            Some(&tool_calls)
+        );
+    }
+
+    #[test]
+    fn batch_cached_chat_layers_preserve_tool_calls() {
+        let state = make_batch_test_state();
+        let req = parse_batch_request(
+            r#"{
+                "prompts":[[{"role":"user","content":"inspect"}]],
+                "n":1,
+                "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]
+            }"#,
+        );
+        let tool_calls = vec![serde_json::json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": "{\"command\":\"pwd\"}"}
+        })];
+        let completion = DeterministicCompletionCacheValue {
+            text: String::new(),
+            reasoning_content: Some("Need the working directory.".to_string()),
+            tool_calls: Some(tool_calls.clone()),
+            finish_reason: "tool_calls".to_string(),
+            completion_tokens: 7,
+        };
+
+        let from_choices = batch_response_from_cached_chat_choices(
+            &state,
+            &req,
+            DeterministicChatChoicesCacheValue {
+                prompt_tokens: 11,
+                completions: vec![completion.clone()],
+            },
+        );
+        assert_eq!(
+            from_choices.completions[0].tool_calls.as_ref(),
+            Some(&tool_calls)
+        );
+
+        let from_requests = batch_response_from_cached_chat_requests(
+            &state,
+            &req,
+            vec![DeterministicChatRequestCacheValue {
+                prompt_tokens: 11,
+                completion,
+            }],
+        );
+        assert_eq!(
+            from_requests.completions[0].tool_calls.as_ref(),
             Some(&tool_calls)
         );
     }

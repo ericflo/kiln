@@ -3530,17 +3530,18 @@ fn marlin_bf16_drop_disabled() -> bool {
 // Dispatch can be forced on/off via `KILN_STREAMING_PREFILL=1|0`. Without an
 // override, CUDA and Metal enable streaming for long prompts where tiled
 // prefill materially reduces peak activation memory. When enabled, prefill is
-// performed as a sequence of fixed-size tiles (default 8192 tokens) so the
-// per-layer materialized GDN intermediates only ever cover one tile at a time.
-// The recurrent state in `LinearAttentionState` already provides the O(1)
-// hand-off required for bit-exact agreement with the monolithic path.
+// performed as a sequence of fixed-size tiles so the per-layer materialized GDN
+// intermediates only ever cover one tile at a time. The recurrent state in
+// `LinearAttentionState` already provides the O(1) hand-off required for
+// bit-exact agreement with the monolithic path.
 // ---------------------------------------------------------------------------
 
-/// Default tile size for streaming prefill, in tokens. Must be a multiple of
-/// `GDN_CHUNK_SIZE` (64) so the chunkwise kernel never sees a partial tail
-/// chunk from a tile boundary.
+/// Fallback tile size for explicit streaming prefill on devices without a
+/// device-specific default. Must be a multiple of `GDN_CHUNK_SIZE` (64) so the
+/// chunkwise kernel never sees a partial tail chunk from a tile boundary.
 pub const STREAMING_PREFILL_DEFAULT_TILE: usize = 8192;
-pub const STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD: usize = 8192;
+pub const STREAMING_PREFILL_CUDA_DEFAULT_TILE: usize = 2048;
+pub const STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD: usize = 2048;
 pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 2048;
 pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 2048;
 const PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS: usize = 1024;
@@ -3634,10 +3635,10 @@ pub fn streaming_tile_tokens() -> usize {
 /// smaller tile because it measured faster for long desktop TTFT.
 pub fn streaming_tile_tokens_for(device: &Device) -> usize {
     streaming_tile_tokens_env_override().unwrap_or_else(|| {
-        if matches!(device, Device::Metal(_)) {
-            STREAMING_PREFILL_METAL_DEFAULT_TILE
-        } else {
-            STREAMING_PREFILL_DEFAULT_TILE
+        match streaming_prefill_device_kind(device) {
+            StreamingPrefillDeviceKind::Cuda => STREAMING_PREFILL_CUDA_DEFAULT_TILE,
+            StreamingPrefillDeviceKind::Metal => STREAMING_PREFILL_METAL_DEFAULT_TILE,
+            StreamingPrefillDeviceKind::Cpu => STREAMING_PREFILL_DEFAULT_TILE,
         }
     })
 }
