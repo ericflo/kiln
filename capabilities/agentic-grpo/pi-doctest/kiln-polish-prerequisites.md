@@ -9,7 +9,19 @@ turn so the existing `tokenize_grpo_group` machinery works without
 change. The list below is the path forward for any cap whose rollouts
 exceed one assistant turn.
 
-## #1 — Per-turn assistant-token masking
+## #1 — Per-turn assistant-token masking — ✅ RESOLVED (ECHO Phase 0)
+
+> **Resolved 2026-05-18.** The trajectory schema and masking primitive
+> ECHO needed (`crates/kiln-train/src/trajectory.rs`,
+> `crates/kiln-train/src/trajectory_mask.rs`) gives `tokenize_grpo_group`
+> a path that consumes a `trajectory: Vec<TurnSegment>` field on each
+> rollout and emits separate `action_mask` (assistant tokens — policy
+> gradient targets) and `env_mask` (tool-result tokens — ECHO env-CE
+> targets). The shared `capabilities/agentic-grpo/lib/pi_trajectory.py`
+> module converts pi's session JSONL into the canonical schema. See
+> `docs/plans/echo-integration-plan.md` for the full design.
+
+### Historical record
 
 **Symptom (today).** `tokenize_grpo_group` (`crates/kiln-train/src/trainer.rs`)
 builds a single-message `assistant` turn from `ScoredCompletion.text`.
