@@ -196,15 +196,32 @@ counter for each:
   conversations sampled from `trajectories.db`, length-stratified
   (30K-50K, 50K-80K, 80K-120K tokens). Pi-serialized via
   `task_scaffold.py` so the rollout input matches what pi would send
-  the model in production.
+  the model in production. **No truncation** — pi compaction is
+  defined as "summarize this long conversation"; truncating the input
+  defeats the task.
 
 - **Eval tasks** (`datasets/eval.tasks.jsonl`): ~24 held-out
   conversations from the trajectories `val` and `test` splits — no
-  overlap with training tasks. Same length stratification.
+  overlap with training tasks. Same length stratification, same
+  no-truncation rule.
 
 Each task carries a precomputed `ground_truth` payload with the
 file paths, identifiers, error messages, and first-user-goal tokens
 extracted by `extract_ground_truth.py` (run once per task).
+
+### Note on iter 1's truncation experiment
+
+In iter 1 we briefly explored truncating source_text to make GRPO
+training tractable (the full 50K-token serialized inputs proved too
+slow for `cuda_grpo_ablation` within reasonable pod TTLs).
+**That was the wrong direction** — truncating the input defines a
+different task ("micro-compaction") that wouldn't generalize to pi's
+real use case (compact a full long session). The training-too-slow
+finding is kept as `kiln-polish.jsonl#training-too-slow-on-long-context-grpo`
+so it's tractable to fix kiln-train rather than rewrite the cap.
+
+`truncate_corpus.py` is kept in the tree as a diagnostic tool, not as
+part of the canonical training recipe.
 
 ## Calibration
 
