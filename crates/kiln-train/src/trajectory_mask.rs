@@ -474,23 +474,32 @@ mod tests {
             r#"{{"version": "1.0", "model": {{"type": "BPE", "vocab": {}, "merges": []}}}}"#,
             vocab
         );
-        let template = r#"{%- for message in messages -%}
-{%- if message.role == 'tool' -%}
-{%- if loop.previtem is undefined or loop.previtem.role != 'tool' -%}
-<|im_start|>user
-{%- endif -%}
-
-<tool_response>
+        // Explicit Jinja with no whitespace control — `{{- ... -}}` would
+        // strip newlines and make the test layout unpredictable. The
+        // tradeoff is that we emit extra newlines vs the real Qwen
+        // template; the byte-search code accepts both since it locates
+        // anchors by string-find rather than position.
+        //
+        // Per-iteration output for non-tool roles:
+        //     <|im_start|>{role}\n{content}<|im_end|>\n
+        // Per-iteration output for tool roles:
+        //     <|im_start|>user\n<tool_response>\n{content}\n</tool_response><|im_end|>\n
+        //
+        // For two consecutive tool turns (no intervening non-tool), the
+        // wrapping <|im_start|>user...<|im_end|> envelope only opens on
+        // the first and closes on the last — matching real Qwen.
+        let template = "{% for message in messages -%}\
+{% if message.role == 'tool' %}\
+{% if loop.previtem is undefined or loop.previtem.role != 'tool' %}<|im_start|>user
+{% endif %}<tool_response>
 {{ message.content }}
-</tool_response>
-{%- if loop.last or loop.nextitem.role != 'tool' -%}
-<|im_end|>
-{% endif -%}
-{%- else -%}
-<|im_start|>{{ message.role }}
+</tool_response>\
+{% if loop.last or loop.nextitem.role != 'tool' %}<|im_end|>
+{% endif %}\
+{% else %}<|im_start|>{{ message.role }}
 {{ message.content }}<|im_end|>
-{% endif -%}
-{%- endfor -%}"#;
+{% endif %}\
+{% endfor %}";
         KilnTokenizer::from_bytes(json.as_bytes())
             .unwrap()
             .with_chat_template(template.to_string())
@@ -636,21 +645,33 @@ mod tests {
         let on_cfg = MaskConfig::default();
         let on = build_masks_from_trajectory(&traj, &[], &tok, &on_cfg).unwrap();
         let n_env_on = on.env_mask.iter().filter(|&&b| b).count();
-        // Should be raw.len() - warning_prefix_len = 53 - 16 = 37 tokens.
+        // Warning_filter trims off the warning prefix; remaining bytes are
+        // raw.len() - warning_prefix_len. Tokenizer maps each byte to one
+        // token in this fixture, so the count is exactly that.
         assert_eq!(n_env_on, raw.len() - warning_prefix_len);
 
-        // Now disable warning_filter; should include the full obs content.
+        // Now disable warning_filter and verify the env_mask grows by
+        // exactly the warning prefix length.
         let off_cfg = MaskConfig {
             warning_filter: false,
             env_mask_mode: EnvMaskMode::EnvOnly,
         };
         let off = build_masks_from_trajectory(&traj, &[], &tok, &off_cfg).unwrap();
         let n_env_off = off.env_mask.iter().filter(|&&b| b).count();
-        assert_eq!(n_env_off, raw.len());
+        assert!(
+            n_env_off > n_env_on,
+            "warning_filter=false must mark more env tokens than warning_filter=true (off={n_env_off}, on={n_env_on})"
+        );
+        assert_eq!(
+            n_env_off - n_env_on,
+            warning_prefix_len,
+            "the delta between off and on must equal the warning_prefix_len"
+        );
 
         // total_obs_len doesn't change with warning_filter — it's |O|, not |O'|.
         assert_eq!(on.total_obs_len(), off.total_obs_len());
-        assert_eq!(on.total_obs_len(), raw.len());
+        // total_obs_len equals the off-case env count (which covers the full content).
+        assert_eq!(on.total_obs_len(), n_env_off);
     }
 
     #[test]
