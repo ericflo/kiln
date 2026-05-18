@@ -40,6 +40,12 @@ use kiln_model::forward::GpuWeights;
 #[cfg(feature = "cuda")]
 use kiln_model::generate::{FinishReason, ModelRunner};
 #[cfg(feature = "cuda")]
+use kiln_eval::result::EvalOutcomeKind;
+#[cfg(feature = "cuda")]
+use kiln_eval::scorers::{NoopJudgeRunner, Scorer, score_completion};
+#[cfg(feature = "cuda")]
+use kiln_eval::suite::{EvalChatMessage, EvalExample};
+#[cfg(feature = "cuda")]
 use kiln_train::{ChatMessage, GrpoGroup};
 
 #[cfg(feature = "cuda")]
@@ -55,6 +61,8 @@ struct Args {
     top_p: f32,
     seed_base: u64,
     label: String,
+    score_doctests: bool,
+    doctest_timeout_seconds: f32,
 }
 
 #[cfg(feature = "cuda")]
@@ -70,6 +78,8 @@ impl Args {
         let mut top_p: f32 = 0.95;
         let mut seed_base: u64 = 0xC0DE_BEEF;
         let mut label = "eval".to_string();
+        let mut score_doctests = false;
+        let mut doctest_timeout_seconds: f32 = 5.0;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -125,6 +135,14 @@ impl Args {
                         .context("--seed must be u64")?
                 }
                 "--label" => label = args.next().context("--label needs value")?,
+                "--score-doctests" => score_doctests = true,
+                "--doctest-timeout" => {
+                    doctest_timeout_seconds = args
+                        .next()
+                        .context("--doctest-timeout needs value")?
+                        .parse()
+                        .context("--doctest-timeout must be a float")?
+                }
                 "--help" | "-h" => {
                     println!(
                         "cuda_grpo_behavioral_eval --data <jsonl> --model <dir> \
@@ -148,6 +166,8 @@ impl Args {
             top_p,
             seed_base,
             label,
+            score_doctests,
+            doctest_timeout_seconds,
         })
     }
 }
@@ -306,10 +326,26 @@ fn main() -> Result<()> {
     let mut all_rep: Vec<f32> = Vec::new();
     let mut truncated = 0usize;
     let mut per_prompt_diversity: Vec<f32> = Vec::new();
+    let mut total_doctest_attempts = 0usize;
+    let mut total_doctest_passes = 0usize;
+    let mut total_doctest_invalid = 0usize;
+    let mut prompts_with_doctests = 0usize;
+    let mut prompts_with_any_pass = 0usize;
+    let mut prompts_with_all_pass = 0usize;
+    let doctest_scorer = if args.score_doctests {
+        Some(Scorer::PythonDoctest {
+            timeout_seconds: args.doctest_timeout_seconds,
+            python_bin: None,
+        })
+    } else {
+        None
+    };
+    let judge_runner = NoopJudgeRunner;
 
     for (prompt_idx, group) in groups.iter().enumerate() {
         let pt = prompt_text(group, &tokenizer)?;
         let mut samples_tokens: Vec<Vec<u32>> = Vec::with_capacity(args.num_samples);
+        let mut sample_texts: Vec<String> = Vec::with_capacity(args.num_samples);
         for s in 0..args.num_samples {
             let mut sp = SamplingParams::default();
             sp.temperature = args.temperature;
@@ -330,6 +366,7 @@ fn main() -> Result<()> {
             all_lengths.push(len);
             all_rep.push(rep);
             samples_tokens.push(out.token_ids);
+            sample_texts.push(out.text.clone());
             println!(
                 "{{\"label\":\"{}\",\"prompt\":{},\"sample\":{},\"len\":{},\"rep\":{:.6},\"truncated\":{}}}",
                 args.label, prompt_idx, s, len, rep, truncated_here
@@ -341,6 +378,79 @@ fn main() -> Result<()> {
             "{{\"label\":\"{}\",\"prompt\":{},\"mean_bigram_jaccard\":{:.6}}}",
             args.label, prompt_idx, div
         );
+
+        // Phase 3+ — per-completion doctest scoring. Each sample gets a
+        // pass/fail; we also derive per-prompt pass@1 (mean) and pass@k
+        // (any) aggregates over the N samples.
+        if let Some(scorer) = doctest_scorer.as_ref() {
+            let example = EvalExample {
+                id: Some(format!("group_{prompt_idx}")),
+                messages: group
+                    .messages
+                    .iter()
+                    .map(|m| EvalChatMessage::new(m.role.clone(), m.content.clone()))
+                    .collect(),
+                target: None,
+                aliases: Vec::new(),
+                tags: Vec::new(),
+                metadata: None,
+                scorer: None,
+                generation: None,
+                weight: 1.0,
+                tools: None,
+            };
+            let mut prompt_attempts = 0usize;
+            let mut prompt_passes = 0usize;
+            let mut prompt_invalid = 0usize;
+            for (s, text) in sample_texts.iter().enumerate() {
+                let outcome = score_completion(scorer, &example, text, &judge_runner)
+                    .with_context(|| format!("score doctest prompt={prompt_idx} sample={s}"))?;
+                let kind_str = match outcome.kind {
+                    EvalOutcomeKind::Pass => "pass",
+                    EvalOutcomeKind::Fail => "fail",
+                    EvalOutcomeKind::Invalid => "invalid",
+                    EvalOutcomeKind::Error => "error",
+                };
+                if matches!(outcome.kind, EvalOutcomeKind::Invalid) {
+                    prompt_invalid += 1;
+                } else {
+                    prompt_attempts += 1;
+                    if matches!(outcome.kind, EvalOutcomeKind::Pass) {
+                        prompt_passes += 1;
+                    }
+                }
+                println!(
+                    "{{\"label\":\"{}\",\"prompt\":{},\"sample\":{},\"doctest_kind\":\"{}\",\"doctest_score\":{:.4}}}",
+                    args.label, prompt_idx, s, kind_str, outcome.score
+                );
+            }
+            if prompt_invalid < args.num_samples {
+                // Prompt had at least one scoreable sample.
+                prompts_with_doctests += 1;
+                if prompt_passes > 0 {
+                    prompts_with_any_pass += 1;
+                }
+                if prompt_attempts > 0 && prompt_passes == prompt_attempts {
+                    prompts_with_all_pass += 1;
+                }
+            }
+            total_doctest_attempts += prompt_attempts;
+            total_doctest_passes += prompt_passes;
+            total_doctest_invalid += prompt_invalid;
+            println!(
+                "{{\"label\":\"{}\",\"prompt\":{},\"doctest_pass_at_1\":{:.4},\"doctest_any_pass\":{},\"doctest_scoreable_samples\":{},\"doctest_invalid\":{}}}",
+                args.label,
+                prompt_idx,
+                if prompt_attempts == 0 {
+                    0.0
+                } else {
+                    prompt_passes as f32 / prompt_attempts as f32
+                },
+                prompt_passes > 0,
+                prompt_attempts,
+                prompt_invalid
+            );
+        }
     }
 
     // Aggregate.
@@ -370,8 +480,23 @@ fn main() -> Result<()> {
     } else {
         truncated as f32 / total_samples as f32
     };
+    let pass_at_1 = if total_doctest_attempts == 0 {
+        0.0
+    } else {
+        total_doctest_passes as f32 / total_doctest_attempts as f32
+    };
+    let pass_any = if prompts_with_doctests == 0 {
+        0.0
+    } else {
+        prompts_with_any_pass as f32 / prompts_with_doctests as f32
+    };
+    let pass_all = if prompts_with_doctests == 0 {
+        0.0
+    } else {
+        prompts_with_all_pass as f32 / prompts_with_doctests as f32
+    };
     println!(
-        "{{\"label\":\"{}\",\"summary\":true,\"prompts\":{},\"samples\":{},\"mean_len\":{:.2},\"p50_len\":{},\"p95_len\":{},\"p99_len\":{},\"max_len\":{},\"mean_rep_rate\":{:.6},\"mean_bigram_jaccard\":{:.6},\"truncation_rate\":{:.6},\"elapsed_secs\":{:.2}}}",
+        "{{\"label\":\"{}\",\"summary\":true,\"prompts\":{},\"samples\":{},\"mean_len\":{:.2},\"p50_len\":{},\"p95_len\":{},\"p99_len\":{},\"max_len\":{},\"mean_rep_rate\":{:.6},\"mean_bigram_jaccard\":{:.6},\"truncation_rate\":{:.6},\"doctest_scored\":{},\"doctest_scoreable_prompts\":{},\"doctest_scoreable_samples\":{},\"doctest_invalid_samples\":{},\"doctest_pass_at_1\":{:.4},\"doctest_pass_any_at_n\":{:.4},\"doctest_pass_all_at_n\":{:.4},\"elapsed_secs\":{:.2}}}",
         args.label,
         groups.len(),
         total_samples,
@@ -383,6 +508,13 @@ fn main() -> Result<()> {
         mean_rep,
         mean_div,
         trunc_rate,
+        args.score_doctests,
+        prompts_with_doctests,
+        total_doctest_attempts,
+        total_doctest_invalid,
+        pass_at_1,
+        pass_any,
+        pass_all,
         started.elapsed().as_secs_f64()
     );
     Ok(())
