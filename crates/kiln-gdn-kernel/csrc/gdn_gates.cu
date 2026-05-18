@@ -161,6 +161,15 @@ int32_t launch_gdn_gates_bf16(
     dim3 grid(rows);
     dim3 block(threads);
 
+    // Clear any previously-latched error state so we attribute only this
+    // launch's failure. Without this, a sticky error from an unrelated
+    // CUDA op can show up here as a spurious launch failure. This
+    // surfaced on H100 (SM90) as "kiln_gdn_gates_bf16 failed with status
+    // 500" while A100 / A6000 (SM80 / SM86) happened not to leave a
+    // residual error in this code path. Mirrors the pattern used by
+    // `kiln_gdn_gate_beta_bf16` and `kiln_gdn_gate_g_bf16` below.
+    cudaGetLastError();
+
     gdn_gates_bf16_kernel<ALogT, DtBiasT><<<grid, block, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(a),
         reinterpret_cast<const __nv_bfloat16*>(b),
