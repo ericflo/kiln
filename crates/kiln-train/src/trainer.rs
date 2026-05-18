@@ -2218,30 +2218,26 @@ fn train_tokenized_grpo_group(
 
         let loss_val;
         if let Some(segs) = segments {
-            // ECHO is not yet wired into the analytic checkpointed tail
-            // (analytic_grpo_tail_loss_grad_pre_final_norm). If a caller
-            // enabled ECHO but selected the checkpointed path (long
-            // contexts, low VRAM), warn loudly that env-CE is being
-            // skipped. Phase 1 follow-up: fold env-CE into the analytic
-            // tail. See docs/plans/echo-integration-plan.md §3.1.
-            if config.loss.echo_lambda() != 0.0 {
+            // Build ECHO inputs for the checkpointed analytic tail. The
+            // tail folds env-CE into the same vocab-chunk forward+backward
+            // loop as GRPO; legacy single-turn rollouts (no env tokens)
+            // pass None so the analytic tail short-circuits the env
+            // branch and behaves bit-identically to pre-ECHO.
+            let echo_tail = config.loss.echo.as_ref().and_then(|cfg| {
                 let env_count = comp
                     .env_mask
                     .get(1..)
                     .map_or(0, |m| m.iter().filter(|&&v| v).count());
-                if env_count > 0 {
-                    tracing::warn!(
-                        env_count,
-                        total_obs_len = comp.total_obs_len,
-                        echo_lambda = config.loss.echo_lambda(),
-                        "checkpointed GRPO path: ECHO env-CE skipped \
-                         (analytic tail does not yet fold the env-CE \
-                         term). Use the uncheckpointed path (smaller \
-                         contexts or KILN_NO_GRAD_CHECKPOINT=1) to apply \
-                         ECHO. Phase 1 follow-up."
-                    );
+                if env_count > 0 && comp.total_obs_len > 0 {
+                    Some(EchoTailParams {
+                        env_mask: &comp.env_mask,
+                        total_obs_len: comp.total_obs_len,
+                        lambda: cfg.lambda,
+                    })
+                } else {
+                    None
                 }
-            }
+            });
             let (lv, accumulated_grads) = checkpointed_grpo_forward_backward(
                 backend,
                 &comp.input_ids,
@@ -2253,6 +2249,7 @@ fn train_tokenized_grpo_group(
                 loss_params,
                 segs,
                 device,
+                echo_tail,
             )?;
             loss_val = lv;
             if token_level {
@@ -3329,6 +3326,32 @@ fn analytic_sft_tail_grad_pre_final_norm(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Optional ECHO env-CE inputs to the analytic GRPO tail. When `Some`, the
+/// tail folds the env-CE term into the same vocab-chunk forward+backward
+/// loop so the checkpointed GRPO path also applies ECHO. When `None`, the
+/// behaviour is bit-identical to the pre-ECHO analytic tail.
+///
+/// Math (paper §3.1):
+///   L_envCE = - (λ / |O|) · Σ_{t ∈ env_positions} log p_θ(x_{t+1} | x_{≤t})
+///   d(L_envCE)/d(logits[t][v]) = (λ / |O|) · (softmax[v] - δ(v = label_t))
+///
+/// The gradient w.r.t. logits at env positions has the same shape as the
+/// action gradient — just a different (uniform) coefficient. We reuse the
+/// existing `(one_hot - softmax) * grad_coeffs` machinery by appending env
+/// positions to the active union with a uniform `-λ/|O|` grad_coeff.
+#[derive(Clone)]
+struct EchoTailParams<'a> {
+    /// `env_mask` over the full input sequence (length `seq_len`).
+    /// Positions where `env_mask[i+1] == true` contribute to the env-CE
+    /// term (predicting `input_ids[i+1]` from `hidden[i]`).
+    env_mask: &'a [bool],
+    /// `|O|` — total observation segment length (including warning-filtered
+    /// tokens). Divides the env-CE sum per paper §3.1.
+    total_obs_len: usize,
+    /// `λ_echo` — mixing coefficient applied to the env-CE term.
+    lambda: f64,
+}
+
 fn analytic_grpo_tail_loss_grad_pre_final_norm(
     hidden: &Tensor,
     final_norm_weight: &Tensor,
@@ -3339,6 +3362,7 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
     loss_params: GrpoLossParams,
     rms_norm_eps: f64,
     chunk_size: usize,
+    echo: Option<EchoTailParams<'_>>,
 ) -> Result<(f64, Tensor)> {
     let device = hidden.device();
     let seq_len = input_ids.len();
@@ -3379,31 +3403,92 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
         );
     }
 
-    let active_positions: Vec<u32> = completion_mask[1..]
+    // Build the active position list as the *union* of action positions
+    // (the GRPO surrogate target) and env positions (the ECHO env-CE
+    // target). For every position we record an enum tag so the gradient
+    // computation can apply the right coefficient.
+    //
+    // The two masks are guaranteed disjoint by trajectory_mask's
+    // `assert_masks_disjoint` invariant, so concatenation + sort gives a
+    // well-defined union.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum PosKind {
+        Action,
+        Env,
+    }
+
+    let action_positions: Vec<u32> = completion_mask[1..]
         .iter()
         .enumerate()
         .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
         .collect();
     anyhow::ensure!(
-        !active_positions.is_empty(),
+        !action_positions.is_empty(),
         "analytic GRPO tail called with no active completion tokens"
     );
+
+    // Env positions are taken from `env_mask[1..]` (same next-token shift
+    // convention as action positions and the token_log_probs/FLCE kernel).
+    let env_positions: Vec<u32> = match echo.as_ref() {
+        Some(e) => {
+            anyhow::ensure!(
+                e.env_mask.len() == seq_len,
+                "env_mask length {} does not match input_ids length {}",
+                e.env_mask.len(),
+                seq_len
+            );
+            anyhow::ensure!(
+                e.total_obs_len > 0 || !e.env_mask.iter().any(|&v| v),
+                "ECHO tail called with env_mask active but total_obs_len = 0"
+            );
+            e.env_mask[1..]
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+
+    let echo_lambda = echo.as_ref().map(|e| e.lambda).unwrap_or(0.0);
+    let total_obs_len = echo.as_ref().map(|e| e.total_obs_len).unwrap_or(0);
+    let env_loss_normalizer = if !env_positions.is_empty() && total_obs_len > 0 {
+        echo_lambda / total_obs_len as f64
+    } else {
+        0.0
+    };
+
+    // Combined sorted positions + kind tags. Action positions come first
+    // (sorted), then env positions (sorted). Indices within each kind track
+    // the original ref_log_probs ordering and env_loss accumulation order.
+    let num_action = action_positions.len();
+    let num_env = env_positions.len();
+    let num_active = num_action + num_env;
+    let mut active_positions: Vec<u32> = Vec::with_capacity(num_active);
+    let mut pos_kinds: Vec<PosKind> = Vec::with_capacity(num_active);
+    active_positions.extend(action_positions.iter().copied());
+    pos_kinds.extend(std::iter::repeat(PosKind::Action).take(num_action));
+    active_positions.extend(env_positions.iter().copied());
+    pos_kinds.extend(std::iter::repeat(PosKind::Env).take(num_env));
     let active_labels: Vec<u32> = active_positions
         .iter()
         .map(|&i| input_ids[i as usize + 1])
         .collect();
-    let num_active = active_positions.len();
 
+    // The caller passes ref_log_probs gathered at *action* positions only —
+    // the policy/reference ratio is meaningful only for the GRPO surrogate
+    // term, not for the ECHO env-CE term (which is a cross-entropy against
+    // observed tokens, not a divergence against a reference policy).
     let ref_values = ref_log_probs
         .to_dtype(DType::F32)?
         .to_device(&Device::Cpu)?
         .to_vec1::<f32>()
         .context("read GRPO reference log-probs")?;
     anyhow::ensure!(
-        ref_values.len() == num_active,
-        "GRPO reference log-prob count {} does not match active token count {}",
+        ref_values.len() == num_action,
+        "GRPO reference log-prob count {} does not match action token count {}",
         ref_values.len(),
-        num_active
+        num_action
     );
 
     let hidden_2d = hidden.squeeze(0)?;
@@ -3516,16 +3601,19 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
     // -advantage. We still need to produce a gradient w.r.t. `hidden` so
     // the rest of the analytic tail can drive backprop, so fill grad_coeffs
     // uniformly and skip the per-token IS math.
+    // GSPO sequence-level setup uses only action positions; env positions
+    // don't contribute to the IS ratio.
     let (seq_surrogate_per_token, seq_d_surrogate_per_token) =
         if loss_params.reinforce {
             (0.0, 0.0)
         } else if matches!(loss_params.is_level, IsLevel::Sequence) {
             let log_ratios: Vec<f64> = policy_values
                 .iter()
+                .take(num_action)
                 .zip(ref_values.iter())
                 .map(|(p, r)| *p as f64 - *r as f64)
                 .collect();
-            let inv_n = 1.0 / num_active as f64;
+            let inv_n = 1.0 / num_action as f64;
             let u = log_ratios.iter().sum::<f64>() * inv_n;
             let s = u.exp();
             let s_clipped = s.clamp(lo, hi);
@@ -3549,73 +3637,92 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
 
     let mut loss_sum = 0.0f64;
     let mut grad_coeffs = Vec::with_capacity(num_active);
-    for (&policy, &reference) in policy_values.iter().zip(ref_values.iter()) {
-        if loss_params.reinforce {
-            // -A per token; gradient coefficient = -A * normalizer.
-            loss_sum += -advantage;
-            grad_coeffs.push((-advantage * normalizer) as f32);
-            continue;
-        }
+    let mut env_log_prob_sum = 0.0f64;
 
-        let log_ratio = policy as f64 - reference as f64;
+    for (idx, &policy) in policy_values.iter().enumerate() {
+        match pos_kinds[idx] {
+            PosKind::Action => {
+                let reference = ref_values[idx];
+                if loss_params.reinforce {
+                    loss_sum += -advantage;
+                    grad_coeffs.push((-advantage * normalizer) as f32);
+                    continue;
+                }
 
-        // KL estimator: K1 = log_ratio, K3 = exp(-log_ratio) - 1 + log_ratio,
-        // None = 0. The derivative w.r.t. log policy log-prob (= log_ratio
-        // for the same active token) is: K1 -> 1, K3 -> -exp(-log_ratio) + 1,
-        // None -> 0.
-        let (mut kl_term, mut d_kl) = match loss_params.kl_estimator {
-            KlEstimator::None => (0.0, 0.0),
-            KlEstimator::K1 => (log_ratio, 1.0),
-            KlEstimator::K3 => {
-                let neg_exp = (-log_ratio).exp();
-                (neg_exp - 1.0 + log_ratio, 1.0 - neg_exp)
-            }
-        };
+                let log_ratio = policy as f64 - reference as f64;
 
-        // Phase 3c — selective KL gating: zero out KL on tokens below the
-        // proxy-entropy threshold.
-        if let Some(thr) = kl_threshold {
-            let proxy_entropy = -(policy as f64);
-            if proxy_entropy < thr {
-                kl_term = 0.0;
-                d_kl = 0.0;
-            }
-        }
-
-        let (per_token_surrogate, d_surrogate) = match loss_params.is_level {
-            IsLevel::Token => {
-                let ratio = log_ratio.exp();
-                let clipped_ratio = ratio.clamp(lo, hi);
-                let surr1 = ratio * advantage;
-                let surr2 = clipped_ratio * advantage;
-                let surrogate = surr1.min(surr2);
-                let d = if surr1 <= surr2 || (ratio >= lo && ratio <= hi) {
-                    advantage * ratio
-                } else {
-                    0.0
+                let (mut kl_term, mut d_kl) = match loss_params.kl_estimator {
+                    KlEstimator::None => (0.0, 0.0),
+                    KlEstimator::K1 => (log_ratio, 1.0),
+                    KlEstimator::K3 => {
+                        let neg_exp = (-log_ratio).exp();
+                        (neg_exp - 1.0 + log_ratio, 1.0 - neg_exp)
+                    }
                 };
-                (surrogate, d)
-            }
-            IsLevel::Sequence => (seq_surrogate_per_token, seq_d_surrogate_per_token),
-            IsLevel::Cispo => {
-                // CISPO: loss contribution per token is
-                //   -stop_grad(clip(r_t)) * A * log π_θ_t
-                // so the per-token "surrogate" (in the loss-sign convention
-                // where we add `-per_token_surrogate` to loss_sum) is
-                //   clip(r_t) * A * log π_θ_t.
-                // Gradient w.r.t. log π_θ_t = clip(r_t) * A.
-                let ratio = log_ratio.exp();
-                let clipped_ratio = ratio.clamp(lo, hi);
-                let surrogate = clipped_ratio * advantage * (policy as f64);
-                let d = clipped_ratio * advantage;
-                (surrogate, d)
-            }
-        };
 
-        loss_sum += -per_token_surrogate + kl_coeff * kl_term;
-        grad_coeffs.push(((-d_surrogate + kl_coeff * d_kl) * normalizer) as f32);
+                if let Some(thr) = kl_threshold {
+                    let proxy_entropy = -(policy as f64);
+                    if proxy_entropy < thr {
+                        kl_term = 0.0;
+                        d_kl = 0.0;
+                    }
+                }
+
+                let (per_token_surrogate, d_surrogate) = match loss_params.is_level {
+                    IsLevel::Token => {
+                        let ratio = log_ratio.exp();
+                        let clipped_ratio = ratio.clamp(lo, hi);
+                        let surr1 = ratio * advantage;
+                        let surr2 = clipped_ratio * advantage;
+                        let surrogate = surr1.min(surr2);
+                        let d = if surr1 <= surr2 || (ratio >= lo && ratio <= hi) {
+                            advantage * ratio
+                        } else {
+                            0.0
+                        };
+                        (surrogate, d)
+                    }
+                    IsLevel::Sequence => (seq_surrogate_per_token, seq_d_surrogate_per_token),
+                    IsLevel::Cispo => {
+                        let ratio = log_ratio.exp();
+                        let clipped_ratio = ratio.clamp(lo, hi);
+                        let surrogate = clipped_ratio * advantage * (policy as f64);
+                        let d = clipped_ratio * advantage;
+                        (surrogate, d)
+                    }
+                };
+
+                loss_sum += -per_token_surrogate + kl_coeff * kl_term;
+                grad_coeffs.push(((-d_surrogate + kl_coeff * d_kl) * normalizer) as f32);
+            }
+            PosKind::Env => {
+                // ECHO env-CE per paper §3.1:
+                //   L_envCE = - (λ / |O|) · Σ_t log p_θ(x_{t+1} | x_{≤t})
+                //
+                // d(L_envCE)/d(log p_θ_t) = -λ/|O| per env position. The
+                // per-position contribution to loss_sum is summed below as
+                // -env_loss_normalizer * log_p; the grad_coeff is
+                // -env_loss_normalizer for env positions (note: this
+                // coefficient is what gets multiplied through
+                // (one_hot - softmax) in the gradient chunk loop, so the
+                // resulting d(loss)/d(logits[v]) = -λ/|O| · (one_hot - softmax)
+                // = λ/|O| · (softmax - one_hot) ✓).
+                //
+                // The loss-side accumulator carries the *unscaled* sum of
+                // log probabilities; the final scale by env_loss_normalizer
+                // happens after the loop so we can read out the env-CE
+                // contribution in receipts.
+                env_log_prob_sum += policy as f64;
+                grad_coeffs.push((-env_loss_normalizer) as f32);
+            }
+        }
     }
-    let loss_val = loss_sum * normalizer;
+
+    // GRPO action surrogate gets normalized by `loss_params.loss_normalizer`
+    // (matches the existing token_log_probs path). The ECHO env-CE term
+    // uses its own |O| normalization built into env_loss_normalizer.
+    let env_loss = -env_loss_normalizer * env_log_prob_sum;
+    let loss_val = loss_sum * normalizer + env_loss;
     let grad_coeffs = Tensor::from_vec(grad_coeffs, (num_active, 1), device)?;
 
     let mut grad_normed = Tensor::zeros((num_active, hidden_size), DType::F32, device)?;
@@ -7825,7 +7932,7 @@ fn grpo_loss(
 /// backward with gradient injection. This preserves full-sequence context and
 /// propagates downstream gradients into every LoRA segment.
 #[allow(clippy::too_many_arguments)]
-fn checkpointed_grpo_forward_backward(
+fn checkpointed_grpo_forward_backward<'echo>(
     backend: &dyn BackendRuntime,
     input_ids: &[u32],
     weights: &GpuWeights,
@@ -7836,6 +7943,11 @@ fn checkpointed_grpo_forward_backward(
     loss_params: GrpoLossParams,
     segments: &[(usize, usize)],
     device: &Device,
+    /// Optional ECHO env-CE inputs. When `Some`, the analytic tail folds the
+    /// env-CE term into the same vocab-chunk forward+backward loop so the
+    /// checkpointed GRPO path applies ECHO too (Phase 1 follow-up of
+    /// docs/plans/echo-integration-plan.md).
+    echo: Option<EchoTailParams<'echo>>,
 ) -> Result<(f64, HashMap<candle_core::TensorId, Tensor>)> {
     let num_segments = segments.len();
     anyhow::ensure!(
@@ -7999,8 +8111,9 @@ fn checkpointed_grpo_forward_backward(
         loss_params,
         model_config.rms_norm_eps,
         DEFAULT_CHUNK_SIZE,
+        echo.clone(),
     )
-    .context("analytic GRPO tail gradient")?;
+    .context("analytic GRPO+ECHO tail gradient")?;
     upstream_grad = offload_checkpoint_tensor_to_cpu(upstream_grad, recompute_boundaries)?;
     drop(final_hidden);
     synchronize_checkpoint_boundary(device, || {
@@ -8898,6 +9011,7 @@ mod tests {
                 params,
                 1e-6,
                 4,
+                None, // no ECHO term in this analytic tail parity test
             )?;
             assert!(
                 loss_val.is_finite(),
@@ -8960,6 +9074,7 @@ mod tests {
             params,
             1e-6,
             4,
+            None, // no ECHO term — REINFORCE short-circuit parity test
         )?;
         assert!(
             ((loss_val - (-advantage)) as f64).abs() < 1e-9,
