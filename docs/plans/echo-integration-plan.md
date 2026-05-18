@@ -30,9 +30,19 @@
 
 ## TL;DR
 
-ECHO isn't an add-on to GRPO — it's the natural completion of the **agentic** training stack kiln was already moving toward. The OPD grand plan (`docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md` §10) already names the agentic loop as kiln's primary deployment shape, already requires multi-turn per-turn token masking, and already discusses tool-result tokens as "inputs the model didn't generate." ECHO takes the third step that plan leaves implicit: **those tool-result tokens aren't just inputs to mask out — they're a dense supervision target.** Mask out of the policy-gradient objective, mask *into* an auxiliary cross-entropy objective, share the same forward pass.
+**Three-sentence version.** Land the agentic-multi-turn masking primitive the agentic-GRPO skill already says we need; once it's in, ECHO is `kiln-flce-kernel` + a second mask + a four-line config field, on by default at λ=0.05. Two code surfaces touch the loss (`trainer.rs` for CUDA/CPU/Metal; `vk_train.rs` for Vulkan-native), validated against three non-negotiable gates (Phase 0: pi-doctest iter-5 reproduces within ±0.005; Phase 1: ≥+0.10 composite over GRPO at 3-seed-verified variance; Phase 2: dynamics-holdout CE drops ≥30%). Roughly three weeks of focused work; intermediate phases ship strict improvements even if the headline doesn't reproduce.
+
+**The longer version.** ECHO isn't an add-on to GRPO — it's the natural completion of the **agentic** training stack kiln was already moving toward. The OPD grand plan (`docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md` §10) already names the agentic loop as kiln's primary deployment shape, already requires multi-turn per-turn token masking, and already discusses tool-result tokens as "inputs the model didn't generate." ECHO takes the third step that plan leaves implicit: **those tool-result tokens aren't just inputs to mask out — they're a dense supervision target.** Mask out of the policy-gradient objective, mask *into* an auxiliary cross-entropy objective, share the same forward pass.
 
 So the integration is less "bolt ECHO onto GRPO" and more "complete the masking primitive the agentic plan needs anyway, and turn it on by default." The loss-term implementation is two code surfaces (CUDA/CPU/Metal share `trainer.rs`; Vulkan-native is separate in `vk_train.rs`) and roughly two new modules (`kiln-core::trajectory` and `kiln-train::echo`); the kernel work the candle path needs is already in `kiln-flce-kernel`, and the VK path is ~50–80 lines of VkTensor ops. The phased plan that follows lands ECHO natively across all backends in ~3 weeks of focused work.
+
+### How to read this document
+
+- **If you're skim-deciding whether this plan is worth approving** — read TL;DR + §1 framing table + §6 validation gates + §7 resolved decisions. ~5 minutes.
+- **If you're the Phase 0 implementer** — read §0.1 audit findings, §3.1–§3.5 (architecture), §A (migration map), §B.1, §B.2, §B.8 (concrete code), §C.4 (CI gates). The migration map in §A.2 is your file-by-file checklist.
+- **If you're the Phase 1 implementer** — read §3.1 (uncheckpointed + checkpointed), §B.3–§B.7 (concrete code), §C.1 (acceptance tests). The Vulkan-path discussion in §3.5 and §B.7 is the load-bearing detail.
+- **If you're a capability author** — read §D (UX narrative). Everything else is plumbing that doesn't change your workflow.
+- **If you're a reviewer of any phase's PR** — read §6.1 risk register first, then the phase-specific tests in §A.6 / §C, then the relevant §3 / §B section. The risk severity tags (S1/S2/S3) and mitigations are how to pattern-match "is this PR de-risked enough."
 
 ### What you get when this lands
 
