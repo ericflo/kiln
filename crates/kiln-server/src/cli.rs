@@ -1,6 +1,7 @@
 //! CLI interface for kiln — structured subcommands with clap.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use console::style;
@@ -344,8 +345,7 @@ pub enum Commands {
         file: Option<String>,
     },
 
-    /// §10.14: write `~/.pi/agent/models.json` pointing pi at the
-    /// local kiln server.
+    /// §10.14: merge kiln into pi's models/settings config.
     ///
     /// The canonical pi + kiln pipeline (§10.14 in the grand plan):
     ///
@@ -357,8 +357,8 @@ pub enum Commands {
     ///   kiln self-improve   # auto-runs Saturday
     #[command(name = "pi-setup", long_about = PI_SETUP_OVERVIEW)]
     PiSetup {
-        /// Override the URL kiln writes into models.json.
-        #[arg(long, default_value = "http://localhost:8420")]
+        /// Override the kiln server URL. `/v1` is appended when omitted.
+        #[arg(long, alias = "kiln-url", default_value = "http://localhost:8420")]
         url: String,
         /// Output path for the models.json file. Default
         /// `$HOME/.pi/agent/models.json`.
@@ -420,7 +420,8 @@ pub enum JudgeCommands {
     },
 }
 
-const PI_SETUP_OVERVIEW: &str = "Write ~/.pi/agent/models.json pointing pi at this kiln server.\n\
+const PI_SETUP_OVERVIEW: &str = "Merge kiln into ~/.pi/agent/models.json and settings.json.\n\
+Backs up existing files first and preserves unrelated pi providers/settings.\n\
 Part of the §10.14 canonical pi + kiln pipeline.";
 
 const JUDGE_OVERVIEW: &str = "§10.6 self-distillation engine.\n\
@@ -1546,51 +1547,230 @@ fn print_job_line(job: &serde_json::Value) {
 // §10.14 pi + kiln canonical pipeline runners
 // ===========================================================================
 
-/// §10.14 `kiln pi-setup` — write `~/.pi/agent/models.json` pointing
-/// pi at the local kiln server.
+const PI_PROVIDER_ID: &str = "kiln-local";
+const PI_MODEL_ID: &str = "qwen-3.5-4b-kiln";
+
+/// §10.14 `kiln pi-setup` — merge kiln into pi's models/settings config.
 pub async fn run_pi_setup(url: &str, out: Option<&str>) -> anyhow::Result<()> {
-    let default_out: std::path::PathBuf = match std::env::var("HOME") {
-        Ok(h) => std::path::PathBuf::from(h)
+    let default_out: PathBuf = match std::env::var("HOME") {
+        Ok(h) => PathBuf::from(h)
             .join(".pi")
             .join("agent")
             .join("models.json"),
-        Err(_) => std::path::PathBuf::from("/tmp/pi-agent-models.json"),
+        Err(_) => PathBuf::from("/tmp/pi-agent-models.json"),
     };
     let path = match out {
-        Some(p) => std::path::PathBuf::from(p),
+        Some(p) => PathBuf::from(p),
         None => default_out,
     };
+    let settings_path = pi_settings_path_for_models_path(&path);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // The kiln server speaks the OpenAI-compatible /v1/chat/completions
-    // surface; pi's `~/.pi/agent/models.json` just needs base_url +
-    // model id.
-    let body = serde_json::json!({
-        "providers": [{
-            "name": "kiln-local",
-            "base_url": url,
-            "api_key": "kiln",
-            "models": [
-                {"id": "qwen3.5-4b", "name": "Qwen3.5-4B via kiln"}
-            ]
-        }],
-        "default_model": "qwen3.5-4b"
-    });
-    let bytes = serde_json::to_vec_pretty(&body)?;
-    std::fs::write(&path, bytes)?;
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let models_backup = backup_existing_file(&path)?;
+    let settings_backup = backup_existing_file(&settings_path)?;
+
+    let models = merge_pi_models_config(read_json_file_if_exists(&path)?, url)?;
+    let settings = merge_pi_settings_config(read_json_file_if_exists(&settings_path)?)?;
+    write_json_pretty(&path, &models)?;
+    write_json_pretty(&settings_path, &settings)?;
+
     println!(
-        "{} Wrote pi models.json → {}",
+        "{} Updated pi models.json → {}",
         style("✓").green().bold(),
         path.display()
     );
-    println!("  pi now talks to {}.", url);
+    println!(
+        "{} Updated pi settings.json → {}",
+        style("✓").green().bold(),
+        settings_path.display()
+    );
+    if let Some(backup) = models_backup {
+        println!("  backup: {}", backup.display());
+    }
+    if let Some(backup) = settings_backup {
+        println!("  backup: {}", backup.display());
+    }
+    println!(
+        "  pi now talks to {} as {}.",
+        pi_openai_base_url(url),
+        PI_MODEL_ID
+    );
     println!(
         "  Next: {} once, then use pi normally; {} on Saturdays.",
         style("kiln judge distill").cyan(),
         style("kiln self-improve").cyan(),
     );
     Ok(())
+}
+
+fn pi_settings_path_for_models_path(models_path: &Path) -> PathBuf {
+    models_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("settings.json")
+}
+
+fn read_json_file_if_exists(path: &Path) -> anyhow::Result<Option<serde_json::Value>> {
+    match std::fs::read_to_string(path) {
+        Ok(body) => serde_json::from_str(&body)
+            .map(Some)
+            .map_err(|err| anyhow::anyhow!("parse {}: {err}", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).map_err(|err| anyhow::anyhow!("read {}: {err}", path.display())),
+    }
+}
+
+fn backup_existing_file(path: &Path) -> anyhow::Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .ok_or_else(|| {
+            anyhow::anyhow!("cannot back up path without file name: {}", path.display())
+        })?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|err| anyhow::anyhow!("system clock before unix epoch: {err}"))?
+        .as_secs();
+
+    for suffix in 0..1000 {
+        let backup_name = if suffix == 0 {
+            format!("{file_name}.bak-{timestamp}")
+        } else {
+            format!("{file_name}.bak-{timestamp}-{suffix}")
+        };
+        let backup = parent.join(backup_name);
+        if !backup.exists() {
+            std::fs::copy(path, &backup).map_err(|err| {
+                anyhow::anyhow!("backup {} to {}: {err}", path.display(), backup.display())
+            })?;
+            return Ok(Some(backup));
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "could not find an unused backup path for {}",
+        path.display()
+    ))
+}
+
+fn write_json_pretty(path: &Path, value: &serde_json::Value) -> anyhow::Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    std::fs::write(path, bytes).map_err(|err| anyhow::anyhow!("write {}: {err}", path.display()))
+}
+
+fn merge_pi_models_config(
+    existing: Option<serde_json::Value>,
+    url: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let mut root = match existing {
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+        Some(_) => {
+            return Err(anyhow::anyhow!(
+                "models.json root must be a JSON object; existing file was backed up"
+            ));
+        }
+        None => serde_json::json!({}),
+    };
+
+    let root_obj = root
+        .as_object_mut()
+        .expect("root was constructed as a JSON object");
+    let providers_value = root_obj
+        .remove("providers")
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut providers = pi_providers_object_from_value(providers_value);
+    providers.insert(PI_PROVIDER_ID.to_string(), kiln_pi_provider_config(url));
+    root_obj.insert(
+        "providers".to_string(),
+        serde_json::Value::Object(providers),
+    );
+    Ok(root)
+}
+
+fn merge_pi_settings_config(
+    existing: Option<serde_json::Value>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut root = match existing {
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+        Some(_) => {
+            return Err(anyhow::anyhow!(
+                "settings.json root must be a JSON object; existing file was backed up"
+            ));
+        }
+        None => serde_json::json!({}),
+    };
+    let root_obj = root
+        .as_object_mut()
+        .expect("root was constructed as a JSON object");
+    root_obj.insert(
+        "defaultProvider".to_string(),
+        serde_json::json!(PI_PROVIDER_ID),
+    );
+    root_obj.insert("defaultModel".to_string(), serde_json::json!(PI_MODEL_ID));
+    Ok(root)
+}
+
+fn pi_providers_object_from_value(
+    value: serde_json::Value,
+) -> serde_json::Map<String, serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => map,
+        serde_json::Value::Array(items) => {
+            let mut map = serde_json::Map::new();
+            for (index, item) in items.into_iter().enumerate() {
+                let serde_json::Value::Object(provider) = item else {
+                    continue;
+                };
+                let key = provider
+                    .get("name")
+                    .or_else(|| provider.get("id"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("provider-{index}"));
+                map.insert(key, serde_json::Value::Object(provider));
+            }
+            map
+        }
+        _ => serde_json::Map::new(),
+    }
+}
+
+fn kiln_pi_provider_config(url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "baseUrl": pi_openai_base_url(url),
+        "api": "openai-completions",
+        "apiKey": "dummy",
+        "compat": {
+            "supportsDeveloperRole": false,
+            "supportsReasoningEffort": false,
+        },
+        "models": [{
+            "id": PI_MODEL_ID,
+            "name": "Qwen 3.5 4B via Kiln",
+            "input": ["text"],
+            "contextWindow": 262144,
+            "maxTokens": 32768,
+        }],
+    })
+}
+
+fn pi_openai_base_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
+    }
 }
 
 /// §10.6 `kiln judge ...` dispatcher.
@@ -1651,10 +1831,7 @@ pub async fn run_self_improve(
     print_simple_json_response("self-improve", resp).await
 }
 
-async fn print_simple_json_response(
-    label: &str,
-    resp: reqwest::Response,
-) -> anyhow::Result<()> {
+async fn print_simple_json_response(label: &str, resp: reqwest::Response) -> anyhow::Result<()> {
     let status = resp.status();
     let body: serde_json::Value = resp.json().await?;
     if status.is_success() {
@@ -1662,11 +1839,7 @@ async fn print_simple_json_response(
         println!("{}", serde_json::to_string_pretty(&body)?);
         Ok(())
     } else {
-        eprintln!(
-            "{} {label} failed ({})",
-            style("✗").red().bold(),
-            status
-        );
+        eprintln!("{} {label} failed ({})", style("✗").red().bold(), status);
         eprintln!("{}", serde_json::to_string_pretty(&body)?);
         std::process::exit(1);
     }
@@ -1712,6 +1885,136 @@ mod tests {
         assert_eq!(cli_with(0, true).effective_log_level("info"), "warn");
         // quiet wins regardless of fallback severity
         assert_eq!(cli_with(0, true).effective_log_level("trace"), "warn");
+    }
+
+    fn read_json(path: &std::path::Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn backup_count(dir: &std::path::Path, prefix: &str) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{prefix}.bak-"))
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn pi_setup_merges_models_and_settings_with_backups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models_path = tmp.path().join("models.json");
+        let settings_path = tmp.path().join("settings.json");
+        std::fs::write(
+            &models_path,
+            serde_json::to_vec_pretty(&json!({
+                "providers": {
+                    "other-provider": {
+                        "baseUrl": "https://example.invalid/v1",
+                        "api": "openai"
+                    }
+                },
+                "unrelatedTopLevel": true
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &settings_path,
+            serde_json::to_vec_pretty(&json!({
+                "lastChangelogVersion": "0.75.0",
+                "theme": "quiet"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        run_pi_setup("http://localhost:8420", Some(models_path.to_str().unwrap()))
+            .await
+            .unwrap();
+
+        let models = read_json(&models_path);
+        assert_eq!(models["unrelatedTopLevel"], true);
+        assert_eq!(
+            models["providers"]["other-provider"]["baseUrl"],
+            "https://example.invalid/v1"
+        );
+        let kiln = &models["providers"][PI_PROVIDER_ID];
+        assert_eq!(kiln["baseUrl"], "http://localhost:8420/v1");
+        assert_eq!(kiln["api"], "openai-completions");
+        assert_eq!(kiln["apiKey"], "dummy");
+        assert_eq!(kiln["compat"]["supportsDeveloperRole"], false);
+        assert_eq!(kiln["compat"]["supportsReasoningEffort"], false);
+        assert_eq!(kiln["models"][0]["id"], PI_MODEL_ID);
+        assert_eq!(kiln["models"][0]["name"], "Qwen 3.5 4B via Kiln");
+        assert_eq!(kiln["models"][0]["input"], json!(["text"]));
+        assert_eq!(kiln["models"][0]["contextWindow"], 262144);
+        assert_eq!(kiln["models"][0]["maxTokens"], 32768);
+
+        let settings = read_json(&settings_path);
+        assert_eq!(settings["lastChangelogVersion"], "0.75.0");
+        assert_eq!(settings["theme"], "quiet");
+        assert_eq!(settings["defaultProvider"], PI_PROVIDER_ID);
+        assert_eq!(settings["defaultModel"], PI_MODEL_ID);
+        assert_eq!(backup_count(tmp.path(), "models.json"), 1);
+        assert_eq!(backup_count(tmp.path(), "settings.json"), 1);
+    }
+
+    #[tokio::test]
+    async fn pi_setup_repairs_legacy_provider_array_without_dropping_named_providers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models_path = tmp.path().join("models.json");
+        let settings_path = tmp.path().join("settings.json");
+        std::fs::write(
+            &models_path,
+            serde_json::to_vec_pretty(&json!({
+                "providers": [
+                    {
+                        "name": "other-provider",
+                        "baseUrl": "https://example.invalid/v1",
+                        "api": "openai"
+                    },
+                    {
+                        "name": "kiln-local",
+                        "base_url": "http://bad.invalid",
+                        "api_key": "wrong"
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        run_pi_setup(
+            "http://office-kiln:8420/v1/",
+            Some(models_path.to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let models = read_json(&models_path);
+        let providers = models["providers"].as_object().unwrap();
+        assert!(providers.contains_key("other-provider"));
+        assert_eq!(
+            providers["other-provider"]["baseUrl"],
+            "https://example.invalid/v1"
+        );
+        assert_eq!(
+            providers[PI_PROVIDER_ID]["baseUrl"],
+            "http://office-kiln:8420/v1"
+        );
+        assert!(providers[PI_PROVIDER_ID].get("base_url").is_none());
+        assert!(providers[PI_PROVIDER_ID].get("api_key").is_none());
+
+        let settings = read_json(&settings_path);
+        assert_eq!(settings["defaultProvider"], PI_PROVIDER_ID);
+        assert_eq!(settings["defaultModel"], PI_MODEL_ID);
+        assert_eq!(backup_count(tmp.path(), "models.json"), 1);
+        assert_eq!(backup_count(tmp.path(), "settings.json"), 0);
     }
 
     #[test]

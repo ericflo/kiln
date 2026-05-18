@@ -1133,7 +1133,7 @@ The reference deployment is one Mac (or 4090, or H200), one terminal, two binari
 Pi already ships exactly the integration kiln needs:
 
 - **OpenAI-compat client with tool use** → kiln's existing `/v1/chat/completions` is the endpoint; zero protocol work needed.
-- **Custom-provider configuration** via `~/.pi/agent/models.json` → one-line setup.
+- **Custom-provider configuration** via `~/.pi/agent/models.json` and `settings.json` → one-line, backup-first merge setup.
 - **JSONL session capture at `~/.pi/agent/sessions/`** with `id` + `parentId` for branching → trajectory storage is solved upstream.
 - **`/tree` branching and `/share`** to publish sessions via [`pi-share-hf`](https://huggingface.co/) → community-distribution channel for agent traces is solved upstream.
 - **Default tools (`read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`) + extension API** → known tool surface to optimise against.
@@ -1481,7 +1481,7 @@ The user is *watching the agent work*. Time-to-first-token, decode latency at ba
 # One-time setup:
 brew install kiln pi             # or: cargo install kiln; bun install -g @badlogic/pi
 kiln serve &                     # serves Qwen3.5-4B at :8420 (the only model kiln targets)
-kiln pi-setup                    # writes ~/.pi/agent/models.json pointing pi at the local kiln
+kiln pi-setup                    # backs up + merges pi config, pointing pi at the local kiln
 kiln judge distill               # one-time: distil a turn-judge LoRA from Qwen3.6-27B (§10.6.1)
 
 # Just use pi normally. Sessions captured automatically at ~/.pi/agent/sessions/.

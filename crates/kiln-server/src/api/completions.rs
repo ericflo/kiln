@@ -13,6 +13,7 @@ use kiln_core::request::Request;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, ChatTemplateOptions};
+use kiln_eval::qwen3::ParsedToolCall;
 use kiln_model::adapter_merge::{PeftLora, merge_concat};
 use kiln_model::lora_loader::LoraWeights;
 use kiln_model::{
@@ -259,6 +260,7 @@ async fn emit_reasoning_chunk(
                     role: None,
                     content: None,
                     reasoning_content: Some(text),
+                    tool_calls: None,
                 },
                 finish_reason: None,
             }],
@@ -287,6 +289,7 @@ async fn emit_reasoning_chunk(
                     role: None,
                     content: Some(text),
                     reasoning_content: None,
+                    tool_calls: None,
                 },
                 finish_reason: None,
             }],
@@ -298,6 +301,121 @@ async fn emit_reasoning_chunk(
         {
             return false;
         }
+    }
+    true
+}
+
+async fn emit_tool_calls_chunk(
+    tx: &tokio::sync::mpsc::Sender<Event>,
+    id: &str,
+    created: u64,
+    model: &str,
+    tool_calls: &[serde_json::Value],
+) -> bool {
+    let event = ChatCompletionChunk {
+        id: id.to_string(),
+        object: "chat.completion.chunk",
+        created,
+        model: model.to_string(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: Delta {
+                role: None,
+                content: None,
+                reasoning_content: None,
+                tool_calls: Some(tool_call_deltas_from_openai_calls(tool_calls)),
+            },
+            finish_reason: None,
+        }],
+    };
+    tx.send(Event::default().data(serde_json::to_string(&event).unwrap()))
+        .await
+        .is_ok()
+}
+
+async fn emit_content_chunk(
+    tx: &tokio::sync::mpsc::Sender<Event>,
+    id: &str,
+    created: u64,
+    model: &str,
+    content: String,
+) -> bool {
+    if content.is_empty() {
+        return true;
+    }
+    let event = ChatCompletionChunk {
+        id: id.to_string(),
+        object: "chat.completion.chunk",
+        created,
+        model: model.to_string(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: Delta {
+                role: None,
+                content: Some(content),
+                reasoning_content: None,
+                tool_calls: None,
+            },
+            finish_reason: None,
+        }],
+    };
+    tx.send(Event::default().data(serde_json::to_string(&event).unwrap()))
+        .await
+        .is_ok()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn emit_or_buffer_reasoning_chunk(
+    tx: &tokio::sync::mpsc::Sender<Event>,
+    id: &str,
+    created: u64,
+    model: &str,
+    chunk: ReasoningChunk,
+    completion_preview_buf: &mut String,
+    reasoning_buf: &mut String,
+    content_buf: &mut String,
+    buffer_content: bool,
+) -> bool {
+    if !buffer_content {
+        return emit_reasoning_chunk(
+            tx,
+            id,
+            created,
+            model,
+            chunk,
+            completion_preview_buf,
+            reasoning_buf,
+            content_buf,
+        )
+        .await;
+    }
+
+    let ReasoningChunk { reasoning, content } = chunk;
+    if let Some(text) = reasoning {
+        let reasoning_only = ReasoningChunk {
+            reasoning: Some(text),
+            content: None,
+        };
+        if !emit_reasoning_chunk(
+            tx,
+            id,
+            created,
+            model,
+            reasoning_only,
+            completion_preview_buf,
+            reasoning_buf,
+            content_buf,
+        )
+        .await
+        {
+            return false;
+        }
+    }
+    if let Some(text) = content {
+        if completion_preview_buf.chars().count() < COMPLETION_PREVIEW_MAX_CHARS + 16 {
+            completion_preview_buf.push_str(&text);
+        }
+        content_buf.push_str(&text);
     }
     true
 }
@@ -323,6 +441,177 @@ fn split_reasoning_response(model_output: &str, prompt_text: &str) -> (Option<St
         }
         None => (Some(model_output.to_string()), String::new()),
     }
+}
+
+#[derive(Debug)]
+struct AssistantOutputParts {
+    content: String,
+    reasoning_content: Option<String>,
+    tool_calls: Option<Vec<serde_json::Value>>,
+    finish_reason: String,
+}
+
+impl AssistantOutputParts {
+    fn preview_source(&self) -> &str {
+        if self.content.is_empty() {
+            self.reasoning_content.as_deref().unwrap_or("")
+        } else {
+            self.content.as_str()
+        }
+    }
+}
+
+fn tool_call_parsing_allowed(
+    tools: Option<&[serde_json::Value]>,
+    tool_choice: Option<&serde_json::Value>,
+) -> bool {
+    normalized_tools_for_cache(tools).is_some()
+        && !matches!(tool_choice.and_then(|value| value.as_str()), Some("none"))
+}
+
+fn request_allows_tool_call_parsing(req: &ChatCompletionRequest) -> bool {
+    tool_call_parsing_allowed(req.tools.as_deref(), req.tool_choice.as_ref())
+}
+
+fn batch_request_allows_tool_call_parsing(req: &BatchCompletionRequest) -> bool {
+    tool_call_parsing_allowed(req.tools.as_deref(), req.tool_choice.as_ref())
+}
+
+fn assistant_output_from_model_output(
+    req: &ChatCompletionRequest,
+    model_output: &str,
+    prompt_text: &str,
+    finish_reason: &str,
+) -> AssistantOutputParts {
+    let (reasoning_content, content) = split_reasoning_response(model_output, prompt_text);
+    assistant_output_from_split_parts(req, reasoning_content, content, finish_reason)
+}
+
+fn assistant_output_from_cached_parts(
+    req: &ChatCompletionRequest,
+    content: String,
+    reasoning_content: Option<String>,
+    finish_reason: String,
+) -> AssistantOutputParts {
+    assistant_output_from_split_parts(req, reasoning_content, content, &finish_reason)
+}
+
+fn assistant_output_from_split_parts(
+    req: &ChatCompletionRequest,
+    reasoning_content: Option<String>,
+    content: String,
+    finish_reason: &str,
+) -> AssistantOutputParts {
+    assistant_output_from_split_parts_with_tool_parsing(
+        request_allows_tool_call_parsing(req),
+        reasoning_content,
+        content,
+        finish_reason,
+    )
+}
+
+fn assistant_output_from_split_parts_with_tool_parsing(
+    allow_tool_call_parsing: bool,
+    reasoning_content: Option<String>,
+    content: String,
+    finish_reason: &str,
+) -> AssistantOutputParts {
+    if allow_tool_call_parsing {
+        let parsed_content_calls = kiln_eval::qwen3::extract_tool_calls(&content);
+        let content_has_tool_calls = !parsed_content_calls.is_empty();
+        let parsed_calls = if content_has_tool_calls {
+            parsed_content_calls
+        } else {
+            reasoning_content
+                .as_deref()
+                .map(kiln_eval::qwen3::extract_tool_calls)
+                .unwrap_or_default()
+        };
+        if !parsed_calls.is_empty() {
+            let content = if content_has_tool_calls {
+                content_before_qwen_tool_call(&content).unwrap_or_default()
+            } else {
+                content
+            };
+            let reasoning_content = reasoning_content
+                .map(|text| strip_qwen_tool_call_blocks(&text))
+                .filter(|text| !text.trim().is_empty());
+            return AssistantOutputParts {
+                content,
+                reasoning_content,
+                tool_calls: Some(openai_tool_calls_from_qwen(&parsed_calls)),
+                finish_reason: "tool_calls".to_string(),
+            };
+        }
+    }
+
+    AssistantOutputParts {
+        content,
+        reasoning_content,
+        tool_calls: None,
+        finish_reason: finish_reason.to_string(),
+    }
+}
+
+fn content_before_qwen_tool_call(text: &str) -> Option<String> {
+    let idx = text.find("<tool_call>")?;
+    Some(text[..idx].trim_end().to_string())
+}
+
+fn strip_qwen_tool_call_blocks(text: &str) -> String {
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        let Some(open_rel) = text[cursor..].find("<tool_call>") else {
+            out.push_str(&text[cursor..]);
+            break;
+        };
+        let open_abs = cursor + open_rel;
+        out.push_str(&text[cursor..open_abs]);
+        let body_start = open_abs + "<tool_call>".len();
+        let Some(close_rel) = text[body_start..].find("</tool_call>") else {
+            out.push_str(&text[open_abs..]);
+            break;
+        };
+        cursor = body_start + close_rel + "</tool_call>".len();
+    }
+    out.trim_end().to_string()
+}
+
+fn openai_tool_calls_from_qwen(calls: &[ParsedToolCall]) -> Vec<serde_json::Value> {
+    calls
+        .iter()
+        .map(|call| {
+            let arguments =
+                serde_json::to_string(&serde_json::Value::Object(call.arguments.clone()))
+                    .unwrap_or_else(|_| "{}".to_string());
+            serde_json::json!({
+                "id": format!("call_{}", Uuid::new_v4().simple()),
+                "type": "function",
+                "function": {
+                    "name": call.name.clone(),
+                    "arguments": arguments,
+                },
+            })
+        })
+        .collect()
+}
+
+fn tool_call_deltas_from_openai_calls(calls: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| {
+            let mut value = call.clone();
+            if let serde_json::Value::Object(ref mut object) = value {
+                object.insert(
+                    "index".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(index)),
+                );
+            }
+            value
+        })
+        .collect()
 }
 
 /// Push a [`RequestRecord`] into the dashboard's recent-requests ring. Logs a
@@ -522,7 +811,10 @@ fn chat_template_options_from_kwargs(
     }
 }
 
-pub(crate) fn encode_prompt_tokens(state: &AppState, prompt_text: &str) -> Result<Vec<TokenId>, ApiError> {
+pub(crate) fn encode_prompt_tokens(
+    state: &AppState,
+    prompt_text: &str,
+) -> Result<Vec<TokenId>, ApiError> {
     if let Some(tokens) = state.prompt_token_cache.lock().unwrap().get(prompt_text) {
         return Ok(tokens);
     }
@@ -833,11 +1125,14 @@ fn deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size(
             vocab_size,
         );
     let message_keys = batch_synth_message_cache_keys(messages);
+    let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
+    let normalized_tool_choice =
+        normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
 
     serde_json::to_string(&DeterministicChatChoicesCacheKey {
         messages: &message_keys,
-        tools: None,
-        tool_choice: None,
+        tools: normalized_tools,
+        tool_choice: normalized_tool_choice,
         chat_template_kwargs: normalized_chat_template_kwargs_for_cache(
             req.chat_template_kwargs.as_ref(),
         ),
@@ -859,9 +1154,9 @@ fn batch_synth_message_cache_keys(messages: &[Message]) -> Vec<ChatPromptMessage
         .map(|message| ChatPromptMessageCacheKey {
             role: &message.role,
             content: &message.content,
-            tool_calls: None,
-            name: None,
-            tool_call_id: None,
+            tool_calls: normalized_message_tool_calls_for_cache(message.tool_calls.as_deref()),
+            name: message.name.as_deref(),
+            tool_call_id: message.tool_call_id.as_deref(),
         })
         .collect()
 }
@@ -898,11 +1193,14 @@ fn deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size(
             vocab_size,
         );
     let message_keys = batch_synth_message_cache_keys(messages);
+    let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
+    let normalized_tool_choice =
+        normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
 
     serde_json::to_string(&DeterministicChatRequestCacheKey {
         messages: &message_keys,
-        tools: None,
-        tool_choice: None,
+        tools: normalized_tools,
+        tool_choice: normalized_tool_choice,
         chat_template_kwargs: normalized_chat_template_kwargs_for_cache(
             req.chat_template_kwargs.as_ref(),
         ),
@@ -1055,6 +1353,14 @@ fn chat_request_cache_value_from_choice(
     prompt_tokens: usize,
     choice: &Choice,
 ) -> DeterministicChatRequestCacheValue {
+    debug_assert!(
+        choice
+            .message
+            .tool_calls
+            .as_ref()
+            .map_or(true, |calls| calls.is_empty()),
+        "tool-call choices should not be cached as text-only completions"
+    );
     DeterministicChatRequestCacheValue {
         prompt_tokens,
         completion: DeterministicCompletionCacheValue {
@@ -1073,6 +1379,15 @@ fn store_chat_request_cache_from_chat_choices_response(
     vocab_size: usize,
 ) -> Result<(), ApiError> {
     if chat_request_max_tokens(req) != 0 || req.adapter.is_some() || req.adapters.is_some() {
+        return Ok(());
+    }
+    if resp.choices.iter().any(|choice| {
+        choice
+            .message
+            .tool_calls
+            .as_ref()
+            .map_or(false, |calls| !calls.is_empty())
+    }) {
         return Ok(());
     }
 
@@ -1138,6 +1453,16 @@ async fn zero_chat_choices_response_from_request_cache_hit(
 fn chat_choices_cache_value_from_response(
     resp: &ChatCompletionResponse,
 ) -> Option<DeterministicChatChoicesCacheValue> {
+    if resp.choices.iter().any(|choice| {
+        choice
+            .message
+            .tool_calls
+            .as_ref()
+            .map_or(false, |calls| !calls.is_empty())
+    }) {
+        return None;
+    }
+
     let completions = resp
         .choices
         .iter()
@@ -1169,24 +1494,28 @@ fn response_from_cached_completion(
         .clone()
         .unwrap_or_else(|| state.served_model_id.clone());
 
-    let preview_source = if cached.text.is_empty() {
-        cached.reasoning_content.as_deref().unwrap_or("")
-    } else {
-        cached.text.as_str()
-    };
+    let completion_tokens = cached.completion_tokens;
+    let cached_output = assistant_output_from_cached_parts(
+        req,
+        cached.text,
+        cached.reasoning_content,
+        cached.finish_reason,
+    );
+    let preview_source = cached_output.preview_source();
     record_recent_request(
         state,
         RequestRecord {
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
             completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
-            completion_tokens: cached.completion_tokens as u32,
+            completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
-            finish_reason: cached.finish_reason.clone(),
+            finish_reason: cached_output.finish_reason.clone(),
             ..request_record_from_req(req, &id, &model, false)
         },
     );
 
+    let finish_reason = cached_output.finish_reason.clone();
     ChatCompletionResponse {
         id,
         object: "chat.completion",
@@ -1196,19 +1525,19 @@ fn response_from_cached_completion(
             index: 0,
             message: Message {
                 role: "assistant".to_string(),
-                content: cached.text,
-                reasoning_content: cached.reasoning_content,
-                tool_calls: None,
+                content: cached_output.content,
+                reasoning_content: cached_output.reasoning_content,
+                tool_calls: cached_output.tool_calls,
                 name: None,
                 tool_call_id: None,
             },
-            finish_reason: cached.finish_reason,
-            completion_tokens: cached.completion_tokens,
+            finish_reason,
+            completion_tokens,
         }],
         usage: Usage {
             prompt_tokens: prompt_token_count,
-            completion_tokens: cached.completion_tokens,
-            total_tokens: prompt_token_count + cached.completion_tokens,
+            completion_tokens,
+            total_tokens: prompt_token_count + completion_tokens,
         },
     }
 }
@@ -1226,21 +1555,27 @@ fn response_from_cached_chat_choices(
         .clone()
         .unwrap_or_else(|| state.served_model_id.clone());
 
-    let preview_source = cached
+    let cached_completions = cached
         .completions
-        .first()
+        .into_iter()
         .map(|completion| {
-            if completion.text.is_empty() {
-                completion.reasoning_content.as_deref().unwrap_or("")
-            } else {
-                completion.text.as_str()
-            }
+            let completion_tokens = completion.completion_tokens;
+            let output = assistant_output_from_cached_parts(
+                req,
+                completion.text,
+                completion.reasoning_content,
+                completion.finish_reason,
+            );
+            (completion_tokens, output)
         })
+        .collect::<Vec<_>>();
+    let preview_source = cached_completions
+        .first()
+        .map(|(_, output)| output.preview_source())
         .unwrap_or("");
-    let completion_tokens = cached
-        .completions
+    let completion_tokens = cached_completions
         .iter()
-        .map(|completion| completion.completion_tokens)
+        .map(|(completion_tokens, _)| *completion_tokens)
         .sum::<usize>();
 
     record_recent_request(
@@ -1251,31 +1586,29 @@ fn response_from_cached_chat_choices(
             prompt_tokens: cached.prompt_tokens as u32,
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
-            finish_reason: cached
-                .completions
+            finish_reason: cached_completions
                 .first()
-                .map(|completion| completion.finish_reason.clone())
+                .map(|(_, output)| output.finish_reason.clone())
                 .unwrap_or_else(|| "length".to_string()),
             ..request_record_from_req(req, &id, &model, false)
         },
     );
 
-    let choices = cached
-        .completions
+    let choices = cached_completions
         .into_iter()
         .enumerate()
-        .map(|(index, completion)| Choice {
+        .map(|(index, (completion_tokens, output))| Choice {
             index,
             message: Message {
                 role: "assistant".to_string(),
-                content: completion.text,
-                reasoning_content: completion.reasoning_content,
-                tool_calls: None,
+                content: output.content,
+                reasoning_content: output.reasoning_content,
+                tool_calls: output.tool_calls,
                 name: None,
                 tool_call_id: None,
             },
-            finish_reason: completion.finish_reason,
-            completion_tokens: completion.completion_tokens,
+            finish_reason: output.finish_reason,
+            completion_tokens,
         })
         .collect();
 
@@ -1306,11 +1639,14 @@ fn streaming_response_from_cached_completion(
         .model
         .clone()
         .unwrap_or_else(|| state.served_model_id.clone());
-    let preview_source = if cached.text.is_empty() {
-        cached.reasoning_content.as_deref().unwrap_or("")
-    } else {
-        cached.text.as_str()
-    };
+    let completion_tokens = cached.completion_tokens;
+    let cached_output = assistant_output_from_cached_parts(
+        req,
+        cached.text,
+        cached.reasoning_content,
+        cached.finish_reason,
+    );
+    let preview_source = cached_output.preview_source();
 
     record_recent_request(
         state,
@@ -1318,9 +1654,9 @@ fn streaming_response_from_cached_completion(
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
             completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
-            completion_tokens: cached.completion_tokens as u32,
+            completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
-            finish_reason: cached.finish_reason.clone(),
+            finish_reason: cached_output.finish_reason.clone(),
             ..request_record_from_req(req, &id, &model, true)
         },
     );
@@ -1337,13 +1673,14 @@ fn streaming_response_from_cached_completion(
                 role: Some("assistant".to_string()),
                 content: None,
                 reasoning_content: None,
+                tool_calls: None,
             },
             finish_reason: None,
         }],
     };
     events.push(Event::default().data(serde_json::to_string(&role_chunk).unwrap()));
 
-    if let Some(reasoning) = cached.reasoning_content {
+    if let Some(reasoning) = cached_output.reasoning_content {
         if !reasoning.is_empty() {
             let chunk = ChatCompletionChunk {
                 id: id.clone(),
@@ -1356,6 +1693,7 @@ fn streaming_response_from_cached_completion(
                         role: None,
                         content: None,
                         reasoning_content: Some(reasoning),
+                        tool_calls: None,
                     },
                     finish_reason: None,
                 }],
@@ -1364,7 +1702,26 @@ fn streaming_response_from_cached_completion(
         }
     }
 
-    if !cached.text.is_empty() {
+    if let Some(tool_calls) = cached_output.tool_calls.as_deref() {
+        if !cached_output.content.is_empty() {
+            let chunk = ChatCompletionChunk {
+                id: id.clone(),
+                object: "chat.completion.chunk",
+                created,
+                model: model.clone(),
+                choices: vec![ChunkChoice {
+                    index: 0,
+                    delta: Delta {
+                        role: None,
+                        content: Some(cached_output.content.clone()),
+                        reasoning_content: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: None,
+                }],
+            };
+            events.push(Event::default().data(serde_json::to_string(&chunk).unwrap()));
+        }
         let chunk = ChatCompletionChunk {
             id: id.clone(),
             object: "chat.completion.chunk",
@@ -1374,8 +1731,27 @@ fn streaming_response_from_cached_completion(
                 index: 0,
                 delta: Delta {
                     role: None,
-                    content: Some(cached.text),
+                    content: None,
                     reasoning_content: None,
+                    tool_calls: Some(tool_call_deltas_from_openai_calls(tool_calls)),
+                },
+                finish_reason: None,
+            }],
+        };
+        events.push(Event::default().data(serde_json::to_string(&chunk).unwrap()));
+    } else if !cached_output.content.is_empty() {
+        let chunk = ChatCompletionChunk {
+            id: id.clone(),
+            object: "chat.completion.chunk",
+            created,
+            model: model.clone(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: Delta {
+                    role: None,
+                    content: Some(cached_output.content),
+                    reasoning_content: None,
+                    tool_calls: None,
                 },
                 finish_reason: None,
             }],
@@ -1394,8 +1770,9 @@ fn streaming_response_from_cached_completion(
                 role: None,
                 content: None,
                 reasoning_content: None,
+                tool_calls: None,
             },
-            finish_reason: Some(cached.finish_reason),
+            finish_reason: Some(cached_output.finish_reason),
         }],
     };
     events.push(Event::default().data(serde_json::to_string(&done_chunk).unwrap()));
@@ -1451,6 +1828,14 @@ fn cache_value_from_response(
     resp: &ChatCompletionResponse,
 ) -> Option<DeterministicCompletionCacheValue> {
     let choice = resp.choices.first()?;
+    if choice
+        .message
+        .tool_calls
+        .as_ref()
+        .map_or(false, |calls| !calls.is_empty())
+    {
+        return None;
+    }
     Some(DeterministicCompletionCacheValue {
         text: choice.message.content.clone(),
         reasoning_content: choice.message.reasoning_content.clone(),
@@ -1953,6 +2338,8 @@ pub struct Delta {
     /// `<think>...</think>` block) or `content` (after the close tag).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone)]
@@ -3041,12 +3428,9 @@ async fn generate_real_batched(
         .unwrap_or_else(|| state.served_model_id.clone());
     let completion_tokens =
         completion_usage_tokens(output.completion_tokens, &output.finish_reason);
-    let (reasoning_content, completion_text) = split_reasoning_response(&output.text, prompt_text);
-    let preview_source = if completion_text.is_empty() {
-        reasoning_content.as_deref().unwrap_or("")
-    } else {
-        completion_text.as_str()
-    };
+    let assistant_output =
+        assistant_output_from_model_output(req, &output.text, prompt_text, finish_reason);
+    let preview_source = assistant_output.preview_source();
     record_recent_request(
         state,
         RequestRecord {
@@ -3055,11 +3439,12 @@ async fn generate_real_batched(
             prompt_tokens: prompt_token_count as u32,
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
-            finish_reason: finish_reason.to_string(),
+            finish_reason: assistant_output.finish_reason.clone(),
             ..request_record_from_req(req, &id, &model, false)
         },
     );
 
+    let finish_reason = assistant_output.finish_reason.clone();
     Ok(ChatCompletionResponse {
         id,
         object: "chat.completion",
@@ -3069,13 +3454,13 @@ async fn generate_real_batched(
             index: 0,
             message: Message {
                 role: "assistant".to_string(),
-                content: completion_text,
-                reasoning_content,
-                tool_calls: None,
+                content: assistant_output.content,
+                reasoning_content: assistant_output.reasoning_content,
+                tool_calls: assistant_output.tool_calls,
                 name: None,
                 tool_call_id: None,
             },
-            finish_reason: finish_reason.to_string(),
+            finish_reason,
             completion_tokens,
         }],
         usage: Usage {
@@ -3130,6 +3515,7 @@ async fn generate_real_batched_streaming(
     let req_top_p = req.top_p;
     let req_max_tokens = req.max_tokens.map(|n| n as u32);
     let prompt_starts_in_reasoning = prompt_starts_in_reasoning(prompt_text);
+    let buffer_tool_content = request_allows_tool_call_parsing(req);
     let batching_engine = batching_engine.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
 
@@ -3182,6 +3568,7 @@ async fn generate_real_batched_streaming(
                         role: Some("assistant".to_string()),
                         content: None,
                         reasoning_content: None,
+                        tool_calls: None,
                     },
                     finish_reason: None,
                 }],
@@ -3228,7 +3615,7 @@ async fn generate_real_batched_streaming(
                                     .unwrap_or_else(|| tokenizer.decode(&[token]).unwrap_or_default());
                                 decoded_prefix = decoded;
                                 let chunk = reasoning_splitter.push(&delta);
-                                if !emit_reasoning_chunk(
+                                if !emit_or_buffer_reasoning_chunk(
                                     &tx,
                                     &id,
                                     created,
@@ -3237,6 +3624,7 @@ async fn generate_real_batched_streaming(
                                     &mut completion_buf,
                                     &mut reasoning_buf,
                                     &mut content_buf,
+                                    buffer_tool_content,
                                 )
                                 .await
                                 {
@@ -3257,7 +3645,7 @@ async fn generate_real_batched_streaming(
                                     kiln_model::FinishReason::StopSequence(_) => "stop",
                                 };
                                 let trailing = reasoning_splitter.flush();
-                                if !emit_reasoning_chunk(
+                                if !emit_or_buffer_reasoning_chunk(
                                     &tx,
                                     &id,
                                     created,
@@ -3266,6 +3654,7 @@ async fn generate_real_batched_streaming(
                                     &mut completion_buf,
                                     &mut reasoning_buf,
                                     &mut content_buf,
+                                    buffer_tool_content,
                                 )
                                 .await
                                 {
@@ -3276,6 +3665,73 @@ async fn generate_real_batched_streaming(
                                     );
                                     return;
                                 }
+                                let reasoning_content = if reasoning_buf.is_empty() {
+                                    None
+                                } else {
+                                    Some(reasoning_buf.clone())
+                                };
+                                let assistant_output =
+                                    assistant_output_from_split_parts_with_tool_parsing(
+                                        buffer_tool_content,
+                                        reasoning_content,
+                                        content_buf.clone(),
+                                        finish,
+                                    );
+                                if assistant_output.tool_calls.is_some()
+                                    && !assistant_output.content.is_empty()
+                                    && !emit_content_chunk(
+                                        &tx,
+                                        &id,
+                                        created,
+                                        &model,
+                                        assistant_output.content.clone(),
+                                    )
+                                    .await
+                                {
+                                    record(
+                                        "client_disconnect".to_string(),
+                                        &completion_buf,
+                                        completion_token_count,
+                                    );
+                                    return;
+                                }
+                                if let Some(tool_calls) = assistant_output.tool_calls.as_deref() {
+                                    if !emit_tool_calls_chunk(
+                                        &tx,
+                                        &id,
+                                        created,
+                                        &model,
+                                        tool_calls,
+                                    )
+                                    .await
+                                    {
+                                        record(
+                                            "client_disconnect".to_string(),
+                                            &completion_buf,
+                                            completion_token_count,
+                                        );
+                                        return;
+                                    }
+                                } else if buffer_tool_content
+                                    && !assistant_output.content.is_empty()
+                                    && !emit_content_chunk(
+                                        &tx,
+                                        &id,
+                                        created,
+                                        &model,
+                                        assistant_output.content.clone(),
+                                    )
+                                    .await
+                                {
+                                    record(
+                                        "client_disconnect".to_string(),
+                                        &completion_buf,
+                                        completion_token_count,
+                                    );
+                                    return;
+                                }
+                                let finish = assistant_output.finish_reason.clone();
+                                let record_completion = assistant_output.preview_source().to_string();
                                 let chunk = ChatCompletionChunk {
                                     id: id.clone(),
                                     object: "chat.completion.chunk",
@@ -3287,8 +3743,9 @@ async fn generate_real_batched_streaming(
                                             role: None,
                                             content: None,
                                             reasoning_content: None,
+                                            tool_calls: None,
                                         },
-                                        finish_reason: Some(finish.to_string()),
+                                        finish_reason: Some(finish.clone()),
                                     }],
                                 };
                                 let _ = tx
@@ -3296,8 +3753,8 @@ async fn generate_real_batched_streaming(
                                     .await;
                                 let _ = tx.send(Event::default().data("[DONE]")).await;
                                 record(
-                                    finish.to_string(),
-                                    &completion_buf,
+                                    finish,
+                                    &record_completion,
                                     output.completion_tokens as u32,
                                 );
                                 return;
@@ -3334,7 +3791,7 @@ async fn generate_real_batched_streaming(
                 cancel.cancel();
                 let _ = batching_engine.cancel(request_id).await;
                 let trailing = reasoning_splitter.flush();
-                let _ = emit_reasoning_chunk(
+                let _ = emit_or_buffer_reasoning_chunk(
                     &tx,
                     &id,
                     created,
@@ -3343,6 +3800,7 @@ async fn generate_real_batched_streaming(
                     &mut completion_buf,
                     &mut reasoning_buf,
                     &mut content_buf,
+                    buffer_tool_content,
                 )
                 .await;
                 let timeout_chunk = ChatCompletionChunk {
@@ -3356,6 +3814,7 @@ async fn generate_real_batched_streaming(
                             role: None,
                             content: None,
                             reasoning_content: None,
+                            tool_calls: None,
                         },
                         finish_reason: Some("timeout".to_string()),
                     }],
@@ -3639,17 +4098,14 @@ async fn generate_real(
     // clients can render the two channels separately. For non-reasoning
     // templates this returns `(None, output.text)` and the response shape
     // is byte-identical to before.
-    let (reasoning_content, completion_text) = split_reasoning_response(&output.text, prompt_text);
+    let assistant_output =
+        assistant_output_from_model_output(req, &output.text, prompt_text, finish_reason);
 
     // Recent-requests preview wants the user-visible answer, but the
     // reasoning often dominates the first few hundred chars. Show
     // reasoning when the answer is empty (still mid-thought at
     // max_tokens cutoff) so the dashboard isn't blank.
-    let preview_source = if completion_text.is_empty() {
-        reasoning_content.as_deref().unwrap_or("")
-    } else {
-        completion_text.as_str()
-    };
+    let preview_source = assistant_output.preview_source();
     record_recent_request(
         state,
         RequestRecord {
@@ -3658,11 +4114,12 @@ async fn generate_real(
             prompt_tokens: prompt_token_count as u32,
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
-            finish_reason: finish_reason.to_string(),
+            finish_reason: assistant_output.finish_reason.clone(),
             ..request_record_from_req(req, &id, &model, false)
         },
     );
 
+    let finish_reason = assistant_output.finish_reason.clone();
     Ok(ChatCompletionResponse {
         id,
         object: "chat.completion",
@@ -3672,13 +4129,13 @@ async fn generate_real(
             index: 0,
             message: Message {
                 role: "assistant".to_string(),
-                content: completion_text,
-                reasoning_content,
-                tool_calls: None,
+                content: assistant_output.content,
+                reasoning_content: assistant_output.reasoning_content,
+                tool_calls: assistant_output.tool_calls,
                 name: None,
                 tool_call_id: None,
             },
-            finish_reason: finish_reason.to_string(),
+            finish_reason,
             completion_tokens,
         }],
         usage: Usage {
@@ -3762,6 +4219,7 @@ async fn generate_real_streaming(
     let req_temperature = req.temperature;
     let req_top_p = req.top_p;
     let req_max_tokens = req.max_tokens.map(|n| n as u32);
+    let buffer_tool_content = request_allows_tool_call_parsing(req);
 
     // Use a tokio mpsc channel to bridge sync generation -> async SSE stream.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -3819,6 +4277,7 @@ async fn generate_real_streaming(
                         role: Some("assistant".to_string()),
                         content: None,
                         reasoning_content: None,
+                        tool_calls: None,
                     },
                     finish_reason: None,
                 }],
@@ -4106,7 +4565,7 @@ async fn generate_real_streaming(
                                 // straddles the boundary may emit both in
                                 // separate chunks (rare; emitted in order).
                                 let chunk = reasoning_splitter.push(&token.text);
-                                if !emit_reasoning_chunk(
+                                if !emit_or_buffer_reasoning_chunk(
                                     &tx,
                                     &id,
                                     created,
@@ -4115,6 +4574,7 @@ async fn generate_real_streaming(
                                     &mut completion_buf,
                                     &mut reasoning_buf,
                                     &mut content_buf,
+                                    buffer_tool_content,
                                 )
                                 .await
                                 {
@@ -4137,7 +4597,7 @@ async fn generate_real_streaming(
                                 // we don't silently swallow up-to-7 chars
                                 // that turned out not to be `</think>`.
                                 let trailing = reasoning_splitter.flush();
-                                if !emit_reasoning_chunk(
+                                if !emit_or_buffer_reasoning_chunk(
                                     &tx,
                                     &id,
                                     created,
@@ -4146,6 +4606,7 @@ async fn generate_real_streaming(
                                     &mut completion_buf,
                                     &mut reasoning_buf,
                                     &mut content_buf,
+                                    buffer_tool_content,
                                 )
                                 .await
                                 {
@@ -4156,6 +4617,73 @@ async fn generate_real_streaming(
                                     );
                                     return;
                                 }
+                                let reasoning_content = if reasoning_buf.is_empty() {
+                                    None
+                                } else {
+                                    Some(reasoning_buf.clone())
+                                };
+                                let assistant_output =
+                                    assistant_output_from_split_parts_with_tool_parsing(
+                                        buffer_tool_content,
+                                        reasoning_content,
+                                        content_buf.clone(),
+                                        finish,
+                                    );
+                                if assistant_output.tool_calls.is_some()
+                                    && !assistant_output.content.is_empty()
+                                    && !emit_content_chunk(
+                                        &tx,
+                                        &id,
+                                        created,
+                                        &model,
+                                        assistant_output.content.clone(),
+                                    )
+                                    .await
+                                {
+                                    record(
+                                        "client_disconnect".to_string(),
+                                        &completion_buf,
+                                        completion_token_count,
+                                    );
+                                    return;
+                                }
+                                if let Some(tool_calls) = assistant_output.tool_calls.as_deref() {
+                                    if !emit_tool_calls_chunk(
+                                        &tx,
+                                        &id,
+                                        created,
+                                        &model,
+                                        tool_calls,
+                                    )
+                                    .await
+                                    {
+                                        record(
+                                            "client_disconnect".to_string(),
+                                            &completion_buf,
+                                            completion_token_count,
+                                        );
+                                        return;
+                                    }
+                                } else if buffer_tool_content
+                                    && !assistant_output.content.is_empty()
+                                    && !emit_content_chunk(
+                                        &tx,
+                                        &id,
+                                        created,
+                                        &model,
+                                        assistant_output.content.clone(),
+                                    )
+                                    .await
+                                {
+                                    record(
+                                        "client_disconnect".to_string(),
+                                        &completion_buf,
+                                        completion_token_count,
+                                    );
+                                    return;
+                                }
+                                let finish = assistant_output.finish_reason.clone();
+                                let record_completion = assistant_output.preview_source().to_string();
                                 let chunk = ChatCompletionChunk {
                                     id: id.clone(),
                                     object: "chat.completion.chunk",
@@ -4167,8 +4695,9 @@ async fn generate_real_streaming(
                                             role: None,
                                             content: None,
                                             reasoning_content: None,
+                                            tool_calls: None,
                                         },
-                                        finish_reason: Some(finish.to_string()),
+                                        finish_reason: Some(finish.clone()),
                                     }],
                                 };
                                 let _ = tx
@@ -4178,35 +4707,32 @@ async fn generate_real_streaming(
                                     )
                                     .await;
                                 let _ = tx.send(Event::default().data("[DONE]")).await;
-                                let reasoning_content = if reasoning_buf.is_empty() {
-                                    None
-                                } else {
-                                    Some(reasoning_buf.clone())
-                                };
-                                let cache_value = DeterministicCompletionCacheValue {
-                                    text: content_buf.clone(),
-                                    reasoning_content,
-                                    finish_reason: finish.to_string(),
-                                    completion_tokens: completion_token_count as usize,
-                                };
-                                if let Some(key) = completion_cache_key.clone() {
-                                    completion_cache.lock().unwrap().insert_complete_value(
-                                        key,
-                                        cache_value.clone(),
-                                    );
-                                }
-                                let chat_cache_value = DeterministicChatRequestCacheValue {
-                                    prompt_tokens: prompt_token_count,
-                                    completion: cache_value,
-                                };
-                                if let Some(owner) = chat_request_cache_owner.take() {
-                                    owner.complete(chat_cache_value);
-                                } else if let Some(key) = chat_request_cache_key.clone() {
-                                    chat_request_cache.lock().unwrap().insert(key, chat_cache_value);
+                                if assistant_output.tool_calls.is_none() {
+                                    let cache_value = DeterministicCompletionCacheValue {
+                                        text: assistant_output.content.clone(),
+                                        reasoning_content: assistant_output.reasoning_content.clone(),
+                                        finish_reason: finish.clone(),
+                                        completion_tokens: completion_token_count as usize,
+                                    };
+                                    if let Some(key) = completion_cache_key.clone() {
+                                        completion_cache.lock().unwrap().insert_complete_value(
+                                            key,
+                                            cache_value.clone(),
+                                        );
+                                    }
+                                    let chat_cache_value = DeterministicChatRequestCacheValue {
+                                        prompt_tokens: prompt_token_count,
+                                        completion: cache_value,
+                                    };
+                                    if let Some(owner) = chat_request_cache_owner.take() {
+                                        owner.complete(chat_cache_value);
+                                    } else if let Some(key) = chat_request_cache_key.clone() {
+                                        chat_request_cache.lock().unwrap().insert(key, chat_cache_value);
+                                    }
                                 }
                                 record(
-                                    finish.to_string(),
-                                    &completion_buf,
+                                    finish,
+                                    &record_completion,
                                     completion_token_count,
                                 );
                                 return;
@@ -4237,7 +4763,7 @@ async fn generate_real_streaming(
                 // Drain any pending partial-tag tail before the timeout
                 // chunk so the client doesn't lose those bytes.
                 let trailing = reasoning_splitter.flush();
-                let _ = emit_reasoning_chunk(
+                let _ = emit_or_buffer_reasoning_chunk(
                     &tx,
                     &id,
                     created,
@@ -4246,6 +4772,7 @@ async fn generate_real_streaming(
                     &mut completion_buf,
                     &mut reasoning_buf,
                     &mut content_buf,
+                    buffer_tool_content,
                 )
                 .await;
                 let error_chunk = ChatCompletionChunk {
@@ -4259,6 +4786,7 @@ async fn generate_real_streaming(
                             role: None,
                             content: None,
                             reasoning_content: None,
+                            tool_calls: None,
                         },
                         finish_reason: Some("timeout".to_string()),
                     }],
@@ -4375,20 +4903,28 @@ async fn generate_mock(
         .clone()
         .unwrap_or_else(|| state.served_model_id.clone());
     let completion_tokens = output_tokens.len();
+    let assistant_output = assistant_output_from_split_parts(req, None, completion_text, "stop");
 
     record_recent_request(
         state,
         RequestRecord {
-            completion_preview: truncate_chars(&completion_text, COMPLETION_PREVIEW_MAX_CHARS),
-            completion_full: Some(truncate_chars(&completion_text, FULL_BODY_MAX_CHARS)),
+            completion_preview: truncate_chars(
+                assistant_output.preview_source(),
+                COMPLETION_PREVIEW_MAX_CHARS,
+            ),
+            completion_full: Some(truncate_chars(
+                assistant_output.preview_source(),
+                FULL_BODY_MAX_CHARS,
+            )),
             prompt_tokens: prompt_token_count as u32,
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
-            finish_reason: "stop".to_string(),
+            finish_reason: assistant_output.finish_reason.clone(),
             ..request_record_from_req(req, &id, &model, false)
         },
     );
 
+    let finish_reason = assistant_output.finish_reason.clone();
     Ok(ChatCompletionResponse {
         id,
         object: "chat.completion",
@@ -4398,14 +4934,14 @@ async fn generate_mock(
             index: 0,
             message: Message {
                 role: "assistant".to_string(),
-                content: completion_text,
+                content: assistant_output.content,
                 // Mock backend never emits a reasoning block.
-                reasoning_content: None,
-                tool_calls: None,
+                reasoning_content: assistant_output.reasoning_content,
+                tool_calls: assistant_output.tool_calls,
                 name: None,
                 tool_call_id: None,
             },
-            finish_reason: "stop".to_string(),
+            finish_reason,
             completion_tokens,
         }],
         usage: Usage {
@@ -4510,6 +5046,14 @@ pub struct BatchCompletionRequest {
     /// Per-prompt adapter override is a future extension.
     #[serde(default)]
     pub adapters: Option<Vec<AdapterRef>>,
+    /// OpenAI-style tool/function definitions shared by every prompt in the
+    /// batch. Forwarded to the same chat template context as the chat endpoint.
+    #[serde(default)]
+    pub tools: Option<Vec<serde_json::Value>>,
+    /// OpenAI-style `tool_choice` shared by every prompt in the batch.
+    /// Forwarded to the same chat template context as the chat endpoint.
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
     /// Kiln extension: additional top-level variables forwarded into the
     /// HuggingFace Jinja chat-template context for every prompt in the batch.
     #[serde(default)]
@@ -4537,6 +5081,8 @@ pub struct BatchCompletionItem {
     pub text: String,
     #[serde(skip)]
     pub reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
     pub finish_reason: String,
     pub usage: Usage,
 }
@@ -4550,11 +5096,21 @@ struct BatchPromptGroup {
 struct BatchPromptMessageCacheKey<'a> {
     role: &'a str,
     content: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Cow<'a, [serde_json::Value]>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<&'a str>,
 }
 
 #[derive(Serialize)]
 struct DeterministicBatchCacheKeyWire<'a> {
     prompts: Vec<Vec<BatchPromptMessageCacheKey<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a [serde_json::Value]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'a serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chat_template_kwargs: Option<&'a serde_json::Map<String, serde_json::Value>>,
     n: usize,
@@ -4572,6 +5128,9 @@ fn batch_prompt_cache_key(messages: &[Message]) -> Vec<BatchPromptMessageCacheKe
         .map(|m| BatchPromptMessageCacheKey {
             role: &m.role,
             content: &m.content,
+            tool_calls: normalized_message_tool_calls_for_cache(m.tool_calls.as_deref()),
+            name: m.name.as_deref(),
+            tool_call_id: m.tool_call_id.as_deref(),
         })
         .collect()
 }
@@ -4582,13 +5141,16 @@ fn batch_synth_messages(messages: &[Message]) -> Vec<Message> {
         .map(|m| Message {
             role: m.role.clone(),
             content: m.content.clone(),
-            // Batch input messages are rendered as plain text turns. The batch
-            // API does not currently thread historical reasoning or tool-call
-            // metadata into synthesized per-output chat requests.
+            // Input reasoning is not rendered by the chat endpoint either, but
+            // tool metadata is part of the visible template conversation.
             reasoning_content: None,
-            tool_calls: None,
-            name: None,
-            tool_call_id: None,
+            tool_calls: m
+                .tool_calls
+                .as_ref()
+                .filter(|tool_calls| !tool_calls.is_empty())
+                .cloned(),
+            name: m.name.clone(),
+            tool_call_id: m.tool_call_id.clone(),
         })
         .collect()
 }
@@ -4667,6 +5229,9 @@ fn deterministic_batch_cache_key_with_vocab_size(
             req.seed,
             vocab_size,
         );
+    let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
+    let normalized_tool_choice =
+        normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
 
     let key = DeterministicBatchCacheKeyWire {
         prompts: req
@@ -4674,6 +5239,8 @@ fn deterministic_batch_cache_key_with_vocab_size(
             .iter()
             .map(|messages| batch_prompt_cache_key(messages))
             .collect(),
+        tools: normalized_tools,
+        tool_choice: normalized_tool_choice,
         chat_template_kwargs: normalized_chat_template_kwargs_for_cache(
             req.chat_template_kwargs.as_ref(),
         ),
@@ -4705,6 +5272,7 @@ fn batch_response_from_cached_value(
             completion_index: item.completion_index,
             text: item.text,
             reasoning_content: item.reasoning_content,
+            tool_calls: item.tool_calls,
             finish_reason: item.finish_reason,
             usage: Usage {
                 prompt_tokens: item.prompt_tokens,
@@ -4753,6 +5321,7 @@ fn batch_response_from_cached_chat_choices(
                 completion_index,
                 text: completion.text,
                 reasoning_content: completion.reasoning_content,
+                tool_calls: None,
                 finish_reason: completion.finish_reason,
                 usage: Usage {
                     prompt_tokens: prompt_tokens_per_choice,
@@ -4810,6 +5379,7 @@ fn batch_response_from_cached_chat_choice_groups(
                 completion_index,
                 text: completion.text,
                 reasoning_content: completion.reasoning_content,
+                tool_calls: None,
                 finish_reason: completion.finish_reason,
                 usage: Usage {
                     prompt_tokens: cached.prompt_tokens,
@@ -4860,6 +5430,7 @@ fn batch_response_from_cached_chat_requests(
                 completion_index: 0,
                 text: completion.text,
                 reasoning_content: completion.reasoning_content,
+                tool_calls: None,
                 finish_reason: completion.finish_reason,
                 usage: Usage {
                     prompt_tokens: cached.prompt_tokens,
@@ -4982,6 +5553,7 @@ fn cache_value_from_batch_response(resp: &BatchCompletionResponse) -> Determinis
                 completion_index: item.completion_index,
                 text: item.text.clone(),
                 reasoning_content: item.reasoning_content.clone(),
+                tool_calls: item.tool_calls.clone(),
                 finish_reason: item.finish_reason.clone(),
                 prompt_tokens: item.usage.prompt_tokens,
                 completion_tokens: item.usage.completion_tokens,
@@ -4994,8 +5566,15 @@ fn cache_value_from_batch_response(resp: &BatchCompletionResponse) -> Determinis
 
 fn chat_request_cache_value_from_batch_item(
     item: &BatchCompletionItem,
-) -> DeterministicChatRequestCacheValue {
-    DeterministicChatRequestCacheValue {
+) -> Option<DeterministicChatRequestCacheValue> {
+    if item
+        .tool_calls
+        .as_ref()
+        .map_or(false, |calls| !calls.is_empty())
+    {
+        return None;
+    }
+    Some(DeterministicChatRequestCacheValue {
         prompt_tokens: item.usage.prompt_tokens,
         completion: DeterministicCompletionCacheValue {
             text: item.text.clone(),
@@ -5003,7 +5582,7 @@ fn chat_request_cache_value_from_batch_item(
             finish_reason: item.finish_reason.clone(),
             completion_tokens: item.usage.completion_tokens,
         },
-    }
+    })
 }
 
 fn store_chat_request_cache_from_batch_response(
@@ -5053,8 +5632,10 @@ fn store_chat_request_cache_from_batch_response(
             else {
                 continue;
             };
-            if seen_keys.insert(key.clone()) {
-                entries.push((key, chat_request_cache_value_from_batch_item(item)));
+            if seen_keys.insert(key.clone())
+                && let Some(value) = chat_request_cache_value_from_batch_item(item)
+            {
+                entries.push((key, value));
             }
         }
     }
@@ -5078,6 +5659,13 @@ fn chat_choices_cache_value_from_batch_items(
         if item.completion_index != expected {
             return None;
         }
+    }
+    if items.iter().any(|item| {
+        item.tool_calls
+            .as_ref()
+            .map_or(false, |calls| !calls.is_empty())
+    }) {
+        return None;
     }
 
     let prompt_tokens = items.first()?.usage.prompt_tokens;
@@ -5371,8 +5959,8 @@ async fn batch_completions_inner(
             let prompt_text = render_prompt_text(
                 state,
                 &prompt_group.messages,
-                None,
-                None,
+                req.tools.as_deref(),
+                req.tool_choice.as_ref(),
                 req.chat_template_kwargs.as_ref(),
             )?;
             let prompt_tokens = encode_prompt_tokens(state, &prompt_text)?;
@@ -5388,6 +5976,7 @@ async fn batch_completions_inner(
                         completion_index,
                         text: String::new(),
                         reasoning_content: None,
+                        tool_calls: None,
                         finish_reason: "length".to_string(),
                         usage: Usage {
                             prompt_tokens: prompt_token_count,
@@ -5504,6 +6093,11 @@ async fn batch_completions_inner(
         let max_tokens = req.max_tokens;
         let max_completion_tokens = req.max_completion_tokens;
         let seed = req.seed;
+        let tools = normalized_tools_option_for_synthetic_request(req.tools.as_deref());
+        let tool_choice = normalized_tool_choice_option_for_synthetic_request(
+            req.tools.as_deref(),
+            req.tool_choice.as_ref(),
+        );
         let chat_template_kwargs = req.chat_template_kwargs.clone();
 
         handles.push(tokio::spawn(async move {
@@ -5515,8 +6109,8 @@ async fn batch_completions_inner(
                 let prompt_text = render_prompt_text(
                     &state_clone,
                     &messages,
-                    None,
-                    None,
+                    tools.as_deref(),
+                    tool_choice.as_ref(),
                     chat_template_kwargs.as_ref(),
                 )?;
                 let prompt_tokens = encode_prompt_tokens(&state_clone, &prompt_text)?;
@@ -5557,8 +6151,8 @@ async fn batch_completions_inner(
                         seed: derived_seed,
                         adapter: None,
                         adapters: None,
-                        tools: None,
-                        tool_choice: None,
+                        tools: tools.clone(),
+                        tool_choice: tool_choice.clone(),
                         chat_template_kwargs: chat_template_kwargs.clone(),
                     };
                     let resp = if let Some((prompt_text, prompt_tokens)) = prepared_prompt.as_ref()
@@ -5643,6 +6237,7 @@ async fn batch_completions_inner(
                 completion_index,
                 text: choice.message.content,
                 reasoning_content: choice.message.reasoning_content,
+                tool_calls: choice.message.tool_calls,
                 finish_reason: choice.finish_reason,
                 usage: resp.usage,
             });
@@ -5689,11 +6284,14 @@ fn request_values_are_effectively_greedy(temperature: Option<f32>, top_k: Option
 }
 
 fn batch_can_clone_deterministic_completions(req: &BatchCompletionRequest) -> bool {
-    req.n.unwrap_or(1) > 1 && request_values_are_effectively_greedy(req.temperature, req.top_k)
+    req.n.unwrap_or(1) > 1
+        && request_values_are_effectively_greedy(req.temperature, req.top_k)
+        && !batch_request_allows_tool_call_parsing(req)
 }
 
 fn batch_can_clone_identical_prompt_groups(req: &BatchCompletionRequest) -> bool {
     request_values_are_effectively_greedy(req.temperature, req.top_k)
+        && !batch_request_allows_tool_call_parsing(req)
 }
 
 async fn generate_multi_chat_response(
@@ -6705,6 +7303,258 @@ mod tests {
     }
 
     #[test]
+    fn qwen_xml_tool_call_output_becomes_openai_tool_calls() {
+        let req = parse_request(
+            r#"{
+                "messages":[{"role":"user","content":"list files"}],
+                "tools":[{
+                    "type":"function",
+                    "function":{
+                        "name":"bash",
+                        "parameters":{
+                            "type":"object",
+                            "properties":{"command":{"type":"string"}},
+                            "required":["command"]
+                        }
+                    }
+                }],
+                "tool_choice":"auto"
+            }"#,
+        );
+        let raw = "<tool_call>\n<function=bash>\n<parameter=command>\nls -la\n</parameter>\n</function>\n</tool_call>";
+        let output = assistant_output_from_split_parts(&req, None, raw.to_string(), "stop");
+
+        assert_eq!(output.finish_reason, "tool_calls");
+        assert_eq!(output.content, "");
+        let calls = output.tool_calls.expect("tool_calls should be populated");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["type"], "function");
+        assert!(calls[0]["id"].as_str().unwrap().starts_with("call_"));
+        assert_eq!(calls[0]["function"]["name"], "bash");
+        let args: serde_json::Value =
+            serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["command"], "ls -la");
+
+        let deltas = tool_call_deltas_from_openai_calls(&calls);
+        assert_eq!(deltas[0]["index"], 0);
+        assert_eq!(deltas[0]["function"]["name"], "bash");
+    }
+
+    #[test]
+    fn qwen_xml_tool_call_output_respects_tool_choice_none() {
+        let req = parse_request(
+            r#"{
+                "messages":[{"role":"user","content":"say hi"}],
+                "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],
+                "tool_choice":"none"
+            }"#,
+        );
+        let raw = "<tool_call>\n<function=bash>\n</function>\n</tool_call>";
+        let output = assistant_output_from_split_parts(&req, None, raw.to_string(), "stop");
+
+        assert_eq!(output.finish_reason, "stop");
+        assert!(output.tool_calls.is_none());
+        assert!(output.content.contains("<tool_call>"));
+    }
+
+    #[test]
+    fn qwen_xml_tool_call_after_reasoning_is_not_leaked_as_content() {
+        let req = parse_request(
+            r#"{
+                "messages":[{"role":"user","content":"inspect the repo"}],
+                "tools":[{
+                    "type":"function",
+                    "function":{
+                        "name":"bash",
+                        "parameters":{
+                            "type":"object",
+                            "properties":{"command":{"type":"string"}},
+                            "required":["command"]
+                        }
+                    }
+                }]
+            }"#,
+        );
+        let prompt_text = "<|im_start|>assistant\n<think>\n";
+        let raw = "The user wants a directory listing.</think>\n\n<tool_call>\n<function=bash>\n<parameter=command>\nls -la\n</parameter>\n</function>\n</tool_call>";
+        let output = assistant_output_from_model_output(&req, raw, prompt_text, "stop");
+
+        assert_eq!(output.finish_reason, "tool_calls");
+        assert_eq!(output.content, "");
+        assert_eq!(
+            output.reasoning_content.as_deref(),
+            Some("The user wants a directory listing.")
+        );
+        assert!(output.tool_calls.is_some());
+    }
+
+    #[test]
+    fn qwen_xml_tool_call_inside_unclosed_reasoning_is_not_cached_as_text() {
+        let req = parse_request(
+            r#"{
+                "messages":[{"role":"user","content":"inspect the repo"}],
+                "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]
+            }"#,
+        );
+        let prompt_text = "<|im_start|>assistant\n<think>\n";
+        let raw = "Need a command.\n<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>";
+        let output = assistant_output_from_model_output(&req, raw, prompt_text, "stop");
+
+        assert_eq!(output.finish_reason, "tool_calls");
+        assert_eq!(output.content, "");
+        assert_eq!(output.reasoning_content.as_deref(), Some("Need a command."));
+        assert!(output.tool_calls.is_some());
+    }
+
+    #[test]
+    fn tool_call_responses_are_not_stored_in_text_only_caches() {
+        let resp = ChatCompletionResponse {
+            id: "chatcmpl-test".to_string(),
+            object: "chat.completion",
+            created: 0,
+            model: "kiln-test".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                    reasoning_content: None,
+                    tool_calls: Some(vec![serde_json::json!({
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
+                    })]),
+                    name: None,
+                    tool_call_id: None,
+                },
+                finish_reason: "tool_calls".to_string(),
+                completion_tokens: 8,
+            }],
+            usage: Usage {
+                prompt_tokens: 4,
+                completion_tokens: 8,
+                total_tokens: 12,
+            },
+        };
+
+        assert!(cache_value_from_response(&resp).is_none());
+        assert!(chat_request_cache_value_from_response(&resp).is_none());
+        assert!(chat_choices_cache_value_from_response(&resp).is_none());
+    }
+
+    #[test]
+    fn batch_items_serialize_openai_tool_calls() {
+        let raw = "<tool_call>\n<function=bash>\n<parameter=command>\npwd\n</parameter>\n</function>\n</tool_call>";
+        let output = assistant_output_from_split_parts_with_tool_parsing(
+            true,
+            None,
+            raw.to_string(),
+            "stop",
+        );
+        let item = BatchCompletionItem {
+            prompt_index: 0,
+            completion_index: 0,
+            text: output.content,
+            reasoning_content: output.reasoning_content,
+            tool_calls: output.tool_calls,
+            finish_reason: output.finish_reason,
+            usage: Usage {
+                prompt_tokens: 5,
+                completion_tokens: 7,
+                total_tokens: 12,
+            },
+        };
+
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["text"], "");
+        assert_eq!(json["finish_reason"], "tool_calls");
+        assert_eq!(json["tool_calls"][0]["type"], "function");
+        assert_eq!(json["tool_calls"][0]["function"]["name"], "bash");
+        let args: serde_json::Value = serde_json::from_str(
+            json["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(args["command"], "pwd");
+        assert!(
+            json.get("reasoning_content").is_none(),
+            "batch responses should not expose the internal reasoning cache field"
+        );
+    }
+
+    #[test]
+    fn batch_cache_value_preserves_tool_calls() {
+        let tool_calls = vec![serde_json::json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
+        })];
+        let resp = BatchCompletionResponse {
+            id: "batchcmpl-test".to_string(),
+            object: "batch.completion",
+            created: 0,
+            model: "kiln-test".to_string(),
+            completions: vec![BatchCompletionItem {
+                prompt_index: 0,
+                completion_index: 0,
+                text: String::new(),
+                reasoning_content: None,
+                tool_calls: Some(tool_calls.clone()),
+                finish_reason: "tool_calls".to_string(),
+                usage: Usage {
+                    prompt_tokens: 4,
+                    completion_tokens: 8,
+                    total_tokens: 12,
+                },
+            }],
+            usage: Usage {
+                prompt_tokens: 4,
+                completion_tokens: 8,
+                total_tokens: 12,
+            },
+        };
+        let cached = cache_value_from_batch_response(&resp);
+        let req = parse_batch_request(
+            r#"{
+                "prompts":[[{"role":"user","content":"list files"}]],
+                "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]
+            }"#,
+        );
+        let rehydrated = batch_response_from_cached_value(&make_batch_test_state(), &req, cached);
+
+        assert_eq!(
+            rehydrated.completions[0].tool_calls.as_ref(),
+            Some(&tool_calls)
+        );
+        assert_eq!(rehydrated.completions[0].finish_reason, "tool_calls");
+    }
+
+    #[test]
+    fn batch_tool_call_items_are_not_stored_in_text_only_chat_caches() {
+        let item = BatchCompletionItem {
+            prompt_index: 0,
+            completion_index: 0,
+            text: String::new(),
+            reasoning_content: None,
+            tool_calls: Some(vec![serde_json::json!({
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
+            })]),
+            finish_reason: "tool_calls".to_string(),
+            usage: Usage {
+                prompt_tokens: 4,
+                completion_tokens: 8,
+                total_tokens: 12,
+            },
+        };
+
+        assert!(chat_request_cache_value_from_batch_item(&item).is_none());
+        assert!(chat_choices_cache_value_from_batch_items(vec![&item], 1).is_none());
+    }
+
+    #[test]
     fn speculative_toggle_defaults_to_skip_layer() {
         let cfg = SpeculativeDecodingConfig {
             enabled: true,
@@ -7062,7 +7912,9 @@ mod tests {
                 "max_tokens":32,
                 "stop":["\n\n"],
                 "seed":1234,
-                "adapter":"my-adapter"
+                "adapter":"my-adapter",
+                "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],
+                "tool_choice":"auto"
             }"#,
         );
         assert_eq!(req.prompts.len(), 2);
@@ -7074,6 +7926,8 @@ mod tests {
         assert_eq!(req.stop.as_deref(), Some(&["\n\n".to_string()][..]));
         assert_eq!(req.seed, Some(1234));
         assert_eq!(req.adapter.as_deref(), Some("my-adapter"));
+        assert_eq!(req.tools.as_ref().unwrap().len(), 1);
+        assert_eq!(req.tool_choice.as_ref().unwrap(), "auto");
     }
 
     #[tokio::test]
@@ -8395,6 +9249,30 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_batch_cache_key_includes_tools_and_tool_choice() {
+        let plain = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"same batch tools"}]],"n":2,"temperature":0.0,"max_tokens":4}"#,
+        );
+        let with_tools = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"same batch tools"}]],"n":2,"temperature":0.0,"max_tokens":4,"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]}"#,
+        );
+        let with_tools_required = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"same batch tools"}]],"n":2,"temperature":0.0,"max_tokens":4,"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],"tool_choice":"required"}"#,
+        );
+
+        assert_ne!(
+            deterministic_batch_cache_key(&plain, 2),
+            deterministic_batch_cache_key(&with_tools, 2),
+            "top-level tools change the rendered batch prompt and must split cache entries"
+        );
+        assert_ne!(
+            deterministic_batch_cache_key(&with_tools, 2),
+            deterministic_batch_cache_key(&with_tools_required, 2),
+            "tool_choice is template-visible when tools are present"
+        );
+    }
+
+    #[test]
     fn deterministic_batch_cache_key_normalizes_text_content_parts() {
         let plain = parse_batch_request(
             r#"{"prompts":[[{"role":"user","content":"same batch text parts"}]],"n":2,"temperature":0.0,"max_tokens":4}"#,
@@ -8438,7 +9316,15 @@ mod tests {
         assert_eq!(
             deterministic_batch_cache_key(&plain, 2),
             deterministic_batch_cache_key(&metadata, 2),
-            "batch renders plain role/content turns, so ignored message metadata should not split batch-cache entries"
+            "reasoning_content and empty tool_calls should not split batch-cache entries"
+        );
+        let non_empty_tool_calls = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"same batch metadata"},{"role":"assistant","content":"ok","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Lookup","arguments":"{}"}}]},{"role":"user","content":"continue"}]],"n":2,"temperature":0.0,"max_tokens":4}"#,
+        );
+        assert_ne!(
+            deterministic_batch_cache_key(&plain, 2),
+            deterministic_batch_cache_key(&non_empty_tool_calls, 2),
+            "historical assistant tool calls are rendered and must split batch-cache entries"
         );
     }
 

@@ -538,6 +538,13 @@ fenced ```` ```tool_call``` ```` blocks) into the same structured
 canonical scores correctly against a model that emitted Qwen3.5 XML, and
 vice versa.
 
+The serving API performs the same normalization for clients: when a
+tools-bearing `/v1/chat/completions` request produces Qwen3.5 XML, Kiln
+returns OpenAI-shaped `tool_calls` with `finish_reason: "tool_calls"` in
+both non-streaming responses and SSE deltas. Raw XML remains accepted in
+datasets and eval artifacts, but OpenAI-compatible agents should not see it
+as assistant prose.
+
 Numeric and boolean XML params auto-coerce to their JSON shape, so a
 target of `{"replace_all": false}` compares correctly against a model
 that wrote `<parameter=replace_all>\nfalse\n</parameter>`. Both `False`

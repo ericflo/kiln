@@ -80,8 +80,9 @@ curl -X POST localhost:8420/v1/library/publish/alice-writes-like-her
 **Reproduction (the §10.14 five-command pipeline):**
 
 ```bash
-# 1. One-time pi configuration — kiln writes ~/.pi/agent/models.json
-#    pointing pi at the office kiln server.
+# 1. One-time pi configuration — kiln backs up and merges
+#    ~/.pi/agent/models.json plus settings.json, pointing pi at the
+#    office kiln server without deleting existing providers.
 kiln pi-setup --kiln-url http://office-kiln:8420
 
 # 2. One-time judge distil (§10.6.1). Pulls 27B once over a week of

@@ -437,7 +437,7 @@ kiln serve --config kiln.toml</code></pre>
         <div class="label mb-3">Inference</div>
         <h2 id="generation" class="text-2xl font-semibold mb-4">OpenAI-compatible generation</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/chat/completions</code> &mdash; chat completions with OpenAI-shaped request and response bodies, including SSE streaming.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/chat/completions</code> &mdash; chat completions with OpenAI-shaped request and response bodies, including SSE streaming and normalized tool-call deltas.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/completions/batch</code> &mdash; multi-prompt batch generation for efficient GRPO rollouts.</div>
         </div>
       </article>

@@ -221,6 +221,20 @@ curl -N http://localhost:8420/v1/chat/completions \
   }'
 ```
 
+### Optional: point pi at Kiln
+
+If you use [pi](https://github.com/earendil-works/pi) as your terminal agent, run the setup helper after Kiln is serving. It merges a `kiln-local` provider into `~/.pi/agent/models.json`, sets `defaultProvider` / `defaultModel` in `~/.pi/agent/settings.json`, and writes timestamped backups before touching either file.
+
+```bash
+# Local Kiln server at http://localhost:8420
+./target/release/kiln pi-setup
+
+# Remote Kiln server; /v1 is appended automatically when omitted
+./target/release/kiln pi-setup --kiln-url http://office-kiln:8420
+```
+
+The configured pi model id is `qwen-3.5-4b-kiln`, with `api: "openai-completions"` and `baseUrl: "http://.../v1"`. Kiln normalizes Qwen3.5 XML tool-call generations into OpenAI `tool_calls` for both streaming and non-streaming responses, so pi executes tools instead of printing raw `<tool_call>` blocks.
+
 ## 5. Open the Browser Dashboard
 
 Kiln ships with an embedded web dashboard. Open [http://localhost:8420/ui](http://localhost:8420/ui) in any browser:
@@ -361,8 +375,7 @@ curl -s http://localhost:8420/v1/chat/completions \
 
 **Where the tool call shows up in the response.** Qwen3.5-4B's official chat
 template (the one that ships with the tokenizer) instructs the model to emit
-tool calls in an **XML** form, not as a structured JSON object. The model's
-output ends up inside `choices[0].message.content` and looks like this:
+tool calls in an **XML** form:
 
 ```
 <tool_call>
@@ -374,13 +387,36 @@ San Francisco
 </tool_call>
 ```
 
-Your client is responsible for parsing this XML out of `content`. Note the
-asymmetry vs. the OpenAI Chat Completions spec: today kiln returns
-`choices[0].message.tool_calls = null` even when the model produced a tool
-call — the structured-output path is a known gap. (See
-`crates/kiln-server/src/api/completions.rs` around line 1370 and line 2010 if
-you want to confirm in source.) On the request side you already use the
-OpenAI-shape `tool_calls` array; on the response side you parse the XML.
+Kiln parses that native XML before it leaves the OpenAI-compatible API. Your
+client receives the normal Chat Completions shape, with assistant `content`
+containing only text before the tool call (usually empty),
+`finish_reason: "tool_calls"`, and
+`choices[0].message.tool_calls[*].function.arguments` encoded as a JSON
+string:
+
+```json
+{
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [{
+        "id": "call_...",
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "arguments": "{\"location\":\"San Francisco\"}"
+        }
+      }]
+    },
+    "finish_reason": "tool_calls"
+  }]
+}
+```
+
+Streaming responses use the same OpenAI shape in `delta.tool_calls`, including
+an `index` per call. This is the path used by pi and other OpenAI-compatible
+agent clients, so they execute tools instead of displaying raw XML.
 
 **Tool result follow-up turn.** When you submit the tool's result back to
 the model, use the OpenAI shape — kiln deserializes it cleanly and the
@@ -646,6 +682,10 @@ kiln serve --served-model-id <id>
 kiln health
 kiln health --json
     Check the running server. Client commands use http://localhost:8420 by default; pass --url to target another server.
+
+kiln pi-setup
+kiln pi-setup --kiln-url http://office-kiln:8420
+    Back up and merge ~/.pi/agent/models.json plus settings.json so pi uses Kiln as qwen-3.5-4b-kiln.
 
 kiln config --file kiln.toml
 kiln config -f kiln.toml

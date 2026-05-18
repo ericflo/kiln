@@ -265,6 +265,7 @@
       <div class="mt-8 flex flex-wrap gap-3">
         <a href="#install" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Choose an install path</a>
         <a href="#verify" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Verify the server</a>
+        <a href="#pi-agent" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Configure pi</a>
       </div>
     </div>
   </section>
@@ -458,6 +459,35 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
       </p>
       <p class="text-sm mt-6" style="color: var(--fg-mute);">
         Prefer terminal-first checks? See the <a href="cli.html">CLI Reference</a> for <code>kiln health</code>, training, and adapter commands.
+      </p>
+    </div>
+  </section>
+
+  <section id="pi-agent" class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-12">
+      <p class="label mb-2">Agent setup</p>
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Point pi at Kiln without clobbering pi config</h2>
+      <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">
+        After the server is healthy, <code>kiln pi-setup</code> adds Kiln as pi's <code>kiln-local</code> provider and sets <code>qwen-3.5-4b-kiln</code> as the default model. It backs up existing <code>models.json</code> and <code>settings.json</code>, then merges the Kiln entries while preserving other providers and settings.
+      </p>
+      <div class="grid lg:grid-cols-3 gap-4">
+        <div class="card p-5">
+          <h3 class="font-semibold mb-2">Local server</h3>
+<pre class="text-sm"><code>kiln pi-setup
+pi -p "Use the bash tool to run: pwd"</code></pre>
+        </div>
+        <div class="card p-5">
+          <h3 class="font-semibold mb-2">Remote server</h3>
+<pre class="text-sm"><code>kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">The helper appends <code>/v1</code> when the URL does not already include it.</p>
+        </div>
+        <div class="card p-5">
+          <h3 class="font-semibold mb-2">Tool calls</h3>
+          <p style="color: var(--fg-dim);">Qwen3.5 can generate native XML tool calls, but Kiln returns OpenAI-shaped <code>tool_calls</code> to pi in both streaming and non-streaming responses.</p>
+        </div>
+      </div>
+      <p class="text-sm mt-4" style="color: var(--fg-mute);">
+        Backup files are written beside the originals as <code>models.json.bak-&lt;timestamp&gt;</code> and <code>settings.json.bak-&lt;timestamp&gt;</code>.
       </p>
     </div>
   </section>

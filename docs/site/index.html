@@ -325,6 +325,10 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
             <p>Sarathi-style chunked prefill. Decode requests merge into a running batch without head-of-line blocking.</p>
           </div>
           <div class="feature feature--compact">
+            <h3>pi agent backend</h3>
+            <p><code>kiln pi-setup</code> backs up and merges pi config, then serves Qwen3.5-4B as <code>qwen-3.5-4b-kiln</code> with OpenAI-shaped tool calls.</p>
+          </div>
+          <div class="feature feature--compact">
             <h3>Paged KV cache</h3>
             <p>Block-allocated KV pages with a prefix cache that re-uses tokens across calls. Multi-tenant by default.</p>
           </div>
@@ -470,6 +474,12 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
             </tr>
           </tbody>
         </table>
+        <p class="install-foot">
+          Using pi as your terminal agent? Start Kiln, then run <code>kiln pi-setup</code>.
+          It backs up and merges pi's provider config, sets <code>qwen-3.5-4b-kiln</code>
+          as the default model, and keeps OpenAI tool calls structured for pi.
+          <a href="cli.html#pi-setup">CLI details →</a>
+        </p>
       </div>
     </section>
 
@@ -484,7 +494,7 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
           <div class="endpoint" role="row">
             <span class="endpoint-method" data-m="POST" role="cell">POST</span>
             <code class="endpoint-path" role="cell">/v1/chat/completions</code>
-            <span class="endpoint-desc" role="cell">OpenAI chat with streaming, tools, structured outputs.</span>
+            <span class="endpoint-desc" role="cell">OpenAI chat with streaming, normalized tools, structured outputs.</span>
           </div>
           <div class="endpoint" role="row">
             <span class="endpoint-method" data-m="POST" role="cell">POST</span>
