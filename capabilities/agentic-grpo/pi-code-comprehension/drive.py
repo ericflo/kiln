@@ -442,14 +442,18 @@ def main() -> int:
     while iter_n <= args.stop_iter:
         try:
             run_one_iter(args.pod, iter_n)
+            iter_n += 1
         except Exception as e:
             print(f"  ERROR: iter {iter_n}: {e}", flush=True)
-            # Record a stub row so we don't replay this iter
-            append_capability_jsonl({
-                "iter": iter_n, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "kind": "error", "error": str(e)[:1000],
-            })
-        iter_n += 1
+            # Log to failures sidecar; do NOT add error rows to capability.jsonl.
+            with open(ROOT / "failures.jsonl", "a") as f:
+                f.write(json.dumps({
+                    "iter": iter_n,
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "error": str(e)[:1500],
+                }) + "\n")
+            # Advance past the failed iter so we don't infinite-loop on a sticky failure.
+            iter_n += 1
     return 0
 
 
