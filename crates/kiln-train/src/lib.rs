@@ -976,4 +976,39 @@ mod tests {
         let cfg: LossConfig = serde_json::from_str(json).unwrap();
         assert!(!cfg.no_policy_loss);
     }
+
+    #[test]
+    fn echo_config_custom_fields_survive_json_roundtrip() {
+        // Every EchoConfig field set away from its default — pin the
+        // wire format so a future field rename or default change is a
+        // loud test failure rather than a silent compatibility break.
+        clear_kiln_echo_env_vars();
+        let custom = EchoConfig {
+            lambda: 0.027,
+            env_mask_mode: EnvMaskMode::FullObs,
+            warning_filter: false,
+        };
+        let json = serde_json::to_string(&custom).unwrap();
+        // The serialized form should mention every non-default field.
+        assert!(json.contains("0.027"), "lambda missing from {json}");
+        assert!(json.contains("full_obs"), "env_mask_mode missing from {json}");
+        assert!(json.contains("\"warning_filter\":false"), "warning_filter missing from {json}");
+
+        let parsed: EchoConfig = serde_json::from_str(&json).unwrap();
+        assert!((parsed.lambda - 0.027).abs() < 1e-12);
+        assert_eq!(parsed.env_mask_mode, EnvMaskMode::FullObs);
+        assert!(!parsed.warning_filter);
+    }
+
+    #[test]
+    fn echo_config_partial_payload_fills_defaults() {
+        // HTTP clients may send only `{"lambda": ...}` — the other fields
+        // must fall back to their `#[serde(default = ...)]` values.
+        clear_kiln_echo_env_vars();
+        let json = r#"{"lambda": 0.012}"#;
+        let parsed: EchoConfig = serde_json::from_str(json).unwrap();
+        assert!((parsed.lambda - 0.012).abs() < 1e-12);
+        assert_eq!(parsed.env_mask_mode, EnvMaskMode::default());
+        assert!(parsed.warning_filter, "warning_filter must default to true");
+    }
 }
