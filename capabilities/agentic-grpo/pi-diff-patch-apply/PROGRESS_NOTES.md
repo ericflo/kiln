@@ -21,14 +21,24 @@ Lease expires `2026-05-19T12:52:01Z`.
 
 ## Iter log (live)
 
-(See `capability.jsonl` for canonical record.)
+(See `capability.jsonl` for canonical record. This table is updated as each iter completes — not just at the end.)
 
-| Iter | Hypothesis | Composite | Δ | Status |
-|------|------------|-----------|---|--------|
-| 0    | baseline-v1-hard-corpus-strict-format | 0.9419 | — | baseline |
-| 1    | h1-default 6×3 hard | 0.8900 | −0.052 | NEGATIVE |
-| 2    | h2-strong-filter T=1.0 6×3 hard | TBD | TBD | in flight |
-| 3-N  | (chain script auto-runs) | TBD | TBD | queued |
+| Iter | Hypothesis                       | Composite | Δ      | Status                                                  |
+|------|----------------------------------|-----------|--------|---------------------------------------------------------|
+| 0    | baseline-v1-hard-corpus-strict   | 0.9419    | —      | baseline (24-task eval, T=0, strict 4-pillar format)    |
+| 1    | h1-default 6×3 hard              | 0.8900    | −0.052 | NEGATIVE — 1/6 strong-signal groups; over-amplified one |
+| 2    | h2-strong-filter T=1.0 6×3       | 0.9246    | −0.017 | NEGATIVE-mild — best trained iter so far                |
+| 3    | h3-temp1-seed4242 6×3            | 0.9162    | −0.026 | NEGATIVE                                                |
+| 4    | h4-lower-lr-5e-6 6×3             | 0.9109    | −0.031 | NEGATIVE                                                |
+| 5    | h5-higher-lr-2e-5 6×3            | 0.2165    | −0.725 | CATASTROPHIC (or infra failure — kiln serve crashed)    |
+| 6    | h6-lower-lr-2e-6 FAILED-no-server| 0.20      | −0.742 | INVALID — kiln serve crashed pre-eval                   |
+| 7    | h7-very-low-lr-2e-6 6×3          | 0.2165    | −0.725 | CATASTROPHIC (same pattern as iter 5 — infra suspect)   |
+| 8    | h8-no-echo 8×3                   | 0.8400    | −0.102 | NEGATIVE — first iter after pi-setup + pytest fixes     |
+| 9    | h9-echo-0.10 8×3                 | 0.7623    | −0.180 | NEGATIVE — higher ECHO over-anchored, drift hit worst   |
+| 10   | h10-echo-0.02 8×3                | —         | —      | **in flight on A100 pod 36xpt4xbmezqtc**                |
+| 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
+
+**Best trained adapter so far:** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
 
 ## Key learnings (intermediate)
 
@@ -47,6 +57,55 @@ Lease expires `2026-05-19T12:52:01Z`.
    takes ~50 min. For 50 iters that's ~40 hours; we won't fit overnight.
 
 5. **Pi 0.75.x does not support --max-turns** — turn budget via wall-clock timeout only.
+
+6. **A6000 → A100 80GB switch (2026-05-19 21:30Z).** First A6000 lease ran out after iter 9.
+   Re-acquired an A100 80GB PCIe ($1.39/hr vs $0.49/hr on A6000). Fresh bootstrap on the
+   A100 hit a new gap: `huggingface-cli download` is now a deprecated alias that silently
+   no-ops without printing anything useful, leaving `/workspace/qwen3.5-4b/` empty.
+   Switched bootstrap to `hf download` (the new tool) + added a post-download verify
+   that exits 41 if no model files appear.
+
+7. **The iter 10 → 49 silent cascade (2026-05-19 21:38Z–22:00Z).** Drive script ran
+   through iters 10-49 in ~20 min but every single one was a no-op because kiln serve
+   was dead after iter 10's GRPO step and never recovered. Cascade pattern: iter 10's
+   rollouts succeeded (composite 0.685), then run_iter.sh's `pkill -9 kiln serve`
+   ran (intentional — frees VRAM for GRPO), then something in the bg launch of
+   `cuda_grpo_ablation` failed silently → `set -e` killed run_iter.sh → kiln serve
+   never restarted → all subsequent iters got "Connection refused" on
+   /v1/adapters. The drive script's strict-Bash interpolation hit
+   `NameError: name 'null' is not defined` when `COMPOSITE` was the string `"null"`,
+   which kept the failed rows out of capability.jsonl (silver lining).
+   **Fix:** added a pre-iter kiln-serve health check that restarts the server if
+   it's dead, and switched the failure literal from `"null"` to `"None"` so Python
+   interpolation works.
+
+## Kiln/infra fixes landed during this loop
+
+(All committed to main, with rationale, so future cap authors and the next session don't repeat them.)
+
+- `bootstrap_pod.sh`:
+  - Install pytest (rollouts need it for the verify step).
+  - Run `kiln pi-setup` so pi uses `provider=kiln-local` instead of bailing with
+    "No API key found".
+  - Build with `--features cuda` (default build is CPU-only, silently slow).
+  - `KILN_CUDA_ARCHS=80` cuts kiln-flash-attn build time ~3x on A6000 (forward-PTX-compat).
+  - Use `hf download` instead of deprecated `huggingface-cli download`.
+  - Post-download verify that fails loudly when no model files appear.
+- `run_iter.sh`:
+  - Kiln-serve health check (5×15s polls) after restart, ensures the new adapter
+    appears in `/v1/adapters` registry before proceeding.
+  - Smoke-test rollout (1 task) before full eval so adapter/infra failures fail fast.
+- `drive_iters_fast.sh`:
+  - Dropped `set -e` so a single iter failure doesn't kill the 50-iter loop.
+  - Pre-iter kiln-serve health check + auto-restart (prevents cascades like iter 10→49).
+  - Per-cap env file `/tmp/grpo-pod-pdp.env` (the shared `/tmp/grpo-pod.env` was
+    getting clobbered by concurrent caps on the same dev box).
+  - Use Python literal `None` not `null` for missing composite (NameError otherwise).
+  - Enriched capability.jsonl row with sub-scores, class means, rollouts_passed.
+- `backup_to_b2.py`:
+  - Auto-installs boto3 to `/tmp/pylibs` instead of bailing out with an error.
+- `kiln-polish.jsonl`:
+  - 6 polish notes appended documenting each of the gaps above.
 
 ## TODO at session end
 
