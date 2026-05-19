@@ -52,16 +52,44 @@ Correct trajectory (3 tool calls):
 2. Observe: `crates/kiln-train/src/trainer.rs:7270`.
 3. Emit final assistant turn with the answer.
 
-## Rubric design (v0)
+## Rubric design (v1 — adopted before iter 0 baseline)
 
-| Sub-score | Weight | What it measures | Cannot be cheated by |
-|-----------|--------|-------------------|----------------------|
-| `outcome` | hard floor | F1 between predicted and gold answer set. Tokenize as `(file, line)` pairs; allow line off-by-N (N=2 default) for symbol-on-multi-line cases. | Empty answer → 0. Answers without `file:line` shape → 0. |
-| `efficiency` | 0.25 | `1 - clip((bytes_consumed - target_bytes)/(span * target_bytes), 0, 1)`. `target_bytes` is the size of the gold grep output. `bytes_consumed` is the sum of tool-result bytes the model saw. `span` default 5. | Read-and-truncate: rubric uses full result body, not what the model emitted. |
-| `tool_choice` | 0.15 | Bonus mass for `grep`/`glob`/`find`/`rg`/`ast-grep` over `Read` on files >2KB. Specifically: 1.0 if no >2KB Read occurred; linear penalty per >2KB Read. | One free Read; subsequent ones penalize. |
-| `format_compliance` | 0.05 | Final answer matches the `file:line` regex required by the prompt. | Free-form prose → 0. |
+The composite combines an ADDITIVE search-quality term with a
+MULTIPLICATIVE grounding factor. Grounding is the single most load-
+bearing dimension for this capability — without it the model could
+score ≥0.85 just by guessing correctly, which is the opposite of what
+we want to train.
 
-**Composite** = `outcome × (0.25·efficiency + 0.15·tool_choice + 0.05·format + 0.55·base)`
+| Sub-score | Role | What it measures | Cannot be cheated by |
+|-----------|------|-------------------|----------------------|
+| `outcome` | hard mult floor | F1 over `(file, line)` tuples with ±2 line tolerance. | Empty / wrong-shape answer → 0. |
+| `efficiency` | additive 0.50 | `1 - clip((bytes - target)/(span·max(target, 100)), 0, 1)` with `span=5`. Target = optimal grep output size. | Truncate-and-paste: rubric uses raw tool-result body bytes. |
+| `tool_choice` | additive 0.30 | `1.0 - 0.20·n_large_reads`, where large = result body ≥2KB AND tool name ∈ {read, view, cat, Read}. | A few small reads OK; many large ones tank it. |
+| `format_compliance` | additive 0.20 | Final answer contains ≥1 `file:line` pair matching `[\w/.\-]+\.<ext>:\d+`. | Prose without `path:line` → 0. |
+| `grounding` | mult 0.40 floor | Fraction of predicted `(file, line)` pairs whose `file:line` (within ±2 lines, basename or full path) appears in some tool-result body. | Guess-without-search ≤ 0.40. |
+
+**Composite formula:**
+
+  `agentic = 0.50·efficiency + 0.30·tool_choice + 0.20·format_compliance`
+  `grounding_factor = 0.40 + 0.60·grounding`   # range [0.40, 1.00]
+  `composite = outcome × grounding_factor × agentic`
+
+When `outcome=1` and all sub-scores=1, `composite=1.0`. When the model
+guesses correctly without searching, `composite ≤ 0.40`. When the model
+returns nothing or the wrong file, `composite=0`.
+
+### Calibration sanity (committed)
+
+`calibration/{good,bad}.jsonl` + `scripts/rubric_sanity.py`. 5 good
+sessions (single-grep, multi-grep, refs, narrow-pattern, with thinking)
+all score 1.0. 5 bad sessions:
+- `bad-read-whole-file`: 0.18 (eff=0, tc=0.80, grd=0)
+- `bad-guess-without-search`: 0.40 (grd=0)
+- `bad-empty-answer`: 0.0 (outcome=0)
+- `bad-wrong-file`: 0.0 (outcome=0)
+- `bad-many-large-reads`: 0.20 (eff=0, grd=0)
+
+Separation good→bad = 0.60. Mean lift = 0.85.
 
 ## ECHO recipe
 
