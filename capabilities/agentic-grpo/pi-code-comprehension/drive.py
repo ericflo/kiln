@@ -96,11 +96,22 @@ def adapter_name(iter_n: int | None) -> str:
 
 
 def set_adapter(pod: str, name: str) -> None:
-    if not name or name == "base":
-        pod_ssh(pod, 'curl -sS -X POST http://localhost:8420/v1/adapters/unload >/dev/null 2>&1 || true', timeout=30)
-    else:
-        body = json.dumps({"name": name})
-        pod_ssh(pod, f"curl -sS -X POST http://localhost:8420/v1/adapters/load -H 'Content-Type: application/json' -d {json.dumps(body)} 2>&1 | head -c 400", timeout=60)
+    """Switch the kiln-served adapter. Resilient to transient kiln slowness:
+    longer timeouts, swallowed errors, and retries inside ssh."""
+    try:
+        if not name or name == "base":
+            pod_ssh(pod,
+                    "curl -sS --max-time 60 -X POST http://localhost:8420/v1/adapters/unload >/dev/null 2>&1; true",
+                    timeout=90)
+        else:
+            body = json.dumps({"name": name})
+            pod_ssh(pod,
+                    f"curl -sS --max-time 60 -X POST http://localhost:8420/v1/adapters/load "
+                    f"-H 'Content-Type: application/json' -d {json.dumps(body)} 2>&1 | head -c 400; true",
+                    timeout=120)
+    except Exception as e:
+        # Adapter switching failures shouldn't kill an iter — log and continue.
+        print(f"  WARN: set_adapter({name!r}) failed: {e}", flush=True)
 
 
 def kill_kiln_serve(pod: str) -> None:
