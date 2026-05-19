@@ -166,6 +166,19 @@ while [ "$iter" -lt 50 ] && [ "$iter" -lt "$end" ]; do
   EVAL_ADAPTER="pi-diff-patch-apply-iter${iter}"
   if [ "$iter" = "0" ]; then EVAL_ADAPTER="base"; fi
 
+  # Pre-iter kiln-serve health check — if down, restart before failing.
+  # Without this, one bad iter that leaves kiln serve dead cascades through
+  # every subsequent iter (discovered iter 10 → 49 silent cascade 2026-05-19).
+  if ! python3 $RP ssh $POD_ID 'curl -sS --max-time 5 http://localhost:8420/v1/adapters >/dev/null 2>&1'; then
+    echo "  kiln serve is down before iter $iter — restarting"
+    python3 $RP bg $POD_ID /tmp/kiln-serve-iter${iter}-restart.log \
+      'cd /workspace/kiln && KILN_DISABLE_FUSED_GDN_GATES=1 KILN_BATCHING_ENGINE=0 KILN_MODEL_PATH=/workspace/qwen3.5-4b ./target/release/kiln serve 2>&1'
+    sleep 35
+    if ! python3 $RP ssh $POD_ID 'curl -sS --max-time 5 http://localhost:8420/v1/adapters >/dev/null 2>&1'; then
+      echo "  WARN: kiln serve still down after restart — iter $iter will likely fail"
+    fi
+  fi
+
   # Pipe through tee to /tmp/iter${iter}-run.log so we have full output for
   # post-mortem. tail -200 lets us see more context if the iter dies.
   bash "$HERE/run_iter.sh" --iter "$iter" --kind "$KIND" --eval-adapter "$EVAL_ADAPTER" $EXTRA 2>&1 | tee /tmp/iter${iter}-run.log | tail -200 || echo "WARN: run_iter.sh iter ${iter} exited non-zero — continuing loop"
@@ -173,10 +186,13 @@ while [ "$iter" -lt 50 ] && [ "$iter" -lt "$end" ]; do
   EVAL_OUT="/tmp/iter${iter}-eval"
   # Pull full summary down for sub-score logging.
   python3 $RP ssh $POD_ID "cat ${EVAL_OUT}/summary.json 2>/dev/null" > /tmp/eval-summary-iter${iter}.json 2>/dev/null || true
-  COMPOSITE=$(python3 -c "import json; d=json.load(open('/tmp/eval-summary-iter${iter}.json')); print(d.get('mean_composite', 'null'))" 2>/dev/null || echo "null")
-  BASELINE=$(cat "$HERE/.baseline_composite" 2>/dev/null || echo "null")
-  DELTA="null"
-  if [ "$COMPOSITE" != "null" ] && [ "$BASELINE" != "null" ]; then
+  # COMPOSITE/BASELINE are interpolated into a Python expression below; use
+  # 'None' (Python literal) when missing, not 'null'. Otherwise the row-log
+  # python -c block hits NameError. Discovered iter 10-49 silent failures.
+  COMPOSITE=$(python3 -c "import json; d=json.load(open('/tmp/eval-summary-iter${iter}.json')); v=d.get('mean_composite'); print(v if v is not None else 'None')" 2>/dev/null || echo "None")
+  BASELINE=$(cat "$HERE/.baseline_composite" 2>/dev/null || echo "None")
+  DELTA="None"
+  if [ "$COMPOSITE" != "None" ] && [ "$BASELINE" != "None" ]; then
     DELTA=$(python3 -c "print(${COMPOSITE} - ${BASELINE})")
   fi
   echo "  iter ${iter}: composite=${COMPOSITE} baseline=${BASELINE} delta=${DELTA}"
@@ -194,7 +210,7 @@ row = {
     'composite': $COMPOSITE,
     'baseline_composite': $BASELINE,
     'delta_vs_baseline': $DELTA,
-    'status': 'logged',
+    'status': 'logged' if $COMPOSITE is not None else 'FAILED-no-eval',
     'sub_scores': s.get('mean_sub_scores') or {},
     'class_means': s.get('class_means') or {},
     'rollouts_passed': s.get('rollouts_passed'),
