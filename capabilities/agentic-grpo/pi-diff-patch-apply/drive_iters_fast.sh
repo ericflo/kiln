@@ -20,10 +20,10 @@ export POD_ID
 export RP=/data/.clouderic-internal/repos/apps/trajectory-trainer/scripts/runpod_api.py
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-if [ ! -f /tmp/grpo-pod.env ]; then
-  echo "export POD_ID=${POD_ID}" > /tmp/grpo-pod.env
-  echo "export RP=${RP}" >> /tmp/grpo-pod.env
-fi
+# Per-cap env file. /tmp/grpo-pod.env is shared across all GRPO caps and
+# gets clobbered when multiple concurrent caps run; use pdp-specific path.
+echo "export POD_ID=${POD_ID}" > /tmp/grpo-pod-pdp.env
+echo "export RP=${RP}" >> /tmp/grpo-pod-pdp.env
 
 next_iter() {
   if [ -n "$START_ITER" ]; then echo "$START_ITER"; return; fi

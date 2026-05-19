@@ -77,7 +77,13 @@ done
 if [ -z "$ITER" ]; then echo "--iter required" >&2; exit 1; fi
 EVAL_ADAPTER="${EVAL_ADAPTER:-pi-diff-patch-apply-iter${ITER}}"
 
-source /tmp/grpo-pod.env  # sets POD_ID, RP
+# Per-cap env file (multiple concurrent caps clobber /tmp/grpo-pod.env).
+# Falls back to legacy /tmp/grpo-pod.env for compatibility.
+if [ -f /tmp/grpo-pod-pdp.env ]; then
+  source /tmp/grpo-pod-pdp.env
+else
+  source /tmp/grpo-pod.env
+fi
 
 POD_REPO=/workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply
 TRAIN_OUT="/tmp/iter${ITER}-rollouts"
