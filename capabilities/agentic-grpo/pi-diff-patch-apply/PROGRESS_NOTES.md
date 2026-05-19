@@ -35,7 +35,9 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 7    | h7-very-low-lr-2e-6 6×3          | 0.2165    | −0.725 | CATASTROPHIC (same pattern as iter 5 — infra suspect)   |
 | 8    | h8-no-echo 8×3                   | 0.8400    | −0.102 | NEGATIVE — first iter after pi-setup + pytest fixes     |
 | 9    | h9-echo-0.10 8×3                 | 0.7623    | −0.180 | NEGATIVE — higher ECHO over-anchored, drift hit worst   |
-| 10   | h10-echo-0.02 8×3                | —         | —      | FAILED-no-eval — pkill-self-kill bug (train rollouts ran, GRPO never started; see §8 below) |
+| 10   | h10-echo-0.02 8×3                | —         | —      | FAILED-no-eval — port-8420 conflict from two concurrent kiln serves (see §9 below) |
+| 11   | h11-2epoch                       | —         | —      | FAILED-no-eval — kiln died during iter; cascaded from iter 10 state |
+| 12   | h12-rank8 (rank 8 / alpha 16)    | —         | —      | **in flight on A100** (train rollouts running with clean kiln-serve) |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far:** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
@@ -64,6 +66,25 @@ Lease expires `2026-05-19T12:52:01Z`.
    no-ops without printing anything useful, leaving `/workspace/qwen3.5-4b/` empty.
    Switched bootstrap to `hf download` (the new tool) + added a post-download verify
    that exits 41 if no model files appear.
+
+9. **Iter 10/11 failure mode: port-8420 conflict from concurrent kiln serves.**
+   While debugging the pkill self-kill, I (Claude) started TWO kiln serves
+   back-to-back via `python3 $RP bg ...` — first `kiln-serve-iter10retry.log`
+   at 22:25Z, then `kiln-serve-debug.log` at 22:27Z. Only one process can
+   bind :8420; when the second came up, the first got "Killed" at 22:28:23Z
+   (right when the v3 drive script's iter 10 sent its `/v1/adapters/unload`
+   call). Iter 10's pi sessions then ran against a kiln that died
+   mid-iter: 24 train rollouts all returned 0.2 (consolation floor) in
+   ~20s each (Connection refused). The fixed-pkill drive's pre-iter
+   health check restarted kiln before iter 11, but iter 11's GRPO step
+   then killed it again (intentionally, via the now-fixed pgrep -x kiln),
+   and the asynchronous `Background pid` launch + 30s sleep didn't give
+   the new kiln serve enough time to come up before `wait-file` for the
+   adapter timed out. Net: iters 10 + 11 both logged as FAILED-no-eval.
+   **Lesson for future:** never bg two kiln serves in a row without
+   `pgrep -x kiln | xargs kill -9 ; sleep 3` between them. Iter 12 (in
+   flight as of 23:55Z) has a clean kiln-serve-iter12-restart and is
+   running rollouts normally.
 
 8. **ROOT CAUSE: `pkill -9 -f "kiln serve"` over SSH self-kills the wrapper bash.**
    Discovered 2026-05-19 22:30Z while debugging iter 10's repeat failure even with the
