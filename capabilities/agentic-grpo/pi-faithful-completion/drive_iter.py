@@ -221,7 +221,8 @@ def main() -> int:
         print(f"[drive_iter] filtered to {n} tasks via filter={task_filter} → {filtered_path}")
         train_tasks_file = f"datasets/{filtered_path.name}"
 
-    # Write the system prompt override if needed
+    # Write the system prompt override if needed; also upload to pod since
+    # run_iter.sh passes the path to rollout.py running on the pod.
     sp_file = ""
     sp_kind = a.get("system_prompt")
     if sp_kind:
@@ -229,8 +230,25 @@ def main() -> int:
         if sp_text:
             sp_path = ROOT / "prompts"
             sp_path.mkdir(exist_ok=True)
-            sp_file = str(sp_path / f"{slug}-system.txt")
-            Path(sp_file).write_text(sp_text)
+            sp_file_local = sp_path / f"{slug}-system.txt"
+            sp_file_local.write_text(sp_text)
+            # Push to pod under the same relative path
+            pod_id = os.environ.get("POD_ID", "")
+            rp = os.environ.get("RP", "/data/.clouderic-internal/repos/apps/trajectory-trainer/scripts/runpod_api.py")
+            if pod_id:
+                pod_path = f"/workspace/kiln/capabilities/agentic-grpo/pi-faithful-completion/prompts/{slug}-system.txt"
+                try:
+                    subprocess.run(["python3", rp, "ssh", pod_id, "mkdir", "-p",
+                                    "/workspace/kiln/capabilities/agentic-grpo/pi-faithful-completion/prompts"],
+                                   check=True, capture_output=True)
+                    subprocess.run(["python3", rp, "upload", pod_id, str(sp_file_local), pod_path],
+                                   check=True, capture_output=True)
+                    sp_file = f"prompts/{slug}-system.txt"
+                except subprocess.CalledProcessError as e:
+                    print(f"warning: could not upload system prompt to pod: {e}", file=sys.stderr)
+                    sp_file = str(sp_file_local)
+            else:
+                sp_file = str(sp_file_local)
 
     # Compose run_iter.sh command
     cmd = ["bash", str(ROOT / "run_iter.sh"),
