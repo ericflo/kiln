@@ -240,8 +240,11 @@ ranges. Iter 0 will not begin until calibration passes.
 
 | Iter | Slug | Family | Composite | Δ | Status | Notes |
 |------|------|--------|-----------|---|--------|-------|
+| 0 | base-eval-23 | baseline | 0.328 | – | recorded | bimodal: 7/19 pass-gate (~0.77), 12/19 fail-gate (~0.07) |
+| 2 | base-eval-23-full-len | baseline-replicate | 0.314 | -0.014 | recorded | full-length eval; same bimodal pattern; rubric stable |
+| 2 | train-rollouts-n8 | rollout-only | 0.570 (train) | – | recorded | 8 tasks × 4 gens full-length; 3/8 strong-signal var>0.05 |
 
-(populated below as iterations land)
+**Iter 2 status**: rollouts generated successfully on full-length conversations; GRPO training step did not complete within wall-clock budget on the strong-signal subset even with KILN_GRAD_CHECKPOINT_SEGMENTS=32, KILN_STREAMING_TILE_TOKENS=512, KILN_SPOOL_CHECKPOINT_BOUNDARIES=1. The shared-prefix reference forward (PR #1055, landed on main) is verified working on tiny inputs (6.5s end-to-end), but the policy forward+backward path remains the dominant bottleneck for long-context (>7K-token) sequences. Iter 2 did NOT produce a trained adapter; iter 2 contributes a working full-length rollout pipeline and confirms the rubric reproduces the baseline (Δ=-0.014 vs iter 0, well within noise).
 
 ## Kiln-polish prerequisites
 
