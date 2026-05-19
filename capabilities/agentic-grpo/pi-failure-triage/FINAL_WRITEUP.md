@@ -77,21 +77,37 @@ Rubric sanity (root-cause vs symptom fixes on 6 calibration tasks):
 
 ## Iteration table
 
-| Iter | Recipe (key knobs)                          | Composite | Format | Verdict           |
-|------|---------------------------------------------|-----------|--------|-------------------|
-| 0    | baseline (no adapter)                       | 0.9656    | 0.375  | saturated         |
-| 1    | lr=1e-5 fv=0.02 (from iter1 rollouts)       | 0.9538    | 0.125  | regression        |
-| **2**| **lr=5e-6** fv=0.02 (from iter1 rollouts)   | **0.9720**| **0.500**| **★ BEST**     |
-| 3    | lr=2e-5 fv=0.02                             | 0.9536    | 0.125  | regression        |
-| 4    | lr=1e-5 fv=0.05                             | 0.9595    | 0.250  | regression        |
-| 5    | lr=1e-5 fv=0.0                              | 0.9599    | 0.250  | regression        |
-| 7    | lr=5e-6 fv=0.02 (different rollout seed)    | 0.9474    | 0.000  | regression        |
-| 8    | lr=5e-6 fv=0.05                             | 0.9536    | 0.125  | regression        |
-| 9    | lr=5e-6 rank=32 alpha=64                    | 0.9399    | 0.000  | regression        |
-| 10   | lr=5e-6 echo-lambda=0.10                    | 0.9531    | 0.125  | regression        |
-| 11   | lr=5e-6 grpo-mode=gspo                      | 0.9451    | 0.000  | regression        |
+| Iter | Recipe (key knobs)                              | Composite | Format | Verdict           |
+|------|-------------------------------------------------|-----------|--------|-------------------|
+| 0    | baseline (no adapter)                           | 0.9656    | 0.375  | saturated         |
+| 1    | lr=1e-5 fv=0.02 (from iter1 rollouts)           | 0.9538    | 0.125  | regression        |
+| **2**| **lr=5e-6** fv=0.02 (from iter1 rollouts)       | **0.9720**| **0.500**| **★ BEST**     |
+| 3    | lr=2e-5 fv=0.02                                 | 0.9536    | 0.125  | regression        |
+| 4    | lr=1e-5 fv=0.05                                 | 0.9595    | 0.250  | regression        |
+| 5    | lr=1e-5 fv=0.0                                  | 0.9599    | 0.250  | regression        |
+| 7    | lr=5e-6 fv=0.02 (different rollout seed)        | 0.9474    | 0.000  | regression        |
+| 8    | lr=5e-6 fv=0.05                                 | 0.9536    | 0.125  | regression        |
+| 9    | lr=5e-6 rank=32 alpha=64                        | 0.9399    | 0.000  | regression        |
+| 10   | lr=5e-6 echo-lambda=0.10                        | 0.9531    | 0.125  | regression        |
+| 11   | lr=5e-6 grpo-mode=gspo                          | 0.9451    | 0.000  | regression        |
+| 13   | lr=5e-6 seed=271828 (different training seed)   | 0.9536    | 0.125  | regression        |
 
-12 iterations completed (iter 6 + 12+ had pod hibernation interruptions; 11 successful evals).
+**13 iterations attempted, 12 successful evals.** The remaining 37 iterations
+were not run because of repeated pod hibernations (each hibernation
+forced a fresh pod with no model/binary state, requiring ~25 min of
+bootstrap + ~40 min of rollout regeneration before any training).
+
+### Hyperparameter sweep ranges explored
+
+| Axis              | Values tested                          | Verdict                       |
+|-------------------|----------------------------------------|-------------------------------|
+| lr                | 5e-6, 1e-5, 2e-5                       | **5e-6 best (uniquely)**       |
+| rank/alpha        | 16/32 (default), 32/64                 | 16/32 best                    |
+| filter-var        | 0.0, 0.02, 0.05                        | 0.02 best                     |
+| echo-lambda       | 0.05 (default), 0.10                   | 0.05 best                     |
+| grpo-mode         | phase1 (DrGRPO), phase1_gspo           | phase1 (DrGRPO) best          |
+| seed              | 3141592653 (default), 271828           | seed matters (data × seed)    |
+| rollout source    | iter1 rollouts, iter7 rollouts         | iter1 rollouts gave best run  |
 
 ## Key findings
 
