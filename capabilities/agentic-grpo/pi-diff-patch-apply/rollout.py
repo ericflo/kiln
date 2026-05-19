@@ -122,8 +122,11 @@ def run_one_rollout(
         "--no-skills",
         "--no-themes",
         "--offline",
-        "--max-turns", str(max_turns),
     ]
+    # NB: pi 0.75.x does not expose a `--max-turns` flag. Turn budget is
+    # enforced indirectly via the wall-clock timeout. We carry max_turns for
+    # diagnostics only.
+    _ = max_turns
     started = time.time()
     proc = subprocess.run(
         cmd,

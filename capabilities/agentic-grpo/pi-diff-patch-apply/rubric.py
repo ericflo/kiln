@@ -421,6 +421,12 @@ def _diff_line_count(a: str | None, b: str | None) -> int:
     return added + removed
 
 
+# Scaffold files written by task_scaffold.init_workdir. These exist in the
+# workdir from the start but are NOT in init_files. They must be excluded
+# from "changed paths" — touching them isn't a meaningful edit.
+SCAFFOLD_PATHS = {"INCOMING_PATCH", "README.md"}
+
+
 def _workspace_changed_paths(init_files: dict[str, str], workdir: Path,
                               extra_known_paths: Iterable[str] = ()) -> list[str]:
     """Return all paths that differ between the initial state and the current
@@ -430,27 +436,28 @@ def _workspace_changed_paths(init_files: dict[str, str], workdir: Path,
       - paths that were in init_files
       - paths under extra_known_paths (e.g. gold-touched, patch-touched)
       - any new files we find anywhere under workdir
+    Excludes:
+      - SCAFFOLD_PATHS (INCOMING_PATCH, README.md) — written by the scaffold
+        from the start, not the model
+      - .git/ artifacts — initial commit + any model commits
+      - .rej / .orig files — byproducts of patch/git apply
+      - __pycache__ / .pyc — bytecode
     """
     candidates: set[str] = set(init_files.keys())
     candidates.update(extra_known_paths)
-    # Also enumerate anything under workdir that wasn't expected.
     if workdir.exists():
         for p in workdir.rglob("*"):
             if not p.is_file():
                 continue
-            # Skip rejects and .orig files (those are tool byproducts, not
-            # model intent).
             rel = str(p.relative_to(workdir))
-            if rel.endswith(".rej") or rel.endswith(".orig"):
-                continue
-            if rel.startswith(".git/"):
-                continue
-            if "/__pycache__/" in ("/" + rel) or rel.endswith(".pyc"):
+            if _is_ignored_artifact(rel):
                 continue
             candidates.add(rel)
 
     changed: list[str] = []
     for rel in sorted(candidates):
+        if _is_ignored_artifact(rel):
+            continue
         before = init_files.get(rel)
         p = workdir / rel
         after: str | None
@@ -464,6 +471,28 @@ def _workspace_changed_paths(init_files: dict[str, str], workdir: Path,
         if before != after:
             changed.append(rel)
     return changed
+
+
+def _is_ignored_artifact(rel: str) -> bool:
+    """Return True iff this path is a tool artifact / scaffold file the
+    rubric should ignore for unrelated-edit purposes."""
+    if rel in SCAFFOLD_PATHS:
+        return True
+    if rel.endswith(".rej") or rel.endswith(".orig"):
+        return True
+    if rel.startswith(".git/") or rel == ".git":
+        return True
+    if rel.startswith(".pytest_cache/") or rel == ".pytest_cache":
+        return True
+    if "/__pycache__/" in ("/" + rel) or rel.endswith(".pyc"):
+        return True
+    if rel.startswith(".coverage") or rel.endswith(".coverage"):
+        return True
+    if rel.startswith(".ruff_cache/") or rel.startswith(".mypy_cache/"):
+        return True
+    if rel.startswith(".cache/"):
+        return True
+    return False
 
 
 # ============================================================================
@@ -905,20 +934,35 @@ def score_rollout(transcript: list, workdir: str, task: dict) -> dict[str, Any]:
     n_test_total, n_test_ok_total = _test_runs(transcript)
 
     if outcome >= 1.0:
-        # PASS path — full sub-score budget. Apply tested_before_done as a
-        # discount: if the model never tested, we award the base 0.50 but
-        # halve the agentic sub-score budget. A "passed-but-untested" rollout
-        # is suspicious — the model may have lucked into a passing state
-        # or rewritten test files.
+        # PASS path — full sub-score budget. Several multiplicative gates
+        # discourage common reward-hacks:
+        #
+        # 1. **`no_unrelated_edits` as a base multiplier.** Tests passing
+        #    after the model touched extra files (e.g. wrote a new
+        #    test_unrelated.py, or mutated configs) is suspicious — the
+        #    model may have circumvented the actual fix. We multiply the
+        #    BASE (0.50) by `no_unrelated_edits` so a model that scribbled
+        #    on extra files loses up to half the floor.
+        #
+        # 2. **`tested_before_done` as a global discount.** Passing without
+        #    testing is also suspicious — the model lucked into success or
+        #    the patch was trivial. We multiply the WHOLE composite by 0.7
+        #    when tested=0 so the model is rewarded for the *habit* of
+        #    verifying. (See pi-doctest iter 0 for why this matters.)
+        #
+        # 3. **Minimality is a sub-score, not a gate.** Writing more lines
+        #    than the gold loses minimality points (up to W_MINIMALITY = 0.20)
+        #    but doesn't collapse the rest. Bad agentic style on a working
+        #    solution is still better than non-working.
         agentic = (
             W_MINIMALITY * minimality
             + W_NO_UNRELATED * nourel
             + W_REPAIR_EFF * repair_eff
             + W_FORMAT * fmt
         )
+        composite = W_OUTCOME_BASE * nourel + agentic
         if tested < 1.0:
-            agentic *= TESTED_BEFORE_DONE_DISCOUNT_WHEN_MISSING
-        composite = W_OUTCOME_BASE + agentic
+            composite *= 0.7
     else:
         # FAIL path — consolation gradient on directional progress. Hard
         # capped at CONSOLATION_CAP so it can never match a passing rollout.

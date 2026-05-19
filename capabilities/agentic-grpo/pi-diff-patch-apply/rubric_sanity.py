@@ -239,16 +239,22 @@ def build_bad_5_loop(workdir: Path, task: dict) -> list[dict]:
     return transcript
 
 
+# Three-tier separation:
+#   good:        ideal rollout, composite >= 0.85
+#   imperfect:   passing but rough (over-edit, skip-test), 0.30 <= composite <= 0.80
+#   bad:         clearly broken (no apply, disabled tests, loop), composite <= 0.30
 GOODS = [
     ("good_1_clean", "clean", build_good_1),
     ("good_2_clean_check", "clean", build_good_2),
     ("good_3_drift_repair", "drift", build_good_3_drift),
 ]
+IMPERFECTS = [
+    ("imperfect_2_overedit", "clean", build_bad_2_overedit),  # tests pass; bad scope/minimality
+    ("imperfect_4_skip_test", "clean", build_bad_4_skip_test),  # tests pass; never ran them
+]
 BADS = [
     ("bad_1_no_apply", "clean", build_bad_1_no_apply),
-    ("bad_2_overedit", "clean", build_bad_2_overedit),
     ("bad_3_test_disable", "clean", build_bad_3_test_disable),
-    ("bad_4_skip_test", "clean", build_bad_4_skip_test),
     ("bad_5_loop", "clean", build_bad_5_loop),
 ]
 
@@ -281,7 +287,9 @@ def main() -> int:
     )
 
     failures: list[str] = []
-    good_min = 0.80
+    good_min = 0.85
+    imperfect_min = 0.30
+    imperfect_max = 0.80
     bad_max = 0.30
 
     with tempfile.TemporaryDirectory() as td:
@@ -303,6 +311,27 @@ def main() -> int:
             )
             if result["composite"] < good_min:
                 failures.append(f"{name}: composite {result['composite']:.3f} < {good_min}")
+
+        for name, cls, fn in IMPERFECTS:
+            task = base_task
+            workdir = td_p / name
+            workdir.mkdir()
+            transcript = fn(workdir, task)
+            result = rubric.score_rollout(transcript, str(workdir), task)
+            ok = imperfect_min <= result["composite"] <= imperfect_max
+            mark = "✓" if ok else "✗"
+            print(
+                f"  {mark} {name:30s} composite={result['composite']:.3f}  "
+                f"outcome={result['outcome']:.0f}  applied={result.get('applied_fraction', 0):.2f}  "
+                f"min={result['minimality']:.2f}  "
+                f"nourel={result['no_unrelated_edits']:.2f}  "
+                f"tested={result['tested_before_done']:.2f}  "
+                f"fmt={result['format_compliance']:.2f}"
+            )
+            if not ok:
+                failures.append(
+                    f"{name}: composite {result['composite']:.3f} outside [{imperfect_min}, {imperfect_max}]"
+                )
 
         for name, cls, fn in BADS:
             task = base_task
@@ -329,7 +358,7 @@ def main() -> int:
             print(f"  - {f}")
         return 1
     print()
-    print("OK: rubric separates good (>= 0.80) from bad (<= 0.30)")
+    print(f"OK: rubric separates good (>= {good_min}) / imperfect ([{imperfect_min}, {imperfect_max}]) / bad (<= {bad_max})")
     return 0
 
 
