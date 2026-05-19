@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - name: Verify gate detects no-op (zero-delta input)
@@ -87,7 +87,7 @@ jobs:
           rustup default stable
           rustc --version
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - name: Run kiln-opd-loss-kernel bench
