@@ -236,10 +236,15 @@ struct Args {
     /// Requires --echo-lambda not be zero (otherwise the loss is
     /// identically zero and no gradient flows).
     no_policy_loss: bool,
-    /// Base adapter path to start training from. The trainer loads the
-    /// adapter's LoRA weights instead of initializing fresh. Used by
-    /// Phase 3 verifier-free runs that start from a strong Phase 2
-    /// adapter. None = fresh LoRA init.
+    /// Base adapter path for the replay-lineage record. The flag is
+    /// accepted and written into `GrpoConfig::base_adapter` for lineage
+    /// tracking, BUT the trainer does not yet load the adapter's LoRA
+    /// weights for continued training — `TrainableLoraParams` always
+    /// initializes from the seed regardless of this field. Phase 3
+    /// verifier-free runs that chain from a strong Phase 2 adapter
+    /// need an explicit `TrainableLoraParams::load_from_safetensors`
+    /// hook in the trainer; tracked as a Phase 3 follow-up. For now
+    /// this flag is effectively a label, not a load.
     base_adapter: Option<String>,
 }
 
@@ -522,6 +527,14 @@ fn main() -> Result<()> {
     }
     if let Some(ref base_adapter) = args.base_adapter {
         config.base_adapter = Some(base_adapter.clone());
+        // Loud warning so operators don't silently expect weight loading
+        // that doesn't happen yet. The lineage record gets written; the
+        // LoRA weights don't carry over. See the Args::base_adapter docs.
+        eprintln!(
+            "warning: --base-adapter is recorded in lineage but does NOT \
+             load LoRA weights yet (trainer lacks TrainableLoraParams::\
+             load_from_safetensors). Adapter trains from fresh init."
+        );
     }
     if let Some(_opd_lambda) = args.opd_lambda {
         // Reserved for OPD branch rebase. Accept the flag but don't fire —
