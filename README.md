@@ -126,6 +126,33 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
 
 See [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md) for worked verifiable-rewards examples (math, JSON, code).
 
+### Agentic GRPO with ECHO (multi-turn rollouts)
+
+For multi-turn agentic rollouts — tool calls, command output, file contents — kiln's GRPO is **ECHO-by-default** (Shrivastava, Awadallah, Papailiopoulos, MSR AI Frontiers 2026). ECHO adds a length-normalized cross-entropy loss on environment-observation tokens to the standard policy-gradient loss, with **zero extra forward-pass cost** — the env tokens were already in the rollout context. Paper headline: roughly doubles TerminalBench-2.0 pass@1.
+
+When your rollouts carry a `trajectory` field with `kind: "action"` / `kind: "observation"` segments, kiln-train's `tokenize_grpo_group` builds separate `action_mask` (policy-gradient targets) and `env_mask` (ECHO env-CE targets); both contribute to the same forward pass at default `λ_echo = 0.05`. Legacy single-turn rollouts (no `trajectory` field) get ECHO contribution = 0 — bit-identical behavior to the pre-ECHO loss.
+
+```python
+# Canonical multi-turn shape (kiln >= 0.3):
+requests.post("http://localhost:8420/v1/train/agentic", json={
+    "agentic_groups": [{
+        "messages": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
+        "rollouts": [{
+            "text": "<TURN_BREAK>-joined action text",
+            "reward": 1.0,
+            "trajectory": [
+                {"role": "assistant", "content": "<tool_call>...</tool_call>", "kind": "action"},
+                {"role": "tool", "content": "command output here", "kind": "observation"},
+                {"role": "assistant", "content": "...", "kind": "action"}
+            ]
+        }]
+    }],
+    "config": {"loss": {"echo": {"lambda": 0.05}}}
+})
+```
+
+See [docs/ECHO_GUIDE.md](docs/ECHO_GUIDE.md) for full ECHO usage (CLI flags, env vars, verifier-free adaptation per paper §5.5, and the receipt-grade `env_ce_drop_pct` diagnostic).
+
 ## The Eval Loop
 
 Training is half the story; the other half is knowing whether your last training run actually helped. Kiln's eval system runs in the same process, against the same model weights, and treats your evals as first-class artifacts — registered suites, drillable per-example outcomes, A/B comparisons across adapters, and a judgment flywheel that turns your A/B picks into a *local* judge LoRA you can re-use.
@@ -321,7 +348,8 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible) |
 | POST | `/v1/completions/batch` | Batch generation API for GRPO (up to 64 prompts per request) |
 | POST | `/v1/train/sft` | Submit SFT training examples (optionally with a `post_eval` hook) |
-| POST | `/v1/train/grpo` | Submit GRPO scored completions (optionally with a `post_eval` hook) |
+| POST | `/v1/train/grpo` | Submit GRPO scored completions (optionally with a `post_eval` hook). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; ECHO env-CE applies automatically. |
+| POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — same handler, semantically-honest name for multi-turn rollouts |
 | GET | `/v1/train/status` | Training queue and job status |
 | GET | `/v1/train/status/{job_id}` | Inspect one training job |
 | GET | `/v1/train/jobs/{job_id}` | Rich training job detail (loss curve + linked-eval back-references) |
