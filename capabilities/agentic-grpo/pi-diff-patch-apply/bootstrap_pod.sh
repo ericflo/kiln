@@ -36,9 +36,13 @@ echo ">>> [2/6] build kiln (release)"
 # Check if pre-built
 BUILT=$(run_pod 'test -x /workspace/kiln/target/release/kiln && echo yes || echo no' 2>/dev/null | tail -1)
 if [ "$BUILT" != "yes" ]; then
-  echo ">>> compiling kiln + cuda_grpo_ablation example (--features cuda)"
+  echo ">>> compiling kiln + cuda_grpo_ablation example (--features cuda, KILN_CUDA_ARCHS=80)"
+  # KILN_CUDA_ARCHS=80 builds compute_80 PTX only. compute_80 is forward-compatible
+  # with A6000 (sm_86) and A100 (sm_80) via PTX→SASS JIT. Default 80;89;90 builds
+  # 3 archs and is 2-3x slower without runtime benefit on A6000. Override with
+  # 80;89;90 if targeting H100 (sm_90) or RTX 40-series (sm_89).
   python3 "$RP" bg "$POD_ID" /tmp/cargo-build.log \
-    'cd /workspace/kiln && cargo build --release --features cuda --bin kiln 2>&1 && cargo build --release --features cuda --example cuda_grpo_ablation 2>&1'
+    'cd /workspace/kiln && KILN_CUDA_ARCHS=80 cargo build --release --features cuda --bin kiln 2>&1 && KILN_CUDA_ARCHS=80 cargo build --release --features cuda --example cuda_grpo_ablation 2>&1'
   python3 "$RP" wait-file "$POD_ID" /workspace/kiln/target/release/kiln --timeout 1800
   python3 "$RP" wait-file "$POD_ID" /workspace/kiln/target/release/examples/cuda_grpo_ablation --timeout 1800
 fi
