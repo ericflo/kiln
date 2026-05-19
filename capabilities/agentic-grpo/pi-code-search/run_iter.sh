@@ -154,6 +154,28 @@ def gmean(g):
     rs = [c["reward"] for c in g["completions"]]
     return sum(rs)/len(rs) if rs else 0.0
 
+# Mandatory: drop empty/placeholder trajectories. They render with a
+# different prompt length than non-empty ones (the chat template adds
+# an `<|im_start|>assistant\n` marker only when there's actual content
+# to follow), which causes the trainer's prompt-length-equality check
+# to fail with "GRPO completions have different prompt lengths".
+out_groups = []
+for g in groups:
+    keep = []
+    for c in g["completions"]:
+        traj = c.get("trajectory", [])
+        if not traj:
+            continue
+        # Drop completions whose text is the literal placeholder.
+        if c.get("text") == "(empty)":
+            continue
+        keep.append(c)
+    if len(keep) >= 2:
+        g["completions"] = keep
+        out_groups.append(g)
+print(f"after drop-empty: {len(out_groups)}/{len(groups)} groups", flush=True)
+groups = out_groups
+
 # Variance filter.
 if fv > 0:
     groups = [g for g in groups if gvar(g) >= fv]
