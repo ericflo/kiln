@@ -55,3 +55,33 @@ Lease expires `2026-05-19T12:52:01Z`.
 - Re-acquire lease if time permits, run more iters
 - Write final writeup with the iters we actually completed
 - B2 backup all adapters
+
+## Session 2026-05-19 (afternoon-evening) — continuation through iter 9
+
+### Iters completed
+| Iter | Slug | Composite | Δ vs baseline | Notes |
+|------|------|-----------|---------------|-------|
+| 8    | h8-no-echo-12tasks-3gens | 0.840 | -0.102 | First successful trained adapter after pi-setup + pytest fixes |
+| 9    | h9-echo-0.10 | 0.762 | -0.180 | Higher ECHO over-anchored — drift class dropped most (0.907 → 0.794) |
+
+### Lessons from iters 8-9
+- Pi sessions are noticeably slower with trained adapters (60s → 120-180s).
+- The trained adapter consistently degrades `incorrect` class (the hardest one).
+- ECHO 0.10 hurts more than no-ECHO (h9 -18pp vs h8 -10pp).
+- The "best" recipe direction is still toward smaller LoRA rank + lower lr + minimal training.
+
+### Kiln/infra fixes landed
+- `bootstrap_pod.sh`: install pytest, run kiln pi-setup, --features cuda, KILN_CUDA_ARCHS=80, correct Qwen3.5-4B repo name.
+- `run_iter.sh`: kiln serve health check + smoke test before eval.
+- `drive_iters_fast.sh`: removed `set -e` so single-iter failures don't kill the 50-iter loop; per-cap env file `/tmp/grpo-pod-pdp.env`; enriched log row with sub_scores/class_means.
+- `backup_to_b2.py`: auto-installs boto3.
+- `kiln-polish.jsonl`: appended 6 notes documenting these gaps.
+
+### State at session end
+- Old A6000 pod (9jshui49gl9up2) released.
+- New A100 80GB pod acquired (36xpt4xbmezqtc, lease pod-b05f748d3fd6ff08b24a2c81), bootstrap kicked off in background.
+- `/tmp/grpo-pod-pdp.env` points at the A100.
+- Next session: wait for bootstrap_pod.sh to finish (~15 min), then `bash drive_iters_fast.sh --pod 36xpt4xbmezqtc --max-iters 50 --start-iter 10`.
+
+### Best adapter so far
+None. All 9 trained iters regress vs base model 0.942. Best is iter 2 (h2-strong-filter T=1.0) at 0.925 (-1.7pp). Base model remains the strongest baseline.
