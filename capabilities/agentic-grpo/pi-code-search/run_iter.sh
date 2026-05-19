@@ -228,14 +228,20 @@ fi
 # Restart kiln-server if needed (training killed it). Use the same env
 # vars that worked on the new H100/A6000 pod (see notes on kernel
 # kill-switch flags above).
+#
+# IMPORTANT: fully detach stdin/stdout/stderr from the launching shell
+# so the parent's `tee`/`tail` pipes close cleanly when run_iter.sh
+# exits. Without `</dev/null` the parent shell hangs forever waiting
+# for the kiln-serve subprocess's stdout to close.
 if ! curl -sf "$KILN_URL/v1/models" >/dev/null 2>&1; then
   echo "[iter $ITER] launching kiln serve in background"
   export KILN_MODEL_PATH
   export KILN_SERVED_MODEL_ID=qwen-3.5-4b-kiln
   export KILN_BATCHING_ENGINE=0
   export KILN_DISABLE_FUSED_GDN_GATES=1
-  ( cd / && nohup "$KILN_BIN" serve \
-        > "$BASE_DIR/logs/kiln-serve.log" 2>&1 & ) || true
+  setsid nohup "$KILN_BIN" serve \
+        </dev/null >>"$BASE_DIR/logs/kiln-serve.log" 2>&1 &
+  disown $! 2>/dev/null || true
   # Wait up to 180s for kiln-server to become reachable.
   for i in $(seq 1 90); do
     if curl -sf "$KILN_URL/v1/models" >/dev/null 2>&1; then break; fi
