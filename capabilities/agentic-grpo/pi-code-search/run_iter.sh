@@ -46,6 +46,8 @@ TRAIN_LIMIT="${TRAIN_LIMIT:-30}"
 NUM_GEN="${NUM_GEN:-4}"
 EVAL_NUM_GEN="${EVAL_NUM_GEN:-1}"
 MAX_WALL="${MAX_WALL:-90}"
+PARALLEL="${PARALLEL:-4}"
+EVAL_PARALLEL="${EVAL_PARALLEL:-2}"
 LR="${LR:-1e-5}"
 RANK="${RANK:-16}"
 ALPHA="${ALPHA:-32}"
@@ -115,7 +117,7 @@ if [ "${EVAL_ONLY:-0}" != "1" ] && [ "${SKIP_TRAIN:-0}" != "1" ]; then
     --mode train \
     --kiln-url "$KILN_URL" \
     --max-wall-clock-s "$MAX_WALL" \
-    --parallel 1 \
+    --parallel "$PARALLEL" \
     --limit "$TRAIN_LIMIT" \
     --shuffle-seed "$SHUFFLE_SEED" \
     --verbose \
@@ -248,7 +250,7 @@ if [ "${SKIP_EVAL:-0}" != "1" ]; then
     --mode eval \
     --kiln-url "$KILN_URL" \
     --max-wall-clock-s "$MAX_WALL" \
-    --parallel 1 \
+    --parallel "$EVAL_PARALLEL" \
     --shuffle-seed "$SHUFFLE_SEED" \
     --verbose \
     2>&1 | tee "$BASE_DIR/logs/eval.log"
