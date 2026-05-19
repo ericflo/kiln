@@ -56,6 +56,38 @@ drive auto-skips and proceeds with the next recipe.
    gradient updates on an already-fit LoRA tends to drift — pure base-warm
    training with a good recipe still wins.
 
+## Rubric v2 ideas (future work — don't change v1 mid-run)
+
+Reviewed rubric.py during iter-12 rollout idle. v1 is already comprehensive
+(7 fields, 5 sub-scores, line-tolerance grounding, F1 with type/identifier
+normalization, semantic invariant matching via Jaccard ≥0.30 + ≥2 shared
+content tokens, multiplicative composite). It's been validated against
+rubric_sanity.py 10-case battery. Things worth adding in a future v2:
+
+1. **AST cross-check for `calls`/`called_by`.** Current rubric trusts the
+   gold set; future v2 could parse the snapshot's AST and verify the
+   prediction matches the ACTUAL call graph — catches both gold errors
+   and agent fabrications.
+2. **LLM judge layer for semantic invariants.** Jaccard ≥0.30 is coarse
+   for invariants like "input non-empty"vs "len(arr) > 0". An LLM-graded
+   semantic match (calibrated against the existing battery) could lift
+   the invariant_coverage ceiling (currently best ~0.40).
+3. **Reasoning-process score.** Did the agent grep before answering?
+   Did it read the file? Currently only the final JSON is scored; the
+   trace is wasted. A reasoning-process bonus would teach the agent
+   the "grep-then-read-then-answer" pattern more directly.
+4. **Adversarial gold variants.** For each task, hand-craft 2-3
+   "wrong-but-plausible" answers and verify the rubric scores them
+   <0.5. Currently sanity battery checks the positives (good answers
+   should score high); adding adversarial negatives would tighten the
+   floor.
+5. **Multi-language corpus extension.** Currently Python-only via AST;
+   could add JS/Rust/Go via Tree-sitter to test grounding generalization.
+
+These are all v2 work — invariant changes would invalidate every
+iter's reward signal mid-run. Documenting here so the v2 build (after
+50-iter close) has a roadmap.
+
 ## Active hypothesis pipeline (next 38 iters)
 
 From `recipes.json`, the queue prioritises:
