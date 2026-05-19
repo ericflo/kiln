@@ -320,16 +320,21 @@ impl Args {
                         "cuda_grpo_ablation --data <jsonl> --model <dir> [--output <dir>] \
                          [--adapter <name>] --mode <baseline|phase1|phase1_gspo|phase1_cispo|\
                          phase1_reinforce|...> [--max-groups N] [--rank N] [--alpha F] \
-                         [--lr F] [--seed N] [--echo-lambda F | --no-echo] [--opd-lambda F]\n\
-                         \n\
-                         ECHO flags (Phase 1, paper §3.3):\n\
-                         \  --echo-lambda <f64>    Override the env-CE coefficient. Default \
-                         from LossConfig::default() = 0.05.\n\
-                         \  --no-echo              Disable ECHO entirely (sets loss.echo = None).\n\
-                         \  --opd-lambda <f64>     Reserved for OPD branch rebase; accepted\n\
-                         \                          here so cap scripts don't fail to parse.\n\
-                         \                          Currently ignored — OPD wiring lands in\n\
-                         \                          the OPD merge."
+                         [--lr F] [--seed N] [--echo-lambda F | --no-echo] [--opd-lambda F]"
+                    );
+                    println!();
+                    println!("ECHO flags (Phase 1, paper §3.3):");
+                    println!(
+                        "  --echo-lambda <f64>    Override the env-CE coefficient. Default \
+                         from LossConfig::default() = 0.05."
+                    );
+                    println!(
+                        "  --no-echo              Disable ECHO entirely (sets loss.echo = None)."
+                    );
+                    println!(
+                        "  --opd-lambda <f64>     Reserved for OPD branch rebase; accepted \
+                         here so cap scripts don't fail to parse. Currently ignored — \
+                         OPD wiring lands in the OPD merge."
                     );
                     std::process::exit(0);
                 }
