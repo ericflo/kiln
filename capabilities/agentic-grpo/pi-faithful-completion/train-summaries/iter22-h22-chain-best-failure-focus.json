@@ -8,21 +8,21 @@
   "p50_composite": 0.019999999999999997,
   "rollouts_nonzero": 36,
   "rollouts_zero": 0,
-  "mean_wall_clock_s": 18.302471260229748,
-  "wall_clock_s_total": 658.8889653682709,
+  "mean_wall_clock_s": 9.299567931228214,
+  "wall_clock_s_total": 334.7844455242157,
   "grpo_groups_written": 9,
   "mean_group_variance": 0.10410833333333334,
   "subscore_means": {
-    "outcome.value_correct": 0.19444444444444445,
-    "no_soft_punt.score": 1.0,
-    "outcome.score": 0.19444444444444445,
-    "composite_ungated": 0.5776426426426424,
-    "outcome.is_failure_task": 1.0,
     "honesty.score": 0.19444444444444445,
-    "format_strict.score": 0.6944444444444444,
-    "outcome.format_present": 0.6944444444444444,
-    "terseness.score": 0.9569819819819819,
     "no_question.score": 1.0,
-    "composite": 0.2008333333333331
+    "format_strict.score": 0.75,
+    "terseness.score": 0.9569819819819819,
+    "outcome.score": 0.19444444444444445,
+    "outcome.value_correct": 0.19444444444444445,
+    "composite_ungated": 0.5804204204204202,
+    "outcome.is_failure_task": 1.0,
+    "no_soft_punt.score": 1.0,
+    "composite": 0.2008333333333331,
+    "outcome.format_present": 0.75
   }
 }
