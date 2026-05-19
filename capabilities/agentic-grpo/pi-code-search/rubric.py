@@ -137,10 +137,27 @@ def _all_assistant_text(transcript: list) -> str:
     return "\n".join(parts)
 
 
+def _normalize_path(p: str) -> str:
+    """Strip common workdir prefixes (`repo/`, `./repo/`, `./`) so the
+    model's path is comparable to gold which is repo-relative."""
+    while True:
+        if p.startswith("./"):
+            p = p[2:]
+        elif p.startswith("repo/"):
+            p = p[5:]
+        elif p.startswith("/repo/"):
+            p = p[6:]
+        else:
+            break
+    return p
+
+
 def parse_predicted_pairs(answer_text: str) -> list[tuple[str, int]]:
     """Extract all (file, line) pairs from the answer text.
 
-    Dedupes while preserving order. Lines must be positive integers."""
+    Dedupes while preserving order. Lines must be positive integers.
+    The `repo/` prefix is stripped if present (the model may include
+    it even though the prompt asks for a path relative to repo/)."""
     pairs: list[tuple[str, int]] = []
     seen: set[tuple[str, int]] = set()
     for m in ANSWER_PAIR.finditer(answer_text or ""):
@@ -150,7 +167,8 @@ def parse_predicted_pairs(answer_text: str) -> list[tuple[str, int]]:
             continue
         if ln <= 0:
             continue
-        pair = (m.group(1), ln)
+        f = _normalize_path(m.group(1))
+        pair = (f, ln)
         if pair in seen:
             continue
         seen.add(pair)
@@ -349,9 +367,16 @@ def _grounding(
     transcript: list,
     predicted: list[tuple[str, int]],
 ) -> tuple[float, dict]:
-    """For each predicted (file, line) check whether
-    `<basename>:<line>` OR `<file>:<line>` OR `<file>:<line>` (with
-    line ±2) appears in some tool-result body. Returns fraction matched."""
+    """For each predicted (file, line) check whether evidence of that
+    file:line appears in some tool result. Accept any of:
+
+    1. `<file>:<line>` (or `<file>:<line±2>`) substring anywhere
+    2. `<basename>:<line>` (or `<basename>:<line±2>`) substring anywhere
+    3. file basename appears in some result + line appears as `<line>:`
+       at start of any line in any tool result (the rg `-n` format with
+       a separate file-context grep).
+
+    Returns fraction matched."""
     if not predicted:
         return 0.0, {"reason": "no predictions"}
     bodies = _iter_tool_results(transcript)
@@ -359,16 +384,26 @@ def _grounding(
     matched = 0
     misses: list[str] = []
     for f, ln in predicted:
-        # File can be quoted with backticks, prefixed with ./, etc. So we
-        # look for several patterns and accept the cheapest.
+        basename = f.split("/")[-1]
         ok = False
+        # Direct file:line (or basename:line) check, ±2 tolerance.
         for tline in range(ln - 2, ln + 3):
-            for hint in (f"{f}:{tline}", f"{f.split('/')[-1]}:{tline}"):
+            for hint in (f"{f}:{tline}", f"{basename}:{tline}",
+                         f"repo/{f}:{tline}"):
                 if hint in haystack:
                     ok = True
                     break
             if ok:
                 break
+        # Fallback: basename appears AND `<line>:` (rg `-n` line prefix)
+        # appears somewhere in tool results — covers the "narrow grep
+        # returning just line: content" pattern.
+        if not ok:
+            if basename in haystack or f in haystack:
+                for tline in range(ln - 2, ln + 3):
+                    if f"\n{tline}:" in haystack or haystack.startswith(f"{tline}:"):
+                        ok = True
+                        break
         if ok:
             matched += 1
         else:

@@ -96,9 +96,12 @@ def pi_prompt(task: dict) -> str:
         "STRATEGY: prefer `grep` / `rg` / `glob` / `find` over reading "
         "whole files. A focused regex search is usually enough. Avoid "
         "calling `read` on files larger than 2KB.\n\n"
-        "When you have the answer, emit a final message containing only "
-        "the answer in the form `path/to/file.ext:LINE` (relative to "
-        "`repo/`). One answer per line. Do not include prose.\n"
+        "ANSWER FORMAT:\n"
+        "- Strip the leading `repo/` from any path.\n"
+        "- One `path:line` per line (path relative to repo root).\n"
+        "- No prose, no backticks, no explanations.\n\n"
+        "EXAMPLE:\n"
+        "  crates/kiln-train/src/trainer.rs:7270\n"
     )
 
 
