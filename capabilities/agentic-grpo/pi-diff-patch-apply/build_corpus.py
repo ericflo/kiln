@@ -917,13 +917,488 @@ def prim_zip_longest() -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# HARD primitives — designed to challenge the 4B base. Each has either:
+#   - a multi-function module where only one function has the bug, and the
+#     model must NOT touch the others while applying the patch
+#   - subtle semantic bugs (boundary conditions, accumulator ordering)
+#   - more involved structure (state machines, recursion, balanced trees)
+# These bring baseline composite down from 0.99 toward 0.6-0.8 so GRPO has
+# meaningful headroom.
+# ---------------------------------------------------------------------------
+
+
+def prim_bsearch() -> dict:
+    return {
+        "module_name": "bsearch",
+        "buggy_src": (
+            "def bsearch(xs, target):\n"
+            "    lo, hi = 0, len(xs)\n"
+            "    while lo < hi:\n"
+            "        mid = (lo + hi) // 2\n"
+            "        if xs[mid] == target:\n"
+            "            return mid\n"
+            "        if xs[mid] < target:\n"
+            "            hi = mid\n"
+            "        else:\n"
+            "            lo = mid + 1\n"
+            "    return -1\n"
+        ),
+        "gold_src": (
+            "def bsearch(xs, target):\n"
+            "    lo, hi = 0, len(xs)\n"
+            "    while lo < hi:\n"
+            "        mid = (lo + hi) // 2\n"
+            "        if xs[mid] == target:\n"
+            "            return mid\n"
+            "        if xs[mid] < target:\n"
+            "            lo = mid + 1\n"
+            "        else:\n"
+            "            hi = mid\n"
+            "    return -1\n"
+        ),
+        "tests_src": (
+            "from src.bsearch import bsearch\n\n"
+            "def test_found_middle():\n"
+            "    assert bsearch([1, 3, 5, 7, 9], 5) == 2\n\n"
+            "def test_found_left():\n"
+            "    assert bsearch([1, 3, 5, 7, 9], 1) == 0\n\n"
+            "def test_found_right():\n"
+            "    assert bsearch([1, 3, 5, 7, 9], 9) == 4\n\n"
+            "def test_not_found():\n"
+            "    assert bsearch([1, 3, 5, 7, 9], 4) == -1\n\n"
+            "def test_empty():\n"
+            "    assert bsearch([], 5) == -1\n"
+        ),
+    }
+
+
+def prim_merge_sort() -> dict:
+    return {
+        "module_name": "msort",
+        "buggy_src": (
+            "def merge(a, b):\n"
+            "    i, j = 0, 0\n"
+            "    out = []\n"
+            "    while i < len(a) and j < len(b):\n"
+            "        if a[i] < b[j]:\n"
+            "            out.append(b[j])\n"
+            "            j += 1\n"
+            "        else:\n"
+            "            out.append(a[i])\n"
+            "            i += 1\n"
+            "    out.extend(a[i:])\n"
+            "    out.extend(b[j:])\n"
+            "    return out\n\n"
+            "def merge_sort(xs):\n"
+            "    if len(xs) <= 1:\n"
+            "        return list(xs)\n"
+            "    mid = len(xs) // 2\n"
+            "    left = merge_sort(xs[:mid])\n"
+            "    right = merge_sort(xs[mid:])\n"
+            "    return merge(left, right)\n"
+        ),
+        "gold_src": (
+            "def merge(a, b):\n"
+            "    i, j = 0, 0\n"
+            "    out = []\n"
+            "    while i < len(a) and j < len(b):\n"
+            "        if a[i] <= b[j]:\n"
+            "            out.append(a[i])\n"
+            "            i += 1\n"
+            "        else:\n"
+            "            out.append(b[j])\n"
+            "            j += 1\n"
+            "    out.extend(a[i:])\n"
+            "    out.extend(b[j:])\n"
+            "    return out\n\n"
+            "def merge_sort(xs):\n"
+            "    if len(xs) <= 1:\n"
+            "        return list(xs)\n"
+            "    mid = len(xs) // 2\n"
+            "    left = merge_sort(xs[:mid])\n"
+            "    right = merge_sort(xs[mid:])\n"
+            "    return merge(left, right)\n"
+        ),
+        "tests_src": (
+            "from src.msort import merge, merge_sort\n\n"
+            "def test_merge_basic():\n"
+            "    assert merge([1, 3, 5], [2, 4, 6]) == [1, 2, 3, 4, 5, 6]\n\n"
+            "def test_merge_overlap():\n"
+            "    assert merge([1, 2, 3], [1, 2, 3]) == [1, 1, 2, 2, 3, 3]\n\n"
+            "def test_sort_basic():\n"
+            "    assert merge_sort([3, 1, 2]) == [1, 2, 3]\n\n"
+            "def test_sort_dups():\n"
+            "    assert merge_sort([2, 1, 2, 1]) == [1, 1, 2, 2]\n\n"
+            "def test_sort_empty():\n"
+            "    assert merge_sort([]) == []\n"
+        ),
+    }
+
+
+def prim_balanced() -> dict:
+    return {
+        "module_name": "balanced",
+        "buggy_src": (
+            "def is_balanced(s):\n"
+            "    pairs = {')': '(', ']': '[', '}': '{'}\n"
+            "    stack = []\n"
+            "    for c in s:\n"
+            "        if c in '([{':\n"
+            "            stack.append(c)\n"
+            "        elif c in ')]}':\n"
+            "            if not stack:\n"
+            "                return True\n"
+            "            stack.pop()\n"
+            "    return not stack\n"
+        ),
+        "gold_src": (
+            "def is_balanced(s):\n"
+            "    pairs = {')': '(', ']': '[', '}': '{'}\n"
+            "    stack = []\n"
+            "    for c in s:\n"
+            "        if c in '([{':\n"
+            "            stack.append(c)\n"
+            "        elif c in ')]}':\n"
+            "            if not stack or stack[-1] != pairs[c]:\n"
+            "                return False\n"
+            "            stack.pop()\n"
+            "    return not stack\n"
+        ),
+        "tests_src": (
+            "from src.balanced import is_balanced\n\n"
+            "def test_simple():\n"
+            "    assert is_balanced('()')\n\n"
+            "def test_nested():\n"
+            "    assert is_balanced('([{}])')\n\n"
+            "def test_unbalanced():\n"
+            "    assert not is_balanced('(()')\n\n"
+            "def test_mismatched():\n"
+            "    assert not is_balanced('(]')\n\n"
+            "def test_empty():\n"
+            "    assert is_balanced('')\n\n"
+            "def test_only_close():\n"
+            "    assert not is_balanced(')]')\n"
+        ),
+    }
+
+
+def prim_kth_largest() -> dict:
+    return {
+        "module_name": "kthlarge",
+        "buggy_src": (
+            "def kth_largest(xs, k):\n"
+            "    s = sorted(xs)\n"
+            "    return s[k]\n"
+        ),
+        "gold_src": (
+            "def kth_largest(xs, k):\n"
+            "    s = sorted(xs, reverse=True)\n"
+            "    return s[k - 1]\n"
+        ),
+        "tests_src": (
+            "from src.kthlarge import kth_largest\n\n"
+            "def test_basic():\n"
+            "    assert kth_largest([3, 1, 4, 1, 5], 1) == 5\n\n"
+            "def test_second():\n"
+            "    assert kth_largest([3, 1, 4, 1, 5], 2) == 4\n\n"
+            "def test_last():\n"
+            "    assert kth_largest([1, 2, 3], 3) == 1\n\n"
+            "def test_duplicates():\n"
+            "    assert kth_largest([5, 5, 5], 2) == 5\n"
+        ),
+    }
+
+
+def prim_two_funcs() -> dict:
+    """Two functions, ONLY one has a bug. The model must NOT touch the
+    correct function — testing the no_unrelated_edits + minimality discipline."""
+    return {
+        "module_name": "twof",
+        "buggy_src": (
+            "def square(x):\n"
+            "    return x * x\n\n"
+            "def cube(x):\n"
+            "    return x * x\n"
+        ),
+        "gold_src": (
+            "def square(x):\n"
+            "    return x * x\n\n"
+            "def cube(x):\n"
+            "    return x * x * x\n"
+        ),
+        "tests_src": (
+            "from src.twof import square, cube\n\n"
+            "def test_square():\n"
+            "    assert square(3) == 9\n\n"
+            "def test_cube():\n"
+            "    assert cube(3) == 27\n\n"
+            "def test_square_zero():\n"
+            "    assert square(0) == 0\n\n"
+            "def test_cube_neg():\n"
+            "    assert cube(-2) == -8\n"
+        ),
+    }
+
+
+def prim_three_funcs() -> dict:
+    """Three functions; only the middle one has a bug."""
+    return {
+        "module_name": "threef",
+        "buggy_src": (
+            "def first(xs):\n"
+            "    return xs[0]\n\n"
+            "def last(xs):\n"
+            "    return xs[0]\n\n"
+            "def middle(xs):\n"
+            "    return xs[len(xs) // 2]\n"
+        ),
+        "gold_src": (
+            "def first(xs):\n"
+            "    return xs[0]\n\n"
+            "def last(xs):\n"
+            "    return xs[-1]\n\n"
+            "def middle(xs):\n"
+            "    return xs[len(xs) // 2]\n"
+        ),
+        "tests_src": (
+            "from src.threef import first, last, middle\n\n"
+            "def test_first():\n"
+            "    assert first([1, 2, 3]) == 1\n\n"
+            "def test_last():\n"
+            "    assert last([1, 2, 3]) == 3\n\n"
+            "def test_middle():\n"
+            "    assert middle([1, 2, 3]) == 2\n"
+        ),
+    }
+
+
+def prim_lcs() -> dict:
+    return {
+        "module_name": "lcs",
+        "buggy_src": (
+            "def lcs(a, b):\n"
+            "    m, n = len(a), len(b)\n"
+            "    dp = [[0] * (n + 1) for _ in range(m + 1)]\n"
+            "    for i in range(1, m + 1):\n"
+            "        for j in range(1, n + 1):\n"
+            "            if a[i - 1] == b[j - 1]:\n"
+            "                dp[i][j] = dp[i - 1][j - 1]\n"
+            "            else:\n"
+            "                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])\n"
+            "    return dp[m][n]\n"
+        ),
+        "gold_src": (
+            "def lcs(a, b):\n"
+            "    m, n = len(a), len(b)\n"
+            "    dp = [[0] * (n + 1) for _ in range(m + 1)]\n"
+            "    for i in range(1, m + 1):\n"
+            "        for j in range(1, n + 1):\n"
+            "            if a[i - 1] == b[j - 1]:\n"
+            "                dp[i][j] = dp[i - 1][j - 1] + 1\n"
+            "            else:\n"
+            "                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])\n"
+            "    return dp[m][n]\n"
+        ),
+        "tests_src": (
+            "from src.lcs import lcs\n\n"
+            "def test_basic():\n"
+            "    assert lcs('abc', 'abc') == 3\n\n"
+            "def test_partial():\n"
+            "    assert lcs('abcd', 'aecd') == 3\n\n"
+            "def test_empty():\n"
+            "    assert lcs('', 'abc') == 0\n\n"
+            "def test_none_common():\n"
+            "    assert lcs('abc', 'def') == 0\n"
+        ),
+    }
+
+
+def prim_rotate_matrix() -> dict:
+    return {
+        "module_name": "rotmat",
+        "buggy_src": (
+            "def rotate(m):\n"
+            "    n = len(m)\n"
+            "    out = [[0] * n for _ in range(n)]\n"
+            "    for i in range(n):\n"
+            "        for j in range(n):\n"
+            "            out[j][i] = m[i][j]\n"
+            "    return out\n"
+        ),
+        "gold_src": (
+            "def rotate(m):\n"
+            "    n = len(m)\n"
+            "    out = [[0] * n for _ in range(n)]\n"
+            "    for i in range(n):\n"
+            "        for j in range(n):\n"
+            "            out[j][n - 1 - i] = m[i][j]\n"
+            "    return out\n"
+        ),
+        "tests_src": (
+            "from src.rotmat import rotate\n\n"
+            "def test_2x2():\n"
+            "    assert rotate([[1, 2], [3, 4]]) == [[3, 1], [4, 2]]\n\n"
+            "def test_3x3():\n"
+            "    assert rotate([[1, 2, 3], [4, 5, 6], [7, 8, 9]]) == [[7, 4, 1], [8, 5, 2], [9, 6, 3]]\n\n"
+            "def test_1x1():\n"
+            "    assert rotate([[7]]) == [[7]]\n"
+        ),
+    }
+
+
+def prim_unique_paths() -> dict:
+    return {
+        "module_name": "paths",
+        "buggy_src": (
+            "def unique_paths(m, n):\n"
+            "    dp = [[1] * n for _ in range(m)]\n"
+            "    for i in range(1, m):\n"
+            "        for j in range(1, n):\n"
+            "            dp[i][j] = dp[i - 1][j] + dp[i][j]\n"
+            "    return dp[m - 1][n - 1]\n"
+        ),
+        "gold_src": (
+            "def unique_paths(m, n):\n"
+            "    dp = [[1] * n for _ in range(m)]\n"
+            "    for i in range(1, m):\n"
+            "        for j in range(1, n):\n"
+            "            dp[i][j] = dp[i - 1][j] + dp[i][j - 1]\n"
+            "    return dp[m - 1][n - 1]\n"
+        ),
+        "tests_src": (
+            "from src.paths import unique_paths\n\n"
+            "def test_2x2():\n"
+            "    assert unique_paths(2, 2) == 2\n\n"
+            "def test_3x3():\n"
+            "    assert unique_paths(3, 3) == 6\n\n"
+            "def test_1xn():\n"
+            "    assert unique_paths(1, 5) == 1\n\n"
+            "def test_3x7():\n"
+            "    assert unique_paths(3, 7) == 28\n"
+        ),
+    }
+
+
+def prim_count_islands() -> dict:
+    return {
+        "module_name": "islands",
+        "buggy_src": (
+            "def count_islands(grid):\n"
+            "    if not grid:\n"
+            "        return 0\n"
+            "    rows, cols = len(grid), len(grid[0])\n"
+            "    visited = set()\n"
+            "    count = 0\n"
+            "    def dfs(r, c):\n"
+            "        if (r, c) in visited:\n"
+            "            return\n"
+            "        if r < 0 or c < 0 or r >= rows or c >= cols:\n"
+            "            return\n"
+            "        if grid[r][c] == 0:\n"
+            "            return\n"
+            "        visited.add((r, c))\n"
+            "        dfs(r + 1, c)\n"
+            "    for r in range(rows):\n"
+            "        for c in range(cols):\n"
+            "            if grid[r][c] == 1 and (r, c) not in visited:\n"
+            "                count += 1\n"
+            "                dfs(r, c)\n"
+            "    return count\n"
+        ),
+        "gold_src": (
+            "def count_islands(grid):\n"
+            "    if not grid:\n"
+            "        return 0\n"
+            "    rows, cols = len(grid), len(grid[0])\n"
+            "    visited = set()\n"
+            "    count = 0\n"
+            "    def dfs(r, c):\n"
+            "        if (r, c) in visited:\n"
+            "            return\n"
+            "        if r < 0 or c < 0 or r >= rows or c >= cols:\n"
+            "            return\n"
+            "        if grid[r][c] == 0:\n"
+            "            return\n"
+            "        visited.add((r, c))\n"
+            "        dfs(r + 1, c)\n"
+            "        dfs(r - 1, c)\n"
+            "        dfs(r, c + 1)\n"
+            "        dfs(r, c - 1)\n"
+            "    for r in range(rows):\n"
+            "        for c in range(cols):\n"
+            "            if grid[r][c] == 1 and (r, c) not in visited:\n"
+            "                count += 1\n"
+            "                dfs(r, c)\n"
+            "    return count\n"
+        ),
+        "tests_src": (
+            "from src.islands import count_islands\n\n"
+            "def test_one():\n"
+            "    assert count_islands([[1, 1], [1, 1]]) == 1\n\n"
+            "def test_three():\n"
+            "    assert count_islands([[1, 0, 1], [0, 0, 0], [1, 0, 0]]) == 3\n\n"
+            "def test_none():\n"
+            "    assert count_islands([[0, 0], [0, 0]]) == 0\n"
+        ),
+    }
+
+
+def prim_substr_count() -> dict:
+    return {
+        "module_name": "substr",
+        "buggy_src": (
+            "def count_substr(s, sub):\n"
+            "    if not sub:\n"
+            "        return 0\n"
+            "    n = 0\n"
+            "    i = 0\n"
+            "    while i < len(s):\n"
+            "        if s[i:i + len(sub)] == sub:\n"
+            "            n += 1\n"
+            "            i += len(sub)\n"
+            "        else:\n"
+            "            i += 1\n"
+            "    return n\n"
+        ),
+        "gold_src": (
+            "def count_substr(s, sub):\n"
+            "    if not sub:\n"
+            "        return 0\n"
+            "    n = 0\n"
+            "    i = 0\n"
+            "    while i <= len(s) - len(sub):\n"
+            "        if s[i:i + len(sub)] == sub:\n"
+            "            n += 1\n"
+            "        i += 1\n"
+            "    return n\n"
+        ),
+        "tests_src": (
+            "from src.substr import count_substr\n\n"
+            "def test_no_overlap():\n"
+            "    assert count_substr('abcabc', 'abc') == 2\n\n"
+            "def test_overlap():\n"
+            "    assert count_substr('aaaa', 'aa') == 3\n\n"
+            "def test_none():\n"
+            "    assert count_substr('hello', 'x') == 0\n\n"
+            "def test_full():\n"
+            "    assert count_substr('abc', 'abc') == 1\n"
+        ),
+    }
+
+
 PRIMITIVES = [
+    # Easy primitives — pass at the 4B base ~95% of the time
     prim_add, prim_factorial, prim_fib, prim_reverse, prim_is_prime,
     prim_max, prim_count_vowels, prim_flatten, prim_dedup, prim_gcd,
     prim_palindrome, prim_sumlist, prim_filter_even, prim_caesar,
     prim_unique_chars, prim_runlength, prim_min_max, prim_titlecase,
     prim_anagram, prim_chunked, prim_word_count, prim_clamp,
     prim_invert_dict, prim_strip_quotes, prim_zip_longest,
+    # Hard primitives — multi-function modules, recursion, DP, subtle bugs
+    prim_bsearch, prim_merge_sort, prim_balanced, prim_kth_largest,
+    prim_two_funcs, prim_three_funcs, prim_lcs, prim_rotate_matrix,
+    prim_unique_paths, prim_count_islands, prim_substr_count,
 ]
 
 
@@ -969,7 +1444,8 @@ def assemble_task(
         patch_text = gold_diff
         expected_repair = False
     elif patch_class == "drift":
-        shift = rng.choice([-3, -2, 2, 3])
+        # Wider drifts on harder primitives to keep the rubric exercised
+        shift = rng.choice([-7, -5, -4, 4, 5, 7])
         patch_text = _shift_hunk_headers(gold_diff, line_shift=shift)
         expected_repair = True
     elif patch_class == "incorrect":
