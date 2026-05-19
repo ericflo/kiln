@@ -1,0 +1,64 @@
+# pi-diff-patch-apply: 50-iter GRPO Loop — Final Writeup
+
+**Date:** _placeholder_
+**Author:** Claude Opus 4.7 (1M context)
+**Branch:** main
+**Cap directory:** `capabilities/agentic-grpo/pi-diff-patch-apply/`
+
+## TL;DR
+
+_(Best adapter, % delta, what the recipe was)_
+
+## The Problem
+
+Pi-diff-patch-apply trains the 4B base to be a careful, minimal,
+verifying patch-applier. The expected failure modes were rewrite-whole-function,
+surrender-on-reject, and apply-without-test.
+
+## The Rubric
+
+_(Final rubric — outcome gate + 5 weighted sub-scores + consolation. Show
+all the §0 adversarial considerations and how each is mitigated)_
+
+## The Corpus
+
+_(36 algorithm primitives, 3 patch classes (clean/drift/incorrect), 60
+train / 24 eval. The hard primitives (bsearch, msort, balanced, lcs, ...)
+brought baseline composite from 0.989 to 0.942)_
+
+## The 50 Iters
+
+| Iter | Hypothesis | Composite | Δ vs baseline | Status |
+|------|------------|-----------|--------------:|--------|
+| 0    | baseline-v1-hard-corpus-strict-format | 0.942 | — | baseline |
+_(populated from capability.jsonl)_
+
+## Best Adapter
+
+_(Slug, recipe, composite, what made it work)_
+
+## What We Learned
+
+_(Per-hypothesis-family findings: which axes moved the needle, which were null)_
+
+## How to Reproduce
+
+```bash
+# 1. Acquire a pod
+ce kiln-pod-acquire --gpu-type 'NVIDIA L40S' --task-id pi-diff-patch-apply-repro
+
+# 2. Bootstrap (kiln-setup.sh + cargo build + npm pi install)
+# 3. Build corpus + sanity check
+cd capabilities/agentic-grpo/pi-diff-patch-apply
+python3 build_corpus.py --train 60 --eval 24
+python3 rubric_sanity.py
+
+# 4. Run the best iter
+bash run_iter.sh --iter <best> --kind train --num-train-tasks <N> --num-gens <G> --lr <LR> --filter-var <FV>
+```
+
+## B2 Backup Location
+
+`b2://clouderic/kiln/pi-diff-patch-apply/<YYYYMMDD>/iter-<n>-<kind>/`
+
+Manifest: `b2://clouderic/kiln/pi-diff-patch-apply/<YYYYMMDD>/MANIFEST_BEST.json`
