@@ -220,6 +220,16 @@ def main() -> int:
         n = filter_corpus(task_filter, DATASETS / "train.tasks.jsonl", filtered_path)
         print(f"[drive_iter] filtered to {n} tasks via filter={task_filter} → {filtered_path}")
         train_tasks_file = f"datasets/{filtered_path.name}"
+        # Upload the filtered file to the pod since rollout.py reads it there
+        pod_id = os.environ.get("POD_ID", "")
+        rp = os.environ.get("RP", "/data/.clouderic-internal/repos/apps/trajectory-trainer/scripts/runpod_api.py")
+        if pod_id:
+            pod_path = f"/workspace/kiln/capabilities/agentic-grpo/pi-faithful-completion/{train_tasks_file}"
+            try:
+                subprocess.run(["python3", rp, "upload", pod_id, str(filtered_path), pod_path],
+                               check=True, capture_output=True)
+            except subprocess.CalledProcessError as e:
+                print(f"warning: could not upload filtered corpus to pod: {e}", file=sys.stderr)
 
     # Write the system prompt override if needed; also upload to pod since
     # run_iter.sh passes the path to rollout.py running on the pod.
