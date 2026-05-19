@@ -1,1 +1,2 @@
 {"iter": 2, "ts": "2026-05-19T12:53:43Z", "error": "Command 'python3 /data/.clouderic-internal/repos/apps/trajectory-trainer/scripts/runpod_api.py ssh 5hwknb14vutm5w \"curl -sS -X POST http://localhost:8420/v1/adapters/unload >/dev/null 2>&1 || true\"' timed out after 30 seconds"}
+{"iter": 2, "ts": "2026-05-19T14:41:15Z", "error": "iter 2 training timed out"}
