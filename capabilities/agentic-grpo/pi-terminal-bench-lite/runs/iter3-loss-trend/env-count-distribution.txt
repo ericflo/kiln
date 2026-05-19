@@ -1,0 +1,12 @@
+# env_count distribution across 80 ECHO firing events (20 groups x 4 completions)
+# Stripped ANSI codes from train.log, grep ECHO firing, extract env_count value.
+#
+# Total events: 80 (matches 20 groups x 4 completions exactly)
+# Distribution (occurrences env_count):
+     20 16
+     14 20
+     13 18
+     13 13
+      7 9
+      7 23
+      6 12
