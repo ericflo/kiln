@@ -116,11 +116,13 @@ from typing import Any, Iterable
 # ============================================================================
 
 # Composite weights — kept in one place for easy tuning later.
-W_OUTCOME_BASE = 0.50  # constant reward for tests passing
+W_OUTCOME_BASE = 0.40  # base reward when tests pass (down from 0.50)
 W_MINIMALITY = 0.20
 W_NO_UNRELATED = 0.15
 W_REPAIR_EFF = 0.10
-W_FORMAT = 0.05
+W_FORMAT = 0.15  # bumped from 0.05 — format is now the movable mass
+
+# Sum: 0.40 + 0.20 + 0.15 + 0.10 + 0.15 = 1.00 (pass path)
 # Sub-score weights for the FAIL-consolation path (must sum to <= 0.40):
 CONSOLATION_W_APPLIED = 0.20
 CONSOLATION_W_TESTED = 0.10
@@ -608,18 +610,27 @@ SUMMARY_HEADING = re.compile(r"^(?:#{1,3}\s+)?summary\b", re.IGNORECASE | re.MUL
 
 
 def score_format(transcript: list, task: dict) -> float:
-    """Final-turn format compliance. 1.0 when the closing message mentions
-    completion AND references the touched-files set or includes a
-    'Summary' heading. 0.0 when the final message is empty."""
+    """Final-turn format compliance — strict v1 design.
+
+    Awards points additively but requires ALL THREE pillars for a perfect score:
+      (0.30) completion marker word present
+      (0.30) at least one touched_paths entry (or its basename) referenced
+      (0.20) markdown summary heading or 'Summary' word + at least one bullet
+      (0.20) the final message names the TYPE of change (added / removed /
+             modified / changed / fixed) — discourages "Done." one-liners
+
+    Empty final message → 0.0.
+    """
     final = _final_assistant_text(transcript).strip()
     if not final:
         return 0.0
+    final_lower = final.lower()
+
     points = 0.0
     if COMPLETION_MARKERS.search(final):
-        points += 0.5
+        points += 0.30
+
     patch_paths = task.get("touched_paths") or []
-    # Reference: any patch path OR its basename mentioned in the final text.
-    final_lower = final.lower()
     referenced = False
     for p in patch_paths:
         if p.lower() in final_lower:
@@ -630,9 +641,21 @@ def score_format(transcript: list, task: dict) -> float:
             referenced = True
             break
     if referenced:
-        points += 0.3
-    if SUMMARY_HEADING.search(final) or "summary" in final_lower:
-        points += 0.2
+        points += 0.30
+
+    has_summary_heading = bool(SUMMARY_HEADING.search(final))
+    has_bullet = bool(re.search(r"(?:^|\n)\s*[-*+]\s+\S", final))
+    if has_summary_heading or has_bullet:
+        points += 0.20
+
+    # Discourage "Done." one-liners: require a verb of intent.
+    if re.search(
+        r"\b(added|removed|modified|changed|fixed|replaced|patched|updated|"
+        r"applied|edited|rewrote|inserted)\b",
+        final_lower,
+    ):
+        points += 0.20
+
     return float(min(1.0, points))
 
 
