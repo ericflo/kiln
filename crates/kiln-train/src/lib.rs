@@ -222,7 +222,10 @@ pub type GrpoGroup = AgenticGroup;
 /// Request to run a GRPO training step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrpoRequest {
-    #[serde(default)]
+    /// Accepts `agentic_groups` as an alias so the /v1/train/agentic
+    /// route's JSON body uses the semantically-meaningful name. Legacy
+    /// clients posting `groups` continue to deserialize unchanged.
+    #[serde(default, alias = "agentic_groups")]
     pub groups: Vec<GrpoGroup>,
     /// Optional server-local JSONL dataset path. Each non-empty line is one
     /// `GrpoGroup`. Used by Vulkan-native GRPO to stream large datasets without
@@ -1010,5 +1013,18 @@ mod tests {
         assert!((parsed.lambda - 0.012).abs() < 1e-12);
         assert_eq!(parsed.env_mask_mode, EnvMaskMode::default());
         assert!(parsed.warning_filter, "warning_filter must default to true");
+    }
+
+    #[test]
+    fn grpo_request_accepts_agentic_groups_alias() {
+        // The /v1/train/agentic route reads the same `GrpoRequest` struct
+        // as /v1/train/grpo, but clients calling the "agentic" route may
+        // semantically prefer `agentic_groups`. Both must parse.
+        let body_legacy = r#"{"groups": []}"#;
+        let body_agentic = r#"{"agentic_groups": []}"#;
+        let parsed_legacy: GrpoRequest = serde_json::from_str(body_legacy).unwrap();
+        let parsed_agentic: GrpoRequest = serde_json::from_str(body_agentic).unwrap();
+        assert_eq!(parsed_legacy.groups.len(), 0);
+        assert_eq!(parsed_agentic.groups.len(), 0);
     }
 }
