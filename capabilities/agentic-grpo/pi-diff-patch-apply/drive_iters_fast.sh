@@ -169,8 +169,13 @@ while [ "$iter" -lt 50 ] && [ "$iter" -lt "$end" ]; do
   # Pre-iter kiln-serve health check — if down, restart before failing.
   # Without this, one bad iter that leaves kiln serve dead cascades through
   # every subsequent iter (discovered iter 10 → 49 silent cascade 2026-05-19).
+  # ALWAYS pkill first if we're going to restart, because:
+  #   - a zombie kiln process holding port 8420 will silently SIGKILL the new one
+  #     (discovered iter 10 — concurrent serves issue)
+  #   - kiln may be hung but still bound to the port (curl times out but bind fails)
   if ! python3 $RP ssh $POD_ID 'curl -sS --max-time 5 http://localhost:8420/v1/adapters >/dev/null 2>&1'; then
-    echo "  kiln serve is down before iter $iter — restarting"
+    echo "  kiln serve is down before iter $iter — killing any zombies + restarting"
+    python3 $RP ssh $POD_ID 'pgrep -x kiln | xargs -r kill -9 2>/dev/null || true; sleep 3'
     python3 $RP bg $POD_ID /tmp/kiln-serve-iter${iter}-restart.log \
       'cd /workspace/kiln && KILN_DISABLE_FUSED_GDN_GATES=1 KILN_BATCHING_ENGINE=0 KILN_MODEL_PATH=/workspace/qwen3.5-4b ./target/release/kiln serve 2>&1'
     sleep 35
