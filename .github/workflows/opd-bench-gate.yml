@@ -100,7 +100,7 @@ jobs:
           python3 bench-results/check_opd_regression.py \
             --bench-stdout /tmp/opd_bench_stdout.txt
       - name: Upload bench artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: opd-bench-output-${{ github.run_id }}
           path: /tmp/opd_bench_stdout.txt
