@@ -55,19 +55,24 @@ This hypothesis is falsified if any of:
 - Expected rollout wall-clock: 30 × 4 × ~25s = ~50 min.
 - Expected GRPO step wall-clock: ~10 min on A100.
 
-## v0 caveat — multi-turn token masking
+## v0 caveat — multi-turn token masking (RESOLVED)
 
-Each pi rollout has 3-27 assistant turns. Kiln's current
-`tokenize_grpo_group` treats all post-prompt tokens as model-emitted,
-including tool-result tokens. For iter 1 we accept the bias: we
-concatenate assistant text/thinking/toolCall blocks per turn and join
-turns with `<TURN_BREAK>`. The IS ratio clip may mask out tool-result
-gradient, but we don't rely on it.
+Each pi rollout has 3-27 assistant turns. Originally
+`tokenize_grpo_group` treated all post-prompt tokens as model-emitted,
+including tool-result tokens. For iter 1 we accepted that bias by
+concatenating assistant text/thinking/toolCall blocks per turn and
+joining turns with `<TURN_BREAK>` — relying on the IS ratio clip to
+softly mask out tool-result gradient.
 
-If iter 1 results are clean: the bias was tolerable.
-If iter 1 results are nonsense: the masking gap is the cause and the
-right next step is landing the fix to `tokenize_grpo_group` (see
-`kiln-polish-prerequisites.md` #1).
+**As of the ECHO branch:** kiln-train now ships first-class trajectory
+schema (`TurnKind` / `TurnSegment` / `ScoredRollout`) and
+`build_masks_from_trajectory` produces correct per-turn `action_mask`
++ `env_mask` arrays. Rollouts emitted via the canonical schema
+(`capabilities/agentic-grpo/lib/pi_trajectory.build_scored_rollout`)
+get per-turn assistant-token masking *and* the ECHO env-CE auxiliary
+loss as the default. The iter 1 result above predates that landing;
+iter 5 (`f4ff31d9`) ran on the new path and produced the 3-seed verified
+GRPO uplift that's now the cap's headline result.
 
 ## Verdict
 

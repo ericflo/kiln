@@ -1,0 +1,8 @@
+{
+  "iter5_vs_iter3_lora_B_mean_abs_diff": 0.0002101564407348633,
+  "iter5_vs_iter3_lora_B_max_abs_diff": 0.0002155303955078125,
+  "iter3_lora_B_max_value": 0.00021076202392578125,
+  "iter5_lora_B_max_value": 0.0004119873046875,
+  "growth_ratio": 1.9547511312217194,
+  "note": "iter5 LoRA-B max nearly doubled iter3's value (1.95x growth), and the iter5-vs-iter3 mean abs diff (2.10e-04) is essentially equal to iter3's starting max — consistent with iter5 starting from iter3's weights and adding another ~2.10e-04 of displacement via 20 SGD steps of verifier-free training. This is the smoking gun that --base-adapter now loads weights correctly."
+}

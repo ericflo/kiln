@@ -2326,6 +2326,7 @@ fn vk_recompute_grpo_step_updates_full_attention_lora_targets() -> Result<()> {
         &cfg,
         Optimizer::default(),
         1,
+        None, // ECHO disabled in vk_train_smoke
     )?;
     assert!(loss.is_finite(), "non-finite full-attn GRPO recompute loss");
 

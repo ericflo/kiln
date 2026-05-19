@@ -507,6 +507,8 @@ recommends:
 
 For the full generate→score→train loop with three worked verifiable-reward examples (math correctness, JSON-validity, code-runs), see [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md).
 
+For **multi-turn agentic** training (tool calls, command output, file contents) kiln ships **ECHO** (paper §3, MSR AI Frontiers 2026) on by default at λ=0.05. ECHO adds a length-normalized cross-entropy on environment-observation tokens with zero extra forward-pass cost; paper headline is ~2× pass@1 on TerminalBench-2.0. The canonical endpoint is `POST /v1/train/agentic` (alias of `/v1/train/grpo`); rollouts carry a `trajectory` field with `kind: "action"` / `kind: "observation"` segments. See [docs/ECHO_GUIDE.md](docs/ECHO_GUIDE.md) for CLI flags (`--echo-lambda`, `--no-echo`, `--no-policy-loss`), env-var overrides (`KILN_ECHO_*`), and the receipt-grade `env_ce_drop_pct` diagnostic.
+
 ```bash
 curl -s http://localhost:8420/v1/completions/batch \
   -H "Content-Type: application/json" \
@@ -738,7 +740,8 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | POST | `/v1/adapters/upload` | Import adapter from a multipart `archive` tar.gz (see [9.6](#96-import-an-adapter-upload-targz)). |
 | POST | `/v1/adapters/merge` | Combine adapters via `weighted_average`, `ties`, or `concat` mode (see [9.7](#97-merge-adapters-ties)). |
 | POST | `/v1/train/sft` | Submit SFT training examples |
-| POST | `/v1/train/grpo` | Submit GRPO training batch |
+| POST | `/v1/train/grpo` | Submit GRPO training batch (supports new `agentic_groups` shape with multi-turn trajectories; ECHO on by default) |
+| POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — semantically-honest name for multi-turn rollouts |
 | GET | `/v1/train/status` | Training queue status |
 | GET | `/v1/train/status/{job_id}` | Individual job status |
 | GET | `/v1/train/queue` | List queued training jobs |

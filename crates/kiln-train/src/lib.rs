@@ -7,6 +7,7 @@
 #[cfg(feature = "cuda")]
 pub mod cuda_train;
 pub mod diagnostics;
+pub mod echo;
 pub mod logit_cache;
 pub mod logit_source;
 pub mod opd;
@@ -14,6 +15,8 @@ pub mod receipt;
 pub mod remote_teacher;
 pub mod replay;
 pub mod trainer;
+pub mod trajectory;
+pub mod trajectory_mask;
 #[cfg(feature = "vulkan")]
 pub mod vk_train;
 
@@ -198,26 +201,31 @@ impl Default for SftConfig {
     }
 }
 
-/// A scored completion for GRPO training.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScoredCompletion {
-    pub text: String,
-    pub reward: f64,
-}
+// ScoredCompletion and GrpoGroup are now re-exports of the canonical
+// trajectory-aware types defined in `crate::trajectory`. The old field
+// shape (`{text, reward}` / `{messages, completions}`) is preserved
+// byte-identical, plus an optional `trajectory` field on each rollout
+// that ECHO consumes. Legacy callers see no field-name change.
+//
+// See `docs/plans/echo-integration-plan.md` §2 and §B.1 for the design.
 
-/// A group of completions for one prompt (GRPO operates on groups).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GrpoGroup {
-    /// The prompt that generated these completions.
-    pub messages: Vec<ChatMessage>,
-    /// Multiple completions with their rewards.
-    pub completions: Vec<ScoredCompletion>,
-}
+pub use crate::trajectory::{
+    AgenticGroup, ScoredRollout, TurnKind, TurnSegment,
+};
+
+/// Legacy alias for [`ScoredRollout`]. Use the canonical name in new code.
+pub type ScoredCompletion = ScoredRollout;
+
+/// Legacy alias for [`AgenticGroup`]. Use the canonical name in new code.
+pub type GrpoGroup = AgenticGroup;
 
 /// Request to run a GRPO training step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrpoRequest {
-    #[serde(default)]
+    /// Accepts `agentic_groups` as an alias so the /v1/train/agentic
+    /// route's JSON body uses the semantically-meaningful name. Legacy
+    /// clients posting `groups` continue to deserialize unchanged.
+    #[serde(default, alias = "agentic_groups")]
     pub groups: Vec<GrpoGroup>,
     /// Optional server-local JSONL dataset path. Each non-empty line is one
     /// `GrpoGroup`. Used by Vulkan-native GRPO to stream large datasets without
@@ -478,6 +486,11 @@ pub struct GrpoConfig {
     /// Optimizer selection — see `SftConfig::optimizer`.
     #[serde(default)]
     pub optimizer: Optimizer,
+    /// Composition of per-token training objectives. ECHO is on by default
+    /// (paper §3.3 λ=0.05); OPD's slot is reserved but empty until the OPD
+    /// branch rebases. See `LossConfig` for the full design.
+    #[serde(default)]
+    pub loss: LossConfig,
 }
 
 fn default_grpo_lr() -> f64 {
@@ -491,6 +504,212 @@ fn default_clip_eps() -> f64 {
 }
 fn default_dynamic_sampling() -> bool {
     true
+}
+
+// ---- ECHO + LossConfig ----------------------------------------------------
+//
+// `LossConfig` composes three loss objectives that share one forward pass:
+//
+//   L_total = L_policy(actions)              [the GRPO surrogate]
+//           + λ_echo · L_envCE(observations) [paper: Shrivastava 2026]
+//           + λ_opd  · L_revKL(actions)      [paper: Lu 2025; wired in OPD merge]
+//
+// `LossConfig::default()` enables ECHO at λ=0.05 (paper §3.3 default).
+// `opd` is a placeholder None until the OPD branch rebases on top; its
+// shape is reserved here so the composition stays orthogonal.
+//
+// For legacy single-string rollouts (`scored.has_trajectory() == false`)
+// the env_mask is empty and ECHO contributes exactly 0 — bit-identical
+// to the pre-ECHO loss. ECHO only fires when a rollout carries
+// observation segments. This is what makes "ECHO on by default" safe.
+
+/// What positions in an observation segment contribute to the env_mask.
+///
+/// Paper §3.2: terminal warning prefixes memorize within ~60 steps and stop
+/// providing useful gradient. `EnvOnly` (default) strips the harness
+/// warning prefix from each Observation; `FullObs` (debug only) covers
+/// the full observation including warnings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvMaskMode {
+    #[default]
+    EnvOnly,
+    FullObs,
+}
+
+/// Configuration for ECHO — the auxiliary environment cross-entropy loss
+/// on tool/observation tokens. See
+/// `docs/papers/echo/echo_paper.md` and `docs/plans/echo-integration-plan.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EchoConfig {
+    /// Mixing coefficient for the env-CE term: `L_total = L_policy + λ · L_envCE`.
+    /// Paper §3.3 default: 0.05. Productive range: 0.01–0.05. ≥0.1 risks
+    /// degrading the policy objective; 0.2 collapses to predictable-output
+    /// rollouts (mode collapse).
+    #[serde(default = "default_echo_lambda")]
+    pub lambda: f64,
+    /// Env_only (default) strips the harness warning prefix. FullObs (debug)
+    /// covers the full observation including warnings.
+    #[serde(default)]
+    pub env_mask_mode: EnvMaskMode,
+    /// Whether the trajectory_mask's warning_filter is on. Defaults to true.
+    /// Set to false for debugging or for environments whose tool output
+    /// never includes a `WARNINGS:` prefix.
+    #[serde(default = "default_warning_filter")]
+    pub warning_filter: bool,
+}
+
+fn default_echo_lambda() -> f64 {
+    0.05
+}
+fn default_warning_filter() -> bool {
+    true
+}
+fn default_echo_some() -> Option<EchoConfig> {
+    Some(EchoConfig::default())
+}
+
+impl Default for EchoConfig {
+    fn default() -> Self {
+        Self {
+            lambda: default_echo_lambda(),
+            env_mask_mode: EnvMaskMode::default(),
+            warning_filter: default_warning_filter(),
+        }
+    }
+}
+
+/// Placeholder for OPD's auxiliary term on the LossConfig — populated when
+/// the OPD branch rebases on top of this work. The fields here mirror
+/// `kiln_train::opd::OpdConfig`'s most relevant knobs; the exact shape will
+/// be reconciled during the OPD merge. Default: None.
+///
+/// Reserving this slot now means `L = L_policy + λ_echo · L_envCE +
+/// λ_opd · L_revKL` is structurally encoded in the type system, so OPD
+/// composition is mechanical when its branch lands.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpdAuxConfig {
+    #[serde(default)]
+    pub lambda: f64,
+}
+
+/// Composition of per-token training objectives. Each branch contributes to
+/// `L_total = L_policy + λ_echo · L_envCE + λ_opd · L_revKL` where inactive
+/// branches contribute zero.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LossConfig {
+    /// Action-token policy-gradient term — knobs already on GrpoConfig
+    /// (clip_eps, kl_coeff, kl_estimator, advantage_mode, is_level,
+    /// reference_policy, etc.). LossConfig doesn't duplicate them; the
+    /// trainer reads them from the surrounding GrpoConfig.
+    ///
+    /// Observation-token cross-entropy (paper: Shrivastava et al. 2026).
+    /// Default: `Some(EchoConfig::default())` with λ=0.05. Set to None to
+    /// opt out. Even when Some, ECHO contributes exactly 0 to the loss for
+    /// rollouts whose `env_mask` is empty (i.e. legacy single-turn) — so
+    /// "ECHO on by default" is safe for existing GRPO callers.
+    #[serde(default = "default_echo_some")]
+    pub echo: Option<EchoConfig>,
+    /// Action-token reverse-KL to a teacher (OPD; Lu 2025). Default: None.
+    /// Wired in by the OPD branch rebase; LossConfig holds the field so the
+    /// composition is structurally orthogonal.
+    #[serde(default)]
+    pub opd: Option<OpdAuxConfig>,
+    /// Verifier-free env-only adaptation mode (paper §5.5). When `true`,
+    /// the trainer masks out the GRPO policy-gradient term entirely and
+    /// trains *only* on ECHO's env-CE objective. Useful for adapting an
+    /// already-trained agentic policy on tasks where no programmatic
+    /// verifier is available — the model improves purely by learning to
+    /// predict the consequences of its own actions. Default: false.
+    #[serde(default)]
+    pub no_policy_loss: bool,
+}
+
+impl Default for LossConfig {
+    fn default() -> Self {
+        Self {
+            echo: default_echo_some(),
+            opd: None,
+            no_policy_loss: false,
+        }
+    }
+}
+
+impl LossConfig {
+    /// Lambda for the ECHO term, or 0.0 if ECHO is disabled.
+    pub fn echo_lambda(&self) -> f64 {
+        self.echo.as_ref().map(|c| c.lambda).unwrap_or(0.0)
+    }
+    /// Lambda for the OPD auxiliary term, or 0.0 if OPD is disabled.
+    pub fn opd_lambda(&self) -> f64 {
+        self.opd.as_ref().map(|c| c.lambda).unwrap_or(0.0)
+    }
+    /// True when the ECHO term is configured to be applied.
+    pub fn echo_enabled(&self) -> bool {
+        self.echo.is_some() && self.echo_lambda() != 0.0
+    }
+
+    /// Apply environment-variable overrides on top of an existing
+    /// `LossConfig`. Honors:
+    ///
+    /// - `KILN_ECHO_ENABLED` — `0`/`false`/`no` → disable ECHO
+    ///   (`loss.echo = None`); `1`/`true`/`yes` → enable with current
+    ///   `lambda` (or default 0.05 if previously disabled).
+    /// - `KILN_ECHO_LAMBDA` — overrides `lambda` on the existing
+    ///   `EchoConfig`; if ECHO is disabled and this is set, ECHO is
+    ///   re-enabled with the given lambda.
+    /// - `KILN_ECHO_ENV_MASK_MODE` — `env_only` (default) | `full_obs`.
+    /// - `KILN_ECHO_WARNING_FILTER` — bool, default true.
+    ///
+    /// Call this from CLI entry points (cuda_grpo_ablation, vk_train CLI,
+    /// future kiln-server route handlers) so users can toggle ECHO from
+    /// the shell without editing JSON.
+    pub fn apply_kiln_echo_env_overrides(&mut self) {
+        // KILN_ECHO_ENABLED — explicit disable wins over anything else.
+        if let Ok(val) = std::env::var("KILN_ECHO_ENABLED") {
+            let v = val.to_lowercase();
+            if v == "0" || v == "false" || v == "no" {
+                self.echo = None;
+            } else if v == "1" || v == "true" || v == "yes" {
+                self.echo.get_or_insert_with(EchoConfig::default);
+            }
+        }
+
+        // The remaining knobs only make sense when ECHO is on. Apply
+        // them on the current EchoConfig (creating one if needed when
+        // any knob is set).
+        let lambda_override =
+            std::env::var("KILN_ECHO_LAMBDA").ok().and_then(|v| v.parse::<f64>().ok());
+        let mask_mode_override =
+            std::env::var("KILN_ECHO_ENV_MASK_MODE").ok().and_then(|v| match v.to_lowercase().as_str() {
+                "env_only" | "envonly" => Some(EnvMaskMode::EnvOnly),
+                "full_obs" | "fullobs" => Some(EnvMaskMode::FullObs),
+                _ => None,
+            });
+        let warning_filter_override = std::env::var("KILN_ECHO_WARNING_FILTER")
+            .ok()
+            .and_then(|v| match v.to_lowercase().as_str() {
+                "0" | "false" | "no" => Some(false),
+                "1" | "true" | "yes" => Some(true),
+                _ => None,
+            });
+
+        if lambda_override.is_some()
+            || mask_mode_override.is_some()
+            || warning_filter_override.is_some()
+        {
+            let cfg = self.echo.get_or_insert_with(EchoConfig::default);
+            if let Some(lambda) = lambda_override {
+                cfg.lambda = lambda;
+            }
+            if let Some(mode) = mask_mode_override {
+                cfg.env_mask_mode = mode;
+            }
+            if let Some(wf) = warning_filter_override {
+                cfg.warning_filter = wf;
+            }
+        }
+    }
 }
 
 impl GrpoConfig {
@@ -527,6 +746,7 @@ impl Default for GrpoConfig {
             checkpoint_interval: None,
             seed: None,
             optimizer: Optimizer::default(),
+            loss: LossConfig::default(),
         }
     }
 }
@@ -610,5 +830,262 @@ mod tests {
         let config: GrpoConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.checkpoint_interval, Some(10));
         assert_eq!(config.kl_coeff, 0.1); // default preserved
+    }
+
+    // ECHO LossConfig + env-var override tests. Env-var manipulation is
+    // process-global; each test scrubs the env vars at start to keep the
+    // suite hermetic regardless of order. We use the modern `unsafe`
+    // wrappers on Rust 1.83+ to make the mutation explicit.
+    //
+    // ENV_LOCK serializes the env-var-touching tests against each other
+    // so cargo test's default parallel runner doesn't race on the
+    // process-global env state. Mirrors `trainer::tests::ENV_LOCK`.
+    // Acquire via `_env_guard = ENV_LOCK.lock().unwrap_or_else(...)` at
+    // the top of every test that calls `clear_kiln_echo_env_vars` or
+    // `std::env::set_var`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn clear_kiln_echo_env_vars() {
+        unsafe {
+            std::env::remove_var("KILN_ECHO_ENABLED");
+            std::env::remove_var("KILN_ECHO_LAMBDA");
+            std::env::remove_var("KILN_ECHO_ENV_MASK_MODE");
+            std::env::remove_var("KILN_ECHO_WARNING_FILTER");
+        }
+    }
+
+    #[test]
+    fn loss_config_default_has_echo_on_at_0_05() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_kiln_echo_env_vars();
+        let cfg = LossConfig::default();
+        assert!(cfg.echo.is_some(), "ECHO should be on by default");
+        assert!((cfg.echo_lambda() - 0.05).abs() < 1e-12);
+        assert!(cfg.opd.is_none(), "OPD should be off by default");
+    }
+
+    #[test]
+    fn loss_config_echo_lambda_returns_zero_when_disabled() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_kiln_echo_env_vars();
+        let mut cfg = LossConfig::default();
+        cfg.echo = None;
+        assert_eq!(cfg.echo_lambda(), 0.0);
+        assert!(!cfg.echo_enabled());
+    }
+
+    #[test]
+    fn kiln_echo_enabled_false_disables_echo() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_kiln_echo_env_vars();
+        unsafe { std::env::set_var("KILN_ECHO_ENABLED", "false") };
+        let mut cfg = LossConfig::default();
+        assert!(cfg.echo.is_some());
+        cfg.apply_kiln_echo_env_overrides();
+        assert!(cfg.echo.is_none(), "KILN_ECHO_ENABLED=false should disable");
+        clear_kiln_echo_env_vars();
+    }
+
+    #[test]
+    fn kiln_echo_lambda_overrides_value() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_kiln_echo_env_vars();
+        unsafe { std::env::set_var("KILN_ECHO_LAMBDA", "0.02") };
+        let mut cfg = LossConfig::default();
+        cfg.apply_kiln_echo_env_overrides();
+        assert!(
+            (cfg.echo_lambda() - 0.02).abs() < 1e-12,
+            "KILN_ECHO_LAMBDA=0.02 should override; got {}",
+            cfg.echo_lambda()
+        );
+        clear_kiln_echo_env_vars();
+    }
+
+    #[test]
+    fn kiln_echo_lambda_re_enables_when_previously_disabled() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_kiln_echo_env_vars();
+        unsafe { std::env::set_var("KILN_ECHO_LAMBDA", "0.03") };
+        let mut cfg = LossConfig::default();
+        cfg.echo = None; // explicitly disabled before override
+        cfg.apply_kiln_echo_env_overrides();
+        assert!(
+            cfg.echo.is_some(),
+            "setting LAMBDA env var should also re-enable ECHO"
+        );
+        assert!((cfg.echo_lambda() - 0.03).abs() < 1e-12);
+        clear_kiln_echo_env_vars();
+    }
+
+    #[test]
+    fn kiln_echo_env_mask_mode_overrides() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_kiln_echo_env_vars();
+        unsafe { std::env::set_var("KILN_ECHO_ENV_MASK_MODE", "full_obs") };
+        let mut cfg = LossConfig::default();
+        cfg.apply_kiln_echo_env_overrides();
+        let echo = cfg.echo.expect("ECHO should still be on");
+        assert_eq!(echo.env_mask_mode, EnvMaskMode::FullObs);
+        clear_kiln_echo_env_vars();
+    }
+
+    #[test]
+    fn kiln_echo_warning_filter_overrides() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_kiln_echo_env_vars();
+        unsafe { std::env::set_var("KILN_ECHO_WARNING_FILTER", "false") };
+        let mut cfg = LossConfig::default();
+        cfg.apply_kiln_echo_env_overrides();
+        let echo = cfg.echo.expect("ECHO should still be on");
+        assert!(!echo.warning_filter);
+        clear_kiln_echo_env_vars();
+    }
+
+    #[test]
+    fn kiln_echo_enabled_true_with_lambda_combo() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_kiln_echo_env_vars();
+        unsafe {
+            std::env::set_var("KILN_ECHO_ENABLED", "true");
+            std::env::set_var("KILN_ECHO_LAMBDA", "0.1");
+        }
+        let mut cfg = LossConfig::default();
+        cfg.echo = None;
+        cfg.apply_kiln_echo_env_overrides();
+        assert!(cfg.echo.is_some());
+        assert!((cfg.echo_lambda() - 0.1).abs() < 1e-12);
+        clear_kiln_echo_env_vars();
+    }
+
+    #[test]
+    fn kiln_echo_no_env_vars_leaves_config_unchanged() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_kiln_echo_env_vars();
+        let mut cfg = LossConfig::default();
+        let original_lambda = cfg.echo_lambda();
+        cfg.apply_kiln_echo_env_overrides();
+        assert!((cfg.echo_lambda() - original_lambda).abs() < 1e-12);
+        assert!(cfg.echo.is_some());
+    }
+
+    #[test]
+    fn loss_config_no_policy_loss_default_is_false() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_kiln_echo_env_vars();
+        let cfg = LossConfig::default();
+        assert!(!cfg.no_policy_loss);
+    }
+
+    #[test]
+    fn loss_config_no_policy_loss_serde_round_trip() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_kiln_echo_env_vars();
+        let cfg = LossConfig {
+            echo: Some(EchoConfig::default()),
+            opd: None,
+            no_policy_loss: true,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: LossConfig = serde_json::from_str(&json).unwrap();
+        assert!(parsed.no_policy_loss);
+        assert!((parsed.echo_lambda() - 0.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn loss_config_legacy_payload_without_no_policy_loss_defaults_false() {
+        // Old payloads that don't include `no_policy_loss` at all still parse.
+        let json = r#"{"echo": {"lambda": 0.05}, "opd": null}"#;
+        let cfg: LossConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.no_policy_loss);
+    }
+
+    #[test]
+    fn echo_config_custom_fields_survive_json_roundtrip() {
+        // Every EchoConfig field set away from its default — pin the
+        // wire format so a future field rename or default change is a
+        // loud test failure rather than a silent compatibility break.
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_kiln_echo_env_vars();
+        let custom = EchoConfig {
+            lambda: 0.027,
+            env_mask_mode: EnvMaskMode::FullObs,
+            warning_filter: false,
+        };
+        let json = serde_json::to_string(&custom).unwrap();
+        // The serialized form should mention every non-default field.
+        assert!(json.contains("0.027"), "lambda missing from {json}");
+        assert!(json.contains("full_obs"), "env_mask_mode missing from {json}");
+        assert!(json.contains("\"warning_filter\":false"), "warning_filter missing from {json}");
+
+        let parsed: EchoConfig = serde_json::from_str(&json).unwrap();
+        assert!((parsed.lambda - 0.027).abs() < 1e-12);
+        assert_eq!(parsed.env_mask_mode, EnvMaskMode::FullObs);
+        assert!(!parsed.warning_filter);
+    }
+
+    #[test]
+    fn echo_config_partial_payload_fills_defaults() {
+        // HTTP clients may send only `{"lambda": ...}` — the other fields
+        // must fall back to their `#[serde(default = ...)]` values.
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_kiln_echo_env_vars();
+        let json = r#"{"lambda": 0.012}"#;
+        let parsed: EchoConfig = serde_json::from_str(json).unwrap();
+        assert!((parsed.lambda - 0.012).abs() < 1e-12);
+        assert_eq!(parsed.env_mask_mode, EnvMaskMode::default());
+        assert!(parsed.warning_filter, "warning_filter must default to true");
+    }
+
+    #[test]
+    fn grpo_request_accepts_agentic_groups_alias() {
+        // The /v1/train/agentic route reads the same `GrpoRequest` struct
+        // as /v1/train/grpo, but clients calling the "agentic" route may
+        // semantically prefer `agentic_groups`. Both must parse.
+        let body_legacy = r#"{"groups": []}"#;
+        let body_agentic = r#"{"agentic_groups": []}"#;
+        let parsed_legacy: GrpoRequest = serde_json::from_str(body_legacy).unwrap();
+        let parsed_agentic: GrpoRequest = serde_json::from_str(body_agentic).unwrap();
+        assert_eq!(parsed_legacy.groups.len(), 0);
+        assert_eq!(parsed_agentic.groups.len(), 0);
+    }
+
+    /// Capability authors ship `capability.config.json` files with a
+    /// `training_phase1_defaults.loss` block that the cap launcher
+    /// passes verbatim to `train_tokenized_grpo_group`. Pin the
+    /// contract: the shapes used in `pi-terminal-bench-lite` and
+    /// `pi-script-fixup` must always deserialize as a valid LossConfig.
+    /// If either ever drifts the assertion fires.
+    #[test]
+    fn cap_config_loss_blocks_deserialize_as_lossconfig() {
+        // pi-terminal-bench-lite: ECHO on, OPD off, no_policy_loss absent.
+        let tblite = r#"{
+            "echo": {
+                "lambda": 0.05,
+                "env_mask_mode": "env_only",
+                "warning_filter": true
+            },
+            "opd": null
+        }"#;
+        let parsed: LossConfig = serde_json::from_str(tblite).unwrap();
+        assert!((parsed.echo_lambda() - 0.05).abs() < 1e-12);
+        assert!(parsed.opd.is_none());
+        assert!(!parsed.no_policy_loss);
+        let echo = parsed.echo.as_ref().unwrap();
+        assert_eq!(echo.env_mask_mode, EnvMaskMode::EnvOnly);
+        assert!(echo.warning_filter);
+
+        // pi-script-fixup: same shape plus no_policy_loss = true.
+        let fixup = r#"{
+            "echo": {
+                "lambda": 0.05,
+                "env_mask_mode": "env_only",
+                "warning_filter": true
+            },
+            "opd": null,
+            "no_policy_loss": true
+        }"#;
+        let parsed: LossConfig = serde_json::from_str(fixup).unwrap();
+        assert!(parsed.no_policy_loss, "verifier-free cap must parse with no_policy_loss=true");
+        assert!((parsed.echo_lambda() - 0.05).abs() < 1e-12);
     }
 }

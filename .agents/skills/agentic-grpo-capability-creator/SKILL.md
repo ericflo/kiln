@@ -104,7 +104,7 @@ Empirical inputs you MUST verify on your pod before Phase 0 step 3:
 Until those are verified empirically, the skill is hand-waving. See
 §17 (Phase 0 pi-smoke) — that smoke is mandatory before iter 1.
 
-### Token-attribution: train only on assistant tokens
+### Token-attribution: action vs observation, both first-class
 
 Pi sessions interleave four roles:
 
@@ -113,26 +113,43 @@ Pi sessions interleave four roles:
 3. **assistant** — model output, possibly with `<tool_call>` XML
 4. **tool** — tool result (bash stdout, file content)
 
-For GRPO, the per-token IS ratio + advantage must apply to **assistant
-tokens only**. System / user / tool tokens are context the model saw,
-not tokens it produced — gradient through them is wrong.
+Kiln distinguishes three kinds of token positions:
 
-Kiln's stock `tokenize_grpo_group` (as of `97b43ae`) treats every
-post-prompt token as model-emitted. **That assumption breaks for
-multi-turn pi sessions.** Before iter 1, kiln-train needs either:
+- **Context** (system / user) — no gradient. Just conditioning.
+- **Action** (assistant) — target of the GRPO policy-gradient objective.
+- **Observation** (tool) — target of **ECHO**'s auxiliary cross-entropy
+  loss. Paper §3.1 (Shrivastava et al. 2026): predicting what the
+  environment returned in response to your actions doubles
+  TerminalBench-2.0 pass@1 at no extra forward-pass cost.
 
-- An extended `GrpoTrajectory` type that takes a `Vec<TurnSegment {
-  role, text, train: bool }>` and builds a per-turn completion_mask, or
-- A simpler hack: encode the full multi-turn conversation, then mark
-  every token outside an assistant-turn span as `completion_mask =
-  false` during tokenization.
+The masking primitive `kiln_train::trajectory_mask::build_masks_from_trajectory`
+takes a `Vec<TurnSegment>` (rendered through the active chat template,
+including Qwen's `<tool_response>` wrapper for tool turns) and emits
+separate `action_mask` and `env_mask` arrays. The trainer reads both:
+`action_mask` drives the GRPO surrogate, `env_mask` drives the ECHO
+env-CE term.
 
-This is a **Phase 0 kiln gap.** Land it (or workaround it) before
-iter 1, or you'll be training against the wrong gradient signal and
-your iter logs will be meaningless.
+**For new caps:** write `rollout.py` to produce the canonical
+`{"trajectory": [TurnSegment, ...], "reward": …}` shape. The shared
+lib at `capabilities/agentic-grpo/lib/pi_trajectory.py` converts a
+pi session JSONL into this schema in one call:
 
-See `agentic-grpo-capability-creator/kiln-polish-prerequisites.md`
-(written during your Phase 0) for the exact API change you'd land.
+```python
+import pi_trajectory  # capabilities/agentic-grpo/lib/
+rollout = pi_trajectory.build_scored_rollout(session_path, reward=score)
+# rollout has {"text": ..., "reward": ..., "trajectory": [...]}
+groups.append({"messages": messages, "completions": [rollout, ...]})
+```
+
+ECHO is on by default at λ=0.05 (`LossConfig::default()`); pass
+`--no-echo` to `cuda_grpo_ablation` for ablation. Paper §3.3:
+productive λ range is 0.01–0.05; 0.1 degrades, 0.2 collapses.
+
+**Legacy `kiln-polish-prerequisites.md` §1 is RESOLVED.** The
+multi-turn assistant-token masking gap that blocked agentic-GRPO
+since `97b43ae` was closed by ECHO Phase 0 (see
+`docs/plans/echo-integration-plan.md`). Caps no longer need to
+constrain rollouts to a single assistant turn.
 
 ### Sandbox isolation
 

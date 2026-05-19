@@ -1,5 +1,114 @@
 # Kiln Server Changelog
 
+## Unreleased — ECHO: agentic multi-turn GRPO loss term
+
+Wires the ECHO technique (Shrivastava, Awadallah, Papailiopoulos — MSR
+AI Frontiers, 2026) into kiln's GRPO training stack. ECHO adds a
+length-normalized cross-entropy loss on environment-observation tokens
+to the standard policy-gradient loss on action tokens — same forward
+pass, different mask. Headline paper result: doubles TerminalBench-2.0
+pass@1 at 8B (2.7% → 5.2%) and 14B (5.2% → 10.8%).
+
+See `docs/papers/echo/` (paper + blog conversion) and
+`docs/plans/echo-integration-plan.md` for the full design.
+
+### Added
+- Canonical trajectory schema in `kiln-train::trajectory`: `TurnKind`,
+  `TurnSegment`, `ScoredRollout`, `AgenticGroup`. `ScoredCompletion`
+  and `GrpoGroup` remain valid as `pub type` aliases for the new
+  types; their existing field names (`text`, `reward`, `completions`,
+  `messages`) are preserved so legacy callers compile unchanged.
+- Masking primitive in `kiln-train::trajectory_mask`:
+  `build_masks_from_trajectory(trajectory, prompt_messages, tokenizer,
+  &MaskConfig) -> MaskedRollout`. Emits separate `action_mask`
+  (policy-gradient targets), `env_mask` (ECHO env-CE targets), and
+  per-segment token spans. Handles Qwen's `<tool_response>` wrapper
+  for tool-role segments. Paper §3.2 warning-prefix exclusion via
+  `MaskConfig::warning_filter` (on by default).
+- `kiln-train::echo::echo_step_loss` — the env-CE loss term. Mirrors
+  `opd_step_loss`'s signature so `LossConfig { policy, echo, opd }`
+  composes structurally. Calls `kiln-flce-kernel`'s
+  `fused_linear_cross_entropy_dispatch` under the hood, with the
+  paper §3.1 `|O'|/|O|` rescale for length normalization.
+- `LossConfig` on `GrpoConfig`: `echo: Some(EchoConfig::default())`
+  is on by default at λ=0.05. `opd: None` reserved for OPD branch
+  rebase. `no_policy_loss: bool` field implements paper §5.5
+  verifier-free env-only adaptation. Set `loss.echo = None` (or
+  `--no-echo` on CLI) to opt out.
+- ECHO is wired into **all three** loss paths:
+  - Uncheckpointed candle path (CUDA / CPU / Metal).
+  - Checkpointed analytic-tail path via `EchoTailParams` threaded
+    through `analytic_grpo_tail_loss_grad_pre_final_norm` — env-CE
+    folded into the same vocab-chunk loop as GRPO with zero
+    additional intermediates.
+  - Vulkan-native path via `VkEchoStepParams` threaded through
+    `vk_recompute_grpo_train_step_with_state`.
+- `cuda_grpo_ablation` CLI flags: `--echo-lambda <f64>`, `--no-echo`,
+  `--no-policy-loss` (verifier-free per paper §5.5), `--opd-lambda
+  <f64>` (placeholder for OPD branch rebase).
+- Env-var overrides: `KILN_ECHO_ENABLED`, `KILN_ECHO_LAMBDA`,
+  `KILN_ECHO_ENV_MASK_MODE`, `KILN_ECHO_WARNING_FILTER`. Env > CLI
+  precedence.
+- HTTP route `POST /v1/train/agentic` — canonical alias of
+  `/v1/train/grpo`, semantically matched to the multi-turn shape.
+  `GrpoRequest::groups` accepts the `agentic_groups` JSON alias for
+  the same reason. Legacy `/v1/train/grpo` + `groups` clients are
+  unaffected.
+- Receipt schema additions in `kiln-train::receipt`:
+  `DiagnosticSummary.echo: Option<EchoDiagnosticSummary>` with
+  `lambda`, `env_ce_initial`, `env_ce_final`, `env_ce_drop_pct`,
+  `lambda_effective_final`, `env_tokens_supervised`, plus the
+  paper §5.2 dynamics-test fields `dynamics_holdout_ce_initial` and
+  `dynamics_holdout_ce_final` (populated by
+  `pi-terminal-bench-lite/calibration/dynamics_holdout.py`).
+- Shared Python lib `capabilities/agentic-grpo/lib/pi_trajectory.py`
+  that converts pi session JSONL into the canonical trajectory schema
+  (with warning-prefix detection).
+- `pi-doctest/rollout.py` migrated to emit the new trajectory shape
+  via `pi_trajectory.build_scored_rollout`.
+- `capabilities/agentic-grpo/pi-terminal-bench-lite/` — Phase 2 cap
+  for paper-reproduction; ECHO defaults pre-wired, dynamics-holdout
+  calibration script, `ECHO_MODE=on|off` paired-run recipe.
+- `capabilities/agentic-grpo/pi-script-fixup/` — Phase 3 cap for
+  paper §5.5 verifier-free env-only adaptation; `--no-policy-loss`
+  CLI flag, run_verifier_free.sh recipe.
+- `docs/ECHO_GUIDE.md` — operational guide (CLI, HTTP, env vars,
+  diagnostics, capability-author checklist, OPD composition story).
+- `docs/plans/grand-plan-for-extraordinarily-great-echo-for-everyone.md`
+  — long-form user-facing companion to the integration plan.
+- `kiln-polish-prerequisites.md` §1 — multi-turn assistant-token
+  masking — now ✅ RESOLVED. The gap that blocked agentic-GRPO
+  multi-turn training since pi-doctest v0 is closed.
+
+### Tests
+- ~50 ECHO-related Rust tests across kernel, masking, serde wire
+  format, `LossConfig`, env-var overrides, end-to-end trainer paths,
+  and Appendix C acceptance gates of the integration plan.
+- Appendix C.1 #1: `lambda=0.0` is bit-equivalent to `echo=None`.
+- Appendix C.1 #3: paper §3.1 normalization `mean_ce ∝ |O'|/|O|`.
+- Appendix C.1 #4: checkpointed analytic-tail ECHO loss matches
+  uncheckpointed within 1e-3 on a tiny-model fixture.
+- Phase 3 e2e: `no_policy_loss=true` upholds the linearity invariant
+  `loss_full ≈ loss_grpo_only + loss_vf` (the GRPO term genuinely
+  zeroed when verifier-free).
+- 16 legacy GRPO/SFT tests still pass; 7 kiln-server training-API
+  tests still pass; 15 Python `pi_trajectory.py` unit tests pass.
+
+### Behaviour for legacy single-turn rollouts
+- When a rollout has no `trajectory` field (only the legacy `text`
+  string), behaviour is bit-identical to the pre-ECHO loss math:
+  `env_mask` is all-false, `total_obs_len` is 0, the ECHO branch
+  short-circuits at zero cost. The default `loss.echo =
+  Some(EchoConfig)` is safe for legacy callers.
+
+### Deferred (Phase 4)
+- OPD composition: the `LossConfig.opd: Option<OpdAuxConfig>` slot is
+  reserved with `None` default. When the OPD branch rebases on top of
+  this work the composition is mechanical — the analytic tail already
+  handles heterogeneous active-position kinds (`PosKind::Action` and
+  `PosKind::Env`); OPD slots in as a third arm. `--opd-lambda` on the
+  CLI parses but warns-and-ignores until that lands.
+
 ## kiln-v0.2.16 — 2026-05-15 — Phase 11 evals as a first-class peer of training
 
 Adds an end-to-end eval system: pluggable scorers, dataset → suite synthesis, post-training auto-eval, head-to-head adapter comparison, and the local A/B judgment flywheel. The whole loop runs on the same single-GPU binary; no frontier-LLM call is ever required.

@@ -1,0 +1,6 @@
+{
+  "n_lora_B": 200,
+  "lora_B_mean_abs_diff": 0.00039585113525390623,
+  "lora_B_max_value_on": 0.00021076202392578125,
+  "diff_to_value_ratio": 1.9457013574660633
+}

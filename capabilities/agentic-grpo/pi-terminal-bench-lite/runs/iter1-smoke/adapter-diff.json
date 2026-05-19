@@ -1,0 +1,13 @@
+{
+  "n_lora_keys_total": 400,
+  "n_lora_A": 200,
+  "n_lora_B": 200,
+  "lora_A_mean_diff": 3.508567810058594e-05,
+  "lora_A_max_diff": 3.814697265625e-05,
+  "lora_A_max_value_on": 0.019775390625,
+  "lora_B_mean_diff": 6.008028984069824e-05,
+  "lora_B_max_diff": 6.008148193359375e-05,
+  "lora_B_max_value_on": 3.0159950256347656e-05,
+  "lora_B_total_max_value_on": 0.006008505821228027,
+  "lora_B_total_max_value_off": 0.0060083866119384766
+}

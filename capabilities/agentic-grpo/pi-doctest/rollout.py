@@ -36,8 +36,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+# Also import the shared agentic-grpo lib (one level up).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import rubric  # noqa: E402
 import task_scaffold  # noqa: E402
+import pi_trajectory  # noqa: E402
 
 
 PI_BIN = os.environ.get("PI_BIN", "pi")
@@ -277,44 +280,30 @@ def main():
             ]
             completions = []
             for r in rolls:
-                # v0 placeholder: extract assistant text/thinking blocks
-                # from the pi session JSONL and concatenate. Multiple
-                # assistant turns are joined with the literal sentinel
-                # `<TURN_BREAK>`. See kiln-polish-prerequisites.md #1
-                # for the proper per-turn-mask fix.
-                tr = parse_transcript(Path(r["transcript_path"])) if r.get("transcript_path") else []
-                turns = []
-                for ev in tr:
-                    if ev.get("type") != "message":
-                        continue
-                    msg = ev.get("message") or {}
-                    if msg.get("role") != "assistant":
-                        continue
-                    parts = []
-                    for b in (msg.get("content") or []):
-                        if not isinstance(b, dict):
-                            continue
-                        bt = b.get("type")
-                        if bt == "text" and isinstance(b.get("text"), str):
-                            parts.append(b["text"])
-                        elif bt == "thinking" and isinstance(b.get("thinking"), str):
-                            # Wrap in Qwen-style think tags so the chat template
-                            # round-trip is closer to what the model emitted.
-                            parts.append(f"<think>{b['thinking']}</think>")
-                        elif bt == "toolCall":
-                            name = b.get("name", "")
-                            inp = json.dumps(b.get("input", {}))
-                            parts.append(
-                                f"<tool_call>"
-                                f'{{"name": "{name}", "arguments": {inp}}}'
-                                f"</tool_call>"
-                            )
-                    if parts:
-                        turns.append("".join(parts))
-                completions.append({
-                    "text": "<TURN_BREAK>".join(turns) or "(empty)",
-                    "reward": r["reward"],
-                })
+                # Trajectory-aware path: pi_trajectory.parse_pi_session
+                # preserves Action segments (assistant turns) AND
+                # Observation segments (tool results) with proper
+                # warning-prefix detection. The resulting ScoredRollout
+                # dict has both the legacy `text` field (for back-compat)
+                # and the canonical `trajectory` field (for ECHO).
+                transcript_path = r.get("transcript_path")
+                if transcript_path:
+                    rollout_dict = pi_trajectory.build_scored_rollout(
+                        Path(transcript_path),
+                        reward=r["reward"],
+                    )
+                    # If parsing produced no segments, fall back to a
+                    # placeholder "(empty)" so the legacy text-only path
+                    # still produces a valid (if uninformative) rollout.
+                    if not rollout_dict.get("trajectory"):
+                        rollout_dict["text"] = "(empty)"
+                else:
+                    rollout_dict = {
+                        "text": "(empty)",
+                        "reward": r["reward"],
+                        "trajectory": [],
+                    }
+                completions.append(rollout_dict)
             groups.append({"messages": messages, "completions": completions})
 
         grp_path = out_root / "grpo-train.jsonl"

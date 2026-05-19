@@ -222,6 +222,29 @@ struct Args {
     lora_alpha: f32,
     learning_rate: f64,
     seed: u64,
+    /// ECHO lambda override. None = leave the LossConfig default (0.05).
+    echo_lambda: Option<f64>,
+    /// Disable ECHO entirely. Sets `loss.echo = None` so the auxiliary
+    /// env-CE term is not added. Useful for ablation runs.
+    no_echo: bool,
+    /// Placeholder for OPD lambda override — accepted at the CLI so caps
+    /// can pass `--opd-lambda` without the parser bailing, but not yet
+    /// wired into the loss (OPD branch rebases on top of ECHO).
+    opd_lambda: Option<f64>,
+    /// Disable the GRPO policy-gradient term entirely. Only ECHO's
+    /// env-CE drives gradients. Paper §5.5 verifier-free adaptation mode.
+    /// Requires --echo-lambda not be zero (otherwise the loss is
+    /// identically zero and no gradient flows).
+    no_policy_loss: bool,
+    /// Base adapter to start training from. Accepts either a full path
+    /// (e.g. `/workspace/echo-iter3-out/on/echo-iter3-on`) or an
+    /// adapter name resolved against the output dir. The trainer
+    /// calls `TrainableLoraParams::load_from_safetensors` to copy the
+    /// base adapter's LoRA weights into the freshly seeded Vars, so
+    /// continued training starts from those values rather than from
+    /// scratch. Used by Phase 3 verifier-free chaining: take a strong
+    /// Phase 2 adapter, run `--no-policy-loss` from those weights.
+    base_adapter: Option<String>,
 }
 
 #[cfg(feature = "cuda")]
@@ -237,6 +260,11 @@ impl Args {
         let mut lora_alpha = 16.0f32;
         let mut learning_rate = 1e-5f64;
         let mut seed = 0x6752_504f_u64;
+        let mut echo_lambda: Option<f64> = None;
+        let mut no_echo = false;
+        let mut opd_lambda: Option<f64> = None;
+        let mut no_policy_loss = false;
+        let mut base_adapter: Option<String> = None;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -286,17 +314,61 @@ impl Args {
                         .parse()
                         .context("--seed must be a u64")?
                 }
+                "--echo-lambda" => {
+                    echo_lambda = Some(
+                        args.next()
+                            .context("--echo-lambda needs a value")?
+                            .parse()
+                            .context("--echo-lambda must be a float (typical: 0.05)")?,
+                    )
+                }
+                "--no-echo" => no_echo = true,
+                "--opd-lambda" => {
+                    opd_lambda = Some(
+                        args.next()
+                            .context("--opd-lambda needs a value")?
+                            .parse()
+                            .context("--opd-lambda must be a float")?,
+                    )
+                }
+                "--no-policy-loss" => no_policy_loss = true,
+                "--base-adapter" => {
+                    base_adapter = Some(args.next().context("--base-adapter needs a path")?)
+                }
                 "--help" | "-h" => {
                     println!(
                         "cuda_grpo_ablation --data <jsonl> --model <dir> [--output <dir>] \
                          [--adapter <name>] --mode <baseline|phase1|phase1_gspo|phase1_cispo|\
-                         phase1_reinforce> [--max-groups N] [--rank N] [--alpha F] [--lr F] \
-                         [--seed N]"
+                         phase1_reinforce|...> [--max-groups N] [--rank N] [--alpha F] \
+                         [--lr F] [--seed N] [--echo-lambda F | --no-echo] [--opd-lambda F]"
+                    );
+                    println!();
+                    println!("ECHO flags (Phase 1, paper §3.3):");
+                    println!(
+                        "  --echo-lambda <f64>    Override the env-CE coefficient. Default \
+                         from LossConfig::default() = 0.05."
+                    );
+                    println!(
+                        "  --no-echo              Disable ECHO entirely (sets loss.echo = None)."
+                    );
+                    println!(
+                        "  --opd-lambda <f64>     Reserved for OPD branch rebase; accepted \
+                         here so cap scripts don't fail to parse. Currently ignored — \
+                         OPD wiring lands in the OPD merge."
                     );
                     std::process::exit(0);
                 }
                 other => anyhow::bail!("unexpected argument: {other}"),
             }
+        }
+
+        if no_echo && echo_lambda.is_some() {
+            anyhow::bail!("--no-echo and --echo-lambda are mutually exclusive");
+        }
+        if no_policy_loss && no_echo {
+            anyhow::bail!(
+                "--no-policy-loss requires ECHO to drive gradients; can't combine with --no-echo"
+            );
         }
 
         Ok(Args {
@@ -310,6 +382,11 @@ impl Args {
             lora_alpha,
             learning_rate,
             seed,
+            echo_lambda,
+            no_echo,
+            opd_lambda,
+            no_policy_loss,
+            base_adapter,
         })
     }
 }
@@ -371,6 +448,20 @@ fn maybe_subset_dataset(input: &PathBuf, max_groups: Option<usize>) -> Result<Pa
 
 #[cfg(feature = "cuda")]
 fn main() -> Result<()> {
+    // Init tracing so kiln-train's tracing::debug!/info!/warn! lines land
+    // in stderr when the user sets RUST_LOG. Without this every tracing
+    // call inside the trainer (including the ECHO env-CE active debug log
+    // on both the uncheckpointed and checkpointed paths) gets silently
+    // dropped. Default: warn. Override with e.g.
+    // `RUST_LOG=info,kiln_train=debug` to see per-completion ECHO firing.
+    use tracing_subscriber::EnvFilter;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+
     let args = Args::parse()?;
     let start = Instant::now();
     let baseline_mib = current_vram_mib();
@@ -412,11 +503,50 @@ fn main() -> Result<()> {
         optimizer: Optimizer::default(),
         ..GrpoConfig::default()
     };
-    let config = args.mode.apply(base);
+    let mut config = args.mode.apply(base);
+
+    // ECHO knob overrides — applied AFTER the mode patch so cap scripts can
+    // pin a specific lambda without depending on a mode that sets it.
+    if args.no_echo {
+        config.loss.echo = None;
+    } else if let Some(lambda) = args.echo_lambda {
+        config.loss.echo = Some(kiln_train::EchoConfig {
+            lambda,
+            ..kiln_train::EchoConfig::default()
+        });
+    }
+    // KILN_ECHO_* env-var overrides take precedence over CLI flags so
+    // operators can override caps from the shell without editing scripts.
+    // (CLI is for inline knob-tweaking during development; env vars are
+    // for ops/CI orchestration.)
+    config.loss.apply_kiln_echo_env_overrides();
+
+    if args.no_policy_loss {
+        config.loss.no_policy_loss = true;
+    }
+    if let Some(ref base_adapter) = args.base_adapter {
+        config.base_adapter = Some(base_adapter.clone());
+    }
+    if let Some(_opd_lambda) = args.opd_lambda {
+        // Reserved for OPD branch rebase. Accept the flag but don't fire —
+        // the loss path doesn't read config.loss.opd yet (see lib.rs
+        // LossConfig design notes).
+        eprintln!(
+            "warning: --opd-lambda accepted but OPD loss not yet wired; \
+             ignoring (lambda={_opd_lambda})"
+        );
+    }
+
+    let echo_lambda_str = config
+        .loss
+        .echo
+        .as_ref()
+        .map(|c| format!("{}", c.lambda))
+        .unwrap_or_else(|| "off".to_string());
     println!(
         "config mode={} advantage_mode={:?} loss_aggregation={:?} clip=({},{:?}) \
          kl_estimator={:?} dynamic_sampling={} is_level={:?} reference_policy={:?} \
-         lr={} rank={} alpha={} seed={}",
+         lr={} rank={} alpha={} seed={} echo_lambda={}",
         args.mode.as_str(),
         config.advantage_mode,
         config.loss_aggregation,
@@ -430,6 +560,7 @@ fn main() -> Result<()> {
         config.lora_rank,
         config.lora_alpha,
         args.seed,
+        echo_lambda_str,
     );
 
     let stop = Arc::new(AtomicBool::new(false));

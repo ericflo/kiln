@@ -1,0 +1,12 @@
+mode=phase1 baseline_vram_mib=1
+subset_dataset=/workspace/synth_traj.max3.jsonl kept_groups=3
+loading_model=/workspace/qwen3.5-4b
+model_loaded_vram_mib=10099
+config mode=phase1 advantage_mode=DrGrpo loss_aggregation=TokenLevel clip=(0.2,Some(0.28)) kl_estimator=K1 dynamic_sampling=true is_level=Token reference_policy=BasePerStep lr=0.00001 rank=8 alpha=16 seed=3141592653 echo_lambda=off
+progress step=4361/12881 loss=-0.034348 vram_mib=13381
+progress step=8626/12881 loss=-0.033895 vram_mib=13541
+progress step=12881/12881 loss=-0.034055 vram_mib=13509
+adapter=/workspace/echo-e2e-out/off/echo-e2e-off
+peak_vram_mib=16101
+elapsed_secs=50.992
+mode_done=phase1

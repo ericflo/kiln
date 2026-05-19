@@ -1,0 +1,8 @@
+{
+  "iter4_vs_iter3_lora_B_mean_abs_diff": 0.00014222621917724609,
+  "iter4_vs_iter3_lora_B_max_abs_diff": 0.00018405914306640625,
+  "iter4_lora_B_max_value": 0.00021076202392578125,
+  "iter4_vs_iter3_lora_A_mean_abs_diff": 0.00020862579345703124,
+  "iter4_lora_A_max_value": 0.019775390625,
+  "note": "iter4 trained verifier-free (--no-policy-loss) from fresh init. The --base-adapter flag is currently lineage-only (no weight load), so iter4 does NOT start from iter3 weights. Comparison shows both adapters diverged from the same init under DIFFERENT objectives (iter3: GRPO+ECHO; iter4: ECHO only)."
+}
