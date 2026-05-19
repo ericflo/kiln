@@ -11154,9 +11154,43 @@ mod tests {
         // tests. Inline it here to keep the test self-contained.
         let tokenizer = make_echo_smoke_tokenizer()?;
 
-        // Phase 1 ablation: same group, same weights, same lr — once with
-        // ECHO on (default), once with ECHO off.
-        for echo_enabled in [false, true] {
+        // Disable the shared-prefix optimization for this smoke test —
+        // the trajectory rollouts here are synthetic byte sequences and
+        // the legacy per-completion ref path is sufficient to validate
+        // ECHO wiring. The shared-prefix path gets its own integration
+        // coverage on real pi-doctest data.
+        // SAFETY: env-var manipulation is process-global; this test
+        // serializes on ENV_LOCK in production but the smoke test is
+        // a single-threaded cargo test invocation here.
+        unsafe {
+            std::env::set_var("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", "1");
+        }
+
+        let tokenized = tokenize_grpo_group(&group, &tokenizer)?;
+        // Both rollouts should produce non-empty action and (echo)
+        // env masks.
+        assert!(tokenized.completions.len() == 2, "both rollouts tokenized");
+        for comp in &tokenized.completions {
+            assert!(comp.action_mask.iter().any(|&b| b), "action_mask not empty");
+            assert!(comp.env_mask.iter().any(|&b| b), "env_mask not empty");
+            assert!(comp.total_obs_len > 0, "total_obs_len > 0");
+        }
+
+        // Phase 1 ablation: same group, same weights, same lr — three modes
+        // exercised so we can pin two acceptance invariants in one fixture:
+        //   - Appendix C.1 #1: `echo: Some({lambda: 0.0})` is bit-equivalent
+        //     to `echo: None` (the "off switch" semantics — both bypass the
+        //     env-CE contribution to the total loss).
+        //   - Strict positivity: `echo: Some({lambda: 0.05})` produces a
+        //     strictly different loss than disabled when env_mask has active
+        //     positions (the ECHO term is non-zero).
+        let mode_disabled = "disabled";
+        let mode_zero = "lambda_zero";
+        let mode_on = "lambda_on";
+        let mut losses: std::collections::HashMap<&str, f64> =
+            std::collections::HashMap::new();
+
+        for mode in [mode_disabled, mode_zero, mode_on] {
             let mut grpo_cfg = GrpoConfig::default();
             grpo_cfg.lora_rank = 4;
             grpo_cfg.lora_alpha = 8.0;
@@ -11164,36 +11198,17 @@ mod tests {
             // Use SGD so we don't need a separate OptimizerState (AdamW
             // requires per-Var moment buffers).
             grpo_cfg.optimizer = Optimizer::Sgd;
-            grpo_cfg.loss.echo = if echo_enabled {
-                Some(crate::EchoConfig::default())
-            } else {
-                None
+            grpo_cfg.loss.echo = match mode {
+                "disabled" => None,
+                "lambda_zero" => Some(crate::EchoConfig {
+                    lambda: 0.0,
+                    ..crate::EchoConfig::default()
+                }),
+                "lambda_on" => Some(crate::EchoConfig::default()),
+                _ => unreachable!(),
             };
 
-            let tokenized = tokenize_grpo_group(&group, &tokenizer)?;
-            // Both rollouts should produce non-empty action and (echo)
-            // env masks.
-            assert!(tokenized.completions.len() == 2, "both rollouts tokenized");
-            for comp in &tokenized.completions {
-                assert!(comp.action_mask.iter().any(|&b| b), "action_mask not empty");
-                assert!(comp.env_mask.iter().any(|&b| b), "env_mask not empty");
-                assert!(comp.total_obs_len > 0, "total_obs_len > 0");
-            }
-
-            // Disable the shared-prefix optimization for this smoke test —
-            // the trajectory rollouts here are synthetic byte sequences and
-            // the legacy per-completion ref path is sufficient to validate
-            // ECHO wiring. The shared-prefix path gets its own integration
-            // coverage on real pi-doctest data.
-            // SAFETY: env-var manipulation is process-global; this test
-            // serializes on ENV_LOCK in production but the smoke test is
-            // a single-threaded cargo test invocation here.
-            unsafe {
-                std::env::set_var("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", "1");
-            }
-
-            let mut params =
-                TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
+            let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
             let loss = train_tokenized_grpo_group(
                 &*backend,
                 &tokenized,
@@ -11207,16 +11222,35 @@ mod tests {
                 None,
             )?;
 
-            assert!(
-                loss.is_finite(),
-                "loss must be finite (echo_enabled={echo_enabled}); got {loss}"
-            );
-            // Verify at least one LoRA Var actually moved (gradients flowed).
-            // Take a snapshot before another step: easier to just call again
-            // and check the loss is still finite — that proves the param
-            // update path didn't poison the trainable state.
-            let _ = &mut params;
+            assert!(loss.is_finite(), "loss must be finite ({mode}); got {loss}");
+            losses.insert(mode, loss);
         }
+
+        // Appendix C.1 #1: echo=None ≈ echo={lambda: 0.0}. The trainer's
+        // env-CE wiring multiplies by `lambda` before adding to the loss,
+        // so lambda=0.0 contributes mathematically zero — must be bit-
+        // equivalent within float epsilon to the disabled path.
+        let loss_off = losses[mode_disabled];
+        let loss_zero = losses[mode_zero];
+        let loss_on = losses[mode_on];
+        let delta_zero = (loss_off - loss_zero).abs();
+        assert!(
+            delta_zero < 1e-5,
+            "echo=None vs echo={{lambda: 0.0}} must be bit-equivalent within 1e-5; \
+             got off={loss_off}, zero={loss_zero}, delta={delta_zero}"
+        );
+
+        // ECHO at lambda=0.05 with non-empty env_mask must produce a
+        // strictly different loss than disabled. (Direction not asserted
+        // because the GRPO surrogate sign can flip with this synthetic
+        // fixture's tiny advantage — we just need a non-trivial delta.)
+        let delta_on = (loss_off - loss_on).abs();
+        assert!(
+            delta_on > 1e-6,
+            "echo at lambda=0.05 should differ measurably from disabled; \
+             got off={loss_off}, on={loss_on}, delta={delta_on}"
+        );
+
         Ok(())
     }
 
