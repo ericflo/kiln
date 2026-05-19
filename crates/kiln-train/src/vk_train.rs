@@ -2260,6 +2260,27 @@ pub fn vk_recompute_train_step_with_state_masked(
 /// one layer at a time so policy training does not keep a full long-context
 /// forward tape alive.
 #[allow(clippy::too_many_arguments)]
+/// Optional ECHO env-CE inputs for the VK-native GRPO step. When
+/// `env_rows` is non-empty AND `total_obs_len > 0` AND `lambda != 0`,
+/// the step adds the auxiliary env-CE term to the GRPO surrogate:
+///
+///     L_total = L_grpo + (lambda * env_rows.len() / total_obs_len) *
+///                 mean_{t ∈ env_rows} (-log p_θ(env_labels[t] | x_{≤t}))
+///
+/// The `mean_*` is what `vk_flce_loss` returns; the scale converts it
+/// to the paper §3.1 `|O|` normalization. Computed via existing VK ops
+/// (`vk_index_select_rows` + `vk_flce_loss` + `vk_scale` + `vk_add`) so
+/// autograd flows through the LoRA Vars the same way the GRPO surrogate
+/// does.
+#[derive(Clone, Copy, Default)]
+pub struct VkEchoStepParams<'a> {
+    pub env_rows: &'a [u32],
+    pub env_labels: &'a [u32],
+    pub total_obs_len: usize,
+    pub lambda: f32,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn vk_recompute_grpo_train_step_with_state(
     weights: &VkModelWeights,
     lora_layers: &[VkLoraLayer],
@@ -2276,6 +2297,7 @@ pub fn vk_recompute_grpo_train_step_with_state(
     cfg: &VkAdamWConfig,
     optimizer: Optimizer,
     step: u32,
+    echo: Option<VkEchoStepParams<'_>>,
 ) -> Result<f32> {
     use kiln_model::vk_forward::{
         vk_compute_rope_tables, vk_full_attention_attention_block_with_rope,
@@ -2393,7 +2415,7 @@ pub fn vk_recompute_grpo_train_step_with_state(
     );
     let h_norm = vk_rmsnorm(&final_param, &weights.final_norm_weight, 1e-5)?;
     let active_h = vk_index_select_rows(&h_norm, active_rows)?;
-    let loss = vk_grpo_loss(
+    let grpo_loss = vk_grpo_loss(
         &active_h,
         &weights.lm_head,
         labels,
@@ -2403,6 +2425,50 @@ pub fn vk_recompute_grpo_train_step_with_state(
         kl_coeff,
         flce_recommended_chunk_len_for_tensors(&active_h, &weights.lm_head),
     )?;
+
+    // ECHO env-CE term (paper §3.1, λ default 0.05). Computed via the same
+    // VK FLCE kernel `vk_grpo_loss` uses, just on a different row mask.
+    // vk_flce_loss returns mean over env_rows = (1/env_count) * Σ -log p;
+    // we rescale to (λ/|O|) * Σ -log p = (λ * env_count / |O|) * raw_mean.
+    use kiln_vulkan_kernel::vk_ops::elementwise::vk_add;
+    use kiln_vulkan_kernel::vk_ops::flce::vk_flce_loss;
+    use kiln_vulkan_kernel::vk_ops::mask::vk_scale;
+    let loss = if let Some(echo_params) = echo {
+        if echo_params.env_rows.is_empty()
+            || echo_params.env_labels.is_empty()
+            || echo_params.total_obs_len == 0
+            || echo_params.lambda == 0.0
+        {
+            grpo_loss
+        } else {
+            anyhow::ensure!(
+                echo_params.env_rows.len() == echo_params.env_labels.len(),
+                "vk-native ECHO: env_rows.len() ({}) != env_labels.len() ({})",
+                echo_params.env_rows.len(),
+                echo_params.env_labels.len()
+            );
+            for &row in echo_params.env_rows {
+                anyhow::ensure!(
+                    (row as usize) + 1 < input_ids.len(),
+                    "vk-native ECHO: env row {row} out of range for {} tokens",
+                    input_ids.len()
+                );
+            }
+            let env_h = vk_index_select_rows(&h_norm, echo_params.env_rows)?;
+            let env_loss_raw = vk_flce_loss(
+                &env_h,
+                &weights.lm_head,
+                echo_params.env_labels,
+                flce_recommended_chunk_len_for_tensors(&env_h, &weights.lm_head),
+            )?;
+            let env_scale = (echo_params.lambda * echo_params.env_rows.len() as f32)
+                / echo_params.total_obs_len as f32;
+            let env_loss_scaled = vk_scale(&env_loss_raw, env_scale)?;
+            vk_add(&grpo_loss, &env_loss_scaled)?
+        }
+    } else {
+        grpo_loss
+    };
     let loss_val = loss.to_vec_f32()?[0];
     if profile {
         tracing::info!(
@@ -3691,6 +3757,26 @@ pub fn vk_native_grpo_train(
                 )
             })?;
 
+            // ECHO env-CE inputs. When the rollout has env tokens AND
+            // LossConfig.echo is enabled, the VK step adds the auxiliary
+            // env-CE term inside vk_recompute_grpo_train_step_with_state.
+            // Legacy single-turn rollouts pass empty arrays which the
+            // function treats as a no-op.
+            let (env_rows, env_labels) =
+                grpo_active_rows_and_labels(&comp.input_ids, &comp.env_mask)?;
+            let echo_params = config.loss.echo.as_ref().and_then(|cfg| {
+                if env_rows.is_empty() || comp.total_obs_len == 0 {
+                    None
+                } else {
+                    Some(VkEchoStepParams {
+                        env_rows: env_rows.as_slice(),
+                        env_labels: env_labels.as_slice(),
+                        total_obs_len: comp.total_obs_len,
+                        lambda: cfg.lambda as f32,
+                    })
+                }
+            });
+
             let loss = vk_recompute_grpo_train_step_with_state(
                 &vk_weights,
                 &lora_layers,
@@ -3707,10 +3793,11 @@ pub fn vk_native_grpo_train(
                 &cfg,
                 config.optimizer,
                 optimizer_step,
+                echo_params,
             )
             .with_context(|| {
                 format!(
-                    "vk-native GRPO policy step group {} completion {}",
+                    "vk-native GRPO+ECHO policy step group {} completion {}",
                     group_step,
                     comp_idx + 1
                 )
@@ -4096,6 +4183,23 @@ pub fn vk_native_grpo_train_jsonl(
                 active_labels = labels.len(),
                 "streamed vk-native GRPO policy step begin"
             );
+
+            // ECHO env-CE inputs (same shape as the in-memory path above).
+            let (env_rows, env_labels) =
+                grpo_active_rows_and_labels(&comp.input_ids, &comp.env_mask)?;
+            let echo_params = config.loss.echo.as_ref().and_then(|cfg| {
+                if env_rows.is_empty() || comp.total_obs_len == 0 {
+                    None
+                } else {
+                    Some(VkEchoStepParams {
+                        env_rows: env_rows.as_slice(),
+                        env_labels: env_labels.as_slice(),
+                        total_obs_len: comp.total_obs_len,
+                        lambda: cfg.lambda as f32,
+                    })
+                }
+            });
+
             let policy_start = std::time::Instant::now();
             let loss = vk_recompute_grpo_train_step_with_state(
                 &vk_weights,
@@ -4113,10 +4217,11 @@ pub fn vk_native_grpo_train_jsonl(
                 &cfg,
                 config.optimizer,
                 optimizer_step,
+                echo_params,
             )
             .with_context(|| {
                 format!(
-                    "vk-native GRPO JSONL policy step group {} completion {}",
+                    "vk-native GRPO+ECHO JSONL policy step group {} completion {}",
                     processed_groups,
                     comp_idx + 1
                 )
