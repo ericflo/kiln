@@ -247,8 +247,8 @@ def train_grpo(pod: str, iter_n: int, recipe: dict, train_adapter: str | None) -
         f'echo DONE > {done}'
     )
     pod_bg(pod, log, cmd)
-    if not pod_wait(pod, done, timeout=3600):
-        raise RuntimeError(f"iter {iter_n} training timed out")
+    if not pod_wait(pod, done, timeout=7200):
+        raise RuntimeError(f"iter {iter_n} training timed out (>2hr)")
     # Verify adapter exists
     pod_ssh(pod, f"ls -la {adapter_out}/pi-cc-iter{iter_n}/ | head -5", timeout=30)
     # Symlink into kiln model dir so /v1/adapters/load works
