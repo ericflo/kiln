@@ -163,14 +163,39 @@ while [ "$iter" -lt 50 ] && [ "$iter" -lt "$end" ]; do
   bash "$HERE/run_iter.sh" --iter "$iter" --kind "$KIND" --eval-adapter "$EVAL_ADAPTER" $EXTRA 2>&1 | tail -100
 
   EVAL_OUT="/tmp/iter${iter}-eval"
-  COMPOSITE=$(python3 $RP ssh $POD_ID "python3 -c 'import json; d=json.load(open(\"${EVAL_OUT}/summary.json\")); print(d[\"mean_composite\"])'" 2>/dev/null || echo "null")
+  # Pull full summary down for sub-score logging.
+  python3 $RP ssh $POD_ID "cat ${EVAL_OUT}/summary.json 2>/dev/null" > /tmp/eval-summary-iter${iter}.json 2>/dev/null || true
+  COMPOSITE=$(python3 -c "import json; d=json.load(open('/tmp/eval-summary-iter${iter}.json')); print(d.get('mean_composite', 'null'))" 2>/dev/null || echo "null")
   BASELINE=$(cat "$HERE/.baseline_composite" 2>/dev/null || echo "null")
   DELTA="null"
   if [ "$COMPOSITE" != "null" ] && [ "$BASELINE" != "null" ]; then
     DELTA=$(python3 -c "print(${COMPOSITE} - ${BASELINE})")
   fi
   echo "  iter ${iter}: composite=${COMPOSITE} baseline=${BASELINE} delta=${DELTA}"
-  append_log_row "$iter" "$KIND" "$SLUG" "$COMPOSITE" "$BASELINE" "$DELTA" "logged"
+  # Enriched log row including sub_scores from summary.json.
+  python3 -c "
+import json, datetime, pathlib
+try:
+    s = json.load(open('/tmp/eval-summary-iter${iter}.json'))
+except Exception:
+    s = {}
+row = {
+    'iter': $iter,
+    'kind': '$KIND',
+    'slug': '$SLUG',
+    'composite': $COMPOSITE,
+    'baseline_composite': $BASELINE,
+    'delta_vs_baseline': $DELTA,
+    'status': 'logged',
+    'sub_scores': s.get('mean_sub_scores') or {},
+    'class_means': s.get('class_means') or {},
+    'rollouts_passed': s.get('rollouts_passed'),
+    'n_rollouts': s.get('n_rollouts'),
+    'logged_at': datetime.datetime.utcnow().isoformat() + 'Z',
+    'pod_id': '$POD_ID',
+}
+pathlib.Path('$HERE/capability.jsonl').open('a').write(json.dumps(row) + chr(10))
+"
 
   cd "$HERE/../../.."
   git add capabilities/agentic-grpo/pi-diff-patch-apply/capability.jsonl || true

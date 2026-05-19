@@ -36,9 +36,9 @@ echo ">>> [2/6] build kiln (release)"
 # Check if pre-built
 BUILT=$(run_pod 'test -x /workspace/kiln/target/release/kiln && echo yes || echo no' 2>/dev/null | tail -1)
 if [ "$BUILT" != "yes" ]; then
-  echo ">>> compiling kiln + cuda_grpo_ablation example"
+  echo ">>> compiling kiln + cuda_grpo_ablation example (--features cuda)"
   python3 "$RP" bg "$POD_ID" /tmp/cargo-build.log \
-    'cd /workspace/kiln && cargo build --release --example cuda_grpo_ablation 2>&1 && cargo build --release --bin kiln 2>&1'
+    'cd /workspace/kiln && cargo build --release --features cuda --bin kiln 2>&1 && cargo build --release --features cuda --example cuda_grpo_ablation 2>&1'
   python3 "$RP" wait-file "$POD_ID" /workspace/kiln/target/release/kiln --timeout 1800
   python3 "$RP" wait-file "$POD_ID" /workspace/kiln/target/release/examples/cuda_grpo_ablation --timeout 1800
 fi
@@ -74,10 +74,10 @@ if [ "$WEIGHTS_OK" != "yes" ]; then
   run_pod '
 mkdir -p /workspace/qwen3.5-4b
 cd /workspace/qwen3.5-4b
-huggingface-cli download Qwen/Qwen2.5-4B-Instruct --local-dir . 2>&1 | tail -5 ||
+huggingface-cli download Qwen/Qwen3.5-4B --local-dir . 2>&1 | tail -5 ||
   python3 -c "
 from huggingface_hub import snapshot_download
-snapshot_download(repo_id=\"Qwen/Qwen2.5-4B-Instruct\", local_dir=\"/workspace/qwen3.5-4b\")
+snapshot_download(repo_id=\"Qwen/Qwen3.5-4B\", local_dir=\"/workspace/qwen3.5-4b\")
 "
 '
 fi
@@ -87,14 +87,14 @@ run_pod 'mkdir -p /workspace/qwen3.5-4b/adapters'
 echo ">>> [5/6] sync capability files"
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # rsync via runpod_api scp
-python3 "$RP" scp-to "$POD_ID" "$HERE/rubric.py" /workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply/rubric.py
-python3 "$RP" scp-to "$POD_ID" "$HERE/rollout.py" /workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply/rollout.py
-python3 "$RP" scp-to "$POD_ID" "$HERE/task_scaffold.py" /workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply/task_scaffold.py
-python3 "$RP" scp-to "$POD_ID" "$HERE/build_corpus.py" /workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply/build_corpus.py
-python3 "$RP" scp-to "$POD_ID" "$HERE/select_hard_tasks.py" /workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply/select_hard_tasks.py
+python3 "$RP" upload "$POD_ID" "$HERE/rubric.py" /workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply/rubric.py
+python3 "$RP" upload "$POD_ID" "$HERE/rollout.py" /workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply/rollout.py
+python3 "$RP" upload "$POD_ID" "$HERE/task_scaffold.py" /workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply/task_scaffold.py
+python3 "$RP" upload "$POD_ID" "$HERE/build_corpus.py" /workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply/build_corpus.py
+python3 "$RP" upload "$POD_ID" "$HERE/select_hard_tasks.py" /workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply/select_hard_tasks.py
 # Build corpus on the pod (idempotent — overwrites datasets/)
 echo ">>> building corpus"
-run_pod 'cd /workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply && mkdir -p datasets && python3 build_corpus.py --out-dir datasets 2>&1 | tail -3'
+run_pod 'cd /workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply && mkdir -p datasets && python3 build_corpus.py --train 60 --eval 24 --seed 3141592653 2>&1 | tail -3'
 
 echo ">>> [6/6] start kiln serve"
 run_pod 'pkill -9 -f "kiln serve" 2>/dev/null || true; sleep 2'
