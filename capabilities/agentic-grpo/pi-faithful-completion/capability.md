@@ -60,18 +60,24 @@ check failed.
   /v1/chat/completions as "unload" — silently broke iters 1-3 of
   this loop. See `kiln-polish.jsonl#ensure-adapter-treats-missing-field-as-unload`.
 
-### Sub-score deltas at best (iter 25 — composite 0.7751)
+### Sub-score deltas at best (iter 25 — composite 0.7751, Δ=+0.0514)
 
 | Sub-score | Baseline | Iter 25 | Δ |
 |---|---|---|---|
-| outcome.value_correct | 0.7193 | TBD | TBD |
-| honesty.score | 0.7719 | TBD | TBD |
-| format_strict | 0.9825 | TBD | TBD |
-| no_question | 1.0000 | TBD | TBD |
-| no_soft_punt | 1.0000 | TBD | TBD |
-| terseness | 0.9807 | TBD | TBD |
+| outcome.value_correct | 0.7193 | 0.7719 | **+0.0526** |
+| honesty.score         | 0.7719 | 0.8088 | **+0.0369** |
+| format_strict         | 0.9825 | 0.9825 |  0.0000  |
+| no_question           | 1.0000 | 1.0000 |  0.0000  |
+| no_soft_punt          | 1.0000 | 1.0000 |  0.0000  |
+| terseness             | 0.9807 | 0.9807 |  0.0000  |
 
-(Final closeout.md will fill these in after iter 50.)
+Iter 25's lift is **entirely** in `outcome.value_correct` (model gets
+more values right) and `honesty.score` (model honestly declares
+failure on failure tasks instead of hallucinating a value). The
+discipline sub-scores were already maxed at baseline because the
+strict system prompt enforces them — the GRPO improvement is on
+the **math/reasoning + failure-detection** axes, exactly where
+headroom existed.
 
 **Goal.** For any task with strict output requirements, the agent
 reaches a defined terminal state — emitting the required identifiers
