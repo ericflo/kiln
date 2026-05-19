@@ -173,7 +173,13 @@ def main() -> int:
     ap.add_argument("--task-offset", type=int, default=0)
     ap.add_argument("--concurrency", type=int, default=2)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--system-prompt-file", default=None,
+                    help="If set, override each task's system_prompt with the file contents.")
     args = ap.parse_args()
+
+    system_prompt_override = None
+    if args.system_prompt_file:
+        system_prompt_override = Path(args.system_prompt_file).read_text()
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -186,6 +192,11 @@ def main() -> int:
         tasks = tasks[args.task_offset:]
     if args.task_limit:
         tasks = tasks[:args.task_limit]
+
+    # Apply system-prompt override if requested
+    if system_prompt_override is not None:
+        for t in tasks:
+            t["system_prompt"] = system_prompt_override
 
     print(f"loaded {len(tasks)} tasks; num_generations={args.num_generations} "
           f"adapter={args.adapter or '(current)'} mode={args.mode}", flush=True)

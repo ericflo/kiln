@@ -23,7 +23,11 @@
 #               [--skip-train] [--skip-eval] \
 #               [--system-prompt-file <path>]
 
-set -euo pipefail
+set -uo pipefail
+# Don't use `-e`: transient SSH return codes (e.g. pkill returning 1 when
+# nothing matched) caused premature exit between rollout and training in
+# iter 1. We rely on explicit `python3 $RP wait-file` calls + adapter file
+# presence to verify success per stage.
 
 ITER=""
 SLUG=""
