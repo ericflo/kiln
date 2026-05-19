@@ -119,13 +119,32 @@ def _iter_messages(transcript: list[dict]) -> Iterator[tuple[int, dict]]:
 
 
 def _assistant_text(msg: dict) -> str:
+    """Concatenate every text-like surface in an assistant message.
+
+    Includes:
+      - plain text blocks
+      - thinking blocks (so reasoning that emits the answer still counts)
+      - the JSON-stringified args of any tool calls (so a model that
+        wraps its answer in a `write`/`bash` call still has it scored —
+        the 4B base regularly does this).
+    """
     parts: list[str] = []
     for b in (msg.get("content") or []):
         if not isinstance(b, dict):
             continue
-        if b.get("type") == "text" and isinstance(b.get("text"), str):
+        bt = b.get("type")
+        if bt == "text" and isinstance(b.get("text"), str):
             parts.append(b["text"])
-    return "".join(parts)
+        elif bt == "thinking" and isinstance(b.get("thinking"), str):
+            parts.append(b["thinking"])
+        elif bt == "toolCall":
+            # JSON-render the tool args so JSON-in-bash-args is reachable.
+            args = b.get("input") or b.get("arguments") or {}
+            try:
+                parts.append(json.dumps(args, default=str))
+            except Exception:
+                pass
+    return "\n".join(parts)
 
 
 def extract_final_answer(transcript: list[dict]) -> tuple[Optional[dict], str]:

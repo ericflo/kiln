@@ -74,35 +74,28 @@ target symbol below.
 Target file:   {target_file}
 Target symbol: {target_symbol}
 
-Use the available tools to:
-1. `read` the target file and any helpers / callers you need.
-2. `bash` (run `grep -rn <symbol> .` etc.) to find cross-file callers.
-3. Read 1-2 callers to confirm conventions (optional).
+Steps:
+1. Use `read` to read the target file.
+2. Use `bash` with `grep -rn {target_symbol} .` to find callers.
+3. Read 1-2 callers if helpful.
 
-When you have enough information, emit a FINAL assistant turn (no tool
-calls) containing exactly one `<answer>` block with a JSON object using
-this schema:
+When you have all the information you need, end your work by emitting a
+PLAIN ASSISTANT TEXT MESSAGE (no tool calls) containing this exact form:
 
 <answer>
-{{
-  "inputs":   [{{"name": "arg1", "type": "str", "source_line": N}}, ...],
-  "returns":  [{{"type": "type_expr", "source_line": N}}],
-  "mutates":  ["filesystem:/path", "global:STATE", "arg:cache_arg", ...],
-  "calls":    [{{"name": "helper", "file": "file.py", "line": N}}, ...],
-  "called_by":[{{"file": "caller.py", "line": N}}, ...],
-  "invariants":   ["invariant 1", "invariant 2", ...],
-  "side_effects": ["raises X on Y", "writes log", ...]
-}}
+{{"inputs": [{{"name": "arg1", "type": "str", "source_line": N}}], "returns": [{{"type": "T", "source_line": N}}], "mutates": ["arg:foo"], "calls": [{{"name": "helper", "file": "file.py", "line": N}}], "called_by": [{{"file": "caller.py", "line": N}}], "invariants": ["..."], "side_effects": ["raises X"]}}
 </answer>
 
 Rules:
-- Line numbers MUST be cited from the actual source. If unknown, omit the
-  field rather than guess.
-- For functions with NO mutations, use the empty list [].
-- `invariants` should include implicit ones too (e.g. "lock must be
-  held", "init() must have been called first"), not just docstring text.
-- `called_by` should reflect callers across ALL files, found via grep.
-- One JSON object inside ONE `<answer>` block. No other prose afterward.
+- DO NOT call any tool named `answer` — there is no such tool. Use a
+  plain assistant text turn instead.
+- DO NOT pass the JSON via `write` or `bash` — emit it as ordinary text.
+- Line numbers MUST be cited from real source. Omit if unknown.
+- For empty fields use the empty list `[]`.
+- `invariants` includes implicit preconds (lock must be held, init must
+  have been called first), not just docstring text.
+- `called_by` is the cross-file callers — find them with grep.
+- ONE `<answer>` block. End the session after it.
 """
 
 
