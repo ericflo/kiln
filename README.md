@@ -133,6 +133,8 @@ For multi-turn agentic rollouts — tool calls, command output, file contents �
 When your rollouts carry a `trajectory` field with `kind: "action"` / `kind: "observation"` segments, kiln-train's `tokenize_grpo_group` builds separate `action_mask` (policy-gradient targets) and `env_mask` (ECHO env-CE targets); both contribute to the same forward pass at default `λ_echo = 0.05`. Legacy single-turn rollouts (no `trajectory` field) get ECHO contribution = 0 — bit-identical behavior to the pre-ECHO loss.
 
 ```python
+import requests
+
 # Canonical multi-turn shape (kiln >= 0.3):
 requests.post("http://localhost:8420/v1/train/agentic", json={
     "agentic_groups": [{
