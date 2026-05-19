@@ -209,8 +209,13 @@ def parse_pi_session(
             if isinstance(content, list):
                 rendered, tool_call_id = _render_tool_result_content(content)
                 if rendered:
+                    # Normalize the role label to "tool" — the Qwen chat
+                    # template only accepts that name; pi 0.75.1 used
+                    # "tool" while pi 0.75.3 emits "toolResult" but both
+                    # carry the same observation tokens. (chat template
+                    # raised "Unexpected message role" otherwise.)
                     seg: dict[str, Any] = {
-                        "role": role,
+                        "role": "tool",
                         "content": rendered,
                         "kind": "observation",
                     }
