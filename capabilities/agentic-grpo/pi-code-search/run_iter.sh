@@ -196,12 +196,12 @@ if [ "${EVAL_ONLY:-0}" != "1" ] && [ "${SKIP_TRAIN:-0}" != "1" ] && [ -s "$GRPO_
     ECHO_ARG=(--echo-lambda "$ECHO_LAMBDA")
   fi
   # A6000 / H100 workaround: the `kiln_gdn_gates_bf16` kernel and the
-  # batching engine both crash on these GPUs in the training path.
-  # Disable both before invoking cuda_grpo_ablation.
+  # fused GDN backend both crash in cuda_grpo_ablation's shared-prefix
+  # reference forward. Verified-working minimal set of disable flags
+  # (see /workspace/test-train.log — 182s on 3 groups, no kernel error):
   export KILN_BATCHING_ENGINE=0
   export KILN_DISABLE_FUSED_GDN_GATES=1
   export KILN_DISABLE_GDN_KERNEL=1
-  export KILN_DISABLE_FUSED_PAGED_DECODE=1
   set -x
   for ep in $(seq 1 "$EPOCHS"); do
     "$GRPO_BIN" \
