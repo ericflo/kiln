@@ -5,21 +5,41 @@ grouped by training paradigm:
 
 ```
 capabilities/
-├── opd/    # On-policy distillation (kiln OPD trainer + remote teacher)
+├── opd/             # On-policy distillation (kiln OPD trainer + remote teacher)
+│   ├── code-fence-language-fidelity/
 │   ├── code-symbol-extraction/
+│   ├── diff-patch-fluency/
 │   ├── faithful-code-summarization/
 │   ├── tool-call-arg-fidelity/
 │   └── transcript-compaction/
-└── sft/    # Supervised fine-tuning (kiln SFT trainer)
-    ├── json-schema-adherence/
-    ├── math-broad/
-    └── python-algo/
+├── sft/             # Supervised fine-tuning (kiln SFT trainer)
+│   ├── json-schema-adherence/
+│   ├── math-broad/
+│   └── python-algo/
+└── agentic-grpo/    # Multi-turn agentic GRPO (kiln + pi, ECHO-on by default)
+    ├── lib/                          # shared pi-trajectory parsing
+    ├── pi-compaction/                # paper-track caps
+    ├── pi-doctest/
+    ├── pi-script-fixup/
+    ├── pi-terminal-bench-lite/
+    ├── pi-precondition-check/        # coding-agent caps (10-cap suite)
+    ├── pi-code-search/
+    ├── pi-code-comprehension/
+    ├── pi-diff-patch-apply/
+    ├── pi-tool-call-efficiency/
+    ├── pi-shell-hygiene/
+    ├── pi-test-interpretation/
+    ├── pi-failure-triage/
+    ├── pi-source-mod-workflow/
+    └── pi-faithful-completion/
 ```
 
 Each capability dir is the output of a single skill session
-(`opd-capability-creator` or `sft-capability-creator`). The skill's
-SKILL.md is authoritative for layout and discipline; this README only
-captures the policy that survives across capabilities.
+(`opd-capability-creator`, `sft-capability-creator`, or agentic-GRPO
+scaffolds). For agentic-GRPO, see
+`capabilities/agentic-grpo/README.md` for the bucket's shared layout,
+ECHO defaults, and standard workflow. For OPD/SFT, the corresponding
+`SKILL.md` is authoritative.
 
 ## Reproducibility — no adapters in git
 

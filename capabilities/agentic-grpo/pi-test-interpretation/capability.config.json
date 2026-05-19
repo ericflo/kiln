@@ -1,0 +1,62 @@
+{
+  "base_model_path": "/workspace/qwen3.5-4b",
+  "kiln_url": "http://localhost:8420",
+  "pi_bin": "/usr/bin/pi",
+  "pi_model_id": "qwen-3.5-4b-kiln",
+  "sandbox_root": "/tmp/pi-test-interpretation-rollouts",
+  "max_iters": 3,
+  "rollout": {
+    "num_generations_train": 4,
+    "num_generations_eval": 1,
+    "max_wall_clock_s": 360,
+    "max_turns": 10,
+    "max_tokens_per_turn": 2048,
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "parallel": 1
+  },
+  "training_phase1_defaults": {
+    "advantage_mode": "dr_grpo",
+    "loss_aggregation": "token_level",
+    "kl_estimator": "k1",
+    "kl_coeff": 0.1,
+    "clip_epsilon": 0.20,
+    "dynamic_sampling": true,
+    "is_level": "token",
+    "reference_policy": "base_per_step",
+    "lr": 1e-5,
+    "rank": 16,
+    "alpha": 32,
+    "seed": 3141592653,
+    "loss": {
+      "echo": {
+        "lambda": 0.05,
+        "env_mask_mode": "env_only",
+        "warning_filter": true
+      },
+      "opd": null,
+      "no_policy_loss": false
+    }
+  },
+  "rubric": {
+    "weights": {
+      "median_not_mean": 0.15,
+      "runs_min_3": 0.10,
+      "warmup_recognition": 0.10,
+      "flake_classification": 0.10,
+      "format_compliance": 0.05,
+      "base": 0.50
+    },
+    "median_tolerance_pct": 5
+  },
+  "task_mix": {
+    "tests_only_pct": 0.40,
+    "bench_pct": 0.40,
+    "mixed_pct": 0.20
+  },
+  "notes_v0": [
+    "median_not_mean compares the reported number against the parsed per-run set; tasks where mean ≈ median ≈ run_1 are excluded from the corpus.",
+    "runs_min_3 checks the count of bench-output repetition markers in stdout, not the count of tool calls (so `--repetitions 3` in one call counts as 3 runs).",
+    "Bench-rollouts have a 360s wall-clock budget; tighter rollout caps will undercount runs."
+  ]
+}
