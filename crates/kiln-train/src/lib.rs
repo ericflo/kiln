@@ -612,6 +612,14 @@ pub struct LossConfig {
     /// composition is structurally orthogonal.
     #[serde(default)]
     pub opd: Option<OpdAuxConfig>,
+    /// Verifier-free env-only adaptation mode (paper §5.5). When `true`,
+    /// the trainer masks out the GRPO policy-gradient term entirely and
+    /// trains *only* on ECHO's env-CE objective. Useful for adapting an
+    /// already-trained agentic policy on tasks where no programmatic
+    /// verifier is available — the model improves purely by learning to
+    /// predict the consequences of its own actions. Default: false.
+    #[serde(default)]
+    pub no_policy_loss: bool,
 }
 
 impl Default for LossConfig {
@@ -619,6 +627,7 @@ impl Default for LossConfig {
         Self {
             echo: default_echo_some(),
             opd: None,
+            no_policy_loss: false,
         }
     }
 }

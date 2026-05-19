@@ -231,6 +231,11 @@ struct Args {
     /// can pass `--opd-lambda` without the parser bailing, but not yet
     /// wired into the loss (OPD branch rebases on top of ECHO).
     opd_lambda: Option<f64>,
+    /// Disable the GRPO policy-gradient term entirely. Only ECHO's
+    /// env-CE drives gradients. Paper §5.5 verifier-free adaptation mode.
+    /// Requires --echo-lambda not be zero (otherwise the loss is
+    /// identically zero and no gradient flows).
+    no_policy_loss: bool,
 }
 
 #[cfg(feature = "cuda")]
@@ -249,6 +254,7 @@ impl Args {
         let mut echo_lambda: Option<f64> = None;
         let mut no_echo = false;
         let mut opd_lambda: Option<f64> = None;
+        let mut no_policy_loss = false;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -315,6 +321,7 @@ impl Args {
                             .context("--opd-lambda must be a float")?,
                     )
                 }
+                "--no-policy-loss" => no_policy_loss = true,
                 "--help" | "-h" => {
                     println!(
                         "cuda_grpo_ablation --data <jsonl> --model <dir> [--output <dir>] \
@@ -345,6 +352,11 @@ impl Args {
         if no_echo && echo_lambda.is_some() {
             anyhow::bail!("--no-echo and --echo-lambda are mutually exclusive");
         }
+        if no_policy_loss && no_echo {
+            anyhow::bail!(
+                "--no-policy-loss requires ECHO to drive gradients; can't combine with --no-echo"
+            );
+        }
 
         Ok(Args {
             data: data.context("--data is required")?,
@@ -360,6 +372,7 @@ impl Args {
             echo_lambda,
             no_echo,
             opd_lambda,
+            no_policy_loss,
         })
     }
 }
@@ -479,6 +492,10 @@ fn main() -> Result<()> {
     // (CLI is for inline knob-tweaking during development; env vars are
     // for ops/CI orchestration.)
     config.loss.apply_kiln_echo_env_overrides();
+
+    if args.no_policy_loss {
+        config.loss.no_policy_loss = true;
+    }
     if let Some(_opd_lambda) = args.opd_lambda {
         // Reserved for OPD branch rebase. Accept the flag but don't fire —
         // the loss path doesn't read config.loss.opd yet (see lib.rs

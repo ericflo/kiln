@@ -2298,11 +2298,24 @@ fn train_tokenized_grpo_group(
             // env_mask is all-false (legacy single-turn rollouts), or
             // when total_obs_len is 0, this contributes exactly nothing.
             //
+            // Verifier-free adaptation (paper §5.5) takes the
+            // `no_policy_loss = true` branch: the GRPO term is masked
+            // (multiplied by 0) and only the ECHO env-CE term drives
+            // gradients. This is what lets a strong-but-stable agent
+            // keep improving from environment interaction alone on
+            // tasks where no programmatic verifier is available.
+            //
             // Implementation: reuse token_log_probs with env_mask as
             // the position selector. Returns log p(x_t) at env
             // positions; CE = -sum(log p) / |O| (paper §3.1, where |O|
             // is total_obs_len). We rescale by env_count/|O| to convert
             // from sum-over-active to paper-normalized mean.
+            let policy_loss_scale = if config.loss.no_policy_loss { 0.0 } else { 1.0 };
+            let scaled_grpo = if policy_loss_scale != 1.0 {
+                grpo_loss_val.affine(policy_loss_scale, 0.0)?
+            } else {
+                grpo_loss_val
+            };
             let loss = if let Some(echo_cfg) = &config.loss.echo {
                 let env_count = comp
                     .env_mask
@@ -2320,15 +2333,20 @@ fn train_tokenized_grpo_group(
                     // mean_ce = -sum / |O| (paper §3.1 normalization)
                     let inv_obs_len = -(1.0 / comp.total_obs_len as f64);
                     let echo_mean_ce = env_log_prob_sum.affine(inv_obs_len, 0.0)?;
-                    // Total loss = L_grpo + λ · L_envCE
+                    // Total loss = (policy_scale * L_grpo) + λ · L_envCE
                     let echo_scaled = echo_mean_ce.affine(echo_cfg.lambda, 0.0)?;
-                    grpo_loss_val.add(&echo_scaled)?
+                    scaled_grpo.add(&echo_scaled)?
                 } else {
-                    grpo_loss_val
+                    scaled_grpo
                 }
             } else {
-                grpo_loss_val
+                scaled_grpo
             };
+            anyhow::ensure!(
+                !config.loss.no_policy_loss || config.loss.echo.is_some(),
+                "config.loss.no_policy_loss = true with no ECHO term defined produces \
+                 a constant-zero loss — set loss.echo = Some(...) to drive gradients."
+            );
 
             loss_val = loss.to_scalar::<f32>()? as f64;
 
