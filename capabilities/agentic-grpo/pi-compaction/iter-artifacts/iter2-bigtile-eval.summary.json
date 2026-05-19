@@ -1,0 +1,14 @@
+{
+  "mode": "eval",
+  "adapter": "current",
+  "n_tasks": 23,
+  "n_rollouts": 23,
+  "n_generations": 1,
+  "mean_composite": 0.31403227054303057,
+  "p50_composite": 0.07423228985448212,
+  "rollouts_nonzero": 23,
+  "rollouts_zero": 0,
+  "mean_wall_clock_s": 96.52787850214088,
+  "wall_clock_s_total": 2220.14120554924,
+  "grpo_groups_written": 0
+}

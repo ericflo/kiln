@@ -1,0 +1,30 @@
+{
+  "slug": "pi-compaction",
+  "base_model": "/workspace/qwen3.5-4b",
+  "model_served_as": "qwen-3.5-4b-kiln",
+  "kiln_server": "http://localhost:8420",
+  "rubric_version": "v1",
+  "rubric_module": "rubric",
+  "rollout_target": "kiln-served qwen3.5-4b via /v1/chat/completions",
+  "rollout_mode": "single_turn_text",
+  "training": {
+    "advantage_mode": "DrGrpo",
+    "loss_aggregation": "TokenLevel",
+    "kl_estimator": "K1",
+    "is_level": "Token",
+    "reference_policy": "BasePerStep",
+    "dynamic_sampling": true,
+    "clip_epsilon": 0.20,
+    "clip_eps_high": 0.28,
+    "lr": 1e-5,
+    "rank": 16,
+    "alpha": 32,
+    "seed": 3141592653,
+    "epochs": 1
+  },
+  "rollouts_per_group": 4,
+  "max_response_tokens": 4096,
+  "temperature": 0.8,
+  "top_p": 0.95,
+  "h100_workarounds": ["KILN_DISABLE_FUSED_GDN_GATES=1", "KILN_BATCHING_ENGINE=0"]
+}
