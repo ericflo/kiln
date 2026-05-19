@@ -3,7 +3,7 @@
 **Date:** 2026-05-19
 **Author:** Claude Opus 4.7 (1M context)
 **Cap directory:** `capabilities/agentic-grpo/pi-diff-patch-apply/`
-**Status:** In progress — loop resumed (iters 0-7 documented; iters 8+ being driven via drive_iters_fast.sh)
+**Status:** In progress — iters 0-9 documented. All 9 trained iters regress vs 0.942 baseline; best is iter 2 (h2-strong-filter T=1.0) at 0.925 (-1.7pp). Iters 10-49 pending on the new A100 pod (bootstrap in flight as of session end 2026-05-19T21:05Z).
 
 ---
 
