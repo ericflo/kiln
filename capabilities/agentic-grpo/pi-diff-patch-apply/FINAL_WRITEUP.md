@@ -147,6 +147,7 @@ format opened the gradient.
 | 2 | `h2-strong-filter-temp1.0-hard-6x3` | same + T=1.0, seed 1729 | **0.9246** | **−0.0173** | NEGATIVE-mild |
 | 3 | `h3-temp1-seed4242-hard-6x3` | same + seed 4242, fresh hard task subset | **0.9162** | **−0.0256** | NEGATIVE |
 | 4 | `h4-lower-lr-5e-6-hard-6x3` | lr 5e-6 + seed 11111, fresh hard tasks | **0.9109** | **−0.0309** | NEGATIVE |
+| 5 | `h5-higher-lr-2e-5-hard-6x3` | lr 2e-5 + seed 33333 | **0.2165** | **−0.7254** | NEGATIVE-CATASTROPHIC (policy collapse) |
 
 ### Iter 1 diagnosis
 
