@@ -148,6 +148,8 @@ format opened the gradient.
 | 3 | `h3-temp1-seed4242-hard-6x3` | same + seed 4242, fresh hard task subset | **0.9162** | **−0.0256** | NEGATIVE |
 | 4 | `h4-lower-lr-5e-6-hard-6x3` | lr 5e-6 + seed 11111, fresh hard tasks | **0.9109** | **−0.0309** | NEGATIVE |
 | 5 | `h5-higher-lr-2e-5-hard-6x3` | lr 2e-5 + seed 33333 | **0.2165** | **−0.7254** | NEGATIVE-CATASTROPHIC (policy collapse) |
+| 6 | `h6-lower-lr-2e-6-FAILED` | lr 2e-6 + seed 99999 | **INVALID** | INVALID | kiln serve crashed mid-rollout |
+| 7 | `h7-very-low-lr-2e-6-hard-6x3` | lr 2e-6 + seed 88888 | **0.2165** | **−0.7254** | NEGATIVE-CATASTROPHIC (identical collapse signature) |
 
 ### Iter 1 diagnosis
 
