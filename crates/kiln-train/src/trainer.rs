@@ -2229,6 +2229,13 @@ fn train_tokenized_grpo_group(
                     .get(1..)
                     .map_or(0, |m| m.iter().filter(|&&v| v).count());
                 if env_count > 0 && comp.total_obs_len > 0 {
+                    tracing::debug!(
+                        comp_idx,
+                        env_count,
+                        total_obs_len = comp.total_obs_len,
+                        echo_lambda = cfg.lambda,
+                        "GRPO checkpointed path: ECHO env-CE active"
+                    );
                     Some(EchoTailParams {
                         env_mask: &comp.env_mask,
                         total_obs_len: comp.total_obs_len,

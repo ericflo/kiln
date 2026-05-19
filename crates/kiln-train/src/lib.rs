@@ -819,4 +819,123 @@ mod tests {
         assert_eq!(config.checkpoint_interval, Some(10));
         assert_eq!(config.kl_coeff, 0.1); // default preserved
     }
+
+    // ECHO LossConfig + env-var override tests. Env-var manipulation is
+    // process-global; each test scrubs the env vars at start to keep the
+    // suite hermetic regardless of order. We use the modern `unsafe`
+    // wrappers on Rust 1.83+ to make the mutation explicit.
+
+    fn clear_kiln_echo_env_vars() {
+        unsafe {
+            std::env::remove_var("KILN_ECHO_ENABLED");
+            std::env::remove_var("KILN_ECHO_LAMBDA");
+            std::env::remove_var("KILN_ECHO_ENV_MASK_MODE");
+            std::env::remove_var("KILN_ECHO_WARNING_FILTER");
+        }
+    }
+
+    #[test]
+    fn loss_config_default_has_echo_on_at_0_05() {
+        clear_kiln_echo_env_vars();
+        let cfg = LossConfig::default();
+        assert!(cfg.echo.is_some(), "ECHO should be on by default");
+        assert!((cfg.echo_lambda() - 0.05).abs() < 1e-12);
+        assert!(cfg.opd.is_none(), "OPD should be off by default");
+    }
+
+    #[test]
+    fn loss_config_echo_lambda_returns_zero_when_disabled() {
+        clear_kiln_echo_env_vars();
+        let mut cfg = LossConfig::default();
+        cfg.echo = None;
+        assert_eq!(cfg.echo_lambda(), 0.0);
+        assert!(!cfg.echo_enabled());
+    }
+
+    #[test]
+    fn kiln_echo_enabled_false_disables_echo() {
+        clear_kiln_echo_env_vars();
+        unsafe { std::env::set_var("KILN_ECHO_ENABLED", "false") };
+        let mut cfg = LossConfig::default();
+        assert!(cfg.echo.is_some());
+        cfg.apply_kiln_echo_env_overrides();
+        assert!(cfg.echo.is_none(), "KILN_ECHO_ENABLED=false should disable");
+        clear_kiln_echo_env_vars();
+    }
+
+    #[test]
+    fn kiln_echo_lambda_overrides_value() {
+        clear_kiln_echo_env_vars();
+        unsafe { std::env::set_var("KILN_ECHO_LAMBDA", "0.02") };
+        let mut cfg = LossConfig::default();
+        cfg.apply_kiln_echo_env_overrides();
+        assert!(
+            (cfg.echo_lambda() - 0.02).abs() < 1e-12,
+            "KILN_ECHO_LAMBDA=0.02 should override; got {}",
+            cfg.echo_lambda()
+        );
+        clear_kiln_echo_env_vars();
+    }
+
+    #[test]
+    fn kiln_echo_lambda_re_enables_when_previously_disabled() {
+        clear_kiln_echo_env_vars();
+        unsafe { std::env::set_var("KILN_ECHO_LAMBDA", "0.03") };
+        let mut cfg = LossConfig::default();
+        cfg.echo = None; // explicitly disabled before override
+        cfg.apply_kiln_echo_env_overrides();
+        assert!(
+            cfg.echo.is_some(),
+            "setting LAMBDA env var should also re-enable ECHO"
+        );
+        assert!((cfg.echo_lambda() - 0.03).abs() < 1e-12);
+        clear_kiln_echo_env_vars();
+    }
+
+    #[test]
+    fn kiln_echo_env_mask_mode_overrides() {
+        clear_kiln_echo_env_vars();
+        unsafe { std::env::set_var("KILN_ECHO_ENV_MASK_MODE", "full_obs") };
+        let mut cfg = LossConfig::default();
+        cfg.apply_kiln_echo_env_overrides();
+        let echo = cfg.echo.expect("ECHO should still be on");
+        assert_eq!(echo.env_mask_mode, EnvMaskMode::FullObs);
+        clear_kiln_echo_env_vars();
+    }
+
+    #[test]
+    fn kiln_echo_warning_filter_overrides() {
+        clear_kiln_echo_env_vars();
+        unsafe { std::env::set_var("KILN_ECHO_WARNING_FILTER", "false") };
+        let mut cfg = LossConfig::default();
+        cfg.apply_kiln_echo_env_overrides();
+        let echo = cfg.echo.expect("ECHO should still be on");
+        assert!(!echo.warning_filter);
+        clear_kiln_echo_env_vars();
+    }
+
+    #[test]
+    fn kiln_echo_enabled_true_with_lambda_combo() {
+        clear_kiln_echo_env_vars();
+        unsafe {
+            std::env::set_var("KILN_ECHO_ENABLED", "true");
+            std::env::set_var("KILN_ECHO_LAMBDA", "0.1");
+        }
+        let mut cfg = LossConfig::default();
+        cfg.echo = None;
+        cfg.apply_kiln_echo_env_overrides();
+        assert!(cfg.echo.is_some());
+        assert!((cfg.echo_lambda() - 0.1).abs() < 1e-12);
+        clear_kiln_echo_env_vars();
+    }
+
+    #[test]
+    fn kiln_echo_no_env_vars_leaves_config_unchanged() {
+        clear_kiln_echo_env_vars();
+        let mut cfg = LossConfig::default();
+        let original_lambda = cfg.echo_lambda();
+        cfg.apply_kiln_echo_env_overrides();
+        assert!((cfg.echo_lambda() - original_lambda).abs() < 1e-12);
+        assert!(cfg.echo.is_some());
+    }
 }
