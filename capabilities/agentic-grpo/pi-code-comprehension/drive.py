@@ -296,6 +296,90 @@ def append_capability_jsonl(row: dict) -> None:
         f.write(json.dumps(row) + "\n")
 
 
+def update_in_progress_md(iter_n: int, slug: str, pod: str, eval_summary: dict, delta: float) -> None:
+    """Refresh the AUTO:RESULTS table and Status line in IN_PROGRESS.md after each iter.
+
+    Safe to call repeatedly — only rewrites between markers. If markers are
+    missing (e.g. file got rewritten by hand), this is a no-op.
+    """
+    p = ROOT / "IN_PROGRESS.md"
+    if not p.exists():
+        return
+    try:
+        text = p.read_text()
+
+        # Rebuild the results table from capability.jsonl (single source of truth).
+        rows = []
+        for line in (ROOT / "capability.jsonl").read_text().splitlines():
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+        # Determine current best
+        best = max(rows, key=lambda r: (r.get("eval") or {}).get("mean_composite") or 0.0,
+                   default=None)
+        best_iter = best["iter"] if best else None
+
+        table = ["| iter | slug | composite | Δ-base | outcome | grounding | cross-file | inv-cov | wall-s |",
+                 "|------|------|-----------|--------|---------|-----------|-----------|---------|--------|"]
+        for r in rows:
+            ev = r.get("eval") or {}
+            slug_s = r.get("slug") or "-"
+            comp = ev.get("mean_composite", 0) or 0
+            d = r.get("delta_vs_baseline")
+            d_s = f"{d:+.3f}" if isinstance(d, (int, float)) else "—"
+            out = ev.get("mean_outcome", 0) or 0
+            g = ev.get("mean_grounding", 0) or 0
+            cf = ev.get("mean_cross_file", 0) or 0
+            ic = ev.get("mean_invariant_coverage", 0) or 0
+            ws = ev.get("mean_wall_clock_s", 0) or 0
+            marker = "**" if r.get("iter") == best_iter else ""
+            row_s = (f"| {marker}{r['iter']}{marker} | {marker}{slug_s}{marker} | "
+                     f"{marker}{comp:.4f}{marker} | {marker}{d_s}{marker} | "
+                     f"{marker}{out:.3f}{marker} | {marker}{g:.3f}{marker} | "
+                     f"{marker}{cf:.3f}{marker} | {marker}{ic:.3f}{marker} | "
+                     f"{marker}{ws:.1f}{marker} |")
+            table.append(row_s)
+        new_table = "<!-- AUTO:RESULTS -->\n" + "\n".join(table) + "\n<!-- /AUTO:RESULTS -->"
+
+        if "<!-- AUTO:RESULTS -->" in text and "<!-- /AUTO:RESULTS -->" in text:
+            import re
+            text = re.sub(
+                r"<!-- AUTO:RESULTS -->.*?<!-- /AUTO:RESULTS -->",
+                new_table.replace("\\", "\\\\"),
+                text,
+                count=1,
+                flags=re.DOTALL,
+            )
+
+        # Update Status: line.
+        status_line = (f"**Status:** Iter {iter_n} `{slug}` complete — "
+                       f"composite **{eval_summary['mean_composite']:.4f}** "
+                       f"(Δ {delta:+.4f}). "
+                       f"Best so far: iter {best_iter} `{(best or {}).get('slug','?')}` = "
+                       f"**{((best or {}).get('eval') or {}).get('mean_composite', 0):.4f}**. "
+                       f"Active pod: `{pod}`.")
+        import re as _re
+        text = _re.sub(r"\*\*Status:\*\*[^\n]*", status_line, text, count=1)
+
+        # Append a short audit-log line at the bottom of the Audit log section.
+        ts = time.strftime("%H:%M", time.gmtime())
+        audit_line = (f"- {ts} — iter {iter_n} `{slug}` = "
+                      f"{eval_summary['mean_composite']:.4f} "
+                      f"(Δ {delta:+.4f}, "
+                      f"g={eval_summary['mean_grounding']:.3f}, "
+                      f"inv={eval_summary['mean_invariant_coverage']:.3f})")
+        # Insert just before the Closeout section.
+        if "## Closeout plan" in text:
+            text = text.replace("## Closeout plan", audit_line + "\n\n## Closeout plan", 1)
+        else:
+            text = text.rstrip() + "\n" + audit_line + "\n"
+
+        p.write_text(text)
+    except Exception as e:
+        print(f"  WARN: IN_PROGRESS.md update failed: {e}", flush=True)
+
+
 def b2_backup(iter_n: int, kind: str, pod: str) -> None:
     try:
         sh(f'cd {ROOT} && python3 backup_to_b2.py --iter {iter_n} --kind {kind} --pod {pod} 2>&1 | tail -3',
@@ -312,7 +396,8 @@ def git_commit_push(iter_n: int, slug: str, delta: float | None) -> None:
     msg = " ".join(msg_parts)
     try:
         sh("cd /data/projects/kiln-pi-code-comprehension/kiln && "
-           "git add -A capabilities/agentic-grpo/pi-code-comprehension/capability.jsonl && "
+           "git add -A capabilities/agentic-grpo/pi-code-comprehension/capability.jsonl "
+           "capabilities/agentic-grpo/pi-code-comprehension/IN_PROGRESS.md && "
            f"git commit -m 'cap[agentic-grpo/pi-code-comprehension]: {msg}' 2>&1 | tail -3",
            timeout=60)
         sh("cd /data/projects/kiln-pi-code-comprehension/kiln && git pull --rebase origin main 2>&1 | tail -3 && "
@@ -443,6 +528,7 @@ def run_one_iter(pod: str, iter_n: int) -> None:
           f"delta={delta:+.4f} grounding={eval_summary['mean_grounding']:.3f} "
           f"cross_file={eval_summary['mean_cross_file_caller_recall']:.3f} "
           f"inv={eval_summary['mean_invariant_coverage']:.3f}", flush=True)
+    update_in_progress_md(iter_n, slug, pod, row["eval"], delta)
     b2_backup(iter_n, kind, pod)
     git_commit_push(iter_n, slug, delta)
 
@@ -471,10 +557,30 @@ def main() -> int:
     args = ap.parse_args()
 
     iter_n = args.start_iter if args.start_iter is not None else next_iter()
+    consecutive_failures = 0
     while iter_n <= args.stop_iter:
+        # Pod-alive precheck — if the pod has no runtime/ports, bail out of the
+        # whole loop rather than racing through every remaining recipe logging
+        # the same dead-pod error.
+        try:
+            sh(f"python3 {RP} ssh {args.pod} 'echo alive' 2>&1 | tail -1",
+               timeout=20)
+        except Exception as e:
+            print(f"  FATAL: pod {args.pod} is unreachable: {e}", flush=True)
+            print(f"  Bailing out of drive loop at iter {iter_n}. Acquire a new "
+                  f"pod and restart drive with --start-iter {iter_n}.", flush=True)
+            with open(ROOT / "failures.jsonl", "a") as f:
+                f.write(json.dumps({
+                    "iter": iter_n,
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "error": f"pod {args.pod} unreachable: {str(e)[:500]}",
+                    "fatal": True,
+                }) + "\n")
+            return 2
         try:
             run_one_iter(args.pod, iter_n)
             iter_n += 1
+            consecutive_failures = 0
         except Exception as e:
             print(f"  ERROR: iter {iter_n}: {e}", flush=True)
             # Log to failures sidecar; do NOT add error rows to capability.jsonl.
@@ -484,7 +590,14 @@ def main() -> int:
                     "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "error": str(e)[:1500],
                 }) + "\n")
-            # Advance past the failed iter so we don't infinite-loop on a sticky failure.
+            consecutive_failures += 1
+            # If 3 iters in a row die, something systemic is wrong — bail and
+            # let a human (or me) diagnose instead of burning the whole queue.
+            if consecutive_failures >= 3:
+                print(f"  FATAL: {consecutive_failures} consecutive iter failures. "
+                      f"Bailing out at iter {iter_n}. Restart drive after diagnosing.",
+                      flush=True)
+                return 3
             iter_n += 1
     return 0
 
