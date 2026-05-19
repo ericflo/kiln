@@ -217,10 +217,25 @@ Same hot-swap semantics as SFT/GRPO. The next inference call uses the new adapte
 - Wired into the checkpointed analytic-tail path (`analytic_grpo_tail_loss_grad_pre_final_norm` grows the `echo: Option<EchoTailParams>` parameter).
 - Wired into vk-native (`vk_recompute_grpo_train_step_with_state` grows `echo: Option<VkEchoStepParams>`).
 - CLI flags on `cuda_grpo_ablation`.
-- KILN_ECHO_* env-var overrides.
-- `POST /v1/train/agentic` route alias.
-- Receipt schema (`EchoDiagnosticSummary`).
-- 26+ ECHO-related tests; 14 legacy GRPO tests still pass; 7 kiln-server tests still pass.
+- KILN_ECHO_* env-var overrides (serialized via `ENV_LOCK` in tests).
+- `POST /v1/train/agentic` route alias + `agentic_groups` serde alias
+  on `GrpoRequest::groups` so the route's body matches the route name.
+- Receipt schema (`EchoDiagnosticSummary`) including
+  `dynamics_holdout_ce_initial` and `dynamics_holdout_ce_final` (paper
+  §5.2 dynamics-test diagnostics).
+- Appendix C acceptance tests pinned:
+  - C.1 #1 — `lambda=0.0` is bit-equivalent to `echo=None`.
+  - C.1 #3 — paper §3.1 normalization `mean_ce ∝ |O'|/|O|`.
+  - C.1 #4 — checkpointed analytic-tail ECHO matches uncheckpointed
+    path within 1e-3 on the trainer-level loss.
+  - Phase 3 e2e — `no_policy_loss=true` upholds the linearity
+    invariant `loss_full ≈ loss_grpo_only + loss_vf`.
+- ~50 ECHO-related Rust tests across `echo.rs`, `receipt.rs`,
+  `trajectory.rs`, `trajectory_mask.rs`, `lib.rs`, `trainer.rs`
+  (kernel + masking + serde wire format + LossConfig + env-var
+  overrides + end-to-end trainer paths + Appendix C acceptance gates);
+  16 legacy GRPO/SFT tests still pass; 7 kiln-server training-API
+  tests still pass; 15 Python `pi_trajectory.py` unit tests pass.
 
 ### Phase 2 — Paper reproduction in a separate cap ✅ SHIPPED (scaffold)
 - `capabilities/agentic-grpo/pi-terminal-bench-lite` cap directory.
