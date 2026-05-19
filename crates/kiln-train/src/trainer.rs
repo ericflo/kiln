@@ -11254,6 +11254,126 @@ mod tests {
         Ok(())
     }
 
+    /// Appendix C.1 #4 — checkpointed-path ECHO loss agrees with the
+    /// uncheckpointed path within float tolerance. Pins the S1 risk
+    /// (analytic-tail refactor drifts the GRPO+ECHO numerics).
+    ///
+    /// Both paths take the same (deterministically-seeded) LoRA init,
+    /// same trajectory fixture, same `loss.echo = Some(EchoConfig::default())`.
+    /// The legacy GRPO equivalent
+    /// `test_checkpointed_grpo_reverse_gradients_match_standard_cpu` pins
+    /// the GRPO term; this test pins the GRPO+ECHO total.
+    #[test]
+    fn test_echo_checkpointed_matches_uncheckpointed_loss() -> Result<()> {
+        let device = Device::Cpu;
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device)?;
+        let backend = backend::for_device(&device);
+
+        use crate::ScoredRollout;
+        use crate::trajectory::{TurnKind, TurnSegment};
+
+        let traj = vec![
+            TurnSegment {
+                role: "assistant".into(),
+                content: "a".into(),
+                kind: TurnKind::Action,
+                tool_call_id: None,
+                warning_prefix_len: None,
+            },
+            TurnSegment {
+                role: "tool".into(),
+                content: "b".into(),
+                kind: TurnKind::Observation,
+                tool_call_id: None,
+                warning_prefix_len: None,
+            },
+            TurnSegment {
+                role: "assistant".into(),
+                content: "ab".into(),
+                kind: TurnKind::Action,
+                tool_call_id: None,
+                warning_prefix_len: None,
+            },
+        ];
+
+        let group = GrpoGroup {
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "ask".to_string(),
+            }],
+            // Two completions so the GRPO advantage variance is non-degenerate.
+            completions: vec![
+                ScoredRollout::from_trajectory(traj.clone(), 1.0),
+                ScoredRollout::from_trajectory(traj, 0.0),
+            ],
+        };
+        let tokenizer = make_echo_smoke_tokenizer()?;
+
+        unsafe {
+            std::env::set_var("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", "1");
+        }
+        let tokenized = tokenize_grpo_group(&group, &tokenizer)?;
+
+        let mut grpo_cfg = GrpoConfig::default();
+        grpo_cfg.lora_rank = 4;
+        grpo_cfg.lora_alpha = 8.0;
+        grpo_cfg.learning_rate = 0.01;
+        grpo_cfg.optimizer = Optimizer::Sgd;
+        grpo_cfg.loss.echo = Some(crate::EchoConfig::default());
+
+        // Uncheckpointed path: segments = None.
+        let seed = 0xEC_AC_0DE_u64;
+        let params_unchk = TrainableLoraParams::initialize_seeded(
+            &config, &weights, 4, 8.0, &device, Some(seed),
+        )?;
+        let loss_unchk = train_tokenized_grpo_group(
+            &*backend,
+            &tokenized,
+            &weights,
+            &config,
+            &params_unchk,
+            &grpo_cfg,
+            None, // segments=None → uncheckpointed branch
+            &device,
+            None,
+            None,
+        )?;
+
+        // Checkpointed path: segments = Some([(0,2),(2,4)]) for the 4-layer
+        // tiny model, fresh LoRA init from the same seed.
+        let segments = compute_segment_boundaries(config.num_layers, 2);
+        let params_chk = TrainableLoraParams::initialize_seeded(
+            &config, &weights, 4, 8.0, &device, Some(seed),
+        )?;
+        let loss_chk = train_tokenized_grpo_group(
+            &*backend,
+            &tokenized,
+            &weights,
+            &config,
+            &params_chk,
+            &grpo_cfg,
+            Some(&segments),
+            &device,
+            None,
+            None,
+        )?;
+
+        assert!(loss_unchk.is_finite(), "uncheckpointed loss not finite: {loss_unchk}");
+        assert!(loss_chk.is_finite(), "checkpointed loss not finite: {loss_chk}");
+
+        // Tolerance matches the legacy GRPO parity test (1e-5 loss-level;
+        // backend reductions accumulate at different orders so single-step
+        // bit-equivalence is not expected).
+        let delta = (loss_unchk - loss_chk).abs();
+        assert!(
+            delta < 1e-3,
+            "checkpointed ECHO loss must agree with uncheckpointed within 1e-3; \
+             got unchk={loss_unchk}, chk={loss_chk}, delta={delta:e}"
+        );
+        Ok(())
+    }
+
     /// ECHO checkpointed-path acceptance: the analytic_grpo_tail's ECHO
     /// branch must produce a finite loss whose absolute value differs
     /// from the GRPO-only loss when env_mask has active positions.
