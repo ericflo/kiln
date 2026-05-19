@@ -153,6 +153,47 @@ pub struct DiagnosticSummary {
     /// Final loss (mean KL for OPD, mean CE for SFT, …).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub final_loss: Option<f64>,
+    /// ECHO summary: present only when the run trained with
+    /// `LossConfig.echo = Some(...)` and at least one rollout
+    /// carried env-observation tokens. Paper §3.1 / §5.2 reporting
+    /// conventions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub echo: Option<EchoDiagnosticSummary>,
+}
+
+/// Receipt-grade ECHO summary. Captures the headline diagnostics from
+/// docs/papers/echo/echo_paper.md §5.2 — env-token CE at the start and
+/// end of training. A large drop (e.g. 30%+) is the paper's evidence
+/// that the model "learned terminal dynamics."
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct EchoDiagnosticSummary {
+    /// Lambda used for the env-CE term (paper §3.3 default 0.05).
+    pub lambda: f64,
+    /// Env-token cross-entropy at the start of training, averaged
+    /// across the env-positions of the first GRPO group. Lower = the
+    /// model already predicts terminal output well; useful as a
+    /// baseline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_ce_initial: Option<f64>,
+    /// Env-token cross-entropy at the end of training. Paper §5.2:
+    /// ECHO sharply lowers this relative to GRPO-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_ce_final: Option<f64>,
+    /// Fraction of env-CE drop: `(env_ce_initial - env_ce_final) /
+    /// env_ce_initial`. Direct comparison to paper Figure 3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_ce_drop_pct: Option<f64>,
+    /// Running λ·L_env / L_grpo ratio at the end of training. Useful
+    /// for the "auto-anneal is working" check — paper §3.3 says ECHO
+    /// self-anneals as the model learns terminal structure, so this
+    /// ratio should shrink over time (or at least stay bounded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lambda_effective_final: Option<f64>,
+    /// Total number of env-token gradients that contributed during the
+    /// run (Σ |O'| across all GRPO groups). Useful for the "ECHO
+    /// actually fired" smoke check.
+    #[serde(default)]
+    pub env_tokens_supervised: u64,
 }
 
 impl AdapterReceipt {

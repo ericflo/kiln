@@ -469,6 +469,11 @@ fn main() -> Result<()> {
             ..kiln_train::EchoConfig::default()
         });
     }
+    // KILN_ECHO_* env-var overrides take precedence over CLI flags so
+    // operators can override caps from the shell without editing scripts.
+    // (CLI is for inline knob-tweaking during development; env vars are
+    // for ops/CI orchestration.)
+    config.loss.apply_kiln_echo_env_overrides();
     if let Some(_opd_lambda) = args.opd_lambda {
         // Reserved for OPD branch rebase. Accept the flag but don't fire —
         // the loss path doesn't read config.loss.opd yet (see lib.rs

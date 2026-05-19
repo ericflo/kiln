@@ -1140,6 +1140,15 @@ pub fn routes() -> Router<AppState> {
             "/v1/train/grpo",
             post(submit_grpo).layer(DefaultBodyLimit::max(GRPO_BODY_LIMIT)),
         )
+        // Canonical alias for /v1/train/grpo after the ECHO trajectory
+        // schema landing. The "agentic" name reflects what the endpoint
+        // actually trains: multi-turn rollouts with action/observation
+        // segments. Both routes serve the same handler; legacy callers
+        // keep working unchanged.
+        .route(
+            "/v1/train/agentic",
+            post(submit_grpo).layer(DefaultBodyLimit::max(GRPO_BODY_LIMIT)),
+        )
         .route(
             "/v1/train/opd",
             post(submit_opd).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),

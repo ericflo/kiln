@@ -636,6 +636,68 @@ impl LossConfig {
     pub fn echo_enabled(&self) -> bool {
         self.echo.is_some() && self.echo_lambda() != 0.0
     }
+
+    /// Apply environment-variable overrides on top of an existing
+    /// `LossConfig`. Honors:
+    ///
+    /// - `KILN_ECHO_ENABLED` — `0`/`false`/`no` → disable ECHO
+    ///   (`loss.echo = None`); `1`/`true`/`yes` → enable with current
+    ///   `lambda` (or default 0.05 if previously disabled).
+    /// - `KILN_ECHO_LAMBDA` — overrides `lambda` on the existing
+    ///   `EchoConfig`; if ECHO is disabled and this is set, ECHO is
+    ///   re-enabled with the given lambda.
+    /// - `KILN_ECHO_ENV_MASK_MODE` — `env_only` (default) | `full_obs`.
+    /// - `KILN_ECHO_WARNING_FILTER` — bool, default true.
+    ///
+    /// Call this from CLI entry points (cuda_grpo_ablation, vk_train CLI,
+    /// future kiln-server route handlers) so users can toggle ECHO from
+    /// the shell without editing JSON.
+    pub fn apply_kiln_echo_env_overrides(&mut self) {
+        // KILN_ECHO_ENABLED — explicit disable wins over anything else.
+        if let Ok(val) = std::env::var("KILN_ECHO_ENABLED") {
+            let v = val.to_lowercase();
+            if v == "0" || v == "false" || v == "no" {
+                self.echo = None;
+            } else if v == "1" || v == "true" || v == "yes" {
+                self.echo.get_or_insert_with(EchoConfig::default);
+            }
+        }
+
+        // The remaining knobs only make sense when ECHO is on. Apply
+        // them on the current EchoConfig (creating one if needed when
+        // any knob is set).
+        let lambda_override =
+            std::env::var("KILN_ECHO_LAMBDA").ok().and_then(|v| v.parse::<f64>().ok());
+        let mask_mode_override =
+            std::env::var("KILN_ECHO_ENV_MASK_MODE").ok().and_then(|v| match v.to_lowercase().as_str() {
+                "env_only" | "envonly" => Some(EnvMaskMode::EnvOnly),
+                "full_obs" | "fullobs" => Some(EnvMaskMode::FullObs),
+                _ => None,
+            });
+        let warning_filter_override = std::env::var("KILN_ECHO_WARNING_FILTER")
+            .ok()
+            .and_then(|v| match v.to_lowercase().as_str() {
+                "0" | "false" | "no" => Some(false),
+                "1" | "true" | "yes" => Some(true),
+                _ => None,
+            });
+
+        if lambda_override.is_some()
+            || mask_mode_override.is_some()
+            || warning_filter_override.is_some()
+        {
+            let cfg = self.echo.get_or_insert_with(EchoConfig::default);
+            if let Some(lambda) = lambda_override {
+                cfg.lambda = lambda;
+            }
+            if let Some(mode) = mask_mode_override {
+                cfg.env_mask_mode = mode;
+            }
+            if let Some(wf) = warning_filter_override {
+                cfg.warning_filter = wf;
+            }
+        }
+    }
 }
 
 impl GrpoConfig {
