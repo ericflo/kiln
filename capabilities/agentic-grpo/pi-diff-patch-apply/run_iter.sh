@@ -164,8 +164,30 @@ PYEOF"
   python3 $RP bg $POD_ID /tmp/kiln-serve-iter${ITER}.log \
     'cd /workspace/kiln && KILN_DISABLE_FUSED_GDN_GATES=1 KILN_BATCHING_ENGINE=0 KILN_MODEL_PATH=/workspace/qwen3.5-4b ./target/release/kiln serve 2>&1'
   sleep 30
-  python3 $RP ssh $POD_ID "curl -sS http://localhost:8420/v1/adapters | head -c 400"
-  echo
+  # Health check: kiln must respond AND the new adapter must be in the registry.
+  HEALTH_OK=0
+  for try in 1 2 3 4 5; do
+    REG=$(python3 $RP ssh $POD_ID "curl -sS --max-time 10 http://localhost:8420/v1/adapters" 2>/dev/null)
+    if echo "$REG" | grep -q "pi-diff-patch-apply-iter${ITER}"; then
+      echo ">>> kiln serve healthy (try $try) — adapter in registry"
+      HEALTH_OK=1
+      break
+    fi
+    echo ">>> kiln serve not ready (try $try) — sleeping 15"
+    sleep 15
+  done
+  if [ "$HEALTH_OK" = "0" ]; then
+    echo "FATAL: kiln serve health check failed after restart. Killing + retrying once."
+    python3 $RP ssh $POD_ID 'pkill -9 -f "kiln serve" 2>/dev/null || true; sleep 5'
+    python3 $RP bg $POD_ID /tmp/kiln-serve-iter${ITER}-retry.log \
+      'cd /workspace/kiln && KILN_DISABLE_FUSED_GDN_GATES=1 KILN_BATCHING_ENGINE=0 KILN_MODEL_PATH=/workspace/qwen3.5-4b ./target/release/kiln serve 2>&1'
+    sleep 45
+    REG=$(python3 $RP ssh $POD_ID "curl -sS --max-time 10 http://localhost:8420/v1/adapters" 2>/dev/null)
+    if ! echo "$REG" | grep -q "pi-diff-patch-apply-iter${ITER}"; then
+      echo "FATAL: kiln serve still not healthy. Bailing this iter — caller should mark INFRA-FAIL."
+      exit 42
+    fi
+  fi
 fi
 
 ###############################################################################
@@ -183,6 +205,20 @@ if [ "$SKIP_EVAL" = "0" ]; then
   if [ "${EVAL_TASK_LIMIT}" -gt 0 ]; then
     EVAL_LIMIT_ARG="--task-limit ${EVAL_TASK_LIMIT}"
   fi
+  # Smoke check: 1 rollout on a known easy task. If it fails (zero tool calls / <30s session),
+  # the adapter is broken — restart kiln before full eval.
+  echo ">>> smoke test eval (1 task × 1 gen) to detect adapter/kiln infra failure"
+  SMOKE_OUT="/tmp/iter${ITER}-smoke"
+  python3 $RP bg $POD_ID "/tmp/iter${ITER}-smoke.log" \
+    "cd ${POD_REPO} && rm -rf ${SMOKE_OUT} && python3 rollout.py \
+      --tasks datasets/eval.tasks.jsonl --task-limit 1 \
+      --out-dir ${SMOKE_OUT} --mode eval --num-generations 1 \
+      --adapter current --seed-base ${SEED} --parallel 1 \
+      --max-wall-clock-s 120 \
+      --temperature 0.0 --verbose 2>&1"
+  python3 $RP wait-file $POD_ID "${SMOKE_OUT}/summary.json" --timeout 900 || true
+  SMOKE_SCORE=$(python3 $RP ssh $POD_ID "python3 -c 'import json; print(json.load(open(\"${SMOKE_OUT}/summary.json\"))[\"mean_composite\"])' 2>/dev/null" || echo "0")
+  echo ">>> smoke test composite: ${SMOKE_SCORE}"
   echo ">>> eval rollouts: ${EVAL_TASK_LIMIT:-full} tasks × 1 gen (parallel=${PARALLEL})"
   python3 $RP bg $POD_ID "/tmp/iter${ITER}-eval.log" \
     "cd ${POD_REPO} && rm -rf ${EVAL_OUT} && python3 rollout.py \
