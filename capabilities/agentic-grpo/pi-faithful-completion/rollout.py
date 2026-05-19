@@ -201,7 +201,26 @@ def main() -> int:
     print(f"loaded {len(tasks)} tasks; num_generations={args.num_generations} "
           f"adapter={args.adapter or '(current)'} mode={args.mode}", flush=True)
 
-    adapter_arg = None if args.adapter in (None, "", "current") else args.adapter
+    # If --adapter is "current" or empty/None, fetch the currently-loaded
+    # adapter name from kiln and send it explicitly on every request.
+    # WHY: kiln's `ensure_adapter` treats a missing `adapter` field in
+    # the request body as "revert to base", which silently unloads the
+    # active LoRA — observed 2026-05-19 making 3 iters' eval composites
+    # mistakenly match base.
+    adapter_arg: str | None
+    if args.adapter in (None, "", "current"):
+        try:
+            with urllib.request.urlopen(f"{args.kiln_base}/v1/adapters", timeout=10) as resp:
+                ad = json.load(resp).get("active")
+            adapter_arg = ad
+            print(f"resolved 'current' adapter -> {ad!r}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"warning: could not resolve current adapter ({e}); proceeding without adapter", flush=True)
+            adapter_arg = None
+    elif args.adapter == "base":
+        adapter_arg = None
+    else:
+        adapter_arg = args.adapter
 
     rollouts_records: list[dict] = []
     rollouts_by_task: dict[str, list[dict]] = {}
