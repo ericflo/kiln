@@ -111,7 +111,7 @@ echo ">>> building corpus"
 run_pod 'cd /workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply && mkdir -p datasets && python3 build_corpus.py --train 60 --eval 24 --seed 3141592653 2>&1 | tail -3'
 
 echo ">>> [6/6] start kiln serve"
-run_pod 'pkill -9 -f "kiln serve" 2>/dev/null || true; sleep 2'
+run_pod 'pgrep -x kiln | xargs -r kill -9 2>/dev/null || true; sleep 2'
 python3 "$RP" bg "$POD_ID" /tmp/kiln-serve-bootstrap.log \
   'cd /workspace/kiln && KILN_DISABLE_FUSED_GDN_GATES=1 KILN_BATCHING_ENGINE=0 KILN_MODEL_PATH=/workspace/qwen3.5-4b ./target/release/kiln serve 2>&1'
 sleep 30

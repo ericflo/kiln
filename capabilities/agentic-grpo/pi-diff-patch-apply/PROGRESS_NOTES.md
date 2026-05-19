@@ -35,7 +35,7 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 7    | h7-very-low-lr-2e-6 6×3          | 0.2165    | −0.725 | CATASTROPHIC (same pattern as iter 5 — infra suspect)   |
 | 8    | h8-no-echo 8×3                   | 0.8400    | −0.102 | NEGATIVE — first iter after pi-setup + pytest fixes     |
 | 9    | h9-echo-0.10 8×3                 | 0.7623    | −0.180 | NEGATIVE — higher ECHO over-anchored, drift hit worst   |
-| 10   | h10-echo-0.02 8×3                | —         | —      | **in flight on A100 pod 36xpt4xbmezqtc**                |
+| 10   | h10-echo-0.02 8×3                | —         | —      | FAILED-no-eval — pkill-self-kill bug (train rollouts ran, GRPO never started; see §8 below) |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far:** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
@@ -64,6 +64,19 @@ Lease expires `2026-05-19T12:52:01Z`.
    no-ops without printing anything useful, leaving `/workspace/qwen3.5-4b/` empty.
    Switched bootstrap to `hf download` (the new tool) + added a post-download verify
    that exits 41 if no model files appear.
+
+8. **ROOT CAUSE: `pkill -9 -f "kiln serve"` over SSH self-kills the wrapper bash.**
+   Discovered 2026-05-19 22:30Z while debugging iter 10's repeat failure even with the
+   health-check guard. `runpod_api.py ssh "pkill -9 -f \"kiln serve\" || true; sleep 3"`
+   reliably returned 255 with empty output. Root cause: pkill on the pod, when invoked
+   with `-f` (full cmdline match), matches its own wrapping bash's argv — which
+   contains the literal string "kiln serve" (because we passed it as the `-f` pattern).
+   The wrapper bash gets SIGKILL'd. SSH session dies. `set -e` in run_iter.sh kills
+   the script silently. This is the root cause of the iter 10→49 cascade in note 7
+   AND of all the iter 5/6/7 catastrophic failures back in the first session.
+   **Fix:** replace `pkill -9 -f "kiln serve"` with `pgrep -x kiln | xargs -r kill -9`.
+   `pgrep -x` matches the binary name exactly (not the full cmdline), so it can't
+   match the wrapper bash. Committed across run_iter.sh and bootstrap_pod.sh.
 
 7. **The iter 10 → 49 silent cascade (2026-05-19 21:38Z–22:00Z).** Drive script ran
    through iters 10-49 in ~20 min but every single one was a no-op because kiln serve

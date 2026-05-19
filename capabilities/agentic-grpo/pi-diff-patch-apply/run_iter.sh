@@ -139,7 +139,7 @@ PYEOF"
   fi
 
   echo ">>> killing kiln serve, training GRPO step"
-  python3 $RP ssh $POD_ID 'pkill -9 -f "kiln serve" 2>/dev/null || true; sleep 3'
+  python3 $RP ssh $POD_ID 'pgrep -x kiln | xargs -r kill -9 2>/dev/null || true; sleep 3'
 
   ECHO_FLAG=""
   if [ "$NO_ECHO" = "1" ]; then
@@ -184,7 +184,7 @@ PYEOF"
   done
   if [ "$HEALTH_OK" = "0" ]; then
     echo "FATAL: kiln serve health check failed after restart. Killing + retrying once."
-    python3 $RP ssh $POD_ID 'pkill -9 -f "kiln serve" 2>/dev/null || true; sleep 5'
+    python3 $RP ssh $POD_ID 'pgrep -x kiln | xargs -r kill -9 2>/dev/null || true; sleep 5'
     python3 $RP bg $POD_ID /tmp/kiln-serve-iter${ITER}-retry.log \
       'cd /workspace/kiln && KILN_DISABLE_FUSED_GDN_GATES=1 KILN_BATCHING_ENGINE=0 KILN_MODEL_PATH=/workspace/qwen3.5-4b ./target/release/kiln serve 2>&1'
     sleep 45
