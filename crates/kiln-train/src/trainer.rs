@@ -7620,6 +7620,175 @@ fn grpo_loss(
     total.affine(params.loss_normalizer, 0.0).map_err(Into::into)
 }
 
+/// Whether the multi-layer per-layer tile-reverse path is enabled.
+///
+/// Defaults to **on** because the legacy multi-layer monolithic fallback
+/// retains full-segment autograd activations and OOMs on consumer GPUs
+/// (24 GB) at long context (≥4K-token GRPO groups, the production
+/// pi-compaction regime). With this path on, the existing per-layer tile
+/// reverse (`exact_gdn_single_layer_tiled_reverse` /
+/// `full_attention_single_layer_tiled_mlp_reverse`) is applied to each
+/// layer inside the segment, chaining gradients layer-to-layer.
+///
+/// Set `KILN_DISABLE_MULTI_LAYER_TILE_REVERSE=1` to fall back to the
+/// monolithic segment forward+backward (the historical pre-#1055 path).
+fn multi_layer_tile_reverse_enabled() -> bool {
+    !kiln_core::env_flag::env_flag("KILN_DISABLE_MULTI_LAYER_TILE_REVERSE", false)
+}
+
+/// Per-layer tile-reverse over a multi-layer segment.
+///
+/// Walks layers in reverse order, applying the existing single-layer tile
+/// reverse to each one and chaining gradients. The detached per-layer input
+/// tensors are recomputed via a forward pass through the segment with detached
+/// LoRA weights so the autograd graph stays empty between layer iterations
+/// (one layer's tile reverse builds + tears down its own autograd graph;
+/// activations for layer i+1 are never held simultaneously with layer i).
+///
+/// Replaces the monolithic `model_forward_segment(seg_input_var, seg_start, seg_end)`
+/// + `(seg_output * upstream_grad).sum().backward()` fallback that held a
+/// full-segment autograd graph at once — the path that OOMs on consumer
+/// GPUs at long context.
+///
+/// Pre-conditions:
+/// * `seg_input.dims() == upstream_grad.dims() == [1, seq_len, hidden_size]`.
+/// * `streaming_prefill_enabled_for(device, seq_len)` is true (otherwise
+///   the per-layer tile reverse functions decline anyway and the caller
+///   should fall back to monolithic).
+/// * `seg_end > seg_start` (caller already handles the single-layer fast
+///   path above via the size-1 specializations).
+#[allow(clippy::too_many_arguments)]
+fn multi_layer_per_layer_tile_reverse(
+    backend: &dyn BackendRuntime,
+    seg_start: usize,
+    seg_end: usize,
+    seg_input: &Tensor,
+    upstream_grad: &Tensor,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    positions: &[u32],
+    params: &TrainableLoraParams,
+    lora_detached: &LoraWeights,
+    device: &Device,
+    accumulated_grads: &mut HashMap<candle_core::TensorId, Tensor>,
+    all_vars: &[&Var],
+) -> Result<Tensor> {
+    anyhow::ensure!(
+        seg_end > seg_start,
+        "multi_layer_per_layer_tile_reverse called with empty segment [{seg_start}, {seg_end})"
+    );
+    anyhow::ensure!(
+        seg_input.dims() == upstream_grad.dims(),
+        "multi_layer_per_layer_tile_reverse seg_input/upstream_grad shape mismatch: {:?} vs {:?}",
+        seg_input.dims(),
+        upstream_grad.dims()
+    );
+
+    let gdn_tile_size = exact_gdn_backward_tile_tokens_for(device);
+    let fa_tile_size = std::env::var("KILN_CUDA_TRAINING_MLP_CHUNK_TOKENS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(1024);
+
+    // Compute per-layer-input boundaries via detached forward through the
+    // segment. layer_inputs[i] is the input to layer (seg_start + i), with
+    // layer_inputs[0] = seg_input. Detached LoRA weights mean no autograd
+    // graph is built during this pass — boundaries are pure values.
+    let num_layers = seg_end - seg_start;
+    let mut layer_inputs: Vec<Tensor> = Vec::with_capacity(num_layers);
+    layer_inputs.push(seg_input.detach());
+    {
+        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        let mut current = layer_inputs[0].clone();
+        for layer_offset in 0..(num_layers - 1) {
+            let layer_idx = seg_start + layer_offset;
+            current = model_forward_segment(
+                backend,
+                current,
+                weights,
+                model_config,
+                positions,
+                layer_idx,
+                layer_idx + 1,
+                Some(&mut linear_state),
+                Some(lora_detached),
+            )
+            .with_context(|| {
+                format!(
+                    "multi-layer tile reverse: per-layer-input forward at layer {layer_idx}"
+                )
+            })?
+            .detach();
+            layer_inputs.push(current.clone());
+        }
+    }
+
+    // Reverse walk: each layer's tile reverse takes the current upstream grad
+    // (gradient at the layer's output) and produces the gradient at the
+    // layer's input, which becomes the next layer's upstream grad.
+    let mut current_grad = upstream_grad.clone();
+    for layer_offset in (0..num_layers).rev() {
+        let layer_idx = seg_start + layer_offset;
+        let layer_input = &layer_inputs[layer_offset];
+        let new_grad = match &weights.layers[layer_idx].attention {
+            GpuAttentionWeights::Linear(_) => exact_gdn_single_layer_tiled_reverse(
+                backend,
+                layer_idx,
+                layer_input,
+                &current_grad,
+                weights,
+                model_config,
+                positions,
+                params,
+                lora_detached,
+                gdn_tile_size,
+                device,
+                accumulated_grads,
+            )
+            .with_context(|| {
+                format!(
+                    "multi-layer tile reverse: GDN tile reverse layer {layer_idx} (seg [{seg_start}, {seg_end}))"
+                )
+            })?,
+            GpuAttentionWeights::Full(_) => {
+                let full_attn_layer_idx = (0..layer_idx)
+                    .filter(|&idx| {
+                        matches!(weights.layers[idx].attention, GpuAttentionWeights::Full(_))
+                    })
+                    .count();
+                full_attention_single_layer_tiled_mlp_reverse(
+                    backend,
+                    layer_idx,
+                    full_attn_layer_idx,
+                    layer_input,
+                    &current_grad,
+                    weights,
+                    model_config,
+                    positions,
+                    params,
+                    lora_detached,
+                    fa_tile_size,
+                    device,
+                    accumulated_grads,
+                    all_vars,
+                )
+                .with_context(|| {
+                    format!(
+                        "multi-layer tile reverse: FA tile reverse layer {layer_idx} (seg [{seg_start}, {seg_end}))"
+                    )
+                })?
+            }
+        };
+        current_grad = new_grad;
+        synchronize_checkpoint_boundary(device, || {
+            format!("synchronize multi-layer tile reverse layer {layer_idx} cleanup")
+        })?;
+    }
+
+    Ok(current_grad)
+}
+
 /// Run one GRPO training step with exact reverse-mode checkpointing.
 ///
 /// Reference log-probs are pre-computed and passed in. The policy path mirrors
@@ -7912,6 +8081,50 @@ fn checkpointed_grpo_forward_backward(
             synchronize_checkpoint_boundary(device, || {
                 format!(
                     "synchronize checkpointed GRPO full-attention tiled MLP reverse segment {seg_idx} cleanup"
+                )
+            })?;
+            continue;
+        }
+
+        // Multi-layer per-layer tile reverse. Default-on. Replaces the
+        // monolithic segment forward+backward fallback that retains the
+        // whole segment's autograd graph at once (OOM-prone on consumer
+        // GPUs at long context, e.g. >24 GB VRAM for 4-layer × 7K-token
+        // GRPO segments). Walks layers in reverse, applying the existing
+        // single-layer tile reverse to each, chaining gradients
+        // layer-to-layer. Equivalent boundary memory to the monolithic
+        // path; transient memory is bounded by one layer × one tile.
+        if seg_end > seg_start + 1
+            && multi_layer_tile_reverse_enabled()
+            && streaming_prefill_enabled_for(device, input_ids.len())
+        {
+            let next_upstream_grad = multi_layer_per_layer_tile_reverse(
+                backend,
+                seg_start,
+                seg_end,
+                &seg_input,
+                &upstream_grad_for_seg,
+                weights,
+                model_config,
+                &positions,
+                params,
+                &lora_detached,
+                device,
+                &mut accumulated_grads,
+                &all_vars,
+            )
+            .with_context(|| {
+                format!(
+                    "multi-layer per-layer tile reverse GRPO segment {seg_idx} layers [{seg_start}, {seg_end})"
+                )
+            })?;
+            drop(seg_input);
+            drop(upstream_grad_for_seg);
+            upstream_grad =
+                offload_checkpoint_tensor_to_cpu(next_upstream_grad, recompute_boundaries)?;
+            synchronize_checkpoint_boundary(device, || {
+                format!(
+                    "synchronize checkpointed GRPO multi-layer tile reverse segment {seg_idx} cleanup"
                 )
             })?;
             continue;
