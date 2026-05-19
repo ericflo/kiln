@@ -11254,6 +11254,126 @@ mod tests {
         Ok(())
     }
 
+    /// Phase 3 (paper §5.5) end-to-end smoke: `no_policy_loss = true`
+    /// masks the GRPO surrogate so only the ECHO env-CE drives the loss.
+    /// Pins the verifier-free adaptation contract: same fixture, with
+    /// the GRPO term scaled to zero, produces a measurably different
+    /// loss than the standard GRPO+ECHO total (the GRPO contribution
+    /// goes away).
+    ///
+    /// This is the end-to-end peer of the serde tests in
+    /// `lib::loss_config_no_policy_loss_*`: those pin the config shape;
+    /// this pins the trainer wiring.
+    #[test]
+    fn test_echo_no_policy_loss_verifier_free_e2e() -> Result<()> {
+        let device = Device::Cpu;
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device)?;
+        let backend = backend::for_device(&device);
+
+        use crate::ScoredRollout;
+        use crate::trajectory::{TurnKind, TurnSegment};
+
+        let traj = vec![
+            TurnSegment {
+                role: "assistant".into(),
+                content: "a".into(),
+                kind: TurnKind::Action,
+                tool_call_id: None,
+                warning_prefix_len: None,
+            },
+            TurnSegment {
+                role: "tool".into(),
+                content: "b".into(),
+                kind: TurnKind::Observation,
+                tool_call_id: None,
+                warning_prefix_len: None,
+            },
+            TurnSegment {
+                role: "assistant".into(),
+                content: "ab".into(),
+                kind: TurnKind::Action,
+                tool_call_id: None,
+                warning_prefix_len: None,
+            },
+        ];
+
+        let group = GrpoGroup {
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "ask".to_string(),
+            }],
+            completions: vec![
+                ScoredRollout::from_trajectory(traj.clone(), 1.0),
+                ScoredRollout::from_trajectory(traj, 0.0),
+            ],
+        };
+        let tokenizer = make_echo_smoke_tokenizer()?;
+
+        unsafe {
+            std::env::set_var("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", "1");
+        }
+        let tokenized = tokenize_grpo_group(&group, &tokenizer)?;
+
+        let seed = 0xFEE_FACE_u64;
+        let mk_cfg = |no_policy_loss: bool| {
+            let mut cfg = GrpoConfig::default();
+            cfg.lora_rank = 4;
+            cfg.lora_alpha = 8.0;
+            cfg.learning_rate = 0.01;
+            cfg.optimizer = Optimizer::Sgd;
+            cfg.loss.echo = Some(crate::EchoConfig::default());
+            cfg.loss.no_policy_loss = no_policy_loss;
+            cfg
+        };
+
+        let params_full = TrainableLoraParams::initialize_seeded(
+            &config, &weights, 4, 8.0, &device, Some(seed),
+        )?;
+        let loss_full = train_tokenized_grpo_group(
+            &*backend,
+            &tokenized,
+            &weights,
+            &config,
+            &params_full,
+            &mk_cfg(false),
+            None,
+            &device,
+            None,
+            None,
+        )?;
+
+        let params_vf = TrainableLoraParams::initialize_seeded(
+            &config, &weights, 4, 8.0, &device, Some(seed),
+        )?;
+        let loss_vf = train_tokenized_grpo_group(
+            &*backend,
+            &tokenized,
+            &weights,
+            &config,
+            &params_vf,
+            &mk_cfg(true),
+            None,
+            &device,
+            None,
+            None,
+        )?;
+
+        assert!(loss_full.is_finite(), "GRPO+ECHO loss not finite: {loss_full}");
+        assert!(loss_vf.is_finite(), "ECHO-only (verifier-free) loss not finite: {loss_vf}");
+
+        // The verifier-free path zeros out the GRPO surrogate. With the
+        // same fixture, total loss must differ from the GRPO+ECHO total
+        // by at least the magnitude of the (now-absent) GRPO term.
+        let delta = (loss_full - loss_vf).abs();
+        assert!(
+            delta > 1e-6,
+            "no_policy_loss=true must produce a measurably different loss \
+             than the standard GRPO+ECHO total; got full={loss_full}, vf={loss_vf}, delta={delta}"
+        );
+        Ok(())
+    }
+
     /// Appendix C.1 #4 — checkpointed-path ECHO loss agrees with the
     /// uncheckpointed path within float tolerance. Pins the S1 risk
     /// (analytic-tail refactor drifts the GRPO+ECHO numerics).
