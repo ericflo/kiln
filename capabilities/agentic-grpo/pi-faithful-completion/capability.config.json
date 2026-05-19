@@ -1,0 +1,75 @@
+{
+  "base_model_path": "/workspace/qwen3.5-4b",
+  "kiln_url": "http://localhost:8420",
+  "pi_bin": "/usr/bin/pi",
+  "pi_model_id": "qwen-3.5-4b-kiln",
+  "sandbox_root": "/tmp/pi-faithful-completion-rollouts",
+  "max_iters": 3,
+  "rollout": {
+    "num_generations_train": 4,
+    "num_generations_eval": 1,
+    "max_wall_clock_s": 60,
+    "max_turns": 6,
+    "max_tokens_per_turn": 768,
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "parallel": 1
+  },
+  "training_phase1_defaults": {
+    "advantage_mode": "dr_grpo",
+    "loss_aggregation": "token_level",
+    "kl_estimator": "k1",
+    "kl_coeff": 0.1,
+    "clip_epsilon": 0.20,
+    "dynamic_sampling": true,
+    "is_level": "token",
+    "reference_policy": "base_per_step",
+    "lr": 1e-5,
+    "rank": 16,
+    "alpha": 32,
+    "seed": 3141592653,
+    "loss": {
+      "echo": {
+        "lambda": 0.05,
+        "env_mask_mode": "env_only",
+        "warning_filter": true
+      },
+      "opd": null,
+      "no_policy_loss": false
+    }
+  },
+  "rubric": {
+    "weights": {
+      "no_question_addressed_to_user": 0.20,
+      "no_soft_punt": 0.15,
+      "honest_failure": 0.10,
+      "format_strict": 0.05,
+      "base": 0.50
+    },
+    "soft_punt_penalty_per_match": 0.5
+  },
+  "soft_punt_phrases": [
+    "Eric's call",
+    "your call",
+    "let me know",
+    "should I",
+    "do you want me to",
+    "awaiting your",
+    "ready when you are",
+    "waiting for Eric",
+    "Eric to decide",
+    "waiting for you to"
+  ],
+  "underlying_failure_rate_pct": 30,
+  "task_mix": {
+    "synthetic_simple_pct": 0.50,
+    "wrapped_precondition_check_pct": 0.20,
+    "wrapped_code_search_pct": 0.20,
+    "wrapped_source_mod_workflow_pct": 0.10
+  },
+  "notes_v0": [
+    "v0 uses literal phrase matching for soft_punt; v1 adds embedding-based paraphrase detection.",
+    "honest_failure cross-references the underlying check verdict against the agent's claim; mismatches score 0.",
+    "Consider a lambda=0.025 ECHO variant in iter 1 — this cap's reward is heavily GRPO-shaped and high lambda may dilute the signal."
+  ]
+}

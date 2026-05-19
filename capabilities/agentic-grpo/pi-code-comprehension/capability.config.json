@@ -1,0 +1,58 @@
+{
+  "base_model_path": "/workspace/qwen3.5-4b",
+  "kiln_url": "http://localhost:8420",
+  "pi_bin": "/usr/bin/pi",
+  "pi_model_id": "qwen-3.5-4b-kiln",
+  "sandbox_root": "/tmp/pi-code-comprehension-rollouts",
+  "max_iters": 3,
+  "rollout": {
+    "num_generations_train": 4,
+    "num_generations_eval": 1,
+    "max_wall_clock_s": 120,
+    "max_turns": 10,
+    "max_tokens_per_turn": 1536,
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "parallel": 1
+  },
+  "training_phase1_defaults": {
+    "advantage_mode": "dr_grpo",
+    "loss_aggregation": "token_level",
+    "kl_estimator": "k1",
+    "kl_coeff": 0.1,
+    "clip_epsilon": 0.20,
+    "dynamic_sampling": true,
+    "is_level": "token",
+    "reference_policy": "base_per_step",
+    "lr": 1e-5,
+    "rank": 16,
+    "alpha": 32,
+    "seed": 3141592653,
+    "loss": {
+      "echo": {
+        "lambda": 0.05,
+        "env_mask_mode": "env_only",
+        "warning_filter": true
+      },
+      "opd": null,
+      "no_policy_loss": false
+    }
+  },
+  "rubric": {
+    "weights": {
+      "grounding": 0.20,
+      "cross_file_caller_recall": 0.15,
+      "invariant_coverage": 0.10,
+      "format_compliance": 0.05,
+      "base": 0.50
+    },
+    "line_tolerance": 2,
+    "invariant_semantic_match_threshold": 0.7,
+    "embedding_model": "bge-small-en-v1.5"
+  },
+  "notes_v0": [
+    "JSON schema fields: inputs, returns, mutates, calls, called_by, invariants, side_effects.",
+    "Line-citation grounding is computed per-field; ungrounded fields contribute 0 to grounding.",
+    "invariant_coverage needs an embedding model (BGE-small); fallback to substring hash if embedding cost is prohibitive at corpus scale."
+  ]
+}

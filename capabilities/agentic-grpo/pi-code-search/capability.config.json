@@ -1,0 +1,57 @@
+{
+  "base_model_path": "/workspace/qwen3.5-4b",
+  "kiln_url": "http://localhost:8420",
+  "pi_bin": "/usr/bin/pi",
+  "pi_model_id": "qwen-3.5-4b-kiln",
+  "sandbox_root": "/tmp/pi-code-search-rollouts",
+  "max_iters": 3,
+  "rollout": {
+    "num_generations_train": 4,
+    "num_generations_eval": 1,
+    "max_wall_clock_s": 60,
+    "max_turns": 6,
+    "max_tokens_per_turn": 512,
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "parallel": 1
+  },
+  "training_phase1_defaults": {
+    "advantage_mode": "dr_grpo",
+    "loss_aggregation": "token_level",
+    "kl_estimator": "k1",
+    "kl_coeff": 0.1,
+    "clip_epsilon": 0.20,
+    "dynamic_sampling": true,
+    "is_level": "token",
+    "reference_policy": "base_per_step",
+    "lr": 1e-5,
+    "rank": 16,
+    "alpha": 32,
+    "seed": 3141592653,
+    "loss": {
+      "echo": {
+        "lambda": 0.05,
+        "env_mask_mode": "env_only",
+        "warning_filter": true
+      },
+      "opd": null,
+      "no_policy_loss": false
+    }
+  },
+  "rubric": {
+    "weights": {
+      "efficiency": 0.25,
+      "tool_choice": 0.15,
+      "format_compliance": 0.05,
+      "base": 0.55
+    },
+    "line_off_by_n_tolerance": 2,
+    "large_file_bytes": 2048,
+    "efficiency_span": 5
+  },
+  "notes_v0": [
+    "Outcome F1 tokenizes the answer as (file, line) pairs and allows ±2 line off-by-N for symbol-on-multi-line cases.",
+    "Efficiency uses the sum of tool-result body bytes the model received, not what it emitted — this prevents truncate-and-paste cheating.",
+    "tool_choice has no free Reads of files >2KB; the first such Read takes 0.05 off, each subsequent another 0.05."
+  ]
+}
