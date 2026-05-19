@@ -115,24 +115,56 @@ region, not the whole subsystem.
   toward `except Exception`.
 - Target sub-score: `held_out_passes` (the whole point).
 
-## Files to create
+## Files (Phase 0 — landed 2026-05-19)
 
-- [ ] `rubric.py`. The `no_blanket_except` check requires AST diffing
-  Python and Rust code separately; use `ast` for Python and
-  `tree-sitter-rust` for Rust. Hand-roll the diff if tree-sitter is
-  too heavy.
-- [ ] `task_scaffold.py`. Bug planting: take a real-bug-fix commit
-  from git history, revert the fix, then plant the bug in a clean
-  branch. The original commit becomes the "gold fix region" reference.
-  Curate ~50 bugs across Python and Rust.
-- [ ] `rollout.py`. Sandboxes the workspace so `tests/held_out/` is
-  not visible to pi.
-- [ ] `build_corpus.py`, `capability.oracle.sh`, `run_iter.sh`.
-- [ ] `calibration/{good,bad}.jsonl` — good: root-cause fix that
-  passes held-out. Bad: try/except symptom fix; test-only edit.
+- [x] `rubric.py` — 9-component composite; `held_out_passes` is the
+  dominant agentic weight (0.30). AST-style regex diff for new
+  `except`/`noqa`/`type:ignore`/`pragma:no cover`/`pylint:disable`
+  patterns (no tree-sitter dep — keeps the rubric fast and
+  self-contained).
+- [x] `task_scaffold.py` — workspace init + pi prompt with the
+  constraint list (no test edits, no blanket except, no manifest
+  changes, minimal diff, structured Fix: summary).
+- [x] `build_corpus.py` — 50 hand-authored bug-planted tasks across
+  ~12 bug families. Each task ships a visible test AND a held-out
+  test that fails under symptom fixes but passes under root-cause
+  fixes. v0 is **Python-only** (Rust deferred to v2+ — the
+  cross-language AST diff was inflating scope without changing the
+  ceiling).
+- [x] `rollout.py` — pi-headless runner against kiln; emits scored
+  rollouts.jsonl + GRPO group JSONL + summary.json. Uses
+  `pi_trajectory` schema for ECHO masking.
+- [x] `rubric_sanity.py` — programmatic root-cause vs symptom
+  calibration. **PASS:** root mean 0.985 vs symptom mean 0.650;
+  separated (rc_min 0.969 > sy_max 0.694).
+- [x] `capability.oracle.sh` — blind eval wrapper.
+- [x] `run_iter.sh` — pod-driven iter recipe (rollouts → filter →
+  GRPO step → eval) with knobs for lr, rank/alpha, kl, clip,
+  echo-lambda, filter-var, advantage-mode.
+- [x] `drive_iters.sh` — 50-iter relentless driver with per-iter
+  hypothesis dispatch table.
+- [x] `backup_to_b2.py` — per-iter B2 backup to
+  `b2://clouderic/kiln/pi-failure-triage/<run-tag>/iter-N/`.
 
-**Infra note.** Bug-planted workspaces are larger than other caps'
-rollouts — config sets `max_wall_clock_s = 300`.
+**Infra note.** Bug-planted workspaces are small (typically 4-6
+files, < 1KB) so `max_wall_clock_s = 180-300` is plenty for typical
+2-6 turn rollouts.
+
+## Rubric sanity (Phase 0 calibration)
+
+```
+ROOT     n=6 mean=0.985 stdev=0.013 min=0.969 max=1.000
+SYMPTOM  n=6 mean=0.650 stdev=0.038 min=0.600 max=0.694
+PASS — rubric separation
+```
+
+The gap between root-cause and symptom is 0.335 mean, with strict
+separation (rc_min > sy_max). The `held_out_passes` and
+`no_blanket_except` sub-scores are doing the load-bearing work:
+- `held_out_passes`: 1.0 for root-cause vs 0.0 for symptom (since
+  symptom fixes hardcode the visible-test input).
+- `no_blanket_except`: 0.5 for try/except-wrapped symptoms vs 1.0
+  for clean root-cause fixes.
 
 ## Next steps for the agent picking this up
 

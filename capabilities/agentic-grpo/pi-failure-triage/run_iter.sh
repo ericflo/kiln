@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
 # Run one complete pi-failure-triage iter on the pod.
 #
-# Stages (any/all skippable):
-#   1. Training rollouts (per chosen train adapter / base).
-#   2. Strong-signal filter (variance threshold).
-#   3. GRPO step → adapter.
-#   4. Eval rollouts (per chosen eval adapter).
-#   5. Capture summaries.
+# Stages (each skippable):
+#   1. (optional) Training rollouts — only if --rollout-source-iter unset.
+#   2. (optional) Strong-signal filter (variance threshold).
+#   3. (optional) GRPO step → adapter.
+#   4. (optional) Eval rollouts.
 #
-# Run on the LOCAL cloud-eric box; it dispatches commands to the pod via
-# runpod_api.py.
+# Drive caches rollouts: subsequent iters can specify
+#   --rollout-source-iter <N> to reuse iter N's grpo-train.jsonl
+# rather than regenerating rollouts. This is essential for fitting 50
+# iters into an overnight window.
 #
-# Usage:
-#   run_iter.sh --iter N --kind train --num-train-tasks 8 --num-gens 4 \
-#               --train-adapter "" --eval-adapter "pi-failure-triage-iter1" \
-#               --lr 1e-5 --filter-var 0.02 --max-wall 180
+# Run on the LOCAL cloud-eric box; commands ssh into the pod.
 
 set -euo pipefail
 
@@ -42,6 +40,7 @@ NO_POLICY=0
 MAX_WALL=180
 PARALLEL=1
 EXTRA_TRAIN_ARGS=""
+ROLLOUT_SOURCE_ITER=""   # if set, reuse rollouts from iter <N> instead of regenerating
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -69,6 +68,7 @@ while [ $# -gt 0 ]; do
     --max-wall) MAX_WALL="$2"; shift 2 ;;
     --parallel) PARALLEL="$2"; shift 2 ;;
     --extra-train-args) EXTRA_TRAIN_ARGS="$2"; shift 2 ;;
+    --rollout-source-iter) ROLLOUT_SOURCE_ITER="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -76,7 +76,6 @@ done
 if [ -z "$ITER" ]; then echo "--iter required" >&2; exit 1; fi
 EVAL_ADAPTER="${EVAL_ADAPTER:-pi-failure-triage-iter${ITER}}"
 
-# /tmp/grpo-pod.env is written by the harness — provides POD_ID, LEASE_ID
 source /tmp/grpo-pod.env
 
 POD_REPO=/workspace/kiln/capabilities/agentic-grpo/pi-failure-triage
@@ -87,33 +86,42 @@ TRAIN_LOG="/tmp/pft-iter${ITER}-train.log"
 ROLLOUT_LOG="/tmp/pft-iter${ITER}-rollout.log"
 EVAL_LOG="/tmp/pft-iter${ITER}-eval.log"
 
-echo "== pft iter ${ITER} kind=${KIND} =="
+# If rollouts are reused, point TRAIN_OUT at the source iter's dir.
+if [ -n "$ROLLOUT_SOURCE_ITER" ]; then
+  TRAIN_OUT="/tmp/pft-iter${ROLLOUT_SOURCE_ITER}-rollouts"
+fi
+
+echo "== pft iter ${ITER} kind=${KIND} rollout_source=${ROLLOUT_SOURCE_ITER:-fresh} =="
 
 ###############################################################################
-# 1+2+3: training rollouts -> filter -> GRPO step
+# 1+2+3: rollouts (or reuse) → filter → GRPO step
 ###############################################################################
 if [ "$SKIP_TRAIN" = "0" ]; then
-  echo ">>> setting train adapter to '${TRAIN_ADAPTER:-(base)}'"
-  if [ -z "$TRAIN_ADAPTER" ] || [ "$TRAIN_ADAPTER" = "base" ]; then
-    python3 $RP ssh $POD_ID 'curl -sS -X POST http://localhost:8420/v1/adapters/unload >/dev/null 2>&1 || true'
-  else
-    python3 $RP ssh $POD_ID "curl -sS -X POST http://localhost:8420/v1/adapters/load -H 'Content-Type: application/json' -d '{\"name\":\"${TRAIN_ADAPTER}\"}'"
-  fi
+  if [ -z "$ROLLOUT_SOURCE_ITER" ]; then
+    echo ">>> setting train adapter to '${TRAIN_ADAPTER:-(base)}'"
+    if [ -z "$TRAIN_ADAPTER" ] || [ "$TRAIN_ADAPTER" = "base" ]; then
+      python3 $RP ssh $POD_ID 'curl -sS -X POST http://localhost:8420/v1/adapters/unload >/dev/null 2>&1 || true'
+    else
+      python3 $RP ssh $POD_ID "curl -sS -X POST http://localhost:8420/v1/adapters/load -H 'Content-Type: application/json' -d '{\"name\":\"${TRAIN_ADAPTER}\"}'"
+    fi
 
-  echo ">>> training rollouts: N=${NUM_TRAIN_TASKS} tasks × ${NUM_GENS} gens"
-  python3 $RP bg $POD_ID "$ROLLOUT_LOG" \
-    "cd ${POD_REPO} && rm -rf ${TRAIN_OUT} && python3 rollout.py \
-      --tasks datasets/train.tasks.jsonl --limit ${NUM_TRAIN_TASKS} \
-      --out-dir ${TRAIN_OUT} --mode train --num-generations ${NUM_GENS} \
-      --adapter current \
-      --max-wall-clock-s ${MAX_WALL} --parallel ${PARALLEL} --verbose 2>&1"
-  python3 $RP wait-file $POD_ID "${TRAIN_OUT}/summary.json" --timeout 7200
+    echo ">>> training rollouts: N=${NUM_TRAIN_TASKS} tasks × ${NUM_GENS} gens"
+    python3 $RP bg $POD_ID "$ROLLOUT_LOG" \
+      "cd ${POD_REPO} && rm -rf ${TRAIN_OUT} && python3 rollout.py \
+        --tasks datasets/train.tasks.jsonl --limit ${NUM_TRAIN_TASKS} \
+        --out-dir ${TRAIN_OUT} --mode train --num-generations ${NUM_GENS} \
+        --adapter current \
+        --max-wall-clock-s ${MAX_WALL} --parallel ${PARALLEL} --verbose 2>&1"
+    python3 $RP wait-file $POD_ID "${TRAIN_OUT}/summary.json" --timeout 7200
+  else
+    echo ">>> reusing rollouts from iter ${ROLLOUT_SOURCE_ITER} → ${TRAIN_OUT}"
+  fi
 
   echo ">>> filtering strong-signal groups (var > ${FILTER_VAR})"
   python3 $RP ssh $POD_ID "python3 - <<PYEOF
 import json, statistics
 inp = '${TRAIN_OUT}/grpo-train.jsonl'
-out = '${TRAIN_OUT}/grpo-train-strong.jsonl'
+out = '/tmp/pft-iter${ITER}-grpo-train-strong.jsonl'
 kept = 0; total = 0
 with open(out, 'w') as fo:
     for line in open(inp):
@@ -135,9 +143,9 @@ PYEOF"
   if [ "$NO_POLICY" = "1" ]; then EXTRA_POL="--no-policy-loss"; fi
 
   python3 $RP bg $POD_ID "$TRAIN_LOG" \
-    "cd /workspace/kiln && KILN_DISABLE_FUSED_GDN_GATES=1 KILN_BATCHING_ENGINE=0 KILN_MODEL_PATH=/workspace/qwen3.5-4b \
+    "cd /workspace/kiln && source /root/.kiln-build-env 2>/dev/null || true; KILN_DISABLE_FUSED_GDN_GATES=1 KILN_BATCHING_ENGINE=0 KILN_MODEL_PATH=/workspace/qwen3.5-4b \
       ./target/release/examples/cuda_grpo_ablation \
-      --data ${TRAIN_OUT}/grpo-train-strong.jsonl \
+      --data /tmp/pft-iter${ITER}-grpo-train-strong.jsonl \
       --model /workspace/qwen3.5-4b \
       --output ${ADAPTER_OUT} \
       --adapter pi-failure-triage-iter${ITER} \
@@ -151,10 +159,16 @@ PYEOF"
   python3 $RP ssh $POD_ID "mkdir -p /workspace/qwen3.5-4b/adapters && ln -sfn ${ADAPTER_OUT}/pi-failure-triage-iter${ITER} /workspace/qwen3.5-4b/adapters/pi-failure-triage-iter${ITER}"
 
   echo ">>> restarting kiln serve"
-  python3 $RP bg $POD_ID /tmp/kiln-serve-pft-iter${ITER}.log \
-    'cd /workspace/kiln && KILN_DISABLE_FUSED_GDN_GATES=1 KILN_BATCHING_ENGINE=0 KILN_MODEL_PATH=/workspace/qwen3.5-4b ./target/release/kiln serve 2>&1'
-  sleep 25
-  python3 $RP ssh $POD_ID "curl -sS http://localhost:8420/v1/adapters | head -c 400"
+  python3 $RP bg $POD_ID /tmp/kiln-serve.log \
+    'cd /workspace/kiln && source /root/b2-env; source /root/.kiln-build-env 2>/dev/null || true; KILN_DISABLE_FUSED_GDN_GATES=1 KILN_BATCHING_ENGINE=0 KILN_MODEL_PATH=/workspace/qwen3.5-4b ./target/release/kiln serve 2>&1'
+  # Wait for /v1/models to come up
+  python3 $RP ssh $POD_ID 'for i in $(seq 1 24); do
+    if curl -sf http://localhost:8420/v1/models > /dev/null 2>&1; then
+      echo "kiln ready"
+      break
+    fi
+    sleep 5
+  done'
 fi
 
 ###############################################################################

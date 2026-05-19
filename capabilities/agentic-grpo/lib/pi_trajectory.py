@@ -92,7 +92,12 @@ def _extract_tool_call_ids(blocks: list) -> list[str]:
 
 def _render_tool_result_content(blocks: list) -> tuple[str, Optional[str]]:
     """Render a tool-role message's content blocks. Returns
-    (rendered_text, tool_call_id-or-None)."""
+    (rendered_text, tool_call_id-or-None).
+
+    Handles two pi formats:
+      - pi 0.75.1: role="tool", content=[{type:"toolResult", content:..., toolCallId:...}]
+      - pi 0.75.3: role="toolResult", content=[{type:"text", text:...}]
+    """
     parts: list[str] = []
     tool_call_id: Optional[str] = None
     for b in blocks:
@@ -104,8 +109,6 @@ def _render_tool_result_content(blocks: list) -> tuple[str, Optional[str]]:
             if isinstance(content, str):
                 parts.append(content)
             elif isinstance(content, list):
-                # Some pi versions ship list-of-blocks tool results; flatten
-                # text-typed children.
                 for inner in content:
                     if isinstance(inner, dict) and isinstance(inner.get("text"), str):
                         parts.append(inner["text"])
@@ -113,8 +116,6 @@ def _render_tool_result_content(blocks: list) -> tuple[str, Optional[str]]:
             if isinstance(tid, str) and tool_call_id is None:
                 tool_call_id = tid
         elif bt == "text" and isinstance(b.get("text"), str):
-            # Some pi versions emit tool results as plain text blocks under
-            # a tool-role message — accept both.
             parts.append(b["text"])
     return "".join(parts), tool_call_id
 
@@ -204,7 +205,7 @@ def parse_pi_session(
                         {"role": role, "content": rendered, "kind": "action"}
                     )
 
-        elif role == "tool":
+        elif role in ("tool", "toolResult"):
             if isinstance(content, list):
                 rendered, tool_call_id = _render_tool_result_content(content)
                 if rendered:

@@ -102,13 +102,16 @@ def _tool_calls_in(msg: dict) -> list[dict]:
 
 
 def _tool_results_in(msg: dict) -> list[dict]:
-    """Return tool result blocks (if any) in a tool-role message."""
+    """Return tool result text blocks. Handles both pi formats:
+    - pi 0.75.1: role="tool", content=[{type:"toolResult", content:...}]
+    - pi 0.75.3: role="toolResult", content=[{type:"text", text:...}]
+    """
     content = msg.get("content")
     if not isinstance(content, list):
         return []
     out = []
     for b in content:
-        if isinstance(b, dict) and b.get("type") == "toolResult":
+        if isinstance(b, dict) and b.get("type") in ("toolResult", "text"):
             out.append(b)
     return out
 
