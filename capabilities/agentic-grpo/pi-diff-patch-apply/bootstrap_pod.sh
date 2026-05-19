@@ -84,6 +84,16 @@ fi
 echo ">>> ensuring adapters dir exists"
 run_pod 'mkdir -p /workspace/qwen3.5-4b/adapters'
 
+echo ">>> install pytest (rollouts need it for the verify step)"
+run_pod 'python3 -m pytest --version 2>/dev/null || pip install pytest 2>&1 | tail -2'
+
+echo ">>> run kiln pi-setup (configures pi to use local kiln on :8420)"
+# This writes ~/.pi/agent/{models,settings}.json so pi uses provider=kiln-local
+# and model=qwen-3.5-4b-kiln. Without this, pi defaults to provider=google and
+# bails with "No API key found for the selected model" — wasting an entire iter
+# of rollouts. Discovered 2026-05-19 on a fresh pod build.
+run_pod '/workspace/kiln/target/release/kiln pi-setup 2>&1 | tail -3'
+
 echo ">>> [5/6] sync capability files"
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # rsync via runpod_api scp

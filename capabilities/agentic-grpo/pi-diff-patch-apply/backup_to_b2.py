@@ -31,13 +31,20 @@ B2_PREFIX_BASE = "kiln/pi-diff-patch-apply"
 
 
 def s3_client():
+    sys.path.insert(0, "/tmp/pylibs")
     try:
-        sys.path.insert(0, "/tmp/pylibs")
         import boto3
-    except Exception as e:
-        raise SystemExit(
-            "boto3 unavailable. Run: uv pip install --target /tmp/pylibs boto3"
-        ) from e
+    except ImportError:
+        # Auto-install on first call instead of forcing the operator to fix it
+        # mid-iter (we discovered this gap 2026-05-19; bootstrap_pod.sh is on
+        # the pod, so backups always run on the dev box and boto3 isn't always
+        # there).
+        print("boto3 not found in /tmp/pylibs — installing...", file=sys.stderr)
+        subprocess.run(
+            ["uv", "pip", "install", "--target", "/tmp/pylibs", "boto3"],
+            check=True,
+        )
+        import boto3
     return boto3.client(
         "s3",
         endpoint_url="https://s3.us-west-002.backblazeb2.com",
