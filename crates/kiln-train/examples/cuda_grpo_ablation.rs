@@ -236,6 +236,11 @@ struct Args {
     /// Requires --echo-lambda not be zero (otherwise the loss is
     /// identically zero and no gradient flows).
     no_policy_loss: bool,
+    /// Base adapter path to start training from. The trainer loads the
+    /// adapter's LoRA weights instead of initializing fresh. Used by
+    /// Phase 3 verifier-free runs that start from a strong Phase 2
+    /// adapter. None = fresh LoRA init.
+    base_adapter: Option<String>,
 }
 
 #[cfg(feature = "cuda")]
@@ -255,6 +260,7 @@ impl Args {
         let mut no_echo = false;
         let mut opd_lambda: Option<f64> = None;
         let mut no_policy_loss = false;
+        let mut base_adapter: Option<String> = None;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -322,6 +328,9 @@ impl Args {
                     )
                 }
                 "--no-policy-loss" => no_policy_loss = true,
+                "--base-adapter" => {
+                    base_adapter = Some(args.next().context("--base-adapter needs a path")?)
+                }
                 "--help" | "-h" => {
                     println!(
                         "cuda_grpo_ablation --data <jsonl> --model <dir> [--output <dir>] \
@@ -373,6 +382,7 @@ impl Args {
             no_echo,
             opd_lambda,
             no_policy_loss,
+            base_adapter,
         })
     }
 }
@@ -509,6 +519,9 @@ fn main() -> Result<()> {
 
     if args.no_policy_loss {
         config.loss.no_policy_loss = true;
+    }
+    if let Some(ref base_adapter) = args.base_adapter {
+        config.base_adapter = Some(base_adapter.clone());
     }
     if let Some(_opd_lambda) = args.opd_lambda {
         // Reserved for OPD branch rebase. Accept the flag but don't fire —
