@@ -145,7 +145,7 @@ format opened the gradient.
 | 0 | `baseline-v1-hard-corpus-strict-format` | base, no adapter, T=0.0 eval | 0.9419 | — | baseline |
 | 1 | `h1-default-recipe-hard-tasks-6x3` | 6 hard × 3 gens, T=0.8, lr 1e-5, rank 16, filter 0.005 | **0.8900** | **−0.0519** | NEGATIVE |
 | 2 | `h2-strong-filter-temp1.0-hard-6x3` | same + T=1.0, seed 1729 | **0.9246** | **−0.0173** | NEGATIVE-mild |
-| 3 | `h3-temp1-seed4242-hard-6x3` | same + seed 4242, fresh hard task subset | TBD | TBD | _(in flight at writeup)_ |
+| 3 | `h3-temp1-seed4242-hard-6x3` | same + seed 4242, fresh hard task subset | **0.9162** | **−0.0256** | NEGATIVE |
 
 ### Iter 1 diagnosis
 
