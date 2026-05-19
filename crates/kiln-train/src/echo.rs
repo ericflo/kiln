@@ -19,7 +19,9 @@
 //!
 //! The env-CE term is
 //!
-//!     L_env(θ; O') = - (1 / |O|) · Σ_{t ∈ O'} log p_θ(x_t | x_{<t})
+//! ```text
+//! L_env(θ; O') = - (1 / |O|) · Σ_{t ∈ O'} log p_θ(x_t | x_{<t})
+//! ```
 //!
 //! where `O'` is the env_mask-active positions (after warning_filter trim)
 //! and `|O|` is the **total** observation length (including filtered-out
@@ -103,7 +105,9 @@ pub struct EchoStepInputs<'a> {
 pub struct EchoStepOutputs {
     /// The scalar env-CE loss term, paper §3.1 normalization applied:
     ///
-    ///     mean_ce = - (1 / |O|) · Σ_{t ∈ O'} log p_θ(x_t | x_{<t})
+    /// ```text
+    /// mean_ce = - (1 / |O|) · Σ_{t ∈ O'} log p_θ(x_t | x_{<t})
+    /// ```
     ///
     /// Autograd-tracked off `student_hidden`'s parents, so
     /// `mean_ce.backward()` flows gradients into the LoRA parameters
