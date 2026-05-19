@@ -2,7 +2,13 @@
 # Faster iter cadence: 8 tasks × 3 gens, eval 12, parallel=4, 180s/rollout.
 # Target: ~12-15 min per iter.
 
-set -euo pipefail
+# Don't use set -e here. If a single iter fails (e.g., kiln serve died,
+# rollouts timed out, GRPO crashed), we want to log the failure and continue
+# to the next iter. We discovered 2026-05-19 that `bash run_iter.sh | tail
+# -100` under `set -euo pipefail` silently killed the whole loop after one
+# iter, because run_iter.sh's set -e + pipe buffering hit a non-zero from
+# pkill or similar. Loosening here lets the loop survive transient failures.
+set -uo pipefail
 MAX_ITERS=50
 START_ITER=""
 POD_ID=""
@@ -160,7 +166,9 @@ while [ "$iter" -lt 50 ] && [ "$iter" -lt "$end" ]; do
   EVAL_ADAPTER="pi-diff-patch-apply-iter${iter}"
   if [ "$iter" = "0" ]; then EVAL_ADAPTER="base"; fi
 
-  bash "$HERE/run_iter.sh" --iter "$iter" --kind "$KIND" --eval-adapter "$EVAL_ADAPTER" $EXTRA 2>&1 | tail -100
+  # Pipe through tee to /tmp/iter${iter}-run.log so we have full output for
+  # post-mortem. tail -200 lets us see more context if the iter dies.
+  bash "$HERE/run_iter.sh" --iter "$iter" --kind "$KIND" --eval-adapter "$EVAL_ADAPTER" $EXTRA 2>&1 | tee /tmp/iter${iter}-run.log | tail -200 || echo "WARN: run_iter.sh iter ${iter} exited non-zero — continuing loop"
 
   EVAL_OUT="/tmp/iter${iter}-eval"
   # Pull full summary down for sub-score logging.
