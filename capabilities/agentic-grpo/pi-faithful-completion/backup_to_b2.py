@@ -61,10 +61,10 @@ def main() -> int:
     size = ssh(pod, f"stat -c %s {tar_remote}").strip()
     print(f"adapter tar size: {size} bytes")
 
-    # 3. scp down
+    # 3. download (runpod_api.py "download" subcommand uses scp under the hood)
     tmp = Path(tempfile.mkdtemp(prefix="pi-faithful-backup-"))
     local_tar = tmp / f"{args.adapter}.tar.gz"
-    subprocess.check_call(["python3", RP, "scp", pod, tar_remote, str(local_tar)])
+    subprocess.check_call(["python3", RP, "download", pod, tar_remote, str(local_tar)])
 
     # 4. b2 upload
     env = os.environ.copy()
