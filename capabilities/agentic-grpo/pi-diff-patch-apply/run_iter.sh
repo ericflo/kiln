@@ -42,6 +42,8 @@ MAX_TURNS=12
 MAX_WALL_CLOCK_S=180
 PARALLEL=4
 TEMPERATURE=0.8
+EVAL_TASK_LIMIT=0     # 0 = full eval set (24); set positive for fast iters
+TRAIN_TASKS_FILE="datasets/train.tasks.jsonl"  # override via --train-tasks-file
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -66,6 +68,8 @@ while [ $# -gt 0 ]; do
     --max-wall-clock-s) MAX_WALL_CLOCK_S="$2"; shift 2 ;;
     --parallel) PARALLEL="$2"; shift 2 ;;
     --temperature) TEMPERATURE="$2"; shift 2 ;;
+    --eval-task-limit) EVAL_TASK_LIMIT="$2"; shift 2 ;;
+    --train-tasks-file) TRAIN_TASKS_FILE="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -97,7 +101,7 @@ if [ "$SKIP_TRAIN" = "0" ]; then
   echo ">>> training rollouts: N=${NUM_TRAIN_TASKS} tasks × ${NUM_GENS} gens (parallel=${PARALLEL})"
   python3 $RP bg $POD_ID "${TRAIN_LOG}.rollout" \
     "cd ${POD_REPO} && rm -rf ${TRAIN_OUT} && python3 rollout.py \
-      --tasks datasets/train.tasks.jsonl --task-limit ${NUM_TRAIN_TASKS} \
+      --tasks ${TRAIN_TASKS_FILE} --task-limit ${NUM_TRAIN_TASKS} \
       --out-dir ${TRAIN_OUT} --mode train --num-generations ${NUM_GENS} \
       --seed-base ${SEED} --parallel ${PARALLEL} \
       --max-wall-clock-s ${MAX_WALL_CLOCK_S} \
@@ -175,14 +179,18 @@ if [ "$SKIP_EVAL" = "0" ]; then
     python3 $RP ssh $POD_ID "curl -sS -X POST http://localhost:8420/v1/adapters/load -H 'Content-Type: application/json' -d '{\"name\":\"${EVAL_ADAPTER}\"}'"
   fi
 
-  echo ">>> eval rollouts: 24 tasks × 1 gen"
+  EVAL_LIMIT_ARG=""
+  if [ "${EVAL_TASK_LIMIT}" -gt 0 ]; then
+    EVAL_LIMIT_ARG="--task-limit ${EVAL_TASK_LIMIT}"
+  fi
+  echo ">>> eval rollouts: ${EVAL_TASK_LIMIT:-full} tasks × 1 gen (parallel=${PARALLEL})"
   python3 $RP bg $POD_ID "/tmp/iter${ITER}-eval.log" \
     "cd ${POD_REPO} && rm -rf ${EVAL_OUT} && python3 rollout.py \
-      --tasks datasets/eval.tasks.jsonl \
+      --tasks datasets/eval.tasks.jsonl ${EVAL_LIMIT_ARG} \
       --out-dir ${EVAL_OUT} --mode eval --num-generations 1 \
       --adapter current --seed-base ${SEED} --parallel ${PARALLEL} \
       --max-wall-clock-s ${MAX_WALL_CLOCK_S} \
-      --temperature ${TEMPERATURE} --verbose 2>&1"
+      --temperature 0.0 --verbose 2>&1"
   python3 $RP wait-file $POD_ID "${EVAL_OUT}/summary.json" --timeout 7200
 
   echo ">>> eval done"
