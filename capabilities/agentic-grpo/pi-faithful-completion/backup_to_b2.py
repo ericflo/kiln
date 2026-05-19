@@ -72,8 +72,26 @@ def main() -> int:
     env.setdefault("B2_APPLICATION_KEY_ID", os.environ.get("B2_APPLICATION_KEY_ID", ""))
     env.setdefault("B2_APPLICATION_KEY", os.environ.get("B2_APPLICATION_KEY", ""))
     b2_target = f"b2://{B2_BUCKET}/{B2_PREFIX}/adapters/{args.adapter}.tar.gz"
-    subprocess.check_call(["b2", "file", "upload", B2_BUCKET, str(local_tar), f"{B2_PREFIX}/adapters/{args.adapter}.tar.gz"], env=env)
-    print(f"backed up to {b2_target}")
+    # b2 cli sometimes fails the first try (transient auth). Retry once.
+    last_err = None
+    for attempt in range(3):
+        try:
+            subprocess.check_call(
+                ["b2", "file", "upload", B2_BUCKET, str(local_tar),
+                 f"{B2_PREFIX}/adapters/{args.adapter}.tar.gz"],
+                env=env,
+            )
+            print(f"backed up to {b2_target}")
+            break
+        except subprocess.CalledProcessError as e:
+            last_err = e
+            print(f"backup attempt {attempt + 1} failed: {e}; retrying", file=sys.stderr)
+            try:
+                subprocess.check_call(["b2", "account", "authorize"], env=env)
+            except Exception:
+                pass
+    else:
+        raise last_err
 
     # 5. Clean up local tmp
     shutil.rmtree(tmp, ignore_errors=True)
