@@ -64,23 +64,35 @@ Tool names in pi 0.75: bash (shell), read, write, edit, glob, grep, etc.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-# Import shared helpers from pi-doctest's rubric_v0_outcome_only.
-# These parse the pi 0.75 session schema (role/content with toolCall blocks).
+# Import shared helpers from pi-doctest's rubric_v0_outcome_only WITHOUT
+# polluting sys.path (otherwise pi-doctest's task_scaffold.py shadows
+# ours when rollout.py later does `import task_scaffold`).
 _PARENT = Path(__file__).resolve().parent
 _SIBLING_DOCTEST = _PARENT.parent / "pi-doctest"
-sys.path.insert(0, str(_SIBLING_DOCTEST))
-from rubric_v0_outcome_only import (  # type: ignore  # noqa: E402
-    _iter_messages,
-    _tool_calls_in,
-    _tool_input,
-    _format_compliance,
+
+def _load_sibling_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+_doctest_rubric_v0 = _load_sibling_module(
+    "_pi_doctest_rubric_v0",
+    _SIBLING_DOCTEST / "rubric_v0_outcome_only.py",
 )
+_iter_messages = _doctest_rubric_v0._iter_messages
+_tool_calls_in = _doctest_rubric_v0._tool_calls_in
+_tool_input = _doctest_rubric_v0._tool_input
+_format_compliance = _doctest_rubric_v0._format_compliance
 
 
 # -----------------------------------------------------------------------------
