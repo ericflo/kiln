@@ -151,8 +151,17 @@ def run_rollouts_train(pod: str, iter_n: int, num_train: int, num_gens: int,
         f'echo DONE > {done}'
     )
     pod_bg(pod, log, cmd)
-    estimated = max(600, num_train * num_gens * 20 + 300)
-    if not pod_wait(pod, done, timeout=min(estimated, 5400)):
+    # Base-model rollouts hit the 180s wall-clock cap routinely; budget for
+    # worst case (200s/rollout including process teardown) divided by
+    # concurrency. Floor 600s, ceiling 7200s (2h).
+    estimated = max(600, int(num_train * num_gens * 200 / max(1, concurrency) + 300))
+    if not pod_wait(pod, done, timeout=min(estimated, 7200)):
+        # Kill any stuck rollout/pi processes so they don't poison the next iter.
+        try:
+            pod_ssh(pod, "pkill -9 -f rollout.py 2>/dev/null; pkill -9 pi 2>/dev/null; true",
+                    timeout=15)
+        except Exception:
+            pass
         raise RuntimeError(f"iter {iter_n} rollouts timed out")
     # Verify summary exists; if not, rollouts crashed before completing
     chk = pod_ssh(pod, f"test -f {out}/summary.json && echo OK || echo MISSING", timeout=20).strip()
