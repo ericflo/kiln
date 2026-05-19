@@ -108,16 +108,19 @@ The trainer writes ECHO-specific fields to `<adapter_dir>/receipt.json` (when re
       "env_ce_final": 0.83,
       "env_ce_drop_pct": 80.3,
       "lambda_effective_final": 0.07,
-      "env_tokens_supervised": 24576
+      "env_tokens_supervised": 24576,
+      "dynamics_holdout_ce_initial": 3.96,
+      "dynamics_holdout_ce_final": 1.12
     }
   }
 }
 ```
 
-- `env_ce_initial` / `env_ce_final` — paper §5.2's headline diagnostic. ECHO is expected to drop env-CE *sharply* (paper Figure 3 shows ~75% drops); GRPO alone barely moves it.
+- `env_ce_initial` / `env_ce_final` — paper §5.2's headline diagnostic on the training rollouts. ECHO is expected to drop env-CE *sharply* (paper Figure 3 shows ~75% drops); GRPO alone barely moves it.
 - `env_ce_drop_pct` — direct comparison to paper §5.2. ≥30% drop is the Phase 2 validation gate.
 - `lambda_effective_final` — `λ · L_envCE / L_GRPO` at end of training. Paper §3.3: ECHO auto-anneals as the model learns terminal structure, so this should *shrink* over the course of training (or at least stay bounded). If it grows, λ is too aggressive.
 - `env_tokens_supervised` — total count of env-position log-prob gradients. Useful for the "did ECHO actually fire" smoke check; legacy single-turn rollouts have this = 0.
+- `dynamics_holdout_ce_initial` / `dynamics_holdout_ce_final` — paper §5.2 *dynamics test*: env-CE on a teacher-generated held-out trajectory set. ECHO is expected to drop this comparably to `env_ce`, proving the model **generalized** the terminal dynamics rather than memorized the training rollouts. `pi-terminal-bench-lite/calibration/dynamics_holdout.py` populates these when the cap provides a teacher.
 
 ## When to turn ECHO off
 
