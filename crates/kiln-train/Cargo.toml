@@ -30,6 +30,7 @@ tempfile = { workspace = true }
 flate2 = { workspace = true }
 tar = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+tracing-subscriber = { workspace = true }
 
 [features]
 cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda", "kiln-opd-loss-kernel/cuda"]

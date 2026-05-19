@@ -434,6 +434,20 @@ fn maybe_subset_dataset(input: &PathBuf, max_groups: Option<usize>) -> Result<Pa
 
 #[cfg(feature = "cuda")]
 fn main() -> Result<()> {
+    // Init tracing so kiln-train's tracing::debug!/info!/warn! lines land
+    // in stderr when the user sets RUST_LOG. Without this every tracing
+    // call inside the trainer (including the ECHO env-CE active debug log
+    // on both the uncheckpointed and checkpointed paths) gets silently
+    // dropped. Default: warn. Override with e.g.
+    // `RUST_LOG=info,kiln_train=debug` to see per-completion ECHO firing.
+    use tracing_subscriber::EnvFilter;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+
     let args = Args::parse()?;
     let start = Instant::now();
     let baseline_mib = current_vram_mib();
