@@ -123,6 +123,8 @@ def run_rollouts_train(pod: str, iter_n: int, num_train: int, num_gens: int,
     done = f'/tmp/iter{iter_n}-rollout.done'
     out = f'/tmp/iter{iter_n}-rollouts'
     seed = recipe.get("seed", 3141592653)
+    # Remove any stale .done file so pod_wait can't return early on a prior run.
+    pod_ssh(pod, f"rm -f {done}", timeout=15)
     cmd = (
         f'cd {CAP_DIR_ON_POD} && rm -rf {out} && '
         f'python3 rollout.py --tasks datasets/train.tasks.jsonl --task-limit {num_train} '
@@ -131,38 +133,58 @@ def run_rollouts_train(pod: str, iter_n: int, num_train: int, num_gens: int,
         f'echo DONE > {done}'
     )
     pod_bg(pod, log, cmd)
-    # Estimated time: num_train × num_gens × 25s + 200s
     estimated = max(600, num_train * num_gens * 30 + 300)
     if not pod_wait(pod, done, timeout=min(estimated, 5400)):
         raise RuntimeError(f"iter {iter_n} rollouts timed out")
+    # Verify summary exists; if not, rollouts crashed before completing
+    chk = pod_ssh(pod, f"test -f {out}/summary.json && echo OK || echo MISSING", timeout=20).strip()
+    if chk != "OK":
+        raise RuntimeError(f"iter {iter_n} rollouts: summary.json missing after .done")
     summary = pod_ssh(pod, f"cat {out}/summary.json")
     return json.loads(summary)
 
 
 def filter_groups(pod: str, iter_n: int, var_threshold: float) -> int:
+    """Filter rollouts/grpo-train.jsonl to groups with reward variance >
+    `var_threshold`. Ship the filter script as base64 to avoid SSH escape
+    issues."""
     print(f"  filter strong-signal groups (var > {var_threshold})", flush=True)
     inp = f'/tmp/iter{iter_n}-rollouts/grpo-train.jsonl'
     out = f'/tmp/iter{iter_n}-rollouts/grpo-train-strong.jsonl'
-    py = f'''
-import json, statistics
-inp = "{inp}"; out = "{out}"
-kept = 0; total = 0
-with open(out, "w") as fo:
-    for line in open(inp):
-        total += 1
-        g = json.loads(line)
-        rewards = [c.get("reward", 0) for c in g.get("completions", [])]
-        if len(rewards) >= 2 and statistics.variance(rewards) > {var_threshold}:
-            fo.write(line); kept += 1
-print(f"kept {{kept}}/{{total}} groups")
-'''
-    out_txt = pod_ssh(pod, f"python3 -c {json.dumps(py)}", timeout=60)
+    import base64
+    py_src = (
+        "import json, statistics\n"
+        f"inp = {inp!r}\n"
+        f"out = {out!r}\n"
+        f"thresh = {var_threshold}\n"
+        "kept = 0\n"
+        "total = 0\n"
+        "with open(out, 'w') as fo:\n"
+        "    for line in open(inp):\n"
+        "        total += 1\n"
+        "        g = json.loads(line)\n"
+        "        rewards = [c.get('reward', 0) for c in g.get('completions', [])]\n"
+        "        if len(rewards) >= 2 and statistics.variance(rewards) > thresh:\n"
+        "            fo.write(line)\n"
+        "            kept += 1\n"
+        "print(f'kept {kept}/{total} groups')\n"
+    )
+    b64 = base64.b64encode(py_src.encode()).decode()
+    out_txt = pod_ssh(pod, f"echo {b64} | base64 -d | python3 -", timeout=60)
     print(f"    {out_txt.strip()}", flush=True)
-    # Fallback to even lower threshold if nothing passes
     if "kept 0/" in out_txt:
-        print(f"    nothing passed; falling back to all groups (no filter)", flush=True)
+        print(f"    nothing passed; falling back to all groups", flush=True)
         pod_ssh(pod, f"cp {inp} {out}", timeout=30)
-    return int(out_txt.split("kept ")[1].split("/")[0])
+        # Recount what we ended up with
+        wc = pod_ssh(pod, f"wc -l < {out}", timeout=10).strip()
+        try:
+            return int(wc)
+        except Exception:
+            return 0
+    try:
+        return int(out_txt.split("kept ")[1].split("/")[0])
+    except Exception:
+        return 0
 
 
 def train_grpo(pod: str, iter_n: int, recipe: dict, train_adapter: str | None) -> None:
@@ -172,6 +194,7 @@ def train_grpo(pod: str, iter_n: int, recipe: dict, train_adapter: str | None) -
     log = f'/tmp/iter{iter_n}-train.log'
     done = f'/tmp/iter{iter_n}-train.done'
     adapter_out = f'/tmp/iter{iter_n}-adapter'
+    pod_ssh(pod, f"rm -f {done}", timeout=15)
     lr = recipe.get("lr", "1e-5")
     rank = recipe.get("rank", 16)
     alpha = recipe.get("alpha", 32)
@@ -221,6 +244,7 @@ def run_eval(pod: str, iter_n: int, adapter: str) -> dict:
     log = f'/tmp/iter{iter_n}-eval.log'
     done = f'/tmp/iter{iter_n}-eval.done'
     out = f'/tmp/iter{iter_n}-eval'
+    pod_ssh(pod, f"rm -f {done}", timeout=15)
     cmd = (
         f'cd {CAP_DIR_ON_POD} && rm -rf {out} && '
         f'python3 rollout.py --tasks datasets/eval.tasks.jsonl '
