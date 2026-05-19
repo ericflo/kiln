@@ -31,7 +31,7 @@
     "seed": 3141592653
   },
   "notes_v0": [
-    "Single-turn rollout constraint per the kiln-polish-prerequisites.md.",
-    "Multi-turn rollouts require per-turn assistant-token masking which is not landed in kiln-train as of cap intake."
+    "Single-turn rollout by cap design (one assistant turn per task).",
+    "Multi-turn rollouts are now supported via kiln-train::trajectory_mask + the ECHO branch; this cap keeps the single-turn shape because that's the pi-doctest task spec, not because the trainer lacks support."
   ]
 }

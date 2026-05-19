@@ -34,11 +34,16 @@ Pi sessions, headless (`pi -p "<prompt>" --session-dir <run_dir>`).
 Sampling defaults from kiln (temperature=0.8, top_p=0.95). N=4
 rollouts per task per training step (raise to 8 once v0 lands).
 
-**Single-turn constraint for v0:** the task prompt instructs pi to
+**Single-turn task design:** the task prompt instructs pi to
 emit the entire solution in one assistant turn (one `write` tool
-call + at most one `bash` call for verification). This sidesteps
-the multi-turn assistant-token-masking gap in kiln-train (see
-`kiln-polish-prerequisites.md`).
+call + at most one `bash` call for verification). Originally this
+sidestepped the kiln-train multi-turn assistant-token-masking gap,
+but that gap is now closed by the ECHO trajectory schema
+(`kiln-train::trajectory_mask`); the single-turn shape is now kept
+because it matches the pi-doctest task spec, not because the
+trainer requires it. See
+[`kiln-polish-prerequisites.md`](kiln-polish-prerequisites.md) §1
+(RESOLVED).
 
 ## Pi configuration (verified during Phase 0 pi-smoke)
 
@@ -178,6 +183,10 @@ documents intent for reviewers.)
 
 ## Kiln-polish prerequisites
 
-See `kiln-polish-prerequisites.md`. v0 sidesteps the multi-turn
-token-masking gap by constraining pi to single-turn task completion.
-Multi-turn agentic GRPO requires the masking landing.
+See [`kiln-polish-prerequisites.md`](kiln-polish-prerequisites.md).
+§1 (per-turn assistant-token masking) is now **RESOLVED** in kiln-train
+via the ECHO trajectory schema (`trajectory.rs` + `trajectory_mask.rs`).
+This cap continues to use single-turn rollouts because the task
+spec calls for one-shot solutions, but multi-turn agentic GRPO is
+now first-class — see `capabilities/agentic-grpo/pi-terminal-bench-lite/`
+for the canonical multi-turn paper-reproduction cap.
