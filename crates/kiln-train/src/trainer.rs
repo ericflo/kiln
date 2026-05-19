@@ -703,6 +703,77 @@ impl TrainableLoraParams {
         vars
     }
 
+    /// Load a previously-saved PEFT adapter into the existing Vars,
+    /// replacing the seeded-init values.
+    ///
+    /// Reads `<adapter_dir>/adapter_model.safetensors` and copies each
+    /// tensor into the matching Var via `Var::set`. The adapter's rank,
+    /// alpha, and target_modules must match this `TrainableLoraParams`
+    /// instance — those are passed at `initialize_seeded` time and not
+    /// reconfigurable here.
+    ///
+    /// Used by Phase 3 verifier-free chaining: take a strong Phase 2
+    /// adapter, run `--no-policy-loss` from those weights, save a new
+    /// adapter that's a verifier-free continuation. Without this, the
+    /// `--base-adapter` CLI flag is effectively a lineage label.
+    ///
+    /// Returns the number of tensors loaded. Tensors not present in
+    /// the safetensors file are left at their seeded init values — useful
+    /// when the saved adapter targets a subset of projections.
+    pub fn load_from_safetensors(
+        &self,
+        adapter_dir: &Path,
+        device: &Device,
+    ) -> Result<usize> {
+        let st_path = adapter_dir.join("adapter_model.safetensors");
+        let tensors = candle_core::safetensors::load(&st_path, device).with_context(|| {
+            format!("loading adapter safetensors from {}", st_path.display())
+        })?;
+
+        let mut loaded = 0usize;
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            let mut load_proj = |name: &str, pair: &Option<(Var, Var)>, is_attn: bool| -> Result<()> {
+                if let Some((a, b)) = pair {
+                    let sub = if is_attn { "self_attn" } else { "mlp" };
+                    let prefix = format!("base_model.model.model.layers.{layer_idx}.{sub}.{name}");
+                    let a_key = format!("{prefix}.lora_A.weight");
+                    let b_key = format!("{prefix}.lora_B.weight");
+                    if let Some(a_t) = tensors.get(&a_key) {
+                        a.set(a_t).with_context(|| {
+                            format!("setting Var for {a_key}")
+                        })?;
+                        loaded += 1;
+                    }
+                    if let Some(b_t) = tensors.get(&b_key) {
+                        b.set(b_t).with_context(|| {
+                            format!("setting Var for {b_key}")
+                        })?;
+                        loaded += 1;
+                    }
+                }
+                Ok(())
+            };
+
+            load_proj("q_proj", &layer.q_proj, true)?;
+            load_proj("k_proj", &layer.k_proj, true)?;
+            load_proj("v_proj", &layer.v_proj, true)?;
+            load_proj("o_proj", &layer.o_proj, true)?;
+            load_proj("in_proj_qkv", &layer.in_proj_qkv, true)?;
+            load_proj("in_proj_z", &layer.in_proj_z, true)?;
+            load_proj("out_proj", &layer.gdn_out_proj, true)?;
+            load_proj("gate_proj", &layer.gate_proj, false)?;
+            load_proj("up_proj", &layer.up_proj, false)?;
+            load_proj("down_proj", &layer.down_proj, false)?;
+        }
+
+        tracing::info!(
+            path = %adapter_dir.display(),
+            num_tensors = loaded,
+            "loaded base adapter into TrainableLoraParams"
+        );
+        Ok(loaded)
+    }
+
     /// Save the trained adapter in PEFT-compatible format.
     ///
     /// Creates `adapter_config.json` and `adapter_model.safetensors` that can
@@ -1446,6 +1517,35 @@ pub fn grpo_train_jsonl(
         num_vars = params.all_vars().len(),
         "initialized streamed GRPO trainable LoRA parameters"
     );
+
+    // Phase 3 chaining: load a previously-saved adapter into the
+    // seeded Vars, replacing the random init. Looks up the adapter
+    // dir as either `config.base_adapter` (a full path) or
+    // `<adapter_dir>/<config.base_adapter>` (a name) — the lineage
+    // path treats it as a name relative to the adapter parent dir,
+    // so we accept both interpretations here.
+    if let Some(base_name) = config.base_adapter.as_deref() {
+        let base_dir = if std::path::Path::new(base_name).exists() {
+            std::path::PathBuf::from(base_name)
+        } else {
+            adapter_dir.join(base_name)
+        };
+        if !base_dir.join("adapter_model.safetensors").exists() {
+            anyhow::bail!(
+                "config.base_adapter is set but no adapter_model.safetensors \
+                 found at {} — pass either a full path or an adapter name \
+                 under {}",
+                base_dir.display(),
+                adapter_dir.display()
+            );
+        }
+        let n_loaded = params.load_from_safetensors(&base_dir, &device)?;
+        tracing::info!(
+            base = %base_dir.display(),
+            num_tensors = n_loaded,
+            "loaded base adapter — continuing training from those weights"
+        );
+    }
 
     params.register_with_backend(&*backend)?;
 
