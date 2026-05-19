@@ -204,7 +204,10 @@ def filter_groups(pod: str, iter_n: int, var_threshold: float) -> int:
         return 0
 
 
-def train_grpo(pod: str, iter_n: int, recipe: dict, train_adapter: str | None) -> None:
+def train_grpo(pod: str, iter_n: int, recipe: dict, train_adapter: str | None) -> bool:
+    """Train GRPO. Returns True if adapter was produced, False if training
+    bailed out (e.g. no GRPO groups). Caller should NOT load the adapter
+    if False."""
     print(f"  killing kiln serve, training GRPO", flush=True)
     kill_kiln_serve(pod)
     time.sleep(5)
@@ -249,11 +252,21 @@ def train_grpo(pod: str, iter_n: int, recipe: dict, train_adapter: str | None) -
     pod_bg(pod, log, cmd)
     if not pod_wait(pod, done, timeout=7200):
         raise RuntimeError(f"iter {iter_n} training timed out (>2hr)")
-    # Verify adapter exists
-    pod_ssh(pod, f"ls -la {adapter_out}/pi-cc-iter{iter_n}/ | head -5", timeout=30)
+    # Verify the safetensors file landed — if not, training bailed (zero groups etc.)
+    chk = pod_ssh(
+        pod,
+        f"test -f {adapter_out}/pi-cc-iter{iter_n}/adapter_model.safetensors && echo OK || echo MISSING",
+        timeout=30,
+    ).strip()
+    if chk != "OK":
+        # Read the tail of the log for context
+        tail = pod_ssh(pod, f"tail -5 {log}", timeout=15)
+        print(f"  WARN: iter {iter_n} training produced no adapter; tail:\n{tail}", flush=True)
+        return False
     # Symlink into kiln model dir so /v1/adapters/load works
     pod_ssh(pod, f"ln -sfn {adapter_out}/pi-cc-iter{iter_n} /workspace/qwen3.5-4b/adapters/pi-cc-iter{iter_n}",
             timeout=30)
+    return True
 
 
 def run_eval(pod: str, iter_n: int, adapter: str) -> dict:
@@ -367,13 +380,19 @@ def run_one_iter(pod: str, iter_n: int) -> None:
         # Auto-fallback: try the configured threshold, drop by 10× if 0 groups
         n_groups = filter_groups(pod, iter_n, filter_var)
         tried = filter_var
-        while n_groups < 2 and tried > 1e-6:
+        while n_groups < 2 and tried > 1e-8:
             tried = tried / 10
             print(f"    only {n_groups} groups passed; retrying at var > {tried}", flush=True)
             n_groups = filter_groups(pod, iter_n, tried)
-        train_grpo(pod, iter_n, recipe, train_adapter)
-        # Restart serve and load adapter
+        trained = train_grpo(pod, iter_n, recipe, train_adapter)
+        # Restart serve so subsequent iters / evals have kiln available.
         start_kiln_serve(pod, iter_n)
+        if not trained:
+            # Training was a no-op (no GRPO groups). Skip this iter — do not
+            # record a misleading eval row. The exception is caught by main()
+            # and routed to failures.jsonl.
+            raise RuntimeError(f"iter {iter_n}: training produced no adapter "
+                               f"(likely zero-variance rollouts when warm-starting)")
         set_adapter(pod, f"pi-cc-iter{iter_n}")
     else:
         # eval-only iter — ensure kiln is serving
