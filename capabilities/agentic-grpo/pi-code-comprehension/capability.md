@@ -1,159 +1,202 @@
-# pi-code-comprehension — mental model from reading
+# Capability: pi-code-comprehension
 
-**Status:** Scaffold. **Rank 3/10**. Every safe edit downstream depends
-on the agent having a correct model of the code it's about to change.
+## Description
 
-**Goal.** Given a function or small module, the agent — using only its
-tool surface (`Read`, `grep`) — produces a structured summary of:
-inputs, returns, mutations (filesystem / global / argument-mutating),
-called helpers, callers, and the function's invariants. The summary
-must cite line numbers grounding each field.
+Given a target symbol (a function or class) in a small Python code
+snapshot, the agent — using pi's tool surface (`read`, `bash`/`grep`,
+`edit`, `write`) — produces a STRUCTURED JSON summary of the symbol's:
 
-## Why this capability
+- **inputs** (name, type, source_line)
+- **returns** (type, source_line)
+- **mutates** (`filesystem:`, `global:`, `arg:`)
+- **calls** (name, file, line)
+- **called_by** (file, line — including cross-file callers found by grep)
+- **invariants** (implicit + explicit preconditions)
+- **side_effects** (raises, log output, I/O)
 
-Two clouderic patterns:
+The answer is emitted as the FINAL pi assistant turn, wrapped in
+`<answer>{...}</answer>` tags (or as a top-level JSON object; the rubric
+accepts both).
 
-1. **Edit-without-comprehension.** The saved note
-   `verify-architecture-claims-in-source` is exactly this — "always
-   verify architecture claims by reading the specific source file, not
-   inferring from adjacent code." Multiple PRs landed broken because
-   the agent inferred from the *call site* rather than reading the
-   *definition*.
-2. **Drive-by edits to long functions.** Agents that don't internalize
-   a function's invariants (e.g. "this function assumes the lock is
-   already held") edit around the invariant, ship green CI, and break
-   things subtly.
+This capability is the agentic complement to the OPD
+`faithful-code-summarization` cap: that one trains generation when the
+context is already provided, this one trains the model to *fetch* the
+context across files before summarising.
 
-This cap is the agentic complement to OPD's
-`faithful-code-summarization` — that one trains generation given a
-single file in context; this one trains *agentic* comprehension where
-the model has to *fetch* the relevant context across files.
+## Why this capability matters
 
-## Task shape
+Two clouderic patterns this targets:
 
-Each task is `(repo_snapshot, target_symbol, gold_summary)`:
+1. **Edit-without-comprehension.** Without structured comprehension of a
+   target function the agent edits around invariants ("assumes the lock
+   is held") and ships green CI that subtly breaks runtime behaviour.
+2. **Drive-by edits to long files.** Even when an agent reads the
+   target file, it skips the cross-file caller graph — and edits a
+   public function as if it had a single caller. The
+   `verify-architecture-claims-in-source` agent note (memory) is exactly
+   this.
 
-- **Repo snapshot** — small-to-mid repo.
-- **Target symbol** — `(file, function_name)` or `(file, class_name)`.
-- **Gold summary** — JSON with fields:
-  ```json
-  {
-    "inputs":   [{"name": "...", "type": "...", "source_line": N}],
-    "returns":  [{"type": "...", "source_line": N}],
-    "mutates":  ["filesystem:writes to /tmp", "global:STATE"],
-    "calls":    [{"name": "...", "file": "...", "line": N}],
-    "called_by":[{"file": "...", "line": N}],
-    "invariants":["...", "..."],
-    "side_effects": ["...", "..."]
-  }
-  ```
+A model that reliably produces grounded, structured summaries on every
+edit-class task is the lowest-bandwidth deployment story for a 4B
+coding agent. **And this matters specifically because the 7-field
+schema becomes the model's mental scaffolding for edit tasks.**
 
-Example prompt:
+## Base model
+
+Qwen3.5-4B served by `kiln serve` on port 8420. Adapter loaded via
+`POST /v1/adapters/load`.
+
+## Rollout source
+
+Multi-turn pi session. The model reads + greps + emits a final
+`<answer>{...}</answer>` block. Sampling defaults (temperature=0.8,
+top_p=0.95) from kiln. N=4 generations per task per training step.
+
+Pi configured via `kiln pi-setup` to use `qwen-3.5-4b-kiln`. Headless
+`pi -p` with `--session-dir`, `--offline`, `--no-context-files`.
+
+## Reward function (v1 — multi-component, adversarially audited)
+
+See `rubric.py` for the implementation. Composite:
 
 ```
-Produce a structured summary of the function `apply_chat_template` in
-`crates/kiln-tokenizer/src/lib.rs`. Output JSON with the schema:
-{inputs, returns, mutates, calls, called_by, invariants}. Cite line
-numbers in each field.
+composite = outcome × (
+    0.20 · grounding
+  + 0.15 · cross_file_caller_recall
+  + 0.10 · invariant_coverage
+  + 0.05 · format_compliance
+  + 0.50
+)
 ```
 
-Correct trajectory:
+Where `outcome` is the *mean F1 across the 7 structured fields* (with
+type / identifier normalisation and a small "abstention beats lying"
+bonus on `called_by`):
 
-1. `Read` the file (paginated if needed).
-2. `grep -rn "apply_chat_template"` to find call sites.
-3. (Optional) read one or two callers to confirm conventions.
-4. Emit the JSON summary.
+| Field | Score | Notes |
+|-------|-------|-------|
+| `inputs`        | F1 on (name, type) pairs (60%) + F1 on names (40%) |
+| `returns`       | F1 on type set (normalized) |
+| `mutates`       | F1 on `tag:target` strings; tag-only matches get half-credit |
+| `calls`         | F1 on name (75%) + (name,file) (25%) |
+| `called_by`     | F1 on file basenames; abstention bonus when gold non-empty |
+| `invariants`    | semantic F1 against gold paraphrase lists (Jaccard >= 0.30, ≥ 2 shared content tokens) |
+| `side_effects`  | semantic F1, looser threshold |
 
-## Rubric design (v0)
+Headline sub-scores (the ones the model can move with training):
 
-| Sub-score | Weight | What it measures | Cannot be cheated by |
-|-----------|--------|-------------------|----------------------|
-| `outcome` | hard floor | Mean F1 across the structured fields (`inputs`, `returns`, `mutates`, `calls`, `called_by`, `invariants`). Field-specific tokenizers; line numbers allowed ±N off-by. | Empty JSON → 0. Free-form prose → JSON parse failure → 0. |
-| `grounding` | 0.20 | Per-field accuracy of cited line numbers: gold has the line, predicted line is within ±2. | Citing line 1 for every field. |
-| `cross_file_caller_recall` | 0.15 | Recall on the `called_by` set. Specifically: did the agent find at least one caller in a different file? | Listing only intra-file callers. |
-| `invariant_coverage` | 0.10 | Fraction of gold invariants the summary names (semantic-match, with embedding similarity ≥ 0.7 to a gold paraphrase). | One generic invariant per task. |
-| `format_compliance` | 0.05 | JSON parses; schema valid. | Malformed JSON → 0. |
+| Sub-score | Weight | What it rewards |
+|-----------|--------|-----------------|
+| `outcome` (multiplier) | hard floor | Mean field-F1 across all 7 fields |
+| `grounding` | 0.20 | Line-number citations within ±2 of gold |
+| `cross_file_caller_recall` | 0.15 | Fraction of gold cross-file callers recovered |
+| `invariant_coverage` | 0.10 | Fraction of gold invariants the summary matches (semantically) |
+| `format_compliance` | 0.05 | All 6 required fields present in the JSON |
 
-**Composite** = `outcome × (0.20·grounding + 0.15·caller_recall + 0.10·invariants + 0.05·format + 0.50·base)`
-
-## ECHO recipe
-
-**Moderate fit.** The forward pass is read-heavy; env tokens are file
-contents, which are extremely predictable from the path. ECHO loss on
-the read response biases the model toward "predict what the file
-says," which is exactly the comprehension skill.
-
-But the *output* (the JSON summary) is action-side. So ECHO helps the
-*read*; GRPO scores the *summary*. This is exactly the standard
-multi-turn shape — ECHO defaults apply.
-
-**Hypothesis worth testing:** raise lambda to `0.075` early. For tasks
-this read-heavy, predicting the file content is a major fraction of
-the learning signal.
-
-## Hypotheses
-
-- **H_paginated_reads** — for long files (>200 lines), force the agent
-  to use paginated reads with `offset/limit`. Tests whether the model
-  reads the *right* slice or asks for the whole thing.
-- **H_invariant_inference** — provide a subset of tasks where the
-  function's docstring is removed; the agent must infer invariants
-  from the body. Predicts: dramatic drop without docstring; ECHO closes
-  some of the gap.
-- **H_callgraph_recall** — vary the caller diversity per task; check if
-  agents trained here generalize to repos with many call sites.
+A perfect rollout scores 1.0; a no-answer rollout scores 0.0. See
+`rubric_sanity.py` for the calibration battery — `perfect=1.0`,
+`good_paraphrase=0.95`, `no_grep=0.70`, `intra_file_only=0.69`,
+`line_1_bluff=0.80`, `bluff_unread=0.01`, `empty_json=0.01`,
+`no_answer=0.0`, `garbage_text=0.0`.
 
 ## Adversarial design (§0)
 
-**Q: bluff the JSON without reading.** Mitigation: `grounding` is line-cited;
-ungrounded fields score 0.
+| Cheat | How the rubric blocks it |
+|-------|--------------------------|
+| Empty JSON | outcome=0 → composite=0 |
+| Skip reads, bluff JSON | outcome F1 ≪ 1 because names/types wrong |
+| Always-cite-line-1 | grounding ≪ 1 |
+| Copy docstring as invariants | gold has *implicit* invariants the docstring doesn't state |
+| Overstuff fields | F1 (not recall) caps the precision loss |
+| Same-file fake callers | cross_file_caller_recall = 0 |
+| Pure abstention (empty list) | small honesty bonus on called_by (0.10) but penalises overall outcome |
 
-**Q: copy the docstring as "invariants".** Mitigation: gold invariants
-include *implicit* ones the docstring doesn't state (e.g. "assumes lock
-held," "must run after `init()`"). Pure-docstring copies miss those.
+## Headroom
 
-**Q: read everything, emit no structure.** Mitigation: `format_compliance`
-gates parse; outcome F1 requires schema fields populated.
+To be measured at iter 0 baseline. Working hypothesis based on the
+`pi-doctest` baseline shape and the OPD `code-symbol-extraction`
+results: composite ~0.30-0.50, dominated by `grounding=0` and
+`cross_file_caller_recall=0` because the 4B base default doesn't grep
+for callers and rarely cites lines without prompting.
 
-## Headroom (estimated)
+## Hypotheses to try
 
-- Baseline composite ~0.40–0.55. The 4B base can produce structured
-  JSON reasonably but loses on `grounding` (it doesn't cite lines) and
-  `cross_file_caller_recall` (it doesn't grep).
-- Target sub-score: `grounding` (highest movable mass — the model can
-  emit citations, it just doesn't by default).
+The goal is to lift composite by ~+0.10 in 50 iters. Each hypothesis
+gets one row in `capability.jsonl`. Initial sequence:
 
-## Files to create
+**Recipe-search hypotheses (1-10):**
+- H1: Default Phase 1 recipe (ECHO 0.05, lr 1e-5, rank 16) on full corpus
+- H2: Strong-signal filter (var > 0.02) on iter-1 pool
+- H3: Higher ECHO lambda (0.075) — paper §3.3 says still productive
+- H4: Lower lr (5e-6) for less overshoot
+- H5: Higher rank (32) for more representation budget
+- H6: Doubled num_generations (4 → 8) for sharper advantages
+- H7: Filter to "hard" tasks only (baseline composite < 0.5)
+- H8: 2-epoch on strong-signal pool (validates 1-epoch sweet spot)
+- H9: Strict outcome floor (gate outcome ≥ 0.3 before scoring sub-scores)
+- H10: Pre-prompt the model with field schema reminders in the user message
 
-- [ ] `rubric.py` — composite. The `invariant_coverage` term needs a
-  small embedding model for semantic match; use BGE-small or hash if
-  embedding cost is too high.
-- [ ] `task_scaffold.py` — gold summaries can be bootstrapped by
-  running a strong teacher (the vLLM teacher used in OPD caps) over
-  hand-picked symbols and human-editing the result. ~50 hand-curated
-  golds; the rest synth-and-filter.
-- [ ] `rollout.py`, `build_corpus.py`, `capability.oracle.sh`,
-  `run_iter.sh`.
-- [ ] `calibration/{good,bad}.jsonl` — good: read-then-grep-then-summary
-  trajectories. Bad: emit JSON without reading.
+**Target-rebalance hypotheses (11-20):**
+- H11: Up-weight `grounding` (0.20 → 0.30) — biggest movable mass
+- H12: Up-weight `cross_file_caller_recall` (0.15 → 0.25)
+- H13: Penalize overstuffed JSON harder (precision-weighted F1)
+- H14: Reward shorter pi sessions (tool-call efficiency add-on)
+- H15: Require ≥ 1 grep call before allowing `called_by` to score
+- H16: Add `consistency` bonus when same line is cited across fields
+- H17: Add `partial_credit` for paraphrased invariants the rubric missed
+- H18: KL coeff sweep (0.05, 0.10, 0.20)
+- H19: clip_epsilon sweep (0.10, 0.20, 0.30)
+- H20: Reduce max_wall_clock_s (60s) — forces decisive behavior
 
-## Next steps for the agent picking this up
+**Corpus + curriculum hypotheses (21-35):**
+- H21: Curriculum: easy tasks (functions ≤ 10 lines) only, iter 1
+- H22: Curriculum: hard tasks (functions ≥ 30 lines) only
+- H23: Mixed corpus: seed + kiln's own scripts/
+- H24: Synthetic-caller heavy corpus (every task has ≥ 3 cross-file callers)
+- H25: Real-only corpus (only tasks where called_by came from real callers)
+- H26: Adversarial-eval corpus (some functions have NO callers in pool)
+- H27: Heuristic-augmented gold (use astroid for richer call-graph)
+- H28: Multi-file targets: include classes spread across modules
+- H29: Reward annealing: outcome multiplier → linear blend over iters
+- H30: Field-disable ablation: train without scoring `mutates`
+- H31: Hard-only filter: pre-baseline-composite < 0.3
+- H32: Replay best-of-prior on each iter (off-policy distillation)
+- H33: Self-play: model bootstraps the gold (then we audit it)
+- H34: Caller-blind tasks: hide caller files; force outside-context grep
+- H35: Invariant-rich tasks: only functions with ≥ 3 invariant patterns
 
-1. Read the shared README and `capabilities/opd/faithful-code-summarization/capability.md`
-   — the OPD sibling is the closest reference.
-2. Pick ~30 target symbols from kiln itself, biased toward
-   non-trivial: training functions, tokenizer methods, scheduler
-   methods. Hand-write golds; this anchors the corpus quality.
-3. Decide on the embedding choice for `invariant_coverage` upfront —
-   running BGE-small adds ~10ms per task; hash-fallback is free but
-   noisier.
-4. Build calibration first; verify that "JSON without reads" is
-   clearly worse than "read-then-summary" in your rubric.
-5. Iter 0 baseline, then iter 1 with ECHO defaults.
+**Sampling + decoding hypotheses (36-45):**
+- H36: Temperature sweep (0.6, 0.8, 1.0)
+- H37: Top-p sweep (0.9, 0.95, 0.99)
+- H38: Min-p sampling (replaces top-p)
+- H39: System prompt anchor: explicit "first, read; then, grep; then, answer"
+- H40: Few-shot system prompt with one calibration-good example
+- H41: Stop-token after `</answer>` (prevents continuation)
+- H42: max-turns lower (8 → 5) to force decisive tool use
+- H43: max-turns higher (8 → 15) for deeper exploration
+- H44: Token-level loss aggregation vs. sample-level (config ablation)
+- H45: Importance-sampling level: token vs sequence
 
-## References
+**Verification + robustness hypotheses (46-50):**
+- H46: Best iter, 2nd seed for eval variance estimate
+- H47: Best iter, 2nd seed for training reproducibility
+- H48: Best iter, expanded eval set
+- H49: Best iter, hidden-tests stress (eval on out-of-distribution corpus)
+- H50: Final adapter merge / ensemble across top-3 iters
 
-- `capabilities/opd/faithful-code-summarization/` — OPD sibling.
-- `capabilities/opd/code-symbol-extraction/` — closely related.
-- `crates/kiln-tokenizer/src/lib.rs::apply_chat_template` — a good
-  candidate target symbol (cross-file callers; non-trivial invariants).
+## Pi prompt template (verbatim)
+
+See `task_scaffold.py::pi_prompt`. Each task scaffolds the workdir
+with the target file + 2-6 sibling files (some may contain callers).
+
+## Hypothesis log
+
+See `capability.jsonl` — one row per iter, append-only.
+
+## Kiln-polish prerequisites
+
+Multi-turn assistant masking is closed by ECHO Phase 0 (per shared
+README §1). Single-turn final-answer JSON keeps things simple; the
+rubric pulls the final assistant turn and ignores the rest of the
+trajectory for scoring (but the trajectory IS the signal for GRPO via
+the action+observation token masks).
