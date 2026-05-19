@@ -12,7 +12,7 @@
     "echo_lambda": null,
     "kind": "train",
     "notes": "Default ECHO+GRPO Phase 1 recipe (iter 1 done = 0.707)",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 2,
@@ -27,7 +27,7 @@
     "echo_lambda": null,
     "kind": "train",
     "notes": "More train tasks (24) vs iter 1's 16",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 3,
@@ -43,7 +43,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm-start best with low lr \u2014 fine-tune",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 4,
@@ -58,7 +58,7 @@
     "echo_lambda": "0.075",
     "kind": "train",
     "notes": "ECHO \u03bb=0.075 \u2014 paper \u00a73.3 productive range",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 5,
@@ -74,7 +74,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm + higher ECHO \u03bb",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 6,
@@ -89,7 +89,7 @@
     "echo_lambda": null,
     "kind": "train",
     "notes": "Higher rank 32/64",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 7,
@@ -104,7 +104,7 @@
     "echo_lambda": null,
     "kind": "train",
     "notes": "Higher lr 2e-5",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 8,
@@ -119,7 +119,7 @@
     "echo_lambda": null,
     "kind": "train",
     "notes": "Doubled gens (8) on smaller task count",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 9,
@@ -135,7 +135,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm + higher rank",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 10,
@@ -150,7 +150,7 @@
     "no_echo": true,
     "kind": "train",
     "notes": "ECHO off \u2014 does ECHO actually contribute?",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 11,
@@ -167,7 +167,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm + 2 epochs",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 12,
@@ -182,7 +182,7 @@
     "echo_lambda": null,
     "kind": "train",
     "notes": "32 tasks \u2014 broad signal",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 13,
@@ -197,7 +197,7 @@
     "echo_lambda": null,
     "kind": "train",
     "notes": "Aggressive lr 3e-5",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 14,
@@ -212,7 +212,7 @@
     "echo_lambda": null,
     "kind": "train",
     "notes": "Aggressive rank 64/128",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 15,
@@ -229,7 +229,7 @@
     "seed": 2718281828,
     "kind": "train",
     "notes": "Warm best, 2nd seed",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 16,
@@ -244,7 +244,7 @@
     "echo_lambda": "0.025",
     "kind": "train",
     "notes": "ECHO \u03bb=0.025 \u2014 bottom of paper range",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 17,
@@ -260,7 +260,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, more tasks (16)",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 18,
@@ -275,7 +275,7 @@
     "echo_lambda": null,
     "kind": "train",
     "notes": "Lower rank 8/16 \u2014 less overfit",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 19,
@@ -291,7 +291,7 @@
     "no_policy_loss": true,
     "kind": "train",
     "notes": "Verifier-free: ECHO-only (paper \u00a75.5)",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 20,
@@ -307,7 +307,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best with ECHO \u03bb=0.10 (high)",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 21,
@@ -324,7 +324,7 @@
     "seed": 1234567,
     "kind": "train",
     "notes": "Warm best, 3rd seed",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 22,
@@ -339,7 +339,7 @@
     "echo_lambda": null,
     "kind": "train",
     "notes": "Higher lr 5e-5",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 23,
@@ -355,7 +355,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best with aggressive rank",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 24,
@@ -372,7 +372,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, very low lr, 2 epochs",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 25,
@@ -388,7 +388,7 @@
     "train_adapter_from": "iter-1",
     "kind": "train",
     "notes": "Warm-start from iter 1 (vs best)",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 26,
@@ -404,7 +404,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best + larger rank",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 27,
@@ -421,7 +421,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, 2 epochs, normal lr",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 28,
@@ -437,7 +437,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, 20 tasks",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 29,
@@ -452,7 +452,7 @@
     "echo_lambda": "0.15",
     "kind": "train",
     "notes": "Very high ECHO \u03bb=0.15 \u2014 paper says collapses",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 30,
@@ -468,7 +468,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, small rank \u2014 conservative",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 31,
@@ -485,7 +485,7 @@
     "seed": 314159265,
     "kind": "train",
     "notes": "Warm best, another seed",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 32,
@@ -501,7 +501,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, ECHO \u03bb=0.035",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 33,
@@ -518,7 +518,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best with rank 32 + 2 epochs",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 34,
@@ -533,7 +533,7 @@
     "echo_lambda": null,
     "kind": "train",
     "notes": "Large pool 40 tasks (slow but broad)",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 35,
@@ -549,7 +549,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, 8 gens \u00d7 8 tasks",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 36,
@@ -565,7 +565,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, ECHO off \u2014 does ECHO matter at this stage?",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 37,
@@ -582,7 +582,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, verifier-free (ECHO-only)",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 38,
@@ -598,7 +598,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, very low lr 1e-6",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 39,
@@ -615,7 +615,7 @@
     "kind": "abl",
     "skip_train": true,
     "notes": "Eval best at 2nd seed \u2014 variance estimate",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 40,
@@ -631,7 +631,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, 24 tasks",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 41,
@@ -647,7 +647,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, high alpha vs rank",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 42,
@@ -664,7 +664,7 @@
     "seed": 999,
     "kind": "train",
     "notes": "Warm best with fresh roll seed",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 43,
@@ -681,7 +681,7 @@
     "kind": "abl",
     "skip_train": true,
     "notes": "Re-eval iter 1 \u2014 variance check",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 44,
@@ -697,7 +697,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, lr between 5e-6 and 1e-5",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 45,
@@ -713,7 +713,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, extreme rank 128",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 46,
@@ -730,7 +730,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best with 16 tasks and 2 epochs",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 47,
@@ -747,7 +747,7 @@
     "kind": "abl",
     "skip_train": true,
     "notes": "Eval best at 4 samples \u00d7 T=0.8 for diversity",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 48,
@@ -763,7 +763,7 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Warm best, default ECHO \u2014 confirm baseline",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 49,
@@ -780,7 +780,7 @@
     "seed": 271828,
     "kind": "train",
     "notes": "Final seed of warm best",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   },
   {
     "iter": 50,
@@ -796,6 +796,6 @@
     "train_adapter_from": "best",
     "kind": "train",
     "notes": "Closeout candidate: warm best, 16 tasks",
-    "rollout_concurrency": 2
+    "rollout_concurrency": 1
   }
 ]
