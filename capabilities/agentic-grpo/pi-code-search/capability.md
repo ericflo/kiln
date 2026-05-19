@@ -120,6 +120,24 @@ correct here.
 - **H_context_budget** — cap the visible tool-result bytes per call.
   Forces multi-call refinement; tests recovery from a truncated view.
 
+## Live iter log (running tally — update after each iter)
+
+| Iter | Slug | Recipe | Composite | Δ vs base | Outcome | Eff | Grd | Calls | Verdict |
+|------|------|--------|-----------|-----------|---------|-----|-----|-------|---------|
+| 0 | baseline-base | (base model, no adapter) | **0.5432** | — | 0.737 | 0.401 | 0.844 | 4.59 | baseline |
+| 1 | h1-fast-recipe | TRAIN_LIMIT=10, FILTER_VAR=0.05, MAX_GROUPS=10, lr=1e-5, rank=16 | 0.5461 | +0.003 | 0.755 | 0.455 | 0.906 | 1.81 | flat composite but **-61% tool calls** + **+0.05 eff** |
+| 2 | h2-low-filter | TRAIN_LIMIT=12, FILTER_VAR=0.02 | **0.2490** | **-0.294** | 0.294 | 0.590 | 0.344 | 1.59 | **regression**: train loss spiked at end (1.07→0.66→1.06), 22/32 zeros |
+| 3 | h3-no-filter | TRAIN_LIMIT=10, no filter, MAX_GROUPS=10 | **0.3604** | **-0.183** | 0.451 | 0.548 | 0.500 | 1.59 | **regression**: untouched-group training corrupted outcome, 17/32 zeros |
+
+**Pattern across iters 1-3:**
+- iter 1 (FILTER_VAR=0.05 → 2 surviving groups): only `kept` iter. Tight filter → small signal but stable.
+- iter 2 (FILTER_VAR=0.02 → 6 groups): wider filter, training loss spiked terminal step (1.07).
+- iter 3 (no filter → 10 groups): all groups training including low-variance ones; outcome collapses.
+
+**Provisional thesis:** the training is sensitive to noisy/low-variance groups — including a group where 3/4 completions had `reward=0` poisons the gradient. Iter 1's tight 2-group filter survived because both groups had real variance. Going forward: keep FILTER_VAR ≥ 0.05, OR use H_strong-signal-only filter (drop groups where >50% completions have reward<0.2).
+
+**Next:** iter 4 = h4-tight-filter (FILTER_VAR=0.08), iter 5 = h5-best-replay (re-run h1 with same config), iter 6 = h6-balanced-corpus (TRAIN_LIMIT=20 FILTER_VAR=0.05 to find sweet spot).
+
 ## Adversarial design (§0)
 
 **Q: cheapest 1.0 without doing the cap?** Guess `crates/kiln-train/src/trainer.rs:1`
