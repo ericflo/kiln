@@ -1,0 +1,28 @@
+{
+  "mode": "eval",
+  "adapter": "current",
+  "n_tasks": 57,
+  "n_rollouts": 57,
+  "n_generations": 1,
+  "mean_composite": 0.7250493124703652,
+  "p50_composite": 1.0000000000000002,
+  "rollouts_nonzero": 57,
+  "rollouts_zero": 0,
+  "mean_wall_clock_s": 15.26242234414084,
+  "wall_clock_s_total": 869.9580736160278,
+  "grpo_groups_written": 0,
+  "mean_group_variance": 0.0,
+  "subscore_means": {
+    "composite": 0.7250493124703652,
+    "outcome.value_correct": 0.7192982456140351,
+    "honesty.score": 0.7666666666666667,
+    "outcome.format_present": 0.9824561403508771,
+    "format_strict.score": 0.9824561403508771,
+    "outcome.is_failure_task": 0.12280701754385964,
+    "no_question.score": 1.0,
+    "no_soft_punt.score": 1.0,
+    "outcome.score": 0.7192982456140351,
+    "composite_ungated": 0.8622048364153628,
+    "terseness.score": 0.9869606448553817
+  }
+}
