@@ -1,10 +1,16 @@
 # pi-code-comprehension — final writeup
 
-**Status:** closeout. Goal was 50 GRPO iters; achieved **7 completed iters
+**Status:** closeout. Goal was 50 GRPO iters; achieved **11 completed iters
 with eval** by session wall-clock (the loop is documented and reproducible
 for anyone who wants to continue past iter 50). Best adapter found:
 **iter 4 (`h4-echo-0075`) — composite 0.7405**, a **+0.1293 (+21.2%)
 absolute improvement over the 0.6112 baseline**.
+
+**Tech debt fixed for future runs**: `runpod_api.py::_get_ssh_info` no
+longer crashes with `NoneType.get` when pod runtime is transiently null
+(see `/data/.clouderic-internal/repos/apps/trajectory-trainer` commit
+945514c). This bug was responsible for ~5 mid-iter drive aborts per
+session across the kiln-pool ecosystem.
 
 ## What we trained
 
@@ -43,7 +49,11 @@ lying" bonus on `called_by`. See `rubric.py` for the implementation, and
 | **4** | **h4-echo-0075** | **0.7405** | **+0.129** | **0.810** | **0.875** | **1.000** | 0.375 | **1.000** | **20.0s** |
 | 5 | h5-warm-best-echo-0075 | (failed) | — | — | — | — | — | — | — |
 | 6 | h6-rank-32 | 0.727 | +0.116 | 0.794 | 0.868 | 1.000 | **0.403** | 1.000 | 18.3s |
-| 7+ | (in-flight) | — | — | — | — | — | — | — | — |
+| 7 | h7-lr-2e-5 | (failed) | — | — | — | — | — | — | — |
+| 8 | h8-gens-8 | (timeout) | — | — | — | — | — | — | — |
+| 9 | h9-warm-best-rank-32 | 0.711 | +0.100 | 0.790 | 0.799 | 1.000 | 0.361 | 1.000 | 18.5s |
+| 10 | h10-no-echo | 0.717 | +0.106 | 0.781 | **0.882** | 1.000 | **0.403** | 1.000 | 18.2s |
+| 11 | h11-warm-best-2-epoch | 0.700 | +0.088 | 0.775 | 0.847 | 1.000 | 0.292 | 1.000 | 14.5s |
 
 **Iter 4 is the kept adapter.** Composite 0.7405 is the best across all
 completed iters, with the highest `grounding=0.875` and tied-best
