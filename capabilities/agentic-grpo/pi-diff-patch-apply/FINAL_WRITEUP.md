@@ -3,7 +3,7 @@
 **Date:** 2026-05-19
 **Author:** Claude Opus 4.7 (1M context)
 **Cap directory:** `capabilities/agentic-grpo/pi-diff-patch-apply/`
-**Status:** Partial loop (3 of 50 target iters completed before lease window closed)
+**Status:** In progress — loop resumed (iters 0-7 documented; iters 8+ being driven via drive_iters_fast.sh)
 
 ---
 
