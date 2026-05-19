@@ -150,8 +150,8 @@ PYEOF"
   # match the ssh process command line itself, kill it, and return 255.
   python3 $RP ssh $POD_ID 'pgrep -x kiln | xargs -r kill -9; sleep 3'
 
-  EXTRA_ECHO=""
-  if [ "$NO_ECHO" = "1" ]; then EXTRA_ECHO="--no-echo"; fi
+  ECHO_ARG="--echo-lambda ${ECHO_LAMBDA}"
+  if [ "$NO_ECHO" = "1" ]; then ECHO_ARG="--no-echo"; fi
   MAX_GROUPS_ARG=""
   if [ -n "$MAX_GROUPS" ]; then MAX_GROUPS_ARG="--max-groups $MAX_GROUPS"; fi
 
@@ -163,8 +163,7 @@ PYEOF"
       --output ${ADAPTER_OUT} \
       --adapter pi-failure-triage-iter${ITER} \
       --mode ${GRPO_MODE} --rank ${RANK} --alpha ${ALPHA} --lr ${LR} --seed ${SEED} \
-      --echo-lambda ${ECHO_LAMBDA} \
-      ${EXTRA_ECHO} ${MAX_GROUPS_ARG} ${EXTRA_TRAIN_ARGS} 2>&1"
+      ${ECHO_ARG} ${MAX_GROUPS_ARG} ${EXTRA_TRAIN_ARGS} 2>&1"
   python3 $RP wait-file $POD_ID "${ADAPTER_OUT}/pi-failure-triage-iter${ITER}/adapter_model.safetensors" --timeout 1800
 
   echo ">>> symlinking adapter into kiln model dir"
