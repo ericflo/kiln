@@ -100,7 +100,7 @@ if [ "$SKIP_TRAIN" = "0" ]; then
       --tasks datasets/train.tasks.jsonl --task-limit ${NUM_TRAIN_TASKS} \
       --out-dir ${TRAIN_OUT} --mode train --num-generations ${NUM_GENS} \
       --seed-base ${SEED} --parallel ${PARALLEL} \
-      --max-turns ${MAX_TURNS} --max-wall-clock-s ${MAX_WALL_CLOCK_S} \
+      --max-wall-clock-s ${MAX_WALL_CLOCK_S} \
       --temperature ${TEMPERATURE} --adapter current --verbose 2>&1"
   python3 $RP wait-file $POD_ID "${TRAIN_OUT}/summary.json" --timeout 7200
 
@@ -181,7 +181,7 @@ if [ "$SKIP_EVAL" = "0" ]; then
       --tasks datasets/eval.tasks.jsonl \
       --out-dir ${EVAL_OUT} --mode eval --num-generations 1 \
       --adapter current --seed-base ${SEED} --parallel ${PARALLEL} \
-      --max-turns ${MAX_TURNS} --max-wall-clock-s ${MAX_WALL_CLOCK_S} \
+      --max-wall-clock-s ${MAX_WALL_CLOCK_S} \
       --temperature ${TEMPERATURE} --verbose 2>&1"
   python3 $RP wait-file $POD_ID "${EVAL_OUT}/summary.json" --timeout 7200
 
