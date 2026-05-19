@@ -1,0 +1,28 @@
+{
+  "mode": "eval",
+  "adapter": "current",
+  "n_tasks": 57,
+  "n_rollouts": 57,
+  "n_generations": 1,
+  "mean_composite": 0.7418624940730204,
+  "p50_composite": 1.0000000000000002,
+  "rollouts_nonzero": 57,
+  "rollouts_zero": 0,
+  "mean_wall_clock_s": 7.291869167695966,
+  "wall_clock_s_total": 415.63654255867004,
+  "grpo_groups_written": 0,
+  "mean_group_variance": 0.0,
+  "subscore_means": {
+    "outcome.format_present": 1.0,
+    "no_question.score": 1.0,
+    "outcome.is_failure_task": 0.12280701754385964,
+    "composite": 0.7418624940730204,
+    "format_strict.score": 1.0,
+    "outcome.value_correct": 0.7368421052631579,
+    "no_soft_punt.score": 1.0,
+    "outcome.score": 0.7368421052631579,
+    "composite_ungated": 0.8710336652441918,
+    "terseness.score": 0.9840208629682312,
+    "honesty.score": 0.7789473684210527
+  }
+}
