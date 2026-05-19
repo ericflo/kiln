@@ -141,15 +141,16 @@ def run_rollouts_train(pod: str, iter_n: int, num_train: int, num_gens: int,
     seed = recipe.get("seed", 3141592653)
     # Remove any stale .done file so pod_wait can't return early on a prior run.
     pod_ssh(pod, f"rm -f {done}", timeout=15)
+    concurrency = recipe.get("rollout_concurrency", 2)
     cmd = (
         f'cd {CAP_DIR_ON_POD} && rm -rf {out} && '
         f'python3 rollout.py --tasks datasets/train.tasks.jsonl --task-limit {num_train} '
         f'--out-dir {out} --mode train --num-generations {num_gens} '
-        f'--max-wall-clock-s 120 --concurrency 1 --verbose --adapter current --seed {seed} 2>&1; '
+        f'--max-wall-clock-s 120 --concurrency {concurrency} --verbose --adapter current --seed {seed} 2>&1; '
         f'echo DONE > {done}'
     )
     pod_bg(pod, log, cmd)
-    estimated = max(600, num_train * num_gens * 30 + 300)
+    estimated = max(600, num_train * num_gens * 20 + 300)
     if not pod_wait(pod, done, timeout=min(estimated, 5400)):
         raise RuntimeError(f"iter {iter_n} rollouts timed out")
     # Verify summary exists; if not, rollouts crashed before completing
@@ -265,7 +266,7 @@ def run_eval(pod: str, iter_n: int, adapter: str) -> dict:
         f'cd {CAP_DIR_ON_POD} && rm -rf {out} && '
         f'python3 rollout.py --tasks datasets/eval.tasks.jsonl '
         f'--out-dir {out} --mode eval --num-generations 1 '
-        f'--max-wall-clock-s 180 --concurrency 1 --verbose --adapter current 2>&1; '
+        f'--max-wall-clock-s 120 --concurrency 2 --verbose --adapter current 2>&1; '
         f'echo DONE > {done}'
     )
     pod_bg(pod, log, cmd)
