@@ -225,13 +225,19 @@ if [ "${EVAL_ONLY:-0}" != "1" ] && [ "${SKIP_TRAIN:-0}" != "1" ] && [ -s "$GRPO_
   ln -sfn "$ADAPTER_OUT" "$KILN_ADAPTERS_DIR/$ADAPTER_NAME"
 fi
 
-# Restart kiln-server if needed (the caller usually restarts it after training).
+# Restart kiln-server if needed (training killed it). Use the same env
+# vars that worked on the new H100/A6000 pod (see notes on kernel
+# kill-switch flags above).
 if ! curl -sf "$KILN_URL/v1/models" >/dev/null 2>&1; then
   echo "[iter $ITER] launching kiln serve in background"
-  ( cd / && nohup "$KILN_BIN" serve --model-path "$KILN_MODEL_PATH" \
-        --port 8420 > "$BASE_DIR/logs/kiln-serve.log" 2>&1 & ) || true
-  # Wait up to 120s for kiln-server to become reachable.
-  for i in $(seq 1 60); do
+  export KILN_MODEL_PATH
+  export KILN_SERVED_MODEL_ID=qwen-3.5-4b-kiln
+  export KILN_BATCHING_ENGINE=0
+  export KILN_DISABLE_FUSED_GDN_GATES=1
+  ( cd / && nohup "$KILN_BIN" serve \
+        > "$BASE_DIR/logs/kiln-serve.log" 2>&1 & ) || true
+  # Wait up to 180s for kiln-server to become reachable.
+  for i in $(seq 1 90); do
     if curl -sf "$KILN_URL/v1/models" >/dev/null 2>&1; then break; fi
     sleep 2
   done
