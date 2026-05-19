@@ -179,7 +179,21 @@ def main() -> int:
     print(f"[drive_iter] iter={iter_n} slug={slug} family={family}")
     print(f"[drive_iter] args={json.dumps(a)}")
 
-    # Resolve BEST / PREV base adapter
+    # Resolve BEST / PREV base adapter — must pass the FULL PATH on the pod
+    # to cuda_grpo_ablation; passing just the name fails because
+    # cuda_grpo_ablation resolves names against the iter's OUTPUT dir,
+    # not the previous iters' output dirs.
+    def _adapter_path_on_pod(name: str) -> str:
+        # Find the iter number from the slug by scanning capability.jsonl
+        rows = load_capability_rows()
+        for r in rows:
+            if r.get("adapter") == name:
+                it = r.get("iter")
+                if it is not None:
+                    return f"/tmp/iter{it}-adapter/{name}"
+        # Fallback: try the active adapter dir
+        return f"/workspace/qwen3.5-4b/adapters/{name}"
+
     base_adapter = a.get("base_adapter", "")
     if base_adapter == "BEST":
         ba, ba_comp = best_adapter_so_far()
@@ -187,16 +201,16 @@ def main() -> int:
             print("[drive_iter] no prior adapter for BEST; falling back to base", file=sys.stderr)
             base_adapter = ""
         else:
-            base_adapter = ba
-            print(f"[drive_iter] BEST adapter -> {ba} (composite {ba_comp:.3f})")
+            base_adapter = _adapter_path_on_pod(ba)
+            print(f"[drive_iter] BEST adapter -> {ba} (composite {ba_comp:.3f}) path={base_adapter}")
     elif base_adapter == "PREV":
         pa = prev_adapter()
         if pa is None:
             print("[drive_iter] no prior adapter for PREV; falling back to base", file=sys.stderr)
             base_adapter = ""
         else:
-            base_adapter = pa
-            print(f"[drive_iter] PREV adapter -> {pa}")
+            base_adapter = _adapter_path_on_pod(pa)
+            print(f"[drive_iter] PREV adapter -> {pa} path={base_adapter}")
 
     # Filter the corpus if requested
     train_tasks_file = "datasets/train.tasks.jsonl"
