@@ -187,20 +187,26 @@ if [ "${EVAL_ONLY:-0}" != "1" ] && [ "${SKIP_TRAIN:-0}" != "1" ] && [ -s "$GRPO_
   N_GROUPS_FILE=$(wc -l < "$GRPO_JSONL")
   EFF_MAX_GROUPS="${MAX_GROUPS:-$N_GROUPS_FILE}"
 
+  ECHO_ARG=()
+  if [ "${NO_ECHO:-0}" = "1" ]; then
+    ECHO_ARG=(--no-echo)
+  else
+    ECHO_ARG=(--echo-lambda "$ECHO_LAMBDA")
+  fi
   set -x
-  "$GRPO_BIN" \
-    --data "$GRPO_JSONL" \
-    --model "$KILN_MODEL_PATH" \
-    --output "$ADAPTER_OUT" \
-    --adapter "$ADAPTER_NAME" \
-    --mode phase1 \
-    --max-groups "$EFF_MAX_GROUPS" \
-    --rank "$RANK" --alpha "$ALPHA" --lr "$LR" \
-    --num-generations "$NUM_GEN" \
-    --epochs "$EPOCHS" \
-    --seed "$SEED" \
-    --echo-lambda "$ECHO_LAMBDA" \
-    2>&1 | tee "$BASE_DIR/logs/train.log"
+  for ep in $(seq 1 "$EPOCHS"); do
+    "$GRPO_BIN" \
+      --data "$GRPO_JSONL" \
+      --model "$KILN_MODEL_PATH" \
+      --output "$ADAPTER_OUT" \
+      --adapter "$ADAPTER_NAME" \
+      --mode phase1 \
+      --max-groups "$EFF_MAX_GROUPS" \
+      --rank "$RANK" --alpha "$ALPHA" --lr "$LR" \
+      --seed "$SEED" \
+      "${ECHO_ARG[@]}" \
+      2>&1 | tee -a "$BASE_DIR/logs/train.log"
+  done
   set +x
 
   # Symlink the adapter into kiln-server's adapter dir so /v1/adapters/load
