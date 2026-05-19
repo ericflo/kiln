@@ -9,7 +9,7 @@ $$\mathcal{L}_{\text{ECHO}} = \mathcal{L}_{\text{GRPO}}(\text{actions}) + \lambd
 The headline result on the paper's TerminalBench-2.0 benchmark: **pass@1 nearly doubles** at 8B (2.7% → 5.2%) and 14B (5.2% → 10.8%) — at **zero extra forward-pass cost** because the env tokens were already in the rollout context.
 
 This guide is the operational companion to the integration plan
-([`docs/plans/echo-integration-plan.md`](plans/echo-integration-plan.md)) and the paper archives ([`docs/papers/echo/`](papers/echo/)).
+([`docs/plans/echo-integration-plan.md`](plans/echo-integration-plan.md)) and the paper archives ([`docs/papers/echo/echo_paper.md`](papers/echo/echo_paper.md)).
 
 ## Quick decisions
 
