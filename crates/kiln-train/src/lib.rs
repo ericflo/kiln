@@ -1048,4 +1048,44 @@ mod tests {
         assert_eq!(parsed_legacy.groups.len(), 0);
         assert_eq!(parsed_agentic.groups.len(), 0);
     }
+
+    /// Capability authors ship `capability.config.json` files with a
+    /// `training_phase1_defaults.loss` block that the cap launcher
+    /// passes verbatim to `train_tokenized_grpo_group`. Pin the
+    /// contract: the shapes used in `pi-terminal-bench-lite` and
+    /// `pi-script-fixup` must always deserialize as a valid LossConfig.
+    /// If either ever drifts the assertion fires.
+    #[test]
+    fn cap_config_loss_blocks_deserialize_as_lossconfig() {
+        // pi-terminal-bench-lite: ECHO on, OPD off, no_policy_loss absent.
+        let tblite = r#"{
+            "echo": {
+                "lambda": 0.05,
+                "env_mask_mode": "env_only",
+                "warning_filter": true
+            },
+            "opd": null
+        }"#;
+        let parsed: LossConfig = serde_json::from_str(tblite).unwrap();
+        assert!((parsed.echo_lambda() - 0.05).abs() < 1e-12);
+        assert!(parsed.opd.is_none());
+        assert!(!parsed.no_policy_loss);
+        let echo = parsed.echo.as_ref().unwrap();
+        assert_eq!(echo.env_mask_mode, EnvMaskMode::EnvOnly);
+        assert!(echo.warning_filter);
+
+        // pi-script-fixup: same shape plus no_policy_loss = true.
+        let fixup = r#"{
+            "echo": {
+                "lambda": 0.05,
+                "env_mask_mode": "env_only",
+                "warning_filter": true
+            },
+            "opd": null,
+            "no_policy_loss": true
+        }"#;
+        let parsed: LossConfig = serde_json::from_str(fixup).unwrap();
+        assert!(parsed.no_policy_loss, "verifier-free cap must parse with no_policy_loss=true");
+        assert!((parsed.echo_lambda() - 0.05).abs() < 1e-12);
+    }
 }
