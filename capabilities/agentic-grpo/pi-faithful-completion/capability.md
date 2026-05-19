@@ -1,10 +1,77 @@
 # pi-faithful-completion — autonomous, format-adherent terminal state
 
-**Status:** Scaffold. **Rank 10/10**. Trains the agent to deliver a
+**Status:** RUNNING 50-iter autonomous loop (2026-05-19).
+**Rank 10/10**. Trains the agent to deliver a
 final assistant turn that (a) matches the task's required output
 format, (b) doesn't ask the user a question, (c) doesn't soft-punt
 ("you decide"), and (d) doesn't claim success when the underlying
 check failed.
+
+## Live progress (updated as iters land)
+
+**Iters completed so far:** check `capability.jsonl` line count.
+**Best so far:** iter 25 (h25-temperature-0.6) composite=0.7751,
+Δ=+0.0514 vs baseline 0.7237. Light-prompt iter 13 close second at
++0.0479. Run `python3 analyze.py` for current TOP-5.
+
+### Findings as of iter 34
+
+**What works (clear positive deltas):**
+- `lr=1e-5 + ECHO λ=0.05 + rank=16` is the safe baseline recipe
+  (iter 1: +0.017)
+- **Lowering rollout temperature from 0.8 → 0.6 yields +0.05**
+  (iter 25 BEST). Tighter rollouts give cleaner advantage signal
+  per group, less gradient-direction noise.
+- **Light system prompt is +0.048 over strict** (iter 13). The strict
+  prompt baselines `no_question` and `no_soft_punt` at 1.0 — GRPO
+  has nothing to push. The light prompt leaves headroom in those
+  sub-scores for the policy gradient to acquire them.
+- **lr=3e-5 (3x default) gives +0.034** (iter 10) — but only with
+  ECHO on.
+- **Chain training from BEST** gives modest +0.034 (iter 34, no
+  variance filter, 32 tasks). Less than BEST itself; chain is best
+  used as a refinement only when the new corpus is BROADER than the
+  base adapter's training set.
+
+**What doesn't work (clear negative deltas):**
+- `lr=1e-4 + no-ECHO`: overshoots, -0.016 (iter 3)
+- `rank=32 alpha=64` at base recipe: -0.016 (iter 4) — too big
+- `rank=8`: nothing changed, 0.000 (iter 5)
+- `ECHO λ=0.025` (paper claims fine): -0.016 (iter 11)
+- `ECHO λ=0.1` (paper warns): -0.017 (iter 12)
+- `temp=1.0 rollout`: -0.016 (iter 26)
+- `task_filter=success_only`: -0.033 (iter 16) — overfits to "always
+  emit format", loses honest_failure
+- `task_filter=balanced`: -0.033 (iter 18) — cycled duplicates kill
+  group variance
+- `mode=phase1_cispo` at base recipe: -0.016 (iter 28)
+
+**Catastrophic (broke the adapter to ~0):**
+- **rank mismatch chain** (iter 19): base rank=16 → train rank=32,
+  produces empty completions, composite 0.022. Hard lesson.
+- **alpha/rank ratio = 4** (iter 24): rank=16 alpha=64 at lr=1e-5
+  → composite 0.022. The LoRA scaling overshoots base weights.
+
+**Other surprises:**
+- `enable_thinking=false` chat_template_kwargs cuts rollout time ~40x
+  (200 tokens of thinking → 5 tokens of answer at temp 0.2). Critical
+  for fast iteration.
+- `ensure_adapter` in kiln-server treats missing `adapter` field on
+  /v1/chat/completions as "unload" — silently broke iters 1-3 of
+  this loop. See `kiln-polish.jsonl#ensure-adapter-treats-missing-field-as-unload`.
+
+### Sub-score deltas at best (iter 25 — composite 0.7751)
+
+| Sub-score | Baseline | Iter 25 | Δ |
+|---|---|---|---|
+| outcome.value_correct | 0.7193 | TBD | TBD |
+| honesty.score | 0.7719 | TBD | TBD |
+| format_strict | 0.9825 | TBD | TBD |
+| no_question | 1.0000 | TBD | TBD |
+| no_soft_punt | 1.0000 | TBD | TBD |
+| terseness | 0.9807 | TBD | TBD |
+
+(Final closeout.md will fill these in after iter 50.)
 
 **Goal.** For any task with strict output requirements, the agent
 reaches a defined terminal state — emitting the required identifiers
