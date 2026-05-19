@@ -378,4 +378,75 @@ mod tests {
         // present but empty.
         assert!(s.contains("\"diagnostic_summary\":{}"));
     }
+
+    #[test]
+    fn echo_diagnostic_summary_round_trips_with_all_fields() {
+        // Pin the wire format for the ECHO diagnostics that
+        // capability authors will read from receipt.json. All fields
+        // set away from default; round-trip must preserve them.
+        let summary = EchoDiagnosticSummary {
+            lambda: 0.05,
+            env_ce_initial: Some(4.21),
+            env_ce_final: Some(0.83),
+            env_ce_drop_pct: Some(80.3),
+            lambda_effective_final: Some(0.07),
+            env_tokens_supervised: 24576,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        // Every non-Option field should be present; every populated
+        // Option should be present (skipped only when None).
+        assert!(json.contains("\"lambda\":0.05"), "lambda missing: {json}");
+        assert!(json.contains("\"env_ce_initial\":4.21"), "env_ce_initial missing: {json}");
+        assert!(json.contains("\"env_ce_final\":0.83"), "env_ce_final missing: {json}");
+        assert!(json.contains("\"env_ce_drop_pct\":80.3"), "drop_pct missing: {json}");
+        assert!(json.contains("\"lambda_effective_final\":0.07"), "lambda_effective missing: {json}");
+        assert!(json.contains("\"env_tokens_supervised\":24576"), "env_tokens_supervised missing: {json}");
+
+        let parsed: EchoDiagnosticSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, summary);
+    }
+
+    #[test]
+    fn echo_diagnostic_summary_skips_none_fields() {
+        // A run with only λ tracked (e.g. before env_ce sampling lands)
+        // should produce a JSON without the unset Option fields.
+        let summary = EchoDiagnosticSummary {
+            lambda: 0.05,
+            env_ce_initial: None,
+            env_ce_final: None,
+            env_ce_drop_pct: None,
+            lambda_effective_final: None,
+            env_tokens_supervised: 0,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(json.contains("\"lambda\":0.05"));
+        assert!(!json.contains("env_ce_initial"), "should skip None: {json}");
+        assert!(!json.contains("env_ce_final"));
+        assert!(!json.contains("env_ce_drop_pct"));
+        assert!(!json.contains("lambda_effective_final"));
+        // env_tokens_supervised is u64, not Option — always present.
+        assert!(json.contains("\"env_tokens_supervised\":0"));
+    }
+
+    #[test]
+    fn echo_section_embeds_in_diagnostic_summary() {
+        // The ECHO summary sits under diagnostic_summary.echo. Verify
+        // a populated receipt round-trips with the ECHO field intact.
+        let echo = EchoDiagnosticSummary {
+            lambda: 0.05,
+            env_ce_initial: Some(4.21),
+            env_ce_final: Some(0.83),
+            env_ce_drop_pct: Some(80.3),
+            lambda_effective_final: Some(0.07),
+            env_tokens_supervised: 24576,
+        };
+        let mut summary = DiagnosticSummary::default();
+        summary.echo = Some(echo.clone());
+        let receipt = AdapterReceipt::new("echo-adapter", "grpo", 4218)
+            .with_diagnostic_summary(summary);
+        let s = serde_json::to_string(&receipt).unwrap();
+        assert!(s.contains("\"echo\""), "echo summary missing: {s}");
+        let parsed: AdapterReceipt = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed.diagnostic_summary.echo, Some(echo));
+    }
 }
