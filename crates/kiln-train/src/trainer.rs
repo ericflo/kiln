@@ -2335,6 +2335,21 @@ fn train_tokenized_grpo_group(
                     let echo_mean_ce = env_log_prob_sum.affine(inv_obs_len, 0.0)?;
                     // Total loss = (policy_scale * L_grpo) + λ · L_envCE
                     let echo_scaled = echo_mean_ce.affine(echo_cfg.lambda, 0.0)?;
+                    // Emit a per-completion debug so operators see ECHO
+                    // firing on the uncheckpointed path with concrete
+                    // env_count / total_obs_len / λ values — the
+                    // checkpointed path already emits this from
+                    // train_tokenized_grpo_group; this matches it for
+                    // the standard path.
+                    let mean_ce_val = echo_mean_ce.to_scalar::<f32>().ok();
+                    tracing::debug!(
+                        comp_idx,
+                        env_count,
+                        total_obs_len = comp.total_obs_len,
+                        echo_lambda = echo_cfg.lambda,
+                        mean_ce = mean_ce_val,
+                        "GRPO uncheckpointed path: ECHO env-CE active"
+                    );
                     scaled_grpo.add(&echo_scaled)?
                 } else {
                     scaled_grpo
