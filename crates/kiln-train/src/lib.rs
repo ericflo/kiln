@@ -836,6 +836,14 @@ mod tests {
     // process-global; each test scrubs the env vars at start to keep the
     // suite hermetic regardless of order. We use the modern `unsafe`
     // wrappers on Rust 1.83+ to make the mutation explicit.
+    //
+    // ENV_LOCK serializes the env-var-touching tests against each other
+    // so cargo test's default parallel runner doesn't race on the
+    // process-global env state. Mirrors `trainer::tests::ENV_LOCK`.
+    // Acquire via `_env_guard = ENV_LOCK.lock().unwrap_or_else(...)` at
+    // the top of every test that calls `clear_kiln_echo_env_vars` or
+    // `std::env::set_var`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn clear_kiln_echo_env_vars() {
         unsafe {
@@ -848,6 +856,7 @@ mod tests {
 
     #[test]
     fn loss_config_default_has_echo_on_at_0_05() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         let cfg = LossConfig::default();
         assert!(cfg.echo.is_some(), "ECHO should be on by default");
@@ -857,6 +866,7 @@ mod tests {
 
     #[test]
     fn loss_config_echo_lambda_returns_zero_when_disabled() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         let mut cfg = LossConfig::default();
         cfg.echo = None;
@@ -866,6 +876,7 @@ mod tests {
 
     #[test]
     fn kiln_echo_enabled_false_disables_echo() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         unsafe { std::env::set_var("KILN_ECHO_ENABLED", "false") };
         let mut cfg = LossConfig::default();
@@ -877,6 +888,7 @@ mod tests {
 
     #[test]
     fn kiln_echo_lambda_overrides_value() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         unsafe { std::env::set_var("KILN_ECHO_LAMBDA", "0.02") };
         let mut cfg = LossConfig::default();
@@ -891,6 +903,7 @@ mod tests {
 
     #[test]
     fn kiln_echo_lambda_re_enables_when_previously_disabled() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         unsafe { std::env::set_var("KILN_ECHO_LAMBDA", "0.03") };
         let mut cfg = LossConfig::default();
@@ -906,6 +919,7 @@ mod tests {
 
     #[test]
     fn kiln_echo_env_mask_mode_overrides() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         unsafe { std::env::set_var("KILN_ECHO_ENV_MASK_MODE", "full_obs") };
         let mut cfg = LossConfig::default();
@@ -917,6 +931,7 @@ mod tests {
 
     #[test]
     fn kiln_echo_warning_filter_overrides() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         unsafe { std::env::set_var("KILN_ECHO_WARNING_FILTER", "false") };
         let mut cfg = LossConfig::default();
@@ -928,6 +943,7 @@ mod tests {
 
     #[test]
     fn kiln_echo_enabled_true_with_lambda_combo() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         unsafe {
             std::env::set_var("KILN_ECHO_ENABLED", "true");
@@ -943,6 +959,7 @@ mod tests {
 
     #[test]
     fn kiln_echo_no_env_vars_leaves_config_unchanged() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         let mut cfg = LossConfig::default();
         let original_lambda = cfg.echo_lambda();
@@ -953,6 +970,7 @@ mod tests {
 
     #[test]
     fn loss_config_no_policy_loss_default_is_false() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         let cfg = LossConfig::default();
         assert!(!cfg.no_policy_loss);
@@ -960,6 +978,7 @@ mod tests {
 
     #[test]
     fn loss_config_no_policy_loss_serde_round_trip() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         let cfg = LossConfig {
             echo: Some(EchoConfig::default()),
@@ -985,6 +1004,7 @@ mod tests {
         // Every EchoConfig field set away from its default — pin the
         // wire format so a future field rename or default change is a
         // loud test failure rather than a silent compatibility break.
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         let custom = EchoConfig {
             lambda: 0.027,
@@ -1007,6 +1027,7 @@ mod tests {
     fn echo_config_partial_payload_fills_defaults() {
         // HTTP clients may send only `{"lambda": ...}` — the other fields
         // must fall back to their `#[serde(default = ...)]` values.
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_kiln_echo_env_vars();
         let json = r#"{"lambda": 0.012}"#;
         let parsed: EchoConfig = serde_json::from_str(json).unwrap();
