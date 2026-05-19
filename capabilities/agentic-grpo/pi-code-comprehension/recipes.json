@@ -311,20 +311,18 @@
   },
   {
     "iter": 21,
-    "slug": "h21-warm-best-fresh-seed",
+    "slug": "h21-rank-2-extreme-low",
     "family": "H21",
     "num_train": 8,
     "num_gens": 4,
     "lr": "1e-5",
     "filter_var": "0.005",
-    "rank": 16,
-    "alpha": 32,
+    "rank": 2,
+    "alpha": 4,
     "echo_lambda": null,
-    "train_adapter_from": "best",
-    "seed": 1234567,
     "kind": "train",
-    "notes": "Warm best, 3rd seed",
-    "rollout_concurrency": 4
+    "rollout_concurrency": 4,
+    "notes": "Extreme low-rank (rank 2/alpha 4) \u2014 can a 0.5M-param LoRA preserve iter-4 gains? Tests information bottleneck of structured-JSON task."
   },
   {
     "iter": 22,
@@ -472,20 +470,18 @@
   },
   {
     "iter": 31,
-    "slug": "h31-warm-best-3rd-seed",
+    "slug": "h31-lr-1e-4-shock",
     "family": "H31",
     "num_train": 8,
     "num_gens": 4,
-    "lr": "5e-6",
+    "lr": "1e-4",
     "filter_var": "0.005",
     "rank": 16,
     "alpha": 32,
     "echo_lambda": null,
-    "train_adapter_from": "best",
-    "seed": 314159265,
     "kind": "train",
-    "notes": "Warm best, another seed",
-    "rollout_concurrency": 4
+    "rollout_concurrency": 4,
+    "notes": "Large-lr ablation (1e-4 vs default 1e-5 = 10x). Likely diverges, but if it converges fast it could be a big win."
   },
   {
     "iter": 32,
@@ -651,20 +647,18 @@
   },
   {
     "iter": 42,
-    "slug": "h42-warm-best-fresh-data",
+    "slug": "h42-gens-16-variance",
     "family": "H42",
-    "num_train": 8,
-    "num_gens": 4,
-    "lr": "5e-6",
+    "num_train": 4,
+    "num_gens": 16,
+    "lr": "1e-5",
     "filter_var": "0.005",
     "rank": 16,
     "alpha": 32,
     "echo_lambda": null,
-    "train_adapter_from": "best",
-    "seed": 999,
     "kind": "train",
-    "notes": "Warm best with fresh roll seed",
-    "rollout_concurrency": 4
+    "rollout_concurrency": 4,
+    "notes": "4 tasks \u00d7 16 gens \u2014 more samples per group \u2192 lower advantage variance. Same total rollouts (64) but distributed differently."
   },
   {
     "iter": 43,
@@ -767,7 +761,7 @@
   },
   {
     "iter": 49,
-    "slug": "h49-warm-best-final-seed",
+    "slug": "h49-warm-iter1-strict",
     "family": "H49",
     "num_train": 8,
     "num_gens": 4,
@@ -776,11 +770,11 @@
     "rank": 16,
     "alpha": 32,
     "echo_lambda": null,
-    "train_adapter_from": "best",
-    "seed": 271828,
+    "epochs": 1,
+    "train_adapter_from": "iter-1",
     "kind": "train",
-    "notes": "Final seed of warm best",
-    "rollout_concurrency": 4
+    "rollout_concurrency": 4,
+    "notes": "Warm-start from iter 1 (intermediate) rather than iter 4 (best). Hypothesis: iter 1 has less overfit, more room to grow."
   },
   {
     "iter": 50,
