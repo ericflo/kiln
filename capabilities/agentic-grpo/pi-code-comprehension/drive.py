@@ -104,7 +104,12 @@ def set_adapter(pod: str, name: str) -> None:
 
 
 def kill_kiln_serve(pod: str) -> None:
-    pod_ssh(pod, 'pkill -9 -f "kiln serve" 2>/dev/null || true; sleep 5', timeout=30)
+    """Kill kiln-serve. Idempotent — if it's already dead, pkill returns 1
+    and we mask that to a 0 exit via || true. SSH errors are also swallowed."""
+    try:
+        pod_ssh(pod, "pkill -9 -f 'kiln serve' || true; sleep 5; true", timeout=60)
+    except Exception as e:
+        print(f"  WARN: kill_kiln_serve failed: {e}", flush=True)
 
 
 def start_kiln_serve(pod: str, iter_n: int) -> None:
@@ -347,11 +352,13 @@ def run_one_iter(pod: str, iter_n: int) -> None:
             start_kiln_serve(pod, iter_n)
 
         train_summary = run_rollouts_train(pod, iter_n, num_train, num_gens, train_adapter, recipe)
+        # Auto-fallback: try the configured threshold, drop by 10× if 0 groups
         n_groups = filter_groups(pod, iter_n, filter_var)
-        if n_groups == 0:
-            # Try even lower threshold
-            print("    retrying filter at var > 0.0001", flush=True)
-            filter_groups(pod, iter_n, 0.0001)
+        tried = filter_var
+        while n_groups < 2 and tried > 1e-6:
+            tried = tried / 10
+            print(f"    only {n_groups} groups passed; retrying at var > {tried}", flush=True)
+            n_groups = filter_groups(pod, iter_n, tried)
         train_grpo(pod, iter_n, recipe, train_adapter)
         # Restart serve and load adapter
         start_kiln_serve(pod, iter_n)
