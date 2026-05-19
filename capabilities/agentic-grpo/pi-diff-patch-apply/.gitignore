@@ -1,0 +1,7 @@
+datasets/eval.tasks.jsonl
+datasets/train.tasks.jsonl
+runs/
+adapters/
+responses/
+*.log
+*.tmp

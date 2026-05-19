@@ -1,11 +1,11 @@
 # pi-diff-patch-apply — agentic patch application with verify/repair
 
-**Status:** Scaffold. **Rank 4/10**. The agentic complement to OPD's
-`diff-patch-fluency` (which trains single-shot diff *generation*); this
-cap trains *application* in a closed loop with tests.
+**Status:** v1 rubric + corpus + rollout harness landed. **Rank 4/10.**
+The agentic complement to OPD's `diff-patch-fluency` (single-shot diff
+*generation*); this cap trains *application* in a closed loop with tests.
 
-**Goal.** Given a working directory and a unified diff (possibly from
-an upstream PR, a teacher rollout, or a bug-fix candidate), the agent
+**Goal.** Given a working directory and a unified diff (sometimes clean,
+sometimes with offset drift, sometimes encoding a subtle bug), the agent
 applies the patch, runs the tests, and — if there are rejects or test
 failures — repairs the patch minimally and re-runs until clean or the
 turn budget is exhausted.
@@ -14,10 +14,9 @@ turn budget is exhausted.
 
 Three clouderic patterns:
 
-1. **Rewrite-whole-function.** Agents who haven't internalized
-   "apply this patch, don't redesign" replace large blocks when a
-   3-line edit was needed. This breaks adjacent tests and produces noisy
-   PRs.
+1. **Rewrite-whole-function.** Agents who haven't internalized "apply
+   this patch, don't redesign" replace large blocks when a 3-line edit
+   was needed. Breaks adjacent tests and produces noisy PRs.
 2. **Surrender-on-reject.** When a patch fails to apply (offset drift,
    conflicting hunk), the 4B base tends to abandon the task or re-apply
    the same patch identically.
@@ -26,51 +25,146 @@ Three clouderic patterns:
 
 This cap is the in-loop, end-to-end cousin of OPD diff-patch-fluency.
 The OPD cap teaches the model to emit clean diffs; this cap teaches it
-to wield diffs against a real workspace.
+to *wield* diffs against a real workspace.
 
 ## Task shape
 
-Each task is `(workspace, patch, tests, gold_outcome)`:
-
-- **Workspace** — small Python or Rust project (tens of files).
-- **Patch** — unified diff, sometimes valid as-is, sometimes with hunks
-  whose offsets drifted by ±N lines, sometimes with one hunk that has
-  to be manually repaired.
-- **Tests** — `pytest -q tests/` or `cargo test -q --package X` — must
-  pass after the patch is applied.
-- **Gold outcome** — `{tests_pass: bool, final_diff_lines: N, expected_repair: bool}`.
-
-Example prompt:
+Each task carries everything the rubric needs to score a rollout:
 
 ```
-Apply the patch in /tmp/incoming.patch to the workspace, then run
-`pytest -q tests/` until all tests pass. If a hunk fails to apply,
-repair it minimally; do not rewrite unrelated code.
+{
+  "task_id":            "task_NNNN",
+  "patch_class":        "clean" | "drift" | "incorrect",
+  "module_name":        e.g. "addition",
+  "init_files":         {path -> content},          # initial state
+  "gold_files":         {path -> content},          # reference solution
+  "patch_text":         "...unified diff...",       # what pi sees
+  "gold_diff_text":     "...the canonical diff...",
+  "gold_diff_lines":    N,                          # for minimality
+  "touched_paths":      ["src/addition.py"],        # files the patch is allowed to modify
+  "protected_paths":    ["tests/test_addition.py"], # files pi MUST NOT modify
+  "expected_repair":    true | false,               # true unless patch_class == "clean"
+  "verify_cmd":         "python3 -m pytest -q tests/",
+  "verify_timeout_s":   60,
+}
 ```
 
-Correct trajectory:
+Corpus mix (from `capability.config.json`):
 
-1. `bash`: `git apply --check /tmp/incoming.patch` (probe applicability).
-2. If clean: `git apply /tmp/incoming.patch`; if not: read the rejected
-   hunk, find the right anchor, repair, retry.
-3. `bash`: `pytest -q tests/`.
-4. If green: emit final assistant turn with the diff summary.
-5. If red: read the failure, narrow to the cause inside the patch
-   scope, repair, retry.
+| Class | Fraction | What's done to the diff | Pi must... |
+|-------|---------:|-------------------------|------------|
+| `clean` | 50% | none — gold diff as-is | `git apply` succeeds; run tests; declare done |
+| `drift` | 30% | hunk @@ headers shifted by ±2-3 lines | `git apply` may reject; recount or apply by hand |
+| `incorrect` | 20% | one `+` line mutated (e.g. `+` → `-`) | applies cleanly but tests fail; pi must repair |
 
-Turn budget: 8 turns; bench-style tasks may need 12.
+## Pi prompt template
 
-## Rubric design (v0)
+```
+[system] You are a meticulous coding assistant operating in a sandboxed
+workspace. You have access to bash, write, read, and edit tools. Apply
+patches minimally — do NOT rewrite functions when a 3-line edit will do.
+Always verify with the test command before declaring done.
 
-| Sub-score | Weight | What it measures | Cannot be cheated by |
-|-----------|--------|-------------------|----------------------|
-| `outcome` | hard floor | All tests pass at the end of the session. | Disabling tests, `pytest --collect-only`, `pytest -k 'nothing'` → 0 (oracle re-runs without overrides). |
-| `minimality` | 0.20 | `1 - clip((final_diff_lines - gold_diff_lines)/(span · gold_diff_lines), 0, 1)`. `span = 2`. | A 1-line diff that fails tests → outcome 0 → composite 0. |
-| `no_unrelated_edits` | 0.15 | 1.0 iff no files outside the patch's touched set were modified. | Read-only inspection is fine; mutating an extra file penalizes. |
-| `repair_efficiency` | 0.10 | For tasks requiring repair: 1.0 if ≤2 repair attempts. Decays for >2. | One-shot apply on clean patches scores 1.0 trivially — gated to `expected_repair=true` tasks. |
-| `format_compliance` | 0.05 | Final assistant turn includes a summary of the applied diff (path + line count) in a stable structure. | Free-form prose without structure → 0. |
+[user] Apply the unified diff in `INCOMING_PATCH` to this workspace,
+then run `python3 -m pytest -q tests/` until all tests pass.
 
-**Composite** = `outcome × (0.20·minimality + 0.15·no_unrelated + 0.10·repair_eff + 0.05·format + 0.50·base)`
+Steps:
+1. Read INCOMING_PATCH to see what change is intended.
+2. Apply it (try `git apply INCOMING_PATCH` or `patch -p1 < INCOMING_PATCH`).
+3. Run the tests with the verify command.
+4. If a hunk rejects, read the affected source file, find the right
+   anchor, and apply the change minimally. [REPAIR-HINT if expected_repair=true]
+5. When all tests pass, emit a final message summarizing what you
+   changed and which files you touched. Do NOT modify the test files.
+```
+
+Turn budget: **12 turns**, **240 s** wall-clock per rollout.
+
+## Reward function (v1 — multi-component)
+
+| Sub-score | Weight (pass) | What it measures | Cannot be cheated by |
+|-----------|---------------|------------------|----------------------|
+| `outcome` | hard gate | All tests pass after re-running in a fresh-checkout that restores test files. | Disabling tests — the oracle restores `protected_paths` before verifying. |
+| `minimality` | 0.20 | `1 - clip(max(0, final_diff_lines - gold_diff_lines) / (span · gold_diff_lines), 0, 1)`. `span = 2`. | Writing the whole file fresh blows up final_diff_lines. |
+| `no_unrelated_edits` | 0.15 | 1.0 iff `touched_workspace_paths ⊆ patch_touched_paths`. | Mutating an extra file penalizes; touching tests collapses score. |
+| `repair_efficiency` | 0.10 | 1.0 if `failed_apply_attempts ≤ 2`. Decays 0.25 per extra attempt. Calibrated by `expected_repair`. | One-shot apply on clean patches scores 1.0 trivially. |
+| `format_compliance` | 0.05 | Final assistant message: completion marker + reference to a touched file + 'summary'. | Empty final message → 0. |
+| `tested_before_done` | discount | If `outcome=1` but no test command before the final assistant turn, **halve** the agentic budget. | "lucked into passing without testing" is suspicious. |
+
+**Composite when `outcome = 1`:**
+
+```
+composite = 0.50 (base)
+          + 0.20 · minimality
+          + 0.15 · no_unrelated_edits
+          + 0.10 · repair_efficiency
+          + 0.05 · format_compliance
+        (multiplied by 0.5 on the agentic-sub-score part
+         if tested_before_done == 0)
+```
+
+Range: `[0.50, 1.00]`.
+
+**Consolation when `outcome = 0` (the "all-zeros gradient" mitigation):**
+
+```
+composite = min(0.40,
+    0.20 · applied_fraction      # dice/F1 of model-final vs gold-final
+  + 0.10 · tested_before_done    # tried verifying at all?
+  + 0.05 · format_compliance
+  + 0.05 · no_loop)              # 1.0 - duplicate-tool-call rate
+```
+
+Range: `[0.00, 0.40]`.
+
+The 0.40 consolation cap is **strictly less** than the 0.50 pass-floor —
+the model can never beat a passing rollout by gaming consolation
+signals. But consolation gives GRPO enough gradient on failed rollouts
+to learn directional progress (apply some hunks, run pytest at all)
+when the base model's pass rate is low.
+
+### Adversarial design (§0)
+
+**Q: cheapest 1.0?** Reset workspace, write the gold-final file fresh
+without using `git apply`.
+*Mitigation:* `no_unrelated_edits` catches any extra touched file (tests,
+configs, irrelevant src); `minimality` catches an oversize diff if the
+model wrote 50 lines fresh when gold was 5 lines. Writing JUST the gold
+src/foo.py is permitted — but that IS the right outcome.
+
+**Q: disable failing tests.** Mutate `tests/test_*.py` to `assert True`.
+*Mitigation:* the oracle restores every `protected_paths` file from
+`init_files` into a fresh-checkout shadow workdir *before* running the
+verifier. Mutations to test files are erased. Additionally,
+`no_unrelated_edits` punishes touching test files when the patch did not
+intend to.
+
+**Q: stop on yellow.** Apply the patch, claim done without running the tests.
+*Mitigation:* `outcome` is a hard gate (re-runs the verifier); if the
+patch was incorrect (the 20% incorrect-hunk class), no testing means no
+repair → outcome=0 → composite at most 0.40 consolation.
+
+**Q: loop forever on `ls`.** `no_loop` penalizes duplicate tool calls;
+turn budget (12) hard-caps; wall-clock budget (240s) caps wall time.
+
+**Q: read the gold solution from outside the workdir.** Pi runs with
+`--no-context-files --no-extensions --no-skills --no-themes --offline`;
+the only files visible to the model are inside `workdir/`, which contains
+only the buggy init + `INCOMING_PATCH` + `README.md`. No gold files
+leak into the rollout.
+
+**Q: respond fully but never call a tool.** `applied_fraction` = 0 (no
+file mutation) and `tested_before_done` = 0, so consolation tops out
+at ≈ 0.05 (format).
+
+### Headroom (estimated; to be measured at iter 0 baseline)
+
+- Baseline composite ~0.20–0.35 expected. The 4B base can run `bash`
+  and emit text but rarely repairs a rejected hunk and frequently
+  rewrites whole functions.
+- Target sub-score (highest movable mass): expected to be
+  `applied_fraction` or `outcome` itself — the consolation signal is the
+  early-learning anchor.
 
 ## ECHO recipe
 
@@ -81,80 +175,86 @@ trains the model's "what will happen if I run this" prior — exactly
 the planning skill that distinguishes a careful patch-applier from a
 chainsaw.
 
-**Hypothesis worth trying:** task families where the patch is
-*incorrect in subtle ways* (off-by-one, missing import) and the agent
-must catch it via test output. These tasks benefit most from ECHO
-because the test output is dense env signal.
+ECHO default: λ=0.05, env-only mask, warning_filter=on.
 
-## Hypotheses
+## Files
 
-- **H_offset_drift** — synth patches with offsets shifted by ±3 lines.
-  Tests whether the agent uses `--reject` and fixes hunks vs gives up.
-- **H_incorrect_patch** — patches that apply cleanly but break tests.
-  Tests in-loop repair vs blind apply.
-- **H_unrelated_passing_tests** — workspaces with already-failing tests
-  outside the patch scope. Tests whether the agent gets distracted vs
-  stays on scope.
-- **H_three_way_merge** — provide `--3way` and a clean ancestor.
-  Bonus task family.
+| File | Purpose |
+|------|---------|
+| `rubric.py` | Multi-component composite scorer. Reads transcript + workdir + task. |
+| `task_scaffold.py` | `init_workdir` + `pi_prompt` + `build_messages`. |
+| `build_corpus.py` | Generates `datasets/{train,eval}.tasks.jsonl` from 25 primitives × {clean, drift, incorrect}. |
+| `rollout.py` | Per-rollout pi runner + GRPO-group + summary emitter. |
+| `rubric_sanity.py` | Calibration test: 3 good (≥0.80) + 5 bad (≤0.30) synthetic transcripts. |
+| `capability.oracle.sh` | Blind eval wrapper: prints `SCORE=<mean_composite>`. |
+| `run_iter.sh` | Full iter recipe: rollouts → filter → train → eval → B2. |
+| `backup_to_b2.py` | Per-iter B2 backup keyed by date + iter + kind. |
+| `capability.config.json` | Trainer + rollout defaults (ECHO on, rank 16, lr 1e-5). |
+| `capability.jsonl` | Append-only iter log (one JSON line per iter). |
 
-## Adversarial design (§0)
+## Hypothesis families to explore
 
-**Q: cheapest 1.0?** Reset workspace, write the gold-final file, run
-tests. Mitigation: `no_unrelated_edits` checks that touched files
-match the patch's file set; a full rewrite changes more files (the
-patch typically touches 1–3 files, gold-final touches all).
+| Slug | Family | Idea |
+|------|--------|------|
+| `h1-default-recipe` | baseline | iter 1 default recipe (ECHO on, rank 16, lr 1e-5, 16 tasks × 4 gens) to anchor |
+| `h2-strong-signal-filter` | filter | only train on groups with var > 0.05 |
+| `h3-temperature-bump` | sample | temperature 1.0 instead of 0.8 — more diversity |
+| `h4-more-gens` | sample | 8 generations per task instead of 4 |
+| `h5-lower-lr` | optim | lr 5e-6 — reduce overfitting |
+| `h6-higher-lr` | optim | lr 2e-5 — see if cap can take it |
+| `h7-rank-32` | optim | rank 32 — more capacity |
+| `h8-no-echo` | ablation | disable ECHO to confirm it's helping |
+| `h9-higher-echo-lambda` | ablation | echo-lambda 0.10 (just inside paper's productive band) |
+| `h10-2epochs` | optim | 2 epochs on the filtered set |
+| `h11-clean-only` | mix | train only on clean patches first |
+| `h12-drift-only` | mix | train only on drift patches |
+| `h13-incorrect-only` | mix | train only on incorrect-hunk patches |
+| `h14-warmstart` | sequence | continue from a previous strong adapter |
+| `h15-more-turns` | budget | 16 turns instead of 12 |
+| `h16-fewer-turns` | budget | 8 turns — force decisiveness |
+| `h17-tighter-minimality` | rubric | span=1 — stricter minimality penalty |
+| `h18-stronger-fmt` | rubric | 0.10 format weight |
+| `h19-system-anchor` | prompt | nudge system prompt toward "use git apply --reject" |
+| `h20-corpus-expand` | data | regenerate corpus with 100 train tasks for variety |
+| `h21-dr-grpo-vs-grpo` | optim | toggle advantage_mode |
+| `h22-token-vs-seq-loss` | optim | toggle loss aggregation |
+| `h23-cold-restart` | optim | reset training adapter mid-loop to re-seed exploration |
+| `h24-on-policy-rollouts` | sample | regenerate rollouts every iter (vs replaying) |
+| `h25-larger-batch` | optim | grpo-train-strong with 30 groups |
+| `h26-pass-amplify` | filter | only train on groups where at least 1 gen outcome=1 |
+| `h27-fail-amplify` | filter | only train on groups where at least 1 gen outcome=0 |
+| `h28-mixed-task-mix` | data | regenerate with 70/20/10 (more clean → easier wins) |
+| `h29-harder-mix` | data | regenerate with 30/40/30 (more drift+incorrect) |
+| `h30-three-way` | data | enable `git apply --3way` in the prompt — bonus task families |
+| `h31-no-policy-loss` | ablation | ECHO-only (paper §5.5 verifier-free) |
+| `h32-larger-lr-warmup` | optim | start lr at 1e-5, warm down to 5e-6 |
+| `h33-kl-tighten` | optim | kl_coeff 0.05 (less anchored to base) |
+| `h34-kl-loosen` | optim | kl_coeff 0.2 (more anchored to base) |
+| `h35-clip-narrow` | optim | clip_epsilon 0.10 |
+| `h36-clip-wide` | optim | clip_epsilon 0.30 |
+| `h37-tokens-bump` | budget | 4096 max tokens per turn |
+| `h38-no-readme` | prompt | drop the README hint — see if it matters |
+| `h39-test-amplify` | rubric | bump tested_before_done weight to discount-multiplier x2 |
+| `h40-applied-amplify` | rubric | bump applied_fraction consolation weight |
+| `h41-seed-sweep` | seed | re-run best recipe with 3 different seeds for variance |
+| `h42-iter-many-tasks` | data | 40 train tasks × 4 gens |
+| `h43-iter-few-many-gens` | data | 8 train tasks × 12 gens |
+| `h44-class-stratified` | data | filter to exactly equal task class mix |
+| `h45-cumulative-best` | sequence | warm-start from best-so-far each iter |
+| `h46-low-temp-train` | sample | temperature 0.5 for training rollouts |
+| `h47-format-strict` | rubric | format requires a markdown summary table |
+| `h48-anti-loop` | rubric | bump no_loop weight |
+| `h49-rank-8` | optim | rank 8 — see if smaller LoRA is enough |
+| `h50-final-best-replay` | replay | replay best recipe with fresh rollouts for verification |
 
-**Q: disable failing tests.** Mitigation: oracle re-runs the test suite
-without the agent's mutations to the test files, in a fresh checkout
-that re-applies *only* the patch the model produced.
+## Hypothesis log
 
-**Q: stop on yellow.** Mitigation: rubric requires `outcome=1` (all
-tests pass). No partial credit for "applied but didn't run."
-
-## Headroom (estimated)
-
-- Baseline composite ~0.35–0.50. The 4B model can apply clean patches
-  but loses badly on reject-repair and on staying within scope.
-- Target sub-score: `repair_efficiency` (highest movable mass — and the
-  hardest sub-skill).
-
-## Files to create
-
-- [ ] `rubric.py`. The `no_unrelated_edits` check needs a clean
-  baseline diff between workspace before & after; `git stash` +
-  `git diff` is the natural primitive.
-- [ ] `task_scaffold.py`. Source patches from kiln's own git history
-  (`git log -p` against curated commits with clear unit-test
-  validation); apply offset-drift and incorrect-hunk transforms
-  programmatically.
-- [ ] `rollout.py` — run pi against a fresh workspace each turn (copy
-  the seed workspace into a per-rollout tmpdir).
-- [ ] `build_corpus.py`, `capability.oracle.sh`, `run_iter.sh`.
-- [ ] `calibration/{good,bad}.jsonl` — good: apply-then-test, clean.
-  Bad: rewrite-the-file, disable-tests.
-
-## Next steps for the agent picking this up
-
-1. Read the shared README and `capabilities/opd/diff-patch-fluency/capability.md`.
-   Note: Python + Rust toolchains are expensive to set up per rollout;
-   pre-bake a tmpfs snapshot that each rollout copies on write before
-   you start iter 0.
-2. Pick a Python and a Rust source repo. Recommended: kiln itself (Rust
-   side) plus a small Python project (`uv` + pytest).
-3. Build the corpus: mine 30 commits from each repo with clear test
-   coverage; transform 30% with offset drift, 20% with incorrect
-   hunks, leave 50% clean.
-4. Sandbox setup costs matter a lot here. Time `git clone + cargo
-   build` ahead of writing `rollout.py`; if it's >30s per rollout,
-   build a snapshot-and-copy strategy first.
-5. Iter 0 baseline on 24 eval tasks (8 clean, 8 offset-drift, 8
-   incorrect).
-6. Iter 1 with ECHO defaults. Watch `env_token_ce_holdout` carefully —
-   the test output is the env signal that matters most here.
+(Populated by `capability.jsonl` — see that file for the canonical history.)
 
 ## References
 
 - `capabilities/opd/diff-patch-fluency/` — OPD sibling.
-- `crates/kiln-train/src/echo.rs` — env-CE term used in training.
-- `docs/plans/echo-integration-plan.md` §3.1.
+- `capabilities/agentic-grpo/pi-doctest/` — closest agentic-GRPO sibling.
+- `capabilities/agentic-grpo/pi-compaction/` — backup_to_b2 and drive_iters template.
+- `crates/kiln-train/src/echo.rs` — ECHO loss term.
+- `docs/plans/echo-integration-plan.md` §3.1, §3.3.
