@@ -38,6 +38,8 @@ ECHO_LAMBDA="0.05"
 NO_ECHO=0
 NO_POLICY=0
 MAX_WALL=180
+GRPO_MODE="phase1"
+MAX_GROUPS=""
 PARALLEL=1
 EXTRA_TRAIN_ARGS=""
 ROLLOUT_SOURCE_ITER=""   # if set, reuse rollouts from iter <N> instead of regenerating
@@ -65,6 +67,8 @@ while [ $# -gt 0 ]; do
     --echo-lambda) ECHO_LAMBDA="$2"; shift 2 ;;
     --no-echo) NO_ECHO=1; shift ;;
     --no-policy) NO_POLICY=1; shift ;;
+    --grpo-mode) GRPO_MODE="$2"; shift 2 ;;
+    --max-groups) MAX_GROUPS="$2"; shift 2 ;;
     --max-wall) MAX_WALL="$2"; shift 2 ;;
     --parallel) PARALLEL="$2"; shift 2 ;;
     --extra-train-args) EXTRA_TRAIN_ARGS="$2"; shift 2 ;;
@@ -98,21 +102,28 @@ echo "== pft iter ${ITER} kind=${KIND} rollout_source=${ROLLOUT_SOURCE_ITER:-fre
 ###############################################################################
 if [ "$SKIP_TRAIN" = "0" ]; then
   if [ -z "$ROLLOUT_SOURCE_ITER" ]; then
-    echo ">>> setting train adapter to '${TRAIN_ADAPTER:-(base)}'"
-    if [ -z "$TRAIN_ADAPTER" ] || [ "$TRAIN_ADAPTER" = "base" ]; then
-      python3 $RP ssh $POD_ID 'curl -sS -X POST http://localhost:8420/v1/adapters/unload >/dev/null 2>&1 || true'
+    # Idempotency: if rollouts already exist AND have a grpo-train.jsonl,
+    # skip regeneration. Use a robust grep check (ssh return code is not reliable).
+    if python3 $RP ssh $POD_ID "test -f ${TRAIN_OUT}/grpo-train.jsonl && wc -c < ${TRAIN_OUT}/grpo-train.jsonl" 2>&1 | grep -qE '^[0-9]+$' \
+       && python3 $RP ssh $POD_ID "wc -c < ${TRAIN_OUT}/grpo-train.jsonl 2>/dev/null" | tr -d ' ' | grep -qE '^[1-9]'; then
+      echo ">>> rollouts already exist at ${TRAIN_OUT}/grpo-train.jsonl — skipping regeneration"
     else
-      python3 $RP ssh $POD_ID "curl -sS -X POST http://localhost:8420/v1/adapters/load -H 'Content-Type: application/json' -d '{\"name\":\"${TRAIN_ADAPTER}\"}'"
-    fi
+      echo ">>> setting train adapter to '${TRAIN_ADAPTER:-(base)}'"
+      if [ -z "$TRAIN_ADAPTER" ] || [ "$TRAIN_ADAPTER" = "base" ]; then
+        python3 $RP ssh $POD_ID 'curl -sS -X POST http://localhost:8420/v1/adapters/unload >/dev/null 2>&1 || true'
+      else
+        python3 $RP ssh $POD_ID "curl -sS -X POST http://localhost:8420/v1/adapters/load -H 'Content-Type: application/json' -d '{\"name\":\"${TRAIN_ADAPTER}\"}'"
+      fi
 
-    echo ">>> training rollouts: N=${NUM_TRAIN_TASKS} tasks × ${NUM_GENS} gens"
-    python3 $RP bg $POD_ID "$ROLLOUT_LOG" \
-      "cd ${POD_REPO} && rm -rf ${TRAIN_OUT} && python3 rollout.py \
-        --tasks datasets/train.tasks.jsonl --limit ${NUM_TRAIN_TASKS} \
-        --out-dir ${TRAIN_OUT} --mode train --num-generations ${NUM_GENS} \
-        --adapter current \
-        --max-wall-clock-s ${MAX_WALL} --parallel ${PARALLEL} --verbose 2>&1"
-    python3 $RP wait-file $POD_ID "${TRAIN_OUT}/summary.json" --timeout 7200
+      echo ">>> training rollouts: N=${NUM_TRAIN_TASKS} tasks × ${NUM_GENS} gens"
+      python3 $RP bg $POD_ID "$ROLLOUT_LOG" \
+        "cd ${POD_REPO} && rm -rf ${TRAIN_OUT} && python3 rollout.py \
+          --tasks datasets/train.tasks.jsonl --limit ${NUM_TRAIN_TASKS} \
+          --out-dir ${TRAIN_OUT} --mode train --num-generations ${NUM_GENS} \
+          --adapter current \
+          --max-wall-clock-s ${MAX_WALL} --parallel ${PARALLEL} --verbose 2>&1"
+      python3 $RP wait-file $POD_ID "${TRAIN_OUT}/summary.json" --timeout 7200
+    fi
   else
     echo ">>> reusing rollouts from iter ${ROLLOUT_SOURCE_ITER} → ${TRAIN_OUT}"
   fi
@@ -135,12 +146,14 @@ print(f'kept {kept}/{total} strong-signal groups')
 PYEOF"
 
   echo ">>> killing kiln serve, training GRPO step"
-  python3 $RP ssh $POD_ID 'pkill -9 -f "kiln serve" 2>/dev/null || true; sleep 3'
+  # Use exact name match — `-f "kiln serve"` or `-f "target/release/kiln"` would
+  # match the ssh process command line itself, kill it, and return 255.
+  python3 $RP ssh $POD_ID 'pgrep -x kiln | xargs -r kill -9; sleep 3'
 
   EXTRA_ECHO=""
   if [ "$NO_ECHO" = "1" ]; then EXTRA_ECHO="--no-echo"; fi
-  EXTRA_POL=""
-  if [ "$NO_POLICY" = "1" ]; then EXTRA_POL="--no-policy-loss"; fi
+  MAX_GROUPS_ARG=""
+  if [ -n "$MAX_GROUPS" ]; then MAX_GROUPS_ARG="--max-groups $MAX_GROUPS"; fi
 
   python3 $RP bg $POD_ID "$TRAIN_LOG" \
     "cd /workspace/kiln && source /root/.kiln-build-env 2>/dev/null || true; KILN_DISABLE_FUSED_GDN_GATES=1 KILN_BATCHING_ENGINE=0 KILN_MODEL_PATH=/workspace/qwen3.5-4b \
@@ -149,10 +162,9 @@ PYEOF"
       --model /workspace/qwen3.5-4b \
       --output ${ADAPTER_OUT} \
       --adapter pi-failure-triage-iter${ITER} \
-      --mode phase1 --rank ${RANK} --alpha ${ALPHA} --lr ${LR} --seed ${SEED} \
-      --advantage-mode ${ADV_MODE} --kl-coeff ${KL_COEFF} --clip-epsilon ${CLIP_EPS} \
+      --mode ${GRPO_MODE} --rank ${RANK} --alpha ${ALPHA} --lr ${LR} --seed ${SEED} \
       --echo-lambda ${ECHO_LAMBDA} \
-      ${EXTRA_ECHO} ${EXTRA_POL} ${EXTRA_TRAIN_ARGS} 2>&1"
+      ${EXTRA_ECHO} ${MAX_GROUPS_ARG} ${EXTRA_TRAIN_ARGS} 2>&1"
   python3 $RP wait-file $POD_ID "${ADAPTER_OUT}/pi-failure-triage-iter${ITER}/adapter_model.safetensors" --timeout 1800
 
   echo ">>> symlinking adapter into kiln model dir"
