@@ -68,13 +68,14 @@ for ((n=START_ITER; n<END_ITER; n++)); do
   fi
 
   python3 "$HERE/_append_iter_log.py" --iter "$n" --pod "$POD_ID" --recipe "$recipe (source=$SOURCE_ITER)" || true
+  python3 "$HERE/_refresh_in_progress.py" || true
   python3 "$HERE/backup_to_b2.py" --iter "$n" --kind iter --pod "$POD_ID" --run-tag "$RUN_TAG" || true
 
   cd "$REPO_ROOT"
   git add capabilities/agentic-grpo/pi-failure-triage/capability.jsonl \
-          capabilities/agentic-grpo/pi-failure-triage/hypotheses/ \
-          capabilities/agentic-grpo/pi-failure-triage/IN_PROGRESS.md 2>/dev/null || true
-  git commit -m "cap[pi-failure-triage/iter$n]: result row" || true
+          capabilities/agentic-grpo/pi-failure-triage/IN_PROGRESS.md \
+          capabilities/agentic-grpo/pi-failure-triage/hypotheses/ 2>/dev/null || true
+  git commit -m "cap[pi-failure-triage/iter$n]: result row + IN_PROGRESS refresh" || true
   git pull --rebase origin main 2>&1 | tail -2 || true
   git push origin main 2>&1 | tail -2 || true
 done
