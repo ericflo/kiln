@@ -75,15 +75,15 @@ echo ">>> [4/6] check qwen3.5-4b weights"
 WEIGHTS_OK=$(run_pod 'test -f /workspace/qwen3.5-4b/model.safetensors && echo yes || echo no' 2>/dev/null | tail -1)
 if [ "$WEIGHTS_OK" != "yes" ]; then
   echo ">>> downloading qwen3.5-4b weights (this is slow)"
-  run_pod '
-mkdir -p /workspace/qwen3.5-4b
-cd /workspace/qwen3.5-4b
-huggingface-cli download Qwen/Qwen3.5-4B --local-dir . 2>&1 | tail -5 ||
-  python3 -c "
-from huggingface_hub import snapshot_download
-snapshot_download(repo_id=\"Qwen/Qwen3.5-4B\", local_dir=\"/workspace/qwen3.5-4b\")
-"
-'
+  # Use `hf download` (not huggingface-cli, which was deprecated/aliased and
+  # silently no-op'd on the A100 image 2026-05-19). The download is ~8GB.
+  # Run synchronously and verify a model file exists before continuing.
+  run_pod 'mkdir -p /workspace/qwen3.5-4b && cd /workspace/qwen3.5-4b && hf download Qwen/Qwen3.5-4B --local-dir . 2>&1 | tail -5'
+  WEIGHTS_OK=$(run_pod 'test -f /workspace/qwen3.5-4b/config.json && ls /workspace/qwen3.5-4b/model.safetensors* 2>/dev/null | wc -l' 2>/dev/null | tail -1)
+  if [ "$WEIGHTS_OK" = "0" ] || [ -z "$WEIGHTS_OK" ]; then
+    echo "FATAL: qwen3.5-4b download produced no model files"
+    exit 41
+  fi
 fi
 echo ">>> ensuring adapters dir exists"
 run_pod 'mkdir -p /workspace/qwen3.5-4b/adapters'
