@@ -1,0 +1,28 @@
+{
+  "mode": "train",
+  "adapter": null,
+  "n_tasks": 24,
+  "n_rollouts": 96,
+  "n_generations": 4,
+  "mean_composite": 0.7208414977477481,
+  "p50_composite": 0.9972972972972974,
+  "rollouts_nonzero": 96,
+  "rollouts_zero": 0,
+  "mean_wall_clock_s": 7.642187029123306,
+  "wall_clock_s_total": 733.6499547958374,
+  "grpo_groups_written": 24,
+  "mean_group_variance": 0.046010577167539174,
+  "subscore_means": {
+    "outcome.format_present": 0.96875,
+    "outcome.score": 0.71875,
+    "no_soft_punt.score": 1.0,
+    "terseness.score": 0.9532939189189188,
+    "format_strict.score": 0.96875,
+    "outcome.is_failure_task": 0.16666666666666666,
+    "outcome.value_correct": 0.71875,
+    "composite_ungated": 0.8564752252252253,
+    "no_question.score": 0.9947916666666666,
+    "honesty.score": 0.7624999999999996,
+    "composite": 0.7208414977477481
+  }
+}
