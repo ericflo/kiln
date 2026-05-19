@@ -947,4 +947,33 @@ mod tests {
         assert!((cfg.echo_lambda() - original_lambda).abs() < 1e-12);
         assert!(cfg.echo.is_some());
     }
+
+    #[test]
+    fn loss_config_no_policy_loss_default_is_false() {
+        clear_kiln_echo_env_vars();
+        let cfg = LossConfig::default();
+        assert!(!cfg.no_policy_loss);
+    }
+
+    #[test]
+    fn loss_config_no_policy_loss_serde_round_trip() {
+        clear_kiln_echo_env_vars();
+        let cfg = LossConfig {
+            echo: Some(EchoConfig::default()),
+            opd: None,
+            no_policy_loss: true,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: LossConfig = serde_json::from_str(&json).unwrap();
+        assert!(parsed.no_policy_loss);
+        assert!((parsed.echo_lambda() - 0.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn loss_config_legacy_payload_without_no_policy_loss_defaults_false() {
+        // Old payloads that don't include `no_policy_loss` at all still parse.
+        let json = r#"{"echo": {"lambda": 0.05}, "opd": null}"#;
+        let cfg: LossConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.no_policy_loss);
+    }
 }
