@@ -113,55 +113,52 @@ recipe_for() {
       echo "h19-combined-from-base --num-train-tasks 8 --num-gens 3 --lr 5e-6 --filter-var 0.04 --temperature 1.0 --rank 2 --alpha 4 --epochs 3 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
       ;;
     20)
-      # Hypothesis: NO variance filter (filter-var 0.0). Hard-mix is already
-      # biased; further filtering may drop signal-rich groups.
-      echo "h20-no-filter-from-base --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.0 --temperature 1.0 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      # **PIVOT after iters 13/14/17/18/19 all degraded on hard_mix corpus.**
+      # The hard_mix.tasks.jsonl subset (4 drift + 4 incorrect) has the WRONG
+      # class distribution vs eval (13c / 6d / 5i = 54/25/21). Training away
+      # from eval distribution -> degraded eval. Pivoting iters 20+ to default
+      # `train.tasks.jsonl` (50/30/20) which matches eval better.
+      #
+      # iter 20: default corpus, rank 8 (replicate iter 12's 0.888 best).
+      echo "h20-rank8-default-corpus --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --rank 8 --alpha 16"
       ;;
     21)
-      # Hypothesis: replay iter 2 EXACTLY. Same recipe, same seed, same corpus.
-      # Reproducibility check — was iter 2 a lucky seed?
-      echo "h21-iter2-replay --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --seed 3141592653 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      # iter 21: default corpus, rank 2 (smallest perturbation on the right mix).
+      echo "h21-rank2-default-corpus --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --rank 2 --alpha 4"
       ;;
     22)
-      # Hypothesis: incorrect-only + rank 2 from base. Smallest perturbation on
-      # the most-headroom class, no chain.
-      echo "h22-incorrect-rank2-from-base --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --rank 2 --alpha 4 --train-tasks-file datasets/train.incorrect_only.tasks.jsonl"
+      # iter 22: default corpus, T=1.0 (iter 2's temperature). Tests whether
+      # iter 2's success was the corpus (matches eval) + T=1.0 (high variance).
+      echo "h22-default-T1.0 --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0"
       ;;
     23)
-      # Hypothesis: T=1.2 (higher temperature) for more exploration. iter 2
-      # used T=1.0; maybe T=1.2 produces even more strong-signal groups.
-      echo "h23-temp1.2-from-base --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.2 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      # iter 23: default corpus, 2 epochs (iter 11 showed 2ep > 1ep at lr 1e-5).
+      echo "h23-2epochs-default --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 2"
       ;;
     24)
-      # Hypothesis: rank 4 (alpha 8) middle-ground from base. Bracket between
-      # iter 12 rank 8 (0.888) and a hypothetical rank 2.
-      echo "h24-rank4-from-base --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --rank 4 --alpha 8 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      # iter 24: default corpus, lr 5e-6 (iter 4 was 0.911 at this lr).
+      echo "h24-lr5e-6-default --num-train-tasks 8 --num-gens 3 --lr 5e-6 --filter-var 0.04 --temperature 1.0"
       ;;
     25)
-      # Hypothesis: --no-policy-loss (ECHO-only training, ablation). Tests
-      # whether the GRPO advantage signal is hurting more than helping.
-      echo "h25-no-policy-loss --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --no-policy-loss --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      # iter 25: --no-policy-loss (ECHO-only). Tests if removing the GRPO
+      # advantage helps. Default corpus.
+      echo "h25-no-policy-loss-default --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --no-policy-loss"
       ;;
     26)
-      # Hypothesis: rank 1 LoRA (alpha 2). Absolute minimum perturbation. If
-      # rank 8 retained clean class and rank 2 retains more, rank 1 should
-      # retain almost all.
-      echo "h26-rank1-from-base --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --rank 1 --alpha 2 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      # iter 26: rank 1 LoRA. Absolute minimum perturbation, default corpus.
+      echo "h26-rank1-default --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --rank 1 --alpha 2"
       ;;
     27)
-      # Hypothesis: rank 2 + 2 epochs + lr 5e-6 + T=1.0. Refined combined
-      # winners (iter 19 might be too long at 3 epochs).
-      echo "h27-rank2-2ep-lr5e6 --num-train-tasks 8 --num-gens 3 --lr 5e-6 --filter-var 0.04 --temperature 1.0 --rank 2 --alpha 4 --epochs 2 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      # iter 27: combined-best on default — rank 2 + 2 epochs + lr 5e-6.
+      echo "h27-combined-default --num-train-tasks 8 --num-gens 3 --lr 5e-6 --filter-var 0.04 --temperature 1.0 --rank 2 --alpha 4 --epochs 2"
       ;;
     28)
-      # Hypothesis: full train corpus (not subset). The hard-mix subset has
-      # only 8 tasks; maybe more diverse training data helps.
-      echo "h28-full-corpus-from-base --num-train-tasks 16 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0"
+      # iter 28: full 16-task default corpus for more diversity.
+      echo "h28-full-corpus-16tasks --num-train-tasks 16 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0"
       ;;
     29)
-      # Hypothesis: seed sweep — different random seed from iter 2 to test if
-      # iter 2's success was seed-specific.
-      echo "h29-seed-1729 --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --seed 1729 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      # iter 29: seed 1729 sweep, default corpus + T=1.0.
+      echo "h29-seed-1729-default --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --seed 1729"
       ;;
     30)
       # Hypothesis: seed sweep 2.
