@@ -69,6 +69,21 @@ async fn main() -> Result<()> {
             AdapterCommands::Delete { name, url } => {
                 return cli::run_adapters_delete(url, name).await;
             }
+            AdapterCommands::Verify {
+                name_or_path,
+                adapter_dir,
+                url,
+                prompt,
+            } => {
+                return cli::run_adapter_verify(
+                    args.config.as_deref(),
+                    url.as_deref(),
+                    adapter_dir.as_deref(),
+                    name_or_path,
+                    prompt.as_deref(),
+                )
+                .await;
+            }
         },
         // §10.14 — pi + kiln canonical pipeline subcommands.
         Some(Commands::PiSetup { ref url, ref out }) => {

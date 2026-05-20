@@ -235,6 +235,47 @@ installed, loadable, selected, and behaviorally active.
 - Command exits zero for a known-good tiny test adapter.
 - Receipt includes hashes, rank, alpha, target modules, and logit-delta summary.
 
+**Status:** Completed and pushed to `main`.
+
+**Implementation notes:** Added `kiln adapter verify <name-or-path>` as the
+singular alias for the existing adapter command group, with
+`kiln adapters verify` also available. The verifier resolves bare names
+through `--adapter-dir`, `model.adapter_dir`, or `<model.path>/adapters`, and
+validates adapter layout, config JSON, safetensors readability, rank/target
+module consistency, A/B tensor pairing, hashes, sizes, and nonzero LoRA
+effect. It prints a machine-readable JSON receipt with rank, alpha,
+alpha/rank, target modules, hashes, tensor summary, and an offline
+`logit_delta_summary` proxy based on LoRA delta norm. Optional `--url` server
+verification loads the named adapter through `/v1/adapters/load`, confirms
+`/v1/adapters` registry state, and compares a fixed base-vs-adapter chat
+prompt.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-20 on RTX A6000 pod `yu0x0wt25rz8u8`,
+  lease `pod-9d17510419e3a5930b68a4fc`.
+- Remote command sequence: `cargo test -p kiln-server adapter_verify --lib`;
+  `cargo test -p kiln-server --test adapter_verify`;
+  `cargo check -p kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issue4-tests.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue4-tests.log`.
+- Focused tests passed: 1 CLI parse test for `kiln adapter verify`, plus 5
+  integration tests covering known-good tiny adapters, nested parent paths,
+  missing weights, rank mismatch, and zero-effect adapters.
+- `cargo fmt --all --check` could not run on the same RunPod image because
+  `cargo-fmt` is not installed for `stable-x86_64-unknown-linux-gnu`; this is
+  recorded in `/workspace/kiln-validation/issue4.log` with sentinel
+  `/workspace/kiln-validation/issue4.done` reporting `exit=1`.
+
+**Commit SHA:** Implementation commit to be recorded in the follow-up metadata
+commit after push.
+
+**Remaining risk:** Offline verification proves layout, tensor consistency,
+and a nonzero LoRA delta norm proxy. Exact logits/token probabilities are not
+available through the current chat API; the optional server path proves
+registry load and observable fixed-prompt behavior, not raw token-probability
+delta.
+
 ### 5. Canonicalize Trainer Output And Optional Adapter Installation
 
 **Area:** `crates/kiln-train`, `examples/cuda_grpo_ablation.rs`

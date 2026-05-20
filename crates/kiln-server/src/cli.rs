@@ -6,6 +6,11 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use console::style;
 
+use crate::adapter_verify::{
+    AdapterVerifyOptions, AdapterVerifyServerReceipt, DEFAULT_VERIFY_PROMPT, finalize_status,
+    push_check, verify_adapter_offline,
+};
+
 const TOP_LEVEL_OVERVIEW: &str = r#"Kiln serves Qwen3.5-4B from one Rust process and lets you adapt it with live LoRA training.
 
 Running `kiln` with no subcommand starts the OpenAI-compatible server, just like `kiln serve`. Commands such as `kiln health`, `kiln train sft`, `kiln train grpo`, and `kiln adapters list` talk to a running server.
@@ -122,6 +127,8 @@ const TRAIN_EXAMPLES: &str = r#"Examples:
 const ADAPTERS_OVERVIEW: &str = r#"Inspect and manage LoRA adapters on the running Kiln server at http://localhost:8420 by default.
 
 Use these commands after `kiln serve` is running; they call the adapter API rather than reading local files directly.
+
+`kiln adapter verify <name-or-path>` also accepts the singular alias and can validate an adapter directory offline before optionally checking a running server with --url.
 "#;
 
 const ADAPTERS_EXAMPLES: &str = r#"Examples:
@@ -139,6 +146,12 @@ const ADAPTERS_EXAMPLES: &str = r#"Examples:
 
   kiln adapters delete support-bot
       Delete an adapter through the running server.
+
+  kiln adapter verify ./runs/grpo/support-bot
+      Validate adapter_config.json, adapter_model.safetensors, rank consistency, and nonzero LoRA effect offline. Prints a JSON receipt.
+
+  kiln adapter verify support-bot --adapter-dir ./Qwen3.5-4B/adapters --url http://localhost:8420
+      Validate the installed adapter, load it through the running server, confirm registry state, and compare a fixed base-vs-adapter prompt.
 "#;
 
 const CONFIG_OVERVIEW: &str = r#"Validate a Kiln TOML config file without starting the server.
@@ -315,6 +328,7 @@ pub enum Commands {
 
     /// Manage LoRA adapters on a running server
     #[command(
+        alias = "adapter",
         subcommand,
         long_about = ADAPTERS_OVERVIEW,
         after_help = ADAPTERS_EXAMPLES
@@ -524,6 +538,21 @@ pub enum AdapterCommands {
         /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
+    },
+    /// Verify an adapter directory and optionally prove it through a running server
+    Verify {
+        /// Adapter name under adapter_dir, or path to an adapter directory
+        name_or_path: String,
+        /// Adapter registry directory used to resolve bare adapter names offline
+        #[arg(long)]
+        adapter_dir: Option<PathBuf>,
+        /// Optional server URL. When set, the verifier loads the named adapter,
+        /// checks /v1/adapters, and compares a fixed base-vs-adapter prompt.
+        #[arg(long)]
+        url: Option<String>,
+        /// Prompt used for the optional server behavior check
+        #[arg(long)]
+        prompt: Option<String>,
     },
 }
 
@@ -1173,6 +1202,247 @@ pub async fn run_adapters_delete(url: &str, name: &str) -> anyhow::Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Run the `adapter verify` / `adapters verify` CLI subcommand.
+pub async fn run_adapter_verify(
+    config_file: Option<&str>,
+    url: Option<&str>,
+    adapter_dir: Option<&Path>,
+    name_or_path: &str,
+    prompt: Option<&str>,
+) -> anyhow::Result<()> {
+    let resolved_adapter_dir = adapter_dir
+        .map(Path::to_path_buf)
+        .or_else(|| adapter_dir_from_config(config_file));
+    let mut receipt = verify_adapter_offline(AdapterVerifyOptions {
+        input: name_or_path.to_string(),
+        adapter_dir: resolved_adapter_dir,
+    });
+
+    if let Some(url) = url {
+        let adapter_name = server_adapter_name(name_or_path, receipt.name.as_deref());
+        let server_receipt =
+            verify_adapter_with_server(url, &adapter_name, prompt.unwrap_or(DEFAULT_VERIFY_PROMPT))
+                .await;
+        receipt.server = Some(server_receipt);
+    }
+
+    finalize_status(&mut receipt);
+    println!("{}", serde_json::to_string_pretty(&receipt)?);
+    if receipt.status != "ok" {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn adapter_dir_from_config(config_file: Option<&str>) -> Option<PathBuf> {
+    let config = crate::config::KilnConfig::load(config_file).ok()?;
+    if let Some(adapter_dir) = config.model.adapter_dir {
+        return Some(PathBuf::from(adapter_dir));
+    }
+    config
+        .model
+        .path
+        .map(|model_path| PathBuf::from(model_path).join("adapters"))
+}
+
+fn server_adapter_name(name_or_path: &str, offline_name: Option<&str>) -> String {
+    let path = Path::new(name_or_path);
+    if path.exists()
+        || path.is_absolute()
+        || name_or_path.contains('/')
+        || name_or_path.contains('\\')
+    {
+        offline_name.unwrap_or(name_or_path).to_string()
+    } else {
+        name_or_path.to_string()
+    }
+}
+
+async fn verify_adapter_with_server(
+    url: &str,
+    adapter_name: &str,
+    prompt: &str,
+) -> AdapterVerifyServerReceipt {
+    let mut receipt = AdapterVerifyServerReceipt {
+        url: url.to_string(),
+        adapter_name: adapter_name.to_string(),
+        checks: Vec::new(),
+        base_output: None,
+        adapter_output: None,
+    };
+    let client = reqwest::Client::new();
+
+    match client
+        .post(adapter_load_url(url))
+        .json(&build_adapter_load_payload(adapter_name))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|err| serde_json::json!({ "error": err.to_string() }));
+            push_check(
+                &mut receipt.checks,
+                "server_load_adapter",
+                status.is_success(),
+                if status.is_success() {
+                    format!("server loaded adapter `{adapter_name}`")
+                } else {
+                    render_api_error(&body, status)
+                },
+            );
+        }
+        Err(err) => {
+            push_check(
+                &mut receipt.checks,
+                "server_load_adapter",
+                false,
+                format!("could not reach Kiln server at {url}: {err}"),
+            );
+            return receipt;
+        }
+    }
+
+    match client.get(format!("{url}/v1/adapters")).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|err| serde_json::json!({ "error": err.to_string() }));
+            if status.is_success() {
+                let loaded = registry_reports_loaded(&body, adapter_name);
+                push_check(
+                    &mut receipt.checks,
+                    "server_registry_loaded",
+                    loaded,
+                    if loaded {
+                        format!("/v1/adapters reports `{adapter_name}` as loaded")
+                    } else {
+                        format!("/v1/adapters does not report `{adapter_name}` as loaded")
+                    },
+                );
+            } else {
+                push_check(
+                    &mut receipt.checks,
+                    "server_registry_loaded",
+                    false,
+                    render_api_error(&body, status),
+                );
+            }
+        }
+        Err(err) => {
+            push_check(
+                &mut receipt.checks,
+                "server_registry_loaded",
+                false,
+                format!("could not fetch /v1/adapters from {url}: {err}"),
+            );
+        }
+    }
+
+    let base_output = chat_verify_output(&client, url, prompt, serde_json::Value::Null).await;
+    let adapter_output = chat_verify_output(
+        &client,
+        url,
+        prompt,
+        serde_json::Value::String(adapter_name.to_string()),
+    )
+    .await;
+    match (base_output, adapter_output) {
+        (Ok(base), Ok(adapter)) => {
+            let changed = base != adapter;
+            receipt.base_output = Some(base);
+            receipt.adapter_output = Some(adapter);
+            push_check(
+                &mut receipt.checks,
+                "server_behavior_delta",
+                changed,
+                if changed {
+                    "fixed prompt output differs between base and adapter".to_string()
+                } else {
+                    "fixed prompt output did not differ between base and adapter".to_string()
+                },
+            );
+        }
+        (Err(err), _) => {
+            push_check(
+                &mut receipt.checks,
+                "server_behavior_delta",
+                false,
+                format!("base prompt failed: {err}"),
+            );
+        }
+        (_, Err(err)) => {
+            push_check(
+                &mut receipt.checks,
+                "server_behavior_delta",
+                false,
+                format!("adapter prompt failed: {err}"),
+            );
+        }
+    }
+
+    receipt
+}
+
+fn registry_reports_loaded(body: &serde_json::Value, adapter_name: &str) -> bool {
+    body.get("loaded_adapter").and_then(|v| v.as_str()) == Some(adapter_name)
+        || body.get("active_adapter").and_then(|v| v.as_str()) == Some(adapter_name)
+        || body
+            .get("loaded_adapters")
+            .and_then(|v| v.as_array())
+            .is_some_and(|adapters| adapters.iter().any(|v| v.as_str() == Some(adapter_name)))
+        || body
+            .get("available_adapters")
+            .and_then(|v| v.as_array())
+            .is_some_and(|adapters| {
+                adapters.iter().any(|entry| {
+                    entry.get("name").and_then(|v| v.as_str()) == Some(adapter_name)
+                        && entry.get("status").and_then(|v| v.as_str()) == Some("loaded")
+                })
+            })
+}
+
+async fn chat_verify_output(
+    client: &reqwest::Client,
+    url: &str,
+    prompt: &str,
+    adapter: serde_json::Value,
+) -> anyhow::Result<String> {
+    let body = serde_json::json!({
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "max_tokens": 8,
+        "seed": 7,
+        "adapter": adapter,
+        "chat_template_kwargs": {"enable_thinking": false},
+    });
+    let resp = client
+        .post(format!("{url}/v1/chat/completions"))
+        .json(&body)
+        .send()
+        .await?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await?;
+    if !status.is_success() {
+        anyhow::bail!("{}", render_api_error(&body, status));
+    }
+    let content = body
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Ok(content)
 }
 
 /// Run the `train sft` CLI subcommand.
@@ -2249,6 +2519,34 @@ mod tests {
                 assert_eq!(url, "http://localhost:8420");
             }
             other => panic!("expected adapters unload, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn cli_parses_singular_adapter_verify() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "kiln",
+            "adapter",
+            "verify",
+            "support-bot",
+            "--adapter-dir",
+            "/tmp/adapters",
+        ])
+        .expect("parse failed");
+        match cli.command {
+            Some(Commands::Adapters(AdapterCommands::Verify {
+                name_or_path,
+                adapter_dir,
+                url,
+                prompt,
+            })) => {
+                assert_eq!(name_or_path, "support-bot");
+                assert_eq!(adapter_dir.unwrap(), std::path::PathBuf::from("/tmp/adapters"));
+                assert_eq!(url, None);
+                assert_eq!(prompt, None);
+            }
+            other => panic!("expected adapter verify, got {:?}", other.is_some()),
         }
     }
 
