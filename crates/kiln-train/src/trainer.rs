@@ -907,6 +907,181 @@ fn resolve_and_validate_base_adapter(
     Ok(Some(base_dir))
 }
 
+fn sft_hyperparameters(
+    config: &SftConfig,
+    effective_seed: Option<u64>,
+    alpha_over_rank: Option<f32>,
+) -> crate::train_receipt::HyperparameterReceipt {
+    crate::train_receipt::HyperparameterReceipt {
+        mode: "sft".to_string(),
+        rank: config.lora_rank,
+        alpha: config.lora_alpha,
+        alpha_over_rank,
+        learning_rate: config.learning_rate,
+        epochs: config.epochs,
+        seed: effective_seed,
+    }
+}
+
+fn grpo_hyperparameters(
+    config: &GrpoConfig,
+    effective_seed: Option<u64>,
+    alpha_over_rank: Option<f32>,
+) -> crate::train_receipt::HyperparameterReceipt {
+    crate::train_receipt::HyperparameterReceipt {
+        mode: "grpo".to_string(),
+        rank: config.lora_rank,
+        alpha: config.lora_alpha,
+        alpha_over_rank,
+        learning_rate: config.learning_rate,
+        epochs: 1,
+        seed: effective_seed,
+    }
+}
+
+fn grpo_echo_receipt(config: &GrpoConfig) -> crate::train_receipt::EchoReceipt {
+    match config.loss.echo.as_ref() {
+        Some(echo) if config.loss.echo_enabled() => crate::train_receipt::EchoReceipt {
+            enabled: true,
+            lambda: Some(echo.lambda),
+            env_mask_mode: serde_json::to_value(echo.env_mask_mode)
+                .ok()
+                .and_then(|v| v.as_str().map(ToString::to_string)),
+            warning_filter: Some(echo.warning_filter),
+        },
+        _ => crate::train_receipt::EchoReceipt::disabled(),
+    }
+}
+
+fn grpo_settings_receipt(
+    config: &GrpoConfig,
+    dynamic_groups_filtered: usize,
+) -> crate::train_receipt::GrpoReceipt {
+    crate::train_receipt::GrpoReceipt {
+        kl_coeff: config.kl_coeff,
+        clip_epsilon: config.clip_epsilon,
+        clip_eps_high: config.clip_eps_high,
+        dynamic_sampling: config.dynamic_sampling,
+        dynamic_groups_filtered,
+        advantage_mode: serde_json::to_value(config.advantage_mode).unwrap_or(serde_json::Value::Null),
+        loss_aggregation: serde_json::to_value(config.loss_aggregation)
+            .unwrap_or(serde_json::Value::Null),
+        kl_estimator: serde_json::to_value(config.kl_estimator).unwrap_or(serde_json::Value::Null),
+        is_level: serde_json::to_value(config.is_level).unwrap_or(serde_json::Value::Null),
+        reference_policy: serde_json::to_value(&config.reference_policy)
+            .unwrap_or(serde_json::Value::Null),
+        entropy_aware_kl_quantile: config.entropy_aware_kl_quantile,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_sft_train_receipt_best_effort(
+    adapter_name: &str,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    config: &SftConfig,
+    effective_seed: Option<u64>,
+    alpha_over_rank: Option<f32>,
+    base_adapter_dir: Option<&Path>,
+    output_dir: &Path,
+    training_data_sha256: Option<String>,
+    data: crate::train_receipt::DataStatsReceipt,
+    token_counts: crate::train_receipt::TokenCountReceipt,
+    wall_clock_ms: u64,
+    status_error: Option<String>,
+) {
+    let mut receipt = crate::train_receipt::TrainReceipt::new(
+        adapter_name,
+        "sft",
+        model_config,
+        tokenizer,
+        sft_hyperparameters(config, effective_seed, alpha_over_rank),
+        serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
+    );
+    receipt.training_data = crate::train_receipt::TrainingDataReceipt {
+        source: "inline_sft_examples".to_string(),
+        path: None,
+        sha256: training_data_sha256,
+    };
+    receipt.adapters.base = crate::train_receipt::adapter_file_receipt(base_adapter_dir);
+    receipt.adapters.output = crate::train_receipt::adapter_file_receipt(Some(output_dir));
+    receipt.data = data;
+    receipt.token_counts = token_counts;
+    receipt.runtime.wall_clock_ms = wall_clock_ms;
+    if status_error.is_none() {
+        receipt.lora_delta_norms =
+            crate::train_receipt::lora_delta_norm_summary_from_adapter(
+                output_dir,
+                alpha_over_rank.unwrap_or(0.0) as f64,
+            )
+            .unwrap_or_else(|err| {
+                tracing::warn!(adapter = adapter_name, error = %err, "failed to summarize LoRA delta norms for train receipt");
+                Vec::new()
+            });
+    }
+    if let Some(err) = status_error {
+        receipt = receipt.mark_failed(err);
+    }
+    if let Err(err) = receipt.write_to_adapter_dir(output_dir) {
+        tracing::warn!(adapter = adapter_name, error = %err, "failed to write SFT train receipt");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_grpo_train_receipt_best_effort(
+    adapter_name: &str,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    config: &GrpoConfig,
+    effective_seed: Option<u64>,
+    alpha_over_rank: Option<f32>,
+    base_adapter_dir: Option<&Path>,
+    output_dir: &Path,
+    training_data: crate::train_receipt::TrainingDataReceipt,
+    data: crate::train_receipt::DataStatsReceipt,
+    rewards: crate::train_receipt::RewardStatsReceipt,
+    token_counts: crate::train_receipt::TokenCountReceipt,
+    wall_clock_ms: u64,
+    dynamic_groups_filtered: usize,
+    status_error: Option<String>,
+) {
+    let mut receipt = crate::train_receipt::TrainReceipt::new(
+        adapter_name,
+        "grpo",
+        model_config,
+        tokenizer,
+        grpo_hyperparameters(config, effective_seed, alpha_over_rank),
+        serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
+    );
+    receipt.training_data = training_data;
+    receipt.adapters.base = crate::train_receipt::adapter_file_receipt(base_adapter_dir);
+    receipt.adapters.output = crate::train_receipt::adapter_file_receipt(Some(output_dir));
+    receipt.grpo = Some(grpo_settings_receipt(config, dynamic_groups_filtered));
+    receipt.echo = grpo_echo_receipt(config);
+    receipt.no_policy_loss = config.loss.no_policy_loss;
+    receipt.data = data;
+    receipt.rewards = rewards;
+    receipt.token_counts = token_counts;
+    receipt.runtime.wall_clock_ms = wall_clock_ms;
+    if status_error.is_none() {
+        receipt.lora_delta_norms =
+            crate::train_receipt::lora_delta_norm_summary_from_adapter(
+                output_dir,
+                alpha_over_rank.unwrap_or(0.0) as f64,
+            )
+            .unwrap_or_else(|err| {
+                tracing::warn!(adapter = adapter_name, error = %err, "failed to summarize LoRA delta norms for train receipt");
+                Vec::new()
+            });
+    }
+    if let Some(err) = status_error {
+        receipt = receipt.mark_failed(err);
+    }
+    if let Err(err) = receipt.write_to_adapter_dir(output_dir) {
+        tracing::warn!(adapter = adapter_name, error = %err, "failed to write GRPO train receipt");
+    }
+}
+
 /// Run SFT training on the provided examples using the already-loaded model.
 ///
 /// This runs in the calling thread (blocking). The caller should spawn this
@@ -930,6 +1105,19 @@ pub fn sft_train(
     progress_cb: Option<ProgressCallback>,
     replay_ctx: Option<ReplayContext>,
 ) -> Result<PathBuf> {
+    let run_started = Instant::now();
+    let output_dir = adapter_dir.join(adapter_name);
+    let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&examples);
+    let mut data_stats = crate::train_receipt::DataStatsReceipt {
+        examples_read: examples.len(),
+        ..Default::default()
+    };
+    let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+    let requested_base_adapter_dir = config
+        .base_adapter
+        .as_deref()
+        .map(|name| crate::adapter_shape::resolve_base_adapter_dir(name, adapter_dir));
+
     let device = weights.embed_tokens.device().clone();
     let backend = backend::for_device(&device);
 
@@ -943,11 +1131,32 @@ pub fn sft_train(
         "starting SFT training"
     );
 
-    let alpha_over_rank = crate::lora_scaling::validate_lora_scaling(
+    let alpha_over_rank = match crate::lora_scaling::validate_lora_scaling(
         config.lora_rank,
         config.lora_alpha,
         config.allow_high_lora_scale,
-    )?;
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            let message = format!("{err:#}");
+            write_sft_train_receipt_best_effort(
+                adapter_name,
+                model_config,
+                tokenizer,
+                config,
+                config.seed,
+                None,
+                requested_base_adapter_dir.as_deref(),
+                &output_dir,
+                training_data_sha256,
+                data_stats,
+                token_counts,
+                run_started.elapsed().as_millis() as u64,
+                Some(message),
+            );
+            return Err(err);
+        }
+    };
     tracing::info!(
         alpha_over_rank,
         allow_high_lora_scale = config.allow_high_lora_scale,
@@ -971,13 +1180,34 @@ pub fn sft_train(
         None => (None, config.seed),
     };
 
-    let base_adapter_dir = resolve_and_validate_base_adapter(
+    let base_adapter_dir = match resolve_and_validate_base_adapter(
         config.base_adapter.as_deref(),
         adapter_dir,
         model_config,
         config.lora_rank,
         config.allow_adapter_shape_conversion,
-    )?;
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            let message = format!("{err:#}");
+            write_sft_train_receipt_best_effort(
+                adapter_name,
+                model_config,
+                tokenizer,
+                config,
+                effective_seed,
+                Some(alpha_over_rank),
+                requested_base_adapter_dir.as_deref(),
+                &output_dir,
+                training_data_sha256,
+                data_stats,
+                token_counts,
+                run_started.elapsed().as_millis() as u64,
+                Some(message),
+            );
+            return Err(err);
+        }
+    };
 
     // Initialize trainable LoRA parameters
     let params = TrainableLoraParams::initialize_seeded(
@@ -1028,21 +1258,37 @@ pub fn sft_train(
         // payload at once. The step loop tokenizes the current example on
         // demand so full-file SFT jobs don't pin all input_ids/label masks for
         // the entire run.
-        let valid_indices: Vec<usize> = examples
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, ex)| match tokenize_for_training(ex, tokenizer) {
-                Ok(_) => Some(idx),
+        let mut valid_indices = Vec::new();
+        let mut one_epoch_counts = crate::train_receipt::TokenCountReceipt::default();
+        for (idx, ex) in examples.iter().enumerate() {
+            match tokenize_for_training(ex, tokenizer) {
+                Ok((input_ids, label_mask)) => {
+                    let action_tokens = label_mask.iter().filter(|&&mask| mask).count() as u64;
+                    one_epoch_counts.action_tokens =
+                        one_epoch_counts.action_tokens.saturating_add(action_tokens);
+                    one_epoch_counts.context_tokens = one_epoch_counts
+                        .context_tokens
+                        .saturating_add(input_ids.len().saturating_sub(action_tokens as usize) as u64);
+                    valid_indices.push(idx);
+                }
                 Err(e) => {
                     tracing::warn!("skipping example: {e}");
-                    None
                 }
-            })
-            .collect();
+            }
+        }
 
         if valid_indices.is_empty() {
             anyhow::bail!("no valid training examples after tokenization");
         }
+        data_stats.examples_filtered = examples.len().saturating_sub(valid_indices.len());
+        data_stats.examples_trained = valid_indices.len().saturating_mul(config.epochs);
+        token_counts.action_tokens = one_epoch_counts
+            .action_tokens
+            .saturating_mul(config.epochs as u64);
+        token_counts.env_tokens = 0;
+        token_counts.context_tokens = one_epoch_counts
+            .context_tokens
+            .saturating_mul(config.epochs as u64);
 
         // Configure gradient checkpointing
         let ckpt_config = CheckpointConfig::from_env(model_config.num_layers);
@@ -1195,7 +1441,6 @@ pub fn sft_train(
         tracing::debug!(synced, "synced LoRA Vars to candle before SFT save");
 
         // Save the trained adapter
-        let output_dir = adapter_dir.join(adapter_name);
         params.save_peft(&output_dir, model_config.num_layers)?;
 
         tracing::info!(
@@ -1205,10 +1450,11 @@ pub fn sft_train(
             "SFT training complete"
         );
 
-        Ok((output_dir, last_loss))
+        Ok((output_dir.clone(), last_loss))
     };
 
     let result = train_body();
+    drop(train_body);
     // Phase 4.1 cleanup: evict the LoRA Vars from the registry so a
     // long-running server doesn't accumulate stale entries from past
     // training jobs (each job creates fresh Vars with new TensorIds).
@@ -1227,6 +1473,22 @@ pub fn sft_train(
             tracing::warn!(error = %e, "failed to append SFT replay outcome record");
         }
     }
+    let status_error = result.as_ref().err().map(|err| format!("{err:#}"));
+    write_sft_train_receipt_best_effort(
+        adapter_name,
+        model_config,
+        tokenizer,
+        config,
+        effective_seed,
+        Some(alpha_over_rank),
+        base_adapter_dir.as_deref(),
+        &output_dir,
+        training_data_sha256,
+        data_stats,
+        token_counts,
+        run_started.elapsed().as_millis() as u64,
+        status_error,
+    );
     result.map(|(dir, _)| dir)
 }
 
@@ -1250,10 +1512,25 @@ pub fn grpo_train(
     progress_cb: Option<ProgressCallback>,
     replay_ctx: Option<ReplayContext>,
 ) -> Result<PathBuf> {
+    let run_started = Instant::now();
+    let output_dir = adapter_dir.join(adapter_name);
+    let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&groups);
+    let requested_base_adapter_dir = config
+        .base_adapter
+        .as_deref()
+        .map(|name| crate::adapter_shape::resolve_base_adapter_dir(name, adapter_dir));
     let device = weights.embed_tokens.device().clone();
     let backend = backend::for_device(&device);
 
     let total_completions: usize = groups.iter().map(|g| g.completions.len()).sum();
+    let mut data_stats = crate::train_receipt::DataStatsReceipt {
+        groups_read: groups.len(),
+        completions_read: total_completions,
+        ..Default::default()
+    };
+    let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+    let mut reward_stats = crate::train_receipt::RewardStatsReceipt::default();
+    let mut dynamic_groups_filtered = 0usize;
     tracing::info!(
         num_groups = groups.len(),
         total_completions,
@@ -1266,11 +1543,38 @@ pub fn grpo_train(
         "starting GRPO training"
     );
 
-    let alpha_over_rank = crate::lora_scaling::validate_lora_scaling(
+    let alpha_over_rank = match crate::lora_scaling::validate_lora_scaling(
         config.lora_rank,
         config.lora_alpha,
         config.allow_high_lora_scale,
-    )?;
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            let message = format!("{err:#}");
+            write_grpo_train_receipt_best_effort(
+                adapter_name,
+                model_config,
+                tokenizer,
+                config,
+                config.seed,
+                None,
+                requested_base_adapter_dir.as_deref(),
+                &output_dir,
+                crate::train_receipt::TrainingDataReceipt {
+                    source: "inline_grpo_groups".to_string(),
+                    path: None,
+                    sha256: training_data_sha256,
+                },
+                data_stats,
+                reward_stats,
+                token_counts,
+                run_started.elapsed().as_millis() as u64,
+                dynamic_groups_filtered,
+                Some(message),
+            );
+            return Err(err);
+        }
+    };
     tracing::info!(
         alpha_over_rank,
         allow_high_lora_scale = config.allow_high_lora_scale,
@@ -1293,13 +1597,40 @@ pub fn grpo_train(
         None => (None, config.seed),
     };
 
-    let base_adapter_dir = resolve_and_validate_base_adapter(
+    let base_adapter_dir = match resolve_and_validate_base_adapter(
         config.base_adapter.as_deref(),
         adapter_dir,
         model_config,
         config.lora_rank,
         config.allow_adapter_shape_conversion,
-    )?;
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            let message = format!("{err:#}");
+            write_grpo_train_receipt_best_effort(
+                adapter_name,
+                model_config,
+                tokenizer,
+                config,
+                effective_seed,
+                Some(alpha_over_rank),
+                requested_base_adapter_dir.as_deref(),
+                &output_dir,
+                crate::train_receipt::TrainingDataReceipt {
+                    source: "inline_grpo_groups".to_string(),
+                    path: None,
+                    sha256: training_data_sha256,
+                },
+                data_stats,
+                reward_stats,
+                token_counts,
+                run_started.elapsed().as_millis() as u64,
+                dynamic_groups_filtered,
+                Some(message),
+            );
+            return Err(err);
+        }
+    };
 
     // Initialize trainable LoRA parameters
     let params = TrainableLoraParams::initialize_seeded(
@@ -1343,30 +1674,36 @@ pub fn grpo_train(
     let mut train_body = || -> Result<(PathBuf, f64)> {
         let dynamic_sampling = config.dynamic_sampling;
         let mut dynamic_dropped: usize = 0;
+        let mut tokenization_failed: usize = 0;
 
         // Tokenize all completions: for each group, tokenize prompt + each completion.
         // When dynamic_sampling is enabled (DAPO, arXiv:2503.14476), groups whose
         // completions all share the same reward are dropped before tokenization —
         // their advantage vector is uniformly zero and would contribute no
         // policy-gradient signal anyway.
-        let tokenized_groups: Vec<TokenizedGrpoGroup> = groups
-            .iter()
-            .filter(|group| {
-                if dynamic_sampling && is_degenerate_grpo_group(group) {
-                    dynamic_dropped += 1;
-                    false
-                } else {
-                    true
-                }
-            })
-            .filter_map(|group| match tokenize_grpo_group(group, tokenizer) {
-                Ok(t) => Some(t),
+        let mut tokenized_groups: Vec<TokenizedGrpoGroup> = Vec::new();
+        for group in groups {
+            if dynamic_sampling && is_degenerate_grpo_group(group) {
+                dynamic_dropped += 1;
+                continue;
+            }
+            match tokenize_grpo_group(group, tokenizer) {
+                Ok(tgroup) => tokenized_groups.push(tgroup),
                 Err(e) => {
+                    tokenization_failed += 1;
                     tracing::warn!("skipping GRPO group: {e}");
-                    None
                 }
-            })
-            .collect();
+            }
+        }
+        dynamic_groups_filtered = dynamic_dropped;
+        data_stats.groups_filtered = dynamic_dropped.saturating_add(tokenization_failed);
+        data_stats.groups_trained = tokenized_groups.len();
+        data_stats.completions_trained =
+            tokenized_groups.iter().map(|g| g.completions.len()).sum();
+        reward_stats = crate::train_receipt::reward_stats_from_groups(
+            tokenized_groups.iter().map(|g| g.rewards.as_slice()),
+        );
+        token_counts = token_counts_for_grpo_groups(&tokenized_groups);
 
         if dynamic_dropped > 0 {
             tracing::info!(
@@ -1511,7 +1848,6 @@ pub fn grpo_train(
         tracing::debug!(synced, "synced LoRA Vars to candle before GRPO save");
 
         // Save the trained adapter
-        let output_dir = adapter_dir.join(adapter_name);
         params.save_peft(&output_dir, model_config.num_layers)?;
 
         tracing::info!(
@@ -1521,10 +1857,11 @@ pub fn grpo_train(
             "GRPO training complete"
         );
 
-        Ok((output_dir, last_loss))
+        Ok((output_dir.clone(), last_loss))
     };
 
     let result = train_body();
+    drop(train_body);
     // Phase 4.1 cleanup: same as sft_train — evict the LoRA Vars
     // and any optimizer-state moment Vars from the registry on
     // completion so stale entries don't accumulate across jobs.
@@ -1541,6 +1878,28 @@ pub fn grpo_train(
             tracing::warn!(error = %e, "failed to append GRPO replay outcome record");
         }
     }
+    let status_error = result.as_ref().err().map(|err| format!("{err:#}"));
+    write_grpo_train_receipt_best_effort(
+        adapter_name,
+        model_config,
+        tokenizer,
+        config,
+        effective_seed,
+        Some(alpha_over_rank),
+        base_adapter_dir.as_deref(),
+        &output_dir,
+        crate::train_receipt::TrainingDataReceipt {
+            source: "inline_grpo_groups".to_string(),
+            path: None,
+            sha256: training_data_sha256,
+        },
+        data_stats,
+        reward_stats,
+        token_counts,
+        run_started.elapsed().as_millis() as u64,
+        dynamic_groups_filtered,
+        status_error,
+    );
     result.map(|(dir, _)| dir)
 }
 
@@ -1562,6 +1921,22 @@ pub fn grpo_train_jsonl(
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
+    let run_started = Instant::now();
+    let output_dir = adapter_dir.join(adapter_name);
+    let training_data = crate::train_receipt::TrainingDataReceipt {
+        source: "jsonl_grpo_groups".to_string(),
+        path: Some(dataset_path.display().to_string()),
+        sha256: crate::train_receipt::sha256_file(dataset_path).ok(),
+    };
+    let requested_base_adapter_dir = config
+        .base_adapter
+        .as_deref()
+        .map(|name| crate::adapter_shape::resolve_base_adapter_dir(name, adapter_dir));
+    let mut data_stats = crate::train_receipt::DataStatsReceipt::default();
+    let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+    let mut reward_stats = crate::train_receipt::RewardStatsReceipt::default();
+    let mut dynamic_groups_filtered = 0usize;
+
     let device = weights.embed_tokens.device().clone();
     let backend = backend::for_device(&device);
 
@@ -1576,11 +1951,34 @@ pub fn grpo_train_jsonl(
         "starting streamed GRPO training"
     );
 
-    let alpha_over_rank = crate::lora_scaling::validate_lora_scaling(
+    let alpha_over_rank = match crate::lora_scaling::validate_lora_scaling(
         config.lora_rank,
         config.lora_alpha,
         config.allow_high_lora_scale,
-    )?;
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            let message = format!("{err:#}");
+            write_grpo_train_receipt_best_effort(
+                adapter_name,
+                model_config,
+                tokenizer,
+                config,
+                config.seed,
+                None,
+                requested_base_adapter_dir.as_deref(),
+                &output_dir,
+                training_data,
+                data_stats,
+                reward_stats,
+                token_counts,
+                run_started.elapsed().as_millis() as u64,
+                dynamic_groups_filtered,
+                Some(message),
+            );
+            return Err(err);
+        }
+    };
     tracing::info!(
         alpha_over_rank,
         allow_high_lora_scale = config.allow_high_lora_scale,
@@ -1601,13 +1999,36 @@ pub fn grpo_train_jsonl(
         None => (None, config.seed),
     };
 
-    let base_adapter_dir = resolve_and_validate_base_adapter(
+    let base_adapter_dir = match resolve_and_validate_base_adapter(
         config.base_adapter.as_deref(),
         adapter_dir,
         model_config,
         config.lora_rank,
         config.allow_adapter_shape_conversion,
-    )?;
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            let message = format!("{err:#}");
+            write_grpo_train_receipt_best_effort(
+                adapter_name,
+                model_config,
+                tokenizer,
+                config,
+                effective_seed,
+                Some(alpha_over_rank),
+                requested_base_adapter_dir.as_deref(),
+                &output_dir,
+                training_data,
+                data_stats,
+                reward_stats,
+                token_counts,
+                run_started.elapsed().as_millis() as u64,
+                dynamic_groups_filtered,
+                Some(message),
+            );
+            return Err(err);
+        }
+    };
 
     let params = TrainableLoraParams::initialize_seeded(
         model_config,
@@ -1675,6 +2096,7 @@ pub fn grpo_train_jsonl(
         let mut line_no = 0usize;
         let mut processed_groups = 0usize;
         let mut processed_completions = 0usize;
+        let mut reward_groups: Vec<Vec<f64>> = Vec::new();
         let mut last_loss = 0.0;
 
         // Phase 3b: maintain an EMA-snapshot LoRA when
@@ -1712,8 +2134,14 @@ pub fn grpo_train_jsonl(
             let Some(group) = parse_grpo_jsonl_group_line(&line, line_no)? else {
                 continue;
             };
+            data_stats.groups_read = data_stats.groups_read.saturating_add(1);
+            data_stats.completions_read = data_stats
+                .completions_read
+                .saturating_add(group.completions.len());
 
             if config.dynamic_sampling && is_degenerate_grpo_group(&group) {
+                dynamic_groups_filtered = dynamic_groups_filtered.saturating_add(1);
+                data_stats.groups_filtered = data_stats.groups_filtered.saturating_add(1);
                 tracing::debug!(
                     line = line_no,
                     "GRPO dynamic sampling: skipping degenerate group (all rewards equal)"
@@ -1736,6 +2164,17 @@ pub fn grpo_train_jsonl(
                     processed_groups, line_no
                 )
             })?;
+            let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(&tgroup));
+            token_counts.action_tokens = token_counts
+                .action_tokens
+                .saturating_add(group_counts.action_tokens);
+            token_counts.env_tokens = token_counts
+                .env_tokens
+                .saturating_add(group_counts.env_tokens);
+            token_counts.context_tokens = token_counts
+                .context_tokens
+                .saturating_add(group_counts.context_tokens);
+            reward_groups.push(tgroup.rewards.clone());
             processed_completions = processed_completions.saturating_add(tgroup.completions.len());
             tracing::info!(
                 group = processed_groups,
@@ -1829,6 +2268,11 @@ pub fn grpo_train_jsonl(
             "grpo_train_jsonl: no valid GRPO completions in {}",
             dataset_path.display()
         );
+        data_stats.groups_trained = processed_groups;
+        data_stats.completions_trained = processed_completions;
+        reward_stats = crate::train_receipt::reward_stats_from_groups(
+            reward_groups.iter().map(Vec::as_slice),
+        );
 
         let synced = params.sync_to_candle(&*backend).unwrap_or(0);
         tracing::debug!(
@@ -1836,7 +2280,6 @@ pub fn grpo_train_jsonl(
             "synced LoRA Vars to candle before streamed GRPO save"
         );
 
-        let output_dir = adapter_dir.join(adapter_name);
         params.save_peft(&output_dir, model_config.num_layers)?;
 
         tracing::info!(
@@ -1848,10 +2291,11 @@ pub fn grpo_train_jsonl(
             "streamed GRPO training complete"
         );
 
-        Ok((output_dir, last_loss))
+        Ok((output_dir.clone(), last_loss))
     };
 
     let result = train_body();
+    drop(train_body);
     if let Some(state) = opt_state.as_ref() {
         state.evict_from_backend(&*backend);
     }
@@ -1865,6 +2309,24 @@ pub fn grpo_train_jsonl(
             tracing::warn!(error = %e, "failed to append streamed GRPO replay outcome record");
         }
     }
+    let status_error = result.as_ref().err().map(|err| format!("{err:#}"));
+    write_grpo_train_receipt_best_effort(
+        adapter_name,
+        model_config,
+        tokenizer,
+        config,
+        effective_seed,
+        Some(alpha_over_rank),
+        base_adapter_dir.as_deref(),
+        &output_dir,
+        training_data,
+        data_stats,
+        reward_stats,
+        token_counts,
+        run_started.elapsed().as_millis() as u64,
+        dynamic_groups_filtered,
+        status_error,
+    );
     result.map(|(dir, _)| dir)
 }
 
@@ -1897,6 +2359,31 @@ struct TokenizedGrpoCompletion {
 struct TokenizedGrpoGroup {
     completions: Vec<TokenizedGrpoCompletion>,
     rewards: Vec<f64>,
+}
+
+fn token_counts_for_grpo_groups(
+    groups: &[TokenizedGrpoGroup],
+) -> crate::train_receipt::TokenCountReceipt {
+    let mut counts = crate::train_receipt::TokenCountReceipt::default();
+    for group in groups {
+        for completion in &group.completions {
+            let action = completion
+                .action_mask
+                .iter()
+                .filter(|&&active| active)
+                .count() as u64;
+            let env = completion.env_mask.iter().filter(|&&active| active).count() as u64;
+            let context = completion
+                .input_ids
+                .len()
+                .saturating_sub(action as usize)
+                .saturating_sub(env as usize) as u64;
+            counts.action_tokens = counts.action_tokens.saturating_add(action);
+            counts.env_tokens = counts.env_tokens.saturating_add(env);
+            counts.context_tokens = counts.context_tokens.saturating_add(context);
+        }
+    }
+    counts
 }
 
 fn parse_grpo_jsonl_group_line(line: &str, line_no: usize) -> Result<Option<GrpoGroup>> {

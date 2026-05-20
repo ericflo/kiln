@@ -99,6 +99,32 @@ impl KilnTokenizer {
         self
     }
 
+    /// Serialize the tokenizer plus kiln's optional external chat template
+    /// into a stable JSON value used by training receipts.
+    pub fn config_json(&self) -> Result<String, TokenizerError> {
+        let tokenizer_json = self
+            .inner
+            .to_string(false)
+            .map_err(|e| TokenizerError::Load(e.to_string()))?;
+        let tokenizer_value = serde_json::from_str::<serde_json::Value>(&tokenizer_json)
+            .map_err(|e| TokenizerError::Load(e.to_string()))?;
+        serde_json::to_string(&serde_json::json!({
+            "tokenizer": tokenizer_value,
+            "chat_template": self.chat_template.as_ref(),
+        }))
+        .map_err(|e| TokenizerError::Load(e.to_string()))
+    }
+
+    /// SHA-256 digest of [`Self::config_json`] with a `sha256:` prefix.
+    pub fn config_sha256(&self) -> Result<String, TokenizerError> {
+        use sha2::{Digest, Sha256};
+
+        let json = self.config_json()?;
+        let digest = Sha256::digest(json.as_bytes());
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        Ok(format!("sha256:{hex}"))
+    }
+
     /// Encode text into token IDs.
     pub fn encode(&self, text: &str) -> Result<Vec<TokenId>, TokenizerError> {
         let encoding = self

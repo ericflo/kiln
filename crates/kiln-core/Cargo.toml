@@ -16,6 +16,7 @@ tokenizers = { workspace = true }
 minijinja = { workspace = true }
 minijinja-contrib = { workspace = true }
 rayon = { workspace = true }
+sha2 = { workspace = true }
 # Optional: pulls Vulkan buffer types into the DeviceBuffer enum so
 # training and inference can refer to the same residency primitive.
 # Off by default so non-Vulkan builds keep kiln-core lean.

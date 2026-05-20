@@ -1332,6 +1332,15 @@ pub fn cuda_native_sft_train(
     adapter_name: &str,
     progress_cb: Option<ProgressCallback>,
 ) -> Result<PathBuf> {
+    let run_started = std::time::Instant::now();
+    let output_dir = adapter_dir.join(adapter_name);
+    let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&examples);
+    let mut data_stats = crate::train_receipt::DataStatsReceipt {
+        examples_read: examples.len(),
+        ..Default::default()
+    };
+    let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+
     tracing::info!(
         num_examples = examples.len(),
         epochs = config.epochs,
@@ -1342,16 +1351,48 @@ pub fn cuda_native_sft_train(
         "starting cuda-native SFT training"
     );
 
-    crate::lora_scaling::validate_lora_scaling(
+    let alpha_over_rank = match crate::lora_scaling::validate_lora_scaling(
         config.lora_rank,
         config.lora_alpha,
         config.allow_high_lora_scale,
-    )?;
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            write_cuda_sft_train_receipt_best_effort(
+                adapter_name,
+                model_config,
+                tokenizer,
+                config,
+                &output_dir,
+                training_data_sha256,
+                data_stats,
+                token_counts,
+                run_started.elapsed().as_millis() as u64,
+                None,
+                Some(format!("{err:#}")),
+            );
+            return Err(err);
+        }
+    };
 
     if let Some(base_adapter) = config.base_adapter.as_deref() {
-        anyhow::bail!(
+        let message = format!(
             "cuda_native_sft_train does not support base_adapter {base_adapter:?}; use the generic trainer until CUDA-native base-adapter loading is implemented"
         );
+        write_cuda_sft_train_receipt_best_effort(
+            adapter_name,
+            model_config,
+            tokenizer,
+            config,
+            &output_dir,
+            training_data_sha256,
+            data_stats,
+            token_counts,
+            run_started.elapsed().as_millis() as u64,
+            Some(alpha_over_rank),
+            Some(message.clone()),
+        );
+        anyhow::bail!(message);
     }
 
     let model = CudaModelWeights::from_gpu_weights(weights, model_config)
@@ -1384,10 +1425,35 @@ pub fn cuda_native_sft_train(
             }
         })
         .collect();
-    ensure!(
-        !tokenized.is_empty(),
-        "cuda_native_sft_train: no valid training examples after tokenization"
-    );
+    data_stats.examples_filtered = examples.len().saturating_sub(tokenized.len());
+    data_stats.examples_trained = tokenized.len().saturating_mul(config.epochs);
+    for (input_ids, label_mask) in &tokenized {
+        let action_tokens = label_mask.iter().filter(|&&mask| mask).count() as u64;
+        token_counts.action_tokens = token_counts
+            .action_tokens
+            .saturating_add(action_tokens.saturating_mul(config.epochs as u64));
+        token_counts.context_tokens = token_counts.context_tokens.saturating_add(
+            (input_ids.len().saturating_sub(action_tokens as usize) as u64)
+                .saturating_mul(config.epochs as u64),
+        );
+    }
+    if tokenized.is_empty() {
+        let message = "cuda_native_sft_train: no valid training examples after tokenization";
+        write_cuda_sft_train_receipt_best_effort(
+            adapter_name,
+            model_config,
+            tokenizer,
+            config,
+            &output_dir,
+            training_data_sha256,
+            data_stats,
+            token_counts,
+            run_started.elapsed().as_millis() as u64,
+            Some(alpha_over_rank),
+            Some(message.to_string()),
+        );
+        anyhow::bail!(message);
+    }
 
     let total_steps = config.epochs * tokenized.len();
     let has_gdn = model
@@ -1482,7 +1548,6 @@ pub fn cuda_native_sft_train(
         );
     }
 
-    let output_dir = adapter_dir.join(adapter_name);
     save_cuda_lora_adapter_dir(
         &lora_layers,
         config.lora_rank,
@@ -1496,7 +1561,75 @@ pub fn cuda_native_sft_train(
         final_loss = format!("{last_loss:.6}"),
         "cuda-native SFT training complete"
     );
+    write_cuda_sft_train_receipt_best_effort(
+        adapter_name,
+        model_config,
+        tokenizer,
+        config,
+        &output_dir,
+        training_data_sha256,
+        data_stats,
+        token_counts,
+        run_started.elapsed().as_millis() as u64,
+        Some(alpha_over_rank),
+        None,
+    );
     Ok(output_dir)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_cuda_sft_train_receipt_best_effort(
+    adapter_name: &str,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    config: &SftConfig,
+    output_dir: &Path,
+    training_data_sha256: Option<String>,
+    data: crate::train_receipt::DataStatsReceipt,
+    token_counts: crate::train_receipt::TokenCountReceipt,
+    wall_clock_ms: u64,
+    alpha_over_rank: Option<f32>,
+    status_error: Option<String>,
+) {
+    let mut receipt = crate::train_receipt::TrainReceipt::new(
+        adapter_name,
+        "cuda_sft",
+        model_config,
+        tokenizer,
+        crate::train_receipt::HyperparameterReceipt {
+            mode: "cuda_sft".to_string(),
+            rank: config.lora_rank,
+            alpha: config.lora_alpha,
+            alpha_over_rank,
+            learning_rate: config.learning_rate,
+            epochs: config.epochs,
+            seed: config.seed,
+        },
+        serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
+    );
+    receipt.training_data = crate::train_receipt::TrainingDataReceipt {
+        source: "inline_sft_examples".to_string(),
+        path: None,
+        sha256: training_data_sha256,
+    };
+    receipt.adapters.output = crate::train_receipt::adapter_file_receipt(Some(output_dir));
+    receipt.data = data;
+    receipt.token_counts = token_counts;
+    receipt.runtime.wall_clock_ms = wall_clock_ms;
+    if status_error.is_none() {
+        receipt.lora_delta_norms =
+            crate::train_receipt::lora_delta_norm_summary_from_adapter(
+                output_dir,
+                alpha_over_rank.unwrap_or(0.0) as f64,
+            )
+            .unwrap_or_default();
+    }
+    if let Some(err) = status_error {
+        receipt = receipt.mark_failed(err);
+    }
+    if let Err(err) = receipt.write_to_adapter_dir(output_dir) {
+        tracing::warn!(adapter = adapter_name, error = %err, "failed to write CUDA SFT train receipt");
+    }
 }
 
 /// Save named CUDA training tensors to safetensors after one CUDA-to-CPU readback.

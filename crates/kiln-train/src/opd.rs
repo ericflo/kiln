@@ -1659,10 +1659,23 @@ pub fn opd_train(
     adapter_name: &str,
     progress_cb: Option<crate::trainer::ProgressCallback>,
 ) -> Result<std::path::PathBuf> {
+    let run_started = std::time::Instant::now();
+    let output_dir = adapter_dir.join(adapter_name);
+    let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&prompts);
+    let requested_base_adapter_dir = config
+        .base_adapter
+        .as_deref()
+        .map(|name| crate::adapter_shape::resolve_base_adapter_dir(name, adapter_dir));
+    let mut data_stats = crate::train_receipt::DataStatsReceipt {
+        examples_read: prompts.len(),
+        ..Default::default()
+    };
+    let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+
     use crate::SftExample;
     use crate::trainer::{
-        TrainableLoraParams, optimizer_step, tokenize_for_training,
-        compute_segment_boundaries, lora_weights_detached, accumulate_grads,
+        TrainableLoraParams, accumulate_grads, compute_segment_boundaries, lora_weights_detached,
+        tokenize_for_training,
     };
     use crate::Optimizer;
     use kiln_model::backend;
@@ -1674,6 +1687,20 @@ pub fn opd_train(
     use std::collections::HashMap;
 
     if prompts.is_empty() {
+        write_opd_train_receipt_best_effort(
+            adapter_name,
+            model_config,
+            tokenizer,
+            config,
+            &output_dir,
+            requested_base_adapter_dir.as_deref(),
+            training_data_sha256,
+            data_stats,
+            token_counts,
+            run_started.elapsed().as_millis() as u64,
+            None,
+            Some("opd_train: prompts must be non-empty".to_string()),
+        );
         anyhow::bail!("opd_train: prompts must be non-empty");
     }
 
@@ -1711,11 +1738,30 @@ pub fn opd_train(
         "starting OPD training"
     );
 
-    crate::lora_scaling::validate_lora_scaling(
+    let alpha_over_rank = match crate::lora_scaling::validate_lora_scaling(
         config.lora_rank,
         config.lora_alpha,
         config.allow_high_lora_scale,
-    )?;
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            write_opd_train_receipt_best_effort(
+                adapter_name,
+                model_config,
+                tokenizer,
+                config,
+                &output_dir,
+                requested_base_adapter_dir.as_deref(),
+                training_data_sha256,
+                data_stats,
+                token_counts,
+                run_started.elapsed().as_millis() as u64,
+                None,
+                Some(format!("{err:#}")),
+            );
+            return Err(err);
+        }
+    };
 
     let effective_seed = config.seed;
 
@@ -1754,8 +1800,24 @@ pub fn opd_train(
         }
     }
     if tokenized.is_empty() {
+        data_stats.examples_filtered = prompts.len();
+        write_opd_train_receipt_best_effort(
+            adapter_name,
+            model_config,
+            tokenizer,
+            config,
+            &output_dir,
+            requested_base_adapter_dir.as_deref(),
+            training_data_sha256,
+            data_stats,
+            token_counts,
+            run_started.elapsed().as_millis() as u64,
+            Some(alpha_over_rank),
+            Some("opd_train: no valid prompts after tokenization".to_string()),
+        );
         anyhow::bail!("opd_train: no valid prompts after tokenization");
     }
+    data_stats.examples_filtered = prompts.len().saturating_sub(tokenized.len());
 
     let epochs = config.epochs.max(1);
     let total_steps = epochs * tokenized.len() * effective_samples_per_prompt.max(1);
@@ -2059,6 +2121,12 @@ pub fn opd_train(
                 if active_positions.is_empty() {
                     continue;
                 }
+                token_counts.action_tokens = token_counts
+                    .action_tokens
+                    .saturating_add(active_positions.len() as u64);
+                token_counts.context_tokens = token_counts.context_tokens.saturating_add(
+                    input_ids.len().saturating_sub(active_positions.len()) as u64,
+                );
                 // Gradient-checkpointed step. Runs the model forward in
                 // detached segments to bound activation memory, computes the
                 // OPD top-K reverse-KL loss at the final boundary, then
@@ -2347,8 +2415,8 @@ pub fn opd_train(
     // `save_peft` serializes them — mirrors sft_train's final sync.
     let _synced = params.sync_to_candle(&*backend_rt).unwrap_or(0);
 
-    let output_dir = adapter_dir.join(adapter_name);
     params.save_peft(&output_dir, model_config.num_layers)?;
+    data_stats.examples_trained = global_step;
 
     tracing::info!(
         adapter = adapter_name,
@@ -2358,7 +2426,79 @@ pub fn opd_train(
         "OPD training complete"
     );
 
+    write_opd_train_receipt_best_effort(
+        adapter_name,
+        model_config,
+        tokenizer,
+        config,
+        &output_dir,
+        requested_base_adapter_dir.as_deref(),
+        training_data_sha256,
+        data_stats,
+        token_counts,
+        run_started.elapsed().as_millis() as u64,
+        Some(alpha_over_rank),
+        None,
+    );
+
     Ok(output_dir)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_opd_train_receipt_best_effort(
+    adapter_name: &str,
+    model_config: &kiln_core::config::ModelConfig,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    config: &OpdConfig,
+    output_dir: &std::path::Path,
+    base_adapter_dir: Option<&std::path::Path>,
+    training_data_sha256: Option<String>,
+    data: crate::train_receipt::DataStatsReceipt,
+    token_counts: crate::train_receipt::TokenCountReceipt,
+    wall_clock_ms: u64,
+    alpha_over_rank: Option<f32>,
+    status_error: Option<String>,
+) {
+    let mut receipt = crate::train_receipt::TrainReceipt::new(
+        adapter_name,
+        "opd",
+        model_config,
+        tokenizer,
+        crate::train_receipt::HyperparameterReceipt {
+            mode: "opd".to_string(),
+            rank: config.lora_rank,
+            alpha: config.lora_alpha,
+            alpha_over_rank,
+            learning_rate: config.learning_rate,
+            epochs: config.epochs.max(1),
+            seed: config.seed,
+        },
+        serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
+    );
+    receipt.training_data = crate::train_receipt::TrainingDataReceipt {
+        source: "inline_opd_prompts".to_string(),
+        path: None,
+        sha256: training_data_sha256,
+    };
+    receipt.adapters.base = crate::train_receipt::adapter_file_receipt(base_adapter_dir);
+    receipt.adapters.output = crate::train_receipt::adapter_file_receipt(Some(output_dir));
+    receipt.data = data;
+    receipt.token_counts = token_counts;
+    receipt.runtime.wall_clock_ms = wall_clock_ms;
+    if status_error.is_none() {
+        receipt.lora_delta_norms =
+            crate::train_receipt::lora_delta_norm_summary_from_adapter(
+                output_dir,
+                alpha_over_rank.unwrap_or(0.0) as f64,
+            )
+            .unwrap_or_default();
+    }
+    if let Some(err) = status_error {
+        receipt = receipt.mark_failed(err);
+    }
+    if let Err(err) = receipt.write_to_adapter_dir(output_dir) {
+        tracing::warn!(adapter = adapter_name, error = %err, "failed to write OPD train receipt");
+    }
 }
 
 #[cfg(test)]

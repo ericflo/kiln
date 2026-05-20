@@ -72,6 +72,164 @@ struct TokenizedVkGrpoGroup {
     rewards: Vec<f64>,
 }
 
+fn vk_grpo_token_counts(group: &TokenizedVkGrpoGroup) -> crate::train_receipt::TokenCountReceipt {
+    let mut counts = crate::train_receipt::TokenCountReceipt::default();
+    for completion in &group.completions {
+        let action = completion
+            .action_mask
+            .iter()
+            .filter(|&&active| active)
+            .count() as u64;
+        let env = completion.env_mask.iter().filter(|&&active| active).count() as u64;
+        let context = completion
+            .input_ids
+            .len()
+            .saturating_sub(action as usize)
+            .saturating_sub(env as usize) as u64;
+        counts.action_tokens = counts.action_tokens.saturating_add(action);
+        counts.env_tokens = counts.env_tokens.saturating_add(env);
+        counts.context_tokens = counts.context_tokens.saturating_add(context);
+    }
+    counts
+}
+
+fn vk_grpo_receipt_settings(
+    config: &GrpoConfig,
+    dynamic_groups_filtered: usize,
+) -> crate::train_receipt::GrpoReceipt {
+    crate::train_receipt::GrpoReceipt {
+        kl_coeff: config.kl_coeff,
+        clip_epsilon: config.clip_epsilon,
+        clip_eps_high: config.clip_eps_high,
+        dynamic_sampling: config.dynamic_sampling,
+        dynamic_groups_filtered,
+        advantage_mode: serde_json::to_value(config.advantage_mode).unwrap_or(serde_json::Value::Null),
+        loss_aggregation: serde_json::to_value(config.loss_aggregation)
+            .unwrap_or(serde_json::Value::Null),
+        kl_estimator: serde_json::to_value(config.kl_estimator).unwrap_or(serde_json::Value::Null),
+        is_level: serde_json::to_value(config.is_level).unwrap_or(serde_json::Value::Null),
+        reference_policy: serde_json::to_value(&config.reference_policy)
+            .unwrap_or(serde_json::Value::Null),
+        entropy_aware_kl_quantile: config.entropy_aware_kl_quantile,
+    }
+}
+
+fn vk_grpo_echo_receipt(config: &GrpoConfig) -> crate::train_receipt::EchoReceipt {
+    match config.loss.echo.as_ref() {
+        Some(echo) if config.loss.echo_enabled() => crate::train_receipt::EchoReceipt {
+            enabled: true,
+            lambda: Some(echo.lambda),
+            env_mask_mode: serde_json::to_value(echo.env_mask_mode)
+                .ok()
+                .and_then(|v| v.as_str().map(ToString::to_string)),
+            warning_filter: Some(echo.warning_filter),
+        },
+        _ => crate::train_receipt::EchoReceipt::disabled(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_vk_grpo_train_receipt_best_effort(
+    adapter_name: &str,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    config: &GrpoConfig,
+    output_dir: &Path,
+    training_data: crate::train_receipt::TrainingDataReceipt,
+    data: crate::train_receipt::DataStatsReceipt,
+    rewards: crate::train_receipt::RewardStatsReceipt,
+    token_counts: crate::train_receipt::TokenCountReceipt,
+    wall_clock_ms: u64,
+    dynamic_groups_filtered: usize,
+    alpha_over_rank: Option<f32>,
+    seed: Option<u64>,
+) {
+    let mut receipt = crate::train_receipt::TrainReceipt::new(
+        adapter_name,
+        "vk_grpo",
+        model_config,
+        tokenizer,
+        crate::train_receipt::HyperparameterReceipt {
+            mode: "vk_grpo".to_string(),
+            rank: config.lora_rank,
+            alpha: config.lora_alpha,
+            alpha_over_rank,
+            learning_rate: config.learning_rate,
+            epochs: 1,
+            seed,
+        },
+        serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
+    );
+    receipt.training_data = training_data;
+    receipt.adapters.output = crate::train_receipt::adapter_file_receipt(Some(output_dir));
+    receipt.grpo = Some(vk_grpo_receipt_settings(config, dynamic_groups_filtered));
+    receipt.echo = vk_grpo_echo_receipt(config);
+    receipt.no_policy_loss = config.loss.no_policy_loss;
+    receipt.data = data;
+    receipt.rewards = rewards;
+    receipt.token_counts = token_counts;
+    receipt.runtime.wall_clock_ms = wall_clock_ms;
+    receipt.lora_delta_norms =
+        crate::train_receipt::lora_delta_norm_summary_from_adapter(
+            output_dir,
+            alpha_over_rank.unwrap_or(0.0) as f64,
+        )
+        .unwrap_or_default();
+    if let Err(err) = receipt.write_to_adapter_dir(output_dir) {
+        tracing::warn!(adapter = adapter_name, error = %err, "failed to write vk-native GRPO train receipt");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_vk_sft_train_receipt_best_effort(
+    adapter_name: &str,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    config: &SftConfig,
+    output_dir: &Path,
+    training_data_sha256: Option<String>,
+    data: crate::train_receipt::DataStatsReceipt,
+    token_counts: crate::train_receipt::TokenCountReceipt,
+    wall_clock_ms: u64,
+    alpha_over_rank: Option<f32>,
+    seed: Option<u64>,
+) {
+    let mut receipt = crate::train_receipt::TrainReceipt::new(
+        adapter_name,
+        "vk_sft",
+        model_config,
+        tokenizer,
+        crate::train_receipt::HyperparameterReceipt {
+            mode: "vk_sft".to_string(),
+            rank: config.lora_rank,
+            alpha: config.lora_alpha,
+            alpha_over_rank,
+            learning_rate: config.learning_rate,
+            epochs: config.epochs,
+            seed,
+        },
+        serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
+    );
+    receipt.training_data = crate::train_receipt::TrainingDataReceipt {
+        source: "inline_sft_examples".to_string(),
+        path: None,
+        sha256: training_data_sha256,
+    };
+    receipt.adapters.output = crate::train_receipt::adapter_file_receipt(Some(output_dir));
+    receipt.data = data;
+    receipt.token_counts = token_counts;
+    receipt.runtime.wall_clock_ms = wall_clock_ms;
+    receipt.lora_delta_norms =
+        crate::train_receipt::lora_delta_norm_summary_from_adapter(
+            output_dir,
+            alpha_over_rank.unwrap_or(0.0) as f64,
+        )
+        .unwrap_or_default();
+    if let Err(err) = receipt.write_to_adapter_dir(output_dir) {
+        tracing::warn!(adapter = adapter_name, error = %err, "failed to write vk-native SFT train receipt");
+    }
+}
+
 fn to_core_messages(msgs: &[crate::ChatMessage]) -> Vec<kiln_core::tokenizer::ChatMessage> {
     msgs.iter()
         .map(|m| kiln_core::tokenizer::ChatMessage {
@@ -3594,6 +3752,7 @@ pub fn vk_native_grpo_train(
     adapter_name: &str,
     progress_cb: Option<ProgressCallback>,
 ) -> Result<PathBuf> {
+    let run_started = std::time::Instant::now();
     anyhow::ensure!(!groups.is_empty(), "vk_native_grpo_train: no GRPO groups");
     if !VulkanDevice::probe() {
         bail!(
@@ -3676,6 +3835,16 @@ pub fn vk_native_grpo_train(
     };
     let num_gdn_layers = vk_count_gdn_layers(&vk_weights);
     let total_completions: usize = groups.iter().map(|g| g.completions.len()).sum();
+    let mut data_stats = crate::train_receipt::DataStatsReceipt {
+        groups_read: groups.len(),
+        completions_read: total_completions,
+        ..Default::default()
+    };
+    let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+    let mut reward_groups: Vec<Vec<f64>> = Vec::new();
+    let mut dynamic_groups_filtered = 0usize;
+    let alpha_over_rank =
+        crate::lora_scaling::alpha_over_rank(config.lora_rank, config.lora_alpha).ok();
     tracing::info!(
         num_groups = groups.len(),
         total_completions,
@@ -3694,6 +3863,8 @@ pub fn vk_native_grpo_train(
     for (group_idx, group) in groups.iter().enumerate() {
         let group_step = group_idx + 1;
         if config.dynamic_sampling && is_degenerate_vk_grpo_group(group) {
+            dynamic_groups_filtered = dynamic_groups_filtered.saturating_add(1);
+            data_stats.groups_filtered = data_stats.groups_filtered.saturating_add(1);
             tracing::debug!(
                 group = group_step,
                 "vk-native GRPO dynamic sampling: skipping degenerate group"
@@ -3702,6 +3873,19 @@ pub fn vk_native_grpo_train(
         }
         let tgroup = tokenize_vk_grpo_group(group, tokenizer)
             .with_context(|| format!("tokenize GRPO group {group_step}"))?;
+        data_stats.groups_trained = data_stats.groups_trained.saturating_add(1);
+        data_stats.completions_trained = data_stats
+            .completions_trained
+            .saturating_add(tgroup.completions.len());
+        let group_counts = vk_grpo_token_counts(&tgroup);
+        token_counts.action_tokens = token_counts
+            .action_tokens
+            .saturating_add(group_counts.action_tokens);
+        token_counts.env_tokens = token_counts.env_tokens.saturating_add(group_counts.env_tokens);
+        token_counts.context_tokens = token_counts
+            .context_tokens
+            .saturating_add(group_counts.context_tokens);
+        reward_groups.push(tgroup.rewards.clone());
         validate_vk_grpo_tokenized_group_context(
             &tgroup,
             model_config,
@@ -3867,6 +4051,25 @@ pub fn vk_native_grpo_train(
         &output_dir.join("adapter_model.safetensors"),
     )?;
     write_vk_adapter_config(&output_dir, config.lora_rank, config.lora_alpha)?;
+    write_vk_grpo_train_receipt_best_effort(
+        adapter_name,
+        model_config,
+        tokenizer,
+        config,
+        &output_dir,
+        crate::train_receipt::TrainingDataReceipt {
+            source: "inline_grpo_groups".to_string(),
+            path: None,
+            sha256: crate::train_receipt::sha256_json_serializable(&groups),
+        },
+        data_stats,
+        crate::train_receipt::reward_stats_from_groups(reward_groups.iter().map(Vec::as_slice)),
+        token_counts,
+        run_started.elapsed().as_millis() as u64,
+        dynamic_groups_filtered,
+        alpha_over_rank,
+        Some(effective_seed),
+    );
 
     tracing::info!(
         adapter = adapter_name,
@@ -3896,6 +4099,7 @@ pub fn vk_native_grpo_train_jsonl(
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
+    let run_started = std::time::Instant::now();
     if !VulkanDevice::probe() {
         bail!(
             "vk_native_grpo_train_jsonl: no Vulkan device available - \
@@ -3994,6 +4198,12 @@ pub fn vk_native_grpo_train_jsonl(
     let mut bytes_read = 0u64;
     let mut line_no = 0usize;
     let mut line = String::new();
+    let mut data_stats = crate::train_receipt::DataStatsReceipt::default();
+    let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+    let mut reward_groups: Vec<Vec<f64>> = Vec::new();
+    let mut dynamic_groups_filtered = 0usize;
+    let alpha_over_rank =
+        crate::lora_scaling::alpha_over_rank(config.lora_rank, config.lora_alpha).ok();
 
     loop {
         line.clear();
@@ -4013,7 +4223,13 @@ pub fn vk_native_grpo_train_jsonl(
         let Some(group) = parse_grpo_jsonl_group_line(&line, line_no)? else {
             continue;
         };
+        data_stats.groups_read = data_stats.groups_read.saturating_add(1);
+        data_stats.completions_read = data_stats
+            .completions_read
+            .saturating_add(group.completions.len());
         if config.dynamic_sampling && is_degenerate_vk_grpo_group(&group) {
+            dynamic_groups_filtered = dynamic_groups_filtered.saturating_add(1);
+            data_stats.groups_filtered = data_stats.groups_filtered.saturating_add(1);
             tracing::debug!(
                 line = line_no,
                 "streamed vk-native GRPO dynamic sampling: skipping degenerate group"
@@ -4035,6 +4251,15 @@ pub fn vk_native_grpo_train_jsonl(
                 processed_groups, line_no
             )
         })?;
+        let group_counts = vk_grpo_token_counts(&tgroup);
+        token_counts.action_tokens = token_counts
+            .action_tokens
+            .saturating_add(group_counts.action_tokens);
+        token_counts.env_tokens = token_counts.env_tokens.saturating_add(group_counts.env_tokens);
+        token_counts.context_tokens = token_counts
+            .context_tokens
+            .saturating_add(group_counts.context_tokens);
+        reward_groups.push(tgroup.rewards.clone());
         validate_vk_grpo_tokenized_group_context(
             &tgroup,
             model_config,
@@ -4328,6 +4553,27 @@ pub fn vk_native_grpo_train_jsonl(
         &output_dir.join("adapter_model.safetensors"),
     )?;
     write_vk_adapter_config(&output_dir, config.lora_rank, config.lora_alpha)?;
+    data_stats.groups_trained = processed_groups;
+    data_stats.completions_trained = processed_completions;
+    write_vk_grpo_train_receipt_best_effort(
+        adapter_name,
+        model_config,
+        tokenizer,
+        config,
+        &output_dir,
+        crate::train_receipt::TrainingDataReceipt {
+            source: "jsonl_grpo_groups".to_string(),
+            path: Some(dataset_path.display().to_string()),
+            sha256: crate::train_receipt::sha256_file(dataset_path).ok(),
+        },
+        data_stats,
+        crate::train_receipt::reward_stats_from_groups(reward_groups.iter().map(Vec::as_slice)),
+        token_counts,
+        run_started.elapsed().as_millis() as u64,
+        dynamic_groups_filtered,
+        alpha_over_rank,
+        Some(effective_seed),
+    );
 
     tracing::info!(
         adapter = adapter_name,
@@ -4362,6 +4608,7 @@ pub fn vk_native_sft_train(
     adapter_name: &str,
     progress_cb: Option<ProgressCallback>,
 ) -> Result<PathBuf> {
+    let run_started = std::time::Instant::now();
     // Probe Vulkan device — if absent, refuse loud rather than silently
     // falling back to candle (the env flag explicitly asked for
     // vk-native; the user wants to know when it's not happening).
@@ -4393,6 +4640,8 @@ pub fn vk_native_sft_train(
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0xdeadbeef)
     });
+    let alpha_over_rank =
+        crate::lora_scaling::alpha_over_rank(config.lora_rank, config.lora_alpha).ok();
 
     // Upload candle GpuWeights → vk-native VkModelWeights (one-time).
     let vk_weights = VkModelWeights::from_gpu_weights(weights, model_config, &vk_device)
@@ -4438,6 +4687,23 @@ pub fn vk_native_sft_train(
         .collect();
     if tokenized.is_empty() {
         bail!("vk_native_sft_train: no valid training examples after tokenization");
+    }
+    let data_stats = crate::train_receipt::DataStatsReceipt {
+        examples_read: examples.len(),
+        examples_filtered: examples.len().saturating_sub(tokenized.len()),
+        examples_trained: tokenized.len().saturating_mul(config.epochs),
+        ..Default::default()
+    };
+    let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+    for ex in &tokenized {
+        let action_tokens = ex.label_mask.iter().filter(|&&mask| mask).count() as u64;
+        token_counts.action_tokens = token_counts
+            .action_tokens
+            .saturating_add(action_tokens.saturating_mul(config.epochs as u64));
+        token_counts.context_tokens = token_counts.context_tokens.saturating_add(
+            (ex.input_ids.len().saturating_sub(action_tokens as usize) as u64)
+                .saturating_mul(config.epochs as u64),
+        );
     }
     let min_seq_len = tokenized
         .iter()
@@ -4651,6 +4917,19 @@ pub fn vk_native_sft_train(
 
     // Write a minimal adapter_config.json mirroring trainer::save_peft.
     write_vk_adapter_config(&output_dir, config.lora_rank, config.lora_alpha)?;
+    write_vk_sft_train_receipt_best_effort(
+        adapter_name,
+        model_config,
+        tokenizer,
+        config,
+        &output_dir,
+        crate::train_receipt::sha256_json_serializable(&examples),
+        data_stats,
+        token_counts,
+        run_started.elapsed().as_millis() as u64,
+        alpha_over_rank,
+        Some(effective_seed),
+    );
 
     tracing::info!(
         adapter = adapter_name,

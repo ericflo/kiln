@@ -17,6 +17,7 @@ pub mod opd;
 pub mod receipt;
 pub mod remote_teacher;
 pub mod replay;
+pub mod train_receipt;
 pub mod trainer;
 pub mod trajectory;
 pub mod trajectory_mask;
@@ -51,6 +52,10 @@ pub use logit_source::{
 pub use lora_scaling::{
     ALLOW_HIGH_LORA_SCALE_FLAG, MAX_LORA_ALPHA_OVER_RANK, alpha_over_rank,
     validate_lora_scaling,
+};
+pub use train_receipt::{
+    TRAIN_RECEIPT_FILENAME, TRAIN_RECEIPT_SCHEMA_VERSION, TrainReceipt,
+    TrainReceiptStatus,
 };
 pub use opd::{
     AgenticLossInputs, AgenticLossWeights, COLD_START_DEFAULT_EPOCHS, COLD_START_DEFAULT_PROMPTS,
