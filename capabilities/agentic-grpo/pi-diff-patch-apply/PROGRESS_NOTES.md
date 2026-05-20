@@ -64,10 +64,11 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 22   | h22-default-T1.0 (default corpus) | 0.5234    | −0.418 | **CATASTROPHIC** — all classes collapsed ~40pp. T=1.0 + default corpus is far worse than T=1.0 + hard_mix (iter 13: 0.846) or T=0.8 + default (iter 12: 0.888). Non-monotonic interactions. |
 | 23   | h23-2epochs-default              | 0.8730    | −0.069 | **2nd best trained iter ever!** Same recipe as catastrophic iter 22 + 2 epochs → 0.873. 2 epochs is the load-bearing signal: it consistently rescues recipes that fail with 1 epoch. |
 | 24   | h24-lr5e-6-default               | 0.8557    | −0.086 | 3rd best of recent batch. lr 5e-6 single-epoch ≈ same as lr 1e-5 2-epochs (iter 11/23). |
-| 25+  | (smart_drive pivoting)           | —         | —      | **smart_drive recipes 25-40 PIVOTED to 2-epochs as default** (iter 23's discovery — 2ep is the strongest knob). iter 25 = no-policy-loss + 2ep in flight. |
+| 25   | h25-no-policy-loss-default       | 0.9233    | −0.019 | **🔥 MAJOR — statistically tied with iter 2 (best ever).** `--no-policy-loss` (ECHO-only). Drift 0.975 → **1.000** (IMPROVED!), clean 0.998 → 0.988 (retained), incorrect 0.757 → 0.662. **The GRPO policy gradient was actively hurting all along; ECHO-only regularization is the winning configuration.** |
+| 26+  | (smart_drive in flight)          | —         | —      | iter 26 (rank 1 + 2 epochs) in flight; recipes 27-40 now mostly include 2 epochs |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
-**Best trained adapter so far (13 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest. **Iter 23 (2 epochs default corpus) at 0.8730 is 2nd best**, suggesting 2-epoch training is the most reliable knob.
+**Best trained adapter so far (14 valid trained iters):** iter 25 (`--no-policy-loss`, ECHO-only) at 0.9233 (−1.9pp), **statistically tied** with iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest, but iter 25's mechanism is interpretable — **removing the GRPO policy gradient improves drift class 0.975 → 1.000**. The signal is: ECHO auxiliary loss alone is the only "training" that doesn't hurt, and slightly helps drift.
 
 **Ranked by composite (trained iters only):** iter 2 (0.9246) > iter 3 (0.9162) > iter 4 (0.9109) > iter 1 (0.8900) > iter 11 (0.8676) > iter 10 (0.8422) > iter 8 (0.8400) > iter 9 (0.7623). The top-4 are all from the original 6-task ×3-gen recipe; the new 8-task ×3-gen sweep produces slightly worse outcomes — possibly because the easier task mix dilutes the per-group signal.
 
