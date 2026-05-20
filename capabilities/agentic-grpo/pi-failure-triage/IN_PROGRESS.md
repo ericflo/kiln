@@ -1,9 +1,9 @@
 # pi-failure-triage 50-iter loop — IN PROGRESS
 
-**Last updated:** 2026-05-19T23:55:46.575354Z (auto-refreshed after every iter)
+**Last updated:** 2026-05-20T00:03:36.967287Z (auto-refreshed after every iter)
 
-**Iters with eval data:** 22 / 50
-**Iters present:** [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 13, 18, 19, 20, 21, 22, 31, 32, 33, 34, 36]
+**Iters with eval data:** 23 / 50
+**Iters present:** [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 13, 18, 19, 20, 21, 22, 31, 32, 33, 34, 36, 37]
 
 **★ Best so far: iter 2** — composite 0.9720
 (baseline 0.9656, Δ +0.0064)
@@ -34,6 +34,7 @@
 | 33 | 0.9599 | 1.00 | 1.00 | 0.250 | 1.00 | 25.8 | --lr 5e-6 --filter-var 0.02 (source=31) |
 | 34 | 0.9536 | 1.00 | 1.00 | 0.125 | 1.00 | 28.2 | --lr 5e-6 --filter-var 0.02 (source=31) |
 | 36 | 0.9595 | 1.00 | 1.00 | 0.250 | 1.00 | 25.4 | --lr 5e-6 --filter-var 0.02 (source=31) |
+| 37 | 0.9572 | 1.00 | 1.00 | 0.250 | 1.00 | 30.1 | --lr 5e-6 --filter-var 0.02 (source=31) |
 
 ## Best adapter — iter 2
 
