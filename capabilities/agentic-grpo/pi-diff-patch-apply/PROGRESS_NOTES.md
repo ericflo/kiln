@@ -46,7 +46,7 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 14   | h14-incorrect-only chain         | —         | —      | VOIDED — A6000 lease expired during iter 14, pod EXITED, smart_drive cycled FAILED rows on dead pod |
 | 15   | h15-rank2-chain                  | —         | —      | VOIDED — same pod death |
 | 16   | h16-3epochs-chain                | —         | —      | VOIDED — same pod death |
-| 14v2+| (smart_drive on new A100)        | —         | —      | New A100 80GB `u5kbp38gjy4wxi` acquired; bootstrap in flight; will restart smart_drive at iter 14 |
+| 14v2 | h14-incorrect-only-from-base     | —         | —      | **in flight on A100 u5kbp38gjy4wxi** — train ONLY on incorrect-class tasks (24pp headroom) from base, not chain. Tests whether concentrated-headroom training helps. |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far (11 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
