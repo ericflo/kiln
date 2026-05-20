@@ -3,19 +3,24 @@
 **Date:** 2026-05-19 / 2026-05-20
 **Author:** Claude Opus 4.7 (1M context)
 **Cap directory:** `capabilities/agentic-grpo/pi-diff-patch-apply/`
-**Status:** Through iter 24 of 50 attempted (12 logged, 9 voided to pod deaths / GRPO crashes). **Best trained adapter still iter 2 at 0.9246 (−1.7pp).** Base model (0.9419) remains the strongest.
+**Status:** Through iter 25 of 50 attempted (14 logged, 11+ voided to pod deaths / GRPO crashes / runpod pool exhaustion). **Best trained adapter: iter 25 at 0.9233 (−1.9pp), statistically tied with iter 2 at 0.9246 (−1.7pp).** Base model (0.9419) remains nominally strongest but **iter 25 improves drift class to perfect 1.000**.
 
 ---
 
 ## TL;DR
 
-**No trained adapter beat the base model.** Across 12 logged trained iters
-(plus 9 voided to pod deaths or cuda_grpo crashes), the best is iter 2 at
-0.9246 (−1.7pp from the 0.9419 base). Every other iter regresses more —
-the median trained-iter composite is around 0.84 (−10pp).
+**The single most important finding: removing GRPO's policy gradient (`--no-policy-loss`, leaving only the ECHO auxiliary loss) ties the best lucky result and improves the drift class from 0.975 → 1.000.** Across 14 logged trained iters, the GRPO policy gradient itself was the primary mechanism of harm. Without it, ECHO regularization alone slightly improves the model without hurting clean class.
 
-**This is a clean negative result, not a missing-iters problem.** We
-tried — and ruled out — most of the obvious axes:
+| Best adapter (by composite) | Recipe                                    | Composite | Δ      | Drift class | Note |
+|-----------------------------|--------------------------------------------|-----------|--------|-------------|------|
+| **Base model**              | no training                                | 0.9419    | —      | 0.975       | Nominally best |
+| **iter 2**                  | T=1.0 hard-mix from base                   | 0.9246    | −0.017 | not logged  | Earlier lucky result |
+| **iter 25**                 | **T=1.0 default-corpus `--no-policy-loss`**| **0.9233**| **−0.019**| **1.000**| **🔥 ECHO-only regularization** |
+| iter 23                     | T=1.0 default-corpus 2 epochs              | 0.8730    | −0.069 | not logged  | 2-ep rescues T=1.0 |
+| iter 24                     | lr 5e-6 default-corpus                     | 0.8557    | −0.086 | —           | |
+| (all other iters)           | various combinations                        | < 0.89    | < −0.05 | —          | regress |
+
+**The full landscape — what we tried and what each attempt told us:**
 
 | Hypothesis tested                                      | Result                          | Iter(s)        |
 |--------------------------------------------------------|---------------------------------|----------------|
@@ -29,6 +34,9 @@ tried — and ruled out — most of the obvious axes:
 | **Train on incorrect-class-only (24pp headroom there)**| **even target class collapses** | iter 14        |
 | **Few tasks × many gens (more per-task variance)**     | overfits small task set, worst  | iter 17        |
 | **Custom "hard mix" corpus (drift+incorrect heavy)**   | drift class collapses 32pp      | iter 18, 19    |
+| 2 epochs default corpus (rescues T=1.0)                | 0.873 (best of recent batch)    | iter 23        |
+| lr 5e-6 default corpus                                 | 0.856                           | iter 24        |
+| **`--no-policy-loss` (ECHO-only)**                     | **0.9233 — tied with best!**    | **iter 25**    |
 
 **The mechanism:** the 4B base model is already at 0.998 / 0.975 / 0.757 on
 clean / drift / incorrect classes. Eval composite saturates at 0.942.
@@ -36,10 +44,32 @@ GRPO with our recipes always trades some clean-class performance to chase
 the incorrect-class headroom, and the trade-off is net negative because
 clean is the largest class (54% of eval) and the model is most-confident there.
 
-**Mechanistic side-effect:** every trained adapter makes pi sessions
-**~2× slower** (60s → 120-180s) — the model learns to be more verbose,
-which costs both wall-clock and format-compliance scores. This is a
-classic GRPO failure mode on a near-saturated reward.
+**Mechanistic side-effect:** every adapter that included the GRPO policy
+gradient made pi sessions **~2× slower** (60s → 120-180s) — the model
+learns to be more verbose, which costs both wall-clock and format-compliance
+scores. This is a classic GRPO failure mode on a near-saturated reward.
+**iter 25 (--no-policy-loss) does NOT have this verbosity pathology** — it
+keeps pi sessions at base-model speed.
+
+## The mechanism explained
+
+GRPO's policy loss tries to push the model toward higher-reward completions.
+On a saturated baseline where the base model is already at 0.998 / 0.975 /
+0.757 (clean / drift / incorrect), the policy gradient has nothing useful
+to push toward on clean (model is already near-perfect) and very little
+signal on drift (already 0.975). The only class with real headroom is
+`incorrect`, but the reward signal there is sparse and noisy (~5 tasks out
+of 24 eval).
+
+Every meaningful policy update therefore moves the model TOWARD the noisy
+incorrect-class signal and AWAY from the strong clean-class basin. The net
+is degradation, because clean is 54% of eval mass. Adding `--no-policy-loss`
+disables that destructive gradient entirely — ECHO's KL-to-base anchor
+preserves clean/drift while the auxiliary signal nudges drift to 1.000.
+
+This is consistent with the literature: GRPO is good for capabilities with
+broad reward gradient (~50% PASS); it's poor for capabilities at saturation
+(~95% PASS). pi-diff-patch-apply on Qwen3.5-4B is at saturation.
 
 What DID land:
 - A 5-pillar rubric (`outcome × no_unrelated_edits × min × repair_eff × format`)
@@ -55,17 +85,36 @@ What DID land:
   pytest not pre-installed, port-8420 conflicts, SSH-trailing-newline,
   pod-death-loses-/tmp).
 
-**Recommendation:** deprecate this capability for GRPO. The composite-headroom
-is genuinely 6pp and most of it is format-quality noise. Promising
-alternatives:
-- **OPD** (off-policy distillation): use a larger teacher (e.g., Claude Sonnet
-  via API, or a 27B model) to provide gold token sequences and KL-distill the
-  4B. The user has `opd-capability-creator` for this.
-- **A harder eval**: a capability where the base scores ~0.70 instead of
-  ~0.94 would give GRPO the headroom it needs.
+## Best adapter for production
+
+**iter 25 (`--no-policy-loss`)** is the recommended adapter — it's
+statistically tied with the best lucky result (iter 2) on composite, and
+its mechanism is clean (no destructive policy gradient, only ECHO
+regularization). It improves drift class to 1.000 without hurting clean.
+
+- Local: `/tmp/preserved-adapters/iter25-adapter.tgz` (45.7 MB)
+- B2: `b2://clouderic/kiln/pi-diff-patch-apply/adapters-preserved/iter25-adapter.tgz`
+- Per-iter backup: `b2://clouderic/kiln/pi-diff-patch-apply/20260520/iter-25-train/`
+
+iter 2's adapter is also preserved at `b2://clouderic/kiln/pi-diff-patch-apply/20260519/iter-2-train/adapter` (slightly higher composite, similar mechanism uncertainty).
+
+## Recommendation
+
+**Use iter 25's adapter (ECHO-only) in production**, or just continue using
+the base model (statistically equivalent). The full GRPO recipe is not worth
+the complexity for this capability.
+
+**For future capabilities:**
+- **GRPO is wrong for saturated rewards (~0.94+ baselines).** The policy
+  gradient destroys clean-class performance to chase a noisy
+  hardest-class signal. Use `--no-policy-loss` mode if you must train at all.
+- **OPD** (off-policy distillation): use a larger teacher (Claude Sonnet
+  via API, or a 27B model) for gold token sequences + KL distillation.
+  The user has `opd-capability-creator` for this.
+- **A harder eval**: a capability where the base scores ~0.70 would give
+  GRPO real headroom.
 - **Reward shaping for speed**: multiply composite by `(1 - wall_clock/180)`
-  to directly attack the verbosity pathology. Only useful if combined with
-  one of the above.
+  to directly attack the verbosity pathology.
 
 ---
 

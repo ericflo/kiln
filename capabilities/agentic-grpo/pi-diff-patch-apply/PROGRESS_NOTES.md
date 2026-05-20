@@ -65,7 +65,11 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 23   | h23-2epochs-default              | 0.8730    | −0.069 | **2nd best trained iter ever!** Same recipe as catastrophic iter 22 + 2 epochs → 0.873. 2 epochs is the load-bearing signal: it consistently rescues recipes that fail with 1 epoch. |
 | 24   | h24-lr5e-6-default               | 0.8557    | −0.086 | 3rd best of recent batch. lr 5e-6 single-epoch ≈ same as lr 1e-5 2-epochs (iter 11/23). |
 | 25   | h25-no-policy-loss-default       | 0.9233    | −0.019 | **🔥 MAJOR — statistically tied with iter 2 (best ever).** `--no-policy-loss` (ECHO-only). Drift 0.975 → **1.000** (IMPROVED!), clean 0.998 → 0.988 (retained), incorrect 0.757 → 0.662. **The GRPO policy gradient was actively hurting all along; ECHO-only regularization is the winning configuration.** |
-| 26+  | (smart_drive in flight)          | —         | —      | iter 26 (rank 1 + 2 epochs) in flight; recipes 27-40 now mostly include 2 epochs |
+| 26-28| (rank 1 + 2 ep, etc., L40S)      | VOIDED    | —      | L40S died after iter 25; pool exhausted across all GPU types. Loop concluding here. |
+
+**🎯 FINAL BEST ADAPTER: iter 25** (,  recipe). Composite 0.9233, drift 1.000. Preserved at:
+- Local:  (45.7 MB)
+- B2: 
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far (14 valid trained iters):** iter 25 (`--no-policy-loss`, ECHO-only) at 0.9233 (−1.9pp), **statistically tied** with iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest, but iter 25's mechanism is interpretable — **removing the GRPO policy gradient improves drift class 0.975 → 1.000**. The signal is: ECHO auxiliary loss alone is the only "training" that doesn't hurt, and slightly helps drift.
