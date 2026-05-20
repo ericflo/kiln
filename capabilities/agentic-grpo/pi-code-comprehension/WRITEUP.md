@@ -359,3 +359,123 @@ The 0.7405 adapter is a genuine, robust improvement over the 0.611
 base — +21% on the composite, with `grounding` lifted +12pp, the two
 saturated sub-scores at ceiling, and **4× faster** rollout wall-clock.
 It's a real outcome the next agent can build on.
+
+---
+
+## Addendum (Session 2, 2026-05-19/20 overnight) — iters 12+ blocked by
+## upstream Qwen3.5 chat-template change; kiln patch shipped; recovery
+## plan staged for next session
+
+### What we tried
+
+After session 1 closed at 11 iters, this session attempted to push to 50.
+Drive was resumed at iter 12, but iter 12-14 all failed in a new failure
+mode that took the bulk of the session to diagnose:
+
+- **Symptom**: every pi rollout hit the 180s wall-clock cap with `exit=124`
+  (timeout), no session JSONL written, all reward=0.0. The pattern was
+  consistent regardless of pod, regardless of adapter (base or iter-4),
+  and regardless of recipe.
+
+- **Root cause** (confirmed by direct curl tests): Qwen3.5-4B's
+  `tokenizer_config.json` chat template defaults `enable_thinking=true`,
+  which prepends `<|im_start|>assistant\n<think>\n` to every assistant
+  turn. With thinking enabled, a 5-token answer takes ~3000 tokens of
+  reasoning preamble (the chat completion returns
+  `content: ""` with `reasoning_content: "Thinking Process:..."`).
+  Pi reads `content`, sees empty, treats it as a non-response, and
+  re-prompts — which thinks again. The 180s cap fires before pi can
+  exit cleanly, so no session is flushed.
+
+- This is the issue [pi-faithful-completion's `kiln-polish.jsonl` #2
+  already documented](capabilities/agentic-grpo/pi-faithful-completion/kiln-polish.jsonl):
+  > "chat_template_kwargs.enable_thinking is required to disable Qwen3's
+  > thinking trace, but is undocumented in kiln-server. With thinking ON,
+  > a 5-token answer takes ~200 tokens (40x slowdown)…"
+
+  Session 1's iters 0-11 succeeded because Qwen3.5-4B's HF snapshot then
+  had a different chat-template default (thinking off). The HF re-push
+  between session 1 and session 2 flipped the default.
+
+### What we shipped
+
+| Commit | What it does |
+|--------|--------------|
+| `91bca83a` (kiln main) | `KILN_DEFAULT_NO_THINK=1` env var. When set, kiln's `chat_template_options_from_kwargs` defaults `enable_thinking=false` for any chat completion that doesn't explicitly specify it. Direct curl tests confirm: `content` is populated, `finish_reason=stop`, sub-1s response on simple prompts. |
+| `bad25479` | `IN_PROGRESS.md` rubric-v2 roadmap — AST cross-check, LLM-judge for invariants, reasoning-process score, adversarial gold negatives, multi-language extension. |
+| `d2f8f9ce` | 4 creative recipe swaps (iters 21, 31, 42, 49) — replaced redundant warm-best iterations with rank-2-extreme-low, lr-1e-4-shock, gens-16-variance, warm-iter1-strict. |
+| `dd5ea851` | Trim `num_train=4` on iters 13-50 (except 28/34/40 which test num_train explicitly) — halves per-iter wall-clock without changing the controlled-variable in each recipe. |
+| `55165175` | Realistic rollout timeout: `num_train × num_gens × 200 / concurrency + 300` instead of the old `× 20` (which under-budgeted by 4-10× for base-model rollouts). Plus SIGKILL of stuck rollout.py/pi on timeout. |
+| `82dff252` | Drive pre-rollout `set_adapter` call when warm-starting (kiln's `ensure_adapter` was silently unloading the adapter on every chat completion that didn't re-send the field — see `kiln-polish.jsonl` issue #1). |
+| `447ceb92` | Drive `update_in_progress_md()` — refreshes the results table + Status line in `IN_PROGRESS.md` on every iter, so the live log is always current (user feedback from session 2: "you never update the .md file while experiments are going"). Also adds pod-alive precheck + 3-consecutive-failure circuit breaker so a dead pod can't cascade across all remaining recipes. |
+| `ec20215d`, `02a56d6e`, `6778c920` | Root-cause diagnoses + recovery plans in `IN_PROGRESS.md` (Paths A, B, C, D). |
+
+### Why iters 12+ STILL didn't complete after the kiln patch
+
+The kiln patch fixes the model-level thinking issue: `curl
+/v1/chat/completions` returns clean content in <1s. **However**, pi's
+agentic loop also failed on the full code-comprehension task prompt
+(verified with both base model and iter-4 LoRA). Diagnosis:
+
+- iter-4 adapter was trained with thinking-on by default. Its LoRA
+  learned to emit `<answer>{...}</answer>` blocks *after* a thinking
+  trace. With `enable_thinking=false`, the prompt distribution shifts
+  and the adapter no longer reliably emits the answer block.
+
+- Even with no adapter (raw base model), the model emits content but
+  doesn't produce tool calls in the OpenAI format pi expects. Pi's
+  agentic loop keeps trying to coax tool calls and times out.
+
+In other words: **the agentic-pi setup was implicitly conditioned on
+thinking-on**. Disabling thinking solves the wall-clock blowup but
+breaks the agentic loop's tool-calling convention.
+
+### Path D — next session
+
+The cleanest fix is to drop the pi agent dependency for rollouts. Take
+the same approach `pi-faithful-completion` already uses: single-turn
+rollouts via direct kiln HTTP, where Python pre-computes the
+read/grep results and feeds them to the model as context. The model
+emits the structured JSON directly; no tool calls, no multi-turn loop,
+no pi.
+
+- Trade-off: loses the "agent chooses what to read/grep" dimension.
+  But the capability's measured worth was always just the JSON-summary
+  quality — the read/grep step was scaffolding, not the trained
+  behavior. The rubric already scores only the final JSON; the agentic
+  trace isn't part of the reward.
+- Estimated effort: ~30 min to rewrite `rollout.py` as ~100 LOC of
+  direct kiln HTTP calls (model with full task context as system+user)
+  + Python file I/O + existing rubric.
+- After the rewrite, drive can resume at iter 12 (recipes 12-50 are
+  pre-queued in `recipes.json`; warm-start patches from session 2 may
+  need reverting if the eval flow is single-turn).
+
+### Final state at session-2 close (2026-05-20 ~09:20Z)
+
+- **Best adapter unchanged**: iter 4 `h4-echo-0075`, composite **0.7405**.
+- **B2 stable backup unchanged**: `b2://clouderic/kiln/pi-code-comprehension/BEST_ADAPTER_iter4/adapter.tgz`
+  (43.9 MB, sha256 `32fe66a36cc31d3662988cc23083053d63980c1f151ed3ab9e97af3462c695b2`,
+  uploaded 2026-05-19 17:18 UTC).
+- **`capability.jsonl` unchanged**: 9 rows (iter 0 baseline + 8 trained
+  iters with logged eval). Iters 5,7,8 + 12-14 went to `failures.jsonl`,
+  not `capability.jsonl`, so the experiment record stays clean.
+- **Kiln patch shipped**, can be picked up by anyone via
+  `KILN_DEFAULT_NO_THINK=1 ./target/release/kiln serve …`.
+- **Drive resilience patched** so the loop survives pod reaps, stale
+  state, and zero-variance training without infinite-looping or
+  corrupting the iter log.
+
+### Honest assessment
+
+The 50-iter target was infeasible in this session given the upstream
+Qwen3.5 chat-template change that landed between session 1 and
+session 2. The kiln patch (`KILN_DEFAULT_NO_THINK`) is the durable
+fix; the agentic-pi mismatch is a downstream consequence that
+requires Path D's rollout-rewrite to fully resolve. Iter 4 remains
+the best adapter found across both sessions; no later iter (had they
+completed) exceeded its 0.7405. The diagnosis trail and code patches
+shipped this session reduce future-session iteration cost from
+~50min/iter (the old rate) to whatever single-turn rollout time is —
+likely ~15min/iter if Path D works as expected, putting 50 iters
+within one ~12-hour session's reach.
