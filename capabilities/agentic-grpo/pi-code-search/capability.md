@@ -165,14 +165,18 @@ the highest outcome (27/32 = 0.844 outcome pass count) and grounding
 **ALL five trained adapters with ECHO lift composite above baseline.**
 GRPO is working; the regression story was a kiln-server adapter-loading bug.
 
-**Iter 6 ablation: ECHO is essential.** Identical recipe to iter 5 but
-`NO_ECHO=1` regressed to 0.239 (-0.34 vs iter 5, -0.30 vs base). The
-adapter loaded correctly (verified `/v1/adapters` and the symlink) so
-this is a real ablation result, not a load bug. This matches the
-paper's claim that env-CE on observation tokens is the load-bearing
-component of agentic-GRPO. Without it the model collapses into the
-same "think indefinitely, never emit final answer" pattern that the
-load-bug was masquerading as.
+**ECHO λ-sweep — λ=0.05 is the only stable value:**
+
+| Iter | ECHO_LAMBDA | Composite | Δ vs base | Notes |
+|------|-------------|-----------|-----------|-------|
+| 6 | --no-echo | 0.2389 | **-0.304** | regressed |
+| 1,5 | 0.05 (default) | 0.5747, 0.5808 | +0.032, +0.038 | both lift |
+| 7 | 0.10 | 0.2416 | **-0.302** | regressed |
+
+Both NO_ECHO and ECHO=0.10 collapse the model into the
+"think-indefinitely, time out at 120s" pattern with 21+ rollouts at
+outcome=0. Default λ=0.05 is the productive band for this cap; the
+paper's upper edge (0.10) is too aggressive on env-CE here.
 
 ### Lessons backported
 
