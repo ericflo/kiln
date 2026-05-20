@@ -13,6 +13,7 @@ use flate2::write::GzEncoder;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use uuid::Uuid;
 
 use kiln_model::adapter_merge::{PeftLora, merge_concat, merge_linear, merge_ties};
 use kiln_model::lora_loader::LoraWeights;
@@ -130,11 +131,21 @@ async fn load_adapter(
     .map_err(|e| ApiError::internal(format!("join error: {e}")))?
     .map_err(ApiError::adapter_load_failed)?;
 
-    // Update the shared active adapter name and drop stale real-backend prefix state.
+    // Update the shared default/runtime adapter names and drop stale real-backend prefix state.
+    let old = state.active_adapter_name.read().unwrap().clone();
     *state.active_adapter_name.write().unwrap() = Some(req.name.clone());
+    *state.loaded_adapter_name.write().unwrap() = Some(req.name.clone());
     state.clear_real_prefix_cache();
 
-    tracing::info!(adapter = %req.name, path = %adapter_path.display(), operation = "load", "loaded LoRA adapter");
+    tracing::info!(
+        request_id = %Uuid::new_v4(),
+        old_adapter = ?old,
+        new_adapter = ?Some(req.name.clone()),
+        reason = "adapter_load_endpoint",
+        path = %adapter_path.display(),
+        operation = "load",
+        "adapter transition"
+    );
 
     Ok(Json(LoadAdapterResponse {
         status: "loaded",
@@ -161,13 +172,19 @@ async fn unload_adapter(
     .await
     .map_err(|e| ApiError::internal(format!("join error: {e}")))?;
 
-    // Clear the shared active adapter name and drop stale real-backend prefix state.
+    // Clear the shared default/runtime adapter names and drop stale real-backend prefix state.
+    let old = state.active_adapter_name.read().unwrap().clone();
     *state.active_adapter_name.write().unwrap() = None;
+    *state.loaded_adapter_name.write().unwrap() = None;
     state.clear_real_prefix_cache();
 
     tracing::info!(
+        request_id = %Uuid::new_v4(),
+        old_adapter = ?old,
+        new_adapter = ?Option::<String>::None,
+        reason = "adapter_unload_endpoint",
         operation = "unload",
-        "unloaded LoRA adapter — reverted to base model"
+        "adapter transition"
     );
 
     Ok(Json(UnloadAdapterResponse { status: "unloaded" }))

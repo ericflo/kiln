@@ -393,6 +393,19 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET | `/v1/health` | /v1 compatibility alias for health and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
 
+### Chat adapter selection
+
+`POST /v1/chat/completions` treats adapter selection as a per-request choice unless you call the adapter management endpoints:
+
+| Request field | Behavior |
+|---|---|
+| `adapter` omitted | Use the current server default adapter without changing it. |
+| `"adapter": null` | Use the base model for this request only. |
+| `"adapter": ""` | Use the base model for this request only. |
+| `"adapter": "<name>"` | Use that named adapter for this request only; the name must be a loaded/available adapter directory under `adapter_dir`. |
+
+Only `POST /v1/adapters/load` and `POST /v1/adapters/unload` change the server default adapter reported by `GET /v1/adapters`. Chat requests log adapter runtime transitions with the old adapter, new adapter, request id, and transition reason.
+
 ## Architecture
 
 ```

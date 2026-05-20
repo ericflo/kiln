@@ -2078,6 +2078,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 if let Err(e) = auto_load_adapter(
                     &weights_ref,
                     &state.active_adapter_name,
+                    &state.loaded_adapter_name,
                     &adapter_path,
                     &adapter_name,
                     num_layers,
@@ -2225,6 +2226,7 @@ pub fn enqueue_post_training_eval(
 fn auto_load_adapter(
     runner: &Arc<std::sync::RwLock<kiln_model::ModelRunner>>,
     active_adapter_name: &Arc<std::sync::RwLock<Option<String>>>,
+    loaded_adapter_name: &Arc<std::sync::RwLock<Option<String>>>,
     adapter_path: &std::path::Path,
     adapter_name: &str,
     num_layers: usize,
@@ -2242,6 +2244,7 @@ fn auto_load_adapter(
         guard.swap_lora(Some(lora));
     }
     *active_adapter_name.write().unwrap() = Some(adapter_name.to_string());
+    *loaded_adapter_name.write().unwrap() = Some(adapter_name.to_string());
 
     Ok(())
 }

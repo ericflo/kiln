@@ -84,7 +84,7 @@ fn request_record_from_req(
         prompt_preview: truncate_chars(&prompt, PROMPT_PREVIEW_MAX_CHARS),
         prompt_full: Some(truncate_chars(&prompt, FULL_BODY_MAX_CHARS)),
         streamed,
-        adapter: req.adapter.clone(),
+        adapter: req.adapter.request_adapter_name(),
         temperature: req.temperature,
         top_p: req.top_p,
         max_tokens: req.max_tokens.map(|n| n as u32),
@@ -901,7 +901,7 @@ fn deterministic_completion_cache_key(
     };
 
     Some(DeterministicCompletionCacheKey {
-        adapter: state.active_adapter_name.read().unwrap().clone(),
+        adapter: state.loaded_adapter_name.read().unwrap().clone(),
         prompt_tokens: prompt_tokens.to_vec(),
         temperature_bits,
         max_tokens: sampling.max_tokens,
@@ -964,7 +964,7 @@ fn deterministic_chat_request_cache_key_with_vocab_size(
         return Ok(None);
     }
 
-    if req.adapter.is_some() || req.adapters.is_some() {
+    if req.adapter.is_explicit() || req.adapters.is_some() {
         return Ok(None);
     }
 
@@ -1011,7 +1011,7 @@ fn deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size(
     seed: Option<u64>,
     vocab_size: usize,
 ) -> Result<Option<String>, ApiError> {
-    if req.adapter.is_some() || req.adapters.is_some() {
+    if req.adapter.is_explicit() || req.adapters.is_some() {
         return Ok(None);
     }
 
@@ -1074,7 +1074,7 @@ fn deterministic_chat_choices_cache_key_with_vocab_size(
     sampling: &SamplingParams,
     vocab_size: usize,
 ) -> Result<Option<String>, ApiError> {
-    if n_per <= 1 || req.adapter.is_some() || req.adapters.is_some() {
+    if n_per <= 1 || req.adapter.is_explicit() || req.adapters.is_some() {
         return Ok(None);
     }
 
@@ -1430,7 +1430,7 @@ fn store_chat_request_cache_from_chat_choices_response(
     resp: &ChatCompletionResponse,
     vocab_size: usize,
 ) -> Result<(), ApiError> {
-    if chat_request_max_tokens(req) != 0 || req.adapter.is_some() || req.adapters.is_some() {
+    if chat_request_max_tokens(req) != 0 || req.adapter.is_explicit() || req.adapters.is_some() {
         return Ok(());
     }
     let mut entries = Vec::with_capacity(resp.choices.len());
@@ -1465,7 +1465,7 @@ async fn zero_chat_choices_response_from_request_cache_hit(
     n_per: usize,
     vocab_size: usize,
 ) -> Result<Option<ChatCompletionResponse>, ApiError> {
-    if chat_request_max_tokens(req) != 0 || req.adapter.is_some() || req.adapters.is_some() {
+    if chat_request_max_tokens(req) != 0 || req.adapter.is_explicit() || req.adapters.is_some() {
         return Ok(None);
     }
 
@@ -2104,6 +2104,66 @@ async fn wait_for_deterministic_batch(
 }
 
 /// OpenAI-compatible chat completion request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatAdapterSelection {
+    /// The request omitted `adapter`; use the server default as-is.
+    Default,
+    /// The request explicitly selected base model for this request.
+    Base,
+    /// The request explicitly selected a named adapter for this request.
+    Named(String),
+}
+
+impl Default for ChatAdapterSelection {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+impl ChatAdapterSelection {
+    fn is_explicit(&self) -> bool {
+        !matches!(self, Self::Default)
+    }
+
+    fn request_adapter_name(&self) -> Option<String> {
+        match self {
+            Self::Named(name) => Some(name.clone()),
+            Self::Default | Self::Base => None,
+        }
+    }
+
+    fn target_adapter_name(&self, default_adapter: Option<String>) -> Option<String> {
+        match self {
+            Self::Default => default_adapter,
+            Self::Base => None,
+            Self::Named(name) => Some(name.clone()),
+        }
+    }
+
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::Default => "chat_adapter_missing_use_default",
+            Self::Base => "chat_adapter_explicit_base",
+            Self::Named(_) => "chat_adapter_explicit_name",
+        }
+    }
+}
+
+fn deserialize_chat_adapter_selection<'de, D>(
+    deserializer: D,
+) -> Result<ChatAdapterSelection, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(match value {
+        None => ChatAdapterSelection::Base,
+        Some(name) if name.is_empty() => ChatAdapterSelection::Base,
+        Some(name) => ChatAdapterSelection::Named(name),
+    })
+}
+
+/// OpenAI-compatible chat completion request.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
     /// When omitted, the server falls back to its configured `served_model_id`.
@@ -2158,8 +2218,12 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub seed: Option<u64>,
     /// Kiln extension: which LoRA adapter to use for this request.
-    #[serde(default)]
-    pub adapter: Option<String>,
+    ///
+    /// Missing means "use the server default"; explicit `null` or `""` means
+    /// "use base for this request only"; a non-empty string means "use this
+    /// adapter for this request only".
+    #[serde(default, deserialize_with = "deserialize_chat_adapter_selection")]
+    pub adapter: ChatAdapterSelection,
     /// Kiln extension: stack multiple LoRA adapters with per-source scaling.
     /// Mutually exclusive with `adapter`. The composed adapter is merged once
     /// (via `merge_concat`) and cached on disk under `adapter_dir/.composed/`,
@@ -2516,6 +2580,7 @@ async fn chat_completions_inner(
     state: &AppState,
     req: ChatCompletionRequest,
 ) -> Result<Response, ApiError> {
+    let adapter_request_id = Uuid::new_v4().to_string();
     // Captured at the top of the request so the recent-requests panel reflects
     // wall-clock time including chat-template formatting and tokenization, not
     // just generation. Streaming and non-streaming paths both consume this.
@@ -2540,7 +2605,7 @@ async fn chat_completions_inner(
 
     // Validate adapter / adapters mutual exclusion. Done up front (before
     // backend dispatch) so 400-on-misuse is observable from any backend.
-    if req.adapter.is_some() && req.adapters.is_some() {
+    if req.adapter.is_explicit() && req.adapters.is_some() {
         return Err(ApiError::invalid_compose_request(
             "specify either 'adapter' (single name) or 'adapters' (list), not both",
         ));
@@ -2774,7 +2839,7 @@ async fn chat_completions_inner(
         if let Some(ref target) = composed_target {
             ensure_composed_adapter_swap(state, runner, target).await?;
         } else {
-            ensure_adapter(state, runner, &req.adapter).await?;
+            ensure_adapter(state, runner, &req.adapter, &adapter_request_id).await?;
         }
     }
 
@@ -3013,31 +3078,63 @@ async fn chat_completions_inner(
     }
 }
 
-/// Ensure the correct LoRA adapter is active for the given request.
+/// Ensure the model runner has the adapter required for this chat request.
 ///
-/// Compares `req_adapter` against the currently active adapter name. If they
-/// differ, loads/unloads the adapter using the two-phase RwLock pattern
-/// (read config, load weights outside lock, write-lock to swap).
+/// Missing `adapter` selects the server default without changing it. Explicit
+/// `null`/`""` selects base for this request. A name selects that adapter for
+/// this request. Only the adapter load/unload endpoints mutate the default.
 async fn ensure_adapter(
     state: &AppState,
     runner: &std::sync::Arc<std::sync::RwLock<ModelRunner>>,
-    req_adapter: &Option<String>,
+    req_adapter: &ChatAdapterSelection,
+    request_id: &str,
 ) -> Result<(), ApiError> {
-    let current = state.active_adapter_name.read().unwrap().clone();
-    if *req_adapter == current {
+    let target = req_adapter.target_adapter_name(state.active_adapter_name.read().unwrap().clone());
+    ensure_runtime_adapter(state, runner, target, request_id, req_adapter.reason()).await
+}
+
+async fn ensure_batch_adapter(
+    state: &AppState,
+    runner: &std::sync::Arc<std::sync::RwLock<ModelRunner>>,
+    req_adapter: &Option<String>,
+    request_id: &str,
+) -> Result<(), ApiError> {
+    let target = req_adapter
+        .clone()
+        .or_else(|| state.active_adapter_name.read().unwrap().clone());
+    ensure_runtime_adapter(
+        state,
+        runner,
+        target,
+        request_id,
+        if req_adapter.is_some() {
+            "batch_adapter_explicit_name"
+        } else {
+            "batch_adapter_missing_use_default"
+        },
+    )
+    .await
+}
+
+async fn ensure_runtime_adapter(
+    state: &AppState,
+    runner: &std::sync::Arc<std::sync::RwLock<ModelRunner>>,
+    target_adapter: Option<String>,
+    request_id: &str,
+    reason: &str,
+) -> Result<(), ApiError> {
+    let current = state.loaded_adapter_name.read().unwrap().clone();
+    if target_adapter == current {
         return Ok(());
     }
 
-    match req_adapter {
+    match target_adapter.clone() {
         Some(name) => {
+            validate_compose_name(&name)?;
             // Resolve adapter path
-            let adapter_path = if Path::new(name).is_absolute() {
-                std::path::PathBuf::from(name)
-            } else {
-                state.adapter_dir.join(name)
-            };
+            let adapter_path = state.adapter_dir.join(&name);
             if !adapter_path.exists() {
-                return Err(ApiError::adapter_not_found(name));
+                return Err(ApiError::adapter_not_found(&name));
             }
 
             // Two-phase load: read device/num_layers, load weights, then swap.
@@ -3051,14 +3148,14 @@ async fn ensure_adapter(
 
             let runner = runner.clone();
             let adapter_name = name.clone();
-            let active_name = state.active_adapter_name.clone();
+            let loaded_name = state.loaded_adapter_name.clone();
 
             tokio::task::spawn_blocking(move || {
                 let lora = LoraWeights::load(&adapter_path, num_layers, &device)
                     .map_err(|e| format!("{e}"))?;
                 let mut guard = runner.write().unwrap();
                 guard.swap_lora(Some(lora));
-                *active_name.write().unwrap() = Some(adapter_name);
+                *loaded_name.write().unwrap() = Some(adapter_name);
                 Ok::<(), String>(())
             })
             .await
@@ -3069,12 +3166,12 @@ async fn ensure_adapter(
         None => {
             // Revert to base model.
             let runner = runner.clone();
-            let active_name = state.active_adapter_name.clone();
+            let loaded_name = state.loaded_adapter_name.clone();
 
             tokio::task::spawn_blocking(move || {
                 let mut guard = runner.write().unwrap();
                 guard.swap_lora(None);
-                *active_name.write().unwrap() = None;
+                *loaded_name.write().unwrap() = None;
             })
             .await
             .map_err(|e| ApiError::internal(format!("join error: {e}")))?;
@@ -3082,13 +3179,21 @@ async fn ensure_adapter(
         }
     }
 
+    tracing::info!(
+        request_id = %request_id,
+        old_adapter = ?current,
+        new_adapter = ?target_adapter,
+        reason = reason,
+        "adapter transition"
+    );
+
     Ok(())
 }
 
 /// Disk handle for a composed adapter ready to be loaded.
 #[derive(Debug, Clone)]
 struct ComposedTarget {
-    /// Stable cache name embedded in `active_adapter_name` once swapped in,
+    /// Stable cache name embedded in `loaded_adapter_name` once swapped in,
     /// e.g. `"__composed:abc123..."`. Used for cache-hit comparison and as
     /// the prefix-cache adapter key.
     active_name: String,
@@ -3120,7 +3225,7 @@ fn validate_compose_name(name: &str) -> Result<(), ApiError> {
 ///
 /// Hashes the sorted list of `"<name>@<scale>"` pairs with `DefaultHasher`
 /// (deterministic SipHash-1-3 with key (0,0)). Used as the cache directory
-/// name and the suffix of `active_adapter_name`.
+/// name and the suffix of `loaded_adapter_name`.
 fn composition_hash(adapters: &[AdapterRef]) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -3355,7 +3460,7 @@ async fn ensure_composed_adapter_swap(
     target: &ComposedTarget,
 ) -> Result<(), ApiError> {
     {
-        let current = state.active_adapter_name.read().unwrap();
+        let current = state.loaded_adapter_name.read().unwrap();
         if current.as_deref() == Some(target.active_name.as_str()) {
             return Ok(());
         }
@@ -3370,7 +3475,7 @@ async fn ensure_composed_adapter_swap(
     };
 
     let runner = runner.clone();
-    let active_name = state.active_adapter_name.clone();
+    let active_name = state.loaded_adapter_name.clone();
     let cache_dir = target.cache_dir.clone();
     let composed_active = target.active_name.clone();
 
@@ -3405,7 +3510,7 @@ async fn generate_real_batched(
     let cancel = CancelHandle::with_prefill_progress_gauge(
         state.metrics.request_prefill_tokens_completed.clone(),
     );
-    let adapter = state.active_adapter_name.read().unwrap().clone();
+    let adapter = state.loaded_adapter_name.read().unwrap().clone();
     let mut events = batching_engine
         .enqueue(EngineRequest {
             request_id,
@@ -3517,7 +3622,7 @@ async fn generate_real_batched_streaming(
     let cancel = CancelHandle::with_prefill_progress_gauge(
         state.metrics.request_prefill_tokens_completed.clone(),
     );
-    let adapter = state.active_adapter_name.read().unwrap().clone();
+    let adapter = state.loaded_adapter_name.read().unwrap().clone();
     let events = batching_engine
         .enqueue(EngineRequest {
             request_id,
@@ -3542,7 +3647,7 @@ async fn generate_real_batched_streaming(
     let prompt_text_full = last_user_message_text(req);
     let prompt_preview = truncate_chars(&prompt_text_full, PROMPT_PREVIEW_MAX_CHARS);
     let prompt_full = truncate_chars(&prompt_text_full, FULL_BODY_MAX_CHARS);
-    let req_adapter = req.adapter.clone();
+    let req_adapter = req.adapter.request_adapter_name();
     let req_temperature = req.temperature;
     let req_top_p = req.top_p;
     let req_max_tokens = req.max_tokens.map(|n| n as u32);
@@ -3929,11 +4034,11 @@ async fn generate_real(
     let prompt_tokens = prompt_tokens.to_vec();
     let params = sampling.clone();
     // For prefix-cache keying. After ensure_adapter / ensure_composed_adapter_swap,
-    // state.active_adapter_name reflects the actually-loaded adapter (a
+    // state.loaded_adapter_name reflects the actually-loaded adapter (a
     // `__composed:<hash>` name when the request used `adapters: [...]`), which
     // is what we want as the cache key — distinct compositions and the base
     // model must not share cached blocks.
-    let adapter = state.active_adapter_name.read().unwrap().clone();
+    let adapter = state.loaded_adapter_name.read().unwrap().clone();
 
     let gpu_lock = state.gpu_lock.clone();
     let memory_budget = state.memory_budget.clone();
@@ -4247,11 +4352,11 @@ async fn generate_real_streaming(
     let prompt_tokens = prompt_tokens.to_vec();
     let params = sampling.clone();
     // For prefix-cache keying. After ensure_adapter / ensure_composed_adapter_swap,
-    // state.active_adapter_name reflects the actually-loaded adapter (a
+    // state.loaded_adapter_name reflects the actually-loaded adapter (a
     // `__composed:<hash>` name when the request used `adapters: [...]`), which
     // is what we want as the cache key — distinct compositions and the base
     // model must not share cached blocks.
-    let adapter = state.active_adapter_name.read().unwrap().clone();
+    let adapter = state.loaded_adapter_name.read().unwrap().clone();
     let model = req
         .model
         .clone()
@@ -4269,7 +4374,7 @@ async fn generate_real_streaming(
     let prompt_text_full = last_user_message_text(req);
     let prompt_preview = truncate_chars(&prompt_text_full, PROMPT_PREVIEW_MAX_CHARS);
     let prompt_full = truncate_chars(&prompt_text_full, FULL_BODY_MAX_CHARS);
-    let req_adapter = req.adapter.clone();
+    let req_adapter = req.adapter.request_adapter_name();
     let req_temperature = req.temperature;
     let req_top_p = req.top_p;
     let req_max_tokens = req.max_tokens.map(|n| n as u32);
@@ -4898,7 +5003,7 @@ async fn generate_mock(
     let request = Request::new(
         prompt_tokens.to_vec(),
         sampling.clone(),
-        req.adapter.clone(),
+        req.adapter.request_adapter_name(),
     );
     let request_id = request.id;
 
@@ -6099,7 +6204,7 @@ async fn batch_completions_inner(
     }
 
     // Resolve adapter once for the entire batch. After this returns,
-    // state.active_adapter_name reflects the loaded adapter and every
+    // state.loaded_adapter_name reflects the loaded adapter and every
     // synthesized per-output ChatCompletionRequest below leaves
     // `adapter`/`adapters` as None — generate_real reads the active adapter
     // from state, not from the request.
@@ -6121,7 +6226,7 @@ async fn batch_completions_inner(
         if let Some(ref target) = composed_target {
             ensure_composed_adapter_swap(state, runner, target).await?;
         } else {
-            ensure_adapter(state, runner, &req.adapter).await?;
+            ensure_batch_adapter(state, runner, &req.adapter, &Uuid::new_v4().to_string()).await?;
         }
     }
 
@@ -6209,7 +6314,7 @@ async fn batch_completions_inner(
                         stream: false,
                         stop: stop.clone(),
                         seed: derived_seed,
-                        adapter: None,
+                        adapter: ChatAdapterSelection::Default,
                         adapters: None,
                         tools: tools.clone(),
                         tool_choice: tool_choice.clone(),
@@ -6403,7 +6508,7 @@ async fn generate_multi_chat_response(
         if let Some(ref target) = composed_target {
             ensure_composed_adapter_swap(state, runner, target).await?;
         } else {
-            ensure_adapter(state, runner, &req.adapter).await?;
+            ensure_adapter(state, runner, &req.adapter, &Uuid::new_v4().to_string()).await?;
         }
     }
 
@@ -6437,7 +6542,7 @@ async fn generate_multi_chat_response(
             stream: false,
             stop: stop.clone(),
             seed: derived_seed,
-            adapter: None,
+            adapter: ChatAdapterSelection::Default,
             adapters: None,
             tools: tools.clone(),
             tool_choice: tool_choice.clone(),
@@ -6600,7 +6705,7 @@ async fn generate_one_response(
         state.model_config.vocab_size,
     )?;
     let can_hit_chat_request_cache_before_prompt_work =
-        state.active_adapter_name.read().unwrap().is_none();
+        state.loaded_adapter_name.read().unwrap().is_none();
     let mut chat_request_cache_owner = None;
     if can_hit_chat_request_cache_before_prompt_work
         && let Some(key) = chat_request_cache_key.as_ref()
@@ -6671,7 +6776,7 @@ async fn generate_one_prepared_prompt_response(
         state.model_config.vocab_size,
     )?;
     let can_hit_chat_request_cache_before_prompt_work =
-        state.active_adapter_name.read().unwrap().is_none();
+        state.loaded_adapter_name.read().unwrap().is_none();
     let mut chat_request_cache_owner = None;
     if can_hit_chat_request_cache_before_prompt_work
         && let Some(key) = chat_request_cache_key.as_ref()
@@ -6940,6 +7045,73 @@ mod tests {
     fn content_accepts_plain_string() {
         let req = parse_request(r#"{"messages":[{"role":"user","content":"hello"}]}"#);
         assert_eq!(req.messages[0].content, "hello");
+    }
+
+    #[test]
+    fn chat_adapter_missing_uses_server_default() {
+        let req = parse_request(r#"{"messages":[{"role":"user","content":"hello"}]}"#);
+        assert_eq!(req.adapter, ChatAdapterSelection::Default);
+        assert_eq!(
+            req.adapter.target_adapter_name(Some("loaded-a".to_string())),
+            Some("loaded-a".to_string())
+        );
+        assert!(!req.adapter.is_explicit());
+    }
+
+    #[test]
+    fn chat_adapter_null_selects_base_for_request() {
+        let req =
+            parse_request(r#"{"messages":[{"role":"user","content":"hello"}],"adapter":null}"#);
+        assert_eq!(req.adapter, ChatAdapterSelection::Base);
+        assert_eq!(
+            req.adapter.target_adapter_name(Some("loaded-a".to_string())),
+            None
+        );
+        assert!(req.adapter.is_explicit());
+    }
+
+    #[test]
+    fn chat_adapter_empty_selects_base_for_request() {
+        let req =
+            parse_request(r#"{"messages":[{"role":"user","content":"hello"}],"adapter":""}"#);
+        assert_eq!(req.adapter, ChatAdapterSelection::Base);
+        assert_eq!(
+            req.adapter.target_adapter_name(Some("loaded-a".to_string())),
+            None
+        );
+        assert!(req.adapter.is_explicit());
+    }
+
+    #[test]
+    fn chat_adapter_name_selects_named_adapter_for_request() {
+        let req = parse_request(
+            r#"{"messages":[{"role":"user","content":"hello"}],"adapter":"my-adapter"}"#,
+        );
+        assert_eq!(
+            req.adapter,
+            ChatAdapterSelection::Named("my-adapter".to_string())
+        );
+        assert_eq!(
+            req.adapter.target_adapter_name(Some("loaded-a".to_string())),
+            Some("my-adapter".to_string())
+        );
+        assert!(req.adapter.is_explicit());
+    }
+
+    #[test]
+    fn chat_adapter_rejects_invalid_value_type() {
+        let err = serde_json::from_str::<ChatCompletionRequest>(
+            r#"{"messages":[{"role":"user","content":"hello"}],"adapter":7}"#,
+        )
+        .expect_err("numeric adapter should not deserialize");
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn chat_adapter_rejects_invalid_name_shape() {
+        assert!(validate_compose_name("../escape").is_err());
+        assert!(validate_compose_name("/tmp/adapter").is_err());
+        assert!(validate_compose_name("valid-name").is_ok());
     }
 
     #[test]

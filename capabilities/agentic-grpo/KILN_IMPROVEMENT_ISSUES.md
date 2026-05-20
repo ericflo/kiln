@@ -45,6 +45,38 @@ adapter operation, controls model state.
 - A loaded adapter remains active across requests that omit `adapter`.
 - Documentation states the exact semantics.
 
+**Status:** Completed locally, awaiting commit/push.
+
+**Implementation notes:** Added an explicit `ChatAdapterSelection` policy for
+`/v1/chat/completions` so Serde distinguishes omitted `adapter` from explicit
+`null`. Omitted adapter now resolves to the server default, explicit `null` or
+`""` resolves to base for the request, and a non-empty name resolves to a
+managed adapter directory. Split server default state (`active_adapter_name`)
+from runtime-loaded state (`loaded_adapter_name`) so per-request overrides do
+not mutate the default reported by `GET /v1/adapters`; load/unload and training
+auto-load update both. Runtime adapter transitions now log old adapter, new
+adapter, request id, and reason. README documents the exact chat adapter
+semantics.
+
+**Validation evidence:**
+
+- `cargo check -p kiln-server --tests` passed on 2026-05-20 (CPU-only local
+  check; warnings were pre-existing unused items/imports plus CUDA-not-found
+  warnings from non-CUDA local environment).
+- `cargo test -p kiln-server chat_adapter --lib` passed on 2026-05-20: 6
+  focused tests for missing, null, empty, named, invalid type, and invalid
+  name-shape adapter selection.
+- `cargo fmt --all` could not run because the configured
+  `stable-x86_64-unknown-linux-musl` toolchain does not have `cargo-fmt`
+  installed in this environment.
+
+**Commit SHA:** Pending commit creation for this issue.
+
+**Remaining risk:** Runtime adapter swapping remains serialized through the
+existing global runner swap path; this issue preserves default semantics but
+does not redesign per-request LoRA isolation for concurrent real-backend
+requests.
+
 ### 2. Make Adapter Load Fail Loudly On Wrong Directory Layout
 
 **Area:** `crates/kiln-server`
@@ -964,4 +996,3 @@ made the first agentic-GRPO runs hard to interpret. Completing all forty would
 turn kiln from "can train agentic adapters" into "can run agentic learning
 experiments with trustworthy receipts, safe adapter state, stable evals, and
 actionable diagnostics."
-

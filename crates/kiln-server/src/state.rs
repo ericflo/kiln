@@ -1210,8 +1210,13 @@ pub struct AppState {
     pub tokenizer: Arc<KilnTokenizer>,
     /// Directory where LoRA adapter weights are stored on disk.
     pub adapter_dir: PathBuf,
-    /// Name of the currently active LoRA adapter (None = base model).
+    /// Server default LoRA adapter selected by adapter load/unload endpoints.
     pub active_adapter_name: Arc<std::sync::RwLock<Option<String>>>,
+    /// LoRA adapter currently loaded into the model runner for inference.
+    ///
+    /// This can differ from `active_adapter_name` during explicit per-request
+    /// chat adapter overrides; missing `adapter` requests reload the default.
+    pub loaded_adapter_name: Arc<std::sync::RwLock<Option<String>>>,
     /// Tracked training jobs (job_id → info).
     pub training_jobs: TrainingJobs,
     /// GPU memory budget for coordinating inference and training.
@@ -1395,6 +1400,7 @@ impl AppState {
             tokenizer: Arc::new(tokenizer),
             adapter_dir: PathBuf::from("adapters"),
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
+            loaded_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 0, 0, 1.0, None)),
             gpu_lock: Arc::new(std::sync::RwLock::new(())),
@@ -1848,6 +1854,7 @@ impl AppState {
             tokenizer: Arc::new(tokenizer),
             adapter_dir,
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
+            loaded_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(memory_budget),
             gpu_lock,
