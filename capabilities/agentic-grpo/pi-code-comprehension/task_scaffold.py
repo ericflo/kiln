@@ -67,7 +67,7 @@ def init_workdir(task: dict, dir: str) -> None:
 # The pi user prompt. This is the only input the model sees besides
 # tool outputs. The exact JSON schema is spelled out so a well-trained
 # model can fill it without further hints.
-PI_PROMPT_TEMPLATE = """You are exploring a small code repository in the current working
+PI_PROMPT_TEMPLATE = """/no_think You are exploring a small code repository in the current working
 directory. Your goal is to produce a STRUCTURED JSON SUMMARY of the
 target symbol below.
 
