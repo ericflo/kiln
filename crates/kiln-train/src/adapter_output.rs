@@ -264,6 +264,17 @@ mod tests {
         std::fs::write(path.join("adapter_model.safetensors"), "weights").unwrap();
     }
 
+    #[cfg(unix)]
+    fn canonical_symlink_target(path: &Path) -> PathBuf {
+        let target = std::fs::read_link(path).unwrap();
+        let resolved = if target.is_absolute() {
+            target
+        } else {
+            path.parent().unwrap().join(target)
+        };
+        resolved.canonicalize().unwrap()
+    }
+
     #[test]
     fn adapter_output_receipt_records_canonical_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -310,10 +321,16 @@ mod tests {
         write_minimal_adapter(&source_two);
 
         let installed = install_adapter_symlink(&source_one, &registry, "agent").unwrap();
-        assert_eq!(std::fs::read_link(&installed).unwrap(), source_one);
+        assert_eq!(
+            canonical_symlink_target(&installed),
+            source_one.canonicalize().unwrap()
+        );
 
         let installed = install_adapter_symlink(&source_two, &registry, "agent").unwrap();
-        assert_eq!(std::fs::read_link(&installed).unwrap(), source_two);
+        assert_eq!(
+            canonical_symlink_target(&installed),
+            source_two.canonicalize().unwrap()
+        );
         assert!(validate_adapter_output_dir(&installed).is_ok());
     }
 
