@@ -1,42 +1,71 @@
 # pi-diff-patch-apply — GRPO 50-iter Loop Writeup
 
-**Date:** 2026-05-19
+**Date:** 2026-05-19 / 2026-05-20
 **Author:** Claude Opus 4.7 (1M context)
 **Cap directory:** `capabilities/agentic-grpo/pi-diff-patch-apply/`
-**Status:** In progress — iters 0-9 documented. All 9 trained iters regress vs 0.942 baseline; best is iter 2 (h2-strong-filter T=1.0) at 0.925 (-1.7pp). Iters 10-49 pending on the new A100 pod (bootstrap in flight as of session end 2026-05-19T21:05Z).
+**Status:** Through iter 24 of 50 attempted (12 logged, 9 voided to pod deaths / GRPO crashes). **Best trained adapter still iter 2 at 0.9246 (−1.7pp).** Base model (0.9419) remains the strongest.
 
 ---
 
 ## TL;DR
 
-**No trained adapter beat the base model on this capability.** All three GRPO iters
-regressed composite vs the 0.942 baseline.
+**No trained adapter beat the base model.** Across 12 logged trained iters
+(plus 9 voided to pod deaths or cuda_grpo crashes), the best is iter 2 at
+0.9246 (−1.7pp from the 0.9419 base). Every other iter regresses more —
+the median trained-iter composite is around 0.84 (−10pp).
 
-The work that DID land:
-- A 5-pillar rubric (outcome gate × multiplicative `no_unrelated_edits` × strict
-  4-pillar format_compliance × consolation gradient when outcome=0) that separates
-  ideal/imperfect/broken pi sessions across the full [0, 1] range.
+**This is a clean negative result, not a missing-iters problem.** We
+tried — and ruled out — most of the obvious axes:
+
+| Hypothesis tested                                      | Result                          | Iter(s)        |
+|--------------------------------------------------------|---------------------------------|----------------|
+| Higher lr (2e-5) / very low lr (2e-6)                  | catastrophic collapse to 0.22   | iter 5, 7      |
+| Mid lr (5e-6, 1e-5) with default knobs                 | mild −5pp regression            | iter 1, 4      |
+| Higher temperature (T=1.0) for more variance           | best iter (iter 2 at −1.7pp)    | iter 2, 3      |
+| Larger / smaller LoRA rank (4, 8, 16, 64)              | rank 8 mildly best (−5.4pp)     | iter 12        |
+| ECHO lambda 0 / 0.02 / 0.05 / 0.10                     | 0-0.02 ≈, 0.10 catastrophic     | iter 8, 9, 10  |
+| More epochs (2, 3)                                     | 2ep > 1ep mildly; 3ep neutral   | iter 11        |
+| **Chain-train from current best (compound)**           | **degrades** 0.925 → 0.846      | iter 13        |
+| **Train on incorrect-class-only (24pp headroom there)**| **even target class collapses** | iter 14        |
+| **Few tasks × many gens (more per-task variance)**     | overfits small task set, worst  | iter 17        |
+| **Custom "hard mix" corpus (drift+incorrect heavy)**   | drift class collapses 32pp      | iter 18, 19    |
+
+**The mechanism:** the 4B base model is already at 0.998 / 0.975 / 0.757 on
+clean / drift / incorrect classes. Eval composite saturates at 0.942.
+GRPO with our recipes always trades some clean-class performance to chase
+the incorrect-class headroom, and the trade-off is net negative because
+clean is the largest class (54% of eval) and the model is most-confident there.
+
+**Mechanistic side-effect:** every trained adapter makes pi sessions
+**~2× slower** (60s → 120-180s) — the model learns to be more verbose,
+which costs both wall-clock and format-compliance scores. This is a
+classic GRPO failure mode on a near-saturated reward.
+
+What DID land:
+- A 5-pillar rubric (`outcome × no_unrelated_edits × min × repair_eff × format`)
+  that separates ideal/imperfect/broken pi sessions across the full [0,1] range.
+  Calibration test (`rubric_sanity.py`) 8/8 pass.
 - A 36-primitive synthetic Python patch corpus (25 easy + 11 hard) with three
-  patch-class transforms (clean / offset-drift / incorrect-hunk).
-- An end-to-end iter pipeline (rollouts → strong-signal filter → GRPO step →
-  eval → capability.jsonl + git commit + B2 backup) that ran fully autonomously
-  via a chain script on the pod.
+  patch-class transforms (clean 50% / offset-drift 30% / incorrect-hunk 20%).
+- An iter pipeline (`run_iter.sh` + `drive_iters_fast.sh` + `smart_drive.sh`)
+  with kiln-serve health checks, adapter-preserve-immediately-after-GRPO,
+  pre-iter resurrection logic, per-iter B2 backups, and per-cap env files.
+- ~12 commits of kiln/runpod-cap-author polish notes documenting gotchas
+  (pkill self-kill, huggingface-cli deprecation, kiln pi-setup needed,
+  pytest not pre-installed, port-8420 conflicts, SSH-trailing-newline,
+  pod-death-loses-/tmp).
 
-The headline finding is **the 4B base model is already near-optimal at applying
-synthetic Python patches**, with composite saturation at 0.99 on the easy corpus
-and 0.94 on the harder 11-primitive corpus + tight rubric. The remaining 6% is
-mostly format quality and the one out-of-24 incorrect-hunk task that the model
-can't repair within 180s. GRPO with the chosen hyperparameters consistently 
-**hurt** more than it helped, because:
-
-1. With saturation at 0.94, only 1–4 of the 6 training groups had reward variance
-   above 0.005 — the policy update was driven by a single noisy group.
-2. The trained adapters made pi sessions **slower** (mean wall-clock 60s → 105s),
-   producing worse format scores and 2× the timeout rate.
-
-A larger corpus, more diverse training data, OPD instead of GRPO, or a teacher-led
-distillation approach would all be more promising than continuing to grind GRPO
-iterations against this saturated baseline.
+**Recommendation:** deprecate this capability for GRPO. The composite-headroom
+is genuinely 6pp and most of it is format-quality noise. Promising
+alternatives:
+- **OPD** (off-policy distillation): use a larger teacher (e.g., Claude Sonnet
+  via API, or a 27B model) to provide gold token sequences and KL-distill the
+  4B. The user has `opd-capability-creator` for this.
+- **A harder eval**: a capability where the base scores ~0.70 instead of
+  ~0.94 would give GRPO the headroom it needs.
+- **Reward shaping for speed**: multiply composite by `(1 - wall_clock/180)`
+  to directly attack the verbosity pathology. Only useful if combined with
+  one of the above.
 
 ---
 
