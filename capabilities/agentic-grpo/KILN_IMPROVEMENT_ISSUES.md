@@ -359,6 +359,43 @@ rank-mismatch adapters collapse to near-floor composite.
   future conversion behavior.
 - Tests cover rank mismatch, missing tensor, extra tensor, and valid match.
 
+**Status:** Completed and pushed to `main`.
+
+**Implementation notes:** Added strict base-adapter compatibility validation
+before training optimizer setup. The validator reads `adapter_config.json` and
+safetensors metadata, then checks requested rank, the normalized target-module
+set, the exact expected PEFT tensor key set, and every tensor shape against the
+current model config. Generic SFT, in-memory GRPO, and streamed JSONL GRPO now
+resolve `base_adapter` as either a direct path or a name under the adapter
+parent, validate it, and only then copy weights into the seeded LoRA vars.
+`cuda_grpo_ablation` and `cuda_sft_file` accept
+`--allow-adapter-shape-conversion`; the flag is deliberately wired as an
+opt-in marker, but conversion is not implemented and incompatible adapters
+still fail. CUDA-native SFT now rejects `base_adapter` instead of silently
+ignoring it.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-20 on RTX A6000 pod `yu0x0wt25rz8u8`,
+  lease `pod-9d17510419e3a5930b68a4fc`.
+- Remote command sequence: `cargo test -p kiln-train adapter_shape --lib`;
+  `cargo check -p kiln-train --tests`; `cargo check -p kiln-server --tests`;
+  `KILN_CUDA_ARCHS=86 cargo check --release -p kiln-train --features cuda --example cuda_grpo_ablation`;
+  `KILN_CUDA_ARCHS=86 cargo check --release -p kiln-train --features cuda --example cuda_sft_file`.
+- Remote sentinel `/workspace/kiln-validation/issue6-rerun.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue6-rerun.log`.
+- Focused tests passed 6 adapter-shape tests covering valid adapters, rank
+  mismatch, target-module mismatch, missing tensor, extra tensor, and exact
+  tensor shape mismatch with the offending tensor name.
+
+**Commit SHA:** Implementation commit to be recorded in the follow-up metadata
+commit after push.
+
+**Remaining risk:** Validation type-checks the training paths and CUDA
+examples but does not run a full GPU fine-tuning job. Base-adapter shape
+conversion remains intentionally unimplemented; CUDA-native SFT requires the
+generic trainer for base-adapter continuation.
+
 ### 7. Guard Unsafe LoRA Scaling
 
 **Area:** `crates/kiln-train`

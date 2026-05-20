@@ -67,6 +67,7 @@ struct Args {
     lora_alpha: f32,
     learning_rate: f64,
     base_adapter: Option<String>,
+    allow_adapter_shape_conversion: bool,
 }
 
 #[cfg(feature = "cuda")]
@@ -86,6 +87,7 @@ impl Args {
         let mut lora_alpha = 16.0f32;
         let mut learning_rate = 1e-4f64;
         let mut base_adapter: Option<String> = None;
+        let mut allow_adapter_shape_conversion = false;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -114,6 +116,7 @@ impl Args {
                 "--base-adapter" => {
                     base_adapter = Some(args.next().context("--base-adapter requires a value")?)
                 }
+                "--allow-adapter-shape-conversion" => allow_adapter_shape_conversion = true,
                 "--data" => data = args.next().map(PathBuf::from),
                 "--model-path" => model_path = args.next().map(PathBuf::from),
                 "--output-dir" => {
@@ -175,6 +178,7 @@ impl Args {
                          [--output-dir <dir>] [--adapter-name <name>] \
                          [--epochs <n>] [--skip-examples <n>] [--max-examples <n>] \
                          [--checkpoint-interval <n>] [--vram-poll-millis <n>] \
+                         [--base-adapter <dir>] [--allow-adapter-shape-conversion] \
                          [--trainer native|generic|server|default]"
                     );
                     std::process::exit(0);
@@ -202,6 +206,7 @@ impl Args {
             lora_alpha,
             learning_rate,
             base_adapter,
+            allow_adapter_shape_conversion,
         })
     }
 }
@@ -299,6 +304,11 @@ fn main() -> Result<()> {
         args.max_examples,
         args.trainer.as_str()
     );
+    if matches!(args.trainer, TrainerKind::Native) && args.base_adapter.is_some() {
+        anyhow::bail!(
+            "--base-adapter requires --trainer generic until CUDA-native base-adapter loading is implemented"
+        );
+    }
 
     let tokenizer = load_tokenizer(&args.model_path)?;
     for (idx, example) in examples.iter().enumerate() {
@@ -335,6 +345,7 @@ fn main() -> Result<()> {
         lora_rank: args.lora_rank,
         lora_alpha: args.lora_alpha,
         base_adapter: args.base_adapter.clone(),
+        allow_adapter_shape_conversion: args.allow_adapter_shape_conversion,
         output_name: Some(args.adapter_name.clone()),
         auto_load: false,
         checkpoint_interval: args.checkpoint_interval,

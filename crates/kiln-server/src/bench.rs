@@ -2224,6 +2224,7 @@ fn bench_training(
         lora_rank: 8,
         lora_alpha: 16.0,
         base_adapter: None,
+        allow_adapter_shape_conversion: false,
         output_name: Some("bench-adapter".to_string()),
         auto_load: false,
         checkpoint_interval: None,

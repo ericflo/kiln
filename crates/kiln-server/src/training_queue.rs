@@ -1158,6 +1158,7 @@ fn run_distill_refresh(
         lora_rank: req.config.lora_rank,
         lora_alpha: req.config.lora_alpha,
         base_adapter: req.config.base_adapter.clone(),
+        allow_adapter_shape_conversion: false,
         output_name: Some(midtrain_name.clone()),
         auto_load: false,
         checkpoint_interval: None,

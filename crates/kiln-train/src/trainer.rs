@@ -230,21 +230,7 @@ fn to_core_messages(msgs: &[ChatMessage]) -> Vec<kiln_core::tokenizer::ChatMessa
 }
 
 /// Which linear projections to train LoRA on.
-const DEFAULT_TARGET_MODULES: &[&str] = &[
-    "q_proj",
-    "k_proj",
-    "v_proj",
-    "o_proj",
-    "in_proj_qkv",
-    "in_proj_z",
-    "out_proj",
-    "gate_proj",
-    "up_proj",
-    "down_proj",
-    "in_proj_qkv",
-    "in_proj_z",
-    "out_proj",
-];
+const DEFAULT_TARGET_MODULES: &[&str] = crate::adapter_shape::TRAINABLE_TARGET_MODULES;
 
 /// Trainable LoRA parameters as candle `Var`s.
 ///
@@ -717,9 +703,10 @@ impl TrainableLoraParams {
     /// adapter that's a verifier-free continuation. Without this, the
     /// `--base-adapter` CLI flag is effectively a lineage label.
     ///
-    /// Returns the number of tensors loaded. Tensors not present in
-    /// the safetensors file are left at their seeded init values — useful
-    /// when the saved adapter targets a subset of projections.
+    /// Returns the number of tensors loaded. Training entry points call
+    /// `validate_base_adapter_compatibility` before this method so missing,
+    /// extra, rank-mismatched, or shape-mismatched tensors fail before
+    /// optimizer setup instead of leaving seeded-init gaps.
     pub fn load_from_safetensors(
         &self,
         adapter_dir: &Path,
@@ -786,7 +773,7 @@ impl TrainableLoraParams {
         let config = serde_json::json!({
             "r": self.rank,
             "lora_alpha": self.alpha,
-            "target_modules": DEFAULT_TARGET_MODULES,
+            "target_modules": crate::adapter_shape::TRAINABLE_TARGET_MODULES,
             "task_type": "CAUSAL_LM",
             "bias": "none",
             "peft_type": "LORA",
@@ -888,6 +875,38 @@ fn make_step_progress(total_steps: usize, label: &str) -> Option<indicatif::Prog
     Some(pb)
 }
 
+fn resolve_and_validate_base_adapter(
+    base_adapter: Option<&str>,
+    adapter_dir: &Path,
+    model_config: &ModelConfig,
+    lora_rank: usize,
+    allow_adapter_shape_conversion: bool,
+) -> Result<Option<PathBuf>> {
+    let Some(base_name) = base_adapter else {
+        return Ok(None);
+    };
+    let base_dir = crate::adapter_shape::resolve_base_adapter_dir(base_name, adapter_dir);
+    let compatibility = crate::adapter_shape::validate_base_adapter_compatibility(
+        &base_dir,
+        model_config,
+        lora_rank,
+        allow_adapter_shape_conversion,
+    )
+    .with_context(|| {
+        format!(
+            "validate base adapter {} before optimizer setup",
+            base_dir.display()
+        )
+    })?;
+    tracing::info!(
+        base = %base_dir.display(),
+        rank = compatibility.rank,
+        tensor_count = compatibility.tensor_count,
+        "validated base adapter compatibility"
+    );
+    Ok(Some(base_dir))
+}
+
 /// Run SFT training on the provided examples using the already-loaded model.
 ///
 /// This runs in the calling thread (blocking). The caller should spawn this
@@ -941,6 +960,14 @@ pub fn sft_train(
         None => (None, config.seed),
     };
 
+    let base_adapter_dir = resolve_and_validate_base_adapter(
+        config.base_adapter.as_deref(),
+        adapter_dir,
+        model_config,
+        config.lora_rank,
+        config.allow_adapter_shape_conversion,
+    )?;
+
     // Initialize trainable LoRA parameters
     let params = TrainableLoraParams::initialize_seeded(
         model_config,
@@ -955,6 +982,15 @@ pub fn sft_train(
         num_vars = params.all_vars().len(),
         "initialized trainable LoRA parameters"
     );
+
+    if let Some(base_dir) = base_adapter_dir.as_deref() {
+        let n_loaded = params.load_from_safetensors(base_dir, &device)?;
+        tracing::info!(
+            base = %base_dir.display(),
+            num_tensors = n_loaded,
+            "loaded base adapter — continuing SFT from those weights"
+        );
+    }
 
     // Phase 4.1: register LoRA Vars in the resident activation
     // registry. Forward LoRA dispatches via `lora_delta_resident`
@@ -1235,6 +1271,14 @@ pub fn grpo_train(
         None => (None, config.seed),
     };
 
+    let base_adapter_dir = resolve_and_validate_base_adapter(
+        config.base_adapter.as_deref(),
+        adapter_dir,
+        model_config,
+        config.lora_rank,
+        config.allow_adapter_shape_conversion,
+    )?;
+
     // Initialize trainable LoRA parameters
     let params = TrainableLoraParams::initialize_seeded(
         model_config,
@@ -1249,6 +1293,15 @@ pub fn grpo_train(
         num_vars = params.all_vars().len(),
         "initialized trainable LoRA parameters"
     );
+
+    if let Some(base_dir) = base_adapter_dir.as_deref() {
+        let n_loaded = params.load_from_safetensors(base_dir, &device)?;
+        tracing::info!(
+            base = %base_dir.display(),
+            num_tensors = n_loaded,
+            "loaded base adapter — continuing GRPO from those weights"
+        );
+    }
 
     // Phase 4.1: register LoRA Vars in the resident activation
     // registry. Forward LoRA dispatches via `lora_delta_resident`
@@ -1515,6 +1568,14 @@ pub fn grpo_train_jsonl(
         None => (None, config.seed),
     };
 
+    let base_adapter_dir = resolve_and_validate_base_adapter(
+        config.base_adapter.as_deref(),
+        adapter_dir,
+        model_config,
+        config.lora_rank,
+        config.allow_adapter_shape_conversion,
+    )?;
+
     let params = TrainableLoraParams::initialize_seeded(
         model_config,
         weights,
@@ -1529,28 +1590,10 @@ pub fn grpo_train_jsonl(
         "initialized streamed GRPO trainable LoRA parameters"
     );
 
-    // Phase 3 chaining: load a previously-saved adapter into the
-    // seeded Vars, replacing the random init. Looks up the adapter
-    // dir as either `config.base_adapter` (a full path) or
-    // `<adapter_dir>/<config.base_adapter>` (a name) — the lineage
-    // path treats it as a name relative to the adapter parent dir,
-    // so we accept both interpretations here.
-    if let Some(base_name) = config.base_adapter.as_deref() {
-        let base_dir = if std::path::Path::new(base_name).exists() {
-            std::path::PathBuf::from(base_name)
-        } else {
-            adapter_dir.join(base_name)
-        };
-        if !base_dir.join("adapter_model.safetensors").exists() {
-            anyhow::bail!(
-                "config.base_adapter is set but no adapter_model.safetensors \
-                 found at {} — pass either a full path or an adapter name \
-                 under {}",
-                base_dir.display(),
-                adapter_dir.display()
-            );
-        }
-        let n_loaded = params.load_from_safetensors(&base_dir, &device)?;
+    // Phase 3 chaining: load a previously-saved, shape-compatible adapter into
+    // the seeded Vars, replacing the random init.
+    if let Some(base_dir) = base_adapter_dir.as_deref() {
+        let n_loaded = params.load_from_safetensors(base_dir, &device)?;
         tracing::info!(
             base = %base_dir.display(),
             num_tensors = n_loaded,

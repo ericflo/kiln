@@ -1340,6 +1340,12 @@ pub fn cuda_native_sft_train(
         "starting cuda-native SFT training"
     );
 
+    if let Some(base_adapter) = config.base_adapter.as_deref() {
+        anyhow::bail!(
+            "cuda_native_sft_train does not support base_adapter {base_adapter:?}; use the generic trainer until CUDA-native base-adapter loading is implemented"
+        );
+    }
+
     let model = CudaModelWeights::from_gpu_weights(weights, model_config)
         .context("cuda_native_sft_train: import CUDA model weights")?;
     ensure_cuda_native_sft_supported(&model)?;

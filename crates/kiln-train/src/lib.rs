@@ -6,8 +6,9 @@
 
 #[cfg(feature = "cuda")]
 pub mod cuda_train;
-pub mod diagnostics;
 pub mod adapter_output;
+pub mod adapter_shape;
+pub mod diagnostics;
 pub mod echo;
 pub mod logit_cache;
 pub mod logit_source;
@@ -37,6 +38,10 @@ pub use diagnostics::{
 pub use adapter_output::{
     ADAPTER_RECEIPT_FILENAME, AdapterOutputReceipt, install_adapter_symlink,
     validate_adapter_output_dir, validate_install_adapter_name, write_adapter_output_receipt,
+};
+pub use adapter_shape::{
+    ALLOW_ADAPTER_SHAPE_CONVERSION_FLAG, BaseAdapterCompatibility, TRAINABLE_TARGET_MODULES,
+    resolve_base_adapter_dir, validate_base_adapter_compatibility,
 };
 pub use logit_source::{
     DeterministicUniformLogitSource, LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch,
@@ -153,6 +158,10 @@ pub struct SftConfig {
     pub lora_alpha: f32,
     /// If set, continue training from this adapter instead of starting fresh.
     pub base_adapter: Option<String>,
+    /// Reserved escape hatch for future explicit shape conversion. Today,
+    /// incompatible base adapters still fail before optimizer setup.
+    #[serde(default)]
+    pub allow_adapter_shape_conversion: bool,
     /// Name for the output adapter. Auto-generated if not set.
     pub output_name: Option<String>,
     /// Automatically load the resulting adapter when training completes (default true).
@@ -197,6 +206,7 @@ impl Default for SftConfig {
             lora_rank: default_rank(),
             lora_alpha: default_alpha(),
             base_adapter: None,
+            allow_adapter_shape_conversion: false,
             output_name: None,
             auto_load: default_auto_load(),
             checkpoint_interval: None,
@@ -476,6 +486,10 @@ pub struct GrpoConfig {
     #[serde(default = "default_alpha")]
     pub lora_alpha: f32,
     pub base_adapter: Option<String>,
+    /// Reserved escape hatch for future explicit shape conversion. Today,
+    /// incompatible base adapters still fail before optimizer setup.
+    #[serde(default)]
+    pub allow_adapter_shape_conversion: bool,
     pub output_name: Option<String>,
     /// Automatically load the resulting adapter when training completes (default true).
     #[serde(default = "default_auto_load")]
@@ -746,6 +760,7 @@ impl Default for GrpoConfig {
             lora_rank: default_rank(),
             lora_alpha: default_alpha(),
             base_adapter: None,
+            allow_adapter_shape_conversion: false,
             output_name: None,
             auto_load: default_auto_load(),
             checkpoint_interval: None,

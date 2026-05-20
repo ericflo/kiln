@@ -245,6 +245,8 @@ struct Args {
     /// scratch. Used by Phase 3 verifier-free chaining: take a strong
     /// Phase 2 adapter, run `--no-policy-loss` from those weights.
     base_adapter: Option<String>,
+    /// Reserved opt-in for future explicit base-adapter shape conversion.
+    allow_adapter_shape_conversion: bool,
     /// Optional serve-ready adapter registry. When set, the completed adapter
     /// directory is installed here under --install-adapter-name or --adapter.
     install_adapter_dir: Option<PathBuf>,
@@ -270,6 +272,7 @@ impl Args {
         let mut opd_lambda: Option<f64> = None;
         let mut no_policy_loss = false;
         let mut base_adapter: Option<String> = None;
+        let mut allow_adapter_shape_conversion = false;
         let mut install_adapter_dir: Option<PathBuf> = None;
         let mut install_adapter_name: Option<String> = None;
 
@@ -342,6 +345,7 @@ impl Args {
                 "--base-adapter" => {
                     base_adapter = Some(args.next().context("--base-adapter needs a path")?)
                 }
+                "--allow-adapter-shape-conversion" => allow_adapter_shape_conversion = true,
                 "--install-adapter-dir" => {
                     install_adapter_dir = Some(PathBuf::from(
                         args.next().context("--install-adapter-dir needs a value")?,
@@ -357,6 +361,7 @@ impl Args {
                          [--adapter <name>] --mode <baseline|phase1|phase1_gspo|phase1_cispo|\
                          phase1_reinforce|...> [--max-groups N] [--rank N] [--alpha F] \
                          [--lr F] [--seed N] [--echo-lambda F | --no-echo] [--opd-lambda F] \
+                         [--base-adapter DIR] [--allow-adapter-shape-conversion] \
                          [--install-adapter-dir DIR] [--install-adapter-name NAME]"
                     );
                     println!();
@@ -407,6 +412,7 @@ impl Args {
             opd_lambda,
             no_policy_loss,
             base_adapter,
+            allow_adapter_shape_conversion,
             install_adapter_dir,
             install_adapter_name,
         })
@@ -523,6 +529,7 @@ fn main() -> Result<()> {
         auto_load: false,
         seed: Some(args.seed),
         optimizer: Optimizer::default(),
+        allow_adapter_shape_conversion: args.allow_adapter_shape_conversion,
         ..GrpoConfig::default()
     };
     let mut config = args.mode.apply(base);
