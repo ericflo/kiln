@@ -92,18 +92,24 @@ async fn load_adapter(
 ) -> Result<Json<LoadAdapterResponse>, ApiError> {
     validate_adapter_name(&req.name)?;
 
+    let adapter_path = state.adapter_dir.join(&req.name);
+    let resolved_adapter_path = validate_loadable_adapter_dir(&adapter_path).map_err(|err| {
+        tracing::warn!(
+            adapter = %req.name,
+            path = %adapter_path.display(),
+            reason = %err.message,
+            operation = "load",
+            "adapter load rejected"
+        );
+        err
+    })?;
+
     let runner = match state.backend.as_ref() {
         ModelBackend::Real { runner, .. } => runner,
         ModelBackend::Mock { .. } => {
             return Err(ApiError::mock_mode_no_adapters());
         }
     };
-
-    let adapter_path = state.adapter_dir.join(&req.name);
-
-    if !adapter_path.exists() {
-        return Err(ApiError::adapter_not_found(&req.name));
-    }
 
     // Two-phase load: read device/num_layers under a brief read lock, then load
     // weights outside any lock so inference is not blocked during I/O.
@@ -116,7 +122,7 @@ async fn load_adapter(
     };
 
     let runner = runner.clone();
-    let path = adapter_path.clone();
+    let path = resolved_adapter_path.clone();
     let name = req.name.clone();
 
     tokio::task::spawn_blocking(move || {
@@ -142,7 +148,7 @@ async fn load_adapter(
         old_adapter = ?old,
         new_adapter = ?Some(req.name.clone()),
         reason = "adapter_load_endpoint",
-        path = %adapter_path.display(),
+        path = %resolved_adapter_path.display(),
         operation = "load",
         "adapter transition"
     );
@@ -151,6 +157,64 @@ async fn load_adapter(
         status: "loaded",
         name,
     }))
+}
+
+fn validate_loadable_adapter_dir(adapter_path: &Path) -> Result<PathBuf, ApiError> {
+    if !adapter_path.exists() || !adapter_path.is_dir() {
+        return Err(ApiError::adapter_not_found(adapter_path.display()));
+    }
+
+    let resolved = adapter_path.canonicalize().map_err(|e| {
+        ApiError::adapter_layout_invalid(format!(
+            "failed to resolve absolute path {}: {e}",
+            adapter_path.display()
+        ))
+    })?;
+
+    let required = ["adapter_config.json", "adapter_model.safetensors"];
+    let missing: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|file| !resolved.join(file).is_file())
+        .collect();
+
+    if missing.is_empty() {
+        return Ok(resolved);
+    }
+
+    let mut detail = format!(
+        "path {} is missing required file(s): {}",
+        resolved.display(),
+        missing.join(", ")
+    );
+
+    if let Some(child) = find_single_nested_adapter_dir(&resolved) {
+        detail.push_str(&format!(
+            "; found nested adapter directory at {}",
+            child.display()
+        ));
+    }
+
+    Err(ApiError::adapter_layout_invalid(detail))
+}
+
+fn find_single_nested_adapter_dir(parent: &Path) -> Option<PathBuf> {
+    let mut matches = Vec::new();
+    let entries = std::fs::read_dir(parent).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir()
+            && path.join("adapter_config.json").is_file()
+            && path.join("adapter_model.safetensors").is_file()
+        {
+            matches.push(path);
+        }
+    }
+    if matches.len() == 1 {
+        matches.pop()
+    } else {
+        None
+    }
 }
 
 /// Unload the active LoRA adapter, reverting to base model.

@@ -152,6 +152,16 @@ impl ApiError {
         }
     }
 
+    pub fn adapter_layout_invalid(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "adapter_layout_invalid",
+            message: format!("Invalid adapter directory layout: {detail}"),
+            hint: "Point /v1/adapters/load at the actual adapter directory containing adapter_config.json and adapter_model.safetensors, not its parent output directory.",
+            retry_after_seconds: None,
+        }
+    }
+
     pub fn adapter_active(name: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::CONFLICT,

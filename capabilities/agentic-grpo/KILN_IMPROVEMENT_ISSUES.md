@@ -102,6 +102,35 @@ directory before mutating state.
 - A test covers the common nested-output mistake.
 - The server logs load failures at warn level with path and reason.
 
+**Status:** Completed locally, awaiting commit/push.
+
+**Implementation notes:** Added `validate_loadable_adapter_dir` before backend
+selection or model mutation in `/v1/adapters/load`. The load endpoint now
+requires the resolved adapter directory to contain both `adapter_config.json`
+and `adapter_model.safetensors`; missing required files return structured
+`400 adapter_layout_invalid` errors with the canonical absolute path and the
+missing file list. The validator detects the common `output/adapter/` nested
+directory mistake and includes the nested adapter path in the error. Rejections
+log at warn level with adapter name, path, operation, and reason. Existing
+active/default and runtime-loaded adapter state is left unchanged on all
+validation failures.
+
+**Validation evidence:**
+
+- `cargo test -p kiln-server --test adapter_path_traversal` passed on
+  2026-05-20: 7 integration tests including missing config, missing weights,
+  nested-output mistake, active-state preservation, and existing traversal
+  protections.
+- `cargo check -p kiln-server --tests` passed on 2026-05-20 (CPU-only local
+  check; warnings were pre-existing unused items/imports plus CUDA-not-found
+  warnings from non-CUDA local environment).
+
+**Commit SHA:** Pending commit creation for this issue.
+
+**Remaining risk:** Tests exercise the validation layer in mock backend mode
+so they prove bad layouts fail before backend mutation. They intentionally do
+not perform a real LoRA tensor load or GPU validation locally.
+
 ### 3. Expose Complete Adapter Registry State
 
 **Area:** `crates/kiln-server`

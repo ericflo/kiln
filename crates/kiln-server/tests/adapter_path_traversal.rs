@@ -87,6 +87,16 @@ async fn read_error_code(resp: axum::http::Response<Body>) -> (StatusCode, Strin
     (status, code)
 }
 
+async fn read_error(resp: axum::http::Response<Body>) -> (StatusCode, serde_json::Value) {
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).expect("error response must be JSON");
+    (status, json)
+}
+
 /// `DELETE /v1/adapters/..` (and a few other escape variants) must return a
 /// 4xx with `invalid_adapter_name`, must not call `remove_dir_all` on the
 /// adapter directory, and must not delete sibling directories.
@@ -183,6 +193,113 @@ async fn test_load_rejects_absolute_path() {
         "load with absolute path should return 400, got {status} (code={code})"
     );
     assert_eq!(code, "invalid_adapter_name");
+}
+
+#[tokio::test]
+async fn test_load_rejects_missing_adapter_config_without_changing_active() {
+    let tmp = tempfile::tempdir().unwrap();
+    let broken = tmp.path().join("missing-config");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(broken.join("adapter_model.safetensors"), b"fake").unwrap();
+
+    let state = make_state(tmp.path().to_path_buf());
+    *state.active_adapter_name.write().unwrap() = Some("previous".to_string());
+    *state.loaded_adapter_name.write().unwrap() = Some("previous".to_string());
+    let state_for_assert = state.clone();
+    let app = api::router(state);
+
+    let body = serde_json::to_vec(&json!({ "name": "missing-config" })).unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/adapters/load")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let (status, body) = read_error(resp).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "adapter_layout_invalid");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("adapter_config.json"));
+    assert!(message.contains(broken.canonicalize().unwrap().to_str().unwrap()));
+    assert_eq!(
+        state_for_assert.active_adapter_name.read().unwrap().as_deref(),
+        Some("previous")
+    );
+    assert_eq!(
+        state_for_assert.loaded_adapter_name.read().unwrap().as_deref(),
+        Some("previous")
+    );
+}
+
+#[tokio::test]
+async fn test_load_rejects_missing_adapter_weights_without_changing_active() {
+    let tmp = tempfile::tempdir().unwrap();
+    let broken = tmp.path().join("missing-weights");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(
+        broken.join("adapter_config.json"),
+        br#"{"r": 8, "lora_alpha": 16}"#,
+    )
+    .unwrap();
+
+    let state = make_state(tmp.path().to_path_buf());
+    *state.active_adapter_name.write().unwrap() = Some("previous".to_string());
+    *state.loaded_adapter_name.write().unwrap() = Some("previous".to_string());
+    let state_for_assert = state.clone();
+    let app = api::router(state);
+
+    let body = serde_json::to_vec(&json!({ "name": "missing-weights" })).unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/adapters/load")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let (status, body) = read_error(resp).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "adapter_layout_invalid");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("adapter_model.safetensors"));
+    assert!(message.contains(broken.canonicalize().unwrap().to_str().unwrap()));
+    assert_eq!(
+        state_for_assert.active_adapter_name.read().unwrap().as_deref(),
+        Some("previous")
+    );
+    assert_eq!(
+        state_for_assert.loaded_adapter_name.read().unwrap().as_deref(),
+        Some("previous")
+    );
+}
+
+#[tokio::test]
+async fn test_load_rejects_common_nested_output_mistake() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = tmp.path().join("train-output");
+    write_adapter(&parent, "actual-adapter");
+
+    let state = make_state(tmp.path().to_path_buf());
+    let app = api::router(state);
+
+    let body = serde_json::to_vec(&json!({ "name": "train-output" })).unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/adapters/load")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let (status, body) = read_error(resp).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "adapter_layout_invalid");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("adapter_config.json"));
+    assert!(message.contains("adapter_model.safetensors"));
+    assert!(message.contains("actual-adapter"));
 }
 
 /// `POST /v1/adapters/merge` with a source adapter name of `".."` (or other
