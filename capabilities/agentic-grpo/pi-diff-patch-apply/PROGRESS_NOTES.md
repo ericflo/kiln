@@ -42,7 +42,8 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 10   | h10-echo-0.02 (retry on A6000)   | 0.8422    | −0.100 | NEGATIVE — ECHO=0.02 ≈ no-echo (h8), both ~10pp regression. Confirms ECHO has little effect at these scales |
 | 11   | h11-2epoch (2 epochs)            | 0.8676    | −0.074 | NEGATIVE — 2 epochs beats 1 (h10 was 0.842). Suggests longer training is mildly helpful at lr=1e-5 |
 | 12   | h12-rank8 (rank 8 / alpha 16)    | 0.8882    | −0.054 | NEGATIVE — best of 8-task sweep; rank-8 retains clean class (0.986). Smaller rank → less perturbation works. |
-| 13+  | (smart_drive launching)           | —         | —      | **smart_drive.sh** designs each iter from prior data; iter 13 = chain-from-best-adapter + iter 2 recipe |
+| 13   | h13-chain-best-hard-mix (chain from iter 2) | 0.8462 | −0.096 | **chain compound FAILED** — iter 2 (0.9246) + same recipe → 0.8462. GRPO on top of trained adapter degrades it. |
+| 14+  | (smart_drive auto-chaining)       | —         | —      | iter 14 = incorrect-class-only chain from iter 2 (next test: does training only on highest-headroom class help?) |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far (11 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
@@ -52,6 +53,8 @@ Lease expires `2026-05-19T12:52:01Z`.
 **ECHO sweep summary (iters 8/9/10):** ECHO=0 → 0.840; ECHO=0.02 → 0.842; ECHO=0.10 → 0.762. ECHO ≈ 0-0.02 are equivalent; 0.10 hurts. The default 0.05 (iters 1-4) was in the safer zone but still net negative.
 
 **Epoch sweep (iter 11):** 2 epochs at lr=1e-5 → 0.8676, better than the 1-epoch comparable iter 10 → 0.8422. Mild evidence that longer training helps slightly at this lr.
+
+**Chain compound test (iter 13):** Loaded iter 2 adapter (0.9246) from B2, trained another GRPO step on top with the same T=1.0 + hard-mix recipe → 0.8462 (−8pp from iter 2). **Compounding GRPO on a trained adapter actively degrades it.** Suggests every successful iter so far was lucky, not a smooth optimization path. Smart_drive will pivot the next hypotheses away from chain-from-best.
 
 ## Key learnings (intermediate)
 
