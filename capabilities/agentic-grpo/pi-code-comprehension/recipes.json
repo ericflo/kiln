@@ -181,8 +181,9 @@
     "alpha": 32,
     "echo_lambda": null,
     "kind": "train",
-    "notes": "32 tasks \u2014 broad signal",
-    "rollout_concurrency": 4
+    "notes": "32 tasks \u2014 broad signal [SESSION-FIX: warm from iter-4 best because base Qwen3.5 thinking-tokens block pi]",
+    "rollout_concurrency": 4,
+    "train_adapter_from": "best"
   },
   {
     "iter": 13,
@@ -196,8 +197,9 @@
     "alpha": 32,
     "echo_lambda": null,
     "kind": "train",
-    "notes": "Aggressive lr 3e-5",
-    "rollout_concurrency": 4
+    "notes": "Aggressive lr 3e-5 [SESSION-FIX: warm from iter-4 best because base Qwen3.5 thinking-tokens block pi]",
+    "rollout_concurrency": 4,
+    "train_adapter_from": "best"
   },
   {
     "iter": 14,
@@ -211,8 +213,9 @@
     "alpha": 128,
     "echo_lambda": null,
     "kind": "train",
-    "notes": "Aggressive rank 64/128",
-    "rollout_concurrency": 4
+    "notes": "Aggressive rank 64/128 [SESSION-FIX: warm from iter-4 best because base Qwen3.5 thinking-tokens block pi]",
+    "rollout_concurrency": 4,
+    "train_adapter_from": "best"
   },
   {
     "iter": 15,
@@ -243,8 +246,9 @@
     "alpha": 32,
     "echo_lambda": "0.025",
     "kind": "train",
-    "notes": "ECHO \u03bb=0.025 \u2014 bottom of paper range",
-    "rollout_concurrency": 4
+    "notes": "ECHO \u03bb=0.025 \u2014 bottom of paper range [SESSION-FIX: warm from iter-4 best because base Qwen3.5 thinking-tokens block pi]",
+    "rollout_concurrency": 4,
+    "train_adapter_from": "best"
   },
   {
     "iter": 17,
@@ -274,8 +278,9 @@
     "alpha": 16,
     "echo_lambda": null,
     "kind": "train",
-    "notes": "Lower rank 8/16 \u2014 less overfit",
-    "rollout_concurrency": 4
+    "notes": "Lower rank 8/16 \u2014 less overfit [SESSION-FIX: warm from iter-4 best because base Qwen3.5 thinking-tokens block pi]",
+    "rollout_concurrency": 4,
+    "train_adapter_from": "best"
   },
   {
     "iter": 19,
@@ -290,8 +295,9 @@
     "echo_lambda": null,
     "no_policy_loss": true,
     "kind": "train",
-    "notes": "Verifier-free: ECHO-only (paper \u00a75.5)",
-    "rollout_concurrency": 4
+    "notes": "Verifier-free: ECHO-only (paper \u00a75.5) [SESSION-FIX: warm from iter-4 best because base Qwen3.5 thinking-tokens block pi]",
+    "rollout_concurrency": 4,
+    "train_adapter_from": "best"
   },
   {
     "iter": 20,
@@ -322,7 +328,8 @@
     "echo_lambda": null,
     "kind": "train",
     "rollout_concurrency": 4,
-    "notes": "Extreme low-rank (rank 2/alpha 4) \u2014 can a 0.5M-param LoRA preserve iter-4 gains? Tests information bottleneck of structured-JSON task."
+    "notes": "Extreme low-rank (rank 2/alpha 4) \u2014 can a 0.5M-param LoRA preserve iter-4 gains? Tests information bottleneck of structured-JSON task. [SESSION-FIX: warm from iter-4 best because base Qwen3.5 thinking-tokens block pi]",
+    "train_adapter_from": "best"
   },
   {
     "iter": 22,
@@ -336,8 +343,9 @@
     "alpha": 32,
     "echo_lambda": null,
     "kind": "train",
-    "notes": "Higher lr 5e-5",
-    "rollout_concurrency": 4
+    "notes": "Higher lr 5e-5 [SESSION-FIX: warm from iter-4 best because base Qwen3.5 thinking-tokens block pi]",
+    "rollout_concurrency": 4,
+    "train_adapter_from": "best"
   },
   {
     "iter": 23,
@@ -449,8 +457,9 @@
     "alpha": 32,
     "echo_lambda": "0.15",
     "kind": "train",
-    "notes": "Very high ECHO \u03bb=0.15 \u2014 paper says collapses",
-    "rollout_concurrency": 4
+    "notes": "Very high ECHO \u03bb=0.15 \u2014 paper says collapses [SESSION-FIX: warm from iter-4 best because base Qwen3.5 thinking-tokens block pi]",
+    "rollout_concurrency": 4,
+    "train_adapter_from": "best"
   },
   {
     "iter": 30,
@@ -481,7 +490,8 @@
     "echo_lambda": null,
     "kind": "train",
     "rollout_concurrency": 4,
-    "notes": "Large-lr ablation (1e-4 vs default 1e-5 = 10x). Likely diverges, but if it converges fast it could be a big win."
+    "notes": "Large-lr ablation (1e-4 vs default 1e-5 = 10x). Likely diverges, but if it converges fast it could be a big win. [SESSION-FIX: warm from iter-4 best because base Qwen3.5 thinking-tokens block pi]",
+    "train_adapter_from": "best"
   },
   {
     "iter": 32,
@@ -528,8 +538,9 @@
     "alpha": 32,
     "echo_lambda": null,
     "kind": "train",
-    "notes": "Large pool 40 tasks (slow but broad)",
-    "rollout_concurrency": 4
+    "notes": "Large pool 40 tasks (slow but broad) [SESSION-FIX: warm from iter-4 best because base Qwen3.5 thinking-tokens block pi]",
+    "rollout_concurrency": 4,
+    "train_adapter_from": "best"
   },
   {
     "iter": 35,
@@ -658,7 +669,8 @@
     "echo_lambda": null,
     "kind": "train",
     "rollout_concurrency": 4,
-    "notes": "4 tasks \u00d7 16 gens \u2014 more samples per group \u2192 lower advantage variance. Same total rollouts (64) but distributed differently."
+    "notes": "4 tasks \u00d7 16 gens \u2014 more samples per group \u2192 lower advantage variance. Same total rollouts (64) but distributed differently. [SESSION-FIX: warm from iter-4 best because base Qwen3.5 thinking-tokens block pi]",
+    "train_adapter_from": "best"
   },
   {
     "iter": 43,
