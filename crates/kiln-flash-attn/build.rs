@@ -49,7 +49,13 @@ fn main() {
     build.flag("-diag-suppress=177"); // variable declared but never referenced
     build.flag("-diag-suppress=174"); // expression has no effect
     // Host compiler emits these on vendored CUTLASS headers; nothing we can fix upstream.
-    build.flag("-Xcompiler").flag("-Wno-unused-parameter");
+    // GCC/clang-only — `-Wno-unused-parameter` becomes `/Wno-unused-parameter` to cl.exe
+    // on Windows, which rejects it with D8021 ("invalid numeric argument"). cl.exe doesn't
+    // emit the GCC-style "unused parameter" warning anyway, so there's nothing to silence.
+    let target = env::var("TARGET").unwrap_or_default();
+    if !target.ends_with("-msvc") {
+        build.flag("-Xcompiler").flag("-Wno-unused-parameter");
+    }
 
     // Architecture flags — only sm80+ (flash-attn requirement)
     for arch in cuda_archs.split(';') {
