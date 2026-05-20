@@ -58,67 +58,118 @@ else:
 "
 }
 
-# Hand-designed hypothesis table. Each row: SLUG | rationale | run_iter.sh-flags
+# Hand-designed hypothesis table. Each row: SLUG | rationale | run_iter.sh-flags.
+#
+# KEY DATA SO FAR (as of iter 13, updated as iters complete):
+#   - iter 2 (T=1.0 hard-mix from base): 0.9246 — best trained iter
+#   - iter 12 (rank 8 from base): 0.8882 — smaller rank retains clean class
+#   - iter 13 (T=1.0 hard-mix chain-from-iter2): 0.8462 — **chain compound FAILS**
+#     → don't chain unless explicitly testing compounding
+#   - all iters except iter 2 regress more than 5pp vs baseline 0.9419
+#
+# DESIGN PRINCIPLES going forward:
+#   - DEFAULT to train from base (chain compounding actively hurts per iter 13)
+#   - Test one variable at a time, response-to-data hypotheses
+#   - Prefer untested axes (incorrect-only corpus, rank 2, no filter, etc.)
 recipe_for() {
   local n=$1
   local BEST=$(best_adapter)
   case "$n" in
     13)
-      # Hypothesis: iter 2's recipe (T=1.0, hard-mix, default echo) was the
-      # original best (0.9246). Re-run with chain from current best to compound.
+      # Already run — chain compound test (failed).
       echo "h13-chain-best-hard-mix --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --train-tasks-file datasets/train.hard_mix.tasks.jsonl --train-adapter ${BEST}"
       ;;
     14)
-      # Hypothesis: train ONLY on incorrect-class tasks (where base has 24%
-      # headroom). All other classes are noise — base already gets 0.998/0.975.
-      echo "h14-incorrect-only --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --train-tasks-file datasets/train.incorrect_only.tasks.jsonl --train-adapter ${BEST}"
+      # Hypothesis: training ONLY on incorrect-class tasks (24pp headroom) from
+      # base. iter 12 retained clean class — maybe targeting only the broken
+      # class will let us actually improve it without trading off clean/drift.
+      echo "h14-incorrect-only-from-base --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --train-tasks-file datasets/train.incorrect_only.tasks.jsonl"
       ;;
     15)
-      # Hypothesis: rank 2 LoRA = minimal perturbation. The catastrophic
-      # collapses (iter 5/7) and the verbosity pathology (all iters) both
-      # suggest the LoRA is moving the model too far. Rank 2 caps it.
-      echo "h15-rank2-chain --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --rank 2 --alpha 4 --train-tasks-file datasets/train.hard_mix.tasks.jsonl --train-adapter ${BEST}"
+      # Hypothesis: rank 2 LoRA (alpha 4) from base. iter 12 (rank 8) was best
+      # of the 8-task sweep; rank 2 = even smaller perturbation. Should retain
+      # more clean/drift performance while still nudging incorrect.
+      echo "h15-rank2-hardmix-from-base --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --rank 2 --alpha 4 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
       ;;
     16)
-      # Hypothesis: 3 epochs on the hard-mix subset. Iter 11 showed 2 ep > 1 ep.
-      # Test if more compounds (with chain from best).
-      echo "h16-3epochs-chain --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 3 --train-tasks-file datasets/train.hard_mix.tasks.jsonl --train-adapter ${BEST}"
+      # Hypothesis: 3 epochs from base on hard-mix. iter 11 showed 2 ep > 1 ep;
+      # extrapolate. Distinct from chain because all 3 epochs are on same data.
+      echo "h16-3epochs-from-base --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 3 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
       ;;
     17)
-      # Hypothesis: 6 gens × 6 tasks (less tasks, more gens per task) gives
-      # higher per-task variance → more strong-signal groups. Closer to iter 2's
-      # 6×3 recipe but with double the gens.
-      echo "h17-6tasks-6gens --num-train-tasks 6 --num-gens 6 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --train-tasks-file datasets/train.hard_mix.tasks.jsonl --train-adapter ${BEST}"
+      # Hypothesis: 6 tasks × 6 gens — more gens per task → more per-group
+      # variance → more strong-signal groups passing the filter. Closer to
+      # iter 2's 6×3 but with double gens.
+      echo "h17-6tasks-6gens-from-base --num-train-tasks 6 --num-gens 6 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
       ;;
     18)
-      # Hypothesis: lower lr (5e-6) + chain. Iter 4 (lr 5e-6 from base) was
-      # second-best at 0.9109. Maybe lr 5e-6 from chain is even better.
-      echo "h18-lr5e-6-chain --num-train-tasks 8 --num-gens 3 --lr 5e-6 --filter-var 0.04 --temperature 1.0 --train-tasks-file datasets/train.hard_mix.tasks.jsonl --train-adapter ${BEST}"
+      # Hypothesis: lr 5e-6 from base. iter 4 was 2nd best from base at this lr.
+      # Test on hard-mix corpus (iter 4 used the older select_hard_tasks output).
+      echo "h18-lr5e-6-from-base --num-train-tasks 8 --num-gens 3 --lr 5e-6 --filter-var 0.04 --temperature 1.0 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
       ;;
     19)
-      # Hypothesis: combine winners — rank 2 + 3 epochs + lr 5e-6 + chain. Small
-      # gradient steps over a long horizon from the best baseline.
-      echo "h19-rank2-3ep-lr5e6-chain --num-train-tasks 8 --num-gens 3 --lr 5e-6 --filter-var 0.04 --temperature 1.0 --rank 2 --alpha 4 --epochs 3 --train-tasks-file datasets/train.hard_mix.tasks.jsonl --train-adapter ${BEST}"
+      # Hypothesis: combined winners — rank 2 + 3 epochs + lr 5e-6 — all from
+      # base. Smallest perturbation × longest horizon × lowest lr.
+      echo "h19-combined-from-base --num-train-tasks 8 --num-gens 3 --lr 5e-6 --filter-var 0.04 --temperature 1.0 --rank 2 --alpha 4 --epochs 3 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
       ;;
     20)
-      # Hypothesis: filter-var 0.0 (no filter, all groups train). The hard-mix
-      # subset already biases toward high-variance tasks; further filtering may
-      # discard signal-rich groups. Test if removing the filter helps.
-      echo "h20-no-filter-chain --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.0 --temperature 1.0 --train-tasks-file datasets/train.hard_mix.tasks.jsonl --train-adapter ${BEST}"
+      # Hypothesis: NO variance filter (filter-var 0.0). Hard-mix is already
+      # biased; further filtering may drop signal-rich groups.
+      echo "h20-no-filter-from-base --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.0 --temperature 1.0 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
       ;;
     21)
-      # Replay iter 2 EXACTLY (no chain): same recipe, same seed. Sanity check
-      # that the iter 2 result is reproducible, not a lucky seed.
+      # Hypothesis: replay iter 2 EXACTLY. Same recipe, same seed, same corpus.
+      # Reproducibility check — was iter 2 a lucky seed?
       echo "h21-iter2-replay --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --seed 3141592653 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
       ;;
     22)
-      # Combine: chain from best + incorrect-only + rank 2 (smallest-perturb
-      # gradient on the largest-headroom class).
-      echo "h22-incorrect-rank2-chain --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --rank 2 --alpha 4 --train-tasks-file datasets/train.incorrect_only.tasks.jsonl --train-adapter ${BEST}"
+      # Hypothesis: incorrect-only + rank 2 from base. Smallest perturbation on
+      # the most-headroom class, no chain.
+      echo "h22-incorrect-rank2-from-base --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --rank 2 --alpha 4 --train-tasks-file datasets/train.incorrect_only.tasks.jsonl"
+      ;;
+    23)
+      # Hypothesis: T=1.2 (higher temperature) for more exploration. iter 2
+      # used T=1.0; maybe T=1.2 produces even more strong-signal groups.
+      echo "h23-temp1.2-from-base --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.2 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      ;;
+    24)
+      # Hypothesis: rank 4 (alpha 8) middle-ground from base. Bracket between
+      # iter 12 rank 8 (0.888) and a hypothetical rank 2.
+      echo "h24-rank4-from-base --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --rank 4 --alpha 8 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      ;;
+    25)
+      # Hypothesis: --no-policy-loss (ECHO-only training, ablation). Tests
+      # whether the GRPO advantage signal is hurting more than helping.
+      echo "h25-no-policy-loss --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --no-policy-loss --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      ;;
+    26)
+      # Hypothesis: rank 1 LoRA (alpha 2). Absolute minimum perturbation. If
+      # rank 8 retained clean class and rank 2 retains more, rank 1 should
+      # retain almost all.
+      echo "h26-rank1-from-base --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --rank 1 --alpha 2 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      ;;
+    27)
+      # Hypothesis: rank 2 + 2 epochs + lr 5e-6 + T=1.0. Refined combined
+      # winners (iter 19 might be too long at 3 epochs).
+      echo "h27-rank2-2ep-lr5e6 --num-train-tasks 8 --num-gens 3 --lr 5e-6 --filter-var 0.04 --temperature 1.0 --rank 2 --alpha 4 --epochs 2 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      ;;
+    28)
+      # Hypothesis: full train corpus (not subset). The hard-mix subset has
+      # only 8 tasks; maybe more diverse training data helps.
+      echo "h28-full-corpus-from-base --num-train-tasks 16 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0"
+      ;;
+    29)
+      # Hypothesis: seed sweep — different random seed from iter 2 to test if
+      # iter 2's success was seed-specific.
+      echo "h29-seed-1729 --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --seed 1729 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      ;;
+    30)
+      # Hypothesis: seed sweep 2.
+      echo "h30-seed-4242 --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --seed 4242 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
       ;;
     *)
-      # Default: chain best with default recipe. New ideas to be added.
-      echo "h${n}-tbd-chain --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --train-tasks-file datasets/train.hard_mix.tasks.jsonl --train-adapter ${BEST}"
+      # Default for iters 31+: design when we get there based on what 14-30 show.
+      echo "h${n}-tbd --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
       ;;
   esac
 }
