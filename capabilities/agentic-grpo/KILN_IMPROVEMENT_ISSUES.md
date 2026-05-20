@@ -166,7 +166,7 @@ prove what will actually run.
 - Tests cover active, loaded-but-inactive, available-unloaded, and invalid
   adapters.
 
-**Status:** Completed locally, awaiting commit/push.
+**Status:** Completed and pushed to `main`.
 
 **Implementation notes:** Expanded `GET /v1/adapters` with explicit
 `active_adapter`, `loaded_adapter`, `loaded_adapters`, `adapter_dir`, and
@@ -189,7 +189,11 @@ in server state and cleared on successful load.
   check; warnings were pre-existing unused items/imports plus CUDA-not-found
   warnings from non-CUDA local environment).
 
-**Commit SHA:** Pending commit creation for this issue.
+**Commit SHA:** `a8d284d6` (`Issue 3: expose adapter registry state`),
+pushed to `origin/main` on 2026-05-20. Note: the commit contains the
+implementation and initial validation notes; this status line is recorded in
+the follow-up metadata commit because a commit cannot include its own final
+SHA.
 
 **Remaining risk:** The registry records the single runtime-loaded adapter
 known to kiln's current one-runner architecture. It does not attempt to prove
