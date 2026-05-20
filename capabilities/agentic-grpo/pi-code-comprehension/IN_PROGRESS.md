@@ -183,6 +183,62 @@ to short-circuit the thinking tokens even for the base model.
 
 Path B (programmatic, no recipe changes) is the cleanest fix.
 
+## Update 2026-05-20 09:15 — kiln patch shipped, but pi tool-call broken without thinking
+
+- Patched kiln `chat_template_options_from_kwargs` to respect new env var
+  `KILN_DEFAULT_NO_THINK=1` (commit 91bca83a). Verified: curl `/v1/chat/completions`
+  with no `chat_template_kwargs` now returns `content: "..."` immediately,
+  `finish_reason: "stop"` in <1s.
+- Pi standalone test against patched kiln WORKS: `pi -p "Say HELLO briefly"`
+  returns "HELLO" cleanly in 30s with session JSONL written.
+- **BUT** pi with the full code-comprehension task prompt (1000+ tokens
+  describing JSON schema, reading + grepping files) STILL hits 180s timeout
+  with no session output written and `exit=124`. Verified with both
+  iter-4 adapter loaded AND base model.
+- Hypothesis: with `enable_thinking=false`, the model emits content directly
+  but doesn't produce tool calls in the OpenAI format pi expects. Pi's
+  agentic loop tries to coax tool calls from the text response, gets stuck.
+  iter-4 adapter was trained against thinking-on responses where tool calls
+  emerged from the reasoning trace; without thinking, the LoRA's learned
+  behavior is out of distribution.
+
+## Path D (next session) — drop pi for single-turn rollouts
+
+The cleanest fix: don't use pi at all for code-comprehension rollouts. Take
+the single-turn approach used by `pi-faithful-completion`:
+- Send chat completion to kiln with system+user prompt that includes
+  the target file contents + grep results pre-computed in Python
+- Read the assistant's response as the structured JSON answer
+- Score with the existing rubric
+
+Trade-off: loses the agentic dimension of the capability (the model no
+longer chooses what to read/grep). But the capability's WORTH was always
+just emitting good JSON summaries — the grep-then-read step was scaffolding,
+not the trained behavior. Plus pi-faithful-completion shows this approach
+works fine for similar tasks. Estimated complexity: rewrite rollout.py to
+~100 LOC of direct kiln HTTP + Python file IO. ~30 min work.
+
+Files committed in this session worth keeping for next session:
+- Kiln patch: `crates/kiln-server/src/api/completions.rs` (`KILN_DEFAULT_NO_THINK`)
+- drive.py: pod-alive guard, 3-failure circuit breaker, `update_in_progress_md`,
+  realistic rollout timeout based on max-wall-clock × num × concurrency
+- Recipes 12-50: warm-from-iter-4 patched (would need revisit if doing single-turn)
+- This IN_PROGRESS.md diagnosis trail
+
+## Session close-out — final state
+
+11/50 iters logged in capability.jsonl. Iter 4 `h4-echo-0075` BEST at
+composite **0.7405** (+0.1293 / +21.2% over 0.6112 baseline). B2 stable
+backup at `b2://clouderic/kiln/pi-code-comprehension/BEST_ADAPTER_iter4/adapter.tgz`
+(43.9 MB, sha256 verified). All session commits pushed to main.
+
+Next session checklist:
+1. Set `KILN_DEFAULT_NO_THINK=1` on kiln serve env (or pass `chat_template_kwargs`
+   per request)
+2. Implement single-turn rollout.py (Path D above) — kill pi dependency
+3. Resume drive at iter 12, use existing recipes (revert warm-start patch
+   if testing base recipes)
+
 ## Update 2026-05-20 04:30 — root cause confirmed
 
 - `/no_think` directive does NOT work — Qwen3.5 chat template only respects
