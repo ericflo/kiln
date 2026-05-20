@@ -388,8 +388,11 @@ ignoring it.
   mismatch, target-module mismatch, missing tensor, extra tensor, and exact
   tensor shape mismatch with the offending tensor name.
 
-**Commit SHA:** Implementation commit to be recorded in the follow-up metadata
-commit after push.
+**Commit SHA:** `67b1e6b4` (`Issue 6: validate base adapter shapes`),
+pushed to `origin/main` on 2026-05-20. Note: the commit contains the
+implementation and initial validation notes; this status line is recorded in
+the follow-up metadata commit because a commit cannot include its own final
+SHA.
 
 **Remaining risk:** Validation type-checks the training paths and CUDA
 examples but does not run a full GPU fine-tuning job. Base-adapter shape
