@@ -46,7 +46,8 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 14   | h14-incorrect-only chain         | —         | —      | VOIDED — A6000 lease expired during iter 14, pod EXITED, smart_drive cycled FAILED rows on dead pod |
 | 15   | h15-rank2-chain                  | —         | —      | VOIDED — same pod death |
 | 16   | h16-3epochs-chain                | —         | —      | VOIDED — same pod death |
-| 14v2 | h14-incorrect-only-from-base     | —         | —      | **in flight on A100 u5kbp38gjy4wxi** — train ONLY on incorrect-class tasks (24pp headroom) from base, not chain. Tests whether concentrated-headroom training helps. |
+| 14   | h14-incorrect-only-from-base     | 0.7715    | −0.170 | **concentrated training BACKFIRED** — even the targeted class itself collapsed: incorrect 0.757 → 0.418 (−34pp). Clean 0.998 → 0.856, drift 0.975 → 0.883. The model needs the diverse mix to stay coherent; training only on broken tasks teaches it the wrong thing. |
+| 15   | h15-rank2-hardmix-from-base      | —         | —      | **in flight on A100** — rank-2 LoRA on hard-mix corpus, from base. Tests minimum-perturbation hypothesis. |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far (11 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
@@ -58,6 +59,8 @@ Lease expires `2026-05-19T12:52:01Z`.
 **Epoch sweep (iter 11):** 2 epochs at lr=1e-5 → 0.8676, better than the 1-epoch comparable iter 10 → 0.8422. Mild evidence that longer training helps slightly at this lr.
 
 **Chain compound test (iter 13):** Loaded iter 2 adapter (0.9246) from B2, trained another GRPO step on top with the same T=1.0 + hard-mix recipe → 0.8462 (−8pp from iter 2). **Compounding GRPO on a trained adapter actively degrades it.** Suggests every successful iter so far was lucky, not a smooth optimization path. Smart_drive will pivot the next hypotheses away from chain-from-best.
+
+**Concentrated-headroom training (iter 14):** Train only on `incorrect`-class tasks (where base has 24pp headroom) from base. **All 3 classes collapsed**, including the targeted one: incorrect 0.757 → 0.418 (−34pp), clean 0.998 → 0.856, drift 0.975 → 0.883. Composite 0.7715 (−17pp). The model needs the diverse training mix to stay coherent; concentrating on broken tasks doesn't teach it to fix them, it teaches it to model the broken distribution. Strong evidence against "isolate the weak class" as a training strategy.
 
 ## Key learnings (intermediate)
 
