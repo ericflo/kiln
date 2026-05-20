@@ -39,7 +39,8 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 11   | h11-2epoch                       | —         | —      | VOIDED — cascaded from iter 10 (kiln-serve died, no eval ran) |
 | 12   | h12-rank8 (rank 8 / alpha 16)    | —         | —      | VOIDED — A100 lease expired mid-rollouts |
 | 13   | h13-rank64                       | —         | —      | VOIDED — drive kept running against dead A100 pod (now killed) |
-| 13+  | (queued)                          | —         | —      | A6000 bootstrap re-running (had 'no weights' false positive — fixed by stripping blank lines in tail check) |
+| 10v2 | h10-echo-0.02 (retry on A6000)   | —         | —      | **in flight on A6000 9jshui49gl9up2** — clean kiln-serve, fresh A6000 lease (180min) |
+| 11+  | (queued)                          | —         | —      | drive_iters_fast.sh auto-chains 11-49 if iter 10v2 succeeds |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far:** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
