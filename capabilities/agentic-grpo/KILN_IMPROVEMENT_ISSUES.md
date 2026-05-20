@@ -485,6 +485,46 @@ and model commit were actually used.
 - JSON schema is documented and stable.
 - Existing cap scripts can parse it without scraping stdout.
 
+**Status:** Completed and pushed to `main`.
+
+**Implementation notes:** Added `train_receipt.json` as a stable trainer-owned
+artifact with schema version 1 and documented it in
+`docs/TRAIN_RECEIPT_SCHEMA.md`. Generic SFT, in-memory GRPO, streamed GRPO,
+CUDA-native SFT, Vulkan-native SFT/GRPO, and OPD now write receipts next to
+the produced adapter. Receipts include kiln source revision/dirty state,
+model/tokenizer config hashes, base/output adapter hashes, training data
+hashes, core hyperparameters, GRPO/ECHO/no-policy-loss settings, data and
+reward stats, action/env/context token counts, wall-clock time, and LoRA
+delta norm summaries. Known validation failures in the generic trainer,
+CUDA-native SFT, and OPD write `"status": "failed"` receipts at the intended
+adapter path before returning the validation error.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-20 on RTX A6000 pod `yu0x0wt25rz8u8`,
+  lease `pod-9d17510419e3a5930b68a4fc`.
+- Remote command sequence: `cargo test -p kiln-train train_receipt --lib`;
+  `cargo check -p kiln-train --tests`; `cargo check -p kiln-server --tests`;
+  `KILN_CUDA_ARCHS=86 cargo check --release -p kiln-train --features cuda
+  --example cuda_grpo_ablation`; `KILN_CUDA_ARCHS=86 cargo check --release
+  -p kiln-train --features cuda --example cuda_sft_file`;
+  `KILN_CUDA_ARCHS=86 cargo check --release -p kiln-train --features cuda
+  --example cuda_opd_remote`.
+- Remote sentinel `/workspace/kiln-validation/issue8-final.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue8-final.log`.
+- Focused receipt tests passed 4 tests covering success/failure round trips,
+  SHA-256 stability, and reward variance histogram shape.
+
+**Commit SHA:** `aea5db9f` (`Issue 8: emit structured training receipts`),
+pushed to `origin/main` on 2026-05-20. Note: the commit contains the
+implementation and schema docs; this status line is recorded in the follow-up
+metadata commit because a commit cannot include its own final SHA.
+
+**Remaining risk:** Full-workspace `cargo fmt --check` is still blocked by
+pre-existing formatting drift in unrelated Vulkan files and tests. This issue
+validated whitespace with `git diff --check` and avoided sweeping unrelated
+formatting changes into the receipt commit.
+
 ### 9. Add GRPO Dry-Run Validation Mode
 
 **Area:** `examples/cuda_grpo_ablation.rs`, `crates/kiln-train`
