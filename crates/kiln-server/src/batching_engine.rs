@@ -57,6 +57,22 @@ fn env_prefix_aware_admission() -> bool {
     }
 }
 
+/// Decide whether multi-row decode steps should be issued one-row-at-a-time
+/// instead of as a single batched forward. The current Vulkan batched-decode
+/// path materializes per-layer state cats/narrows that cost more than running
+/// N single-row forwards through the resident-decode fast path, so rowwise is
+/// the throughput win on Vulkan today. CUDA / Metal keep batched decode by
+/// default. `KILN_BATCH_DECODE_ROWWISE` (0/1) overrides the auto choice.
+fn default_rowwise_decode(backend_name: Option<&'static str>) -> bool {
+    if let Ok(raw) = std::env::var("KILN_BATCH_DECODE_ROWWISE") {
+        return !matches!(
+            raw.trim(),
+            "0" | "false" | "FALSE" | "off" | "OFF" | "no" | "NO"
+        );
+    }
+    matches!(backend_name, Some("vulkan"))
+}
+
 #[derive(Debug, Clone)]
 pub struct EngineRequest {
     pub request_id: Uuid,
@@ -190,6 +206,13 @@ pub struct RealDecodeForward {
     paged_cache: Arc<PagedKvCache>,
     prefix_cache: Arc<Mutex<RealPrefixCache>>,
     gpu_lock: GpuCoordinationLock,
+    // When set, multi-row decode steps are dispatched as a loop of single-row
+    // forwards instead of one batched forward. Default-on for Vulkan because
+    // the resident-decode fast path (single-row, GPU-resident state/scratch)
+    // is dramatically faster than the legacy batched-row path that materializes
+    // per-layer cats/narrows for every step. Two concurrent playground
+    // requests measured ~0.16 tok/s aggregate batched vs ~14 tok/s rowwise.
+    rowwise_decode: bool,
 }
 
 impl RealDecodeForward {
@@ -200,13 +223,20 @@ impl RealDecodeForward {
         prefix_cache: Arc<Mutex<RealPrefixCache>>,
         gpu_lock: GpuCoordinationLock,
     ) -> Self {
+        let rowwise_decode = default_rowwise_decode(runner.read().ok().map(|g| g.backend_name()));
         Self {
             runner,
             block_manager,
             paged_cache,
             prefix_cache,
             gpu_lock,
+            rowwise_decode,
         }
+    }
+
+    pub fn with_rowwise_decode(mut self, rowwise: bool) -> Self {
+        self.rowwise_decode = rowwise;
+        self
     }
 
     fn release_hit(&self, hit_entry_id: Option<u64>) {
@@ -406,11 +436,39 @@ impl DecodeForward for RealDecodeForward {
                 row_refs.len(),
                 decode_params.len()
             );
-            let next_tokens = self.runner.read().unwrap().paged_batched_decode_step(
-                &mut row_refs,
-                &decode_params,
-                self.paged_cache.as_ref(),
-            )?;
+            let runner_guard = self.runner.read().unwrap();
+            let next_tokens: Vec<TokenId> = if self.rowwise_decode && row_refs.len() > 1 {
+                // Dispatch one single-row forward per active slot. On Vulkan
+                // each row then hits the resident-decode fast path
+                // (`gated_deltanet_forward_decode_resident_b1` + cached weight
+                // buffers + GPU-resident scratch), which the multi-row path
+                // does not. Even though the rows now serialize on the GPU
+                // queue, total throughput is dramatically higher because the
+                // single-row kernel is hand-tuned for decode.
+                let mut tokens = Vec::with_capacity(row_refs.len());
+                for (row, params) in row_refs.iter_mut().zip(decode_params.iter()) {
+                    let mut single_row: [&mut PagedBatchedDecodeState; 1] = [&mut **row];
+                    let single_params = std::slice::from_ref(params);
+                    let mut next = runner_guard.paged_batched_decode_step(
+                        &mut single_row,
+                        single_params,
+                        self.paged_cache.as_ref(),
+                    )?;
+                    anyhow::ensure!(
+                        next.len() == 1,
+                        "rowwise decode returned {} tokens for a 1-row step",
+                        next.len()
+                    );
+                    tokens.push(next.remove(0));
+                }
+                tokens
+            } else {
+                runner_guard.paged_batched_decode_step(
+                    &mut row_refs,
+                    &decode_params,
+                    self.paged_cache.as_ref(),
+                )?
+            };
             for (idx, token) in decode_indices.into_iter().zip(next_tokens) {
                 output[idx] = token;
             }
@@ -1106,6 +1164,36 @@ mod tests {
         assert_eq!(blocks_needed_for_tokens(1, 16), 1);
         assert_eq!(blocks_needed_for_tokens(16, 16), 1);
         assert_eq!(blocks_needed_for_tokens(17, 16), 2);
+    }
+
+    #[test]
+    fn default_rowwise_decode_picks_vulkan_unless_overridden() {
+        // Snapshot + restore the env var so other tests that share this
+        // process see the original value.
+        let prior = std::env::var("KILN_BATCH_DECODE_ROWWISE").ok();
+        // SAFETY: tests in this crate that touch this env var must not run in
+        // parallel; cargo defaults to serial within a single test binary.
+        unsafe {
+            std::env::remove_var("KILN_BATCH_DECODE_ROWWISE");
+        }
+        assert!(default_rowwise_decode(Some("vulkan")));
+        assert!(!default_rowwise_decode(Some("cuda")));
+        assert!(!default_rowwise_decode(Some("metal")));
+        assert!(!default_rowwise_decode(None));
+        unsafe {
+            std::env::set_var("KILN_BATCH_DECODE_ROWWISE", "0");
+        }
+        assert!(!default_rowwise_decode(Some("vulkan")));
+        assert!(!default_rowwise_decode(Some("cuda")));
+        unsafe {
+            std::env::set_var("KILN_BATCH_DECODE_ROWWISE", "1");
+        }
+        assert!(default_rowwise_decode(Some("cuda")));
+        assert!(default_rowwise_decode(None));
+        match prior {
+            Some(v) => unsafe { std::env::set_var("KILN_BATCH_DECODE_ROWWISE", v) },
+            None => unsafe { std::env::remove_var("KILN_BATCH_DECODE_ROWWISE") },
+        }
     }
 
     #[test]
