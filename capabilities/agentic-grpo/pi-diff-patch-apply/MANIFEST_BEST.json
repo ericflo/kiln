@@ -1,0 +1,35 @@
+{
+  "capability": "pi-diff-patch-apply",
+  "loop_concluded_at": "2026-05-20T13:00:00Z",
+  "iters_target": 50,
+  "iters_attempted": 28,
+  "iters_with_valid_eval_logged": 14,
+  "iters_voided_pod_death_or_crash": 14,
+  "best_adapter": {
+    "iter": 25,
+    "slug": "h25-no-policy-loss-default",
+    "composite": 0.9233229166666667,
+    "baseline_composite": 0.9418645833333333,
+    "delta_vs_baseline": -0.01854166666666668,
+    "class_means": {"clean": 0.9884615384615384, "drift": 1.0, "incorrect": 0.6619499999999999},
+    "rollouts_passed": 22,
+    "n_rollouts": 24,
+    "mechanism": "--no-policy-loss flag: only ECHO auxiliary loss runs, no GRPO policy gradient. Avoids the verbosity / clean-class-collapse pathology that hurt all 13+ policy-gradient iters.",
+    "recipe_flags": "--num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --no-policy-loss",
+    "train_corpus": "datasets/train.tasks.jsonl (default, 50/30/20 clean/drift/incorrect matching eval)",
+    "preserved_paths": {
+      "local": "/tmp/preserved-adapters/iter25-adapter.tgz",
+      "b2_preserved": "b2://clouderic/kiln/pi-diff-patch-apply/adapters-preserved/iter25-adapter.tgz",
+      "b2_iter_backup": "b2://clouderic/kiln/pi-diff-patch-apply/20260520/iter-25-train/"
+    }
+  },
+  "runner_up": {
+    "iter": 2,
+    "slug": "h2-strong-filter-T1.0",
+    "composite": 0.9246,
+    "delta_vs_baseline": -0.0173,
+    "note": "Statistically tied with iter 25. Earlier lucky GRPO result. Less interpretable mechanism."
+  },
+  "key_finding": "GRPO's policy gradient is the primary mechanism of harm on saturated-baseline capabilities (>=0.94 base composite). Removing it (--no-policy-loss, ECHO-only) ties or beats every other recipe. The drift class improved from 0.975 to 1.000 with no other class regressed materially.",
+  "recommendation": "Use iter 25's adapter, OR just use the base model (statistically equivalent on composite). For future capabilities at saturation, default to --no-policy-loss or pivot to OPD."
+}

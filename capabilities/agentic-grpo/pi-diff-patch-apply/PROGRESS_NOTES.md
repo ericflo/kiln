@@ -1,7 +1,6 @@
 # pi-diff-patch-apply: 50-iter GRPO loop — Progress Notes
 
-**Status:** In-flight. Pod: L40S `4z9ofil5k8rlxs` (lease pod-7e747cbee9fc5b604c293d49).
-Lease expires `2026-05-19T12:52:01Z`.
+**Status:** CONCLUDED 2026-05-20. Loop ran 25 iters of 50 target (14 valid eval, 14 voided to pod deaths / pool exhaustion / cuda_grpo crashes). **Best adapter: iter 25 `pi-diff-patch-apply-iter25` (`--no-policy-loss` / ECHO-only) at composite 0.9233 / drift class 1.000.** See FINAL_WRITEUP.md for the full story.
 
 ## What got built (scaffold v1, all under capabilities/agentic-grpo/pi-diff-patch-apply/)
 
