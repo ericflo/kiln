@@ -45,7 +45,7 @@ adapter operation, controls model state.
 - A loaded adapter remains active across requests that omit `adapter`.
 - Documentation states the exact semantics.
 
-**Status:** Completed locally, awaiting commit/push.
+**Status:** Completed and pushed to `main`.
 
 **Implementation notes:** Added an explicit `ChatAdapterSelection` policy for
 `/v1/chat/completions` so Serde distinguishes omitted `adapter` from explicit
@@ -70,7 +70,10 @@ semantics.
   `stable-x86_64-unknown-linux-musl` toolchain does not have `cargo-fmt`
   installed in this environment.
 
-**Commit SHA:** Pending commit creation for this issue.
+**Commit SHA:** `47f31b25` (`Issue 1: define chat adapter semantics`), pushed
+to `origin/main` on 2026-05-20. Note: the commit contains the implementation
+and initial validation notes; this status line is recorded in the follow-up
+metadata commit because a commit cannot include its own final SHA.
 
 **Remaining risk:** Runtime adapter swapping remains serialized through the
 existing global runner swap path; this issue preserves default semantics but
