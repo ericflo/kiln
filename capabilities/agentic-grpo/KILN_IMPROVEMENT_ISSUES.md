@@ -102,7 +102,7 @@ directory before mutating state.
 - A test covers the common nested-output mistake.
 - The server logs load failures at warn level with path and reason.
 
-**Status:** Completed locally, awaiting commit/push.
+**Status:** Completed and pushed to `main`.
 
 **Implementation notes:** Added `validate_loadable_adapter_dir` before backend
 selection or model mutation in `/v1/adapters/load`. The load endpoint now
@@ -125,7 +125,11 @@ validation failures.
   check; warnings were pre-existing unused items/imports plus CUDA-not-found
   warnings from non-CUDA local environment).
 
-**Commit SHA:** Pending commit creation for this issue.
+**Commit SHA:** `54f8c689` (`Issue 2: validate adapter load layout`),
+pushed to `origin/main` on 2026-05-20. Note: the commit contains the
+implementation and initial validation notes; this status line is recorded in
+the follow-up metadata commit because a commit cannot include its own final
+SHA.
 
 **Remaining risk:** Tests exercise the validation layer in mock backend mode
 so they prove bad layouts fail before backend mutation. They intentionally do
