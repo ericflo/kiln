@@ -47,7 +47,8 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 15   | h15-rank2-chain                  | —         | —      | VOIDED — same pod death |
 | 16   | h16-3epochs-chain                | —         | —      | VOIDED — same pod death |
 | 14   | h14-incorrect-only-from-base     | 0.7715    | −0.170 | **concentrated training BACKFIRED** — even the targeted class itself collapsed: incorrect 0.757 → 0.418 (−34pp). Clean 0.998 → 0.856, drift 0.975 → 0.883. The model needs the diverse mix to stay coherent; training only on broken tasks teaches it the wrong thing. |
-| 15   | h15-rank2-hardmix-from-base      | —         | —      | **in flight on A100** — rank-2 LoRA on hard-mix corpus, from base. Tests minimum-perturbation hypothesis. |
+| 15   | h15-rank2-hardmix-from-base      | EVAL-PENDING | — | Adapter trained (rank 2, ~7MB ✓). Eval failed mid-smoke from transient pod runtime/ports glitch. Will backfill-eval when kiln has capacity. |
+| 16   | h16-3epochs-from-base            | —         | —      | **in flight on A100** — 3 epochs on hard-mix from base. iter 11 showed 2 ep > 1 ep; extrapolate. |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far (11 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
