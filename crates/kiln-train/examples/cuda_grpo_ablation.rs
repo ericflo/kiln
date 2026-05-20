@@ -245,6 +245,11 @@ struct Args {
     /// scratch. Used by Phase 3 verifier-free chaining: take a strong
     /// Phase 2 adapter, run `--no-policy-loss` from those weights.
     base_adapter: Option<String>,
+    /// Optional serve-ready adapter registry. When set, the completed adapter
+    /// directory is installed here under --install-adapter-name or --adapter.
+    install_adapter_dir: Option<PathBuf>,
+    /// Optional install name used with --install-adapter-dir.
+    install_adapter_name: Option<String>,
 }
 
 #[cfg(feature = "cuda")]
@@ -265,6 +270,8 @@ impl Args {
         let mut opd_lambda: Option<f64> = None;
         let mut no_policy_loss = false;
         let mut base_adapter: Option<String> = None;
+        let mut install_adapter_dir: Option<PathBuf> = None;
+        let mut install_adapter_name: Option<String> = None;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -335,12 +342,22 @@ impl Args {
                 "--base-adapter" => {
                     base_adapter = Some(args.next().context("--base-adapter needs a path")?)
                 }
+                "--install-adapter-dir" => {
+                    install_adapter_dir = Some(PathBuf::from(
+                        args.next().context("--install-adapter-dir needs a value")?,
+                    ))
+                }
+                "--install-adapter-name" => {
+                    install_adapter_name =
+                        Some(args.next().context("--install-adapter-name needs a value")?)
+                }
                 "--help" | "-h" => {
                     println!(
                         "cuda_grpo_ablation --data <jsonl> --model <dir> [--output <dir>] \
                          [--adapter <name>] --mode <baseline|phase1|phase1_gspo|phase1_cispo|\
                          phase1_reinforce|...> [--max-groups N] [--rank N] [--alpha F] \
-                         [--lr F] [--seed N] [--echo-lambda F | --no-echo] [--opd-lambda F]"
+                         [--lr F] [--seed N] [--echo-lambda F | --no-echo] [--opd-lambda F] \
+                         [--install-adapter-dir DIR] [--install-adapter-name NAME]"
                     );
                     println!();
                     println!("ECHO flags (Phase 1, paper §3.3):");
@@ -370,6 +387,9 @@ impl Args {
                 "--no-policy-loss requires ECHO to drive gradients; can't combine with --no-echo"
             );
         }
+        if install_adapter_name.is_some() && install_adapter_dir.is_none() {
+            anyhow::bail!("--install-adapter-name requires --install-adapter-dir");
+        }
 
         Ok(Args {
             data: data.context("--data is required")?,
@@ -387,6 +407,8 @@ impl Args {
             opd_lambda,
             no_policy_loss,
             base_adapter,
+            install_adapter_dir,
+            install_adapter_name,
         })
     }
 }
@@ -607,7 +629,35 @@ fn main() -> Result<()> {
     let _ = poller.join();
     let peak_mib = peak.load(Ordering::Relaxed);
     let output_path = result?;
-    println!("adapter={}", output_path.display());
+    let adapter_dir = output_path
+        .canonicalize()
+        .unwrap_or_else(|_| output_path.clone());
+    let mut installed_adapter_dir: Option<PathBuf> = None;
+    if let Some(install_dir) = args.install_adapter_dir.as_deref() {
+        let install_name = args
+            .install_adapter_name
+            .as_deref()
+            .unwrap_or(&args.adapter_name);
+        let installed =
+            kiln_train::install_adapter_symlink(&adapter_dir, install_dir, install_name)
+                .with_context(|| {
+                    format!(
+                        "install adapter {} into {} as {}",
+                        adapter_dir.display(),
+                        install_dir.display(),
+                        install_name
+                    )
+                })?;
+        println!("INSTALLED_ADAPTER_DIR={}", installed.display());
+        installed_adapter_dir = Some(installed);
+    }
+    kiln_train::write_adapter_output_receipt(
+        &adapter_dir,
+        &args.adapter_name,
+        installed_adapter_dir.as_deref(),
+    )?;
+    println!("ADAPTER_DIR={}", adapter_dir.display());
+    println!("adapter={}", adapter_dir.display());
     println!("peak_vram_mib={peak_mib}");
     println!("elapsed_secs={:.3}", start.elapsed().as_secs_f64());
     println!("mode_done={}", args.mode.as_str());

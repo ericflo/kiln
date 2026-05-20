@@ -1603,6 +1603,17 @@ pub fn save_cuda_lora_adapter_dir(
         .with_context(|| format!("save CUDA adapter tensors {}", adapter_path.display()))?;
     write_cuda_adapter_config(output_dir, rank, alpha)
         .with_context(|| format!("write CUDA adapter config {}", output_dir.display()))?;
+    let adapter_name = output_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("adapter");
+    crate::adapter_output::write_adapter_output_receipt(output_dir, adapter_name, None)
+        .with_context(|| {
+            format!(
+                "write CUDA adapter output receipt {}",
+                output_dir.display()
+            )
+        })?;
     Ok(output_dir.to_path_buf())
 }
 

@@ -823,6 +823,17 @@ impl TrainableLoraParams {
         let st_path = output_dir.join("adapter_model.safetensors");
         candle_core::safetensors::save(&tensor_data, &st_path)
             .with_context(|| format!("saving safetensors to {}", st_path.display()))?;
+        let adapter_name = output_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("adapter");
+        crate::adapter_output::write_adapter_output_receipt(output_dir, adapter_name, None)
+            .with_context(|| {
+                format!(
+                    "writing adapter output receipt to {}",
+                    output_dir.display()
+                )
+            })?;
 
         tracing::info!(
             path = %output_dir.display(),

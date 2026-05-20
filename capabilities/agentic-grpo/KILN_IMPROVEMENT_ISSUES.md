@@ -301,6 +301,41 @@ convention. That produced the adapter symlink bug.
 - Install operation validates the target before replacing existing symlink.
 - Receipt and stdout agree on the adapter path.
 
+**Status:** Completed and pushed to `main`.
+
+**Implementation notes:** Added `adapter_receipt.json` emission for PEFT and
+CUDA adapter saves. The receipt records the canonical adapter directory plus
+the config and safetensors paths, and can include the installed registry path
+when the CUDA GRPO ablation example installs the adapter. The example now
+prints `ADAPTER_DIR=<absolute path>` on successful completion while preserving
+the legacy `adapter=...` line. Added `--install-adapter-dir <dir>` and
+`--install-adapter-name <name>`; installs validate the produced adapter first,
+create the registry when needed, replace existing symlinks atomically, and
+refuse to replace a real adapter directory.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-20 on RTX A6000 pod `yu0x0wt25rz8u8`,
+  lease `pod-9d17510419e3a5930b68a4fc`.
+- Remote command sequence: `cargo test -p kiln-train adapter_output --lib`;
+  `cargo check -p kiln-train --tests`;
+  `KILN_CUDA_ARCHS=86 cargo check --release -p kiln-train --features cuda --example cuda_grpo_ablation`.
+- Remote sentinel `/workspace/kiln-validation/issue5-release.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue5-release.log`.
+- Focused tests passed 4 adapter-output tests covering canonical receipts,
+  nested adapter diagnostics, symlink replacement after validation, and
+  refusal to replace a real existing adapter directory.
+- The CUDA example was checked in release profile because the first debug
+  CUDA check attempted `nvcc -G` and was killed by the pod; release profile is
+  the documented kiln CUDA validation path.
+
+**Commit SHA:** Implementation commit to be recorded in the follow-up metadata
+commit after push.
+
+**Remaining risk:** Validation proves the receipt/install helper behavior and
+type-checks the CUDA GRPO example. It does not run a full GPU training job to
+produce a real learned adapter end to end.
+
 ### 6. Enforce Base-Adapter Shape Compatibility Before Training
 
 **Area:** `crates/kiln-train`

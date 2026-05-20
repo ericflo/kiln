@@ -7,6 +7,7 @@
 #[cfg(feature = "cuda")]
 pub mod cuda_train;
 pub mod diagnostics;
+pub mod adapter_output;
 pub mod echo;
 pub mod logit_cache;
 pub mod logit_source;
@@ -32,6 +33,10 @@ pub use diagnostics::{
     LengthInflationGuardrail, OpdDiagnosticSnapshot, REPETITION_GUARDRAIL_THRESHOLD, RolloutSummary,
     SELF_PLAY_SATURATION_THRESHOLD, SELF_PLAY_SATURATION_WINDOW, build_snapshot, repetition_rate,
     rollout_diversity, truncation_rate,
+};
+pub use adapter_output::{
+    ADAPTER_RECEIPT_FILENAME, AdapterOutputReceipt, install_adapter_symlink,
+    validate_adapter_output_dir, validate_install_adapter_name, write_adapter_output_receipt,
 };
 pub use logit_source::{
     DeterministicUniformLogitSource, LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch,
