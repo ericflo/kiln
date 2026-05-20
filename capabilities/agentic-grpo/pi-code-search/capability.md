@@ -178,6 +178,19 @@ Both NO_ECHO and ECHO=0.10 collapse the model into the
 outcome=0. Default λ=0.05 is the productive band for this cap; the
 paper's upper edge (0.10) is too aggressive on env-CE here.
 
+**LoRA rank — rank=32 collapses worse than ECHO ablations:**
+
+| Iter | Rank | Alpha | Composite | Δ vs base | Notes |
+|------|------|-------|-----------|-----------|-------|
+| 1-5 reeval | 16 | 32 | 0.56-0.58 | +0.02 to +0.04 | all lift |
+| 8 | 32 | 64 | **0.1106** | **-0.433** | catastrophic regression (27/32 zeros, 5/32 outcome pass) |
+
+Doubling LoRA capacity (rank=16→32, alpha=32→64) catastrophically
+regresses the cap. This is the worst regression yet. Hypothesis: 4B
+model + rank-32 = too much policy drift per token, model collapses
+into the same think-indefinitely pattern but worse. Will NOT explore
+ranks ≥32 further. Will try rank=8 to test the other direction.
+
 ### Lessons backported
 
 - **kiln-polish.jsonl** entry to file: every cap that writes adapters
