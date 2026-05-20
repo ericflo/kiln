@@ -12,6 +12,7 @@ pub mod diagnostics;
 pub mod echo;
 pub mod logit_cache;
 pub mod logit_source;
+pub mod lora_scaling;
 pub mod opd;
 pub mod receipt;
 pub mod remote_teacher;
@@ -46,6 +47,10 @@ pub use adapter_shape::{
 pub use logit_source::{
     DeterministicUniformLogitSource, LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch,
     TopKLogprobs,
+};
+pub use lora_scaling::{
+    ALLOW_HIGH_LORA_SCALE_FLAG, MAX_LORA_ALPHA_OVER_RANK, alpha_over_rank,
+    validate_lora_scaling,
 };
 pub use opd::{
     AgenticLossInputs, AgenticLossWeights, COLD_START_DEFAULT_EPOCHS, COLD_START_DEFAULT_PROMPTS,
@@ -162,6 +167,10 @@ pub struct SftConfig {
     /// incompatible base adapters still fail before optimizer setup.
     #[serde(default)]
     pub allow_adapter_shape_conversion: bool,
+    /// Permit alpha/rank above the default safety limit for deliberate
+    /// experiments.
+    #[serde(default)]
+    pub allow_high_lora_scale: bool,
     /// Name for the output adapter. Auto-generated if not set.
     pub output_name: Option<String>,
     /// Automatically load the resulting adapter when training completes (default true).
@@ -207,6 +216,7 @@ impl Default for SftConfig {
             lora_alpha: default_alpha(),
             base_adapter: None,
             allow_adapter_shape_conversion: false,
+            allow_high_lora_scale: false,
             output_name: None,
             auto_load: default_auto_load(),
             checkpoint_interval: None,
@@ -490,6 +500,10 @@ pub struct GrpoConfig {
     /// incompatible base adapters still fail before optimizer setup.
     #[serde(default)]
     pub allow_adapter_shape_conversion: bool,
+    /// Permit alpha/rank above the default safety limit for deliberate
+    /// experiments.
+    #[serde(default)]
+    pub allow_high_lora_scale: bool,
     pub output_name: Option<String>,
     /// Automatically load the resulting adapter when training completes (default true).
     #[serde(default = "default_auto_load")]
@@ -761,6 +775,7 @@ impl Default for GrpoConfig {
             lora_alpha: default_alpha(),
             base_adapter: None,
             allow_adapter_shape_conversion: false,
+            allow_high_lora_scale: false,
             output_name: None,
             auto_load: default_auto_load(),
             checkpoint_interval: None,

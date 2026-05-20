@@ -228,6 +228,7 @@ fn run_one(
         lora_alpha: 16.0,
         base_adapter: None,
         allow_adapter_shape_conversion: false,
+        allow_high_lora_scale: false,
         output_name: Some(format!("phase10-rmsnorm-T{target_t}-{tag}")),
         auto_load: false,
         checkpoint_interval: None,

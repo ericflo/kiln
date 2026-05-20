@@ -415,6 +415,39 @@ The trainer currently allows dangerous settings without warning.
 - Receipt records `rank`, `alpha`, and `alpha_over_rank`.
 - Tests cover accepted and rejected configurations.
 
+**Status:** Completed and pushed to `main`.
+
+**Implementation notes:** Added a shared LoRA scaling guard with the default
+limit `alpha / rank <= 2.0`. SFT, GRPO, streamed JSONL GRPO, OPD, and
+CUDA-native SFT now validate rank/alpha before optimizer setup; the CUDA
+token-sequence adapter helpers also reject unsafe scaling by default.
+`cuda_grpo_ablation`, `cuda_sft_file`, and `cuda_opd_remote` expose
+`--allow-high-lora-scale` for deliberate experiments. `adapter_receipt.json`
+now records `rank`, `alpha`, and `alpha_over_rank` from the adapter config.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-20 on RTX A6000 pod `yu0x0wt25rz8u8`,
+  lease `pod-9d17510419e3a5930b68a4fc`.
+- Remote command sequence: `cargo test -p kiln-train lora_scaling --lib`;
+  `cargo test -p kiln-train adapter_output --lib`;
+  `cargo check -p kiln-train --tests`; `cargo check -p kiln-server --tests`;
+  `KILN_CUDA_ARCHS=86 cargo check --release -p kiln-train --features cuda --example cuda_grpo_ablation`;
+  `KILN_CUDA_ARCHS=86 cargo check --release -p kiln-train --features cuda --example cuda_sft_file`;
+  `KILN_CUDA_ARCHS=86 cargo check --release -p kiln-train --features cuda --example cuda_opd_remote`.
+- Remote sentinel `/workspace/kiln-validation/issue7.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue7.log`.
+- Focused tests passed 3 scaling tests covering accepted default-limit
+  scaling, rejected high scaling, and explicit override. Adapter-output tests
+  also passed and verify receipt `rank`, `alpha`, and `alpha_over_rank`.
+
+**Commit SHA:** Implementation commit to be recorded in the follow-up metadata
+commit after push.
+
+**Remaining risk:** Validation covers config checks and CUDA example
+type-checks, but it does not run a full training job with an overridden high
+LoRA scale.
+
 ### 8. Emit A Structured Training Receipt For Every GRPO/SFT Run
 
 **Area:** `crates/kiln-train`

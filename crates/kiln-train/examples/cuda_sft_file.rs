@@ -68,6 +68,7 @@ struct Args {
     learning_rate: f64,
     base_adapter: Option<String>,
     allow_adapter_shape_conversion: bool,
+    allow_high_lora_scale: bool,
 }
 
 #[cfg(feature = "cuda")]
@@ -88,6 +89,7 @@ impl Args {
         let mut learning_rate = 1e-4f64;
         let mut base_adapter: Option<String> = None;
         let mut allow_adapter_shape_conversion = false;
+        let mut allow_high_lora_scale = false;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -117,6 +119,7 @@ impl Args {
                     base_adapter = Some(args.next().context("--base-adapter requires a value")?)
                 }
                 "--allow-adapter-shape-conversion" => allow_adapter_shape_conversion = true,
+                "--allow-high-lora-scale" => allow_high_lora_scale = true,
                 "--data" => data = args.next().map(PathBuf::from),
                 "--model-path" => model_path = args.next().map(PathBuf::from),
                 "--output-dir" => {
@@ -179,6 +182,7 @@ impl Args {
                          [--epochs <n>] [--skip-examples <n>] [--max-examples <n>] \
                          [--checkpoint-interval <n>] [--vram-poll-millis <n>] \
                          [--base-adapter <dir>] [--allow-adapter-shape-conversion] \
+                         [--allow-high-lora-scale] \
                          [--trainer native|generic|server|default]"
                     );
                     std::process::exit(0);
@@ -207,6 +211,7 @@ impl Args {
             learning_rate,
             base_adapter,
             allow_adapter_shape_conversion,
+            allow_high_lora_scale,
         })
     }
 }
@@ -346,6 +351,7 @@ fn main() -> Result<()> {
         lora_alpha: args.lora_alpha,
         base_adapter: args.base_adapter.clone(),
         allow_adapter_shape_conversion: args.allow_adapter_shape_conversion,
+        allow_high_lora_scale: args.allow_high_lora_scale,
         output_name: Some(args.adapter_name.clone()),
         auto_load: false,
         checkpoint_interval: args.checkpoint_interval,

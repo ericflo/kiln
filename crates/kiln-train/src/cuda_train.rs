@@ -1224,6 +1224,7 @@ pub fn cuda_lora_train_token_sequences_with_gdn_state_to_adapter(
     adamw_cfg: CudaAdamWConfig,
     output_dir: &Path,
 ) -> Result<(PathBuf, Vec<f32>)> {
+    crate::lora_scaling::validate_lora_scaling(rank, alpha, false)?;
     let lora_layers =
         cuda_init_lora_layers(model, rank, alpha, seed).context("initialize CUDA LoRA layers")?;
     let mut adamw =
@@ -1293,6 +1294,7 @@ pub fn cuda_full_attention_lora_train_token_sequences_to_adapter(
     adamw_cfg: CudaAdamWConfig,
     output_dir: &Path,
 ) -> Result<(PathBuf, Vec<f32>)> {
+    crate::lora_scaling::validate_lora_scaling(rank, alpha, false)?;
     let lora_layers =
         cuda_init_lora_layers(model, rank, alpha, seed).context("initialize CUDA LoRA layers")?;
     let mut adamw =
@@ -1339,6 +1341,12 @@ pub fn cuda_native_sft_train(
         adapter_name,
         "starting cuda-native SFT training"
     );
+
+    crate::lora_scaling::validate_lora_scaling(
+        config.lora_rank,
+        config.lora_alpha,
+        config.allow_high_lora_scale,
+    )?;
 
     if let Some(base_adapter) = config.base_adapter.as_deref() {
         anyhow::bail!(

@@ -181,6 +181,7 @@ fn run_one(
         lora_alpha: 16.0,
         base_adapter: None,
         allow_adapter_shape_conversion: false,
+        allow_high_lora_scale: false,
         output_name: Some(format!("flce-preflight-T{target_t}")),
         auto_load: false,
         checkpoint_interval: None,

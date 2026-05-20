@@ -495,6 +495,11 @@ pub struct OpdConfig {
     #[serde(default = "default_alpha")]
     pub lora_alpha: f32,
 
+    /// Permit alpha/rank above the default safety limit for deliberate
+    /// experiments.
+    #[serde(default)]
+    pub allow_high_lora_scale: bool,
+
     /// If set, continue training from this adapter (continual learning,
     /// §3.6 refresh recipe). When the teacher is the user's *prior*
     /// adapter, this is Lu's `recover-instruction-following` recipe.
@@ -577,6 +582,7 @@ impl Default for OpdConfig {
             learning_rate: default_opd_lr(),
             lora_rank: default_rank(),
             lora_alpha: default_alpha(),
+            allow_high_lora_scale: false,
             base_adapter: None,
             output_name: None,
             auto_load: default_auto_load(),
@@ -1704,6 +1710,12 @@ pub fn opd_train(
         adapter_name,
         "starting OPD training"
     );
+
+    crate::lora_scaling::validate_lora_scaling(
+        config.lora_rank,
+        config.lora_alpha,
+        config.allow_high_lora_scale,
+    )?;
 
     let effective_seed = config.seed;
 

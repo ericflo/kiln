@@ -14,8 +14,17 @@ pub struct AdapterOutputReceipt {
     pub adapter_dir: String,
     pub adapter_config: String,
     pub adapter_model: String,
+    pub rank: usize,
+    pub alpha: f32,
+    pub alpha_over_rank: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub installed_adapter_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdapterOutputConfig {
+    r: usize,
+    lora_alpha: f32,
 }
 
 pub fn validate_adapter_output_dir(adapter_dir: &Path) -> Result<PathBuf> {
@@ -55,16 +64,27 @@ pub fn write_adapter_output_receipt(
     installed_adapter_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     let resolved = validate_adapter_output_dir(adapter_dir)?;
+    let adapter_config_path = resolved.join("adapter_config.json");
+    let adapter_config: AdapterOutputConfig = serde_json::from_slice(
+        &std::fs::read(&adapter_config_path)
+            .with_context(|| format!("read {}", adapter_config_path.display()))?,
+    )
+    .with_context(|| format!("parse {}", adapter_config_path.display()))?;
+    let alpha_over_rank =
+        crate::lora_scaling::alpha_over_rank(adapter_config.r, adapter_config.lora_alpha)?;
     let installed = installed_adapter_dir.map(|path| path.display().to_string());
     let receipt = AdapterOutputReceipt {
         schema_version: 1,
         adapter_name: adapter_name.to_string(),
         adapter_dir: resolved.display().to_string(),
-        adapter_config: resolved.join("adapter_config.json").display().to_string(),
+        adapter_config: adapter_config_path.display().to_string(),
         adapter_model: resolved
             .join("adapter_model.safetensors")
             .display()
             .to_string(),
+        rank: adapter_config.r,
+        alpha: adapter_config.lora_alpha,
+        alpha_over_rank,
         installed_adapter_dir: installed,
     };
     let path = resolved.join(ADAPTER_RECEIPT_FILENAME);
@@ -231,7 +251,16 @@ mod tests {
 
     fn write_minimal_adapter(path: &Path) {
         std::fs::create_dir_all(path).unwrap();
-        std::fs::write(path.join("adapter_config.json"), "{}").unwrap();
+        std::fs::write(
+            path.join("adapter_config.json"),
+            serde_json::json!({
+                "r": 2,
+                "lora_alpha": 4.0,
+                "target_modules": ["q_proj"],
+            })
+            .to_string(),
+        )
+        .unwrap();
         std::fs::write(path.join("adapter_model.safetensors"), "weights").unwrap();
     }
 
@@ -250,6 +279,9 @@ mod tests {
             receipt.adapter_dir,
             adapter.canonicalize().unwrap().display().to_string()
         );
+        assert_eq!(receipt.rank, 2);
+        assert_eq!(receipt.alpha, 4.0);
+        assert_eq!(receipt.alpha_over_rank, 2.0);
         assert!(receipt.adapter_config.ends_with("adapter_config.json"));
         assert!(receipt.adapter_model.ends_with("adapter_model.safetensors"));
     }

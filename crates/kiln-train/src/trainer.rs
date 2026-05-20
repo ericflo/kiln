@@ -943,6 +943,17 @@ pub fn sft_train(
         "starting SFT training"
     );
 
+    let alpha_over_rank = crate::lora_scaling::validate_lora_scaling(
+        config.lora_rank,
+        config.lora_alpha,
+        config.allow_high_lora_scale,
+    )?;
+    tracing::info!(
+        alpha_over_rank,
+        allow_high_lora_scale = config.allow_high_lora_scale,
+        "validated LoRA scaling"
+    );
+
     // Open replay state (writes request record + lineage.json *before* the
     // optimizer step, so a crash mid-step still leaves a recoverable trail)
     // and resolve the effective seed.
@@ -1255,6 +1266,17 @@ pub fn grpo_train(
         "starting GRPO training"
     );
 
+    let alpha_over_rank = crate::lora_scaling::validate_lora_scaling(
+        config.lora_rank,
+        config.lora_alpha,
+        config.allow_high_lora_scale,
+    )?;
+    tracing::info!(
+        alpha_over_rank,
+        allow_high_lora_scale = config.allow_high_lora_scale,
+        "validated LoRA scaling"
+    );
+
     // Open replay state (writes request record + lineage.json *before* the
     // optimizer step) and resolve the effective seed.
     let (replay_state, effective_seed) = match replay_ctx.as_ref() {
@@ -1552,6 +1574,17 @@ pub fn grpo_train_jsonl(
         alpha = config.lora_alpha,
         adapter_name,
         "starting streamed GRPO training"
+    );
+
+    let alpha_over_rank = crate::lora_scaling::validate_lora_scaling(
+        config.lora_rank,
+        config.lora_alpha,
+        config.allow_high_lora_scale,
+    )?;
+    tracing::info!(
+        alpha_over_rank,
+        allow_high_lora_scale = config.allow_high_lora_scale,
+        "validated LoRA scaling"
     );
 
     let (replay_state, effective_seed) = match replay_ctx.as_ref() {

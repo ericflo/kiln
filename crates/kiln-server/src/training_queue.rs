@@ -1159,6 +1159,7 @@ fn run_distill_refresh(
         lora_alpha: req.config.lora_alpha,
         base_adapter: req.config.base_adapter.clone(),
         allow_adapter_shape_conversion: false,
+        allow_high_lora_scale: req.config.allow_high_lora_scale,
         output_name: Some(midtrain_name.clone()),
         auto_load: false,
         checkpoint_interval: None,

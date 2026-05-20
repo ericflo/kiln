@@ -76,6 +76,7 @@ struct Args {
     max_examples: Option<usize>,
     lora_rank: usize,
     lora_alpha: f32,
+    allow_high_lora_scale: bool,
     learning_rate: f64,
     top_k: usize,
     temperature: f64,
@@ -98,6 +99,7 @@ impl Args {
         let mut max_examples = None;
         let mut lora_rank = 8usize;
         let mut lora_alpha = 16.0f32;
+        let mut allow_high_lora_scale = false;
         let mut learning_rate = 1e-4f64;
         let mut top_k = 8usize;
         let mut temperature = 1.0f64;
@@ -127,6 +129,7 @@ impl Args {
                 }
                 "--rank" => lora_rank = args.next().context("--rank value")?.parse()?,
                 "--alpha" => lora_alpha = args.next().context("--alpha value")?.parse()?,
+                "--allow-high-lora-scale" => allow_high_lora_scale = true,
                 "--lr" => learning_rate = args.next().context("--lr value")?.parse()?,
                 "--top-k" => top_k = args.next().context("--top-k value")?.parse()?,
                 "--temperature" => {
@@ -157,6 +160,7 @@ impl Args {
                          [--output-dir <dir>] [--adapter-name <name>] \
                          [--epochs N] [--max-examples N] \
                          [--rank N] [--alpha F] [--lr F] \
+                         [--allow-high-lora-scale] \
                          [--top-k K] [--temperature F] [--top-p F] [--max-tokens N] \
                          [--samples-per-prompt N] \
                          [--checkpoint-interval N | --no-checkpoint]\n\
@@ -183,6 +187,7 @@ impl Args {
             max_examples,
             lora_rank,
             lora_alpha,
+            allow_high_lora_scale,
             learning_rate,
             top_k,
             temperature,
@@ -291,6 +296,7 @@ fn main() -> Result<()> {
     cfg.learning_rate = args.learning_rate;
     cfg.lora_rank = args.lora_rank;
     cfg.lora_alpha = args.lora_alpha;
+    cfg.allow_high_lora_scale = args.allow_high_lora_scale;
     cfg.top_k = args.top_k;
     cfg.temperature = args.temperature;
     cfg.top_p = args.top_p;

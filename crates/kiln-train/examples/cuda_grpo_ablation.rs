@@ -247,6 +247,8 @@ struct Args {
     base_adapter: Option<String>,
     /// Reserved opt-in for future explicit base-adapter shape conversion.
     allow_adapter_shape_conversion: bool,
+    /// Allow alpha/rank above the default safety limit for deliberate tests.
+    allow_high_lora_scale: bool,
     /// Optional serve-ready adapter registry. When set, the completed adapter
     /// directory is installed here under --install-adapter-name or --adapter.
     install_adapter_dir: Option<PathBuf>,
@@ -273,6 +275,7 @@ impl Args {
         let mut no_policy_loss = false;
         let mut base_adapter: Option<String> = None;
         let mut allow_adapter_shape_conversion = false;
+        let mut allow_high_lora_scale = false;
         let mut install_adapter_dir: Option<PathBuf> = None;
         let mut install_adapter_name: Option<String> = None;
 
@@ -346,6 +349,7 @@ impl Args {
                     base_adapter = Some(args.next().context("--base-adapter needs a path")?)
                 }
                 "--allow-adapter-shape-conversion" => allow_adapter_shape_conversion = true,
+                "--allow-high-lora-scale" => allow_high_lora_scale = true,
                 "--install-adapter-dir" => {
                     install_adapter_dir = Some(PathBuf::from(
                         args.next().context("--install-adapter-dir needs a value")?,
@@ -362,6 +366,7 @@ impl Args {
                          phase1_reinforce|...> [--max-groups N] [--rank N] [--alpha F] \
                          [--lr F] [--seed N] [--echo-lambda F | --no-echo] [--opd-lambda F] \
                          [--base-adapter DIR] [--allow-adapter-shape-conversion] \
+                         [--allow-high-lora-scale] \
                          [--install-adapter-dir DIR] [--install-adapter-name NAME]"
                     );
                     println!();
@@ -413,6 +418,7 @@ impl Args {
             no_policy_loss,
             base_adapter,
             allow_adapter_shape_conversion,
+            allow_high_lora_scale,
             install_adapter_dir,
             install_adapter_name,
         })
@@ -530,6 +536,7 @@ fn main() -> Result<()> {
         seed: Some(args.seed),
         optimizer: Optimizer::default(),
         allow_adapter_shape_conversion: args.allow_adapter_shape_conversion,
+        allow_high_lora_scale: args.allow_high_lora_scale,
         ..GrpoConfig::default()
     };
     let mut config = args.mode.apply(base);
