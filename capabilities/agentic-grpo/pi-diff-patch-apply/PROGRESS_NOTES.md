@@ -49,7 +49,8 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 14   | h14-incorrect-only-from-base     | 0.7715    | −0.170 | **concentrated training BACKFIRED** — even the targeted class itself collapsed: incorrect 0.757 → 0.418 (−34pp). Clean 0.998 → 0.856, drift 0.975 → 0.883. The model needs the diverse mix to stay coherent; training only on broken tasks teaches it the wrong thing. |
 | 15   | h15-rank2-hardmix-from-base      | EVAL-PENDING | — | Adapter trained (rank 2, ~7MB ✓). Eval failed mid-smoke from transient pod runtime/ports glitch. Will backfill-eval when kiln has capacity. |
 | 16   | h16-3epochs-from-base            | EVAL-PENDING | — | Adapter trained ✓ (rank 16, 61MB), **smoke composite 0.85** (best smoke seen). Eval bailed on transient SSH glitch like iter 15. Two adapters now waiting for backfill-eval. |
-| 17   | h17-6tasks-6gens-from-base       | —         | —      | **in flight on A100** — 6 tasks × 6 gens for more per-task variance |
+| 17   | h17-6tasks-6gens-from-base       | 0.7106    | −0.231 | **WORST yet** — 6 unique tasks × 6 gens = overfits to small task set. Clean 0.998 → 0.767, drift 0.975 → 0.857, incorrect 0.757 → 0.388. Strong evidence: small task variety hurts more than the extra gens-per-task help. |
+| 18+  | (smart_drive auto-chaining)      | —         | —      | iter 18 (h18-lr5e-6-from-base) in flight |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far (11 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
