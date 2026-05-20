@@ -241,10 +241,15 @@ if [ "${EVAL_ONLY:-0}" != "1" ] && [ "${SKIP_TRAIN:-0}" != "1" ] && [ -s "$GRPO_
   set +x
 
   # Symlink the adapter into kiln-server's adapter dir so /v1/adapters/load
-  # finds it. (See kiln-polish.jsonl: adapter dir defaults to model_path/adapters/.)
+  # finds it. cuda_grpo_ablation writes weights to $ADAPTER_OUT/$ADAPTER_NAME/
+  # (one extra level of nesting) so the symlink target must include that
+  # nested directory — otherwise kiln tries to load $ADAPTER_OUT/ which
+  # has no adapter_model.safetensors and silently keeps the previous
+  # adapter active. (Adapters loaded for iters 1-5 silently no-op'd this
+  # way before the fix.)
   KILN_ADAPTERS_DIR="$KILN_MODEL_PATH/adapters"
   mkdir -p "$KILN_ADAPTERS_DIR"
-  ln -sfn "$ADAPTER_OUT" "$KILN_ADAPTERS_DIR/$ADAPTER_NAME"
+  ln -sfn "$ADAPTER_OUT/$ADAPTER_NAME" "$KILN_ADAPTERS_DIR/$ADAPTER_NAME"
 fi
 
 # Restart kiln-server if needed (training killed it). Use the same env
