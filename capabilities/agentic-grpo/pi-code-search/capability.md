@@ -128,15 +128,20 @@ correct here.
 | 1 | h1-fast-recipe | TRAIN_LIMIT=10, FILTER_VAR=0.05, MAX_GROUPS=10, lr=1e-5, rank=16 | 0.5461 | +0.003 | 0.755 | 0.455 | 0.906 | 1.81 | flat composite but **-61% tool calls** + **+0.05 eff** |
 | 2 | h2-low-filter | TRAIN_LIMIT=12, FILTER_VAR=0.02 | **0.2490** | **-0.294** | 0.294 | 0.590 | 0.344 | 1.59 | **regression**: train loss spiked at end (1.07→0.66→1.06), 22/32 zeros |
 | 3 | h3-no-filter | TRAIN_LIMIT=10, no filter, MAX_GROUPS=10 | **0.3604** | **-0.183** | 0.451 | 0.548 | 0.500 | 1.59 | **regression**: untouched-group training corrupted outcome, 17/32 zeros |
+| 4 | h4-tight-filter | TRAIN_LIMIT=20, FILTER_VAR=0.08 | **0.2848** | **-0.258** | 0.331 | 0.570 | 0.406 | 1.38 | **regression**: even tight filter regressed; thesis upset |
 
-**Pattern across iters 1-3:**
-- iter 1 (FILTER_VAR=0.05 → 2 surviving groups): only `kept` iter. Tight filter → small signal but stable.
-- iter 2 (FILTER_VAR=0.02 → 6 groups): wider filter, training loss spiked terminal step (1.07).
-- iter 3 (no filter → 10 groups): all groups training including low-variance ones; outcome collapses.
+**Iters 2-4 all regressed.** Three regressions in a row defeats the "noisy groups" thesis from iter 1-3 analysis. Common features:
+- All regressed iters have `mean_wall_clock` 100s+ on eval (vs iter 0 baseline 19s and iter 1 31s). The TRAINED model takes MUCH longer per pi turn.
+- All have `mean_n_tool_calls` 1.3-1.6 (vs baseline 4.6). Model emits FEWER tool calls but each one is enormous.
+- Outcome and grounding drop together — model issues a search, can't ground its answer in the result.
 
-**Provisional thesis:** the training is sensitive to noisy/low-variance groups — including a group where 3/4 completions had `reward=0` poisons the gradient. Iter 1's tight 2-group filter survived because both groups had real variance. Going forward: keep FILTER_VAR ≥ 0.05, OR use H_strong-signal-only filter (drop groups where >50% completions have reward<0.2).
+**Revised thesis:** the trained adapter shifts the model toward early-stop / overconfident "I know the answer" behavior but the answers are wrong. The adapter is being **over-trained** even on a single epoch of small filtered corpora. Iter 1 only "worked" because it trained on 2 groups for ~7 min — minimal damage.
 
-**Next:** iter 4 = h4-tight-filter (FILTER_VAR=0.08), iter 5 = h5-best-replay (re-run h1 with same config), iter 6 = h6-balanced-corpus (TRAIN_LIMIT=20 FILTER_VAR=0.05 to find sweet spot).
+**Next directions to test:**
+- iter 5: replay iter 1 exact config (TRAIN_LIMIT=10, FILTER_VAR=0.05, MAX_GROUPS=10) — verify iter 1 result is reproducible.
+- iter 6: very low learning rate `LR=5e-6` (or even `LR=1e-6`) — slow the over-fit drift.
+- iter 7: `NO_ECHO=1` — control: maybe ECHO loss is driving the bad behavior on env tokens.
+- iter 8: higher rank (rank=32, alpha=64) with low lr — see if capacity helps stability.
 
 ## Adversarial design (§0)
 
