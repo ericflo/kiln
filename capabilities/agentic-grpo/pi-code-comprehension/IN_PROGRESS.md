@@ -183,6 +183,41 @@ to short-circuit the thinking tokens even for the base model.
 
 Path B (programmatic, no recipe changes) is the cleanest fix.
 
+## Update 2026-05-20 04:30 — root cause confirmed
+
+- `/no_think` directive does NOT work — Qwen3.5 chat template only respects
+  the `enable_thinking` kwarg in `apply_chat_template`, not inline tokens.
+  Verified: curl /v1/chat/completions with `/no_think say hello` still
+  emits `content=""` and `reasoning_content="Thinking Process:..."`.
+- Loading iter-4 LoRA on kiln (POST /v1/adapters/load returns `loaded`)
+  ALSO doesn't fix it — even chat completions with `adapter: pi-cc-iter4`
+  body param still return empty content. This is surprising because
+  iter-4 was trained against this same model and `did` short-circuit
+  thinking during its successful training session.
+- **Hypothesis**: HuggingFace re-pushed Qwen3.5-4B with a different
+  tokenizer_config (chat_template) that has thinking enabled by default
+  AND ignores adapter-learned token preferences. The iter-4 LoRA was
+  trained against the OLD template (thinking off by default) so its
+  learned "go straight to JSON" behavior is overridden by the new
+  template's `<think>\n` injection at the assistant turn.
+- **Required for next session**: a kiln-side change that either
+  (a) passes `enable_thinking=false` to `apply_chat_template` by default,
+  or (b) exposes a `chat_template_kwargs.enable_thinking` API param
+  that pi can set. Without that, base-model rollouts are broken for
+  this capability.
+
+## Session close-out
+
+11 successful iters logged in capability.jsonl. Iter 4 `h4-echo-0075`
+remains best at composite 0.7405 (+0.1293 vs 0.6112 baseline).
+
+B2 stable backup: `b2://clouderic/kiln/pi-code-comprehension/BEST_ADAPTER_iter4/adapter.tgz`
+(already in place from the original successful session).
+
+The remaining 39 iters' recipes are queued in recipes.json and will
+auto-resume on next session restart — provided the kiln chat template
+issue is fixed first (Path B above).
+
 ## Closeout plan
 
 - At iter 50 (or session wall-clock limit), pick best-eval adapter, re-eval at
