@@ -50,7 +50,12 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 15   | h15-rank2-hardmix-from-base      | EVAL-PENDING | — | Adapter trained (rank 2, ~7MB ✓). Eval failed mid-smoke from transient pod runtime/ports glitch. Will backfill-eval when kiln has capacity. |
 | 16   | h16-3epochs-from-base            | EVAL-PENDING | — | Adapter trained ✓ (rank 16, 61MB), **smoke composite 0.85** (best smoke seen). Eval bailed on transient SSH glitch like iter 15. Two adapters now waiting for backfill-eval. |
 | 17   | h17-6tasks-6gens-from-base       | 0.7106    | −0.231 | **WORST yet** — 6 unique tasks × 6 gens = overfits to small task set. Clean 0.998 → 0.767, drift 0.975 → 0.857, incorrect 0.757 → 0.388. Strong evidence: small task variety hurts more than the extra gens-per-task help. |
-| 18+  | (smart_drive auto-chaining)      | —         | —      | iter 18 (h18-lr5e-6-from-base) in flight |
+| 15   | h15-rank2-hardmix-from-base     | VOIDED    | —      | Adapter trained but A100 pod died before backfill-eval — weights lost with /tmp |
+| 16   | h16-3epochs-from-base           | VOIDED    | —      | Adapter trained (smoke 0.85!) but A100 pod died before backfill — promising signal lost. |
+| 18   | h18-lr5e-6-from-base             | VOIDED    | —      | A100 pod died mid-iter (lease expired or pod crashed) |
+| 19   | h19-combined-from-base           | VOIDED    | —      | A100 pod died |
+| 20   | h20-no-filter-from-base          | VOIDED    | —      | A100 pod died |
+| 18v2+| (new A100 pod 0b74tp4pjzenkb)    | —         | —      | Bootstrap in flight on fresh A100; smart_drive will resume at iter 18 |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far (11 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
