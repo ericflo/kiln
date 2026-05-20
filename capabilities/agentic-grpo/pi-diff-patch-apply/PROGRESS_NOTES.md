@@ -41,7 +41,8 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 13   | h13-rank64                       | —         | —      | VOIDED — drive kept running against dead A100 pod (now killed) |
 | 10   | h10-echo-0.02 (retry on A6000)   | 0.8422    | −0.100 | NEGATIVE — ECHO=0.02 ≈ no-echo (h8), both ~10pp regression. Confirms ECHO has little effect at these scales |
 | 11   | h11-2epoch (2 epochs)            | 0.8676    | −0.074 | NEGATIVE — 2 epochs beats 1 (h10 was 0.842). Suggests longer training is mildly helpful at lr=1e-5 |
-| 12+  | (queued)                          | —         | —      | **iter 12 (h12-rank8) in flight on A6000** — drive auto-chains 12-49 |
+| 12   | h12-rank8 (rank 8 / alpha 16)    | 0.8882    | −0.054 | NEGATIVE — best of 8-task sweep; rank-8 retains clean class (0.986). Smaller rank → less perturbation works. |
+| 13+  | (smart_drive launching)           | —         | —      | **smart_drive.sh** designs each iter from prior data; iter 13 = chain-from-best-adapter + iter 2 recipe |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far (11 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
