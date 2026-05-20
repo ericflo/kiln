@@ -441,8 +441,10 @@ now records `rank`, `alpha`, and `alpha_over_rank` from the adapter config.
   scaling, rejected high scaling, and explicit override. Adapter-output tests
   also passed and verify receipt `rank`, `alpha`, and `alpha_over_rank`.
 
-**Commit SHA:** Implementation commit to be recorded in the follow-up metadata
-commit after push.
+**Commit SHA:** `30fac60d` (`Issue 7: guard unsafe lora scaling`), pushed
+to `origin/main` on 2026-05-20. Note: the commit contains the implementation
+and initial validation notes; this status line is recorded in the follow-up
+metadata commit because a commit cannot include its own final SHA.
 
 **Remaining risk:** Validation covers config checks and CUDA example
 type-checks, but it does not run a full training job with an overridden high
