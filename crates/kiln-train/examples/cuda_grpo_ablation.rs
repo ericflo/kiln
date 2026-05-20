@@ -34,7 +34,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 #[cfg(feature = "cuda")]
 use kiln_model::forward::GpuWeights;
 #[cfg(feature = "cuda")]
-use kiln_train::trainer::grpo_train_jsonl;
+use kiln_train::trainer::{grpo_dry_run_jsonl, grpo_train_jsonl};
 #[cfg(feature = "cuda")]
 use kiln_train::{
     AdvantageMode, GrpoConfig, IsLevel, KlEstimator, LossAggregation, Optimizer, ReferencePolicy,
@@ -254,6 +254,11 @@ struct Args {
     install_adapter_dir: Option<PathBuf>,
     /// Optional install name used with --install-adapter-dir.
     install_adapter_name: Option<String>,
+    /// Validate data, masks, filters, and adapter inputs without loading
+    /// model weights or running forward/backward.
+    dry_run: bool,
+    /// Permit a dry run where dynamic sampling filters every group.
+    allow_empty_dry_run: bool,
 }
 
 #[cfg(feature = "cuda")]
@@ -278,6 +283,8 @@ impl Args {
         let mut allow_high_lora_scale = false;
         let mut install_adapter_dir: Option<PathBuf> = None;
         let mut install_adapter_name: Option<String> = None;
+        let mut dry_run = false;
+        let mut allow_empty_dry_run = false;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -359,6 +366,8 @@ impl Args {
                     install_adapter_name =
                         Some(args.next().context("--install-adapter-name needs a value")?)
                 }
+                "--dry-run" => dry_run = true,
+                "--allow-empty-dry-run" => allow_empty_dry_run = true,
                 "--help" | "-h" => {
                     println!(
                         "cuda_grpo_ablation --data <jsonl> --model <dir> [--output <dir>] \
@@ -367,7 +376,8 @@ impl Args {
                          [--lr F] [--seed N] [--echo-lambda F | --no-echo] [--opd-lambda F] \
                          [--base-adapter DIR] [--allow-adapter-shape-conversion] \
                          [--allow-high-lora-scale] \
-                         [--install-adapter-dir DIR] [--install-adapter-name NAME]"
+                         [--install-adapter-dir DIR] [--install-adapter-name NAME] \
+                         [--dry-run] [--allow-empty-dry-run]"
                     );
                     println!();
                     println!("ECHO flags (Phase 1, paper §3.3):");
@@ -421,6 +431,8 @@ impl Args {
             allow_high_lora_scale,
             install_adapter_dir,
             install_adapter_name,
+            dry_run,
+            allow_empty_dry_run,
         })
     }
 }
@@ -503,24 +515,7 @@ fn main() -> Result<()> {
 
     let tokenizer = load_tokenizer(&args.model_path)?;
     let dataset_path = maybe_subset_dataset(&args.data, args.max_groups)?;
-
-    anyhow::ensure!(
-        candle_core::utils::cuda_is_available(),
-        "CUDA is not available in this build/runtime"
-    );
-    let device = candle_core::Device::new_cuda(0).context("create CUDA device 0")?;
     let model_config = ModelConfig::qwen3_5_4b();
-    println!("loading_model={}", args.model_path.display());
-    let model_weights = kiln_model::load_model_with_options(
-        &args.model_path,
-        &model_config,
-        kiln_model::LoadModelOptions { load_mtp: false },
-    )
-    .context("load model weights")?;
-    let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)
-        .context("transfer weights to CUDA")?;
-    drop(model_weights);
-    println!("model_loaded_vram_mib={}", current_vram_mib());
 
     std::fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("creating {}", args.output_dir.display()))?;
@@ -598,6 +593,88 @@ fn main() -> Result<()> {
         args.seed,
         echo_lambda_str,
     );
+
+    if args.dry_run {
+        let report = grpo_dry_run_jsonl(
+            &dataset_path,
+            &config,
+            &model_config,
+            &tokenizer,
+            &args.output_dir,
+            &args.adapter_name,
+            args.allow_empty_dry_run,
+        )?;
+        let reward_mean = report
+            .rewards
+            .mean
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "none".to_string());
+        let reward_stdev = report
+            .rewards
+            .stdev
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "none".to_string());
+        let variance_histogram = report
+            .rewards
+            .group_variance_histogram
+            .iter()
+            .map(|bucket| format!("{}={}", bucket.label, bucket.count))
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "dry_run=ok adapter_dir={} receipt={}",
+            report.adapter_dir.display(),
+            report.receipt_path.display()
+        );
+        println!(
+            "dry_run_data groups_read={} groups_filtered={} groups_valid={} \
+             completions_read={} completions_valid={}",
+            report.data.groups_read,
+            report.data.groups_filtered,
+            report.data.groups_trained,
+            report.data.completions_read,
+            report.data.completions_trained
+        );
+        println!(
+            "dry_run_tokens action_tokens={} env_tokens={} context_tokens={}",
+            report.token_counts.action_tokens,
+            report.token_counts.env_tokens,
+            report.token_counts.context_tokens
+        );
+        println!(
+            "dry_run_rewards count={} mean={} stdev={} variance_histogram={}",
+            report.rewards.count,
+            reward_mean,
+            reward_stdev,
+            variance_histogram
+        );
+        if let Some(base) = report.base_adapter_dir.as_deref() {
+            println!("dry_run_base_adapter={}", base.display());
+        }
+        if let Some(alpha_over_rank) = report.alpha_over_rank {
+            println!("dry_run_alpha_over_rank={alpha_over_rank}");
+        }
+        println!("elapsed_secs={:.3}", start.elapsed().as_secs_f64());
+        println!("mode_done={}", args.mode.as_str());
+        return Ok(());
+    }
+
+    anyhow::ensure!(
+        candle_core::utils::cuda_is_available(),
+        "CUDA is not available in this build/runtime"
+    );
+    let device = candle_core::Device::new_cuda(0).context("create CUDA device 0")?;
+    println!("loading_model={}", args.model_path.display());
+    let model_weights = kiln_model::load_model_with_options(
+        &args.model_path,
+        &model_config,
+        kiln_model::LoadModelOptions { load_mtp: false },
+    )
+    .context("load model weights")?;
+    let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)
+        .context("transfer weights to CUDA")?;
+    drop(model_weights);
+    println!("model_loaded_vram_mib={}", current_vram_mib());
 
     let stop = Arc::new(AtomicBool::new(false));
     let peak = Arc::new(AtomicU64::new(baseline_mib));

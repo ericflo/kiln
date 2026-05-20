@@ -2,8 +2,10 @@
 
 `train_receipt.json` is written next to every adapter produced by kiln-owned
 SFT, GRPO, CUDA-native SFT, Vulkan-native SFT/GRPO, and OPD training paths.
-It is the stable machine-readable training audit artifact. Scripts should read
-this file instead of scraping trainer stdout.
+GRPO dry-run validation also writes the same receipt at the intended adapter
+path before any model forward/backward occurs. It is the stable
+machine-readable training audit artifact. Scripts should read this file instead
+of scraping trainer stdout.
 
 ## Location
 

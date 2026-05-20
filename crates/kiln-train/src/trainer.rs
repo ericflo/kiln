@@ -48,7 +48,7 @@ use crate::replay::{
 };
 use crate::{
     AdvantageMode, ChatMessage, GrpoConfig, GrpoGroup, IsLevel, KlEstimator, LossAggregation,
-    Optimizer, ReferencePolicy, SftConfig, SftExample,
+    Optimizer, ReferencePolicy, SftConfig, SftExample, TurnKind,
 };
 
 /// Per-job context the HTTP layer hands the trainer so the training run can
@@ -847,6 +847,18 @@ pub struct TrainingProgress {
     pub progress: f32,
 }
 
+#[derive(Debug, Clone)]
+pub struct GrpoDryRunReport {
+    pub adapter_dir: PathBuf,
+    pub receipt_path: PathBuf,
+    pub base_adapter_dir: Option<PathBuf>,
+    pub alpha_over_rank: Option<f32>,
+    pub data: crate::train_receipt::DataStatsReceipt,
+    pub rewards: crate::train_receipt::RewardStatsReceipt,
+    pub token_counts: crate::train_receipt::TokenCountReceipt,
+    pub dynamic_groups_filtered: usize,
+}
+
 /// Build a progress bar for a training step/group loop.
 ///
 /// Returns `None` when stderr is not a TTY so log files, server-mode tracing,
@@ -1028,7 +1040,7 @@ fn write_sft_train_receipt_best_effort(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn write_grpo_train_receipt_best_effort(
+fn build_grpo_train_receipt(
     adapter_name: &str,
     model_config: &ModelConfig,
     tokenizer: &KilnTokenizer,
@@ -1044,7 +1056,7 @@ fn write_grpo_train_receipt_best_effort(
     wall_clock_ms: u64,
     dynamic_groups_filtered: usize,
     status_error: Option<String>,
-) {
+) -> crate::train_receipt::TrainReceipt {
     let mut receipt = crate::train_receipt::TrainReceipt::new(
         adapter_name,
         "grpo",
@@ -1077,6 +1089,44 @@ fn write_grpo_train_receipt_best_effort(
     if let Some(err) = status_error {
         receipt = receipt.mark_failed(err);
     }
+    receipt
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_grpo_train_receipt_best_effort(
+    adapter_name: &str,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    config: &GrpoConfig,
+    effective_seed: Option<u64>,
+    alpha_over_rank: Option<f32>,
+    base_adapter_dir: Option<&Path>,
+    output_dir: &Path,
+    training_data: crate::train_receipt::TrainingDataReceipt,
+    data: crate::train_receipt::DataStatsReceipt,
+    rewards: crate::train_receipt::RewardStatsReceipt,
+    token_counts: crate::train_receipt::TokenCountReceipt,
+    wall_clock_ms: u64,
+    dynamic_groups_filtered: usize,
+    status_error: Option<String>,
+) {
+    let receipt = build_grpo_train_receipt(
+        adapter_name,
+        model_config,
+        tokenizer,
+        config,
+        effective_seed,
+        alpha_over_rank,
+        base_adapter_dir,
+        output_dir,
+        training_data,
+        data,
+        rewards,
+        token_counts,
+        wall_clock_ms,
+        dynamic_groups_filtered,
+        status_error,
+    );
     if let Err(err) = receipt.write_to_adapter_dir(output_dir) {
         tracing::warn!(adapter = adapter_name, error = %err, "failed to write GRPO train receipt");
     }
@@ -1903,6 +1953,193 @@ pub fn grpo_train(
     result.map(|(dir, _)| dir)
 }
 
+/// Validate a streamed GRPO JSONL dataset and training configuration without
+/// loading model weights or running forward/backward.
+pub fn grpo_dry_run_jsonl(
+    dataset_path: &Path,
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    adapter_name: &str,
+    allow_empty_after_filter: bool,
+) -> Result<GrpoDryRunReport> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let run_started = Instant::now();
+    let output_dir = adapter_dir.join(adapter_name);
+    let receipt_path = output_dir.join(crate::train_receipt::TRAIN_RECEIPT_FILENAME);
+    let training_data = crate::train_receipt::TrainingDataReceipt {
+        source: "jsonl_grpo_groups_dry_run".to_string(),
+        path: Some(dataset_path.display().to_string()),
+        sha256: crate::train_receipt::sha256_file(dataset_path).ok(),
+    };
+    let requested_base_adapter_dir = config
+        .base_adapter
+        .as_deref()
+        .map(|name| crate::adapter_shape::resolve_base_adapter_dir(name, adapter_dir));
+    let mut data_stats = crate::train_receipt::DataStatsReceipt::default();
+    let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+    let mut reward_stats = crate::train_receipt::RewardStatsReceipt::default();
+    let mut dynamic_groups_filtered = 0usize;
+    let mut alpha_over_rank = None;
+    let mut base_adapter_dir = None;
+
+    let result = (|| -> Result<GrpoDryRunReport> {
+        let ratio = crate::lora_scaling::validate_lora_scaling(
+            config.lora_rank,
+            config.lora_alpha,
+            config.allow_high_lora_scale,
+        )?;
+        alpha_over_rank = Some(ratio);
+        base_adapter_dir = resolve_and_validate_base_adapter(
+            config.base_adapter.as_deref(),
+            adapter_dir,
+            model_config,
+            config.lora_rank,
+            config.allow_adapter_shape_conversion,
+        )?;
+
+        let file = File::open(dataset_path)
+            .with_context(|| format!("open GRPO JSONL dataset {}", dataset_path.display()))?;
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        let mut line_no = 0usize;
+        let mut processed_groups = 0usize;
+        let mut processed_completions = 0usize;
+        let mut reward_groups: Vec<Vec<f64>> = Vec::new();
+
+        loop {
+            line.clear();
+            let read = reader.read_line(&mut line).with_context(|| {
+                format!(
+                    "read GRPO JSONL dataset {} line {}",
+                    dataset_path.display(),
+                    line_no + 1
+                )
+            })?;
+            if read == 0 {
+                break;
+            }
+            line_no += 1;
+            let Some(group) = parse_grpo_jsonl_group_line(&line, line_no)? else {
+                continue;
+            };
+            validate_grpo_trajectory_roles(&group, line_no)?;
+            data_stats.groups_read = data_stats.groups_read.saturating_add(1);
+            data_stats.completions_read = data_stats
+                .completions_read
+                .saturating_add(group.completions.len());
+
+            if config.dynamic_sampling && is_degenerate_grpo_group(&group) {
+                dynamic_groups_filtered = dynamic_groups_filtered.saturating_add(1);
+                data_stats.groups_filtered = data_stats.groups_filtered.saturating_add(1);
+                continue;
+            }
+
+            let group_idx = processed_groups + 1;
+            let tgroup = tokenize_grpo_group(&group, tokenizer).with_context(|| {
+                format!("tokenize GRPO dry-run group {group_idx} at line {line_no}")
+            })?;
+            validate_grpo_dry_run_masks(&tgroup, group_idx, line_no)?;
+            let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(&tgroup));
+            token_counts.action_tokens = token_counts
+                .action_tokens
+                .saturating_add(group_counts.action_tokens);
+            token_counts.env_tokens = token_counts
+                .env_tokens
+                .saturating_add(group_counts.env_tokens);
+            token_counts.context_tokens = token_counts
+                .context_tokens
+                .saturating_add(group_counts.context_tokens);
+            processed_groups = processed_groups.saturating_add(1);
+            processed_completions =
+                processed_completions.saturating_add(tgroup.completions.len());
+            reward_groups.push(tgroup.rewards.clone());
+        }
+
+        data_stats.groups_trained = processed_groups;
+        data_stats.completions_trained = processed_completions;
+        reward_stats = crate::train_receipt::reward_stats_from_groups(
+            reward_groups.iter().map(Vec::as_slice),
+        );
+
+        if processed_groups == 0 && !allow_empty_after_filter {
+            anyhow::bail!(
+                "GRPO dry run: zero valid GRPO groups after filtering in {}; pass --allow-empty-dry-run to permit this",
+                dataset_path.display()
+            );
+        }
+        if processed_groups > 0 {
+            anyhow::ensure!(
+                processed_completions > 0,
+                "GRPO dry run: no valid GRPO completions in {}",
+                dataset_path.display()
+            );
+            anyhow::ensure!(
+                token_counts.action_tokens > 0,
+                "GRPO dry run: dataset has no action tokens after mask construction"
+            );
+            if config.loss.echo_enabled() {
+                anyhow::ensure!(
+                    token_counts.env_tokens > 0,
+                    "GRPO dry run: ECHO is enabled but env_mask is empty across all valid groups; pass --no-echo or provide trajectory Observation/tool segments"
+                );
+            }
+        }
+
+        Ok(GrpoDryRunReport {
+            adapter_dir: output_dir.clone(),
+            receipt_path: receipt_path.clone(),
+            base_adapter_dir: base_adapter_dir.clone(),
+            alpha_over_rank,
+            data: data_stats.clone(),
+            rewards: reward_stats.clone(),
+            token_counts: token_counts.clone(),
+            dynamic_groups_filtered,
+        })
+    })();
+
+    let status_error = result.as_ref().err().map(|err| format!("{err:#}"));
+    let receipt = build_grpo_train_receipt(
+        adapter_name,
+        model_config,
+        tokenizer,
+        config,
+        config.seed,
+        alpha_over_rank,
+        base_adapter_dir
+            .as_deref()
+            .or(requested_base_adapter_dir.as_deref()),
+        &output_dir,
+        training_data,
+        data_stats,
+        reward_stats,
+        token_counts,
+        run_started.elapsed().as_millis() as u64,
+        dynamic_groups_filtered,
+        status_error,
+    );
+    let receipt_write = receipt
+        .write_to_adapter_dir(&output_dir)
+        .with_context(|| format!("write GRPO dry-run receipt {}", receipt_path.display()));
+
+    match (result, receipt_write) {
+        (Ok(report), Ok(_)) => Ok(report),
+        (Ok(_), Err(err)) => Err(err),
+        (Err(err), Ok(_)) => Err(err),
+        (Err(err), Err(write_err)) => {
+            tracing::warn!(
+                adapter = adapter_name,
+                error = %write_err,
+                "failed to write GRPO dry-run receipt after validation failure"
+            );
+            Err(err)
+        }
+    }
+}
+
 /// Stream GRPO training from a JSONL dataset path using the generic candle path.
 ///
 /// Each non-empty line must be one [`GrpoGroup`]. Unlike [`grpo_train`], this
@@ -2384,6 +2621,59 @@ fn token_counts_for_grpo_groups(
         }
     }
     counts
+}
+
+fn validate_grpo_trajectory_roles(group: &GrpoGroup, line_no: usize) -> Result<()> {
+    for (rollout_idx, rollout) in group.completions.iter().enumerate() {
+        for (segment_idx, segment) in rollout.trajectory.iter().enumerate() {
+            let role = segment.role.trim();
+            anyhow::ensure!(
+                !role.is_empty(),
+                "malformed trajectory role at line {line_no}, completion {rollout_idx}, segment {segment_idx}: role must be non-empty"
+            );
+            match segment.kind {
+                TurnKind::Action => anyhow::ensure!(
+                    role.eq_ignore_ascii_case("assistant"),
+                    "malformed trajectory role at line {line_no}, completion {rollout_idx}, segment {segment_idx}: Action segment must use role \"assistant\", got {:?}",
+                    segment.role
+                ),
+                TurnKind::Observation => anyhow::ensure!(
+                    role.eq_ignore_ascii_case("tool"),
+                    "malformed trajectory role at line {line_no}, completion {rollout_idx}, segment {segment_idx}: Observation segment must use role \"tool\", got {:?}",
+                    segment.role
+                ),
+                TurnKind::Context => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_grpo_dry_run_masks(
+    group: &TokenizedGrpoGroup,
+    group_idx: usize,
+    line_no: usize,
+) -> Result<()> {
+    for (completion_idx, completion) in group.completions.iter().enumerate() {
+        anyhow::ensure!(
+            completion.action_mask.len() == completion.input_ids.len(),
+            "GRPO dry run: group {group_idx} line {line_no} completion {completion_idx} action_mask length {} does not match input_ids length {}",
+            completion.action_mask.len(),
+            completion.input_ids.len()
+        );
+        anyhow::ensure!(
+            completion.env_mask.len() == completion.input_ids.len(),
+            "GRPO dry run: group {group_idx} line {line_no} completion {completion_idx} env_mask length {} does not match input_ids length {}",
+            completion.env_mask.len(),
+            completion.input_ids.len()
+        );
+        let action_tokens = completion.action_mask.iter().filter(|&&active| active).count();
+        anyhow::ensure!(
+            action_tokens > 0,
+            "GRPO dry run: group {group_idx} line {line_no} completion {completion_idx} has empty action_mask"
+        );
+    }
+    Ok(())
 }
 
 fn parse_grpo_jsonl_group_line(line: &str, line_no: usize) -> Result<Option<GrpoGroup>> {
@@ -9317,6 +9607,246 @@ mod tests {
         assert!(is_degenerate_grpo_group(&mk(&[])));
         assert!(!is_degenerate_grpo_group(&mk(&[1.0, 0.0, 1.0])));
         assert!(!is_degenerate_grpo_group(&mk(&[0.5, 0.5, 0.500001])));
+    }
+
+    fn dry_run_config(echo: bool, dynamic_sampling: bool) -> GrpoConfig {
+        let mut config = GrpoConfig {
+            dynamic_sampling,
+            lora_rank: 8,
+            lora_alpha: 16.0,
+            seed: Some(42),
+            ..GrpoConfig::default()
+        };
+        if !echo {
+            config.loss.echo = None;
+        }
+        config
+    }
+
+    fn dry_run_dataset(dir: &Path, name: &str, groups: &[GrpoGroup]) -> PathBuf {
+        let path = dir.join(name);
+        let mut body = String::new();
+        for group in groups {
+            body.push_str(&serde_json::to_string(group).unwrap());
+            body.push('\n');
+        }
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn dry_run_group(completions: Vec<crate::ScoredRollout>) -> GrpoGroup {
+        GrpoGroup {
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "a".to_string(),
+            }],
+            completions,
+        }
+    }
+
+    fn dry_run_action(content: &str) -> crate::TurnSegment {
+        crate::TurnSegment {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            kind: TurnKind::Action,
+            tool_call_id: None,
+            warning_prefix_len: None,
+        }
+    }
+
+    fn dry_run_observation(content: &str) -> crate::TurnSegment {
+        crate::TurnSegment {
+            role: "tool".to_string(),
+            content: content.to_string(),
+            kind: TurnKind::Observation,
+            tool_call_id: None,
+            warning_prefix_len: None,
+        }
+    }
+
+    #[test]
+    fn grpo_dry_run_rejects_malformed_trajectory_roles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tok = make_echo_smoke_tokenizer().unwrap();
+        let bad_action = crate::TurnSegment {
+            role: "user".to_string(),
+            content: "a".to_string(),
+            kind: TurnKind::Action,
+            tool_call_id: None,
+            warning_prefix_len: None,
+        };
+        let group = dry_run_group(vec![crate::ScoredRollout::from_trajectory(
+            vec![bad_action],
+            1.0,
+        )]);
+        let data = dry_run_dataset(tmp.path(), "bad-role.jsonl", &[group]);
+        let output = tmp.path().join("out");
+
+        let err = grpo_dry_run_jsonl(
+            &data,
+            &dry_run_config(false, false),
+            &ModelConfig::qwen3_5_4b(),
+            &tok,
+            &output,
+            "bad-role",
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("malformed trajectory role"));
+        assert!(err.to_string().contains("Action segment"));
+    }
+
+    #[test]
+    fn grpo_dry_run_rejects_empty_action_mask() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tok = make_echo_smoke_tokenizer().unwrap();
+        let group = dry_run_group(vec![crate::ScoredRollout::from_trajectory(
+            vec![dry_run_observation("b")],
+            1.0,
+        )]);
+        let data = dry_run_dataset(tmp.path(), "empty-action.jsonl", &[group]);
+        let output = tmp.path().join("out");
+
+        let err = grpo_dry_run_jsonl(
+            &data,
+            &dry_run_config(false, false),
+            &ModelConfig::qwen3_5_4b(),
+            &tok,
+            &output,
+            "empty-action",
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("empty action_mask"));
+    }
+
+    #[test]
+    fn grpo_dry_run_rejects_echo_without_env_tokens_and_writes_receipt() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let tok = make_echo_smoke_tokenizer()?;
+        let group = dry_run_group(vec![
+            crate::ScoredRollout::legacy("a".to_string(), 0.0),
+            crate::ScoredRollout::legacy("b".to_string(), 1.0),
+        ]);
+        let data = dry_run_dataset(tmp.path(), "echo-empty-env.jsonl", &[group]);
+        let output = tmp.path().join("out");
+
+        let err = grpo_dry_run_jsonl(
+            &data,
+            &dry_run_config(true, false),
+            &ModelConfig::qwen3_5_4b(),
+            &tok,
+            &output,
+            "echo-empty-env",
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("ECHO is enabled"));
+        let receipt =
+            crate::train_receipt::TrainReceipt::read_from_adapter_dir(&output.join("echo-empty-env"))?
+                .unwrap();
+        assert_eq!(
+            receipt.status,
+            crate::train_receipt::TrainReceiptStatus::Failed
+        );
+        assert_eq!(receipt.token_counts.env_tokens, 0);
+        assert!(receipt.failure_reason.unwrap().contains("ECHO is enabled"));
+        Ok(())
+    }
+
+    #[test]
+    fn grpo_dry_run_rejects_zero_groups_after_filter_unless_allowed() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let tok = make_echo_smoke_tokenizer()?;
+        let group = dry_run_group(vec![
+            crate::ScoredRollout::legacy("a".to_string(), 1.0),
+            crate::ScoredRollout::legacy("b".to_string(), 1.0),
+        ]);
+        let data = dry_run_dataset(tmp.path(), "filtered.jsonl", &[group]);
+        let output = tmp.path().join("out");
+        let config = dry_run_config(false, true);
+
+        let err = grpo_dry_run_jsonl(
+            &data,
+            &config,
+            &ModelConfig::qwen3_5_4b(),
+            &tok,
+            &output,
+            "filtered-fail",
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("zero valid GRPO groups"));
+
+        let report = grpo_dry_run_jsonl(
+            &data,
+            &config,
+            &ModelConfig::qwen3_5_4b(),
+            &tok,
+            &output,
+            "filtered-ok",
+            true,
+        )?;
+        assert_eq!(report.data.groups_read, 1);
+        assert_eq!(report.data.groups_filtered, 1);
+        assert_eq!(report.data.groups_trained, 0);
+        assert_eq!(report.dynamic_groups_filtered, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn grpo_dry_run_success_records_counts_and_receipt() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let tok = make_echo_smoke_tokenizer()?;
+        let group = dry_run_group(vec![
+            crate::ScoredRollout::from_trajectory(
+                vec![
+                    dry_run_action("a"),
+                    dry_run_observation("b"),
+                    dry_run_action("a"),
+                ],
+                0.0,
+            ),
+            crate::ScoredRollout::from_trajectory(
+                vec![
+                    dry_run_action("b"),
+                    dry_run_observation("a"),
+                    dry_run_action("b"),
+                ],
+                1.0,
+            ),
+        ]);
+        let data = dry_run_dataset(tmp.path(), "ok.jsonl", &[group]);
+        let output = tmp.path().join("out");
+
+        let report = grpo_dry_run_jsonl(
+            &data,
+            &dry_run_config(true, false),
+            &ModelConfig::qwen3_5_4b(),
+            &tok,
+            &output,
+            "ok",
+            false,
+        )?;
+
+        assert_eq!(report.data.groups_read, 1);
+        assert_eq!(report.data.groups_trained, 1);
+        assert_eq!(report.data.completions_trained, 2);
+        assert!(report.token_counts.action_tokens > 0);
+        assert!(report.token_counts.env_tokens > 0);
+        let receipt =
+            crate::train_receipt::TrainReceipt::read_from_adapter_dir(&report.adapter_dir)?
+                .unwrap();
+        assert_eq!(
+            receipt.status,
+            crate::train_receipt::TrainReceiptStatus::Success
+        );
+        assert_eq!(receipt.data.groups_trained, 1);
+        assert!(receipt.echo.enabled);
+        Ok(())
     }
 
     #[test]
