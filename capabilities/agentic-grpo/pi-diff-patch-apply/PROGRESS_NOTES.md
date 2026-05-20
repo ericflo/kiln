@@ -62,10 +62,11 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 21-24| (various, A100)                  | VOIDED    | —      | A100 pod died mid-iter. Adapter-preserve fix saved iter 18/19 weights to b2; iter 20/21+ adapters never produced. |
 | 21v2 | h21-rank2-default-corpus (L40S)  | VOIDED    | —      | L40S had transient runtime glitch mid-iter; pod resurrected. iter 22 used as replay test. |
 | 22   | h22-default-T1.0 (default corpus) | 0.5234    | −0.418 | **CATASTROPHIC** — all classes collapsed ~40pp. T=1.0 + default corpus is far worse than T=1.0 + hard_mix (iter 13: 0.846) or T=0.8 + default (iter 12: 0.888). Non-monotonic interactions. |
-| 23+  | (smart_drive in flight)          | —         | —      | iter 23 (h23-2epochs-default) in flight |
+| 23   | h23-2epochs-default              | 0.8730    | −0.069 | **2nd best trained iter ever!** Same recipe as catastrophic iter 22 + 2 epochs → 0.873. 2 epochs is the load-bearing signal: it consistently rescues recipes that fail with 1 epoch. |
+| 24+  | (smart_drive in flight)          | —         | —      | iter 24 (h24-lr5e-6-default) in flight |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
-**Best trained adapter so far (11 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
+**Best trained adapter so far (13 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest. **Iter 23 (2 epochs default corpus) at 0.8730 is 2nd best**, suggesting 2-epoch training is the most reliable knob.
 
 **Ranked by composite (trained iters only):** iter 2 (0.9246) > iter 3 (0.9162) > iter 4 (0.9109) > iter 1 (0.8900) > iter 11 (0.8676) > iter 10 (0.8422) > iter 8 (0.8400) > iter 9 (0.7623). The top-4 are all from the original 6-task ×3-gen recipe; the new 8-task ×3-gen sweep produces slightly worse outcomes — possibly because the easier task mix dilutes the per-group signal.
 
