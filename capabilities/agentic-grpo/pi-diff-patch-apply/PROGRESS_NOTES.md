@@ -58,7 +58,9 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 18v2 | h18-lr5e-6-from-base             | 0.7018    | −0.240 | NEGATIVE — drift class collapsed 0.975 → 0.659. Same lr as iter 4 (0.911) but on hard_mix corpus. **Strong hypothesis: hard_mix corpus is poison** (over-weighted incorrect+drift vs eval's 50/30/20 distribution). |
 | 19v2 | h19-combined-from-base (hard_mix)| 0.7386    | −0.203 | NEGATIVE — combined recipe (rank2 + 3ep + lr5e-6) on hard_mix also degraded. **2/2 hard_mix iters fail → corpus distribution mismatch confirmed.** |
 | 20   | h20-rank8-default-corpus         | FAILED    | —      | GRPO crashed: `GRPO completions have different prompt lengths (248 vs 246 for completion 2)`. Bug in cuda_grpo_ablation when rollouts have variable prompt lengths. Pod is fine. |
-| 21   | h21-rank2-default-corpus         | —         | —      | **in flight on A100** — rank 2 LoRA on default corpus (the correct mix matching eval). |
+| 20   | h20-rank8-default-corpus (A100)  | FAILED    | —      | cuda_grpo crash: GRPO completions had different prompt lengths (248 vs 246). Real cuda_grpo_ablation limitation, not pod death. |
+| 21-24| (various, A100)                  | VOIDED    | —      | A100 pod died mid-iter. Adapter-preserve fix saved iter 18/19 weights to b2; iter 20/21+ adapters never produced. |
+| 21v2 | h21-rank2-default-corpus (L40S)  | —         | —      | **in flight on L40S ve0abvv0k4e2f0** — fresh pod, manually bootstrapped, default corpus, rank-2 LoRA. |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far (11 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
