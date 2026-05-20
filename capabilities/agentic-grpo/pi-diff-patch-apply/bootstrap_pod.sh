@@ -79,9 +79,11 @@ if [ "$WEIGHTS_OK" != "yes" ]; then
   # silently no-op'd on the A100 image 2026-05-19). The download is ~8GB.
   # Run synchronously and verify a model file exists before continuing.
   run_pod 'mkdir -p /workspace/qwen3.5-4b && cd /workspace/qwen3.5-4b && hf download Qwen/Qwen3.5-4B --local-dir . 2>&1 | tail -5'
-  WEIGHTS_OK=$(run_pod 'test -f /workspace/qwen3.5-4b/config.json && ls /workspace/qwen3.5-4b/model.safetensors* 2>/dev/null | wc -l' 2>/dev/null | tail -1)
+  # `python3 $RP ssh ...` appends an extra trailing newline so `tail -1` returns
+  # the empty trailing line. Use `grep -v '^$' | tail -1` to strip blanks.
+  WEIGHTS_OK=$(run_pod 'test -f /workspace/qwen3.5-4b/config.json && ls /workspace/qwen3.5-4b/model.safetensors* 2>/dev/null | wc -l' 2>/dev/null | grep -v '^$' | tail -1)
   if [ "$WEIGHTS_OK" = "0" ] || [ -z "$WEIGHTS_OK" ]; then
-    echo "FATAL: qwen3.5-4b download produced no model files"
+    echo "FATAL: qwen3.5-4b download produced no model files (WEIGHTS_OK=[$WEIGHTS_OK])"
     exit 41
   fi
 fi

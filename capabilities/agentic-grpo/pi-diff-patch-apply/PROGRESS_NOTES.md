@@ -35,10 +35,11 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 7    | h7-very-low-lr-2e-6 6×3          | 0.2165    | −0.725 | CATASTROPHIC (same pattern as iter 5 — infra suspect)   |
 | 8    | h8-no-echo 8×3                   | 0.8400    | −0.102 | NEGATIVE — first iter after pi-setup + pytest fixes     |
 | 9    | h9-echo-0.10 8×3                 | 0.7623    | −0.180 | NEGATIVE — higher ECHO over-anchored, drift hit worst   |
-| 10   | h10-echo-0.02 8×3                | —         | —      | FAILED-no-eval — port-8420 conflict from two concurrent kiln serves (see §9 below) |
-| 11   | h11-2epoch                       | —         | —      | FAILED-no-eval — kiln died during iter; cascaded from iter 10 state |
-| 12   | h12-rank8 (rank 8 / alpha 16)    | —         | —      | **in flight on A100** — likely to die at lease expiry (~11 min left as of 23:59Z) |
-| 13+  | (queued)                          | —         | —      | A6000 pod re-acquired + bootstrap in flight; will resume from iter 13 when ready |
+| 10   | h10-echo-0.02 8×3                | —         | —      | VOIDED — concurrent kiln-serve port conflict killed serve, all rollouts 0.2 |
+| 11   | h11-2epoch                       | —         | —      | VOIDED — cascaded from iter 10 (kiln-serve died, no eval ran) |
+| 12   | h12-rank8 (rank 8 / alpha 16)    | —         | —      | VOIDED — A100 lease expired mid-rollouts |
+| 13   | h13-rank64                       | —         | —      | VOIDED — drive kept running against dead A100 pod (now killed) |
+| 13+  | (queued)                          | —         | —      | A6000 bootstrap re-running (had 'no weights' false positive — fixed by stripping blank lines in tail check) |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far:** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
