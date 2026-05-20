@@ -329,8 +329,11 @@ refuse to replace a real adapter directory.
   CUDA check attempted `nvcc -G` and was killed by the pod; release profile is
   the documented kiln CUDA validation path.
 
-**Commit SHA:** Implementation commit to be recorded in the follow-up metadata
-commit after push.
+**Commit SHA:** `c6693c9e` (`Issue 5: canonicalize adapter outputs`),
+pushed to `origin/main` on 2026-05-20. Note: the commit contains the
+implementation and initial validation notes; this status line is recorded in
+the follow-up metadata commit because a commit cannot include its own final
+SHA.
 
 **Remaining risk:** Validation proves the receipt/install helper behavior and
 type-checks the CUDA GRPO example. It does not run a full GPU training job to
