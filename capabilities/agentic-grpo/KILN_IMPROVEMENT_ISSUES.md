@@ -267,8 +267,10 @@ prompt.
   recorded in `/workspace/kiln-validation/issue4.log` with sentinel
   `/workspace/kiln-validation/issue4.done` reporting `exit=1`.
 
-**Commit SHA:** Implementation commit to be recorded in the follow-up metadata
-commit after push.
+**Commit SHA:** `706b099a` (`Issue 4: add adapter verifier`), pushed to
+`origin/main` on 2026-05-20. Note: the commit contains the implementation and
+initial validation notes; this status line is recorded in the follow-up
+metadata commit because a commit cannot include its own final SHA.
 
 **Remaining risk:** Offline verification proves layout, tensor consistency,
 and a nonzero LoRA delta norm proxy. Exact logits/token probabilities are not
