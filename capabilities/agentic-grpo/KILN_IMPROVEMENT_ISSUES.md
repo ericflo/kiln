@@ -554,6 +554,47 @@ variance, missing base adapter.
 - Dry run catches zero groups after filtering unless explicitly allowed.
 - Dry run writes a receipt.
 
+**Status:** Completed and validated on RunPod.
+
+**Implementation notes:** Added `grpo_dry_run_jsonl` in `kiln-train` so dry
+run uses the same JSONL parser, trajectory-mask builder, dynamic-sampling
+filter, base-adapter validator, LoRA scaling guard, reward statistics, token
+counting, and `train_receipt.json` schema as streamed GRPO training. Added
+strict dry-run trajectory role validation for Action=`assistant` and
+Observation=`tool`, explicit empty `action_mask` detection, ECHO-with-empty
+`env_mask` detection, and zero-valid-groups rejection with an
+`--allow-empty-dry-run` escape hatch. Wired `--dry-run` and
+`--allow-empty-dry-run` into `cuda_grpo_ablation`; dry run now loads the
+tokenizer, applies ECHO env overrides, prints the effective config plus
+action/env/context counts and reward variance histogram, writes the intended
+adapter receipt, and exits before CUDA availability checks or model
+forward/backward setup.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-20 on RTX A6000 pod `yu0x0wt25rz8u8`,
+  lease `pod-9d17510419e3a5930b68a4fc`.
+- Remote command sequence: `cargo test -p kiln-train grpo_dry_run --lib`;
+  `cargo check -p kiln-train --tests`; `cargo check -p kiln-server --tests`;
+  `KILN_CUDA_ARCHS=86 cargo check --release -p kiln-train --features cuda
+  --example cuda_grpo_ablation`.
+- Remote sentinel `/workspace/kiln-validation/issue9.done` recorded `exit=0`;
+  remote log is `/workspace/kiln-validation/issue9.log`.
+- The focused dry-run test run passed 5 tests covering malformed trajectory
+  roles, empty action masks, ECHO enabled with no env tokens plus failed
+  receipt writing, zero groups after filtering with and without the explicit
+  allow flag, and a successful dry run with action/env token counts and a
+  success receipt.
+
+**Commit SHA:** `04449b56` (`Issue 9: add GRPO dry-run validation`). This is
+the implementation commit; these final metadata notes are recorded in the
+follow-up backlog commit.
+
+**Remaining risk:** Dry run intentionally mirrors the current streamed GRPO
+tokenization path, including its default mask configuration. Broader Pi session
+normalization and a standalone trajectory-inspection UX are left to issues 10
+and 11.
+
 ### 10. Add A Trajectory Inspector CLI
 
 **Area:** `crates/kiln-train` or kiln CLI
