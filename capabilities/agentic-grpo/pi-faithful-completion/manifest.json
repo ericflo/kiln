@@ -1,0 +1,486 @@
+{
+  "capability": "pi-faithful-completion",
+  "run_window": "2026-05-19T09:30 to 2026-05-20T00:30 UTC",
+  "n_iters": 50,
+  "baseline_composite": 0.7237363679468943,
+  "best": {
+    "iter": 50,
+    "adapter": "pi-faithful-h50-temp-0.6-x-light-x-lr-3e-5",
+    "composite": 0.8065414888572784,
+    "delta_vs_baseline": 0.0828,
+    "b2_path": "b2://clouderic/capabilities/pi-faithful-completion/BEST/pi-faithful-h50-temp-0.6-x-light-x-lr-3e-5.tar.gz",
+    "hyperparameters": {
+      "lr": "3e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "echo_lambda": 0.05,
+      "temperature": 0.6,
+      "system_prompt": "light",
+      "train_tasks": 24,
+      "mode": "phase1",
+      "seed": 3141592653
+    }
+  },
+  "all_iters": [
+    {
+      "iter": 0,
+      "slug": "iter0-baseline",
+      "family": "baseline",
+      "composite": 0.7237363679468943,
+      "delta": null,
+      "adapter": null,
+      "status": "recorded"
+    },
+    {
+      "iter": 1,
+      "slug": "h1-default-recipe",
+      "family": "H1-default",
+      "composite": 0.7408245614035087,
+      "delta": 0.01712456140350871,
+      "adapter": "pi-faithful-h1-default-recipe",
+      "status": "positive"
+    },
+    {
+      "iter": 2,
+      "slug": "h2-no-echo",
+      "family": "H2-no-echo",
+      "composite": 0.7239497392128972,
+      "delta": 0.00024973921289717094,
+      "adapter": "pi-faithful-h2-no-echo",
+      "status": "null"
+    },
+    {
+      "iter": 3,
+      "slug": "h3-lr-1e-4",
+      "family": "H3-lr-aggressive",
+      "composite": 0.7082456140350878,
+      "delta": -0.01545438596491222,
+      "adapter": "pi-faithful-h3-lr-1e-4",
+      "status": "negative"
+    },
+    {
+      "iter": 4,
+      "slug": "h4-rank-32-echo",
+      "family": "H4-rank",
+      "composite": 0.7077951635846373,
+      "delta": -0.01594120436225699,
+      "adapter": "pi-faithful-h4-rank-32-echo",
+      "status": "recorded"
+    },
+    {
+      "iter": 5,
+      "slug": "h5-rank-8-echo",
+      "family": "H4-rank",
+      "composite": 0.7237458511142723,
+      "delta": 9.483167377921653e-06,
+      "adapter": "pi-faithful-h5-rank-8-echo",
+      "status": "recorded"
+    },
+    {
+      "iter": 6,
+      "slug": "h6-num-gens-8-echo",
+      "family": "H5-num-gens",
+      "composite": 0.7237268847795164,
+      "delta": -9.483167377921653e-06,
+      "adapter": "pi-faithful-h6-num-gens-8-echo",
+      "status": "recorded"
+    },
+    {
+      "iter": 7,
+      "slug": "h7-train-tasks-48-echo",
+      "family": "H6-scale-tasks",
+      "composite": 0.7249829302987199,
+      "delta": 0.0012465623518255198,
+      "adapter": "pi-faithful-h7-train-tasks-48-echo",
+      "status": "recorded"
+    },
+    {
+      "iter": 8,
+      "slug": "h8-chain-from-iter1-echo",
+      "family": "H7-chain",
+      "composite": 0.7237363679468943,
+      "delta": 0.0,
+      "adapter": "pi-faithful-h8-chain-from-iter1-echo",
+      "status": "recorded"
+    },
+    {
+      "iter": 9,
+      "slug": "h9-lr-5e-6-echo",
+      "family": "H3-lr",
+      "composite": 0.7410900900900901,
+      "delta": 0.01739009009009007,
+      "adapter": "pi-faithful-h9-lr-5e-6-echo",
+      "status": "positive"
+    },
+    {
+      "iter": 10,
+      "slug": "h10-lr-3e-5-echo",
+      "family": "H3-lr",
+      "composite": 0.7571929824561404,
+      "delta": 0.03349298245614041,
+      "adapter": "pi-faithful-h10-lr-3e-5-echo",
+      "status": "recorded"
+    },
+    {
+      "iter": 11,
+      "slug": "h11-echo-lambda-0.025",
+      "family": "H8-echo-lambda",
+      "composite": 0.7078805120910384,
+      "delta": -0.015855855855855916,
+      "adapter": "pi-faithful-h11-echo-lambda-0.025",
+      "status": "recorded"
+    },
+    {
+      "iter": 12,
+      "slug": "h12-echo-lambda-0.1",
+      "family": "H8-echo-lambda",
+      "composite": 0.7068568041725937,
+      "delta": -0.016879563774300665,
+      "adapter": "pi-faithful-h12-echo-lambda-0.1",
+      "status": "recorded"
+    },
+    {
+      "iter": 13,
+      "slug": "h13-light-system-prompt",
+      "family": "H9-system-prompt",
+      "composite": 0.7716676149834044,
+      "delta": 0.047967614983404405,
+      "adapter": "pi-faithful-h13-light-system-prompt",
+      "status": "recorded"
+    },
+    {
+      "iter": 14,
+      "slug": "h14-minimal-system-prompt",
+      "family": "H9-system-prompt",
+      "composite": 0.7418624940730204,
+      "delta": 0.018162494073020397,
+      "adapter": "pi-faithful-h14-minimal-system-prompt",
+      "status": "recorded"
+    },
+    {
+      "iter": 15,
+      "slug": "h15-strict-system-prompt",
+      "family": "H9-system-prompt",
+      "composite": 0.7238311996206733,
+      "delta": 0.0001311996206733168,
+      "adapter": "pi-faithful-h15-strict-system-prompt",
+      "status": "recorded"
+    },
+    {
+      "iter": 16,
+      "slug": "h16-success-only-tasks",
+      "family": "H10-task-mix",
+      "composite": 0.6906927453769559,
+      "delta": -0.033043622569938425,
+      "adapter": "pi-faithful-h16-success-only-tasks",
+      "status": "recorded"
+    },
+    {
+      "iter": 17,
+      "slug": "h17-failure-only-tasks",
+      "family": "H10-task-mix",
+      "composite": 0.7237553342816502,
+      "delta": 5.533428165016563e-05,
+      "adapter": "pi-faithful-h17-failure-only-tasks",
+      "status": "recorded"
+    },
+    {
+      "iter": 18,
+      "slug": "h18-balanced-mix",
+      "family": "H10-task-mix",
+      "composite": 0.6905647226173541,
+      "delta": -0.03313527738264588,
+      "adapter": "pi-faithful-h18-balanced-mix",
+      "status": "recorded"
+    },
+    {
+      "iter": 19,
+      "slug": "h19-chain-best-rank-32",
+      "family": "H7-chain",
+      "composite": 0.02263157894736841,
+      "delta": -0.7010684210526316,
+      "adapter": "pi-faithful-h19-chain-best-rank-32",
+      "status": "recorded"
+    },
+    {
+      "iter": 20,
+      "slug": "h20-chain-best-balanced",
+      "family": "H7-chain",
+      "composite": 0.7237363679468943,
+      "delta": 0.0,
+      "adapter": "pi-faithful-h20-chain-best-balanced",
+      "status": "recorded"
+    },
+    {
+      "iter": 21,
+      "slug": "h21-filter-var-0.05",
+      "family": "H11-filter",
+      "composite": 0.0,
+      "delta": -0.7237363679468943,
+      "adapter": "pi-faithful-h21-filter-var-0.05",
+      "status": "recorded"
+    },
+    {
+      "iter": 22,
+      "slug": "h22-chain-best-failure-focus",
+      "family": "H7-chain",
+      "composite": 0.7408767188240872,
+      "delta": 0.017176718824087223,
+      "adapter": "pi-faithful-h22-chain-best-failure-focus",
+      "status": "recorded"
+    },
+    {
+      "iter": 23,
+      "slug": "h23-num-gens-12-echo",
+      "family": "H5-num-gens",
+      "composite": 0.7237363679468943,
+      "delta": 3.636794689432232e-05,
+      "adapter": "pi-faithful-h23-num-gens-12-echo",
+      "status": "recorded"
+    },
+    {
+      "iter": 24,
+      "slug": "h24-alpha-64-rank-16",
+      "family": "H12-lora-scaling",
+      "composite": 0.02263157894736841,
+      "delta": -0.7011047889995259,
+      "adapter": "pi-faithful-h24-alpha-64-rank-16",
+      "status": "recorded"
+    },
+    {
+      "iter": 25,
+      "slug": "h25-temperature-0.6",
+      "family": "H13-temperature",
+      "composite": 0.7751100047415836,
+      "delta": 0.051373636794689315,
+      "adapter": "pi-faithful-h25-temperature-0.6",
+      "status": "recorded"
+    },
+    {
+      "iter": 26,
+      "slug": "h26-temperature-1.0",
+      "family": "H13-temperature",
+      "composite": 0.70782835467046,
+      "delta": -0.015871645329539996,
+      "adapter": "pi-faithful-h26-temperature-1.0",
+      "status": "recorded"
+    },
+    {
+      "iter": 27,
+      "slug": "h27-mode-baseline",
+      "family": "H14-grpo-mode",
+      "composite": 0.741417259364628,
+      "delta": 0.01771725936462798,
+      "adapter": "pi-faithful-h27-mode-baseline",
+      "status": "recorded"
+    },
+    {
+      "iter": 28,
+      "slug": "h28-mode-cispo",
+      "family": "H14-grpo-mode",
+      "composite": 0.7078520625889048,
+      "delta": -0.01588430535798957,
+      "adapter": "pi-faithful-h28-mode-cispo",
+      "status": "recorded"
+    },
+    {
+      "iter": 29,
+      "slug": "h29-mode-gspo",
+      "family": "H14-grpo-mode",
+      "composite": 0.7249212897107635,
+      "delta": 0.0012212897107635179,
+      "adapter": "pi-faithful-h29-mode-gspo",
+      "status": "recorded"
+    },
+    {
+      "iter": 30,
+      "slug": "h30-format-diverse",
+      "family": "H10-task-mix",
+      "composite": 0.7067809388335705,
+      "delta": -0.016955429113323817,
+      "adapter": "pi-faithful-h30-format-diverse",
+      "status": "recorded"
+    },
+    {
+      "iter": 31,
+      "slug": "h31-soft-punt-focus",
+      "family": "H10-task-mix",
+      "composite": 0.7237363679468943,
+      "delta": 3.636794689432232e-05,
+      "adapter": "pi-faithful-h31-soft-punt-focus",
+      "status": "recorded"
+    },
+    {
+      "iter": 32,
+      "slug": "h32-chain-best-large",
+      "family": "H7-chain",
+      "composite": 0.7079137031768611,
+      "delta": -0.015822664770033246,
+      "adapter": "pi-faithful-h32-chain-best-large",
+      "status": "recorded"
+    },
+    {
+      "iter": 33,
+      "slug": "h33-chain-rolling-prev",
+      "family": "H15-rolling",
+      "composite": 0.740806069227122,
+      "delta": 0.01710606922712199,
+      "adapter": "pi-faithful-h33-chain-rolling-prev",
+      "status": "recorded"
+    },
+    {
+      "iter": 34,
+      "slug": "h34-chain-best-no-filter",
+      "family": "H7-chain",
+      "composite": 0.7583679468942627,
+      "delta": 0.03463157894736835,
+      "adapter": "pi-faithful-h34-chain-best-no-filter",
+      "status": "recorded"
+    },
+    {
+      "iter": 35,
+      "slug": "h35-chain-best-tight-filter",
+      "family": "H7-chain",
+      "composite": 0.7250493124703652,
+      "delta": 0.0013129445234708603,
+      "adapter": "pi-faithful-h35-chain-best-tight-filter",
+      "status": "recorded"
+    },
+    {
+      "iter": 36,
+      "slug": "h36-num-gens-16",
+      "family": "H5-num-gens",
+      "composite": 0.7417534376481745,
+      "delta": 0.018017069701280142,
+      "adapter": "pi-faithful-h36-num-gens-16",
+      "status": "recorded"
+    },
+    {
+      "iter": 37,
+      "slug": "h37-rank-24-alpha-48",
+      "family": "H4-rank",
+      "composite": 0.7237363679468943,
+      "delta": 3.636794689432232e-05,
+      "adapter": "pi-faithful-h37-rank-24-alpha-48",
+      "status": "recorded"
+    },
+    {
+      "iter": 38,
+      "slug": "h38-rank-64-alpha-128",
+      "family": "H4-rank",
+      "composite": 0.724561403508772,
+      "delta": 0.0008614035087719518,
+      "adapter": "pi-faithful-h38-rank-64-alpha-128",
+      "status": "recorded"
+    },
+    {
+      "iter": 39,
+      "slug": "h39-chain-best-rank-32",
+      "family": "H7-chain",
+      "composite": 0.02263157894736841,
+      "delta": -0.7011047889995259,
+      "adapter": "pi-faithful-h39-chain-best-rank-32",
+      "status": "recorded"
+    },
+    {
+      "iter": 40,
+      "slug": "h40-large-corpus-balanced",
+      "family": "H6-scale-tasks",
+      "composite": 0.7237363679468943,
+      "delta": 0.0,
+      "adapter": "pi-faithful-h40-large-corpus-balanced",
+      "status": "recorded"
+    },
+    {
+      "iter": 41,
+      "slug": "h41-chain-balanced-large",
+      "family": "H7-chain",
+      "composite": 0.7078662873399716,
+      "delta": -0.015870080606922743,
+      "adapter": "pi-faithful-h41-chain-balanced-large",
+      "status": "recorded"
+    },
+    {
+      "iter": 42,
+      "slug": "h42-mode-reinforce-echo",
+      "family": "H14-grpo-mode",
+      "composite": 0.6907686107159793,
+      "delta": -0.03296775723091505,
+      "adapter": "pi-faithful-h42-mode-reinforce-echo",
+      "status": "recorded"
+    },
+    {
+      "iter": 43,
+      "slug": "h43-max-tokens-256",
+      "family": "H16-max-tokens",
+      "composite": 0.7068852536747274,
+      "delta": -0.0168511142721669,
+      "adapter": "pi-faithful-h43-max-tokens-256",
+      "status": "recorded"
+    },
+    {
+      "iter": 44,
+      "slug": "h44-max-tokens-1536",
+      "family": "H16-max-tokens",
+      "composite": 0.7067951635846372,
+      "delta": -0.01690483641536278,
+      "adapter": "pi-faithful-h44-max-tokens-1536",
+      "status": "recorded"
+    },
+    {
+      "iter": 45,
+      "slug": "h45-temp-0.6-x-light",
+      "family": "H18-combo",
+      "composite": 0.7579696538643907,
+      "delta": 0.03426965386439074,
+      "adapter": "pi-faithful-h45-temp-0.6-x-light",
+      "status": "recorded"
+    },
+    {
+      "iter": 46,
+      "slug": "h46-temp-0.6-x-lr-3e-5",
+      "family": "H18-combo",
+      "composite": 0.7414030346135609,
+      "delta": 0.01770303461356093,
+      "adapter": "pi-faithful-h46-temp-0.6-x-lr-3e-5",
+      "status": "recorded"
+    },
+    {
+      "iter": 47,
+      "slug": "h47-temp-0.5-push-lower",
+      "family": "H13-temperature",
+      "composite": 0.7077430061640588,
+      "delta": -0.01595699383594118,
+      "adapter": "pi-faithful-h47-temp-0.5-push-lower",
+      "status": "recorded"
+    },
+    {
+      "iter": 48,
+      "slug": "h48-chain-best-x-temp-0.6",
+      "family": "H18-combo",
+      "composite": 0.7402797534376482,
+      "delta": 0.01657975343764817,
+      "adapter": "pi-faithful-h48-chain-best-x-temp-0.6",
+      "status": "recorded"
+    },
+    {
+      "iter": 49,
+      "slug": "h49-chain-best-x-light",
+      "family": "H18-combo",
+      "composite": 0.0,
+      "delta": null,
+      "adapter": null,
+      "status": "broken-training-not-launched"
+    },
+    {
+      "iter": 50,
+      "slug": "h50-temp-0.6-x-light-x-lr-3e-5",
+      "family": "H18-combo",
+      "composite": 0.8065414888572784,
+      "delta": 0.08284148885727838,
+      "adapter": "pi-faithful-h50-temp-0.6-x-light-x-lr-3e-5",
+      "status": "recorded"
+    }
+  ]
+}

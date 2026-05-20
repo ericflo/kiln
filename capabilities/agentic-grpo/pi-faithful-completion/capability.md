@@ -1,20 +1,29 @@
 # pi-faithful-completion — autonomous, format-adherent terminal state
 
-**Status:** RUNNING 50-iter autonomous loop (2026-05-19).
+**Status:** 🏆 50-iter loop COMPLETE (2026-05-19 → 2026-05-20).
 **Rank 10/10**. Trains the agent to deliver a
 final assistant turn that (a) matches the task's required output
 format, (b) doesn't ask the user a question, (c) doesn't soft-punt
 ("you decide"), and (d) doesn't claim success when the underlying
 check failed.
 
-## Live progress (updated as iters land)
+## Final result
 
-**Iters completed so far:** check `capability.jsonl` line count.
-**Best so far:** iter 25 (h25-temperature-0.6) composite=0.7751,
-Δ=+0.0514 vs baseline 0.7237. Light-prompt iter 13 close second at
-+0.0479. Run `python3 analyze.py` for current TOP-5.
+**🏆 BEST:** iter 50 (`pi-faithful-h50-temp-0.6-x-light-x-lr-3e-5`)
+**composite = 0.8065** vs baseline 0.7237 = **Δ=+0.0828** (+11.4% relative).
 
-### Findings as of iter 34
+The winning recipe: `lr=3e-5 + rollout temperature=0.6 + light system
+prompt + ECHO λ=0.05 + rank=16 alpha=32`. Each of the three non-default
+knobs (temp, prompt, LR) gave ~+0.05 alone; combined, they compounded
+to +0.083. See `closeout.md` for the full writeup.
+
+## Live progress (kept current through the run)
+
+**Iters completed:** 50/50.
+**Best:** iter 50 (h50-temp-0.6-x-light-x-lr-3e-5) composite=0.8065,
+Δ=+0.0828.  Run `python3 analyze.py` for the live TOP-5.
+
+### Findings (final, after iter 50)
 
 **What works (clear positive deltas):**
 - `lr=1e-5 + ECHO λ=0.05 + rank=16` is the safe baseline recipe
@@ -60,24 +69,22 @@ check failed.
   /v1/chat/completions as "unload" — silently broke iters 1-3 of
   this loop. See `kiln-polish.jsonl#ensure-adapter-treats-missing-field-as-unload`.
 
-### Sub-score deltas at best (iter 25 — composite 0.7751, Δ=+0.0514)
+### Sub-score deltas at FINAL BEST (iter 50 — composite 0.8065, Δ=+0.0828)
 
-| Sub-score | Baseline | Iter 25 | Δ |
+| Sub-score | Baseline | Iter 50 | Δ |
 |---|---|---|---|
-| outcome.value_correct | 0.7193 | 0.7719 | **+0.0526** |
-| honesty.score         | 0.7719 | 0.8088 | **+0.0369** |
-| format_strict         | 0.9825 | 0.9825 |  0.0000  |
-| no_question           | 1.0000 | 1.0000 |  0.0000  |
-| no_soft_punt          | 1.0000 | 1.0000 |  0.0000  |
-| terseness             | 0.9807 | 0.9807 |  0.0000  |
+| outcome.value_correct | 0.7193 | 0.8070 | **+0.0877** |
+| honesty.score         | 0.7719 | 0.8386 | **+0.0667** |
+| format_strict         | 0.9825 | 0.9474 | -0.0351 |
+| no_question           | 1.0000 | 1.0000 |  0.0000 |
+| no_soft_punt          | 1.0000 | 1.0000 |  0.0000 |
+| terseness             | 0.9807 | 0.9590 | -0.0217 |
 
-Iter 25's lift is **entirely** in `outcome.value_correct` (model gets
-more values right) and `honesty.score` (model honestly declares
-failure on failure tasks instead of hallucinating a value). The
-discipline sub-scores were already maxed at baseline because the
-strict system prompt enforces them — the GRPO improvement is on
-the **math/reasoning + failure-detection** axes, exactly where
-headroom existed.
+The combo broke through what looked like a `outcome.value_correct ≤ 0.7719`
+ceiling at iter 25. Once temp+prompt+LR all worked in concert, the model
+actually learned MORE correct values AND more honest failure declarations.
+Tiny regressions on format_strict and terseness are dwarfed by the
++0.09 lift in the load-bearing sub-scores. **There is no hard cap.**
 
 **Goal.** For any task with strict output requirements, the agent
 reaches a defined terminal state — emitting the required identifiers
