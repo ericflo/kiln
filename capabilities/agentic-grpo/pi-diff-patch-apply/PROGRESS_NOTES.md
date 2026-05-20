@@ -63,7 +63,8 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 21v2 | h21-rank2-default-corpus (L40S)  | VOIDED    | —      | L40S had transient runtime glitch mid-iter; pod resurrected. iter 22 used as replay test. |
 | 22   | h22-default-T1.0 (default corpus) | 0.5234    | −0.418 | **CATASTROPHIC** — all classes collapsed ~40pp. T=1.0 + default corpus is far worse than T=1.0 + hard_mix (iter 13: 0.846) or T=0.8 + default (iter 12: 0.888). Non-monotonic interactions. |
 | 23   | h23-2epochs-default              | 0.8730    | −0.069 | **2nd best trained iter ever!** Same recipe as catastrophic iter 22 + 2 epochs → 0.873. 2 epochs is the load-bearing signal: it consistently rescues recipes that fail with 1 epoch. |
-| 24+  | (smart_drive in flight)          | —         | —      | iter 24 (h24-lr5e-6-default) in flight |
+| 24   | h24-lr5e-6-default               | 0.8557    | −0.086 | 3rd best of recent batch. lr 5e-6 single-epoch ≈ same as lr 1e-5 2-epochs (iter 11/23). |
+| 25+  | (smart_drive pivoting)           | —         | —      | **smart_drive recipes 25-40 PIVOTED to 2-epochs as default** (iter 23's discovery — 2ep is the strongest knob). iter 25 = no-policy-loss + 2ep in flight. |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far (13 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest. **Iter 23 (2 epochs default corpus) at 0.8730 is 2nd best**, suggesting 2-epoch training is the most reliable knob.

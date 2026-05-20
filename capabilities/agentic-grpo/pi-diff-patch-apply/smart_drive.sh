@@ -140,33 +140,75 @@ recipe_for() {
       echo "h24-lr5e-6-default --num-train-tasks 8 --num-gens 3 --lr 5e-6 --filter-var 0.04 --temperature 1.0"
       ;;
     25)
-      # iter 25: --no-policy-loss (ECHO-only). Tests if removing the GRPO
-      # advantage helps. Default corpus.
-      echo "h25-no-policy-loss-default --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --no-policy-loss"
+      # iter 25: --no-policy-loss + 2 epochs. Tests if ECHO-only training
+      # with the now-established 2-epoch winner works.
+      echo "h25-no-policy-2ep --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 2 --no-policy-loss"
       ;;
     26)
-      # iter 26: rank 1 LoRA. Absolute minimum perturbation, default corpus.
-      echo "h26-rank1-default --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --rank 1 --alpha 2"
+      # iter 26: rank 1 LoRA + 2 epochs. Minimal perturbation + best training horizon.
+      echo "h26-rank1-2ep --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 2 --rank 1 --alpha 2"
       ;;
     27)
-      # iter 27: combined-best on default — rank 2 + 2 epochs + lr 5e-6.
+      # iter 27: combined-best — rank 2 + 2 epochs + lr 5e-6 (already had 2 epochs).
       echo "h27-combined-default --num-train-tasks 8 --num-gens 3 --lr 5e-6 --filter-var 0.04 --temperature 1.0 --rank 2 --alpha 4 --epochs 2"
       ;;
     28)
-      # iter 28: full 16-task default corpus for more diversity.
-      echo "h28-full-corpus-16tasks --num-train-tasks 16 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0"
+      # iter 28: full 16-task default corpus + 2 epochs (apply the winner).
+      echo "h28-full-corpus-2ep --num-train-tasks 16 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 2"
       ;;
     29)
-      # iter 29: seed 1729 sweep, default corpus + T=1.0.
-      echo "h29-seed-1729-default --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --seed 1729"
+      # iter 29: seed 1729 + 2 epochs. Reproducibility check at the winning horizon.
+      echo "h29-seed-1729-2ep --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 2 --seed 1729"
       ;;
     30)
-      # Hypothesis: seed sweep 2.
-      echo "h30-seed-4242 --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --seed 4242 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      # iter 30: seed 4242 + 2 epochs (was hard_mix; pivoting to default).
+      echo "h30-seed-4242-2ep --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 2 --seed 4242"
+      ;;
+    31)
+      # Hypothesis: 3 epochs default. iter 23 was 2 ep (0.873), iter 16 was 3 ep
+      # on hard_mix (lost). Test 3 ep on default corpus.
+      echo "h31-3epochs-default --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 3"
+      ;;
+    32)
+      # Hypothesis: 2 epochs + lr 5e-6 on default (combine the two best knobs).
+      echo "h32-2ep-lr5e6 --num-train-tasks 8 --num-gens 3 --lr 5e-6 --filter-var 0.04 --temperature 1.0 --epochs 2"
+      ;;
+    33)
+      # Hypothesis: 2 epochs + rank 8 on default (combine 2nd best signals).
+      echo "h33-2ep-rank8 --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 2 --rank 8 --alpha 16"
+      ;;
+    34)
+      # Hypothesis: 2 epochs + 12 tasks (more data + winning horizon).
+      echo "h34-2ep-12tasks --num-train-tasks 12 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 2"
+      ;;
+    35)
+      # Hypothesis: 2 epochs + T=0.8 (revert temp). iter 11 was T=0.8 2ep → 0.868.
+      echo "h35-2ep-T0.8 --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 0.8 --epochs 2"
+      ;;
+    36)
+      # Hypothesis: 2 epochs + filter-var 0.0 (no filter, all groups train).
+      echo "h36-2ep-no-filter --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.0 --temperature 1.0 --epochs 2"
+      ;;
+    37)
+      # Hypothesis: 2 epochs + rank 4 (middle ground).
+      echo "h37-2ep-rank4 --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 2 --rank 4 --alpha 8"
+      ;;
+    38)
+      # Hypothesis: 2 epochs + 4 gens (more variance per task).
+      echo "h38-2ep-4gens --num-train-tasks 8 --num-gens 4 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 2"
+      ;;
+    39)
+      # Hypothesis: 2 epochs + seed 11111 (more seed coverage).
+      echo "h39-2ep-seed11111 --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 2 --seed 11111"
+      ;;
+    40)
+      # Hypothesis: 4 epochs default. Extrapolate 2 ep > 1 ep trend.
+      echo "h40-4epochs-default --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 4"
       ;;
     *)
-      # Default for iters 31+: design when we get there based on what 14-30 show.
-      echo "h${n}-tbd --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --train-tasks-file datasets/train.hard_mix.tasks.jsonl"
+      # Default for iters 41+: 2 epochs on default corpus (current best signal)
+      # with seed variation, until we've designed something better.
+      echo "h${n}-2ep-default --num-train-tasks 8 --num-gens 3 --lr 1e-5 --filter-var 0.04 --temperature 1.0 --epochs 2 --seed $((n * 1000 + 13))"
       ;;
   esac
 }
