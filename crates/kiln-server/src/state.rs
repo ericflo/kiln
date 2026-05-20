@@ -1217,6 +1217,9 @@ pub struct AppState {
     /// This can differ from `active_adapter_name` during explicit per-request
     /// chat adapter overrides; missing `adapter` requests reload the default.
     pub loaded_adapter_name: Arc<std::sync::RwLock<Option<String>>>,
+    /// Last adapter load failure by adapter name. Used by the registry so
+    /// automation can distinguish "not loaded" from "failed to load".
+    pub adapter_load_errors: Arc<std::sync::RwLock<HashMap<String, String>>>,
     /// Tracked training jobs (job_id → info).
     pub training_jobs: TrainingJobs,
     /// GPU memory budget for coordinating inference and training.
@@ -1401,6 +1404,7 @@ impl AppState {
             adapter_dir: PathBuf::from("adapters"),
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             loaded_adapter_name: Arc::new(std::sync::RwLock::new(None)),
+            adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 0, 0, 1.0, None)),
             gpu_lock: Arc::new(std::sync::RwLock::new(())),
@@ -1855,6 +1859,7 @@ impl AppState {
             adapter_dir,
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             loaded_adapter_name: Arc::new(std::sync::RwLock::new(None)),
+            adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(memory_budget),
             gpu_lock,

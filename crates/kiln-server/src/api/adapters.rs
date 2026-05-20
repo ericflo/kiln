@@ -11,6 +11,7 @@ use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
@@ -24,14 +25,25 @@ use crate::state::{AppState, ModelBackend};
 /// Response for GET /v1/adapters.
 #[derive(Serialize)]
 struct AdaptersResponse {
+    /// Name of the current server default adapter, if any.
+    active_adapter: Option<String>,
     /// Name of the currently active adapter, if any.
     active: Option<String>,
+    /// Adapter currently loaded into the model runner, if any.
+    loaded_adapter: Option<String>,
+    /// All adapters currently resident in server state. Kiln has one runner,
+    /// so this is at most the default and runtime-loaded adapter names.
+    loaded_adapters: Vec<String>,
+    /// Absolute adapter registry directory path.
+    adapter_dir: String,
     /// Adapters available on disk in the adapter directory.
     available: Vec<AdapterDiskEntry>,
+    /// Expanded registry entries, including invalid directories.
+    available_adapters: Vec<AdapterDiskEntry>,
 }
 
 /// An adapter directory found on disk.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct AdapterDiskEntry {
     /// Directory name (used as the adapter name).
     name: String,
@@ -45,6 +57,30 @@ struct AdapterDiskEntry {
     modified_at: Option<String>,
     /// List of filenames in the adapter directory.
     files: Vec<String>,
+    /// Resolved absolute directory path when available.
+    path: Option<String>,
+    /// Registry status: `loaded`, `available`, or `invalid`.
+    status: String,
+    /// SHA-256 of adapter_model.safetensors when present.
+    adapter_model_sha256: Option<String>,
+    /// Size of adapter_model.safetensors when present.
+    adapter_model_size_bytes: Option<u64>,
+    /// LoRA rank from adapter_config.json.
+    rank: Option<u64>,
+    /// LoRA alpha from adapter_config.json.
+    alpha: Option<f64>,
+    /// LoRA alpha/rank from adapter_config.json.
+    alpha_over_rank: Option<f64>,
+    /// Target modules from adapter_config.json.
+    target_modules: Vec<String>,
+    /// PEFT base model metadata when present.
+    base_model_name_or_path: Option<String>,
+    /// Parent/base adapter lineage metadata when present.
+    parent_adapter_metadata: Option<serde_json::Value>,
+    /// Last load error recorded for this adapter name.
+    last_load_error: Option<String>,
+    /// Validation error for invalid adapter directories.
+    error: Option<String>,
 }
 
 /// Request body for POST /v1/adapters/load.
@@ -78,11 +114,36 @@ struct DeleteAdapterResponse {
 async fn list_adapters(State(state): State<AppState>) -> Json<AdaptersResponse> {
     // Read the active adapter name from shared state.
     let active = state.active_adapter_name.read().unwrap().clone();
+    let loaded_adapter = state.loaded_adapter_name.read().unwrap().clone();
+    let load_errors = state.adapter_load_errors.read().unwrap().clone();
 
+    let mut loaded_adapters = Vec::new();
+    if let Some(name) = active.clone() {
+        loaded_adapters.push(name);
+    }
+    if let Some(name) = loaded_adapter.clone()
+        && !loaded_adapters.iter().any(|existing| existing == &name)
+    {
+        loaded_adapters.push(name);
+    }
     // Scan adapter directory for available adapters
-    let available = scan_adapter_dir(&state.adapter_dir);
+    let available = scan_adapter_dir(&state.adapter_dir, &loaded_adapters, &load_errors);
+    let adapter_dir = state
+        .adapter_dir
+        .canonicalize()
+        .unwrap_or_else(|_| state.adapter_dir.clone())
+        .display()
+        .to_string();
 
-    Json(AdaptersResponse { active, available })
+    Json(AdaptersResponse {
+        active_adapter: active.clone(),
+        active,
+        loaded_adapter,
+        loaded_adapters,
+        adapter_dir,
+        available: available.clone(),
+        available_adapters: available,
+    })
 }
 
 /// Load a LoRA adapter from disk.
@@ -94,6 +155,11 @@ async fn load_adapter(
 
     let adapter_path = state.adapter_dir.join(&req.name);
     let resolved_adapter_path = validate_loadable_adapter_dir(&adapter_path).map_err(|err| {
+        state
+            .adapter_load_errors
+            .write()
+            .unwrap()
+            .insert(req.name.clone(), err.message.clone());
         tracing::warn!(
             adapter = %req.name,
             path = %adapter_path.display(),
@@ -125,7 +191,7 @@ async fn load_adapter(
     let path = resolved_adapter_path.clone();
     let name = req.name.clone();
 
-    tokio::task::spawn_blocking(move || {
+    let load_result = tokio::task::spawn_blocking(move || {
         // Load weights outside any lock (I/O + tensor allocation).
         let lora = LoraWeights::load(&path, num_layers, &device).map_err(|e| format!("{e}"))?;
         // Brief write lock to swap the adapter in.
@@ -134,13 +200,28 @@ async fn load_adapter(
         Ok::<(), String>(())
     })
     .await
-    .map_err(|e| ApiError::internal(format!("join error: {e}")))?
-    .map_err(ApiError::adapter_load_failed)?;
+    .map_err(|e| ApiError::internal(format!("join error: {e}")))?;
+    if let Err(err) = load_result {
+        state
+            .adapter_load_errors
+            .write()
+            .unwrap()
+            .insert(req.name.clone(), err.clone());
+        tracing::warn!(
+            adapter = %req.name,
+            path = %resolved_adapter_path.display(),
+            reason = %err,
+            operation = "load",
+            "adapter load rejected"
+        );
+        return Err(ApiError::adapter_load_failed(err));
+    }
 
     // Update the shared default/runtime adapter names and drop stale real-backend prefix state.
     let old = state.active_adapter_name.read().unwrap().clone();
     *state.active_adapter_name.write().unwrap() = Some(req.name.clone());
     *state.loaded_adapter_name.write().unwrap() = Some(req.name.clone());
+    state.adapter_load_errors.write().unwrap().remove(&req.name);
     state.clear_real_prefix_cache();
 
     tracing::info!(
@@ -298,7 +379,11 @@ async fn delete_adapter(
 }
 
 /// Scan a directory for adapter subdirectories.
-fn scan_adapter_dir(dir: &Path) -> Vec<AdapterDiskEntry> {
+fn scan_adapter_dir(
+    dir: &Path,
+    loaded_adapters: &[String],
+    load_errors: &std::collections::HashMap<String, String>,
+) -> Vec<AdapterDiskEntry> {
     let mut entries = Vec::new();
     let read_dir = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
@@ -308,58 +393,155 @@ fn scan_adapter_dir(dir: &Path) -> Vec<AdapterDiskEntry> {
         let path = entry.path();
         if path.is_dir() {
             let name = entry.file_name().to_string_lossy().to_string();
+            if name == ".composed" || name.starts_with(".upload-tmp-") {
+                continue;
+            }
             let has_config = path.join("adapter_config.json").exists();
             let has_weights = path.join("adapter_model.safetensors").exists();
-            if has_config || has_weights {
-                let mut size_bytes: u64 = 0;
-                let mut latest_modified: Option<std::time::SystemTime> = None;
-                let mut files = Vec::new();
 
-                if let Ok(sub_entries) = std::fs::read_dir(&path) {
-                    for sub in sub_entries.flatten() {
-                        if let Ok(meta) = sub.metadata() {
-                            if meta.is_file() {
-                                files.push(sub.file_name().to_string_lossy().to_string());
-                                size_bytes += meta.len();
-                                if let Ok(modified) = meta.modified() {
-                                    latest_modified = Some(match latest_modified {
-                                        Some(prev) if prev >= modified => prev,
-                                        _ => modified,
-                                    });
-                                }
+            let mut size_bytes: u64 = 0;
+            let mut latest_modified: Option<std::time::SystemTime> = None;
+            let mut files = Vec::new();
+
+            if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                for sub in sub_entries.flatten() {
+                    if let Ok(meta) = sub.metadata() {
+                        if meta.is_file() {
+                            files.push(sub.file_name().to_string_lossy().to_string());
+                            size_bytes += meta.len();
+                            if let Ok(modified) = meta.modified() {
+                                latest_modified = Some(match latest_modified {
+                                    Some(prev) if prev >= modified => prev,
+                                    _ => modified,
+                                });
                             }
                         }
                     }
                 }
-                files.sort();
-
-                let modified_at = latest_modified.map(|t| {
-                    let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-                    let secs = d.as_secs();
-                    // Format as ISO 8601 UTC manually (no chrono dependency needed).
-                    let days_since_epoch = secs / 86400;
-                    let time_of_day = secs % 86400;
-                    let hours = time_of_day / 3600;
-                    let minutes = (time_of_day % 3600) / 60;
-                    let seconds = time_of_day % 60;
-                    // Compute year/month/day from days since 1970-01-01.
-                    let (year, month, day) = days_to_ymd(days_since_epoch);
-                    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
-                });
-
-                entries.push(AdapterDiskEntry {
-                    name,
-                    has_config,
-                    has_weights,
-                    size_bytes,
-                    modified_at,
-                    files,
-                });
             }
+            files.sort();
+
+            let modified_at = latest_modified.map(|t| {
+                let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                let secs = d.as_secs();
+                // Format as ISO 8601 UTC manually (no chrono dependency needed).
+                let days_since_epoch = secs / 86400;
+                let time_of_day = secs % 86400;
+                let hours = time_of_day / 3600;
+                let minutes = (time_of_day % 3600) / 60;
+                let seconds = time_of_day % 60;
+                // Compute year/month/day from days since 1970-01-01.
+                let (year, month, day) = days_to_ymd(days_since_epoch);
+                format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+            });
+
+            let path = path.canonicalize().unwrap_or(path);
+            let config = read_adapter_config_metadata(&path);
+            let weights_path = path.join("adapter_model.safetensors");
+            let adapter_model_size_bytes = std::fs::metadata(&weights_path).ok().map(|m| m.len());
+            let adapter_model_sha256 = if has_weights {
+                sha256_file_hex(&weights_path).ok()
+            } else {
+                None
+            };
+            let error = validate_loadable_adapter_dir(&path)
+                .err()
+                .map(|err| err.message);
+            let status = if error.is_some() {
+                "invalid"
+            } else if loaded_adapters.iter().any(|loaded| loaded == &name) {
+                "loaded"
+            } else {
+                "available"
+            }
+            .to_string();
+
+            entries.push(AdapterDiskEntry {
+                name: name.clone(),
+                has_config,
+                has_weights,
+                size_bytes,
+                modified_at,
+                files,
+                path: Some(path.display().to_string()),
+                status,
+                adapter_model_sha256,
+                adapter_model_size_bytes,
+                rank: config.rank,
+                alpha: config.alpha,
+                alpha_over_rank: config.alpha_over_rank,
+                target_modules: config.target_modules,
+                base_model_name_or_path: config.base_model_name_or_path,
+                parent_adapter_metadata: read_parent_adapter_metadata(&path),
+                last_load_error: load_errors.get(&name).cloned(),
+                error,
+            });
         }
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     entries
+}
+
+#[derive(Default)]
+struct AdapterConfigMetadata {
+    rank: Option<u64>,
+    alpha: Option<f64>,
+    alpha_over_rank: Option<f64>,
+    target_modules: Vec<String>,
+    base_model_name_or_path: Option<String>,
+}
+
+fn read_adapter_config_metadata(path: &Path) -> AdapterConfigMetadata {
+    let Ok(config_bytes) = std::fs::read(path.join("adapter_config.json")) else {
+        return AdapterConfigMetadata::default();
+    };
+    let Ok(config) = serde_json::from_slice::<serde_json::Value>(&config_bytes) else {
+        return AdapterConfigMetadata::default();
+    };
+    let rank = config.get("r").and_then(|v| v.as_u64());
+    let alpha = config.get("lora_alpha").and_then(|v| v.as_f64());
+    let alpha_over_rank = match (alpha, rank) {
+        (Some(alpha), Some(rank)) if rank != 0 => Some(alpha / rank as f64),
+        _ => None,
+    };
+    let target_modules = config
+        .get("target_modules")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let base_model_name_or_path = config
+        .get("base_model_name_or_path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    AdapterConfigMetadata {
+        rank,
+        alpha,
+        alpha_over_rank,
+        target_modules,
+        base_model_name_or_path,
+    }
+}
+
+fn read_parent_adapter_metadata(path: &Path) -> Option<serde_json::Value> {
+    for filename in ["lineage.json", "adapter_receipt.json", "receipt.json"] {
+        let value = std::fs::read(path.join(filename))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        if value.is_some() {
+            return value;
+        }
+    }
+    None
+}
+
+fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
+    let bytes = std::fs::read(path)?;
+    let digest = Sha256::digest(&bytes);
+    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Source adapter to include in a merge.

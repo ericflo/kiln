@@ -166,6 +166,36 @@ prove what will actually run.
 - Tests cover active, loaded-but-inactive, available-unloaded, and invalid
   adapters.
 
+**Status:** Completed locally, awaiting commit/push.
+
+**Implementation notes:** Expanded `GET /v1/adapters` with explicit
+`active_adapter`, `loaded_adapter`, `loaded_adapters`, `adapter_dir`, and
+`available_adapters` fields while preserving the legacy `active` and
+`available` fields. Registry entries now include resolved path, status,
+config/weights presence, total directory size, safetensors file size, SHA-256,
+rank, alpha, alpha/rank, target modules, base model metadata, optional lineage
+or receipt metadata, last load error, and invalid-layout error text. Directory
+scan includes invalid adapter directories rather than omitting them, excluding
+only internal transient/cache directories. Adapter load failures are retained
+in server state and cleared on successful load.
+
+**Validation evidence:**
+
+- `cargo test -p kiln-server --test adapter_registry_state` passed on
+  2026-05-20: covers active default, loaded-but-inactive runtime adapter,
+  available-unloaded adapter, invalid directory, hashes, sizes, LoRA config
+  fields, paths, and last load error.
+- `cargo check -p kiln-server --tests` passed on 2026-05-20 (CPU-only local
+  check; warnings were pre-existing unused items/imports plus CUDA-not-found
+  warnings from non-CUDA local environment).
+
+**Commit SHA:** Pending commit creation for this issue.
+
+**Remaining risk:** The registry records the single runtime-loaded adapter
+known to kiln's current one-runner architecture. It does not attempt to prove
+that a real backend's in-memory LoRA tensors still match disk beyond the state
+updated by the load/unload paths.
+
 ### 4. Add `kiln adapter verify`
 
 **Area:** kiln CLI / `crates/kiln-server`
