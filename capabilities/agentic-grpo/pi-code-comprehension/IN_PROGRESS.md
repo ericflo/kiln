@@ -145,6 +145,43 @@ From `recipes.json`, the queue prioritises:
   results table + Status line + audit log on each successful iter, before
   git commit. Going forward the MD reflects reality as iters land.
 - 22:55 — recovery: pending pod acquisition
+- 22:22 (next day) — pod 88eqxaqnb6ma5d acquired (RTX 6000 Ada); bootstrap built
+  kiln main + cuda_grpo_ablation **without `--features cuda`** (bug in bootstrap).
+- 22:35 — restarted drive at iter 12; rollouts started but later iter 12 training
+  failed with "no valid GRPO groups" — all base-model rollouts scored 0.0
+- 23:36 — diagnosed: cuda binary missing cuda feature flag → training never ran.
+  Rebuilt with `--features cuda` (11:48 wall clock).
+- 01:10 — pod 88eqxaqnb6ma5d reaped mid-iter-14, drive bailed (3-failure breaker)
+- 01:23 — pod sfnfy255wrklcb acquired (RTX 6000 Ada). Bootstrap v4 succeeded
+  (model 8.8GB downloaded, kiln + cuda binary built, pi 0.75.3 installed,
+  iter 4 adapter restored from B2).
+- 02:11 — restarted drive at iter 12 on new pod. Iter 12 rollouts ran 48 min,
+  all 64 rollouts scored 0.0 with mean_wall_clock=180s (every pi session
+  hit the wall-clock cap producing nothing).
+- 03:30 — root cause: **Qwen3.5-4B (base, no adapter) emits `reasoning_content`
+  in chat completions but leaves `content` empty.** Pi reads `content`, sees
+  empty, treats response as failure. With 32K max_tokens budget the model
+  thinks the whole budget away producing no answer. iter-4-trained adapter
+  was specifically trained to short-circuit thinking → straight JSON answer,
+  which is why iter 0-11 worked but iters 12+ (base rollouts) failed on
+  this fresh pod. The earlier session's "base model" Qwen weights may
+  have shipped with thinking disabled by default; HF upstream change?
+- 03:50 — session close-out at 11 successful iters. Iter 4 remains BEST.
+
+## Recovery for the next session
+
+Path A — continue training: warm-start ALL remaining iters from iter 4 best
+(use `--train-adapter best`). This avoids the base-model thinking trap.
+The 12+ recipes that intended base-warm should be re-spec'd as warm-start.
+
+Path B — fix pi/kiln: patch pi's openai-completions adapter to fall back
+to `reasoning_content` when `content` is empty. OR patch kiln's chat
+template to disable thinking by default. EITHER fixes iter 12+ as-spec'd.
+
+Path C — change rollout system prompt to "answer directly without thinking"
+to short-circuit the thinking tokens even for the base model.
+
+Path B (programmatic, no recipe changes) is the cleanest fix.
 
 ## Closeout plan
 
