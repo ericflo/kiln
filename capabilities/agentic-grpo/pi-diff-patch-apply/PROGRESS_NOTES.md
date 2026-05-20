@@ -40,12 +40,17 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 12   | h12-rank8 (rank 8 / alpha 16)    | —         | —      | VOIDED — A100 lease expired mid-rollouts |
 | 13   | h13-rank64                       | —         | —      | VOIDED — drive kept running against dead A100 pod (now killed) |
 | 10   | h10-echo-0.02 (retry on A6000)   | 0.8422    | −0.100 | NEGATIVE — ECHO=0.02 ≈ no-echo (h8), both ~10pp regression. Confirms ECHO has little effect at these scales |
-| 11+  | (queued)                          | —         | —      | **iter 11 (h11-2epoch) in flight on A6000** — drive auto-chains 11-49 |
+| 11   | h11-2epoch (2 epochs)            | 0.8676    | −0.074 | NEGATIVE — 2 epochs beats 1 (h10 was 0.842). Suggests longer training is mildly helpful at lr=1e-5 |
+| 12+  | (queued)                          | —         | —      | **iter 12 (h12-rank8) in flight on A6000** — drive auto-chains 12-49 |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
-**Best trained adapter so far (10 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
+**Best trained adapter so far (11 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
+
+**Ranked by composite (trained iters only):** iter 2 (0.9246) > iter 3 (0.9162) > iter 4 (0.9109) > iter 1 (0.8900) > iter 11 (0.8676) > iter 10 (0.8422) > iter 8 (0.8400) > iter 9 (0.7623). The top-4 are all from the original 6-task ×3-gen recipe; the new 8-task ×3-gen sweep produces slightly worse outcomes — possibly because the easier task mix dilutes the per-group signal.
 
 **ECHO sweep summary (iters 8/9/10):** ECHO=0 → 0.840; ECHO=0.02 → 0.842; ECHO=0.10 → 0.762. ECHO ≈ 0-0.02 are equivalent; 0.10 hurts. The default 0.05 (iters 1-4) was in the safer zone but still net negative.
+
+**Epoch sweep (iter 11):** 2 epochs at lr=1e-5 → 0.8676, better than the 1-epoch comparable iter 10 → 0.8422. Mild evidence that longer training helps slightly at this lr.
 
 ## Key learnings (intermediate)
 
