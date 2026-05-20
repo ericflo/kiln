@@ -163,6 +163,27 @@ PYEOF"
       ${ECHO_FLAG} ${POLICY_FLAG} 2>&1"
   python3 $RP wait-file $POD_ID "${ADAPTER_OUT}/pi-diff-patch-apply-iter${ITER}/adapter_model.safetensors" --timeout 2400
 
+  # IMMEDIATELY tar the adapter and stream it off-pod. Pods die regularly
+  # (mid-eval, lease expiry, runtime/ports glitches) and anything in /tmp is
+  # lost. Multiple promising adapters were lost 2026-05-20 because we waited
+  # until after-eval to back them up. Save FIRST, then eval.
+  echo ">>> immediately preserving adapter to B2 + local"
+  python3 $RP ssh $POD_ID "cd ${ADAPTER_OUT%/*} && tar czf /tmp/iter${ITER}-adapter.tgz \"\$(basename ${ADAPTER_OUT})/pi-diff-patch-apply-iter${ITER}\"" 2>&1 | tail -2 || echo "WARN: tar on pod failed"
+  mkdir -p /tmp/preserved-adapters
+  python3 $RP download $POD_ID /tmp/iter${ITER}-adapter.tgz /tmp/preserved-adapters/iter${ITER}-adapter.tgz 2>&1 | tail -2 || echo "WARN: local download failed"
+  # Background B2 upload (best-effort, non-blocking)
+  ( python3 -c "
+import sys, os
+sys.path.insert(0, '/tmp/pylibs')
+import boto3
+s3 = boto3.client('s3', endpoint_url='https://s3.us-west-002.backblazeb2.com',
+    aws_access_key_id=os.environ['B2_APPLICATION_KEY_ID'],
+    aws_secret_access_key=os.environ['B2_APPLICATION_KEY'])
+key = f'kiln/pi-diff-patch-apply/adapters-preserved/iter${ITER}-adapter.tgz'
+s3.upload_file('/tmp/preserved-adapters/iter${ITER}-adapter.tgz', 'clouderic', key)
+print(f'preserved iter${ITER} -> b2://clouderic/{key}')
+" 2>&1 | tail -2 ) &
+
   echo ">>> symlinking adapter into kiln model dir"
   python3 $RP ssh $POD_ID "ln -sfn ${ADAPTER_OUT}/pi-diff-patch-apply-iter${ITER} /workspace/qwen3.5-4b/adapters/pi-diff-patch-apply-iter${ITER}"
 
