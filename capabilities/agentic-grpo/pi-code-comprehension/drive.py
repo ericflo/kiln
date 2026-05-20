@@ -471,6 +471,15 @@ def run_one_iter(pod: str, iter_n: int) -> None:
         except Exception:
             start_kiln_serve(pod, iter_n)
 
+        # Critical: if warm-starting, activate the warm-start adapter on kiln
+        # BEFORE running rollouts (otherwise rollouts hit base model with all
+        # the thinking-token issues). For base rollouts (no warm-start),
+        # explicitly clear any previously-loaded adapter.
+        if train_adapter:
+            set_adapter(pod, train_adapter)
+        else:
+            set_adapter(pod, "")  # clear → base model
+
         train_summary = run_rollouts_train(pod, iter_n, num_train, num_gens, train_adapter, recipe)
         # Auto-fallback: try the configured threshold, drop by 10× if 0 groups
         n_groups = filter_groups(pod, iter_n, filter_var)
