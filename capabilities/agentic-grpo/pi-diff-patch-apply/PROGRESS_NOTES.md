@@ -43,7 +43,10 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 11   | h11-2epoch (2 epochs)            | 0.8676    | −0.074 | NEGATIVE — 2 epochs beats 1 (h10 was 0.842). Suggests longer training is mildly helpful at lr=1e-5 |
 | 12   | h12-rank8 (rank 8 / alpha 16)    | 0.8882    | −0.054 | NEGATIVE — best of 8-task sweep; rank-8 retains clean class (0.986). Smaller rank → less perturbation works. |
 | 13   | h13-chain-best-hard-mix (chain from iter 2) | 0.8462 | −0.096 | **chain compound FAILED** — iter 2 (0.9246) + same recipe → 0.8462. GRPO on top of trained adapter degrades it. |
-| 14+  | (smart_drive auto-chaining)       | —         | —      | iter 14 = incorrect-class-only chain from iter 2 (next test: does training only on highest-headroom class help?) |
+| 14   | h14-incorrect-only chain         | —         | —      | VOIDED — A6000 lease expired during iter 14, pod EXITED, smart_drive cycled FAILED rows on dead pod |
+| 15   | h15-rank2-chain                  | —         | —      | VOIDED — same pod death |
+| 16   | h16-3epochs-chain                | —         | —      | VOIDED — same pod death |
+| 14v2+| (smart_drive on new A100)        | —         | —      | New A100 80GB `u5kbp38gjy4wxi` acquired; bootstrap in flight; will restart smart_drive at iter 14 |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far (11 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
