@@ -129,28 +129,58 @@ correct here.
 | 2 | h2-low-filter | TRAIN_LIMIT=12, FILTER_VAR=0.02 | **0.2490** | **-0.294** | 0.294 | 0.590 | 0.344 | 1.59 | **regression**: train loss spiked at end (1.07→0.66→1.06), 22/32 zeros |
 | 3 | h3-no-filter | TRAIN_LIMIT=10, no filter, MAX_GROUPS=10 | **0.3604** | **-0.183** | 0.451 | 0.548 | 0.500 | 1.59 | **regression**: untouched-group training corrupted outcome, 17/32 zeros |
 | 4 | h4-tight-filter | TRAIN_LIMIT=20, FILTER_VAR=0.08 | **0.2848** | **-0.258** | 0.331 | 0.570 | 0.406 | 1.38 | **regression**: even tight filter regressed; thesis upset |
-| 5 | h5-replay-iter1 | EXACT iter 1 config replay (FILTER_VAR=0.05, TRAIN_LIMIT=10) | **0.2324** | **-0.311** | 0.300 | 0.560 | 0.313 | 1.25 | **iter 1 was a fluke** — replay regressed deeper |
+| 5 | h5-replay-iter1 | EXACT iter 1 config replay | **0.2324** | **-0.311** | 0.300 | 0.560 | 0.313 | 1.25 | (silent base eval — see correction below) |
 
-**Five trained iters, every one regressed.** Pattern is highly consistent:
-- All regressed iters: `mean_wall_clock` 100-115s on eval (vs base 19s, iter 1 outlier 31s). The trained model is **timing out at 120s**.
-- All: outcome 0.29-0.45 (vs base 0.74).
-- All: very few tool calls (1.25-1.6 vs base 4.6).
+### 🔴 MAJOR CORRECTION (2026-05-20): adapter-load bug invalidated iters 1-5 eval rows
 
-**Root cause (inspected transcript of iter 5 / eval_define_0019):**
-Trained model:
-1. Issued a malformed first grep (`grep -n "X" repo/` — missing `-r`).
-2. Got "Is a directory" error.
-3. Retried with `grep -rn "X" repo/` and got the right hit `repo/.../trajectory.rs:74`.
-4. **Then never emitted a final answer.** Pi timed out at 120s waiting for the final message.
+After 5 "regressed" iters in a row, I dug into `/v1/adapters` and found
+`available: []` — kiln-server **never saw the adapters**. The trainer
+writes weights to `$ADAPTER_OUT/$ADAPTER_NAME/adapter_model.safetensors`
+(one extra level of nesting). `run_iter.sh` was symlinking
+`$ADAPTER_OUT` (the outer wrapper) into `$KILN_ADAPTERS_DIR/$ADAPTER_NAME`
+instead of `$ADAPTER_OUT/$ADAPTER_NAME` (the actual file location). The
+`POST /v1/adapters/load` call returned **500** silently and the
+previous adapter (usually base) remained active. Every "regression"
+above was the base model + eval-rollout variance from kiln-serve
+state drift between iters.
 
-The training pushes the model toward **thinking instead of answering**: it knows how to grep, finds the answer, then loops in thinking tokens without emitting the final `path:line`. Likely cause: the GRPO advantage rewards small `mean_n_tool_calls` (efficiency sub-score) but does not penalize "thought without exit" — the model finds a local optimum where it thinks indefinitely.
+**Fix:** symlink the nested directory (commit `4237f591`).
 
-**Pipeline-level question I'm now investigating:** even iter 1's small "win" may have been mostly noise — its mean_wall_clock had already crept from 19s → 31s and the +0.05 efficiency could come from the same "fewer tool calls" drift seen in regressed iters.
+### Real iter table (after re-eval with adapters actually loaded)
 
-**Next directions to test:**
-- iter 6: `NO_ECHO=1` — disable env-CE, in case the env-token loss is the driver of the over-think drift.
-- iter 7: very low learning rate `LR=2e-6` — minimize policy drift.
-- iter 8: tighten the rubric so it explicitly rewards "session ended with a clean file:line text" and penalises thinking-without-exit. The current `format_compliance` only checks the final answer; it doesn't punish never reaching a final answer.
+| Iter | Recipe | Composite | Δ vs base | Outcome | Eff | Grd | Pass | Wall |
+|------|--------|-----------|-----------|---------|-----|-----|------|------|
+| 0 | baseline (no adapter) | 0.5432 | — | 0.737 | 0.401 | 0.844 | 25/32 | 19.2s |
+| 1 reeval | TRAIN_LIMIT=10, FILTER_VAR=0.05, MAX_GROUPS=10 | **0.5747** | **+0.032** | 0.785 | 0.412 | 0.844 | 26/32 | 49.2s |
+| 2 reeval | TRAIN_LIMIT=12, FILTER_VAR=0.02 | **0.5752** | **+0.032** | 0.799 | 0.406 | 0.906 | 27/32 | 49.0s |
+| 3 reeval | TRAIN_LIMIT=10, no filter, MAX_GROUPS=10 | **0.5598** | **+0.017** | 0.720 | 0.428 | 0.875 | 24/32 | 45.6s |
+| 4 reeval | TRAIN_LIMIT=20, FILTER_VAR=0.08 | **0.5686** | **+0.025** | 0.796 | 0.439 | 0.969 | 27/32 | 37.1s |
+| **5 reeval** | TRAIN_LIMIT=10, FILTER_VAR=0.05 (replay iter 1) | **0.5808** | **+0.038** | 0.759 | 0.462 | 0.844 | 26/32 | 41.1s |
+
+**Best so far: iter 5 @ +0.038 composite, +0.06 efficiency.** Iter 2 has
+the highest outcome (27/32 = 0.844 outcome pass count) and grounding
+0.906. Iter 4 has the cleanest format compliance (0.969).
+
+**ALL five trained adapters lift composite above baseline.** GRPO is
+working; the regression story was a kiln-server adapter-loading bug.
+
+### Lessons backported
+
+- **kiln-polish.jsonl** entry to file: every cap that writes adapters
+  via `cuda_grpo_ablation --output X --adapter Y` must symlink the
+  *nested* `X/Y/` directory into `$KILN_MODEL_PATH/adapters/Y`, not
+  the outer `X/` wrapper. Otherwise `/v1/adapters/load` 500s silently.
+- **Always GET /v1/adapters before trusting a load** — the load endpoint
+  doesn't bubble a clear error to callers; the only way to detect a
+  silent failure is to verify the adapter shows up in
+  `available[]` after the load.
+
+### Next directions
+
+- iter 6-15: same FILTER_VAR=0.05 recipe with varied hyperparams (LR,
+  rank, ECHO lambda, NO_ECHO) to map the response surface.
+- iter 16+: combine iter 5 best with iter 2's higher outcome — multi-seed
+  verification of best recipe.
 
 ## Adversarial design (§0)
 
