@@ -156,13 +156,23 @@ state drift between iters.
 | 3 reeval | TRAIN_LIMIT=10, no filter, MAX_GROUPS=10 | **0.5598** | **+0.017** | 0.720 | 0.428 | 0.875 | 24/32 | 45.6s |
 | 4 reeval | TRAIN_LIMIT=20, FILTER_VAR=0.08 | **0.5686** | **+0.025** | 0.796 | 0.439 | 0.969 | 27/32 | 37.1s |
 | **5 reeval** | TRAIN_LIMIT=10, FILTER_VAR=0.05 (replay iter 1) | **0.5808** | **+0.038** | 0.759 | 0.462 | 0.844 | 26/32 | 41.1s |
+| 6 | h6-no-echo (NO_ECHO=1, otherwise same as iter 5) | **0.2389** | **-0.304** | 0.304 | 0.571 | 0.438 | 10/32 | 105.3s |
 
 **Best so far: iter 5 @ +0.038 composite, +0.06 efficiency.** Iter 2 has
 the highest outcome (27/32 = 0.844 outcome pass count) and grounding
 0.906. Iter 4 has the cleanest format compliance (0.969).
 
-**ALL five trained adapters lift composite above baseline.** GRPO is
-working; the regression story was a kiln-server adapter-loading bug.
+**ALL five trained adapters with ECHO lift composite above baseline.**
+GRPO is working; the regression story was a kiln-server adapter-loading bug.
+
+**Iter 6 ablation: ECHO is essential.** Identical recipe to iter 5 but
+`NO_ECHO=1` regressed to 0.239 (-0.34 vs iter 5, -0.30 vs base). The
+adapter loaded correctly (verified `/v1/adapters` and the symlink) so
+this is a real ablation result, not a load bug. This matches the
+paper's claim that env-CE on observation tokens is the load-bearing
+component of agentic-GRPO. Without it the model collapses into the
+same "think indefinitely, never emit final answer" pattern that the
+load-bug was masquerading as.
 
 ### Lessons backported
 
