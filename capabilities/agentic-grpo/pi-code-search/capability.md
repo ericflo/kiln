@@ -191,6 +191,30 @@ model + rank-32 = too much policy drift per token, model collapses
 into the same think-indefinitely pattern but worse. Will NOT explore
 ranks ≥32 further. Will try rank=8 to test the other direction.
 
+### 🔴 SECOND MAJOR CORRECTION (2026-05-20): kiln-serve state drift inflates "regressions"
+
+iters 6-11 ALL appeared to regress catastrophically (composite 0.07-0.43)
+even on configs that have been verified good in earlier iters. Suspected
+adapter-load bug again — but the symlinks were correct.
+
+**Real cause: kiln-serve degrades after extended uptime + many
+adapter load/unload cycles.** Eval rollouts start hitting the 120s
+wall-clock timeout because the inference loop slows down dramatically
+(20ms responses → 80-120s per pi turn).
+
+**Verified by re-eval of iter 5 adapter immediately after a kiln serve
+restart:** composite jumped from prior 0.581 → **0.600** (and outcome
+from 0.759 → 0.820, 28/32 pass). The adapter is genuinely better than
+base by ~+0.06 composite, but only when the server is fresh.
+
+**Fix:** always restart kiln-serve between iter steps (in particular
+between training and eval). Will backport into run_iter.sh.
+
+**Best so far: iter 5 adapter, composite=0.6004 (+0.057 vs base) with
+clean kiln-serve.** 28/32 outcome pass, grounding 0.969, format 0.969,
+mean_wall_clock 40s (vs base 19s — model takes longer per turn but
+answers correctly far more often).
+
 ### Lessons backported
 
 - **kiln-polish.jsonl** entry to file: every cap that writes adapters

@@ -252,32 +252,29 @@ if [ "${EVAL_ONLY:-0}" != "1" ] && [ "${SKIP_TRAIN:-0}" != "1" ] && [ -s "$GRPO_
   ln -sfn "$ADAPTER_OUT/$ADAPTER_NAME" "$KILN_ADAPTERS_DIR/$ADAPTER_NAME"
 fi
 
-# Restart kiln-server if needed (training killed it). Use the same env
-# vars that worked on the new H100/A6000 pod (see notes on kernel
-# kill-switch flags above).
-#
-# IMPORTANT: fully detach stdin/stdout/stderr from the launching shell
-# so the parent's `tee`/`tail` pipes close cleanly when run_iter.sh
-# exits. Without `</dev/null` the parent shell hangs forever waiting
-# for the kiln-serve subprocess's stdout to close.
+# ALWAYS restart kiln-serve before eval — even if it's already running.
+# Without a fresh restart, latency creep + state drift from many
+# adapter load/unload cycles silently inflates eval wall-clock times,
+# causing rollouts to hit the 120s timeout and producing fake
+# regressions. See "SECOND MAJOR CORRECTION" in capability.md.
+echo "[iter $ITER] restarting kiln serve (always-restart-pre-eval policy)"
+pkill -9 -f "kiln serve" 2>/dev/null || true
+sleep 3
+export KILN_MODEL_PATH
+export KILN_SERVED_MODEL_ID=qwen-3.5-4b-kiln
+export KILN_BATCHING_ENGINE=0
+export KILN_DISABLE_FUSED_GDN_GATES=1
+setsid nohup "$KILN_BIN" serve \
+      </dev/null >>"$BASE_DIR/logs/kiln-serve.log" 2>&1 &
+disown $! 2>/dev/null || true
+# Wait up to 180s for kiln-server to become reachable.
+for i in $(seq 1 90); do
+  if curl -sf "$KILN_URL/v1/models" >/dev/null 2>&1; then break; fi
+  sleep 2
+done
 if ! curl -sf "$KILN_URL/v1/models" >/dev/null 2>&1; then
-  echo "[iter $ITER] launching kiln serve in background"
-  export KILN_MODEL_PATH
-  export KILN_SERVED_MODEL_ID=qwen-3.5-4b-kiln
-  export KILN_BATCHING_ENGINE=0
-  export KILN_DISABLE_FUSED_GDN_GATES=1
-  setsid nohup "$KILN_BIN" serve \
-        </dev/null >>"$BASE_DIR/logs/kiln-serve.log" 2>&1 &
-  disown $! 2>/dev/null || true
-  # Wait up to 180s for kiln-server to become reachable.
-  for i in $(seq 1 90); do
-    if curl -sf "$KILN_URL/v1/models" >/dev/null 2>&1; then break; fi
-    sleep 2
-  done
-  if ! curl -sf "$KILN_URL/v1/models" >/dev/null 2>&1; then
-    echo "ERROR: kiln-server failed to start" >&2
-    exit 3
-  fi
+  echo "ERROR: kiln-server failed to start" >&2
+  exit 3
 fi
 
 # ----------------------------------------------------------------------------
