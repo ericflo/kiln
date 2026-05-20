@@ -60,7 +60,9 @@ Lease expires `2026-05-19T12:52:01Z`.
 | 20   | h20-rank8-default-corpus         | FAILED    | —      | GRPO crashed: `GRPO completions have different prompt lengths (248 vs 246 for completion 2)`. Bug in cuda_grpo_ablation when rollouts have variable prompt lengths. Pod is fine. |
 | 20   | h20-rank8-default-corpus (A100)  | FAILED    | —      | cuda_grpo crash: GRPO completions had different prompt lengths (248 vs 246). Real cuda_grpo_ablation limitation, not pod death. |
 | 21-24| (various, A100)                  | VOIDED    | —      | A100 pod died mid-iter. Adapter-preserve fix saved iter 18/19 weights to b2; iter 20/21+ adapters never produced. |
-| 21v2 | h21-rank2-default-corpus (L40S)  | —         | —      | **in flight on L40S ve0abvv0k4e2f0** — fresh pod, manually bootstrapped, default corpus, rank-2 LoRA. |
+| 21v2 | h21-rank2-default-corpus (L40S)  | VOIDED    | —      | L40S had transient runtime glitch mid-iter; pod resurrected. iter 22 used as replay test. |
+| 22   | h22-default-T1.0 (default corpus) | 0.5234    | −0.418 | **CATASTROPHIC** — all classes collapsed ~40pp. T=1.0 + default corpus is far worse than T=1.0 + hard_mix (iter 13: 0.846) or T=0.8 + default (iter 12: 0.888). Non-monotonic interactions. |
+| 23+  | (smart_drive in flight)          | —         | —      | iter 23 (h23-2epochs-default) in flight |
 | 11-49| (auto-chained by drive_iters_fast)| —        | —      | queued                                                  |
 
 **Best trained adapter so far (11 valid trained iters):** iter 2 at 0.9246 (−1.7pp). Base model at 0.9419 remains the strongest.
