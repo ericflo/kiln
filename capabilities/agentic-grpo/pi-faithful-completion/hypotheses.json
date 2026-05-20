@@ -1,52 +1,745 @@
 [
-  {"iter": 1,  "slug": "h1-default-recipe",            "family": "H1-default",         "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "mode": "phase1"}, "rationale": "baseline GRPO recipe with ECHO defaults; POSITIVE +0.0171"},
-  {"iter": 2,  "slug": "h2-no-echo",                   "family": "H2-no-echo",         "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "no_echo": 1},     "rationale": "ECHO ablation; NULL +0.0002"},
-  {"iter": 3,  "slug": "h3-lr-1e-4",                   "family": "H3-lr-aggressive",   "args": {"lr": "1e-4", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "no_echo": 1},     "rationale": "high LR no-ECHO; NEGATIVE -0.0155"},
-  {"iter": 4,  "slug": "h4-rank-32-echo",              "family": "H4-rank",            "args": {"lr": "1e-5", "rank": 32, "alpha": 64, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05"},     "rationale": "rank-32 + ECHO + base recipe — bigger adapter capacity"},
-  {"iter": 5,  "slug": "h5-rank-8-echo",               "family": "H4-rank",            "args": {"lr": "1e-5", "rank": 8,  "alpha": 16, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05"},     "rationale": "rank-8 + ECHO — minimal LoRA bandwidth"},
-  {"iter": 6,  "slug": "h6-num-gens-8-echo",           "family": "H5-num-gens",        "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 8, "train_tasks": 16, "echo_lambda": "0.05"},     "rationale": "8 gens per task — sharper advantage signal"},
-  {"iter": 7,  "slug": "h7-train-tasks-48-echo",       "family": "H6-scale-tasks",     "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 48, "echo_lambda": "0.05"},     "rationale": "2x train tasks — more diverse gradient"},
-  {"iter": 8,  "slug": "h8-chain-from-iter1-echo",     "family": "H7-chain",           "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "base_adapter": "BEST"}, "rationale": "continue from h1 (current best); refine"},
-  {"iter": 9,  "slug": "h9-lr-5e-6-echo",              "family": "H3-lr",              "args": {"lr": "5e-6", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05"},     "rationale": "half LR — gentler updates"},
-  {"iter": 10, "slug": "h10-lr-3e-5-echo",             "family": "H3-lr",              "args": {"lr": "3e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05"},     "rationale": "3x LR with ECHO regularization"},
-  {"iter": 11, "slug": "h11-echo-lambda-0.025",        "family": "H8-echo-lambda",     "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.025"},    "rationale": "lower ECHO lambda"},
-  {"iter": 12, "slug": "h12-echo-lambda-0.1",          "family": "H8-echo-lambda",     "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.1"},      "rationale": "higher ECHO lambda — paper §3.3 says 0.1 degrades"},
-  {"iter": 13, "slug": "h13-light-system-prompt",      "family": "H9-system-prompt",   "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "system_prompt": "light"}, "rationale": "lighter prompt — GRPO must acquire discipline"},
-  {"iter": 14, "slug": "h14-minimal-system-prompt",    "family": "H9-system-prompt",   "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "system_prompt": "minimal"}, "rationale": "near-empty prompt — pure GRPO acquisition"},
-  {"iter": 15, "slug": "h15-strict-system-prompt",     "family": "H9-system-prompt",   "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "system_prompt": "strict"}, "rationale": "stricter prompt — see if anchoring helps"},
-  {"iter": 16, "slug": "h16-success-only-tasks",       "family": "H10-task-mix",       "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "task_filter": "success_only"}, "rationale": "drop failure tasks; focus on format/value"},
-  {"iter": 17, "slug": "h17-failure-only-tasks",       "family": "H10-task-mix",       "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 16, "echo_lambda": "0.05", "task_filter": "failure_only"}, "rationale": "honest-failure focus"},
-  {"iter": 18, "slug": "h18-balanced-mix",             "family": "H10-task-mix",       "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 32, "echo_lambda": "0.05", "task_filter": "balanced"}, "rationale": "balanced 50/25/25 success/failure/softpunt"},
-  {"iter": 19, "slug": "h19-chain-best-rank-32",       "family": "H7-chain",           "args": {"lr": "1e-5", "rank": 32, "alpha": 64, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "base_adapter": "BEST"}, "rationale": "chain from best + bigger LoRA"},
-  {"iter": 20, "slug": "h20-chain-best-balanced",      "family": "H7-chain",           "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 32, "echo_lambda": "0.05", "base_adapter": "BEST", "task_filter": "balanced"}, "rationale": "balanced mix from best"},
-  {"iter": 21, "slug": "h21-filter-var-0.05",          "family": "H11-filter",         "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 40, "echo_lambda": "0.05", "filter_var": 0.05}, "rationale": "drop low-variance groups"},
-  {"iter": 22, "slug": "h22-chain-best-failure-focus", "family": "H7-chain",           "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 16, "echo_lambda": "0.05", "base_adapter": "BEST", "task_filter": "failure_only"}, "rationale": "target honesty sub-score from best"},
-  {"iter": 23, "slug": "h23-num-gens-12-echo",         "family": "H5-num-gens",        "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 12, "train_tasks": 8, "echo_lambda": "0.05"}, "rationale": "12 gens × 8 tasks — extreme advantage signal density"},
-  {"iter": 24, "slug": "h24-alpha-64-rank-16",         "family": "H12-lora-scaling",   "args": {"lr": "1e-5", "rank": 16, "alpha": 64, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05"}, "rationale": "alpha/rank = 4 (instead of 2) — stronger LoRA scaling"},
-  {"iter": 25, "slug": "h25-temperature-0.6",          "family": "H13-temperature",    "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "temperature": "0.6"}, "rationale": "lower rollout temp — tighter consistency"},
-  {"iter": 26, "slug": "h26-temperature-1.0",          "family": "H13-temperature",    "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "temperature": "1.0"}, "rationale": "higher rollout temp — more variance per group"},
-  {"iter": 27, "slug": "h27-mode-baseline",            "family": "H14-grpo-mode",      "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "mode": "baseline"}, "rationale": "old DeepSeekMath/R1 recipe"},
-  {"iter": 28, "slug": "h28-mode-cispo",               "family": "H14-grpo-mode",      "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "mode": "phase1_cispo"}, "rationale": "CISPO weight-clip IS"},
-  {"iter": 29, "slug": "h29-mode-gspo",                "family": "H14-grpo-mode",      "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "mode": "phase1_gspo"}, "rationale": "GSPO sequence-level IS"},
-  {"iter": 30, "slug": "h30-format-diverse",           "family": "H10-task-mix",       "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 30, "echo_lambda": "0.05", "task_filter": "format_diverse"}, "rationale": "ensure all format kinds appear"},
-  {"iter": 31, "slug": "h31-soft-punt-focus",          "family": "H10-task-mix",       "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 8,  "echo_lambda": "0.05", "task_filter": "soft_punt_only"}, "rationale": "soft-punt-tempting tasks"},
-  {"iter": 32, "slug": "h32-chain-best-large",         "family": "H7-chain",           "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 48, "echo_lambda": "0.05", "base_adapter": "BEST"}, "rationale": "large refinement chain"},
-  {"iter": 33, "slug": "h33-chain-rolling-prev",       "family": "H15-rolling",        "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "base_adapter": "PREV"}, "rationale": "rolling: continue from previous iter"},
-  {"iter": 34, "slug": "h34-chain-best-no-filter",     "family": "H7-chain",           "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 32, "echo_lambda": "0.05", "base_adapter": "BEST", "filter_var": 0.0}, "rationale": "no variance filter on best"},
-  {"iter": 35, "slug": "h35-chain-best-tight-filter", "family": "H7-chain",           "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 40, "echo_lambda": "0.05", "base_adapter": "BEST", "filter_var": 0.1}, "rationale": "very tight variance filter"},
-  {"iter": 36, "slug": "h36-num-gens-16",              "family": "H5-num-gens",        "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 16, "train_tasks": 8, "echo_lambda": "0.05"}, "rationale": "16 gens × 8 tasks — max signal density"},
-  {"iter": 37, "slug": "h37-rank-24-alpha-48",         "family": "H4-rank",            "args": {"lr": "1e-5", "rank": 24, "alpha": 48, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05"}, "rationale": "rank-24 — intermediate"},
-  {"iter": 38, "slug": "h38-rank-64-alpha-128",        "family": "H4-rank",            "args": {"lr": "1e-5", "rank": 64, "alpha": 128, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05"}, "rationale": "rank-64 — max LoRA capacity"},
-  {"iter": 39, "slug": "h39-chain-best-rank-32",       "family": "H7-chain",           "args": {"lr": "1e-5", "rank": 32, "alpha": 64, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "base_adapter": "BEST"}, "rationale": "chain best + rank-32 (re-test)"},
-  {"iter": 40, "slug": "h40-large-corpus-balanced",    "family": "H6-scale-tasks",     "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 50, "echo_lambda": "0.05", "task_filter": "balanced"}, "rationale": "scale balanced mix"},
-  {"iter": 41, "slug": "h41-chain-balanced-large",     "family": "H7-chain",           "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 48, "echo_lambda": "0.05", "base_adapter": "BEST", "task_filter": "balanced"}, "rationale": "balanced large from best"},
-  {"iter": 42, "slug": "h42-mode-reinforce-echo",      "family": "H14-grpo-mode",      "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "mode": "phase1_reinforce"}, "rationale": "REINFORCE + ECHO"},
-  {"iter": 43, "slug": "h43-max-tokens-256",           "family": "H16-max-tokens",     "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "max_tokens": "256"}, "rationale": "force terse rollouts"},
-  {"iter": 44, "slug": "h44-max-tokens-1536",          "family": "H16-max-tokens",     "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "max_tokens": "1536"}, "rationale": "more space for reasoning"},
-  {"iter": 45, "slug": "h45-aggressive-chain-3e-5",    "family": "H7-chain",           "args": {"lr": "3e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "base_adapter": "BEST"}, "rationale": "3x LR chain from best"},
-  {"iter": 46, "slug": "h46-conservative-chain-5e-6",  "family": "H7-chain",           "args": {"lr": "5e-6", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 24, "echo_lambda": "0.05", "base_adapter": "BEST"}, "rationale": "half LR chain from best — gentle polish"},
-  {"iter": 47, "slug": "h47-chain-failure-only-best",  "family": "H7-chain",           "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 16, "echo_lambda": "0.05", "base_adapter": "BEST", "task_filter": "failure_only"}, "rationale": "targeted honesty refinement"},
-  {"iter": 48, "slug": "h48-chain-soft-punt-best",     "family": "H7-chain",           "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 8,  "echo_lambda": "0.05", "base_adapter": "BEST", "task_filter": "soft_punt_only"}, "rationale": "targeted soft-punt refinement"},
-  {"iter": 49, "slug": "h49-chain-best-num-gens-8",    "family": "H7-chain",           "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 8, "train_tasks": 16, "echo_lambda": "0.05", "base_adapter": "BEST"}, "rationale": "best + more gens"},
-  {"iter": 50, "slug": "h50-final-chain-large",        "family": "H17-finale",         "args": {"lr": "1e-5", "rank": 16, "alpha": 32, "num_gens": 4, "train_tasks": 50, "echo_lambda": "0.05", "base_adapter": "BEST", "task_filter": "balanced"}, "rationale": "final long balanced refinement from best"}
+  {
+    "iter": 1,
+    "slug": "h1-default-recipe",
+    "family": "H1-default",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "mode": "phase1"
+    },
+    "rationale": "baseline GRPO recipe with ECHO defaults; POSITIVE +0.0171"
+  },
+  {
+    "iter": 2,
+    "slug": "h2-no-echo",
+    "family": "H2-no-echo",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "no_echo": 1
+    },
+    "rationale": "ECHO ablation; NULL +0.0002"
+  },
+  {
+    "iter": 3,
+    "slug": "h3-lr-1e-4",
+    "family": "H3-lr-aggressive",
+    "args": {
+      "lr": "1e-4",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "no_echo": 1
+    },
+    "rationale": "high LR no-ECHO; NEGATIVE -0.0155"
+  },
+  {
+    "iter": 4,
+    "slug": "h4-rank-32-echo",
+    "family": "H4-rank",
+    "args": {
+      "lr": "1e-5",
+      "rank": 32,
+      "alpha": 64,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05"
+    },
+    "rationale": "rank-32 + ECHO + base recipe \u2014 bigger adapter capacity"
+  },
+  {
+    "iter": 5,
+    "slug": "h5-rank-8-echo",
+    "family": "H4-rank",
+    "args": {
+      "lr": "1e-5",
+      "rank": 8,
+      "alpha": 16,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05"
+    },
+    "rationale": "rank-8 + ECHO \u2014 minimal LoRA bandwidth"
+  },
+  {
+    "iter": 6,
+    "slug": "h6-num-gens-8-echo",
+    "family": "H5-num-gens",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 8,
+      "train_tasks": 16,
+      "echo_lambda": "0.05"
+    },
+    "rationale": "8 gens per task \u2014 sharper advantage signal"
+  },
+  {
+    "iter": 7,
+    "slug": "h7-train-tasks-48-echo",
+    "family": "H6-scale-tasks",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 48,
+      "echo_lambda": "0.05"
+    },
+    "rationale": "2x train tasks \u2014 more diverse gradient"
+  },
+  {
+    "iter": 8,
+    "slug": "h8-chain-from-iter1-echo",
+    "family": "H7-chain",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "base_adapter": "BEST"
+    },
+    "rationale": "continue from h1 (current best); refine"
+  },
+  {
+    "iter": 9,
+    "slug": "h9-lr-5e-6-echo",
+    "family": "H3-lr",
+    "args": {
+      "lr": "5e-6",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05"
+    },
+    "rationale": "half LR \u2014 gentler updates"
+  },
+  {
+    "iter": 10,
+    "slug": "h10-lr-3e-5-echo",
+    "family": "H3-lr",
+    "args": {
+      "lr": "3e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05"
+    },
+    "rationale": "3x LR with ECHO regularization"
+  },
+  {
+    "iter": 11,
+    "slug": "h11-echo-lambda-0.025",
+    "family": "H8-echo-lambda",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.025"
+    },
+    "rationale": "lower ECHO lambda"
+  },
+  {
+    "iter": 12,
+    "slug": "h12-echo-lambda-0.1",
+    "family": "H8-echo-lambda",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.1"
+    },
+    "rationale": "higher ECHO lambda \u2014 paper \u00a73.3 says 0.1 degrades"
+  },
+  {
+    "iter": 13,
+    "slug": "h13-light-system-prompt",
+    "family": "H9-system-prompt",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "system_prompt": "light"
+    },
+    "rationale": "lighter prompt \u2014 GRPO must acquire discipline"
+  },
+  {
+    "iter": 14,
+    "slug": "h14-minimal-system-prompt",
+    "family": "H9-system-prompt",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "system_prompt": "minimal"
+    },
+    "rationale": "near-empty prompt \u2014 pure GRPO acquisition"
+  },
+  {
+    "iter": 15,
+    "slug": "h15-strict-system-prompt",
+    "family": "H9-system-prompt",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "system_prompt": "strict"
+    },
+    "rationale": "stricter prompt \u2014 see if anchoring helps"
+  },
+  {
+    "iter": 16,
+    "slug": "h16-success-only-tasks",
+    "family": "H10-task-mix",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "task_filter": "success_only"
+    },
+    "rationale": "drop failure tasks; focus on format/value"
+  },
+  {
+    "iter": 17,
+    "slug": "h17-failure-only-tasks",
+    "family": "H10-task-mix",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 16,
+      "echo_lambda": "0.05",
+      "task_filter": "failure_only"
+    },
+    "rationale": "honest-failure focus"
+  },
+  {
+    "iter": 18,
+    "slug": "h18-balanced-mix",
+    "family": "H10-task-mix",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 32,
+      "echo_lambda": "0.05",
+      "task_filter": "balanced"
+    },
+    "rationale": "balanced 50/25/25 success/failure/softpunt"
+  },
+  {
+    "iter": 19,
+    "slug": "h19-chain-best-rank-32",
+    "family": "H7-chain",
+    "args": {
+      "lr": "1e-5",
+      "rank": 32,
+      "alpha": 64,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "base_adapter": "BEST"
+    },
+    "rationale": "chain from best + bigger LoRA"
+  },
+  {
+    "iter": 20,
+    "slug": "h20-chain-best-balanced",
+    "family": "H7-chain",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 32,
+      "echo_lambda": "0.05",
+      "base_adapter": "BEST",
+      "task_filter": "balanced"
+    },
+    "rationale": "balanced mix from best"
+  },
+  {
+    "iter": 21,
+    "slug": "h21-filter-var-0.05",
+    "family": "H11-filter",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 40,
+      "echo_lambda": "0.05",
+      "filter_var": 0.05
+    },
+    "rationale": "drop low-variance groups"
+  },
+  {
+    "iter": 22,
+    "slug": "h22-chain-best-failure-focus",
+    "family": "H7-chain",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 16,
+      "echo_lambda": "0.05",
+      "base_adapter": "BEST",
+      "task_filter": "failure_only"
+    },
+    "rationale": "target honesty sub-score from best"
+  },
+  {
+    "iter": 23,
+    "slug": "h23-num-gens-12-echo",
+    "family": "H5-num-gens",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 12,
+      "train_tasks": 8,
+      "echo_lambda": "0.05"
+    },
+    "rationale": "12 gens \u00d7 8 tasks \u2014 extreme advantage signal density"
+  },
+  {
+    "iter": 24,
+    "slug": "h24-alpha-64-rank-16",
+    "family": "H12-lora-scaling",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 64,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05"
+    },
+    "rationale": "alpha/rank = 4 (instead of 2) \u2014 stronger LoRA scaling"
+  },
+  {
+    "iter": 25,
+    "slug": "h25-temperature-0.6",
+    "family": "H13-temperature",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "temperature": "0.6"
+    },
+    "rationale": "lower rollout temp \u2014 tighter consistency"
+  },
+  {
+    "iter": 26,
+    "slug": "h26-temperature-1.0",
+    "family": "H13-temperature",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "temperature": "1.0"
+    },
+    "rationale": "higher rollout temp \u2014 more variance per group"
+  },
+  {
+    "iter": 27,
+    "slug": "h27-mode-baseline",
+    "family": "H14-grpo-mode",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "mode": "baseline"
+    },
+    "rationale": "old DeepSeekMath/R1 recipe"
+  },
+  {
+    "iter": 28,
+    "slug": "h28-mode-cispo",
+    "family": "H14-grpo-mode",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "mode": "phase1_cispo"
+    },
+    "rationale": "CISPO weight-clip IS"
+  },
+  {
+    "iter": 29,
+    "slug": "h29-mode-gspo",
+    "family": "H14-grpo-mode",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "mode": "phase1_gspo"
+    },
+    "rationale": "GSPO sequence-level IS"
+  },
+  {
+    "iter": 30,
+    "slug": "h30-format-diverse",
+    "family": "H10-task-mix",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 30,
+      "echo_lambda": "0.05",
+      "task_filter": "format_diverse"
+    },
+    "rationale": "ensure all format kinds appear"
+  },
+  {
+    "iter": 31,
+    "slug": "h31-soft-punt-focus",
+    "family": "H10-task-mix",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 8,
+      "echo_lambda": "0.05",
+      "task_filter": "soft_punt_only"
+    },
+    "rationale": "soft-punt-tempting tasks"
+  },
+  {
+    "iter": 32,
+    "slug": "h32-chain-best-large",
+    "family": "H7-chain",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 48,
+      "echo_lambda": "0.05",
+      "base_adapter": "BEST"
+    },
+    "rationale": "large refinement chain"
+  },
+  {
+    "iter": 33,
+    "slug": "h33-chain-rolling-prev",
+    "family": "H15-rolling",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "base_adapter": "PREV"
+    },
+    "rationale": "rolling: continue from previous iter"
+  },
+  {
+    "iter": 34,
+    "slug": "h34-chain-best-no-filter",
+    "family": "H7-chain",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 32,
+      "echo_lambda": "0.05",
+      "base_adapter": "BEST",
+      "filter_var": 0.0
+    },
+    "rationale": "no variance filter on best"
+  },
+  {
+    "iter": 35,
+    "slug": "h35-chain-best-tight-filter",
+    "family": "H7-chain",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 40,
+      "echo_lambda": "0.05",
+      "base_adapter": "BEST",
+      "filter_var": 0.1
+    },
+    "rationale": "very tight variance filter"
+  },
+  {
+    "iter": 36,
+    "slug": "h36-num-gens-16",
+    "family": "H5-num-gens",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 16,
+      "train_tasks": 8,
+      "echo_lambda": "0.05"
+    },
+    "rationale": "16 gens \u00d7 8 tasks \u2014 max signal density"
+  },
+  {
+    "iter": 37,
+    "slug": "h37-rank-24-alpha-48",
+    "family": "H4-rank",
+    "args": {
+      "lr": "1e-5",
+      "rank": 24,
+      "alpha": 48,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05"
+    },
+    "rationale": "rank-24 \u2014 intermediate"
+  },
+  {
+    "iter": 38,
+    "slug": "h38-rank-64-alpha-128",
+    "family": "H4-rank",
+    "args": {
+      "lr": "1e-5",
+      "rank": 64,
+      "alpha": 128,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05"
+    },
+    "rationale": "rank-64 \u2014 max LoRA capacity"
+  },
+  {
+    "iter": 39,
+    "slug": "h39-chain-best-rank-32",
+    "family": "H7-chain",
+    "args": {
+      "lr": "1e-5",
+      "rank": 32,
+      "alpha": 64,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "base_adapter": "BEST"
+    },
+    "rationale": "chain best + rank-32 (re-test)"
+  },
+  {
+    "iter": 40,
+    "slug": "h40-large-corpus-balanced",
+    "family": "H6-scale-tasks",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 50,
+      "echo_lambda": "0.05",
+      "task_filter": "balanced"
+    },
+    "rationale": "scale balanced mix"
+  },
+  {
+    "iter": 41,
+    "slug": "h41-chain-balanced-large",
+    "family": "H7-chain",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 48,
+      "echo_lambda": "0.05",
+      "base_adapter": "BEST",
+      "task_filter": "balanced"
+    },
+    "rationale": "balanced large from best"
+  },
+  {
+    "iter": 42,
+    "slug": "h42-mode-reinforce-echo",
+    "family": "H14-grpo-mode",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "mode": "phase1_reinforce"
+    },
+    "rationale": "REINFORCE + ECHO"
+  },
+  {
+    "iter": 43,
+    "slug": "h43-max-tokens-256",
+    "family": "H16-max-tokens",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "max_tokens": "256"
+    },
+    "rationale": "force terse rollouts"
+  },
+  {
+    "iter": 44,
+    "slug": "h44-max-tokens-1536",
+    "family": "H16-max-tokens",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "max_tokens": "1536"
+    },
+    "rationale": "more space for reasoning"
+  },
+  {
+    "iter": 45,
+    "slug": "h45-temp-0.6-x-light",
+    "family": "H18-combo",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "temperature": "0.6",
+      "system_prompt": "light"
+    },
+    "rationale": "combine winning knobs: temp=0.6 (iter 25) + light prompt (iter 13)"
+  },
+  {
+    "iter": 46,
+    "slug": "h46-temp-0.6-x-lr-3e-5",
+    "family": "H18-combo",
+    "args": {
+      "lr": "3e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "temperature": "0.6"
+    },
+    "rationale": "combine: temp=0.6 (iter 25) + lr=3e-5 (iter 10)"
+  },
+  {
+    "iter": 47,
+    "slug": "h47-temp-0.5-push-lower",
+    "family": "H13-temperature",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "temperature": "0.5"
+    },
+    "rationale": "push temp lower than iter 25 winning 0.6"
+  },
+  {
+    "iter": 48,
+    "slug": "h48-chain-best-x-temp-0.6",
+    "family": "H18-combo",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "temperature": "0.6",
+      "base_adapter": "BEST"
+    },
+    "rationale": "chain from iter 25 BEST + winning temp=0.6 \u2014 refinement"
+  },
+  {
+    "iter": 49,
+    "slug": "h49-chain-best-x-light",
+    "family": "H18-combo",
+    "args": {
+      "lr": "1e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "base_adapter": "BEST",
+      "system_prompt": "light"
+    },
+    "rationale": "chain from BEST + light prompt \u2014 combined refinement"
+  },
+  {
+    "iter": 50,
+    "slug": "h50-temp-0.6-x-light-x-lr-3e-5",
+    "family": "H18-combo",
+    "args": {
+      "lr": "3e-5",
+      "rank": 16,
+      "alpha": 32,
+      "num_gens": 4,
+      "train_tasks": 24,
+      "echo_lambda": "0.05",
+      "temperature": "0.6",
+      "system_prompt": "light"
+    },
+    "rationale": "combine all three winners \u2014 full-knob combo final"
+  }
 ]
