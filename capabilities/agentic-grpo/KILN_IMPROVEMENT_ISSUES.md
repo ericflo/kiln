@@ -60,15 +60,16 @@ semantics.
 
 **Validation evidence:**
 
-- `cargo check -p kiln-server --tests` passed on 2026-05-20 (CPU-only local
-  check; warnings were pre-existing unused items/imports plus CUDA-not-found
-  warnings from non-CUDA local environment).
-- `cargo test -p kiln-server chat_adapter --lib` passed on 2026-05-20: 6
-  focused tests for missing, null, empty, named, invalid type, and invalid
-  name-shape adapter selection.
-- `cargo fmt --all` could not run because the configured
-  `stable-x86_64-unknown-linux-musl` toolchain does not have `cargo-fmt`
-  installed in this environment.
+- RunPod validation passed on 2026-05-20 on RTX A6000 pod `yu0x0wt25rz8u8`,
+  lease `pod-9d17510419e3a5930b68a4fc`.
+- Remote command sequence: `cargo test -p kiln-server chat_adapter --lib`;
+  `cargo test -p kiln-server --test adapter_path_traversal`;
+  `cargo test -p kiln-server --test adapter_registry_state`;
+  `cargo check -p kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issues-1-3.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issues-1-3.log`.
+- The focused chat adapter test run passed 6 tests covering missing, null,
+  empty, named, invalid type, and invalid name-shape adapter selection.
 
 **Commit SHA:** `47f31b25` (`Issue 1: define chat adapter semantics`), pushed
 to `origin/main` on 2026-05-20. Note: the commit contains the implementation
@@ -117,13 +118,17 @@ validation failures.
 
 **Validation evidence:**
 
-- `cargo test -p kiln-server --test adapter_path_traversal` passed on
-  2026-05-20: 7 integration tests including missing config, missing weights,
-  nested-output mistake, active-state preservation, and existing traversal
-  protections.
-- `cargo check -p kiln-server --tests` passed on 2026-05-20 (CPU-only local
-  check; warnings were pre-existing unused items/imports plus CUDA-not-found
-  warnings from non-CUDA local environment).
+- RunPod validation passed on 2026-05-20 on RTX A6000 pod `yu0x0wt25rz8u8`,
+  lease `pod-9d17510419e3a5930b68a4fc`.
+- Remote command sequence: `cargo test -p kiln-server chat_adapter --lib`;
+  `cargo test -p kiln-server --test adapter_path_traversal`;
+  `cargo test -p kiln-server --test adapter_registry_state`;
+  `cargo check -p kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issues-1-3.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issues-1-3.log`.
+- The adapter path traversal test run passed 7 integration tests including
+  missing config, missing weights, nested-output mistake, active-state
+  preservation, and existing traversal protections.
 
 **Commit SHA:** `54f8c689` (`Issue 2: validate adapter load layout`),
 pushed to `origin/main` on 2026-05-20. Note: the commit contains the
@@ -181,13 +186,17 @@ in server state and cleared on successful load.
 
 **Validation evidence:**
 
-- `cargo test -p kiln-server --test adapter_registry_state` passed on
-  2026-05-20: covers active default, loaded-but-inactive runtime adapter,
-  available-unloaded adapter, invalid directory, hashes, sizes, LoRA config
-  fields, paths, and last load error.
-- `cargo check -p kiln-server --tests` passed on 2026-05-20 (CPU-only local
-  check; warnings were pre-existing unused items/imports plus CUDA-not-found
-  warnings from non-CUDA local environment).
+- RunPod validation passed on 2026-05-20 on RTX A6000 pod `yu0x0wt25rz8u8`,
+  lease `pod-9d17510419e3a5930b68a4fc`.
+- Remote command sequence: `cargo test -p kiln-server chat_adapter --lib`;
+  `cargo test -p kiln-server --test adapter_path_traversal`;
+  `cargo test -p kiln-server --test adapter_registry_state`;
+  `cargo check -p kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issues-1-3.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issues-1-3.log`.
+- The adapter registry state test run passed and covers active default,
+  loaded-but-inactive runtime adapter, available-unloaded adapter, invalid
+  directory, hashes, sizes, LoRA config fields, paths, and last load error.
 
 **Commit SHA:** `a8d284d6` (`Issue 3: expose adapter registry state`),
 pushed to `origin/main` on 2026-05-20. Note: the commit contains the
