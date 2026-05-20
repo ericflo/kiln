@@ -836,8 +836,23 @@ pub(crate) fn render_prompt_text(
 fn chat_template_options_from_kwargs(
     chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> ChatTemplateOptions {
+    let mut kwargs = chat_template_kwargs.cloned().unwrap_or_default();
+    // When KILN_DEFAULT_NO_THINK is set, default enable_thinking=false unless
+    // the client explicitly specified a value. Models with reasoning templates
+    // (Qwen3.5, DeepSeek R1) honor this; templates without the variable ignore
+    // it. Use for agentic flows (pi) where the OpenAI client can't easily pass
+    // chat_template_kwargs and where thinking tokens collapse throughput
+    // (50-iter GRPO loops are 40× slower with thinking on).
+    if std::env::var("KILN_DEFAULT_NO_THINK").is_ok()
+        && !kwargs.contains_key("enable_thinking")
+    {
+        kwargs.insert(
+            "enable_thinking".to_string(),
+            serde_json::Value::Bool(false),
+        );
+    }
     ChatTemplateOptions {
-        template_kwargs: chat_template_kwargs.cloned().unwrap_or_default(),
+        template_kwargs: kwargs,
     }
 }
 
