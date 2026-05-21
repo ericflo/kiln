@@ -24,9 +24,9 @@
   "rollout": {
     "num_generations_train": 4,
     "num_generations_eval": 1,
-    "max_wall_clock_s": 120,
-    "max_turns": 8,
-    "max_tokens_per_turn": 1024,
+    "max_wall_clock_s": 600,
+    "max_turns": 4,
+    "max_tokens_per_turn": 8192,
     "temperature": 0.8,
     "top_p": 0.95,
     "parallel": 1
@@ -46,7 +46,7 @@
     "rank": 16,
     "alpha": 32,
     "seed": 3141592653,
-    "filter_var_min": null,
+    "filter_var_min": 0.1,
     "loss": {
       "echo": {
         "lambda": 0.05,

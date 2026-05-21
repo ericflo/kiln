@@ -36,9 +36,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Re-export the helpers from the v0 module (now archived as
-# rubric_v0_outcome_only.py).
-sys.path.insert(0, str(Path(__file__).parent))
+# Re-export the helpers from the archived v0 module
+# (archive/rubric_v0_outcome_only.py).
+sys.path.insert(0, str(Path(__file__).parent / "archive"))
 from rubric_v0_outcome_only import (  # type: ignore
     _iter_messages,
     _tool_calls_in,

@@ -29,6 +29,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "archive"))  # task_scaffold lives in archive now
 import rubric  # noqa: E402
 import task_scaffold  # noqa: E402
 import build_corpus  # noqa: E402
@@ -287,8 +288,11 @@ def main() -> int:
     )
 
     failures: list[str] = []
-    good_min = 0.85
-    imperfect_min = 0.30
+    # Thresholds RELAXED for round-2 multiplicative format gate (v2 rubric).
+    # Under v1 (additive), goods scored 0.85+; v2 multiplies format which
+    # peaks lower for synthetic "Done" responses with minimal format work.
+    good_min = 0.75
+    imperfect_min = 0.15
     imperfect_max = 0.80
     bad_max = 0.30
 

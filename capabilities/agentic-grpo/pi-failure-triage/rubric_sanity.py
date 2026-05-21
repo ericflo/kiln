@@ -25,6 +25,7 @@ from statistics import mean, stdev
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "archive"))  # task_scaffold lives in archive
 
 import rubric
 import task_scaffold

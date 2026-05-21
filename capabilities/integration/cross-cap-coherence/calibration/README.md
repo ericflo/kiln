@@ -1,39 +1,26 @@
-# calibration/ — rubric sanity fixtures
+# calibration/ — cross-cap-coherence
 
-Round 2 mandates this directory for every cap. `rubric_sanity.py`
-reads:
+This cap is **eval-only** and **delegates rubric.score_one to each
+member cap's rubric**. Calibration here is trivial since the per-cap
+calibrations cover the substance.
 
-- `good.jsonl` — known-high-quality rollouts (the agent did the right
-  thing). At least 5.
-- `bad.jsonl` — known-low-quality rollouts including each §0 cheat
-  named in `../capability.md`. At least 5.
+The cross-cap coherence rubric has no standalone sub-scores; the
+"coherence" is computed at the oracle level (per-cap composites
+aggregated, deltas vs base reported).
 
-The rubric must score the good set above the bad set with separation
-> 0.2 (configurable via `RUBRIC_SANITY_MARGIN`). `run_iter.sh` runs
-the sanity gate BEFORE training, so a broken rubric never reaches
-the GPU.
+`rubric_sanity.py` returns WARNING on this cap (calibration unpopulated),
+which is acceptable since no training happens here. The oracle pulls
+fresh member-cap evals at run time.
 
-## How to write a calibration fixture
+## How to populate
 
-Each line is one JSON object with the same shape `rubric.score_one()`
-expects (or `score_rollout(transcript, workdir, task)` for legacy caps
-— in that case the line should be `{"transcript": [...], "workdir":
-"...", "task": {...}}`).
+Optional: write 5 fixtures with a `_member_cap` annotation pointing to
+a member's good rollout (and similarly 5 bad). This proves the
+delegation works. Not required for the eval-only workflow.
 
-### Good fixture template
+## Refreshing
 
-```json
-{"task": {...}, "transcript": [...], "workdir": "..."}
+After changing member-cap rubrics, run:
+```bash
+python3 ../rubric_sanity.py
 ```
-
-Where the transcript shows the agent:
-- reading appropriate context
-- making the right action
-- verifying the result
-- summarizing cleanly
-
-### Bad fixture template — one per §0 cheat
-
-For each cheat enumerated in `../capability.md ## Adversarial design (§0)`,
-write a fixture where the agent executes that cheat. Score should be 0
-or near-zero. This is the round-2 anti-saturation discipline.
