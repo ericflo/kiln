@@ -2563,6 +2563,14 @@ not yet have `/workspace/Qwen3.5-4B`. The failure was not accepted as
 validation; the model was downloaded into the canonical caps path and the
 actual-model validation was rerun as `actual12`.
 
+GitHub Actions on pushed head `59f5d3ca` passed: CI run `26247661346`
+completed cargo-deny, Linux default features, Linux Vulkan, and macOS Metal;
+Release Version Drift run `26247661348` also passed. The immediately previous
+head `dc54e2ac` exposed a pre-existing docs drift failure from issue 36
+(`kiln adapter restore` vs canonical `kiln adapters restore`); follow-up commit
+`59f5d3ca` fixed the README/docs/help examples and local
+`python3 scripts/check_release_versions.py` passed before pushing.
+
 **Commit SHA:** `1db6b0f7` (`Issue 37: add off-policy distillation mode`).
 
 **Remaining risk:** Validation covers real Qwen3.5-4B server/training receipt
