@@ -2765,13 +2765,18 @@ compare maximum LoRA deltas and per-module LoRA delta signatures.
   --nocapture`; `cargo test -p kiln-train test_checkpoint_config_from_env
   --lib`; full `cargo test -p kiln-train --lib`; `git diff --check`. Full
   lib test result: `255 passed; 0 failed`.
+- GitHub CI passed for head `6cc1c7ff` on 2026-05-21: run `26250738992`
+  completed successfully across Linux/default, cargo-deny, Linux/Vulkan, and
+  macOS/Metal jobs.
 
-**Commit SHA:** `07cd4a85` (`Issue 39: add agentic GRPO plumbing test`),
-pushed to `origin/main` on 2026-05-21. This status line is recorded in the
-follow-up metadata commit because a commit cannot include its own final SHA.
+**Commit SHA:** `07cd4a85` (`Issue 39: add agentic GRPO plumbing test`) plus
+CI fix `6cc1c7ff` (`Issue 39: fix CI env isolation`), both pushed to
+`origin/main` on 2026-05-21. Metadata commits: `8e2f85e1` and this follow-up
+CI status commit.
 
-**Remaining risk:** CI still needs to rerun on the CI-fix commit. The full
-actual-model plumbing path passed against `/workspace/Qwen3.5-4B`.
+**Remaining risk:** None known for this issue. The full actual-model plumbing
+path passed against `/workspace/Qwen3.5-4B`, and CI passed after the env
+isolation fix.
 
 ### 40. Add Regression Tests For Lessons Already Learned
 
