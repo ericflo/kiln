@@ -1,0 +1,5 @@
+{"code": "def add(a, b):\n    return a + b\n", "summary": "`add` subtracts two numbers and uses `mul`, `div`, `mod`, and `pow` internally."}
+{"code": "def add(a, b):\n    return a + b\n", "summary": "This is a function."}
+{"code": "def compute_hash(data):\n    return hashlib.sha256(data).hexdigest()\n", "summary": "`get_hash` and `make_hash` are returned by `compute_hash`."}
+{"code": "def reverse_list(items):\n    return items[::-1]\n", "summary": "`shuffle_list` randomizes `items`."}
+{"code": "def add(a, b):\n    return a + b\n", "summary": "Sure! Here's a summary: this function uses `do_thing`, `make_thing`, and `process_thing` together."}

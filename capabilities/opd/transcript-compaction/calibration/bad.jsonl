@@ -1,0 +1,5 @@
+{"transcript": "Installed foo via pip. Ran pytest; 5/5 passed.", "compaction": "Did some unrelated work with bar and baz and qux modules."}
+{"transcript": "Discussion about ECHO lambda values. Tried 0.05, 0.075, 0.10. λ=0.075 was best.", "compaction": "Tried RoPE, SwiGLU, and GeGLU variants; FlashAttention was best."}
+{"transcript": "Fixed bug in cache.py. Wrote test_cache.py. Test passes.", "compaction": "Created banner.html and ran make deploy. Updated docs."}
+{"transcript": "Wanted to know baseline composite. Ran eval; composite 0.61. Decided next steps.", "compaction": ""}
+{"transcript": "PR #150 reported 20x TTFT speedup; turned out to be warmup artifact.", "compaction": "PR #200 added a new bench harness for FlashInfer; performance unchanged."}

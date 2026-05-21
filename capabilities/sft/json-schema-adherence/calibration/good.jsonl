@@ -1,0 +1,5 @@
+{"response": "{\"name\": \"Alice\", \"age\": 30}", "schema": {"type": "object", "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}, "required": ["name", "age"], "additionalProperties": false}}
+{"response": "{\"name\": \"Bob\", \"age\": 25}", "schema": {"type": "object", "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}, "required": ["name", "age"], "additionalProperties": false}}
+{"response": "{\"name\": \"Carol Jane Robertson III\", \"age\": 45}", "schema": {"type": "object", "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}, "required": ["name", "age"], "additionalProperties": false}}
+{"response": "  {\"name\": \"Dave\", \"age\": 50}  ", "schema": {"type": "object", "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}, "required": ["name", "age"], "additionalProperties": false}}
+{"response": "{\"name\": \"Eve\", \"age\": 28}", "schema": {"type": "object", "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}, "required": ["name", "age"], "additionalProperties": false}}

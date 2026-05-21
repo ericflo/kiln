@@ -1,0 +1,5 @@
+{"ground_truth": ["foo", "bar", "baz"], "response": "foo\nbar\nbaz\n", "task": {}}
+{"ground_truth": ["MyClass", "helper"], "response": "MyClass\nhelper\n", "task": {}}
+{"ground_truth": ["compute_hash"], "response": "compute_hash\n", "task": {}}
+{"ground_truth": ["x", "y", "z"], "response": "x\ny\nz\n", "task": {}}
+{"ground_truth": ["A", "B"], "response": "A\nB\n", "task": {}}

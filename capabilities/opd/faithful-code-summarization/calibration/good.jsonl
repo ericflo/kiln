@@ -1,0 +1,5 @@
+{"code": "def compute_hash(data):\n    return hashlib.sha256(data).hexdigest()\n", "summary": "`compute_hash(data)` returns the SHA-256 hex digest of `data`."}
+{"code": "class Counter:\n    def __init__(self): self.n = 0\n    def inc(self): self.n += 1\n", "summary": "`Counter` class with `inc` method that increments `n`."}
+{"code": "def parse_iso(s):\n    return datetime.fromisoformat(s)\n", "summary": "`parse_iso(s)` parses an ISO 8601 string into a datetime."}
+{"code": "def reverse_list(items):\n    return items[::-1]\n", "summary": "`reverse_list(items)` returns the reverse of `items`."}
+{"code": "def divide(numerator, denominator):\n    return numerator / denominator\n", "summary": "`divide` returns `numerator` divided by `denominator`."}

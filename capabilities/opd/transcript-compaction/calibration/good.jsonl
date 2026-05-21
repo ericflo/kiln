@@ -1,0 +1,5 @@
+{"transcript": "User: install foo. Assistant: ran pip install foo. User: now run tests. Assistant: pytest passes 5/5.", "compaction": "Installed foo; ran tests; 5/5 pass."}
+{"transcript": "Discussion about ECHO lambda values. Tried 0.05, 0.075, 0.10 settings. λ=0.075 was best for env attention.", "compaction": "ECHO λ=0.05, 0.075, 0.10 swept; 0.075 was best for env attention."}
+{"transcript": "Fixed bug in cache.py. Wrote test. Test passes. Decided to ship.", "compaction": "Fixed cache.py bug; new test passes. Decided to ship."}
+{"transcript": "User wanted to know baseline composite. Ran eval; composite 0.61. Decided to start round 2.", "compaction": "Baseline composite 0.61; decided to start round 2."}
+{"transcript": "PR #150 reported 20x TTFT speedup; turned out to be warmup artifact. Decided to revert.", "compaction": "PR #150 TTFT 20x speedup was warmup artifact; decided to revert."}

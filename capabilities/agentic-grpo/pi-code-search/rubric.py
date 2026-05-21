@@ -87,7 +87,7 @@ def _load_sibling_module(name: str, path: Path):
 
 _doctest_rubric_v0 = _load_sibling_module(
     "_pi_doctest_rubric_v0",
-    _SIBLING_DOCTEST / "rubric_v0_outcome_only.py",
+    _SIBLING_DOCTEST / "archive" / "rubric_v0_outcome_only.py",
 )
 _iter_messages = _doctest_rubric_v0._iter_messages
 _tool_calls_in = _doctest_rubric_v0._tool_calls_in

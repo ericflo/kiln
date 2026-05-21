@@ -1,0 +1,5 @@
+{"response": "```json\n{\"name\": \"Alice\", \"age\": 30}\n```", "schema": {"type": "object", "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}, "required": ["name", "age"], "additionalProperties": false}}
+{"response": "Here is the JSON: {\"name\": \"Alice\", \"age\": 30}", "schema": {"type": "object", "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}, "required": ["name", "age"], "additionalProperties": false}}
+{"response": "{\"name\": \"Alice\"}", "schema": {"type": "object", "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}, "required": ["name", "age"], "additionalProperties": false}}
+{"response": "{\"name\": \"Alice\", \"age\": \"thirty\"}", "schema": {"type": "object", "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}, "required": ["name", "age"], "additionalProperties": false}}
+{"response": "{\"name\": \"TODO\", \"age\": 0}", "schema": {"type": "object", "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}, "required": ["name", "age"], "additionalProperties": false}}

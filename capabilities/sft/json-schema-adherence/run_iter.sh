@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # run_iter.sh — full SFT iter recipe for json-schema-adherence.
+#
+# NOTE: rubric depends on `jsonschema` package. Install with
+# `uv pip install --system jsonschema` on the pod before first iter.
+# (sft pods typically have it; this is a fresh-env caveat.)
 set -euo pipefail
 cd "$(dirname "$0")"
 

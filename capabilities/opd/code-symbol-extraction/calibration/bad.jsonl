@@ -1,0 +1,5 @@
+{"ground_truth": ["foo", "bar"], "response": "Here are the symbols:\n- foo\n- bar\n- extra_hallucinated_1\n- extra_hallucinated_2\n", "task": {}}
+{"ground_truth": ["foo", "bar"], "response": "Imports: foo, bar, baz, qux, extra1, extra2\n", "task": {}}
+{"ground_truth": ["foo"], "response": "Sure! foo is a function defined here.\n", "task": {}}
+{"ground_truth": ["foo", "bar", "baz", "qux"], "response": "foo\n", "task": {}}
+{"ground_truth": ["foo"], "response": "", "task": {}}

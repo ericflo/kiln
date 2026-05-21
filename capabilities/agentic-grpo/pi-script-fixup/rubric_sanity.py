@@ -31,17 +31,42 @@ def _load_jsonl(p: Path) -> list[dict]:
 
 
 def _score(rubric, rollout: dict) -> float:
+    import inspect
     if hasattr(rubric, "score_one"):
         d = rubric.score_one(rollout)
     elif hasattr(rubric, "score_rollout"):
-        d = rubric.score_rollout(
-            rollout.get("transcript", []),
-            rollout.get("workdir", ""),
-            rollout.get("task", {}),
-        )
+        sig = inspect.signature(rubric.score_rollout)
+        params = list(sig.parameters)
+        # Standard: score_rollout(transcript, workdir, task)
+        if "transcript" in params and "workdir" in params:
+            d = rubric.score_rollout(
+                rollout.get("transcript", []),
+                rollout.get("workdir", ""),
+                rollout.get("task", {}),
+            )
+        elif "response" in params and "task" in params:
+            d = rubric.score_rollout(
+                rollout.get("response") or rollout.get("format_text", ""),
+                rollout.get("task", {}),
+            )
+        elif "transcript_path" in params:
+            d = rubric.score_rollout(
+                rollout.get("transcript_path") or rollout.get("transcript", ""),
+                rollout.get("workdir", ""),
+                rollout.get("task", {}),
+            )
+        else:
+            # Fall back to kwargs from rollout
+            kwargs = {k: v for k, v in rollout.items() if k in params}
+            d = rubric.score_rollout(**kwargs)
+    elif hasattr(rubric, "score_response"):
+        sig = inspect.signature(rubric.score_response)
+        params = list(sig.parameters)
+        kwargs = {k: v for k, v in rollout.items() if k in params}
+        d = rubric.score_response(**kwargs)
     else:
         raise AttributeError(
-            "rubric.py must expose score_one(rollout) or score_rollout(transcript, workdir, task)"
+            "rubric.py must expose score_one(rollout), score_rollout(...), or score_response(...)"
         )
     if "composite" in d:
         return float(d["composite"])
