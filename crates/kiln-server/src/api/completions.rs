@@ -1,5 +1,5 @@
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -85,6 +85,79 @@ fn thinking_mode_for_prompt(prompt_text: &str) -> &'static str {
     } else {
         "non_reasoning"
     }
+}
+
+fn ensure_eval_mode_no_think_default(
+    chat_template_kwargs: &mut Option<serde_json::Map<String, serde_json::Value>>,
+) {
+    let kwargs = chat_template_kwargs.get_or_insert_with(serde_json::Map::new);
+    kwargs
+        .entry("enable_thinking".to_string())
+        .or_insert(serde_json::Value::Bool(false));
+}
+
+fn apply_eval_mode_chat_defaults(state: &AppState, req: &mut ChatCompletionRequest) {
+    if !state.eval_mode {
+        return;
+    }
+
+    if req.temperature.is_none() {
+        req.temperature = Some(0.0);
+    }
+    if req.top_p.is_none() {
+        req.top_p = Some(1.0);
+    }
+    if req.top_k.is_none() {
+        req.top_k = Some(0);
+    }
+    if req.min_p.is_none() {
+        req.min_p = Some(0.0);
+    }
+    if req.presence_penalty.is_none() {
+        req.presence_penalty = Some(0.0);
+    }
+    if req.frequency_penalty.is_none() {
+        req.frequency_penalty = Some(0.0);
+    }
+    if req.repetition_penalty.is_none() {
+        req.repetition_penalty = Some(1.0);
+    }
+    if req.seed.is_none() {
+        req.seed = Some(0);
+    }
+    ensure_eval_mode_no_think_default(&mut req.chat_template_kwargs);
+}
+
+fn apply_eval_mode_batch_defaults(state: &AppState, req: &mut BatchCompletionRequest) {
+    if !state.eval_mode {
+        return;
+    }
+
+    if req.temperature.is_none() {
+        req.temperature = Some(0.0);
+    }
+    if req.top_p.is_none() {
+        req.top_p = Some(1.0);
+    }
+    if req.top_k.is_none() {
+        req.top_k = Some(0);
+    }
+    if req.min_p.is_none() {
+        req.min_p = Some(0.0);
+    }
+    if req.presence_penalty.is_none() {
+        req.presence_penalty = Some(0.0);
+    }
+    if req.frequency_penalty.is_none() {
+        req.frequency_penalty = Some(0.0);
+    }
+    if req.repetition_penalty.is_none() {
+        req.repetition_penalty = Some(1.0);
+    }
+    if req.seed.is_none() {
+        req.seed = Some(0);
+    }
+    ensure_eval_mode_no_think_default(&mut req.chat_template_kwargs);
 }
 
 /// Build a [`RequestRecord`] pre-populated with everything we know from the
@@ -700,6 +773,32 @@ fn record_failed_chat_completion(
             ..request_record_from_req(req, &id, model, false)
         },
     );
+}
+
+fn adapter_header_value(adapter: Option<String>) -> HeaderValue {
+    HeaderValue::from_str(adapter.as_deref().unwrap_or("base"))
+        .unwrap_or_else(|_| HeaderValue::from_static("invalid"))
+}
+
+fn response_with_runtime_headers(state: &AppState, mut response: Response) -> Response {
+    let eval_mode = if state.eval_mode {
+        HeaderValue::from_static("true")
+    } else {
+        HeaderValue::from_static("false")
+    };
+    response.headers_mut().insert(
+        HeaderName::from_static("x-kiln-eval-mode"),
+        eval_mode,
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("x-kiln-active-adapter"),
+        adapter_header_value(state.active_adapter_name.read().unwrap().clone()),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("x-kiln-loaded-adapter"),
+        adapter_header_value(state.loaded_adapter_name.read().unwrap().clone()),
+    );
+    response
 }
 
 fn maybe_log_slow_chat_completion(state: &AppState, record: &RequestRecord) {
@@ -2714,6 +2813,7 @@ async fn chat_completions(
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Response, ApiError> {
     let start = std::time::Instant::now();
+    let streaming = req.stream;
     state.metrics.inc_active();
 
     let result = chat_completions_inner(&state, req).await;
@@ -2733,12 +2833,16 @@ async fn chat_completions(
         }
     }
 
-    result
+    if state.eval_mode && !streaming {
+        state.clear_eval_mode_transient_state();
+    }
+
+    result.map(|response| response_with_runtime_headers(&state, response))
 }
 
 async fn chat_completions_inner(
     state: &AppState,
-    req: ChatCompletionRequest,
+    mut req: ChatCompletionRequest,
 ) -> Result<Response, ApiError> {
     let adapter_request_id = Uuid::new_v4().to_string();
     // Captured at the top of the request so the recent-requests panel reflects
@@ -2761,6 +2865,7 @@ async fn chat_completions_inner(
         ));
     }
 
+    apply_eval_mode_chat_defaults(state, &mut req);
     let sampling = sampling_params_for_chat_request(&req);
 
     // Validate adapter / adapters mutual exclusion. Done up front (before
@@ -3370,6 +3475,15 @@ async fn ensure_runtime_adapter(
         reason = reason,
         "adapter transition"
     );
+    if state.eval_mode {
+        tracing::warn!(
+            request_id = %request_id,
+            old_adapter = ?current,
+            new_adapter = ?target_adapter,
+            reason = reason,
+            "adapter transition during eval mode"
+        );
+    }
 
     Ok(())
 }
@@ -3675,6 +3789,12 @@ async fn ensure_composed_adapter_swap(
     .map_err(|e| ApiError::internal(format!("join error: {e}")))?
     .map_err(ApiError::adapter_load_failed)?;
     state.clear_real_prefix_cache();
+    if state.eval_mode {
+        tracing::warn!(
+            adapter = %target.active_name,
+            "composed adapter transition during eval mode"
+        );
+    }
 
     Ok(())
 }
@@ -6151,12 +6271,16 @@ async fn batch_completions(
         }
     }
 
-    result
+    if state.eval_mode {
+        state.clear_eval_mode_transient_state();
+    }
+
+    result.map(|response| response_with_runtime_headers(&state, response))
 }
 
 async fn batch_completions_inner(
     state: &AppState,
-    req: BatchCompletionRequest,
+    mut req: BatchCompletionRequest,
 ) -> Result<Response, ApiError> {
     let n_per = req.n.unwrap_or(1);
 
@@ -6201,6 +6325,8 @@ async fn batch_completions_inner(
             validate_compose_name(&src.name)?;
         }
     }
+
+    apply_eval_mode_batch_defaults(state, &mut req);
 
     let batch_cache_key = deterministic_batch_cache_key_with_vocab_size(
         &req,
@@ -6908,9 +7034,10 @@ fn preset_or_default(name: Option<&str>) -> SamplingParams {
 
 async fn generate_one_response(
     state: &AppState,
-    req: ChatCompletionRequest,
+    mut req: ChatCompletionRequest,
 ) -> Result<ChatCompletionResponse, ApiError> {
     let request_start = std::time::Instant::now();
+    apply_eval_mode_chat_defaults(state, &mut req);
     let sampling = sampling_params_for_chat_request(&req);
 
     let chat_request_cache_key = deterministic_chat_request_cache_key_with_vocab_size(
@@ -6977,11 +7104,12 @@ async fn generate_one_response(
 
 async fn generate_one_prepared_prompt_response(
     state: &AppState,
-    req: ChatCompletionRequest,
+    mut req: ChatCompletionRequest,
     prompt_text: &str,
     prompt_tokens: &[TokenId],
 ) -> Result<ChatCompletionResponse, ApiError> {
     let request_start = std::time::Instant::now();
+    apply_eval_mode_chat_defaults(state, &mut req);
     let sampling = sampling_params_for_chat_request(&req);
 
     let chat_request_cache_key = deterministic_chat_request_cache_key_with_vocab_size(
@@ -8592,27 +8720,32 @@ mod tests {
         state: AppState,
         body_json: &str,
     ) -> (axum::http::StatusCode, serde_json::Value) {
-        use axum::body::{Body, to_bytes};
-        use axum::http::Request;
-        use tower::ServiceExt;
+        use axum::body::to_bytes;
 
-        let app = routes().with_state(state);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/chat/completions")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body_json.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = chat_post_raw(state, body_json).await;
         let status = resp.status();
         let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         let body: serde_json::Value =
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, body)
+    }
+
+    async fn chat_post_raw(state: AppState, body_json: &str) -> Response {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = routes().with_state(state);
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body_json.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
     }
 
     async fn chat_post_text(state: AppState, body_json: &str) -> (axum::http::StatusCode, String) {
@@ -8658,6 +8791,102 @@ mod tests {
         .await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["code"], "chat_invalid_request");
+    }
+
+    #[tokio::test]
+    async fn eval_mode_chat_completion_sets_headers_defaults_and_resets_caches() {
+        use axum::body::to_bytes;
+
+        let mut state = make_batch_test_state();
+        state.eval_mode = true;
+        *state.active_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
+        let state_for_assert = state.clone();
+        let body = r#"{"messages":[{"role":"user","content":"eval direct"}],"max_tokens":2}"#;
+
+        for _ in 0..16 {
+            let resp = chat_post_raw(state.clone(), body).await;
+            assert_eq!(resp.status(), axum::http::StatusCode::OK);
+            assert_eq!(
+                resp.headers().get("x-kiln-eval-mode").unwrap(),
+                "true"
+            );
+            assert_eq!(
+                resp.headers().get("x-kiln-active-adapter").unwrap(),
+                "eval-adapter"
+            );
+            assert_eq!(
+                resp.headers().get("x-kiln-loaded-adapter").unwrap(),
+                "base"
+            );
+            let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(json["object"], "chat.completion");
+        }
+
+        let recent = state_for_assert.recent_requests.lock().unwrap().snapshot();
+        assert_eq!(recent.len(), 16);
+        let latest = recent.first().unwrap();
+        assert_eq!(latest.temperature, Some(0.0));
+        assert_eq!(latest.top_p, Some(1.0));
+        assert_eq!(latest.max_tokens, Some(2));
+        assert_eq!(latest.thinking_mode.as_deref(), Some("mock"));
+
+        assert_eq!(state_for_assert.completion_cache.lock().unwrap().stats(), 0);
+        assert_eq!(state_for_assert.chat_request_cache.lock().unwrap().stats(), 0);
+        assert_eq!(state_for_assert.chat_choices_cache.lock().unwrap().stats(), 0);
+        assert_eq!(state_for_assert.batch_cache.lock().unwrap().stats(), 0);
+        assert_eq!(
+            state_for_assert
+                .rendered_prompt_cache
+                .lock()
+                .unwrap()
+                .stats()
+                .2,
+            0
+        );
+        assert_eq!(
+            state_for_assert
+                .prompt_token_cache
+                .lock()
+                .unwrap()
+                .stats()
+                .2,
+            0
+        );
+    }
+
+    #[test]
+    fn eval_mode_defaults_are_deterministic_and_disable_thinking_unless_overridden() {
+        let mut state = make_batch_test_state();
+        state.eval_mode = true;
+        let mut req: ChatCompletionRequest =
+            serde_json::from_str(r#"{"messages":[{"role":"user","content":"hi"}]}"#).unwrap();
+
+        apply_eval_mode_chat_defaults(&state, &mut req);
+        assert_eq!(req.temperature, Some(0.0));
+        assert_eq!(req.top_p, Some(1.0));
+        assert_eq!(req.top_k, Some(0));
+        assert_eq!(req.seed, Some(0));
+        assert_eq!(
+            req.chat_template_kwargs
+                .as_ref()
+                .and_then(|kwargs| kwargs.get("enable_thinking")),
+            Some(&serde_json::Value::Bool(false))
+        );
+
+        let mut explicit: ChatCompletionRequest = serde_json::from_str(
+            r#"{"messages":[{"role":"user","content":"hi"}],"temperature":0.7,"chat_template_kwargs":{"enable_thinking":true}}"#,
+        )
+        .unwrap();
+        apply_eval_mode_chat_defaults(&state, &mut explicit);
+        assert_eq!(explicit.temperature, Some(0.7));
+        assert_eq!(
+            explicit
+                .chat_template_kwargs
+                .as_ref()
+                .and_then(|kwargs| kwargs.get("enable_thinking")),
+            Some(&serde_json::Value::Bool(true))
+        );
     }
 
     #[test]

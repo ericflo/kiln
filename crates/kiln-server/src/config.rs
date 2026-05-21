@@ -67,6 +67,8 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub request_timeout_secs: u64,
+    /// Enable deterministic eval-serving behavior for `kiln serve`.
+    pub eval_mode: bool,
     /// Emit a structured warning when a chat completion takes at least this
     /// many seconds. Set to 0 to disable.
     pub slow_request_warn_secs: u64,
@@ -368,6 +370,7 @@ impl Default for ServerConfig {
             host: "127.0.0.1".into(),
             port: 8420,
             request_timeout_secs: 600,
+            eval_mode: false,
             slow_request_warn_secs: 30,
             // Hard ceiling on graceful-shutdown drain. With proactive
             // engine.stop() on signal, real draining typically completes
@@ -574,6 +577,9 @@ impl KilnConfig {
             if let Ok(s) = v.parse() {
                 self.server.request_timeout_secs = s;
             }
+        }
+        if let Ok(v) = std::env::var("KILN_EVAL_MODE") {
+            self.server.eval_mode = v == "1" || v.eq_ignore_ascii_case("true");
         }
         if let Ok(v) = std::env::var("KILN_SLOW_REQUEST_WARN_SECS") {
             if let Ok(s) = v.parse() {
@@ -823,6 +829,7 @@ mod tests {
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 8420);
         assert_eq!(config.server.request_timeout_secs, 600);
+        assert!(!config.server.eval_mode);
         assert_eq!(config.server.slow_request_warn_secs, 30);
         assert_eq!(config.server.shutdown_timeout_secs, 5);
         assert_eq!(config.model.model_id, "Qwen/Qwen3.5-4B");
@@ -873,6 +880,7 @@ mod tests {
 host = "127.0.0.1"
 port = 9000
 request_timeout_secs = 60
+eval_mode = true
 slow_request_warn_secs = 15
 shutdown_timeout_secs = 10
 
@@ -927,6 +935,7 @@ composed_cache_max_entries = 8
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 9000);
         assert_eq!(config.server.request_timeout_secs, 60);
+        assert!(config.server.eval_mode);
         assert_eq!(config.server.slow_request_warn_secs, 15);
         assert_eq!(config.model.path.as_deref(), Some("/models/qwen"));
         assert_eq!(config.model.model_id, "custom/model");
@@ -974,6 +983,7 @@ port = 3000
         assert_eq!(config.server.port, 3000);
         assert_eq!(config.server.host, "127.0.0.1"); // default (loopback)
         assert_eq!(config.server.request_timeout_secs, 600); // default
+        assert!(!config.server.eval_mode); // default
         assert_eq!(config.server.slow_request_warn_secs, 30); // default
         assert_eq!(config.model.model_id, "Qwen/Qwen3.5-4B"); // default
         assert_eq!(config.memory.inference_memory_fraction, 0.7); // default
@@ -1049,6 +1059,7 @@ port = 3000
         unsafe {
             std::env::set_var("KILN_HOST", "10.0.0.1");
             std::env::set_var("KILN_PORT", "7777");
+            std::env::set_var("KILN_EVAL_MODE", "true");
             std::env::set_var("KILN_SLOW_REQUEST_WARN_SECS", "12");
             std::env::set_var("KILN_MODEL_PATH", "/tmp/model");
             std::env::set_var("KILN_INFERENCE_MEMORY_FRACTION", "0.9");
@@ -1076,6 +1087,7 @@ port = 3000
 
         assert_eq!(config.server.host, "10.0.0.1");
         assert_eq!(config.server.port, 7777);
+        assert!(config.server.eval_mode);
         assert_eq!(config.server.slow_request_warn_secs, 12);
         assert_eq!(config.model.path.as_deref(), Some("/tmp/model"));
         assert_eq!(config.memory.inference_memory_fraction, 0.9);
@@ -1105,6 +1117,7 @@ port = 3000
         unsafe {
             std::env::remove_var("KILN_HOST");
             std::env::remove_var("KILN_PORT");
+            std::env::remove_var("KILN_EVAL_MODE");
             std::env::remove_var("KILN_SLOW_REQUEST_WARN_SECS");
             std::env::remove_var("KILN_MODEL_PATH");
             std::env::remove_var("KILN_INFERENCE_MEMORY_FRACTION");
@@ -1268,6 +1281,7 @@ webhook_url = "https://from-toml.example/hook"
             // Clear env vars that would override defaults
             std::env::remove_var("KILN_HOST");
             std::env::remove_var("KILN_PORT");
+            std::env::remove_var("KILN_EVAL_MODE");
             std::env::remove_var("KILN_SLOW_REQUEST_WARN_SECS");
             std::env::remove_var("KILN_MODEL_PATH");
             std::env::remove_var("KILN_LOG_LEVEL");

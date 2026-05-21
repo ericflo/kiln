@@ -125,6 +125,7 @@ async fn main() -> Result<()> {
         // Serve mode (default)
         Some(Commands::Serve {
             ref served_model_id,
+            eval_mode,
         }) => {
             // CLI flag wins over env/TOML; surface it via env var so the
             // config loader picks it up uniformly.
@@ -132,6 +133,12 @@ async fn main() -> Result<()> {
                 // Safety: argv parsing happens before any threads are spawned.
                 unsafe {
                     std::env::set_var("KILN_SERVED_MODEL_ID", v);
+                }
+            }
+            if eval_mode {
+                // Safety: argv parsing happens before any threads are spawned.
+                unsafe {
+                    std::env::set_var("KILN_EVAL_MODE", "1");
                 }
             }
         }
@@ -317,6 +324,7 @@ async fn main() -> Result<()> {
     state.max_queued_training_jobs = config.training.max_queued_jobs;
     state.max_tracked_jobs = config.training.max_tracked_jobs;
     state.tracked_job_ttl = std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
+    state.eval_mode = config.server.eval_mode;
     state.slow_request_warn_threshold = if config.server.slow_request_warn_secs == 0 {
         None
     } else {
@@ -344,6 +352,7 @@ async fn main() -> Result<()> {
         enabled = state.slow_request_warn_threshold.is_some(),
         "slow request watchdog configured"
     );
+    tracing::debug!(enabled = state.eval_mode, "eval mode configured");
 
     // Restore terminal training jobs persisted from previous runs so the
     // /ui training queue still shows last week's history after a restart.

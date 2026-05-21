@@ -59,6 +59,9 @@ const SERVE_EXAMPLES: &str = r#"Examples:
   KILN_MODEL_PATH=/models/Qwen3.5-4B kiln serve
       Start the local server with model weights from KILN_MODEL_PATH.
 
+  kiln serve --eval-mode
+      Start with deterministic eval defaults, no-thinking chat-template defaults, adapter headers, and per-request transient cache cleanup.
+
   kiln serve --config kiln.toml
       Start with a checked TOML config. Run `kiln config --file kiln.toml` first if you want to preview the effective settings.
 
@@ -338,6 +341,10 @@ pub enum Commands {
         /// Wins over KILN_SERVED_MODEL_ID env and TOML `model.served_model_id`.
         #[arg(long, value_name = "ID")]
         served_model_id: Option<String>,
+        /// Enable deterministic eval-serving defaults, adapter headers, and
+        /// transient cache cleanup between direct completions.
+        #[arg(long)]
+        eval_mode: bool,
     },
 
     /// Submit training data to a running server
@@ -2426,6 +2433,21 @@ mod tests {
         assert_eq!(cli_with(0, true).effective_log_level("info"), "warn");
         // quiet wins regardless of fallback severity
         assert_eq!(cli_with(0, true).effective_log_level("trace"), "warn");
+    }
+
+    #[test]
+    fn parses_serve_eval_mode() {
+        let cli = Cli::parse_from(["kiln", "serve", "--eval-mode", "--served-model-id", "eval"]);
+        match cli.command {
+            Some(Commands::Serve {
+                served_model_id,
+                eval_mode,
+            }) => {
+                assert_eq!(served_model_id.as_deref(), Some("eval"));
+                assert!(eval_mode);
+            }
+            _ => panic!("expected serve command"),
+        }
     }
 
     #[test]

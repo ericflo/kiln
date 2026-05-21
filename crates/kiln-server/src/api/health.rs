@@ -18,6 +18,7 @@ struct HealthResponse {
     uptime_seconds: u64,
     model: String,
     backend: &'static str,
+    eval_mode: bool,
     active_adapter: Option<String>,
     loaded_adapter: Option<String>,
     loaded_adapter_count: usize,
@@ -383,6 +384,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
             state.model_config.num_kv_heads,
         ),
         backend: backend_name,
+        eval_mode: state.eval_mode,
         active_adapter,
         loaded_adapter,
         loaded_adapter_count,
@@ -662,6 +664,7 @@ mod tests {
         assert!(json["uptime_seconds"].is_number());
         assert!(json["model"].as_str().unwrap().contains("qwen3.5-4b-kiln"));
         assert_eq!(json["backend"], "mock");
+        assert_eq!(json["eval_mode"], false);
         assert!(json["active_adapter"].is_null());
         assert!(json["loaded_adapter"].is_null());
         assert_eq!(json["loaded_adapter_count"], 0);
@@ -701,7 +704,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_reports_active_adapter_and_request_count() {
-        let state = make_test_state();
+        let mut state = make_test_state();
+        state.eval_mode = true;
         *state.active_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
         state
             .metrics
@@ -729,6 +733,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(json["active_adapter"], "eval-adapter");
+        assert_eq!(json["eval_mode"], true);
         assert_eq!(json["request_count"], 2);
         assert_eq!(json["requests"]["total"], 2);
         assert_eq!(json["requests"]["ok"], 1);

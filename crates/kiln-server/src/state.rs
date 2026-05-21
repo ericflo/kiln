@@ -531,6 +531,11 @@ impl DeterministicBatchCache {
         self.insert_complete_value(key, value);
     }
 
+    pub fn clear_completed(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+    }
+
     fn insert_complete_value(
         &mut self,
         key: DeterministicBatchCacheKey,
@@ -617,6 +622,11 @@ impl DeterministicChatRequestCache {
         self.insert_complete_value(key, value);
     }
 
+    pub fn clear_completed(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+    }
+
     fn insert_complete_value(&mut self, key: String, value: DeterministicChatRequestCacheValue) {
         if self.capacity == 0 {
             return;
@@ -697,6 +707,11 @@ impl DeterministicChatChoicesCache {
 
     pub fn insert(&mut self, key: String, value: DeterministicChatChoicesCacheValue) {
         self.insert_complete_value(key, value);
+    }
+
+    pub fn clear_completed(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
     }
 
     fn insert_complete_value(&mut self, key: String, value: DeterministicChatChoicesCacheValue) {
@@ -817,6 +832,15 @@ impl DeterministicCompletionCache {
         for (_, sender) in self.in_flight.drain() {
             let _ = sender.send(DeterministicCompletionInFlightState::Ready(None));
         }
+    }
+
+    pub fn clear_completed(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+    }
+
+    pub fn stats(&self) -> usize {
+        self.entries.len()
     }
 }
 
@@ -1130,6 +1154,11 @@ impl PromptTokenCache {
     pub fn stats(&self) -> (u64, u64, usize) {
         (self.hits, self.misses, self.entries.len())
     }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+    }
 }
 
 pub struct RenderedPromptCache {
@@ -1181,6 +1210,11 @@ impl RenderedPromptCache {
 
     pub fn stats(&self) -> (u64, u64, usize) {
         (self.hits, self.misses, self.entries.len())
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
     }
 }
 
@@ -1241,6 +1275,9 @@ pub struct AppState {
     pub shutdown: ShutdownFlag,
     /// Per-request timeout duration. Configurable via KILN_REQUEST_TIMEOUT_SECS (default 600).
     pub request_timeout: std::time::Duration,
+    /// Eval-serving mode: deterministic defaults, no-think defaults, headers,
+    /// adapter-switch warnings, and per-request transient cache cleanup.
+    pub eval_mode: bool,
     /// Slow chat-completion warning threshold. None disables slow-request logs.
     pub slow_request_warn_threshold: Option<std::time::Duration>,
     /// Prometheus metrics counters.
@@ -1388,6 +1425,16 @@ impl AppState {
         }
     }
 
+    pub fn clear_eval_mode_transient_state(&self) {
+        self.completion_cache.lock().unwrap().clear_completed();
+        self.chat_request_cache.lock().unwrap().clear_completed();
+        self.chat_choices_cache.lock().unwrap().clear_completed();
+        self.batch_cache.lock().unwrap().clear_completed();
+        self.rendered_prompt_cache.lock().unwrap().clear();
+        self.prompt_token_cache.lock().unwrap().clear();
+        self.clear_real_prefix_cache();
+    }
+
     pub fn new_mock(
         model_config: ModelConfig,
         scheduler: Scheduler,
@@ -1418,6 +1465,7 @@ impl AppState {
             },
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
+            eval_mode: false,
             slow_request_warn_threshold: None,
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
@@ -1871,6 +1919,7 @@ impl AppState {
             vram_info,
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
+            eval_mode: false,
             slow_request_warn_threshold: None,
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
