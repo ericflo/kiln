@@ -1816,7 +1816,9 @@ before/after accounting, synthetic `WARNINGS:` trajectory filtering,
   and verified that `warning_filter=false` includes more env tokens than the
   default warning-filtered mask for a `WARNINGS:` observation prefix.
 
-**Commit SHA:** Pending until the implementation commit is created and pushed.
+**Commit SHA:** `82397f8a` (`Issue 28: make warning-prefix masking
+testable`). This status line is recorded in a follow-up metadata commit
+because a commit cannot include its own final SHA.
 
 **Remaining risk:** The receipt warning threshold is intentionally a simple
 "more than half of before-filter env tokens stripped" diagnostic. It flags
