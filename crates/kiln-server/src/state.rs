@@ -1278,6 +1278,9 @@ pub struct AppState {
     /// Eval-serving mode: deterministic defaults, no-think defaults, headers,
     /// adapter-switch warnings, and per-request transient cache cleanup.
     pub eval_mode: bool,
+    /// Server-level default for chat-template thinking mode. `None` preserves
+    /// the template's own default.
+    pub default_thinking_enabled: Option<bool>,
     /// Slow chat-completion warning threshold. None disables slow-request logs.
     pub slow_request_warn_threshold: Option<std::time::Duration>,
     /// Prometheus metrics counters.
@@ -1466,6 +1469,7 @@ impl AppState {
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             eval_mode: false,
+            default_thinking_enabled: None,
             slow_request_warn_threshold: None,
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
@@ -1920,6 +1924,7 @@ impl AppState {
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             eval_mode: false,
+            default_thinking_enabled: None,
             slow_request_warn_threshold: None,
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),

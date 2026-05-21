@@ -19,6 +19,7 @@ struct HealthResponse {
     model: String,
     backend: &'static str,
     eval_mode: bool,
+    default_thinking_enabled: Option<bool>,
     active_adapter: Option<String>,
     loaded_adapter: Option<String>,
     loaded_adapter_count: usize,
@@ -385,6 +386,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         ),
         backend: backend_name,
         eval_mode: state.eval_mode,
+        default_thinking_enabled: state.default_thinking_enabled,
         active_adapter,
         loaded_adapter,
         loaded_adapter_count,
@@ -665,6 +667,7 @@ mod tests {
         assert!(json["model"].as_str().unwrap().contains("qwen3.5-4b-kiln"));
         assert_eq!(json["backend"], "mock");
         assert_eq!(json["eval_mode"], false);
+        assert!(json["default_thinking_enabled"].is_null());
         assert!(json["active_adapter"].is_null());
         assert!(json["loaded_adapter"].is_null());
         assert_eq!(json["loaded_adapter_count"], 0);
@@ -706,6 +709,7 @@ mod tests {
     async fn test_health_reports_active_adapter_and_request_count() {
         let mut state = make_test_state();
         state.eval_mode = true;
+        state.default_thinking_enabled = Some(false);
         *state.active_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
         state
             .metrics
@@ -734,6 +738,7 @@ mod tests {
 
         assert_eq!(json["active_adapter"], "eval-adapter");
         assert_eq!(json["eval_mode"], true);
+        assert_eq!(json["default_thinking_enabled"], false);
         assert_eq!(json["request_count"], 2);
         assert_eq!(json["requests"]["total"], 2);
         assert_eq!(json["requests"]["ok"], 1);

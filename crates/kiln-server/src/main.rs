@@ -325,6 +325,7 @@ async fn main() -> Result<()> {
     state.max_tracked_jobs = config.training.max_tracked_jobs;
     state.tracked_job_ttl = std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
     state.eval_mode = config.server.eval_mode;
+    state.default_thinking_enabled = config.server.default_thinking_enabled;
     state.slow_request_warn_threshold = if config.server.slow_request_warn_secs == 0 {
         None
     } else {
@@ -353,6 +354,10 @@ async fn main() -> Result<()> {
         "slow request watchdog configured"
     );
     tracing::debug!(enabled = state.eval_mode, "eval mode configured");
+    tracing::debug!(
+        default_thinking_enabled = ?state.default_thinking_enabled,
+        "chat-template thinking default configured"
+    );
 
     // Restore terminal training jobs persisted from previous runs so the
     // /ui training queue still shows last week's history after a restart.

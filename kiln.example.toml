@@ -21,6 +21,11 @@ host = "0.0.0.0"
 port = 8420
 request_timeout_secs = 600
 shutdown_timeout_secs = 5
+# eval_mode = false
+# default_thinking_enabled = false     # Optional. When set, defaults Qwen/DeepSeek-style
+                                      # chat templates to thinking on/off unless a request
+                                      # overrides chat_template_kwargs.enable_thinking.
+                                      # Omit to preserve the model template default.
 
 [model]
 # path = "/path/to/model"            # Required for real inference (omit for mock mode)

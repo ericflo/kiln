@@ -461,11 +461,21 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 |---|---|---|---|
 | `model.path` | `KILN_MODEL_PATH` | — | Path to model weights (required) |
 | `server.port` | `KILN_PORT` | 8420 | Server listen port |
+| `server.default_thinking_enabled` | `KILN_DEFAULT_THINKING_ENABLED` | template default | Default `chat_template_kwargs.enable_thinking` when a request omits it |
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference vs training |
 | `memory.kv_cache_fp8` | `KILN_KV_CACHE_FP8` | false | FP8 KV cache (2x context length) |
 | `logging.format` | `KILN_LOG_FORMAT` | auto | `auto` (default; pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, or `human` |
 | `prefix_cache.enabled` | `KILN_PREFIX_CACHE_ENABLED` | true | Reuse KV cache for shared prefixes |
 | `prefix_cache.max_entries` | `KILN_PREFIX_CACHE_MAX_ENTRIES` | auto | Cap cached GDN state snapshots (~49 MiB each; auto budget ≤1 GiB) |
+
+Qwen3.5-4B's official chat template starts assistant turns in thinking mode
+unless `enable_thinking=false` is passed. For tool-agent evals and Pi-style
+loops, set `server.default_thinking_enabled = false` or
+`KILN_DEFAULT_THINKING_ENABLED=false` so omitted requests produce normal
+`content` instead of long `reasoning_content`. A request can still override the
+server default with `chat_template_kwargs: {"enable_thinking": true}` or
+`false`. The legacy `KILN_DEFAULT_NO_THINK` env var is still accepted as a
+compatibility alias for `KILN_DEFAULT_THINKING_ENABLED=false`.
 
 ## Security model
 

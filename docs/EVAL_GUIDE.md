@@ -514,6 +514,15 @@ To disable thinking on a per-example basis, set
 Qwen3.5's template will then prefill an empty `<think>\n\n</think>\n\n`
 block.
 
+For agentic evals where most requests should run without Qwen thinking, set
+`server.default_thinking_enabled = false` in `kiln.toml` or
+`KILN_DEFAULT_THINKING_ENABLED=false` in the environment. Kiln applies that as
+the default `chat_template_kwargs.enable_thinking` value only when a request
+omits it, so individual examples can still opt back into thinking with
+`"generation": {"chat_template_kwargs": {"enable_thinking": true}}`. `/health`
+reports the configured default, and chat responses include metadata showing the
+thinking mode used for that response.
+
 ### 2. Tool calls — XML and JSON both score
 
 Qwen3.5's *native* tool-call wire form is XML:

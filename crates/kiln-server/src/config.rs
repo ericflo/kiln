@@ -69,6 +69,10 @@ pub struct ServerConfig {
     pub request_timeout_secs: u64,
     /// Enable deterministic eval-serving behavior for `kiln serve`.
     pub eval_mode: bool,
+    /// Server-level default for chat-template `enable_thinking`. `None`
+    /// preserves the model template default; requests can still override via
+    /// `chat_template_kwargs.enable_thinking`.
+    pub default_thinking_enabled: Option<bool>,
     /// Emit a structured warning when a chat completion takes at least this
     /// many seconds. Set to 0 to disable.
     pub slow_request_warn_secs: u64,
@@ -371,6 +375,7 @@ impl Default for ServerConfig {
             port: 8420,
             request_timeout_secs: 600,
             eval_mode: false,
+            default_thinking_enabled: None,
             slow_request_warn_secs: 30,
             // Hard ceiling on graceful-shutdown drain. With proactive
             // engine.stop() on signal, real draining typically completes
@@ -580,6 +585,14 @@ impl KilnConfig {
         }
         if let Ok(v) = std::env::var("KILN_EVAL_MODE") {
             self.server.eval_mode = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if std::env::var("KILN_DEFAULT_NO_THINK").is_ok() {
+            self.server.default_thinking_enabled = Some(false);
+        }
+        if let Ok(v) = std::env::var("KILN_DEFAULT_THINKING_ENABLED")
+            && let Some(enabled) = parse_bool_env(&v)
+        {
+            self.server.default_thinking_enabled = Some(enabled);
         }
         if let Ok(v) = std::env::var("KILN_SLOW_REQUEST_WARN_SECS") {
             if let Ok(s) = v.parse() {
@@ -809,6 +822,14 @@ impl KilnConfig {
     }
 }
 
+fn parse_bool_env(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,6 +851,7 @@ mod tests {
         assert_eq!(config.server.port, 8420);
         assert_eq!(config.server.request_timeout_secs, 600);
         assert!(!config.server.eval_mode);
+        assert_eq!(config.server.default_thinking_enabled, None);
         assert_eq!(config.server.slow_request_warn_secs, 30);
         assert_eq!(config.server.shutdown_timeout_secs, 5);
         assert_eq!(config.model.model_id, "Qwen/Qwen3.5-4B");
@@ -881,6 +903,7 @@ host = "127.0.0.1"
 port = 9000
 request_timeout_secs = 60
 eval_mode = true
+default_thinking_enabled = false
 slow_request_warn_secs = 15
 shutdown_timeout_secs = 10
 
@@ -936,6 +959,7 @@ composed_cache_max_entries = 8
         assert_eq!(config.server.port, 9000);
         assert_eq!(config.server.request_timeout_secs, 60);
         assert!(config.server.eval_mode);
+        assert_eq!(config.server.default_thinking_enabled, Some(false));
         assert_eq!(config.server.slow_request_warn_secs, 15);
         assert_eq!(config.model.path.as_deref(), Some("/models/qwen"));
         assert_eq!(config.model.model_id, "custom/model");
@@ -984,6 +1008,7 @@ port = 3000
         assert_eq!(config.server.host, "127.0.0.1"); // default (loopback)
         assert_eq!(config.server.request_timeout_secs, 600); // default
         assert!(!config.server.eval_mode); // default
+        assert_eq!(config.server.default_thinking_enabled, None); // default
         assert_eq!(config.server.slow_request_warn_secs, 30); // default
         assert_eq!(config.model.model_id, "Qwen/Qwen3.5-4B"); // default
         assert_eq!(config.memory.inference_memory_fraction, 0.7); // default
@@ -1060,6 +1085,7 @@ port = 3000
             std::env::set_var("KILN_HOST", "10.0.0.1");
             std::env::set_var("KILN_PORT", "7777");
             std::env::set_var("KILN_EVAL_MODE", "true");
+            std::env::set_var("KILN_DEFAULT_THINKING_ENABLED", "false");
             std::env::set_var("KILN_SLOW_REQUEST_WARN_SECS", "12");
             std::env::set_var("KILN_MODEL_PATH", "/tmp/model");
             std::env::set_var("KILN_INFERENCE_MEMORY_FRACTION", "0.9");
@@ -1088,6 +1114,7 @@ port = 3000
         assert_eq!(config.server.host, "10.0.0.1");
         assert_eq!(config.server.port, 7777);
         assert!(config.server.eval_mode);
+        assert_eq!(config.server.default_thinking_enabled, Some(false));
         assert_eq!(config.server.slow_request_warn_secs, 12);
         assert_eq!(config.model.path.as_deref(), Some("/tmp/model"));
         assert_eq!(config.memory.inference_memory_fraction, 0.9);
@@ -1118,6 +1145,7 @@ port = 3000
             std::env::remove_var("KILN_HOST");
             std::env::remove_var("KILN_PORT");
             std::env::remove_var("KILN_EVAL_MODE");
+            std::env::remove_var("KILN_DEFAULT_THINKING_ENABLED");
             std::env::remove_var("KILN_SLOW_REQUEST_WARN_SECS");
             std::env::remove_var("KILN_MODEL_PATH");
             std::env::remove_var("KILN_INFERENCE_MEMORY_FRACTION");
@@ -1138,6 +1166,33 @@ port = 3000
             std::env::remove_var("KILN_STREAMING_PREFILL");
             std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
             std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
+        }
+    }
+
+    #[test]
+    fn test_legacy_default_no_think_env_override() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("KILN_DEFAULT_NO_THINK", "1");
+        }
+
+        let mut config = KilnConfig::default();
+        config.apply_env_overrides();
+        assert_eq!(config.server.default_thinking_enabled, Some(false));
+
+        unsafe {
+            std::env::set_var("KILN_DEFAULT_THINKING_ENABLED", "true");
+        }
+        config.apply_env_overrides();
+        assert_eq!(
+            config.server.default_thinking_enabled,
+            Some(true),
+            "new explicit env var should win over the legacy disable switch"
+        );
+
+        unsafe {
+            std::env::remove_var("KILN_DEFAULT_NO_THINK");
+            std::env::remove_var("KILN_DEFAULT_THINKING_ENABLED");
         }
     }
 

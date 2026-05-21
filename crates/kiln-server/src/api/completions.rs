@@ -79,11 +79,104 @@ fn thinking_mode_for_request(req: &ChatCompletionRequest) -> &'static str {
     }
 }
 
+fn request_thinking_enabled(req: &ChatCompletionRequest) -> Option<bool> {
+    req.chat_template_kwargs
+        .as_ref()
+        .and_then(|kwargs| kwargs.get("enable_thinking"))
+        .and_then(|value| value.as_bool())
+}
+
+fn effective_thinking_enabled_for_request(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+) -> Option<bool> {
+    request_thinking_enabled(req).or(state.default_thinking_enabled)
+}
+
+fn thinking_source_for_request(state: &AppState, req: &ChatCompletionRequest) -> &'static str {
+    match req
+        .chat_template_kwargs
+        .as_ref()
+        .and_then(|kwargs| kwargs.get("enable_thinking"))
+    {
+        Some(serde_json::Value::Bool(_)) => "request",
+        Some(_) => "custom",
+        None if state.default_thinking_enabled.is_some() => "server_default",
+        None => "template_default",
+    }
+}
+
 fn thinking_mode_for_prompt(prompt_text: &str) -> &'static str {
     if prompt_starts_in_reasoning(prompt_text) {
         "reasoning"
     } else {
         "non_reasoning"
+    }
+}
+
+fn effective_chat_template_kwargs(
+    default_thinking_enabled: Option<bool>,
+    chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut kwargs = chat_template_kwargs.cloned().unwrap_or_default();
+    if let Some(enabled) = default_thinking_enabled {
+        kwargs
+            .entry("enable_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(enabled));
+    }
+    kwargs
+}
+
+fn chat_completion_metadata_from_prompt(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    prompt_text: &str,
+) -> ChatCompletionMetadata {
+    ChatCompletionMetadata {
+        thinking_enabled: prompt_starts_in_reasoning(prompt_text),
+        thinking_mode: thinking_mode_for_prompt(prompt_text).to_string(),
+        thinking_source: thinking_source_for_request(state, req),
+        default_thinking_enabled: state.default_thinking_enabled,
+    }
+}
+
+fn chat_completion_metadata_from_cached_output(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    cached_output: &AssistantOutputParts,
+) -> ChatCompletionMetadata {
+    let thinking_enabled = effective_thinking_enabled_for_request(state, req).unwrap_or_else(|| {
+        cached_output
+            .reasoning_content
+            .as_deref()
+            .is_some_and(|text| !text.is_empty())
+    });
+    ChatCompletionMetadata {
+        thinking_enabled,
+        thinking_mode: if thinking_enabled {
+            "reasoning".to_string()
+        } else {
+            "non_reasoning".to_string()
+        },
+        thinking_source: thinking_source_for_request(state, req),
+        default_thinking_enabled: state.default_thinking_enabled,
+    }
+}
+
+fn chat_completion_metadata_from_request(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+) -> ChatCompletionMetadata {
+    let thinking_enabled = effective_thinking_enabled_for_request(state, req).unwrap_or(false);
+    ChatCompletionMetadata {
+        thinking_enabled,
+        thinking_mode: if thinking_enabled {
+            "reasoning".to_string()
+        } else {
+            "non_reasoning".to_string()
+        },
+        thinking_source: thinking_source_for_request(state, req),
+        default_thinking_enabled: state.default_thinking_enabled,
     }
 }
 
@@ -1053,10 +1146,12 @@ pub(crate) fn render_prompt_text(
     tool_choice: Option<&serde_json::Value>,
     chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<String, ApiError> {
+    let merged_chat_template_kwargs =
+        effective_chat_template_kwargs(state.default_thinking_enabled, chat_template_kwargs);
     let normalized_tools = normalized_tools_for_cache(tools);
     let normalized_tool_choice = normalized_tool_choice_for_cache(normalized_tools, tool_choice);
     let normalized_chat_template_kwargs =
-        normalized_chat_template_kwargs_for_cache(chat_template_kwargs);
+        normalized_chat_template_kwargs_for_cache(Some(&merged_chat_template_kwargs));
     let message_keys = message_cache_keys(messages);
     let key = serde_json::to_string(&RenderedPromptCacheKey {
         messages: &message_keys,
@@ -1071,7 +1166,8 @@ pub(crate) fn render_prompt_text(
     }
 
     let chat_messages: Vec<ChatMessage> = messages.iter().map(message_to_chat).collect();
-    let chat_template_options = chat_template_options_from_kwargs(normalized_chat_template_kwargs);
+    let chat_template_options =
+        chat_template_options_from_kwargs(Some(&merged_chat_template_kwargs));
     let prompt_text = state
         .tokenizer
         .apply_chat_template_full_with_options(
@@ -1092,23 +1188,8 @@ pub(crate) fn render_prompt_text(
 fn chat_template_options_from_kwargs(
     chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> ChatTemplateOptions {
-    let mut kwargs = chat_template_kwargs.cloned().unwrap_or_default();
-    // When KILN_DEFAULT_NO_THINK is set, default enable_thinking=false unless
-    // the client explicitly specified a value. Models with reasoning templates
-    // (Qwen3.5, DeepSeek R1) honor this; templates without the variable ignore
-    // it. Use for agentic flows (pi) where the OpenAI client can't easily pass
-    // chat_template_kwargs and where thinking tokens collapse throughput
-    // (50-iter GRPO loops are 40× slower with thinking on).
-    if std::env::var("KILN_DEFAULT_NO_THINK").is_ok()
-        && !kwargs.contains_key("enable_thinking")
-    {
-        kwargs.insert(
-            "enable_thinking".to_string(),
-            serde_json::Value::Bool(false),
-        );
-    }
     ChatTemplateOptions {
-        template_kwargs: kwargs,
+        template_kwargs: chat_template_kwargs.cloned().unwrap_or_default(),
     }
 }
 
@@ -1792,6 +1873,7 @@ fn response_from_cached_completion(
         cached.finish_reason,
     );
     let preview_source = cached_output.preview_source();
+    let metadata = chat_completion_metadata_from_cached_output(state, req, &cached_output);
     record_recent_request(
         state,
         RequestRecord {
@@ -1830,6 +1912,7 @@ fn response_from_cached_completion(
             completion_tokens,
             total_tokens: prompt_token_count + completion_tokens,
         },
+        metadata,
     }
 }
 
@@ -1869,6 +1952,10 @@ fn response_from_cached_chat_choices(
         .iter()
         .map(|(completion_tokens, _)| *completion_tokens)
         .sum::<usize>();
+    let metadata = cached_completions
+        .first()
+        .map(|(_, output)| chat_completion_metadata_from_cached_output(state, req, output))
+        .unwrap_or_else(|| chat_completion_metadata_from_request(state, req));
 
     record_recent_request(
         state,
@@ -1916,6 +2003,7 @@ fn response_from_cached_chat_choices(
             completion_tokens,
             total_tokens: cached.prompt_tokens.saturating_add(completion_tokens),
         },
+        metadata,
     }
 }
 
@@ -2638,6 +2726,16 @@ pub struct ChatCompletionResponse {
     pub model: String,
     pub choices: Vec<Choice>,
     pub usage: Usage,
+    pub metadata: ChatCompletionMetadata,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatCompletionMetadata {
+    pub thinking_enabled: bool,
+    pub thinking_mode: String,
+    pub thinking_source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_thinking_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3078,7 +3176,9 @@ async fn chat_completions_inner(
                 request_start,
             ));
         }
-        let resp = empty_chat_completion_response(state, &req, prompt_tokens.len(), request_start);
+        let mut resp =
+            empty_chat_completion_response(state, &req, prompt_tokens.len(), request_start);
+        resp.metadata = chat_completion_metadata_from_prompt(state, &req, &prompt_text);
         return Ok(Json(resp).into_response());
     }
 
@@ -3318,6 +3418,7 @@ async fn chat_completions_inner(
                     state,
                     scheduler,
                     engine,
+                    &prompt_text,
                     &prompt_tokens,
                     &sampling,
                     &req,
@@ -3886,6 +3987,7 @@ async fn generate_real_batched(
         },
     );
 
+    let metadata = chat_completion_metadata_from_prompt(state, req, prompt_text);
     let finish_reason = assistant_output.finish_reason.clone();
     Ok(ChatCompletionResponse {
         id,
@@ -3910,6 +4012,7 @@ async fn generate_real_batched(
             completion_tokens,
             total_tokens: prompt_token_count + completion_tokens,
         },
+        metadata,
     })
 }
 
@@ -4597,6 +4700,7 @@ async fn generate_real(
         },
     );
 
+    let metadata = chat_completion_metadata_from_prompt(state, req, prompt_text);
     let finish_reason = assistant_output.finish_reason.clone();
     Ok(ChatCompletionResponse {
         id,
@@ -4621,6 +4725,7 @@ async fn generate_real(
             completion_tokens,
             total_tokens: prompt_token_count + completion_tokens,
         },
+        metadata,
     })
 }
 
@@ -5326,6 +5431,7 @@ async fn generate_mock(
     state: &AppState,
     scheduler: &tokio::sync::Mutex<kiln_scheduler::Scheduler>,
     engine: &std::sync::Arc<dyn kiln_model::engine::Engine>,
+    prompt_text: &str,
     prompt_tokens: &[TokenId],
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
@@ -5436,6 +5542,7 @@ async fn generate_mock(
         },
     );
 
+    let metadata = chat_completion_metadata_from_prompt(state, req, prompt_text);
     let finish_reason = assistant_output.finish_reason.clone();
     Ok(ChatCompletionResponse {
         id,
@@ -5461,6 +5568,7 @@ async fn generate_mock(
             completion_tokens,
             total_tokens: prompt_token_count + completion_tokens,
         },
+        metadata,
     })
 }
 
@@ -6814,7 +6922,7 @@ async fn generate_multi_chat_response(
             req.chat_template_kwargs.as_ref(),
         )?;
         let prompt_tokens = encode_prompt_tokens(state, &prompt_text)?;
-        let resp = response_from_cached_completion(
+        let mut resp = response_from_cached_completion(
             state,
             req,
             prompt_tokens.len(),
@@ -6827,6 +6935,7 @@ async fn generate_multi_chat_response(
                 completion_tokens: 0,
             },
         );
+        resp.metadata = chat_completion_metadata_from_prompt(state, req, &prompt_text);
         return chat_response_from_multi_responses(state, req, vec![(0, resp)], n_per, true);
     }
 
@@ -6918,10 +7027,12 @@ fn chat_response_from_multi_responses(
         .unwrap_or_else(|| state.served_model_id.clone());
     let mut prompt_tokens = None;
     let mut completion_tokens = 0usize;
+    let mut metadata = None;
     let mut choices = Vec::with_capacity(n_per);
     for (completion_idx, resp) in responses {
         prompt_tokens.get_or_insert(resp.usage.prompt_tokens);
         completion_tokens = completion_tokens.saturating_add(resp.usage.completion_tokens);
+        metadata.get_or_insert_with(|| resp.metadata.clone());
         let choice =
             resp.choices.into_iter().next().ok_or_else(|| {
                 ApiError::internal("generate returned a response with no choices")
@@ -6947,6 +7058,7 @@ fn chat_response_from_multi_responses(
             completion_tokens,
             total_tokens: prompt_tokens.saturating_add(completion_tokens),
         },
+        metadata: metadata.unwrap_or_else(|| chat_completion_metadata_from_request(state, req)),
     })
 }
 
@@ -7300,6 +7412,7 @@ async fn generate_one_prepared_response(
                 state,
                 scheduler,
                 engine,
+                prompt_text,
                 prompt_tokens,
                 sampling,
                 req,
@@ -7375,6 +7488,30 @@ mod tests {
 
     fn parse_request(json: &str) -> ChatCompletionRequest {
         serde_json::from_str(json).expect("request should deserialize")
+    }
+
+    fn make_qwen_template_test_state() -> AppState {
+        let config = ModelConfig::qwen3_5_4b();
+        let sched_config = kiln_scheduler::SchedulerConfig {
+            max_batch_tokens: 8192,
+            max_batch_size: 64,
+            block_size: 16,
+            prefix_cache_enabled: false,
+            ..Default::default()
+        };
+        let scheduler = kiln_scheduler::Scheduler::new(sched_config, 256);
+        let engine = kiln_model::engine::MockEngine::new(config.clone());
+        let template =
+            include_str!("../../../kiln-core/test_fixtures/qwen35_4b_chat_template.jinja");
+        let tokenizer = crate::api::test_tokenizer().with_chat_template(template.to_string());
+        AppState::new_mock(
+            config,
+            scheduler,
+            std::sync::Arc::new(engine),
+            tokenizer,
+            300,
+            "kiln-test".to_string(),
+        )
     }
 
     fn make_sampling(temperature: f32) -> SamplingParams {
@@ -7898,6 +8035,66 @@ mod tests {
     }
 
     #[test]
+    fn qwen35_server_default_thinking_can_be_disabled_and_overridden() {
+        let mut state = make_qwen_template_test_state();
+        state.default_thinking_enabled = Some(false);
+        let req = parse_request(
+            r#"{
+                "messages":[{"role":"user","content":"List files."}],
+                "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],
+                "tool_choice":"auto",
+                "temperature":0.0,
+                "max_tokens":12
+            }"#,
+        );
+
+        let prompt = render_prompt_text(
+            &state,
+            &req.messages,
+            req.tools.as_deref(),
+            req.tool_choice.as_ref(),
+            req.chat_template_kwargs.as_ref(),
+        )
+        .expect("Qwen3.5 prompt with server default should render");
+        assert!(
+            prompt.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"),
+            "server default thinking=false should pre-close thinking: {prompt:?}"
+        );
+        let metadata = chat_completion_metadata_from_prompt(&state, &req, &prompt);
+        assert!(!metadata.thinking_enabled);
+        assert_eq!(metadata.thinking_mode, "non_reasoning");
+        assert_eq!(metadata.thinking_source, "server_default");
+
+        let override_req = parse_request(
+            r#"{
+                "messages":[{"role":"user","content":"List files."}],
+                "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],
+                "tool_choice":"auto",
+                "chat_template_kwargs":{"enable_thinking":true},
+                "temperature":0.0,
+                "max_tokens":12
+            }"#,
+        );
+        let override_prompt = render_prompt_text(
+            &state,
+            &override_req.messages,
+            override_req.tools.as_deref(),
+            override_req.tool_choice.as_ref(),
+            override_req.chat_template_kwargs.as_ref(),
+        )
+        .expect("Qwen3.5 prompt with request override should render");
+        assert!(
+            override_prompt.ends_with("<|im_start|>assistant\n<think>\n"),
+            "request enable_thinking=true should override server default: {override_prompt:?}"
+        );
+        let override_metadata =
+            chat_completion_metadata_from_prompt(&state, &override_req, &override_prompt);
+        assert!(override_metadata.thinking_enabled);
+        assert_eq!(override_metadata.thinking_mode, "reasoning");
+        assert_eq!(override_metadata.thinking_source, "request");
+    }
+
+    #[test]
     fn message_tool_calls_round_trip_preserved() {
         let json = r#"{
             "messages":[
@@ -8209,6 +8406,12 @@ mod tests {
                 prompt_tokens: 4,
                 completion_tokens: 8,
                 total_tokens: 12,
+            },
+            metadata: ChatCompletionMetadata {
+                thinking_enabled: false,
+                thinking_mode: "non_reasoning".to_string(),
+                thinking_source: "template_default",
+                default_thinking_enabled: None,
             },
         };
 
@@ -8791,6 +8994,20 @@ mod tests {
         .await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["code"], "chat_invalid_request");
+    }
+
+    #[tokio::test]
+    async fn chat_response_metadata_reports_server_thinking_default() {
+        let mut state = make_batch_test_state();
+        state.default_thinking_enabled = Some(false);
+        let body = r#"{"messages":[{"role":"user","content":"metadata"}],"max_tokens":0}"#;
+
+        let (status, json) = chat_post(state, body).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(json["metadata"]["thinking_enabled"], false);
+        assert_eq!(json["metadata"]["thinking_mode"], "non_reasoning");
+        assert_eq!(json["metadata"]["thinking_source"], "server_default");
+        assert_eq!(json["metadata"]["default_thinking_enabled"], false);
     }
 
     #[tokio::test]
