@@ -1,0 +1,5 @@
+{"response": "11", "task": {"gold_answer": "10"}}
+{"response": "Alice has many apples.", "task": {"gold_answer": "10"}}
+{"response": "The answer requires more calculation.", "task": {"gold_answer": "2"}}
+{"response": "", "task": {"gold_answer": "4"}}
+{"response": "$40 minus 25% is $40", "task": {"gold_answer": "$30"}}

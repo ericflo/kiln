@@ -1,0 +1,5 @@
+{"response": "10", "task": {"gold_answer": "10"}}
+{"response": "Alice has 10 apples.", "task": {"gold_answer": "10"}}
+{"response": "The answer is 2 slices.", "task": {"gold_answer": "2"}}
+{"response": "Each child gets 4 cookies.", "task": {"gold_answer": "4"}}
+{"response": "$30", "task": {"gold_answer": "$30"}}

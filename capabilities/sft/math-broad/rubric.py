@@ -1,31 +1,43 @@
-"""Composite reward function — scaffold for math-broad.
+"""Composite reward function for sft/math-broad (v0).
 
-Round 2 contract:
-
-  score_one(rollout: dict) -> dict[str, float]
-  RUBRIC_VERSION: str
-
-`rollout` is one element of `rollout.jsonl` (or one entry of an OPD/SFT eval
-case). Must return a dict containing every sub-score under its weight name
-plus a `composite` field.
-
-See `../pi-doctest/rubric.py` for the established multi-component pattern
-(outcome * (w1*sub1 + w2*sub2 + ... + base)).
-
-This file is a SCAFFOLD — the next agent picking this cap up needs to fill in
-the real sub-score computations from the rubric defined in capability.md.
+Compare final-answer substring match against gold_answer (case
+insensitive). The cap targets WORD-PROBLEM accuracy.
 """
 from __future__ import annotations
+import re
 from typing import Any
 
-RUBRIC_VERSION = "v0-scaffold"
+RUBRIC_VERSION = "v0"
 
 
-def score_one(rollout):
-    raise NotImplementedError(
-        "math-broad: rubric.py is a scaffold. Fill in score_one() per the rubric "
-        "in ./capability.md and the cheat resistance bullets in section 0."
-    )
+def _normalize(s: str) -> str:
+    s = s.lower().strip()
+    s = re.sub(r"[\$,]", "", s)
+    s = re.sub(r"\s+", " ", s)
+    return s
 
 
-CHEAT_PROBES = []
+def score_one(rollout: dict) -> dict[str, Any]:
+    response = rollout.get("response") or rollout.get("completion") or ""
+    task = rollout.get("task") or rollout
+    gold = (task.get("gold_answer") or task.get("answer") or "").strip()
+    if not gold or not response:
+        return {"composite": 0.0, "exact_match": 0.0, "substring_match": 0.0}
+    response = response.strip()
+    gold_n = _normalize(gold)
+    resp_n = _normalize(response)
+    exact = 1.0 if resp_n == gold_n else 0.0
+    substr = 1.0 if gold_n in resp_n else 0.0
+    composite = max(exact, substr)
+    return {
+        "composite": float(composite),
+        "exact_match": float(exact),
+        "substring_match": float(substr),
+        "accuracy": float(composite),
+    }
+
+
+CHEAT_PROBES = [
+    "very long response containing the answer somewhere (mitigation: substring match acceptable here)",
+    "wrong format (e.g. write '$30' as 'thirty dollars') (mitigation: normalize strips $ but not words)",
+]

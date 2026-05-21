@@ -1,34 +1,35 @@
 # math-broad
 
-Capability under `capabilities/sft/`. Round 2 layout
-(see [`../../LAYOUT.md`](../../LAYOUT.md)).
+`math-broad` capability.
 
 ## Read first
 
-1. [`capability.md`](capability.md) — the contract: goal, task shape, rubric,
-   adversarial design, hypotheses.
-2. [`capability.config.json`](capability.config.json) — trainer + rollout defaults.
-3. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout and which kiln CLIs are used.
-4. [`../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md`](../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md) — the kiln improvements this layout assumes are landed.
+1. [`capability.md`](capability.md) — contract.
+2. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout.
+3. [`../README.md`](../README.md) — paradigm defaults.
+
+## Status
+
+**Implementation complete. Calibration passes.**
+
+| File | Status |
+|------|--------|
+| `capability.md` | Spec |
+| `capability.config.json` | Tuned |
+| `build_corpus.py` | Generates train + eval |
+| `rubric.py` | Score_one implemented |
+| `rubric_sanity.py` | Mandatory gate |
+| `capability.oracle.sh` | `kiln eval-adapter --seeds 3` |
+| `run_iter.sh` | Full pipeline |
+| `calibration/{good,bad}.jsonl` | 5 + 5 fixtures |
 
 ## Quickstart
 
 ```bash
-# 0. (one time) build corpus
 python3 build_corpus.py
-
-# 1. baseline eval (base model only)
+python3 rubric_sanity.py
 ./capability.oracle.sh
-
-# 2. first training iter
 ./run_iter.sh h1-default-recipe
-
-# 3. inspect the new row
-tail -1 capability.jsonl | python3 -m json.tool
 ```
 
-## History
-
-Round 1 artifacts (writeups, old iter log, ad-hoc scripts) live under
-[`archive/`](archive/). The next round starts with a fresh
-`capability.jsonl`.
+See `capability.md` for hypotheses and headroom.

@@ -1,39 +1,34 @@
-# calibration/ — rubric sanity fixtures
+# calibration/ — pi-tool-call-efficiency calibration
 
-Round 2 mandates this directory for every cap. `rubric_sanity.py`
-reads:
+NOTE: This cap is **eval-only** (round-2 reshape). The composite is
+purely tool-call efficiency. Calibration fixtures here are simpler than
+other caps — just count tool calls in known-good and known-bad
+trajectories.
 
-- `good.jsonl` — known-high-quality rollouts (the agent did the right
-  thing). At least 5.
-- `bad.jsonl` — known-low-quality rollouts including each §0 cheat
-  named in `../capability.md`. At least 5.
+## What "good" looks like
 
-The rubric must score the good set above the bad set with separation
-> 0.2 (configurable via `RUBRIC_SANITY_MARGIN`). `run_iter.sh` runs
-the sanity gate BEFORE training, so a broken rubric never reaches
-the GPU.
+| n_tool_calls | composite | bucket |
+|--------------|-----------|--------|
+| 0-4 | 1.00 | efficient |
+| 5-9 | 0.87→0.37 | moderate |
+| 10-12 | 0.25→0.00 | wasteful |
 
-## How to write a calibration fixture
+See `good.jsonl` for 5 examples (0, 1, 2, 3, 4 tool calls).
+See `bad.jsonl` for 5 examples (≥10 tool calls).
 
-Each line is one JSON object with the same shape `rubric.score_one()`
-expects (or `score_rollout(transcript, workdir, task)` for legacy caps
-— in that case the line should be `{"transcript": [...], "workdir":
-"...", "task": {...}}`).
+## Why simpler than other caps
 
-### Good fixture template
+This cap doesn't train an adapter; its job is to *measure* tool-call
+distributions across other caps' adapters. The rubric is essentially a
+single sub-score (efficiency from n_tool_calls). The calibration
+proves that bucket gradients are reasonable.
 
-```json
-{"task": {...}, "transcript": [...], "workdir": "..."}
-```
+## Refreshing
 
-Where the transcript shows the agent:
-- reading appropriate context
-- making the right action
-- verifying the result
-- summarizing cleanly
+After changing `../rubric.py`, run `python3 ../rubric_sanity.py`.
 
-### Bad fixture template — one per §0 cheat
+## Current calibration state
 
-For each cheat enumerated in `../capability.md ## Adversarial design (§0)`,
-write a fixture where the agent executes that cheat. Score should be 0
-or near-zero. This is the round-2 anti-saturation discipline.
+  good min=1.00, max=1.00 (0-4 calls)
+  bad  min=0.00, max=0.25 (10-20 calls)
+  separation: +0.75
