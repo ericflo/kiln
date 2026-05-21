@@ -2060,6 +2060,9 @@ tool calls.
   `/v1/chat/completions` response returned model `Qwen3.5-4B` with
   `metadata.thinking_enabled=false`, `metadata.thinking_mode=non_reasoning`,
   and a non-null `chat_template_hash`.
+- GitHub Actions on pushed head `d2de2e11` passed: CI run `26229390822`
+  completed cargo-deny, Linux default, Linux Vulkan, and macOS/Metal
+  successfully; Release Version Drift run `26229390789` also passed.
 
 **Commit SHA:** `be02f004` (`Issue 31: add Qwen defaults profile`). The SHA is
 recorded in a follow-up metadata commit because a commit cannot include its own
