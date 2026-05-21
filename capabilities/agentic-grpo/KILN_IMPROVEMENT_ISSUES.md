@@ -2419,22 +2419,69 @@ adapter provenance regardless of storage backend.
 - Restore command verifies hashes after copy.
 - Manifest schema is documented.
 
-**Status:** In progress on 2026-05-21.
+**Status:** Implemented and validated on RunPod on 2026-05-21.
 
-**Intended behavior:** Kiln-owned training paths write an
-`adapter_manifest.json` next to each completed adapter. The manifest records
-adapter identity, hashes for `adapter_model.safetensors`, `adapter_config.json`,
-`train_receipt.json`, model config/provenance, parent adapter, kiln commit, and
-training data hash/provenance. `GET /v1/adapters` includes manifest metadata
-when the file is present. `kiln adapter restore` copies a manifest-described
-adapter into a target adapter root/name and verifies copied file hashes before
-reporting success.
+**Implementation notes:**
 
-**Progress notes:** Active RunPod lease is
-`pod-684fd507d9ca2fb6183af36f` / pod `7cgkz5rvm91eq8`, with canonical model
-directory `/workspace/Qwen3.5-4B` and lowercase compatibility symlink only.
-Next step is to inspect adapter receipt/training output code, CLI command
-layout, adapter registry serialization, and docs before editing.
+- Added a kiln-owned `adapter_manifest.json` schema with adapter name,
+  `adapter_model.safetensors` hash, `adapter_config.json` hash,
+  `train_receipt.json` hash, parent adapter, model config hash, kiln commit,
+  training data hash/source/path, and canonical filenames.
+- `TrainReceipt::write_to_adapter_dir` now writes the manifest automatically
+  for successful training outputs when real adapter config and safetensors
+  files are present. Dry-run and failed receipts without adapter files continue
+  to write receipts without manufacturing a manifest.
+- `GET /v1/adapters` reads `adapter_manifest.json` when present and exposes
+  `adapter_manifest`, `adapter_manifest_path`, and `adapter_manifest_error`
+  in each registry entry.
+- Added `kiln adapter restore <adapter_manifest.json>` / `kiln adapters
+  restore <adapter_manifest.json>`. The command copies the manifest-described
+  adapter into a target adapter registry, supports `--name` and `--overwrite`,
+  and verifies config, safetensors, and receipt hashes after copy before
+  reporting success.
+- Documented the schema and restore workflow in `docs/ADAPTER_MANIFEST.md`
+  and linked it from `README.md`.
+
+**Validation evidence:**
+
+- Focused RunPod validation passed on RTX A6000 lease
+  `pod-684fd507d9ca2fb6183af36f` / pod `7cgkz5rvm91eq8`; sentinel
+  `/workspace/kiln-validation/issue36/focused.ok` recorded `exit=0` for branch
+  head `c77a2b33`.
+- Focused commands: `rustfmt --edition 2024 --check` on touched standalone
+  files, `cargo test -p kiln-train adapter_manifest --lib`,
+  `cargo test -p kiln-train restore_adapter_from_manifest --lib`,
+  `cargo test -p kiln-train
+  train_receipt_writes_adapter_manifest_when_adapter_files_exist --lib`,
+  `cargo test -p kiln-server --test adapter_registry_state adapter_manifest`,
+  `cargo check -p kiln-server --bin kiln`, and `git diff --check`.
+- Actual Qwen3.5-4B RunPod validation passed on the same A6000 with canonical
+  model directory `/workspace/Qwen3.5-4B`; sentinel
+  `/workspace/kiln-validation/issue36/actual-model2.ok` recorded `exit=0`.
+- Actual-model validation built the patched CUDA release server, booted
+  `/workspace/Qwen3.5-4B` with served model id `Qwen3.5-4B` on
+  `KILN_PORT=18436`, completed a real SFT job for
+  `issue36-real-manifest`, verified the produced `adapter_manifest.json` and
+  `train_receipt.json`, verified registry manifest fields, restored the
+  adapter as `issue36-real-restored` with `kiln adapter restore --overwrite`,
+  verified restored config/safetensors/receipt hashes, verified the restored
+  adapter appeared in `/v1/adapters`, and loaded the restored adapter through
+  `/v1/adapters/load`.
+- Earlier actual-model attempt
+  `/workspace/kiln-validation/issue36/actual-model.done` failed during
+  validation setup because the pod worktree had carried dirty files from a
+  prior run and the synthetic SFT request used an unsafe default
+  alpha/rank ratio for rank 2. The successful `actual-model2` run stashed the
+  pod-local dirty state, checked out the validation branch cleanly, and set
+  `lora_alpha=4.0`.
+
+**Commit SHA:** `c77a2b33` (`Issue 36: add adapter manifest restore`).
+
+**Remaining risk:** Restore currently expects the manifest to be adjacent to
+the files named by its `files` object. That covers local directories and
+downloaded artifact bundles; remote object-store fetch orchestration remains
+outside kiln and should pass a local materialized manifest directory to the
+command.
 
 ### 37. Add Off-Policy Distillation Training Mode
 
