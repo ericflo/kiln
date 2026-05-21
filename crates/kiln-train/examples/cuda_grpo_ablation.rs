@@ -38,6 +38,7 @@ use kiln_train::trainer::{grpo_dry_run_jsonl, grpo_train_jsonl};
 #[cfg(feature = "cuda")]
 use kiln_train::{
     AdvantageMode, GrpoConfig, IsLevel, KlEstimator, LossAggregation, Optimizer, ReferencePolicy,
+    RewardFilterOnEmpty,
 };
 
 #[cfg(feature = "cuda")]
@@ -259,6 +260,14 @@ struct Args {
     dry_run: bool,
     /// Permit a dry run where dynamic sampling filters every group.
     allow_empty_dry_run: bool,
+    /// Drop groups below this population reward-variance threshold.
+    filter_var_min: Option<f64>,
+    /// Drop groups above this population reward-variance threshold.
+    filter_var_max: Option<f64>,
+    /// Minimum groups that must remain after reward filtering.
+    min_groups: usize,
+    /// Explicit behavior if reward filtering leaves too few groups.
+    on_empty_filter: RewardFilterOnEmpty,
 }
 
 #[cfg(feature = "cuda")]
@@ -285,17 +294,23 @@ impl Args {
         let mut install_adapter_name: Option<String> = None;
         let mut dry_run = false;
         let mut allow_empty_dry_run = false;
+        let mut filter_var_min: Option<f64> = None;
+        let mut filter_var_max: Option<f64> = None;
+        let mut min_groups = 1usize;
+        let mut on_empty_filter = RewardFilterOnEmpty::Fail;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                "--data" => data = Some(PathBuf::from(args.next().context("--data needs a value")?)),
-                "--model" => {
-                    model_path = Some(PathBuf::from(
-                        args.next().context("--model needs a value")?,
-                    ))
+                "--data" => {
+                    data = Some(PathBuf::from(args.next().context("--data needs a value")?))
                 }
-                "--output" => output_dir = PathBuf::from(args.next().context("--output needs a value")?),
+                "--model" => {
+                    model_path = Some(PathBuf::from(args.next().context("--model needs a value")?))
+                }
+                "--output" => {
+                    output_dir = PathBuf::from(args.next().context("--output needs a value")?)
+                }
                 "--adapter" => adapter_name = args.next().context("--adapter needs a value")?,
                 "--mode" => mode = Mode::parse(&args.next().context("--mode needs a value")?)?,
                 "--max-groups" => {
@@ -363,11 +378,47 @@ impl Args {
                     ))
                 }
                 "--install-adapter-name" => {
-                    install_adapter_name =
-                        Some(args.next().context("--install-adapter-name needs a value")?)
+                    install_adapter_name = Some(
+                        args.next()
+                            .context("--install-adapter-name needs a value")?,
+                    )
                 }
                 "--dry-run" => dry_run = true,
                 "--allow-empty-dry-run" => allow_empty_dry_run = true,
+                "--filter-var-min" => {
+                    filter_var_min = Some(
+                        args.next()
+                            .context("--filter-var-min needs a value")?
+                            .parse()
+                            .context("--filter-var-min must be a float")?,
+                    )
+                }
+                "--filter-var-max" => {
+                    filter_var_max = Some(
+                        args.next()
+                            .context("--filter-var-max needs a value")?
+                            .parse()
+                            .context("--filter-var-max must be a float")?,
+                    )
+                }
+                "--min-groups" => {
+                    min_groups = args
+                        .next()
+                        .context("--min-groups needs a value")?
+                        .parse()
+                        .context("--min-groups must be a positive integer")?
+                }
+                "--on-empty-filter" => {
+                    let value = args.next().context("--on-empty-filter needs a value")?;
+                    on_empty_filter = match value.as_str() {
+                        "fail" => RewardFilterOnEmpty::Fail,
+                        "train-all" => RewardFilterOnEmpty::TrainAll,
+                        "skip" => RewardFilterOnEmpty::Skip,
+                        other => anyhow::bail!(
+                            "unknown --on-empty-filter {other}; expected fail, train-all, or skip"
+                        ),
+                    };
+                }
                 "--help" | "-h" => {
                     println!(
                         "cuda_grpo_ablation --data <jsonl> --model <dir> [--output <dir>] \
@@ -377,7 +428,9 @@ impl Args {
                          [--base-adapter DIR] [--allow-adapter-shape-conversion] \
                          [--allow-high-lora-scale] \
                          [--install-adapter-dir DIR] [--install-adapter-name NAME] \
-                         [--dry-run] [--allow-empty-dry-run]"
+                         [--dry-run] [--allow-empty-dry-run] \
+                         [--filter-var-min F] [--filter-var-max F] [--min-groups N] \
+                         [--on-empty-filter fail|train-all|skip]"
                     );
                     println!();
                     println!("ECHO flags (Phase 1, paper §3.3):");
@@ -410,6 +463,9 @@ impl Args {
         if install_adapter_name.is_some() && install_adapter_dir.is_none() {
             anyhow::bail!("--install-adapter-name requires --install-adapter-dir");
         }
+        if min_groups == 0 {
+            anyhow::bail!("--min-groups must be at least 1");
+        }
 
         Ok(Args {
             data: data.context("--data is required")?,
@@ -433,6 +489,10 @@ impl Args {
             install_adapter_name,
             dry_run,
             allow_empty_dry_run,
+            filter_var_min,
+            filter_var_max,
+            min_groups,
+            on_empty_filter,
         })
     }
 }
@@ -471,8 +531,8 @@ fn maybe_subset_dataset(input: &PathBuf, max_groups: Option<usize>) -> Result<Pa
     let Some(max) = max_groups else {
         return Ok(input.clone());
     };
-    let raw = std::fs::read_to_string(input)
-        .with_context(|| format!("reading {}", input.display()))?;
+    let raw =
+        std::fs::read_to_string(input).with_context(|| format!("reading {}", input.display()))?;
     let mut buf = String::new();
     let mut kept = 0usize;
     for line in raw.lines() {
@@ -511,7 +571,11 @@ fn main() -> Result<()> {
     let args = Args::parse()?;
     let start = Instant::now();
     let baseline_mib = current_vram_mib();
-    println!("mode={} baseline_vram_mib={}", args.mode.as_str(), baseline_mib);
+    println!(
+        "mode={} baseline_vram_mib={}",
+        args.mode.as_str(),
+        baseline_mib
+    );
 
     let tokenizer = load_tokenizer(&args.model_path)?;
     let dataset_path = maybe_subset_dataset(&args.data, args.max_groups)?;
@@ -532,6 +596,10 @@ fn main() -> Result<()> {
         optimizer: Optimizer::default(),
         allow_adapter_shape_conversion: args.allow_adapter_shape_conversion,
         allow_high_lora_scale: args.allow_high_lora_scale,
+        reward_filter_var_min: args.filter_var_min,
+        reward_filter_var_max: args.filter_var_max,
+        reward_filter_min_groups: args.min_groups,
+        reward_filter_on_empty: args.on_empty_filter,
         ..GrpoConfig::default()
     };
     let mut config = args.mode.apply(base);
@@ -577,7 +645,8 @@ fn main() -> Result<()> {
     println!(
         "config mode={} advantage_mode={:?} loss_aggregation={:?} clip=({},{:?}) \
          kl_estimator={:?} dynamic_sampling={} is_level={:?} reference_policy={:?} \
-         lr={} rank={} alpha={} seed={} echo_lambda={}",
+         lr={} rank={} alpha={} seed={} echo_lambda={} filter_var_min={:?} \
+         filter_var_max={:?} min_groups={} on_empty_filter={:?}",
         args.mode.as_str(),
         config.advantage_mode,
         config.loss_aggregation,
@@ -592,6 +661,10 @@ fn main() -> Result<()> {
         config.lora_alpha,
         args.seed,
         echo_lambda_str,
+        config.reward_filter_var_min,
+        config.reward_filter_var_max,
+        config.reward_filter_min_groups,
+        config.reward_filter_on_empty,
     );
 
     if args.dry_run {
@@ -628,13 +701,19 @@ fn main() -> Result<()> {
         );
         println!(
             "dry_run_data groups_read={} groups_filtered={} groups_valid={} \
-             completions_read={} completions_valid={}",
+             completions_read={} completions_valid={} reward_groups_filtered={} \
+             reward_groups_kept={}",
             report.data.groups_read,
             report.data.groups_filtered,
             report.data.groups_trained,
             report.data.completions_read,
-            report.data.completions_trained
+            report.data.completions_trained,
+            report.data.reward_groups_filtered,
+            report.data.reward_groups_kept
         );
+        if let Some(sidecar) = report.data.reward_filter_sidecar.as_deref() {
+            println!("dry_run_reward_filter_sidecar={sidecar}");
+        }
         println!(
             "dry_run_tokens action_tokens={} env_tokens={} context_tokens={}",
             report.token_counts.action_tokens,
@@ -643,10 +722,7 @@ fn main() -> Result<()> {
         );
         println!(
             "dry_run_rewards count={} mean={} stdev={} variance_histogram={}",
-            report.rewards.count,
-            reward_mean,
-            reward_stdev,
-            variance_histogram
+            report.rewards.count, reward_mean, reward_stdev, variance_histogram
         );
         if let Some(base) = report.base_adapter_dir.as_deref() {
             println!("dry_run_base_adapter={}", base.display());
@@ -747,6 +823,15 @@ fn main() -> Result<()> {
         &args.adapter_name,
         installed_adapter_dir.as_deref(),
     )?;
+    if let Some(receipt) = kiln_train::TrainReceipt::read_from_adapter_dir(&adapter_dir)? {
+        println!(
+            "reward_filter groups_filtered={} groups_kept={}",
+            receipt.data.reward_groups_filtered, receipt.data.reward_groups_kept
+        );
+        if let Some(sidecar) = receipt.data.reward_filter_sidecar.as_deref() {
+            println!("reward_filter_sidecar={sidecar}");
+        }
+    }
     println!("ADAPTER_DIR={}", adapter_dir.display());
     println!("adapter={}", adapter_dir.display());
     println!("peak_vram_mib={peak_mib}");

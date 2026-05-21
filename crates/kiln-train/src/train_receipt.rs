@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const TRAIN_RECEIPT_FILENAME: &str = "train_receipt.json";
+pub const REWARD_FILTER_SIDECAR_FILENAME: &str = "reward_filter_groups.json";
 pub const TRAIN_RECEIPT_SCHEMA_VERSION: u32 = 1;
 pub const ADAPTER_SMOKE_LOGIT_DELTA_EPSILON: f64 = 1e-6;
 pub const LORA_DELTA_NEAR_ZERO_EPSILON: f64 = 1e-12;
@@ -150,6 +151,12 @@ pub struct DataStatsReceipt {
     pub groups_trained: usize,
     pub completions_read: usize,
     pub completions_trained: usize,
+    #[serde(default)]
+    pub reward_groups_filtered: usize,
+    #[serde(default)]
+    pub reward_groups_kept: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reward_filter_sidecar: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -176,6 +183,38 @@ pub struct HistogramBucket {
     pub min_inclusive: Option<f64>,
     pub max_inclusive: Option<f64>,
     pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RewardFilterSidecar {
+    pub schema_version: u32,
+    pub sidecar_type: String,
+    pub source: String,
+    pub var_min: Option<f64>,
+    pub var_max: Option<f64>,
+    pub min_groups: usize,
+    pub on_empty_filter: String,
+    pub empty_filter_triggered: bool,
+    pub empty_filter_action: String,
+    pub groups_read: usize,
+    pub groups_kept: usize,
+    pub groups_dropped: usize,
+    pub kept_group_ids: Vec<String>,
+    pub dropped_group_ids: Vec<String>,
+    pub groups: Vec<RewardFilterGroupDecisionReceipt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RewardFilterGroupDecisionReceipt {
+    pub id: String,
+    pub source_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_line: Option<usize>,
+    pub reward_variance: f64,
+    pub matched_filter: bool,
+    pub kept: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -362,6 +401,23 @@ impl TrainReceipt {
             .with_context(|| format!("deserialize train receipt {}", path.display()))?;
         Ok(Some(receipt))
     }
+}
+
+pub fn write_reward_filter_sidecar(
+    adapter_dir: &Path,
+    sidecar: &RewardFilterSidecar,
+) -> Result<PathBuf> {
+    std::fs::create_dir_all(adapter_dir).with_context(|| {
+        format!(
+            "create adapter dir {} for reward filter sidecar",
+            adapter_dir.display()
+        )
+    })?;
+    let path = adapter_dir.join(REWARD_FILTER_SIDECAR_FILENAME);
+    let json = serde_json::to_string_pretty(sidecar).context("serialize reward filter sidecar")?;
+    std::fs::write(&path, json)
+        .with_context(|| format!("write reward filter sidecar {}", path.display()))?;
+    Ok(path)
 }
 
 impl AdapterFileReceipt {

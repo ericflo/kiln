@@ -438,6 +438,19 @@ pub enum KlEstimator {
     None,
 }
 
+/// Behavior when reward-variance filtering would leave too few groups.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RewardFilterOnEmpty {
+    /// Fail the run with a receipt and reward-filter sidecar.
+    #[default]
+    Fail,
+    /// Ignore the reward filter for this run and train on every group.
+    TrainAll,
+    /// Skip optimizer work and emit an untrained/base adapter plus receipt.
+    Skip,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrpoConfig {
     #[serde(default = "default_grpo_lr")]
@@ -511,6 +524,21 @@ pub struct GrpoConfig {
     /// to warn about low-signal reward distributions.
     #[serde(default = "default_reward_low_variance_threshold")]
     pub reward_low_variance_threshold: f64,
+    /// Drop groups whose population reward variance is below this threshold.
+    /// Disabled when both reward-filter variance bounds are unset.
+    #[serde(default)]
+    pub reward_filter_var_min: Option<f64>,
+    /// Drop groups whose population reward variance is above this threshold.
+    /// Usually left unset; useful for excluding pathological reward outliers.
+    #[serde(default)]
+    pub reward_filter_var_max: Option<f64>,
+    /// Minimum number of groups that must remain after reward filtering.
+    #[serde(default = "default_reward_filter_min_groups")]
+    pub reward_filter_min_groups: usize,
+    /// Explicit behavior when reward filtering keeps fewer than
+    /// `reward_filter_min_groups`.
+    #[serde(default)]
+    pub reward_filter_on_empty: RewardFilterOnEmpty,
     #[serde(default = "default_rank")]
     pub lora_rank: usize,
     #[serde(default = "default_alpha")]
@@ -567,6 +595,9 @@ fn default_reward_saturation_threshold() -> f64 {
 }
 fn default_reward_low_variance_threshold() -> f64 {
     crate::train_receipt::DEFAULT_REWARD_LOW_VARIANCE_THRESHOLD
+}
+fn default_reward_filter_min_groups() -> usize {
+    1
 }
 
 // ---- ECHO + LossConfig ----------------------------------------------------
@@ -803,6 +834,10 @@ impl Default for GrpoConfig {
             entropy_aware_kl_quantile: None,
             reward_saturation_threshold: default_reward_saturation_threshold(),
             reward_low_variance_threshold: default_reward_low_variance_threshold(),
+            reward_filter_var_min: None,
+            reward_filter_var_max: None,
+            reward_filter_min_groups: default_reward_filter_min_groups(),
+            reward_filter_on_empty: RewardFilterOnEmpty::default(),
             lora_rank: default_rank(),
             lora_alpha: default_alpha(),
             base_adapter: None,
@@ -915,17 +950,29 @@ mod tests {
                 .abs()
                 < 1e-12
         );
+        assert!(config.reward_filter_var_min.is_none());
+        assert!(config.reward_filter_var_max.is_none());
+        assert_eq!(config.reward_filter_min_groups, 1);
+        assert_eq!(config.reward_filter_on_empty, RewardFilterOnEmpty::Fail);
     }
 
     #[test]
     fn test_grpo_reward_diagnostic_thresholds_deserialize() {
         let json = r#"{
             "reward_saturation_threshold": 0.8,
-            "reward_low_variance_threshold": 0.002
+            "reward_low_variance_threshold": 0.002,
+            "reward_filter_var_min": 0.01,
+            "reward_filter_var_max": 0.25,
+            "reward_filter_min_groups": 3,
+            "reward_filter_on_empty": "train-all"
         }"#;
         let config: GrpoConfig = serde_json::from_str(json).unwrap();
         assert!((config.reward_saturation_threshold - 0.8).abs() < 1e-12);
         assert!((config.reward_low_variance_threshold - 0.002).abs() < 1e-12);
+        assert_eq!(config.reward_filter_var_min, Some(0.01));
+        assert_eq!(config.reward_filter_var_max, Some(0.25));
+        assert_eq!(config.reward_filter_min_groups, 3);
+        assert_eq!(config.reward_filter_on_empty, RewardFilterOnEmpty::TrainAll);
         assert_eq!(config.kl_coeff, 0.1);
     }
 

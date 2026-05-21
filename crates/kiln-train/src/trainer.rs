@@ -3,7 +3,7 @@
 //! Trains LoRA adapter weights directly on the already-loaded model's GPU
 //! tensors. No Python sidecar, no second model copy, single process.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -49,7 +49,7 @@ use crate::replay::{
 };
 use crate::{
     AdvantageMode, ChatMessage, GrpoConfig, GrpoGroup, IsLevel, KlEstimator, LossAggregation,
-    Optimizer, ReferencePolicy, SftConfig, SftExample, TurnKind,
+    Optimizer, ReferencePolicy, RewardFilterOnEmpty, SftConfig, SftExample, TurnKind,
 };
 
 /// Per-job context the HTTP layer hands the trainer so the training run can
@@ -1012,6 +1012,249 @@ fn grpo_settings_receipt(
             .unwrap_or(serde_json::Value::Null),
         entropy_aware_kl_quantile: config.entropy_aware_kl_quantile,
     }
+}
+
+#[derive(Debug, Clone)]
+struct RewardFilterInputGroup {
+    id: String,
+    source_index: usize,
+    source_line: Option<usize>,
+    rewards: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct RewardFilterPlan {
+    kept_source_indices: BTreeSet<usize>,
+    kept_source_lines: BTreeSet<usize>,
+    skip_training: bool,
+    failure_reason: Option<String>,
+    sidecar_path: PathBuf,
+    groups_kept: usize,
+    groups_dropped: usize,
+}
+
+impl RewardFilterPlan {
+    fn keeps_source_index(&self, source_index: usize) -> bool {
+        self.kept_source_indices.contains(&source_index)
+    }
+
+    fn keeps_source_line(&self, line_no: usize) -> bool {
+        self.kept_source_lines.contains(&line_no)
+    }
+}
+
+fn reward_filter_enabled(config: &GrpoConfig) -> bool {
+    config.reward_filter_var_min.is_some() || config.reward_filter_var_max.is_some()
+}
+
+fn validate_reward_filter_config(config: &GrpoConfig) -> Result<()> {
+    if let Some(var_min) = config.reward_filter_var_min {
+        anyhow::ensure!(
+            var_min.is_finite() && var_min >= 0.0,
+            "reward filter --filter-var-min must be a finite non-negative float"
+        );
+    }
+    if let Some(var_max) = config.reward_filter_var_max {
+        anyhow::ensure!(
+            var_max.is_finite() && var_max >= 0.0,
+            "reward filter --filter-var-max must be a finite non-negative float"
+        );
+    }
+    if let (Some(var_min), Some(var_max)) =
+        (config.reward_filter_var_min, config.reward_filter_var_max)
+    {
+        anyhow::ensure!(
+            var_min <= var_max,
+            "reward filter --filter-var-min must be <= --filter-var-max"
+        );
+    }
+    anyhow::ensure!(
+        config.reward_filter_min_groups > 0,
+        "reward filter --min-groups must be at least 1"
+    );
+    Ok(())
+}
+
+fn reward_filter_group_matches(
+    variance: f64,
+    var_min: Option<f64>,
+    var_max: Option<f64>,
+) -> (bool, Option<String>) {
+    if let Some(min) = var_min {
+        if variance < min {
+            return (false, Some(format!("variance_below_min:{min}")));
+        }
+    }
+    if let Some(max) = var_max {
+        if variance > max {
+            return (false, Some(format!("variance_above_max:{max}")));
+        }
+    }
+    (true, None)
+}
+
+fn reward_filter_variance(rewards: &[f64]) -> f64 {
+    if rewards.is_empty() {
+        return 0.0;
+    }
+    let mean = rewards.iter().sum::<f64>() / rewards.len() as f64;
+    rewards
+        .iter()
+        .map(|reward| {
+            let centered = *reward - mean;
+            centered * centered
+        })
+        .sum::<f64>()
+        / rewards.len() as f64
+}
+
+fn reward_filter_on_empty_label(mode: RewardFilterOnEmpty) -> &'static str {
+    match mode {
+        RewardFilterOnEmpty::Fail => "fail",
+        RewardFilterOnEmpty::TrainAll => "train-all",
+        RewardFilterOnEmpty::Skip => "skip",
+    }
+}
+
+fn build_reward_filter_plan(
+    config: &GrpoConfig,
+    output_dir: &Path,
+    source: &str,
+    groups: Vec<RewardFilterInputGroup>,
+) -> Result<Option<RewardFilterPlan>> {
+    if !reward_filter_enabled(config) {
+        return Ok(None);
+    }
+    validate_reward_filter_config(config)?;
+
+    let mut candidate_kept_ids = BTreeSet::new();
+    let mut candidate_kept_indices = BTreeSet::new();
+    let mut decisions = Vec::new();
+    for group in &groups {
+        let variance = reward_filter_variance(&group.rewards);
+        let (matched_filter, reject_reason) = reward_filter_group_matches(
+            variance,
+            config.reward_filter_var_min,
+            config.reward_filter_var_max,
+        );
+        if matched_filter {
+            candidate_kept_ids.insert(group.id.clone());
+            candidate_kept_indices.insert(group.source_index);
+        }
+        decisions.push(crate::train_receipt::RewardFilterGroupDecisionReceipt {
+            id: group.id.clone(),
+            source_index: group.source_index,
+            source_line: group.source_line,
+            reward_variance: variance,
+            matched_filter,
+            kept: matched_filter,
+            reject_reason,
+        });
+    }
+
+    let empty_filter_triggered = candidate_kept_ids.len() < config.reward_filter_min_groups;
+    let on_empty = config.reward_filter_on_empty;
+    let empty_filter_action = if empty_filter_triggered {
+        reward_filter_on_empty_label(on_empty)
+    } else {
+        "use-filter"
+    };
+
+    let mut kept_ids = Vec::new();
+    let mut dropped_ids = Vec::new();
+    let mut kept_indices = BTreeSet::new();
+    let mut kept_lines = BTreeSet::new();
+    let mut skip_training = false;
+    let mut failure_reason = None;
+
+    if empty_filter_triggered {
+        match on_empty {
+            RewardFilterOnEmpty::Fail => {
+                dropped_ids = groups.iter().map(|group| group.id.clone()).collect();
+                for decision in &mut decisions {
+                    decision.kept = false;
+                    decision.reject_reason
+                        .get_or_insert_with(|| "below_min_groups".to_string());
+                }
+                failure_reason = Some(format!(
+                    "reward variance filter kept {} group(s), below --min-groups {}; --on-empty-filter=fail",
+                    candidate_kept_ids.len(),
+                    config.reward_filter_min_groups
+                ));
+            }
+            RewardFilterOnEmpty::TrainAll => {
+                kept_ids = groups.iter().map(|group| group.id.clone()).collect();
+                for group in &groups {
+                    kept_indices.insert(group.source_index);
+                    if let Some(line) = group.source_line {
+                        kept_lines.insert(line);
+                    }
+                }
+                for decision in &mut decisions {
+                    decision.kept = true;
+                    decision.reject_reason = None;
+                }
+            }
+            RewardFilterOnEmpty::Skip => {
+                skip_training = true;
+                dropped_ids = groups.iter().map(|group| group.id.clone()).collect();
+                for decision in &mut decisions {
+                    decision.kept = false;
+                    decision.reject_reason
+                        .get_or_insert_with(|| "below_min_groups".to_string());
+                }
+            }
+        }
+    } else {
+        for group in &groups {
+            if candidate_kept_indices.contains(&group.source_index) {
+                kept_ids.push(group.id.clone());
+                kept_indices.insert(group.source_index);
+                if let Some(line) = group.source_line {
+                    kept_lines.insert(line);
+                }
+            } else {
+                dropped_ids.push(group.id.clone());
+            }
+        }
+    }
+
+    let sidecar = crate::train_receipt::RewardFilterSidecar {
+        schema_version: 1,
+        sidecar_type: "kiln_reward_filter_groups".to_string(),
+        source: source.to_string(),
+        var_min: config.reward_filter_var_min,
+        var_max: config.reward_filter_var_max,
+        min_groups: config.reward_filter_min_groups,
+        on_empty_filter: reward_filter_on_empty_label(on_empty).to_string(),
+        empty_filter_triggered,
+        empty_filter_action: empty_filter_action.to_string(),
+        groups_read: groups.len(),
+        groups_kept: kept_ids.len(),
+        groups_dropped: dropped_ids.len(),
+        kept_group_ids: kept_ids,
+        dropped_group_ids: dropped_ids,
+        groups: decisions,
+    };
+    let sidecar_path = crate::train_receipt::write_reward_filter_sidecar(output_dir, &sidecar)?;
+    Ok(Some(RewardFilterPlan {
+        groups_kept: sidecar.groups_kept,
+        groups_dropped: sidecar.groups_dropped,
+        kept_source_indices: kept_indices,
+        kept_source_lines: kept_lines,
+        skip_training,
+        failure_reason,
+        sidecar_path,
+    }))
+}
+
+fn record_reward_filter_plan(
+    data_stats: &mut crate::train_receipt::DataStatsReceipt,
+    plan: &RewardFilterPlan,
+) {
+    data_stats.reward_groups_kept = plan.groups_kept;
+    data_stats.reward_groups_filtered = plan.groups_dropped;
+    data_stats.reward_filter_sidecar = Some(plan.sidecar_path.display().to_string());
 }
 
 fn run_adapter_smoke_test_best_effort(
@@ -2046,6 +2289,48 @@ pub fn grpo_train(
             input_reward_groups.iter().map(Vec::as_slice),
             config.reward_saturation_threshold,
         );
+        let reward_filter_plan = build_reward_filter_plan(
+            config,
+            &output_dir,
+            "inline_grpo_groups",
+            groups
+                .iter()
+                .enumerate()
+                .map(|(idx, group)| RewardFilterInputGroup {
+                    id: format!("group:{}", idx + 1),
+                    source_index: idx + 1,
+                    source_line: None,
+                    rewards: group
+                        .completions
+                        .iter()
+                        .map(|completion| completion.reward)
+                        .collect(),
+                })
+                .collect(),
+        )?;
+        if let Some(plan) = reward_filter_plan.as_ref() {
+            record_reward_filter_plan(&mut data_stats, plan);
+            data_stats.groups_filtered =
+                data_stats.groups_filtered.saturating_add(plan.groups_dropped);
+            tracing::info!(
+                kept = plan.groups_kept,
+                dropped = plan.groups_dropped,
+                sidecar = %plan.sidecar_path.display(),
+                "GRPO reward variance filter applied"
+            );
+            if let Some(reason) = plan.failure_reason.as_ref() {
+                anyhow::bail!("{reason}");
+            }
+            if plan.skip_training {
+                params.save_peft(&output_dir, model_config.num_layers)?;
+                tracing::info!(
+                    adapter = adapter_name,
+                    path = %output_dir.display(),
+                    "GRPO reward variance filter skipped training"
+                );
+                return Ok((output_dir.clone(), 0.0));
+            }
+        }
 
         // Tokenize all completions: for each group, tokenize prompt + each completion.
         // When dynamic_sampling is enabled (DAPO, arXiv:2503.14476), groups whose
@@ -2053,7 +2338,13 @@ pub fn grpo_train(
         // their advantage vector is uniformly zero and would contribute no
         // policy-gradient signal anyway.
         let mut tokenized_groups: Vec<TokenizedGrpoGroup> = Vec::new();
-        for group in groups {
+        for (idx, group) in groups.iter().enumerate() {
+            let source_index = idx + 1;
+            if let Some(plan) = reward_filter_plan.as_ref() {
+                if !plan.keeps_source_index(source_index) {
+                    continue;
+                }
+            }
             if dynamic_sampling && is_degenerate_grpo_group(group) {
                 dynamic_dropped += 1;
                 continue;
@@ -2067,7 +2358,10 @@ pub fn grpo_train(
             }
         }
         dynamic_groups_filtered = dynamic_dropped;
-        data_stats.groups_filtered = dynamic_dropped.saturating_add(tokenization_failed);
+        data_stats.groups_filtered = data_stats
+            .reward_groups_filtered
+            .saturating_add(dynamic_dropped)
+            .saturating_add(tokenization_failed);
         data_stats.groups_trained = tokenized_groups.len();
         data_stats.completions_trained =
             tokenized_groups.iter().map(|g| g.completions.len()).sum();
@@ -2361,8 +2655,7 @@ pub fn grpo_dry_run_jsonl(
         let mut reader = BufReader::new(file);
         let mut line = String::new();
         let mut line_no = 0usize;
-        let mut processed_groups = 0usize;
-        let mut processed_completions = 0usize;
+        let mut parsed_groups: Vec<(usize, GrpoGroup)> = Vec::new();
         let mut reward_groups: Vec<Vec<f64>> = Vec::new();
 
         loop {
@@ -2393,8 +2686,59 @@ pub fn grpo_dry_run_jsonl(
                     .map(|completion| completion.reward)
                     .collect(),
             );
+            parsed_groups.push((line_no, group));
+        }
 
-            if config.dynamic_sampling && is_degenerate_grpo_group(&group) {
+        reward_stats = crate::train_receipt::reward_stats_from_groups_with_threshold(
+            reward_groups.iter().map(Vec::as_slice),
+            config.reward_saturation_threshold,
+        );
+        let reward_filter_plan = build_reward_filter_plan(
+            config,
+            &output_dir,
+            "jsonl_grpo_groups_dry_run",
+            parsed_groups
+                .iter()
+                .enumerate()
+                .map(|(idx, (line_no, group))| RewardFilterInputGroup {
+                    id: format!("line:{line_no}"),
+                    source_index: idx + 1,
+                    source_line: Some(*line_no),
+                    rewards: group
+                        .completions
+                        .iter()
+                        .map(|completion| completion.reward)
+                        .collect(),
+                })
+                .collect(),
+        )?;
+        if let Some(plan) = reward_filter_plan.as_ref() {
+            record_reward_filter_plan(&mut data_stats, plan);
+            data_stats.groups_filtered =
+                data_stats.groups_filtered.saturating_add(plan.groups_dropped);
+            tracing::info!(
+                kept = plan.groups_kept,
+                dropped = plan.groups_dropped,
+                sidecar = %plan.sidecar_path.display(),
+                "GRPO dry-run reward variance filter applied"
+            );
+            if let Some(reason) = plan.failure_reason.as_ref() {
+                anyhow::bail!("{reason}");
+            }
+        }
+
+        let mut processed_groups = 0usize;
+        let mut processed_completions = 0usize;
+        for (line_no, group) in &parsed_groups {
+            if let Some(plan) = reward_filter_plan.as_ref() {
+                if !plan.keeps_source_line(*line_no) {
+                    continue;
+                }
+                if plan.skip_training {
+                    continue;
+                }
+            }
+            if config.dynamic_sampling && is_degenerate_grpo_group(group) {
                 dynamic_groups_filtered = dynamic_groups_filtered.saturating_add(1);
                 data_stats.groups_filtered = data_stats.groups_filtered.saturating_add(1);
                 continue;
@@ -2404,7 +2748,7 @@ pub fn grpo_dry_run_jsonl(
             let tgroup = tokenize_grpo_group(&group, tokenizer).with_context(|| {
                 format!("tokenize GRPO dry-run group {group_idx} at line {line_no}")
             })?;
-            validate_grpo_dry_run_masks(&tgroup, group_idx, line_no)?;
+            validate_grpo_dry_run_masks(&tgroup, group_idx, *line_no)?;
             let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(&tgroup));
             token_counts.action_tokens = token_counts
                 .action_tokens
@@ -2422,12 +2766,11 @@ pub fn grpo_dry_run_jsonl(
 
         data_stats.groups_trained = processed_groups;
         data_stats.completions_trained = processed_completions;
-        reward_stats = crate::train_receipt::reward_stats_from_groups_with_threshold(
-            reward_groups.iter().map(Vec::as_slice),
-            config.reward_saturation_threshold,
-        );
 
-        if processed_groups == 0 && !allow_empty_after_filter {
+        let reward_filter_skipped = reward_filter_plan
+            .as_ref()
+            .is_some_and(|plan| plan.skip_training);
+        if processed_groups == 0 && !allow_empty_after_filter && !reward_filter_skipped {
             anyhow::bail!(
                 "GRPO dry run: zero valid GRPO groups after filtering in {}; pass --allow-empty-dry-run to permit this",
                 dataset_path.display()
@@ -2698,6 +3041,95 @@ pub fn grpo_train_jsonl(
             tracing::info!("streamed GRPO gradient checkpointing disabled");
         }
 
+        let reward_filter_plan = if reward_filter_enabled(config) {
+            let filter_file = File::open(dataset_path).with_context(|| {
+                format!(
+                    "open GRPO JSONL dataset {} for reward filtering",
+                    dataset_path.display()
+                )
+            })?;
+            let mut filter_reader = BufReader::new(filter_file);
+            let mut filter_line = String::new();
+            let mut filter_line_no = 0usize;
+            let mut filter_source_index = 0usize;
+            let mut filter_groups_read = 0usize;
+            let mut filter_completions_read = 0usize;
+            let mut filter_reward_groups: Vec<Vec<f64>> = Vec::new();
+            let mut filter_inputs = Vec::new();
+
+            loop {
+                filter_line.clear();
+                let read = filter_reader.read_line(&mut filter_line).with_context(|| {
+                    format!(
+                        "read GRPO JSONL dataset {} line {} for reward filtering",
+                        dataset_path.display(),
+                        filter_line_no + 1
+                    )
+                })?;
+                if read == 0 {
+                    break;
+                }
+                filter_line_no += 1;
+                let Some(group) = parse_grpo_jsonl_group_line(&filter_line, filter_line_no)? else {
+                    continue;
+                };
+                filter_source_index += 1;
+                filter_groups_read = filter_groups_read.saturating_add(1);
+                filter_completions_read =
+                    filter_completions_read.saturating_add(group.completions.len());
+                let rewards: Vec<f64> = group
+                    .completions
+                    .iter()
+                    .map(|completion| completion.reward)
+                    .collect();
+                filter_reward_groups.push(rewards.clone());
+                filter_inputs.push(RewardFilterInputGroup {
+                    id: format!("line:{filter_line_no}"),
+                    source_index: filter_source_index,
+                    source_line: Some(filter_line_no),
+                    rewards,
+                });
+            }
+
+            reward_stats = crate::train_receipt::reward_stats_from_groups_with_threshold(
+                filter_reward_groups.iter().map(Vec::as_slice),
+                config.reward_saturation_threshold,
+            );
+            let plan =
+                build_reward_filter_plan(config, &output_dir, "jsonl_grpo_groups", filter_inputs)?
+                    .expect("reward filter enabled should build a plan");
+            record_reward_filter_plan(&mut data_stats, &plan);
+            data_stats.groups_filtered =
+                data_stats.groups_filtered.saturating_add(plan.groups_dropped);
+            tracing::info!(
+                kept = plan.groups_kept,
+                dropped = plan.groups_dropped,
+                sidecar = %plan.sidecar_path.display(),
+                "streamed GRPO reward variance filter applied"
+            );
+            if let Some(reason) = plan.failure_reason.as_ref() {
+                data_stats.groups_read = filter_groups_read;
+                data_stats.completions_read = filter_completions_read;
+                anyhow::bail!("{reason}");
+            }
+            if plan.skip_training {
+                data_stats.groups_read = filter_groups_read;
+                data_stats.completions_read = filter_completions_read;
+                data_stats.groups_trained = 0;
+                data_stats.completions_trained = 0;
+                params.save_peft(&output_dir, model_config.num_layers)?;
+                tracing::info!(
+                    adapter = adapter_name,
+                    path = %output_dir.display(),
+                    "streamed GRPO reward variance filter skipped training"
+                );
+                return Ok((output_dir.clone(), 0.0));
+            }
+            Some(plan)
+        } else {
+            None
+        };
+
         let file = File::open(dataset_path)
             .with_context(|| format!("open GRPO JSONL dataset {}", dataset_path.display()))?;
         let total_bytes = file.metadata().map(|m| m.len()).unwrap_or(0).max(1);
@@ -2756,6 +3188,12 @@ pub fn grpo_train_jsonl(
                     .map(|completion| completion.reward)
                     .collect(),
             );
+
+            if let Some(plan) = reward_filter_plan.as_ref() {
+                if !plan.keeps_source_line(line_no) {
+                    continue;
+                }
+            }
 
             if config.dynamic_sampling && is_degenerate_grpo_group(&group) {
                 dynamic_groups_filtered = dynamic_groups_filtered.saturating_add(1);
@@ -10352,6 +10790,92 @@ mod tests {
         assert_eq!(report.data.groups_filtered, 1);
         assert_eq!(report.data.groups_trained, 0);
         assert_eq!(report.dynamic_groups_filtered, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn grpo_dry_run_reward_filter_on_empty_modes() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let tok = make_echo_smoke_tokenizer()?;
+        let groups = vec![
+            dry_run_group(vec![
+                crate::ScoredRollout::legacy("a".to_string(), 1.0),
+                crate::ScoredRollout::legacy("b".to_string(), 1.0),
+            ]),
+            dry_run_group(vec![
+                crate::ScoredRollout::legacy("c".to_string(), 0.0),
+                crate::ScoredRollout::legacy("d".to_string(), 0.0),
+            ]),
+        ];
+        let data = dry_run_dataset(tmp.path(), "reward-filter.jsonl", &groups);
+        let output = tmp.path().join("out");
+        let mut config = dry_run_config(false, false);
+        config.reward_filter_var_min = Some(0.01);
+
+        config.reward_filter_on_empty = RewardFilterOnEmpty::Fail;
+        let err = grpo_dry_run_jsonl(
+            &data,
+            &config,
+            &ModelConfig::qwen3_5_4b(),
+            &tok,
+            &output,
+            "filter-fail",
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("reward variance filter"));
+        let fail_receipt =
+            crate::train_receipt::TrainReceipt::read_from_adapter_dir(&output.join("filter-fail"))?
+                .unwrap();
+        assert_eq!(
+            fail_receipt.status,
+            crate::train_receipt::TrainReceiptStatus::Failed
+        );
+        assert_eq!(fail_receipt.data.reward_groups_filtered, 2);
+        let fail_sidecar: crate::train_receipt::RewardFilterSidecar = serde_json::from_slice(
+            &std::fs::read(fail_receipt.data.reward_filter_sidecar.as_ref().unwrap())?,
+        )?;
+        assert_eq!(fail_sidecar.empty_filter_action, "fail");
+        assert_eq!(fail_sidecar.dropped_group_ids, vec!["line:1", "line:2"]);
+
+        config.reward_filter_on_empty = RewardFilterOnEmpty::TrainAll;
+        let train_all = grpo_dry_run_jsonl(
+            &data,
+            &config,
+            &ModelConfig::qwen3_5_4b(),
+            &tok,
+            &output,
+            "filter-train-all",
+            false,
+        )?;
+        assert_eq!(train_all.data.groups_trained, 2);
+        assert_eq!(train_all.data.reward_groups_filtered, 0);
+        assert_eq!(train_all.data.reward_groups_kept, 2);
+        let train_all_sidecar: crate::train_receipt::RewardFilterSidecar =
+            serde_json::from_slice(&std::fs::read(
+                train_all.data.reward_filter_sidecar.as_ref().unwrap(),
+            )?)?;
+        assert_eq!(train_all_sidecar.empty_filter_action, "train-all");
+        assert_eq!(train_all_sidecar.kept_group_ids, vec!["line:1", "line:2"]);
+
+        config.reward_filter_on_empty = RewardFilterOnEmpty::Skip;
+        let skip = grpo_dry_run_jsonl(
+            &data,
+            &config,
+            &ModelConfig::qwen3_5_4b(),
+            &tok,
+            &output,
+            "filter-skip",
+            false,
+        )?;
+        assert_eq!(skip.data.groups_trained, 0);
+        assert_eq!(skip.data.reward_groups_filtered, 2);
+        assert_eq!(skip.data.reward_groups_kept, 0);
+        let skip_sidecar: crate::train_receipt::RewardFilterSidecar = serde_json::from_slice(
+            &std::fs::read(skip.data.reward_filter_sidecar.as_ref().unwrap())?,
+        )?;
+        assert_eq!(skip_sidecar.empty_filter_action, "skip");
+        assert_eq!(skip_sidecar.dropped_group_ids, vec!["line:1", "line:2"]);
         Ok(())
     }
 
