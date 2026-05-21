@@ -2563,7 +2563,7 @@ not yet have `/workspace/Qwen3.5-4B`. The failure was not accepted as
 validation; the model was downloaded into the canonical caps path and the
 actual-model validation was rerun as `actual12`.
 
-**Commit SHA:** Pending.
+**Commit SHA:** `1db6b0f7` (`Issue 37: add off-policy distillation mode`).
 
 **Remaining risk:** Validation covers real Qwen3.5-4B server/training receipt
 behavior with small fixture teacher data and one JSONL replay example. It does
