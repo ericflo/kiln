@@ -34,6 +34,7 @@ pub const DEFAULT_REWARD_SATURATION_THRESHOLD: f64 = 0.95;
 pub const DEFAULT_REWARD_LOW_VARIANCE_THRESHOLD: f64 = 1e-4;
 pub const REWARD_DEGENERATE_GROUP_VARIANCE_EPSILON: f64 = 1e-12;
 pub const REWARD_MOST_GROUPS_FRACTION: f64 = 0.5;
+pub const REWARD_SATURATION_RECOMMENDATION: &str = "policy-gradient may be harmful; collect harder tasks, use stronger rubric gates, switch to OPD/teacher distillation, or use `--no-policy-loss` with ECHO";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1325,9 +1326,10 @@ pub fn reward_diagnostic_warnings(
         let saturated_fraction = saturated_groups as f64 / rewards.group_count as f64;
         if saturated_fraction > REWARD_MOST_GROUPS_FRACTION {
             warnings.push(format!(
-                "most GRPO reward groups are all-pass or all-fail ({saturated_groups}/{} = {:.1}%); policy-gradient signal may be saturated, so consider `--no-policy-loss` with ECHO or collect harder data",
+                "most GRPO reward groups are all-pass or all-fail ({saturated_groups}/{} = {:.1}%); {}",
                 rewards.group_count,
-                saturated_fraction * 100.0
+                saturated_fraction * 100.0,
+                REWARD_SATURATION_RECOMMENDATION
             ));
         }
     }
@@ -1336,7 +1338,8 @@ pub fn reward_diagnostic_warnings(
         let variance = stdev * stdev;
         if mean >= saturation_threshold && variance <= low_variance_threshold {
             warnings.push(format!(
-                "reward mean {mean:.4} is above saturation threshold {saturation_threshold:.4} while variance {variance:.3e} is below {low_variance_threshold:.3e}; consider `--no-policy-loss` or harder data"
+                "reward mean {mean:.4} is above saturation threshold {saturation_threshold:.4} while variance {variance:.3e} is below {low_variance_threshold:.3e}; {}",
+                REWARD_SATURATION_RECOMMENDATION
             ));
         }
     }
@@ -2227,6 +2230,22 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("all-pass or all-fail"))
         );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("policy-gradient may be harmful"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("harder tasks"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("stronger rubric gates"))
+        );
+        assert!(warnings.iter().any(|warning| warning.contains("OPD")));
         assert!(
             warnings
                 .iter()

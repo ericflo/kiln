@@ -2596,6 +2596,63 @@ distribution is saturated.
   `--no-policy-loss`.
 - Thresholds are configurable.
 
+**Status:** Implemented and validated on RunPod; commit pending.
+
+**Intended behavior:** When GRPO startup or dry-run reward statistics show a
+near-ceiling mean with low variance, kiln emits an actionable warning before
+training authors burn time on an unlikely policy-gradient signal. The same
+diagnostic path also covers mostly all-pass/all-fail reward groups, and uses
+the configured saturation and low-variance thresholds recorded in the training
+receipt.
+
+**Implementation notes:** Added one shared reward-saturation recommendation
+string in `crates/kiln-train/src/train_receipt.rs` so the receipt warnings and
+startup warnings stay consistent. The warning explicitly says
+`policy-gradient may be harmful` and recommends harder tasks, stronger rubric
+gates, OPD/teacher distillation, or `--no-policy-loss` with ECHO. GRPO training
+startup, GRPO dry-run, and streamed JSONL GRPO startup now call
+`warn_reward_diagnostics`; streamed JSONL training reads reward groups before
+building the reward-filter plan so the warning is available even when filtering
+is disabled.
+
+**Validation evidence:**
+
+- Focused RunPod validation passed on 2026-05-21 on A6000 lease
+  `pod-ad0999c0694eca57da9716df`, pod `m5qfrqcbwt16pe`.
+- Focused sentinel:
+  `/workspace/kiln-validation/issue38/focused3.ok`; log:
+  `/workspace/kiln-validation/issue38/focused3.log`.
+- Focused command sequence: `rustfmt --edition 2024` on touched train files;
+  `cargo test -p kiln-train reward_diagnostics_warn_on_degenerate_and_saturated_rewards --lib`;
+  `cargo test -p kiln-train test_grpo_reward_diagnostic_threshold_defaults --lib`;
+  `cargo test -p kiln-train test_grpo_reward_diagnostic_thresholds_deserialize --lib`;
+  `cargo test -p kiln-train grpo_dry_run_success_records_counts_and_receipt --lib`;
+  `cargo check -p kiln-train --lib`; `git diff --check`.
+- Actual-model validation passed on the same RunPod lease with
+  `KILN_MODEL_PATH=/workspace/Qwen3.5-4B`, server model id `Qwen3.5-4B`, and
+  compatibility symlink `/workspace/qwen3.5-4b` not used for the run.
+- Actual-model sentinels:
+  `/workspace/kiln-validation/issue38/actual1.done` and
+  `/workspace/kiln-validation/issue38/actual1.ok`.
+- Actual-model summary:
+  `/workspace/kiln-validation/issue38/actual1-summary.json` recorded adapter
+  `issue38-saturated-grpo-actual1`, reward mean `0.995`, reward variance
+  `2.5000000000000045e-05`, saturation threshold `0.95`, low-variance
+  threshold `0.001`, and `warning_checked=true`.
+- Server log `/workspace/kiln-validation/issue38/server-actual1.log` showed
+  both startup and receipt warnings containing `policy-gradient may be
+  harmful`, harder tasks, stronger rubric gates, OPD/teacher distillation, and
+  `--no-policy-loss` with ECHO while training a real GRPO adapter on the
+  loaded Qwen3.5-4B CUDA server.
+
+**Commit SHA:** Pending. The final hash will be recorded in the follow-up
+metadata commit because a commit cannot include its own final SHA.
+
+**Remaining risk:** The real-model validation used a deliberately tiny
+saturated GRPO request to prove the warning path against the loaded CUDA model;
+it did not rerun the long-context benchmark matrix because this issue changes
+diagnostics, not long-context execution.
+
 ### 39. Add End-To-End Agentic-GRPO Plumbing Test
 
 **Area:** tests / examples

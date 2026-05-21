@@ -2425,6 +2425,13 @@ pub fn grpo_train(
             input_reward_groups.iter().map(Vec::as_slice),
             config.reward_saturation_threshold,
         );
+        crate::train_receipt::warn_reward_diagnostics(
+            "grpo_startup",
+            adapter_name,
+            &reward_stats,
+            config.reward_saturation_threshold,
+            config.reward_low_variance_threshold,
+        );
         let reward_filter_plan = build_reward_filter_plan(
             config,
             &output_dir,
@@ -2854,6 +2861,13 @@ pub fn grpo_dry_run_jsonl(
             reward_groups.iter().map(Vec::as_slice),
             config.reward_saturation_threshold,
         );
+        crate::train_receipt::warn_reward_diagnostics(
+            "grpo_dry_run",
+            adapter_name,
+            &reward_stats,
+            config.reward_saturation_threshold,
+            config.reward_low_variance_threshold,
+        );
         let reward_filter_plan = build_reward_filter_plan(
             config,
             &output_dir,
@@ -3201,6 +3215,21 @@ pub fn grpo_train_jsonl(
             tracing::info!("streamed GRPO gradient checkpointing disabled");
         }
 
+        if !reward_filter_enabled(config) {
+            let startup_reward_groups = read_grpo_jsonl_reward_groups(dataset_path)?;
+            reward_stats = crate::train_receipt::reward_stats_from_groups_with_threshold(
+                startup_reward_groups.iter().map(Vec::as_slice),
+                config.reward_saturation_threshold,
+            );
+            crate::train_receipt::warn_reward_diagnostics(
+                "streamed_grpo_startup",
+                adapter_name,
+                &reward_stats,
+                config.reward_saturation_threshold,
+                config.reward_low_variance_threshold,
+            );
+        }
+
         let reward_filter_plan = if reward_filter_enabled(config) {
             let filter_file = File::open(dataset_path).with_context(|| {
                 format!(
@@ -3254,6 +3283,13 @@ pub fn grpo_train_jsonl(
             reward_stats = crate::train_receipt::reward_stats_from_groups_with_threshold(
                 filter_reward_groups.iter().map(Vec::as_slice),
                 config.reward_saturation_threshold,
+            );
+            crate::train_receipt::warn_reward_diagnostics(
+                "streamed_grpo_startup",
+                adapter_name,
+                &reward_stats,
+                config.reward_saturation_threshold,
+                config.reward_low_variance_threshold,
             );
             let plan =
                 build_reward_filter_plan(config, &output_dir, "jsonl_grpo_groups", filter_inputs)?
@@ -3817,6 +3853,43 @@ fn parse_grpo_jsonl_group_line(line: &str, line_no: usize) -> Result<Option<Grpo
     serde_json::from_str::<GrpoGroup>(trimmed)
         .map(Some)
         .with_context(|| format!("parse GRPO JSONL group at line {line_no}"))
+}
+
+fn read_grpo_jsonl_reward_groups(dataset_path: &Path) -> Result<Vec<Vec<f64>>> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let file = File::open(dataset_path)
+        .with_context(|| format!("open GRPO JSONL dataset {}", dataset_path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let mut line_no = 0usize;
+    let mut reward_groups = Vec::new();
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).with_context(|| {
+            format!(
+                "read GRPO JSONL dataset {} line {} for reward diagnostics",
+                dataset_path.display(),
+                line_no + 1
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        line_no += 1;
+        let Some(group) = parse_grpo_jsonl_group_line(&line, line_no)? else {
+            continue;
+        };
+        reward_groups.push(
+            group
+                .completions
+                .iter()
+                .map(|completion| completion.reward)
+                .collect(),
+        );
+    }
+    Ok(reward_groups)
 }
 
 fn jsonl_byte_progress(total_bytes: u64, offset: u64) -> (usize, usize, f32) {
