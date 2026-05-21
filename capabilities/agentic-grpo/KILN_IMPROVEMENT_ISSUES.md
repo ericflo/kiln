@@ -948,6 +948,52 @@ than maximum throughput.
 - Direct completion tests work in eval mode.
 - Repeated short completions do not show latency creep in a stress test.
 
+**Status:** Completed 2026-05-21.
+
+**Implementation notes:**
+
+- Added `kiln serve --eval-mode`, `server.eval_mode`, and
+  `KILN_EVAL_MODE`.
+- Eval mode applies deterministic omitted-request defaults
+  (`temperature=0`, `top_p=1`, `top_k=0`, neutral penalties, `seed=0`) while
+  preserving explicit caller overrides.
+- Eval mode defaults `chat_template_kwargs.enable_thinking=false` unless the
+  caller explicitly sets `enable_thinking`.
+- Chat and batch completion responses now include
+  `x-kiln-eval-mode`, `x-kiln-active-adapter`, and
+  `x-kiln-loaded-adapter` headers.
+- Non-streaming eval requests clear completed deterministic caches,
+  rendered-prompt/token caches, and real prefix-cache state after completion.
+- Adapter transitions emit a warning while eval mode is active, including
+  composed-adapter transitions.
+- `/health` and `/v1/health` report `eval_mode`.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on direct fallback RTX A6000 pod
+  `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo test -p kiln-server
+  eval_mode --lib`; `cargo test -p kiln-server
+  test_health_reports_active_adapter_and_request_count --lib`; `cargo test -p
+  kiln-server parses_serve_eval_mode --lib`; `cargo test -p kiln-server
+  test_env_var_overrides --lib`; `cargo test -p kiln-server
+  test_parse_full_toml --lib`; and `cargo check -p kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issue15.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue15.log`.
+- Focused tests cover CLI parsing/documentation surface, health reporting,
+  eval-mode deterministic/no-think defaults with override preservation,
+  direct chat completion headers, and repeated short eval-mode completions with
+  transient caches reset after each request.
+
+**Commit SHA:** `83d202b9` (`Issue 15: add eval serve mode`).
+This is the implementation commit; these final metadata notes are recorded in
+the follow-up backlog commit.
+
+**Remaining risk:** Streaming eval-mode responses get adapter/eval headers and
+deterministic/no-think defaults, but transient cache cleanup is intentionally
+limited to non-streaming requests so the server does not clear prefix-cache
+blocks while a streaming decode worker may still be consuming them.
+
 ### 16. Add Adapter Load/Unload Stress Test
 
 **Area:** `crates/kiln-server` tests or integration tests
