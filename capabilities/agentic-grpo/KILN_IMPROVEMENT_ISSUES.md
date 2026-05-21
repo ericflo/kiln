@@ -1781,6 +1781,48 @@ parser tracks `warning_prefix_len`, but kiln needs explicit tests and metrics.
 - Config can disable warning filter for ablation.
 - Logs warn if most env tokens are stripped as warnings.
 
+**Status:** Completed and validated on RunPod.
+
+**Implementation notes:** Added explicit warning-filter receipt metrics to
+`TokenCountReceipt`: `env_tokens_before_warning_filter`,
+`env_tokens_after_warning_filter`, and `warning_tokens_filtered`, while keeping
+legacy `env_tokens` as the after-filter env-CE token count. GRPO and
+vk-native GRPO token counting now derive before-filter observation length from
+trajectory `total_obs_len`, aggregate via receipt helpers, and log a warning
+when warning-prefix stripping removes most observation tokens. The GRPO
+trajectory tokenizer now consumes `EchoConfig.warning_filter` and
+`EchoConfig.env_mask_mode` instead of always using `MaskConfig::default`, so
+ablation configs can disable the warning filter. Tests cover receipt
+before/after accounting, synthetic `WARNINGS:` trajectory filtering,
+`warning_filter=false`, and real Qwen3.5-4B tokenizer/template masking.
+
+**Validation evidence:**
+
+- RunPod validation passed on RTX A6000 pod `qmfxie9izl6lc6` using clean
+  worktree `/workspace/kiln-issue28`; sentinel
+  `/workspace/kiln-validation/issue28/focused-tests.done` recorded `exit=0`.
+- Remote log: `/workspace/kiln-validation/issue28/focused-tests.log`.
+- Commands run on RunPod: `cargo fmt --all`;
+  `cargo test --locked -p kiln-train
+  token_count_receipt_records_warning_filter_before_after_counts --lib`;
+  `cargo test --locked -p kiln-train
+  build_masks_warning_filter_trims_env_span --lib`;
+  `KILN_QWEN_TOKENIZER_PATH=/workspace/Qwen3.5-4B/tokenizer.json cargo test
+  --locked -p kiln-train build_masks_against_real_qwen_tokenizer --lib`;
+  `cargo test --locked -p kiln-train
+  grpo_dry_run_receipt_reports_warning_filter_counts --lib`; and
+  `git diff --check`.
+- The real Qwen tokenizer test used `/workspace/Qwen3.5-4B/tokenizer.json`
+  and verified that `warning_filter=false` includes more env tokens than the
+  default warning-filtered mask for a `WARNINGS:` observation prefix.
+
+**Commit SHA:** Pending until the implementation commit is created and pushed.
+
+**Remaining risk:** The receipt warning threshold is intentionally a simple
+"more than half of before-filter env tokens stripped" diagnostic. It flags
+warning-heavy data but does not decide whether the underlying rollout corpus is
+usable.
+
 ## P1: Improve Server And API Observability
 
 ### 29. Add Per-Request Performance Counters To Chat Responses

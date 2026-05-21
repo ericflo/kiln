@@ -257,8 +257,66 @@ pub struct RewardFilterGroupDecisionReceipt {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TokenCountReceipt {
     pub action_tokens: u64,
+    /// Active env-CE tokens after warning-prefix filtering. Kept as the
+    /// legacy field name for stable consumers.
     pub env_tokens: u64,
+    /// Observation tokens before warning-prefix filtering. For trajectories
+    /// without warning prefixes this equals `env_tokens`.
+    #[serde(default)]
+    pub env_tokens_before_warning_filter: u64,
+    /// Explicit alias for the filtered env-CE token count so receipts expose
+    /// both sides of the warning-filter gate without overloading names.
+    #[serde(default)]
+    pub env_tokens_after_warning_filter: u64,
+    /// Tokens excluded from env-CE by `warning_prefix_len` filtering.
+    #[serde(default)]
+    pub warning_tokens_filtered: u64,
     pub context_tokens: u64,
+}
+
+impl TokenCountReceipt {
+    pub fn observe_completion(
+        &mut self,
+        seq_len: usize,
+        action_tokens: u64,
+        env_tokens_after_warning_filter: u64,
+        env_tokens_before_warning_filter: u64,
+    ) {
+        let env_before = env_tokens_before_warning_filter.max(env_tokens_after_warning_filter);
+        let context = seq_len
+            .saturating_sub(action_tokens as usize)
+            .saturating_sub(env_tokens_after_warning_filter as usize) as u64;
+
+        self.action_tokens = self.action_tokens.saturating_add(action_tokens);
+        self.env_tokens = self
+            .env_tokens
+            .saturating_add(env_tokens_after_warning_filter);
+        self.env_tokens_after_warning_filter = self
+            .env_tokens_after_warning_filter
+            .saturating_add(env_tokens_after_warning_filter);
+        self.env_tokens_before_warning_filter = self
+            .env_tokens_before_warning_filter
+            .saturating_add(env_before);
+        self.warning_tokens_filtered = self
+            .warning_tokens_filtered
+            .saturating_add(env_before.saturating_sub(env_tokens_after_warning_filter));
+        self.context_tokens = self.context_tokens.saturating_add(context);
+    }
+
+    pub fn add_from(&mut self, other: &Self) {
+        self.action_tokens = self.action_tokens.saturating_add(other.action_tokens);
+        self.env_tokens = self.env_tokens.saturating_add(other.env_tokens);
+        self.env_tokens_before_warning_filter = self
+            .env_tokens_before_warning_filter
+            .saturating_add(other.env_tokens_before_warning_filter);
+        self.env_tokens_after_warning_filter = self
+            .env_tokens_after_warning_filter
+            .saturating_add(other.env_tokens_after_warning_filter);
+        self.warning_tokens_filtered = self
+            .warning_tokens_filtered
+            .saturating_add(other.warning_tokens_filtered);
+        self.context_tokens = self.context_tokens.saturating_add(other.context_tokens);
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -629,9 +687,13 @@ pub fn log_training_token_counts(mode: &str, token_counts: &TokenCountReceipt) {
         mode,
         action_tokens = token_counts.action_tokens,
         env_tokens = token_counts.env_tokens,
+        env_tokens_before_warning_filter = token_counts.env_tokens_before_warning_filter,
+        env_tokens_after_warning_filter = token_counts.env_tokens_after_warning_filter,
+        warning_tokens_filtered = token_counts.warning_tokens_filtered,
         context_tokens = token_counts.context_tokens,
         "training token counts"
     );
+    warn_if_warning_filter_stripped_most_env_tokens(mode, token_counts);
 }
 
 pub fn warn_echo_enabled_without_env_tokens(
@@ -646,6 +708,27 @@ pub fn warn_echo_enabled_without_env_tokens(
             env_tokens = token_counts.env_tokens,
             context_tokens = token_counts.context_tokens,
             "ECHO is enabled but no environment tokens were observed; env-CE is inactive"
+        );
+    }
+}
+
+pub fn warning_filter_stripped_most_env_tokens(token_counts: &TokenCountReceipt) -> bool {
+    token_counts.env_tokens_before_warning_filter > 0
+        && token_counts.warning_tokens_filtered.saturating_mul(2)
+            > token_counts.env_tokens_before_warning_filter
+}
+
+pub fn warn_if_warning_filter_stripped_most_env_tokens(
+    mode: &str,
+    token_counts: &TokenCountReceipt,
+) {
+    if warning_filter_stripped_most_env_tokens(token_counts) {
+        tracing::warn!(
+            mode,
+            env_tokens_before_warning_filter = token_counts.env_tokens_before_warning_filter,
+            env_tokens_after_warning_filter = token_counts.env_tokens_after_warning_filter,
+            warning_tokens_filtered = token_counts.warning_tokens_filtered,
+            "warning-prefix filter stripped most environment tokens; verify harness warnings are not dominating ECHO data"
         );
     }
 }
@@ -1497,6 +1580,24 @@ mod tests {
         assert_eq!(receipt.initial_env_ce, Some(2.5));
         assert_eq!(receipt.final_env_ce, Some(1.25));
         assert_eq!(metrics.measurements, 2);
+    }
+
+    #[test]
+    fn token_count_receipt_records_warning_filter_before_after_counts() {
+        let mut counts = TokenCountReceipt::default();
+        counts.observe_completion(100, 10, 20, 70);
+
+        assert_eq!(counts.action_tokens, 10);
+        assert_eq!(counts.env_tokens, 20);
+        assert_eq!(counts.env_tokens_after_warning_filter, 20);
+        assert_eq!(counts.env_tokens_before_warning_filter, 70);
+        assert_eq!(counts.warning_tokens_filtered, 50);
+        assert_eq!(counts.context_tokens, 70);
+        assert!(warning_filter_stripped_most_env_tokens(&counts));
+
+        let mut total = TokenCountReceipt::default();
+        total.add_from(&counts);
+        assert_eq!(total, counts);
     }
 
     #[test]

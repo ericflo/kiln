@@ -43,11 +43,32 @@ impl Default for MaskConfig {
     }
 }
 
+impl MaskConfig {
+    pub fn from_grpo_config(config: &crate::GrpoConfig) -> Self {
+        match config.loss.echo.as_ref() {
+            Some(echo) => Self {
+                warning_filter: echo.warning_filter,
+                env_mask_mode: echo.env_mask_mode.into(),
+            },
+            None => Self::default(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EnvMaskMode {
     #[default]
     EnvOnly,
     FullObs,
+}
+
+impl From<crate::EnvMaskMode> for EnvMaskMode {
+    fn from(value: crate::EnvMaskMode) -> Self {
+        match value {
+            crate::EnvMaskMode::EnvOnly => Self::EnvOnly,
+            crate::EnvMaskMode::FullObs => Self::FullObs,
+        }
+    }
 }
 
 /// The output of [`build_masks_from_trajectory`]: tokens plus the two masks
@@ -870,6 +891,8 @@ mod tests {
             role: "user".into(),
             content: "List files in /tmp".into(),
         }];
+        let warning_prefix = "WARNINGS:\n- harness warning\n";
+        let observation = format!("{warning_prefix}file1.txt\nfile2.txt\n");
         let traj = vec![
             TurnSegment {
                 role: "assistant".into(),
@@ -882,10 +905,10 @@ mod tests {
             },
             TurnSegment {
                 role: "tool".into(),
-                content: "file1.txt\nfile2.txt\n".into(),
+                content: observation,
                 kind: TurnKind::Observation,
                 tool_call_id: None,
-                warning_prefix_len: None,
+                warning_prefix_len: Some(warning_prefix.len()),
             },
             TurnSegment {
                 role: "assistant".into(),
@@ -897,6 +920,15 @@ mod tests {
         ];
 
         let result = build_masks_from_trajectory(&traj, &prompt, &tok, &MaskConfig::default())?;
+        let unfiltered = build_masks_from_trajectory(
+            &traj,
+            &prompt,
+            &tok,
+            &MaskConfig {
+                warning_filter: false,
+                env_mask_mode: EnvMaskMode::EnvOnly,
+            },
+        )?;
 
         // Three supervised segments expected: 2 Action + 1 Observation.
         // If the masker missed the Qwen tool_response wrapper, the
@@ -925,6 +957,15 @@ mod tests {
         assert!(
             n_env >= 3,
             "expected at least 3 env tokens (covers 'file1.txt\\nfile2.txt\\n'); got {n_env}"
+        );
+        let n_env_unfiltered = unfiltered.env_mask.iter().filter(|&&b| b).count();
+        assert!(
+            n_env_unfiltered > n_env,
+            "warning_filter=false should include the WARNINGS prefix; filtered={n_env}, unfiltered={n_env_unfiltered}"
+        );
+        assert!(
+            result.total_obs_len() >= n_env_unfiltered,
+            "total_obs_len should count the full observation before warning filtering"
         );
 
         // Sanity: the env span covers tokens we can decode back to bytes

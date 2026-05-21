@@ -2486,7 +2486,8 @@ pub fn grpo_train(
                 dynamic_dropped += 1;
                 continue;
             }
-            match tokenize_grpo_group_timed(group, tokenizer, Some(&mut phase_timings)) {
+            let mask_cfg = crate::trajectory_mask::MaskConfig::from_grpo_config(config);
+            match tokenize_grpo_group_timed(group, tokenizer, &mask_cfg, Some(&mut phase_timings)) {
                 Ok(tgroup) => tokenized_groups.push(tgroup),
                 Err(e) => {
                     tokenization_failed += 1;
@@ -2899,21 +2900,15 @@ pub fn grpo_dry_run_jsonl(
             }
 
             let group_idx = processed_groups + 1;
-            let tgroup = tokenize_grpo_group_timed(&group, tokenizer, Some(&mut phase_timings))
-                .with_context(|| {
+            let mask_cfg = crate::trajectory_mask::MaskConfig::from_grpo_config(config);
+            let tgroup =
+                tokenize_grpo_group_timed(&group, tokenizer, &mask_cfg, Some(&mut phase_timings))
+                    .with_context(|| {
                     format!("tokenize GRPO dry-run group {group_idx} at line {line_no}")
                 })?;
             validate_grpo_dry_run_masks(&tgroup, group_idx, *line_no)?;
             let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(&tgroup));
-            token_counts.action_tokens = token_counts
-                .action_tokens
-                .saturating_add(group_counts.action_tokens);
-            token_counts.env_tokens = token_counts
-                .env_tokens
-                .saturating_add(group_counts.env_tokens);
-            token_counts.context_tokens = token_counts
-                .context_tokens
-                .saturating_add(group_counts.context_tokens);
+            token_counts.add_from(&group_counts);
             processed_groups = processed_groups.saturating_add(1);
             processed_completions = processed_completions.saturating_add(tgroup.completions.len());
         }
@@ -3382,23 +3377,17 @@ pub fn grpo_train_jsonl(
                 "streamed GRPO tokenize start"
             );
             let tokenize_start = Instant::now();
-            let tgroup = tokenize_grpo_group_timed(&group, tokenizer, Some(&mut phase_timings))
-                .with_context(|| {
+            let mask_cfg = crate::trajectory_mask::MaskConfig::from_grpo_config(config);
+            let tgroup =
+                tokenize_grpo_group_timed(&group, tokenizer, &mask_cfg, Some(&mut phase_timings))
+                    .with_context(|| {
                     format!(
                         "tokenize GRPO JSONL group {} at line {}",
                         processed_groups, line_no
                     )
                 })?;
             let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(&tgroup));
-            token_counts.action_tokens = token_counts
-                .action_tokens
-                .saturating_add(group_counts.action_tokens);
-            token_counts.env_tokens = token_counts
-                .env_tokens
-                .saturating_add(group_counts.env_tokens);
-            token_counts.context_tokens = token_counts
-                .context_tokens
-                .saturating_add(group_counts.context_tokens);
+            token_counts.add_from(&group_counts);
             processed_completions = processed_completions.saturating_add(tgroup.completions.len());
             tracing::info!(
                 group = processed_groups,
@@ -3647,14 +3636,8 @@ fn token_counts_for_grpo_groups(
                 .filter(|&&active| active)
                 .count() as u64;
             let env = completion.env_mask.iter().filter(|&&active| active).count() as u64;
-            let context = completion
-                .input_ids
-                .len()
-                .saturating_sub(action as usize)
-                .saturating_sub(env as usize) as u64;
-            counts.action_tokens = counts.action_tokens.saturating_add(action);
-            counts.env_tokens = counts.env_tokens.saturating_add(env);
-            counts.context_tokens = counts.context_tokens.saturating_add(context);
+            let env_before = (completion.total_obs_len as u64).max(env);
+            counts.observe_completion(completion.input_ids.len(), action, env, env_before);
         }
     }
     counts
@@ -3710,7 +3693,8 @@ pub fn grpo_benchmark_tokenization(
 ) -> Result<GrpoBenchmarkReport> {
     let started = Instant::now();
     let mut timings = GrpoBenchmarkTimings::default();
-    let tgroup = tokenize_grpo_group_timed(group, tokenizer, Some(&mut timings))?;
+    let mask_cfg = crate::trajectory_mask::MaskConfig::default();
+    let tgroup = tokenize_grpo_group_timed(group, tokenizer, &mask_cfg, Some(&mut timings))?;
     Ok(grpo_benchmark_report_from_tokenized(
         &tgroup,
         timings,
@@ -3734,7 +3718,8 @@ pub fn grpo_benchmark_training_step(
 ) -> Result<GrpoBenchmarkReport> {
     let started = Instant::now();
     let mut timings = GrpoBenchmarkTimings::default();
-    let tgroup = tokenize_grpo_group_timed(group, tokenizer, Some(&mut timings))?;
+    let mask_cfg = crate::trajectory_mask::MaskConfig::from_grpo_config(config);
+    let tgroup = tokenize_grpo_group_timed(group, tokenizer, &mask_cfg, Some(&mut timings))?;
     let mut grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
     let lora_grad_index = LoraGradNormIndex::new(params);
     let step_report = train_tokenized_grpo_group_with_grad_norms(
@@ -4826,12 +4811,14 @@ fn observe_lora_grad_module_norms(
 /// behaviour is bit-identical to the pre-ECHO path: `action_mask` is "true
 /// after the prompt" and `env_mask` is all-false.
 fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<TokenizedGrpoGroup> {
-    tokenize_grpo_group_timed(group, tokenizer, None)
+    let mask_cfg = crate::trajectory_mask::MaskConfig::default();
+    tokenize_grpo_group_timed(group, tokenizer, &mask_cfg, None)
 }
 
 fn tokenize_grpo_group_timed(
     group: &GrpoGroup,
     tokenizer: &KilnTokenizer,
+    mask_cfg: &crate::trajectory_mask::MaskConfig,
     mut timings: Option<&mut GrpoBenchmarkTimings>,
 ) -> Result<TokenizedGrpoGroup> {
     if group.completions.is_empty() {
@@ -4865,7 +4852,6 @@ fn tokenize_grpo_group_timed(
     let mut prebuilt: Vec<Option<crate::trajectory_mask::MaskedRollout>> =
         Vec::with_capacity(group.completions.len());
 
-    let mask_cfg = crate::trajectory_mask::MaskConfig::default();
     for scored in &group.completions {
         if scored.has_trajectory() {
             // Trajectory-aware path: build masks from the explicit
@@ -4876,7 +4862,7 @@ fn tokenize_grpo_group_timed(
                 &scored.trajectory,
                 &group.messages,
                 tokenizer,
-                &mask_cfg,
+                mask_cfg,
             )?;
             if let Some(t) = timings.as_deref_mut() {
                 t.tokenize_ms += mask_timings.tokenize_ms;
@@ -11240,6 +11226,16 @@ mod tests {
         }
     }
 
+    fn dry_run_warning_observation(content: &str, warning_prefix_len: usize) -> crate::TurnSegment {
+        crate::TurnSegment {
+            role: "tool".to_string(),
+            content: content.to_string(),
+            kind: TurnKind::Observation,
+            tool_call_id: None,
+            warning_prefix_len: Some(warning_prefix_len),
+        }
+    }
+
     #[test]
     fn grpo_dry_run_rejects_malformed_trajectory_roles() {
         let tmp = tempfile::tempdir().unwrap();
@@ -11530,6 +11526,104 @@ mod tests {
             receipt.phase_timings.mask_build_ms > 0.0,
             "dry-run receipt should record mask-build timing"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn grpo_dry_run_receipt_reports_warning_filter_counts() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let tok = make_echo_smoke_tokenizer()?;
+        let warning = "WARNINGS:\n- A\n";
+        let observation = format!("{warning}abba");
+        let warning_prefix_len = warning.len();
+        let group = dry_run_group(vec![
+            crate::ScoredRollout::from_trajectory(
+                vec![
+                    dry_run_action("a"),
+                    dry_run_warning_observation(&observation, warning_prefix_len),
+                    dry_run_action("b"),
+                ],
+                0.0,
+            ),
+            crate::ScoredRollout::from_trajectory(
+                vec![
+                    dry_run_action("b"),
+                    dry_run_warning_observation(&observation, warning_prefix_len),
+                    dry_run_action("a"),
+                ],
+                1.0,
+            ),
+        ]);
+        let data = dry_run_dataset(tmp.path(), "warning-filter.jsonl", &[group]);
+        let output = tmp.path().join("out");
+
+        let report = grpo_dry_run_jsonl(
+            &data,
+            &dry_run_config(true, false),
+            &ModelConfig::qwen3_5_4b(),
+            &tok,
+            &output,
+            "warning-on",
+            false,
+        )?;
+        assert!(report.token_counts.env_tokens > 0);
+        assert!(
+            report.token_counts.env_tokens_before_warning_filter
+                > report.token_counts.env_tokens_after_warning_filter
+        );
+        assert_eq!(
+            report.token_counts.env_tokens,
+            report.token_counts.env_tokens_after_warning_filter
+        );
+        assert_eq!(
+            report.token_counts.env_tokens_before_warning_filter,
+            report
+                .token_counts
+                .env_tokens_after_warning_filter
+                .saturating_add(report.token_counts.warning_tokens_filtered)
+        );
+        let receipt =
+            crate::train_receipt::TrainReceipt::read_from_adapter_dir(&report.adapter_dir)?
+                .unwrap();
+        assert_eq!(receipt.echo.warning_filter, Some(true));
+        assert_eq!(
+            receipt.token_counts.env_tokens_before_warning_filter,
+            report.token_counts.env_tokens_before_warning_filter
+        );
+        assert_eq!(
+            receipt.token_counts.warning_tokens_filtered,
+            report.token_counts.warning_tokens_filtered
+        );
+
+        let mut filter_off = dry_run_config(true, false);
+        filter_off
+            .loss
+            .echo
+            .as_mut()
+            .expect("ECHO enabled")
+            .warning_filter = false;
+        let off_report = grpo_dry_run_jsonl(
+            &data,
+            &filter_off,
+            &ModelConfig::qwen3_5_4b(),
+            &tok,
+            &output,
+            "warning-off",
+            false,
+        )?;
+        assert_eq!(off_report.token_counts.warning_tokens_filtered, 0);
+        assert_eq!(
+            off_report.token_counts.env_tokens_before_warning_filter,
+            off_report.token_counts.env_tokens_after_warning_filter
+        );
+        assert_eq!(
+            off_report.token_counts.env_tokens,
+            off_report.token_counts.env_tokens_after_warning_filter
+        );
+        let off_receipt =
+            crate::train_receipt::TrainReceipt::read_from_adapter_dir(&off_report.adapter_dir)?
+                .unwrap();
+        assert_eq!(off_receipt.echo.warning_filter, Some(false));
         Ok(())
     }
 
@@ -14892,7 +14986,7 @@ mod tests {
         // Single-byte vocab keyed by char so each byte → one token. Limited
         // to a handful of chars used in the smoke trajectory.
         let mut vocab = String::from("{");
-        let chars = "abuserAssistantool_response<|im_start|><|im_end|>\n";
+        let chars = "abuserAssistantool_response<|im_start|><|im_end|>\nWARNINGS:- ";
         let mut seen = std::collections::HashSet::new();
         let mut id = 0u32;
         for ch in chars.chars() {

@@ -81,14 +81,8 @@ fn vk_grpo_token_counts(group: &TokenizedVkGrpoGroup) -> crate::train_receipt::T
             .filter(|&&active| active)
             .count() as u64;
         let env = completion.env_mask.iter().filter(|&&active| active).count() as u64;
-        let context = completion
-            .input_ids
-            .len()
-            .saturating_sub(action as usize)
-            .saturating_sub(env as usize) as u64;
-        counts.action_tokens = counts.action_tokens.saturating_add(action);
-        counts.env_tokens = counts.env_tokens.saturating_add(env);
-        counts.context_tokens = counts.context_tokens.saturating_add(context);
+        let env_before = (completion.total_obs_len as u64).max(env);
+        counts.observe_completion(completion.input_ids.len(), action, env, env_before);
     }
     counts
 }
@@ -103,7 +97,8 @@ fn vk_grpo_receipt_settings(
         clip_eps_high: config.clip_eps_high,
         dynamic_sampling: config.dynamic_sampling,
         dynamic_groups_filtered,
-        advantage_mode: serde_json::to_value(config.advantage_mode).unwrap_or(serde_json::Value::Null),
+        advantage_mode: serde_json::to_value(config.advantage_mode)
+            .unwrap_or(serde_json::Value::Null),
         loss_aggregation: serde_json::to_value(config.loss_aggregation)
             .unwrap_or(serde_json::Value::Null),
         kl_estimator: serde_json::to_value(config.kl_estimator).unwrap_or(serde_json::Value::Null),
@@ -192,12 +187,11 @@ fn write_vk_grpo_train_receipt_best_effort(
         config.reward_saturation_threshold,
         config.reward_low_variance_threshold,
     );
-    receipt.lora_delta_norms =
-        crate::train_receipt::lora_delta_norm_summary_from_adapter(
-            output_dir,
-            alpha_over_rank.unwrap_or(0.0) as f64,
-        )
-        .unwrap_or_default();
+    receipt.lora_delta_norms = crate::train_receipt::lora_delta_norm_summary_from_adapter(
+        output_dir,
+        alpha_over_rank.unwrap_or(0.0) as f64,
+    )
+    .unwrap_or_default();
     crate::train_receipt::warn_lora_delta_norms(
         "vk_grpo",
         adapter_name,
@@ -249,12 +243,11 @@ fn write_vk_sft_train_receipt_best_effort(
     receipt.token_counts = token_counts;
     receipt.runtime.wall_clock_ms = wall_clock_ms;
     crate::train_receipt::log_training_token_counts("vk_sft", &receipt.token_counts);
-    receipt.lora_delta_norms =
-        crate::train_receipt::lora_delta_norm_summary_from_adapter(
-            output_dir,
-            alpha_over_rank.unwrap_or(0.0) as f64,
-        )
-        .unwrap_or_default();
+    receipt.lora_delta_norms = crate::train_receipt::lora_delta_norm_summary_from_adapter(
+        output_dir,
+        alpha_over_rank.unwrap_or(0.0) as f64,
+    )
+    .unwrap_or_default();
     crate::train_receipt::warn_lora_delta_norms(
         "vk_sft",
         adapter_name,
@@ -279,6 +272,7 @@ fn to_core_messages(msgs: &[crate::ChatMessage]) -> Vec<kiln_core::tokenizer::Ch
 fn tokenize_vk_grpo_group(
     group: &GrpoGroup,
     tokenizer: &KilnTokenizer,
+    mask_cfg: &crate::trajectory_mask::MaskConfig,
 ) -> Result<TokenizedVkGrpoGroup> {
     if group.completions.is_empty() {
         bail!("GRPO group has no completions");
@@ -301,14 +295,13 @@ fn tokenize_vk_grpo_group(
     // path. Parallel to the candle path in trainer.rs::tokenize_grpo_group.
     let mut prebuilt: Vec<Option<crate::trajectory_mask::MaskedRollout>> =
         Vec::with_capacity(group.completions.len());
-    let mask_cfg = crate::trajectory_mask::MaskConfig::default();
     for scored in &group.completions {
         if scored.has_trajectory() {
             let masked = crate::trajectory_mask::build_masks_from_trajectory(
                 &scored.trajectory,
                 &group.messages,
                 tokenizer,
-                &mask_cfg,
+                mask_cfg,
             )?;
             prebuilt.push(Some(masked));
             full_message_batches.push(prompt_messages.clone());
@@ -3276,7 +3269,9 @@ pub fn vk_recompute_opd_train_step_with_state(
                 let prod = vk_mul(&after_attn, &upstream_after_attn)?;
                 let scalar = vk_sum_all(&prod)?;
                 let grads = vk_backward(&scalar).with_context(|| {
-                    format!("vk_recompute_opd_train_step: backward full layer {layer_idx} attention")
+                    format!(
+                        "vk_recompute_opd_train_step: backward full layer {layer_idx} attention"
+                    )
                 })?;
                 upstream = grads.get(boundary_id).cloned().ok_or_else(|| {
                     anyhow::anyhow!("missing boundary grad for full layer {layer_idx}")
@@ -3833,7 +3828,10 @@ pub fn vk_native_grpo_train(
              KlEstimator::K1 (default) or KlEstimator::None"
         );
     }
-    if config.clip_eps_high.is_some_and(|hi| hi != config.clip_epsilon) {
+    if config
+        .clip_eps_high
+        .is_some_and(|hi| hi != config.clip_epsilon)
+    {
         anyhow::bail!(
             "vk-native GRPO does not yet support asymmetric Clip-Higher; \
              use the candle path or leave clip_eps_high = None / equal to \
@@ -3922,20 +3920,15 @@ pub fn vk_native_grpo_train(
             );
             continue;
         }
-        let tgroup = tokenize_vk_grpo_group(group, tokenizer)
+        let mask_cfg = crate::trajectory_mask::MaskConfig::from_grpo_config(config);
+        let tgroup = tokenize_vk_grpo_group(group, tokenizer, &mask_cfg)
             .with_context(|| format!("tokenize GRPO group {group_step}"))?;
         data_stats.groups_trained = data_stats.groups_trained.saturating_add(1);
         data_stats.completions_trained = data_stats
             .completions_trained
             .saturating_add(tgroup.completions.len());
         let group_counts = vk_grpo_token_counts(&tgroup);
-        token_counts.action_tokens = token_counts
-            .action_tokens
-            .saturating_add(group_counts.action_tokens);
-        token_counts.env_tokens = token_counts.env_tokens.saturating_add(group_counts.env_tokens);
-        token_counts.context_tokens = token_counts
-            .context_tokens
-            .saturating_add(group_counts.context_tokens);
+        token_counts.add_from(&group_counts);
         reward_groups.push(tgroup.rewards.clone());
         validate_vk_grpo_tokenized_group_context(
             &tgroup,
@@ -4206,7 +4199,10 @@ pub fn vk_native_grpo_train_jsonl(
              KlEstimator::K1 (default) or KlEstimator::None"
         );
     }
-    if config.clip_eps_high.is_some_and(|hi| hi != config.clip_epsilon) {
+    if config
+        .clip_eps_high
+        .is_some_and(|hi| hi != config.clip_epsilon)
+    {
         anyhow::bail!(
             "vk-native GRPO does not yet support asymmetric Clip-Higher; \
              use the candle path or leave clip_eps_high = None / equal to \
@@ -4328,20 +4324,15 @@ pub fn vk_native_grpo_train_jsonl(
             "streamed vk-native GRPO group tokenization begin"
         );
         let tokenize_start = std::time::Instant::now();
-        let tgroup = tokenize_vk_grpo_group(&group, tokenizer).with_context(|| {
+        let mask_cfg = crate::trajectory_mask::MaskConfig::from_grpo_config(config);
+        let tgroup = tokenize_vk_grpo_group(&group, tokenizer, &mask_cfg).with_context(|| {
             format!(
                 "tokenize GRPO JSONL group {} at line {}",
                 processed_groups, line_no
             )
         })?;
         let group_counts = vk_grpo_token_counts(&tgroup);
-        token_counts.action_tokens = token_counts
-            .action_tokens
-            .saturating_add(group_counts.action_tokens);
-        token_counts.env_tokens = token_counts.env_tokens.saturating_add(group_counts.env_tokens);
-        token_counts.context_tokens = token_counts
-            .context_tokens
-            .saturating_add(group_counts.context_tokens);
+        token_counts.add_from(&group_counts);
         reward_groups.push(tgroup.rewards.clone());
         validate_vk_grpo_tokenized_group_context(
             &tgroup,
