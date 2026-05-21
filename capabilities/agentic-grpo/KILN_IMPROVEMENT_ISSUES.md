@@ -1382,6 +1382,32 @@ default.
 - If `--no-echo` and `--echo-lambda` conflict, error text explains the correct
   single-argument pattern.
 
+**Implementation status:** Complete. `cuda_grpo_ablation` now keeps effective
+config printing enabled by default, exposes `--print-effective-config`,
+`--no-print-effective-config`, and `--print-effective-config-json` (with
+`--effective-config-json` as an alias), and emits a resolved config record that
+includes CLI values, ECHO environment overrides, paths, mode, and the full
+serialized `GrpoConfig`. The existing `config mode=...` compatibility line is
+preserved for the ablation analyzer. Help text now explains that `--mode`
+selects the effective advantage formulation and related GRPO knobs, and the
+`--no-echo`/`--echo-lambda` conflict error now states the one-argument pattern
+to use.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on RTX A6000 pod `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo build --release -p
+  kiln-train --features cuda --example cuda_grpo_ablation`; CLI help smoke
+  checks for `--print-effective-config-json` and `--mode` advantage text; CLI
+  conflict smoke check for `--no-echo --echo-lambda`; `cargo check -p
+  kiln-train --tests`; `cargo check -p kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issue23.done` recorded `exit=0`;
+  remote log is `/workspace/kiln-validation/issue23.log`.
+
+**Commit SHA:** `3acbdea7` (`Issue 23: print effective GRPO config`).
+This status line is recorded in the follow-up metadata commit because a
+commit cannot include its own final SHA.
+
 ### 24. Add Standard Failure Reasons To Training Output
 
 **Area:** `crates/kiln-train`
