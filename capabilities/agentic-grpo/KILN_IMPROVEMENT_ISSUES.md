@@ -623,6 +623,46 @@ debugging masks requires reading Python helper code and Rust internals.
 - Emits JSON with `--json`.
 - Fails nonzero when no trainable action tokens are present.
 
+**Status:** Completed and validated on RunPod.
+
+**Implementation notes:** Added `kiln_train::trajectory_inspect`, a Rust
+inspector that loads Pi session JSONL events, kiln `ScoredRollout` JSONL, and
+kiln `AgenticGroup` JSONL, then renders each rollout through `KilnTokenizer`
+and the canonical `build_masks_from_trajectory` path. The Pi session loader
+handles observed 0.75.1-style `role="tool"` / `toolResult` content blocks and
+0.75.3-style `role="toolResult"` text blocks, normalizes tool results to
+`role="tool"`, records schema warnings, detects harness warning prefixes, and
+fails when no action-mask tokens are trainable. Wired `kiln trajectory inspect`
+into the server CLI with pretty output, `--json`, `--include-context`,
+`--preview-tokens`, explicit `--tokenizer`, explicit `--chat-template`, and
+`--model-path` tokenizer discovery.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-20 on RTX A6000 pod `yu0x0wt25rz8u8`,
+  lease `pod-9d17510419e3a5930b68a4fc`.
+- Remote command sequence: `cargo test -p kiln-train trajectory_inspect
+  --lib`; `cargo test -p kiln-server trajectory --lib`; `cargo check -p
+  kiln-server --tests`; `cargo check -p kiln-train --tests`; `cargo run -p
+  kiln-server --bin kiln -- trajectory inspect ... --json` against a generated
+  Pi 0.75.3-style fixture; and a negative `kiln trajectory inspect --json`
+  smoke confirming no-action input exits nonzero.
+- Remote sentinel `/workspace/kiln-validation/issue10-v8.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue10-v8.log`.
+- Focused Rust tests cover Pi 0.75.1 action/env masks, Pi 0.75.3
+  `toolResult` normalization, kiln `ScoredRollout` JSONL, no-action failure,
+  warning-prefix reporting, CLI parsing, and the human-readable formatter's
+  required fields.
+
+**Commit SHA:** `81363388` (`Issue 10: add trajectory inspector CLI`). This is
+the implementation commit; these final metadata notes are recorded in the
+follow-up backlog commit.
+
+**Remaining risk:** The inspector deliberately reports masks produced by the
+current canonical trajectory-mask builder. Issue 11 still owns moving broader
+Pi session normalization into kiln-owned ingestion code beyond this standalone
+inspection command.
+
 ### 11. Move Pi Session Normalization Into Kiln-Owned Code
 
 **Area:** `crates/kiln-train`, `crates/kiln-server` agent trace parser
