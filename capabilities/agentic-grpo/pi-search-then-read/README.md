@@ -1,30 +1,63 @@
 # pi-search-then-read
 
-Capability under `capabilities/agentic-grpo/` (round 2 — new cap).
+grep/find before reading whole large files. Round-2 new cap (Tier 2).
+Composes naturally with `pi-code-search` (which is about *which file*);
+this cap is about *which window of that file*.
 
 ## Read first
 
-1. [`capability.md`](capability.md) — contract: goal, rubric, hypotheses.
-2. [`capability.config.json`](capability.config.json) — trainer + rollout defaults.
-3. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout and kiln CLIs used.
-4. [`../README.md`](../README.md) — ECHO defaults and pi-rollout shape.
+1. [`capability.md`](capability.md) — contract.
+2. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout.
+3. [`../README.md`](../README.md) — ECHO defaults.
 
 ## Status
 
-**Scaffold.** The capability.md is fully specified; the implementation
-files (build_corpus.py, rollout.py, rubric.py) are NotImplementedError
-stubs. The next agent picking this up:
+**Implementation complete. Calibration passes (separation +0.49).**
 
-1. Fill build_corpus.py per `capability.md ## Task shape`.
-2. Fill rubric.py per `capability.md ## Rubric (v0)`.
-3. Fill rollout.py per the pi-rollout reference (`../pi-doctest/rollout.py`).
-4. Fill rubric_sanity.py + `calibration/{good,bad}.jsonl` per `capability.md ## Adversarial design (§0)`.
-5. Run `./capability.oracle.sh` to baseline.
-6. Run `./run_iter.sh h1-default-recipe` for the first training iter.
+| File | Status |
+|------|--------|
+| `capability.md` | Full spec |
+| `capability.config.json` | Tuned (max_turns=6) |
+| `build_corpus.py` | 24 train + 12 eval tasks across 3 size tiers (200/800/2000 lines) |
+| `rubric.py` | Multiplicative gate; small-file exemption at ≤ 250 lines |
+| `rubric_sanity.py` | Mandatory gate |
+| `rollout.py` | Pi driver (shared shape) |
+| `capability.oracle.sh` | `kiln eval-adapter --seeds 3` |
+| `run_iter.sh` | Full pipeline |
+| `calibration/good.jsonl` | 5 hand-written good rollouts |
+| `calibration/bad.jsonl` | 5 §0 cheats |
 
-The capability.md `## Adversarial design (§0)` is the calibration spec
-— the §0 cheats are the bad-class entries for `calibration/bad.jsonl`.
+## Quickstart
+
+```bash
+python3 build_corpus.py
+python3 rubric_sanity.py     # PASS — separation 0.49
+./capability.oracle.sh
+./run_iter.sh h1-default-recipe
+```
+
+## Headroom estimate
+
+- **Baseline:** ~0.40 (the 4B reads whole files routinely on large ones).
+- **Headroom:** ~0.60.
+- **Target sub-score:** `search_efficiency` (biggest movable mass on
+  large-file tasks).
+
+## Hypotheses
+
+| Slug | Knob | Hypothesis |
+|------|------|------------|
+| h1-default-recipe | defaults | +0.15 composite |
+| h2-echo-heavier | ECHO λ=0.075 | Search results are env tokens |
+| h3-scaled-tasks | balanced across file sizes | Avoid overfit to one regime |
+| h4-chain-code-search | chain from pi-code-search best | "Which file" → "which window" |
+
+## Composition
+
+- **Upstream:** `pi-code-search`.
+- **Downstream:** all caps benefit from search-first habit (reduces context burn).
+- **Integration:** member of `integration/cross-cap-coherence/`.
 
 ## History
 
-Brand-new in round 2 — no archive.
+Brand-new in round 2.

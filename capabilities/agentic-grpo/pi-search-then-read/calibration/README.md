@@ -1,39 +1,43 @@
-# calibration/ — rubric sanity fixtures
+# calibration/ — pi-search-then-read rubric sanity fixtures
 
-Round 2 mandates this directory for every cap. `rubric_sanity.py`
-reads:
+Hand-written rollouts. `rubric_sanity.py` asserts
+min(good_composite) > max(bad_composite) + 0.2.
 
-- `good.jsonl` — known-high-quality rollouts (the agent did the right
-  thing). At least 5.
-- `bad.jsonl` — known-low-quality rollouts including each §0 cheat
-  named in `../capability.md`. At least 5.
+## What "good" looks like
 
-The rubric must score the good set above the bad set with separation
-> 0.2 (configurable via `RUBRIC_SANITY_MARGIN`). `run_iter.sh` runs
-the sanity gate BEFORE training, so a broken rubric never reaches
-the GPU.
+A good rollout for a large file:
+1. `grep -n <symbol> <file>` to locate the line.
+2. `sed -n 'A,Bp' <file>` or `read --offset --limit` for a small window.
+3. Cite `file:line` in the final answer.
 
-## How to write a calibration fixture
+For small files (≤ 250 lines), reading whole is also OK — the rubric
+awards full efficiency credit.
 
-Each line is one JSON object with the same shape `rubric.score_one()`
-expects (or `score_rollout(transcript, workdir, task)` for legacy caps
-— in that case the line should be `{"transcript": [...], "workdir":
-"...", "task": {...}}`).
+See `good.jsonl` for 5 examples across size tiers.
 
-### Good fixture template
+## What "bad" looks like
 
-```json
-{"task": {...}, "transcript": [...], "workdir": "..."}
-```
+| §0 cheat | bad.jsonl id | Why it scores low |
+|----------|--------------|-------------------|
+| Read whole large file | `calib_bad_read_whole_large` | efficiency=0, no_search → composite ~0.30 |
+| No search at all | `calib_bad_no_search` | no search, no citation → composite ~0.09 |
+| grep an irrelevant keyword then read whole | `calib_bad_irrelevant_grep` | search_before_read=0 (symbol mismatch) |
+| Found it but no file:line citation | `calib_bad_no_citation` | format=0 → composite=0 |
+| 3x identical reads | `calib_bad_redundant_reads` | no_redundant_reads=0.33 |
 
-Where the transcript shows the agent:
-- reading appropriate context
-- making the right action
-- verifying the result
-- summarizing cleanly
+## Tuning the small-file threshold
 
-### Bad fixture template — one per §0 cheat
+`SMALL_FILE_THRESHOLD = 250` in `../rubric.py`. Files at or below this
+get full search_efficiency and search_before_read credit (small files
+don't need search). Adjust if your eval corpus has different size
+characteristics.
 
-For each cheat enumerated in `../capability.md ## Adversarial design (§0)`,
-write a fixture where the agent executes that cheat. Score should be 0
-or near-zero. This is the round-2 anti-saturation discipline.
+## Refreshing
+
+After changing `../rubric.py`, run `python3 ../rubric_sanity.py`.
+
+## Current calibration state
+
+  good min=0.95, max=1.00
+  bad  min=0.00, max=0.46 (calibrated to keep all cheats < 0.5)
+  separation: +0.49
