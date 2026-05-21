@@ -149,6 +149,7 @@ fn chat_completion_metadata_from_prompt(
         final_content_empty: false,
         content_empty_reason: None,
         reasoning_folded_into_content: false,
+        performance: None,
     }
 }
 
@@ -171,6 +172,7 @@ fn chat_completion_metadata_from_prompt_and_output(
                 .reasoning_content
                 .as_deref()
                 .is_some_and(|text| !text.is_empty()),
+        performance: None,
     }
 }
 
@@ -201,6 +203,7 @@ fn chat_completion_metadata_from_cached_output(
                 .reasoning_content
                 .as_deref()
                 .is_some_and(|text| !text.is_empty()),
+        performance: None,
     }
 }
 
@@ -221,6 +224,102 @@ fn chat_completion_metadata_from_request(
         final_content_empty: false,
         content_empty_reason: None,
         reasoning_folded_into_content: false,
+        performance: None,
+    }
+}
+
+fn chat_performance_metadata_enabled(state: &AppState, req: &ChatCompletionRequest) -> bool {
+    req.include_performance
+        .unwrap_or(state.chat_performance_metadata)
+}
+
+fn duration_ms_f64(duration: std::time::Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn adapter_used_for_performance_metadata(state: &AppState) -> String {
+    state
+        .loaded_adapter_name
+        .read()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| "base".to_string())
+}
+
+fn decode_tokens_per_sec_for_performance_metadata(
+    completion_tokens: usize,
+    total_latency: std::time::Duration,
+    ttft: Option<std::time::Duration>,
+    decode_duration: Option<std::time::Duration>,
+) -> Option<f64> {
+    if completion_tokens == 0 {
+        return Some(0.0);
+    }
+
+    let decode_secs = decode_duration
+        .filter(|duration| !duration.is_zero())
+        .map(|duration| duration.as_secs_f64())
+        .or_else(|| {
+            ttft.and_then(|ttft| {
+                total_latency
+                    .checked_sub(ttft)
+                    .filter(|duration| !duration.is_zero())
+                    .map(|duration| duration.as_secs_f64())
+            })
+        })
+        .or_else(|| (!total_latency.is_zero()).then_some(total_latency.as_secs_f64()))?;
+
+    Some(completion_tokens as f64 / decode_secs)
+}
+
+fn attach_chat_performance_metadata(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    resp: &mut ChatCompletionResponse,
+    request_start: std::time::Instant,
+    ttft: Option<std::time::Duration>,
+    decode_duration: Option<std::time::Duration>,
+) {
+    if !chat_performance_metadata_enabled(state, req) {
+        return;
+    }
+
+    let total_latency = request_start.elapsed();
+    let finish_reason = resp
+        .choices
+        .first()
+        .map(|choice| choice.finish_reason.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    resp.metadata.performance = Some(ChatCompletionPerformanceMetadata {
+        prompt_tokens: resp.usage.prompt_tokens,
+        completion_tokens: resp.usage.completion_tokens,
+        ttft_ms: ttft.map(duration_ms_f64),
+        total_latency_ms: duration_ms_f64(total_latency),
+        decode_tokens_per_sec: decode_tokens_per_sec_for_performance_metadata(
+            resp.usage.completion_tokens,
+            total_latency,
+            ttft,
+            decode_duration,
+        ),
+        adapter_used: adapter_used_for_performance_metadata(state),
+        thinking_mode: resp.metadata.thinking_mode.clone(),
+        finish_reason,
+    });
+}
+
+struct TimedGenerationOutput {
+    output: GenerationOutput,
+    ttft: Option<std::time::Duration>,
+    decode_duration: Option<std::time::Duration>,
+}
+
+impl TimedGenerationOutput {
+    fn without_timings(output: GenerationOutput) -> Self {
+        Self {
+            output,
+            ttft: None,
+            decode_duration: None,
+        }
     }
 }
 
@@ -1996,7 +2095,8 @@ async fn zero_chat_choices_response_from_request_cache_hit(
     };
 
     let resp = response_from_cached_chat_request(state, req, request_start, cached);
-    chat_response_from_multi_responses(state, req, vec![(0, resp)], n_per, true).map(Some)
+    chat_response_from_multi_responses(state, req, request_start, vec![(0, resp)], n_per, true)
+        .map(Some)
 }
 
 fn chat_choices_cache_value_from_response(
@@ -2066,7 +2166,7 @@ fn response_from_cached_completion(
     );
 
     let finish_reason = cached_output.finish_reason.clone();
-    ChatCompletionResponse {
+    let mut response = ChatCompletionResponse {
         id,
         object: "chat.completion",
         created: now,
@@ -2090,7 +2190,16 @@ fn response_from_cached_completion(
             total_tokens: prompt_token_count + completion_tokens,
         },
         metadata,
-    }
+    };
+    attach_chat_performance_metadata(
+        state,
+        req,
+        &mut response,
+        request_start,
+        Some(std::time::Duration::ZERO),
+        Some(std::time::Duration::ZERO),
+    );
+    response
 }
 
 fn response_from_cached_chat_choices(
@@ -2178,7 +2287,7 @@ fn response_from_cached_chat_choices(
         })
         .collect();
 
-    ChatCompletionResponse {
+    let mut response = ChatCompletionResponse {
         id,
         object: "chat.completion",
         created: now,
@@ -2190,7 +2299,16 @@ fn response_from_cached_chat_choices(
             total_tokens: cached.prompt_tokens.saturating_add(completion_tokens),
         },
         metadata,
-    }
+    };
+    attach_chat_performance_metadata(
+        state,
+        req,
+        &mut response,
+        request_start,
+        Some(std::time::Duration::ZERO),
+        Some(std::time::Duration::ZERO),
+    );
+    response
 }
 
 fn streaming_response_from_cached_completion(
@@ -2793,6 +2911,11 @@ pub struct ChatCompletionRequest {
     /// Defaults to the server setting, which is off by default.
     #[serde(default)]
     pub fold_reasoning_into_content: Option<bool>,
+    /// Kiln extension: include request-scoped performance counters in the
+    /// stable `metadata.performance` response field. When omitted, the server
+    /// config default decides.
+    #[serde(default)]
+    pub include_performance: Option<bool>,
 }
 
 /// A single source adapter for per-request composition.
@@ -2934,6 +3057,20 @@ pub struct ChatCompletionMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_empty_reason: Option<&'static str>,
     pub reasoning_folded_into_content: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub performance: Option<ChatCompletionPerformanceMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatCompletionPerformanceMetadata {
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub ttft_ms: Option<f64>,
+    pub total_latency_ms: f64,
+    pub decode_tokens_per_sec: Option<f64>,
+    pub adapter_used: String,
+    pub thinking_mode: String,
+    pub finish_reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3379,6 +3516,14 @@ async fn chat_completions_inner(
         let mut resp =
             empty_chat_completion_response(state, &req, prompt_tokens.len(), request_start);
         resp.metadata = chat_completion_metadata_from_prompt(state, &req, &prompt_text);
+        attach_chat_performance_metadata(
+            state,
+            &req,
+            &mut resp,
+            request_start,
+            Some(std::time::Duration::ZERO),
+            Some(std::time::Duration::ZERO),
+        );
         return Ok(Json(resp).into_response());
     }
 
@@ -4133,10 +4278,13 @@ async fn generate_real_batched(
         .map_err(ApiError::generation_failed)?;
 
     let timeout = state.request_timeout;
+    let mut first_token_at: Option<std::time::Instant> = None;
     let collect = async {
         loop {
             match events.recv().await {
-                Some(EngineEvent::Token(_token)) => {}
+                Some(EngineEvent::Token(_token)) => {
+                    first_token_at.get_or_insert_with(std::time::Instant::now);
+                }
                 Some(EngineEvent::Done { output }) => break Ok(output),
                 Some(EngineEvent::Error(err)) => break Err(anyhow::anyhow!(err)),
                 None => break Err(anyhow::anyhow!("batching engine response channel closed")),
@@ -4199,7 +4347,7 @@ async fn generate_real_batched(
     );
 
     let finish_reason = assistant_output.finish_reason.clone();
-    Ok(ChatCompletionResponse {
+    let mut response = ChatCompletionResponse {
         id,
         object: "chat.completion",
         created: now,
@@ -4223,7 +4371,10 @@ async fn generate_real_batched(
             total_tokens: prompt_token_count + completion_tokens,
         },
         metadata,
-    })
+    };
+    let ttft = first_token_at.map(|instant| instant.duration_since(request_start));
+    attach_chat_performance_metadata(state, req, &mut response, request_start, ttft, None);
+    Ok(response)
 }
 
 async fn generate_real_batched_streaming(
@@ -4695,6 +4846,7 @@ async fn generate_real(
                         pc.as_ref(),
                         Some(&cancel_inner),
                     )
+                    .map(TimedGenerationOutput::without_timings)
                 } else {
                     let (hit, should_register_on_miss) = {
                         let mut cache = prefix_cache.lock().unwrap();
@@ -4709,13 +4861,15 @@ async fn generate_real(
                     };
                     if hit.is_none() && !should_register_on_miss {
                         *prefix_cache_diagnostic_inner.lock().unwrap() = "skipped";
-                        return runner_guard.generate_paged_shared_tokens(
-                            &prompt_tokens,
-                            &params,
-                            bm.as_ref(),
-                            pc.as_ref(),
-                            Some(&cancel_inner),
-                        );
+                        return runner_guard
+                            .generate_paged_shared_tokens(
+                                &prompt_tokens,
+                                &params,
+                                bm.as_ref(),
+                                pc.as_ref(),
+                                Some(&cancel_inner),
+                            )
+                            .map(TimedGenerationOutput::without_timings);
                     }
 
                     *prefix_cache_diagnostic_inner.lock().unwrap() = if hit.is_some() {
@@ -4797,7 +4951,11 @@ async fn generate_real(
                         bm_guard.free_all(&blocks_to_free);
                     }
 
-                    Ok(output.output)
+                    Ok(TimedGenerationOutput {
+                        output: output.output,
+                        ttft: Some(output.prefill_duration),
+                        decode_duration: Some(output.decode_duration),
+                    })
                 }
             }
             ResolvedSpeculativeMode::SkipLayer(spec_config) => {
@@ -4811,22 +4969,25 @@ async fn generate_real(
                         &spec_config,
                         Some(&cancel_inner),
                     )
+                    .map(TimedGenerationOutput::without_timings)
                 } else {
                     let flat_spec_config = SpeculativeConfig {
                         num_speculative_tokens: spec_config.num_speculative_tokens.min(4),
                         draft_layers: spec_config.draft_layers,
                     };
-                    runner_guard.generate_speculative(&prompt, &params, &flat_spec_config)
+                    runner_guard
+                        .generate_speculative(&prompt, &params, &flat_spec_config)
+                        .map(TimedGenerationOutput::without_timings)
                 }
             }
             ResolvedSpeculativeMode::Mtp => {
                 *prefix_cache_diagnostic_inner.lock().unwrap() = "not_used_speculative";
                 let output = runner_guard.generate_mtp_speculative(&prompt, &params)?;
-                Ok(GenerationOutput {
+                Ok(TimedGenerationOutput::without_timings(GenerationOutput {
                     text: output.text,
                     token_ids: output.token_ids,
                     finish_reason: output.finish_reason,
-                })
+                }))
             }
         }
     });
@@ -4865,6 +5026,10 @@ async fn generate_real(
             return Err(ApiError::request_timeout(timeout.as_secs()));
         }
     };
+
+    let ttft = output.ttft;
+    let decode_duration = output.decode_duration;
+    let output = output.output;
 
     let finish_reason = match output.finish_reason {
         kiln_model::FinishReason::Eos => "stop",
@@ -4917,7 +5082,7 @@ async fn generate_real(
     );
 
     let finish_reason = assistant_output.finish_reason.clone();
-    Ok(ChatCompletionResponse {
+    let mut response = ChatCompletionResponse {
         id,
         object: "chat.completion",
         created: now,
@@ -4941,7 +5106,16 @@ async fn generate_real(
             total_tokens: prompt_token_count + completion_tokens,
         },
         metadata,
-    })
+    };
+    attach_chat_performance_metadata(
+        state,
+        req,
+        &mut response,
+        request_start,
+        ttft,
+        decode_duration,
+    );
+    Ok(response)
 }
 
 /// Generate using the real ModelRunner with SSE streaming and paged KV cache.
@@ -5669,6 +5843,7 @@ async fn generate_mock(
     // Run scheduler steps until this request completes.
     let max_steps = 100;
     let mut output_tokens = Vec::new();
+    let mut first_token_at: Option<std::time::Instant> = None;
 
     for _ in 0..max_steps {
         let mut sched = scheduler.lock().await;
@@ -5693,6 +5868,7 @@ async fn generate_mock(
         for (rid, token, finished) in &engine_output.results {
             if *rid == request_id {
                 if let Some(t) = token {
+                    first_token_at.get_or_insert_with(std::time::Instant::now);
                     output_tokens.push(*t);
                 }
             }
@@ -5764,7 +5940,7 @@ async fn generate_mock(
     );
 
     let finish_reason = assistant_output.finish_reason.clone();
-    Ok(ChatCompletionResponse {
+    let mut response = ChatCompletionResponse {
         id,
         object: "chat.completion",
         created: now,
@@ -5789,7 +5965,10 @@ async fn generate_mock(
             total_tokens: prompt_token_count + completion_tokens,
         },
         metadata,
-    })
+    };
+    let ttft = first_token_at.map(|instant| instant.duration_since(request_start));
+    attach_chat_performance_metadata(state, req, &mut response, request_start, ttft, None);
+    Ok(response)
 }
 
 fn now_epoch() -> u64 {
@@ -7039,6 +7218,7 @@ async fn batch_completions_inner(
                         tool_choice: tool_choice.clone(),
                         chat_template_kwargs: chat_template_kwargs.clone(),
                         fold_reasoning_into_content: None,
+                        include_performance: None,
                     };
                     let resp = if let Some((prompt_text, prompt_tokens)) = prepared_prompt.as_ref()
                     {
@@ -7208,7 +7388,22 @@ async fn generate_multi_chat_response(
             },
         );
         resp.metadata = chat_completion_metadata_from_prompt(state, req, &prompt_text);
-        return chat_response_from_multi_responses(state, req, vec![(0, resp)], n_per, true);
+        attach_chat_performance_metadata(
+            state,
+            req,
+            &mut resp,
+            request_start,
+            Some(std::time::Duration::ZERO),
+            Some(std::time::Duration::ZERO),
+        );
+        return chat_response_from_multi_responses(
+            state,
+            req,
+            request_start,
+            vec![(0, resp)],
+            n_per,
+            true,
+        );
     }
 
     let composed_target: Option<ComposedTarget> = if let Some(list) = req.adapters.as_deref() {
@@ -7269,17 +7464,26 @@ async fn generate_multi_chat_response(
             tool_choice: tool_choice.clone(),
             chat_template_kwargs: req.chat_template_kwargs.clone(),
             fold_reasoning_into_content: req.fold_reasoning_into_content,
+            include_performance: req.include_performance,
         };
         let resp = generate_one_response(state, synth_req).await?;
         responses.push((completion_idx, resp));
     }
 
-    chat_response_from_multi_responses(state, req, responses, n_per, clone_greedy_choices)
+    chat_response_from_multi_responses(
+        state,
+        req,
+        request_start,
+        responses,
+        n_per,
+        clone_greedy_choices,
+    )
 }
 
 fn chat_response_from_multi_responses(
     state: &AppState,
     req: &ChatCompletionRequest,
+    request_start: std::time::Instant,
     mut responses: Vec<(usize, ChatCompletionResponse)>,
     n_per: usize,
     clone_first_response: bool,
@@ -7320,7 +7524,7 @@ fn chat_response_from_multi_responses(
     choices.sort_by_key(|choice| choice.index);
 
     let prompt_tokens = prompt_tokens.unwrap_or(0);
-    Ok(ChatCompletionResponse {
+    let mut response = ChatCompletionResponse {
         id: format!("chatcmpl-{}", Uuid::new_v4()),
         object: "chat.completion",
         created: now_epoch(),
@@ -7332,7 +7536,9 @@ fn chat_response_from_multi_responses(
             total_tokens: prompt_tokens.saturating_add(completion_tokens),
         },
         metadata: metadata.unwrap_or_else(|| chat_completion_metadata_from_request(state, req)),
-    })
+    };
+    attach_chat_performance_metadata(state, req, &mut response, request_start, None, None);
+    Ok(response)
 }
 
 /// Run a single non-streaming completion against whichever backend is loaded.
@@ -8546,6 +8752,7 @@ mod tests {
                 final_content_empty: false,
                 content_empty_reason: None,
                 reasoning_folded_into_content: true,
+                performance: None,
             },
         };
 
@@ -8875,6 +9082,7 @@ mod tests {
                 final_content_empty: true,
                 content_empty_reason: Some("tool_call"),
                 reasoning_folded_into_content: false,
+                performance: None,
             },
         };
 
@@ -9492,6 +9700,64 @@ mod tests {
         assert_eq!(json["metadata"]["thinking_mode"], "non_reasoning");
         assert_eq!(json["metadata"]["thinking_source"], "server_default");
         assert_eq!(json["metadata"]["default_thinking_enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn chat_performance_metadata_is_omitted_by_default() {
+        let (status, json) = chat_post(
+            make_batch_test_state(),
+            r#"{"messages":[{"role":"user","content":"perf default"}],"max_tokens":0}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(
+            json["metadata"].get("performance").is_none(),
+            "performance metadata should be opt-in by default: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_performance_metadata_can_be_enabled_by_request_flag() {
+        let (status, json) = chat_post(
+            make_batch_test_state(),
+            r#"{"messages":[{"role":"user","content":"perf request"}],"max_tokens":0,"include_performance":true}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{json}");
+        let perf = &json["metadata"]["performance"];
+        assert_eq!(perf["prompt_tokens"], json["usage"]["prompt_tokens"]);
+        assert_eq!(perf["completion_tokens"], 0);
+        assert_eq!(perf["ttft_ms"], 0.0);
+        assert!(perf["total_latency_ms"].as_f64().unwrap() >= 0.0);
+        assert_eq!(perf["decode_tokens_per_sec"], 0.0);
+        assert_eq!(perf["adapter_used"], "base");
+        assert_eq!(perf["thinking_mode"], json["metadata"]["thinking_mode"]);
+        assert_eq!(perf["finish_reason"], "length");
+    }
+
+    #[tokio::test]
+    async fn chat_performance_metadata_can_be_enabled_by_server_config() {
+        let mut state = make_batch_test_state();
+        state.chat_performance_metadata = true;
+
+        let (status, json) = chat_post(
+            state.clone(),
+            r#"{"messages":[{"role":"user","content":"perf server"}],"max_tokens":0}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{json}");
+        assert!(json["metadata"]["performance"].is_object());
+
+        let (status, json) = chat_post(
+            state,
+            r#"{"messages":[{"role":"user","content":"perf server disabled"}],"max_tokens":0,"include_performance":false}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{json}");
+        assert!(
+            json["metadata"].get("performance").is_none(),
+            "request flag should be able to disable the server default"
+        );
     }
 
     #[tokio::test]

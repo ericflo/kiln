@@ -1284,6 +1284,9 @@ pub struct AppState {
     pub default_thinking_enabled: Option<bool>,
     /// Compatibility mode: duplicate separated reasoning into `content`.
     pub fold_reasoning_into_content: bool,
+    /// Include per-request performance counters in chat response metadata when
+    /// a request does not explicitly opt in or out.
+    pub chat_performance_metadata: bool,
     /// Slow chat-completion warning threshold. None disables slow-request logs.
     pub slow_request_warn_threshold: Option<std::time::Duration>,
     /// Prometheus metrics counters.
@@ -1474,6 +1477,7 @@ impl AppState {
             eval_mode: false,
             default_thinking_enabled: None,
             fold_reasoning_into_content: false,
+            chat_performance_metadata: false,
             slow_request_warn_threshold: None,
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
@@ -1930,6 +1934,7 @@ impl AppState {
             eval_mode: false,
             default_thinking_enabled: None,
             fold_reasoning_into_content: false,
+            chat_performance_metadata: false,
             slow_request_warn_threshold: None,
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),

@@ -1853,6 +1853,59 @@ just making sessions slower and chattier.
 - Does not break OpenAI compatibility by default.
 - Eval scripts can parse it from a stable JSON field.
 
+**Status:** Completed and validated on RunPod.
+
+**Implementation notes:** Added an opt-in `metadata.performance` object to
+non-streaming chat-completion responses. Callers can enable it per request with
+`include_performance: true`; operators can enable it by default with
+`server.chat_performance_metadata = true` or
+`KILN_CHAT_PERFORMANCE_METADATA=true`, and a request can explicitly disable a
+server default with `include_performance: false`. The stable metadata object
+reports `prompt_tokens`, `completion_tokens`, `ttft_ms`, `total_latency_ms`,
+`decode_tokens_per_sec`, `adapter_used`, `thinking_mode`, and `finish_reason`.
+Default responses omit the field to preserve OpenAI-compatible response shape.
+Cached and zero-token responses compute the metadata for the current request
+instead of replaying stale timing.
+
+**Validation evidence:**
+
+- RunPod focused checks passed on RTX A6000 pod `qmfxie9izl6lc6` using clean
+  worktree `/workspace/kiln-issue29`; sentinel
+  `/workspace/kiln-validation/issue29/focused-tests.done` recorded `exit=0`.
+- Remote log: `/workspace/kiln-validation/issue29/focused-tests.log`.
+- Commands run on RunPod: `git diff --check`; `cargo test --locked -p
+  kiln-server chat_performance_metadata --lib`; `cargo test --locked -p
+  kiln-server test_env_var_overrides --lib`; `cargo test --locked -p
+  kiln-server test_parse_full_toml --lib`; and `cargo test --locked -p
+  kiln-server test_defaults --lib`.
+- Actual Qwen3.5-4B CUDA smoke passed on the same A6000 with canonical model
+  path `/workspace/Qwen3.5-4B`; sentinel
+  `/workspace/kiln-validation/issue29/actual-model.done` recorded `exit=0`.
+- The real-model smoke built `kiln-server --bin kiln --features cuda` with
+  `KILN_CUDA_ARCHS=86`, booted the release server on CUDA (`CUDA: available
+  ✓`), verified `/health` returned model `Qwen3.5-4B (32L, 16H, 4KV)` with
+  backend `model`, then posted `/v1/chat/completions` with
+  `include_performance=true`.
+- Real response artifact
+  `/workspace/kiln-validation/issue29/actual-model/chat_performance.json`
+  returned model `Qwen3.5-4B`, usage `prompt_tokens=20`,
+  `completion_tokens=1`, and `metadata.performance` with `ttft_ms=197.279899`,
+  `total_latency_ms=233.017319`, `decode_tokens_per_sec=27.981874460999144`,
+  `adapter_used=base`, `thinking_mode=non_reasoning`, and
+  `finish_reason=length`.
+- Full-file `cargo fmt` / `rustfmt --check` remain blocked by pre-existing
+  unrelated formatting differences on `main` in `kiln-vulkan-kernel` and
+  older sections of `kiln-server`; no whitespace errors were present in this
+  patch (`git diff --check` passed).
+
+**Commit SHA:** Pending until the issue commit is created.
+
+**Remaining risk:** Non-streaming real batched generation records true TTFT from
+the first token event, and prefix-cache generation records prefill/decode
+durations. Other synchronous non-streaming paths expose total latency and
+decode tokens/sec but may leave `ttft_ms` null until their model runner APIs
+surface first-token timing.
+
 ### 30. Add Train-Time And Serve-Time Config Hashes
 
 **Area:** `crates/kiln-server`, `crates/kiln-train`

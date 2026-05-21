@@ -345,6 +345,7 @@ async fn main() -> Result<()> {
     state.eval_mode = config.server.eval_mode;
     state.default_thinking_enabled = config.server.default_thinking_enabled;
     state.fold_reasoning_into_content = config.server.fold_reasoning_into_content;
+    state.chat_performance_metadata = config.server.chat_performance_metadata;
     state.slow_request_warn_threshold = if config.server.slow_request_warn_secs == 0 {
         None
     } else {
