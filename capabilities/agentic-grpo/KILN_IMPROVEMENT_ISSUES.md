@@ -2228,6 +2228,9 @@ template / scorer hashes, config hashes, adapter hashes from
   for `issue33-eval-adapter`. Both real base and adapter completions returned
   `issue thirty three`, proving the command exercised the actual Qwen3.5-4B
   chat path and the paired adapter request path.
+- GitHub Actions on pushed head `e28b8e21` passed: CI run `26233118952`
+  completed cargo-deny, Linux default, Linux Vulkan, and macOS/Metal
+  successfully.
 
 **Commit SHA:** `e28b8e21` (`Issue 33: add eval adapter`). This status line
 is recorded in a follow-up metadata commit because a commit cannot include its
