@@ -4,10 +4,10 @@
 //! loop using candle autograd. Training runs in the same process as inference,
 //! operating on the already-loaded model weights. No Python sidecar needed.
 
-#[cfg(feature = "cuda")]
-pub mod cuda_train;
 pub mod adapter_output;
 pub mod adapter_shape;
+#[cfg(feature = "cuda")]
+pub mod cuda_train;
 pub mod diagnostics;
 pub mod echo;
 pub mod logit_cache;
@@ -28,18 +28,12 @@ pub mod trajectory_mask;
 pub mod vk_train;
 
 pub use logit_cache::{CacheEntry, CacheStats, CachedLogitSource, LogitCache, hash_prefix};
-pub use remote_teacher::{CostTally, RemoteProvider, RemoteTeacher, RemoteTeacherConfig};
 pub use receipt::{
     AdapterReceipt, DiagnosticSummary, PromptSourceDescriptor, RECEIPT_SCHEMA_VERSION,
     TeacherDescriptor,
 };
+pub use remote_teacher::{CostTally, RemoteProvider, RemoteTeacher, RemoteTeacherConfig};
 
-pub use diagnostics::{
-    DIVERSITY_COLLAPSE_THRESHOLD, DIVERSITY_COLLAPSE_WINDOW, GuardrailDecision, GuardrailTrigger,
-    LengthInflationGuardrail, OpdDiagnosticSnapshot, REPETITION_GUARDRAIL_THRESHOLD, RolloutSummary,
-    SELF_PLAY_SATURATION_THRESHOLD, SELF_PLAY_SATURATION_WINDOW, build_snapshot, repetition_rate,
-    rollout_diversity, truncation_rate,
-};
 pub use adapter_output::{
     ADAPTER_MANIFEST_FILENAME, ADAPTER_MANIFEST_SCHEMA_VERSION, ADAPTER_RECEIPT_FILENAME,
     AdapterManifest, AdapterManifestFiles, AdapterOutputReceipt, AdapterRestoreOptions,
@@ -52,32 +46,41 @@ pub use adapter_shape::{
     ALLOW_ADAPTER_SHAPE_CONVERSION_FLAG, BaseAdapterCompatibility, TRAINABLE_TARGET_MODULES,
     resolve_base_adapter_dir, validate_base_adapter_compatibility,
 };
+pub use diagnostics::{
+    DIVERSITY_COLLAPSE_THRESHOLD, DIVERSITY_COLLAPSE_WINDOW, GuardrailDecision, GuardrailTrigger,
+    LengthInflationGuardrail, OpdDiagnosticSnapshot, REPETITION_GUARDRAIL_THRESHOLD,
+    RolloutSummary, SELF_PLAY_SATURATION_THRESHOLD, SELF_PLAY_SATURATION_WINDOW, build_snapshot,
+    repetition_rate, rollout_diversity, truncation_rate,
+};
 pub use logit_source::{
     DeterministicUniformLogitSource, LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch,
     TopKLogprobs,
 };
 pub use lora_scaling::{
-    ALLOW_HIGH_LORA_SCALE_FLAG, MAX_LORA_ALPHA_OVER_RANK, alpha_over_rank,
-    validate_lora_scaling,
-};
-pub use train_receipt::{
-    ADAPTER_CANARY_STATUS_FILENAME, AdapterCanaryCheckReceipt, AdapterCanaryState,
-    AdapterCanaryStatusReceipt, AdapterSmokePromptDiagnosis,
-    AdapterSmokePromptDiagnosisReceipt, AdapterSmokePromptReceipt, AdapterSmokeTestReceipt,
-    TRAIN_RECEIPT_FILENAME, TRAIN_RECEIPT_SCHEMA_VERSION, TrainFailureReason, TrainReceipt,
-    TrainReceiptStatus, read_adapter_canary_status_from_adapter_dir,
+    ALLOW_HIGH_LORA_SCALE_FLAG, MAX_LORA_ALPHA_OVER_RANK, alpha_over_rank, validate_lora_scaling,
 };
 pub use opd::{
     AgenticLossInputs, AgenticLossWeights, COLD_START_DEFAULT_EPOCHS, COLD_START_DEFAULT_PROMPTS,
     COLD_START_OVERLAP_THRESHOLD, ColdStartDecision, DistillMergeRequest, DistillMergeSource,
     DistillPumpMode, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest,
-    NewKnowledgeSource, OpdConfig, OpdLossGranularity, OpdPrompt, OpdRequest, SelfDistillMode,
-    StableOpdCoefficients, StableOpdLossInputs, StableOpdLossOutputs, TipTokenClass,
-    cold_start_probe, cold_start_probe_default, compute_agentic_loss_weights,
-    compute_initial_overlap, compute_stable_opd_loss, default_beta_kl,
-    default_lambda_sft, default_lambda_verifier, default_opd_samples_per_prompt,
-    default_opd_top_k, default_score_decay_steps, default_score_earliest_weight,
-    default_tip_tool_call_weight, default_tip_tool_name_weight,
+    NewKnowledgeSource, OffPolicyDistillationExample, OffPolicyDistillationSummary,
+    OffPolicyLossBreakdown, OpdConfig, OpdLossGranularity, OpdObjective, OpdPrompt, OpdRequest,
+    OpdTrainingMode, PreparedOffPolicyDistillation, SelfDistillMode, StableOpdCoefficients,
+    StableOpdLossInputs, StableOpdLossOutputs, TeacherActionToken, TeacherTopLogprob,
+    TipTokenClass, cold_start_probe, cold_start_probe_default,
+    compose_off_policy_distillation_loss, compute_agentic_loss_weights, compute_initial_overlap,
+    compute_stable_opd_loss, default_beta_kl, default_lambda_sft, default_lambda_verifier,
+    default_opd_samples_per_prompt, default_opd_top_k, default_score_decay_steps,
+    default_score_earliest_weight, default_tip_tool_call_weight, default_tip_tool_name_weight,
+    load_off_policy_distillation_jsonl, parse_off_policy_distillation_jsonl_str,
+    prepare_off_policy_distillation_dataset,
+};
+pub use train_receipt::{
+    ADAPTER_CANARY_STATUS_FILENAME, AdapterCanaryCheckReceipt, AdapterCanaryState,
+    AdapterCanaryStatusReceipt, AdapterSmokePromptDiagnosis, AdapterSmokePromptDiagnosisReceipt,
+    AdapterSmokePromptReceipt, AdapterSmokeTestReceipt, OpdReceipt, TRAIN_RECEIPT_FILENAME,
+    TRAIN_RECEIPT_SCHEMA_VERSION, TrainFailureReason, TrainReceipt, TrainReceiptStatus,
+    read_adapter_canary_status_from_adapter_dir,
 };
 
 pub use replay::{
@@ -254,9 +257,7 @@ impl Default for SftConfig {
 //
 // See `docs/plans/echo-integration-plan.md` §2 and §B.1 for the design.
 
-pub use crate::trajectory::{
-    AgenticGroup, ScoredRollout, TurnKind, TurnSegment,
-};
+pub use crate::trajectory::{AgenticGroup, ScoredRollout, TurnKind, TurnSegment};
 
 /// Legacy alias for [`ScoredRollout`]. Use the canonical name in new code.
 pub type ScoredCompletion = ScoredRollout;
@@ -780,21 +781,25 @@ impl LossConfig {
         // The remaining knobs only make sense when ECHO is on. Apply
         // them on the current EchoConfig (creating one if needed when
         // any knob is set).
-        let lambda_override =
-            std::env::var("KILN_ECHO_LAMBDA").ok().and_then(|v| v.parse::<f64>().ok());
-        let mask_mode_override =
-            std::env::var("KILN_ECHO_ENV_MASK_MODE").ok().and_then(|v| match v.to_lowercase().as_str() {
-                "env_only" | "envonly" => Some(EnvMaskMode::EnvOnly),
-                "full_obs" | "fullobs" => Some(EnvMaskMode::FullObs),
-                _ => None,
-            });
-        let warning_filter_override = std::env::var("KILN_ECHO_WARNING_FILTER")
+        let lambda_override = std::env::var("KILN_ECHO_LAMBDA")
             .ok()
-            .and_then(|v| match v.to_lowercase().as_str() {
-                "0" | "false" | "no" => Some(false),
-                "1" | "true" | "yes" => Some(true),
-                _ => None,
+            .and_then(|v| v.parse::<f64>().ok());
+        let mask_mode_override =
+            std::env::var("KILN_ECHO_ENV_MASK_MODE").ok().and_then(|v| {
+                match v.to_lowercase().as_str() {
+                    "env_only" | "envonly" => Some(EnvMaskMode::EnvOnly),
+                    "full_obs" | "fullobs" => Some(EnvMaskMode::FullObs),
+                    _ => None,
+                }
             });
+        let warning_filter_override =
+            std::env::var("KILN_ECHO_WARNING_FILTER")
+                .ok()
+                .and_then(|v| match v.to_lowercase().as_str() {
+                    "0" | "false" | "no" => Some(false),
+                    "1" | "true" | "yes" => Some(true),
+                    _ => None,
+                });
 
         if lambda_override.is_some()
             || mask_mode_override.is_some()
@@ -1166,8 +1171,14 @@ mod tests {
         let json = serde_json::to_string(&custom).unwrap();
         // The serialized form should mention every non-default field.
         assert!(json.contains("0.027"), "lambda missing from {json}");
-        assert!(json.contains("full_obs"), "env_mask_mode missing from {json}");
-        assert!(json.contains("\"warning_filter\":false"), "warning_filter missing from {json}");
+        assert!(
+            json.contains("full_obs"),
+            "env_mask_mode missing from {json}"
+        );
+        assert!(
+            json.contains("\"warning_filter\":false"),
+            "warning_filter missing from {json}"
+        );
 
         let parsed: EchoConfig = serde_json::from_str(&json).unwrap();
         assert!((parsed.lambda - 0.027).abs() < 1e-12);
@@ -1237,7 +1248,10 @@ mod tests {
             "no_policy_loss": true
         }"#;
         let parsed: LossConfig = serde_json::from_str(fixup).unwrap();
-        assert!(parsed.no_policy_loss, "verifier-free cap must parse with no_policy_loss=true");
+        assert!(
+            parsed.no_policy_loss,
+            "verifier-free cap must parse with no_policy_loss=true"
+        );
         assert!((parsed.echo_lambda() - 0.05).abs() < 1e-12);
     }
 }

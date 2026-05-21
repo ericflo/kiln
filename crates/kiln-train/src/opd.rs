@@ -65,7 +65,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::logit_source::{LogitSource, LogprobBatch};
 use crate::{ChatMessage, Optimizer, default_alpha, default_rank};
-use kiln_opd_loss_kernel::{opd_top_k_reverse_kl_phase_a_per_position, DEFAULT_CHUNK_SIZE};
+use kiln_opd_loss_kernel::{DEFAULT_CHUNK_SIZE, opd_top_k_reverse_kl_phase_a_per_position};
 
 /// §6 default top-K for the `TeacherTopK` loss path. Picked by Fu et al.
 /// (2026) ablation table 3: K = 32 is the optimum across math and
@@ -99,6 +99,37 @@ pub enum OpdLossGranularity {
 impl Default for OpdLossGranularity {
     fn default() -> Self {
         Self::TeacherTopK
+    }
+}
+
+/// Whether OPD should sample fresh student rollouts or replay
+/// teacher-authored completions from an offline dataset.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpdTrainingMode {
+    OnPolicy,
+    OffPolicy,
+}
+
+impl Default for OpdTrainingMode {
+    fn default() -> Self {
+        Self::OnPolicy
+    }
+}
+
+/// Action-token supervision objective for off-policy distillation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpdObjective {
+    /// Reverse-KL against teacher top-K logprobs.
+    ReverseKl,
+    /// Cross-entropy on the teacher response tokens.
+    CrossEntropy,
+}
+
+impl Default for OpdObjective {
+    fn default() -> Self {
+        Self::ReverseKl
     }
 }
 
@@ -146,6 +177,10 @@ impl Default for StableOpdMode {
 /// asymmetric prefix is the only source of gradient signal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpdPrompt {
+    /// Student-visible prompt scaffold. For plain off-policy replay this can
+    /// include the teacher-authored assistant turn. For trajectory-shaped
+    /// replay this is only the prompt scaffold; `trajectory` supplies the
+    /// replayed action/observation turns.
     pub messages: Vec<ChatMessage>,
     /// Asymmetric teacher-only context. Empty = symmetric (default).
     /// When non-empty, the teacher's logprobs are computed against
@@ -153,6 +188,70 @@ pub struct OpdPrompt {
     /// student still rolls out from `messages` alone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub teacher_extra_messages: Vec<ChatMessage>,
+    /// Optional agentic replay trajectory. Action segments receive OPD
+    /// supervision; Observation segments can receive ECHO env-CE when
+    /// `OpdConfig::echo` is set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trajectory: Vec<crate::trajectory::TurnSegment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeacherTopLogprob {
+    pub token_id: u32,
+    pub logprob: f32,
+}
+
+/// One teacher action token from the off-policy OPD JSONL schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeacherActionToken {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprob: Option<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_logprobs: Vec<TeacherTopLogprob>,
+}
+
+/// One line of the documented off-policy OPD teacher JSONL schema.
+///
+/// `messages` is the prompt seen by the student. `teacher_response` is
+/// appended as the assistant turn for off-policy replay. `teacher_tokens`
+/// carries optional teacher logprobs for reverse-KL; cross-entropy mode only
+/// requires the response text. `trajectory` is optional agentic structure used
+/// to account for ECHO observation tokens.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OffPolicyDistillationExample {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub teacher_response: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub teacher_tokens: Vec<TeacherActionToken>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trajectory: Vec<crate::trajectory::TurnSegment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct OffPolicyDistillationSummary {
+    pub examples: usize,
+    pub action_tokens: u64,
+    pub env_tokens: u64,
+    pub examples_with_teacher_logprobs: usize,
+    pub objective: OpdObjective,
+    pub echo_combined: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OffPolicyLossBreakdown {
+    pub objective: OpdObjective,
+    pub action_token_loss: f64,
+    pub echo_env_ce: Option<f64>,
+    pub echo_lambda: Option<f64>,
+    pub total_loss: f64,
 }
 
 /// Reference to a new-knowledge dataset for [`DistillRefreshRequest`].
@@ -414,9 +513,9 @@ pub struct OpdRequest {
     /// Prompts to OPD-train on. May be empty if `dataset_path` is set.
     #[serde(default)]
     pub prompts: Vec<OpdPrompt>,
-    /// Optional server-local JSONL dataset path. Each non-empty line is
-    /// one [`OpdPrompt`]. Used for large prompt sets that shouldn't be
-    /// held in memory.
+    /// Optional server-local JSONL dataset path. In `off_policy` mode each
+    /// non-empty line is an [`OffPolicyDistillationExample`] carrying the
+    /// teacher response and optional per-token logprobs.
     #[serde(default)]
     pub dataset_path: Option<String>,
     /// Alias of the `LogitSource` registered via `/v1/teachers` (§3.2).
@@ -432,6 +531,16 @@ pub struct OpdRequest {
 /// §3.1 + §6 default config for the OPD trainer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpdConfig {
+    /// Training data source: on-policy student rollouts, or off-policy replay
+    /// of teacher-authored responses from JSONL.
+    #[serde(default)]
+    pub training_mode: OpdTrainingMode,
+
+    /// Action-token objective. `reverse_kl` consumes teacher logprobs;
+    /// `cross_entropy` trains on teacher response tokens.
+    #[serde(default)]
+    pub objective: OpdObjective,
+
     /// Loss granularity (§3.1). Defaults to `TeacherTopK` per §6.
     #[serde(default)]
     pub loss: OpdLossGranularity,
@@ -526,6 +635,12 @@ pub struct OpdConfig {
     #[serde(default)]
     pub optimizer: Optimizer,
 
+    /// Optional ECHO term for off-policy agentic trajectories. When present
+    /// and the JSONL line includes Observation segments, env tokens are
+    /// accounted separately from action-token OPD loss in the receipt.
+    #[serde(default)]
+    pub echo: Option<crate::EchoConfig>,
+
     /// Number of training epochs. Default 1.
     #[serde(default = "default_opd_epochs")]
     pub epochs: usize,
@@ -570,6 +685,8 @@ fn default_opd_epochs() -> usize {
 impl Default for OpdConfig {
     fn default() -> Self {
         Self {
+            training_mode: OpdTrainingMode::default(),
+            objective: OpdObjective::default(),
             loss: OpdLossGranularity::default(),
             top_k: default_opd_top_k(),
             samples_per_prompt: default_opd_samples_per_prompt(),
@@ -589,10 +706,274 @@ impl Default for OpdConfig {
             checkpoint_interval: default_opd_checkpoint_interval(),
             seed: None,
             optimizer: Optimizer::default(),
+            echo: None,
             max_cost_usd: None,
             epochs: 1,
         }
     }
+}
+
+pub struct PreparedOffPolicyDistillation {
+    pub prompts: Vec<OpdPrompt>,
+    pub teacher: crate::logit_source::FixtureLogitSource,
+    pub summary: OffPolicyDistillationSummary,
+}
+
+struct TokenizedOpdPrompt {
+    input_ids: Vec<u32>,
+    action_mask: Vec<bool>,
+    env_mask: Vec<bool>,
+    total_obs_len: usize,
+}
+
+fn tokenize_opd_prompt_for_training(
+    prompt: &OpdPrompt,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    echo: Option<&crate::EchoConfig>,
+) -> Result<TokenizedOpdPrompt> {
+    if prompt.trajectory.is_empty() {
+        let (input_ids, action_mask) = crate::trainer::tokenize_for_training(
+            &crate::SftExample {
+                messages: prompt.messages.clone(),
+            },
+            tokenizer,
+        )?;
+        let env_mask = vec![false; input_ids.len()];
+        return Ok(TokenizedOpdPrompt {
+            input_ids,
+            action_mask,
+            env_mask,
+            total_obs_len: 0,
+        });
+    }
+
+    let mask_cfg = echo
+        .map(|echo| crate::trajectory_mask::MaskConfig {
+            warning_filter: echo.warning_filter,
+            env_mask_mode: echo.env_mask_mode.into(),
+        })
+        .unwrap_or_default();
+    let masked = crate::trajectory_mask::build_masks_from_trajectory(
+        &prompt.trajectory,
+        &prompt.messages,
+        tokenizer,
+        &mask_cfg,
+    )?;
+    let total_obs_len = masked.total_obs_len();
+    Ok(TokenizedOpdPrompt {
+        input_ids: masked.input_ids,
+        action_mask: masked.action_mask,
+        env_mask: masked.env_mask,
+        total_obs_len,
+    })
+}
+
+pub fn parse_off_policy_distillation_jsonl_str(
+    input: &str,
+) -> Result<Vec<OffPolicyDistillationExample>> {
+    let mut examples = Vec::new();
+    for (line_idx, line) in input.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let example: OffPolicyDistillationExample = serde_json::from_str(line)
+            .with_context(|| format!("parse off-policy OPD JSONL line {}", line_idx + 1))?;
+        examples.push(example);
+    }
+    Ok(examples)
+}
+
+pub fn load_off_policy_distillation_jsonl(
+    path: impl AsRef<std::path::Path>,
+) -> Result<Vec<OffPolicyDistillationExample>> {
+    let path = path.as_ref();
+    let input = std::fs::read_to_string(path)
+        .with_context(|| format!("reading off-policy OPD JSONL {}", path.display()))?;
+    parse_off_policy_distillation_jsonl_str(&input)
+}
+
+pub fn prepare_off_policy_distillation_dataset(
+    examples: &[OffPolicyDistillationExample],
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    teacher_id: impl Into<String>,
+    vocab_size: usize,
+    top_k: usize,
+    objective: OpdObjective,
+    echo: Option<&crate::EchoConfig>,
+) -> Result<PreparedOffPolicyDistillation> {
+    anyhow::ensure!(top_k > 0, "top_k must be > 0");
+    anyhow::ensure!(vocab_size > 0, "vocab_size must be > 0");
+    let teacher_id = teacher_id.into();
+    let mut prompts = Vec::with_capacity(examples.len());
+    let mut fixture =
+        crate::logit_source::FixtureLogitSource::uniform_topk(&teacher_id, vocab_size, top_k);
+    let mut summary = OffPolicyDistillationSummary {
+        examples: examples.len(),
+        objective,
+        echo_combined: false,
+        ..Default::default()
+    };
+
+    for (example_idx, example) in examples.iter().enumerate() {
+        anyhow::ensure!(
+            !example.messages.is_empty(),
+            "off-policy OPD example {example_idx} has no messages"
+        );
+        anyhow::ensure!(
+            !example.teacher_response.is_empty(),
+            "off-policy OPD example {example_idx} has empty teacher_response"
+        );
+
+        let prompt = if example.trajectory.is_empty() {
+            let mut messages = example.messages.clone();
+            messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: example.teacher_response.clone(),
+            });
+            OpdPrompt {
+                messages,
+                teacher_extra_messages: Vec::new(),
+                trajectory: Vec::new(),
+            }
+        } else {
+            OpdPrompt {
+                messages: example.messages.clone(),
+                teacher_extra_messages: Vec::new(),
+                trajectory: example.trajectory.clone(),
+            }
+        };
+
+        let tokenized = tokenize_opd_prompt_for_training(&prompt, tokenizer, echo)
+            .with_context(|| format!("tokenize off-policy OPD example {example_idx}"))?;
+        let active_positions: Vec<usize> = tokenized
+            .action_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, active)| active.then_some(idx))
+            .collect();
+        anyhow::ensure!(
+            !active_positions.is_empty(),
+            "off-policy OPD example {example_idx} produced no assistant action tokens"
+        );
+        summary.action_tokens = summary
+            .action_tokens
+            .saturating_add(active_positions.len() as u64);
+
+        let tokens_hash =
+            crate::logit_source::FixtureLogitSource::hash_tokens(&tokenized.input_ids);
+        match objective {
+            OpdObjective::ReverseKl => {
+                anyhow::ensure!(
+                    example.teacher_tokens.len() == active_positions.len(),
+                    "off-policy OPD example {example_idx} has {} teacher_tokens but {} action tokens",
+                    example.teacher_tokens.len(),
+                    active_positions.len()
+                );
+                for (token_idx, (teacher_token, &position)) in example
+                    .teacher_tokens
+                    .iter()
+                    .zip(active_positions.iter())
+                    .enumerate()
+                {
+                    anyhow::ensure!(
+                        teacher_token.top_logprobs.len() >= top_k,
+                        "off-policy OPD example {example_idx} token {token_idx} has {} top_logprobs, need at least {top_k}",
+                        teacher_token.top_logprobs.len()
+                    );
+                    let mut indices = Vec::with_capacity(top_k);
+                    let mut logprobs = Vec::with_capacity(top_k);
+                    for entry in teacher_token.top_logprobs.iter().take(top_k) {
+                        anyhow::ensure!(
+                            (entry.token_id as usize) < vocab_size,
+                            "off-policy OPD example {example_idx} token {token_idx} has token_id {} outside vocab_size {vocab_size}",
+                            entry.token_id
+                        );
+                        anyhow::ensure!(
+                            entry.logprob.is_finite(),
+                            "off-policy OPD example {example_idx} token {token_idx} has non-finite logprob"
+                        );
+                        indices.push(entry.token_id);
+                        logprobs.push(entry.logprob);
+                    }
+                    fixture.insert(tokens_hash, position, indices, logprobs);
+                }
+                summary.examples_with_teacher_logprobs += 1;
+            }
+            OpdObjective::CrossEntropy => {
+                for (token_idx, &position) in active_positions.iter().enumerate() {
+                    let target = tokenized.input_ids[position];
+                    let mut indices = Vec::with_capacity(top_k);
+                    indices.push(target);
+                    for candidate in 0..vocab_size as u32 {
+                        if indices.len() == top_k {
+                            break;
+                        }
+                        if candidate != target {
+                            indices.push(candidate);
+                        }
+                    }
+                    anyhow::ensure!(
+                        indices.len() == top_k,
+                        "off-policy OPD example {example_idx} token {token_idx} could not build a {top_k}-way CE fixture from vocab_size {vocab_size}"
+                    );
+                    let mut logprobs = vec![-30.0_f32; top_k];
+                    logprobs[0] = 0.0;
+                    fixture.insert(tokens_hash, position, indices, logprobs);
+                }
+            }
+        }
+
+        let env_tokens = tokenized.env_mask.iter().filter(|&&active| active).count() as u64;
+        summary.env_tokens = summary.env_tokens.saturating_add(env_tokens);
+        if echo.is_some() && env_tokens > 0 {
+            summary.echo_combined = true;
+        }
+
+        prompts.push(prompt);
+    }
+
+    Ok(PreparedOffPolicyDistillation {
+        prompts,
+        teacher: fixture,
+        summary,
+    })
+}
+
+pub fn compose_off_policy_distillation_loss(
+    objective: OpdObjective,
+    action_token_losses: &[f64],
+    env_token_cross_entropy: &[f64],
+    echo_lambda: Option<f64>,
+) -> Result<OffPolicyLossBreakdown> {
+    anyhow::ensure!(
+        !action_token_losses.is_empty(),
+        "off-policy OPD loss requires at least one action token"
+    );
+    anyhow::ensure!(
+        action_token_losses.iter().all(|v| v.is_finite()),
+        "off-policy OPD action loss contains non-finite values"
+    );
+    anyhow::ensure!(
+        env_token_cross_entropy.iter().all(|v| v.is_finite()),
+        "off-policy OPD env CE contains non-finite values"
+    );
+    let action_token_loss =
+        action_token_losses.iter().sum::<f64>() / action_token_losses.len() as f64;
+    let echo_env_ce = if env_token_cross_entropy.is_empty() {
+        None
+    } else {
+        Some(env_token_cross_entropy.iter().sum::<f64>() / env_token_cross_entropy.len() as f64)
+    };
+    let echo_lambda = echo_lambda.filter(|lambda| *lambda != 0.0 && echo_env_ce.is_some());
+    let total_loss = action_token_loss + echo_lambda.unwrap_or(0.0) * echo_env_ce.unwrap_or(0.0);
+    Ok(OffPolicyLossBreakdown {
+        objective,
+        action_token_loss,
+        echo_env_ce,
+        echo_lambda,
+        total_loss,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -785,7 +1166,10 @@ pub fn opd_step_loss(inputs: OpdStepInputs<'_>) -> Result<OpdStepOutputs> {
 
     let (teacher_topk_indices, teacher_topk_logprobs) = match batch {
         LogprobBatch::TopK(t) => (t.indices, t.logprobs),
-        LogprobBatch::FullVocab { logprobs, vocab_size: _ } => {
+        LogprobBatch::FullVocab {
+            logprobs,
+            vocab_size: _,
+        } => {
             // For full-vocab, indices are 0..V repeated per position.
             let mut indices = Vec::with_capacity(active_count * resolved_top_k);
             for _ in 0..active_count {
@@ -823,9 +1207,7 @@ pub fn opd_step_loss(inputs: OpdStepInputs<'_>) -> Result<OpdStepOutputs> {
         resolved_top_k,
         &device,
     )?;
-    let mean_kl = per_position_kl
-        .mean_all()
-        .context("mean per-position KL")?;
+    let mean_kl = per_position_kl.mean_all().context("mean per-position KL")?;
 
     Ok(OpdStepOutputs {
         per_position_kl,
@@ -919,7 +1301,10 @@ impl StableOpdCoefficients {
         match mode {
             StableOpdMode::Off => Self::off(),
             StableOpdMode::Auto => Self::auto_default(),
-            StableOpdMode::Manual { kl_beta, sft_lambda } => Self {
+            StableOpdMode::Manual {
+                kl_beta,
+                sft_lambda,
+            } => Self {
                 beta_kl: kl_beta,
                 lambda_sft: sft_lambda,
             },
@@ -1148,11 +1533,7 @@ pub enum TipTokenClass {
 
 impl TipTokenClass {
     /// Loss multiplier for this class given the §10.4 C weights.
-    pub fn multiplier(
-        &self,
-        tool_call_weight: f64,
-        tool_name_weight: f64,
-    ) -> f64 {
+    pub fn multiplier(&self, tool_call_weight: f64, tool_name_weight: f64) -> f64 {
         match self {
             Self::Prose => 1.0,
             Self::ToolCallName => tool_name_weight,
@@ -1213,10 +1594,7 @@ pub fn compute_agentic_loss_weights(inputs: &AgenticLossInputs) -> AgenticLossWe
     let mut weights = vec![1.0_f64; n];
     // TIP per-class multiplier.
     for (i, class) in inputs.token_classes.iter().enumerate() {
-        weights[i] *= class.multiplier(
-            inputs.tip_tool_call_weight,
-            inputs.tip_tool_name_weight,
-        );
+        weights[i] *= class.multiplier(inputs.tip_tool_call_weight, inputs.tip_tool_name_weight);
     }
     // SCoRe earliest-divergence schedule.
     if let Some(idx) = inputs.earliest_divergence {
@@ -1227,8 +1605,8 @@ pub fn compute_agentic_loss_weights(inputs: &AgenticLossInputs) -> AgenticLossWe
             } else {
                 (dist as f64) / (inputs.score_decay_steps as f64)
             };
-            let extra = inputs.score_earliest_weight
-                + (1.0 - inputs.score_earliest_weight) * frac.min(1.0);
+            let extra =
+                inputs.score_earliest_weight + (1.0 - inputs.score_earliest_weight) * frac.min(1.0);
             // The schedule modulates ON TOP of TIP. Multiplicative
             // composition: a tool-call-name position at earliest
             // divergence gets `score_earliest * tool_name_weight`.
@@ -1317,8 +1695,8 @@ pub fn opd_train_synthetic_validation(
     learning_rate: f64,
 ) -> Result<(f32, f32)> {
     use candle_core::Var;
-    use candle_nn::optim::{AdamW, ParamsAdamW};
     use candle_nn::Optimizer;
+    use candle_nn::optim::{AdamW, ParamsAdamW};
 
     let device = candle_core::Device::Cpu;
 
@@ -1334,11 +1712,7 @@ pub fn opd_train_synthetic_validation(
     let head_vec: Vec<f32> = (0..(hidden_size * vocab_size))
         .map(|i| ((i as f32 + 7.0) * 0.0007).cos() * 0.2)
         .collect();
-    let head_t = candle_core::Tensor::from_vec(
-        head_vec,
-        (hidden_size, vocab_size),
-        &device,
-    )?;
+    let head_t = candle_core::Tensor::from_vec(head_vec, (hidden_size, vocab_size), &device)?;
 
     // Synthetic teacher: pick K random vocab indices per active
     // position; logprobs uniform over the K support (so the
@@ -1399,7 +1773,9 @@ pub fn opd_train_synthetic_validation(
             first_loss = lv;
         }
         last_loss = lv;
-        optimizer.backward_step(&loss).with_context(|| format!("backward step {step}"))?;
+        optimizer
+            .backward_step(&loss)
+            .with_context(|| format!("backward step {step}"))?;
     }
 
     Ok((first_loss, last_loss))
@@ -1479,8 +1855,8 @@ pub fn build_local_teacher_fixture(
         .context("local-teacher forward pass")?;
         // logits shape: [1, T, V]. Detach autograd — no gradients needed.
         let logits = logits.detach();
-        let log_probs = candle_nn::ops::log_softmax(&logits, 2)
-            .context("local-teacher log_softmax")?;
+        let log_probs =
+            candle_nn::ops::log_softmax(&logits, 2).context("local-teacher log_softmax")?;
         let log_probs_2d = log_probs
             .squeeze(0)
             .context("local-teacher squeeze batch dim")?
@@ -1556,14 +1932,16 @@ fn sample_student_rollout(
     top_p: f32,
     seed: Option<u64>,
 ) -> Result<Vec<u32>> {
+    use kiln_core::sampling::SamplingParams;
     use kiln_model::forward::{
-        LinearAttentionState, model_forward_embed, model_forward_final_norm,
-        model_forward_segment,
+        LinearAttentionState, model_forward_embed, model_forward_final_norm, model_forward_segment,
     };
     use kiln_model::sampling::sample_step;
-    use kiln_core::sampling::SamplingParams;
 
-    anyhow::ensure!(!prompt_tokens.is_empty(), "sample_student_rollout: prompt empty");
+    anyhow::ensure!(
+        !prompt_tokens.is_empty(),
+        "sample_student_rollout: prompt empty"
+    );
 
     let device = weights.embed_tokens.device().clone();
     let head_t = weights.embed_tokens_t.clone();
@@ -1592,10 +1970,8 @@ fn sample_student_rollout(
         .filter(|&n| n > 0)
         .unwrap_or(18);
     let num_segments = default_segments.min(model_config.num_layers);
-    let segments = crate::trainer::compute_segment_boundaries(
-        model_config.num_layers,
-        num_segments,
-    );
+    let segments =
+        crate::trainer::compute_segment_boundaries(model_config.num_layers, num_segments);
     let run_forward = |seq: &[u32]| -> Result<Tensor> {
         let positions: Vec<u32> = (0..seq.len() as u32).collect();
         let (embed_hidden, _) = model_forward_embed(seq, weights)?;
@@ -1672,18 +2048,15 @@ pub fn opd_train(
     };
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
 
-    use crate::SftExample;
+    use crate::Optimizer;
     use crate::trainer::{
         TrainableLoraParams, accumulate_grads, compute_segment_boundaries, lora_weights_detached,
-        tokenize_for_training,
-    };
-    use crate::Optimizer;
-    use kiln_model::backend;
-    use kiln_model::forward::{
-        LinearAttentionState, model_forward_embed, model_forward_final_norm,
-        model_forward_segment,
     };
     use candle_core::Var;
+    use kiln_model::backend;
+    use kiln_model::forward::{
+        LinearAttentionState, model_forward_embed, model_forward_final_norm, model_forward_segment,
+    };
     use std::collections::HashMap;
 
     if prompts.is_empty() {
@@ -1700,9 +2073,13 @@ pub fn opd_train(
             token_counts,
             run_started.elapsed().as_millis() as u64,
             None,
+            None,
             Some(message.to_string()),
         );
-        anyhow::bail!("{}", crate::train_receipt::training_failure_error_message(message));
+        anyhow::bail!(
+            "{}",
+            crate::train_receipt::training_failure_error_message(message)
+        );
     }
 
     let device = weights.embed_tokens.device().clone();
@@ -1714,7 +2091,11 @@ pub fn opd_train(
     // any non-default user override (≠ default_opd_samples_per_prompt
     // = 4) and only auto-scale when the user didn't ask for a
     // specific count.
-    let effective_samples_per_prompt = if config.samples_per_prompt == default_opd_samples_per_prompt() {
+    let effective_samples_per_prompt = if matches!(config.training_mode, OpdTrainingMode::OffPolicy)
+        && config.samples_per_prompt == default_opd_samples_per_prompt()
+    {
+        1
+    } else if config.samples_per_prompt == default_opd_samples_per_prompt() {
         if prompts.len() < 50 {
             64
         } else if prompts.len() < 200 {
@@ -1758,6 +2139,7 @@ pub fn opd_train(
                 token_counts,
                 run_started.elapsed().as_millis() as u64,
                 None,
+                None,
                 Some(format!("{err:#}")),
             );
             return Err(crate::train_receipt::annotate_training_error(err));
@@ -1786,15 +2168,22 @@ pub fn opd_train(
     };
 
     // Tokenize every prompt up-front (cheap relative to the forward
-    // pass) and skip any prompts that produce no supervised assistant
-    // tokens — same shape as sft_train's validity probe.
-    let mut tokenized: Vec<(Vec<u32>, Vec<bool>)> = Vec::with_capacity(prompts.len());
+    // pass) and skip any prompts that produce no supervised action
+    // tokens — same shape as sft_train's validity probe, with optional
+    // trajectory ECHO masks for off-policy agentic data.
+    let mut tokenized: Vec<TokenizedOpdPrompt> = Vec::with_capacity(prompts.len());
     for (idx, prompt) in prompts.iter().enumerate() {
-        let example = SftExample {
-            messages: prompt.messages.clone(),
-        };
-        match tokenize_for_training(&example, tokenizer) {
-            Ok(pair) => tokenized.push(pair),
+        match tokenize_opd_prompt_for_training(prompt, tokenizer, config.echo.as_ref()) {
+            Ok(pair) => {
+                if pair.action_mask.iter().any(|&active| active) {
+                    tokenized.push(pair);
+                } else {
+                    tracing::warn!(
+                        prompt_idx = idx,
+                        "skipping OPD prompt with no action tokens"
+                    );
+                }
+            }
             Err(e) => {
                 tracing::warn!(prompt_idx = idx, error = %e, "skipping OPD prompt");
             }
@@ -1815,9 +2204,13 @@ pub fn opd_train(
             token_counts,
             run_started.elapsed().as_millis() as u64,
             Some(alpha_over_rank),
+            None,
             Some(message.to_string()),
         );
-        anyhow::bail!("{}", crate::train_receipt::training_failure_error_message(message));
+        anyhow::bail!(
+            "{}",
+            crate::train_receipt::training_failure_error_message(message)
+        );
     }
     data_stats.examples_filtered = prompts.len().saturating_sub(tokenized.len());
 
@@ -1840,11 +2233,12 @@ pub fn opd_train(
 
     // Resolve EOS token ids once for rollout termination.
     let eos_token_ids: Vec<u32> = tokenizer.eos_token_ids();
+    let configured_on_policy = matches!(config.training_mode, OpdTrainingMode::OnPolicy);
     let on_policy_enabled = std::env::var("KILN_OPD_OFF_POLICY")
         .ok()
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .map(|off| !off)
-        .unwrap_or(true);
+        .unwrap_or(configured_on_policy);
 
     // Generation-prompt suffix that turns the prompt boundary into the
     // same context the model sees at inference under
@@ -1891,39 +2285,39 @@ pub fn opd_train(
         // per the legacy behavior. Same as pre-fix.
         vec![Vec::new(); prompts.len()]
     } else {
-    prompts
-        .iter()
-        .map(|p| {
-            // Drop trailing assistant message(s) if present; we want the
-            // chat template to *insert* the assistant cue via
-            // add_generation_prompt rather than echo the (dummy) one we
-            // have in the prompt. Convert kiln-train ChatMessage to the
-            // kiln-core variant the template engine expects.
-            let mut msgs: Vec<CoreChatMessage> = p
-                .messages
-                .iter()
-                .map(|m| CoreChatMessage {
-                    role: m.role.clone(),
-                    content: m.content.clone(),
-                    ..Default::default()
-                })
-                .collect();
-            while msgs.last().map(|m| m.role.as_str()) == Some("assistant") {
-                msgs.pop();
-            }
-            let opts = ChatTemplateOptions {
-                template_kwargs: serde_json::Map::from_iter([(
-                    "enable_thinking".to_string(),
-                    serde_json::Value::Bool(false),
-                )]),
-            };
-            let text = tokenizer
-                .apply_chat_template_full_with_options(msgs.as_slice(), None, None, opts)
-                .map_err(|e| anyhow!("apply_chat_template_full_with_options: {e}"))
-                .unwrap_or_default();
-            tokenizer.encode(&text).unwrap_or_default()
-        })
-        .collect()
+        prompts
+            .iter()
+            .map(|p| {
+                // Drop trailing assistant message(s) if present; we want the
+                // chat template to *insert* the assistant cue via
+                // add_generation_prompt rather than echo the (dummy) one we
+                // have in the prompt. Convert kiln-train ChatMessage to the
+                // kiln-core variant the template engine expects.
+                let mut msgs: Vec<CoreChatMessage> = p
+                    .messages
+                    .iter()
+                    .map(|m| CoreChatMessage {
+                        role: m.role.clone(),
+                        content: m.content.clone(),
+                        ..Default::default()
+                    })
+                    .collect();
+                while msgs.last().map(|m| m.role.as_str()) == Some("assistant") {
+                    msgs.pop();
+                }
+                let opts = ChatTemplateOptions {
+                    template_kwargs: serde_json::Map::from_iter([(
+                        "enable_thinking".to_string(),
+                        serde_json::Value::Bool(false),
+                    )]),
+                };
+                let text = tokenizer
+                    .apply_chat_template_full_with_options(msgs.as_slice(), None, None, opts)
+                    .map_err(|e| anyhow!("apply_chat_template_full_with_options: {e}"))
+                    .unwrap_or_default();
+                tokenizer.encode(&text).unwrap_or_default()
+            })
+            .collect()
     };
     if use_chat_template_render {
         let avg_prefix_len = rollout_prompt_prefixes
@@ -2030,7 +2424,10 @@ pub fn opd_train(
         .collect();
     let any_asymmetric = teacher_prompt_tokens.iter().any(|v| !v.is_empty());
     if any_asymmetric {
-        let n_with_extra = teacher_prompt_tokens.iter().filter(|v| !v.is_empty()).count();
+        let n_with_extra = teacher_prompt_tokens
+            .iter()
+            .filter(|v| !v.is_empty())
+            .count();
         let avg_extra: usize = teacher_prompt_tokens
             .iter()
             .filter(|v| !v.is_empty())
@@ -2050,7 +2447,7 @@ pub fn opd_train(
     }
 
     for epoch in 0..epochs {
-        for (prompt_idx, (orig_input_ids, label_mask)) in tokenized.iter().enumerate() {
+        for (prompt_idx, tokenized_prompt) in tokenized.iter().enumerate() {
             // Build the rollout prompt from the pre-rendered chat-template
             // prefix (see above — drops the dummy assistant turn and lets
             // the template emit the proper assistant cue marker tokens).
@@ -2061,15 +2458,16 @@ pub fn opd_train(
             } else {
                 // Fallback path — preserves prior behaviour rather than
                 // failing hard if a chat template is missing.
-                let prompt_end = label_mask
+                let prompt_end = tokenized_prompt
+                    .action_mask
                     .iter()
                     .position(|&m| m)
-                    .unwrap_or(orig_input_ids.len());
-                if prompt_end == 0 || prompt_end >= orig_input_ids.len() {
+                    .unwrap_or(tokenized_prompt.input_ids.len());
+                if prompt_end == 0 || prompt_end >= tokenized_prompt.input_ids.len() {
                     tracing::warn!(prompt_idx, "skipping prompt with no prompt/assistant split");
                     continue;
                 }
-                orig_input_ids[..prompt_end].to_vec()
+                tokenized_prompt.input_ids[..prompt_end].to_vec()
             };
             let rollout_prompt_len = prompt_only.len();
 
@@ -2079,7 +2477,12 @@ pub fn opd_train(
                 // of the teacher-authored assistant turn with the
                 // student's own tokens — the defining property of
                 // on-policy distillation per Lu (2025) §1.
-                let (input_ids_owned, active_positions): (Vec<u32>, Vec<usize>) = if on_policy_enabled {
+                let (input_ids_owned, active_positions, env_mask_owned, total_obs_len): (
+                    Vec<u32>,
+                    Vec<usize>,
+                    Vec<bool>,
+                    usize,
+                ) = if on_policy_enabled {
                     let lora_for_sample = params.as_lora_weights();
                     let step_seed = effective_seed.map(|s| {
                         s.wrapping_add(global_step as u64)
@@ -2100,7 +2503,11 @@ pub fn opd_train(
                     )
                     .with_context(|| format!("on-policy rollout for prompt {prompt_idx}"))?;
                     if sampled.is_empty() {
-                        tracing::warn!(prompt_idx, sample_idx, "student produced 0 new tokens; skipping step");
+                        tracing::warn!(
+                            prompt_idx,
+                            sample_idx,
+                            "student produced 0 new tokens; skipping step"
+                        );
                         continue;
                     }
                     let mut full = prompt_only.clone();
@@ -2110,24 +2517,37 @@ pub fn opd_train(
                     // prompt + the generation-prompt suffix).
                     let active: Vec<usize> =
                         (rollout_prompt_len..rollout_prompt_len + sampled.len()).collect();
-                    (full, active)
+                    let env_mask = vec![false; full.len()];
+                    (full, active, env_mask, 0)
                 } else {
-                    let active: Vec<usize> = label_mask
+                    let active: Vec<usize> = tokenized_prompt
+                        .action_mask
                         .iter()
                         .enumerate()
                         .filter_map(|(i, &m)| if m { Some(i) } else { None })
                         .collect();
-                    (orig_input_ids.clone(), active)
+                    (
+                        tokenized_prompt.input_ids.clone(),
+                        active,
+                        tokenized_prompt.env_mask.clone(),
+                        tokenized_prompt.total_obs_len,
+                    )
                 };
                 let input_ids: &[u32] = &input_ids_owned;
+                let env_mask: &[bool] = &env_mask_owned;
                 if active_positions.is_empty() {
                     continue;
                 }
+                let env_count = env_mask.iter().filter(|&&active| active).count();
                 token_counts.action_tokens = token_counts
                     .action_tokens
                     .saturating_add(active_positions.len() as u64);
+                token_counts.env_tokens = token_counts.env_tokens.saturating_add(env_count as u64);
                 token_counts.context_tokens = token_counts.context_tokens.saturating_add(
-                    input_ids.len().saturating_sub(active_positions.len()) as u64,
+                    input_ids
+                        .len()
+                        .saturating_sub(active_positions.len().saturating_add(env_count))
+                        as u64,
                 );
                 // Gradient-checkpointed step. Runs the model forward in
                 // detached segments to bound activation memory, computes the
@@ -2143,8 +2563,7 @@ pub fn opd_train(
 
                 // === Step 1: detached forward; save segment boundaries ===
                 let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
-                let mut boundary_states: Vec<Tensor> =
-                    Vec::with_capacity(segments.len() + 1);
+                let mut boundary_states: Vec<Tensor> = Vec::with_capacity(segments.len() + 1);
                 boundary_states.push(embed_hidden.detach());
                 {
                     let mut current = boundary_states[0].clone();
@@ -2172,11 +2591,8 @@ pub fn opd_train(
                 // Build a Var so candle autograd routes the kernel's backward
                 // into `final_var.grad()`.
                 let final_var = Var::from_tensor(&final_hidden)?;
-                let normed = model_forward_final_norm(
-                    final_var.as_tensor(),
-                    weights,
-                    model_config,
-                )?;
+                let normed =
+                    model_forward_final_norm(final_var.as_tensor(), weights, model_config)?;
                 // §20 asymmetric teacher conditioning: if this prompt
                 // declared `teacher_extra_messages`, build the teacher's
                 // token sequence as `teacher_prompt_tokens ++ sampled`.
@@ -2227,25 +2643,52 @@ pub fn opd_train(
                     teacher_tokens: teacher_tokens_opt,
                     teacher_active_positions: teacher_active_opt,
                 })?;
-                let loss_val = out.mean_kl.to_scalar::<f32>()? as f64;
                 let active_count = out.active_count;
-                let head_grads = out
-                    .mean_kl
+                let mut loss = out.mean_kl;
+                if let Some(echo_cfg) = &config.echo {
+                    if echo_cfg.lambda != 0.0 && env_count > 0 && total_obs_len > 0 {
+                        if let Some(echo_out) =
+                            crate::echo::echo_step_loss(crate::echo::EchoStepInputs {
+                                tokens: input_ids,
+                                env_mask,
+                                student_hidden: &normed,
+                                head_t: &head_t,
+                                total_obs_len,
+                                chunk_size: 0,
+                                provider: None,
+                            })?
+                        {
+                            let echo_env_ce =
+                                echo_out.mean_ce.to_scalar::<f32>().ok().map(f64::from);
+                            let echo_scaled = echo_out.mean_ce.affine(echo_cfg.lambda, 0.0)?;
+                            loss = loss.add(&echo_scaled)?;
+                            tracing::debug!(
+                                prompt = prompt_idx,
+                                sample = sample_idx,
+                                env_tokens = echo_out.env_count,
+                                total_obs_len,
+                                echo_lambda = echo_cfg.lambda,
+                                echo_env_ce = ?echo_env_ce,
+                                "OPD off-policy path: ECHO env CE active"
+                            );
+                        }
+                    }
+                }
+                let loss_val = loss.to_scalar::<f32>()? as f64;
+                let head_grads = loss
                     .backward()
-                    .context("OPD loss kernel backward at final boundary")?;
+                    .context("OPD/ECHO loss backward at final boundary")?;
                 let mut upstream_grad = head_grads
                     .get(final_var.as_tensor())
                     .ok_or_else(|| anyhow!("no gradient at final_hidden Var"))?
                     .clone()
                     .detach();
                 drop(head_grads);
-                drop(out);
                 drop(normed);
                 drop(final_var);
 
                 // === Step 3: walk segments in reverse, accumulate LoRA grads ===
-                let mut accumulated_grads: HashMap<candle_core::TensorId, Tensor> =
-                    HashMap::new();
+                let mut accumulated_grads: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
                 let all_vars = params.all_vars();
                 for seg_idx in (0..segments.len()).rev() {
                     let (seg_start, seg_end) = segments[seg_idx];
@@ -2265,9 +2708,7 @@ pub fn opd_train(
                         Some(&lora_for_seg),
                     )
                     .with_context(|| {
-                        format!(
-                            "OPD checkpointed reverse segment [{seg_start},{seg_end})"
-                        )
+                        format!("OPD checkpointed reverse segment [{seg_start},{seg_end})")
                     })?;
 
                     // Inject upstream gradient: scalar = sum(seg_output * upstream)
@@ -2280,9 +2721,7 @@ pub fn opd_train(
                     accumulate_grads(&mut accumulated_grads, &seg_grads, &all_vars)?;
                     upstream_grad = seg_grads
                         .get(seg_input_var.as_tensor())
-                        .ok_or_else(|| {
-                            anyhow!("no grad at seg_input_var (seg_idx={seg_idx})")
-                        })?
+                        .ok_or_else(|| anyhow!("no grad at seg_input_var (seg_idx={seg_idx})"))?
                         .clone()
                         .detach();
                     drop(seg_grads);
@@ -2321,12 +2760,9 @@ pub fn opd_train(
                 // finished there. Disabled when `config.checkpoint_interval`
                 // is None or 0.
                 if let Some(interval) = config.checkpoint_interval {
-                    if interval > 0
-                        && global_step % interval == 0
-                        && global_step < total_steps
-                    {
-                        let ckpt_dir = adapter_dir
-                            .join(format!("{adapter_name}-checkpoint-{global_step}"));
+                    if interval > 0 && global_step % interval == 0 && global_step < total_steps {
+                        let ckpt_dir =
+                            adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
                         if let Err(e) = params.sync_to_candle(&*backend_rt) {
                             tracing::warn!(
                                 step = global_step,
@@ -2369,9 +2805,7 @@ pub fn opd_train(
                 // truncation signals are best-effort against the
                 // ground-truth tail; the kl / loss signals are real.
                 if global_step as u64 % validation_cadence == 0 {
-                    let rollout = crate::diagnostics::RolloutSummary::from_tokens(
-                        input_ids, true,
-                    );
+                    let rollout = crate::diagnostics::RolloutSummary::from_tokens(input_ids, true);
                     let snapshot = crate::diagnostics::build_snapshot(
                         global_step as u64,
                         std::slice::from_ref(&rollout),
@@ -2440,6 +2874,7 @@ pub fn opd_train(
         token_counts,
         run_started.elapsed().as_millis() as u64,
         Some(alpha_over_rank),
+        Some(last_loss),
         None,
     );
 
@@ -2459,6 +2894,7 @@ fn write_opd_train_receipt_best_effort(
     token_counts: crate::train_receipt::TokenCountReceipt,
     wall_clock_ms: u64,
     alpha_over_rank: Option<f32>,
+    final_opd_loss: Option<f64>,
     status_error: Option<String>,
 ) {
     let mut receipt = crate::train_receipt::TrainReceipt::new(
@@ -2482,18 +2918,57 @@ fn write_opd_train_receipt_best_effort(
         path: None,
         sha256: training_data_sha256,
     };
+    receipt.opd = Some(crate::train_receipt::OpdReceipt {
+        training_mode: serde_json::to_value(config.training_mode)
+            .ok()
+            .and_then(|value| value.as_str().map(ToString::to_string))
+            .unwrap_or_else(|| "on_policy".to_string()),
+        objective: serde_json::to_value(config.objective)
+            .ok()
+            .and_then(|value| value.as_str().map(ToString::to_string))
+            .unwrap_or_else(|| "reverse_kl".to_string()),
+        loss_granularity: serde_json::to_value(config.loss)
+            .ok()
+            .and_then(|value| value.as_str().map(ToString::to_string))
+            .unwrap_or_else(|| "teacher_top_k".to_string()),
+        teacher_id: None,
+        top_k: matches!(
+            config.loss,
+            OpdLossGranularity::TeacherTopK | OpdLossGranularity::FullVocab
+        )
+        .then_some(config.top_k),
+        samples_per_prompt: config.samples_per_prompt,
+        action_tokens: token_counts.action_tokens,
+        env_tokens: token_counts.env_tokens,
+        echo_combined: config.echo.is_some() && token_counts.env_tokens > 0,
+        echo_lambda: config.echo.as_ref().map(|echo| echo.lambda),
+        initial_opd_loss: None,
+        final_opd_loss,
+    });
+    receipt.echo = match config.echo.as_ref() {
+        Some(echo) => crate::train_receipt::EchoReceipt {
+            enabled: echo.lambda != 0.0,
+            lambda: Some(echo.lambda),
+            env_mask_mode: serde_json::to_value(echo.env_mask_mode)
+                .ok()
+                .and_then(|value| value.as_str().map(ToString::to_string)),
+            warning_filter: Some(echo.warning_filter),
+            initial_env_ce: None,
+            final_env_ce: None,
+        },
+        None => crate::train_receipt::EchoReceipt::disabled(),
+    };
     receipt.adapters.base = crate::train_receipt::adapter_file_receipt(base_adapter_dir);
     receipt.adapters.output = crate::train_receipt::adapter_file_receipt(Some(output_dir));
     receipt.data = data;
     receipt.token_counts = token_counts;
     receipt.runtime.wall_clock_ms = wall_clock_ms;
     if status_error.is_none() {
-        receipt.lora_delta_norms =
-            crate::train_receipt::lora_delta_norm_summary_from_adapter(
-                output_dir,
-                alpha_over_rank.unwrap_or(0.0) as f64,
-            )
-            .unwrap_or_default();
+        receipt.lora_delta_norms = crate::train_receipt::lora_delta_norm_summary_from_adapter(
+            output_dir,
+            alpha_over_rank.unwrap_or(0.0) as f64,
+        )
+        .unwrap_or_default();
         crate::train_receipt::warn_lora_delta_norms(
             "opd",
             adapter_name,
@@ -2517,6 +2992,40 @@ mod tests {
     use super::*;
     use crate::logit_source::FixtureLogitSource;
     use candle_core::{DType, Device};
+    use kiln_core::tokenizer::KilnTokenizer;
+
+    fn off_policy_smoke_tokenizer() -> Result<KilnTokenizer> {
+        let mut vocab = String::from("{");
+        let chars = "userassistanttoolokhiresult<|im_start|><|im_end|>\n ";
+        let mut seen = std::collections::HashSet::new();
+        let mut id = 0u32;
+        for ch in chars.chars() {
+            let key = match ch {
+                '"' => "\\\"".to_string(),
+                '\\' => "\\\\".to_string(),
+                '\n' => "\\n".to_string(),
+                c if (c as u32) < 0x20 => format!("\\u{:04x}", c as u32),
+                c => c.to_string(),
+            };
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if id > 0 {
+                vocab.push(',');
+            }
+            vocab.push_str(&format!("\"{}\":{}", key, id));
+            id += 1;
+        }
+        vocab.push('}');
+        let json = format!(
+            r#"{{"version":"1.0","model":{{"type":"BPE","vocab":{},"merges":[]}}}}"#,
+            vocab
+        );
+        let template = "{% for message in messages -%}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}";
+        Ok(KilnTokenizer::from_bytes(json.as_bytes())
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .with_chat_template(template.to_string()))
+    }
 
     /// End-to-end: feed a tokenized rollout, a fixture teacher, and a
     /// random `student_hidden` into `opd_step_loss`, confirm we get a
@@ -2540,7 +3049,9 @@ mod tests {
             .collect();
         let head_t = Tensor::from_vec(head_vec, (hidden_size, vocab_size), &device)?;
 
-        let tokens: Vec<u32> = (0..seq_len).map(|i| ((i * 7 + 3) % vocab_size) as u32).collect();
+        let tokens: Vec<u32> = (0..seq_len)
+            .map(|i| ((i * 7 + 3) % vocab_size) as u32)
+            .collect();
         let active_positions = vec![3, 5, 7]; // arbitrary completion tokens
 
         // Build a fixture teacher with deterministic top-K at each active position.
@@ -2620,8 +3131,11 @@ mod tests {
         let student_hidden_vec: Vec<f32> = (0..1 * student_seq_len * hidden_size)
             .map(|i| ((i * 13 + 7) % 1000) as f32 / 1000.0)
             .collect();
-        let student_hidden =
-            Tensor::from_vec(student_hidden_vec, (1, student_seq_len, hidden_size), &device)?;
+        let student_hidden = Tensor::from_vec(
+            student_hidden_vec,
+            (1, student_seq_len, hidden_size),
+            &device,
+        )?;
         let head_vec: Vec<f32> = (0..hidden_size * vocab_size)
             .map(|i| ((i * 11 + 5) % 1000) as f32 / 1000.0)
             .collect();
@@ -2718,6 +3232,7 @@ mod tests {
                     content: "Evaluate ∫_0^∞ e^{-x^2} dx".into(),
                 }],
                 teacher_extra_messages: vec![],
+                trajectory: vec![],
             }],
             dataset_path: None,
             teacher: "qwen3.6-27b@local".into(),
@@ -2728,13 +3243,148 @@ mod tests {
         let parsed: OpdRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.teacher, req.teacher);
         assert_eq!(parsed.config.top_k, default_opd_top_k());
-        assert_eq!(parsed.config.samples_per_prompt, default_opd_samples_per_prompt());
-        assert!(matches!(parsed.config.loss, OpdLossGranularity::TeacherTopK));
+        assert_eq!(
+            parsed.config.samples_per_prompt,
+            default_opd_samples_per_prompt()
+        );
+        assert!(matches!(
+            parsed.config.loss,
+            OpdLossGranularity::TeacherTopK
+        ));
+    }
+
+    #[test]
+    fn off_policy_teacher_jsonl_builds_reverse_kl_fixture_and_echo_summary() -> Result<()> {
+        let jsonl = r#"{"id":"ex1","messages":[{"role":"user","content":"hi"}],"teacher_response":"ok","trajectory":[{"role":"assistant","content":"ok","kind":"action"},{"role":"tool","content":"result","kind":"observation"}]}"#;
+        let mut examples = parse_off_policy_distillation_jsonl_str(jsonl)?;
+        let tokenizer = off_policy_smoke_tokenizer()?;
+        let echo = crate::EchoConfig::default();
+        let ce_prepared = prepare_off_policy_distillation_dataset(
+            &examples,
+            &tokenizer,
+            "teacher-fixture",
+            32,
+            2,
+            OpdObjective::CrossEntropy,
+            Some(&echo),
+        )?;
+        examples[0].teacher_tokens = (0..ce_prepared.summary.action_tokens)
+            .map(|idx| TeacherActionToken {
+                token_id: None,
+                token: None,
+                logprob: None,
+                top_logprobs: vec![
+                    TeacherTopLogprob {
+                        token_id: (idx % 16) as u32,
+                        logprob: -0.1,
+                    },
+                    TeacherTopLogprob {
+                        token_id: ((idx + 1) % 16) as u32,
+                        logprob: -2.4,
+                    },
+                ],
+            })
+            .collect();
+        let prepared = prepare_off_policy_distillation_dataset(
+            &examples,
+            &tokenizer,
+            "teacher-fixture",
+            32,
+            2,
+            OpdObjective::ReverseKl,
+            Some(&echo),
+        )?;
+
+        assert_eq!(prepared.prompts.len(), 1);
+        assert_eq!(
+            prepared.teacher.capabilities().teacher_id,
+            "teacher-fixture"
+        );
+        assert_eq!(prepared.summary.examples, 1);
+        assert_eq!(prepared.summary.examples_with_teacher_logprobs, 1);
+        assert_eq!(
+            prepared.summary.action_tokens,
+            ce_prepared.summary.action_tokens
+        );
+        assert!(prepared.summary.env_tokens > 0);
+        assert!(prepared.summary.echo_combined);
+        Ok(())
+    }
+
+    #[test]
+    fn off_policy_teacher_jsonl_cross_entropy_does_not_require_logprobs() -> Result<()> {
+        let jsonl = r#"{"messages":[{"role":"user","content":"hi"}],"teacher_response":"ok"}"#;
+        let examples = parse_off_policy_distillation_jsonl_str(jsonl)?;
+        let tokenizer = off_policy_smoke_tokenizer()?;
+        let prepared = prepare_off_policy_distillation_dataset(
+            &examples,
+            &tokenizer,
+            "teacher-fixture",
+            32,
+            2,
+            OpdObjective::CrossEntropy,
+            None,
+        )?;
+
+        assert_eq!(prepared.prompts.len(), 1);
+        assert_eq!(
+            prepared.teacher.capabilities().teacher_id,
+            "teacher-fixture"
+        );
+        assert_eq!(prepared.summary.objective, OpdObjective::CrossEntropy);
+        assert!(prepared.summary.action_tokens > 0);
+
+        let tokenized = tokenize_opd_prompt_for_training(&prepared.prompts[0], &tokenizer, None)?;
+        let active_positions: Vec<usize> = tokenized
+            .action_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, active)| active.then_some(idx))
+            .collect();
+        let batch =
+            prepared
+                .teacher
+                .fetch_logprobs(&tokenized.input_ids, &active_positions, Some(2))?;
+        let LogprobBatch::TopK(topk) = batch else {
+            panic!("CE fixture should return top-k logprobs");
+        };
+        assert_eq!(topk.indices.len(), active_positions.len() * 2);
+        assert_eq!(topk.logprobs[0], 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn off_policy_loss_composes_action_objective_with_echo_env_ce() -> Result<()> {
+        let kl = compose_off_policy_distillation_loss(
+            OpdObjective::ReverseKl,
+            &[0.2, 0.4],
+            &[1.0, 3.0],
+            Some(0.05),
+        )?;
+        assert_eq!(kl.objective, OpdObjective::ReverseKl);
+        assert!((kl.action_token_loss - 0.3).abs() < 1e-12);
+        assert_eq!(kl.echo_env_ce, Some(2.0));
+        assert_eq!(kl.echo_lambda, Some(0.05));
+        assert!((kl.total_loss - 0.4).abs() < 1e-12);
+
+        let ce = compose_off_policy_distillation_loss(
+            OpdObjective::CrossEntropy,
+            &[1.5, 0.5],
+            &[],
+            Some(0.05),
+        )?;
+        assert_eq!(ce.objective, OpdObjective::CrossEntropy);
+        assert_eq!(ce.echo_env_ce, None);
+        assert_eq!(ce.echo_lambda, None);
+        assert!((ce.total_loss - 1.0).abs() < 1e-12);
+        Ok(())
     }
 
     #[test]
     fn opd_config_defaults_match_grand_plan_section_6() {
         let cfg = OpdConfig::default();
+        assert!(matches!(cfg.training_mode, OpdTrainingMode::OnPolicy));
+        assert!(matches!(cfg.objective, OpdObjective::ReverseKl));
         assert_eq!(cfg.top_k, 32);
         assert_eq!(cfg.samples_per_prompt, 4);
         assert_eq!(cfg.temperature, 1.0);
@@ -2832,12 +3482,8 @@ mod tests {
         // Small enough to converge fast on CPU; representative of
         // the gather + matmul + softmax dynamics.
         let (first, last) = opd_train_synthetic_validation(
-            /* seq_len = */ 16,
-            /* hidden_size = */ 8,
-            /* vocab_size = */ 64,
-            /* top_k = */ 8,
-            /* num_steps = */ 50,
-            /* learning_rate = */ 0.05,
+            /* seq_len = */ 16, /* hidden_size = */ 8, /* vocab_size = */ 64,
+            /* top_k = */ 8, /* num_steps = */ 50, /* learning_rate = */ 0.05,
         )?;
         assert!(
             last < first,
@@ -2947,9 +3593,9 @@ mod tests {
     fn cold_start_overlap_is_median() {
         // Three positions, overlap ratios 0.25, 0.5, 0.75. Median = 0.5.
         let pairs = vec![
-            (vec![1u32, 2, 3, 4], vec![1u32, 10, 11, 12]),     // 0.25
-            (vec![1u32, 2, 3, 4], vec![1u32, 2, 11, 12]),       // 0.5
-            (vec![1u32, 2, 3, 4], vec![1u32, 2, 3, 12]),        // 0.75
+            (vec![1u32, 2, 3, 4], vec![1u32, 10, 11, 12]), // 0.25
+            (vec![1u32, 2, 3, 4], vec![1u32, 2, 11, 12]),  // 0.5
+            (vec![1u32, 2, 3, 4], vec![1u32, 2, 3, 12]),   // 0.75
         ];
         assert!((compute_initial_overlap(&pairs) - 0.5).abs() < 1e-9);
     }
@@ -2960,7 +3606,7 @@ mod tests {
         let pairs = vec![
             (vec![1u32, 2, 3, 4], vec![1u32, 10, 11, 12]), // 0.25
             (vec![1u32, 2, 3, 4], vec![1u32, 10, 11, 12]), // 0.25
-            (vec![1u32, 2, 3, 4], vec![1u32, 2, 11, 12]),   // 0.5
+            (vec![1u32, 2, 3, 4], vec![1u32, 2, 11, 12]),  // 0.5
         ];
         // Median of [0.25, 0.25, 0.5] = 0.25 < 0.5.
         match cold_start_probe_default(&pairs) {
@@ -2983,19 +3629,13 @@ mod tests {
             (vec![1u32, 2, 3, 4], vec![1u32, 2, 3, 12]), // 0.75
             (vec![1u32, 2, 3, 4], vec![1u32, 2, 3, 12]), // 0.75
         ];
-        assert_eq!(
-            cold_start_probe_default(&pairs),
-            ColdStartDecision::Skip
-        );
+        assert_eq!(cold_start_probe_default(&pairs), ColdStartDecision::Skip);
     }
 
     #[test]
     fn cold_start_probe_empty_pairs_is_skip() {
         // Edge case: no probe positions ⇒ vacuously aligned ⇒ Skip.
-        assert_eq!(
-            cold_start_probe_default(&[]),
-            ColdStartDecision::Skip
-        );
+        assert_eq!(cold_start_probe_default(&[]), ColdStartDecision::Skip);
     }
 
     #[test]
@@ -3034,9 +3674,18 @@ mod tests {
         let req = DistillMergeRequest {
             name: "unified-coder".into(),
             sources: vec![
-                DistillMergeSource { adapter: "rust-helper".into(), weight: 1.0 },
-                DistillMergeSource { adapter: "python-helper".into(), weight: 1.0 },
-                DistillMergeSource { adapter: "sql-helper".into(), weight: 0.7 },
+                DistillMergeSource {
+                    adapter: "rust-helper".into(),
+                    weight: 1.0,
+                },
+                DistillMergeSource {
+                    adapter: "python-helper".into(),
+                    weight: 1.0,
+                },
+                DistillMergeSource {
+                    adapter: "sql-helper".into(),
+                    weight: 0.7,
+                },
             ],
             student: "base".into(),
             rollout_budget: 5000,

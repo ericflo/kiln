@@ -2503,6 +2503,73 @@ OPD for high-baseline capabilities.
 - Receipt distinguishes OPD loss from GRPO loss.
 - Includes a small synthetic test.
 
+**Status:** Implemented and validated on RunPod on 2026-05-21.
+
+**Implementation notes:**
+
+- Added explicit OPD training mode/objective configuration:
+  `training_mode = on_policy | off_policy` and
+  `objective = reverse_kl | cross_entropy`.
+- Added a documented off-policy teacher JSONL schema with messages,
+  teacher responses, optional per-action token top-logprob distributions,
+  trajectory action/observation segments, and metadata. The schema is in
+  `docs/OPD_TEACHER_JSONL.md` and linked from `README.md`.
+- Added parser/preparation helpers for off-policy distillation examples:
+  `OffPolicyDistillationExample`, `TeacherActionToken`,
+  `TeacherTopLogprob`, `parse_off_policy_distillation_jsonl_str`,
+  `load_off_policy_distillation_jsonl`,
+  `prepare_off_policy_distillation_dataset`, and
+  `compose_off_policy_distillation_loss`.
+- Extended `/v1/train/opd` so callers can provide either inline `prompts` or a
+  `dataset_path`, but not both. Off-policy JSONL datasets are loaded into a
+  fixture teacher for reverse-KL or cross-entropy action-token supervision.
+- Off-policy replay defaults the effective `samples_per_prompt` to 1 and can
+  combine OPD action-token supervision with ECHO env-token accounting when the
+  JSONL trajectory includes observation tokens and `config.echo` is enabled.
+- `train_receipt.json` now records OPD-specific training metadata separately
+  from GRPO metadata, including training mode, objective, teacher id,
+  action/env token counts, final OPD loss, and whether ECHO was combined.
+
+**Validation evidence:** Focused validation passed on RunPod lease
+`pod-684fd507d9ca2fb6183af36f` / pod `7cgkz5rvm91eq8`: `rustfmt --edition
+2024` on touched Rust files, `cargo test -p kiln-train off_policy --lib`,
+`cargo test -p kiln-train opd_config_defaults_match_grand_plan_section_6
+--lib`, `cargo test -p kiln-train train_receipt_success_round_trip --lib`,
+`cargo check -p kiln-train --lib`, `cargo check -p kiln-server --lib`, and
+`git diff --check`; sentinel `/workspace/kiln-validation/issue37/focused9.ok`.
+
+Actual Qwen3.5-4B validation passed on RunPod lease
+`pod-ad0999c0694eca57da9716df` / pod `m5qfrqcbwt16pe` after provisioning the
+canonical model directory `/workspace/Qwen3.5-4B` and compatibility symlink
+`/workspace/qwen3.5-4b`. The successful run used log
+`/workspace/kiln-validation/issue37/actual12.log`, done sentinel
+`/workspace/kiln-validation/issue37/actual12.done`, success sentinel
+`/workspace/kiln-validation/issue37/actual12.ok`, and receipt summary
+`/workspace/kiln-validation/issue37/receipt-summary-actual12.json`.
+
+The actual-model run built the patched CUDA release server, booted
+`/workspace/Qwen3.5-4B` with served model id `Qwen3.5-4B` on
+`KILN_PORT=18444`, registered fixture teacher `issue37-fixture`, trained
+reverse-KL off-policy OPD adapter `issue37-opd-rkl-actual12`, trained
+cross-entropy JSONL+ECHO adapter `issue37-opd-ce-actual12`, and verified both
+receipts. Receipt summary: reverse-KL action tokens `10`, env tokens `0`,
+final OPD loss `0.20836149156093597`, source `inline_opd_prompts`;
+cross-entropy action tokens `10`, env tokens `1`, ECHO combined `true`, final
+OPD loss `20.56163024902344`, source `jsonl_off_policy_opd_teacher`, JSONL
+sha256 `b1725eaf394fe8e22bdb7a562becf0cf3edfb8640f5fbc7af8c770e1e6784720`.
+
+Earlier attempt `actual11` failed before `/health` because the fresh pod did
+not yet have `/workspace/Qwen3.5-4B`. The failure was not accepted as
+validation; the model was downloaded into the canonical caps path and the
+actual-model validation was rerun as `actual12`.
+
+**Commit SHA:** Pending.
+
+**Remaining risk:** Validation covers real Qwen3.5-4B server/training receipt
+behavior with small fixture teacher data and one JSONL replay example. It does
+not benchmark quality gains from a large external teacher corpus; that remains
+capability-workload dependent.
+
 ### 38. Add Reward-Saturation-Aware Training Recommendation
 
 **Area:** `crates/kiln-train`

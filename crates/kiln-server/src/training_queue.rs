@@ -599,7 +599,53 @@ fn run_opd(
     if req.prompts.is_empty() && req.dataset_path.is_none() {
         return Err("OPD request must include at least one prompt or a dataset_path".into());
     }
-    for (i, prompt) in req.prompts.iter().enumerate() {
+    if req.dataset_path.is_some() && !req.prompts.is_empty() {
+        return Err("OPD request must use either prompts or dataset_path, not both".into());
+    }
+
+    let mut dataset_teacher: Option<std::sync::Arc<dyn kiln_train::LogitSource>> = None;
+    let mut dataset_summary: Option<kiln_train::OffPolicyDistillationSummary> = None;
+    let mut owned_prompts: Option<Vec<kiln_train::opd::OpdPrompt>> = None;
+    if let Some(path) = req.dataset_path.as_deref() {
+        if !matches!(
+            req.config.training_mode,
+            kiln_train::opd::OpdTrainingMode::OffPolicy
+        ) {
+            return Err(
+                "OPD dataset_path is only supported with config.training_mode = \"off_policy\""
+                    .into(),
+            );
+        }
+        let examples = kiln_train::load_off_policy_distillation_jsonl(path)
+            .map_err(|e| format!("load off-policy OPD dataset_path {path:?}: {e:#}"))?;
+        let prepared = kiln_train::prepare_off_policy_distillation_dataset(
+            &examples,
+            tokenizer,
+            req.teacher.clone(),
+            model_config.vocab_size,
+            req.config.top_k,
+            req.config.objective,
+            req.config.echo.as_ref(),
+        )
+        .map_err(|e| format!("prepare off-policy OPD dataset_path {path:?}: {e:#}"))?;
+        tracing::info!(
+            job_id = %job_id,
+            dataset_path = %path,
+            examples = prepared.summary.examples,
+            action_tokens = prepared.summary.action_tokens,
+            env_tokens = prepared.summary.env_tokens,
+            objective = ?prepared.summary.objective,
+            echo_combined = prepared.summary.echo_combined,
+            "loaded off-policy OPD teacher JSONL dataset"
+        );
+        dataset_teacher = Some(std::sync::Arc::new(prepared.teacher));
+        dataset_summary = Some(prepared.summary);
+        owned_prompts = Some(prepared.prompts);
+    }
+    let prompts: &[kiln_train::opd::OpdPrompt] =
+        owned_prompts.as_deref().unwrap_or(req.prompts.as_slice());
+
+    for (i, prompt) in prompts.iter().enumerate() {
         if prompt.messages.is_empty() {
             return Err(format!("OPD prompt {i} has no messages"));
         }
@@ -611,7 +657,8 @@ fn run_opd(
         loss = ?req.config.loss,
         top_k = req.config.top_k,
         samples_per_prompt = req.config.samples_per_prompt,
-        num_prompts = req.prompts.len(),
+        num_prompts = prompts.len(),
+        dataset_path = req.dataset_path.as_deref().unwrap_or(""),
         "OPD training started"
     );
 
@@ -623,58 +670,71 @@ fn run_opd(
     //               top-K teacher logprobs (§3.2 in-process local
     //               teacher).
     //   • Remote  → RemoteTeacher with provider guessed from the URL.
-    let spec = teacher_registry
-        .get(&req.teacher)
-        .ok_or_else(|| format!("teacher alias {:?} not registered (POST /v1/teachers first)", req.teacher))?;
-
-    let resolved_vocab = spec.vocab_size.unwrap_or(model_config.vocab_size);
-    let resolved_max_top_k = spec.max_top_k.unwrap_or(req.config.top_k);
-    let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = match spec.kind {
-        crate::api::teachers::TeacherKind::Fixture => {
-            std::sync::Arc::new(kiln_train::DeterministicUniformLogitSource::new(
-                spec.alias.clone(),
-                resolved_vocab,
-                resolved_max_top_k.max(req.config.top_k),
-            ))
-        }
-        crate::api::teachers::TeacherKind::Local => {
-            std::sync::Arc::new(build_local_teacher_for(
-                &spec,
-                &req.prompts,
-                tokenizer,
-                weights,
-                model_config,
-                req.config.top_k,
-            )?)
-        }
-        crate::api::teachers::TeacherKind::Remote => {
-            let url = spec.url.clone().ok_or_else(|| {
-                format!(
-                    "teacher {:?} is Remote but has no `url` field — re-register with `url` set",
-                    spec.alias
-                )
-            })?;
-            let provider = guess_remote_provider(&url);
-            let cfg = kiln_train::RemoteTeacherConfig {
-                provider,
-                model: spec.model_id.clone(),
-                url,
-                api_key_env: spec.api_key_env.clone(),
-                teacher_id: spec.alias.clone(),
-                tokenizer_hash: spec.tokenizer_hash.clone(),
-                max_top_k: resolved_max_top_k,
-                vocab_size: resolved_vocab,
-                max_cost_usd: Some(req.config.max_cost_usd.unwrap_or(DEFAULT_REMOTE_COST_CAP_USD)),
-                timeout_ms: 60_000,
-            };
-            std::sync::Arc::new(kiln_train::RemoteTeacher::new(cfg))
+    let spec = teacher_registry.get(&req.teacher);
+    let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = if let Some(teacher) =
+        dataset_teacher
+    {
+        teacher
+    } else {
+        let spec = spec.as_ref().ok_or_else(|| {
+            format!(
+                "teacher alias {:?} not registered (POST /v1/teachers first)",
+                req.teacher
+            )
+        })?;
+        let resolved_vocab = spec.vocab_size.unwrap_or(model_config.vocab_size);
+        let resolved_max_top_k = spec.max_top_k.unwrap_or(req.config.top_k);
+        match spec.kind {
+            crate::api::teachers::TeacherKind::Fixture => {
+                std::sync::Arc::new(kiln_train::DeterministicUniformLogitSource::new(
+                    spec.alias.clone(),
+                    resolved_vocab,
+                    resolved_max_top_k.max(req.config.top_k),
+                ))
+            }
+            crate::api::teachers::TeacherKind::Local => {
+                std::sync::Arc::new(build_local_teacher_for(
+                    &spec,
+                    prompts,
+                    tokenizer,
+                    weights,
+                    model_config,
+                    req.config.top_k,
+                )?)
+            }
+            crate::api::teachers::TeacherKind::Remote => {
+                let url = spec.url.clone().ok_or_else(|| {
+                        format!(
+                            "teacher {:?} is Remote but has no `url` field — re-register with `url` set",
+                            spec.alias
+                        )
+                    })?;
+                let provider = guess_remote_provider(&url);
+                let cfg = kiln_train::RemoteTeacherConfig {
+                    provider,
+                    model: spec.model_id.clone(),
+                    url,
+                    api_key_env: spec.api_key_env.clone(),
+                    teacher_id: spec.alias.clone(),
+                    tokenizer_hash: spec.tokenizer_hash.clone(),
+                    max_top_k: resolved_max_top_k,
+                    vocab_size: resolved_vocab,
+                    max_cost_usd: Some(
+                        req.config
+                            .max_cost_usd
+                            .unwrap_or(DEFAULT_REMOTE_COST_CAP_USD),
+                    ),
+                    timeout_ms: 60_000,
+                };
+                std::sync::Arc::new(kiln_train::RemoteTeacher::new(cfg))
+            }
         }
     };
 
     let trainer_progress_cb: trainer::ProgressCallback = progress_cb;
 
     let output_dir = kiln_train::opd::opd_train(
-        &req.prompts,
+        prompts,
         &req.config,
         model_config,
         weights,
@@ -686,20 +746,63 @@ fn run_opd(
     )
     .map_err(|e| format!("opd_train failed: {e:#}"))?;
 
+    if let Some(path) = req.dataset_path.as_deref() {
+        match kiln_train::TrainReceipt::read_from_adapter_dir(&output_dir) {
+            Ok(Some(mut receipt)) => {
+                receipt.training_data = kiln_train::train_receipt::TrainingDataReceipt {
+                    source: "jsonl_off_policy_opd_teacher".to_string(),
+                    path: Some(path.to_string()),
+                    sha256: kiln_train::train_receipt::sha256_file(std::path::Path::new(path)).ok(),
+                };
+                if let Some(opd) = receipt.opd.as_mut() {
+                    opd.teacher_id = Some(req.teacher.clone());
+                }
+                if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
+                    tracing::warn!(job_id = %job_id, "failed to update OPD dataset receipt: {e}");
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(job_id = %job_id, "OPD dataset receipt missing after training");
+            }
+            Err(e) => {
+                tracing::warn!(job_id = %job_id, "failed to read OPD dataset receipt: {e}");
+            }
+        }
+    }
+
     // §8.11 reproducibility receipt — every adapter ships with one.
     let seed = req.config.seed.unwrap_or(0);
     let hyperparameters = serde_json::to_value(&req.config)
         .unwrap_or_else(|_| serde_json::json!({"error": "failed to serialize OpdConfig"}));
-    let receipt = kiln_train::AdapterReceipt::new(adapter_name, "opd", seed)
-        .with_teacher(kiln_train::TeacherDescriptor {
+    let teacher_descriptor = spec
+        .map(|spec| kiln_train::TeacherDescriptor {
             alias: spec.alias.clone(),
             model_id: spec.model_id.clone(),
             model_version_hash: None,
             snapshot_url: None,
         })
+        .unwrap_or_else(|| kiln_train::TeacherDescriptor {
+            alias: req.teacher.clone(),
+            model_id: req.teacher.clone(),
+            model_version_hash: None,
+            snapshot_url: None,
+        });
+    let receipt = kiln_train::AdapterReceipt::new(adapter_name, "opd", seed)
+        .with_teacher(teacher_descriptor)
         .with_hyperparameters(hyperparameters);
     if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
         tracing::warn!(job_id = %job_id, "failed to write OPD receipt: {e}");
+    }
+
+    if let Some(summary) = dataset_summary {
+        tracing::info!(
+            job_id = %job_id,
+            examples = summary.examples,
+            action_tokens = summary.action_tokens,
+            env_tokens = summary.env_tokens,
+            objective = ?summary.objective,
+            "off-policy OPD dataset training summary"
+        );
     }
 
     Ok(output_dir)
@@ -724,7 +827,10 @@ fn run_opd(
 #[allow(clippy::too_many_arguments)]
 fn build_multi_tenant_merge_teacher(
     teacher_id: &str,
-    per_source: &[(kiln_train::DistillMergeSource, Vec<kiln_train::opd::OpdPrompt>)],
+    per_source: &[(
+        kiln_train::DistillMergeSource,
+        Vec<kiln_train::opd::OpdPrompt>,
+    )],
     adapter_dir: &std::path::Path,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     weights: &kiln_model::forward::GpuWeights,
@@ -852,14 +958,16 @@ fn build_self_distill_teacher(
         let student_ex = kiln_train::SftExample {
             messages: prompt.messages.clone(),
         };
-        let (student_tokens, student_label_mask) =
-            match kiln_train::trainer::tokenize_for_training(&student_ex, tokenizer) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(prompt_idx = i, error = %e, "self-distill: skipping student-tokenize failure");
-                    continue;
-                }
-            };
+        let (student_tokens, student_label_mask) = match kiln_train::trainer::tokenize_for_training(
+            &student_ex,
+            tokenizer,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(prompt_idx = i, error = %e, "self-distill: skipping student-tokenize failure");
+                continue;
+            }
+        };
         let active: Vec<usize> = student_label_mask
             .iter()
             .enumerate()
@@ -911,14 +1019,16 @@ fn build_self_distill_teacher(
         let teacher_ex = kiln_train::SftExample {
             messages: teacher_messages,
         };
-        let (teacher_tokens, _) =
-            match kiln_train::trainer::tokenize_for_training(&teacher_ex, tokenizer) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(prompt_idx = i, error = %e, "self-distill: skipping teacher-tokenize failure");
-                    continue;
-                }
-            };
+        let (teacher_tokens, _) = match kiln_train::trainer::tokenize_for_training(
+            &teacher_ex,
+            tokenizer,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(prompt_idx = i, error = %e, "self-distill: skipping teacher-tokenize failure");
+                continue;
+            }
+        };
         student_active.push((student_tokens, active.clone()));
         // Teacher-side active positions: the suffix of the teacher
         // tokenization that aligns with the student's active span.
@@ -951,12 +1061,11 @@ fn build_self_distill_teacher(
     )
     .map_err(|e| format!("self-distill local-teacher forward: {e:#}"))?;
 
-    let mut student_fixture =
-        kiln_train::logit_source::FixtureLogitSource::uniform_topk(
-            teacher_id.to_string(),
-            model_config.vocab_size,
-            top_k,
-        );
+    let mut student_fixture = kiln_train::logit_source::FixtureLogitSource::uniform_topk(
+        teacher_id.to_string(),
+        model_config.vocab_size,
+        top_k,
+    );
 
     // Transplant teacher-key entries → student-key entries.
     for ((s_tokens, s_active), (t_tokens, t_active)) in
@@ -1208,15 +1317,19 @@ fn run_distill_refresh(
             ))
         }
         crate::api::teachers::TeacherKind::Local => std::sync::Arc::new(
-            build_local_teacher_for(&spec, &prompts, tokenizer, weights, model_config, req.config.top_k)
-                .map_err(|e| format!("distill_refresh phase 2 local-teacher build: {e}"))?,
+            build_local_teacher_for(
+                &spec,
+                &prompts,
+                tokenizer,
+                weights,
+                model_config,
+                req.config.top_k,
+            )
+            .map_err(|e| format!("distill_refresh phase 2 local-teacher build: {e}"))?,
         ),
         crate::api::teachers::TeacherKind::Remote => {
             let url = spec.url.clone().ok_or_else(|| {
-                format!(
-                    "teacher {:?} is Remote but has no `url` field",
-                    spec.alias
-                )
+                format!("teacher {:?} is Remote but has no `url` field", spec.alias)
             })?;
             let cfg = kiln_train::RemoteTeacherConfig {
                 provider: guess_remote_provider(&url),
@@ -1227,7 +1340,11 @@ fn run_distill_refresh(
                 tokenizer_hash: spec.tokenizer_hash.clone(),
                 max_top_k: resolved_max_top_k,
                 vocab_size: resolved_vocab,
-                max_cost_usd: Some(req.config.max_cost_usd.unwrap_or(DEFAULT_REMOTE_COST_CAP_USD)),
+                max_cost_usd: Some(
+                    req.config
+                        .max_cost_usd
+                        .unwrap_or(DEFAULT_REMOTE_COST_CAP_USD),
+                ),
                 timeout_ms: 60_000,
             };
             std::sync::Arc::new(kiln_train::RemoteTeacher::new(cfg))
@@ -1271,9 +1388,9 @@ fn run_distill_refresh(
             model_version_hash: None,
             snapshot_url: None,
         })
-        .with_hyperparameters(serde_json::to_value(req).unwrap_or_else(|_| {
-            serde_json::json!({"error": "failed to serialize DistillRefreshRequest"})
-        }));
+        .with_hyperparameters(serde_json::to_value(req).unwrap_or_else(
+            |_| serde_json::json!({"error": "failed to serialize DistillRefreshRequest"}),
+        ));
     if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
         tracing::warn!(job_id = %job_id, "failed to write distill_refresh receipt: {e}");
     }
@@ -1316,8 +1433,10 @@ fn run_distill_merge(
     // replay history we fall back to the wide canonical seed-prompt
     // bank for that source so the runtime still produces a real
     // adapter; the user is warned via tracing.
-    let mut per_source: Vec<(kiln_train::DistillMergeSource, Vec<kiln_train::opd::OpdPrompt>)> =
-        Vec::new();
+    let mut per_source: Vec<(
+        kiln_train::DistillMergeSource,
+        Vec<kiln_train::opd::OpdPrompt>,
+    )> = Vec::new();
     for source in &req.sources {
         let src_dir = adapter_dir.join(&source.adapter);
         if !src_dir.exists() {
@@ -1373,8 +1492,8 @@ fn run_distill_merge(
     // the base-model teacher for that source's prompts and surface
     // the issue via tracing — the run still produces a real adapter.
     let teacher_id = format!("merge-multi:{}", req.name);
-    let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = std::sync::Arc::new(
-        build_multi_tenant_merge_teacher(
+    let teacher: std::sync::Arc<dyn kiln_train::LogitSource> =
+        std::sync::Arc::new(build_multi_tenant_merge_teacher(
             &teacher_id,
             &per_source,
             adapter_dir,
@@ -1383,8 +1502,7 @@ fn run_distill_merge(
             model_config,
             req.config.top_k,
             job_id,
-        )?,
-    );
+        )?);
 
     let mut merge_config = req.config.clone();
     if req.student != "base" {
@@ -1479,6 +1597,7 @@ fn derive_source_prompts(
                     out.push(kiln_train::opd::OpdPrompt {
                         messages: chat,
                         teacher_extra_messages: vec![],
+                        trajectory: vec![],
                     });
                 }
             }
@@ -1554,8 +1673,15 @@ fn run_distill_pump(
             ))
         }
         crate::api::teachers::TeacherKind::Local => std::sync::Arc::new(
-            build_local_teacher_for(&spec, &prompts, tokenizer, weights, model_config, req.config.top_k)
-                .map_err(|e| format!("distill_pump local-teacher build: {e}"))?,
+            build_local_teacher_for(
+                &spec,
+                &prompts,
+                tokenizer,
+                weights,
+                model_config,
+                req.config.top_k,
+            )
+            .map_err(|e| format!("distill_pump local-teacher build: {e}"))?,
         ),
         crate::api::teachers::TeacherKind::Remote => {
             let url = spec.url.clone().ok_or_else(|| {
@@ -1570,7 +1696,11 @@ fn run_distill_pump(
                 tokenizer_hash: spec.tokenizer_hash.clone(),
                 max_top_k: resolved_max_top_k,
                 vocab_size: resolved_vocab,
-                max_cost_usd: Some(req.config.max_cost_usd.unwrap_or(DEFAULT_REMOTE_COST_CAP_USD)),
+                max_cost_usd: Some(
+                    req.config
+                        .max_cost_usd
+                        .unwrap_or(DEFAULT_REMOTE_COST_CAP_USD),
+                ),
                 timeout_ms: 60_000,
             };
             std::sync::Arc::new(kiln_train::RemoteTeacher::new(cfg))
@@ -1657,6 +1787,7 @@ fn canonical_domain_seed_prompts(domain: &str) -> Vec<kiln_train::opd::OpdPrompt
                 content: (*p).into(),
             }],
             teacher_extra_messages: vec![],
+            trajectory: vec![],
         })
         .collect()
 }
@@ -1700,10 +1831,8 @@ fn run_distill_self(
     if req.name.trim().is_empty() {
         return Err("distill_self: name must be non-empty".into());
     }
-    let prompts: Vec<kiln_train::opd::OpdPrompt> = req
-        .prompts
-        .clone()
-        .unwrap_or_else(wide_seed_prompts);
+    let prompts: Vec<kiln_train::opd::OpdPrompt> =
+        req.prompts.clone().unwrap_or_else(wide_seed_prompts);
     if prompts.is_empty() {
         return Err("distill_self: prompts resolved to zero items".into());
     }
@@ -1892,7 +2021,8 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     // new-knowledge suite names so we can enqueue dual evals after
     // training completes. The thresholds from the request become
     // min_accuracy on each PostEvalConfig.
-    let distill_refresh_dual: Option<(Option<String>, Option<String>, f64, f64)> = match &entry.job {
+    let distill_refresh_dual: Option<(Option<String>, Option<String>, f64, f64)> = match &entry.job
+    {
         QueuedJob::DistillRefresh(req) => Some((
             req.if_eval_suite.clone(),
             req.new_knowledge_eval_suite.clone(),
@@ -2123,7 +2253,8 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                         min_accuracy: None,
                         include_baseline: true,
                     };
-                    if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg) {
+                    if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg)
+                    {
                         tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh IF-eval enqueue failed");
                     } else {
                         tracing::info!(job_id = %job_id, suite = %suite, "distill_refresh IF-eval queued");
@@ -2136,7 +2267,8 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                         min_accuracy: None,
                         include_baseline: true,
                     };
-                    if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg) {
+                    if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg)
+                    {
                         tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh QA-eval enqueue failed");
                     } else {
                         tracing::info!(job_id = %job_id, suite = %suite, "distill_refresh QA-eval queued");

@@ -156,6 +156,17 @@ requests.post("http://localhost:8420/v1/train/agentic", json={
 
 See [docs/ECHO_GUIDE.md](docs/ECHO_GUIDE.md) for full ECHO usage (CLI flags, env vars, verifier-free adaptation per paper §5.5, and the receipt-grade `env_ce_drop_pct` diagnostic).
 
+### Off-policy OPD teacher data
+
+For saturated tasks where reward-only GRPO is low signal, kiln-train also
+accepts off-policy teacher distillation data: prompt messages plus a teacher
+response, optionally with per-token teacher top-logprobs for reverse-KL. The
+same agentic `trajectory` shape can be attached so action tokens receive OPD
+supervision while observation tokens are accounted for ECHO.
+
+See [docs/OPD_TEACHER_JSONL.md](docs/OPD_TEACHER_JSONL.md) for the JSONL
+schema and the `reverse_kl` vs `cross_entropy` objective contract.
+
 ## The Eval Loop
 
 Training is half the story; the other half is knowing whether your last training run actually helped. Kiln's eval system runs in the same process, against the same model weights, and treats your evals as first-class artifacts — registered suites, drillable per-example outcomes, A/B comparisons across adapters, and a judgment flywheel that turns your A/B picks into a *local* judge LoRA you can re-use.

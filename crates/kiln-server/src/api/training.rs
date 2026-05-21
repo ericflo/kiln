@@ -527,6 +527,11 @@ async fn submit_opd(
             "OPD request must include at least one prompt or a dataset_path".to_string(),
         ));
     }
+    if req.dataset_path.is_some() && !req.prompts.is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "OPD request must use either prompts or dataset_path, not both".to_string(),
+        ));
+    }
     if req.teacher.trim().is_empty() {
         return Err(ApiError::training_invalid_request(
             "OPD request must specify a teacher alias (e.g. \"qwen3.6-27b@local\")".to_string(),
@@ -606,9 +611,7 @@ async fn submit_opd(
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
-        message: format!(
-            "Queued OPD training (position {queue_position} in queue)."
-        ),
+        message: format!("Queued OPD training (position {queue_position} in queue)."),
     }))
 }
 
@@ -709,9 +712,7 @@ async fn submit_distill_refresh(
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
-        message: format!(
-            "Queued distill/refresh (position {queue_position} in queue)."
-        ),
+        message: format!("Queued distill/refresh (position {queue_position} in queue)."),
     }))
 }
 
@@ -950,8 +951,12 @@ async fn list_queue(State(state): State<AppState>) -> Json<QueueResponse> {
     // time when the terminal-transition timestamp is missing — e.g., an
     // archived entry that pre-dates the `finished_unix_ms` field).
     completed.sort_by(|a, b| {
-        let a_t = a.finished_unix_ms.unwrap_or_else(|| a.submitted_unix_ms.unwrap_or(0));
-        let b_t = b.finished_unix_ms.unwrap_or_else(|| b.submitted_unix_ms.unwrap_or(0));
+        let a_t = a
+            .finished_unix_ms
+            .unwrap_or_else(|| a.submitted_unix_ms.unwrap_or(0));
+        let b_t = b
+            .finished_unix_ms
+            .unwrap_or_else(|| b.submitted_unix_ms.unwrap_or(0));
         b_t.cmp(&a_t)
     });
 
@@ -1052,8 +1057,8 @@ async fn delete_archived_job(
     }
 
     // Delete the on-disk archive file. Missing is fine (already gone).
-    let archive_path = crate::training_history::archive_dir(&state.adapter_dir)
-        .join(format!("{job_id}.json"));
+    let archive_path =
+        crate::training_history::archive_dir(&state.adapter_dir).join(format!("{job_id}.json"));
     let removed_file = match std::fs::remove_file(&archive_path) {
         Ok(_) => true,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
@@ -1182,8 +1187,8 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiln_train::{ChatMessage, GrpoConfig, OpdLossGranularity, ScoredCompletion};
     use kiln_train::opd::{OpdConfig, OpdPrompt};
+    use kiln_train::{ChatMessage, GrpoConfig, OpdLossGranularity, ScoredCompletion};
 
     fn grpo_group() -> GrpoGroup {
         GrpoGroup {
@@ -1250,6 +1255,7 @@ mod tests {
                     content: "Solve 5x + 7 = 22".into(),
                 }],
                 teacher_extra_messages: vec![],
+                trajectory: vec![],
             }],
             dataset_path: None,
             teacher: "qwen3.6-27b@local".into(),
@@ -1267,7 +1273,10 @@ mod tests {
         assert_eq!(parsed.config.top_k, 32);
         assert_eq!(parsed.config.samples_per_prompt, 4);
         assert!((parsed.config.top_p - 0.9).abs() < 1e-9);
-        assert!(matches!(parsed.config.loss, OpdLossGranularity::TeacherTopK));
+        assert!(matches!(
+            parsed.config.loss,
+            OpdLossGranularity::TeacherTopK
+        ));
         assert_eq!(parsed.config.max_tokens, 7168);
     }
 
@@ -1276,7 +1285,8 @@ mod tests {
         // A streaming-dataset payload — no inline prompts but a
         // `dataset_path` set. The `submit_opd` handler treats this as
         // valid; tested at the wire level.
-        let json = r#"{"prompts":[],"dataset_path":"/tmp/opd.jsonl","teacher":"qwen3.6-27b@openrouter"}"#;
+        let json =
+            r#"{"prompts":[],"dataset_path":"/tmp/opd.jsonl","teacher":"qwen3.6-27b@openrouter"}"#;
         let req: OpdRequest = serde_json::from_str(json).unwrap();
         assert!(req.prompts.is_empty());
         assert_eq!(req.dataset_path.as_deref(), Some("/tmp/opd.jsonl"));

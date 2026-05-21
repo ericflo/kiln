@@ -92,6 +92,8 @@ pub struct TrainReceipt {
     pub training_data: TrainingDataReceipt,
     pub hyperparameters: HyperparameterReceipt,
     pub grpo: Option<GrpoReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opd: Option<OpdReceipt>,
     pub echo: EchoReceipt,
     pub no_policy_loss: bool,
     pub data: DataStatsReceipt,
@@ -180,6 +182,22 @@ pub struct GrpoReceipt {
     pub is_level: serde_json::Value,
     pub reference_policy: serde_json::Value,
     pub entropy_aware_kl_quantile: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpdReceipt {
+    pub training_mode: String,
+    pub objective: String,
+    pub loss_granularity: String,
+    pub teacher_id: Option<String>,
+    pub top_k: Option<usize>,
+    pub samples_per_prompt: usize,
+    pub action_tokens: u64,
+    pub env_tokens: u64,
+    pub echo_combined: bool,
+    pub echo_lambda: Option<f64>,
+    pub initial_opd_loss: Option<f64>,
+    pub final_opd_loss: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -560,6 +578,7 @@ impl TrainReceipt {
             },
             hyperparameters,
             grpo: None,
+            opd: None,
             echo: EchoReceipt::disabled(),
             no_policy_loss: false,
             data: DataStatsReceipt::default(),
@@ -1815,7 +1834,9 @@ mod tests {
 
         receipt.write_to_adapter_dir(dir.path())?;
 
-        let manifest_path = dir.path().join(crate::adapter_output::ADAPTER_MANIFEST_FILENAME);
+        let manifest_path = dir
+            .path()
+            .join(crate::adapter_output::ADAPTER_MANIFEST_FILENAME);
         assert!(manifest_path.is_file());
         let manifest = crate::adapter_output::read_adapter_manifest(&manifest_path)?;
         assert_eq!(manifest.adapter_name, "adapter-manifest");
