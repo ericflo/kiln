@@ -191,6 +191,12 @@ fn write_vk_grpo_train_receipt_best_effort(
             alpha_over_rank.unwrap_or(0.0) as f64,
         )
         .unwrap_or_default();
+    crate::train_receipt::warn_lora_delta_norms(
+        "vk_grpo",
+        adapter_name,
+        &receipt.lora_delta_norms,
+        alpha_over_rank.unwrap_or(0.0) as f64,
+    );
     if let Err(err) = receipt.write_to_adapter_dir(output_dir) {
         tracing::warn!(adapter = adapter_name, error = %err, "failed to write vk-native GRPO train receipt");
     }
@@ -242,6 +248,12 @@ fn write_vk_sft_train_receipt_best_effort(
             alpha_over_rank.unwrap_or(0.0) as f64,
         )
         .unwrap_or_default();
+    crate::train_receipt::warn_lora_delta_norms(
+        "vk_sft",
+        adapter_name,
+        &receipt.lora_delta_norms,
+        alpha_over_rank.unwrap_or(0.0) as f64,
+    );
     if let Err(err) = receipt.write_to_adapter_dir(output_dir) {
         tracing::warn!(adapter = adapter_name, error = %err, "failed to write vk-native SFT train receipt");
     }

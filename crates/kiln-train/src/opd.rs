@@ -2492,6 +2492,12 @@ fn write_opd_train_receipt_best_effort(
                 alpha_over_rank.unwrap_or(0.0) as f64,
             )
             .unwrap_or_default();
+        crate::train_receipt::warn_lora_delta_norms(
+            "opd",
+            adapter_name,
+            &receipt.lora_delta_norms,
+            alpha_over_rank.unwrap_or(0.0) as f64,
+        );
     }
     if let Some(err) = status_error {
         receipt = receipt.mark_failed(err);

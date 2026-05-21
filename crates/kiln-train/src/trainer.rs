@@ -3,7 +3,7 @@
 //! Trains LoRA adapter weights directly on the already-loaded model's GPU
 //! tensors. No Python sidecar, no second model copy, single process.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -269,6 +269,22 @@ pub struct TrainableLoraLayerParams {
     pub gate_proj: Option<(Var, Var)>,
     pub up_proj: Option<(Var, Var)>,
     pub down_proj: Option<(Var, Var)>,
+}
+
+struct LoraVarRef<'a> {
+    module: &'static str,
+    var: &'a Var,
+}
+
+fn push_lora_var_pair<'a>(
+    vars: &mut Vec<LoraVarRef<'a>>,
+    module: &'static str,
+    pair: &'a Option<(Var, Var)>,
+) {
+    if let Some((a, b)) = pair {
+        vars.push(LoraVarRef { module, var: a });
+        vars.push(LoraVarRef { module, var: b });
+    }
 }
 
 impl TrainableLoraParams {
@@ -676,26 +692,25 @@ impl TrainableLoraParams {
 
     /// Collect all Var references for gradient extraction and updates.
     pub fn all_vars(&self) -> Vec<&Var> {
+        self.all_vars_with_modules()
+            .into_iter()
+            .map(|entry| entry.var)
+            .collect()
+    }
+
+    fn all_vars_with_modules(&self) -> Vec<LoraVarRef<'_>> {
         let mut vars = Vec::new();
         for layer in &self.layers {
-            let pairs: [&Option<(Var, Var)>; 10] = [
-                &layer.q_proj,
-                &layer.k_proj,
-                &layer.v_proj,
-                &layer.o_proj,
-                &layer.in_proj_qkv,
-                &layer.in_proj_z,
-                &layer.gdn_out_proj,
-                &layer.gate_proj,
-                &layer.up_proj,
-                &layer.down_proj,
-            ];
-            for pair in pairs {
-                if let Some((a, b)) = pair {
-                    vars.push(a);
-                    vars.push(b);
-                }
-            }
+            push_lora_var_pair(&mut vars, "q_proj", &layer.q_proj);
+            push_lora_var_pair(&mut vars, "k_proj", &layer.k_proj);
+            push_lora_var_pair(&mut vars, "v_proj", &layer.v_proj);
+            push_lora_var_pair(&mut vars, "o_proj", &layer.o_proj);
+            push_lora_var_pair(&mut vars, "in_proj_qkv", &layer.in_proj_qkv);
+            push_lora_var_pair(&mut vars, "in_proj_z", &layer.in_proj_z);
+            push_lora_var_pair(&mut vars, "out_proj", &layer.gdn_out_proj);
+            push_lora_var_pair(&mut vars, "gate_proj", &layer.gate_proj);
+            push_lora_var_pair(&mut vars, "up_proj", &layer.up_proj);
+            push_lora_var_pair(&mut vars, "down_proj", &layer.down_proj);
         }
         vars
     }
@@ -1211,6 +1226,7 @@ fn write_sft_train_receipt_best_effort(
     data: crate::train_receipt::DataStatsReceipt,
     token_counts: crate::train_receipt::TokenCountReceipt,
     wall_clock_ms: u64,
+    lora_grad_norms: Vec<crate::train_receipt::LoraGradNormSummary>,
     adapter_smoke_test: Option<crate::train_receipt::AdapterSmokeTestReceipt>,
     status_error: Option<String>,
 ) {
@@ -1232,6 +1248,7 @@ fn write_sft_train_receipt_best_effort(
     receipt.data = data;
     receipt.token_counts = token_counts;
     receipt.runtime.wall_clock_ms = wall_clock_ms;
+    receipt.lora_grad_norms = lora_grad_norms;
     receipt.adapter_smoke_test = adapter_smoke_test;
     crate::train_receipt::log_training_token_counts("sft", &receipt.token_counts);
     if status_error.is_none() {
@@ -1244,6 +1261,12 @@ fn write_sft_train_receipt_best_effort(
                 tracing::warn!(adapter = adapter_name, error = %err, "failed to summarize LoRA delta norms for train receipt");
                 Vec::new()
             });
+        crate::train_receipt::warn_lora_delta_norms(
+            "sft",
+            adapter_name,
+            &receipt.lora_delta_norms,
+            alpha_over_rank.unwrap_or(0.0) as f64,
+        );
     }
     if let Some(err) = status_error {
         receipt = receipt.mark_failed(err);
@@ -1271,6 +1294,7 @@ fn build_grpo_train_receipt(
     wall_clock_ms: u64,
     dynamic_groups_filtered: usize,
     adapter_smoke_test: Option<crate::train_receipt::AdapterSmokeTestReceipt>,
+    lora_grad_norms: Vec<crate::train_receipt::LoraGradNormSummary>,
     status_error: Option<String>,
 ) -> crate::train_receipt::TrainReceipt {
     let mut receipt = crate::train_receipt::TrainReceipt::new(
@@ -1293,6 +1317,7 @@ fn build_grpo_train_receipt(
     receipt.token_counts = token_counts;
     receipt.runtime.wall_clock_ms = wall_clock_ms;
     receipt.adapter_smoke_test = adapter_smoke_test;
+    receipt.lora_grad_norms = lora_grad_norms;
     crate::train_receipt::log_training_token_counts("grpo", &receipt.token_counts);
     crate::train_receipt::warn_echo_enabled_without_env_tokens(
         "grpo",
@@ -1309,6 +1334,12 @@ fn build_grpo_train_receipt(
                 tracing::warn!(adapter = adapter_name, error = %err, "failed to summarize LoRA delta norms for train receipt");
                 Vec::new()
             });
+        crate::train_receipt::warn_lora_delta_norms(
+            "grpo",
+            adapter_name,
+            &receipt.lora_delta_norms,
+            alpha_over_rank.unwrap_or(0.0) as f64,
+        );
     }
     if let Some(err) = status_error {
         receipt = receipt.mark_failed(err);
@@ -1334,6 +1365,7 @@ fn write_grpo_train_receipt_best_effort(
     wall_clock_ms: u64,
     dynamic_groups_filtered: usize,
     adapter_smoke_test: Option<crate::train_receipt::AdapterSmokeTestReceipt>,
+    lora_grad_norms: Vec<crate::train_receipt::LoraGradNormSummary>,
     status_error: Option<String>,
 ) {
     let receipt = build_grpo_train_receipt(
@@ -1353,6 +1385,7 @@ fn write_grpo_train_receipt_best_effort(
         wall_clock_ms,
         dynamic_groups_filtered,
         adapter_smoke_test,
+        lora_grad_norms,
         status_error,
     );
     if let Err(err) = receipt.write_to_adapter_dir(output_dir) {
@@ -1391,6 +1424,7 @@ pub fn sft_train(
         ..Default::default()
     };
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+    let mut lora_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
     let requested_base_adapter_dir = config
         .base_adapter
         .as_deref()
@@ -1430,6 +1464,7 @@ pub fn sft_train(
                 data_stats,
                 token_counts,
                 run_started.elapsed().as_millis() as u64,
+                Vec::new(),
                 None,
                 Some(message),
             );
@@ -1482,6 +1517,7 @@ pub fn sft_train(
                 data_stats,
                 token_counts,
                 run_started.elapsed().as_millis() as u64,
+                Vec::new(),
                 None,
                 Some(message),
             );
@@ -1503,6 +1539,7 @@ pub fn sft_train(
         num_vars = params.all_vars().len(),
         "initialized trainable LoRA parameters"
     );
+    let lora_grad_index = LoraGradNormIndex::new(&params);
 
     if let Some(base_dir) = base_adapter_dir.as_deref() {
         let n_loaded = params.load_from_safetensors(base_dir, &device)?;
@@ -1621,6 +1658,11 @@ pub fn sft_train(
                         flce_provider,
                     )?;
                     loss_val = lv;
+                    observe_lora_grad_norms_from_map(
+                        &mut lora_grad_norms,
+                        &lora_grad_index,
+                        &accumulated_grads,
+                    )?;
                     optimizer_step_from_map(
                         &*backend,
                         &params,
@@ -1642,6 +1684,11 @@ pub fn sft_train(
                         flce_provider,
                     )?;
                     loss_val = lv;
+                    observe_lora_grad_norms_from_grad_store(
+                        &mut lora_grad_norms,
+                        &params,
+                        &grads,
+                    )?;
                     optimizer_step(
                         &*backend,
                         &params,
@@ -1779,6 +1826,7 @@ pub fn sft_train(
         data_stats,
         token_counts,
         run_started.elapsed().as_millis() as u64,
+        lora_grad_norms.finish(),
         adapter_smoke_test,
         status_error,
     );
@@ -1824,6 +1872,7 @@ pub fn grpo_train(
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
     let mut echo_metrics = crate::train_receipt::EchoActivityMetrics::default();
     let mut reward_stats = crate::train_receipt::RewardStatsReceipt::default();
+    let mut lora_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
     let mut dynamic_groups_filtered = 0usize;
     tracing::info!(
         num_groups = groups.len(),
@@ -1866,6 +1915,7 @@ pub fn grpo_train(
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
                 None,
+                Vec::new(),
                 Some(message),
             );
             return Err(err);
@@ -1924,6 +1974,7 @@ pub fn grpo_train(
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
                 None,
+                Vec::new(),
                 Some(message),
             );
             return Err(err);
@@ -1944,6 +1995,7 @@ pub fn grpo_train(
         num_vars = params.all_vars().len(),
         "initialized trainable LoRA parameters"
     );
+    let lora_grad_index = LoraGradNormIndex::new(&params);
 
     if let Some(base_dir) = base_adapter_dir.as_deref() {
         let n_loaded = params.load_from_safetensors(base_dir, &device)?;
@@ -2069,7 +2121,7 @@ pub fn grpo_train(
         for (group_idx, tgroup) in tokenized_groups.iter().enumerate() {
             let num_completions = tgroup.completions.len();
             let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(tgroup));
-            let step_report = train_tokenized_grpo_group(
+            let step_report = train_tokenized_grpo_group_with_grad_norms(
                 &*backend,
                 tgroup,
                 weights,
@@ -2079,6 +2131,8 @@ pub fn grpo_train(
                 segments.as_deref(),
                 &device,
                 opt_state.as_mut(),
+                &mut lora_grad_norms,
+                &lora_grad_index,
                 ema_ref_state.as_ref().map(|s| &s.snapshot),
             )?;
             let avg_group_loss = step_report.loss;
@@ -2230,6 +2284,7 @@ pub fn grpo_train(
         run_started.elapsed().as_millis() as u64,
         dynamic_groups_filtered,
         adapter_smoke_test,
+        lora_grad_norms.finish(),
         status_error,
     );
     result.map(|(dir, _)| dir)
@@ -2403,6 +2458,7 @@ pub fn grpo_dry_run_jsonl(
         run_started.elapsed().as_millis() as u64,
         dynamic_groups_filtered,
         None,
+        Vec::new(),
         status_error,
     );
     let receipt_write = receipt
@@ -2457,6 +2513,7 @@ pub fn grpo_train_jsonl(
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
     let mut echo_metrics = crate::train_receipt::EchoActivityMetrics::default();
     let mut reward_stats = crate::train_receipt::RewardStatsReceipt::default();
+    let mut lora_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
     let mut dynamic_groups_filtered = 0usize;
 
     let device = weights.embed_tokens.device().clone();
@@ -2498,6 +2555,7 @@ pub fn grpo_train_jsonl(
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
                 None,
+                Vec::new(),
                 Some(message),
             );
             return Err(err);
@@ -2550,6 +2608,7 @@ pub fn grpo_train_jsonl(
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
                 None,
+                Vec::new(),
                 Some(message),
             );
             return Err(err);
@@ -2569,6 +2628,7 @@ pub fn grpo_train_jsonl(
         num_vars = params.all_vars().len(),
         "initialized streamed GRPO trainable LoRA parameters"
     );
+    let lora_grad_index = LoraGradNormIndex::new(&params);
 
     // Phase 3 chaining: load a previously-saved, shape-compatible adapter into
     // the seeded Vars, replacing the random init.
@@ -2709,7 +2769,7 @@ pub fn grpo_train_jsonl(
                 "streamed GRPO group tokenized"
             );
 
-            let step_report = train_tokenized_grpo_group(
+            let step_report = train_tokenized_grpo_group_with_grad_norms(
                 &*backend,
                 &tgroup,
                 weights,
@@ -2719,6 +2779,8 @@ pub fn grpo_train_jsonl(
                 segments.as_deref(),
                 &device,
                 opt_state.as_mut(),
+                &mut lora_grad_norms,
+                &lora_grad_index,
                 ema_ref_state.as_ref().map(|s| &s.snapshot),
             )?;
             let avg_group_loss = step_report.loss;
@@ -2884,6 +2946,7 @@ pub fn grpo_train_jsonl(
         run_started.elapsed().as_millis() as u64,
         dynamic_groups_filtered,
         adapter_smoke_test,
+        lora_grad_norms.finish(),
         status_error,
     );
     result.map(|(dir, _)| dir)
@@ -3352,7 +3415,7 @@ fn chunked_log_probs_for_completion(
     Ok((correct_logits - log_sum_exp)?.squeeze(1)?)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn train_tokenized_grpo_group(
     backend: &dyn BackendRuntime,
@@ -3364,6 +3427,43 @@ fn train_tokenized_grpo_group(
     segments: Option<&[(usize, usize)]>,
     device: &Device,
     opt_state: Option<&mut OptimizerState>,
+    // Phase 3b: optional EMA-snapshot LoRA used as the reference policy when
+    // `config.reference_policy == ReferencePolicy::Ema`. None means the
+    // reference forward runs without any LoRA (base model — historical
+    // `BasePerStep`) or is skipped entirely (`ReferencePolicy::None`).
+    ema_ref_lora: Option<&LoraWeights>,
+) -> Result<GrpoGroupStepReport> {
+    let mut discarded_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
+    let lora_grad_index = LoraGradNormIndex::new(params);
+    train_tokenized_grpo_group_with_grad_norms(
+        backend,
+        tgroup,
+        weights,
+        model_config,
+        params,
+        config,
+        segments,
+        device,
+        opt_state,
+        &mut discarded_grad_norms,
+        &lora_grad_index,
+        ema_ref_lora,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn train_tokenized_grpo_group_with_grad_norms(
+    backend: &dyn BackendRuntime,
+    tgroup: &TokenizedGrpoGroup,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &TrainableLoraParams,
+    config: &GrpoConfig,
+    segments: Option<&[(usize, usize)]>,
+    device: &Device,
+    opt_state: Option<&mut OptimizerState>,
+    grad_norms: &mut crate::train_receipt::LoraGradNormAccumulator,
+    lora_grad_index: &LoraGradNormIndex,
     // Phase 3b: optional EMA-snapshot LoRA used as the reference policy when
     // `config.reference_policy == ReferencePolicy::Ema`. None means the
     // reference forward runs without any LoRA (base model — historical
@@ -3561,6 +3661,11 @@ fn train_tokenized_grpo_group(
             if token_level {
                 merge_grad_maps(&mut group_accum, accumulated_grads)?;
             } else {
+                observe_lora_grad_norms_from_map(
+                    grad_norms,
+                    lora_grad_index,
+                    &accumulated_grads,
+                )?;
                 optimizer_step_from_map(
                     backend,
                     params,
@@ -3666,6 +3771,7 @@ fn train_tokenized_grpo_group(
                 let vars = params.all_vars();
                 accumulate_grads(&mut group_accum, &grads, &vars)?;
             } else {
+                observe_lora_grad_norms_from_grad_store(grad_norms, params, &grads)?;
                 optimizer_step(
                     backend,
                     params,
@@ -3687,6 +3793,7 @@ fn train_tokenized_grpo_group(
     }
 
     if token_level && !group_accum.is_empty() {
+        observe_lora_grad_norms_from_map(grad_norms, lora_grad_index, &group_accum)?;
         optimizer_step_from_map(
             backend,
             params,
@@ -3734,6 +3841,76 @@ fn merge_grad_maps(
         }
     }
     Ok(())
+}
+
+struct LoraGradNormIndex {
+    modules_by_var: HashMap<candle_core::TensorId, &'static str>,
+}
+
+impl LoraGradNormIndex {
+    fn new(params: &TrainableLoraParams) -> Self {
+        Self {
+            modules_by_var: params
+                .all_vars_with_modules()
+                .into_iter()
+                .map(|entry| (entry.var.as_tensor().id(), entry.module))
+                .collect(),
+        }
+    }
+}
+
+fn observe_lora_grad_norms_from_map(
+    accumulator: &mut crate::train_receipt::LoraGradNormAccumulator,
+    index: &LoraGradNormIndex,
+    grads: &HashMap<candle_core::TensorId, Tensor>,
+) -> Result<()> {
+    let mut sum_sq_by_module: BTreeMap<&'static str, f64> = BTreeMap::new();
+    for (id, grad) in grads {
+        if let Some(module) = index.modules_by_var.get(id).copied() {
+            accumulate_lora_grad_sum_sq(&mut sum_sq_by_module, module, grad)?;
+        }
+    }
+    observe_lora_grad_module_norms(accumulator, sum_sq_by_module);
+    Ok(())
+}
+
+fn observe_lora_grad_norms_from_grad_store(
+    accumulator: &mut crate::train_receipt::LoraGradNormAccumulator,
+    params: &TrainableLoraParams,
+    grads: &candle_core::backprop::GradStore,
+) -> Result<()> {
+    let mut sum_sq_by_module: BTreeMap<&'static str, f64> = BTreeMap::new();
+    for entry in params.all_vars_with_modules() {
+        if let Some(grad) = grads.get(entry.var.as_tensor()) {
+            accumulate_lora_grad_sum_sq(&mut sum_sq_by_module, entry.module, &grad)?;
+        }
+    }
+    observe_lora_grad_module_norms(accumulator, sum_sq_by_module);
+    Ok(())
+}
+
+fn accumulate_lora_grad_sum_sq(
+    sum_sq_by_module: &mut BTreeMap<&'static str, f64>,
+    module: &'static str,
+    grad: &Tensor,
+) -> Result<()> {
+    let norm = crate::train_receipt::tensor_l2_norm(grad)
+        .with_context(|| format!("compute LoRA grad l2 norm for module {module}"))?;
+    if norm.is_finite() {
+        *sum_sq_by_module.entry(module).or_insert(0.0) += norm * norm;
+    } else {
+        tracing::warn!(module, "skipping non-finite LoRA grad norm sample");
+    }
+    Ok(())
+}
+
+fn observe_lora_grad_module_norms(
+    accumulator: &mut crate::train_receipt::LoraGradNormAccumulator,
+    sum_sq_by_module: BTreeMap<&'static str, f64>,
+) {
+    for (module, sum_sq) in sum_sq_by_module {
+        accumulator.observe(module, sum_sq.sqrt());
+    }
 }
 
 /// Tokenize a GRPO group: prompt messages + each completion text.

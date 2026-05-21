@@ -20,6 +20,8 @@ use sha2::{Digest, Sha256};
 pub const TRAIN_RECEIPT_FILENAME: &str = "train_receipt.json";
 pub const TRAIN_RECEIPT_SCHEMA_VERSION: u32 = 1;
 pub const ADAPTER_SMOKE_LOGIT_DELTA_EPSILON: f64 = 1e-6;
+pub const LORA_DELTA_NEAR_ZERO_EPSILON: f64 = 1e-12;
+pub const LORA_DELTA_EXTREME_SCALE_MULTIPLIER: f64 = 100.0;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +52,8 @@ pub struct TrainReceipt {
     pub token_counts: TokenCountReceipt,
     pub runtime: RuntimeReceipt,
     pub lora_delta_norms: Vec<LoraDeltaNormSummary>,
+    #[serde(default)]
+    pub lora_grad_norms: Vec<LoraGradNormSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_smoke_test: Option<AdapterSmokeTestReceipt>,
     pub config: serde_json::Value,
@@ -217,6 +221,15 @@ pub struct LoraDeltaNormSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LoraGradNormSummary {
+    pub module: String,
+    pub sample_count: usize,
+    pub min: f64,
+    pub mean: f64,
+    pub max: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AdapterSmokeTestReceipt {
     pub enabled: bool,
     pub passed: bool,
@@ -292,6 +305,7 @@ impl TrainReceipt {
                 peak_vram_mib: None,
             },
             lora_delta_norms: Vec::new(),
+            lora_grad_norms: Vec::new(),
             adapter_smoke_test: None,
             config,
         }
@@ -375,6 +389,22 @@ pub fn warn_echo_enabled_without_env_tokens(
             env_tokens = token_counts.env_tokens,
             context_tokens = token_counts.context_tokens,
             "ECHO is enabled but no environment tokens were observed; env-CE is inactive"
+        );
+    }
+}
+
+pub fn warn_lora_delta_norms(
+    mode: &str,
+    adapter_name: &str,
+    summaries: &[LoraDeltaNormSummary],
+    alpha_over_rank: f64,
+) {
+    for warning in lora_delta_norm_warnings(summaries, alpha_over_rank) {
+        tracing::warn!(
+            mode,
+            adapter = adapter_name,
+            warning = %warning,
+            "LoRA delta norm warning"
         );
     }
 }
@@ -561,6 +591,45 @@ pub fn lora_delta_norm_summary_from_adapter(
         .collect())
 }
 
+pub fn lora_delta_norm_warnings(
+    summaries: &[LoraDeltaNormSummary],
+    alpha_over_rank: f64,
+) -> Vec<String> {
+    let finite: Vec<&LoraDeltaNormSummary> = summaries
+        .iter()
+        .filter(|summary| summary.delta_l2_upper_bound_max.is_finite())
+        .collect();
+    if finite.is_empty() {
+        return Vec::new();
+    }
+
+    let mut warnings = Vec::new();
+    let max_delta = finite
+        .iter()
+        .map(|summary| summary.delta_l2_upper_bound_max)
+        .fold(0.0_f64, f64::max);
+    if max_delta <= LORA_DELTA_NEAR_ZERO_EPSILON {
+        warnings.push(format!(
+            "all LoRA delta norms are near zero (max_delta_l2_upper_bound={max_delta:.3e}, threshold={LORA_DELTA_NEAR_ZERO_EPSILON:.3e}); adapter weights may not have moved enough to affect inference"
+        ));
+    }
+
+    let scale = alpha_over_rank.abs().max(f64::MIN_POSITIVE);
+    let extreme_threshold = scale * LORA_DELTA_EXTREME_SCALE_MULTIPLIER;
+    for summary in finite {
+        if summary.delta_l2_upper_bound_max > extreme_threshold {
+            warnings.push(format!(
+                "LoRA delta norm for module {} is extreme relative to initialized scale (delta_l2_upper_bound_max={:.3e}, threshold={:.3e}, alpha_over_rank={:.3e})",
+                summary.module,
+                summary.delta_l2_upper_bound_max,
+                extreme_threshold,
+                alpha_over_rank
+            ));
+        }
+    }
+    warnings
+}
+
 fn detect_kiln_source() -> KilnSourceReceipt {
     let repo_root = std::env::var("KILN_REPO_ROOT")
         .ok()
@@ -664,13 +733,67 @@ fn population_variance(values: &[f64]) -> f64 {
         / values.len() as f64
 }
 
-fn tensor_l2_norm(tensor: &Tensor) -> Result<f64> {
+pub(crate) fn tensor_l2_norm(tensor: &Tensor) -> Result<f64> {
     let sum_sq = tensor
         .to_dtype(DType::F32)?
         .sqr()?
         .sum_all()?
         .to_scalar::<f32>()?;
     Ok((sum_sq as f64).sqrt())
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct LoraGradNormAccumulator {
+    by_module: BTreeMap<String, GradNormAccumulator>,
+}
+
+impl LoraGradNormAccumulator {
+    pub fn observe(&mut self, module: impl Into<String>, norm: f64) {
+        if !norm.is_finite() {
+            return;
+        }
+        self.by_module.entry(module.into()).or_default().push(norm);
+    }
+
+    pub fn finish(&self) -> Vec<LoraGradNormSummary> {
+        self.by_module
+            .iter()
+            .map(|(module, acc)| acc.finish(module.clone()))
+            .collect()
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct GradNormAccumulator {
+    sample_count: usize,
+    sum: f64,
+    min: f64,
+    max: f64,
+}
+
+impl GradNormAccumulator {
+    fn push(&mut self, norm: f64) {
+        if self.sample_count == 0 {
+            self.min = norm;
+            self.max = norm;
+        } else {
+            self.min = self.min.min(norm);
+            self.max = self.max.max(norm);
+        }
+        self.sample_count += 1;
+        self.sum += norm;
+    }
+
+    fn finish(&self, module: String) -> LoraGradNormSummary {
+        let denom = self.sample_count.max(1) as f64;
+        LoraGradNormSummary {
+            module,
+            sample_count: self.sample_count,
+            min: self.min,
+            mean: self.sum / denom,
+            max: self.max,
+        }
+    }
 }
 
 fn parse_peft_lora_key(key: &str) -> Option<ParsedLoraKey> {
@@ -789,6 +912,7 @@ mod tests {
         assert_eq!(loaded.status, TrainReceiptStatus::Success);
         assert_eq!(loaded.adapter_name, "adapter-a");
         assert_eq!(loaded.hyperparameters.rank, 8);
+        assert!(loaded.lora_grad_norms.is_empty());
         assert!(loaded.adapter_smoke_test.is_none());
         Ok(())
     }
@@ -820,6 +944,68 @@ mod tests {
         assert!(json.contains("\"status\": \"failed\""));
         assert!(json.contains("no valid GRPO groups"));
         Ok(())
+    }
+
+    #[test]
+    fn lora_grad_norm_accumulator_summarizes_by_module() {
+        let mut acc = LoraGradNormAccumulator::default();
+        acc.observe("q_proj", 3.0);
+        acc.observe("q_proj", 5.0);
+        acc.observe("q_proj", f64::NAN);
+        acc.observe("down_proj", 2.0);
+
+        let summaries = acc.finish();
+        assert_eq!(summaries.len(), 2);
+        let down = summaries
+            .iter()
+            .find(|summary| summary.module == "down_proj")
+            .expect("down_proj summary");
+        assert_eq!(down.sample_count, 1);
+        assert_eq!(down.min, 2.0);
+        assert_eq!(down.mean, 2.0);
+        assert_eq!(down.max, 2.0);
+
+        let q = summaries
+            .iter()
+            .find(|summary| summary.module == "q_proj")
+            .expect("q_proj summary");
+        assert_eq!(q.sample_count, 2);
+        assert_eq!(q.min, 3.0);
+        assert_eq!(q.mean, 4.0);
+        assert_eq!(q.max, 5.0);
+    }
+
+    #[test]
+    fn lora_delta_norm_warnings_cover_near_zero_and_extreme() {
+        let near_zero = vec![LoraDeltaNormSummary {
+            module: "q_proj".to_string(),
+            pair_count: 1,
+            a_l2_mean: 1.0,
+            a_l2_max: 1.0,
+            b_l2_mean: 0.0,
+            b_l2_max: 0.0,
+            delta_l2_upper_bound_mean: 0.0,
+            delta_l2_upper_bound_max: 0.0,
+        }];
+        let warnings = lora_delta_norm_warnings(&near_zero, 2.0);
+        assert!(warnings.iter().any(|warning| warning.contains("near zero")));
+
+        let extreme = vec![LoraDeltaNormSummary {
+            module: "down_proj".to_string(),
+            pair_count: 1,
+            a_l2_mean: 1.0,
+            a_l2_max: 1.0,
+            b_l2_mean: 1.0,
+            b_l2_max: 1.0,
+            delta_l2_upper_bound_mean: 250.0,
+            delta_l2_upper_bound_max: 250.0,
+        }];
+        let warnings = lora_delta_norm_warnings(&extreme, 2.0);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("down_proj") && warning.contains("extreme"))
+        );
     }
 
     #[test]
