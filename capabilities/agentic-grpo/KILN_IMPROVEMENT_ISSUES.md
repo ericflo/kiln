@@ -1070,6 +1070,47 @@ traces, Pi timeouts, and 40x slowdowns. The control exists through
 - Docs explain behavior for Qwen3.5-4B and tool-agent usage.
 - Tests cover content output with thinking on and off.
 
+**Status:** Completed and pushed to `main`.
+
+**Implementation notes:** Added `server.default_thinking_enabled` plus the
+`KILN_DEFAULT_THINKING_ENABLED` env var to configure the default
+`chat_template_kwargs.enable_thinking` value when requests omit it. The legacy
+`KILN_DEFAULT_NO_THINK` env var remains supported as a compatibility alias for
+`false`, while explicit per-request `chat_template_kwargs.enable_thinking`
+continues to win over the server default. The configured default is copied into
+`AppState`, included in `/health`, and used by prompt rendering/cache keys so
+Qwen3.5-4B can default to non-thinking mode for tool-agent evals. Chat
+completion responses now include metadata with `thinking_enabled`,
+`thinking_mode`, `thinking_source`, and the configured default.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-20 on RTX A6000 pod `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo test -p kiln-server
+  qwen35_server_default_thinking_can_be_disabled_and_overridden --lib`;
+  `cargo test -p kiln-server
+  chat_response_metadata_reports_server_thinking_default --lib`; `cargo test
+  -p kiln-server test_env_var_overrides --lib`; `cargo test -p kiln-server
+  test_legacy_default_no_think_env_override --lib`; `cargo test -p
+  kiln-server test_health_reports_active_adapter_and_request_count --lib`;
+  `cargo check -p kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issue17.done` recorded `exit=0`;
+  remote log is `/workspace/kiln-validation/issue17.log`.
+- `cargo fmt --check` was attempted on the RunPod after installing `rustfmt`,
+  but it reports unrelated pre-existing formatting diffs under
+  `crates/kiln-vulkan-kernel`; the Issue 17 patch itself passes
+  `git diff --check`.
+
+**Commit SHA:** `e07e9395` (`Issue 17: configure Qwen thinking default`),
+pushed to `origin/main` on 2026-05-20. Note: the commit contains the
+implementation and initial validation notes; this status line is recorded in
+the follow-up metadata commit because a commit cannot include its own final
+SHA.
+
+**Remaining risk:** Response metadata is reported for the OpenAI-compatible
+chat response body. Streaming chunks still use the existing SSE shape and do
+not repeat the top-level response metadata.
+
 ### 18. Surface Reasoning Content Separately And Safely
 
 **Area:** `crates/kiln-server` OpenAI-compatible API
