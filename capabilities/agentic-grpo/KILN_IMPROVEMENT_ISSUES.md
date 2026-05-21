@@ -1281,6 +1281,35 @@ can detect low variance and high reward means in the training data.
   is low.
 - Suggest `--no-policy-loss` or harder data in the warning text.
 
+**Implementation status:** Complete. GRPO reward receipts now include
+`min`, `max`, `group_count`, all-pass/all-fail group counts, degenerate group
+count, and the existing mean/stdev plus group variance histogram. Inline,
+streamed JSONL, dry-run, and Vulkan-native GRPO receipt paths use the new
+reward stats helper. `GrpoConfig` now exposes configurable
+`reward_saturation_threshold` and `reward_low_variance_threshold` values, and
+receipt writing logs warnings for mostly all-pass/all-fail groups or
+high-mean/low-variance reward distributions. Warning text suggests
+`--no-policy-loss` and harder data.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on RTX A6000 pod `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo test -p kiln-train
+  reward_diagnostic --lib`; `cargo test -p kiln-train
+  reward_stats_include_variance_histogram --lib`; `cargo test -p kiln-train
+  grpo_dry_run_success_records_counts_and_receipt --lib`; `cargo check -p
+  kiln-train --tests`; `cargo check -p kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issue21.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue21.log`.
+
+**Commit SHA:** `aabab213` (`Issue 21: add saturated reward diagnostics`).
+This status line is recorded in the follow-up metadata commit because a
+commit cannot include its own final SHA.
+
+**Remaining risk:** The `--no-policy-loss` suggestion is emitted as operator
+guidance; API callers can set `config.loss.no_policy_loss=true`, while the
+thin CLI still passes arbitrary GRPO JSON config through unchanged.
+
 ### 22. Officialize Strong-Signal Filtering
 
 **Area:** `examples/cuda_grpo_ablation.rs`, `crates/kiln-train`
