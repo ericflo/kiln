@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 use axum::extract::{Path as AxumPath, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use kiln_train::pi_trajectory::{is_pi_message_event, parse_pi_session_str};
+use kiln_train::trajectory::TurnSegment;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -58,6 +60,9 @@ pub struct AgentTrace {
     /// pi tool manifest fingerprint at the time the session ran
     /// (§10.11 tool-schema versioning).
     pub tool_manifest_sha: Option<String>,
+    /// Canonical action/observation trajectory parsed from Pi message events.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trajectory: Vec<TurnSegment>,
 }
 
 /// Outcome heuristics inferred from the session JSONL.
@@ -194,12 +199,13 @@ async fn get_trace(
         .ok_or_else(|| ApiError::training_invalid_request(format!("trace {id} not indexed")))
 }
 
-/// Parse one pi session JSONL into an `AgentTrace`. Best-effort: pi's
-/// schema is documented as `{messages, tool_calls, tool_results, id,
-/// parentId}` per line; we accept any line that has `id`.
+/// Parse one pi session JSONL into an `AgentTrace`. Best-effort: accepts both
+/// the legacy summary rows with `{messages, tool_calls, id, parentId}` and the
+/// observed Pi 0.75.x event stream with `{type:"message", message:{...}}`.
 fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
     let bytes = std::fs::read(path).ok()?;
     let text = std::str::from_utf8(&bytes).ok()?;
+    let parsed_pi = parse_pi_session_str(text, false);
     let mut id: Option<String> = None;
     let mut parent_id: Option<String> = None;
     let mut num_turns = 0;
@@ -209,6 +215,7 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
     let mut last_event_at: Option<String> = None;
     let mut forked = false;
     let mut tool_manifest_sha: Option<String> = None;
+    let mut saw_pi_message_event = false;
 
     for line in text.lines() {
         let line = line.trim();
@@ -232,6 +239,27 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
         if let Some(s) = v.get("tool_manifest_sha").and_then(|x| x.as_str()) {
             tool_manifest_sha = Some(s.to_string());
         }
+        if is_pi_message_event(&v) {
+            saw_pi_message_event = true;
+            if let Some(message) = v.get("message").and_then(|x| x.as_object()) {
+                if let Some(role) = message.get("role").and_then(|x| x.as_str()) {
+                    if matches!(role, "user" | "assistant") {
+                        num_turns += 1;
+                    }
+                    if role == "assistant" {
+                        if let Some(blocks) = message.get("content").and_then(|x| x.as_array()) {
+                            num_tool_calls += blocks
+                                .iter()
+                                .filter(|block| {
+                                    block.get("type").and_then(|x| x.as_str())
+                                        == Some("toolCall")
+                                })
+                                .count();
+                        }
+                    }
+                }
+            }
+        }
         if v.get("messages").is_some() {
             num_turns += 1;
         }
@@ -253,7 +281,11 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
         }
     }
 
-    let id = id?;
+    let id = id.or_else(|| {
+        saw_pi_message_event
+            .then(|| path.file_stem().map(|stem| stem.to_string_lossy().to_string()))
+            .flatten()
+    })?;
     let working_dir = path
         .parent()
         .map(|p| p.display().to_string())
@@ -273,6 +305,11 @@ fn parse_pi_session(path: &Path) -> Option<AgentTrace> {
         forked,
         parent_id,
         tool_manifest_sha,
+        trajectory: if saw_pi_message_event {
+            parsed_pi.trajectory
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -286,7 +323,18 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+    use serde_json::json;
     use tempfile::tempdir;
+
+    fn write_jsonl(path: &Path, rows: &[Value]) {
+        let mut body = String::new();
+        for row in rows {
+            body.push_str(&serde_json::to_string(row).unwrap());
+            body.push('\n');
+        }
+        std::fs::write(path, body).unwrap();
+    }
 
     #[test]
     fn parse_minimal_pi_session_extracts_id_and_counts_turns() {
@@ -308,6 +356,67 @@ mod tests {
         assert_eq!(trace.outcome.ended_with_exit_0, Some(true));
         assert!(!trace.forked);
         assert_eq!(trace.first_event_at.as_deref(), Some("2026-05-15T10:00:00Z"));
+        assert!(trace.trajectory.is_empty());
+    }
+
+    #[test]
+    fn parse_pi_0751_message_events_normalizes_trajectory() {
+        let dir = tempdir().unwrap();
+        let session_path = dir.path().join("pi0751.jsonl");
+        write_jsonl(
+            &session_path,
+            &[
+                json!({"type":"message","message":{"role":"user","content":[{"type":"text","text":"Print 42"}]}}),
+                json!({"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"use bash"},{"type":"toolCall","name":"bash","input":{"cmd":"python3 -c 'print(42)'"},"id":"c1"}]}}),
+                json!({"type":"message","message":{"role":"tool","content":[{"type":"toolResult","content":"42\n","toolCallId":"c1"}]}}),
+                json!({"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Done"}]}}),
+            ],
+        );
+
+        let trace = parse_pi_session(&session_path).unwrap();
+
+        assert_eq!(trace.id, "pi0751");
+        assert_eq!(trace.num_turns, 3);
+        assert_eq!(trace.num_tool_calls, 1);
+        assert_eq!(trace.trajectory.len(), 3);
+        assert_eq!(trace.trajectory[0].role, "assistant");
+        assert_eq!(trace.trajectory[0].kind, kiln_train::trajectory::TurnKind::Action);
+        assert!(trace.trajectory[0].content.contains("<think>use bash</think>"));
+        assert!(trace.trajectory[0].content.contains("\"arguments\""));
+        assert_eq!(trace.trajectory[1].role, "tool");
+        assert_eq!(
+            trace.trajectory[1].kind,
+            kiln_train::trajectory::TurnKind::Observation
+        );
+        assert_eq!(trace.trajectory[1].tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(trace.trajectory[1].content, "42\n");
+        assert_eq!(trace.trajectory[2].content, "Done");
+    }
+
+    #[test]
+    fn parse_pi_0753_tool_result_role_normalizes_to_tool() {
+        let dir = tempdir().unwrap();
+        let session_path = dir.path().join("pi0753.jsonl");
+        write_jsonl(
+            &session_path,
+            &[
+                json!({"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","input":{"cmd":"echo ok"},"id":"c1"}]}}),
+                json!({"type":"message","message":{"role":"toolResult","content":[{"type":"text","text":"ok\n"}]}}),
+            ],
+        );
+
+        let trace = parse_pi_session(&session_path).unwrap();
+
+        assert_eq!(trace.id, "pi0753");
+        assert_eq!(trace.num_turns, 1);
+        assert_eq!(trace.num_tool_calls, 1);
+        assert_eq!(trace.trajectory.len(), 2);
+        assert_eq!(trace.trajectory[1].role, "tool");
+        assert_eq!(
+            trace.trajectory[1].kind,
+            kiln_train::trajectory::TurnKind::Observation
+        );
+        assert_eq!(trace.trajectory[1].content, "ok\n");
     }
 
     #[test]
@@ -364,6 +473,7 @@ mod tests {
                 forked: false,
                 parent_id: None,
                 tool_manifest_sha: Some("sha256:abc".into()),
+                trajectory: Vec::new(),
             },
         );
         idx.save_to_path(&path).unwrap();

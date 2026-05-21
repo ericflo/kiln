@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::ChatMessage;
+use crate::pi_trajectory::{is_pi_message_event, parse_pi_session_values};
 use crate::trajectory::{AgenticGroup, ScoredRollout, TurnKind, TurnSegment};
 use crate::trajectory_mask::{MaskConfig, build_masks_from_trajectory};
 
@@ -271,15 +272,15 @@ fn load_inspect_input(path: &Path, include_context: bool) -> Result<InspectInput
     }
 
     if values.iter().any(is_pi_message_event) {
-        let rollouts = vec![parse_pi_session_values(
-            &values,
-            include_context,
-            &mut warnings,
-        )];
+        let parsed = parse_pi_session_values(&values, include_context, warnings);
+        let rollouts = vec![RolloutInput {
+            prompt_messages: parsed.prompt_messages,
+            trajectory: parsed.trajectory,
+        }];
         return Ok(InspectInput {
             source_format: "pi_session_jsonl",
             rollouts,
-            warnings,
+            warnings: parsed.warnings,
         });
     }
 
@@ -327,198 +328,6 @@ fn scored_rollout_input(
         prompt_messages,
         trajectory,
     }
-}
-
-fn is_pi_message_event(value: &Value) -> bool {
-    value.get("type").and_then(Value::as_str) == Some("message") && value.get("message").is_some()
-}
-
-fn parse_pi_session_values(
-    values: &[Value],
-    include_context: bool,
-    warnings: &mut Vec<String>,
-) -> RolloutInput {
-    let mut prompt_messages = Vec::new();
-    let mut trajectory = Vec::new();
-    for value in values {
-        if !is_pi_message_event(value) {
-            continue;
-        }
-        let Some(message) = value.get("message").and_then(Value::as_object) else {
-            warnings.push("skipped Pi message event with non-object message".to_string());
-            continue;
-        };
-        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
-        let content = message.get("content").unwrap_or(&Value::Null);
-        match role {
-            "system" | "user" => {
-                let text = stringify_content(content);
-                if text.is_empty() {
-                    continue;
-                }
-                if include_context {
-                    trajectory.push(TurnSegment {
-                        role: role.to_string(),
-                        content: text,
-                        kind: TurnKind::Context,
-                        tool_call_id: None,
-                        warning_prefix_len: None,
-                    });
-                } else {
-                    prompt_messages.push(ChatMessage {
-                        role: role.to_string(),
-                        content: text,
-                    });
-                }
-            }
-            "assistant" => {
-                let rendered = render_assistant_content(content, warnings);
-                if !rendered.is_empty() {
-                    trajectory.push(TurnSegment {
-                        role: "assistant".to_string(),
-                        content: rendered,
-                        kind: TurnKind::Action,
-                        tool_call_id: None,
-                        warning_prefix_len: None,
-                    });
-                }
-            }
-            "tool" | "toolResult" => {
-                let (rendered, tool_call_id) = render_tool_result_content(content, warnings);
-                if !rendered.is_empty() {
-                    trajectory.push(TurnSegment {
-                        role: "tool".to_string(),
-                        warning_prefix_len: detect_warning_prefix(&rendered),
-                        content: rendered,
-                        kind: TurnKind::Observation,
-                        tool_call_id,
-                    });
-                }
-            }
-            other => warnings.push(format!("skipped Pi message with unknown role {other:?}")),
-        }
-    }
-    RolloutInput {
-        prompt_messages,
-        trajectory,
-    }
-}
-
-fn stringify_content(content: &Value) -> String {
-    match content {
-        Value::String(text) => text.clone(),
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter_map(|block| {
-                if let Some(text) = block.as_str() {
-                    Some(text.to_string())
-                } else {
-                    block
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .map(ToString::to_string)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(""),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
-fn render_assistant_content(content: &Value, warnings: &mut Vec<String>) -> String {
-    let Some(blocks) = content.as_array() else {
-        return stringify_content(content);
-    };
-    let mut parts = Vec::new();
-    for block in blocks {
-        let Some(kind) = block.get("type").and_then(Value::as_str) else {
-            continue;
-        };
-        match kind {
-            "text" => {
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    parts.push(text.to_string());
-                }
-            }
-            "thinking" => {
-                if let Some(text) = block.get("thinking").and_then(Value::as_str) {
-                    parts.push(format!("<think>{text}</think>"));
-                }
-            }
-            "toolCall" => {
-                let name = block.get("name").and_then(Value::as_str).unwrap_or("");
-                let name_json = serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_string());
-                let args = block.get("input").unwrap_or(&Value::Null);
-                let args_json = if args.is_null() {
-                    "{}".to_string()
-                } else {
-                    serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string())
-                };
-                parts.push(format!(
-                    "<tool_call>{{\"name\": {name_json}, \"arguments\": {args_json}}}</tool_call>"
-                ));
-            }
-            other => warnings.push(format!(
-                "skipped unsupported assistant block type {other:?}"
-            )),
-        }
-    }
-    parts.join("")
-}
-
-fn render_tool_result_content(
-    content: &Value,
-    warnings: &mut Vec<String>,
-) -> (String, Option<String>) {
-    let Some(blocks) = content.as_array() else {
-        return (stringify_content(content), None);
-    };
-    let mut parts = Vec::new();
-    let mut tool_call_id = None;
-    for block in blocks {
-        let Some(kind) = block.get("type").and_then(Value::as_str) else {
-            continue;
-        };
-        match kind {
-            "toolResult" => {
-                let result_content = block.get("content").unwrap_or(&Value::Null);
-                parts.push(stringify_content(result_content));
-                if tool_call_id.is_none() {
-                    tool_call_id = block
-                        .get("toolCallId")
-                        .or_else(|| block.get("tool_call_id"))
-                        .or_else(|| block.get("id"))
-                        .and_then(Value::as_str)
-                        .map(ToString::to_string);
-                }
-            }
-            "text" => {
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    parts.push(text.to_string());
-                }
-            }
-            other => warnings.push(format!("skipped unsupported tool block type {other:?}")),
-        }
-    }
-    (parts.join(""), tool_call_id)
-}
-
-fn detect_warning_prefix(text: &str) -> Option<usize> {
-    if !text.starts_with("WARNINGS:\n") {
-        return None;
-    }
-    if let Some(idx) = text.find("<command_output>") {
-        if idx > 0 {
-            return Some(idx);
-        }
-    }
-    if let Some(idx) = text.find("\n\n") {
-        if idx > 0 {
-            return Some(idx + 2);
-        }
-    }
-    Some("WARNINGS:\n".len())
 }
 
 #[cfg(test)]

@@ -14,6 +14,7 @@ pub mod logit_cache;
 pub mod logit_source;
 pub mod lora_scaling;
 pub mod opd;
+pub mod pi_trajectory;
 pub mod receipt;
 pub mod remote_teacher;
 pub mod replay;
