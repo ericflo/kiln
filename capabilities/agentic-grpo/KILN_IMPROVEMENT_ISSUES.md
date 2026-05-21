@@ -1236,6 +1236,33 @@ enough to affect BF16 inference. We need direct norms rather than guesswork.
 - Logs warn if all LoRA deltas are near zero.
 - Logs warn if any delta is extreme relative to initialized scale.
 
+**Implementation status:** Complete. `train_receipt.json` now includes
+`lora_grad_norms`, a per-target-module min/mean/max summary collected before
+each generic SFT/GRPO optimizer step. Existing per-module
+`lora_delta_norms` remain populated from the final adapter safetensors, and
+receipt writing now emits LoRA delta warnings when all deltas are effectively
+zero or when any module delta is extreme relative to `alpha / rank`. The GRPO
+collector covers inline and streamed JSONL training, including token-level
+group accumulation.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on RTX A6000 pod `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo test -p kiln-train
+  lora_grad_norm --lib`; `cargo test -p kiln-train lora_delta_norm --lib`;
+  `cargo check -p kiln-train --tests`; `cargo check -p kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issue20c.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue20c.log`.
+
+**Commit SHA:** `7ac32f74` (`Issue 20: report LoRA grad and delta norms`).
+This status line is recorded in the follow-up metadata commit because a
+commit cannot include its own final SHA.
+
+**Remaining risk:** Native CUDA/Vulkan/OPD receipt paths now warn on saved
+adapter delta norms, but gradient norm collection is currently limited to the
+generic Candle SFT/GRPO trainers where gradients are available as `GradStore`
+or accumulated gradient maps.
+
 ### 21. Add Saturated-Reward Diagnostics
 
 **Area:** `crates/kiln-train`
