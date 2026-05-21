@@ -2300,6 +2300,8 @@ a summary JSON (`rollout_summary.json` by default).
 - Actual smoke used adapter `issue33-eval-adapter`, seeds `[34, 35]`, produced
   `completion_count=2`, `total_tokens=54`, mean reward `1.0`, and first
   content `issue thirty four`.
+- GitHub CI run `26235207355` passed for implementation commit `e701eac3`:
+  cargo-deny, Linux default features, Linux Vulkan, and macOS/Metal all green.
 
 **Commit SHA:** `e701eac3` (`Issue 34: add rollout generation utility`). This
 status line is recorded in the follow-up metadata commit because a commit
