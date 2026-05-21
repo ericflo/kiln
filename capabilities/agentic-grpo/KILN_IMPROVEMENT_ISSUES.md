@@ -1436,6 +1436,45 @@ training and data failures.
 - CLI exits nonzero for all failure reasons.
 - Error messages include enough context to fix the issue.
 
+**Implementation status:** Complete. Training receipts now keep
+`failure_reason` as a stable machine-readable code and add
+`failure_message` for the human-readable context. The standard classifier
+covers `data_schema_error`, `adapter_load_failed`, `zero_groups`,
+`zero_action_tokens`, `zero_env_tokens`, `nan_loss`, `oom`,
+`shape_mismatch`, `unsafe_lora_scale`, and `base_adapter_missing`, with a
+`training_error` fallback for unexpected failures. Generic SFT/GRPO,
+streamed GRPO, GRPO dry-run, OPD early validation, and CUDA-native SFT early
+validation now annotate returned errors with `failure_reason=<code>` while
+preserving the original diagnostic text. Existing failed receipts from all
+receipt writers now store the standard reason plus the detailed message.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on RTX A6000 pod `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo test -p kiln-train
+  training_failure_reason_classifier_covers_standard_reasons --lib`; `cargo
+  test -p kiln-train train_receipt_failed_status_is_stable --lib`; `cargo
+  test -p kiln-train
+  grpo_dry_run_rejects_echo_without_env_tokens_and_writes_receipt --lib`;
+  `cargo test -p kiln-train
+  grpo_dry_run_rejects_zero_groups_after_filter_unless_allowed --lib`;
+  `cargo test -p kiln-train grpo_dry_run_reward_filter_on_empty_modes --lib`;
+  `cargo check --release -p kiln-train --features cuda --example
+  cuda_grpo_ablation`; `cargo check -p kiln-train --tests`; `cargo check -p
+  kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issue24b.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue24b.log`.
+
+**Commit SHA:** `7110f67a` (`Issue 24: standardize training failure reasons`).
+This status line is recorded in the follow-up metadata commit because a
+commit cannot include its own final SHA.
+
+**Remaining risk:** Deep native CUDA/Vulkan/OPD failures that occur after
+early validation can still propagate through lower-level anyhow context before
+a path-specific failed receipt is written. The shared receipt machinery and
+the generic/CLI-facing GRPO/SFT validation paths now produce standardized
+failure codes for the common operator-facing failures listed above.
+
 ### 25. Add Long-Context GRPO Benchmark Suite
 
 **Area:** `crates/kiln-train`, benchmarks
