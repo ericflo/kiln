@@ -2474,6 +2474,8 @@ adapter provenance regardless of storage backend.
   alpha/rank ratio for rank 2. The successful `actual-model2` run stashed the
   pod-local dirty state, checked out the validation branch cleanly, and set
   `lora_alpha=4.0`.
+- GitHub Actions on pushed head `93bf0b20` passed: CI run `26240825826`
+  completed cargo-deny, Linux default features, Linux Vulkan, and macOS Metal.
 
 **Commit SHA:** `c77a2b33` (`Issue 36: add adapter manifest restore`).
 
