@@ -148,7 +148,7 @@ const TRAIN_EXAMPLES: &str = r#"Examples:
 
 const ADAPTERS_OVERVIEW: &str = r#"Inspect and manage LoRA adapters on the running Kiln server at http://localhost:8420 by default.
 
-Most commands call the adapter API after `kiln serve` is running. `kiln adapter verify` can validate local adapter directories offline, and `kiln adapter restore` copies a manifest-described adapter into a local registry.
+Most commands call the adapter API after `kiln serve` is running. `kiln adapter verify` can validate local adapter directories offline, and `kiln adapters restore` copies a manifest-described adapter into a local registry.
 
 `kiln adapter verify <name-or-path>` also accepts the singular alias and can validate an adapter directory offline before optionally checking a running server with --url.
 "#;
@@ -175,7 +175,7 @@ const ADAPTERS_EXAMPLES: &str = r#"Examples:
   kiln adapter verify support-bot --adapter-dir ./Qwen3.5-4B/adapters --url http://localhost:8420
       Validate the installed adapter, load it through the running server, confirm registry state, and compare a fixed base-vs-adapter prompt.
 
-  kiln adapter restore ./runs/grpo/support-bot/adapter_manifest.json --adapter-dir ./Qwen3.5-4B/adapters
+  kiln adapters restore ./runs/grpo/support-bot/adapter_manifest.json --adapter-dir ./Qwen3.5-4B/adapters
       Restore a manifest-described adapter into an adapter registry and verify copied file hashes.
 "#;
 

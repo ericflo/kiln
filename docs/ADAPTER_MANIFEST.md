@@ -61,7 +61,7 @@ To restore an adapter, keep `adapter_manifest.json` beside the files named in
 `files`, then run:
 
 ```bash
-kiln adapter restore ./adapter_manifest.json --adapter-dir /models/Qwen3.5-4B/adapters
+kiln adapters restore ./adapter_manifest.json --adapter-dir /models/Qwen3.5-4B/adapters
 ```
 
 By default the restored adapter name is `adapter_name` from the manifest. Use

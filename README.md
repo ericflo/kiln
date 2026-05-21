@@ -519,7 +519,7 @@ Adapters are easy to revert if a bad training run lands. `POST /v1/adapters/unlo
 Completed training runs also write `adapter_manifest.json` beside the adapter
 weights. The manifest records adapter/config/receipt hashes, parent adapter,
 model config hash, kiln commit, and training data hash. Use
-`kiln adapter restore <path>/adapter_manifest.json --adapter-dir <registry>`
+`kiln adapters restore <path>/adapter_manifest.json --adapter-dir <registry>`
 to copy an adapter into a registry and verify hashes after copy. See
 [`docs/ADAPTER_MANIFEST.md`](docs/ADAPTER_MANIFEST.md) for the schema.
 
