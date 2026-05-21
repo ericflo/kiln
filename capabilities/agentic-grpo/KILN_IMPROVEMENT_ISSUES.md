@@ -744,6 +744,47 @@ uncheckpointed paths.
 - Checkpointed and uncheckpointed paths expose the same metric names.
 - Tests cover ECHO on, ECHO off, and no-policy-loss.
 
+**Status:** Completed and validated on RunPod.
+
+**Implementation notes:** Added first/final ECHO env-CE measurements to
+`train_receipt.json` when a GRPO path can measure them. Standardized
+`training token counts` logs for SFT/GRPO receipt-writing paths, including
+generic, Vulkan-native, and CUDA-native training. Generic GRPO now returns a
+per-group step report with `echo_env_ce`, logs per-group ECHO metrics with
+the same field names for checkpointed and uncheckpointed paths, and warns
+when ECHO is enabled but no env tokens were observed. Streamed GRPO records
+the same metrics incrementally. Vulkan-native GRPO now returns a step report,
+records weighted per-group ECHO env CE, and carries those measurements into
+the receipt.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on direct fallback RTX A6000 pod
+  `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo test -p kiln-train
+  train_receipt --lib`; `cargo test -p kiln-train
+  test_echo_end_to_end_grpo_with_trajectory_rollouts --lib`; `cargo test -p
+  kiln-train test_echo_no_policy_loss_verifier_free_e2e --lib`; `cargo test
+  -p kiln-train test_echo_checkpointed_matches_uncheckpointed_loss --lib`;
+  `cargo test -p kiln-train
+  test_echo_checkpointed_forward_backward_threads_echo_params --lib`; and
+  `cargo check -p kiln-train --tests`.
+- Remote sentinel `/workspace/kiln-validation/issue12.done` recorded
+  `exit=0`; remote logs are `/workspace/kiln-validation/issue12.log` and
+  `/workspace/kiln-validation/issue12.inner.log`.
+- Focused tests cover ECHO enabled, ECHO disabled, lambda-zero off semantics,
+  no-policy-loss verifier-free mode, checkpointed/uncheckpointed env-CE
+  reporting, analytic-tail env-CE reporting, and receipt env-CE bounds.
+
+**Commit SHA:** `c0cc1b57` (`Issue 12: expose ECHO training metrics`).
+This is the implementation commit; these final metadata notes are recorded in
+the follow-up backlog commit.
+
+**Remaining risk:** The receipt records the first and final measured
+per-group env CE observed during the training pass, not an extra full-dataset
+post-training evaluation sweep. That keeps the metric cheap and available in
+streaming paths, but it should not be interpreted as an eval-set CE.
+
 ## P0: Make Evaluation Trustworthy
 
 ### 13. Add Server Health Metrics For Eval Stability
