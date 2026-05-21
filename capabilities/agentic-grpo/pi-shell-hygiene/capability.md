@@ -217,3 +217,34 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 status: **scaffold**.
+
+Highest-leverage improvements:
+
+1. **Paired examples are non-negotiable.** Eval and calibration must
+   include both positive and negative examples of long-running-process
+   patterns. Without paired examples the rubric can't measure
+   *discrimination*; it only measures whether the model produces some
+   pattern.
+
+   Positive (must rate high):
+   - `python3 $RP bg <pod> /tmp/log.txt '<cmd>' && python3 $RP wait-file <pod> /tmp/sentinel --timeout 1800`
+   - `nohup <long-cmd> > /tmp/out.log 2>&1 &; disown`
+   - `trap 'cleanup' ERR INT TERM`
+
+   Negative (must rate low):
+   - `until ssh $pod "test -f /tmp/done"; do sleep 5; done`
+   - `while ssh $pod "kill -0 $pid" 2>/dev/null; do sleep 10; done`
+   - `bare trap ... EXIT` (kills pod on every tool-call shell exit)
+   - sleep-then-poll without timeout
+
+2. **Anchor against the kiln-skill anti-pattern doc.** The
+   `capabilities/agentic-grpo/kiln-skill` reference (and the kiln
+   skill body in clouderic) enumerate exactly these patterns. Make
+   the rubric scoring align with that doc rather than inventing
+   new categories.
+3. **Cross-domain robustness.** Train on bash; eval on PowerShell /
+   fish equivalents. If the recipe generalizes, the behavior is
+   real shell-hygiene, not bash-syntax memorization.

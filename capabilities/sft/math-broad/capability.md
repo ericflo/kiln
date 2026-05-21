@@ -271,3 +271,25 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 result: **iter 13 hit 1.000 single-seed; 3-seed mean ~0.95**.
+Order-noise tail confirmed. The "least mathy" prose-approach recipe
+works.
+
+### Round 2 plan
+
+1. **Replicate iter-13 recipe across 5 seeds** (not just 3) — the
+   ceiling was hit at the high tail of order-noise; broader seed
+   sampling tightens the honest expected score.
+2. **Anchor suite mandatory.** Round-2 layout already enforces it,
+   but make sure the anchor catches the *style* of non-mathy reasoning
+   (i.e., that the model still does prose well after math training).
+3. **Hard-eval pool from harder math.** Round-1 capped at general
+   competence; build a hard-eval pool of algebra/calculus problems
+   that require multi-step reasoning. If iter-13 recipe holds on
+   hard-eval, the win is real; if it collapses, round-1 was easy-task
+   memorization.
+4. **Cross-paradigm comparison.** If `cuda_opd_remote` (#37) is
+   available and a math teacher exists, run a parallel OPD path. SFT
+   vs OPD on math is a clean comparison.

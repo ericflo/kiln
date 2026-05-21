@@ -3,6 +3,34 @@
 A practical guide for the agent picking up any capability dir in this tree.
 Read [`LAYOUT.md`](LAYOUT.md) first; this doc is the *operating* manual.
 
+## What changed strategically between round 1 and round 2
+
+Quick orientation if you ran round 1 and are picking up round 2:
+
+1. **`rubric_sanity.py` is mandatory.** It runs BEFORE training in
+   every `run_iter.sh`. Failures block the iter. Populate
+   `calibration/{good,bad}.jsonl` with at least 5 good and 5 bad
+   fixtures (one bad per §0 cheat) before the first iter.
+2. **Multiplicative format gate is the default composite shape** for
+   new caps: `composite = outcome × format × (process + base)`. Round 1
+   evidence showed additive composites trap +12.5pp of signal when
+   outcome is saturated.
+3. **`integration/cross-cap-coherence/`** runs eval against held-out
+   slices of every member cap. Use it after every meaningful training
+   iter to catch sibling-cap regressions.
+4. **4 new caps** target high-leverage process behaviors:
+   `pi-error-recovery`, `pi-context-aware-edits`,
+   `pi-incremental-progress`, `pi-search-then-read`. These are the
+   highest-priority round-2 caps in the new-work bucket.
+5. **2 reshaped caps**: `pi-diff-patch-apply` and `pi-failure-triage`
+   now use multiplicative format gates. Their round-1 v1 rubrics live
+   under `archive/rubric_v1_additive.py`.
+6. **`hard_eval.tasks.jsonl` pattern** per cap: a round-1-failures-derived
+   pool where base composite is < 0.5. Lift on hard-eval is the cleanest
+   signal of capability uplift vs. lucky-tasks.
+7. **`pi-tool-call-efficiency` is eval-only** — wraps other caps'
+   adapters and reports tool-call distributions; doesn't train.
+
 ## The 30-second version
 
 ```bash
@@ -13,19 +41,26 @@ kiln serve --eval-mode --model-path /workspace/qwen3.5-4b \
 # 1. Pick a cap
 cd capabilities/agentic-grpo/pi-doctest
 
-# 2. Build corpus + baseline
+# 2. Build corpus + populate calibration + baseline
 python3 build_corpus.py
-./capability.oracle.sh                          # baseline (no adapter)
+$EDITOR calibration/good.jsonl calibration/bad.jsonl   # >=5 good, >=5 bad
+python3 rubric_sanity.py                               # gate passes?
+./capability.oracle.sh                                 # baseline (no adapter)
 
 # 3. First training iter
 ./run_iter.sh h1-default-recipe
 
 # 4. Check the row
 tail -1 capability.jsonl | python3 -m json.tool
+
+# 5. Cross-cap regression check
+cd ../../integration/cross-cap-coherence/
+./capability.oracle.sh pi-doctest-h1-default-recipe
 ```
 
-Everything from rollouts → trajectory inspection → dry-run → train → install
-→ adapter verify → multi-seed eval → iter-row append is in `run_iter.sh`.
+Everything from rubric-sanity → rollouts → trajectory inspection → dry-run
+→ train → install → adapter verify → multi-seed eval → iter-row append is
+in `run_iter.sh`. The cross-cap regression check is one-line.
 
 ## Pre-flight before any GPU work
 
@@ -419,3 +454,91 @@ from [`LAYOUT.md`](LAYOUT.md). Reference `pi-doctest` (agentic) /
 A: Only if the round-1 writeup explicitly flags a behavior the round-2
 rubric needs to handle. Otherwise treat round-2 as a fresh start and
 trust the kiln receipts and `capability.md` contract.
+
+## Round 2 priority ranking
+
+If you have to pick caps to run first (limited pod budget), this is
+the recommended order:
+
+### Tier 1 — High-leverage, ready to run
+
+1. **`opd/code-symbol-extraction`** — the OPD canary. Round-1 bug
+   diagnosed and fixed; this cap should jump from 7 effective steps to
+   30+ and composite from 0.937 → 0.96+. Cheap, fast, validates the
+   OPD trainer fix unblocks the other 5 OPD caps.
+2. **`agentic-grpo/pi-doctest`** with hidden-tests sub-score — round-1
+   winner +4.2pp 3-seed; hidden-tests fix mitigates the §0 A1 cheat and
+   should give another 2-3pp on a harder eval.
+3. **`agentic-grpo/pi-terminal-bench-lite`** — round-1 validated the
+   plumbing; round-2 produces the paper-scale headline number.
+
+### Tier 2 — New caps with high estimated headroom
+
+4. **`agentic-grpo/pi-error-recovery`** — baseline ~0.40, headroom
+   ~0.60. Process behavior, strong ECHO signal.
+5. **`agentic-grpo/pi-incremental-progress`** — baseline ~0.50,
+   headroom ~0.50. Foundational habit that composes well across caps.
+6. **`agentic-grpo/pi-context-aware-edits`** — baseline ~0.45,
+   headroom ~0.55. Style-consistency win is highly visible.
+7. **`agentic-grpo/pi-search-then-read`** — baseline ~0.40, headroom
+   ~0.60. Reduces context burn; composes naturally with
+   `pi-code-search`.
+
+### Tier 3 — Existing wins to extend
+
+8. **`agentic-grpo/pi-code-comprehension`** — round-1 big win; OPD
+   format polish + cross-file generalization eval.
+9. **`agentic-grpo/pi-faithful-completion`** — chain training from
+   iter-50 best.
+10. **`agentic-grpo/pi-precondition-check`** — round-1 rank-1; needs
+    the strengthened evidence-based rubric.
+
+### Tier 4 — Reshapes (re-test the new gates)
+
+11. **`agentic-grpo/pi-diff-patch-apply`** — v2 multiplicative-gate
+    rubric; will the +12.5pp format gain now show as composite uplift?
+12. **`agentic-grpo/pi-failure-triage`** — same.
+
+### Tier 5 — Dependency-gated
+
+13. **`agentic-grpo/pi-compaction`** — first prove kiln #25 long-context
+    bench moves weights at 32K; then switch this cap to OPD.
+14. **`agentic-grpo/pi-script-fixup`** — needs strong base adapter from
+    pi-terminal-bench-lite Phase 2.
+
+### Tier 6 — Eval-only
+
+15. **`integration/cross-cap-coherence/`** — run after every Tier 2-3
+    iter to surface sibling regressions.
+16. **`agentic-grpo/pi-tool-call-efficiency`** — run periodically
+    against the suite of installed adapters.
+
+### Tier 7 — Lower-priority but still in queue
+
+17. **`opd/code-fence-language-fidelity`** + 4 more OPD caps —
+    run sequentially after the canary lands.
+18. **`sft/*`** — standardize anchor suites; multi-seed eval; coordinate
+    corpus with `pi-doctest` to avoid leak.
+19. **`agentic-grpo/pi-shell-hygiene`**, **`pi-test-interpretation`**,
+    **`pi-source-mod-workflow`** — scaffolds; the §0 + corpus design
+    work is non-trivial.
+
+## Diagnostic checklist for "iter didn't move" (round-2 version)
+
+If `composite_delta` ≈ 0 after a training step:
+
+1. **Did rubric_sanity gate fire?** Check `$LOG_DIR/rubric_sanity.log`.
+   If calibration didn't pass, the rubric itself is broken — fix that
+   first.
+2. **Was the adapter actually loaded?** `verify.json::behavioral == true`.
+3. **Did ECHO fire?** `train_receipt.json::echo_metrics::env_ce_steps_observed > 0`.
+4. **Did weights move?** `lora_delta_norm_summary` not all near-zero.
+5. **Is reward saturated?** Receipt `reward_saturation_warning` —
+   switch to `--no-policy-loss` (ECHO-only) or use a multiplicative
+   format gate.
+6. **Is the rubric rewarding the wrong thing?** If sub-scores moved
+   but composite didn't, check the weight matrix in `rubric.py` —
+   consider whether multiplicative gates are needed.
+7. **Cross-cap regression?** Run `integration/cross-cap-coherence/`
+   against the adapter — sometimes the iter "didn't move" *this cap*
+   but moved a sibling cap heavily, indicating skill-clobber.

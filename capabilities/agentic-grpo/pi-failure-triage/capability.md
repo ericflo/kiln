@@ -229,3 +229,29 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 result: **base 0.9656 saturated, +0.006 composite, +12.5pp
+format**. Net null. Same prescription as `pi-diff-patch-apply`.
+
+### Highest-leverage reshape
+
+1. **Multiplicative format gate.** Round-1 finding: "format moved
+   +12.5pp but composite didn't move because outcome was already
+   saturated." That is the exact signal that the additive composite
+   was wrong. Change to
+   `composite = outcome × format × (process_weights + base)`. The
+   +12.5pp format gain *would have* meaningfully moved composite under
+   the multiplicative formulation, and would have been a publishable
+   win.
+2. **Build a hard-eval pool of multi-cause failures.** Round-1
+   failures were mostly single-root-cause. Hand-construct (or scrape
+   from clouderic failed-task tape) ~30 multi-cause failures where the
+   model needs to identify ≥2 root causes to score outcome.
+3. **Cross-domain transfer evaluation.** Train on Python failures,
+   eval on shell/Rust failures. If the recipe generalizes, the
+   capability is real; if it doesn't, the round-1 saturation was
+   memorization, not understanding.
+4. **Optional: chain with pi-test-interpretation.** Test-interpretation
+   is upstream of failure-triage (read the test output → identify the
+   failure → fix it). A chained adapter may compose; sub-cap of integration/.

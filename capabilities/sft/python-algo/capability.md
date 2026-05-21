@@ -501,3 +501,17 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 status: **SFT cap, fresh scaffold**.
+
+### Round 2 plan
+
+1. **Coordinate with `pi-doctest`.** Both target Python coding
+   ability; `pi-doctest` is the agentic process cap, this is the
+   pure code-emission cap. They should NOT both train on HumanEval-
+   adjacent corpora or we'll have train/eval leakage.
+2. **Pick a corpus that doesn't overlap with HumanEval-derived tasks.**
+   Candidates: LeetCode-style algorithmic problems with hidden tests,
+   competitive programming problems, Project Euler.
+3. **Anchor suite mandatory.** Same as math-broad.

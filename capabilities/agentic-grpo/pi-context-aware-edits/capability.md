@@ -1,0 +1,146 @@
+# Capability: pi-context-aware-edits
+
+**Status:** New in round 2. Scaffold.
+
+## Description
+
+Before editing a file, the agent must **read enough surrounding context
+to make the edit stylistically and structurally consistent**: imports,
+neighbor functions, naming conventions, type-annotation style, comment
+style, error-handling pattern.
+
+This is *distinct* from `pi-precondition-check` (which is about
+staleness — does the claim still hold). This cap is about *idiom
+consistency* — the edit fits the file's existing style.
+
+Concrete failure modes the 4B exhibits:
+
+- Adds `import os` at the bottom of a file that imports at the top
+  alphabetically.
+- Uses `snake_case` in a `camelCase` codebase (or vice versa).
+- Uses `type: ignore` when the codebase uses `# pyright: ignore`.
+- Emits `print(...)` in a logging-everywhere codebase.
+- Adds `try/except Exception` in a typed codebase that uses Result
+  patterns.
+- Introduces a new dependency for a function the codebase already has
+  3 times.
+
+These look like minor style issues but they're the #1 reviewer-rejection
+reason in clouderic PRs. Training context-awareness is a high-leverage
+behavior cap.
+
+## Base model
+
+Qwen3.5-4B (kiln serve on `http://localhost:8420`).
+
+## Rollout source
+
+Pi sessions. Multi-turn. Max turns 6 (read → understand → edit →
+verify, with headroom).
+
+## Task shape
+
+Each task is a `(workspace, edit_request, conventions, gold_edit)`
+tuple:
+
+- **Workspace** — a small Python/Rust/Go/JS repo with consistent
+  conventions throughout.
+- **Edit request** — natural-language description of the change
+  (e.g. "Add a function `parse_date(s: str) -> datetime` to
+  `lib/dates.py`").
+- **Conventions** — ground truth: the file's existing import style
+  (top alphabetical / per-section), naming case, type-annotation
+  conventions, error-handling pattern. Used by the rubric.
+- **Gold edit** — at least one valid edit that respects all
+  conventions. Multiple gold edits per task to handle the "many
+  right answers" problem.
+
+Six convention categories tracked:
+
+1. **Import style** — top vs. inline, alphabetical vs. grouped
+2. **Naming case** — snake_case / camelCase / PascalCase
+3. **Type annotations** — present / absent / partial / strict
+4. **Error handling** — try/except / Result / panic / unwrap
+5. **Logging style** — print / logging.X / structured log
+6. **Comment style** — docstrings / inline / minimal
+
+## Rubric (v0)
+
+Multi-component with multiplicative format gate (round-2 default).
+
+| Sub-score | Weight | What it measures | Cannot be cheated by |
+|-----------|--------|-------------------|----------------------|
+| `outcome` | hard floor (multiplicative) | The edit was made and the file still parses (Python: `compile()`; Rust: `cargo check`; etc.). | Empty edit (file unchanged → outcome 0). Broken syntax → outcome 0. |
+| `format_compliance` | multiplicative gate | Final assistant turn names the file modified and the convention it followed. | Boilerplate without convention name. |
+| `convention_consistency` | 0.40 | Per-category score across the 6 convention categories. For each, the rubric inspects the edit and compares to the file's existing pattern. Average of 6 binary checks (was the import style preserved? was the naming case preserved? etc.). | Lucky guessing — score is averaged across 6 checks; can't be max'd without actually reading context. |
+| `read_before_edit` | 0.20 | Session shows ≥1 `read` operation on the target file (or a `grep` against the same file) before the `write`/`edit` operation. | Reading a tangential file. Rubric verifies the read covered the byte range adjacent to the edit. |
+| `no_redundant_imports` | 0.15 | If the function the agent adds already exists in the file or a sibling module, score 0. | — |
+| `no_style_drift` | 0.10 | Adjacent functions in the same file are stylistically uniform; the new addition matches that uniformity. | — |
+| `base` | 0.15 | Floor for any complete-and-parseable edit. | — |
+
+**Composite = `outcome × format_compliance × (0.40·convention_consistency + 0.20·read_before_edit + 0.15·no_redundant_imports + 0.10·no_style_drift + 0.15)`**
+
+## Adversarial design (§0)
+
+**Q: What's the cheapest way to score 1.0 without doing the capability?**
+
+A1: Always read the file before editing — wins `read_before_edit`
+   even when ignoring the contents.
+
+   Mitigation: `convention_consistency` only scores when the edit
+   actually follows the file's conventions. Reading without
+   attending is recoverable by ECHO env-CE — and the convention
+   sub-score zeros if convention isn't followed.
+
+A2: Copy-paste an existing function in the file and modify slightly.
+   Trivially follows all conventions because it IS the convention.
+
+   Mitigation: `outcome` requires the function to actually do what
+   the task asks. Copy-paste with the wrong logic → outcome 0.
+
+A3: Use the same import line every time — wins import-style category
+   when the codebase happens to use that style.
+
+   Mitigation: tasks span workspaces with *different* conventions, so
+   a constant strategy averages to ~50% across the eval set.
+
+A4: Skip the actual edit, claim the function already exists.
+
+   Mitigation: outcome verifies the workspace was modified
+   appropriately.
+
+## Headroom estimate
+
+- Baseline composite: **~0.45** (the 4B reads sometimes but rarely
+  preserves conventions across all 6 categories).
+- Headroom: ~0.55.
+- Target sub-score: `convention_consistency` (biggest movable mass).
+
+## Hypotheses
+
+- **H1: default GRPO recipe with ECHO λ=0.05.**
+- **H2: mixed-language corpus** (Python + Rust + Go + JS) — does
+  context-awareness generalize across language conventions, or is it
+  language-specific?
+- **H3: OPD chained on H1 best** — distill teacher's stronger
+  convention-preservation onto the GRPO-trained adapter.
+- **H4: stratified by convention category** — equal task counts per
+  category.
+
+## Composition with other caps
+
+- **Upstream:** `pi-precondition-check` (read-before-mutation is a
+  shared discipline; both caps train it on different surfaces).
+- **Downstream:** `pi-source-mod-workflow` (PR-quality edits need
+  context-awareness).
+- **Integration test:** included in `integration/cross-cap-coherence/`.
+
+## Round 2 standard workflow
+
+```bash
+python3 build_corpus.py              # Synthetic corpus + a few real OSS slices
+./capability.oracle.sh               # Baseline
+./run_iter.sh h1-default-recipe      # H1
+```
+
+See `../../LAYOUT.md` for layout and `../README.md` for shared defaults.

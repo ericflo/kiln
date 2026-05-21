@@ -335,3 +335,29 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 result: **+2.4pp 5-eval mean, +5.7pp peak**. Real but modest;
+σ comparable to lift. Adapter-load and server-drift bugs initially
+inverted the story.
+
+Highest-leverage improvements:
+
+1. **Add a `precision_of_read` sub-score.** Round-1 rubric scores
+   outcome when the read happens to hit the right symbol; it doesn't
+   distinguish "grep then read the right file" from "guess then read
+   the right file." Compute `precision_of_read = relevant_bytes /
+   total_bytes_read` where relevant_bytes is bytes inside ground-truth
+   region. This makes the rubric care about *search efficiency*, not
+   just outcome.
+2. **Harder corpus with bigger repos.** Round-1 baseline 0.5432 leaves
+   real headroom but the corpus was small synthetic repos. Pull
+   3-5 actual mid-sized OSS Python repos (10K-50K LoC) as seed corpus.
+3. **Multi-seed measurement on training side too.** Round 1 found peak
+   +5.7pp at single seed but 5-eval mean only +2.4pp. Use kiln's
+   `--filter-var-min` to keep only high-variance training groups so the
+   adapter doesn't fit to a single training-seed quirk.
+4. **Cross-validate adapter-load** — wire `kiln adapter verify` into
+   `run_iter.sh` (already done in round-2 normalize), and verify the
+   logit-delta-summary is nonzero before claiming "the adapter
+   regressed."

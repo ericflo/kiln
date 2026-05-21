@@ -239,3 +239,30 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 result: **+12.93pp big win** (iter 4, ECHO λ=0.075). Outcome,
+grounding, cross-file all moved. ECHO λ=0.075 vs paper-suggested 0.05
+was the productive ceiling.
+
+Highest-leverage improvements:
+
+1. **Cross-file *generalization* eval set.** Round 1 saturated
+   cross-file recall at 1.00 by training the model to always grep.
+   That's a process win but not proof of generalization. Build a
+   held-out eval with a *different* repo layout (deeper nesting,
+   different file naming, monorepo vs single-package) and measure
+   whether the always-grep behavior transfers.
+2. **OPD from 27B for structured JSON output.** The format
+   sub-score has clean teacher signal — the 7-field JSON shape is
+   exactly what OPD distills well. Try `cuda_opd_remote` chained
+   *after* the round-1 best GRPO adapter (kiln #6 validates the chain
+   shape). Hypothesis: format polish from OPD, behavior from GRPO,
+   composing.
+3. **Anchor regression suite.** Does this adapter hurt
+   `pi-code-search` or `pi-doctest`? Run them after each iter as a
+   side-check; round 1 hinted that broad code-reading training may
+   come with style drift.
+4. **Investigate ECHO λ=0.075 vs paper's 0.01–0.05.** Round 1 found
+   the productive ceiling at 0.075. Worth a dedicated ablation:
+   λ ∈ {0.025, 0.05, 0.075, 0.10} at fixed everything else.

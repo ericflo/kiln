@@ -110,3 +110,20 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 status: **OPD cap, less developed**.
+
+### Round 2 plan
+
+1. **Mature the rubric first.** Round-1 cap is sparse; before training,
+   build `calibration/{good,bad}.jsonl` with at least 10/10 separated
+   examples. Round-2 LAYOUT now makes rubric_sanity.py mandatory.
+2. **Teacher pool larger than student baseline.** Faithful
+   summarization requires the teacher to be reliably more faithful
+   than the student. Spot-check 20 teacher outputs against ground
+   truth before running OPD.
+3. **Compose with `pi-code-comprehension`.** Code comprehension
+   (round-1 +12.9pp big win) produces structured summaries; this cap
+   refines the *fidelity* of those summaries. Sequential composition
+   in the integration track.

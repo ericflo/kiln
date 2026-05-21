@@ -297,3 +297,47 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 result: **base 0.9419 saturated, GRPO regressed to 0.9246
+(best trained iter 2), 0.9233 (best ECHO-only iter 25).** Negative
+result: on saturated rewards, GRPO policy gradient is the harm vector.
+
+This cap needs **substantial reshaping** for round 2. Three options
+in order of preference:
+
+### Option A (recommended): Multiplicative format gate on harder data
+
+Replace `composite = w1·outcome + w2·format + w3·process` with
+`composite = outcome × format × (0.7·process + 0.3·base)`. This
+means:
+
+- Outcome 0 → composite 0 (already true)
+- Format failures (malformed diff, wrong hunk count, etc.) → composite 0
+- Process improvements (efficiency, verification) multiply, don't add
+
+This unlocks training signal even when outcome is already high,
+because *format* is where the round-1 measurable headroom actually was
+(+12.5pp on format in pi-failure-triage despite saturated outcome).
+
+Build a hard-eval pool: multi-hunk patches, refactor patches that
+touch >3 files, conflict-prone edits, patches that look right but
+break on a hidden test. Target measured base composite < 0.85.
+
+### Option B: Switch to OPD from 27B teacher
+
+Diff/patch is well-defined behavior with clean teacher signal. OPD
+on a few thousand teacher-generated patches should land cleanly.
+Train rank=16 LoRA via `cuda_opd_remote` with the same task corpus.
+
+### Option C: Negative-class GRPO
+
+Keep GRPO but train *only* on rollouts where the model got it
+wrong (n_correct < N/2 in the group). This is what `--filter-var-min`
+should expose, but the round-1 saturation means filter-var-min may
+keep too few groups. Pair with `--on-empty-filter train-all` so it
+falls back gracefully.
+
+**Decision:** Start with Option A. Rewrite rubric.py for the
+multiplicative composite. Re-baseline. If base ≥ 0.90 again, switch
+to Option B.

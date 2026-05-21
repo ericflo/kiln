@@ -253,3 +253,29 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 status: **scaffold, rank 1/10 in cap decomposition** — highest
+priority for round 2 based on clouderic failure analysis.
+
+Highest-leverage improvements:
+
+1. **Rubric must require evidence, not just sentinel emission.** The
+   v0 rubric grades the `precondition_failed:{claim_id}` sentinel
+   token. That's cheat-able by always emitting it on every task.
+   Fix: rubric replays the session JSONL and verifies the `read`
+   operation referenced the *claim's file path / symbol* before any
+   mutating operation. Use `kiln trajectory inspect --json` to get
+   the segment list; match read content against claim region.
+2. **Adversarial calibration cases (mandatory).** Build calibration:
+   - good: read-then-mutate, holds-true case (correct fix shipped)
+   - good: read-then-not-mutate, stale-case (sentinel + no edit)
+   - bad: always-emit-sentinel, holds-true case (sentinel but no fix)
+   - bad: mutate-without-read, holds-true case (correct fix lucky)
+   - bad: read-wrong-file-then-mutate (the wrong-read cheat)
+   The rubric must score the good > bad cleanly across all four.
+3. **Balanced 50/50 stale/holds-true split.** Round-0 spec already
+   calls for this; enforce it strictly in `build_corpus.py`.
+4. **Sequential dependency awareness.** This cap composes with
+   `pi-context-aware-edits` and `pi-failure-triage`. Reuse the
+   workspace generator from those caps to avoid corpus drift.

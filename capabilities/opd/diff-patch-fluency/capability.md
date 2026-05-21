@@ -185,3 +185,16 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 status: **OPD cap**.
+
+### Round 2 plan
+
+1. **Run iter 1 after `code-symbol-extraction` canary passes.**
+2. **Consider chaining from `pi-diff-patch-apply` reshape (Option A).**
+   If the GRPO cap reshape lifts the format sub-score, OPD here can
+   add the underlying patch-fluency. Kiln #6 validates the chain.
+3. **Build a hard-eval pool from the round-1 GRPO regression tasks.**
+   The patches the GRPO adapter got wrong are exactly the data OPD
+   from a stronger teacher should fix.

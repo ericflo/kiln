@@ -127,3 +127,26 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 result: **composite 0.9370 (+0.6pp over 0.9314 baseline) at
+iter 1**, blocked by 97% EOS-skip rate due to OPD trainer prompt-cue
+bug. Best result captured 8.2% of 0.0686 movable headroom.
+
+The root-cause kiln OPD bug was diagnosed (see round-1 closeout in
+`archive/`) and is now fixed in the round-2 kiln stack. **This cap
+is the canary for the fix.**
+
+### Round 2 plan
+
+1. **Re-run iter 1 of round-1's H1-r16-6ep recipe.** Same data, same
+   hyperparameters, on the patched kiln. Expect:
+   - effective steps to jump from 7 → 30+ (the 97% skip should drop
+     to <50%)
+   - composite to reach 0.96+ (round-1 predicted this in the closeout)
+2. **If iter 1 passes:** the OPD path is unblocked; queue the other
+   5 OPD caps. This is the canary signal.
+3. **If iter 1 doesn't move:** the prompt-cue fix isn't enough; file
+   against kiln with the diagnostic.
+4. **Add `kiln adapter verify` to every iter** so we never again
+   confuse "OPD trainer is broken" with "adapter didn't get loaded."

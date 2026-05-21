@@ -12,6 +12,40 @@ Companion docs:
 - `capabilities/agentic-grpo/KILN_IMPROVEMENT_ISSUES.md` — the 40 kiln
   improvements this layout assumes are landed.
 
+## Round-2 strategic updates (2026-05-21)
+
+After analyzing round-1 results across all 23 capabilities, four
+strategic changes were applied to this layout:
+
+1. **`rubric_sanity.py` is now MANDATORY.** Round 1 hit "rubric too lax"
+   three times. `run_iter.sh` runs `rubric_sanity.py` BEFORE training and
+   fails the iter if the calibration set doesn't separate good from bad
+   with margin > 0.2. Bypass with `KILN_SKIP_RUBRIC_SANITY=1` only for
+   early-development scaffolds.
+
+2. **Multiplicative format gate is the default rubric pattern.** Round 1
+   found that additive composites trap signal when outcome is saturated
+   (`pi-failure-triage` moved format +12.5pp but composite only +0.6pp).
+   New caps use `composite = outcome × format × (process_weights + base)`.
+   Reshaped caps: `pi-diff-patch-apply`, `pi-failure-triage`.
+
+3. **`integration/` track added.** A per-cap win can mask a cross-cap
+   regression. Round 1 hinted that `pi-faithful-completion` may have
+   hurt `pi-code-comprehension` but nothing measured it. The new
+   `integration/cross-cap-coherence/` cap is an eval-only suite that
+   runs any adapter against held-out slices of every member cap and
+   flags `per_cap_delta < -0.02` as regressions.
+
+4. **`datasets/hard_eval.tasks.jsonl` pattern.** Each cap now reserves
+   a "hard-eval pool" built from round-1 failed-task IDs (or hand-marked
+   adversarial tasks). Composite on hard-eval is the cleanest evidence
+   of capability uplift vs. lucky-tasks. Documented in
+   `datasets/hard_eval.README.md` per cap.
+
+Together these changes raise the bar: a positive round-2 iter must
+pass calibration, gate format multiplicatively, demonstrate hard-eval
+lift, and not regress sibling caps in the integration suite.
+
 ## Why a uniform layout
 
 The first experimental round produced 23 capabilities with wildly different
@@ -49,7 +83,7 @@ cap to be runnable; items marked **O** are optional but conventional.
 ├── capability.config.json       # R   Trainer + rollout defaults (versioned)
 ├── capability.jsonl             # R   Append-only iter log (one row per iter)
 ├── rubric.py                    # R   Composite reward function
-├── rubric_sanity.py             # O   Calibration-fixture sanity check
+├── rubric_sanity.py             # R   Calibration sanity check (MANDATORY round 2)
 ├── build_corpus.py              # R   Task generator → datasets/{train,eval}.tasks.jsonl
 ├── rollout.py                   # R*  Agentic only: pi-runner → rollout JSONL
 ├── capability.oracle.sh         # R   Wraps `kiln eval-adapter` for blind eval
@@ -64,16 +98,53 @@ cap to be runnable; items marked **O** are optional but conventional.
 │   └── kiln-polish.jsonl        #     Old kiln-polish issue list (now in KILN_IMPROVEMENT_ISSUES.md)
 ├── hypotheses/                  # O   Alternative experiments + verdicts
 │   └── <slug>.md
-├── calibration/                 # O   Rubric sanity fixtures
-│   ├── good.jsonl               #     Known-high-quality rollouts
-│   └── bad.jsonl                #     Known-low-quality rollouts (cheats included)
+├── calibration/                 # R   Rubric sanity fixtures (MANDATORY round 2)
+│   ├── README.md                #     How to write fixtures
+│   ├── good.jsonl               #     >=5 known-high-quality rollouts
+│   └── bad.jsonl                #     >=5 known-low-quality rollouts (each §0 cheat)
 ├── datasets/                    # R   Task data
 │   ├── train.tasks.jsonl        # R   Committed
-│   └── eval.tasks.jsonl         #     GITIGNORED — blind-eval firewall
+│   ├── eval.tasks.jsonl         #     GITIGNORED — blind-eval firewall
+│   ├── hard_eval.tasks.jsonl    #     GITIGNORED — round-1-failures-derived hard pool
+│   └── hard_eval.README.md      #     How to build the hard pool
 ├── manifest/                    # O   Per-iter reproducibility manifests
 │   └── README.md
 └── prompts/                     # O*  OPD/SFT only: training prompts (committed)
     └── train.jsonl
+```
+
+## Bucket layout (3 paradigms + integration track)
+
+```
+capabilities/
+├── LAYOUT.md           ← this file
+├── README.md
+├── NEXT_ROUND.md
+├── agentic-grpo/       ← multi-turn agentic GRPO (14 caps round 2 + 4 new)
+│   ├── lib/
+│   ├── pi-doctest/             (round-1 winner +4.2pp 3-seed)
+│   ├── pi-code-comprehension/  (round-1 winner +12.9pp)
+│   ├── pi-faithful-completion/ (round-1 winner +8.3pp)
+│   ├── pi-code-search/         (round-1 winner +2.4pp)
+│   ├── pi-doctest/
+│   ├── pi-terminal-bench-lite/ (paper-track integration)
+│   ├── pi-script-fixup/        (verifier-free §5.5)
+│   ├── pi-compaction/          (long-context; gated on kiln #25)
+│   ├── pi-precondition-check/  (rank-1 round-2 priority)
+│   ├── pi-diff-patch-apply/    (RESHAPED: multiplicative format gate)
+│   ├── pi-failure-triage/      (RESHAPED: multiplicative format gate)
+│   ├── pi-shell-hygiene/
+│   ├── pi-source-mod-workflow/ (REFRAMED: integration test)
+│   ├── pi-test-interpretation/
+│   ├── pi-tool-call-efficiency/ (REPURPOSED: transfer eval only)
+│   ├── pi-error-recovery/       (NEW round 2)
+│   ├── pi-context-aware-edits/  (NEW round 2)
+│   ├── pi-incremental-progress/ (NEW round 2)
+│   └── pi-search-then-read/     (NEW round 2)
+├── opd/                ← on-policy distillation (6 caps)
+├── sft/                ← supervised fine-tuning (3 caps)
+└── integration/        ← cross-cap eval (NEW round 2)
+    └── cross-cap-coherence/
 ```
 
 ## Roles per file

@@ -141,3 +141,26 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 status: **scaffold for paper §5.5 verifier-free adaptation**.
+
+Highest-leverage improvements:
+
+1. **Base adapter dependency is mandatory.** This cap follows the
+   paper's recipe of taking the strongest Phase 2 ECHO checkpoint and
+   running 100 verifier-free steps. Without a strong base adapter the
+   recipe produces noise. Wire `BASE_ADAPTER` resolution into
+   `run_iter.sh` with a check that the named adapter exists in the
+   registry; fail early if missing. Default `BASE_ADAPTER` should be
+   the kept adapter from `pi-terminal-bench-lite` (or `pi-doctest`
+   when terminal-bench-lite hasn't been trained yet).
+2. **Run the paper's negative control on TBLite.** The paper expects
+   TBLite to *regress* under §5.5 adaptation (-3.9pp). If we don't
+   see the regression, the recipe didn't transfer; the experiment
+   wasn't a faithful reproduction. Build TBLite into the eval suite
+   alongside val100 / ITD / PyTerm.
+3. **Verifier-free assertion.** `cuda_grpo_ablation --no-policy-loss`
+   must zero the policy term; `train_receipt.echo_metrics` should
+   show env CE dropping while `lora_delta_norm_summary` is nonzero.
+   Round-2 receipts make this asserrtable in the iter row.

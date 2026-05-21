@@ -148,3 +148,18 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 status: **OPD cap with measured baseline**.
+
+### Round 2 plan
+
+1. **Run iter 1 after `code-symbol-extraction` canary passes.** If
+   the OPD trainer fix unblocks code-symbol-extraction, the same fix
+   should help here.
+2. **Verify with adapter smoke test (kiln #19).** The cap targets a
+   surface format pattern; the smoke test catches "no measurable
+   adapter effect" cheaply.
+3. **Multi-language eval coverage.** Round-1 spec covers Python,
+   JavaScript, Rust. Make sure the eval is balanced across all three
+   (and that the rubric's language-detection works on each).

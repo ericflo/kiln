@@ -229,3 +229,28 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 result: **+4.2pp 3-seed verified**, 15× tighter eval variance,
+25% faster wall-clock. Strong-signal filter recipe at iter 5/9/10
+reproducible at 0.896 ± 0.003 (n=3 seeds).
+
+Highest-leverage improvements:
+
+1. **Add the hidden_tests sub-score** (§0 A1 mitigation, deferred from
+   round 1). Each task gets ≥3 visible doctests plus ≥3 hidden test
+   cases the model can't see. Composite gains a `hidden_test_passrate`
+   sub-score that distinguishes "memorize the doctests" from "actually
+   solve the function." Round-1 §0 A1 documented this explicitly as the
+   chief cheat path; round-2 fixes it.
+2. **Expand eval pool 24 → 50 tasks.** Round-1 base composite_stdev
+   across seeds was 0.048 (n=24); doubling the eval set should bring
+   it to ~0.034, making smaller deltas distinguishable from noise.
+3. **Build a hard-eval pool from round-1 failed tasks.** The task IDs
+   the base model failed on (task_0019 circular_shift, etc.) become a
+   `datasets/hard_eval.tasks.jsonl` for separate measurement. Lift on
+   hard-eval is the cleanest evidence of capability uplift vs.
+   lucky-tasks.
+4. **Replicate the iter-5 H12 recipe at the larger eval pool** before
+   trying new hyperparameter axes. The 3-seed reproducibility result
+   should hold; if it doesn't, the larger eval pool exposed a fragility.

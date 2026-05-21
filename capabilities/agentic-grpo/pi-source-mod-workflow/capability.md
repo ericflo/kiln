@@ -224,3 +224,31 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 status: **scaffold; flagged as integration-test material**.
+
+**Reframe for round 2: this cap is an integration test, not a
+training cap.** The full clone → branch → edit → test → push → PR
+sequence is too long and multi-turn to get reliable GRPO signal as a
+single cap. Three options were considered:
+
+- (a) Split into sub-caps (`pi-clone-branch`, `pi-edit-test`,
+  `pi-push-pr`). Three new caps to maintain, partial overlap with
+  existing caps.
+- (b) Keep as single training cap. Round-1 evidence suggests the
+  signal-to-noise ratio is too low.
+- (c) **Reframe as integration test under `capabilities/integration/`**.
+  Use this cap to *measure* whether an adapter trained on
+  pi-context-aware-edits + pi-test-interpretation + pi-faithful-completion
+  composes correctly to handle the full workflow.
+
+**Decision: option (c)**. This cap is renamed conceptually to
+"source-mod workflow integration test." It still has rollout.py /
+rubric.py / capability.oracle.sh because we *evaluate* on the full
+workflow, but it does NOT have a meaningful `run_iter.sh` that trains
+a new adapter — instead, `run_iter.sh` runs the workflow against the
+*latest cross-cap-coherence adapter* and reports pass-rate.
+
+See `capabilities/integration/cross-cap-coherence/` for the integration
+adapter; this cap is one of its eval-bucket members.

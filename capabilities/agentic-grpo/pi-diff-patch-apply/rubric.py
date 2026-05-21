@@ -1,4 +1,32 @@
-"""Pi-diff-patch-apply multi-component rubric (v1).
+"""Pi-diff-patch-apply multi-component rubric (v2 — multiplicative format gate).
+
+CHANGED FROM v1 (round 1, archived at archive/rubric_v1_additive.py):
+
+Round 1's v1 rubric used an *additive* composite when outcome=1:
+
+    composite = 0.40 * no_unrelated + 0.20 * minimality + 0.15 * no_unrelated +
+                0.10 * repair_eff + 0.15 * format
+
+Round 1 found that **format moved +12.5pp on the analogous pi-failure-triage
+cap while composite barely moved (+0.6pp)** because outcome was already
+saturated at 0.94+ and the additive formulation gave format only 15% of
+total weight. The +12.5pp format gain *should have been* a +12.5pp
+composite gain — that's the headline this cap could have shipped.
+
+v2 fixes this with a **multiplicative format gate**:
+
+    if outcome >= 1.0:
+        process = W_MINIMALITY * minimality + W_NO_UNRELATED * no_unrelated +
+                  W_REPAIR_EFF * repair_eff
+        composite = outcome * format * (W_OUTCOME_BASE + process)
+
+Format is now a *gate*, not an additive term. When format = 0.5 the
+composite halves regardless of how good outcome+process are. When format
+moves from 0.85 → 0.96, composite moves +12.9% directly — the round-1
+trapped headroom is now visible to GRPO.
+
+The FAIL-consolation path is unchanged (still capped at 0.40, still
+additive, still gives directional gradient).
 
 The capability under test: given a workspace and a unified diff (sometimes
 clean, sometimes with offset drift, sometimes broken in subtle ways), the
@@ -76,17 +104,17 @@ Returns a dict with these keys:
     _final_diff_lines               int
     _gold_diff_lines                int
 
-Each sub-score is in [0, 1]. The composite is:
+Each sub-score is in [0, 1]. The composite (v2 — multiplicative format gate):
 
     if outcome == 1:
-        composite = 0.50                              # base credit for passing
-                    + 0.20 * minimality
-                    + 0.15 * no_unrelated_edits
-                    + 0.10 * repair_efficiency
-                    + 0.05 * format_compliance
-                    (tested_before_done is a multiplicative discount: see below)
+        process = 0.20 * minimality
+                + 0.15 * no_unrelated_edits
+                + 0.10 * repair_efficiency
+        composite = outcome * format_compliance * (0.55 + process)
+        if tested_before_done < 1.0:
+            composite *= 0.7
     else:
-        # Consolation: gradient on directional progress.
+        # Consolation: gradient on directional progress (unchanged from v1).
         composite = 0.20 * applied_fraction
                   + 0.10 * tested_before_done
                   + 0.05 * format_compliance
@@ -94,9 +122,10 @@ Each sub-score is in [0, 1]. The composite is:
         # capped at 0.40 so a failed-tests rollout cannot match a
         # passed-tests one even if all consolation components are 1.0.
 
-Note the explicit ordering: 0.40 (consolation max) < 0.50 (passing
-floor), so the model can never reward-hack by skipping the actual
-patch-apply task.
+Note the explicit ordering: 0.40 (consolation max) < 0.55 (passing floor
+when format=1.0, process=0), so the model can never reward-hack by
+skipping the actual patch-apply task. Pass-path peaks at 1.0 when
+outcome=format=process_max=tested=1.
 """
 
 from __future__ import annotations
@@ -115,14 +144,15 @@ from typing import Any, Iterable
 # Constants
 # ============================================================================
 
-# Composite weights — kept in one place for easy tuning later.
-W_OUTCOME_BASE = 0.40  # base reward when tests pass (down from 0.50)
+# Composite weights (v2 — multiplicative format gate).
+# `format` is no longer in this list; it's a multiplicative gate on the whole
+# pass-path composite below. Process weights + base must sum to 1.0 since they
+# get multiplied by format ∈ [0, 1].
+W_OUTCOME_BASE = 0.55  # base reward when tests pass
 W_MINIMALITY = 0.20
 W_NO_UNRELATED = 0.15
 W_REPAIR_EFF = 0.10
-W_FORMAT = 0.15  # bumped from 0.05 — format is now the movable mass
-
-# Sum: 0.40 + 0.20 + 0.15 + 0.10 + 0.15 = 1.00 (pass path)
+# Sum process + base: 0.55 + 0.20 + 0.15 + 0.10 = 1.00 (pass path before format gate)
 # Sub-score weights for the FAIL-consolation path (must sum to <= 0.40):
 CONSOLATION_W_APPLIED = 0.20
 CONSOLATION_W_TESTED = 0.10
@@ -957,33 +987,33 @@ def score_rollout(transcript: list, workdir: str, task: dict) -> dict[str, Any]:
     n_test_total, n_test_ok_total = _test_runs(transcript)
 
     if outcome >= 1.0:
-        # PASS path — full sub-score budget. Several multiplicative gates
-        # discourage common reward-hacks:
+        # PASS path — v2 multiplicative format gate.
         #
-        # 1. **`no_unrelated_edits` as a base multiplier.** Tests passing
-        #    after the model touched extra files (e.g. wrote a new
-        #    test_unrelated.py, or mutated configs) is suspicious — the
-        #    model may have circumvented the actual fix. We multiply the
-        #    BASE (0.50) by `no_unrelated_edits` so a model that scribbled
-        #    on extra files loses up to half the floor.
+        # composite = outcome * format * (base + process_weights)
         #
-        # 2. **`tested_before_done` as a global discount.** Passing without
-        #    testing is also suspicious — the model lucked into success or
-        #    the patch was trivial. We multiply the WHOLE composite by 0.7
-        #    when tested=0 so the model is rewarded for the *habit* of
-        #    verifying. (See pi-doctest iter 0 for why this matters.)
+        # Why this shape (CHANGED FROM v1 — see module docstring):
         #
-        # 3. **Minimality is a sub-score, not a gate.** Writing more lines
-        #    than the gold loses minimality points (up to W_MINIMALITY = 0.20)
-        #    but doesn't collapse the rest. Bad agentic style on a working
-        #    solution is still better than non-working.
-        agentic = (
+        # 1. **Format is a multiplicative gate.** Round 1 saw +12.5pp format
+        #    on pi-failure-triage with the additive rubric show as +0.6pp
+        #    composite. v2 lets that +12.5pp format show as +12.5pp composite.
+        #    Format = 0 means composite = 0 regardless of how clean the
+        #    patch was — the rubric demands the model communicate the change
+        #    cleanly to score.
+        #
+        # 2. **Tested_before_done remains a global multiplicative discount.**
+        #    Passing without testing is suspicious — the model lucked into
+        #    success or the patch was trivial. 0.7× when tested=0.
+        #
+        # 3. **Minimality / no_unrelated / repair are additive process
+        #    sub-scores.** Bad process on a working solution still beats
+        #    non-working — they reduce composite within the pass-band, they
+        #    don't gate it.
+        process = (
             W_MINIMALITY * minimality
             + W_NO_UNRELATED * nourel
             + W_REPAIR_EFF * repair_eff
-            + W_FORMAT * fmt
         )
-        composite = W_OUTCOME_BASE * nourel + agentic
+        composite = outcome * fmt * (W_OUTCOME_BASE + process)
         if tested < 1.0:
             composite *= 0.7
     else:

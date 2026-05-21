@@ -28,21 +28,24 @@ Composite design philosophy:
   - `no_dependency_changes` penalizes the "I'll just upgrade the lib"
     shortcut.
 
-Composite (after outcome=1 gate):
-    composite = outcome × (
+Composite (v2 — multiplicative format gate):
+    process = (
         0.30 * held_out_passes
       + 0.15 * fix_localised_correctly
       + 0.10 * no_test_mutation
       + 0.10 * no_blanket_except
       + 0.10 * reproduced_before_fixing
-      + 0.05 * format_compliance
       + 0.05 * diff_minimality
       + 0.05 * no_dependency_changes
-      + 0.10 * base
+      + 0.15 * base
     )
+    composite = outcome × format_compliance × process
 
-Range: [0, 1]. Base term provides a floor of 0.10 for any correct
-visible-test fix.
+Range: [0, 1]. Both outcome and format are MULTIPLICATIVE GATES (round
+2 — see capability.md). The v1 additive rubric trapped +12.5pp of format
+gain that round 1 actually produced; v2 makes that gain visible as
+composite movement. Base term (0.15) is the floor inside process for any
+correct visible-test fix.
 
 Adversarial design (see capability.md §Adversarial design (§0)):
   - Delete the failing test → outcome=0 (oracle re-runs from clean dir).
@@ -569,18 +572,31 @@ def score_rollout(transcript: list[dict], workdir: str, task: dict) -> dict:
     repro_score, repro_diag = _reproduced_before_fixing(transcript, task)
     fmt_score, fmt_diag = _format_compliance(transcript, task)
 
-    agentic = (
+    # v2 — multiplicative format gate.
+    #
+    # Round 1 (additive): outcome × (0.30·held_out + 0.15·fix_local +
+    # 0.10·no_test_mut + 0.10·no_blanket + 0.10·repro + 0.05·fmt +
+    # 0.05·diff_min + 0.05·no_dep + 0.10·base)
+    #
+    # Round 1 result: format moved +12.5pp on this cap, composite barely
+    # moved (+0.6pp). That signal was trapped by additive weighting on a
+    # saturated outcome. v2 changes format from an additive sub-score
+    # (weight 0.05) to a multiplicative gate on the whole composite, so a
+    # +12.5pp format gain now produces a +12.5pp composite movement.
+    #
+    # See capability.md "## Round 2 improvement plan" for the rationale.
+    process = (
         0.30 * held_out_val
         + 0.15 * fix_local
         + 0.10 * no_test_mut
         + 0.10 * no_blanket
         + 0.10 * repro_score
-        + 0.05 * fmt_score
         + 0.05 * diff_min_score
         + 0.05 * no_dep
-        + 0.10  # base
+        + 0.15  # base (was 0.10 — bumped to keep process+base = 1.0 before gates)
     )
-    composite = outcome_val * agentic
+    # outcome and format are both multiplicative gates.
+    composite = outcome_val * fmt_score * process
 
     n_tool_calls = sum(
         len(_tool_calls_in(m)) for _, m in _iter_messages(transcript) if m.get("role") == "assistant"

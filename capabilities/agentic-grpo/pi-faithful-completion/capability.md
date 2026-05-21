@@ -300,3 +300,29 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 result: **+8.28pp big win** (iter 50, family H18-combo:
+temp 0.6 × light prompt × lr 3e-5). Single-axis sweeps each gave
+~+0.05; the combination compounded to +0.083.
+
+Highest-leverage improvements:
+
+1. **Chain training from the iter-50 best adapter.** Round 1 stopped
+   at iter 50 with a clear "combinations compound" pattern. The
+   obvious next step is to take iter-50 as `--base-adapter` and run
+   another 50-iter search over orthogonal axes (rank=32, different
+   ECHO mask mode, hidden eval). Kiln #6 validates the chain
+   compatibility.
+2. **Cross-cap anchor regression.** This was the win that may have
+   side-effects on other behaviors (round 1's CONSOLIDATED_REPORT
+   hinted that terminal-state discipline can come with stylistic
+   shifts). Run pi-code-comprehension, pi-doctest, pi-code-search
+   evals against this adapter; if it hurts them by > 0.02, that's a
+   negative finding the integration track will surface.
+3. **OPD for the format component.** The "OUTPUT FORMAT:" line is a
+   strict structural pattern; 27B has it down cleanly. OPD on just
+   the format sub-score should be quick win additive on top of GRPO
+   behavior win.
+4. **Search recipe combinations, not axes.** Round-1 lesson stays —
+   don't sweep lr alone or temperature alone; sweep crosses.

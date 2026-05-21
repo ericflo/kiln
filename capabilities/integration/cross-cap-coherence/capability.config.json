@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "slug": "cross-cap-coherence",
+  "paradigm": "integration",
+  "base_model_path": "/workspace/qwen3.5-4b",
+  "kiln_url": "http://localhost:8420",
+  "adapter_dir": "/workspace/adapters",
+  "kiln_features_required": [
+    "kiln eval-adapter --seeds N (#33)",
+    "kiln adapter verify (#4)",
+    "kiln serve --eval-mode (#15)"
+  ],
+  "mode": "eval_only",
+  "member_caps": [
+    {"slug": "pi-doctest", "n_tasks": 8, "path": "../../agentic-grpo/pi-doctest"},
+    {"slug": "pi-code-comprehension", "n_tasks": 8, "path": "../../agentic-grpo/pi-code-comprehension"},
+    {"slug": "pi-code-search", "n_tasks": 8, "path": "../../agentic-grpo/pi-code-search"},
+    {"slug": "pi-faithful-completion", "n_tasks": 8, "path": "../../agentic-grpo/pi-faithful-completion"},
+    {"slug": "pi-error-recovery", "n_tasks": 8, "path": "../../agentic-grpo/pi-error-recovery"},
+    {"slug": "pi-incremental-progress", "n_tasks": 6, "path": "../../agentic-grpo/pi-incremental-progress"},
+    {"slug": "pi-context-aware-edits", "n_tasks": 6, "path": "../../agentic-grpo/pi-context-aware-edits"},
+    {"slug": "pi-search-then-read", "n_tasks": 6, "path": "../../agentic-grpo/pi-search-then-read"}
+  ],
+  "regression_threshold": -0.02,
+  "eval": {
+    "seeds": 3,
+    "thinking_mode": "off"
+  }
+}

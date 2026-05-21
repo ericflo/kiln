@@ -212,3 +212,36 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 status: **scaffold**.
+
+**Refined scope for round 2:** this cap is specifically about
+*reading noisy/flaky test output correctly*, not about *fixing the
+underlying bug*. Bug-fixing belongs to `pi-failure-triage`.
+
+Concrete skills:
+
+- Median-of-3: recognize when a test passes in 2/3 runs and one
+  failure was warmup or transient
+- Flake classification: distinguish flaky tests from real failures
+  by output pattern (timing jitter, race condition signatures,
+  network errors)
+- Warmup artifact recognition: the first run's TTFT is noise
+- Compilation/setup vs test failure: tell apart "build broke" from
+  "test broke"
+
+### Highest-leverage improvements
+
+1. **Build a synthetic test-output corpus.** Easier than mining real
+   noisy CI logs: generate noise-perturbed pytest output with known
+   ground truth (this run *should* be classified as flake / real /
+   warmup). Round 2's `kiln rollout` (#34) makes direct HTTP rollouts
+   cheap; no pi needed for this cap.
+2. **Use direct rollouts, not pi sessions.** This cap doesn't need
+   the agentic loop; it's a one-turn classification task. Use
+   `kiln rollout` instead of pi for both training and eval — faster,
+   cheaper, deterministic.
+3. **Chain into pi-failure-triage as input.** The integration track
+   should compose: pi-test-interpretation classifies the failure;
+   pi-failure-triage fixes the root cause.

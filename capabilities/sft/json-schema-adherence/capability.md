@@ -93,3 +93,19 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 status: **SFT cap with broad experiment ledger**.
+
+### Round 2 plan
+
+1. **Add the standard anchor suite.** `sft/math-broad` and
+   `sft/python-algo` have `capability.anchor.sh`; this cap doesn't.
+   Round-2 layout mandates the anchor suite for SFT caps to catch
+   stylistic clobber. Build the anchor suite first.
+2. **Multi-seed eval mandatory.** Round-1 used single-eval scoring;
+   replicate the round-1 best recipe across 3 seeds and report the
+   σ-aware result. Use `kiln eval-adapter --seeds 3` per LAYOUT.
+3. **Receipt-driven iter logging.** The round-1 ledger was hand-built;
+   round 2 derives it from `train_receipt.json` + `eval_summary.json`.
+   This is what the normalized `run_iter.sh` does.

@@ -139,3 +139,18 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 status: **OPD cap with multiple iters attempted**.
+
+### Round 2 plan
+
+1. **Run after `code-symbol-extraction` canary passes** to confirm the
+   OPD trainer fix transferred.
+2. **Adversarial calibration cases.** Tool-call argument fidelity is
+   exactly where the §0 cheat-by-guessing pattern bites. Include in
+   calibration: well-formed args, args with one swapped field,
+   args with extra hallucinated fields, args missing required fields.
+3. **Cross-validate with `pi-tool-call-efficiency` eval cap.** A
+   tool-call-arg-fidelity adapter that hurts tool-call efficiency
+   (more retries, more arg-rebuild loops) is a Pyrrhic win.

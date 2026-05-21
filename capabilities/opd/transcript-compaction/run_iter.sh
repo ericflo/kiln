@@ -39,6 +39,16 @@ if [ ! -f "$PROMPTS" ]; then
   python3 build_corpus.py
 fi
 
+# 0b. Rubric sanity gate (round-2 mandatory).
+#     Run rubric_sanity.py if it exists. Bypass with KILN_SKIP_RUBRIC_SANITY=1.
+if [ -f rubric_sanity.py ] && [ -z "${KILN_SKIP_RUBRIC_SANITY:-}" ]; then
+  echo "[0b] rubric_sanity (calibration gate)…"
+  python3 rubric_sanity.py 2>&1 | tee "$LOG_DIR/rubric_sanity.log" || {
+    echo "rubric_sanity failed; set KILN_SKIP_RUBRIC_SANITY=1 to bypass" >&2
+    exit 4
+  }
+fi
+
 echo "[1/5] cuda_opd_remote --dry-run…"
 KILN_CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}" "$OPD_BIN" \
   --prompts "$PROMPTS" \

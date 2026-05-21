@@ -189,3 +189,34 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 status: **scaffold**.
+
+**Repurposed for round 2: transfer eval, not training cap.** Tool-call
+efficiency is already a sub-score in 4 caps' rubrics (pi-doctest,
+pi-code-search, pi-code-comprehension, pi-faithful-completion).
+Training a *standalone* tool-call-efficiency adapter would either:
+
+- duplicate signal already present in each cap's rubric, or
+- train on synthetic prompts that don't transfer to real tasks.
+
+**Round-2 reshape:** make this an **eval-only** cap that measures
+tool-call efficiency *across* the trained adapters from other caps.
+Its `run_iter.sh` doesn't train; it runs `kiln eval-adapter` against
+multiple adapters and reports the tool-call distribution per adapter.
+
+This becomes a *cross-cap behavioral test*: does training
+pi-faithful-completion accidentally hurt pi-doctest's tool-call
+efficiency? Today we can't measure that without this cap.
+
+### Concrete shape
+
+- `capability.oracle.sh <adapter1> <adapter2> ...` — eval each
+  adapter on a fixed mixed task pool, report:
+  - mean n_tool_calls per adapter
+  - distribution: efficient (≤4) / moderate (5-9) / wasteful (≥10)
+  - delta vs base
+- `run_iter.sh` is renamed to `run_eval.sh` (no training step).
+- Rubric has only the tool_call_efficiency sub-score; everything
+  else is irrelevant for this measurement.

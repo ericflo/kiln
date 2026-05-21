@@ -290,3 +290,34 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 result: **byte-identical adapter outputs** after training
+became tractable. Negative result; training appeared to be a no-op.
+
+Round 2 finally has the diagnostic tooling to debug this:
+
+- kiln #25 long-context bench suite (8K/16K/32K/64K)
+- kiln #26 per-phase progress logging
+- kiln #27 byte-identical adapter diagnostic
+- kiln #28 testable warning-prefix masking
+
+### Round 2 plan (sequential gates)
+
+1. **Run kiln #25 bench** at 32K to confirm the trainer moves weights
+   non-trivially on long-context inputs. If `lora_delta_norm_summary`
+   is near-zero at 32K but normal at 8K, the bug is in long-context
+   gradient flow.
+2. **If weights move:** switch this cap to OPD from 27B. Long-context
+   summarization has clean teacher signal — the 27B produces a clear
+   target compaction; the 4B distills it. Round-1's GRPO approach was
+   the wrong tool: GRPO needs reward variance, and compaction quality
+   measured by a noisy LLM-judge has too little variance per group.
+3. **If weights don't move:** that's a kiln bug, not a cap problem.
+   File against the project and pause this cap.
+4. **Apply the warning-prefix mask test.** Round-1 may have had
+   warning boilerplate contamination. Use #28's mask test to verify
+   env tokens being trained on are real, not harness preamble.
+
+This cap stays in the queue but is now **dependency-gated**: do not
+re-train until step 1 passes.

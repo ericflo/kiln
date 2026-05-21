@@ -156,3 +156,33 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 status: **infrastructure validated end-to-end; paper-scale
+experiment not run.** Synthetic GPU iters proved ECHO firing,
+`--no-policy-loss` working, `--base-adapter` loading real weights.
+
+### Round 2: actually run the paper-scale experiment
+
+The plumbing works. The publishable headline doesn't exist yet.
+
+1. **Build the paper task pool.** Paper §4 enumerates the
+   terminal-bench-lite task family; reproduce that corpus.
+2. **Two-phase training as in paper.** Phase 1 (GRPO with ECHO) →
+   Phase 2 (`--no-policy-loss` verifier-free adaptation). Both phases
+   are now first-class kiln operations.
+3. **Compare against the paper's reported numbers.** Match the
+   evaluation protocol; the reported numbers were val100, ITD,
+   PyTerm, TBLite (3 positive transfers + 1 negative control).
+4. **Triple-seed the paper's headline.** Round-1 lesson: single-seed
+   wins don't reproduce. The publishable result is a 3-seed mean.
+
+This cap should be the **second-round headline** — pi-doctest gives
+us a small reproducible win on a narrow task; pi-terminal-bench-lite
+should give us the paper-quality multi-eval reproduction.
+
+### Dependency for pi-script-fixup
+
+`pi-script-fixup`'s base adapter is the strongest Phase 2 ECHO
+checkpoint produced here. Land Phase 2 first, then fan out to
+pi-script-fixup.

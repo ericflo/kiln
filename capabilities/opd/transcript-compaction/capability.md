@@ -133,3 +133,15 @@ iter log and writeups are preserved in [`archive/`](archive/). The
 ```
 
 See [`run_iter.sh`](run_iter.sh) for the full pipeline.
+
+## Round 2 improvement plan
+Round 1 status: **OPD cap; multiple iters attempted**.
+
+### Round 2 plan
+
+1. **Run after `code-symbol-extraction` canary.**
+2. **Pair with `pi-compaction` decision.** Once pi-compaction's
+   kiln-bench gates resolve (long-context weight movement), this OPD
+   cap and pi-compaction (now OPD per round-2 reshape) are
+   complementary — different task framings of the same underlying
+   summarization skill. They should share an eval set.
