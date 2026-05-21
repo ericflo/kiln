@@ -1,30 +1,62 @@
 # pi-incremental-progress
 
-Capability under `capabilities/agentic-grpo/` (round 2 — new cap).
+When making a non-trivial change, work in verified sub-steps rather than
+writing everything then testing once. New cap in round 2 (Tier 2).
 
 ## Read first
 
-1. [`capability.md`](capability.md) — contract: goal, rubric, hypotheses.
-2. [`capability.config.json`](capability.config.json) — trainer + rollout defaults.
-3. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout and kiln CLIs used.
-4. [`../README.md`](../README.md) — ECHO defaults and pi-rollout shape.
+1. [`capability.md`](capability.md) — contract: goal, rubric (multiplicative
+   gate), §0, hypotheses.
+2. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout.
+3. [`../README.md`](../README.md) — ECHO defaults.
 
 ## Status
 
-**Scaffold.** The capability.md is fully specified; the implementation
-files (build_corpus.py, rollout.py, rubric.py) are NotImplementedError
-stubs. The next agent picking this up:
+**Implementation complete. Calibration passes (separation +0.33).**
 
-1. Fill build_corpus.py per `capability.md ## Task shape`.
-2. Fill rubric.py per `capability.md ## Rubric (v0)`.
-3. Fill rollout.py per the pi-rollout reference (`../pi-doctest/rollout.py`).
-4. Fill rubric_sanity.py + `calibration/{good,bad}.jsonl` per `capability.md ## Adversarial design (§0)`.
-5. Run `./capability.oracle.sh` to baseline.
-6. Run `./run_iter.sh h1-default-recipe` for the first training iter.
+| File | Status |
+|------|--------|
+| `capability.md` | Full spec |
+| `capability.config.json` | Tuned — `max_turns=12` (this cap needs more turns) |
+| `build_corpus.py` | 24 train + 12 eval tasks across 3 families |
+| `rubric.py` | Multiplicative-gate composite — measures progress, alignment, failure-catching |
+| `rubric_sanity.py` | Mandatory gate |
+| `rollout.py` | Pi driver (shared shape with pi-error-recovery) |
+| `capability.oracle.sh` | `kiln eval-adapter --seeds 3` |
+| `run_iter.sh` | Full pipeline |
+| `calibration/good.jsonl` | 5 hand-written good rollouts |
+| `calibration/bad.jsonl` | 5 §0 cheats: big-bang, no-verify, fake-steps, spam, ignored-failure |
 
-The capability.md `## Adversarial design (§0)` is the calibration spec
-— the §0 cheats are the bad-class entries for `calibration/bad.jsonl`.
+## Quickstart
+
+```bash
+python3 build_corpus.py
+python3 rubric_sanity.py     # PASS — separation 0.33
+./capability.oracle.sh
+./run_iter.sh h1-default-recipe
+```
+
+## Headroom estimate
+
+- **Baseline:** ~0.50 (4B sometimes decomposes; usually doesn't on >2-step tasks).
+- **Headroom:** ~0.50.
+- **Target sub-score:** `step_progress_observability`.
+
+## Hypotheses
+
+| Slug | Knob | Hypothesis |
+|------|------|------------|
+| h1-default-recipe | defaults | +0.10 composite |
+| h2-extended-turns | max_turns=16 (vs 12) | More room → more decomposition |
+| h3-echo-heavier | ECHO λ=0.075 | Stronger env-attention; verify results matter |
+| h4-chain-faithful | Chain from pi-faithful-completion best | Terminal-state + decomposition compose |
+
+## Composition
+
+- **Upstream:** none.
+- **Downstream:** almost all other caps benefit; this is a foundational habit.
+- **Integration:** central member of `integration/cross-cap-coherence/`.
 
 ## History
 
-Brand-new in round 2 — no archive.
+Brand-new in round 2.
