@@ -907,6 +907,17 @@ impl GrpoBenchmarkTimings {
     fn add_optimizer(&mut self, elapsed: Duration) {
         self.optimizer_ms += elapsed.as_secs_f64() * 1000.0;
     }
+
+    fn to_receipt(&self) -> crate::train_receipt::TrainingPhaseTimingsReceipt {
+        crate::train_receipt::TrainingPhaseTimingsReceipt {
+            tokenize_ms: self.tokenize_ms,
+            mask_build_ms: self.mask_build_ms,
+            reference_forward_ms: self.reference_forward_ms,
+            policy_forward_ms: self.policy_forward_ms,
+            backward_ms: self.backward_ms,
+            optimizer_ms: self.optimizer_ms,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1584,6 +1595,7 @@ fn build_grpo_train_receipt(
     data: crate::train_receipt::DataStatsReceipt,
     rewards: crate::train_receipt::RewardStatsReceipt,
     token_counts: crate::train_receipt::TokenCountReceipt,
+    phase_timings: crate::train_receipt::TrainingPhaseTimingsReceipt,
     echo_metrics: crate::train_receipt::EchoActivityMetrics,
     wall_clock_ms: u64,
     dynamic_groups_filtered: usize,
@@ -1609,6 +1621,7 @@ fn build_grpo_train_receipt(
     receipt.data = data;
     receipt.rewards = rewards;
     receipt.token_counts = token_counts;
+    receipt.phase_timings = phase_timings;
     receipt.runtime.wall_clock_ms = wall_clock_ms;
     receipt.adapter_smoke_test = adapter_smoke_test;
     receipt.lora_grad_norms = lora_grad_norms;
@@ -1662,6 +1675,7 @@ fn write_grpo_train_receipt_best_effort(
     data: crate::train_receipt::DataStatsReceipt,
     rewards: crate::train_receipt::RewardStatsReceipt,
     token_counts: crate::train_receipt::TokenCountReceipt,
+    phase_timings: crate::train_receipt::TrainingPhaseTimingsReceipt,
     echo_metrics: crate::train_receipt::EchoActivityMetrics,
     wall_clock_ms: u64,
     dynamic_groups_filtered: usize,
@@ -1682,6 +1696,7 @@ fn write_grpo_train_receipt_best_effort(
         data,
         rewards,
         token_counts,
+        phase_timings,
         echo_metrics,
         wall_clock_ms,
         dynamic_groups_filtered,
@@ -2176,10 +2191,13 @@ pub fn grpo_train(
     let mut echo_metrics = crate::train_receipt::EchoActivityMetrics::default();
     let mut reward_stats = crate::train_receipt::RewardStatsReceipt::default();
     let mut lora_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
+    let mut phase_timings = GrpoBenchmarkTimings::default();
     let mut dynamic_groups_filtered = 0usize;
     tracing::info!(
         num_groups = groups.len(),
         total_completions,
+        total_input_groups = groups.len(),
+        total_input_completions = total_completions,
         lr = config.learning_rate,
         kl_coeff = config.kl_coeff,
         clip_epsilon = config.clip_epsilon,
@@ -2187,6 +2205,11 @@ pub fn grpo_train(
         alpha = config.lora_alpha,
         adapter_name,
         "starting GRPO training"
+    );
+    tracing::info!(
+        groups = groups.len(),
+        completions = total_completions,
+        "GRPO data loaded"
     );
 
     let alpha_over_rank = match crate::lora_scaling::validate_lora_scaling(
@@ -2214,6 +2237,7 @@ pub fn grpo_train(
                 data_stats,
                 reward_stats,
                 token_counts,
+                crate::train_receipt::TrainingPhaseTimingsReceipt::default(),
                 crate::train_receipt::EchoActivityMetrics::default(),
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
@@ -2273,6 +2297,7 @@ pub fn grpo_train(
                 data_stats,
                 reward_stats,
                 token_counts,
+                crate::train_receipt::TrainingPhaseTimingsReceipt::default(),
                 crate::train_receipt::EchoActivityMetrics::default(),
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
@@ -2390,6 +2415,13 @@ pub fn grpo_train(
         // completions all share the same reward are dropped before tokenization —
         // their advantage vector is uniformly zero and would contribute no
         // policy-gradient signal anyway.
+        tracing::info!(
+            groups = groups.len(),
+            completions = total_completions,
+            dynamic_sampling,
+            "GRPO tokenize start"
+        );
+        let tokenize_all_started = Instant::now();
         let mut tokenized_groups: Vec<TokenizedGrpoGroup> = Vec::new();
         for (idx, group) in groups.iter().enumerate() {
             let source_index = idx + 1;
@@ -2402,7 +2434,7 @@ pub fn grpo_train(
                 dynamic_dropped += 1;
                 continue;
             }
-            match tokenize_grpo_group(group, tokenizer) {
+            match tokenize_grpo_group_timed(group, tokenizer, Some(&mut phase_timings)) {
                 Ok(tgroup) => tokenized_groups.push(tgroup),
                 Err(e) => {
                     tokenization_failed += 1;
@@ -2419,6 +2451,15 @@ pub fn grpo_train(
         data_stats.completions_trained =
             tokenized_groups.iter().map(|g| g.completions.len()).sum();
         token_counts = token_counts_for_grpo_groups(&tokenized_groups);
+        tracing::info!(
+            groups = tokenized_groups.len(),
+            completions = data_stats.completions_trained,
+            action_tokens = token_counts.action_tokens,
+            env_tokens = token_counts.env_tokens,
+            context_tokens = token_counts.context_tokens,
+            elapsed_ms = tokenize_all_started.elapsed().as_millis() as u64,
+            "GRPO tokenize end"
+        );
         crate::train_receipt::warn_echo_enabled_without_env_tokens(
             "grpo",
             config.loss.echo_enabled(),
@@ -2646,6 +2687,7 @@ pub fn grpo_train(
         data_stats,
         reward_stats,
         token_counts,
+        phase_timings.to_receipt(),
         echo_metrics,
         run_started.elapsed().as_millis() as u64,
         dynamic_groups_filtered,
@@ -2687,6 +2729,7 @@ pub fn grpo_dry_run_jsonl(
     let mut data_stats = crate::train_receipt::DataStatsReceipt::default();
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
     let mut reward_stats = crate::train_receipt::RewardStatsReceipt::default();
+    let mut phase_timings = GrpoBenchmarkTimings::default();
     let mut dynamic_groups_filtered = 0usize;
     let mut alpha_over_rank = None;
     let mut base_adapter_dir = None;
@@ -2801,9 +2844,11 @@ pub fn grpo_dry_run_jsonl(
             }
 
             let group_idx = processed_groups + 1;
-            let tgroup = tokenize_grpo_group(&group, tokenizer).with_context(|| {
-                format!("tokenize GRPO dry-run group {group_idx} at line {line_no}")
-            })?;
+            let tgroup =
+                tokenize_grpo_group_timed(&group, tokenizer, Some(&mut phase_timings))
+                    .with_context(|| {
+                        format!("tokenize GRPO dry-run group {group_idx} at line {line_no}")
+                    })?;
             validate_grpo_dry_run_masks(&tgroup, group_idx, *line_no)?;
             let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(&tgroup));
             token_counts.action_tokens = token_counts
@@ -2878,6 +2923,7 @@ pub fn grpo_dry_run_jsonl(
         data_stats,
         reward_stats,
         token_counts,
+        phase_timings.to_receipt(),
         crate::train_receipt::EchoActivityMetrics::default(),
         run_started.elapsed().as_millis() as u64,
         dynamic_groups_filtered,
@@ -2938,6 +2984,7 @@ pub fn grpo_train_jsonl(
     let mut echo_metrics = crate::train_receipt::EchoActivityMetrics::default();
     let mut reward_stats = crate::train_receipt::RewardStatsReceipt::default();
     let mut lora_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
+    let mut phase_timings = GrpoBenchmarkTimings::default();
     let mut dynamic_groups_filtered = 0usize;
 
     let device = weights.embed_tokens.device().clone();
@@ -2975,6 +3022,7 @@ pub fn grpo_train_jsonl(
                 data_stats,
                 reward_stats,
                 token_counts,
+                crate::train_receipt::TrainingPhaseTimingsReceipt::default(),
                 crate::train_receipt::EchoActivityMetrics::default(),
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
@@ -3028,6 +3076,7 @@ pub fn grpo_train_jsonl(
                 data_stats,
                 reward_stats,
                 token_counts,
+                crate::train_receipt::TrainingPhaseTimingsReceipt::default(),
                 crate::train_receipt::EchoActivityMetrics::default(),
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
@@ -3189,6 +3238,12 @@ pub fn grpo_train_jsonl(
         let file = File::open(dataset_path)
             .with_context(|| format!("open GRPO JSONL dataset {}", dataset_path.display()))?;
         let total_bytes = file.metadata().map(|m| m.len()).unwrap_or(0).max(1);
+        tracing::info!(
+            dataset = %dataset_path.display(),
+            total_bytes,
+            reward_filter_enabled = reward_filter_plan.is_some(),
+            "streamed GRPO data loaded"
+        );
         let mut reader = BufReader::new(file);
         let mut line = String::new();
         let mut bytes_read = 0u64;
@@ -3267,15 +3322,17 @@ pub fn grpo_train_jsonl(
                 line = line_no,
                 line_bytes = read,
                 byte_offset = bytes_read.saturating_sub(read as u64),
-                "streamed GRPO group tokenization begin"
+                "streamed GRPO tokenize start"
             );
             let tokenize_start = Instant::now();
-            let tgroup = tokenize_grpo_group(&group, tokenizer).with_context(|| {
-                format!(
-                    "tokenize GRPO JSONL group {} at line {}",
-                    processed_groups, line_no
-                )
-            })?;
+            let tgroup =
+                tokenize_grpo_group_timed(&group, tokenizer, Some(&mut phase_timings))
+                    .with_context(|| {
+                        format!(
+                            "tokenize GRPO JSONL group {} at line {}",
+                            processed_groups, line_no
+                        )
+                    })?;
             let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(&tgroup));
             token_counts.action_tokens = token_counts
                 .action_tokens
@@ -3290,8 +3347,11 @@ pub fn grpo_train_jsonl(
             tracing::info!(
                 group = processed_groups,
                 completions = tgroup.completions.len(),
+                action_tokens = group_counts.action_tokens,
+                env_tokens = group_counts.env_tokens,
+                context_tokens = group_counts.context_tokens,
                 elapsed_ms = tokenize_start.elapsed().as_millis() as u64,
-                "streamed GRPO group tokenized"
+                "streamed GRPO tokenize end"
             );
 
             let step_report = train_tokenized_grpo_group_with_grad_norms(
@@ -3469,6 +3529,7 @@ pub fn grpo_train_jsonl(
         data_stats,
         reward_stats,
         token_counts,
+        phase_timings.to_receipt(),
         echo_metrics,
         run_started.elapsed().as_millis() as u64,
         dynamic_groups_filtered,
@@ -4125,6 +4186,16 @@ fn train_tokenized_grpo_group_with_grad_norms(
             echo_env_ce: None,
         });
     }
+    let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(tgroup));
+    let group_max_seq_len = tgroup
+        .completions
+        .iter()
+        .map(|completion| completion.input_ids.len())
+        .max()
+        .unwrap_or(0);
+    let checkpoint_segments = segments.map_or(0, |segs| segs.len());
+    let streaming_tile_tokens = streaming_tile_tokens_for(device);
+    let streaming_prefill = streaming_prefill_enabled_for(device, group_max_seq_len);
 
     let token_level = matches!(config.loss_aggregation, LossAggregation::TokenLevel);
     let mut group_accum: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
@@ -4143,6 +4214,16 @@ fn train_tokenized_grpo_group_with_grad_norms(
         && !kiln_core::env_flag::env_flag("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", false);
     let shared_prefix_log_probs: Option<Vec<Tensor>> = if use_shared_prefix {
         let started = Instant::now();
+        tracing::info!(
+            completions = tgroup.completions.len(),
+            max_seq_len = group_max_seq_len,
+            action_tokens = group_counts.action_tokens,
+            env_tokens = group_counts.env_tokens,
+            checkpoint_segments,
+            streaming_prefill,
+            streaming_tile_tokens,
+            "GRPO ref forward start"
+        );
         let log_probs = compute_ref_log_probs_shared_prefix(
             backend,
             tgroup,
@@ -4156,10 +4237,16 @@ fn train_tokenized_grpo_group_with_grad_norms(
         if let Some(t) = timings.as_deref_mut() {
             t.add_reference_forward(elapsed);
         }
-        tracing::debug!(
+        tracing::info!(
             n_completions = tgroup.completions.len(),
+            max_seq_len = group_max_seq_len,
+            action_tokens = group_counts.action_tokens,
+            env_tokens = group_counts.env_tokens,
+            checkpoint_segments,
+            streaming_prefill,
+            streaming_tile_tokens,
             elapsed_ms = elapsed.as_millis() as u64,
-            "GRPO shared-prefix ref forward complete"
+            "GRPO ref forward end"
         );
         Some(log_probs)
     } else {
@@ -4231,6 +4318,16 @@ fn train_tokenized_grpo_group_with_grad_norms(
             }
         } else {
             let ref_started = Instant::now();
+            tracing::info!(
+                comp_idx,
+                seq_len = comp.input_ids.len(),
+                action_tokens = num_active,
+                env_tokens = comp_env_count,
+                checkpoint_segments,
+                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                streaming_tile_tokens,
+                "GRPO ref forward start"
+            );
             let mut ref_linear_state = LinearAttentionState::new(model_config, device)?;
             // BasePerStep (None ema_ref_lora) → base model (no LoRA).
             // Ema (Some(snapshot)) → frozen snapshot of the LoRA from a
@@ -4255,6 +4352,17 @@ fn train_tokenized_grpo_group_with_grad_norms(
             if let Some(t) = timings.as_deref_mut() {
                 t.add_reference_forward(ref_started.elapsed());
             }
+            tracing::info!(
+                comp_idx,
+                seq_len = comp.input_ids.len(),
+                action_tokens = num_active,
+                env_tokens = comp_env_count,
+                checkpoint_segments,
+                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                streaming_tile_tokens,
+                elapsed_ms = ref_started.elapsed().as_millis() as u64,
+                "GRPO ref forward end"
+            );
             ref_log_probs
         };
 
@@ -4308,6 +4416,14 @@ fn train_tokenized_grpo_group_with_grad_norms(
                     &accumulated_grads,
                 )?;
                 let optimizer_started = Instant::now();
+                tracing::info!(
+                    comp_idx,
+                    seq_len = comp.input_ids.len(),
+                    action_tokens = num_active,
+                    env_tokens = comp_env_count,
+                    optimizer = ?config.optimizer,
+                    "GRPO optimizer start"
+                );
                 optimizer_step_from_map(
                     backend,
                     params,
@@ -4319,11 +4435,30 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 if let Some(t) = timings.as_deref_mut() {
                     t.add_optimizer(optimizer_started.elapsed());
                 }
+                tracing::info!(
+                    comp_idx,
+                    seq_len = comp.input_ids.len(),
+                    action_tokens = num_active,
+                    env_tokens = comp_env_count,
+                    optimizer = ?config.optimizer,
+                    elapsed_ms = optimizer_started.elapsed().as_millis() as u64,
+                    "GRPO optimizer end"
+                );
             }
         } else {
             let lora_weights = params.as_lora_weights();
             let mut linear_state = LinearAttentionState::new(model_config, device)?;
             let policy_forward_started = Instant::now();
+            tracing::info!(
+                comp_idx,
+                seq_len = comp.input_ids.len(),
+                action_tokens = num_active,
+                env_tokens = comp_env_count,
+                checkpoint_segments,
+                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                streaming_tile_tokens,
+                "GRPO policy forward start"
+            );
             let policy_logits = model_forward(
                 backend,
                 &comp.input_ids,
@@ -4337,6 +4472,17 @@ fn train_tokenized_grpo_group_with_grad_norms(
             if let Some(t) = timings.as_deref_mut() {
                 t.add_policy_forward(policy_forward_started.elapsed());
             }
+            tracing::info!(
+                comp_idx,
+                seq_len = comp.input_ids.len(),
+                action_tokens = num_active,
+                env_tokens = comp_env_count,
+                checkpoint_segments,
+                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                streaming_tile_tokens,
+                elapsed_ms = policy_forward_started.elapsed().as_millis() as u64,
+                "GRPO policy forward end"
+            );
 
             let policy_log_probs = token_log_probs(
                 &policy_logits,
@@ -4416,16 +4562,45 @@ fn train_tokenized_grpo_group_with_grad_norms(
             loss_val = loss.to_scalar::<f32>()? as f64;
 
             let backward_started = Instant::now();
+            tracing::info!(
+                comp_idx,
+                seq_len = comp.input_ids.len(),
+                action_tokens = num_active,
+                env_tokens = comp_env_count,
+                checkpoint_segments = 0usize,
+                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                streaming_tile_tokens,
+                "GRPO backward start"
+            );
             let grads = loss.backward().context("GRPO+ECHO backward pass")?;
             if let Some(t) = timings.as_deref_mut() {
                 t.add_backward(backward_started.elapsed());
             }
+            tracing::info!(
+                comp_idx,
+                seq_len = comp.input_ids.len(),
+                action_tokens = num_active,
+                env_tokens = comp_env_count,
+                checkpoint_segments = 0usize,
+                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                streaming_tile_tokens,
+                elapsed_ms = backward_started.elapsed().as_millis() as u64,
+                "GRPO backward end"
+            );
             if token_level {
                 let vars = params.all_vars();
                 accumulate_grads(&mut group_accum, &grads, &vars)?;
             } else {
                 observe_lora_grad_norms_from_grad_store(grad_norms, params, &grads)?;
                 let optimizer_started = Instant::now();
+                tracing::info!(
+                    comp_idx,
+                    seq_len = comp.input_ids.len(),
+                    action_tokens = num_active,
+                    env_tokens = comp_env_count,
+                    optimizer = ?config.optimizer,
+                    "GRPO optimizer start"
+                );
                 optimizer_step(
                     backend,
                     params,
@@ -4437,6 +4612,15 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 if let Some(t) = timings.as_deref_mut() {
                     t.add_optimizer(optimizer_started.elapsed());
                 }
+                tracing::info!(
+                    comp_idx,
+                    seq_len = comp.input_ids.len(),
+                    action_tokens = num_active,
+                    env_tokens = comp_env_count,
+                    optimizer = ?config.optimizer,
+                    elapsed_ms = optimizer_started.elapsed().as_millis() as u64,
+                    "GRPO optimizer end"
+                );
             }
         }
 
@@ -4452,6 +4636,14 @@ fn train_tokenized_grpo_group_with_grad_norms(
     if token_level && !group_accum.is_empty() {
         observe_lora_grad_norms_from_map(grad_norms, lora_grad_index, &group_accum)?;
         let optimizer_started = Instant::now();
+        tracing::info!(
+            completions = tgroup.completions.len(),
+            max_seq_len = group_max_seq_len,
+            action_tokens = group_counts.action_tokens,
+            env_tokens = group_counts.env_tokens,
+            optimizer = ?config.optimizer,
+            "GRPO optimizer start"
+        );
         optimizer_step_from_map(
             backend,
             params,
@@ -4463,6 +4655,15 @@ fn train_tokenized_grpo_group_with_grad_norms(
         if let Some(t) = timings.as_deref_mut() {
             t.add_optimizer(optimizer_started.elapsed());
         }
+        tracing::info!(
+            completions = tgroup.completions.len(),
+            max_seq_len = group_max_seq_len,
+            action_tokens = group_counts.action_tokens,
+            env_tokens = group_counts.env_tokens,
+            optimizer = ?config.optimizer,
+            elapsed_ms = optimizer_started.elapsed().as_millis() as u64,
+            "GRPO optimizer end"
+        );
     }
 
     let loss = if tgroup.completions.is_empty() {
@@ -4717,14 +4918,28 @@ fn tokenize_grpo_group_timed(
         // Legacy single-string path: tokens after the prompt are
         // action tokens; there are no observation tokens.
         let mask_started = Instant::now();
+        tracing::info!(
+            seq_len = full_ids.len(),
+            prompt_tokens = prompt_ids.len(),
+            completion_tokens = full_ids.len().saturating_sub(prompt_ids.len()),
+            "GRPO mask build start"
+        );
         let mut action_mask = vec![false; full_ids.len()];
         for i in prompt_ids.len()..full_ids.len() {
             action_mask[i] = true;
         }
         let env_mask = vec![false; full_ids.len()];
+        let mask_elapsed = mask_started.elapsed();
         if let Some(t) = timings.as_deref_mut() {
-            t.add_mask_build(mask_started.elapsed());
+            t.add_mask_build(mask_elapsed);
         }
+        tracing::info!(
+            seq_len = full_ids.len(),
+            action_tokens = action_mask.iter().filter(|&&active| active).count(),
+            env_tokens = 0usize,
+            elapsed_ms = mask_elapsed.as_secs_f64() * 1000.0,
+            "GRPO mask build end"
+        );
 
         completions.push(TokenizedGrpoCompletion {
             input_ids: full_ids,
@@ -10360,6 +10575,21 @@ fn checkpointed_grpo_forward_backward<'echo>(
     let resident_activation = backend.supports_resident_activation();
     let recompute_boundaries = recompute_checkpoint_boundaries(input_ids.len());
     let should_spool_boundaries = recompute_boundaries && spool_checkpoint_boundaries(device);
+    let active_tokens = completion_mask
+        .get(1..)
+        .map_or(0usize, |mask| mask.iter().filter(|&&active| active).count());
+    let streaming_tile_tokens = streaming_tile_tokens_for(device);
+    tracing::info!(
+        seq_len = input_ids.len(),
+        action_tokens = active_tokens,
+        num_segments,
+        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
+        streaming_tile_tokens,
+        recompute_boundaries,
+        should_spool_boundaries,
+        resident_activation,
+        "GRPO policy forward start"
+    );
 
     let detached_boundary = |boundary_idx: usize| -> Result<Tensor> {
         anyhow::ensure!(
@@ -10489,8 +10719,30 @@ fn checkpointed_grpo_forward_backward<'echo>(
     if let Some(t) = timings.as_deref_mut() {
         t.add_policy_forward(policy_forward_started.elapsed());
     }
+    tracing::info!(
+        seq_len = input_ids.len(),
+        action_tokens = active_tokens,
+        num_segments,
+        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
+        streaming_tile_tokens,
+        recompute_boundaries,
+        should_spool_boundaries,
+        resident_activation,
+        elapsed_ms = policy_forward_started.elapsed().as_millis() as u64,
+        "GRPO policy forward end"
+    );
 
     let backward_started = Instant::now();
+    tracing::info!(
+        seq_len = input_ids.len(),
+        action_tokens = active_tokens,
+        num_segments,
+        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
+        streaming_tile_tokens,
+        recompute_boundaries,
+        should_spool_boundaries,
+        "GRPO backward start"
+    );
     let (loss_val, mut upstream_grad, echo_env_ce) = analytic_grpo_tail_loss_grad_pre_final_norm(
         &final_hidden,
         &weights.final_norm,
@@ -10515,12 +10767,26 @@ fn checkpointed_grpo_forward_backward<'echo>(
 
     for seg_idx in (0..num_segments).rev() {
         let (seg_start, seg_end) = segments[seg_idx];
+        let segment_started = Instant::now();
+        let gdn_tile_size =
+            exact_gdn_reverse_tile_size(weights, device, input_ids.len(), seg_start, seg_end);
+        let fa_tile_size =
+            full_attention_mlp_reverse_tile_size(weights, input_ids.len(), seg_start, seg_end);
+        let use_multi_layer_tile_reverse = seg_end > seg_start + 1
+            && multi_layer_tile_reverse_enabled()
+            && streaming_prefill_enabled_for(device, input_ids.len());
         tracing::info!(
             segment = seg_idx + 1,
             num_segments,
             start_layer = seg_start,
             end_layer = seg_end,
-            "checkpointed GRPO reverse segment begin"
+            seq_len = input_ids.len(),
+            action_tokens = active_tokens,
+            gdn_tile_size = ?gdn_tile_size,
+            fa_tile_size = ?fa_tile_size,
+            use_multi_layer_tile_reverse,
+            streaming_tile_tokens,
+            "GRPO backward checkpoint segment start"
         );
 
         let seg_input = if let Some(spool) = spooled_boundaries.as_ref() {
@@ -10544,9 +10810,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         }
         let upstream_grad_for_seg = tensor_on_device(&upstream_grad, device)?;
 
-        if let Some(tile_size) =
-            exact_gdn_reverse_tile_size(weights, device, input_ids.len(), seg_start, seg_end)
-        {
+        if let Some(tile_size) = gdn_tile_size {
             let next_upstream_grad = exact_gdn_single_layer_tiled_reverse(
                 backend,
                 seg_start,
@@ -10573,12 +10837,22 @@ fn checkpointed_grpo_forward_backward<'echo>(
             synchronize_checkpoint_boundary(device, || {
                 format!("synchronize checkpointed GRPO tiled GDN reverse segment {seg_idx} cleanup")
             })?;
+            tracing::info!(
+                segment = seg_idx + 1,
+                num_segments,
+                start_layer = seg_start,
+                end_layer = seg_end,
+                seq_len = input_ids.len(),
+                action_tokens = active_tokens,
+                tile_size,
+                reverse_mode = "gdn_tiled",
+                elapsed_ms = segment_started.elapsed().as_millis() as u64,
+                "GRPO backward checkpoint segment end"
+            );
             continue;
         }
 
-        if let Some(tile_size) =
-            full_attention_mlp_reverse_tile_size(weights, input_ids.len(), seg_start, seg_end)
-        {
+        if let Some(tile_size) = fa_tile_size {
             let full_attn_layer_idx = (0..seg_start)
                 .filter(|&idx| {
                     matches!(weights.layers[idx].attention, GpuAttentionWeights::Full(_))
@@ -10614,6 +10888,18 @@ fn checkpointed_grpo_forward_backward<'echo>(
                     "synchronize checkpointed GRPO full-attention tiled MLP reverse segment {seg_idx} cleanup"
                 )
             })?;
+            tracing::info!(
+                segment = seg_idx + 1,
+                num_segments,
+                start_layer = seg_start,
+                end_layer = seg_end,
+                seq_len = input_ids.len(),
+                action_tokens = active_tokens,
+                tile_size,
+                reverse_mode = "full_attention_mlp_tiled",
+                elapsed_ms = segment_started.elapsed().as_millis() as u64,
+                "GRPO backward checkpoint segment end"
+            );
             continue;
         }
 
@@ -10625,10 +10911,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         // single-layer tile reverse to each, chaining gradients
         // layer-to-layer. Equivalent boundary memory to the monolithic
         // path; transient memory is bounded by one layer × one tile.
-        if seg_end > seg_start + 1
-            && multi_layer_tile_reverse_enabled()
-            && streaming_prefill_enabled_for(device, input_ids.len())
-        {
+        if use_multi_layer_tile_reverse {
             let next_upstream_grad = multi_layer_per_layer_tile_reverse(
                 backend,
                 seg_start,
@@ -10658,6 +10941,18 @@ fn checkpointed_grpo_forward_backward<'echo>(
                     "synchronize checkpointed GRPO multi-layer tile reverse segment {seg_idx} cleanup"
                 )
             })?;
+            tracing::info!(
+                segment = seg_idx + 1,
+                num_segments,
+                start_layer = seg_start,
+                end_layer = seg_end,
+                seq_len = input_ids.len(),
+                action_tokens = active_tokens,
+                tile_size = streaming_tile_tokens,
+                reverse_mode = "multi_layer_tile_reverse",
+                elapsed_ms = segment_started.elapsed().as_millis() as u64,
+                "GRPO backward checkpoint segment end"
+            );
             continue;
         }
 
@@ -10711,6 +11006,17 @@ fn checkpointed_grpo_forward_backward<'echo>(
         synchronize_checkpoint_boundary(device, || {
             format!("synchronize checkpointed GRPO reverse segment {seg_idx} cleanup")
         })?;
+        tracing::info!(
+            segment = seg_idx + 1,
+            num_segments,
+            start_layer = seg_start,
+            end_layer = seg_end,
+            seq_len = input_ids.len(),
+            action_tokens = active_tokens,
+            reverse_mode = "monolithic_segment",
+            elapsed_ms = segment_started.elapsed().as_millis() as u64,
+            "GRPO backward checkpoint segment end"
+        );
     }
 
     if !recompute_boundaries && resident_activation {
@@ -10721,6 +11027,17 @@ fn checkpointed_grpo_forward_backward<'echo>(
     if let Some(t) = timings.as_deref_mut() {
         t.add_backward(backward_started.elapsed());
     }
+    tracing::info!(
+        seq_len = input_ids.len(),
+        action_tokens = active_tokens,
+        num_segments,
+        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
+        streaming_tile_tokens,
+        recompute_boundaries,
+        should_spool_boundaries,
+        elapsed_ms = backward_started.elapsed().as_millis() as u64,
+        "GRPO backward end"
+    );
 
     Ok((loss_val, accumulated_grads, echo_env_ce))
 }
@@ -11166,6 +11483,14 @@ mod tests {
         assert_eq!(receipt.rewards.max, Some(1.0));
         assert_eq!(receipt.rewards.group_count, 1);
         assert!(receipt.echo.enabled);
+        assert!(
+            receipt.phase_timings.tokenize_ms > 0.0,
+            "dry-run receipt should record tokenization timing"
+        );
+        assert!(
+            receipt.phase_timings.mask_build_ms > 0.0,
+            "dry-run receipt should record mask-build timing"
+        );
         Ok(())
     }
 

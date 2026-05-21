@@ -1568,6 +1568,38 @@ progress lines.
 - Logs include token count and segment/tile config.
 - Receipt includes per-phase timings.
 
+**Status:** Implemented.
+
+**Implementation notes:**
+
+- Added GRPO progress logs for data load, tokenization, trajectory mask build,
+  reference forward, policy forward, backward, checkpoint backward segments, and
+  optimizer phases.
+- Included token counts, sequence length, segment count, streaming prefill, and
+  tile/reverse-mode details in long-context phase logs where applicable.
+- Added `phase_timings` to GRPO train receipts and schema docs, with aggregate
+  tokenization, mask build, reference forward, policy forward, backward, and
+  optimizer durations.
+- Updated the GRPO dry-run receipt test to assert populated tokenization and
+  mask-build phase timings.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on RTX A6000 pod `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo check -p kiln-train
+  --tests`; `cargo test -p kiln-train
+  grpo_dry_run_success_records_counts_and_receipt --lib`; `cargo check
+  --release -p kiln-train --features cuda --example long_context_grpo_bench`.
+- Remote sentinel `/workspace/kiln-validation/issue26.done` recorded `exit=0`;
+  remote log is `/workspace/kiln-validation/issue26.log`.
+
+**Commit SHA:** TBD. This status line will be updated in the follow-up metadata
+commit because a commit cannot include its own final SHA.
+
+**Remaining risk:** Validation covered compilation, the focused receipt test, and
+CUDA release example compilation. Full long-context CUDA training runtime still
+depends on model assets being present on the pod.
+
 ### 27. Debug Why Long-Context Adapters Can Be Byte-Identical
 
 **Area:** `crates/kiln-train`, possibly `crates/kiln-server`

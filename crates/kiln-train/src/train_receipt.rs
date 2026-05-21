@@ -90,6 +90,8 @@ pub struct TrainReceipt {
     pub data: DataStatsReceipt,
     pub rewards: RewardStatsReceipt,
     pub token_counts: TokenCountReceipt,
+    #[serde(default)]
+    pub phase_timings: TrainingPhaseTimingsReceipt,
     pub runtime: RuntimeReceipt,
     pub lora_delta_norms: Vec<LoraDeltaNormSummary>,
     #[serde(default)]
@@ -259,6 +261,16 @@ pub struct TokenCountReceipt {
     pub context_tokens: u64,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TrainingPhaseTimingsReceipt {
+    pub tokenize_ms: f64,
+    pub mask_build_ms: f64,
+    pub reference_forward_ms: f64,
+    pub policy_forward_ms: f64,
+    pub backward_ms: f64,
+    pub optimizer_ms: f64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EchoActivityMetrics {
     pub initial_env_ce: Option<f64>,
@@ -395,6 +407,7 @@ impl TrainReceipt {
             data: DataStatsReceipt::default(),
             rewards: RewardStatsReceipt::default(),
             token_counts: TokenCountReceipt::default(),
+            phase_timings: TrainingPhaseTimingsReceipt::default(),
             runtime: RuntimeReceipt {
                 wall_clock_ms: 0,
                 peak_vram_mib: None,

@@ -41,6 +41,9 @@ Required top-level fields:
 - `data`: examples/groups/completions read, filtered, and trained.
 - `rewards`: reward count, mean, stdev, and group-variance histogram.
 - `token_counts`: action, env, and context token counts.
+- `phase_timings`: aggregate phase timings in milliseconds for tokenization,
+  mask construction, reference forward, policy forward, backward, and optimizer
+  work. Non-applicable phases are `0.0`.
 - `runtime`: wall-clock milliseconds and nullable peak VRAM.
 - `lora_delta_norms`: per-module LoRA A/B norm and delta upper-bound summary.
 - `config`: full serialized effective trainer config.
@@ -72,3 +75,19 @@ normal path.
 For repeated-epoch SFT paths, counts are multiplied by epoch count. For GRPO
 paths, counts reflect trained groups after dynamic sampling and tokenization
 filters.
+
+## Phase Timings
+
+`phase_timings` records cumulative phase durations:
+
+- `tokenize_ms`
+- `mask_build_ms`
+- `reference_forward_ms`
+- `policy_forward_ms`
+- `backward_ms`
+- `optimizer_ms`
+
+GRPO and GRPO dry-run paths populate tokenization and mask timings. GRPO
+training paths additionally populate reference, policy, backward, and optimizer
+timings. Other training paths may leave fields at `0.0` until they wire the same
+instrumentation.

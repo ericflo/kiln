@@ -180,6 +180,14 @@ pub fn build_masks_from_trajectory_timed(
     let mut env_mask = vec![false; seq_len];
     let mut segment_spans: Vec<(usize, usize, TurnKind)> = Vec::new();
 
+    tracing::info!(
+        seq_len,
+        trajectory_segments = trajectory.len(),
+        supervised_segments = count_supervised_segments(trajectory),
+        warning_filter = cfg.warning_filter,
+        env_mask_mode = ?cfg.env_mask_mode,
+        "GRPO mask build start"
+    );
     // Step 3: try the byte-search strategy first (cheap, robust for ChatML).
     let byte_search_result = byte_search_strategy(
         trajectory,
@@ -222,6 +230,14 @@ pub fn build_masks_from_trajectory_timed(
         .assert_masks_disjoint()
         .context("trajectory mask invariant violated")?;
     let mask_build_ms = mask_started.elapsed().as_secs_f64() * 1000.0;
+    tracing::info!(
+        seq_len = masked.input_ids.len(),
+        action_tokens = masked.action_mask.iter().filter(|&&active| active).count(),
+        env_tokens = masked.env_mask.iter().filter(|&&active| active).count(),
+        total_obs_len = masked.total_obs_len(),
+        elapsed_ms = mask_build_ms,
+        "GRPO mask build end"
+    );
     Ok((
         masked,
         MaskBuildTimings {
