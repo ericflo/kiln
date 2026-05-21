@@ -173,7 +173,18 @@ async fn load_adapter(
     let runner = match state.backend.as_ref() {
         ModelBackend::Real { runner, .. } => runner,
         ModelBackend::Mock { .. } => {
-            return Err(ApiError::mock_mode_no_adapters());
+            #[cfg(test)]
+            {
+                record_adapter_loaded(&state, &req.name, &resolved_adapter_path);
+                return Ok(Json(LoadAdapterResponse {
+                    status: "loaded",
+                    name: req.name,
+                }));
+            }
+            #[cfg(not(test))]
+            {
+                return Err(ApiError::mock_mode_no_adapters());
+            }
         }
     };
 
@@ -217,27 +228,30 @@ async fn load_adapter(
         return Err(ApiError::adapter_load_failed(err));
     }
 
-    // Update the shared default/runtime adapter names and drop stale real-backend prefix state.
-    let old = state.active_adapter_name.read().unwrap().clone();
-    *state.active_adapter_name.write().unwrap() = Some(req.name.clone());
-    *state.loaded_adapter_name.write().unwrap() = Some(req.name.clone());
-    state.adapter_load_errors.write().unwrap().remove(&req.name);
-    state.clear_real_prefix_cache();
-
-    tracing::info!(
-        request_id = %Uuid::new_v4(),
-        old_adapter = ?old,
-        new_adapter = ?Some(req.name.clone()),
-        reason = "adapter_load_endpoint",
-        path = %resolved_adapter_path.display(),
-        operation = "load",
-        "adapter transition"
-    );
+    record_adapter_loaded(&state, &req.name, &resolved_adapter_path);
 
     Ok(Json(LoadAdapterResponse {
         status: "loaded",
         name,
     }))
+}
+
+fn record_adapter_loaded(state: &AppState, name: &str, path: &Path) {
+    let old = state.active_adapter_name.read().unwrap().clone();
+    *state.active_adapter_name.write().unwrap() = Some(name.to_string());
+    *state.loaded_adapter_name.write().unwrap() = Some(name.to_string());
+    state.adapter_load_errors.write().unwrap().remove(name);
+    state.clear_real_prefix_cache();
+
+    tracing::info!(
+        request_id = %Uuid::new_v4(),
+        old_adapter = ?old,
+        new_adapter = ?Some(name.to_string()),
+        reason = "adapter_load_endpoint",
+        path = %path.display(),
+        operation = "load",
+        "adapter transition"
+    );
 }
 
 fn validate_loadable_adapter_dir(adapter_path: &Path) -> Result<PathBuf, ApiError> {
@@ -305,7 +319,15 @@ async fn unload_adapter(
     let runner = match state.backend.as_ref() {
         ModelBackend::Real { runner, .. } => runner,
         ModelBackend::Mock { .. } => {
-            return Err(ApiError::mock_mode_no_adapters());
+            #[cfg(test)]
+            {
+                record_adapter_unloaded(&state);
+                return Ok(Json(UnloadAdapterResponse { status: "unloaded" }));
+            }
+            #[cfg(not(test))]
+            {
+                return Err(ApiError::mock_mode_no_adapters());
+            }
         }
     };
 
@@ -317,7 +339,12 @@ async fn unload_adapter(
     .await
     .map_err(|e| ApiError::internal(format!("join error: {e}")))?;
 
-    // Clear the shared default/runtime adapter names and drop stale real-backend prefix state.
+    record_adapter_unloaded(&state);
+
+    Ok(Json(UnloadAdapterResponse { status: "unloaded" }))
+}
+
+fn record_adapter_unloaded(state: &AppState) {
     let old = state.active_adapter_name.read().unwrap().clone();
     *state.active_adapter_name.write().unwrap() = None;
     *state.loaded_adapter_name.write().unwrap() = None;
@@ -331,8 +358,6 @@ async fn unload_adapter(
         operation = "unload",
         "adapter transition"
     );
-
-    Ok(Json(UnloadAdapterResponse { status: "unloaded" }))
 }
 
 /// Delete an adapter from disk.
@@ -1547,4 +1572,239 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/adapters/{name}/detail", get(adapter_detail))
         .route("/v1/adapters/{name}/download", get(download_adapter))
         .route("/v1/adapters/{name}/receipt", get(adapter_receipt))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{HeaderMap, Method, Request, StatusCode};
+    use kiln_core::config::ModelConfig;
+    use kiln_model::engine::MockEngine;
+    use kiln_scheduler::{Scheduler, SchedulerConfig};
+    use serde_json::json;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tower::ServiceExt;
+
+    const STRESS_CYCLES: usize = 100;
+
+    fn make_state(adapter_dir: PathBuf) -> AppState {
+        let config = ModelConfig::qwen3_5_4b();
+        let scheduler = Scheduler::new(
+            SchedulerConfig {
+                max_batch_tokens: 8192,
+                max_batch_size: 64,
+                block_size: 16,
+                prefix_cache_enabled: false,
+                ..Default::default()
+            },
+            256,
+        );
+        let engine = MockEngine::new(config.clone());
+        let mut state = AppState::new_mock(
+            config,
+            scheduler,
+            Arc::new(engine),
+            crate::api::test_tokenizer(),
+            300,
+            "kiln-test".to_string(),
+        );
+        state.adapter_dir = adapter_dir;
+        state.eval_mode = true;
+        state
+    }
+
+    fn write_test_adapter(adapter_dir: &Path, name: &str) {
+        let path = adapter_dir.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("adapter_config.json"),
+            br#"{
+                "r": 1,
+                "lora_alpha": 1,
+                "target_modules": ["q_proj"],
+                "base_model_name_or_path": "Qwen/Qwen3.5-4B"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("adapter_model.safetensors"),
+            b"\x00\x00\x00\x00tiny-test-adapter",
+        )
+        .unwrap();
+    }
+
+    async fn request_json(
+        app: &axum::Router,
+        method: Method,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, HeaderMap, serde_json::Value) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        let body = if let Some(body) = body {
+            builder = builder.header("content-type", "application/json");
+            Body::from(body.to_string())
+        } else {
+            Body::empty()
+        };
+        let resp = app.clone().oneshot(builder.body(body).unwrap()).await.unwrap();
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let body = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, headers, body)
+    }
+
+    fn assert_adapter_state(body: &serde_json::Value, expected: Option<&str>) {
+        match expected {
+            Some(name) => {
+                assert_eq!(body["active"].as_str(), Some(name));
+                assert_eq!(body["active_adapter"].as_str(), Some(name));
+                assert_eq!(body["loaded_adapter"].as_str(), Some(name));
+                assert!(
+                    body["loaded_adapters"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|value| value.as_str() == Some(name)),
+                    "loaded_adapters should include {name}: {body:?}"
+                );
+            }
+            None => {
+                assert!(body["active"].is_null());
+                assert!(body["active_adapter"].is_null());
+                assert!(body["loaded_adapter"].is_null());
+                assert!(body["loaded_adapters"].as_array().unwrap().is_empty());
+            }
+        }
+    }
+
+    fn memory_growth_counter_bytes(state: &AppState) -> Option<u64> {
+        let budget = state.memory_budget.as_ref();
+        if budget.total_vram_bytes == 0 {
+            return None;
+        }
+        Some(
+            budget
+                .model_memory_bytes
+                .saturating_add(budget.kv_cache_bytes)
+                .saturating_add(budget.peak_prefill_used_vram_bytes()),
+        )
+    }
+
+    fn percentile_micros(samples: &[Duration], percentile: f64) -> u128 {
+        let mut values: Vec<u128> = samples.iter().map(|sample| sample.as_micros()).collect();
+        values.sort_unstable();
+        let idx = ((values.len() as f64 * percentile).ceil() as usize)
+            .saturating_sub(1)
+            .min(values.len().saturating_sub(1));
+        values[idx]
+    }
+
+    #[tokio::test]
+    async fn adapter_load_eval_unload_stress_tracks_state_latency_and_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_test_adapter(tmp.path(), "stress-a");
+        write_test_adapter(tmp.path(), "stress-b");
+
+        let state = make_state(tmp.path().to_path_buf());
+        let state_for_assert = state.clone();
+        let memory_before = memory_growth_counter_bytes(&state_for_assert);
+        let app = crate::api::router(state);
+        let mut cycle_latencies = Vec::with_capacity(STRESS_CYCLES);
+
+        for cycle in 0..STRESS_CYCLES {
+            let adapter = if cycle % 2 == 0 {
+                "stress-a"
+            } else {
+                "stress-b"
+            };
+            let started = std::time::Instant::now();
+
+            let (status, _, body) = request_json(
+                &app,
+                Method::POST,
+                "/v1/adapters/load",
+                Some(json!({ "name": adapter })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["status"], "loaded");
+            assert_eq!(body["name"], adapter);
+
+            let (status, _, body) =
+                request_json(&app, Method::GET, "/v1/adapters", None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_adapter_state(&body, Some(adapter));
+            assert_eq!(
+                state_for_assert
+                    .active_adapter_name
+                    .read()
+                    .unwrap()
+                    .as_deref(),
+                Some(adapter)
+            );
+            assert_eq!(
+                state_for_assert
+                    .loaded_adapter_name
+                    .read()
+                    .unwrap()
+                    .as_deref(),
+                Some(adapter)
+            );
+
+            let (status, headers, body) = request_json(
+                &app,
+                Method::POST,
+                "/v1/chat/completions",
+                Some(json!({
+                    "messages": [{"role": "user", "content": format!("stress cycle {cycle}")}],
+                    "max_tokens": 1
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(headers.get("x-kiln-eval-mode").unwrap(), "true");
+            assert_eq!(headers.get("x-kiln-active-adapter").unwrap(), adapter);
+            assert_eq!(headers.get("x-kiln-loaded-adapter").unwrap(), adapter);
+            assert_eq!(body["object"], "chat.completion");
+
+            let (status, _, body) =
+                request_json(&app, Method::POST, "/v1/adapters/unload", Some(json!({}))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["status"], "unloaded");
+
+            let (status, _, body) =
+                request_json(&app, Method::GET, "/v1/adapters", None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_adapter_state(&body, None);
+            assert!(state_for_assert.active_adapter_name.read().unwrap().is_none());
+            assert!(state_for_assert.loaded_adapter_name.read().unwrap().is_none());
+
+            cycle_latencies.push(started.elapsed());
+        }
+
+        let first_p95 = percentile_micros(&cycle_latencies[..10], 0.95);
+        let last_p95 = percentile_micros(&cycle_latencies[STRESS_CYCLES - 10..], 0.95);
+        let severe_drift_limit = first_p95.saturating_mul(20).max(first_p95 + 100_000);
+        assert!(
+            last_p95 <= severe_drift_limit,
+            "adapter stress latency drifted severely: first_p95={first_p95}us \
+             last_p95={last_p95}us limit={severe_drift_limit}us"
+        );
+
+        if let (Some(before), Some(after)) =
+            (memory_before, memory_growth_counter_bytes(&state_for_assert))
+        {
+            assert!(
+                after <= before.saturating_add(16 * 1024 * 1024),
+                "adapter stress memory grew unexpectedly: before={before} after={after}"
+            );
+        }
+    }
 }
