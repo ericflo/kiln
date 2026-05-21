@@ -818,6 +818,41 @@ server metrics.
 - Health response is cheap enough to call between eval rollouts.
 - Tests cover at least active adapter and request count.
 
+**Status:** Completed and validated on RunPod.
+
+**Implementation notes:** Expanded `/health` and `/v1/health` with
+eval-stability JSON fields for active and loaded adapter state, aggregate
+request counts, recent request p50/p95/p99 latency, recent completion
+tokens/sec, recent timeout/error counts, last error summary, prefix-cache
+occupancy, rendered prompt and prompt-token cache counts, decode batcher and
+batching engine state, nonblocking CUDA graph state, and VRAM
+allocated/reserved budget fields. The handler reuses atomics, bounded rings,
+and existing snapshots so it remains cheap enough to call between eval
+rollouts.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on direct fallback RTX A6000 pod
+  `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo test -p kiln-server
+  api::health --lib`; and `cargo check -p kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issue13.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue13.log`.
+- Focused health tests cover the `/v1/health` alias, active adapter reporting,
+  request count reporting, scheduler stats, and prewarm degraded-check
+  reporting.
+
+**Commit SHA:** `25b01d53` (`Issue 13: add eval health metrics`).
+This is the implementation commit; these final metadata notes are recorded in
+the follow-up backlog commit.
+
+**Remaining risk:** Recent timeout/error counts are derived from completed
+records retained in the bounded recent-request ring, while total request
+counts come from process-lifetime atomics. Non-streaming failures that return
+before a recent-request record is written are still visible in aggregate
+request counters, but may not have a last-error summary until Issue 14 adds
+structured slow/error diagnostics.
+
 ### 14. Add A Slow-Request Watchdog
 
 **Area:** `crates/kiln-server`
