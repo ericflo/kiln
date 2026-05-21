@@ -2099,6 +2099,52 @@ I actually hitting?"
 - Response contains no prompt/user data.
 - Tests cover active adapter and config fields.
 
+**Status:** Implemented and validated on 2026-05-21.
+
+**Implementation notes:**
+
+- Added `GET /v1/debug/model-state`, gated behind `server.eval_mode=true` or
+  `KILN_DEBUG_ENDPOINTS=1`.
+- The response includes model path, served model id, active Qwen3.5-4B defaults
+  profile, active/loaded adapter names with adapter weight SHA-256 for loaded
+  adapters, config hashes, selected non-secret `KILN_*` env flags, batching
+  engine/decode-batcher status, thinking defaults, and aggregate cache counts.
+- Added `AppState::model_path` so the endpoint can report the configured model
+  directory without scraping logs or env vars.
+- README and ARCHITECTURE document the endpoint and its debug gating.
+
+**Validation evidence:**
+
+- Local lightweight check: `git diff --check` passed.
+- First RunPod compile attempt caught a SHA digest formatting issue in
+  `debug_model_state.rs`; the implementation was fixed to hex-encode the digest
+  explicitly, then the full validation was rerun.
+- RunPod rerun passed on RTX A6000 pod `qmfxie9izl6lc6`, lease
+  `pod-e6a9a744a671ae965e1c7f36`; sentinel
+  `/workspace/kiln-validation/issue32.done` contained `exit=0`.
+- Remote clean-worktree checks applied `/workspace/kiln-validation/issue32.patch`
+  to `origin/main` and passed `git diff --check`.
+- Remote focused checks passed:
+  `cargo check --locked -p kiln-server --bin kiln` and
+  `cargo test --locked -p kiln-server api::debug_model_state`.
+- Actual-model CUDA validation built
+  `cargo build --locked --release -p kiln-server --bin kiln --features cuda`
+  with `KILN_CUDA_ARCHS=86`, booted the server against
+  `/workspace/Qwen3.5-4B` with `KILN_EVAL_MODE=true`, verified
+  `/v1/debug/model-state` returned model path `/workspace/Qwen3.5-4B`,
+  served model id `Qwen3.5-4B`, Qwen3.5-4B profile metadata, config hashes,
+  selected env flags, enabled model batching-engine status, adapter directory
+  `/workspace/Qwen3.5-4B/adapters`, thinking defaults, and cache summaries.
+- The same actual-model smoke sent a chat request containing
+  `debug secret marker issue32` and verified the subsequent debug model-state
+  response did not contain that prompt text.
+
+**Commit SHA:** Pending.
+
+**Remaining risk:** The endpoint is diagnostic and intentionally gated to
+eval/debug mode. It reports aggregate cache counts and selected non-secret
+`KILN_*` flags only; it does not expose prompt bodies or recent request rows.
+
 ## P2: Add Higher-Level Kiln Capabilities For This Workflow
 
 ### 33. Add `kiln eval-adapter`

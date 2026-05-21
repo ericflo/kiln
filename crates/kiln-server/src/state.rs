@@ -1242,6 +1242,8 @@ pub enum ModelBackend {
 #[derive(Clone)]
 pub struct AppState {
     pub model_config: ModelConfig,
+    /// Configured model directory path for real inference mode. `None` in mock mode.
+    pub model_path: Option<PathBuf>,
     pub backend: Arc<ModelBackend>,
     pub tokenizer: Arc<KilnTokenizer>,
     /// Directory where LoRA adapter weights are stored on disk.
@@ -1464,6 +1466,7 @@ impl AppState {
         let config_hashes = ConfigHashes::from_model_tokenizer(&model_config, &tokenizer, None);
         Self {
             model_config,
+            model_path: None,
             backend: Arc::new(ModelBackend::Mock {
                 scheduler: Arc::new(Mutex::new(scheduler)),
                 engine,
@@ -1924,6 +1927,7 @@ impl AppState {
         let config_hashes = ConfigHashes::from_model_tokenizer(&model_config, &tokenizer, None);
         Self {
             model_config,
+            model_path: None,
             backend: Arc::new(ModelBackend::Real {
                 runner,
                 block_manager,

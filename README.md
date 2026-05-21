@@ -387,6 +387,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/judgments/render_prompt` | Render the canonical pairwise judging prompt (debug aid) |
 | GET | `/v1/models` | List available models |
 | GET | `/v1/config` | Current server configuration |
+| GET | `/v1/debug/model-state` | Trusted eval/debug snapshot of active model, adapters, config hashes, env flags, batching, thinking defaults, and cache counts; enabled only with `server.eval_mode=true` or `KILN_DEBUG_ENDPOINTS=1` |
 | GET | `/ui` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
 | GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history for the dashboard's request panel |

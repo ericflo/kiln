@@ -829,6 +829,16 @@ See `crates/kiln-server/src/metrics.rs`.
 
 Returns uptime, model info, scheduler statistics, GPU memory breakdown, active adapter, and training queue state.
 
+### Debug Model State (`GET /v1/debug/model-state`)
+
+Trusted eval/debug endpoint for answering "what model state am I actually
+hitting?" It is available only when `server.eval_mode=true` or
+`KILN_DEBUG_ENDPOINTS=1`, and returns no prompt or user message data. The
+response includes model path, served model id, active defaults profile,
+active/loaded adapters with adapter weight hashes, config hashes, selected
+`KILN_*` flags, batching-engine status, thinking defaults, and aggregate cache
+counts.
+
 ## Phase status (2026-05-13)
 
 Phase 6 (performance optimization) is closed. The post-#534 perf shortlist concluded with PRs #525 / #526 (SGLang RadixAttention), #210 / #206 (Marlin pack determinism + BF16 cleanup), #222 (FP8 KV opt-in), and #536 (native MTP self-spec, null at α=0.69). Phase 11 (eval as a first-class surface — `kiln-eval` crate, `/v1/eval/*` API, dataset → suite synthesis, judgment flywheel, post-training auto-eval, drill-in UI) shipped as a single bundled commit. Active work is now Phase 7 (developer experience). For current decode numbers see `BENCHMARKS.md`; for the live profiling hotspot table see `PROFILING.md`.

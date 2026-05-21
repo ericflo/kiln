@@ -10,6 +10,7 @@ pub(crate) mod agent_traces;
 pub(crate) mod cache;
 pub(crate) mod completions;
 mod config;
+mod debug_model_state;
 mod eval;
 mod health;
 pub(crate) mod library;
@@ -75,6 +76,7 @@ pub fn router(state: AppState) -> Router {
         .merge(training::routes())
         .merge(eval::routes())
         .merge(config::routes())
+        .merge(debug_model_state::routes())
         .merge(stats::routes())
         .merge(ui::routes())
         .with_state(state)

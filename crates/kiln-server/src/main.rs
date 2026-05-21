@@ -343,6 +343,7 @@ async fn main() -> Result<()> {
     state.eval_mode = config.server.eval_mode;
     state.default_thinking_enabled = config.server.default_thinking_enabled;
     state.model_defaults_profile = model_defaults_profile;
+    state.model_path = model_path.map(PathBuf::from);
     state.fold_reasoning_into_content = config.server.fold_reasoning_into_content;
     state.chat_performance_metadata = config.server.chat_performance_metadata;
     state.chat_config_hash_metadata = config.server.chat_config_hash_metadata;
