@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 #[cfg(feature = "cuda")]
@@ -871,6 +871,57 @@ pub struct TrainingProgress {
     pub loss: f64,
     /// Overall progress as a fraction [0, 1].
     pub progress: f32,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct GrpoBenchmarkTimings {
+    pub tokenize_ms: f64,
+    pub mask_build_ms: f64,
+    pub reference_forward_ms: f64,
+    pub policy_forward_ms: f64,
+    pub backward_ms: f64,
+    pub optimizer_ms: f64,
+}
+
+impl GrpoBenchmarkTimings {
+    fn add_tokenize(&mut self, elapsed: Duration) {
+        self.tokenize_ms += elapsed.as_secs_f64() * 1000.0;
+    }
+
+    fn add_mask_build(&mut self, elapsed: Duration) {
+        self.mask_build_ms += elapsed.as_secs_f64() * 1000.0;
+    }
+
+    fn add_reference_forward(&mut self, elapsed: Duration) {
+        self.reference_forward_ms += elapsed.as_secs_f64() * 1000.0;
+    }
+
+    fn add_policy_forward(&mut self, elapsed: Duration) {
+        self.policy_forward_ms += elapsed.as_secs_f64() * 1000.0;
+    }
+
+    fn add_backward(&mut self, elapsed: Duration) {
+        self.backward_ms += elapsed.as_secs_f64() * 1000.0;
+    }
+
+    fn add_optimizer(&mut self, elapsed: Duration) {
+        self.optimizer_ms += elapsed.as_secs_f64() * 1000.0;
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GrpoBenchmarkReport {
+    pub completions: usize,
+    pub min_seq_len: usize,
+    pub max_seq_len: usize,
+    pub total_tokens: u64,
+    pub action_tokens: u64,
+    pub env_tokens: u64,
+    pub context_tokens: u64,
+    pub loss: Option<f64>,
+    pub timings: GrpoBenchmarkTimings,
+    pub total_ms: f64,
+    pub tokens_per_sec: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -2448,6 +2499,7 @@ pub fn grpo_train(
                 &mut lora_grad_norms,
                 &lora_grad_index,
                 ema_ref_state.as_ref().map(|s| &s.snapshot),
+                None,
             )?;
             let avg_group_loss = step_report.loss;
             echo_metrics.observe_env_ce(step_report.echo_env_ce);
@@ -3255,6 +3307,7 @@ pub fn grpo_train_jsonl(
                 &mut lora_grad_norms,
                 &lora_grad_index,
                 ema_ref_state.as_ref().map(|s| &s.snapshot),
+                None,
             )?;
             let avg_group_loss = step_report.loss;
             echo_metrics.observe_env_ce(step_report.echo_env_ce);
@@ -3488,6 +3541,106 @@ fn token_counts_for_grpo_groups(
         }
     }
     counts
+}
+
+fn grpo_benchmark_report_from_tokenized(
+    tgroup: &TokenizedGrpoGroup,
+    timings: GrpoBenchmarkTimings,
+    loss: Option<f64>,
+    elapsed: Duration,
+) -> GrpoBenchmarkReport {
+    let counts = token_counts_for_grpo_groups(std::slice::from_ref(tgroup));
+    let min_seq_len = tgroup
+        .completions
+        .iter()
+        .map(|completion| completion.input_ids.len())
+        .min()
+        .unwrap_or(0);
+    let max_seq_len = tgroup
+        .completions
+        .iter()
+        .map(|completion| completion.input_ids.len())
+        .max()
+        .unwrap_or(0);
+    let total_tokens = counts
+        .action_tokens
+        .saturating_add(counts.env_tokens)
+        .saturating_add(counts.context_tokens);
+    let total_ms = elapsed.as_secs_f64() * 1000.0;
+    let tokens_per_sec = if total_ms > 0.0 {
+        total_tokens as f64 / (total_ms / 1000.0)
+    } else {
+        0.0
+    };
+    GrpoBenchmarkReport {
+        completions: tgroup.completions.len(),
+        min_seq_len,
+        max_seq_len,
+        total_tokens,
+        action_tokens: counts.action_tokens,
+        env_tokens: counts.env_tokens,
+        context_tokens: counts.context_tokens,
+        loss,
+        timings,
+        total_ms,
+        tokens_per_sec,
+    }
+}
+
+pub fn grpo_benchmark_tokenization(
+    group: &GrpoGroup,
+    tokenizer: &KilnTokenizer,
+) -> Result<GrpoBenchmarkReport> {
+    let started = Instant::now();
+    let mut timings = GrpoBenchmarkTimings::default();
+    let tgroup = tokenize_grpo_group_timed(group, tokenizer, Some(&mut timings))?;
+    Ok(grpo_benchmark_report_from_tokenized(
+        &tgroup,
+        timings,
+        None,
+        started.elapsed(),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn grpo_benchmark_training_step(
+    backend: &dyn BackendRuntime,
+    group: &GrpoGroup,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &TrainableLoraParams,
+    config: &GrpoConfig,
+    segments: Option<&[(usize, usize)]>,
+    device: &Device,
+    tokenizer: &KilnTokenizer,
+    opt_state: Option<&mut OptimizerState>,
+) -> Result<GrpoBenchmarkReport> {
+    let started = Instant::now();
+    let mut timings = GrpoBenchmarkTimings::default();
+    let tgroup = tokenize_grpo_group_timed(group, tokenizer, Some(&mut timings))?;
+    let mut grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
+    let lora_grad_index = LoraGradNormIndex::new(params);
+    let step_report = train_tokenized_grpo_group_with_grad_norms(
+        backend,
+        &tgroup,
+        weights,
+        model_config,
+        params,
+        config,
+        segments,
+        device,
+        opt_state,
+        &mut grad_norms,
+        &lora_grad_index,
+        None,
+        Some(&mut timings),
+    )?;
+    Ok(grpo_benchmark_report_from_tokenized(
+        &tgroup,
+        timings,
+        Some(step_report.loss),
+        started.elapsed(),
+    ))
 }
 
 fn validate_grpo_trajectory_roles(group: &GrpoGroup, line_no: usize) -> Result<()> {
@@ -3924,6 +4077,7 @@ fn train_tokenized_grpo_group(
         &mut discarded_grad_norms,
         &lora_grad_index,
         ema_ref_lora,
+        None,
     )
 }
 
@@ -3945,6 +4099,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
     // reference forward runs without any LoRA (base model — historical
     // `BasePerStep`) or is skipped entirely (`ReferencePolicy::None`).
     ema_ref_lora: Option<&LoraWeights>,
+    mut timings: Option<&mut GrpoBenchmarkTimings>,
 ) -> Result<GrpoGroupStepReport> {
     let skip_reference = matches!(config.reference_policy, ReferencePolicy::None);
 
@@ -3997,9 +4152,13 @@ fn train_tokenized_grpo_group_with_grad_norms(
             device,
         )
         .context("GRPO shared-prefix reference forward")?;
+        let elapsed = started.elapsed();
+        if let Some(t) = timings.as_deref_mut() {
+            t.add_reference_forward(elapsed);
+        }
         tracing::debug!(
             n_completions = tgroup.completions.len(),
-            elapsed_ms = started.elapsed().as_millis() as u64,
+            elapsed_ms = elapsed.as_millis() as u64,
             "GRPO shared-prefix ref forward complete"
         );
         Some(log_probs)
@@ -4071,6 +4230,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 span.index_select(&indices, 0)?.detach()
             }
         } else {
+            let ref_started = Instant::now();
             let mut ref_linear_state = LinearAttentionState::new(model_config, device)?;
             // BasePerStep (None ema_ref_lora) → base model (no LoRA).
             // Ema (Some(snapshot)) → frozen snapshot of the LoRA from a
@@ -4084,14 +4244,18 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 ema_ref_lora,
             )
             .context("GRPO reference forward pass")?;
-            selected_log_probs_from_normed_hidden_chunked(
+            let ref_log_probs = selected_log_probs_from_normed_hidden_chunked(
                 &ref_hidden,
                 &weights.embed_tokens_t,
                 &comp.input_ids,
                 &comp.action_mask,
                 DEFAULT_CHUNK_SIZE,
             )?
-            .detach()
+            .detach();
+            if let Some(t) = timings.as_deref_mut() {
+                t.add_reference_forward(ref_started.elapsed());
+            }
+            ref_log_probs
         };
 
         let loss_val;
@@ -4131,6 +4295,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 segs,
                 device,
                 echo_tail,
+                timings.as_deref_mut(),
             )?;
             loss_val = lv;
             comp_echo_env_ce = env_ce;
@@ -4142,6 +4307,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                     lora_grad_index,
                     &accumulated_grads,
                 )?;
+                let optimizer_started = Instant::now();
                 optimizer_step_from_map(
                     backend,
                     params,
@@ -4150,10 +4316,14 @@ fn train_tokenized_grpo_group_with_grad_norms(
                     config.optimizer,
                     opt_state.as_deref_mut(),
                 )?;
+                if let Some(t) = timings.as_deref_mut() {
+                    t.add_optimizer(optimizer_started.elapsed());
+                }
             }
         } else {
             let lora_weights = params.as_lora_weights();
             let mut linear_state = LinearAttentionState::new(model_config, device)?;
+            let policy_forward_started = Instant::now();
             let policy_logits = model_forward(
                 backend,
                 &comp.input_ids,
@@ -4164,6 +4334,9 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 Some(&lora_weights),
             )
             .context("GRPO policy forward pass")?;
+            if let Some(t) = timings.as_deref_mut() {
+                t.add_policy_forward(policy_forward_started.elapsed());
+            }
 
             let policy_log_probs = token_log_probs(
                 &policy_logits,
@@ -4242,12 +4415,17 @@ fn train_tokenized_grpo_group_with_grad_norms(
 
             loss_val = loss.to_scalar::<f32>()? as f64;
 
+            let backward_started = Instant::now();
             let grads = loss.backward().context("GRPO+ECHO backward pass")?;
+            if let Some(t) = timings.as_deref_mut() {
+                t.add_backward(backward_started.elapsed());
+            }
             if token_level {
                 let vars = params.all_vars();
                 accumulate_grads(&mut group_accum, &grads, &vars)?;
             } else {
                 observe_lora_grad_norms_from_grad_store(grad_norms, params, &grads)?;
+                let optimizer_started = Instant::now();
                 optimizer_step(
                     backend,
                     params,
@@ -4256,6 +4434,9 @@ fn train_tokenized_grpo_group_with_grad_norms(
                     config.optimizer,
                     opt_state.as_deref_mut(),
                 )?;
+                if let Some(t) = timings.as_deref_mut() {
+                    t.add_optimizer(optimizer_started.elapsed());
+                }
             }
         }
 
@@ -4270,6 +4451,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
 
     if token_level && !group_accum.is_empty() {
         observe_lora_grad_norms_from_map(grad_norms, lora_grad_index, &group_accum)?;
+        let optimizer_started = Instant::now();
         optimizer_step_from_map(
             backend,
             params,
@@ -4278,6 +4460,9 @@ fn train_tokenized_grpo_group_with_grad_norms(
             config.optimizer,
             opt_state.as_deref_mut(),
         )?;
+        if let Some(t) = timings.as_deref_mut() {
+            t.add_optimizer(optimizer_started.elapsed());
+        }
     }
 
     let loss = if tgroup.completions.is_empty() {
@@ -4402,6 +4587,14 @@ fn observe_lora_grad_module_norms(
 /// behaviour is bit-identical to the pre-ECHO path: `action_mask` is "true
 /// after the prompt" and `env_mask` is all-false.
 fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<TokenizedGrpoGroup> {
+    tokenize_grpo_group_timed(group, tokenizer, None)
+}
+
+fn tokenize_grpo_group_timed(
+    group: &GrpoGroup,
+    tokenizer: &KilnTokenizer,
+    mut timings: Option<&mut GrpoBenchmarkTimings>,
+) -> Result<TokenizedGrpoGroup> {
     if group.completions.is_empty() {
         anyhow::bail!("GRPO group has no completions");
     }
@@ -4412,12 +4605,16 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
     // legacy single-string path to find where the completion begins; the
     // trajectory-aware path computes its own boundaries via the mask
     // builder so it doesn't need this.
+    let prompt_tokenize_started = Instant::now();
     let prompt_text = tokenizer
         .apply_chat_template(&prompt_messages)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let prompt_ids = tokenizer
         .encode(&prompt_text)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if let Some(t) = timings.as_deref_mut() {
+        t.add_tokenize(prompt_tokenize_started.elapsed());
+    }
 
     let mut raw_rewards = Vec::with_capacity(group.completions.len());
     let mut full_message_batches = Vec::with_capacity(group.completions.len());
@@ -4436,12 +4633,16 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
             // segment structure. The MaskedRollout is the canonical
             // output; full_message_batches gets a stub so the indices
             // stay aligned with `full_id_batches` below.
-            let masked = crate::trajectory_mask::build_masks_from_trajectory(
+            let (masked, mask_timings) = crate::trajectory_mask::build_masks_from_trajectory_timed(
                 &scored.trajectory,
                 &group.messages,
                 tokenizer,
                 &mask_cfg,
             )?;
+            if let Some(t) = timings.as_deref_mut() {
+                t.tokenize_ms += mask_timings.tokenize_ms;
+                t.mask_build_ms += mask_timings.mask_build_ms;
+            }
             prebuilt.push(Some(masked));
             // Placeholder; not used when prebuilt is Some.
             full_message_batches.push(prompt_messages.clone());
@@ -4462,12 +4663,16 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
         raw_rewards.push(scored.reward);
     }
 
+    let batch_tokenize_started = Instant::now();
     let full_texts = tokenizer
         .apply_chat_template_batch(&full_message_batches)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let full_id_batches = tokenizer
         .encode_batch(&full_texts)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if let Some(t) = timings.as_deref_mut() {
+        t.add_tokenize(batch_tokenize_started.elapsed());
+    }
     let mut completions = Vec::with_capacity(full_id_batches.len());
     let mut rewards = Vec::with_capacity(full_id_batches.len());
     for ((full_ids, reward), pre) in full_id_batches
@@ -4511,11 +4716,15 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
 
         // Legacy single-string path: tokens after the prompt are
         // action tokens; there are no observation tokens.
+        let mask_started = Instant::now();
         let mut action_mask = vec![false; full_ids.len()];
         for i in prompt_ids.len()..full_ids.len() {
             action_mask[i] = true;
         }
         let env_mask = vec![false; full_ids.len()];
+        if let Some(t) = timings.as_deref_mut() {
+            t.add_mask_build(mask_started.elapsed());
+        }
 
         completions.push(TokenizedGrpoCompletion {
             input_ids: full_ids,
@@ -10123,6 +10332,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
     segments: &[(usize, usize)],
     device: &Device,
     echo: Option<EchoTailParams<'echo>>,
+    mut timings: Option<&mut GrpoBenchmarkTimings>,
 ) -> Result<(f64, HashMap<candle_core::TensorId, Tensor>, Option<f64>)> {
     let num_segments = segments.len();
     anyhow::ensure!(
@@ -10142,6 +10352,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         "checkpointed GRPO called with no active completion tokens"
     );
 
+    let policy_forward_started = Instant::now();
     let positions: Vec<u32> = (0..input_ids.len())
         .map(|position| position as u32)
         .collect();
@@ -10275,7 +10486,11 @@ fn checkpointed_grpo_forward_backward<'echo>(
             resident_activation,
         )?
     };
+    if let Some(t) = timings.as_deref_mut() {
+        t.add_policy_forward(policy_forward_started.elapsed());
+    }
 
+    let backward_started = Instant::now();
     let (loss_val, mut upstream_grad, echo_env_ce) = analytic_grpo_tail_loss_grad_pre_final_norm(
         &final_hidden,
         &weights.final_norm,
@@ -10502,6 +10717,9 @@ fn checkpointed_grpo_forward_backward<'echo>(
         for boundary in &boundary_states {
             backend.evict_resident_activation(boundary);
         }
+    }
+    if let Some(t) = timings.as_deref_mut() {
+        t.add_backward(backward_started.elapsed());
     }
 
     Ok((loss_val, accumulated_grads, echo_env_ce))
@@ -12798,6 +13016,7 @@ mod tests {
             &segments,
             &device,
             None, // ECHO disabled — this test pins checkpointed vs standard GRPO parity
+            None,
         )?;
 
         let loss_diff = (loss_std - loss_ckpt).abs();
@@ -14269,6 +14488,7 @@ mod tests {
             &segments,
             &device,
             None,
+            None,
         )?;
         assert!(loss_off.is_finite(), "ECHO-off loss not finite: {loss_off}");
 
@@ -14290,6 +14510,7 @@ mod tests {
                 total_obs_len,
                 lambda: 0.05,
             }),
+            None,
         )?;
         assert!(loss_on.is_finite(), "ECHO-on loss not finite: {loss_on}");
         assert!(

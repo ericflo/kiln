@@ -1504,6 +1504,43 @@ lengths.
 - Results are emitted as JSON.
 - Docs explain expected use for compaction-like workloads.
 
+**Status:** Implemented.
+
+**Implementation notes:**
+
+- Added `crates/kiln-train/examples/long_context_grpo_bench.rs`, a synthetic
+  compaction-shaped GRPO benchmark with default length sweep
+  `8192,16384,32768,65536`.
+- Added trainer timing hooks for tokenization, mask build, reference forward,
+  policy forward, backward, and optimizer phases.
+- Dry mode emits JSON with a built-in byte tokenizer when `--model` is omitted,
+  so CPU-only development environments can run a smoke without model assets.
+- CUDA mode requires `--model <qwen3.5-4b-dir>`, supports configurable
+  `--lengths`, `--completions`, and `--segments`, and records peak VRAM when
+  `nvidia-smi` is available. `kernel_launch_count` is emitted as `null` until a
+  launch counter is wired.
+- Added `docs/LONG_CONTEXT_GRPO_BENCH.md` with dry/CUDA examples and expected
+  compaction-workload usage.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on RTX A6000 pod `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo check -p kiln-train
+  --example long_context_grpo_bench`; `cargo check -p kiln-train --tests`;
+  `cargo check --release -p kiln-train --features cuda --example
+  long_context_grpo_bench`; `cargo run -p kiln-train --example
+  long_context_grpo_bench -- --dry-run --lengths 256 --output
+  /workspace/kiln-validation/issue25-dry.json`.
+- Remote sentinel `/workspace/kiln-validation/issue25.done` recorded `exit=0`;
+  remote log is `/workspace/kiln-validation/issue25.log`.
+
+**Commit SHA:** TBD after commit.
+
+**Remaining risk:** The active pod does not currently have a Qwen tokenizer/model
+directory, so CUDA runtime smoke was skipped after the CUDA release example
+compiled successfully. Full 8K-64K CUDA benchmark execution still requires a
+pod/model directory with Qwen3.5-4B assets.
+
 ### 26. Add Long-Context Progress Logging
 
 **Area:** `crates/kiln-train`

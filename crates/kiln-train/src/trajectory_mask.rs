@@ -9,6 +9,8 @@
 //!
 //! [`Trajectory`]: crate::trajectory
 
+use std::time::Instant;
+
 use anyhow::{Context, Result};
 use kiln_core::tokenizer::{ChatMessage as CoreChatMessage, KilnTokenizer};
 
@@ -62,6 +64,12 @@ pub struct MaskedRollout {
     /// per non-Context segment in the trajectory (Context segments
     /// contribute no gradient, so we don't bother recording them).
     pub segment_spans: Vec<(usize, usize, TurnKind)>,
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct MaskBuildTimings {
+    pub tokenize_ms: f64,
+    pub mask_build_ms: f64,
 }
 
 impl MaskedRollout {
@@ -122,6 +130,17 @@ pub fn build_masks_from_trajectory(
     tokenizer: &KilnTokenizer,
     cfg: &MaskConfig,
 ) -> Result<MaskedRollout> {
+    let (masked, _) =
+        build_masks_from_trajectory_timed(trajectory, prompt_messages, tokenizer, cfg)?;
+    Ok(masked)
+}
+
+pub fn build_masks_from_trajectory_timed(
+    trajectory: &[TurnSegment],
+    prompt_messages: &[ChatMessage],
+    tokenizer: &KilnTokenizer,
+    cfg: &MaskConfig,
+) -> Result<(MaskedRollout, MaskBuildTimings)> {
     // Step 1: assemble the full ChatMessage list — prompt scaffold first,
     // then every trajectory segment.
     let mut full_messages: Vec<CoreChatMessage> = prompt_messages
@@ -139,6 +158,7 @@ pub fn build_masks_from_trajectory(
     }));
 
     // Step 2: render the full conversation once.
+    let tokenize_started = Instant::now();
     let full_text = tokenizer
         .apply_chat_template(&full_messages)
         .map_err(|e| anyhow::anyhow!("{e}"))
@@ -147,12 +167,14 @@ pub fn build_masks_from_trajectory(
         .encode_with_offsets(&full_text)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("encode_with_offsets on rendered trajectory")?;
+    let tokenize_ms = tokenize_started.elapsed().as_secs_f64() * 1000.0;
 
     anyhow::ensure!(
         !input_ids.is_empty(),
         "build_masks_from_trajectory: empty tokenization result"
     );
 
+    let mask_started = Instant::now();
     let seq_len = input_ids.len();
     let mut action_mask = vec![false; seq_len];
     let mut env_mask = vec![false; seq_len];
@@ -199,7 +221,14 @@ pub fn build_masks_from_trajectory(
     masked
         .assert_masks_disjoint()
         .context("trajectory mask invariant violated")?;
-    Ok(masked)
+    let mask_build_ms = mask_started.elapsed().as_secs_f64() * 1000.0;
+    Ok((
+        masked,
+        MaskBuildTimings {
+            tokenize_ms,
+            mask_build_ms,
+        },
+    ))
 }
 
 // ---- Internal helpers ------------------------------------------------------
