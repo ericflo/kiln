@@ -1704,7 +1704,7 @@ scale.
 - If logits change but text is identical, report sampling/determinism reason.
 - If logits do not change, file a root-cause note in the doc or test.
 
-**Status:** Completed and pending commit on 2026-05-21.
+**Status:** Completed and committed on 2026-05-21.
 
 **Implementation notes:** Added explicit adapter-smoke prompt diagnostics to
 `train_receipt.json`: each prompt now records whether logits changed, text
@@ -1756,7 +1756,9 @@ byte-identical.
   `generated_text_different=false`, and
   `behavior_diagnosis=measurable_adapter_delta_with_identical_greedy_text`.
 
-**Commit SHA:** Pending.
+**Commit SHA:** `5d74c4a7` (`Issue 27: debug byte-identical adapters`). This
+status line is recorded in a follow-up metadata commit because a commit cannot
+include its own final SHA.
 
 **Remaining risk:** This issue now distinguishes “logits moved but greedy text
 matched” from a no-op adapter on a real Qwen3.5-4B fixture. It does not claim
