@@ -2301,7 +2301,9 @@ a summary JSON (`rollout_summary.json` by default).
   `completion_count=2`, `total_tokens=54`, mean reward `1.0`, and first
   content `issue thirty four`.
 
-**Commit SHA:** Pending.
+**Commit SHA:** `e701eac3` (`Issue 34: add rollout generation utility`). This
+status line is recorded in the follow-up metadata commit because a commit
+cannot include its own final SHA.
 
 **Remaining risk:** The real-model smoke proves the utility against one short
 single-turn prompt and the existing `issue33-eval-adapter`; it does not claim
