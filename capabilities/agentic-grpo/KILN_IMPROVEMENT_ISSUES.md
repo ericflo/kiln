@@ -1011,6 +1011,46 @@ small test adapters while running short completions.
 - It tracks latency and fails on severe drift.
 - It checks memory growth if allocator stats are available.
 
+**Status:** Completed 2026-05-21.
+
+**Implementation notes:**
+
+- Added an HTTP-level adapter stress test that runs 100 load/eval/unload cycles
+  across two tiny fixture adapters.
+- Each cycle checks `GET /v1/adapters`, direct shared state, and eval-mode chat
+  completion runtime headers for active/loaded adapter consistency.
+- The stress test records per-cycle latency and fails if the final-window p95
+  shows severe drift from the initial-window p95.
+- Memory growth is checked when the server exposes memory-budget counters; the
+  lightweight mock fixture documents that allocator counters are unavailable.
+- Refactored adapter load/unload state recording into shared helpers so the
+  production real-backend path and test-only lightweight stress harness exercise
+  the same state transition logic. Production mock-mode adapter load/unload
+  behavior remains unchanged outside `cfg(test)`.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on direct fallback RTX A6000 pod
+  `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo test -p kiln-server
+  adapter_load_eval_unload_stress_tracks_state_latency_and_memory --lib`;
+  `cargo test -p kiln-server --test adapter_path_traversal
+  test_load_rejects_missing_adapter_config_without_changing_active`; `cargo
+  test -p kiln-server --test adapter_path_traversal
+  test_load_rejects_missing_adapter_weights_without_changing_active`; and
+  `cargo check -p kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issue16.done` recorded `exit=0`;
+  remote log is `/workspace/kiln-validation/issue16.log`.
+
+**Commit SHA:** `b7bf0c43` (`Issue 16: add adapter stress test`).
+This is the implementation commit; these final metadata notes are recorded in
+the follow-up backlog commit.
+
+**Remaining risk:** The 100-cycle stress loop intentionally uses the mock
+backend to stay lightweight in CI, so it catches API/state/cache/header drift
+but does not parse real LoRA safetensors or exercise real runner adapter tensor
+allocation churn.
+
 ### 17. Make Qwen Thinking Mode A First-Class Config
 
 **Area:** `crates/kiln-server`, config docs
