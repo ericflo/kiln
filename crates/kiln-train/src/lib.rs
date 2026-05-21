@@ -503,6 +503,14 @@ pub struct GrpoConfig {
     /// Only meaningful when `kl_estimator != None`.
     #[serde(default)]
     pub entropy_aware_kl_quantile: Option<f32>,
+    /// Mean reward threshold above which low-variance groups are considered
+    /// saturated. Used only for diagnostics and train receipts.
+    #[serde(default = "default_reward_saturation_threshold")]
+    pub reward_saturation_threshold: f64,
+    /// Population variance threshold used with `reward_saturation_threshold`
+    /// to warn about low-signal reward distributions.
+    #[serde(default = "default_reward_low_variance_threshold")]
+    pub reward_low_variance_threshold: f64,
     #[serde(default = "default_rank")]
     pub lora_rank: usize,
     #[serde(default = "default_alpha")]
@@ -553,6 +561,12 @@ fn default_clip_eps() -> f64 {
 }
 fn default_dynamic_sampling() -> bool {
     true
+}
+fn default_reward_saturation_threshold() -> f64 {
+    crate::train_receipt::DEFAULT_REWARD_SATURATION_THRESHOLD
+}
+fn default_reward_low_variance_threshold() -> f64 {
+    crate::train_receipt::DEFAULT_REWARD_LOW_VARIANCE_THRESHOLD
 }
 
 // ---- ECHO + LossConfig ----------------------------------------------------
@@ -787,6 +801,8 @@ impl Default for GrpoConfig {
             is_level: IsLevel::default(),
             reference_policy: ReferencePolicy::default(),
             entropy_aware_kl_quantile: None,
+            reward_saturation_threshold: default_reward_saturation_threshold(),
+            reward_low_variance_threshold: default_reward_low_variance_threshold(),
             lora_rank: default_rank(),
             lora_alpha: default_alpha(),
             base_adapter: None,
@@ -882,6 +898,35 @@ mod tests {
         let config: GrpoConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.checkpoint_interval, Some(10));
         assert_eq!(config.kl_coeff, 0.1); // default preserved
+    }
+
+    #[test]
+    fn test_grpo_reward_diagnostic_threshold_defaults() {
+        let config = GrpoConfig::default();
+        assert!(
+            (config.reward_saturation_threshold
+                - crate::train_receipt::DEFAULT_REWARD_SATURATION_THRESHOLD)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (config.reward_low_variance_threshold
+                - crate::train_receipt::DEFAULT_REWARD_LOW_VARIANCE_THRESHOLD)
+                .abs()
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn test_grpo_reward_diagnostic_thresholds_deserialize() {
+        let json = r#"{
+            "reward_saturation_threshold": 0.8,
+            "reward_low_variance_threshold": 0.002
+        }"#;
+        let config: GrpoConfig = serde_json::from_str(json).unwrap();
+        assert!((config.reward_saturation_threshold - 0.8).abs() < 1e-12);
+        assert!((config.reward_low_variance_threshold - 0.002).abs() < 1e-12);
+        assert_eq!(config.kl_coeff, 0.1);
     }
 
     // ECHO LossConfig + env-var override tests. Env-var manipulation is

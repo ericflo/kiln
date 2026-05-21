@@ -22,6 +22,10 @@ pub const TRAIN_RECEIPT_SCHEMA_VERSION: u32 = 1;
 pub const ADAPTER_SMOKE_LOGIT_DELTA_EPSILON: f64 = 1e-6;
 pub const LORA_DELTA_NEAR_ZERO_EPSILON: f64 = 1e-12;
 pub const LORA_DELTA_EXTREME_SCALE_MULTIPLIER: f64 = 100.0;
+pub const DEFAULT_REWARD_SATURATION_THRESHOLD: f64 = 0.95;
+pub const DEFAULT_REWARD_LOW_VARIANCE_THRESHOLD: f64 = 1e-4;
+pub const REWARD_DEGENERATE_GROUP_VARIANCE_EPSILON: f64 = 1e-12;
+pub const REWARD_MOST_GROUPS_FRACTION: f64 = 0.5;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -153,6 +157,16 @@ pub struct RewardStatsReceipt {
     pub count: usize,
     pub mean: Option<f64>,
     pub stdev: Option<f64>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    #[serde(default)]
+    pub group_count: usize,
+    #[serde(default)]
+    pub all_pass_group_count: usize,
+    #[serde(default)]
+    pub all_fail_group_count: usize,
+    #[serde(default)]
+    pub degenerate_group_count: usize,
     pub group_variance_histogram: Vec<HistogramBucket>,
 }
 
@@ -255,6 +269,12 @@ impl Default for RewardStatsReceipt {
             count: 0,
             mean: None,
             stdev: None,
+            min: None,
+            max: None,
+            group_count: 0,
+            all_pass_group_count: 0,
+            all_fail_group_count: 0,
+            degenerate_group_count: 0,
             group_variance_histogram: variance_histogram(&[]),
         }
     }
@@ -409,6 +429,27 @@ pub fn warn_lora_delta_norms(
     }
 }
 
+pub fn warn_reward_diagnostics(
+    mode: &str,
+    adapter_name: &str,
+    rewards: &RewardStatsReceipt,
+    saturation_threshold: f64,
+    low_variance_threshold: f64,
+) {
+    for warning in reward_diagnostic_warnings(
+        rewards,
+        saturation_threshold,
+        low_variance_threshold,
+    ) {
+        tracing::warn!(
+            mode,
+            adapter = adapter_name,
+            warning = %warning,
+            "GRPO reward diagnostic warning"
+        );
+    }
+}
+
 pub fn build_adapter_smoke_test_receipt(
     prompts: Vec<AdapterSmokePromptReceipt>,
 ) -> AdapterSmokeTestReceipt {
@@ -518,12 +559,38 @@ pub fn reward_stats_from_groups<'a, I>(groups: I) -> RewardStatsReceipt
 where
     I: IntoIterator<Item = &'a [f64]>,
 {
+    reward_stats_from_groups_with_threshold(groups, DEFAULT_REWARD_SATURATION_THRESHOLD)
+}
+
+pub fn reward_stats_from_groups_with_threshold<'a, I>(
+    groups: I,
+    all_pass_threshold: f64,
+) -> RewardStatsReceipt
+where
+    I: IntoIterator<Item = &'a [f64]>,
+{
     let mut rewards = Vec::new();
     let mut variances = Vec::new();
+    let mut group_count = 0usize;
+    let mut all_pass_group_count = 0usize;
+    let mut all_fail_group_count = 0usize;
+    let mut degenerate_group_count = 0usize;
     for group_rewards in groups {
+        if group_rewards.is_empty() {
+            continue;
+        }
+        group_count += 1;
         rewards.extend_from_slice(group_rewards);
-        if !group_rewards.is_empty() {
-            variances.push(population_variance(group_rewards));
+        let group_variance = population_variance(group_rewards);
+        variances.push(group_variance);
+        if group_variance <= REWARD_DEGENERATE_GROUP_VARIANCE_EPSILON {
+            degenerate_group_count += 1;
+        }
+        if group_rewards.iter().all(|reward| *reward >= all_pass_threshold) {
+            all_pass_group_count += 1;
+        }
+        if group_rewards.iter().all(|reward| *reward <= 0.0) {
+            all_fail_group_count += 1;
         }
     }
     let count = rewards.len();
@@ -539,12 +606,51 @@ where
         })
         .sum::<f64>()
         / count as f64;
+    let min = rewards.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = rewards.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     RewardStatsReceipt {
         count,
         mean: Some(mean),
         stdev: Some(variance.sqrt()),
+        min: Some(min),
+        max: Some(max),
+        group_count,
+        all_pass_group_count,
+        all_fail_group_count,
+        degenerate_group_count,
         group_variance_histogram: variance_histogram(&variances),
     }
+}
+
+pub fn reward_diagnostic_warnings(
+    rewards: &RewardStatsReceipt,
+    saturation_threshold: f64,
+    low_variance_threshold: f64,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if rewards.group_count > 0 {
+        let saturated_groups = rewards
+            .all_pass_group_count
+            .saturating_add(rewards.all_fail_group_count);
+        let saturated_fraction = saturated_groups as f64 / rewards.group_count as f64;
+        if saturated_fraction > REWARD_MOST_GROUPS_FRACTION {
+            warnings.push(format!(
+                "most GRPO reward groups are all-pass or all-fail ({saturated_groups}/{} = {:.1}%); policy-gradient signal may be saturated, so consider `--no-policy-loss` with ECHO or collect harder data",
+                rewards.group_count,
+                saturated_fraction * 100.0
+            ));
+        }
+    }
+
+    if let (Some(mean), Some(stdev)) = (rewards.mean, rewards.stdev) {
+        let variance = stdev * stdev;
+        if mean >= saturation_threshold && variance <= low_variance_threshold {
+            warnings.push(format!(
+                "reward mean {mean:.4} is above saturation threshold {saturation_threshold:.4} while variance {variance:.3e} is below {low_variance_threshold:.3e}; consider `--no-policy-loss` or harder data"
+            ));
+        }
+    }
+    warnings
 }
 
 pub fn lora_delta_norm_summary_from_adapter(
@@ -1114,6 +1220,10 @@ mod tests {
         let stats = reward_stats_from_groups(slices);
         assert_eq!(stats.count, 6);
         assert!(stats.mean.unwrap().abs() > 0.0);
+        assert_eq!(stats.min, Some(-2.0));
+        assert_eq!(stats.max, Some(2.0));
+        assert_eq!(stats.group_count, 3);
+        assert_eq!(stats.degenerate_group_count, 1);
         assert_eq!(stats.group_variance_histogram.len(), 6);
         assert_eq!(
             stats
@@ -1122,6 +1232,38 @@ mod tests {
                 .map(|b| b.count)
                 .sum::<usize>(),
             3
+        );
+    }
+
+    #[test]
+    fn reward_diagnostics_warn_on_degenerate_and_saturated_rewards() {
+        let groups = [vec![1.0, 1.0], vec![1.0, 1.0], vec![0.0, 0.0]];
+        let slices: Vec<&[f64]> = groups.iter().map(Vec::as_slice).collect();
+        let stats = reward_stats_from_groups_with_threshold(slices, 0.95);
+        assert_eq!(stats.group_count, 3);
+        assert_eq!(stats.all_pass_group_count, 2);
+        assert_eq!(stats.all_fail_group_count, 1);
+
+        let warnings = reward_diagnostic_warnings(&stats, 0.95, 1e-4);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("all-pass or all-fail"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("`--no-policy-loss`"))
+        );
+
+        let saturated_groups = [vec![1.0, 0.99], vec![0.98, 1.0]];
+        let slices: Vec<&[f64]> = saturated_groups.iter().map(Vec::as_slice).collect();
+        let stats = reward_stats_from_groups_with_threshold(slices, 0.95);
+        let warnings = reward_diagnostic_warnings(&stats, 0.95, 1e-3);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("reward mean"))
         );
     }
 

@@ -1324,6 +1324,13 @@ fn build_grpo_train_receipt(
         config.loss.echo_enabled(),
         &receipt.token_counts,
     );
+    crate::train_receipt::warn_reward_diagnostics(
+        "grpo",
+        adapter_name,
+        &receipt.rewards,
+        config.reward_saturation_threshold,
+        config.reward_low_variance_threshold,
+    );
     if status_error.is_none() {
         receipt.lora_delta_norms =
             crate::train_receipt::lora_delta_norm_summary_from_adapter(
@@ -2025,6 +2032,20 @@ pub fn grpo_train(
         let dynamic_sampling = config.dynamic_sampling;
         let mut dynamic_dropped: usize = 0;
         let mut tokenization_failed: usize = 0;
+        let input_reward_groups: Vec<Vec<f64>> = groups
+            .iter()
+            .map(|group| {
+                group
+                    .completions
+                    .iter()
+                    .map(|completion| completion.reward)
+                    .collect()
+            })
+            .collect();
+        reward_stats = crate::train_receipt::reward_stats_from_groups_with_threshold(
+            input_reward_groups.iter().map(Vec::as_slice),
+            config.reward_saturation_threshold,
+        );
 
         // Tokenize all completions: for each group, tokenize prompt + each completion.
         // When dynamic_sampling is enabled (DAPO, arXiv:2503.14476), groups whose
@@ -2050,9 +2071,6 @@ pub fn grpo_train(
         data_stats.groups_trained = tokenized_groups.len();
         data_stats.completions_trained =
             tokenized_groups.iter().map(|g| g.completions.len()).sum();
-        reward_stats = crate::train_receipt::reward_stats_from_groups(
-            tokenized_groups.iter().map(|g| g.rewards.as_slice()),
-        );
         token_counts = token_counts_for_grpo_groups(&tokenized_groups);
         crate::train_receipt::warn_echo_enabled_without_env_tokens(
             "grpo",
@@ -2368,6 +2386,13 @@ pub fn grpo_dry_run_jsonl(
             data_stats.completions_read = data_stats
                 .completions_read
                 .saturating_add(group.completions.len());
+            reward_groups.push(
+                group
+                    .completions
+                    .iter()
+                    .map(|completion| completion.reward)
+                    .collect(),
+            );
 
             if config.dynamic_sampling && is_degenerate_grpo_group(&group) {
                 dynamic_groups_filtered = dynamic_groups_filtered.saturating_add(1);
@@ -2393,13 +2418,13 @@ pub fn grpo_dry_run_jsonl(
             processed_groups = processed_groups.saturating_add(1);
             processed_completions =
                 processed_completions.saturating_add(tgroup.completions.len());
-            reward_groups.push(tgroup.rewards.clone());
         }
 
         data_stats.groups_trained = processed_groups;
         data_stats.completions_trained = processed_completions;
-        reward_stats = crate::train_receipt::reward_stats_from_groups(
+        reward_stats = crate::train_receipt::reward_stats_from_groups_with_threshold(
             reward_groups.iter().map(Vec::as_slice),
+            config.reward_saturation_threshold,
         );
 
         if processed_groups == 0 && !allow_empty_after_filter {
@@ -2724,6 +2749,13 @@ pub fn grpo_train_jsonl(
             data_stats.completions_read = data_stats
                 .completions_read
                 .saturating_add(group.completions.len());
+            reward_groups.push(
+                group
+                    .completions
+                    .iter()
+                    .map(|completion| completion.reward)
+                    .collect(),
+            );
 
             if config.dynamic_sampling && is_degenerate_grpo_group(&group) {
                 dynamic_groups_filtered = dynamic_groups_filtered.saturating_add(1);
@@ -2760,7 +2792,6 @@ pub fn grpo_train_jsonl(
             token_counts.context_tokens = token_counts
                 .context_tokens
                 .saturating_add(group_counts.context_tokens);
-            reward_groups.push(tgroup.rewards.clone());
             processed_completions = processed_completions.saturating_add(tgroup.completions.len());
             tracing::info!(
                 group = processed_groups,
@@ -2872,8 +2903,9 @@ pub fn grpo_train_jsonl(
         );
         data_stats.groups_trained = processed_groups;
         data_stats.completions_trained = processed_completions;
-        reward_stats = crate::train_receipt::reward_stats_from_groups(
+        reward_stats = crate::train_receipt::reward_stats_from_groups_with_threshold(
             reward_groups.iter().map(Vec::as_slice),
+            config.reward_saturation_threshold,
         );
         crate::train_receipt::warn_echo_enabled_without_env_tokens(
             "streamed_grpo",
@@ -10371,6 +10403,9 @@ mod tests {
             crate::train_receipt::TrainReceiptStatus::Success
         );
         assert_eq!(receipt.data.groups_trained, 1);
+        assert_eq!(receipt.rewards.min, Some(0.0));
+        assert_eq!(receipt.rewards.max, Some(1.0));
+        assert_eq!(receipt.rewards.group_count, 1);
         assert!(receipt.echo.enabled);
         Ok(())
     }

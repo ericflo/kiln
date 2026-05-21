@@ -185,6 +185,13 @@ fn write_vk_grpo_train_receipt_best_effort(
         config.loss.echo_enabled(),
         &receipt.token_counts,
     );
+    crate::train_receipt::warn_reward_diagnostics(
+        "vk_grpo",
+        adapter_name,
+        &receipt.rewards,
+        config.reward_saturation_threshold,
+        config.reward_low_variance_threshold,
+    );
     receipt.lora_delta_norms =
         crate::train_receipt::lora_delta_norm_summary_from_adapter(
             output_dir,
@@ -4134,7 +4141,10 @@ pub fn vk_native_grpo_train(
             sha256: crate::train_receipt::sha256_json_serializable(&groups),
         },
         data_stats,
-        crate::train_receipt::reward_stats_from_groups(reward_groups.iter().map(Vec::as_slice)),
+        crate::train_receipt::reward_stats_from_groups_with_threshold(
+            reward_groups.iter().map(Vec::as_slice),
+            config.reward_saturation_threshold,
+        ),
         token_counts,
         echo_metrics,
         run_started.elapsed().as_millis() as u64,
@@ -4667,7 +4677,10 @@ pub fn vk_native_grpo_train_jsonl(
             sha256: crate::train_receipt::sha256_file(dataset_path).ok(),
         },
         data_stats,
-        crate::train_receipt::reward_stats_from_groups(reward_groups.iter().map(Vec::as_slice)),
+        crate::train_receipt::reward_stats_from_groups_with_threshold(
+            reward_groups.iter().map(Vec::as_slice),
+            config.reward_saturation_threshold,
+        ),
         token_counts,
         echo_metrics,
         run_started.elapsed().as_millis() as u64,
