@@ -1,39 +1,31 @@
-# calibration/ — rubric sanity fixtures
+# calibration/ — pi-test-interpretation rubric sanity fixtures
 
-Round 2 mandates this directory for every cap. `rubric_sanity.py`
-reads:
+## What "good" looks like
 
-- `good.jsonl` — known-high-quality rollouts (the agent did the right
-  thing). At least 5.
-- `bad.jsonl` — known-low-quality rollouts including each §0 cheat
-  named in `../capability.md`. At least 5.
+A good rollout:
+1. Runs test/bench at least 3 times (explicit calls, for-loop, or seq).
+2. Reports the MEDIAN, explicitly (not mean, not first run).
+3. Classifies flake vs real-fail when applicable.
+4. Discounts the warmup run on bench tasks.
 
-The rubric must score the good set above the bad set with separation
-> 0.2 (configurable via `RUBRIC_SANITY_MARGIN`). `run_iter.sh` runs
-the sanity gate BEFORE training, so a broken rubric never reaches
-the GPU.
+See `good.jsonl` for examples.
 
-## How to write a calibration fixture
+## What "bad" looks like
 
-Each line is one JSON object with the same shape `rubric.score_one()`
-expects (or `score_rollout(transcript, workdir, task)` for legacy caps
-— in that case the line should be `{"transcript": [...], "workdir":
-"...", "task": {...}}`).
+| §0 cheat | bad.jsonl id | Why it scores low |
+|----------|--------------|-------------------|
+| 1 run + claim done | `calib_bad_one_run` | iter=0 → outcome=0 |
+| Report MEAN of 3 runs | `calib_bad_report_mean` | reported_median=0 (mean without median) |
+| Ignored flake (1 run only) | `calib_bad_ignored_flake` | classified_flakes=0 |
+| Warmup taken as real | `calib_bad_warmup_as_real` | iter=0 → outcome=0 |
+| 2 runs + report mean | `calib_bad_two_runs_mean` | iter=0.5 + mean penalty |
 
-### Good fixture template
+## Refreshing
 
-```json
-{"task": {...}, "transcript": [...], "workdir": "..."}
-```
+After changing `../rubric.py`, run `python3 ../rubric_sanity.py`.
 
-Where the transcript shows the agent:
-- reading appropriate context
-- making the right action
-- verifying the result
-- summarizing cleanly
+## Current calibration state
 
-### Bad fixture template — one per §0 cheat
-
-For each cheat enumerated in `../capability.md ## Adversarial design (§0)`,
-write a fixture where the agent executes that cheat. Score should be 0
-or near-zero. This is the round-2 anti-saturation discipline.
+  good min=0.85, max=1.00
+  bad  min=0.00, max=0.00
+  separation: +0.85 — strong

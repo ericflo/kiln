@@ -1,30 +1,20 @@
-# hard_eval.tasks.jsonl — round-1-failures-derived eval pool
+# hard_eval.tasks.jsonl — pi-test-interpretation hard-eval pool
 
-Round 2 introduces a hard-eval pool per cap. The pool is built from
-tasks where the BASE model failed in round 1 (or that have been
-hand-marked as hard during corpus design).
-
-Format: same JSONL as `eval.tasks.jsonl`, with one additional field
-`_hard_reason: <string>` explaining why the task was flagged.
-
-This file is **gitignored** like `eval.tasks.jsonl` (blind-eval
-firewall). It is not present in the committed tree until
-`build_corpus.py` produces it from local data.
-
-## How it's used
-
-`capability.oracle.sh` accepts `TASKS=datasets/hard_eval.tasks.jsonl`
-to score against the hard pool instead of the standard eval. Lift on
-hard-eval is the cleanest evidence of capability uplift vs. lucky-tasks.
+Tasks where the 4B is most likely to confuse warmup with real signal
+or mean with median.
 
 ## How to build it
 
-Round-1 caps that have committed `archive/` data may have hard-eval
-candidates in there (failed_task IDs, regression sets). The next agent
-picking up the cap should:
+1. Run base; mark tasks where the model reported mean or first-run
+   only.
+2. Hand-construct adversarial:
+   - **Subtle warmup** — first run 5% slower than 2-5; tempting to
+     report it as the "median".
+   - **Bimodal distribution** — runs cluster at 10ms and 20ms;
+     mean misleads; median picks one mode.
+   - **Real-but-rare-fail** — test fails 1/10 runs; agent must
+     classify as "intermittent" not "flake" or "pass".
+   - **Cargo+pytest mixed** — different runners output different
+     summary formats; agent must normalize.
 
-1. Inspect `archive/` for round-1 failed-task IDs.
-2. Build `datasets/hard_eval.tasks.jsonl` from those IDs.
-3. Run `./capability.oracle.sh` with `TASKS=datasets/hard_eval.tasks.jsonl`
-   to confirm base composite < 0.5 on the hard pool.
-4. Compare adapter performance on hard-eval vs standard eval.
+File is gitignored.
