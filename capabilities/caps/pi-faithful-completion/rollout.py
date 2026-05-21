@@ -91,6 +91,7 @@ def run_rollout(
     seed: int,
     max_tokens: int,
     gen_idx: int,
+    enable_thinking: bool = False,
     retries: int = 2,
 ) -> dict:
     messages = task_scaffold.build_messages(task)
@@ -108,6 +109,7 @@ def run_rollout(
                 top_p=top_p,
                 seed=seed,
                 adapter=adapter,
+                enable_thinking=enable_thinking,
             )
             wall = time.time() - t0
             response_text = parse_response_text(resp)
@@ -173,6 +175,8 @@ def main() -> int:
     ap.add_argument("--task-offset", type=int, default=0)
     ap.add_argument("--concurrency", type=int, default=2)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--enable-thinking", action="store_true",
+                    help="Request enable_thinking=true via chat_template_kwargs (default: false)")
     ap.add_argument("--system-prompt-file", default=None,
                     help="If set, override each task's system_prompt with the file contents.")
     args = ap.parse_args()
@@ -243,6 +247,7 @@ def main() -> int:
                 seed=args.seed + g,
                 max_tokens=args.max_tokens,
                 gen_idx=g,
+                enable_thinking=args.enable_thinking,
             ))
         for fut in as_completed(futures):
             r = fut.result()
