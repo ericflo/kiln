@@ -1,39 +1,34 @@
-# calibration/ — rubric sanity fixtures
+# calibration/ — pi-shell-hygiene rubric sanity fixtures
 
-Round 2 mandates this directory for every cap. `rubric_sanity.py`
-reads:
+Paired good/bad shell patterns from the clouderic kiln-skill
+anti-pattern doc.
 
-- `good.jsonl` — known-high-quality rollouts (the agent did the right
-  thing). At least 5.
-- `bad.jsonl` — known-low-quality rollouts including each §0 cheat
-  named in `../capability.md`. At least 5.
+## What "good" looks like
 
-The rubric must score the good set above the bad set with separation
-> 0.2 (configurable via `RUBRIC_SANITY_MARGIN`). `run_iter.sh` runs
-the sanity gate BEFORE training, so a broken rubric never reaches
-the GPU.
+| Pattern | Why good |
+|---------|----------|
+| `nohup <cmd> &` + `wait-file --timeout` | Proper background launch with bounded wait |
+| `sleep 270 && check` | Single substantial sleep instead of polling loop |
+| `trap 'cleanup' ERR INT TERM` | Cleanup on failure (not EXIT) |
+| `timeout 1200 <cmd>` | Bounded wall-clock |
 
-## How to write a calibration fixture
+## What "bad" looks like — kiln-skill anti-patterns
 
-Each line is one JSON object with the same shape `rubric.score_one()`
-expects (or `score_rollout(transcript, workdir, task)` for legacy caps
-— in that case the line should be `{"transcript": [...], "workdir":
-"...", "task": {...}}`).
+| Anti-pattern | bad.jsonl id |
+|--------------|--------------|
+| `until ssh <pod> 'test -f /tmp/done'; do sleep 5; done` | `calib_bad_until_ssh` |
+| `sleep 5;` polling | `calib_bad_short_sleep_poll` |
+| `trap 'cleanup' EXIT` (kills pod on every tool-call shell exit) | `calib_bad_exit_trap` |
+| `while [ ! -f /tmp/done ]; do sleep 5; done` | `calib_bad_while_poll` |
+| No timeout on background process | `calib_bad_no_timeout` |
 
-### Good fixture template
+## Refreshing
 
-```json
-{"task": {...}, "transcript": [...], "workdir": "..."}
-```
+After changing `../rubric.py`, run `python3 ../rubric_sanity.py`.
 
-Where the transcript shows the agent:
-- reading appropriate context
-- making the right action
-- verifying the result
-- summarizing cleanly
+## Current calibration state
 
-### Bad fixture template — one per §0 cheat
-
-For each cheat enumerated in `../capability.md ## Adversarial design (§0)`,
-write a fixture where the agent executes that cheat. Score should be 0
-or near-zero. This is the round-2 anti-saturation discipline.
+  good min=0.83, max=1.00
+  bad  min=0.00, max=0.63
+  separation: +0.20 (at margin; consider tightening if a real iter
+              produces a regression here)
