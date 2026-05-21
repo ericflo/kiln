@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use kiln_server::api;
-use kiln_server::cli::{self, AdapterCommands, Cli, Commands, TrainCommands};
+use kiln_server::cli::{self, AdapterCommands, Cli, Commands, TrainCommands, TrajectoryCommands};
 use kiln_server::config::KilnConfig;
 use kiln_server::device::select_device_with_options;
 use kiln_server::state;
@@ -83,6 +83,28 @@ async fn main() -> Result<()> {
                     prompt.as_deref(),
                 )
                 .await;
+            }
+        },
+        Some(Commands::Trajectory(ref trajectory_cmd)) => match trajectory_cmd {
+            TrajectoryCommands::Inspect {
+                file,
+                json,
+                include_context,
+                preview_tokens,
+                tokenizer,
+                chat_template,
+                model_path,
+            } => {
+                return cli::run_trajectory_inspect(
+                    args.config.as_deref(),
+                    file.as_path(),
+                    tokenizer.as_deref(),
+                    chat_template.as_deref(),
+                    model_path.as_deref(),
+                    *json,
+                    *include_context,
+                    *preview_tokens,
+                );
             }
         },
         // §10.14 — pi + kiln canonical pipeline subcommands.

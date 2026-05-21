@@ -20,6 +20,7 @@ pub mod replay;
 pub mod train_receipt;
 pub mod trainer;
 pub mod trajectory;
+pub mod trajectory_inspect;
 pub mod trajectory_mask;
 #[cfg(feature = "vulkan")]
 pub mod vk_train;

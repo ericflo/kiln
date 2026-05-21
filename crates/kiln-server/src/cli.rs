@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use console::style;
+use kiln_core::tokenizer::KilnTokenizer;
+use kiln_train::trajectory_inspect::{
+    RolloutInspection, SegmentInspection, TrajectoryInspectReport, inspect_trajectory_file,
+};
 
 use crate::adapter_verify::{
     AdapterVerifyOptions, AdapterVerifyServerReceipt, DEFAULT_VERIFY_PROMPT, finalize_status,
@@ -172,6 +176,24 @@ const CONFIG_EXAMPLES: &str = r#"Examples:
       Check a production config file and print the effective server, model, logging, and feature settings.
 "#;
 
+const TRAJECTORY_OVERVIEW: &str = r#"Inspect Pi or Kiln agentic trajectory JSONL before training.
+
+`kiln trajectory inspect` renders each rollout through Kiln's tokenizer and canonical trajectory mask builder, then reports action/env/context token counts, per-segment spans, warning-prefix filtering, decoded target-token previews, and schema warnings.
+
+The command accepts Pi session JSONL events as well as Kiln ScoredRollout or AgenticGroup JSONL. It exits non-zero when no trainable action tokens are present.
+"#;
+
+const TRAJECTORY_EXAMPLES: &str = r#"Examples:
+  kiln trajectory inspect session.jsonl --tokenizer /models/Qwen3.5-4B/tokenizer.json
+      Inspect a Pi session capture with an explicit tokenizer.
+
+  kiln --config kiln.toml trajectory inspect rollouts.jsonl --json
+      Emit a machine-readable report using the tokenizer/model paths from kiln.toml.
+
+  kiln trajectory inspect rollouts.jsonl --model-path /models/Qwen3.5-4B --preview-tokens 128
+      Load tokenizer.json and chat_template.jinja from a local model directory.
+"#;
+
 /// Render a structured server error response. Falls back to HTTP status if the body
 /// is not the expected `{error: {code, message, hint}}` shape.
 ///
@@ -334,6 +356,14 @@ pub enum Commands {
         after_help = ADAPTERS_EXAMPLES
     )]
     Adapters(AdapterCommands),
+
+    /// Inspect agentic trajectory JSONL masks before training
+    #[command(
+        subcommand,
+        long_about = TRAJECTORY_OVERVIEW,
+        after_help = TRAJECTORY_EXAMPLES
+    )]
+    Trajectory(TrajectoryCommands),
 
     /// Check health of a running server
     #[command(long_about = HEALTH_OVERVIEW, after_help = HEALTH_EXAMPLES)]
@@ -553,6 +583,42 @@ pub enum AdapterCommands {
         /// Prompt used for the optional server behavior check
         #[arg(long)]
         prompt: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TrajectoryCommands {
+    /// Inspect Pi session or Kiln ScoredRollout JSONL through the mask builder
+    Inspect {
+        /// Pi session JSONL, Kiln ScoredRollout JSONL, or AgenticGroup JSONL
+        file: PathBuf,
+
+        /// Emit the full report as pretty JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+
+        /// Treat system/user Pi messages as non-trainable trajectory context segments
+        #[arg(long, default_value_t = false)]
+        include_context: bool,
+
+        /// Number of action/env target tokens to decode in previews
+        #[arg(long, default_value_t = 64)]
+        preview_tokens: usize,
+
+        /// Explicit tokenizer.json path. Defaults to KILN_TOKENIZER_PATH,
+        /// config model.tokenizer_path, <model-path>/tokenizer.json, or HF model_id.
+        #[arg(long)]
+        tokenizer: Option<PathBuf>,
+
+        /// Explicit chat template file. Defaults to chat_template.jinja or
+        /// tokenizer_config.json beside the tokenizer/model path when available.
+        #[arg(long)]
+        chat_template: Option<PathBuf>,
+
+        /// Local model directory used to find tokenizer.json and chat template.
+        /// Overrides config model.path for this inspection only.
+        #[arg(long)]
+        model_path: Option<PathBuf>,
     },
 }
 
@@ -998,6 +1064,211 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
             eprintln!("{} Configuration error: {e}", style("✗").red().bold());
             std::process::exit(1);
         }
+    }
+}
+
+/// Run `kiln trajectory inspect`: load a tokenizer, inspect the JSONL file
+/// through kiln-train's canonical mask builder, and print the report.
+pub fn run_trajectory_inspect(
+    config_file: Option<&str>,
+    file: &Path,
+    tokenizer_path: Option<&Path>,
+    chat_template_path: Option<&Path>,
+    model_path: Option<&Path>,
+    json: bool,
+    include_context: bool,
+    preview_tokens: usize,
+) -> anyhow::Result<()> {
+    let tokenizer = load_trajectory_inspect_tokenizer(
+        config_file,
+        tokenizer_path,
+        chat_template_path,
+        model_path,
+    )?;
+    let report = inspect_trajectory_file(file, &tokenizer, include_context, preview_tokens)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", format_trajectory_inspect_report(&report));
+    }
+    Ok(())
+}
+
+fn load_trajectory_inspect_tokenizer(
+    config_file: Option<&str>,
+    tokenizer_path: Option<&Path>,
+    chat_template_path: Option<&Path>,
+    model_path: Option<&Path>,
+) -> anyhow::Result<KilnTokenizer> {
+    use crate::config::KilnConfig;
+    use anyhow::Context as _;
+
+    let config = KilnConfig::load(config_file)?;
+    let configured_tokenizer = config.model.tokenizer_path.as_deref().map(PathBuf::from);
+    let configured_model_path = config.model.path.as_deref().map(PathBuf::from);
+    let tokenizer_path = tokenizer_path.map(PathBuf::from).or(configured_tokenizer);
+    let model_path = model_path.map(PathBuf::from).or(configured_model_path);
+
+    let (mut tokenizer, template_dir) = if let Some(path) = tokenizer_path.as_deref() {
+        let path_str = path
+            .to_str()
+            .with_context(|| format!("tokenizer path is not UTF-8: {}", path.display()))?;
+        let tokenizer = KilnTokenizer::from_file(path_str)
+            .with_context(|| format!("load tokenizer from {}", path.display()))?;
+        (tokenizer, path.parent().map(Path::to_path_buf))
+    } else if let Some(path) = model_path.as_deref() {
+        let tok_file = path.join("tokenizer.json");
+        if tok_file.exists() {
+            let path_str = tok_file
+                .to_str()
+                .with_context(|| format!("tokenizer path is not UTF-8: {}", tok_file.display()))?;
+            let tokenizer = KilnTokenizer::from_file(path_str)
+                .with_context(|| format!("load tokenizer from {}", tok_file.display()))?;
+            (tokenizer, Some(path.to_path_buf()))
+        } else {
+            let tokenizer = KilnTokenizer::from_pretrained(&config.model.model_id)
+                .with_context(|| format!("load tokenizer for {}", config.model.model_id))?;
+            (tokenizer, None)
+        }
+    } else {
+        let tokenizer = KilnTokenizer::from_pretrained(&config.model.model_id)
+            .with_context(|| format!("load tokenizer for {}", config.model.model_id))?;
+        (tokenizer, None)
+    };
+
+    if let Some(path) = chat_template_path {
+        let template = std::fs::read_to_string(path)
+            .with_context(|| format!("read chat template {}", path.display()))?;
+        tokenizer = tokenizer.with_chat_template(template);
+    } else if let Some(dir) = template_dir.as_deref() {
+        if let Some((_source, template)) = load_inspect_chat_template_from_model_dir(dir)
+            .with_context(|| format!("load chat template from {}", dir.display()))?
+        {
+            tokenizer = tokenizer.with_chat_template(template);
+        }
+    }
+
+    Ok(tokenizer)
+}
+
+fn load_inspect_chat_template_from_model_dir(
+    dir: &Path,
+) -> anyhow::Result<Option<(&'static str, String)>> {
+    let standalone = dir.join("chat_template.jinja");
+    if standalone.exists() {
+        let template = std::fs::read_to_string(&standalone)?;
+        return Ok(Some(("chat_template.jinja", template)));
+    }
+    let config_path = dir.join("tokenizer_config.json");
+    if !config_path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&config_path)?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw)?;
+    Ok(parsed
+        .get("chat_template")
+        .and_then(|v| v.as_str())
+        .map(|s| ("tokenizer_config.json", s.to_string())))
+}
+
+fn format_trajectory_inspect_report(report: &TrajectoryInspectReport) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Trajectory inspection: {}", report.path);
+    let _ = writeln!(out, "  Source format: {}", report.source_format);
+    let _ = writeln!(out, "  Rollouts: {}", report.rollouts.len());
+    let _ = writeln!(out, "  Action tokens: {}", report.action_tokens);
+    let _ = writeln!(out, "  Env tokens: {}", report.env_tokens);
+    let _ = writeln!(out, "  Context tokens: {}", report.context_tokens);
+    let _ = writeln!(
+        out,
+        "  Warning-prefix stripped bytes: {}",
+        report.warning_prefix_stripped_bytes
+    );
+
+    if report.schema_warnings.is_empty() {
+        let _ = writeln!(out, "  Schema warnings: none");
+    } else {
+        let _ = writeln!(out, "  Schema warnings:");
+        for warning in &report.schema_warnings {
+            let _ = writeln!(out, "    - {warning}");
+        }
+    }
+
+    for rollout in &report.rollouts {
+        append_rollout_inspection(&mut out, rollout);
+    }
+
+    out
+}
+
+fn append_rollout_inspection(out: &mut String, rollout: &RolloutInspection) {
+    use std::fmt::Write as _;
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Rollout {}:", rollout.index);
+    let _ = writeln!(out, "  Prompt messages: {}", rollout.prompt_messages.len());
+    let _ = writeln!(out, "  Action tokens: {}", rollout.action_tokens);
+    let _ = writeln!(out, "  Env tokens: {}", rollout.env_tokens);
+    let _ = writeln!(out, "  Context tokens: {}", rollout.context_tokens);
+    let _ = writeln!(
+        out,
+        "  Warning-prefix stripped bytes: {}",
+        rollout.warning_prefix_stripped_bytes
+    );
+    append_indented_block(out, "  Rendered messages:", &rollout.rendered_messages, 4);
+    append_indented_block(out, "  Action preview:", &rollout.action_preview, 4);
+    append_indented_block(out, "  Env preview:", &rollout.env_preview, 4);
+
+    let _ = writeln!(out, "  Segments:");
+    for segment in &rollout.segments {
+        append_segment_inspection(out, segment);
+    }
+}
+
+fn append_segment_inspection(out: &mut String, segment: &SegmentInspection) {
+    use std::fmt::Write as _;
+
+    let span = match (segment.token_start, segment.token_end) {
+        (Some(start), Some(end)) => format!("{start}..{end}"),
+        _ => "unspanned".to_string(),
+    };
+    let _ = writeln!(
+        out,
+        "    [{}] role={} kind={:?} tokens={} span={}",
+        segment.index, segment.role, segment.kind, segment.token_count, span
+    );
+    if let Some(tool_call_id) = segment.tool_call_id.as_deref() {
+        let _ = writeln!(out, "      tool_call_id: {tool_call_id}");
+    }
+    if let Some(len) = segment.warning_prefix_len {
+        let _ = writeln!(out, "      warning_prefix_len: {len}");
+    }
+    if segment.warning_prefix_stripped_bytes > 0 {
+        let _ = writeln!(
+            out,
+            "      warning-prefix stripped bytes: {}",
+            segment.warning_prefix_stripped_bytes
+        );
+    }
+    append_indented_block(out, "      content:", &segment.content, 8);
+}
+
+fn append_indented_block(out: &mut String, header: &str, body: &str, indent: usize) {
+    use std::fmt::Write as _;
+
+    let _ = writeln!(out, "{header}");
+    let pad = " ".repeat(indent);
+    if body.is_empty() {
+        let _ = writeln!(out, "{pad}<empty>");
+        return;
+    }
+    for line in body.lines() {
+        let _ = writeln!(out, "{pad}{line}");
+    }
+    if body.ends_with('\n') {
+        let _ = writeln!(out, "{pad}");
     }
 }
 
@@ -2155,6 +2426,105 @@ mod tests {
         assert_eq!(cli_with(0, true).effective_log_level("info"), "warn");
         // quiet wins regardless of fallback severity
         assert_eq!(cli_with(0, true).effective_log_level("trace"), "warn");
+    }
+
+    #[test]
+    fn parses_trajectory_inspect_command() {
+        let cli = Cli::parse_from([
+            "kiln",
+            "--config",
+            "kiln.toml",
+            "trajectory",
+            "inspect",
+            "session.jsonl",
+            "--json",
+            "--include-context",
+            "--preview-tokens",
+            "12",
+            "--tokenizer",
+            "tokenizer.json",
+            "--chat-template",
+            "chat_template.jinja",
+            "--model-path",
+            "/models/Qwen3.5-4B",
+        ]);
+
+        assert_eq!(cli.config.as_deref(), Some("kiln.toml"));
+        let Some(Commands::Trajectory(TrajectoryCommands::Inspect {
+            file,
+            json,
+            include_context,
+            preview_tokens,
+            tokenizer,
+            chat_template,
+            model_path,
+        })) = cli.command
+        else {
+            panic!("expected trajectory inspect command");
+        };
+
+        assert_eq!(file, PathBuf::from("session.jsonl"));
+        assert!(json);
+        assert!(include_context);
+        assert_eq!(preview_tokens, 12);
+        assert_eq!(tokenizer.as_deref(), Some(Path::new("tokenizer.json")));
+        assert_eq!(
+            chat_template.as_deref(),
+            Some(Path::new("chat_template.jinja"))
+        );
+        assert_eq!(model_path.as_deref(), Some(Path::new("/models/Qwen3.5-4B")));
+    }
+
+    #[test]
+    fn trajectory_report_formatter_includes_mask_fields() {
+        let report = TrajectoryInspectReport {
+            path: "rollouts.jsonl".to_string(),
+            source_format: "kiln_rollout_jsonl".to_string(),
+            rollouts: vec![RolloutInspection {
+                index: 0,
+                prompt_messages: vec![kiln_train::ChatMessage {
+                    role: "user".to_string(),
+                    content: "run it".to_string(),
+                }],
+                rendered_messages: "<|im_start|>assistant\ncall".to_string(),
+                segments: vec![SegmentInspection {
+                    index: 0,
+                    role: "assistant".to_string(),
+                    kind: kiln_train::trajectory::TurnKind::Action,
+                    content: "call".to_string(),
+                    token_start: Some(2),
+                    token_end: Some(6),
+                    token_count: 4,
+                    warning_prefix_len: None,
+                    warning_prefix_stripped_bytes: 0,
+                    tool_call_id: Some("tool-1".to_string()),
+                }],
+                action_tokens: 4,
+                env_tokens: 2,
+                context_tokens: 8,
+                warning_prefix_stripped_bytes: 3,
+                action_preview: "call".to_string(),
+                env_preview: "ok".to_string(),
+            }],
+            action_tokens: 4,
+            env_tokens: 2,
+            context_tokens: 8,
+            warning_prefix_stripped_bytes: 3,
+            schema_warnings: vec![
+                "legacy text-only ScoredRollout synthesized one Action segment".to_string(),
+            ],
+        };
+
+        let rendered = format_trajectory_inspect_report(&report);
+
+        assert!(rendered.contains("Rendered messages:"));
+        assert!(rendered.contains("role=assistant kind=Action tokens=4 span=2..6"));
+        assert!(rendered.contains("Action tokens: 4"));
+        assert!(rendered.contains("Env tokens: 2"));
+        assert!(rendered.contains("Warning-prefix stripped bytes: 3"));
+        assert!(rendered.contains("Action preview:"));
+        assert!(rendered.contains("Env preview:"));
+        assert!(rendered.contains("Schema warnings:"));
     }
 
     fn read_json(path: &std::path::Path) -> serde_json::Value {
