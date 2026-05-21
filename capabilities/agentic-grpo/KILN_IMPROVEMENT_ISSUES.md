@@ -616,7 +616,7 @@ variance, missing base adapter.
 - Dry run catches zero groups after filtering unless explicitly allowed.
 - Dry run writes a receipt.
 
-**Status:** Completed and validated on RunPod.
+**Status:** Completed and pushed to `main`.
 
 **Implementation notes:** Added `grpo_dry_run_jsonl` in `kiln-train` so dry
 run uses the same JSONL parser, trajectory-mask builder, dynamic-sampling
@@ -1986,8 +1986,9 @@ existing `model`, `tokenizer`, and `kiln` receipt sections.
   `/workspace/kiln-validation/issue30/post-format-check.done` recorded
   `exit=0`.
 
-**Commit SHA:** Pending; this status line will be updated in a follow-up
-metadata commit because a commit cannot include its own final SHA.
+**Commit SHA:** `f601d5d0` (`Issue 30: add config hashes`). This status line
+is recorded in a follow-up metadata commit because a commit cannot include its
+own final SHA.
 
 **Remaining risk:** Full workspace `cargo fmt --all --check` still fails on
 pre-existing unrelated formatting in `crates/kiln-vulkan-kernel/tests/
