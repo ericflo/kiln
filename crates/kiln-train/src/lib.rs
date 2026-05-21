@@ -12,6 +12,7 @@ pub mod diagnostics;
 pub mod echo;
 pub mod logit_cache;
 pub mod logit_source;
+pub mod long_context_fixture;
 pub mod lora_scaling;
 pub mod opd;
 pub mod pi_trajectory;
@@ -56,8 +57,9 @@ pub use lora_scaling::{
     validate_lora_scaling,
 };
 pub use train_receipt::{
-    AdapterSmokePromptReceipt, AdapterSmokeTestReceipt, TRAIN_RECEIPT_FILENAME,
-    TRAIN_RECEIPT_SCHEMA_VERSION, TrainFailureReason, TrainReceipt, TrainReceiptStatus,
+    AdapterSmokePromptDiagnosis, AdapterSmokePromptDiagnosisReceipt, AdapterSmokePromptReceipt,
+    AdapterSmokeTestReceipt, TRAIN_RECEIPT_FILENAME, TRAIN_RECEIPT_SCHEMA_VERSION,
+    TrainFailureReason, TrainReceipt, TrainReceiptStatus,
 };
 pub use opd::{
     AgenticLossInputs, AgenticLossWeights, COLD_START_DEFAULT_EPOCHS, COLD_START_DEFAULT_PROMPTS,

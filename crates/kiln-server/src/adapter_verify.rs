@@ -90,15 +90,23 @@ impl Default for AdapterLogitDeltaSummary {
 pub struct AdapterVerifyServerReceipt {
     pub url: String,
     pub adapter_name: String,
+    pub prompt: String,
     pub checks: Vec<AdapterVerifyCheck>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_output: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adapter_output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_text_different: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behavior_diagnosis: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behavior_note: Option<String>,
 }
 
 pub const DEFAULT_VERIFY_PROMPT: &str =
     "In one short sentence, answer with the word kiln and one adjective.";
+pub const DETERMINISTIC_GREEDY_TEXT_NOTE: &str = "deterministic greedy decoding can preserve byte-identical text even when adapter weights or checked logits move; compare logit deltas, grad/delta norms, and a fixture-specific prompt before concluding the adapter is a no-op";
 
 pub fn verify_adapter_offline(options: AdapterVerifyOptions) -> AdapterVerifyReceipt {
     let resolved = resolve_adapter_path(&options.input, options.adapter_dir.as_deref());
@@ -170,9 +178,8 @@ pub fn verify_adapter_offline(options: AdapterVerifyOptions) -> AdapterVerifyRec
     }
     if has_weights {
         receipt.files.adapter_model_sha256 = sha256_file_hex(&weights_path).ok();
-        receipt.files.adapter_model_size_bytes = std::fs::metadata(&weights_path)
-            .ok()
-            .map(|meta| meta.len());
+        receipt.files.adapter_model_size_bytes =
+            std::fs::metadata(&weights_path).ok().map(|meta| meta.len());
     }
     push_check(
         &mut receipt.checks,
@@ -290,7 +297,11 @@ pub fn finalize_status(receipt: &mut AdapterVerifyReceipt) {
         .as_ref()
         .map(|server| server.checks.iter().all(|check| check.pass))
         .unwrap_or(true);
-    receipt.status = if offline_ok && server_ok { "ok" } else { "failed" };
+    receipt.status = if offline_ok && server_ok {
+        "ok"
+    } else {
+        "failed"
+    };
 }
 
 pub fn push_check(
@@ -353,7 +364,8 @@ struct AdapterConfigMetadata {
 
 fn read_config_metadata(path: &Path) -> Result<AdapterConfigMetadata, String> {
     let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
-    let config: serde_json::Value = serde_json::from_slice(&bytes).map_err(|err| err.to_string())?;
+    let config: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|err| err.to_string())?;
     let rank = config.get("r").and_then(|v| v.as_u64());
     let alpha = config.get("lora_alpha").and_then(|v| v.as_f64());
     let alpha_over_rank = match (alpha, rank) {
@@ -487,8 +499,7 @@ fn validate_tensors(adapter: &PeftLora, receipt: &mut AdapterVerifyReceipt) {
         && receipt.tensor_summary.lora_update_l2_upper_bound > 0.0;
     receipt.logit_delta_summary.measurable = measurable;
     receipt.logit_delta_summary.max_abs_delta_proxy = receipt.tensor_summary.max_abs_weight;
-    receipt.logit_delta_summary.l2_delta_proxy =
-        receipt.tensor_summary.lora_update_l2_upper_bound;
+    receipt.logit_delta_summary.l2_delta_proxy = receipt.tensor_summary.lora_update_l2_upper_bound;
     push_check(
         &mut receipt.checks,
         "measurable_adapter_effect",
@@ -560,7 +571,9 @@ fn parse_peft_lora_key(key: &str) -> Option<ParsedLoraKey> {
     let parts: Vec<&str> = key.split('.').collect();
     let layer_pos = parts.iter().position(|part| *part == "layers")?;
     let layer = parts.get(layer_pos + 1)?.parse().ok()?;
-    let lora_pos = parts.iter().position(|part| *part == "lora_A" || *part == "lora_B")?;
+    let lora_pos = parts
+        .iter()
+        .position(|part| *part == "lora_A" || *part == "lora_B")?;
     if parts.get(lora_pos + 1)? != &"weight" || lora_pos == 0 {
         return None;
     }

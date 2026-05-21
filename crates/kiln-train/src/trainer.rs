@@ -236,6 +236,7 @@ const ADAPTER_SMOKE_TEST_PROMPTS: &[&str] = &[
     "In one short sentence, name a primary color:",
     "Complete this sentence with a brief answer: The capital of France is",
 ];
+const ADAPTER_SMOKE_TEST_PROMPT_FILE_ENV: &str = "KILN_ADAPTER_SMOKE_PROMPT_FILE";
 const ADAPTER_SMOKE_TEST_MAX_NEW_TOKENS: usize = 4;
 
 struct AdapterSmokeGeneration {
@@ -1352,9 +1353,10 @@ fn run_adapter_smoke_test(
     params: &TrainableLoraParams,
 ) -> Result<crate::train_receipt::AdapterSmokeTestReceipt> {
     let lora = lora_weights_detached(params);
-    let mut prompts = Vec::with_capacity(ADAPTER_SMOKE_TEST_PROMPTS.len());
+    let smoke_prompts = adapter_smoke_test_prompts()?;
+    let mut prompts = Vec::with_capacity(smoke_prompts.len());
 
-    for prompt in ADAPTER_SMOKE_TEST_PROMPTS {
+    for prompt in &smoke_prompts {
         let prompt_ids = tokenizer
             .encode(prompt)
             .map_err(|err| anyhow::anyhow!("{err}"))
@@ -1388,7 +1390,7 @@ fn run_adapter_smoke_test(
         .with_context(|| format!("adapter generation for adapter smoke prompt {prompt:?}"))?;
 
         prompts.push(crate::train_receipt::AdapterSmokePromptReceipt {
-            prompt: (*prompt).to_string(),
+            prompt: prompt.to_string(),
             finite_logits,
             logit_delta_l2,
             generated_text_different: base_generation.output != adapter_generation.output,
@@ -1402,6 +1404,51 @@ fn run_adapter_smoke_test(
     Ok(crate::train_receipt::build_adapter_smoke_test_receipt(
         prompts,
     ))
+}
+
+fn adapter_smoke_test_prompts() -> Result<Vec<String>> {
+    let Some(path) = std::env::var_os(ADAPTER_SMOKE_TEST_PROMPT_FILE_ENV) else {
+        return Ok(ADAPTER_SMOKE_TEST_PROMPTS
+            .iter()
+            .map(|prompt| (*prompt).to_string())
+            .collect());
+    };
+    let path = std::path::PathBuf::from(path);
+    let contents = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "read adapter smoke prompt file from {}={}",
+            ADAPTER_SMOKE_TEST_PROMPT_FILE_ENV,
+            path.display()
+        )
+    })?;
+    let trimmed = contents.trim();
+    anyhow::ensure!(
+        !trimmed.is_empty(),
+        "{}={} did not contain a prompt",
+        ADAPTER_SMOKE_TEST_PROMPT_FILE_ENV,
+        path.display()
+    );
+    if trimmed.starts_with('[') {
+        let prompts: Vec<String> = serde_json::from_str(trimmed).with_context(|| {
+            format!(
+                "parse {}={} as JSON prompt array",
+                ADAPTER_SMOKE_TEST_PROMPT_FILE_ENV,
+                path.display()
+            )
+        })?;
+        anyhow::ensure!(
+            prompts.iter().any(|prompt| !prompt.trim().is_empty()),
+            "{}={} JSON prompt array did not contain a non-empty prompt",
+            ADAPTER_SMOKE_TEST_PROMPT_FILE_ENV,
+            path.display()
+        );
+        Ok(prompts
+            .into_iter()
+            .filter(|prompt| !prompt.trim().is_empty())
+            .collect())
+    } else {
+        Ok(vec![contents])
+    }
 }
 
 fn adapter_smoke_linear_state(

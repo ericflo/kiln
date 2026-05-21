@@ -17,10 +17,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
-use kiln_train::trainer::{GrpoBenchmarkReport, grpo_benchmark_tokenization};
-use kiln_train::{
-    ChatMessage, GrpoConfig, GrpoGroup, Optimizer, ScoredRollout, TurnKind, TurnSegment,
+use kiln_train::long_context_fixture::{
+    SyntheticLongContextFixture, synthetic_long_context_group_for_length,
 };
+use kiln_train::trainer::{GrpoBenchmarkReport, grpo_benchmark_tokenization};
+use kiln_train::{GrpoConfig, GrpoGroup, Optimizer};
 use serde::Serialize;
 
 #[cfg(feature = "cuda")]
@@ -45,6 +46,7 @@ impl BenchMode {
 struct Args {
     model_path: Option<PathBuf>,
     output: Option<PathBuf>,
+    fixture_output: Option<PathBuf>,
     lengths: Vec<usize>,
     completions: usize,
     mode: BenchMode,
@@ -59,6 +61,7 @@ impl Args {
     fn parse() -> Result<Self> {
         let mut model_path = None;
         let mut output = None;
+        let mut fixture_output = None;
         let mut lengths = vec![8_192, 16_384, 32_768, 65_536];
         let mut completions = 2usize;
         let mut mode = BenchMode::Dry;
@@ -77,6 +80,11 @@ impl Args {
                 "--output" => {
                     output = Some(PathBuf::from(
                         args.next().context("--output needs a value")?,
+                    ))
+                }
+                "--fixture-output" => {
+                    fixture_output = Some(PathBuf::from(
+                        args.next().context("--fixture-output needs a value")?,
                     ))
                 }
                 "--lengths" => {
@@ -150,6 +158,7 @@ impl Args {
         Ok(Self {
             model_path,
             output,
+            fixture_output,
             lengths,
             completions,
             mode,
@@ -241,6 +250,7 @@ fn print_help() {
     println!(
         "long_context_grpo_bench [--model <Qwen3.5-4B-dir>] [--dry-run|--cuda] \
          [--lengths 8192,16384,32768,65536] [--output results.json] \
+         [--fixture-output fixture.json] \
          [--completions N] [--segments N] [--rank N] [--alpha F] [--lr F] [--seed N]"
     );
     println!();
@@ -314,109 +324,6 @@ fn current_vram_mib() -> Option<u64> {
         .ok()
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .and_then(|stdout| stdout.trim().lines().next()?.trim().parse::<u64>().ok())
-}
-
-fn prompt_messages() -> Vec<ChatMessage> {
-    vec![
-        ChatMessage {
-            role: "system".to_string(),
-            content: "You are a concise agent compressing long terminal traces.".to_string(),
-        },
-        ChatMessage {
-            role: "user".to_string(),
-            content: "Inspect the synthetic trace and produce the final compact answer."
-                .to_string(),
-        },
-    ]
-}
-
-fn synthetic_rollout(repeats: usize, completion_idx: usize, reward: f64) -> ScoredRollout {
-    let observation_unit = format!(
-        "trace_line={completion_idx} status=ok metric=pi_compaction payload=abcdefghijklmnopqrstuvwxyz0123456789\n"
-    );
-    let observation = observation_unit.repeat(repeats);
-    ScoredRollout::from_trajectory(
-        vec![
-            TurnSegment {
-                role: "assistant".to_string(),
-                content: format!(
-                    "<tool_call>\n{{\"cmd\":\"inspect_trace\",\"completion\":{completion_idx}}}\n</tool_call>"
-                ),
-                kind: TurnKind::Action,
-                tool_call_id: Some(format!("inspect-{completion_idx}")),
-                warning_prefix_len: None,
-            },
-            TurnSegment {
-                role: "tool".to_string(),
-                content: observation,
-                kind: TurnKind::Observation,
-                tool_call_id: Some(format!("inspect-{completion_idx}")),
-                warning_prefix_len: None,
-            },
-            TurnSegment {
-                role: "assistant".to_string(),
-                content: format!(
-                    "Final compact answer for completion {completion_idx}: retain causal facts and discard repeated trace noise."
-                ),
-                kind: TurnKind::Action,
-                tool_call_id: None,
-                warning_prefix_len: None,
-            },
-        ],
-        reward,
-    )
-}
-
-fn rollout_seq_len(
-    tokenizer: &KilnTokenizer,
-    messages: &[ChatMessage],
-    repeats: usize,
-) -> Result<usize> {
-    let rollout = synthetic_rollout(repeats, 0, 1.0);
-    let masked = kiln_train::trajectory_mask::build_masks_from_trajectory(
-        &rollout.trajectory,
-        messages,
-        tokenizer,
-        &kiln_train::trajectory_mask::MaskConfig::default(),
-    )?;
-    Ok(masked.input_ids.len())
-}
-
-fn synthetic_group_for_length(
-    tokenizer: &KilnTokenizer,
-    target_len: usize,
-    completions: usize,
-) -> Result<GrpoGroup> {
-    let messages = prompt_messages();
-    let mut high = 1usize;
-    while rollout_seq_len(tokenizer, &messages, high)? < target_len {
-        high = high.saturating_mul(2);
-        anyhow::ensure!(
-            high <= target_len.saturating_mul(32).max(1_024),
-            "could not synthesize a rollout near {target_len} tokens"
-        );
-    }
-
-    let mut low = 0usize;
-    while low < high {
-        let mid = low + (high - low) / 2;
-        if rollout_seq_len(tokenizer, &messages, mid)? < target_len {
-            low = mid + 1;
-        } else {
-            high = mid;
-        }
-    }
-
-    let completions = (0..completions)
-        .map(|idx| {
-            let reward = if idx % 2 == 0 { 1.0 } else { 0.0 };
-            synthetic_rollout(low, idx, reward)
-        })
-        .collect();
-    Ok(GrpoGroup {
-        messages,
-        completions,
-    })
 }
 
 fn checkpoint_segments(num_layers: usize, requested: usize) -> Option<Vec<(usize, usize)>> {
@@ -557,9 +464,11 @@ fn main() -> Result<()> {
     };
 
     let mut records = Vec::with_capacity(args.lengths.len());
+    let mut fixtures = Vec::new();
     for &target_len in &args.lengths {
-        let group = synthetic_group_for_length(&tokenizer, target_len, args.completions)
-            .with_context(|| format!("building synthetic group for {target_len} tokens"))?;
+        let group =
+            synthetic_long_context_group_for_length(&tokenizer, target_len, args.completions)
+                .with_context(|| format!("building synthetic group for {target_len} tokens"))?;
 
         let (report, peak_vram_mib) = match args.mode {
             BenchMode::Dry => (grpo_benchmark_tokenization(&group, &tokenizer)?, None),
@@ -580,12 +489,13 @@ fn main() -> Result<()> {
                 }
             }
         };
+        let observed_seq_len = report.max_seq_len;
 
         let record = BenchRecord {
             event: "long_context_grpo_bench",
             mode: args.mode.as_str(),
             requested_seq_len: target_len,
-            observed_seq_len: report.max_seq_len,
+            observed_seq_len,
             completions: args.completions,
             checkpoint_segments: (args.mode == BenchMode::Cuda && args.checkpoint_segments > 0)
                 .then_some(args.checkpoint_segments),
@@ -594,12 +504,25 @@ fn main() -> Result<()> {
             kernel_launch_count: None,
             report,
         };
+        if args.fixture_output.is_some() {
+            fixtures.push(serde_json::to_value(SyntheticLongContextFixture::new(
+                target_len,
+                observed_seq_len,
+                args.completions,
+                group.clone(),
+            ))?);
+        }
         println!("{}", serde_json::to_string(&record)?);
         records.push(serde_json::to_value(record)?);
     }
 
     if let Some(output) = args.output.as_deref() {
         std::fs::write(output, serde_json::to_string_pretty(&records)?)
+            .with_context(|| format!("writing {}", output.display()))?;
+    }
+
+    if let Some(output) = args.fixture_output.as_deref() {
+        std::fs::write(output, serde_json::to_string_pretty(&fixtures)?)
             .with_context(|| format!("writing {}", output.display()))?;
     }
 

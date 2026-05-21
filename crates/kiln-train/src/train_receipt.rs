@@ -334,6 +334,10 @@ pub struct AdapterSmokeTestReceipt {
     pub enabled: bool,
     pub passed: bool,
     pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_diagnostics: Vec<AdapterSmokePromptDiagnosisReceipt>,
     pub prompts: Vec<AdapterSmokePromptReceipt>,
 }
 
@@ -347,6 +351,24 @@ pub struct AdapterSmokePromptReceipt {
     pub adapter_output: String,
     pub adapter_output_tokens: usize,
     pub adapter_output_chars: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdapterSmokePromptDiagnosisReceipt {
+    pub prompt: String,
+    pub outcome: AdapterSmokePromptDiagnosis,
+    pub explanation: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterSmokePromptDiagnosis {
+    NonFiniteLogits,
+    EmptyAdapterOutput,
+    LogitsChangedTextChanged,
+    LogitsChangedTextIdentical,
+    TextChangedWithoutMeasurableLogitDelta,
+    NoLogitChange,
 }
 
 impl Default for RewardStatsReceipt {
@@ -455,8 +477,8 @@ impl TrainReceipt {
         if !path.exists() {
             return Ok(None);
         }
-        let bytes =
-            std::fs::read(&path).with_context(|| format!("read train receipt {}", path.display()))?;
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("read train receipt {}", path.display()))?;
         let receipt = serde_json::from_slice(&bytes)
             .with_context(|| format!("deserialize train receipt {}", path.display()))?;
         Ok(Some(receipt))
@@ -651,11 +673,8 @@ pub fn warn_reward_diagnostics(
     saturation_threshold: f64,
     low_variance_threshold: f64,
 ) {
-    for warning in reward_diagnostic_warnings(
-        rewards,
-        saturation_threshold,
-        low_variance_threshold,
-    ) {
+    for warning in reward_diagnostic_warnings(rewards, saturation_threshold, low_variance_threshold)
+    {
         tracing::warn!(
             mode,
             adapter = adapter_name,
@@ -669,6 +688,8 @@ pub fn build_adapter_smoke_test_receipt(
     prompts: Vec<AdapterSmokePromptReceipt>,
 ) -> AdapterSmokeTestReceipt {
     let mut warnings = Vec::new();
+    let mut notes = Vec::new();
+    let prompt_diagnostics: Vec<_> = prompts.iter().map(diagnose_adapter_smoke_prompt).collect();
 
     if prompts.is_empty() {
         warnings.push("adapter smoke test did not run any prompts".to_string());
@@ -689,15 +710,32 @@ pub fn build_adapter_smoke_test_receipt(
     });
     if !measurable_effect {
         warnings.push(format!(
-            "adapter smoke test observed no measurable adapter effect (all logit_delta_l2 <= {ADAPTER_SMOKE_LOGIT_DELTA_EPSILON:e} and generated text matched base)"
+            "adapter smoke test observed no measurable adapter effect (all logit_delta_l2 <= {ADAPTER_SMOKE_LOGIT_DELTA_EPSILON:e} and generated text matched base); inspect adapter load path, lora_grad_norms, lora_delta_norms, KL/clipping, masks, and LoRA scale"
         ));
     }
 
-    if prompts.iter().any(|prompt| {
-        prompt.adapter_output_tokens == 0 || prompt.adapter_output.trim().is_empty()
+    if prompts
+        .iter()
+        .any(|prompt| prompt.adapter_output_tokens == 0 || prompt.adapter_output.trim().is_empty())
+    {
+        warnings
+            .push("adapter smoke test produced empty adapter output on canary prompt".to_string());
+    }
+
+    if prompt_diagnostics.iter().any(|diagnostic| {
+        diagnostic.outcome == AdapterSmokePromptDiagnosis::LogitsChangedTextIdentical
     }) {
-        warnings.push(
-            "adapter smoke test produced empty adapter output on canary prompt".to_string(),
+        notes.push(
+            "adapter smoke test observed changed logits with byte-identical greedy text; deterministic argmax decoding can keep selecting the same top token even when lower-ranked logits move, so this is not by itself evidence of a no-op adapter".to_string(),
+        );
+    }
+
+    if prompt_diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.outcome == AdapterSmokePromptDiagnosis::NoLogitChange)
+    {
+        notes.push(
+            "adapter smoke test observed no checked-logit movement on at least one prompt; use lora_grad_norms and lora_delta_norms to distinguish zero gradients from an adapter loading, masking, KL/clipping, or scale issue".to_string(),
         );
     }
 
@@ -705,7 +743,57 @@ pub fn build_adapter_smoke_test_receipt(
         enabled: true,
         passed: warnings.is_empty(),
         warnings,
+        notes,
+        prompt_diagnostics,
         prompts,
+    }
+}
+
+pub fn diagnose_adapter_smoke_prompt(
+    prompt: &AdapterSmokePromptReceipt,
+) -> AdapterSmokePromptDiagnosisReceipt {
+    let logit_delta_changed = prompt
+        .logit_delta_l2
+        .is_some_and(|delta| delta > ADAPTER_SMOKE_LOGIT_DELTA_EPSILON);
+    let adapter_output_empty =
+        prompt.adapter_output_tokens == 0 || prompt.adapter_output.trim().is_empty();
+
+    let (outcome, explanation) = if !prompt.finite_logits || prompt.logit_delta_l2.is_none() {
+        (
+            AdapterSmokePromptDiagnosis::NonFiniteLogits,
+            "base-vs-adapter logits could not be compared because at least one checked logit was non-finite".to_string(),
+        )
+    } else if adapter_output_empty {
+        (
+            AdapterSmokePromptDiagnosis::EmptyAdapterOutput,
+            "adapter generation produced no non-whitespace text for this canary prompt".to_string(),
+        )
+    } else if logit_delta_changed && prompt.generated_text_different {
+        (
+            AdapterSmokePromptDiagnosis::LogitsChangedTextChanged,
+            "adapter changed checked logits and the greedy output differed from base".to_string(),
+        )
+    } else if logit_delta_changed {
+        (
+            AdapterSmokePromptDiagnosis::LogitsChangedTextIdentical,
+            "adapter changed checked logits but greedy output stayed byte-identical; deterministic decoding can preserve the selected token sequence despite logit movement".to_string(),
+        )
+    } else if prompt.generated_text_different {
+        (
+            AdapterSmokePromptDiagnosis::TextChangedWithoutMeasurableLogitDelta,
+            "greedy output differed even though the single checked logit vector did not exceed the logit-delta threshold; inspect later decode positions or sampling settings".to_string(),
+        )
+    } else {
+        (
+            AdapterSmokePromptDiagnosis::NoLogitChange,
+            "adapter did not move checked logits above threshold and greedy output matched base on this prompt".to_string(),
+        )
+    };
+
+    AdapterSmokePromptDiagnosisReceipt {
+        prompt: prompt.prompt.clone(),
+        outcome,
+        explanation,
     }
 }
 
@@ -717,6 +805,8 @@ pub fn failed_adapter_smoke_test_receipt(error: impl Into<String>) -> AdapterSmo
             "adapter smoke test failed before metrics were recorded: {}",
             error.into()
         )],
+        notes: Vec::new(),
+        prompt_diagnostics: Vec::new(),
         prompts: Vec::new(),
     }
 }
@@ -742,8 +832,8 @@ pub fn adapter_file_receipt(adapter_dir: Option<&Path>) -> AdapterFileReceipt {
 }
 
 pub fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("open {} for sha256", path.display()))?;
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("open {} for sha256", path.display()))?;
     let mut h = Sha256::new();
     let mut buf = [0u8; 1024 * 64];
     loop {
@@ -801,7 +891,10 @@ where
         if group_variance <= REWARD_DEGENERATE_GROUP_VARIANCE_EPSILON {
             degenerate_group_count += 1;
         }
-        if group_rewards.iter().all(|reward| *reward >= all_pass_threshold) {
+        if group_rewards
+            .iter()
+            .all(|reward| *reward >= all_pass_threshold)
+        {
             all_pass_group_count += 1;
         }
         if group_rewards.iter().all(|reward| *reward <= 0.0) {
@@ -886,9 +979,7 @@ pub fn lora_delta_norm_summary_from_adapter(
         };
         let norm = tensor_l2_norm(&tensor)
             .with_context(|| format!("compute l2 norm for adapter tensor {key}"))?;
-        let pair = pairs
-            .entry((parsed.layer, parsed.module))
-            .or_default();
+        let pair = pairs.entry((parsed.layer, parsed.module)).or_default();
         match parsed.kind {
             LoraTensorKind::A => pair.a_l2 = Some(norm),
             LoraTensorKind::B => pair.b_l2 = Some(norm),
@@ -955,7 +1046,12 @@ fn detect_kiln_source() -> KilnSourceReceipt {
     let repo_root = std::env::var("KILN_REPO_ROOT")
         .ok()
         .map(PathBuf::from)
-        .or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).map(Path::to_path_buf));
+        .or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(2)
+                .map(Path::to_path_buf)
+        });
 
     let (git_commit, git_dirty, git_source) = if let Some(root) = repo_root.as_deref() {
         let commit = Command::new("git")
@@ -1227,7 +1323,10 @@ mod tests {
             serde_json::json!({"epochs": 1}),
         );
         let path = receipt.write_to_adapter_dir(dir.path())?;
-        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some(TRAIN_RECEIPT_FILENAME));
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some(TRAIN_RECEIPT_FILENAME)
+        );
         let loaded = TrainReceipt::read_from_adapter_dir(dir.path())?.expect("receipt exists");
         assert_eq!(loaded.schema_version, TRAIN_RECEIPT_SCHEMA_VERSION);
         assert_eq!(loaded.status, TrainReceiptStatus::Success);
@@ -1416,6 +1515,10 @@ mod tests {
         assert!(receipt.enabled);
         assert!(receipt.passed);
         assert!(receipt.warnings.is_empty());
+        assert_eq!(
+            receipt.prompt_diagnostics[0].outcome,
+            AdapterSmokePromptDiagnosis::LogitsChangedTextChanged
+        );
     }
 
     #[test]
@@ -1437,6 +1540,43 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("no measurable adapter effect"))
+        );
+        assert!(
+            receipt
+                .notes
+                .iter()
+                .any(|note| note.contains("lora_grad_norms"))
+        );
+        assert_eq!(
+            receipt.prompt_diagnostics[0].outcome,
+            AdapterSmokePromptDiagnosis::NoLogitChange
+        );
+    }
+
+    #[test]
+    fn adapter_smoke_receipt_notes_logits_changed_but_text_identical() {
+        let receipt = build_adapter_smoke_test_receipt(vec![AdapterSmokePromptReceipt {
+            prompt: "Say hello.".to_string(),
+            finite_logits: true,
+            logit_delta_l2: Some(0.25),
+            generated_text_different: false,
+            base_output: "Hello".to_string(),
+            adapter_output: "Hello".to_string(),
+            adapter_output_tokens: 1,
+            adapter_output_chars: 5,
+        }]);
+
+        assert!(receipt.passed);
+        assert!(receipt.warnings.is_empty());
+        assert!(
+            receipt
+                .notes
+                .iter()
+                .any(|note| note.contains("deterministic argmax"))
+        );
+        assert_eq!(
+            receipt.prompt_diagnostics[0].outcome,
+            AdapterSmokePromptDiagnosis::LogitsChangedTextIdentical
         );
     }
 
@@ -1465,6 +1605,10 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("empty adapter output"))
+        );
+        assert_eq!(
+            receipt.prompt_diagnostics[0].outcome,
+            AdapterSmokePromptDiagnosis::NonFiniteLogits
         );
     }
 

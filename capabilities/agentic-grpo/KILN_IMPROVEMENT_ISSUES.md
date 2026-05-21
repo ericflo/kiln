@@ -1704,6 +1704,65 @@ scale.
 - If logits change but text is identical, report sampling/determinism reason.
 - If logits do not change, file a root-cause note in the doc or test.
 
+**Status:** Completed and pending commit on 2026-05-21.
+
+**Implementation notes:** Added explicit adapter-smoke prompt diagnostics to
+`train_receipt.json`: each prompt now records whether logits changed, text
+changed, both changed, neither changed, logits were non-finite, or adapter
+output was empty. The receipt records non-failing notes for the important
+`logits_changed_text_identical` case, explaining deterministic greedy argmax,
+and the no-effect warning now names the concrete root-cause surfaces to inspect
+(`adapter` load path, `lora_grad_norms`, `lora_delta_norms`, KL/clipping,
+masks, and LoRA scale). Added a reusable `kiln-train` synthetic long-context
+fixture module and taught `long_context_grpo_bench` to write fixture JSON with
+an adapter-verify prompt carrying the synthetic trace. Added
+`KILN_ADAPTER_SMOKE_PROMPT_FILE` so actual training can run the adapter-smoke
+logit comparison on that fixture prompt. `kiln adapter verify --url` now reports
+the fixed prompt, whether generated text differs, and a deterministic-greedy
+diagnosis/note when the offline LoRA delta proxy is measurable but text remains
+byte-identical.
+
+**Validation evidence:**
+
+- Focused RunPod checks passed on RTX A6000 pod `qmfxie9izl6lc6`; sentinel
+  `/workspace/kiln-validation/issue27/focused-tests.done` recorded `exit=0`.
+  Remote log: `/workspace/kiln-validation/issue27/focused-tests.log`.
+- Focused checks run: `cargo test --locked -p kiln-train adapter_smoke_receipt
+  --lib`, `cargo test --locked -p kiln-train long_context_fixture --lib`,
+  `cargo test --locked -p kiln-server --test adapter_verify`, and
+  `cargo run --locked -p kiln-train --example long_context_grpo_bench --
+  --dry-run --lengths 512 --output ... --fixture-output ...`. The dry fixture
+  observed 551 tokens and wrote a trace-bearing `adapter_verify_prompt`.
+- Actual Qwen3.5-4B RunPod validation passed on the same A6000 with canonical
+  model path `/workspace/Qwen3.5-4B`; sentinel
+  `/workspace/kiln-validation/issue27/actual-model.done` recorded `exit=0` and
+  driver log `/workspace/kiln-validation/issue27/actual-model/driver.log`
+  ended with `ISSUE27_ACTUAL_MODEL_OK`.
+- Actual-model CUDA fixture bench wrote
+  `/workspace/kiln-validation/issue27/actual-model/long_context_cuda.json`:
+  requested 1024 tokens, observed 1030, total tokens 2060, peak VRAM 26538 MiB,
+  53.1482 tok/s, reference forward 1095.19 ms, policy forward 614.54 ms,
+  backward 37009.56 ms, optimizer 9.25 ms.
+- Actual-model CUDA GRPO trained `issue27-cuda-grpo` from the fixture JSONL
+  with `KILN_ADAPTER_SMOKE_PROMPT_FILE` set to the fixture prompt.
+  `train_receipt.json` recorded status `success`, 10 gradient-norm modules,
+  10 delta-norm modules, adapter smoke passed, `logit_delta_l2=48.0585737549`,
+  and prompt outcome `logits_changed_text_identical` with the deterministic
+  argmax note.
+- `kiln adapter verify issue27-cuda-grpo --adapter-dir ...` returned
+  `status=ok`, `measurable=true`, and `l2_delta_proxy=1.6667806786`.
+- `kiln adapter verify issue27-cuda-grpo --adapter-dir ... --url
+  http://127.0.0.1:18427 --prompt <fixture prompt>` returned `status=ok`,
+  `generated_text_different=false`, and
+  `behavior_diagnosis=measurable_adapter_delta_with_identical_greedy_text`.
+
+**Commit SHA:** Pending.
+
+**Remaining risk:** This issue now distinguishes “logits moved but greedy text
+matched” from a no-op adapter on a real Qwen3.5-4B fixture. It does not claim
+that the trained fixture adapter improves pi-compaction eval quality; that
+requires the cap-level eval loop after the diagnostics are available.
+
 ### 28. Make Warning-Prefix Masking Testable
 
 **Area:** `crates/kiln-train`

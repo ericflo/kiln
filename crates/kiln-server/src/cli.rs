@@ -11,8 +11,8 @@ use kiln_train::trajectory_inspect::{
 };
 
 use crate::adapter_verify::{
-    AdapterVerifyOptions, AdapterVerifyServerReceipt, DEFAULT_VERIFY_PROMPT, finalize_status,
-    push_check, verify_adapter_offline,
+    AdapterVerifyOptions, AdapterVerifyServerReceipt, DEFAULT_VERIFY_PROMPT,
+    DETERMINISTIC_GREEDY_TEXT_NOTE, finalize_status, push_check, verify_adapter_offline,
 };
 
 const TOP_LEVEL_OVERVIEW: &str = r#"Kiln serves Qwen3.5-4B from one Rust process and lets you adapt it with live LoRA training.
@@ -1523,9 +1523,13 @@ pub async fn run_adapter_verify(
 
     if let Some(url) = url {
         let adapter_name = server_adapter_name(name_or_path, receipt.name.as_deref());
-        let server_receipt =
-            verify_adapter_with_server(url, &adapter_name, prompt.unwrap_or(DEFAULT_VERIFY_PROMPT))
-                .await;
+        let server_receipt = verify_adapter_with_server(
+            url,
+            &adapter_name,
+            prompt.unwrap_or(DEFAULT_VERIFY_PROMPT),
+            receipt.logit_delta_summary.measurable,
+        )
+        .await;
         receipt.server = Some(server_receipt);
     }
 
@@ -1565,13 +1569,18 @@ async fn verify_adapter_with_server(
     url: &str,
     adapter_name: &str,
     prompt: &str,
+    offline_delta_measurable: bool,
 ) -> AdapterVerifyServerReceipt {
     let mut receipt = AdapterVerifyServerReceipt {
         url: url.to_string(),
         adapter_name: adapter_name.to_string(),
+        prompt: prompt.to_string(),
         checks: Vec::new(),
         base_output: None,
         adapter_output: None,
+        generated_text_different: None,
+        behavior_diagnosis: None,
+        behavior_note: None,
     };
     let client = reqwest::Client::new();
 
@@ -1660,14 +1669,29 @@ async fn verify_adapter_with_server(
             let changed = base != adapter;
             receipt.base_output = Some(base);
             receipt.adapter_output = Some(adapter);
+            receipt.generated_text_different = Some(changed);
+            if changed {
+                receipt.behavior_diagnosis = Some("generated_text_changed".to_string());
+            } else if offline_delta_measurable {
+                receipt.behavior_diagnosis =
+                    Some("measurable_adapter_delta_with_identical_greedy_text".to_string());
+                receipt.behavior_note = Some(DETERMINISTIC_GREEDY_TEXT_NOTE.to_string());
+            } else {
+                receipt.behavior_diagnosis =
+                    Some("no_generated_text_change_and_no_offline_delta".to_string());
+            }
             push_check(
                 &mut receipt.checks,
                 "server_behavior_delta",
-                changed,
+                changed || offline_delta_measurable,
                 if changed {
                     "fixed prompt output differs between base and adapter".to_string()
+                } else if offline_delta_measurable {
+                    format!(
+                        "fixed prompt output matched, but offline LoRA delta proxy is nonzero; {DETERMINISTIC_GREEDY_TEXT_NOTE}"
+                    )
                 } else {
-                    "fixed prompt output did not differ between base and adapter".to_string()
+                    "fixed prompt output did not differ between base and adapter, and offline LoRA delta proxy was not measurable".to_string()
                 },
             );
         }
