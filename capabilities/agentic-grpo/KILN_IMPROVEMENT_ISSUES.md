@@ -2382,6 +2382,8 @@ adapter registry.
   marked failed after the validation script's `pkill -f` cleanup matched its
   own command string before server boot; it is not counted as product
   validation.
+- GitHub Actions on pushed head `15e7f8a6` passed: CI run `26239298730`
+  completed Linux default features, Linux Vulkan, macOS Metal, and cargo-deny.
 
 **Commit SHA:** `203726c9` (`Issue 35: add adapter canary quarantine`).
 
