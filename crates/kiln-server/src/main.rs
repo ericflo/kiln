@@ -149,6 +149,20 @@ async fn main() -> Result<()> {
                 )
                 .await;
             }
+            AdapterCommands::Restore {
+                manifest,
+                adapter_dir,
+                name,
+                overwrite,
+            } => {
+                return cli::run_adapter_restore(
+                    args.config.as_deref(),
+                    manifest,
+                    adapter_dir.as_deref(),
+                    name.as_deref(),
+                    *overwrite,
+                );
+            }
         },
         Some(Commands::Trajectory(ref trajectory_cmd)) => match trajectory_cmd {
             TrajectoryCommands::Inspect {

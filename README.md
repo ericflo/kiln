@@ -505,6 +505,13 @@ Kiln has no built-in auth. The default listen address is `127.0.0.1:8420` so a f
 
 Adapters are easy to revert if a bad training run lands. `POST /v1/adapters/unload` deactivates the current adapter; `DELETE /v1/adapters/{name}` removes it from disk. The base model is unaffected — only LoRA deltas are written.
 
+Completed training runs also write `adapter_manifest.json` beside the adapter
+weights. The manifest records adapter/config/receipt hashes, parent adapter,
+model config hash, kiln commit, and training data hash. Use
+`kiln adapter restore <path>/adapter_manifest.json --adapter-dir <registry>`
+to copy an adapter into a registry and verify hashes after copy. See
+[`docs/ADAPTER_MANIFEST.md`](docs/ADAPTER_MANIFEST.md) for the schema.
+
 Full v0.1 threat model and per-finding analysis: [`docs/audits/security-audit-v0.1.md`](docs/audits/security-audit-v0.1.md).
 
 ## Desktop App

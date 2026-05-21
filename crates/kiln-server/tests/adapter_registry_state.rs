@@ -68,6 +68,34 @@ fn write_adapter(adapter_dir: &std::path::Path, name: &str, rank: u64, alpha: f6
     std::fs::write(path.join("adapter_model.safetensors"), b"weights").unwrap();
 }
 
+fn write_adapter_manifest(adapter_dir: &std::path::Path, name: &str) {
+    let path = adapter_dir.join(name);
+    std::fs::write(
+        path.join("adapter_manifest.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "manifest_type": "kiln_adapter_manifest",
+            "adapter_name": name,
+            "safetensors_hash": "sha256:weights",
+            "config_hash": "sha256:config",
+            "receipt_hash": "sha256:receipt",
+            "parent_adapter": "parent-v1",
+            "model_config_hash": "sha256:model-config",
+            "kiln_commit": "abc123",
+            "training_data_hash": "sha256:data",
+            "training_data_source": "jsonl_grpo_groups",
+            "training_data_path": "/data/groups.jsonl",
+            "files": {
+                "adapter_model": "adapter_model.safetensors",
+                "adapter_config": "adapter_config.json",
+                "train_receipt": "train_receipt.json"
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 fn entry_by_name<'a>(body: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
     body["available_adapters"]
         .as_array()
@@ -75,6 +103,45 @@ fn entry_by_name<'a>(body: &'a serde_json::Value, name: &str) -> &'a serde_json:
         .iter()
         .find(|entry| entry["name"] == name)
         .unwrap_or_else(|| panic!("missing registry entry {name}"))
+}
+
+#[tokio::test]
+async fn adapters_registry_reports_adapter_manifest_when_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_adapter(tmp.path(), "manifested", 8, 16.0);
+    write_adapter_manifest(tmp.path(), "manifested");
+
+    let state = make_state(tmp.path().to_path_buf());
+    let app = api::router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/adapters")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let entry = entry_by_name(&body, "manifested");
+
+    assert!(entry["adapter_manifest_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("adapter_manifest.json"));
+    assert!(entry["adapter_manifest_error"].is_null());
+    assert_eq!(entry["adapter_manifest"]["adapter_name"], "manifested");
+    assert_eq!(entry["adapter_manifest"]["parent_adapter"], "parent-v1");
+    assert_eq!(entry["adapter_manifest"]["kiln_commit"], "abc123");
+    assert_eq!(
+        entry["adapter_manifest"]["training_data_hash"],
+        "sha256:data"
+    );
 }
 
 #[tokio::test]

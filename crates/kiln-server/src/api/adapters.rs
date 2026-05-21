@@ -87,6 +87,12 @@ struct AdapterDiskEntry {
     canary_checks: Vec<kiln_train::AdapterCanaryCheckReceipt>,
     /// Resolved path for the canary status source when available.
     canary_status_path: Option<String>,
+    /// Parsed adapter_manifest.json when present.
+    adapter_manifest: Option<kiln_train::AdapterManifest>,
+    /// Resolved path for adapter_manifest.json when present.
+    adapter_manifest_path: Option<String>,
+    /// Manifest parse/read error when adapter_manifest.json is present but invalid.
+    adapter_manifest_error: Option<String>,
     /// Last load error recorded for this adapter name.
     last_load_error: Option<String>,
     /// Validation error for invalid adapter directories.
@@ -497,6 +503,7 @@ fn scan_adapter_dir(
             let path = path.canonicalize().unwrap_or(path);
             let config = read_adapter_config_metadata(&path);
             let canary = read_adapter_canary_metadata(&path);
+            let manifest = read_adapter_manifest_metadata(&path);
             let weights_path = path.join("adapter_model.safetensors");
             let adapter_model_size_bytes = std::fs::metadata(&weights_path).ok().map(|m| m.len());
             let adapter_model_sha256 = if has_weights {
@@ -540,6 +547,9 @@ fn scan_adapter_dir(
                 canary_warnings: canary.warnings,
                 canary_checks: canary.checks,
                 canary_status_path: canary.status_path,
+                adapter_manifest: manifest.manifest,
+                adapter_manifest_path: manifest.path,
+                adapter_manifest_error: manifest.error,
                 last_load_error: load_errors.get(&name).cloned(),
                 error,
             });
@@ -564,6 +574,12 @@ struct AdapterCanaryMetadata {
     warnings: Vec<String>,
     checks: Vec<kiln_train::AdapterCanaryCheckReceipt>,
     status_path: Option<String>,
+}
+
+struct AdapterManifestMetadata {
+    manifest: Option<kiln_train::AdapterManifest>,
+    path: Option<String>,
+    error: Option<String>,
 }
 
 impl AdapterCanaryMetadata {
@@ -613,6 +629,29 @@ fn adapter_canary_status_source_path(path: &Path) -> Option<String> {
         return Some(receipt.display().to_string());
     }
     None
+}
+
+fn read_adapter_manifest_metadata(path: &Path) -> AdapterManifestMetadata {
+    let manifest_path = path.join(kiln_train::ADAPTER_MANIFEST_FILENAME);
+    if !manifest_path.is_file() {
+        return AdapterManifestMetadata {
+            manifest: None,
+            path: None,
+            error: None,
+        };
+    }
+    match kiln_train::read_adapter_manifest(&manifest_path) {
+        Ok(manifest) => AdapterManifestMetadata {
+            manifest: Some(manifest),
+            path: Some(manifest_path.display().to_string()),
+            error: None,
+        },
+        Err(err) => AdapterManifestMetadata {
+            manifest: None,
+            path: Some(manifest_path.display().to_string()),
+            error: Some(format!("{err:#}")),
+        },
+    }
 }
 
 fn read_adapter_config_metadata(path: &Path) -> AdapterConfigMetadata {

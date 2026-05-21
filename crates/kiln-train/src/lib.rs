@@ -41,8 +41,12 @@ pub use diagnostics::{
     rollout_diversity, truncation_rate,
 };
 pub use adapter_output::{
-    ADAPTER_RECEIPT_FILENAME, AdapterOutputReceipt, install_adapter_symlink,
-    validate_adapter_output_dir, validate_install_adapter_name, write_adapter_output_receipt,
+    ADAPTER_MANIFEST_FILENAME, ADAPTER_MANIFEST_SCHEMA_VERSION, ADAPTER_RECEIPT_FILENAME,
+    AdapterManifest, AdapterManifestFiles, AdapterOutputReceipt, AdapterRestoreOptions,
+    AdapterRestoreReceipt, install_adapter_symlink, read_adapter_manifest,
+    read_adapter_manifest_from_adapter_dir, restore_adapter_from_manifest,
+    validate_adapter_output_dir, validate_install_adapter_name,
+    write_adapter_manifest_from_train_receipt, write_adapter_output_receipt,
 };
 pub use adapter_shape::{
     ALLOW_ADAPTER_SHAPE_CONVERSION_FLAG, BaseAdapterCompatibility, TRAINABLE_TARGET_MODULES,

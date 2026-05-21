@@ -148,7 +148,7 @@ const TRAIN_EXAMPLES: &str = r#"Examples:
 
 const ADAPTERS_OVERVIEW: &str = r#"Inspect and manage LoRA adapters on the running Kiln server at http://localhost:8420 by default.
 
-Use these commands after `kiln serve` is running; they call the adapter API rather than reading local files directly.
+Most commands call the adapter API after `kiln serve` is running. `kiln adapter verify` can validate local adapter directories offline, and `kiln adapter restore` copies a manifest-described adapter into a local registry.
 
 `kiln adapter verify <name-or-path>` also accepts the singular alias and can validate an adapter directory offline before optionally checking a running server with --url.
 "#;
@@ -174,6 +174,9 @@ const ADAPTERS_EXAMPLES: &str = r#"Examples:
 
   kiln adapter verify support-bot --adapter-dir ./Qwen3.5-4B/adapters --url http://localhost:8420
       Validate the installed adapter, load it through the running server, confirm registry state, and compare a fixed base-vs-adapter prompt.
+
+  kiln adapter restore ./runs/grpo/support-bot/adapter_manifest.json --adapter-dir ./Qwen3.5-4B/adapters
+      Restore a manifest-described adapter into an adapter registry and verify copied file hashes.
 "#;
 
 const EVAL_ADAPTER_OVERVIEW: &str = r#"Run a paired base-vs-adapter eval through a running Kiln server.
@@ -745,6 +748,20 @@ pub enum AdapterCommands {
         /// Prompt used for the optional server behavior check
         #[arg(long)]
         prompt: Option<String>,
+    },
+    /// Restore a manifest-described adapter into an adapter registry
+    Restore {
+        /// Path to adapter_manifest.json
+        manifest: PathBuf,
+        /// Adapter registry directory. Defaults to config/model adapter_dir when omitted.
+        #[arg(long)]
+        adapter_dir: Option<PathBuf>,
+        /// Override restored adapter name. Defaults to manifest.adapter_name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Replace an existing adapter directory or symlink with the same name
+        #[arg(long)]
+        overwrite: bool,
     },
 }
 
@@ -1670,6 +1687,32 @@ pub async fn run_adapter_verify(
     if receipt.status != "ok" {
         std::process::exit(1);
     }
+    Ok(())
+}
+
+/// Run the `adapter restore` / `adapters restore` CLI subcommand.
+pub fn run_adapter_restore(
+    config_file: Option<&str>,
+    manifest: &Path,
+    adapter_dir: Option<&Path>,
+    name: Option<&str>,
+    overwrite: bool,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    let target_adapter_dir = adapter_dir
+        .map(Path::to_path_buf)
+        .or_else(|| adapter_dir_from_config(config_file))
+        .context(
+            "could not determine adapter registry; pass --adapter-dir or use --config/KILN_MODEL_PATH",
+        )?;
+    let receipt = kiln_train::restore_adapter_from_manifest(kiln_train::AdapterRestoreOptions {
+        manifest_path: manifest.to_path_buf(),
+        adapter_dir: target_adapter_dir,
+        adapter_name: name.map(str::to_string),
+        overwrite,
+    })?;
+    println!("{}", serde_json::to_string_pretty(&receipt)?);
     Ok(())
 }
 

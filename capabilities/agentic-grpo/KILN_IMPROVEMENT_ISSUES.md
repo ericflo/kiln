@@ -2419,6 +2419,23 @@ adapter provenance regardless of storage backend.
 - Restore command verifies hashes after copy.
 - Manifest schema is documented.
 
+**Status:** In progress on 2026-05-21.
+
+**Intended behavior:** Kiln-owned training paths write an
+`adapter_manifest.json` next to each completed adapter. The manifest records
+adapter identity, hashes for `adapter_model.safetensors`, `adapter_config.json`,
+`train_receipt.json`, model config/provenance, parent adapter, kiln commit, and
+training data hash/provenance. `GET /v1/adapters` includes manifest metadata
+when the file is present. `kiln adapter restore` copies a manifest-described
+adapter into a target adapter root/name and verifies copied file hashes before
+reporting success.
+
+**Progress notes:** Active RunPod lease is
+`pod-684fd507d9ca2fb6183af36f` / pod `7cgkz5rvm91eq8`, with canonical model
+directory `/workspace/Qwen3.5-4B` and lowercase compatibility symlink only.
+Next step is to inspect adapter receipt/training output code, CLI command
+layout, adapter registry serialization, and docs before editing.
+
 ### 37. Add Off-Policy Distillation Training Mode
 
 **Area:** `crates/kiln-train`

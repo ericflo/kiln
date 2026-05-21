@@ -609,6 +609,7 @@ impl TrainReceipt {
         if let Some(status) = adapter_canary_status_from_train_receipt(self) {
             write_adapter_canary_status(adapter_dir, &status)?;
         }
+        crate::adapter_output::write_adapter_manifest_from_train_receipt(adapter_dir, self)?;
         Ok(path)
     }
 
@@ -1775,6 +1776,53 @@ mod tests {
                 .iter()
                 .any(|check| check.name == "simple_tool_call_shaped_prompt" && check.passed)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn train_receipt_writes_adapter_manifest_when_adapter_files_exist() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(
+            dir.path().join("adapter_config.json"),
+            serde_json::json!({
+                "r": 2,
+                "lora_alpha": 4.0,
+                "target_modules": ["q_proj"],
+            })
+            .to_string(),
+        )?;
+        std::fs::write(dir.path().join("adapter_model.safetensors"), "weights")?;
+        let model = ModelConfig::qwen3_5_4b();
+        let tokenizer = minimal_tokenizer()?;
+        let mut receipt = TrainReceipt::new(
+            "adapter-manifest",
+            "sft",
+            &model,
+            &tokenizer,
+            HyperparameterReceipt {
+                mode: "sft".to_string(),
+                rank: 2,
+                alpha: 4.0,
+                alpha_over_rank: Some(2.0),
+                learning_rate: 1e-4,
+                epochs: 1,
+                seed: Some(9),
+            },
+            serde_json::json!({"base_adapter": "parent"}),
+        );
+        receipt.kiln.git_commit = Some("abc123".to_string());
+        receipt.training_data.sha256 = Some("sha256:data".to_string());
+
+        receipt.write_to_adapter_dir(dir.path())?;
+
+        let manifest_path = dir.path().join(crate::adapter_output::ADAPTER_MANIFEST_FILENAME);
+        assert!(manifest_path.is_file());
+        let manifest = crate::adapter_output::read_adapter_manifest(&manifest_path)?;
+        assert_eq!(manifest.adapter_name, "adapter-manifest");
+        assert_eq!(manifest.parent_adapter.as_deref(), Some("parent"));
+        assert_eq!(manifest.kiln_commit.as_deref(), Some("abc123"));
+        assert_eq!(manifest.training_data_hash.as_deref(), Some("sha256:data"));
+        assert!(manifest.receipt_hash.is_some());
         Ok(())
     }
 
