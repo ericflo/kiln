@@ -616,7 +616,7 @@ variance, missing base adapter.
 - Dry run catches zero groups after filtering unless explicitly allowed.
 - Dry run writes a receipt.
 
-**Status:** Completed and pushed to `main`.
+**Status:** Completed and validated on RunPod.
 
 **Implementation notes:** Added `grpo_dry_run_jsonl` in `kiln-train` so dry
 run uses the same JSONL parser, trajectory-mask builder, dynamic-sampling
@@ -1929,7 +1929,7 @@ receipts.
 - Server health includes all hashes.
 - Chat response metadata can include all hashes in debug mode.
 
-**Status:** Completed and validated on RunPod.
+**Status:** Completed and pushed to `main`.
 
 **Implementation notes:** Added `kiln_core::config_hashes::ConfigHashes` with
 separate SHA-256 fields for tokenizer JSON, chat template, model config, and
