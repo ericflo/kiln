@@ -2596,7 +2596,7 @@ distribution is saturated.
   `--no-policy-loss`.
 - Thresholds are configurable.
 
-**Status:** Implemented and validated on RunPod; commit pending.
+**Status:** Completed and pushed to `main`.
 
 **Intended behavior:** When GRPO startup or dry-run reward statistics show a
 near-ceiling mean with low variance, kiln emits an actionable warning before
@@ -2644,9 +2644,13 @@ is disabled.
   harmful`, harder tasks, stronger rubric gates, OPD/teacher distillation, and
   `--no-policy-loss` with ECHO while training a real GRPO adapter on the
   loaded Qwen3.5-4B CUDA server.
+- GitHub CI passed for head `7b1f63c2` on 2026-05-21: run `26248713404`
+  completed successfully across Linux/default, cargo-deny, Linux/Vulkan, and
+  macOS/Metal jobs.
 
-**Commit SHA:** Pending. The final hash will be recorded in the follow-up
-metadata commit because a commit cannot include its own final SHA.
+**Commit SHA:** `7b1f63c2` (`Issue 38: add reward saturation recommendation`),
+pushed to `origin/main` on 2026-05-21. This status line is recorded in the
+follow-up metadata commit because a commit cannot include its own final SHA.
 
 **Remaining risk:** The real-model validation used a deliberately tiny
 saturated GRPO request to prove the warning path against the loaded CUDA model;
