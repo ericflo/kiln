@@ -1,30 +1,64 @@
 # pi-context-aware-edits
 
-Capability under `capabilities/agentic-grpo/` (round 2 — new cap).
+Read imports / neighbors / conventions BEFORE editing. Round-2 new cap
+(Tier 2). Distinct from `pi-precondition-check` (which is about
+staleness); this cap is about *style and idiom consistency*.
 
 ## Read first
 
-1. [`capability.md`](capability.md) — contract: goal, rubric, hypotheses.
-2. [`capability.config.json`](capability.config.json) — trainer + rollout defaults.
-3. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout and kiln CLIs used.
-4. [`../README.md`](../README.md) — ECHO defaults and pi-rollout shape.
+1. [`capability.md`](capability.md) — contract: 6 convention categories,
+   multiplicative-gate rubric, §0.
+2. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout.
+3. [`../README.md`](../README.md) — ECHO defaults.
 
 ## Status
 
-**Scaffold.** The capability.md is fully specified; the implementation
-files (build_corpus.py, rollout.py, rubric.py) are NotImplementedError
-stubs. The next agent picking this up:
+**Implementation complete. Calibration passes (separation +0.58).**
 
-1. Fill build_corpus.py per `capability.md ## Task shape`.
-2. Fill rubric.py per `capability.md ## Rubric (v0)`.
-3. Fill rollout.py per the pi-rollout reference (`../pi-doctest/rollout.py`).
-4. Fill rubric_sanity.py + `calibration/{good,bad}.jsonl` per `capability.md ## Adversarial design (§0)`.
-5. Run `./capability.oracle.sh` to baseline.
-6. Run `./run_iter.sh h1-default-recipe` for the first training iter.
+| File | Status |
+|------|--------|
+| `capability.md` | Full spec — 6 convention categories |
+| `capability.config.json` | Tuned for max_turns=6 (read + edit + verify cycle) |
+| `build_corpus.py` | 32 train + 16 eval tasks across 4 style profiles (Py strict, Py loose, Rust, Go) |
+| `rubric.py` | Multiplicative gate + per-convention checkers (naming case, types, logging, error handling, comments, imports) |
+| `rubric_sanity.py` | Mandatory gate |
+| `rollout.py` | Pi driver (shared shape) |
+| `capability.oracle.sh` | `kiln eval-adapter --seeds 3` |
+| `run_iter.sh` | Full pipeline |
+| `calibration/good.jsonl` | 5 hand-written good rollouts (Py strict, Py loose, Rust, simple camel, docstring) |
+| `calibration/bad.jsonl` | 5 §0 cheats including outcome-passes-but-process-violates |
 
-The capability.md `## Adversarial design (§0)` is the calibration spec
-— the §0 cheats are the bad-class entries for `calibration/bad.jsonl`.
+## Quickstart
+
+```bash
+python3 build_corpus.py
+python3 rubric_sanity.py     # PASS — separation 0.58
+./capability.oracle.sh
+./run_iter.sh h1-default-recipe
+```
+
+## Headroom estimate
+
+- **Baseline:** ~0.45 (the 4B reads sometimes but rarely preserves all
+  conventions).
+- **Headroom:** ~0.55.
+- **Target sub-score:** `convention_consistency` (biggest movable mass).
+
+## Hypotheses
+
+| Slug | Knob | Hypothesis |
+|------|------|------------|
+| h1-default-recipe | defaults | +0.10 composite |
+| h2-mixed-language | corpus weighted across Py/Rust/Go | Generalization test |
+| h3-opd-chain | OPD from 27B on H1 best | Format polish |
+| h4-stratified | balanced per-category sampling | Avoid overfitting |
+
+## Composition
+
+- **Upstream:** `pi-precondition-check` (read-before-edit shared discipline).
+- **Downstream:** `pi-source-mod-workflow` (PR-quality edits need conventions).
+- **Integration:** member of `integration/cross-cap-coherence/`.
 
 ## History
 
-Brand-new in round 2 — no archive.
+Brand-new in round 2.

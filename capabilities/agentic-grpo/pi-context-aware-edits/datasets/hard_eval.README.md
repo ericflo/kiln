@@ -1,30 +1,32 @@
-# hard_eval.tasks.jsonl — round-1-failures-derived eval pool
+# hard_eval.tasks.jsonl — pi-context-aware-edits hard-eval pool
 
-Round 2 introduces a hard-eval pool per cap. The pool is built from
-tasks where the BASE model failed in round 1 (or that have been
-hand-marked as hard during corpus design).
-
-Format: same JSONL as `eval.tasks.jsonl`, with one additional field
-`_hard_reason: <string>` explaining why the task was flagged.
-
-This file is **gitignored** like `eval.tasks.jsonl` (blind-eval
-firewall). It is not present in the committed tree until
-`build_corpus.py` produces it from local data.
-
-## How it's used
-
-`capability.oracle.sh` accepts `TASKS=datasets/hard_eval.tasks.jsonl`
-to score against the hard pool instead of the standard eval. Lift on
-hard-eval is the cleanest evidence of capability uplift vs. lucky-tasks.
+Tasks the base 4B is expected to violate conventions on.
 
 ## How to build it
 
-Round-1 caps that have committed `archive/` data may have hard-eval
-candidates in there (failed_task IDs, regression sets). The next agent
-picking up the cap should:
+Brand-new cap (no round-1 archive). Build by:
 
-1. Inspect `archive/` for round-1 failed-task IDs.
-2. Build `datasets/hard_eval.tasks.jsonl` from those IDs.
-3. Run `./capability.oracle.sh` with `TASKS=datasets/hard_eval.tasks.jsonl`
-   to confirm base composite < 0.5 on the hard pool.
-4. Compare adapter performance on hard-eval vs standard eval.
+1. Run base on standard eval; mark tasks with
+   `convention_consistency < 0.5`.
+2. Hand-construct adversarial cases:
+   - **Mixed-style workspace** — half files snake, half camel; agent
+     must read the *specific target file* not the directory average.
+   - **Subtle conventions** — e.g. type annotation style is "all
+     keyword args annotated, positional unannotated" (real OSS convention).
+   - **Multi-language workspace** — Python + Rust + Go in one repo;
+     edit the .rs file with Rust conventions, not Python ones.
+   - **Recently-refactored conventions** — old conventions visible in
+     recent commits but obsoleted; the agent must read the latest
+     file state, not infer from one stale neighbor.
+
+## Expected hard-eval lift
+
+| profile | base | trained | lift |
+|---------|------|---------|------|
+| py_strict_typed_snake | ~0.50 | ~0.80 | +0.30 |
+| py_camel_loose | ~0.40 | ~0.75 | +0.35 |
+| rust_snake_result | ~0.45 | ~0.75 | +0.30 |
+| go_camel_pascal | ~0.40 | ~0.70 | +0.30 |
+| mixed_language | ~0.30 | ~0.65 | +0.35 |
+
+File is gitignored.
