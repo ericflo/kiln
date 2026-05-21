@@ -1,30 +1,53 @@
-# hard_eval.tasks.jsonl — round-1-failures-derived eval pool
+# hard_eval.tasks.jsonl — pi-error-recovery hard-eval pool
 
-Round 2 introduces a hard-eval pool per cap. The pool is built from
-tasks where the BASE model failed in round 1 (or that have been
-hand-marked as hard during corpus design).
+Round 2 ships every cap with a hard-eval pool: tasks the base model is
+expected to fail on. Lift on hard-eval is the cleanest evidence of
+capability uplift vs. lucky-tasks.
 
-Format: same JSONL as `eval.tasks.jsonl`, with one additional field
-`_hard_reason: <string>` explaining why the task was flagged.
+For pi-error-recovery, hard-eval covers the tasks the 4B base hits its
+documented failure modes on: looping, giving up, compounding the error.
 
-This file is **gitignored** like `eval.tasks.jsonl` (blind-eval
-firewall). It is not present in the committed tree until
-`build_corpus.py` produces it from local data.
+## How to build it for this cap
 
-## How it's used
+Brand-new cap (no round-1 archive yet). Build the hard pool by:
 
-`capability.oracle.sh` accepts `TASKS=datasets/hard_eval.tasks.jsonl`
-to score against the hard pool instead of the standard eval. Lift on
-hard-eval is the cleanest evidence of capability uplift vs. lucky-tasks.
+1. Run `./capability.oracle.sh` against the base model. Look at the
+   per-task scores in the eval summary; tasks with composite < 0.3 are
+   hard candidates.
+2. Optionally hand-construct adversarial cases for each error class:
+   - **file_not_found** — directory has 50+ files, only one is the
+     target; lazy ls misses it.
+   - **permission_denied** — read-only dir (not just file); needs
+     chmod on the parent.
+   - **syntax_error** — the model's first solution has a non-obvious
+     bug (e.g. wrong indentation in a multi-line function); requires
+     reading the error line carefully.
+   - **command_not_found** — multiple alternatives exist with subtle
+     incompatibilities (pytest 6 vs 7).
+   - **dependency_missing** — the dependency *is* available but under
+     a different name (e.g. `Levenshtein` vs `python-Levenshtein`).
+   - **timeout** — task requires a fast path that the README doesn't
+     hint at; agent must invent the alternative.
 
-## How to build it
-
-Round-1 caps that have committed `archive/` data may have hard-eval
-candidates in there (failed_task IDs, regression sets). The next agent
-picking up the cap should:
-
-1. Inspect `archive/` for round-1 failed-task IDs.
-2. Build `datasets/hard_eval.tasks.jsonl` from those IDs.
-3. Run `./capability.oracle.sh` with `TASKS=datasets/hard_eval.tasks.jsonl`
+3. Write the resulting tasks to `hard_eval.tasks.jsonl` (gitignored).
+4. Run `TASKS=datasets/hard_eval.tasks.jsonl ./capability.oracle.sh`
    to confirm base composite < 0.5 on the hard pool.
-4. Compare adapter performance on hard-eval vs standard eval.
+
+## Per-class headroom on hard-eval
+
+After round-2 training, expected lift on hard-eval (vs base):
+
+| error_class | base | trained | lift |
+|-------------|------|---------|------|
+| file_not_found | ~0.40 | ~0.75 | +0.35 |
+| permission_denied | ~0.45 | ~0.75 | +0.30 |
+| syntax_error | ~0.55 | ~0.80 | +0.25 |
+| command_not_found | ~0.45 | ~0.80 | +0.35 |
+| dependency_missing | ~0.35 | ~0.70 | +0.35 |
+| timeout | ~0.30 | ~0.65 | +0.35 |
+
+These are *pre-training estimates*; the rubric_sanity gate already
+confirms the rubric can measure these lifts.
+
+This file (`hard_eval.tasks.jsonl`) is gitignored to keep the blind-eval
+firewall: agents must not read it from inside the training loop.

@@ -94,8 +94,7 @@ def main() -> int:
 
     if sep < MARGIN:
         print(
-            "
-rubric_sanity: FAIL — rubric cannot distinguish good from bad. "
+            "\nrubric_sanity: FAIL — rubric cannot distinguish good from bad. "
             "Fix the rubric, expand calibration fixtures, or tighten weights. "
             "See ./capability.md `## Adversarial design (§0)` for the cheats "
             "that should score 0."
