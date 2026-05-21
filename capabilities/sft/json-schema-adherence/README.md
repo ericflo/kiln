@@ -1,34 +1,27 @@
-# json-schema-adherence
+# json-schema-adherence (SFT)
 
-Capability under `capabilities/sft/`. Round 2 layout
-(see [`../../LAYOUT.md`](../../LAYOUT.md)).
+OPD on strict JSON-schema output. **Round-1 SFT cap with broad ledger;
+round-2 adds anchor suite.**
 
-## Read first
+## Status
 
-1. [`capability.md`](capability.md) — the contract: goal, task shape, rubric,
-   adversarial design, hypotheses.
-2. [`capability.config.json`](capability.config.json) — trainer + rollout defaults.
-3. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout and which kiln CLIs are used.
-4. [`../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md`](../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md) — the kiln improvements this layout assumes are landed.
+| File | Status |
+|------|--------|
+| `capability.md` | Spec |
+| `rubric.py` | parses + validates + is_pure + is_substantive |
+| `calibration/` | 5 good + 5 bad; requires `jsonschema` package |
+| `archive/` | Round-1 RESULTS, sweep scripts |
+
+## Round-2 plan
+
+1. Standardize anchor suite (math-broad and python-algo have it).
+2. Multi-seed eval mandatory.
+3. Install `jsonschema` on pod before first iter.
 
 ## Quickstart
 
 ```bash
-# 0. (one time) build corpus
+uv pip install --system jsonschema   # if missing
 python3 build_corpus.py
-
-# 1. baseline eval (base model only)
-./capability.oracle.sh
-
-# 2. first training iter
-./run_iter.sh h1-default-recipe
-
-# 3. inspect the new row
-tail -1 capability.jsonl | python3 -m json.tool
+./run_iter.sh h1-default
 ```
-
-## History
-
-Round 1 artifacts (writeups, old iter log, ad-hoc scripts) live under
-[`archive/`](archive/). The next round starts with a fresh
-`capability.jsonl`.

@@ -1,34 +1,19 @@
-# code-fence-language-fidelity
+# code-fence-language-fidelity (OPD)
 
-Capability under `capabilities/opd/`. Round 2 layout
-(see [`../../LAYOUT.md`](../../LAYOUT.md)).
+Emit code snippets with correct language tag in markdown fence. **Round 1
+calibration exists**; awaiting OPD canary unblock.
 
-## Read first
+## Status
 
-1. [`capability.md`](capability.md) — the contract: goal, task shape, rubric,
-   adversarial design, hypotheses.
-2. [`capability.config.json`](capability.config.json) — trainer + rollout defaults.
-3. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout and which kiln CLIs are used.
-4. [`../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md`](../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md) — the kiln improvements this layout assumes are landed.
+| File | Status |
+|------|--------|
+| `capability.md` | Spec |
+| `rubric.py` | 4-component cascade (fence_pair gate, language_tag, code_parses) |
+| `calibration/` | 3 good + 3 bad existing; separation +0.70 PASS |
 
-## Quickstart
+## Quickstart (after canary)
 
 ```bash
-# 0. (one time) build corpus
-python3 build_corpus.py
-
-# 1. baseline eval (base model only)
 ./capability.oracle.sh
-
-# 2. first training iter
-./run_iter.sh h1-default-recipe
-
-# 3. inspect the new row
-tail -1 capability.jsonl | python3 -m json.tool
+./run_iter.sh h1-default
 ```
-
-## History
-
-Round 1 artifacts (writeups, old iter log, ad-hoc scripts) live under
-[`archive/`](archive/). The next round starts with a fresh
-`capability.jsonl`.

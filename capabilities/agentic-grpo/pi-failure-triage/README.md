@@ -1,34 +1,31 @@
 # pi-failure-triage
 
-Capability under `capabilities/agentic-grpo/`. Round 2 layout
-(see [`../../LAYOUT.md`](../../LAYOUT.md)).
+Root-cause-fix discipline. **Round 1: saturated (+0.006), format moved
++12.5pp but additive composite trapped it.** Round-2 reshape:
+multiplicative format gate (rubric.py changed to outcome × format × process).
 
-## Read first
+## Status (round 2)
 
-1. [`capability.md`](capability.md) — the contract: goal, task shape, rubric,
-   adversarial design, hypotheses.
-2. [`capability.config.json`](capability.config.json) — trainer + rollout defaults.
-3. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout and which kiln CLIs are used.
-4. [`../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md`](../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md) — the kiln improvements this layout assumes are landed.
+**RESHAPED RUBRIC.** v2 multiplicative format gate.
+
+| File | Status |
+|------|--------|
+| `capability.md` | Spec + round-2 reshape plan |
+| `rubric.py` | v2: `composite = outcome × format × process` |
+| `archive/rubric_v1_additive.py` | Round-1 additive version preserved |
+| `calibration/` | Workdir-dependent; bypassed |
+| `archive/` | Round-1 FINAL_WRITEUP, drive scripts |
+
+## Round-2 plan
+
+1. **Multiplicative format gate** (done in rubric.py).
+2. **Hard-eval pool of multi-cause failures** — round 1 was single-root.
+3. **Cross-domain transfer** — train Python, eval shell/Rust.
 
 ## Quickstart
 
 ```bash
-# 0. (one time) build corpus
 python3 build_corpus.py
-
-# 1. baseline eval (base model only)
-./capability.oracle.sh
-
-# 2. first training iter
+./capability.oracle.sh           # re-baseline under v2 rubric
 ./run_iter.sh h1-default-recipe
-
-# 3. inspect the new row
-tail -1 capability.jsonl | python3 -m json.tool
 ```
-
-## History
-
-Round 1 artifacts (writeups, old iter log, ad-hoc scripts) live under
-[`archive/`](archive/). The next round starts with a fresh
-`capability.jsonl`.

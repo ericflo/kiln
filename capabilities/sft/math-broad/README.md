@@ -1,35 +1,28 @@
-# math-broad
+# math-broad (SFT)
 
-`math-broad` capability.
-
-## Read first
-
-1. [`capability.md`](capability.md) — contract.
-2. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout.
-3. [`../README.md`](../README.md) — paradigm defaults.
+Word-problem math via non-mathy supervision. **Round 1 saturated at
+1.000 single-seed (order-noise tail); 3-seed mean ~0.95.**
 
 ## Status
 
-**Implementation complete. Calibration passes.**
-
 | File | Status |
 |------|--------|
-| `capability.md` | Spec |
-| `capability.config.json` | Tuned |
-| `build_corpus.py` | Generates train + eval |
-| `rubric.py` | Score_one implemented |
-| `rubric_sanity.py` | Mandatory gate |
-| `capability.oracle.sh` | `kiln eval-adapter --seeds 3` |
-| `run_iter.sh` | Full pipeline |
-| `calibration/{good,bad}.jsonl` | 5 + 5 fixtures |
+| `capability.md` | Spec + ideas + round-2 plan |
+| `rubric.py` | Implemented (exact + substring match, normalize) |
+| `calibration/` | 5 good + 5 bad fixtures, separation +1.00 PASS |
+| `capability.anchor.sh` | Regression watch on non-math suite |
+| `archive/` | Round-1 ledger (20 iters + baseline) |
+
+## Round-2 plan
+
+1. Replicate iter-13 recipe across 5 seeds.
+2. Hard-eval pool of harder algebra/calculus.
+3. SFT vs OPD comparison (if math teacher available).
 
 ## Quickstart
 
 ```bash
 python3 build_corpus.py
-python3 rubric_sanity.py
-./capability.oracle.sh
-./run_iter.sh h1-default-recipe
+./capability.oracle.sh        # baseline
+./run_iter.sh h1-iter13-replicate
 ```
-
-See `capability.md` for hypotheses and headroom.

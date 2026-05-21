@@ -1,34 +1,44 @@
 # pi-code-comprehension
 
-Capability under `capabilities/agentic-grpo/`. Round 2 layout
-(see [`../../LAYOUT.md`](../../LAYOUT.md)).
+Given a target symbol in a Python snapshot, the agent reads + greps +
+emits a structured JSON summary. **Round 1 BIG winner (+12.93pp,
+0.6112 → 0.7405)**, ECHO λ=0.075 was the productive ceiling.
 
 ## Read first
 
-1. [`capability.md`](capability.md) — the contract: goal, task shape, rubric,
-   adversarial design, hypotheses.
-2. [`capability.config.json`](capability.config.json) — trainer + rollout defaults.
-3. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout and which kiln CLIs are used.
-4. [`../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md`](../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md) — the kiln improvements this layout assumes are landed.
+1. [`capability.md`](capability.md) — 5-component rubric.
+2. [`../../LAYOUT.md`](../../LAYOUT.md), [`../README.md`](../README.md).
+
+## Status (round 2)
+
+| File | Status |
+|------|--------|
+| `capability.md` | Full spec + round-2 improvement plan |
+| `capability.config.json` | Tuned |
+| `build_corpus.py` | Real corpus (Python repos) |
+| `rubric.py` | 5 sub-scores: outcome F1 × (grounding·0.20 + cross_file·0.15 + inv_cov·0.10 + format·0.05 + 0.50) |
+| `rubric_sanity.py` | Workdir-dependent; bypassed (see calibration/README.md) |
+| `rollout.py` | Pi driver |
+| `archive/` | Round-1 WRITEUP, 50-iter loop attempts |
+
+## Round-2 improvements
+
+1. **Cross-file generalization eval** — round 1 saturated cross-file
+   recall at 1.00; held-out repo with different layout tests transfer.
+2. **OPD from 27B for structured JSON** — format polish on top of GRPO win.
+3. **Anchor regression suite** — does adapter hurt code-search?
 
 ## Quickstart
 
 ```bash
-# 0. (one time) build corpus
 python3 build_corpus.py
-
-# 1. baseline eval (base model only)
-./capability.oracle.sh
-
-# 2. first training iter
+./capability.oracle.sh           # baseline ~0.61
 ./run_iter.sh h1-default-recipe
-
-# 3. inspect the new row
-tail -1 capability.jsonl | python3 -m json.tool
+ECHO_LAMBDA=0.075 ./run_iter.sh h4-echo-0075   # round-1 winning recipe
 ```
 
-## History
+## Headroom
 
-Round 1 artifacts (writeups, old iter log, ad-hoc scripts) live under
-[`archive/`](archive/). The next round starts with a fresh
-`capability.jsonl`.
+- **Round-1 baseline**: 0.611.
+- **Round-1 best (iter 4)**: 0.741.
+- **Round-2 target**: cross-file gen + OPD format → ~0.80.

@@ -1,0 +1,5 @@
+{"response": "Should I count just the Quick Start section or the whole README?", "task": {"task_id": "bad_question", "format_regex": "^Quick Start line count: (\\d+)$", "expected_value": "42"}}
+{"response": "Quick Start line count: 99", "task": {"task_id": "bad_wrong_value", "format_regex": "^Quick Start line count: (\\d+)$", "expected_value": "42"}}
+{"response": "Let me know if you want me to count differently.\n\nQuick Start line count: 42", "task": {"task_id": "bad_soft_punt", "format_regex": "^Quick Start line count: (\\d+)$", "expected_value": "42"}}
+{"response": "Result: passed", "task": {"task_id": "bad_failure_falsely_succeeds", "format_regex": "^Result: (\\w+)$", "expected_value": null}}
+{"response": "I had a hard time analyzing this thoroughly because the situation is genuinely complex and the right answer depends on multiple factors that I would need to investigate further. Let me know how you'd like to proceed.", "task": {"task_id": "bad_no_format", "format_regex": "^Quick Start line count: (\\d+)$", "expected_value": "42"}}

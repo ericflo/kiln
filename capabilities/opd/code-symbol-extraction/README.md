@@ -1,34 +1,29 @@
-# code-symbol-extraction
+# code-symbol-extraction (OPD canary)
 
-Capability under `capabilities/opd/`. Round 2 layout
-(see [`../../LAYOUT.md`](../../LAYOUT.md)).
+Round-2 canary cap for the kiln OPD trainer fix. **Round 1 blocked by
+97% EOS-skip bug; now fixed.**
 
-## Read first
+## Status (round 2)
 
-1. [`capability.md`](capability.md) — the contract: goal, task shape, rubric,
-   adversarial design, hypotheses.
-2. [`capability.config.json`](capability.config.json) — trainer + rollout defaults.
-3. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout and which kiln CLIs are used.
-4. [`../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md`](../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md) — the kiln improvements this layout assumes are landed.
+| File | Status |
+|------|--------|
+| `capability.md` | Spec + round-2 canary plan |
+| `rubric.py` | 4-component (parses, format, recall, precision) |
+| `calibration/` | 5 good + 5 bad; separation +0.24 PASS |
+| `archive/` | Round-1 closeout (97% skip diagnosis) |
+
+## Canary plan
+
+1. Re-run round-1 H1-r16-6ep recipe on patched kiln.
+2. Expect effective steps to jump from 7 → 30+ (97% skip drops to <50%).
+3. Expect composite 0.937 → 0.96+ (round-1 closeout predicted this).
+4. **If canary passes**: unblock the other 5 OPD caps.
+5. **If canary fails**: file against kiln; pause all OPD work.
 
 ## Quickstart
 
 ```bash
-# 0. (one time) build corpus
 python3 build_corpus.py
-
-# 1. baseline eval (base model only)
 ./capability.oracle.sh
-
-# 2. first training iter
-./run_iter.sh h1-default-recipe
-
-# 3. inspect the new row
-tail -1 capability.jsonl | python3 -m json.tool
+./run_iter.sh h1-r16-6ep         # the round-1 recipe
 ```
-
-## History
-
-Round 1 artifacts (writeups, old iter log, ad-hoc scripts) live under
-[`archive/`](archive/). The next round starts with a fresh
-`capability.jsonl`.

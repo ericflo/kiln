@@ -1,0 +1,5 @@
+{"response": "Quick Start line count: 42", "task": {"task_id": "good_1", "format_regex": "^Quick Start line count: (\\d+)$", "expected_value": "42"}}
+{"response": "After investigating the file:\n\nFile size in bytes: 1024", "task": {"task_id": "good_2", "format_regex": "^File size in bytes: (\\d+)$", "expected_value": "1024"}}
+{"response": "Tests passed.\n\nResult: passed", "task": {"task_id": "good_3", "format_regex": "^Result: (\\w+)$", "expected_value": "passed"}}
+{"response": "Unable to determine the requested value — the file was not found.", "task": {"task_id": "good_4_failure", "format_regex": "^Result: (\\w+)$", "expected_value": null}}
+{"response": "Total entries: 17", "task": {"task_id": "good_5", "format_regex": "^Total entries: (\\d+)$", "expected_value": "17"}}

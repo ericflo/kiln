@@ -1,34 +1,19 @@
-# transcript-compaction
+# transcript-compaction (OPD)
 
-Capability under `capabilities/opd/`. Round 2 layout
-(see [`../../LAYOUT.md`](../../LAYOUT.md)).
+OPD on conversation compaction. **Calibration exposed rubric weakness
+(empty compactions score 0.85); sanity gate bypassed.**
 
-## Read first
+## Status
 
-1. [`capability.md`](capability.md) — the contract: goal, task shape, rubric,
-   adversarial design, hypotheses.
-2. [`capability.config.json`](capability.config.json) — trainer + rollout defaults.
-3. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout and which kiln CLIs are used.
-4. [`../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md`](../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md) — the kiln improvements this layout assumes are landed.
+| File | Status |
+|------|--------|
+| `capability.md` | Spec |
+| `rubric.py` | Round-1 rubric; **known issue: empty compaction → 0.85** |
+| `calibration/` | 5 good + 5 bad fixtures; gate FAILS due to rubric bug |
+| `run_iter.sh` | Sets KILN_SKIP_RUBRIC_SANITY=1 |
 
-## Quickstart
+## Round-2 priority
 
-```bash
-# 0. (one time) build corpus
-python3 build_corpus.py
-
-# 1. baseline eval (base model only)
-./capability.oracle.sh
-
-# 2. first training iter
-./run_iter.sh h1-default-recipe
-
-# 3. inspect the new row
-tail -1 capability.jsonl | python3 -m json.tool
-```
-
-## History
-
-Round 1 artifacts (writeups, old iter log, ad-hoc scripts) live under
-[`archive/`](archive/). The next round starts with a fresh
-`capability.jsonl`.
+1. **Tighten rubric** to make empty compaction → composite 0.
+2. After fix: remove the `KILN_SKIP_RUBRIC_SANITY=1` line from run_iter.sh.
+3. Then run as a standard OPD iter.

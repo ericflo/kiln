@@ -1,39 +1,36 @@
-# calibration/ — rubric sanity fixtures
+# calibration/ — pi-code-comprehension
 
-Round 2 mandates this directory for every cap. `rubric_sanity.py`
-reads:
+**ROUND-2 LIMITATION**: this cap's rubric.score_rollout reads
+**workdir disk state** (outcome reads workdir transcript file + workdir state). Calibration fixtures can't be
+synthesized in JSONL alone — they need a materialized workdir with
+the right gold files / failing tests / etc.
 
-- `good.jsonl` — known-high-quality rollouts (the agent did the right
-  thing). At least 5.
-- `bad.jsonl` — known-low-quality rollouts including each §0 cheat
-  named in `../capability.md`. At least 5.
+`rubric_sanity.py` is bypassed in `run_iter.sh` via
+`KILN_SKIP_RUBRIC_SANITY=1` for this cap. The next agent on a real
+pod should:
 
-The rubric must score the good set above the bad set with separation
-> 0.2 (configurable via `RUBRIC_SANITY_MARGIN`). `run_iter.sh` runs
-the sanity gate BEFORE training, so a broken rubric never reaches
-the GPU.
+1. Run base eval against `datasets/eval.tasks.jsonl`.
+2. Save 5 high-scoring rollouts (composite ~1.0) as `calibration/good.jsonl`
+   with their associated workdir state.
+3. Save 5 §0-cheat rollouts (composite ~0) as `calibration/bad.jsonl`.
+4. Remove the `KILN_SKIP_RUBRIC_SANITY=1` line from `run_iter.sh`.
 
-## How to write a calibration fixture
-
-Each line is one JSON object with the same shape `rubric.score_one()`
-expects (or `score_rollout(transcript, workdir, task)` for legacy caps
-— in that case the line should be `{"transcript": [...], "workdir":
-"...", "task": {...}}`).
-
-### Good fixture template
-
+Each fixture entry needs:
 ```json
-{"task": {...}, "transcript": [...], "workdir": "..."}
+{
+  "transcript": [...pi session events...],
+  "workdir": "/path/to/materialized/workdir",
+  "task": { ...task spec... }
+}
 ```
 
-Where the transcript shows the agent:
-- reading appropriate context
-- making the right action
-- verifying the result
-- summarizing cleanly
+Or use the workdir-builder pattern: include `_workdir_files` in the
+fixture and have a `setup_fixture.py` script that materializes them
+into a tmp dir before running rubric_sanity.
 
-### Bad fixture template — one per §0 cheat
+## §0 cheats to populate in bad.jsonl
 
-For each cheat enumerated in `../capability.md ## Adversarial design (§0)`,
-write a fixture where the agent executes that cheat. Score should be 0
-or near-zero. This is the round-2 anti-saturation discipline.
+(See `../capability.md` for the full §0 list.)
+
+For now: the calibration is documented but unpopulated. This cap's
+rubric is exercised live during real iter runs.

@@ -1,34 +1,32 @@
 # pi-diff-patch-apply
 
-Capability under `capabilities/agentic-grpo/`. Round 2 layout
-(see [`../../LAYOUT.md`](../../LAYOUT.md)).
+Apply unified diffs, repair drift, verify tests. **Round 1 saturated
+(base 0.9419, GRPO regressed)**. Round-2 reshape: multiplicative format
+gate + harder data.
 
-## Read first
+## Status (round 2)
 
-1. [`capability.md`](capability.md) — the contract: goal, task shape, rubric,
-   adversarial design, hypotheses.
-2. [`capability.config.json`](capability.config.json) — trainer + rollout defaults.
-3. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout and which kiln CLIs are used.
-4. [`../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md`](../../agentic-grpo/KILN_IMPROVEMENT_ISSUES.md) — the kiln improvements this layout assumes are landed.
+**RESHAPED RUBRIC v2.** Multiplicative format gate (was additive).
+
+| File | Status |
+|------|--------|
+| `capability.md` | Spec + round-2 reshape options (A/B/C) |
+| `rubric.py` | v2: `composite = outcome × format × (base + process)` |
+| `archive/rubric_v1_additive.py` | Round-1 version preserved |
+| `calibration/` | Workdir-dependent; bypassed |
+| `archive/` | FINAL_WRITEUP, drive scripts |
+
+## Round-2 plan (capability.md Option A — recommended)
+
+1. **Multiplicative format gate** (done).
+2. **Re-target hard-eval**: multi-hunk, refactor-heavy, conflict-prone
+   patches with measured base < 0.85.
+3. Fall back to OPD (Option B) if base still >0.90 after reshape.
 
 ## Quickstart
 
 ```bash
-# 0. (one time) build corpus
 python3 build_corpus.py
-
-# 1. baseline eval (base model only)
-./capability.oracle.sh
-
-# 2. first training iter
+./capability.oracle.sh           # re-baseline
 ./run_iter.sh h1-default-recipe
-
-# 3. inspect the new row
-tail -1 capability.jsonl | python3 -m json.tool
 ```
-
-## History
-
-Round 1 artifacts (writeups, old iter log, ad-hoc scripts) live under
-[`archive/`](archive/). The next round starts with a fresh
-`capability.jsonl`.
