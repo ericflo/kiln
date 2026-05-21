@@ -2259,6 +2259,55 @@ single-turn generation would avoid Pi schema and orchestration overhead.
 - Supports deterministic seeds if server supports them.
 - Emits ScoredRollout-compatible JSONL for trainer input.
 
+**Status:** Implemented and validated on RunPod on 2026-05-21.
+
+**Implementation notes:** Added `kiln rollout-generate` as a client-side CLI
+that reads task JSONL plus a chat-completions request template, renders one
+request per task/seed, and forces explicit `adapter`, deterministic `seed`,
+`stream: false`, `include_performance: true`, and
+`chat_template_kwargs.enable_thinking` before posting to
+`/v1/chat/completions`. The scorer contract is one completion JSON on stdin and
+a numeric reward or `{reward|score|value}` JSON on stdout. Output is one
+GRPO-compatible group per task with `ScoredRollout` completions and metadata
+for latency, token counts, seed, adapter, thinking mode, and scorer output.
+The command writes both trainer JSONL (`rollouts.scored.jsonl` by default) and
+a summary JSON (`rollout_summary.json` by default).
+
+**Validation evidence:**
+
+- Focused RunPod validation passed on RTX A6000 lease
+  `pod-e6a9a744a671ae965e1c7f36`, pod `qmfxie9izl6lc6`.
+- Focused sentinel `/workspace/kiln-validation/issue34/focused7.done`
+  contains `exit=0`; remote log is
+  `/workspace/kiln-validation/issue34/focused7.log`.
+- Focused commands applied the issue patch on top of `origin/main`, then ran
+  `git diff --check`, `rustfmt --edition 2024 --check
+  crates/kiln-server/src/rollout_generate_cli.rs`, `cargo test --locked -p
+  kiln-server rollout_generate_cli --lib`, `cargo test --locked -p kiln-server
+  parses_rollout_generate_command --lib`, and `cargo check --locked -p
+  kiln-server --bin kiln`.
+- Actual `Qwen3.5-4B` RunPod smoke passed with sentinel
+  `/workspace/kiln-validation/issue34/actual-model.done` containing `exit=0`.
+- Actual smoke artifacts are under
+  `/workspace/kiln-validation/issue34/actual-model/`, including
+  `rollouts.scored.jsonl`, `rollout_summary.json`, `trajectory_inspect.json`,
+  and `summary_check.json`.
+- Actual smoke built `cargo build --locked --release -p kiln-server --bin kiln
+  --features cuda` with `KILN_CUDA_ARCHS=86`, booted a live server with
+  `KILN_MODEL_PATH=/workspace/Qwen3.5-4B`, generated rollouts through
+  `kiln rollout-generate`, and inspected the produced GRPO JSONL with
+  `kiln trajectory inspect --model-path /workspace/Qwen3.5-4B --json`.
+- Actual smoke used adapter `issue33-eval-adapter`, seeds `[34, 35]`, produced
+  `completion_count=2`, `total_tokens=54`, mean reward `1.0`, and first
+  content `issue thirty four`.
+
+**Commit SHA:** Pending.
+
+**Remaining risk:** The real-model smoke proves the utility against one short
+single-turn prompt and the existing `issue33-eval-adapter`; it does not claim
+throughput characteristics for large task files or long-context rollout
+generation.
+
 ### 35. Add Adapter Canary And Quarantine Status
 
 **Area:** `crates/kiln-train`, `crates/kiln-server`

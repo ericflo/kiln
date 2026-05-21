@@ -51,6 +51,32 @@ async fn main() -> Result<()> {
             )
             .await;
         }
+        Some(Commands::RolloutGenerate {
+            ref url,
+            ref adapter,
+            thinking,
+            ref tasks,
+            seeds,
+            seed_start,
+            ref request_template,
+            ref scorer,
+            ref output,
+            ref summary_output,
+        }) => {
+            return cli::run_rollout_generate(
+                url,
+                adapter,
+                thinking,
+                tasks,
+                seeds,
+                seed_start,
+                request_template,
+                scorer,
+                output,
+                summary_output,
+            )
+            .await;
+        }
         Some(Commands::ConfigCheck { ref file }) => {
             return cli::run_config_check(file.as_deref().or(args.config.as_deref()));
         }

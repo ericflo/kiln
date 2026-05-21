@@ -199,6 +199,30 @@ const EVAL_ADAPTER_EXAMPLES: &str = r#"Examples:
       Write the summary to a named file against a specific server.
 "#;
 
+const ROLLOUT_GENERATE_OVERVIEW: &str = r#"Generate scored single-turn GRPO rollouts through a running Kiln server.
+
+The tasks file is JSONL, one task object per line. The request template is a
+chat-completions JSON body with placeholders like {{prompt}}, {{task.prompt}},
+{{seed}}, {{adapter_label}}, and {{thinking_enabled}}. For every task/seed, the
+CLI forces an explicit `adapter`, deterministic `seed`, non-streaming response,
+performance metadata, and `chat_template_kwargs.enable_thinking`.
+
+The scorer executable receives one JSON object on stdin with the task, request,
+response, content, seed, adapter, token usage, and latency. It may print a
+single numeric reward or a JSON object with `reward`, `score`, or `value`.
+Output JSONL contains one GRPO group per task with ScoredRollout-compatible
+completions and metadata recording latency, token counts, seed, adapter, and
+scorer output.
+"#;
+
+const ROLLOUT_GENERATE_EXAMPLES: &str = r#"Examples:
+  kiln rollout-generate --adapter support-bot --thinking false --tasks tasks.jsonl --seeds 4 --request-template request.json --scorer ./score_one.py
+      Generate four deterministic scored completions per task and write rollouts.scored.jsonl.
+
+  kiln rollout-generate --adapter base --thinking false --tasks tasks.jsonl --request-template request.json --scorer ./score_one.py --output base.rollouts.jsonl --summary-output base.rollouts.summary.json --url http://127.0.0.1:8420
+      Generate base-model rollouts by forcing `adapter: null` in every request.
+"#;
+
 const CONFIG_OVERVIEW: &str = r#"Validate a Kiln TOML config file without starting the server.
 
 Use this before `kiln serve` to catch invalid values, confirm resolved model settings, and preview feature toggles such as prefix cache, CUDA graphs, and speculative decoding.
@@ -448,6 +472,59 @@ pub enum Commands {
         /// Output summary path
         #[arg(long, default_value = "eval_summary.json")]
         output: PathBuf,
+
+        /// Server URL; defaults to the local kiln serve instance
+        #[arg(long, default_value = "http://localhost:8420")]
+        url: String,
+    },
+
+    /// Generate scored single-turn rollouts for GRPO training
+    #[command(
+        name = "rollout-generate",
+        long_about = ROLLOUT_GENERATE_OVERVIEW,
+        after_help = ROLLOUT_GENERATE_EXAMPLES
+    )]
+    RolloutGenerate {
+        /// Adapter name to use, or `base`/`none`/`null` to force the base model
+        #[arg(long)]
+        adapter: String,
+
+        /// Explicit Qwen thinking mode to set on every request
+        #[arg(
+            long,
+            action = clap::ArgAction::Set,
+            value_parser = clap::value_parser!(bool),
+            default_value_t = false
+        )]
+        thinking: bool,
+
+        /// JSONL task file, one task object per line
+        #[arg(long)]
+        tasks: PathBuf,
+
+        /// Number of deterministic completions to generate for each task
+        #[arg(long, default_value_t = 1)]
+        seeds: usize,
+
+        /// First seed value; later seeds increment by one with wrapping arithmetic
+        #[arg(long = "seed-start", default_value_t = 0)]
+        seed_start: u64,
+
+        /// Chat-completions request template JSON
+        #[arg(long = "request-template")]
+        request_template: PathBuf,
+
+        /// Executable scorer. Receives completion JSON on stdin and prints a reward.
+        #[arg(long)]
+        scorer: PathBuf,
+
+        /// Output GRPO JSONL path
+        #[arg(long, default_value = "rollouts.scored.jsonl")]
+        output: PathBuf,
+
+        /// Output summary JSON path
+        #[arg(long = "summary-output", default_value = "rollout_summary.json")]
+        summary_output: PathBuf,
 
         /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value = "http://localhost:8420")]
@@ -2534,6 +2611,52 @@ pub async fn run_eval_adapter(
     Ok(())
 }
 
+/// Run the `kiln rollout-generate` CLI subcommand.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_rollout_generate(
+    url: &str,
+    adapter: &str,
+    thinking: bool,
+    tasks: &Path,
+    seeds: usize,
+    seed_start: u64,
+    request_template: &Path,
+    scorer: &Path,
+    output: &Path,
+    summary_output: &Path,
+) -> anyhow::Result<()> {
+    let summary = crate::rollout_generate_cli::run_rollout_generate(
+        crate::rollout_generate_cli::RolloutGenerateOptions {
+            url: url.to_string(),
+            adapter: adapter.to_string(),
+            thinking,
+            tasks: tasks.to_path_buf(),
+            seeds,
+            seed_start,
+            request_template: request_template.to_path_buf(),
+            scorer: scorer.to_path_buf(),
+            output: output.to_path_buf(),
+            summary_output: summary_output.to_path_buf(),
+        },
+    )
+    .await?;
+
+    println!(
+        "{} rollout-generate completed: {} group(s), {} completion(s), mean reward {:.6}, total tokens {}, wrote {}",
+        style("✓").green().bold(),
+        summary.group_count,
+        summary.completion_count,
+        summary.stats.mean_reward,
+        summary.stats.total_tokens,
+        output.display()
+    );
+    println!("summary: {}", summary_output.display());
+    for warning in &summary.warnings {
+        eprintln!("{} {warning}", style("warning:").yellow().bold());
+    }
+    Ok(())
+}
+
 async fn print_simple_json_response(label: &str, resp: reqwest::Response) -> anyhow::Result<()> {
     let status = resp.status();
     let body: serde_json::Value = resp.json().await?;
@@ -2641,6 +2764,59 @@ mod tests {
         assert_eq!(request_template, PathBuf::from("request.json"));
         assert_eq!(scorer, PathBuf::from("./score_one.py"));
         assert_eq!(output, PathBuf::from("eval_summary.json"));
+        assert_eq!(url, "http://localhost:8420");
+    }
+
+    #[test]
+    fn parses_rollout_generate_command() {
+        let cli = Cli::parse_from([
+            "kiln",
+            "rollout-generate",
+            "--adapter",
+            "support-bot",
+            "--thinking",
+            "false",
+            "--tasks",
+            "tasks.jsonl",
+            "--seeds",
+            "3",
+            "--seed-start",
+            "42",
+            "--request-template",
+            "request.json",
+            "--scorer",
+            "./score_one.py",
+            "--output",
+            "rollouts.jsonl",
+            "--summary-output",
+            "summary.json",
+        ]);
+
+        let Some(Commands::RolloutGenerate {
+            adapter,
+            thinking,
+            tasks,
+            seeds,
+            seed_start,
+            request_template,
+            scorer,
+            output,
+            summary_output,
+            url,
+        }) = cli.command
+        else {
+            panic!("expected rollout-generate command");
+        };
+
+        assert_eq!(adapter, "support-bot");
+        assert!(!thinking);
+        assert_eq!(tasks, PathBuf::from("tasks.jsonl"));
+        assert_eq!(seeds, 3);
+        assert_eq!(seed_start, 42);
+        assert_eq!(request_template, PathBuf::from("request.json"));
+        assert_eq!(scorer, PathBuf::from("./score_one.py"));
+        assert_eq!(output, PathBuf::from("rollouts.jsonl"));
+        assert_eq!(summary_output, PathBuf::from("summary.json"));
         assert_eq!(url, "http://localhost:8420");
     }
 

@@ -14,6 +14,7 @@ pub mod eval_history;
 pub mod logging;
 pub mod metrics;
 pub mod recent_requests;
+pub mod rollout_generate_cli;
 pub mod state;
 pub mod training_history;
 pub mod training_preflight;
