@@ -1,30 +1,67 @@
 {
+  "schema_version": 2,
   "slug": "pi-compaction",
-  "base_model": "/workspace/qwen3.5-4b",
-  "model_served_as": "qwen-3.5-4b-kiln",
-  "kiln_server": "http://localhost:8420",
-  "rubric_version": "v1",
-  "rubric_module": "rubric",
-  "rollout_target": "kiln-served qwen3.5-4b via /v1/chat/completions",
-  "rollout_mode": "single_turn_text",
-  "training": {
-    "advantage_mode": "DrGrpo",
-    "loss_aggregation": "TokenLevel",
-    "kl_estimator": "K1",
-    "is_level": "Token",
-    "reference_policy": "BasePerStep",
+  "paradigm": "agentic-grpo",
+  "base_model_path": "/workspace/qwen3.5-4b",
+  "kiln_url": "http://localhost:8420",
+  "adapter_dir": "/workspace/adapters",
+  "kiln_features_required": [
+    "kiln adapter verify (#4)",
+    "cuda_grpo_ablation --install-adapter-dir/--install-adapter-name (#5)",
+    "train_receipt.json (#8)",
+    "cuda_grpo_ablation --dry-run (#9)",
+    "kiln trajectory inspect (#10)",
+    "ECHO observability in train_receipt (#12)",
+    "kiln serve --eval-mode (#15)",
+    "--adapter-smoke-test (#19)",
+    "--filter-var-min (#22)",
+    "kiln eval-adapter --seeds N (#33)",
+    "adapter_manifest.json + kiln adapter restore (#36)"
+  ],
+  "pi_bin": "/usr/bin/pi",
+  "pi_model_id": "qwen-3.5-4b-kiln",
+  "sandbox_root": "/tmp/pi-compaction-rollouts",
+  "rollout": {
+    "num_generations_train": 4,
+    "num_generations_eval": 1,
+    "max_wall_clock_s": 120,
+    "max_turns": 8,
+    "max_tokens_per_turn": 1024,
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "parallel": 1
+  },
+  "training_phase1_defaults": {
+    "mode": "phase1",
+    "advantage_mode": "dr_grpo",
+    "loss_aggregation": "token_level",
+    "kl_estimator": "k1",
+    "kl_coeff": 0.1,
+    "clip_epsilon": 0.2,
+    "clip_eps_high": null,
     "dynamic_sampling": true,
-    "clip_epsilon": 0.20,
-    "clip_eps_high": 0.28,
-    "lr": 1e-5,
+    "is_level": "token",
+    "reference_policy": "base_per_step",
+    "lr": 1e-05,
     "rank": 16,
     "alpha": 32,
     "seed": 3141592653,
-    "epochs": 1
+    "filter_var_min": null,
+    "loss": {
+      "echo": {
+        "lambda": 0.05,
+        "env_mask_mode": "env_only",
+        "warning_filter": true
+      },
+      "opd": null,
+      "no_policy_loss": false
+    },
+    "adapter_smoke_test": true,
+    "allow_high_lora_scale": false
   },
-  "rollouts_per_group": 4,
-  "max_response_tokens": 4096,
-  "temperature": 0.8,
-  "top_p": 0.95,
-  "h100_workarounds": ["KILN_DISABLE_FUSED_GDN_GATES=1", "KILN_BATCHING_ENGINE=0"]
+  "eval": {
+    "seeds": 3,
+    "max_tasks": null,
+    "thinking_mode": "off"
+  }
 }

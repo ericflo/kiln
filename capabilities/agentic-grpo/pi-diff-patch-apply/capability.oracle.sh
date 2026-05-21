@@ -1,49 +1,56 @@
-#!/bin/bash
-# Blind eval oracle for pi-diff-patch-apply.
+#!/usr/bin/env bash
+# capability.oracle.sh — blind eval driver for pi-diff-patch-apply.
+#
+# Wraps `kiln eval-adapter` (KILN_IMPROVEMENT_ISSUES.md #33) — multi-seed,
+# paired eval, base-vs-adapter comparison, sigma-vs-lift warning, writes a
+# stable eval_summary.json schema.
 #
 # Usage:
-#   capability.oracle.sh <adapter-name>     # adapter on pod; e.g. ""/"base" = base model
-#
-# Runs the eval task set (24 held-out tasks) against the named adapter
-# via the kiln server on the pod, then prints `SCORE=<mean_composite>`
-# on stdout (eval-script-friendly).
-#
-# Requires: $POD_ID and $RP env (sourced from /tmp/grpo-pod.env on the
-# local machine, see drive_iters.sh).
-
+#   ./capability.oracle.sh             # eval base
+#   ./capability.oracle.sh my-adapter  # eval one adapter
+#   SEEDS=5 ./capability.oracle.sh my-adapter
 set -euo pipefail
+cd "$(dirname "$0")"
+
 ADAPTER="${1:-}"
-if [ -z "$ADAPTER" ] || [ "$ADAPTER" = "base" ]; then
-  ADAPTER_ARG=""
-  ADAPTER_LABEL="base"
-else
-  ADAPTER_ARG="$ADAPTER"
-  ADAPTER_LABEL="$ADAPTER"
+TASKS="${TASKS:-datasets/eval.tasks.jsonl}"
+KILN_URL="${KILN_URL:-http://localhost:8420}"
+SEEDS="${SEEDS:-3}"
+ADAPTER_DIR="${ADAPTER_DIR:-/workspace/adapters}"
+SCORER="${SCORER:-./rubric.py}"
+OUT_FILE="${OUT_FILE:-/tmp/pi-diff-patch-apply-eval-${ADAPTER:-base}.json}"
+KILN_BIN="${KILN_BIN:-kiln}"
+
+if ! curl -sf "$KILN_URL/v1/health" > /dev/null 2>&1; then
+  echo "ORACLE_ERROR: kiln-server not reachable at $KILN_URL" >&2
+  exit 2
 fi
 
-source /tmp/grpo-pod.env
-
-OUT="/tmp/oracle-eval-$(echo "$ADAPTER_LABEL" | tr '/' '_' | tr '[:upper:]' '[:lower:]')"
-POD_REPO=/workspace/kiln/capabilities/agentic-grpo/pi-diff-patch-apply
-
-# Set adapter.
-if [ -z "$ADAPTER_ARG" ]; then
-  python3 $RP ssh $POD_ID 'curl -sS -X POST http://localhost:8420/v1/adapters/unload >/dev/null'
-else
-  python3 $RP ssh $POD_ID "curl -sS -X POST http://localhost:8420/v1/adapters/load -H 'Content-Type: application/json' -d '{\"name\":\"${ADAPTER_ARG}\"}'"
+if [ ! -f "$TASKS" ]; then
+  echo "ORACLE_ERROR: $TASKS missing — run build_corpus.py first" >&2
+  exit 3
 fi
 
-# Run eval.
-python3 $RP bg $POD_ID "/tmp/oracle-${ADAPTER_LABEL}.log" \
-  "cd ${POD_REPO} && rm -rf ${OUT} && python3 rollout.py \
-    --tasks datasets/eval.tasks.jsonl \
-    --out-dir ${OUT} --mode eval --num-generations 1 \
-    --adapter current --seed-base 3141592653 --parallel 2 \
-    --max-turns 12 --max-wall-clock-s 240 --temperature 0.0 \
-    --verbose 2>&1"
-python3 $RP wait-file $POD_ID "${OUT}/summary.json" --timeout 7200
+"$KILN_BIN" eval-adapter \
+  --url "$KILN_URL" \
+  --adapter "${ADAPTER:-}" \
+  --adapter-dir "$ADAPTER_DIR" \
+  --tasks "$TASKS" \
+  --seeds "$SEEDS" \
+  --scorer "$SCORER" \
+  --output "$OUT_FILE" \
+  --thinking off
 
-# Pull and print.
-python3 $RP ssh $POD_ID "cat ${OUT}/summary.json"
-SCORE=$(python3 $RP ssh $POD_ID "python3 -c 'import json; d=json.load(open(\"${OUT}/summary.json\")); print(d[\"mean_composite\"])'")
-echo "SCORE=${SCORE}"
+python3 - "$OUT_FILE" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+mc = d.get("mean_composite")
+n  = d.get("n_tasks")
+print(f"SCORE={mc:.4f}")
+print(f"N={n}")
+for k, v in (d.get("sub_scores_mean") or {}).items():
+    print(f"{k}={v:.4f}")
+stdev = d.get("composite_stdev")
+if stdev is not None:
+    print(f"STDEV={stdev:.4f}")
+PY

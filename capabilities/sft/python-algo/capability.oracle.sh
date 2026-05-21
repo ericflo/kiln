@@ -1,39 +1,56 @@
-#!/bin/bash
-# capability.oracle.sh — blind primary oracle for python algorithmic problem-solving.
+#!/usr/bin/env bash
+# capability.oracle.sh — blind eval driver for python-algo.
 #
-# Usage: ./capability.oracle.sh <adapter_name>
-#   Empty string "" means use the base model.
+# Wraps `kiln eval-adapter` (KILN_IMPROVEMENT_ISSUES.md #33) — multi-seed,
+# paired eval, base-vs-adapter comparison, sigma-vs-lift warning, writes a
+# stable eval_summary.json schema.
 #
-# On success: exits 0, prints SCORE=<float> N=<int> on the last line.
-# On failure: exits non-zero, prints ORACLE_ERROR: <reason> on stderr.
-#
-# The main agent must not look inside .oracle-build/. That dir contains the
-# eval items, scorer, sandbox, and reference solutions — all of which would
-# leak the eval and invalidate the experiment.
+# Usage:
+#   ./capability.oracle.sh             # eval base
+#   ./capability.oracle.sh my-adapter  # eval one adapter
+#   SEEDS=5 ./capability.oracle.sh my-adapter
+set -euo pipefail
+cd "$(dirname "$0")"
 
-set -eu
+ADAPTER="${1:-}"
+TASKS="${TASKS:-datasets/eval.tasks.jsonl}"
+KILN_URL="${KILN_URL:-http://localhost:8420}"
+SEEDS="${SEEDS:-3}"
+ADAPTER_DIR="${ADAPTER_DIR:-/workspace/adapters}"
+SCORER="${SCORER:-./rubric.py}"
+OUT_FILE="${OUT_FILE:-/tmp/python-algo-eval-${ADAPTER:-base}.json}"
+KILN_BIN="${KILN_BIN:-kiln}"
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD="$HERE/.oracle-build"
-RUNNER="$BUILD/sandbox/eval_runner.py"
-
-if [ ! -f "$RUNNER" ]; then
-  echo "ORACLE_ERROR: eval runner missing at $RUNNER" >&2
+if ! curl -sf "$KILN_URL/v1/health" > /dev/null 2>&1; then
+  echo "ORACLE_ERROR: kiln-server not reachable at $KILN_URL" >&2
   exit 2
 fi
 
-ADAPTER="${1-}"
-
-mkdir -p "$BUILD/logs"
-LOG="$BUILD/logs/oracle_$(date +%s)_$$.log"
-
-# stderr -> log file (full diagnostics); stdout -> oracle stdout.
-# On success we print only the final SCORE line; on failure we surface the
-# ORACLE_ERROR / RuntimeError line on stderr.
-if ! python3 "$RUNNER" "$ADAPTER" 2>"$LOG"; then
-  grep -E '^(ORACLE_ERROR|RuntimeError):' "$LOG" >&2 || true
-  if ! grep -q '^ORACLE_ERROR' "$LOG"; then
-    echo "ORACLE_ERROR: eval runner failed (see oracle log)" >&2
-  fi
+if [ ! -f "$TASKS" ]; then
+  echo "ORACLE_ERROR: $TASKS missing — run build_corpus.py first" >&2
   exit 3
 fi
+
+"$KILN_BIN" eval-adapter \
+  --url "$KILN_URL" \
+  --adapter "${ADAPTER:-}" \
+  --adapter-dir "$ADAPTER_DIR" \
+  --tasks "$TASKS" \
+  --seeds "$SEEDS" \
+  --scorer "$SCORER" \
+  --output "$OUT_FILE" \
+  --thinking off
+
+python3 - "$OUT_FILE" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+mc = d.get("mean_composite")
+n  = d.get("n_tasks")
+print(f"SCORE={mc:.4f}")
+print(f"N={n}")
+for k, v in (d.get("sub_scores_mean") or {}).items():
+    print(f"{k}={v:.4f}")
+stdev = d.get("composite_stdev")
+if stdev is not None:
+    print(f"STDEV={stdev:.4f}")
+PY

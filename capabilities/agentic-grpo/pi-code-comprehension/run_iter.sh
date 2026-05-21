@@ -1,176 +1,194 @@
-#!/bin/bash
-# Run one complete iter of pi-code-comprehension GRPO on a runpod pod.
+#!/usr/bin/env bash
+# run_iter.sh — full iter recipe for pi-code-comprehension.
 #
-# Stages:
-#   1. (optional) training rollouts from a chosen adapter (or base)
-#   2. (optional) filter strong-signal groups (var > FILTER_VAR)
-#   3. (optional) GRPO step -> save adapter
-#   4. eval the resulting adapter (or specified --eval-adapter)
-#   5. backup artifacts to B2 (locally, on Cloud Eric, since B2 creds live there)
+# Pipeline (numbered by step in LAYOUT.md):
+#   0. Build corpus if datasets/train.tasks.jsonl missing.
+#   1. Gather training rollouts via pi.
+#   2. kiln trajectory inspect — sanity-check action/env masks.
+#   3. cuda_grpo_ablation --dry-run — pre-GPU validation.
+#   4. Real training with --filter-var-min, --adapter-smoke-test,
+#      --install-adapter-dir, --install-adapter-name.
+#   5. kiln adapter verify — adapter is loadable + behavioral.
+#   6. capability.oracle.sh — blind multi-seed eval (kiln eval-adapter).
+#   7. Append a row to capability.jsonl from train_receipt.json + eval summary.
 #
 # Usage:
-#   bash run_iter.sh --iter N --kind train|baseline|abl \
-#                    --num-train-tasks 20 --num-gens 4 \
-#                    --train-adapter "" --eval-adapter "pi-cc-iterN" \
-#                    --lr 1e-5 --filter-var 0.02 --max-wall 180 \
-#                    --rank 16 --alpha 32 --epochs 1 --seed 3141592653 \
-#                    [--skip-train] [--skip-eval] [--echo-lambda 0.05] \
-#                    [--no-echo] [--no-policy-loss]
-#
-# Requires `/tmp/grpo-pod.env` to be sourced with POD_ID, LEASE_ID, RP.
+#   ./run_iter.sh                       # default H1 recipe
+#   ./run_iter.sh h2-lower-lr           # named hypothesis
+#   ITER_NUM=3 ./run_iter.sh h3-warm    # override iter number in log
 set -euo pipefail
+cd "$(dirname "$0")"
 
-ITER=""
-KIND="train"
-NUM_TRAIN_TASKS=20
-NUM_GENS=4
-TRAIN_ADAPTER=""
-EVAL_ADAPTER=""
-LR="1e-5"
-FILTER_VAR="0.02"
-SKIP_TRAIN=0
-SKIP_EVAL=0
-SEED=3141592653
-EPOCHS=1
-RANK=16
-ALPHA=32
-ECHO_LAMBDA=""
-NO_ECHO=0
-NO_POLICY_LOSS=0
-MAX_WALL=180
-EVAL_TASKS=24
+SLUG="${1:-h1-default-recipe}"
+ITER_NUM="${ITER_NUM:-1}"
+CFG="capability.config.json"
+OUT_ROOT="${OUT_ROOT:-/tmp/pi-code-comprehension-iter-${SLUG}}"
+ROLLOUT_DIR="$OUT_ROOT/rollouts"
+ADAPTER_NAME="${ADAPTER_NAME:-pi-code-comprehension-${SLUG}}"
+ADAPTER_REGISTRY="${ADAPTER_DIR:-/workspace/adapters}"
+LOG_DIR="$OUT_ROOT/logs"
+KILN_BIN="${KILN_BIN:-/workspace/kiln/target/release/kiln}"
+CUDA_GRPO_BIN="${CUDA_GRPO_BIN:-/workspace/kiln/target/release/examples/cuda_grpo_ablation}"
+MODEL_PATH="${MODEL_PATH:-/workspace/qwen3.5-4b}"
+TRAIN_LIMIT="${TRAIN_LIMIT:-30}"
+NUM_GEN="${NUM_GEN:-4}"
+FILTER_VAR_MIN="${FILTER_VAR_MIN:-0.05}"
+SEED="${SEED:-3141592653}"
+LR="${LR:-1e-5}"
+RANK="${RANK:-16}"
+ALPHA="${ALPHA:-32}"
+ECHO_LAMBDA="${ECHO_LAMBDA:-0.05}"
+BASE_ADAPTER="${BASE_ADAPTER:-}"
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --iter) ITER="$2"; shift 2 ;;
-    --kind) KIND="$2"; shift 2 ;;
-    --num-train-tasks) NUM_TRAIN_TASKS="$2"; shift 2 ;;
-    --num-gens) NUM_GENS="$2"; shift 2 ;;
-    --train-adapter) TRAIN_ADAPTER="$2"; shift 2 ;;
-    --eval-adapter) EVAL_ADAPTER="$2"; shift 2 ;;
-    --lr) LR="$2"; shift 2 ;;
-    --filter-var) FILTER_VAR="$2"; shift 2 ;;
-    --skip-train) SKIP_TRAIN=1; shift ;;
-    --skip-eval) SKIP_EVAL=1; shift ;;
-    --seed) SEED="$2"; shift 2 ;;
-    --epochs) EPOCHS="$2"; shift 2 ;;
-    --rank) RANK="$2"; shift 2 ;;
-    --alpha) ALPHA="$2"; shift 2 ;;
-    --echo-lambda) ECHO_LAMBDA="$2"; shift 2 ;;
-    --no-echo) NO_ECHO=1; shift ;;
-    --no-policy-loss) NO_POLICY_LOSS=1; shift ;;
-    --max-wall) MAX_WALL="$2"; shift 2 ;;
-    --eval-tasks) EVAL_TASKS="$2"; shift 2 ;;
-    *) echo "unknown arg: $1" >&2; exit 1 ;;
-  esac
-done
+mkdir -p "$ROLLOUT_DIR" "$LOG_DIR"
 
-if [ -z "$ITER" ]; then echo "--iter required" >&2; exit 1; fi
-EVAL_ADAPTER="${EVAL_ADAPTER:-pi-cc-iter${ITER}}"
+echo "=== run_iter $SLUG (iter $ITER_NUM) for pi-code-comprehension ==="
+echo "  adapter:        $ADAPTER_NAME"
+echo "  registry:       $ADAPTER_REGISTRY"
+echo "  base adapter:   ${BASE_ADAPTER:-<none>}"
+echo "  echo lambda:    $ECHO_LAMBDA"
+echo "  filter-var-min: $FILTER_VAR_MIN"
+echo
 
-source /tmp/grpo-pod.env
-
-POD_REPO=/workspace/kiln/capabilities/agentic-grpo/pi-code-comprehension
-TRAIN_OUT="/tmp/iter${ITER}-rollouts"
-EVAL_OUT="/tmp/iter${ITER}-eval"
-ADAPTER_OUT="/tmp/iter${ITER}-adapter"
-TRAIN_LOG="/tmp/iter${ITER}-train.log"
-
-echo "== iter ${ITER} kind=${KIND} =="
-
-ECHO_FLAGS=()
-if [ "$NO_ECHO" = "1" ]; then ECHO_FLAGS+=("--no-echo"); fi
-if [ -n "$ECHO_LAMBDA" ]; then ECHO_FLAGS+=("--echo-lambda" "$ECHO_LAMBDA"); fi
-if [ "$NO_POLICY_LOSS" = "1" ]; then ECHO_FLAGS+=("--no-policy-loss"); fi
-
-############################################################################
-# 1+2+3 — training
-############################################################################
-if [ "$SKIP_TRAIN" = "0" ]; then
-  echo ">>> set train adapter -> '${TRAIN_ADAPTER:-(base)}'"
-  if [ -z "$TRAIN_ADAPTER" ] || [ "$TRAIN_ADAPTER" = "base" ]; then
-    python3 $RP ssh $POD_ID 'curl -sS -X POST http://localhost:8420/v1/adapters/unload >/dev/null || true'
-  else
-    python3 $RP ssh $POD_ID "curl -sS -X POST http://localhost:8420/v1/adapters/load -H 'Content-Type: application/json' -d '{\"name\":\"${TRAIN_ADAPTER}\"}'"
-  fi
-
-  echo ">>> training rollouts: N=${NUM_TRAIN_TASKS} tasks × ${NUM_GENS} gens"
-  python3 $RP bg $POD_ID "$TRAIN_LOG.rollout" \
-    "cd ${POD_REPO} && rm -rf ${TRAIN_OUT} && python3 rollout.py \
-      --tasks datasets/train.tasks.jsonl --task-limit ${NUM_TRAIN_TASKS} \
-      --out-dir ${TRAIN_OUT} --mode train --num-generations ${NUM_GENS} \
-      --max-wall-clock-s ${MAX_WALL} --concurrency 1 --verbose --adapter current 2>&1"
-  python3 $RP wait-file $POD_ID "${TRAIN_OUT}/summary.json" --timeout 7200
-
-  python3 $RP ssh $POD_ID "cat ${TRAIN_OUT}/summary.json | head -c 1200"
-
-  echo ">>> filter strong-signal groups (var > ${FILTER_VAR})"
-  python3 $RP ssh $POD_ID "python3 - <<PYEOF
-import json, statistics
-inp = '${TRAIN_OUT}/grpo-train.jsonl'
-out = '${TRAIN_OUT}/grpo-train-strong.jsonl'
-kept = 0; total = 0
-with open(out, 'w') as fo:
-    for line in open(inp):
-        total += 1
-        g = json.loads(line)
-        rewards = [c.get('reward', 0) for c in g.get('completions', [])]
-        if len(rewards) >= 2 and statistics.variance(rewards) > ${FILTER_VAR}:
-            fo.write(line); kept += 1
-print(f'kept {kept}/{total} strong-signal groups')
-PYEOF"
-
-  echo ">>> kill kiln serve, train GRPO step"
-  python3 $RP ssh $POD_ID 'pkill -9 -f "kiln serve" 2>/dev/null || true; sleep 3'
-
-  python3 $RP bg $POD_ID "$TRAIN_LOG" \
-    "cd /workspace/kiln && KILN_DISABLE_FUSED_GDN_GATES=1 KILN_BATCHING_ENGINE=0 KILN_MODEL_PATH=/workspace/qwen3.5-4b \
-      ./target/release/examples/cuda_grpo_ablation \
-      --data ${TRAIN_OUT}/grpo-train-strong.jsonl \
-      --model /workspace/qwen3.5-4b \
-      --output ${ADAPTER_OUT} \
-      --adapter pi-cc-iter${ITER} \
-      --mode phase1 --rank ${RANK} --alpha ${ALPHA} --lr ${LR} --seed ${SEED} \
-      ${ECHO_FLAGS[@]+\"\${ECHO_FLAGS[@]}\"} 2>&1"
-  python3 $RP wait-file $POD_ID "${ADAPTER_OUT}/pi-cc-iter${ITER}/adapter_model.safetensors" --timeout 1800
-
-  echo ">>> symlink adapter into kiln model dir"
-  python3 $RP ssh $POD_ID "ln -sfn ${ADAPTER_OUT}/pi-cc-iter${ITER} /workspace/qwen3.5-4b/adapters/pi-cc-iter${ITER}"
-
-  echo ">>> restart kiln serve"
-  python3 $RP bg $POD_ID /tmp/kiln-serve-iter${ITER}.log \
-    'cd /workspace/kiln && KILN_DISABLE_FUSED_GDN_GATES=1 KILN_BATCHING_ENGINE=0 KILN_MODEL_PATH=/workspace/qwen3.5-4b ./target/release/kiln serve 2>&1'
-  sleep 25
-  python3 $RP ssh $POD_ID "curl -sS http://localhost:8420/v1/adapters | head -c 400"
+# 0. Build corpus if missing.
+if [ ! -f datasets/train.tasks.jsonl ]; then
+  echo "[0/7] build_corpus…"
+  python3 build_corpus.py
 fi
 
-############################################################################
-# 4 — eval
-############################################################################
-if [ "$SKIP_EVAL" = "0" ]; then
-  echo ">>> load eval adapter: ${EVAL_ADAPTER}"
-  if [ -z "$EVAL_ADAPTER" ] || [ "$EVAL_ADAPTER" = "base" ]; then
-    python3 $RP ssh $POD_ID 'curl -sS -X POST http://localhost:8420/v1/adapters/unload >/dev/null || true'
-  else
-    python3 $RP ssh $POD_ID "curl -sS -X POST http://localhost:8420/v1/adapters/load -H 'Content-Type: application/json' -d '{\"name\":\"${EVAL_ADAPTER}\"}'"
-  fi
+# 1. Gather training rollouts.
+echo "[1/7] rollouts (pi)…"
+python3 rollout.py \
+  --tasks datasets/train.tasks.jsonl \
+  --out-dir "$ROLLOUT_DIR" \
+  --config "$CFG" \
+  --num-generations "$NUM_GEN" \
+  --mode train \
+  --limit "$TRAIN_LIMIT" \
+  2>&1 | tee "$LOG_DIR/rollout.log"
 
-  echo ">>> eval rollouts"
-  python3 $RP bg $POD_ID "/tmp/iter${ITER}-eval.log" \
-    "cd ${POD_REPO} && rm -rf ${EVAL_OUT} && python3 rollout.py \
-      --tasks datasets/eval.tasks.jsonl --task-limit ${EVAL_TASKS} \
-      --out-dir ${EVAL_OUT} --mode eval --num-generations 1 \
-      --max-wall-clock-s ${MAX_WALL} --adapter current --concurrency 1 --verbose 2>&1"
-  python3 $RP wait-file $POD_ID "${EVAL_OUT}/summary.json" --timeout 7200
+# 2. Trajectory inspector (kiln #10) — fails if no trainable action tokens.
+echo "[2/7] kiln trajectory inspect…"
+"$KILN_BIN" trajectory inspect "$ROLLOUT_DIR/grpo-train.jsonl" --json \
+  > "$LOG_DIR/trajectory_inspect.json"
 
-  echo ">>> eval done"
-  python3 $RP ssh $POD_ID "cat ${EVAL_OUT}/summary.json"
+# 3. Dry-run validation (kiln #9).
+echo "[3/7] cuda_grpo_ablation --dry-run…"
+ECHO_FLAGS="--echo-lambda $ECHO_LAMBDA"
+if [ "$ECHO_LAMBDA" = "0" ] || [ "$ECHO_LAMBDA" = "0.0" ]; then
+  ECHO_FLAGS="--no-echo"
+fi
+BASE_FLAGS=""
+if [ -n "$BASE_ADAPTER" ]; then
+  BASE_FLAGS="--base-adapter $BASE_ADAPTER"
 fi
 
-############################################################################
-# 5 — backup to B2 (locally — Cloud Eric has B2 creds)
-############################################################################
-echo ">>> backing up iter ${ITER} to B2"
-python3 ${0%/*}/backup_to_b2.py --iter ${ITER} --kind ${KIND} --pod ${POD_ID} || echo "backup failed (continuing)"
+KILN_CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}" "$CUDA_GRPO_BIN" \
+  --data "$ROLLOUT_DIR/grpo-train.jsonl" \
+  --model "$MODEL_PATH" \
+  --output "$OUT_ROOT/adapter" \
+  --adapter "$ADAPTER_NAME" \
+  --mode phase1 \
+  --rank "$RANK" --alpha "$ALPHA" --lr "$LR" \
+  --num-generations "$NUM_GEN" \
+  --seed "$SEED" \
+  --filter-var-min "$FILTER_VAR_MIN" \
+  $ECHO_FLAGS $BASE_FLAGS \
+  --dry-run \
+  2>&1 | tee "$LOG_DIR/dry-run.log"
 
-echo "== iter ${ITER} done =="
+# 4. Real training (kiln #5, #19, #22).
+echo "[4/7] cuda_grpo_ablation (training)…"
+KILN_CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}" "$CUDA_GRPO_BIN" \
+  --data "$ROLLOUT_DIR/grpo-train.jsonl" \
+  --model "$MODEL_PATH" \
+  --output "$OUT_ROOT/adapter" \
+  --adapter "$ADAPTER_NAME" \
+  --mode phase1 \
+  --rank "$RANK" --alpha "$ALPHA" --lr "$LR" \
+  --num-generations "$NUM_GEN" \
+  --seed "$SEED" \
+  --filter-var-min "$FILTER_VAR_MIN" \
+  $ECHO_FLAGS $BASE_FLAGS \
+  --adapter-smoke-test \
+  --install-adapter-dir "$ADAPTER_REGISTRY" \
+  --install-adapter-name "$ADAPTER_NAME" \
+  2>&1 | tee "$LOG_DIR/train.log"
+
+# 5. Verify (kiln #4).
+echo "[5/7] kiln adapter verify…"
+"$KILN_BIN" adapter verify "$ADAPTER_NAME" \
+  --adapter-dir "$ADAPTER_REGISTRY" \
+  --url http://localhost:8420 \
+  --json \
+  > "$LOG_DIR/verify.json"
+
+# 6. Blind eval (kiln #33).
+echo "[6/7] capability.oracle.sh…"
+OUT_FILE="$LOG_DIR/eval.json" SEEDS="${EVAL_SEEDS:-3}" \
+  ./capability.oracle.sh "$ADAPTER_NAME" \
+  2>&1 | tee "$LOG_DIR/eval.log"
+
+# 7. Append iter row from train_receipt.json + eval summary.
+echo "[7/7] append capability.jsonl…"
+TRAIN_RECEIPT="$OUT_ROOT/adapter/train_receipt.json" \
+EVAL_JSON="$LOG_DIR/eval.json" \
+VERIFY_JSON="$LOG_DIR/verify.json" \
+ITER_NUM="$ITER_NUM" \
+SLUG="$SLUG" \
+python3 - <<'PY'
+import json, os, time
+from pathlib import Path
+
+receipt = json.load(open(os.environ["TRAIN_RECEIPT"]))
+eval_sum = json.load(open(os.environ["EVAL_JSON"]))
+verify = json.load(open(os.environ["VERIFY_JSON"]))
+slug = os.environ["SLUG"]
+iter_num = int(os.environ["ITER_NUM"])
+
+row = {
+    "iter": iter_num,
+    "slug": slug,
+    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "status": eval_sum.get("status", "kept-with-caveat"),
+    "family": slug.split("-", 1)[0].upper(),
+    "rubric_version": eval_sum.get("rubric_version"),
+    "composite": eval_sum.get("mean_composite"),
+    "composite_delta": eval_sum.get("composite_delta"),
+    "sub_scores": eval_sum.get("sub_scores_mean"),
+    "verdict": eval_sum.get("verdict"),
+    "training": {
+        "lr": receipt.get("lr"),
+        "rank": receipt.get("rank"),
+        "alpha": receipt.get("alpha"),
+        "seed": receipt.get("seed"),
+        "echo_lambda": receipt.get("echo_lambda"),
+        "filter_var_min": receipt.get("filter_var_min"),
+        "groups_seen": receipt.get("groups_seen"),
+        "groups_kept": receipt.get("groups_kept"),
+        "wall_clock_s": receipt.get("wall_clock_s"),
+        "peak_vram_mib": receipt.get("peak_vram_mib"),
+        "lora_delta_norm_summary": receipt.get("lora_delta_norm_summary"),
+        "echo_metrics": receipt.get("echo_metrics"),
+    },
+    "rollout_stats": eval_sum.get("rollout_stats"),
+    "kiln_commit": receipt.get("kiln_commit"),
+    "adapter_manifest": receipt.get("adapter_manifest_path"),
+    "train_receipt": os.environ["TRAIN_RECEIPT"],
+    "verify": {
+        "loadable": verify.get("loadable"),
+        "behavioral": verify.get("behavioral"),
+        "logit_delta_summary": verify.get("logit_delta_summary"),
+    },
+    "notes": "",
+}
+with open("capability.jsonl", "a") as f:
+    f.write(json.dumps(row, sort_keys=True) + "\n")
+print("Appended iter %d %s composite=%s" % (row["iter"], row["slug"], row.get("composite")))
+PY
+
+echo
+echo "=== iter $SLUG complete ==="
+echo "  train_receipt: $OUT_ROOT/adapter/train_receipt.json"
+echo "  adapter:       $ADAPTER_REGISTRY/$ADAPTER_NAME"
+echo "  eval summary:  $LOG_DIR/eval.json"

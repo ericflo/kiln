@@ -1,7 +1,23 @@
 {
+  "schema_version": 2,
   "slug": "transcript-compaction",
+  "paradigm": "opd",
   "base_model_path": "/workspace/kiln/Qwen3.5-4B",
-  "kiln_server_url": "http://localhost:8420",
+  "kiln_url": "http://localhost:8420",
+  "adapter_dir": "/workspace/adapters",
+  "kiln_features_required": [
+    "kiln adapter verify (#4)",
+    "cuda_grpo_ablation --install-adapter-dir/--install-adapter-name (#5)",
+    "train_receipt.json (#8)",
+    "cuda_grpo_ablation --dry-run (#9)",
+    "kiln trajectory inspect (#10)",
+    "ECHO observability in train_receipt (#12)",
+    "kiln serve --eval-mode (#15)",
+    "--adapter-smoke-test (#19)",
+    "--filter-var-min (#22)",
+    "kiln eval-adapter --seeds N (#33)",
+    "adapter_manifest.json + kiln adapter restore (#36)"
+  ],
   "teacher": {
     "url": "http://localhost:8002",
     "served_name": "qwen3.6-27b-awq",
@@ -18,7 +34,9 @@
     "top_k": 8,
     "temperature": 1.0,
     "top_p": 0.9,
-    "streaming_prefill": true
+    "streaming_prefill": true,
+    "adapter_smoke_test": true,
+    "allow_high_lora_scale": false
   },
   "budget": {
     "max_iterations": 12,
@@ -45,5 +63,10 @@
     ],
     "composite_formula": "0.40*entity_recall + 0.30*entity_grounding + 0.15*length_band + 0.15*decision_retention",
     "direction": "higher_is_better"
+  },
+  "eval": {
+    "seeds": 3,
+    "max_tasks": null,
+    "thinking_mode": "off"
   }
 }

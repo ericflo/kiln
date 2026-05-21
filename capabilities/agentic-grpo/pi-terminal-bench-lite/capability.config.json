@@ -1,10 +1,26 @@
 {
+  "schema_version": 2,
+  "slug": "pi-terminal-bench-lite",
+  "paradigm": "agentic-grpo",
   "base_model_path": "/workspace/qwen3.5-4b",
   "kiln_url": "http://localhost:8420",
+  "adapter_dir": "/workspace/adapters",
+  "kiln_features_required": [
+    "kiln adapter verify (#4)",
+    "cuda_grpo_ablation --install-adapter-dir/--install-adapter-name (#5)",
+    "train_receipt.json (#8)",
+    "cuda_grpo_ablation --dry-run (#9)",
+    "kiln trajectory inspect (#10)",
+    "ECHO observability in train_receipt (#12)",
+    "kiln serve --eval-mode (#15)",
+    "--adapter-smoke-test (#19)",
+    "--filter-var-min (#22)",
+    "kiln eval-adapter --seeds N (#33)",
+    "adapter_manifest.json + kiln adapter restore (#36)"
+  ],
   "pi_bin": "/usr/bin/pi",
   "pi_model_id": "qwen-3.5-4b-kiln",
   "sandbox_root": "/tmp/pi-tblite-rollouts",
-  "max_iters": 6,
   "rollout": {
     "num_generations_train": 4,
     "num_generations_eval": 1,
@@ -16,20 +32,21 @@
     "parallel": 1
   },
   "training_phase1_defaults": {
+    "mode": "phase1",
     "advantage_mode": "dr_grpo",
     "loss_aggregation": "token_level",
     "kl_estimator": "k1",
     "kl_coeff": 0.1,
-    "clip_epsilon": 0.20,
+    "clip_epsilon": 0.2,
     "clip_eps_high": null,
     "dynamic_sampling": true,
     "is_level": "token",
     "reference_policy": "base_per_step",
-    "entropy_aware_kl_quantile": null,
-    "lr": 1e-5,
+    "lr": 1e-05,
     "rank": 16,
     "alpha": 32,
     "seed": 3141592653,
+    "filter_var_min": null,
     "loss": {
       "echo": {
         "lambda": 0.05,
@@ -37,12 +54,13 @@
         "warning_filter": true
       },
       "opd": null
-    }
+    },
+    "adapter_smoke_test": true,
+    "allow_high_lora_scale": false
   },
-  "dynamics_holdout": {
-    "teacher_model_id": "qwen-3.6-27b-or-best-available",
-    "teacher_endpoint_env": "KILN_TBLITE_TEACHER_URL",
-    "num_trajectories": 30,
-    "target_ce_reduction_pct": 30.0
+  "eval": {
+    "seeds": 3,
+    "max_tasks": null,
+    "thinking_mode": "off"
   }
 }

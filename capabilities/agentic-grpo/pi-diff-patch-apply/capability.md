@@ -258,3 +258,42 @@ ECHO default: λ=0.05, env-only mask, warning_filter=on.
 - `capabilities/agentic-grpo/pi-compaction/` — backup_to_b2 and drive_iters template.
 - `crates/kiln-train/src/echo.rs` — ECHO loss term.
 - `docs/plans/echo-integration-plan.md` §3.1, §3.3.
+
+
+## Round 2 setup
+
+This cap was normalized to the round-2 layout on 2026-05-21. The previous
+iter log and writeups are preserved in [`archive/`](archive/). The
+`capability.jsonl` starts empty for the new round.
+
+### Kiln features the new round uses
+
+- `kiln adapter verify` (#4) — adapter loadability + behavioral check.
+- `cuda_*` trainer `--install-adapter-dir` / `--install-adapter-name` (#5) —
+  atomic install into the registry; no more `output/adapter/` symlink bugs.
+- `train_receipt.json` (#8) — the canonical per-run artifact with kiln SHA,
+  data hashes, hyperparameters, LoRA delta norms, and ECHO metrics.
+- `cuda_grpo_ablation --dry-run` (#9) — pre-GPU validation of data, masks,
+  base-adapter shape, and saturated-reward warnings.
+- `kiln trajectory inspect` (#10) — Rust-native mask + token-count
+  diagnostic; replaces the Python `lib/pi_trajectory.py` for new code.
+- ECHO observability in receipt (#12) — env-token CE, action-token count,
+  warning-prefix masked-out byte count.
+- `kiln serve --eval-mode` (#15) — deterministic, no thinking, no
+  per-request adapter drift.
+- `--adapter-smoke-test` (#19) — post-train base-vs-adapter logit-delta check.
+- `--filter-var-min` (#22) — official strong-signal filtering.
+- `kiln eval-adapter --seeds N` (#33) — multi-seed paired-eval driver wrapped
+  by `capability.oracle.sh`.
+- `adapter_manifest.json` + `kiln adapter restore` (#36) — replaces ad-hoc B2
+  backup scripts.
+
+### Workflow
+
+```bash
+./capability.oracle.sh                     # baseline (no adapter)
+./run_iter.sh h1-default-recipe            # first training iter
+./run_iter.sh h2-lower-lr                  # subsequent
+```
+
+See [`run_iter.sh`](run_iter.sh) for the full pipeline.

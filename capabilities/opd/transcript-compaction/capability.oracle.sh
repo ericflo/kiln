@@ -1,59 +1,56 @@
 #!/usr/bin/env bash
+# capability.oracle.sh — blind eval driver for transcript-compaction.
+#
+# Wraps `kiln eval-adapter` (KILN_IMPROVEMENT_ISSUES.md #33) — multi-seed,
+# paired eval, base-vs-adapter comparison, sigma-vs-lift warning, writes a
+# stable eval_summary.json schema.
+#
+# Usage:
+#   ./capability.oracle.sh             # eval base
+#   ./capability.oracle.sh my-adapter  # eval one adapter
+#   SEEDS=5 ./capability.oracle.sh my-adapter
 set -euo pipefail
-ADAPTER="${1:-}"
-EVAL_FILE="datasets/eval.jsonl"
-KILN_URL="${KILN_URL:-http://localhost:8420}"
+cd "$(dirname "$0")"
 
-if ! curl -sf "$KILN_URL/v1/models" > /dev/null 2>&1; then
+ADAPTER="${1:-}"
+TASKS="${TASKS:-datasets/eval.tasks.jsonl}"
+KILN_URL="${KILN_URL:-http://localhost:8420}"
+SEEDS="${SEEDS:-3}"
+ADAPTER_DIR="${ADAPTER_DIR:-/workspace/adapters}"
+SCORER="${SCORER:-./rubric.py}"
+OUT_FILE="${OUT_FILE:-/tmp/transcript-compaction-eval-${ADAPTER:-base}.json}"
+KILN_BIN="${KILN_BIN:-kiln}"
+
+if ! curl -sf "$KILN_URL/v1/health" > /dev/null 2>&1; then
   echo "ORACLE_ERROR: kiln-server not reachable at $KILN_URL" >&2
   exit 2
 fi
 
-python3 - "$ADAPTER" "$EVAL_FILE" "$KILN_URL" <<'PY'
-import json, sys, urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
-sys.path.insert(0, ".")
-from rubric import score_response
+if [ ! -f "$TASKS" ]; then
+  echo "ORACLE_ERROR: $TASKS missing — run build_corpus.py first" >&2
+  exit 3
+fi
 
-adapter, eval_file, url = sys.argv[1], sys.argv[2], sys.argv[3]
-prompts = []
-with open(eval_file) as f:
-    for line in f:
-        if line.strip():
-            prompts.append(json.loads(line))
+"$KILN_BIN" eval-adapter \
+  --url "$KILN_URL" \
+  --adapter "${ADAPTER:-}" \
+  --adapter-dir "$ADAPTER_DIR" \
+  --tasks "$TASKS" \
+  --seeds "$SEEDS" \
+  --scorer "$SCORER" \
+  --output "$OUT_FILE" \
+  --thinking off
 
-
-def request_one(prompt):
-    body = {"messages": prompt["messages"][:-1], "max_tokens": 300,
-            "temperature": 0.0, "chat_template_kwargs": {"enable_thinking": False}}
-    if adapter and adapter not in ("base","none",""):
-        body["adapter"] = adapter
-    req = urllib.request.Request(f"{url}/v1/chat/completions",
-        data=json.dumps(body).encode(), headers={"Content-Type":"application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=180) as r:
-            d = json.loads(r.read())
-        resp = d["choices"][0]["message"].get("content") or ""
-    except Exception:
-        resp = ""
-    return {"transcript": prompt["transcript"], "response": resp}
-
-
-with ThreadPoolExecutor(max_workers=4) as exe:
-    futs = [exe.submit(request_one, p) for p in prompts]
-    results = [f.result() for f in as_completed(futs)]
-
-sums = {"entity_recall":0.0, "entity_grounding":0.0, "length_band":0.0,
-        "decision_retention":0.0, "composite":0.0}
-n = 0
-for r in results:
-    s = score_response(r["transcript"], r["response"])
-    for k in sums:
-        sums[k] += s[k]
-    n += 1
-
-print(f"SCORE={sums['composite']/n:.4f}")
-for k in ["entity_recall","entity_grounding","length_band","decision_retention"]:
-    print(f"{k}={sums[k]/n:.4f}")
+python3 - "$OUT_FILE" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+mc = d.get("mean_composite")
+n  = d.get("n_tasks")
+print(f"SCORE={mc:.4f}")
 print(f"N={n}")
+for k, v in (d.get("sub_scores_mean") or {}).items():
+    print(f"{k}={v:.4f}")
+stdev = d.get("composite_stdev")
+if stdev is not None:
+    print(f"STDEV={stdev:.4f}")
 PY

@@ -1,26 +1,31 @@
-# Capabilities tree gitignore.
+# Capabilities tree gitignore (round 2).
+#
+# See ../LAYOUT.md for the uniform layout this gitignore enforces.
 #
 # Policy: this directory holds capability *experiments*. We commit:
-#   - rubric.py, build_corpus.py, oracle.sh         (the contract — reviewable)
 #   - capability.md, capability.config.json         (the spec)
-#   - capability.jsonl                              (append-only log)
-#   - hypotheses/*.md                               (planning + verdicts)
-#   - prompts/*.jsonl                               (your training prompts)
-#   - datasets/train.opd.jsonl                      (your training data)
-#   - calibration/{good,bad}.jsonl                  (rubric sanity)
-#   - kiln-polish.jsonl                             (rough-edges ledger)
-#   - run_iter*.sh, eval_adapter.sh, reproduce.sh   (replay scripts)
-#   - manifest/<iter>.json                          (reproducibility manifest)
+#   - capability.jsonl                              (append-only iter log)
+#   - rubric.py, rubric_sanity.py                   (composite reward + sanity)
+#   - build_corpus.py, rollout.py                   (contract; reviewable)
+#   - capability.oracle.sh, run_iter.sh             (run scripts)
+#   - capability.anchor.sh                          (SFT regression watch)
+#   - hypotheses/<slug>.md                          (planning + verdicts)
+#   - prompts/train.jsonl                           (OPD/SFT training prompts)
+#   - datasets/train.tasks.jsonl                    (the training tasks)
+#   - calibration/{good,bad}.jsonl                  (rubric sanity fixtures)
+#   - manifest/<iter>.json                          (reproducibility manifests)
+#   - archive/                                      (round-1 history)
 #
 # We do NOT commit:
 
 # --- Blind-eval firewall: never let eval contents or per-example judgments enter git ---
 **/datasets/eval.jsonl
+**/datasets/eval.tasks.jsonl
 **/judgments/
 
 # --- Adapter binaries: regenerable from training data + manifest + git SHA ---
-# (the manifest + train.opd.jsonl + capability.config.json must be sufficient
-#  to recompute the adapter; if you can't reproduce, that's a manifest bug)
+# Round 2: kiln #5 + #36 — adapter_manifest.json + kiln adapter restore is the
+# canonical provenance; the binary lives in /workspace/adapters or B2.
 **/adapters/
 
 # --- Teacher fixture caches: large, regenerable from teacher + prompts ---
@@ -32,6 +37,13 @@
 **/experiments/
 **/.oracle-build/
 **/.eval/
+**/iter-artifacts/
+
+# --- Round 2: trainer-owned per-run artifacts are written under /tmp ---
+# but if they slip into a cap dir, don't commit them.
+**/train_receipt.json
+**/adapter_receipt.json
+**/eval_summary.json
 
 # --- All log files at any depth ---
 **/*.log

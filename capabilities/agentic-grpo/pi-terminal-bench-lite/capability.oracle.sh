@@ -1,28 +1,56 @@
 #!/usr/bin/env bash
-# capability.oracle.sh — Blind eval for pi-terminal-bench-lite.
+# capability.oracle.sh — blind eval driver for pi-terminal-bench-lite.
 #
-# Usage: ./capability.oracle.sh <adapter_name>
-#   <adapter_name> = "" means base model (no adapter loaded)
+# Wraps `kiln eval-adapter` (KILN_IMPROVEMENT_ISSUES.md #33) — multi-seed,
+# paired eval, base-vs-adapter comparison, sigma-vs-lift warning, writes a
+# stable eval_summary.json schema.
 #
-# Runs the 30-task held-out eval set and prints `SCORE=<composite>`
-# plus per-sub-score breakdown.
+# Usage:
+#   ./capability.oracle.sh             # eval base
+#   ./capability.oracle.sh my-adapter  # eval one adapter
+#   SEEDS=5 ./capability.oracle.sh my-adapter
 set -euo pipefail
+cd "$(dirname "$0")"
 
 ADAPTER="${1:-}"
-HERE="$(cd "$(dirname "$0")" && pwd)"
-CONFIG="$HERE/capability.config.json"
-OUT_DIR="${OUT_DIR:-/tmp/pi-tblite-eval-$$}"
+TASKS="${TASKS:-datasets/eval.tasks.jsonl}"
+KILN_URL="${KILN_URL:-http://localhost:8420}"
+SEEDS="${SEEDS:-3}"
+ADAPTER_DIR="${ADAPTER_DIR:-/workspace/adapters}"
+SCORER="${SCORER:-./rubric.py}"
+OUT_FILE="${OUT_FILE:-/tmp/pi-terminal-bench-lite-eval-${ADAPTER:-base}.json}"
+KILN_BIN="${KILN_BIN:-kiln}"
 
-mkdir -p "$OUT_DIR"
+if ! curl -sf "$KILN_URL/v1/health" > /dev/null 2>&1; then
+  echo "ORACLE_ERROR: kiln-server not reachable at $KILN_URL" >&2
+  exit 2
+fi
 
-python3 "$HERE/rollout.py" \
-  --tasks "$HERE/datasets/eval.tasks.jsonl" \
-  --config "$CONFIG" \
-  --out-dir "$OUT_DIR" \
-  --mode eval \
-  --adapter "$ADAPTER"
+if [ ! -f "$TASKS" ]; then
+  echo "ORACLE_ERROR: $TASKS missing — run build_corpus.py first" >&2
+  exit 3
+fi
 
-# rollout.py writes <OUT_DIR>/eval.json with {mean_composite, sub_scores, ...}
-COMPOSITE=$(python3 -c "import json; d=json.load(open('$OUT_DIR/eval.json')); print(d['mean_composite'])")
-echo "SCORE=$COMPOSITE"
-echo "DETAILS=$OUT_DIR/eval.json"
+"$KILN_BIN" eval-adapter \
+  --url "$KILN_URL" \
+  --adapter "${ADAPTER:-}" \
+  --adapter-dir "$ADAPTER_DIR" \
+  --tasks "$TASKS" \
+  --seeds "$SEEDS" \
+  --scorer "$SCORER" \
+  --output "$OUT_FILE" \
+  --thinking off
+
+python3 - "$OUT_FILE" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+mc = d.get("mean_composite")
+n  = d.get("n_tasks")
+print(f"SCORE={mc:.4f}")
+print(f"N={n}")
+for k, v in (d.get("sub_scores_mean") or {}).items():
+    print(f"{k}={v:.4f}")
+stdev = d.get("composite_stdev")
+if stdev is not None:
+    print(f"STDEV={stdev:.4f}")
+PY

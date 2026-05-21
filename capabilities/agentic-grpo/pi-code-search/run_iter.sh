@@ -1,302 +1,194 @@
 #!/usr/bin/env bash
-# Run one pi-code-search iteration end-to-end.
+# run_iter.sh — full iter recipe for pi-code-search.
+#
+# Pipeline (numbered by step in LAYOUT.md):
+#   0. Build corpus if datasets/train.tasks.jsonl missing.
+#   1. Gather training rollouts via pi.
+#   2. kiln trajectory inspect — sanity-check action/env masks.
+#   3. cuda_grpo_ablation --dry-run — pre-GPU validation.
+#   4. Real training with --filter-var-min, --adapter-smoke-test,
+#      --install-adapter-dir, --install-adapter-name.
+#   5. kiln adapter verify — adapter is loadable + behavioral.
+#   6. capability.oracle.sh — blind multi-seed eval (kiln eval-adapter).
+#   7. Append a row to capability.jsonl from train_receipt.json + eval summary.
 #
 # Usage:
-#   ITER=N SLUG=hX-name [other env...] ./run_iter.sh
-#
-# Required env:
-#   ITER       — integer iter number (used for output dir naming).
-#   SLUG       — hypothesis slug, e.g. h1-default-recipe.
-#
-# Optional env (with sensible defaults):
-#   TRAIN_TASKS    — datasets/train.tasks.jsonl
-#   TRAIN_LIMIT    — N train tasks to use this iter (0 = all)
-#   NUM_GEN        — N rollouts per task (default 4)
-#   MAX_WALL       — per-rollout wall-clock cap seconds (default 90)
-#   LR             — GRPO lr (default 1e-5)
-#   RANK / ALPHA   — LoRA rank/alpha (default 16/32)
-#   MAX_GROUPS     — train-step cap (default = number of train tasks)
-#   EPOCHS         — passes over the data (default 1)
-#   ECHO_LAMBDA    — ECHO weight (default 0.05)
-#   FILTER_VAR     — drop groups with variance < FILTER_VAR (default 0.0)
-#   FILTER_HEAD_FRAC — drop top-FRAC by mean reward (default 0.0 keeps all)
-#   SEED           — training seed (default 3141592653)
-#   SHUFFLE_SEED   — rollout shuffle seed (default same as SEED)
-#   ADAPTER_NAME   — override adapter name (default pi-code-search-iter<N>-<SLUG>)
-#   BASE_DIR       — where to write outputs (default /workspace/pi-code-search-iter${ITER})
-#   KILN_MODEL_PATH — path to base model (default /workspace/qwen3.5-4b)
-#   KILN_URL       — kiln-server endpoint (default http://localhost:8420)
-#   SKIP_TRAIN     — if 1, only rollout+eval (used for baseline iters)
-#   SKIP_EVAL      — if 1, skip eval step (used for rollout-only iters)
-#   EVAL_ONLY      — if 1, only run eval (skip rollouts and training)
-#
-# This script is designed to be re-invokable: it will not destroy an
-# existing $BASE_DIR but it WILL overwrite intermediate logs.
+#   ./run_iter.sh                       # default H1 recipe
+#   ./run_iter.sh h2-lower-lr           # named hypothesis
+#   ITER_NUM=3 ./run_iter.sh h3-warm    # override iter number in log
 set -euo pipefail
+cd "$(dirname "$0")"
 
-CAP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$CAP_DIR"
-
-: "${ITER:?ITER required}"
-: "${SLUG:?SLUG required}"
-
-TRAIN_TASKS="${TRAIN_TASKS:-datasets/train.tasks.jsonl}"
-EVAL_TASKS="${EVAL_TASKS:-datasets/eval.tasks.jsonl}"
+SLUG="${1:-h1-default-recipe}"
+ITER_NUM="${ITER_NUM:-1}"
+CFG="capability.config.json"
+OUT_ROOT="${OUT_ROOT:-/tmp/pi-code-search-iter-${SLUG}}"
+ROLLOUT_DIR="$OUT_ROOT/rollouts"
+ADAPTER_NAME="${ADAPTER_NAME:-pi-code-search-${SLUG}}"
+ADAPTER_REGISTRY="${ADAPTER_DIR:-/workspace/adapters}"
+LOG_DIR="$OUT_ROOT/logs"
+KILN_BIN="${KILN_BIN:-/workspace/kiln/target/release/kiln}"
+CUDA_GRPO_BIN="${CUDA_GRPO_BIN:-/workspace/kiln/target/release/examples/cuda_grpo_ablation}"
+MODEL_PATH="${MODEL_PATH:-/workspace/qwen3.5-4b}"
 TRAIN_LIMIT="${TRAIN_LIMIT:-30}"
 NUM_GEN="${NUM_GEN:-4}"
-EVAL_NUM_GEN="${EVAL_NUM_GEN:-1}"
-MAX_WALL="${MAX_WALL:-120}"
-PARALLEL="${PARALLEL:-2}"
-EVAL_PARALLEL="${EVAL_PARALLEL:-2}"
+FILTER_VAR_MIN="${FILTER_VAR_MIN:-0.05}"
+SEED="${SEED:-3141592653}"
 LR="${LR:-1e-5}"
 RANK="${RANK:-16}"
 ALPHA="${ALPHA:-32}"
-MAX_GROUPS="${MAX_GROUPS:-}"
-EPOCHS="${EPOCHS:-1}"
 ECHO_LAMBDA="${ECHO_LAMBDA:-0.05}"
-FILTER_VAR="${FILTER_VAR:-0.0}"
-FILTER_HEAD_FRAC="${FILTER_HEAD_FRAC:-0.0}"
-SEED="${SEED:-3141592653}"
-SHUFFLE_SEED="${SHUFFLE_SEED:-$SEED}"
-ADAPTER_NAME="${ADAPTER_NAME:-pi-code-search-iter${ITER}-${SLUG}}"
-BASE_DIR="${BASE_DIR:-/workspace/pi-code-search-iter${ITER}}"
-KILN_MODEL_PATH="${KILN_MODEL_PATH:-/workspace/qwen3.5-4b}"
-KILN_URL="${KILN_URL:-http://localhost:8420}"
-KILN_BIN="${KILN_BIN:-/workspace/kiln/target/release/kiln}"
-GRPO_BIN="${GRPO_BIN:-/workspace/kiln/target/release/examples/cuda_grpo_ablation}"
+BASE_ADAPTER="${BASE_ADAPTER:-}"
 
-mkdir -p "$BASE_DIR" "$BASE_DIR/logs"
+mkdir -p "$ROLLOUT_DIR" "$LOG_DIR"
 
-# Persist hyperparams for reproducibility.
-cat > "$BASE_DIR/manifest.json" <<EOF
-{
-  "iter": $ITER,
-  "slug": "$SLUG",
-  "ts": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "train_tasks": "$TRAIN_TASKS",
-  "eval_tasks": "$EVAL_TASKS",
-  "train_limit": $TRAIN_LIMIT,
-  "num_gen": $NUM_GEN,
-  "eval_num_gen": $EVAL_NUM_GEN,
-  "max_wall": $MAX_WALL,
-  "lr": "$LR",
-  "rank": $RANK,
-  "alpha": $ALPHA,
-  "epochs": $EPOCHS,
-  "echo_lambda": "$ECHO_LAMBDA",
-  "filter_var": "$FILTER_VAR",
-  "filter_head_frac": "$FILTER_HEAD_FRAC",
-  "seed": $SEED,
-  "shuffle_seed": $SHUFFLE_SEED,
-  "adapter_name": "$ADAPTER_NAME",
-  "base_dir": "$BASE_DIR"
+echo "=== run_iter $SLUG (iter $ITER_NUM) for pi-code-search ==="
+echo "  adapter:        $ADAPTER_NAME"
+echo "  registry:       $ADAPTER_REGISTRY"
+echo "  base adapter:   ${BASE_ADAPTER:-<none>}"
+echo "  echo lambda:    $ECHO_LAMBDA"
+echo "  filter-var-min: $FILTER_VAR_MIN"
+echo
+
+# 0. Build corpus if missing.
+if [ ! -f datasets/train.tasks.jsonl ]; then
+  echo "[0/7] build_corpus…"
+  python3 build_corpus.py
+fi
+
+# 1. Gather training rollouts.
+echo "[1/7] rollouts (pi)…"
+python3 rollout.py \
+  --tasks datasets/train.tasks.jsonl \
+  --out-dir "$ROLLOUT_DIR" \
+  --config "$CFG" \
+  --num-generations "$NUM_GEN" \
+  --mode train \
+  --limit "$TRAIN_LIMIT" \
+  2>&1 | tee "$LOG_DIR/rollout.log"
+
+# 2. Trajectory inspector (kiln #10) — fails if no trainable action tokens.
+echo "[2/7] kiln trajectory inspect…"
+"$KILN_BIN" trajectory inspect "$ROLLOUT_DIR/grpo-train.jsonl" --json \
+  > "$LOG_DIR/trajectory_inspect.json"
+
+# 3. Dry-run validation (kiln #9).
+echo "[3/7] cuda_grpo_ablation --dry-run…"
+ECHO_FLAGS="--echo-lambda $ECHO_LAMBDA"
+if [ "$ECHO_LAMBDA" = "0" ] || [ "$ECHO_LAMBDA" = "0.0" ]; then
+  ECHO_FLAGS="--no-echo"
+fi
+BASE_FLAGS=""
+if [ -n "$BASE_ADAPTER" ]; then
+  BASE_FLAGS="--base-adapter $BASE_ADAPTER"
+fi
+
+KILN_CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}" "$CUDA_GRPO_BIN" \
+  --data "$ROLLOUT_DIR/grpo-train.jsonl" \
+  --model "$MODEL_PATH" \
+  --output "$OUT_ROOT/adapter" \
+  --adapter "$ADAPTER_NAME" \
+  --mode phase1 \
+  --rank "$RANK" --alpha "$ALPHA" --lr "$LR" \
+  --num-generations "$NUM_GEN" \
+  --seed "$SEED" \
+  --filter-var-min "$FILTER_VAR_MIN" \
+  $ECHO_FLAGS $BASE_FLAGS \
+  --dry-run \
+  2>&1 | tee "$LOG_DIR/dry-run.log"
+
+# 4. Real training (kiln #5, #19, #22).
+echo "[4/7] cuda_grpo_ablation (training)…"
+KILN_CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}" "$CUDA_GRPO_BIN" \
+  --data "$ROLLOUT_DIR/grpo-train.jsonl" \
+  --model "$MODEL_PATH" \
+  --output "$OUT_ROOT/adapter" \
+  --adapter "$ADAPTER_NAME" \
+  --mode phase1 \
+  --rank "$RANK" --alpha "$ALPHA" --lr "$LR" \
+  --num-generations "$NUM_GEN" \
+  --seed "$SEED" \
+  --filter-var-min "$FILTER_VAR_MIN" \
+  $ECHO_FLAGS $BASE_FLAGS \
+  --adapter-smoke-test \
+  --install-adapter-dir "$ADAPTER_REGISTRY" \
+  --install-adapter-name "$ADAPTER_NAME" \
+  2>&1 | tee "$LOG_DIR/train.log"
+
+# 5. Verify (kiln #4).
+echo "[5/7] kiln adapter verify…"
+"$KILN_BIN" adapter verify "$ADAPTER_NAME" \
+  --adapter-dir "$ADAPTER_REGISTRY" \
+  --url http://localhost:8420 \
+  --json \
+  > "$LOG_DIR/verify.json"
+
+# 6. Blind eval (kiln #33).
+echo "[6/7] capability.oracle.sh…"
+OUT_FILE="$LOG_DIR/eval.json" SEEDS="${EVAL_SEEDS:-3}" \
+  ./capability.oracle.sh "$ADAPTER_NAME" \
+  2>&1 | tee "$LOG_DIR/eval.log"
+
+# 7. Append iter row from train_receipt.json + eval summary.
+echo "[7/7] append capability.jsonl…"
+TRAIN_RECEIPT="$OUT_ROOT/adapter/train_receipt.json" \
+EVAL_JSON="$LOG_DIR/eval.json" \
+VERIFY_JSON="$LOG_DIR/verify.json" \
+ITER_NUM="$ITER_NUM" \
+SLUG="$SLUG" \
+python3 - <<'PY'
+import json, os, time
+from pathlib import Path
+
+receipt = json.load(open(os.environ["TRAIN_RECEIPT"]))
+eval_sum = json.load(open(os.environ["EVAL_JSON"]))
+verify = json.load(open(os.environ["VERIFY_JSON"]))
+slug = os.environ["SLUG"]
+iter_num = int(os.environ["ITER_NUM"])
+
+row = {
+    "iter": iter_num,
+    "slug": slug,
+    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "status": eval_sum.get("status", "kept-with-caveat"),
+    "family": slug.split("-", 1)[0].upper(),
+    "rubric_version": eval_sum.get("rubric_version"),
+    "composite": eval_sum.get("mean_composite"),
+    "composite_delta": eval_sum.get("composite_delta"),
+    "sub_scores": eval_sum.get("sub_scores_mean"),
+    "verdict": eval_sum.get("verdict"),
+    "training": {
+        "lr": receipt.get("lr"),
+        "rank": receipt.get("rank"),
+        "alpha": receipt.get("alpha"),
+        "seed": receipt.get("seed"),
+        "echo_lambda": receipt.get("echo_lambda"),
+        "filter_var_min": receipt.get("filter_var_min"),
+        "groups_seen": receipt.get("groups_seen"),
+        "groups_kept": receipt.get("groups_kept"),
+        "wall_clock_s": receipt.get("wall_clock_s"),
+        "peak_vram_mib": receipt.get("peak_vram_mib"),
+        "lora_delta_norm_summary": receipt.get("lora_delta_norm_summary"),
+        "echo_metrics": receipt.get("echo_metrics"),
+    },
+    "rollout_stats": eval_sum.get("rollout_stats"),
+    "kiln_commit": receipt.get("kiln_commit"),
+    "adapter_manifest": receipt.get("adapter_manifest_path"),
+    "train_receipt": os.environ["TRAIN_RECEIPT"],
+    "verify": {
+        "loadable": verify.get("loadable"),
+        "behavioral": verify.get("behavioral"),
+        "logit_delta_summary": verify.get("logit_delta_summary"),
+    },
+    "notes": "",
 }
-EOF
-echo "manifest: $BASE_DIR/manifest.json"
-
-# Sanity: kiln-server reachable?
-if ! curl -sf "$KILN_URL/v1/models" > /dev/null 2>&1; then
-  echo "ERROR: kiln-server not reachable at $KILN_URL" >&2
-  exit 2
-fi
-
-# ----------------------------------------------------------------------------
-# Step 1: Rollouts (train mode produces a grpo-train.jsonl)
-# ----------------------------------------------------------------------------
-ROLLOUT_DIR="$BASE_DIR/rollouts"
-mkdir -p "$ROLLOUT_DIR"
-
-if [ "${EVAL_ONLY:-0}" != "1" ] && [ "${SKIP_TRAIN:-0}" != "1" ]; then
-  echo "[iter $ITER] rollout pass: $TRAIN_LIMIT tasks × $NUM_GEN gens"
-  # Use base adapter for rollouts (we're sampling from the current model).
-  python3 rollout.py \
-    --tasks "$TRAIN_TASKS" \
-    --out-dir "$ROLLOUT_DIR" \
-    --adapter "" \
-    --num-generations "$NUM_GEN" \
-    --mode train \
-    --kiln-url "$KILN_URL" \
-    --max-wall-clock-s "$MAX_WALL" \
-    --parallel "$PARALLEL" \
-    --limit "$TRAIN_LIMIT" \
-    --shuffle-seed "$SHUFFLE_SEED" \
-    --verbose \
-    2>&1 | tee "$BASE_DIR/logs/rollout.log"
-fi
-
-# ----------------------------------------------------------------------------
-# Step 2: optional filtering of grpo-train.jsonl (variance + head)
-# ----------------------------------------------------------------------------
-ORIG_GRPO_JSONL="$ROLLOUT_DIR/grpo-train.jsonl"
-GRPO_JSONL="$ORIG_GRPO_JSONL"
-
-if [ "${EVAL_ONLY:-0}" != "1" ] && [ -f "$ORIG_GRPO_JSONL" ]; then
-  FILT_JSONL="$ROLLOUT_DIR/grpo-train.filtered.jsonl"
-  python3 - "$ORIG_GRPO_JSONL" "$FILT_JSONL" "$FILTER_VAR" "$FILTER_HEAD_FRAC" <<'PY'
-import json, sys
-src, dst, fv_s, fh_s = sys.argv[1:5]
-fv = float(fv_s)
-fh = float(fh_s)
-groups = []
-with open(src) as f:
-    for line in f:
-        line = line.strip()
-        if not line: continue
-        groups.append(json.loads(line))
-
-def gvar(g):
-    rs = [c["reward"] for c in g["completions"]]
-    if not rs: return 0.0
-    m = sum(rs)/len(rs)
-    return sum((r-m)**2 for r in rs)/len(rs)
-
-def gmean(g):
-    rs = [c["reward"] for c in g["completions"]]
-    return sum(rs)/len(rs) if rs else 0.0
-
-# Mandatory: drop empty/placeholder trajectories. They render with a
-# different prompt length than non-empty ones (the chat template adds
-# an `<|im_start|>assistant\n` marker only when there's actual content
-# to follow), which causes the trainer's prompt-length-equality check
-# to fail with "GRPO completions have different prompt lengths".
-out_groups = []
-for g in groups:
-    keep = []
-    for c in g["completions"]:
-        traj = c.get("trajectory", [])
-        if not traj:
-            continue
-        # Drop completions whose text is the literal placeholder.
-        if c.get("text") == "(empty)":
-            continue
-        keep.append(c)
-    if len(keep) >= 2:
-        g["completions"] = keep
-        out_groups.append(g)
-print(f"after drop-empty: {len(out_groups)}/{len(groups)} groups", flush=True)
-groups = out_groups
-
-# Variance filter.
-if fv > 0:
-    groups = [g for g in groups if gvar(g) >= fv]
-# Drop top-FRAC by mean reward (the "trivially easy" tasks).
-if fh > 0 and groups:
-    sg = sorted(groups, key=gmean, reverse=True)
-    drop = int(len(sg)*fh)
-    keep = sg[drop:]
-    groups = keep
-
-with open(dst, "w") as f:
-    for g in groups:
-        f.write(json.dumps(g)+"\n")
-print(f"filtered: {len(groups)} groups → {dst}", flush=True)
+with open("capability.jsonl", "a") as f:
+    f.write(json.dumps(row, sort_keys=True) + "\n")
+print("Appended iter %d %s composite=%s" % (row["iter"], row["slug"], row.get("composite")))
 PY
-  if [ -s "$FILT_JSONL" ]; then
-    GRPO_JSONL="$FILT_JSONL"
-  fi
-fi
 
-# ----------------------------------------------------------------------------
-# Step 3: Training (cuda_grpo_ablation)
-# ----------------------------------------------------------------------------
-ADAPTER_OUT="$BASE_DIR/adapter"
-
-if [ "${EVAL_ONLY:-0}" != "1" ] && [ "${SKIP_TRAIN:-0}" != "1" ] && [ -s "$GRPO_JSONL" ]; then
-  echo "[iter $ITER] training adapter: $ADAPTER_NAME"
-  # The kiln-server is holding VRAM. Kill it before training, then restart
-  # at the end via the caller's outer loop.
-  pkill -9 -f "kiln serve" 2>/dev/null || true
-  sleep 2
-
-  N_GROUPS_FILE=$(wc -l < "$GRPO_JSONL")
-  EFF_MAX_GROUPS="${MAX_GROUPS:-$N_GROUPS_FILE}"
-
-  ECHO_ARG=()
-  if [ "${NO_ECHO:-0}" = "1" ]; then
-    ECHO_ARG=(--no-echo)
-  else
-    ECHO_ARG=(--echo-lambda "$ECHO_LAMBDA")
-  fi
-  # A6000 / H100 workaround: the `kiln_gdn_gates_bf16` kernel and the
-  # fused GDN backend both crash in cuda_grpo_ablation's shared-prefix
-  # reference forward. Verified-working minimal set of disable flags
-  # (see /workspace/test-train.log — 182s on 3 groups, no kernel error):
-  export KILN_BATCHING_ENGINE=0
-  export KILN_DISABLE_FUSED_GDN_GATES=1
-  export KILN_DISABLE_GDN_KERNEL=1
-  set -x
-  for ep in $(seq 1 "$EPOCHS"); do
-    "$GRPO_BIN" \
-      --data "$GRPO_JSONL" \
-      --model "$KILN_MODEL_PATH" \
-      --output "$ADAPTER_OUT" \
-      --adapter "$ADAPTER_NAME" \
-      --mode phase1 \
-      --max-groups "$EFF_MAX_GROUPS" \
-      --rank "$RANK" --alpha "$ALPHA" --lr "$LR" \
-      --seed "$SEED" \
-      "${ECHO_ARG[@]}" \
-      2>&1 | tee -a "$BASE_DIR/logs/train.log"
-  done
-  set +x
-
-  # Symlink the adapter into kiln-server's adapter dir so /v1/adapters/load
-  # finds it. cuda_grpo_ablation writes weights to $ADAPTER_OUT/$ADAPTER_NAME/
-  # (one extra level of nesting) so the symlink target must include that
-  # nested directory — otherwise kiln tries to load $ADAPTER_OUT/ which
-  # has no adapter_model.safetensors and silently keeps the previous
-  # adapter active. (Adapters loaded for iters 1-5 silently no-op'd this
-  # way before the fix.)
-  KILN_ADAPTERS_DIR="$KILN_MODEL_PATH/adapters"
-  mkdir -p "$KILN_ADAPTERS_DIR"
-  ln -sfn "$ADAPTER_OUT/$ADAPTER_NAME" "$KILN_ADAPTERS_DIR/$ADAPTER_NAME"
-fi
-
-# ALWAYS restart kiln-serve before eval — even if it's already running.
-# Without a fresh restart, latency creep + state drift from many
-# adapter load/unload cycles silently inflates eval wall-clock times,
-# causing rollouts to hit the 120s timeout and producing fake
-# regressions. See "SECOND MAJOR CORRECTION" in capability.md.
-echo "[iter $ITER] restarting kiln serve (always-restart-pre-eval policy)"
-pkill -9 -f "kiln serve" 2>/dev/null || true
-sleep 3
-export KILN_MODEL_PATH
-export KILN_SERVED_MODEL_ID=qwen-3.5-4b-kiln
-export KILN_BATCHING_ENGINE=0
-export KILN_DISABLE_FUSED_GDN_GATES=1
-setsid nohup "$KILN_BIN" serve \
-      </dev/null >>"$BASE_DIR/logs/kiln-serve.log" 2>&1 &
-disown $! 2>/dev/null || true
-# Wait up to 180s for kiln-server to become reachable.
-for i in $(seq 1 90); do
-  if curl -sf "$KILN_URL/v1/models" >/dev/null 2>&1; then break; fi
-  sleep 2
-done
-if ! curl -sf "$KILN_URL/v1/models" >/dev/null 2>&1; then
-  echo "ERROR: kiln-server failed to start" >&2
-  exit 3
-fi
-
-# ----------------------------------------------------------------------------
-# Step 4: Eval (blind oracle on held-out eval set)
-# ----------------------------------------------------------------------------
-if [ "${SKIP_EVAL:-0}" != "1" ]; then
-  EVAL_DIR="$BASE_DIR/eval"
-  mkdir -p "$EVAL_DIR"
-
-  echo "[iter $ITER] eval pass with adapter '$ADAPTER_NAME'"
-  python3 rollout.py \
-    --tasks "$EVAL_TASKS" \
-    --out-dir "$EVAL_DIR" \
-    --adapter "$ADAPTER_NAME" \
-    --num-generations "$EVAL_NUM_GEN" \
-    --mode eval \
-    --kiln-url "$KILN_URL" \
-    --max-wall-clock-s "$MAX_WALL" \
-    --parallel "$EVAL_PARALLEL" \
-    --shuffle-seed "$SHUFFLE_SEED" \
-    --verbose \
-    2>&1 | tee "$BASE_DIR/logs/eval.log"
-fi
-
-echo "[iter $ITER] done. base_dir=$BASE_DIR"
+echo
+echo "=== iter $SLUG complete ==="
+echo "  train_receipt: $OUT_ROOT/adapter/train_receipt.json"
+echo "  adapter:       $ADAPTER_REGISTRY/$ADAPTER_NAME"
+echo "  eval summary:  $LOG_DIR/eval.json"

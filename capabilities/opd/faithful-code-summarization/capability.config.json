@@ -1,7 +1,23 @@
 {
+  "schema_version": 2,
   "slug": "faithful-code-summarization",
+  "paradigm": "opd",
   "base_model_path": "/workspace/kiln/Qwen3.5-4B",
-  "kiln_server_url": "http://localhost:8420",
+  "kiln_url": "http://localhost:8420",
+  "adapter_dir": "/workspace/adapters",
+  "kiln_features_required": [
+    "kiln adapter verify (#4)",
+    "cuda_grpo_ablation --install-adapter-dir/--install-adapter-name (#5)",
+    "train_receipt.json (#8)",
+    "cuda_grpo_ablation --dry-run (#9)",
+    "kiln trajectory inspect (#10)",
+    "ECHO observability in train_receipt (#12)",
+    "kiln serve --eval-mode (#15)",
+    "--adapter-smoke-test (#19)",
+    "--filter-var-min (#22)",
+    "kiln eval-adapter --seeds N (#33)",
+    "adapter_manifest.json + kiln adapter restore (#36)"
+  ],
   "teacher": {
     "url": "http://localhost:8002",
     "served_name": "qwen3.6-27b-awq",
@@ -11,14 +27,16 @@
   "training_defaults": {
     "rank": 16,
     "alpha": 32,
-    "lr": 1e-4,
+    "lr": 0.0001,
     "epochs": 6,
     "samples_per_prompt": 1,
     "max_tokens": 64,
     "top_k": 8,
     "temperature": 1.0,
     "top_p": 0.9,
-    "streaming_prefill": true
+    "streaming_prefill": true,
+    "adapter_smoke_test": true,
+    "allow_high_lora_scale": false
   },
   "budget": {
     "max_iterations": 12,
@@ -26,12 +44,29 @@
   },
   "rubric": {
     "sub_scores": [
-      {"name": "parses", "weight": 0.20},
-      {"name": "entity_recall", "weight": 0.20},
-      {"name": "entity_precision", "weight": 0.40},
-      {"name": "concise", "weight": 0.20}
+      {
+        "name": "parses",
+        "weight": 0.2
+      },
+      {
+        "name": "entity_recall",
+        "weight": 0.2
+      },
+      {
+        "name": "entity_precision",
+        "weight": 0.4
+      },
+      {
+        "name": "concise",
+        "weight": 0.2
+      }
     ],
     "composite_formula": "0.20*parses + 0.20*entity_recall + 0.40*entity_precision + 0.20*concise",
     "direction": "higher_is_better"
+  },
+  "eval": {
+    "seeds": 3,
+    "max_tasks": null,
+    "thinking_mode": "off"
   }
 }

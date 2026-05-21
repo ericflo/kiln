@@ -1,19 +1,38 @@
 {
-  "workdir": ".",
-  "base_model": "Qwen/Qwen3.5-4B",
-  "server": "http://localhost:8420",
-  "kiln_server_version_at_scaffold": "0.2.16",
-  "max_iterations": 30,
-  "dataset_size_cap": 128,
-  "direction": "higher",
-  "eval_suite": "BLIND_CUSTOM_WRAPPER",
-  "scorer_field": "accuracy",
-  "oracle_mode": "sub_agent_built",
+  "schema_version": 2,
+  "slug": "python-algo",
+  "paradigm": "sft",
+  "base_model_path": "/workspace/qwen3.5-4b",
+  "kiln_url": "http://localhost:8420",
+  "adapter_dir": "/workspace/adapters",
+  "kiln_features_required": [
+    "kiln adapter verify (#4)",
+    "cuda_grpo_ablation --install-adapter-dir/--install-adapter-name (#5)",
+    "train_receipt.json (#8)",
+    "cuda_grpo_ablation --dry-run (#9)",
+    "kiln trajectory inspect (#10)",
+    "ECHO observability in train_receipt (#12)",
+    "kiln serve --eval-mode (#15)",
+    "--adapter-smoke-test (#19)",
+    "--filter-var-min (#22)",
+    "kiln eval-adapter --seeds N (#33)",
+    "adapter_manifest.json + kiln adapter restore (#36)"
+  ],
   "training_defaults": {
+    "rank": 4,
+    "alpha": 8,
     "lr": "1e-4",
     "epochs": 1,
-    "lora_rank": 4
+    "dataset_size_cap": 128,
+    "adapter_smoke_test": true
+  },
+  "budget": {
+    "max_iterations": 30
   },
   "anchor_suite": "BLIND_CUSTOM_WRAPPER",
-  "_notes": "Oracle is built by a separate Opus sub-agent. Main agent must not read eval contents. Oracle wrapper at ./capability.oracle.sh is the firewall; an anchor-suite wrapper may live at ./capability.anchor.sh."
+  "eval": {
+    "seeds": 3,
+    "max_tasks": null,
+    "thinking_mode": "off"
+  }
 }

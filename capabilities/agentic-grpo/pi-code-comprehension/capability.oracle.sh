@@ -1,39 +1,56 @@
 #!/usr/bin/env bash
-# Blind eval oracle for pi-code-comprehension.
-# Usage: ./capability.oracle.sh [adapter-name]
+# capability.oracle.sh — blind eval driver for pi-code-comprehension.
+#
+# Wraps `kiln eval-adapter` (KILN_IMPROVEMENT_ISSUES.md #33) — multi-seed,
+# paired eval, base-vs-adapter comparison, sigma-vs-lift warning, writes a
+# stable eval_summary.json schema.
+#
+# Usage:
+#   ./capability.oracle.sh             # eval base
+#   ./capability.oracle.sh my-adapter  # eval one adapter
+#   SEEDS=5 ./capability.oracle.sh my-adapter
 set -euo pipefail
+cd "$(dirname "$0")"
+
 ADAPTER="${1:-}"
 TASKS="${TASKS:-datasets/eval.tasks.jsonl}"
 KILN_URL="${KILN_URL:-http://localhost:8420}"
-NUM_GEN="${NUM_GEN:-1}"
-MAX_WALL="${MAX_WALL:-180}"
-OUT_DIR="${OUT_DIR:-/tmp/pi-code-comp-eval-$$}"
+SEEDS="${SEEDS:-3}"
+ADAPTER_DIR="${ADAPTER_DIR:-/workspace/adapters}"
+SCORER="${SCORER:-./rubric.py}"
+OUT_FILE="${OUT_FILE:-/tmp/pi-code-comprehension-eval-${ADAPTER:-base}.json}"
+KILN_BIN="${KILN_BIN:-kiln}"
 
-if ! curl -sf "$KILN_URL/v1/models" >/dev/null 2>&1; then
+if ! curl -sf "$KILN_URL/v1/health" > /dev/null 2>&1; then
   echo "ORACLE_ERROR: kiln-server not reachable at $KILN_URL" >&2
   exit 2
 fi
 
-python3 rollout.py \
-  --tasks "$TASKS" \
-  --out-dir "$OUT_DIR" \
-  --adapter "$ADAPTER" \
-  --num-generations "$NUM_GEN" \
-  --mode eval \
-  --kiln-url "$KILN_URL" \
-  --max-wall-clock-s "$MAX_WALL" \
-  --concurrency 1 \
-  --verbose
+if [ ! -f "$TASKS" ]; then
+  echo "ORACLE_ERROR: $TASKS missing — run build_corpus.py first" >&2
+  exit 3
+fi
 
-python3 - "$OUT_DIR/summary.json" <<'PY'
+"$KILN_BIN" eval-adapter \
+  --url "$KILN_URL" \
+  --adapter "${ADAPTER:-}" \
+  --adapter-dir "$ADAPTER_DIR" \
+  --tasks "$TASKS" \
+  --seeds "$SEEDS" \
+  --scorer "$SCORER" \
+  --output "$OUT_FILE" \
+  --thinking off
+
+python3 - "$OUT_FILE" <<'PY'
 import json, sys
-s = json.load(open(sys.argv[1]))
-print(f"SCORE={s['mean_composite']:.4f}")
-print(f"outcome={s['mean_outcome']:.4f}")
-print(f"grounding={s['mean_grounding']:.4f}")
-print(f"cross_file_caller_recall={s['mean_cross_file_caller_recall']:.4f}")
-print(f"invariant_coverage={s['mean_invariant_coverage']:.4f}")
-print(f"format_compliance={s['mean_format_compliance']:.4f}")
-print(f"N={s['n_rollouts']}")
-print(f"mean_wall_clock_s={s['mean_wall_clock_s']:.2f}")
+d = json.load(open(sys.argv[1]))
+mc = d.get("mean_composite")
+n  = d.get("n_tasks")
+print(f"SCORE={mc:.4f}")
+print(f"N={n}")
+for k, v in (d.get("sub_scores_mean") or {}).items():
+    print(f"{k}={v:.4f}")
+stdev = d.get("composite_stdev")
+if stdev is not None:
+    print(f"STDEV={stdev:.4f}")
 PY
