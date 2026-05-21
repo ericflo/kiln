@@ -2015,6 +2015,59 @@ tool calls.
 - Server logs which profile is active.
 - Tests assert profile defaults.
 
+**Status:** Implemented and validated on 2026-05-21.
+
+**Implementation notes:**
+
+- Added `ModelDefaultsProfile::qwen3_5_4b()` in `crates/kiln-server/src/config.rs`
+  with canonical `Qwen3.5-4B` identifiers, ordinary-serving thinking behavior
+  (`None`, preserving the template default), eval-mode thinking behavior
+  (`enable_thinking=false` unless request overrides), adapter-dir policy, and
+  chat-template support policy.
+- Wired eval-mode chat and batch defaults through the active model profile
+  instead of a hidden hardcoded value.
+- Server startup now logs the active profile and profile policies.
+- `/health` includes the active profile for lightweight diagnostics.
+- README, ARCHITECTURE, and `kiln.example.toml` document the Qwen3.5-4B
+  thinking, adapter directory, and chat-template expectations.
+
+**Validation evidence:**
+
+- Local lightweight check: `git diff --check` passed.
+- RunPod validation passed on RTX A6000 pod `qmfxie9izl6lc6`, lease
+  `pod-e6a9a744a671ae965e1c7f36`; sentinel
+  `/workspace/kiln-validation/issue31.done` contained `exit=0`.
+- Remote clean-worktree checks applied `/workspace/kiln-validation/issue31.patch`
+  to `origin/main` and passed `git diff --check`.
+- Remote focused checks passed:
+  `cargo check --locked -p kiln-server --bin kiln`,
+  `cargo test --locked -p kiln-server config::tests::test_qwen35_defaults_profile`,
+  `cargo test --locked -p kiln-server api::health::tests::test_health_returns_ok`,
+  `cargo test --locked -p kiln-server api::completions::tests::eval_mode_defaults_are_deterministic_and_disable_thinking_unless_overridden`,
+  and
+  `cargo test --locked -p kiln-server api::completions::tests::eval_mode_thinking_default_comes_from_model_profile`.
+- Actual-model CUDA validation built
+  `cargo build --locked --release -p kiln-server --bin kiln --features cuda`
+  with `KILN_CUDA_ARCHS=86`, booted the server against
+  `/workspace/Qwen3.5-4B` with `KILN_EVAL_MODE=true`, verified `/health`
+  reported backend `model`, active profile `Qwen3.5-4B`, canonical model id
+  `Qwen/Qwen3.5-4B`, canonical served model id `Qwen3.5-4B`, template default
+  thinking enabled, eval-mode default thinking disabled, and tool/template
+  support enabled.
+- The same actual-model smoke verified startup logs contained
+  `model defaults profile active`, verified the default adapter directory
+  `/workspace/Qwen3.5-4B/adapters` existed, and verified a real
+  `/v1/chat/completions` response returned model `Qwen3.5-4B` with
+  `metadata.thinking_enabled=false`, `metadata.thinking_mode=non_reasoning`,
+  and a non-null `chat_template_hash`.
+
+**Commit SHA:** Pending.
+
+**Remaining risk:** This issue changes startup/config defaults and diagnostics,
+so no long-context benchmark was rerun. The real Qwen3.5-4B CUDA server path
+was exercised for profile logging, health, adapter-dir default, and chat
+thinking behavior.
+
 ### 32. Add `/v1/debug/model-state`
 
 **Area:** `crates/kiln-server`

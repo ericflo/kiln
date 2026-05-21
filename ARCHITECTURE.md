@@ -752,6 +752,14 @@ num_speculative_tokens = 4
 draft_layers = 8
 ```
 
+Startup selects the built-in `Qwen3.5-4B` defaults profile and logs it. The
+profile preserves the official template thinking default for ordinary serving,
+uses `enable_thinking=false` as the eval-mode default for deterministic
+tool-agent loops, resolves adapters from `model.adapter_dir` or
+`<model.path>/adapters`, and supports the official Qwen chat template from
+`chat_template.jinja` or `tokenizer_config.json` with `enable_thinking` and
+tool-call rendering.
+
 ### Key Environment Variables
 
 | Variable | Description |

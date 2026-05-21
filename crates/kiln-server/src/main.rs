@@ -176,6 +176,7 @@ async fn main() -> Result<()> {
     let model_config = ModelConfig::qwen3_5_4b();
     let model_path = config.model.path.as_deref();
     let served_model_id = config.model.effective_served_model_id();
+    let model_defaults_profile = config.model.defaults_profile();
     tracing::debug!(served_model_id = %served_model_id, "served model identifier");
 
     // Print startup banner to stderr (doesn't interfere with structured logs)
@@ -286,12 +287,8 @@ async fn main() -> Result<()> {
             pb.finish_and_clear();
         }
 
-        let adapter_dir = config
-            .model
-            .adapter_dir
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(mp).join("adapters"));
+        let adapter_dir =
+            model_defaults_profile.resolve_adapter_dir(config.model.adapter_dir.as_deref(), mp);
 
         if !adapter_dir.exists() {
             tracing::debug!(path = %adapter_dir.display(), "creating adapter directory");
@@ -345,6 +342,7 @@ async fn main() -> Result<()> {
     state.tracked_job_ttl = std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
     state.eval_mode = config.server.eval_mode;
     state.default_thinking_enabled = config.server.default_thinking_enabled;
+    state.model_defaults_profile = model_defaults_profile;
     state.fold_reasoning_into_content = config.server.fold_reasoning_into_content;
     state.chat_performance_metadata = config.server.chat_performance_metadata;
     state.chat_config_hash_metadata = config.server.chat_config_hash_metadata;
@@ -389,6 +387,20 @@ async fn main() -> Result<()> {
         "config hashes initialized"
     );
     tracing::debug!(enabled = state.eval_mode, "eval mode configured");
+    tracing::info!(
+        profile = state.model_defaults_profile.name,
+        canonical_model_id = state.model_defaults_profile.canonical_model_id,
+        canonical_served_model_id = state.model_defaults_profile.canonical_served_model_id,
+        server_default_thinking_enabled = ?state.model_defaults_profile.server_default_thinking_enabled,
+        template_default_thinking_enabled = state.model_defaults_profile.template_default_thinking_enabled,
+        eval_mode_default_thinking_enabled = state.model_defaults_profile.eval_mode_default_thinking_enabled,
+        adapter_dir = %state.adapter_dir.display(),
+        adapter_dir_policy = state.model_defaults_profile.adapter_dir_policy,
+        chat_template_policy = state.model_defaults_profile.chat_template_policy,
+        supports_enable_thinking_kwarg = state.model_defaults_profile.supports_enable_thinking_kwarg,
+        supports_tool_chat_template = state.model_defaults_profile.supports_tool_chat_template,
+        "model defaults profile active"
+    );
     tracing::debug!(
         default_thinking_enabled = ?state.default_thinking_enabled,
         "chat-template thinking default configured"

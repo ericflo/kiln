@@ -11,7 +11,7 @@
 //! 3. `./kiln.toml` in the current working directory (if it exists)
 //! 4. No file — use defaults only
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -101,6 +101,63 @@ pub struct ModelConfig {
     pub served_model_id: Option<String>,
 }
 
+/// Built-in runtime defaults for the only supported kiln model family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ModelDefaultsProfile {
+    /// Human-readable profile name emitted in startup logs and diagnostics.
+    pub name: &'static str,
+    /// Canonical HuggingFace model identifier for this profile.
+    pub canonical_model_id: &'static str,
+    /// Canonical served model id exposed when no override is configured.
+    pub canonical_served_model_id: &'static str,
+    /// Server-level thinking default for ordinary serving. `None` preserves the
+    /// model chat template default; explicit config/env/request values still win.
+    pub server_default_thinking_enabled: Option<bool>,
+    /// The official Qwen3.5-4B chat template starts assistant turns in thinking
+    /// mode unless `enable_thinking=false` is supplied.
+    pub template_default_thinking_enabled: bool,
+    /// Eval mode should produce deterministic final-content answers for
+    /// tool-agent loops unless a request explicitly opts into thinking.
+    pub eval_mode_default_thinking_enabled: bool,
+    /// How the adapter directory is resolved for this model profile.
+    pub adapter_dir_policy: &'static str,
+    /// Chat template sources accepted by startup loading, in preference order.
+    pub chat_template_policy: &'static str,
+    /// Whether `chat_template_kwargs.enable_thinking` is a supported template kwarg.
+    pub supports_enable_thinking_kwarg: bool,
+    /// Whether the bundled/official template supports OpenAI-style tool calls.
+    pub supports_tool_chat_template: bool,
+}
+
+impl ModelDefaultsProfile {
+    /// Qwen3.5-4B is kiln's canonical profile.
+    pub const fn qwen3_5_4b() -> Self {
+        Self {
+            name: "Qwen3.5-4B",
+            canonical_model_id: "Qwen/Qwen3.5-4B",
+            canonical_served_model_id: "Qwen3.5-4B",
+            server_default_thinking_enabled: None,
+            template_default_thinking_enabled: true,
+            eval_mode_default_thinking_enabled: false,
+            adapter_dir_policy: "explicit model.adapter_dir, otherwise <model_path>/adapters",
+            chat_template_policy: "prefer chat_template.jinja, fallback to tokenizer_config.json chat_template",
+            supports_enable_thinking_kwarg: true,
+            supports_tool_chat_template: true,
+        }
+    }
+
+    /// Resolve the adapter directory according to this profile.
+    pub fn resolve_adapter_dir(
+        &self,
+        configured_adapter_dir: Option<&str>,
+        model_path: &str,
+    ) -> PathBuf {
+        configured_adapter_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(model_path).join("adapters"))
+    }
+}
+
 impl ModelConfig {
     /// Resolve the served model identifier.
     ///
@@ -115,6 +172,14 @@ impl ModelConfig {
             .next()
             .unwrap_or(&self.model_id)
             .to_string()
+    }
+
+    /// Return the active built-in defaults profile.
+    ///
+    /// Kiln deliberately supports Qwen3.5-4B, so every server boot uses the
+    /// Qwen3.5-4B profile even when an operator overrides display identifiers.
+    pub fn defaults_profile(&self) -> ModelDefaultsProfile {
+        ModelDefaultsProfile::qwen3_5_4b()
     }
 }
 
@@ -924,6 +989,29 @@ mod tests {
             config.adapters.composed_cache_max_entries,
             Some(64),
             "default composed-cache entry cap should be 64"
+        );
+    }
+
+    #[test]
+    fn test_qwen35_defaults_profile() {
+        let config = KilnConfig::default();
+        let profile = config.model.defaults_profile();
+
+        assert_eq!(profile.name, "Qwen3.5-4B");
+        assert_eq!(profile.canonical_model_id, "Qwen/Qwen3.5-4B");
+        assert_eq!(profile.canonical_served_model_id, "Qwen3.5-4B");
+        assert_eq!(profile.server_default_thinking_enabled, None);
+        assert!(profile.template_default_thinking_enabled);
+        assert!(!profile.eval_mode_default_thinking_enabled);
+        assert!(profile.supports_enable_thinking_kwarg);
+        assert!(profile.supports_tool_chat_template);
+        assert_eq!(
+            profile.resolve_adapter_dir(None, "/models/Qwen3.5-4B"),
+            PathBuf::from("/models/Qwen3.5-4B/adapters")
+        );
+        assert_eq!(
+            profile.resolve_adapter_dir(Some("/tmp/adapters"), "/models/Qwen3.5-4B"),
+            PathBuf::from("/tmp/adapters")
         );
     }
 

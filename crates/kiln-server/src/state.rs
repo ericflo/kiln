@@ -1283,6 +1283,8 @@ pub struct AppState {
     /// Server-level default for chat-template thinking mode. `None` preserves
     /// the template's own default.
     pub default_thinking_enabled: Option<bool>,
+    /// Active model-specific runtime defaults profile.
+    pub model_defaults_profile: crate::config::ModelDefaultsProfile,
     /// Compatibility mode: duplicate separated reasoning into `content`.
     pub fold_reasoning_into_content: bool,
     /// Include per-request performance counters in chat response metadata when
@@ -1484,6 +1486,7 @@ impl AppState {
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             eval_mode: false,
             default_thinking_enabled: None,
+            model_defaults_profile: crate::config::ModelDefaultsProfile::qwen3_5_4b(),
             fold_reasoning_into_content: false,
             chat_performance_metadata: false,
             chat_config_hash_metadata: false,
@@ -1944,6 +1947,7 @@ impl AppState {
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             eval_mode: false,
             default_thinking_enabled: None,
+            model_defaults_profile: crate::config::ModelDefaultsProfile::qwen3_5_4b(),
             fold_reasoning_into_content: false,
             chat_performance_metadata: false,
             chat_config_hash_metadata: false,

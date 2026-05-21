@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::sync::atomic::Ordering;
 
 use crate::batching_engine::BatchingEngineSnapshot;
+use crate::config::ModelDefaultsProfile;
 use crate::recent_requests::RequestRecord;
 use crate::state::{AppState, ModelBackend};
 
@@ -19,6 +20,7 @@ struct HealthResponse {
     uptime_seconds: u64,
     model: String,
     backend: &'static str,
+    model_defaults_profile: ModelDefaultsProfile,
     eval_mode: bool,
     default_thinking_enabled: Option<bool>,
     fold_reasoning_into_content: bool,
@@ -388,6 +390,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
             state.model_config.num_kv_heads,
         ),
         backend: backend_name,
+        model_defaults_profile: state.model_defaults_profile,
         eval_mode: state.eval_mode,
         default_thinking_enabled: state.default_thinking_enabled,
         fold_reasoning_into_content: state.fold_reasoning_into_content,
@@ -671,6 +674,32 @@ mod tests {
         assert!(json["uptime_seconds"].is_number());
         assert!(json["model"].as_str().unwrap().contains("Qwen3.5-4B"));
         assert_eq!(json["backend"], "mock");
+        assert_eq!(json["model_defaults_profile"]["name"], "Qwen3.5-4B");
+        assert_eq!(
+            json["model_defaults_profile"]["canonical_model_id"],
+            "Qwen/Qwen3.5-4B"
+        );
+        assert_eq!(
+            json["model_defaults_profile"]["canonical_served_model_id"],
+            "Qwen3.5-4B"
+        );
+        assert!(json["model_defaults_profile"]["server_default_thinking_enabled"].is_null());
+        assert_eq!(
+            json["model_defaults_profile"]["template_default_thinking_enabled"],
+            true
+        );
+        assert_eq!(
+            json["model_defaults_profile"]["eval_mode_default_thinking_enabled"],
+            false
+        );
+        assert_eq!(
+            json["model_defaults_profile"]["supports_enable_thinking_kwarg"],
+            true
+        );
+        assert_eq!(
+            json["model_defaults_profile"]["supports_tool_chat_template"],
+            true
+        );
         assert_eq!(json["eval_mode"], false);
         assert!(json["default_thinking_enabled"].is_null());
         assert_eq!(json["fold_reasoning_into_content"], false);

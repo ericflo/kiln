@@ -22,10 +22,11 @@ port = 8420
 request_timeout_secs = 600
 shutdown_timeout_secs = 5
 # eval_mode = false
-# default_thinking_enabled = false     # Optional. When set, defaults Qwen/DeepSeek-style
-                                      # chat templates to thinking on/off unless a request
-                                      # overrides chat_template_kwargs.enable_thinking.
-                                      # Omit to preserve the model template default.
+# default_thinking_enabled = false     # Optional. Qwen3.5-4B profile preserves the
+                                      # official template thinking default unless this
+                                      # is set; eval mode still defaults omitted
+                                      # requests to enable_thinking=false. Requests
+                                      # can override chat_template_kwargs.enable_thinking.
 # fold_reasoning_into_content = false # Optional. Compatibility mode for clients that expect
                                       # non-empty assistant content: duplicate separated
                                       # reasoning_content into content. Requests can override
@@ -35,7 +36,7 @@ shutdown_timeout_secs = 5
 # path = "/path/to/model"            # Required for real inference (omit for mock mode)
 model_id = "Qwen/Qwen3.5-4B"
 # tokenizer_path = "/path/to/tokenizer.json"
-# adapter_dir = "/path/to/adapters"  # Default: <model_path>/adapters
+# adapter_dir = "/path/to/adapters"  # Qwen3.5-4B profile default: <model_path>/adapters
 # served_model_id = "Qwen3.5-4B" # ID exposed at /v1/models and echoed in chat completion
                                       # responses. Default: derived from `model_id` by stripping
                                       # everything up to and including the last "/" (so

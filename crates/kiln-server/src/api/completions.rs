@@ -354,13 +354,14 @@ fn content_empty_reason(output: &AssistantOutputParts) -> Option<&'static str> {
     Some("no_content")
 }
 
-fn ensure_eval_mode_no_think_default(
+fn ensure_eval_mode_thinking_default(
     chat_template_kwargs: &mut Option<serde_json::Map<String, serde_json::Value>>,
+    enabled: bool,
 ) {
     let kwargs = chat_template_kwargs.get_or_insert_with(serde_json::Map::new);
     kwargs
         .entry("enable_thinking".to_string())
-        .or_insert(serde_json::Value::Bool(false));
+        .or_insert(serde_json::Value::Bool(enabled));
 }
 
 fn apply_eval_mode_chat_defaults(state: &AppState, req: &mut ChatCompletionRequest) {
@@ -392,7 +393,12 @@ fn apply_eval_mode_chat_defaults(state: &AppState, req: &mut ChatCompletionReque
     if req.seed.is_none() {
         req.seed = Some(0);
     }
-    ensure_eval_mode_no_think_default(&mut req.chat_template_kwargs);
+    ensure_eval_mode_thinking_default(
+        &mut req.chat_template_kwargs,
+        state
+            .model_defaults_profile
+            .eval_mode_default_thinking_enabled,
+    );
 }
 
 fn apply_eval_mode_batch_defaults(state: &AppState, req: &mut BatchCompletionRequest) {
@@ -424,7 +430,12 @@ fn apply_eval_mode_batch_defaults(state: &AppState, req: &mut BatchCompletionReq
     if req.seed.is_none() {
         req.seed = Some(0);
     }
-    ensure_eval_mode_no_think_default(&mut req.chat_template_kwargs);
+    ensure_eval_mode_thinking_default(
+        &mut req.chat_template_kwargs,
+        state
+            .model_defaults_profile
+            .eval_mode_default_thinking_enabled,
+    );
 }
 
 /// Build a [`RequestRecord`] pre-populated with everything we know from the
@@ -9927,6 +9938,27 @@ mod tests {
         assert_eq!(
             explicit
                 .chat_template_kwargs
+                .as_ref()
+                .and_then(|kwargs| kwargs.get("enable_thinking")),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn eval_mode_thinking_default_comes_from_model_profile() {
+        let mut state = make_batch_test_state();
+        state.eval_mode = true;
+        state.model_defaults_profile = crate::config::ModelDefaultsProfile {
+            eval_mode_default_thinking_enabled: true,
+            ..crate::config::ModelDefaultsProfile::qwen3_5_4b()
+        };
+        let mut req: ChatCompletionRequest =
+            serde_json::from_str(r#"{"messages":[{"role":"user","content":"hi"}]}"#).unwrap();
+
+        apply_eval_mode_chat_defaults(&state, &mut req);
+
+        assert_eq!(
+            req.chat_template_kwargs
                 .as_ref()
                 .and_then(|kwargs| kwargs.get("enable_thinking")),
             Some(&serde_json::Value::Bool(true))

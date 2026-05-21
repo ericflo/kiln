@@ -470,14 +470,22 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `prefix_cache.enabled` | `KILN_PREFIX_CACHE_ENABLED` | true | Reuse KV cache for shared prefixes |
 | `prefix_cache.max_entries` | `KILN_PREFIX_CACHE_MAX_ENTRIES` | auto | Cap cached GDN state snapshots (~49 MiB each; auto budget ≤1 GiB) |
 
-Qwen3.5-4B's official chat template starts assistant turns in thinking mode
-unless `enable_thinking=false` is passed. For tool-agent evals and Pi-style
-loops, set `server.default_thinking_enabled = false` or
-`KILN_DEFAULT_THINKING_ENABLED=false` so omitted requests produce normal
-`content` instead of long `reasoning_content`. A request can still override the
-server default with `chat_template_kwargs: {"enable_thinking": true}` or
-`false`. The legacy `KILN_DEFAULT_NO_THINK` env var is still accepted as a
-compatibility alias for `KILN_DEFAULT_THINKING_ENABLED=false`.
+Kiln boots with the built-in `Qwen3.5-4B` defaults profile. That profile
+preserves Qwen3.5-4B's official chat-template thinking default for ordinary
+serving: assistant turns start in thinking mode unless `enable_thinking=false`
+is passed. In eval mode, the same profile injects
+`chat_template_kwargs.enable_thinking=false` unless a request explicitly
+overrides it, so tool-agent evals and Pi-style loops get final `content`
+instead of long `reasoning_content`. Operators can also set
+`server.default_thinking_enabled = false` or
+`KILN_DEFAULT_THINKING_ENABLED=false` for non-eval serving. The legacy
+`KILN_DEFAULT_NO_THINK` env var is still accepted as a compatibility alias.
+
+The Qwen3.5-4B profile expects adapters in `model.adapter_dir` when configured,
+otherwise `<model.path>/adapters`. Chat-template loading prefers
+`chat_template.jinja` next to the tokenizer and falls back to the
+`tokenizer_config.json` `chat_template` field; the supported template behavior
+includes `chat_template_kwargs.enable_thinking` and OpenAI-style tool calls.
 
 When the model emits reasoning separately, chat responses expose it as
 `choices[].message.reasoning_content` while `content` contains only the final
