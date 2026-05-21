@@ -2383,7 +2383,7 @@ adapter registry.
   own command string before server boot; it is not counted as product
   validation.
 
-**Commit SHA:** Pending.
+**Commit SHA:** `203726c9` (`Issue 35: add adapter canary quarantine`).
 
 **Remaining risk:** File-level rustfmt checks for `adapters.rs`,
 `training_queue.rs`, and all of `kiln-train` are blocked by pre-existing
