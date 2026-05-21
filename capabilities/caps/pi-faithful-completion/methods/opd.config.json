@@ -1,0 +1,21 @@
+{
+  "rationale": "Conservative OPD recipe on top of a stage-1 adapter where baseline composite (0.807) is at the cap-#5 high-baseline watch zone. Gentle lr, low epochs, samples_per_prompt=1 to minimize the risk of teacher-rollout-quality-asymmetry regressing on the bad-rollout tail.",
+  "trainer": "cuda_opd_remote",
+  "prompts_file": "datasets/opd.prompts.jsonl",
+  "teacher_url": "http://localhost:8002",
+  "teacher_name": "qwen3.6-27b-awq",
+  "defaults": {
+    "rank": 16,
+    "alpha": 32,
+    "lr": 5e-5,
+    "epochs": 3,
+    "samples_per_prompt": 1,
+    "seed": 3141592653,
+    "adapter_smoke_test": true
+  },
+  "high_baseline_caveat": "Stage-1 composite is 0.807, at the edge of the cap-#5 watch zone (>0.80 with variable rollout quality). Recipe uses lr=5e-5 (half the kiln default 1e-4) and 3 epochs (half the default 6). If first eval regresses by > σ, revert to stage-1 and file a stage-transition dead-end.",
+  "watch_signals": {
+    "abort_if_composite_below": 0.78,
+    "abort_if_outcome_value_correct_below": 0.75
+  }
+}

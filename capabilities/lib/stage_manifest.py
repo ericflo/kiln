@@ -185,8 +185,11 @@ def validate(cap_dir: Path) -> dict:
         if r.get("status") == "kept" and r.get("stage") is not None
     }
 
+    # pipeline.md slugs use the full `stage-N-<descriptor>` form; the
+    # stages/ regex captures just `<descriptor>`. Normalize both to the
+    # full form so the diff is meaningful.
     declared_keys = {(int(s["n"]), s["slug"]) for s in declared_stages}
-    file_keys = set(stage_files.keys())
+    file_keys = {(n, f"stage-{n}-{inner}") for (n, inner) in stage_files.keys()}
 
     if declared_keys != file_keys:
         missing_files = declared_keys - file_keys

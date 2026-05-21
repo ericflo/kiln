@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "stage": 1,
+  "slug": "stage-1-grpo-h50-iter50",
+  "method": "agentic-grpo",
+  "hypothesis": "Round-1 50-iter agentic-GRPO loop discovers a 3-knob combo (lr=3e-5 + light system prompt + rollout temp=0.6) that compounds for +0.0828 composite over baseline 0.7237 by lifting outcome.value_correct (+0.088) and honesty.score (+0.067) via sharper advantage signal and less prose drift.",
+  "stage_transition_rationale": "Backfill of the round-1 kept iter-50 result into the round-3 schema. METHODS.md Rule A applies (multi-turn pi tool-calling task). Single-stage agentic-GRPO with ECHO was the round-1 method; this stage record preserves that result as the round-3 starting point for stage 2 (OPD polish on the remaining process headroom).",
+  "base_adapter": null,
+  "output_adapter": "pi-faithful-h50-temp-0.6-x-light-x-lr-3e-5",
+  "training_iters": [
+    {
+      "iter": 50,
+      "slug": "h50-temp-0.6-x-light-x-lr-3e-5",
+      "family": "H18-combo",
+      "ts": "2026-05-20T05:27:28Z",
+      "status": "kept",
+      "composite": 0.8065414888572784,
+      "composite_delta": 0.0828414888572784,
+      "hyperparams": {
+        "lr": "3e-5",
+        "rank": 16,
+        "alpha": 32,
+        "num_gens": 4,
+        "echo_lambda": 0.05,
+        "temperature": "0.6",
+        "system_prompt": "light"
+      },
+      "git_sha": "f95d7073"
+    }
+  ],
+  "promoted_iter": 50,
+  "final_composite": 0.8065414888572784,
+  "final_composite_delta": 0.0828414888572784,
+  "final_sub_scores": {
+    "outcome.format_present": 0.9473684210526315,
+    "outcome.value_correct": 0.8070175438596491,
+    "outcome.score": 0.8070175438596491,
+    "outcome.format_strict": 0.9473684210526315,
+    "outcome.is_failure_task": 0.12280701754385964,
+    "honesty.score": 0.8385964912280701,
+    "format_strict.score": 0.9473684210526315,
+    "no_question.score": 1.0,
+    "no_soft_punt.score": 1.0,
+    "terseness.score": 0.9589853010905641,
+    "composite_ungated": 0.8999336178283547,
+    "composite": 0.8065414888572784
+  },
+  "cross_cap_check": null,
+  "adapter_manifest": null,
+  "train_receipt": null,
+  "kiln_commit": "f95d7073",
+  "ts_promoted": "2026-05-21T21:08:00Z",
+  "round_origin": "round-1",
+  "b2_archive": "b2://clouderic/capabilities/pi-faithful-completion/adapters/pi-faithful-h50-temp-0.6-x-light-x-lr-3e-5.tar.gz",
+  "notes": "This stage record backfills the round-1 winner. Round-1 used a pre-receipt trainer; no train_receipt.json exists. The round-3 stage-2 (OPD polish) base_adapter must point at this adapter."
+}
