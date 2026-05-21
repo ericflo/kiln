@@ -2229,7 +2229,9 @@ template / scorer hashes, config hashes, adapter hashes from
   `issue thirty three`, proving the command exercised the actual Qwen3.5-4B
   chat path and the paired adapter request path.
 
-**Commit SHA:** Pending follow-up after commit.
+**Commit SHA:** `e28b8e21` (`Issue 33: add eval adapter`). This status line
+is recorded in a follow-up metadata commit because a commit cannot include its
+own final hash.
 
 **Remaining risk:** The actual-model smoke proves the generic paired CLI,
 summary writing, config-hash capture, adapter-hash capture, and scorer
