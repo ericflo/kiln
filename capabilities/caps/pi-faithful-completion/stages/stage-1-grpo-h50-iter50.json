@@ -3,10 +3,62 @@
   "stage": 1,
   "slug": "stage-1-grpo-h50-iter50",
   "method": "agentic-grpo",
+  "status": "needs-revalidation",
   "hypothesis": "Round-1 50-iter agentic-GRPO loop discovers a 3-knob combo (lr=3e-5 + light system prompt + rollout temp=0.6) that compounds for +0.0828 composite over baseline 0.7237 by lifting outcome.value_correct (+0.088) and honesty.score (+0.067) via sharper advantage signal and less prose drift.",
-  "stage_transition_rationale": "Backfill of the round-1 kept iter-50 result into the round-3 schema. METHODS.md Rule A applies (multi-turn pi tool-calling task). Single-stage agentic-GRPO with ECHO was the round-1 method; this stage record preserves that result as the round-3 starting point for stage 2 (OPD polish on the remaining process headroom).",
+  "stage_transition_rationale": "Backfill of the round-1 kept iter-50 result into the round-3 schema. METHODS.md Rule A applies (multi-turn pi tool-calling task). Single-stage agentic-GRPO with ECHO was the round-1 method; this stage record preserves that result as the round-3 starting point for stage 2 (OPD polish on the remaining process headroom). UPDATE: re-validation under round-3 kiln serve --eval-mode failed (see round_3_revalidation_result below). The stage is no longer kept until diagnosed and re-trained.",
   "base_adapter": null,
   "output_adapter": "pi-faithful-h50-temp-0.6-x-light-x-lr-3e-5",
+  "round_3_revalidation_result": {
+    "ts": "2026-05-21T21:23:00Z",
+    "kiln_commit": "66fa0782",
+    "pod_id": "m5qfrqcbwt16pe",
+    "lease_id": "pod-ad0999c0694eca57da9716df",
+    "n_tasks": 57,
+    "single_seed_paired_eval": {
+      "seed": 3141592653,
+      "temperature": 0.2,
+      "top_p": 0.95,
+      "max_tokens": 768,
+      "no_system_prompt": {
+        "base_composite": 0.6733105737316264,
+        "adapter_composite": 0.6543504030346136,
+        "delta": -0.018960170697012768,
+        "verdict": "negative",
+        "subscore_means_adapter": {
+          "outcome.value_correct": 0.6491228070175439,
+          "honesty.score": 0.7280701754385965,
+          "format_strict.score": 0.9649122807017544,
+          "terseness.score": 0.9510194404931247,
+          "no_question.score": 1.0,
+          "no_soft_punt.score": 1.0
+        }
+      },
+      "with_light_system_prompt": {
+        "adapter_composite": 0.4984931247036509,
+        "outcome.value_correct": 0.49122807017543857,
+        "honesty.score": 0.6070175438596492,
+        "note": "Light prompt produced longer responses but worse composite under round-3 server; counter-intuitive vs round-1."
+      }
+    },
+    "comparison_to_round_1": {
+      "round_1_base": 0.7237,
+      "round_1_adapter": 0.8065,
+      "round_1_delta": 0.0828,
+      "round_3_base": 0.6733,
+      "round_3_adapter": 0.6544,
+      "round_3_delta": -0.0190,
+      "delta_in_delta": -0.1018,
+      "base_drift": -0.0504,
+      "adapter_drift": -0.1521,
+      "conclusion": "Both base and adapter regressed under round-3 eval-mode. Adapter regressed more than base, suggesting the adapter overfit to round-1 server behavior."
+    },
+    "likely_causes_to_diagnose": [
+      "Thinking-mode default flipped (round-3 eval-mode forces thinking=false)",
+      "Stricter eval-mode determinism (transient cache cleanup between completions, kiln #15)",
+      "Kiln serve commit drift over the 40-issue backlog",
+      "Adapter overfit to round-1 server idiosyncrasies"
+    ]
+  },
   "training_iters": [
     {
       "iter": 50,
