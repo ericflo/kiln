@@ -14847,7 +14847,7 @@ mod tests {
             );
             assert!(
                 vf_receipt.token_counts.env_tokens > 0,
-                "verifier-free adapter should train on env tokens"
+                "Issue 40 regression: ECHO-enabled verifier-free adapter should record nonzero env tokens"
             );
             assert!(
                 max_lora_delta(&vf_receipt) > 1e-9,
@@ -14901,7 +14901,7 @@ mod tests {
             let step1_gap = (fresh_step1 - chained_step1).abs();
             assert!(
                 step1_gap > 1e-9,
-                "loading base_adapter should change step-1 loss; fresh={fresh_step1}, \
+                "Issue 40 regression: loading base_adapter must load weights, not just lineage; fresh={fresh_step1}, \
                  chained={chained_step1}, gap={step1_gap:e}"
             );
             assert!(

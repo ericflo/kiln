@@ -293,6 +293,9 @@ async fn test_load_rejects_missing_adapter_weights_without_changing_active() {
 
 #[tokio::test]
 async fn test_load_rejects_common_nested_output_mistake() {
+    // Issue 40 regression: pointing load at the parent output directory
+    // (`output/`) instead of the actual adapter directory (`output/name/`)
+    // must fail clearly and leave adapter state unchanged.
     let tmp = tempfile::tempdir().unwrap();
     let parent = tmp.path().join("train-output");
     write_adapter(&parent, "actual-adapter");

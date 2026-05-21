@@ -67,7 +67,8 @@ pub fn validate_base_adapter_compatibility(
     }
 
     let expected_targets = target_module_set(TRAINABLE_TARGET_MODULES.iter().copied());
-    let adapter_targets = target_module_set(adapter_config.target_modules.iter().map(String::as_str));
+    let adapter_targets =
+        target_module_set(adapter_config.target_modules.iter().map(String::as_str));
     if adapter_targets != expected_targets {
         return incompatible(
             allow_adapter_shape_conversion,
@@ -126,10 +127,7 @@ pub fn validate_base_adapter_compatibility(
     })
 }
 
-fn incompatible<T>(
-    allow_adapter_shape_conversion: bool,
-    message: String,
-) -> Result<T> {
+fn incompatible<T>(allow_adapter_shape_conversion: bool, message: String) -> Result<T> {
     if allow_adapter_shape_conversion {
         bail!(
             "{message}; {ALLOW_ADAPTER_SHAPE_CONVERSION_FLAG} was set, but adapter shape conversion is not implemented"
@@ -262,14 +260,8 @@ fn insert_lora_pair(
     rank: usize,
 ) {
     let prefix = format!("base_model.model.model.layers.{layer_idx}.{submodule}.{module}");
-    expected.insert(
-        format!("{prefix}.lora_A.weight"),
-        vec![rank, in_features],
-    );
-    expected.insert(
-        format!("{prefix}.lora_B.weight"),
-        vec![out_features, rank],
-    );
+    expected.insert(format!("{prefix}.lora_A.weight"), vec![rank, in_features]);
+    expected.insert(format!("{prefix}.lora_B.weight"), vec![out_features, rank]);
 }
 
 #[cfg(test)]
@@ -337,12 +329,17 @@ mod tests {
         let result = validate_base_adapter_compatibility(tmp.path(), &config, 2, false)?;
 
         assert_eq!(result.rank, 2);
-        assert_eq!(result.tensor_count, expected_base_adapter_tensors(&config, 2).len());
+        assert_eq!(
+            result.tensor_count,
+            expected_base_adapter_tensors(&config, 2).len()
+        );
         Ok(())
     }
 
     #[test]
     fn base_adapter_rank_mismatch_fails() -> Result<()> {
+        // Issue 40 regression: rank mismatches must fail in the
+        // pre-training compatibility check, before optimizer setup.
         let tmp = tempfile::tempdir()?;
         let config = tiny_hybrid_config();
         write_adapter(tmp.path(), &config, 4, |_, _| {})?;

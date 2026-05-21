@@ -184,12 +184,13 @@ fn chat_completion_metadata_from_cached_output(
     req: &ChatCompletionRequest,
     cached_output: &AssistantOutputParts,
 ) -> ChatCompletionMetadata {
-    let thinking_enabled = effective_thinking_enabled_for_request(state, req).unwrap_or_else(|| {
-        cached_output
-            .reasoning_content
-            .as_deref()
-            .is_some_and(|text| !text.is_empty())
-    });
+    let thinking_enabled =
+        effective_thinking_enabled_for_request(state, req).unwrap_or_else(|| {
+            cached_output
+                .reasoning_content
+                .as_deref()
+                .is_some_and(|text| !text.is_empty())
+        });
     ChatCompletionMetadata {
         thinking_enabled,
         thinking_mode: if thinking_enabled {
@@ -348,7 +349,11 @@ fn content_empty_reason(output: &AssistantOutputParts) -> Option<&'static str> {
     {
         return Some("reasoning_without_final_content");
     }
-    if output.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) {
+    if output
+        .tool_calls
+        .as_ref()
+        .is_some_and(|calls| !calls.is_empty())
+    {
         return Some("tool_call");
     }
     Some("no_content")
@@ -860,7 +865,9 @@ fn unfold_reasoning_from_content(content: &str, reasoning: &str) -> String {
 
 fn response_content_for_cache(content: &str, reasoning: Option<&str>) -> String {
     match reasoning {
-        Some(reasoning) if !reasoning.is_empty() => unfold_reasoning_from_content(content, reasoning),
+        Some(reasoning) if !reasoning.is_empty() => {
+            unfold_reasoning_from_content(content, reasoning)
+        }
         _ => content.to_string(),
     }
 }
@@ -1114,10 +1121,9 @@ fn response_with_runtime_headers(state: &AppState, mut response: Response) -> Re
     } else {
         HeaderValue::from_static("false")
     };
-    response.headers_mut().insert(
-        HeaderName::from_static("x-kiln-eval-mode"),
-        eval_mode,
-    );
+    response
+        .headers_mut()
+        .insert(HeaderName::from_static("x-kiln-eval-mode"), eval_mode);
     response.headers_mut().insert(
         HeaderName::from_static("x-kiln-active-adapter"),
         adapter_header_value(state.active_adapter_name.read().unwrap().clone()),
@@ -2096,13 +2102,12 @@ async fn zero_chat_choices_response_from_request_cache_hit(
         return Ok(None);
     }
 
-    let Some(key) =
-        deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size_and_fold(
-            req,
-            req.seed,
-            vocab_size,
-            fold_reasoning_into_content_for_request(state, req),
-        )?
+    let Some(key) = deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size_and_fold(
+        req,
+        req.seed,
+        vocab_size,
+        fold_reasoning_into_content_for_request(state, req),
+    )?
     else {
         return Ok(None);
     };
@@ -4871,14 +4876,15 @@ async fn generate_real(
                 };
                 if !prefix_enabled {
                     *prefix_cache_diagnostic_inner.lock().unwrap() = "disabled";
-                    runner_guard.generate_paged_shared_tokens(
-                        &prompt_tokens,
-                        &params,
-                        bm.as_ref(),
-                        pc.as_ref(),
-                        Some(&cancel_inner),
-                    )
-                    .map(TimedGenerationOutput::without_timings)
+                    runner_guard
+                        .generate_paged_shared_tokens(
+                            &prompt_tokens,
+                            &params,
+                            bm.as_ref(),
+                            pc.as_ref(),
+                            Some(&cancel_inner),
+                        )
+                        .map(TimedGenerationOutput::without_timings)
                 } else {
                     let (hit, should_register_on_miss) = {
                         let mut cache = prefix_cache.lock().unwrap();
@@ -4904,11 +4910,8 @@ async fn generate_real(
                             .map(TimedGenerationOutput::without_timings);
                     }
 
-                    *prefix_cache_diagnostic_inner.lock().unwrap() = if hit.is_some() {
-                        "hit"
-                    } else {
-                        "miss"
-                    };
+                    *prefix_cache_diagnostic_inner.lock().unwrap() =
+                        if hit.is_some() { "hit" } else { "miss" };
                     let hit_entry_id = hit.as_ref().map(|hit| hit.entry_id);
                     let cached_prefix = hit.map(|hit| PagedPrefixReuse {
                         cached_tokens: hit.cached_tokens,
@@ -4993,15 +4996,16 @@ async fn generate_real(
             ResolvedSpeculativeMode::SkipLayer(spec_config) => {
                 *prefix_cache_diagnostic_inner.lock().unwrap() = "not_used_speculative";
                 if params.temperature == 0.0 {
-                    runner_guard.generate_paged_speculative_shared_tokens(
-                        &prompt_tokens,
-                        &params,
-                        bm.as_ref(),
-                        pc.as_ref(),
-                        &spec_config,
-                        Some(&cancel_inner),
-                    )
-                    .map(TimedGenerationOutput::without_timings)
+                    runner_guard
+                        .generate_paged_speculative_shared_tokens(
+                            &prompt_tokens,
+                            &params,
+                            bm.as_ref(),
+                            pc.as_ref(),
+                            &spec_config,
+                            Some(&cancel_inner),
+                        )
+                        .map(TimedGenerationOutput::without_timings)
                 } else {
                     let flat_spec_config = SpeculativeConfig {
                         num_speculative_tokens: spec_config.num_speculative_tokens.min(4),
@@ -8075,10 +8079,46 @@ mod tests {
         let req = parse_request(r#"{"messages":[{"role":"user","content":"hello"}]}"#);
         assert_eq!(req.adapter, ChatAdapterSelection::Default);
         assert_eq!(
-            req.adapter.target_adapter_name(Some("loaded-a".to_string())),
+            req.adapter
+                .target_adapter_name(Some("loaded-a".to_string())),
             Some("loaded-a".to_string())
         );
         assert!(!req.adapter.is_explicit());
+    }
+
+    #[tokio::test]
+    async fn chat_adapter_missing_regression_does_not_unload_active_adapter_http_path() {
+        let state = make_batch_test_state();
+        *state.active_adapter_name.write().unwrap() = Some("loaded-a".to_string());
+        *state.loaded_adapter_name.write().unwrap() = Some("loaded-a".to_string());
+        let state_for_assert = state.clone();
+
+        let (status, body) = chat_post(
+            state,
+            r#"{"messages":[{"role":"user","content":"adapter default"}],"max_tokens":0}"#,
+        )
+        .await;
+
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["object"], "chat.completion");
+        assert_eq!(
+            state_for_assert
+                .active_adapter_name
+                .read()
+                .unwrap()
+                .as_deref(),
+            Some("loaded-a"),
+            "regression: omitted chat `adapter` must not unload server default"
+        );
+        assert_eq!(
+            state_for_assert
+                .loaded_adapter_name
+                .read()
+                .unwrap()
+                .as_deref(),
+            Some("loaded-a"),
+            "regression: omitted chat `adapter` must not unload runtime adapter"
+        );
     }
 
     #[test]
@@ -8087,7 +8127,8 @@ mod tests {
             parse_request(r#"{"messages":[{"role":"user","content":"hello"}],"adapter":null}"#);
         assert_eq!(req.adapter, ChatAdapterSelection::Base);
         assert_eq!(
-            req.adapter.target_adapter_name(Some("loaded-a".to_string())),
+            req.adapter
+                .target_adapter_name(Some("loaded-a".to_string())),
             None
         );
         assert!(req.adapter.is_explicit());
@@ -8095,11 +8136,11 @@ mod tests {
 
     #[test]
     fn chat_adapter_empty_selects_base_for_request() {
-        let req =
-            parse_request(r#"{"messages":[{"role":"user","content":"hello"}],"adapter":""}"#);
+        let req = parse_request(r#"{"messages":[{"role":"user","content":"hello"}],"adapter":""}"#);
         assert_eq!(req.adapter, ChatAdapterSelection::Base);
         assert_eq!(
-            req.adapter.target_adapter_name(Some("loaded-a".to_string())),
+            req.adapter
+                .target_adapter_name(Some("loaded-a".to_string())),
             None
         );
         assert!(req.adapter.is_explicit());
@@ -8115,7 +8156,8 @@ mod tests {
             ChatAdapterSelection::Named("my-adapter".to_string())
         );
         assert_eq!(
-            req.adapter.target_adapter_name(Some("loaded-a".to_string())),
+            req.adapter
+                .target_adapter_name(Some("loaded-a".to_string())),
             Some("my-adapter".to_string())
         );
         assert!(req.adapter.is_explicit());
@@ -8615,6 +8657,41 @@ mod tests {
     }
 
     #[test]
+    fn qwen35_thinking_off_short_prompt_regression_splits_normal_content() {
+        let mut state = make_qwen_template_test_state();
+        state.default_thinking_enabled = Some(false);
+        let req = parse_request(
+            r#"{
+                "messages":[{"role":"user","content":"Answer with exactly two words."}],
+                "temperature":0.0,
+                "max_tokens":8
+            }"#,
+        );
+
+        let prompt = render_prompt_text(
+            &state,
+            &req.messages,
+            req.tools.as_deref(),
+            req.tool_choice.as_ref(),
+            req.chat_template_kwargs.as_ref(),
+        )
+        .expect("Qwen3.5 non-thinking short prompt should render");
+        assert!(
+            !prompt_starts_in_reasoning(&prompt),
+            "regression: thinking-off prompt must pre-close the reasoning block"
+        );
+        let (reasoning_content, content) = split_reasoning_response("Quality control", &prompt);
+        assert_eq!(
+            reasoning_content, None,
+            "regression: thinking-off Qwen output should not be hidden in reasoning_content"
+        );
+        assert_eq!(
+            content, "Quality control",
+            "regression: thinking-off short prompt should produce normal content"
+        );
+    }
+
+    #[test]
     fn reasoning_only_output_serializes_reasoning_channel_and_empty_reason_metadata() {
         let state = make_qwen_template_test_state();
         let req = parse_request(
@@ -8627,8 +8704,12 @@ mod tests {
             String::new(),
             "length",
         );
-        let metadata =
-            chat_completion_metadata_from_prompt_and_output(&state, &req, prompt_text, &assistant_output);
+        let metadata = chat_completion_metadata_from_prompt_and_output(
+            &state,
+            &req,
+            prompt_text,
+            &assistant_output,
+        );
         let resp = ChatCompletionResponse {
             id: "chatcmpl-test".to_string(),
             object: "chat.completion",
@@ -8687,8 +8768,12 @@ mod tests {
             String::new(),
             "length",
         );
-        let metadata =
-            chat_completion_metadata_from_prompt_and_output(&state, &req, prompt_text, &assistant_output);
+        let metadata = chat_completion_metadata_from_prompt_and_output(
+            &state,
+            &req,
+            prompt_text,
+            &assistant_output,
+        );
         let assistant_output = apply_reasoning_content_policy(
             assistant_output,
             fold_reasoning_into_content_for_request(&state, &req),
@@ -9764,7 +9849,12 @@ mod tests {
         .await;
         assert_eq!(status, axum::http::StatusCode::OK, "{json}");
         let hashes = &json["metadata"]["config_hashes"];
-        assert!(hashes["model_config_hash"].as_str().unwrap().starts_with("sha256:"));
+        assert!(
+            hashes["model_config_hash"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
         assert!(
             hashes["tokenizer_config_hash"]
                 .as_str()
@@ -9772,7 +9862,12 @@ mod tests {
                 .starts_with("sha256:")
         );
         assert!(hashes["chat_template_hash"].is_null());
-        assert!(hashes["kiln_env_config_hash"].as_str().unwrap().starts_with("sha256:"));
+        assert!(
+            hashes["kiln_env_config_hash"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
         assert!(
             json["metadata"].get("performance").is_none(),
             "config hash debug metadata must not imply performance metadata"
@@ -9861,18 +9956,12 @@ mod tests {
         for _ in 0..16 {
             let resp = chat_post_raw(state.clone(), body).await;
             assert_eq!(resp.status(), axum::http::StatusCode::OK);
-            assert_eq!(
-                resp.headers().get("x-kiln-eval-mode").unwrap(),
-                "true"
-            );
+            assert_eq!(resp.headers().get("x-kiln-eval-mode").unwrap(), "true");
             assert_eq!(
                 resp.headers().get("x-kiln-active-adapter").unwrap(),
                 "eval-adapter"
             );
-            assert_eq!(
-                resp.headers().get("x-kiln-loaded-adapter").unwrap(),
-                "base"
-            );
+            assert_eq!(resp.headers().get("x-kiln-loaded-adapter").unwrap(), "base");
             let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
             let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(json["object"], "chat.completion");
@@ -9887,8 +9976,14 @@ mod tests {
         assert_eq!(latest.thinking_mode.as_deref(), Some("mock"));
 
         assert_eq!(state_for_assert.completion_cache.lock().unwrap().stats(), 0);
-        assert_eq!(state_for_assert.chat_request_cache.lock().unwrap().stats(), 0);
-        assert_eq!(state_for_assert.chat_choices_cache.lock().unwrap().stats(), 0);
+        assert_eq!(
+            state_for_assert.chat_request_cache.lock().unwrap().stats(),
+            0
+        );
+        assert_eq!(
+            state_for_assert.chat_choices_cache.lock().unwrap().stats(),
+            0
+        );
         assert_eq!(state_for_assert.batch_cache.lock().unwrap().stats(), 0);
         assert_eq!(
             state_for_assert
@@ -10281,7 +10376,12 @@ mod tests {
                 &seeded_full_distribution,
                 false
             ),
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_top_p_above_one, false),
+            deterministic_completion_cache_key(
+                &state,
+                &prompt_tokens,
+                &seeded_top_p_above_one,
+                false
+            ),
             "top_p >= 1.0 disables nucleus filtering, so full-distribution seeded sampling should share completion-cache entries"
         );
         assert_eq!(
@@ -10301,7 +10401,12 @@ mod tests {
                 &seeded_full_distribution,
                 false
             ),
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_top_p_negative, false),
+            deterministic_completion_cache_key(
+                &state,
+                &prompt_tokens,
+                &seeded_top_p_negative,
+                false
+            ),
             "negative top_p disables nucleus filtering, so full-distribution seeded sampling should share completion-cache entries"
         );
         assert_eq!(
@@ -10311,7 +10416,12 @@ mod tests {
                 &seeded_full_distribution,
                 false
             ),
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_top_k_disabled, false),
+            deterministic_completion_cache_key(
+                &state,
+                &prompt_tokens,
+                &seeded_top_k_disabled,
+                false
+            ),
             "top_k >= model vocab size is disabled, so full-distribution seeded sampling should share completion-cache entries"
         );
 

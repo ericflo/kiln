@@ -1637,7 +1637,11 @@ async fn adapter_detail(
     let mut eval_pairs: Vec<(String, AdapterLinkedEval)> = {
         let jobs = state.eval_jobs.read().unwrap();
         jobs.values()
-            .filter(|j| j.adapters.iter().any(|a| a.as_deref() == Some(name.as_str())))
+            .filter(|j| {
+                j.adapters
+                    .iter()
+                    .any(|a| a.as_deref() == Some(name.as_str()))
+            })
             .map(|j| {
                 (
                     j.submitted_at_iso.clone(),
@@ -1687,9 +1691,7 @@ async fn adapter_receipt(
     }
     match kiln_train::AdapterReceipt::read_from_adapter_dir(&adapter_dir) {
         Ok(Some(r)) => Ok(Json(r)),
-        Ok(None) => Err(ApiError::adapter_not_found(&format!(
-            "{name}/receipt.json"
-        ))),
+        Ok(None) => Err(ApiError::adapter_not_found(&format!("{name}/receipt.json"))),
         Err(e) => Err(ApiError::internal(format!(
             "failed to read adapter receipt for {name}: {e:#}"
         ))),
@@ -1815,7 +1817,11 @@ mod tests {
         } else {
             Body::empty()
         };
-        let resp = app.clone().oneshot(builder.body(body).unwrap()).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(builder.body(body).unwrap())
+            .await
+            .unwrap();
         let status = resp.status();
         let headers = resp.headers().clone();
         let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
@@ -1983,6 +1989,8 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_load_eval_unload_stress_tracks_state_latency_and_memory() {
+        // Issue 40 regression: repeated load/eval/unload cycles must not
+        // accumulate state, memory, or severe latency drift.
         let tmp = tempfile::tempdir().unwrap();
         write_test_adapter(tmp.path(), "stress-a");
         write_test_adapter(tmp.path(), "stress-b");
@@ -2012,8 +2020,7 @@ mod tests {
             assert_eq!(body["status"], "loaded");
             assert_eq!(body["name"], adapter);
 
-            let (status, _, body) =
-                request_json(&app, Method::GET, "/v1/adapters", None).await;
+            let (status, _, body) = request_json(&app, Method::GET, "/v1/adapters", None).await;
             assert_eq!(status, StatusCode::OK);
             assert_adapter_state(&body, Some(adapter));
             assert_eq!(
@@ -2054,12 +2061,23 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body["status"], "unloaded");
 
-            let (status, _, body) =
-                request_json(&app, Method::GET, "/v1/adapters", None).await;
+            let (status, _, body) = request_json(&app, Method::GET, "/v1/adapters", None).await;
             assert_eq!(status, StatusCode::OK);
             assert_adapter_state(&body, None);
-            assert!(state_for_assert.active_adapter_name.read().unwrap().is_none());
-            assert!(state_for_assert.loaded_adapter_name.read().unwrap().is_none());
+            assert!(
+                state_for_assert
+                    .active_adapter_name
+                    .read()
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                state_for_assert
+                    .loaded_adapter_name
+                    .read()
+                    .unwrap()
+                    .is_none()
+            );
 
             cycle_latencies.push(started.elapsed());
         }
@@ -2073,9 +2091,10 @@ mod tests {
              last_p95={last_p95}us limit={severe_drift_limit}us"
         );
 
-        if let (Some(before), Some(after)) =
-            (memory_before, memory_growth_counter_bytes(&state_for_assert))
-        {
+        if let (Some(before), Some(after)) = (
+            memory_before,
+            memory_growth_counter_bytes(&state_for_assert),
+        ) {
             assert!(
                 after <= before.saturating_add(16 * 1024 * 1024),
                 "adapter stress memory grew unexpectedly: before={before} after={after}"

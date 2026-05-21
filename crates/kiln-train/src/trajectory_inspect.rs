@@ -416,6 +416,8 @@ mod tests {
 
     #[test]
     fn inspect_pi_0753_tool_result_role_normalizes_to_tool() -> Result<()> {
+        // Issue 40 regression: Pi session exports may use role
+        // `toolResult`; kiln must normalize it to the Qwen/tool role.
         let path = write_jsonl(&[
             serde_json::json!({"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"run"}]}}),
             serde_json::json!({"type":"message","message":{"role":"toolResult","content":[{"type":"text","text":"ok\n"}]}}),

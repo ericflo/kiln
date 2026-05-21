@@ -2804,6 +2804,80 @@ tests so they do not recur.
 - Tests are included in the normal Rust test suite where feasible.
 - CUDA-only tests are marked and documented separately.
 
+**Status:** Completed and pending push to `main`.
+
+**Intended behavior:** Preserve the lessons from issues 1-39 as named,
+maintained regressions. Normal Rust tests should cover parser, routing,
+adapter-layout, training-config, trajectory-normalization, ECHO, and
+base-adapter-weight behavior where they can run without a full model. The
+actual Qwen3.5-4B server behaviors that require CUDA and model weights,
+especially non-thinking short-prompt content and repeated load/eval/unload
+latency stability, must be validated on RunPod and documented as CUDA-only
+evidence.
+
+**Implementation notes:** Added
+`chat_adapter_missing_regression_does_not_unload_active_adapter_http_path` to
+exercise the HTTP route and assert that an omitted chat `adapter` field leaves
+both `active_adapter_name` and `loaded_adapter_name` unchanged. Added
+`qwen35_thinking_off_short_prompt_regression_splits_normal_content` to pin the
+Qwen3.5-4B non-thinking prompt split so generated text lands in normal
+`content`, not `reasoning_content`. Added Issue 40 bug-class comments to the
+existing nested adapter directory, base-adapter rank mismatch, alpha/rank
+guardrail, Pi `toolResult`, ECHO env-token, base-adapter weight-load, and
+load/eval/unload stress tests. Added
+`scripts/issue40_actual_model_regressions.sh` as the documented CUDA-only
+actual-model validation script; it builds the CUDA server, boots
+`/workspace/Qwen3.5-4B`, verifies non-thinking short-prompt content, trains a
+small real SFT adapter, and measures repeated load/eval/unload latency drift.
+
+**Validation evidence:**
+
+- Focused RunPod validation passed on 2026-05-21 on RTX A6000 pod
+  `m5qfrqcbwt16pe`, lease `pod-ad0999c0694eca57da9716df`. Sentinel:
+  `/workspace/kiln-validation/issue40/focused.ok`; log:
+  `/workspace/kiln-validation/issue40/focused.log`.
+- Focused commands run on RunPod: `rustfmt --edition 2024` on touched Rust
+  files; `bash -n scripts/issue40_actual_model_regressions.sh`;
+  `git diff --check`; focused `cargo test` runs for
+  `chat_adapter_missing_regression_does_not_unload_active_adapter_http_path`,
+  `qwen35_thinking_off_short_prompt_regression_splits_normal_content`,
+  `adapter_load_eval_unload_stress_tracks_state_latency_and_memory`,
+  `test_load_rejects_common_nested_output_mistake`,
+  `base_adapter_rank_mismatch_fails`,
+  `lora_scaling_rejects_high_ratio_by_default`,
+  `inspect_pi_0753_tool_result_role_normalizes_to_tool`, and
+  `test_agentic_grpo_plumbing_trains_echo_variants_and_base_adapter`.
+- Focused Issue 39 base-adapter/ECHO regression printed
+  `delta_gap=6.493757504594556e-3`, verifier-free max delta
+  `1.591720e-2`, fresh first-step loss `0.340465`, chained first-step loss
+  `0.340047`, and step-1 gap `4.1725635528566674e-4`.
+- Actual Qwen3.5-4B RunPod validation passed on the same A6000 lease. Script:
+  `scripts/issue40_actual_model_regressions.sh`; sentinel:
+  `/workspace/kiln-validation/issue40/actual-model.done` with `exit=0`; log:
+  `/workspace/kiln-validation/issue40/actual-model/driver.log`; summary:
+  `/workspace/kiln-validation/issue40/actual-model/summary.json`.
+- Actual-model evidence: CUDA release server built, `/health` reported
+  `Qwen3.5-4B (32L, 16H, 4KV)` with `eval_mode=true`,
+  `default_thinking_enabled=false`, and passing `model_loaded`,
+  `scheduler_responsive`, and `inference_prewarm_complete` checks. A short
+  non-thinking chat returned normal content `Thinking hard.` with no
+  `reasoning_content`. The script trained `issue40-latency-smoke` on the real
+  model, adapter smoke passed, then ran eight load/eval/unload cycles; first
+  cycle median was `291.82 ms`, last cycle median was `288.06 ms`, under the
+  severe-drift limit `5291.82 ms`.
+- Full relevant RunPod suites passed on the same A6000 lease. Sentinel:
+  `/workspace/kiln-validation/issue40/full.ok`; log:
+  `/workspace/kiln-validation/issue40/full.log`. Results:
+  `cargo test -p kiln-server --lib` passed `457 passed; 0 failed`;
+  `cargo test -p kiln-server --test adapter_path_traversal` passed
+  `7 passed; 0 failed`; `cargo test -p kiln-train --lib` passed
+  `255 passed; 0 failed`.
+
+**Commit SHA:** Pending metadata update after commit.
+
+**Remaining risk:** GitHub CI still needs to run after push; no code-level or
+actual-model validation risk is known for this issue.
+
 ## Suggested Execution Order
 
 1. Adapter semantics and load validation: issues 1-7.

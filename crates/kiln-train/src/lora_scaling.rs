@@ -12,11 +12,7 @@ pub fn alpha_over_rank(rank: usize, alpha: f32) -> Result<f32> {
     Ok(alpha / rank as f32)
 }
 
-pub fn validate_lora_scaling(
-    rank: usize,
-    alpha: f32,
-    allow_high_lora_scale: bool,
-) -> Result<f32> {
+pub fn validate_lora_scaling(rank: usize, alpha: f32, allow_high_lora_scale: bool) -> Result<f32> {
     let ratio = alpha_over_rank(rank, alpha)?;
     if ratio > MAX_LORA_ALPHA_OVER_RANK && !allow_high_lora_scale {
         bail!(
@@ -39,6 +35,8 @@ mod tests {
 
     #[test]
     fn lora_scaling_rejects_high_ratio_by_default() {
+        // Issue 40 regression: alpha/rank above the default safety limit
+        // requires an explicit override instead of silently training.
         let err = validate_lora_scaling(4, 12.0, false)
             .unwrap_err()
             .to_string();
