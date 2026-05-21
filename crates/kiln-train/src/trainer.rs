@@ -14728,15 +14728,7 @@ mod tests {
 
     #[test]
     fn test_agentic_grpo_plumbing_trains_echo_variants_and_base_adapter() -> Result<()> {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior_shared_prefix = std::env::var("KILN_DISABLE_GRPO_SHARED_PREFIX_REF").ok();
-        let prior_grad_checkpoint = std::env::var("KILN_NO_GRAD_CHECKPOINT").ok();
-        unsafe {
-            std::env::set_var("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", "1");
-            std::env::set_var("KILN_NO_GRAD_CHECKPOINT", "1");
-        }
-
-        let result = (|| -> Result<()> {
+        (|| -> Result<()> {
             use crate::ScoredRollout;
 
             let device = Device::Cpu;
@@ -14806,6 +14798,7 @@ mod tests {
                 config.lora_rank = 4;
                 config.lora_alpha = 8.0;
                 config.optimizer = Optimizer::Sgd;
+                config.reference_policy = ReferencePolicy::None;
                 config.seed = Some(0xA6E17C_u64);
                 config.loss.echo = echo;
                 config.loss.no_policy_loss = no_policy_loss;
@@ -14931,11 +14924,7 @@ mod tests {
             );
 
             Ok(())
-        })();
-
-        restore_env("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", prior_shared_prefix);
-        restore_env("KILN_NO_GRAD_CHECKPOINT", prior_grad_checkpoint);
-        result
+        })()
     }
 
     fn max_lora_delta(receipt: &crate::train_receipt::TrainReceipt) -> f64 {

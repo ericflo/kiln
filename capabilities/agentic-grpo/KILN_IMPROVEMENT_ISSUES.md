@@ -2692,8 +2692,11 @@ verifier-free ECHO, fresh ECHO, and parent-chained ECHO adapters through the
 shared `grpo_train` implementation, then verifies adapter SHA differences,
 LoRA delta summary differences, nonzero environment token counts, nonzero
 verifier-free LoRA deltas, first-step loss differences, and recorded base
-adapter receipt metadata. Helper functions compare maximum LoRA deltas and
-per-module LoRA delta signatures.
+adapter receipt metadata. The CI-feasible CPU test uses
+`ReferencePolicy::None` for its synthetic rollouts so it does not need the
+shared-prefix reference path and does not mutate process-wide `KILN_*`
+environment variables while other Rust tests run in parallel. Helper functions
+compare maximum LoRA deltas and per-module LoRA delta signatures.
 
 **Validation evidence:**
 
@@ -2746,12 +2749,28 @@ per-module LoRA delta signatures.
   `0.943492263211783`; chained first-step loss `0.9420405293615728`;
   base-adapter loss gap `0.0014517338502102461`; chained base path
   `/workspace/kiln-validation/issue39/adapters-actual2/issue39-vf-parent-actual2`.
+- GitHub CI run `26250252455` failed on the first pushed Issue 39 code commit:
+  Linux/default and macOS/default both failed
+  `trainer::tests::test_checkpoint_config_from_env` because the initial test
+  used `KILN_NO_GRAD_CHECKPOINT=1` process env while the Rust suite ran in
+  parallel.
+- RunPod CI-fix validation `ci-fix2` passed on 2026-05-21 on the same A6000
+  lease after removing the env mutation and setting `ReferencePolicy::None` in
+  the synthetic CPU test. Sentinel:
+  `/workspace/kiln-validation/issue39/ci-fix2.ok`; log:
+  `/workspace/kiln-validation/issue39/ci-fix2.log`. Commands: `rustfmt
+  --edition 2024 crates/kiln-train/src/trainer.rs`; focused
+  `cargo test -p kiln-train
+  test_agentic_grpo_plumbing_trains_echo_variants_and_base_adapter --lib --
+  --nocapture`; `cargo test -p kiln-train test_checkpoint_config_from_env
+  --lib`; full `cargo test -p kiln-train --lib`; `git diff --check`. Full
+  lib test result: `255 passed; 0 failed`.
 
 **Commit SHA:** `07cd4a85` (`Issue 39: add agentic GRPO plumbing test`),
 pushed to `origin/main` on 2026-05-21. This status line is recorded in the
 follow-up metadata commit because a commit cannot include its own final SHA.
 
-**Remaining risk:** CI still needs to run on the pushed commit. The full
+**Remaining risk:** CI still needs to rerun on the CI-fix commit. The full
 actual-model plumbing path passed against `/workspace/Qwen3.5-4B`.
 
 ### 40. Add Regression Tests For Lessons Already Learned
