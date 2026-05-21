@@ -1592,13 +1592,20 @@ progress lines.
   --release -p kiln-train --features cuda --example long_context_grpo_bench`.
 - Remote sentinel `/workspace/kiln-validation/issue26.done` recorded `exit=0`;
   remote log is `/workspace/kiln-validation/issue26.log`.
+- Additional RunPod locked test after the `Cargo.lock` repair passed:
+  `cargo test --locked -p kiln-train --lib -- --skip test_health_with_real_backend`
+  (241 tests passed).
+- Remote sentinel `/workspace/kiln-validation/issue26-fulltest.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue26-fulltest.log`.
 
-**Commit SHA:** TBD. This status line will be updated in the follow-up metadata
-commit because a commit cannot include its own final SHA.
+**Commit SHA:** `1ce37ca4` (`Issue 26: add long-context progress logging`).
+This status line is recorded in the follow-up metadata commit because a commit
+cannot include its own final SHA.
 
-**Remaining risk:** Validation covered compilation, the focused receipt test, and
-CUDA release example compilation. Full long-context CUDA training runtime still
-depends on model assets being present on the pod.
+**Remaining risk:** Validation covered compilation, the focused receipt test, the
+full `kiln-train` library test suite, and CUDA release example compilation. Full
+long-context CUDA training runtime still depends on model assets being present on
+the pod.
 
 ### 27. Debug Why Long-Context Adapters Can Be Byte-Identical
 
