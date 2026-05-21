@@ -1333,6 +1333,37 @@ implemented or tuned it outside kiln.
 - Empty-filter behavior is explicit, not accidental.
 - Tests cover each `--on-empty-filter` mode.
 
+**Implementation status:** Complete. `GrpoConfig` now has first-class reward
+variance filter knobs (`reward_filter_var_min`, `reward_filter_var_max`,
+`reward_filter_min_groups`, and `reward_filter_on_empty`). Inline GRPO,
+streamed JSONL GRPO, and dry-run JSONL apply the filter before dynamic
+sampling, record reward-filter kept/dropped counts in `train_receipt.json`,
+and write `reward_filter_groups.json` with exact source ids (`group:N` for
+inline groups and `line:N` for JSONL), variances, final decisions, and
+empty-filter action. The CUDA ablation CLI exposes `--filter-var-min`,
+`--filter-var-max`, `--min-groups`, and `--on-empty-filter
+fail|train-all|skip`, then prints reward-filter counts and sidecar paths.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on RTX A6000 pod `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo test -p kiln-train
+  grpo_dry_run_reward_filter_on_empty_modes --lib`; `cargo test -p
+  kiln-train test_grpo_reward_diagnostic_thresholds_deserialize --lib`;
+  `cargo check --release -p kiln-train --features cuda --example
+  cuda_grpo_ablation`; `cargo check -p kiln-train --tests`; `cargo check -p
+  kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issue22f.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue22f.log`.
+
+**Commit SHA:** `8834e27c` (`Issue 22: add reward variance filtering`).
+This status line is recorded in the follow-up metadata commit because a
+commit cannot include its own final SHA.
+
+**Remaining risk:** Vulkan-native GRPO keeps its existing dynamic-sampling
+behavior and does not yet apply the reward variance filter; Issue 22's CLI
+and generic Candle GRPO paths are covered.
+
 ### 23. Print Effective Training Config
 
 **Area:** `examples/cuda_grpo_ablation.rs`
