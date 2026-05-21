@@ -2061,7 +2061,9 @@ tool calls.
   `metadata.thinking_enabled=false`, `metadata.thinking_mode=non_reasoning`,
   and a non-null `chat_template_hash`.
 
-**Commit SHA:** Pending.
+**Commit SHA:** `be02f004` (`Issue 31: add Qwen defaults profile`). The SHA is
+recorded in a follow-up metadata commit because a commit cannot include its own
+final hash.
 
 **Remaining risk:** This issue changes startup/config defaults and diagnostics,
 so no long-context benchmark was rerun. The real Qwen3.5-4B CUDA server path
