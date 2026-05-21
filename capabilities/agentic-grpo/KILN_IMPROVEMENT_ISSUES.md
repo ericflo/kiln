@@ -1898,7 +1898,7 @@ instead of replaying stale timing.
   older sections of `kiln-server`; no whitespace errors were present in this
   patch (`git diff --check` passed).
 
-**Commit SHA:** Pending until the issue commit is created.
+**Commit SHA:** `967bb93b` (`Issue 29: add chat performance metadata`).
 
 **Remaining risk:** Non-streaming real batched generation records true TTFT from
 the first token event, and prefix-cache generation records prefill/decode
