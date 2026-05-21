@@ -1130,6 +1130,37 @@ reasoning and final content.
   off.
 - Tests cover empty content with nonempty reasoning.
 
+**Implementation status:** Complete. Chat responses now keep separated
+reasoning in `choices[].message.reasoning_content`, report
+`metadata.final_content_empty`, `metadata.content_empty_reason`, and
+`metadata.reasoning_folded_into_content`, and support per-request
+`fold_reasoning_into_content` plus server-level
+`server.fold_reasoning_into_content` / `KILN_FOLD_REASONING_INTO_CONTENT`.
+Batch responses now serialize `reasoning_content` when present. Deterministic
+chat, completion, and batch cache keys account for the effective folding mode,
+while cache values are stored in unfolded form before response-shaping.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on RTX A6000 pod `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo test -p kiln-server
+  reasoning --lib`; `cargo test -p kiln-server
+  deterministic_cache_keys_include_reasoning_fold_mode --lib`; `cargo test -p
+  kiln-server batch_items_serialize_reasoning_content_when_present --lib`;
+  `cargo test -p kiln-server env_overrides --lib`; `cargo check -p
+  kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issue18b.done` recorded `exit=0`;
+  remote log is `/workspace/kiln-validation/issue18b.log`.
+
+**Commit SHA:** `c4512584` (`Issue 18: surface reasoning content safely`),
+pushed to `origin/main` on 2026-05-21. Note: the commit contains the
+implementation and docs; this status line is recorded in the follow-up
+metadata commit because a commit cannot include its own final SHA.
+
+**Remaining risk:** Streaming chunks continue to use the existing SSE delta
+shape; the new empty-final-content metadata is reported on non-streaming
+OpenAI-compatible response bodies.
+
 ## P1: Make Training Diagnostics Strong Enough To Debug Science
 
 ### 19. Add Adapter-Effect Smoke Test After Training
