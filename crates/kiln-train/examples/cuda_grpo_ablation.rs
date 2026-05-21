@@ -268,6 +268,10 @@ struct Args {
     min_groups: usize,
     /// Explicit behavior if reward filtering leaves too few groups.
     on_empty_filter: RewardFilterOnEmpty,
+    /// Print the resolved training config before dry-run or training work.
+    print_effective_config: bool,
+    /// Emit the effective-config record as single-line JSON.
+    print_effective_config_json: bool,
 }
 
 #[cfg(feature = "cuda")]
@@ -298,6 +302,8 @@ impl Args {
         let mut filter_var_max: Option<f64> = None;
         let mut min_groups = 1usize;
         let mut on_empty_filter = RewardFilterOnEmpty::Fail;
+        let mut print_effective_config = true;
+        let mut print_effective_config_json = false;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -419,6 +425,12 @@ impl Args {
                         ),
                     };
                 }
+                "--print-effective-config" => print_effective_config = true,
+                "--no-print-effective-config" => print_effective_config = false,
+                "--print-effective-config-json" | "--effective-config-json" => {
+                    print_effective_config = true;
+                    print_effective_config_json = true;
+                }
                 "--help" | "-h" => {
                     println!(
                         "cuda_grpo_ablation --data <jsonl> --model <dir> [--output <dir>] \
@@ -430,7 +442,23 @@ impl Args {
                          [--install-adapter-dir DIR] [--install-adapter-name NAME] \
                          [--dry-run] [--allow-empty-dry-run] \
                          [--filter-var-min F] [--filter-var-max F] [--min-groups N] \
-                         [--on-empty-filter fail|train-all|skip]"
+                         [--on-empty-filter fail|train-all|skip] \
+                         [--print-effective-config|--no-print-effective-config] \
+                         [--print-effective-config-json]"
+                    );
+                    println!();
+                    println!(
+                        "Config printing: the runner prints the resolved training config by \
+                         default before dry-run or training. Use --no-print-effective-config \
+                         to suppress it, or --print-effective-config-json for a machine-readable \
+                         JSON record."
+                    );
+                    println!();
+                    println!(
+                        "Advantage formulation: --mode selects the effective advantage mode \
+                         and related GRPO knobs. baseline restores the historical vanilla \
+                         advantage/per-sample recipe; phase modes use Dr. GRPO and their \
+                         documented loss, clipping, KL, IS, and reference-policy settings."
                     );
                     println!();
                     println!("ECHO flags (Phase 1, paper §3.3):");
@@ -453,7 +481,11 @@ impl Args {
         }
 
         if no_echo && echo_lambda.is_some() {
-            anyhow::bail!("--no-echo and --echo-lambda are mutually exclusive");
+            anyhow::bail!(
+                "--no-echo and --echo-lambda are mutually exclusive; use one argument only: \
+                 pass --no-echo to disable ECHO, or pass --echo-lambda <f64> to keep ECHO \
+                 enabled with that coefficient"
+            );
         }
         if no_policy_loss && no_echo {
             anyhow::bail!(
@@ -493,8 +525,77 @@ impl Args {
             filter_var_max,
             min_groups,
             on_empty_filter,
+            print_effective_config,
+            print_effective_config_json,
         })
     }
+}
+
+#[cfg(feature = "cuda")]
+fn effective_config_record(
+    args: &Args,
+    dataset_path: &PathBuf,
+    config: &GrpoConfig,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event": "effective_config",
+        "mode": args.mode.as_str(),
+        "paths": {
+            "data": args.data.display().to_string(),
+            "effective_data": dataset_path.display().to_string(),
+            "model": args.model_path.display().to_string(),
+            "output": args.output_dir.display().to_string(),
+            "adapter": args.adapter_name,
+            "base_adapter": args.base_adapter,
+            "install_adapter_dir": args
+                .install_adapter_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            "install_adapter_name": args.install_adapter_name,
+        },
+        "cli": {
+            "max_groups": args.max_groups,
+            "rank": args.lora_rank,
+            "alpha": args.lora_alpha,
+            "lr": args.learning_rate,
+            "seed": args.seed,
+            "echo_lambda": args.echo_lambda,
+            "no_echo": args.no_echo,
+            "opd_lambda": args.opd_lambda,
+            "no_policy_loss": args.no_policy_loss,
+            "allow_adapter_shape_conversion": args.allow_adapter_shape_conversion,
+            "allow_high_lora_scale": args.allow_high_lora_scale,
+            "dry_run": args.dry_run,
+            "allow_empty_dry_run": args.allow_empty_dry_run,
+            "filter_var_min": args.filter_var_min,
+            "filter_var_max": args.filter_var_max,
+            "min_groups": args.min_groups,
+            "on_empty_filter": args.on_empty_filter,
+        },
+        "env": {
+            "KILN_ECHO_ENABLED": std::env::var("KILN_ECHO_ENABLED").ok(),
+            "KILN_ECHO_LAMBDA": std::env::var("KILN_ECHO_LAMBDA").ok(),
+            "KILN_ECHO_ENV_MASK_MODE": std::env::var("KILN_ECHO_ENV_MASK_MODE").ok(),
+            "KILN_ECHO_WARNING_FILTER": std::env::var("KILN_ECHO_WARNING_FILTER").ok(),
+        },
+        "grpo_config": config,
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn print_effective_config(
+    args: &Args,
+    dataset_path: &PathBuf,
+    config: &GrpoConfig,
+) -> Result<()> {
+    let record = effective_config_record(args, dataset_path, config);
+    if args.print_effective_config_json {
+        println!("{}", serde_json::to_string(&record)?);
+    } else {
+        println!("effective_config mode={} format=text", args.mode.as_str());
+        println!("effective_config_json={}", serde_json::to_string(&record)?);
+    }
+    Ok(())
 }
 
 #[cfg(feature = "cuda")]
@@ -666,6 +767,10 @@ fn main() -> Result<()> {
         config.reward_filter_min_groups,
         config.reward_filter_on_empty,
     );
+
+    if args.print_effective_config {
+        print_effective_config(&args, &dataset_path, &config)?;
+    }
 
     if args.dry_run {
         let report = grpo_dry_run_jsonl(
