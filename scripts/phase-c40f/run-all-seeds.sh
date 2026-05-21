@@ -15,7 +15,7 @@ mkdir -p docs/archive/phase-c/phase-c40f
 
 for seed in $(seq 0 19); do
   ./target/release/kiln-bench \
-    --model-path /workspace/qwen3.5-4b \
+    --model-path /workspace/Qwen3.5-4B \
     --paged --chat-template --skip-training --latency-only \
     --prompt-tokens 512 --max-output-tokens 128 \
     --prompt-subset humaneval \

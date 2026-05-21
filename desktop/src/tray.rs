@@ -891,7 +891,7 @@ mod tests {
     #[test]
     fn is_model_path_set_valid_returns_true() {
         let mut s = Settings::default();
-        s.model_path = Some(std::path::PathBuf::from("/models/qwen3.5-4b"));
+        s.model_path = Some(std::path::PathBuf::from("/models/Qwen3.5-4B"));
         assert!(is_model_path_set(&s));
     }
 

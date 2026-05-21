@@ -19,7 +19,7 @@
 //!
 //! Run:
 //!   cargo run --release --features cuda -p kiln-server \
-//!     --example phase10_rmsnorm_bench -- --model-path /workspace/qwen3.5-4b
+//!     --example phase10_rmsnorm_bench -- --model-path /workspace/Qwen3.5-4B
 //!
 //! Env vars set/unset by this bench:
 //!   KILN_DISABLE_RMSNORM_BACKWARD  (1 = fallback path; unset = custom op)

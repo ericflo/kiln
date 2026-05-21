@@ -335,7 +335,7 @@ build cache wiring; see `deploy/runpod/`.
 
 ### Fetch the model
 ```bash
-hf download Qwen/Qwen3.5-4B --local-dir qwen3.5-4b
+hf download Qwen/Qwen3.5-4B --local-dir Qwen3.5-4B
 ```
 
 ### Build kiln
@@ -348,7 +348,7 @@ cargo build --release --features cuda --bin kiln-bench
 ```bash
 cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 -DBUILD_SHARED_LIBS=OFF
 cmake --build build --config Release -j --target llama-bench llama-quantize
-python3 convert_hf_to_gguf.py qwen3.5-4b --outfile qwen3.5-4b-bf16.gguf --outtype bf16
+python3 convert_hf_to_gguf.py Qwen3.5-4B --outfile Qwen3.5-4B-bf16.gguf --outtype bf16
 ```
 
 ### Run
@@ -356,7 +356,7 @@ Current single-stream kiln protocol (matches PR #535 / PR #536):
 
 ```bash
 KILN_W4A16=1 KILN_CUDA_GRAPHS=true ./target/release/kiln-bench \
-  --model-path qwen3.5-4b \
+  --model-path Qwen3.5-4B \
   --paged \
   --prompt-tokens 512 --max-output-tokens 128 \
   --skip-training \
@@ -370,7 +370,7 @@ llama.cpp side (still on the `f3d5089` head-to-head shape, 512 → 256):
 
 ```bash
 ./llama.cpp/build/bin/llama-bench \
-  -m qwen3.5-4b-bf16.gguf \
+  -m Qwen3.5-4B-bf16.gguf \
   -p 512 -n 256 -r 3 -o json > llama-bench.json
 ```
 
@@ -400,7 +400,7 @@ cargo build --release --features metal --bin kiln-bench
 ### Run
 ```bash
 ./target/release/kiln-bench \
-  --model-path qwen3.5-4b \
+  --model-path Qwen3.5-4B \
   --prompt-tokens 512 --max-output-tokens 256 \
   --paged --skip-training > kiln-bench-metal.json
 ```

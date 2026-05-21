@@ -50,7 +50,7 @@ fn make_state(adapter_dir: std::path::PathBuf) -> AppState {
         Arc::new(engine),
         test_tokenizer(),
         300,
-        "qwen3.5-4b-kiln".to_string(),
+        "Qwen3.5-4B".to_string(),
     );
     state.adapter_dir = adapter_dir;
     state

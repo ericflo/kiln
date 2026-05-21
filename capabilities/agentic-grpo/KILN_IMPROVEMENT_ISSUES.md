@@ -1216,9 +1216,12 @@ implementation and docs; this status line is recorded in the follow-up
 metadata commit because a commit cannot include its own final SHA.
 
 **Remaining risk:** Native CUDA/Vulkan training paths continue to write normal
-training receipts but do not run the generic post-training canary; the
-`--adapter-smoke-test` canary currently covers the generic trainer path used
-by default SFT/GRPO submissions.
+training receipts. The CUDA GRPO path now has actual-model coverage for the
+adapter canary: RunPod validation on 2026-05-21 ran
+`cuda_grpo_ablation --adapter-smoke-test` against `/workspace/Qwen3.5-4B`,
+produced `cuda_grpo_receipt_ok`, installed the trained adapter, and recorded
+nonzero train timings. Vulkan-native training still needs equivalent
+actual-model coverage.
 
 ### 20. Report LoRA Delta And Gradient Norms
 
@@ -1515,7 +1518,7 @@ lengths.
   policy forward, backward, and optimizer phases.
 - Dry mode emits JSON with a built-in byte tokenizer when `--model` is omitted,
   so CPU-only development environments can run a smoke without model assets.
-- CUDA mode requires `--model <qwen3.5-4b-dir>`, supports configurable
+- CUDA mode requires `--model <Qwen3.5-4B-dir>`, supports configurable
   `--lengths`, `--completions`, and `--segments`, and records peak VRAM when
   `nvidia-smi` is available. `kernel_launch_count` is emitted as `null` until a
   launch counter is wired.
@@ -1533,15 +1536,23 @@ lengths.
   /workspace/kiln-validation/issue25-dry.json`.
 - Remote sentinel `/workspace/kiln-validation/issue25.done` recorded `exit=0`;
   remote log is `/workspace/kiln-validation/issue25.log`.
+- Actual-model CUDA validation later passed on the same RTX A6000 pod
+  `qmfxie9izl6lc6` with `KILN_MODEL_PATH=/workspace/Qwen3.5-4B`.
+  `/workspace/kiln-validation/actual_model_validation.done` recorded `exit=0`
+  and `ACTUAL_MODEL_VALIDATION_OK`; artifacts are under
+  `/workspace/kiln-validation/actual-model-validation/`.
+- `long_context_grpo_bench --cuda --lengths 8192,16384,32768,65536` completed
+  with model path `/workspace/Qwen3.5-4B`, nonzero reference/policy/backward/
+  optimizer timings at every length, and peak VRAM of 14344, 15338, 18218, and
+  25066 MiB respectively.
 
 **Commit SHA:** `7b62d451` (`Issue 25: add long-context GRPO benchmark`).
 This status line is recorded in the follow-up metadata commit because a
 commit cannot include its own final SHA.
 
-**Remaining risk:** The active pod does not currently have a Qwen tokenizer/model
-directory, so CUDA runtime smoke was skipped after the CUDA release example
-compiled successfully. Full 8K-64K CUDA benchmark execution still requires a
-pod/model directory with Qwen3.5-4B assets.
+**Remaining risk:** `kernel_launch_count` is still emitted as `null` until a
+kernel launch counter is wired. The full 8K-64K CUDA runtime path has now been
+validated against actual Qwen3.5-4B assets on RTX A6000.
 
 ### 26. Add Long-Context Progress Logging
 
@@ -1597,15 +1608,20 @@ progress lines.
   (241 tests passed).
 - Remote sentinel `/workspace/kiln-validation/issue26-fulltest.done` recorded
   `exit=0`; remote log is `/workspace/kiln-validation/issue26-fulltest.log`.
+- Actual-model CUDA validation later passed on RTX A6000 pod `qmfxie9izl6lc6`
+  with `KILN_MODEL_PATH=/workspace/Qwen3.5-4B`. The 8K, 16K, 32K, and 64K
+  long-context GRPO bench rows were written to
+  `/workspace/kiln-validation/actual-model-validation/long_context_grpo_bench.json`
+  with nonzero phase timings and `ACTUAL_MODEL_VALIDATION_OK`.
 
 **Commit SHA:** `1ce37ca4` (`Issue 26: add long-context progress logging`).
 This status line is recorded in the follow-up metadata commit because a commit
 cannot include its own final SHA.
 
 **Remaining risk:** Validation covered compilation, the focused receipt test, the
-full `kiln-train` library test suite, and CUDA release example compilation. Full
-long-context CUDA training runtime still depends on model assets being present on
-the pod.
+full `kiln-train` library test suite, CUDA release example compilation, and the
+full actual-model 8K-64K CUDA training runtime on A6000. Progress logging still
+does not include per-kernel launch counts because that counter is not wired.
 
 ### 27. Debug Why Long-Context Adapters Can Be Byte-Identical
 

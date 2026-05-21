@@ -8,13 +8,13 @@
 #
 # Usage:
 #   scripts/cuda_qwen_sft_smoke.sh
-#   scripts/cuda_qwen_sft_smoke.sh --model-path /workspace/qwen3.5-4b --skip-build
-#   scripts/cuda_qwen_sft_smoke.sh --model-path /workspace/qwen3.5-4b --skip-build --native-cuda
+#   scripts/cuda_qwen_sft_smoke.sh --model-path /workspace/Qwen3.5-4B --skip-build
+#   scripts/cuda_qwen_sft_smoke.sh --model-path /workspace/Qwen3.5-4B --skip-build --native-cuda
 
 set -euo pipefail
 
 MODEL_ID="${KILN_MODEL_ID:-Qwen/Qwen3.5-4B}"
-MODEL_PATH="${KILN_MODEL_PATH:-/workspace/qwen3.5-4b}"
+MODEL_PATH="${KILN_MODEL_PATH:-/workspace/Qwen3.5-4B}"
 BENCH_BIN="${KILN_BENCH_BIN:-target/release/kiln-bench}"
 CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}"
 SKIP_BUILD=0

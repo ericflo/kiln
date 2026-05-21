@@ -91,7 +91,7 @@ fn make_state_with_caps(
         Arc::new(engine),
         test_tokenizer(),
         300,
-        "qwen3.5-4b-kiln".to_string(),
+        "Qwen3.5-4B".to_string(),
     );
     state.adapter_dir = adapter_dir;
     state.composed_cache_max_bytes = composed_cache_max_bytes;
@@ -132,7 +132,7 @@ fn write_uniform_adapter(adapter_dir: &std::path::Path, name: &str, rank: usize,
 
 fn chat_with_adapters(adapters: Value) -> Request<Body> {
     let body = json!({
-        "model": "qwen3.5-4b-kiln",
+        "model": "Qwen3.5-4B",
         "messages": [{"role": "user", "content": "t1 t2 t3"}],
         "max_tokens": 4,
         "adapters": adapters,
@@ -297,7 +297,7 @@ async fn test_compose_endpoint_rejects_both_adapter_and_adapters() {
     let app = api::router(state);
 
     let body = json!({
-        "model": "qwen3.5-4b-kiln",
+        "model": "Qwen3.5-4B",
         "messages": [{"role": "user", "content": "t1 t2 t3"}],
         "max_tokens": 1,
         "adapter": "src-a",

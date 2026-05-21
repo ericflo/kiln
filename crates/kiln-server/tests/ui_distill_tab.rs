@@ -60,7 +60,7 @@ fn mock_state() -> AppState {
         Arc::new(engine),
         tiny_tokenizer(),
         300,
-        "qwen3.5-4b-kiln".to_string(),
+        "Qwen3.5-4B".to_string(),
     )
 }
 

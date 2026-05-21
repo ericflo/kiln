@@ -75,7 +75,9 @@ impl Args {
                     model_path = Some(PathBuf::from(args.next().context("--model needs a value")?))
                 }
                 "--output" => {
-                    output = Some(PathBuf::from(args.next().context("--output needs a value")?))
+                    output = Some(PathBuf::from(
+                        args.next().context("--output needs a value")?,
+                    ))
                 }
                 "--lengths" => {
                     lengths = parse_lengths(&args.next().context("--lengths needs a value")?)?
@@ -94,7 +96,9 @@ impl Args {
                         .next()
                         .context("--segments needs a value")?
                         .parse()
-                        .context("--segments must be an integer; use 0 to disable checkpointing")?
+                        .context(
+                        "--segments must be an integer; use 0 to disable checkpointing",
+                    )?
                 }
                 "--rank" => {
                     lora_rank = args
@@ -235,7 +239,7 @@ fn parse_lengths(value: &str) -> Result<Vec<usize>> {
 
 fn print_help() {
     println!(
-        "long_context_grpo_bench [--model <qwen3.5-4b-dir>] [--dry-run|--cuda] \
+        "long_context_grpo_bench [--model <Qwen3.5-4B-dir>] [--dry-run|--cuda] \
          [--lengths 8192,16384,32768,65536] [--output results.json] \
          [--completions N] [--segments N] [--rank N] [--alpha F] [--lr F] [--seed N]"
     );
@@ -463,12 +467,9 @@ fn load_cuda_state(model_path: &Path, model_config: &ModelConfig) -> Result<Cuda
         kiln_model::LoadModelOptions { load_mtp: false },
     )
     .context("load model weights")?;
-    let weights = kiln_model::forward::GpuWeights::from_model_weights(
-        &model_weights,
-        model_config,
-        &device,
-    )
-    .context("transfer model weights to CUDA")?;
+    let weights =
+        kiln_model::forward::GpuWeights::from_model_weights(&model_weights, model_config, &device)
+            .context("transfer model weights to CUDA")?;
     drop(model_weights);
     let backend = kiln_model::backend::for_device(&device);
     Ok(CudaState {

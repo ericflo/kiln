@@ -22,7 +22,7 @@ Decision rule (re-stated, unchanged from PR #530/#531):
 Usage on a RunPod A6000 pod with vllm==0.20.x installed:
 
     python3 scripts/h17b_vllm_020_alpha_dump.py \
-        --model-path /workspace/qwen3.5-4b \
+        --model-path /workspace/Qwen3.5-4B \
         --prompt-tokens 512 --max-tokens 16 \
         --seeds 1 2 3 --num-spec-tokens 1 \
         --out docs/archive/phase-c/phase-c29-v3-vllm-020/vllm_020_alpha_per_seed.json
@@ -63,7 +63,7 @@ def vllm_version() -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model-path", default="/workspace/qwen3.5-4b")
+    ap.add_argument("--model-path", default="/workspace/Qwen3.5-4B")
     ap.add_argument("--prompt-tokens", type=int, default=512)
     ap.add_argument("--max-tokens", type=int, default=16)
     ap.add_argument(

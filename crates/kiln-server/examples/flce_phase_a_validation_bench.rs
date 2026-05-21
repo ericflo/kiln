@@ -34,7 +34,7 @@
 //!
 //! Run:
 //!   cargo run --release --features cuda -p kiln-server \
-//!     --example flce_phase_a_validation_bench -- --model-path /path/to/qwen3.5-4b
+//!     --example flce_phase_a_validation_bench -- --model-path /path/to/Qwen3.5-4B
 //!
 //! Env toggles honored by the inner training loop:
 //!   KILN_GRAD_CHECKPOINT_SEGMENTS  (default 4; matches the preflight)

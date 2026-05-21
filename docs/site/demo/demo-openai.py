@@ -9,7 +9,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8420/v1", api_key="kiln")
 
 stream = client.chat.completions.create(
-    model="qwen3.5-4b",
+    model="Qwen3.5-4B",
     messages=[
         {"role": "user", "content": "In two short sentences, why does single-GPU LLM inference matter?"},
     ],

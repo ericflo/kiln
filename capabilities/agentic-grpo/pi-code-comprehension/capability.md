@@ -52,7 +52,7 @@ Multi-turn pi session. The model reads + greps + emits a final
 `<answer>{...}</answer>` block. Sampling defaults (temperature=0.8,
 top_p=0.95) from kiln. N=4 generations per task per training step.
 
-Pi configured via `kiln pi-setup` to use `qwen-3.5-4b-kiln`. Headless
+Pi configured via `kiln pi-setup` to use `Qwen3.5-4B`. Headless
 `pi -p` with `--session-dir`, `--offline`, `--no-context-files`.
 
 ## Reward function (v1 — multi-component, adversarially audited)

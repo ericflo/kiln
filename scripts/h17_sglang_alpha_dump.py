@@ -236,7 +236,7 @@ def extract_alpha_from_metrics(engine) -> dict | None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model-path", default="/workspace/qwen3.5-4b")
+    ap.add_argument("--model-path", default="/workspace/Qwen3.5-4B")
     ap.add_argument("--prompt-tokens", type=int, default=512)
     ap.add_argument("--max-tokens", type=int, default=16)
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])

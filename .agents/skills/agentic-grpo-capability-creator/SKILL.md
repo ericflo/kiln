@@ -231,7 +231,7 @@ Same shape as `grpo-capability-creator`. Add these sections:
 ```markdown
 ## Pi configuration
 - Pi binary: `which pi` → /workspace/pi/target/release/pi
-- Model id served by kiln: `qwen-3.5-4b-kiln`
+- Model id served by kiln: `Qwen3.5-4B`
 - Pi --workdir flag: yes / pi inherits cwd
 - Session JSONL location: ~/.pi/sessions/<uuid>.jsonl (verified <ts>)
 - Session end signal: exit 0 + final assistant turn (verified <ts>)
@@ -550,7 +550,7 @@ end-to-end. Run it before Phase 0 step 3.
 command -v pi || (echo "install pi first"; exit 1)
 
 # 2. Kiln serving the base model
-curl -sf http://localhost:8420/v1/models | grep -q qwen-3.5-4b-kiln
+curl -sf http://localhost:8420/v1/models | grep -q Qwen3.5-4B
 
 # 3. Pi configured against kiln
 test -f ~/.pi/agent/models.json && grep -q kiln-local ~/.pi/agent/models.json

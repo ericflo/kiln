@@ -26,7 +26,7 @@ pi-smoke):
 ## Base model
 
 Qwen3.5-4B (kiln serve on http://localhost:8420). Pi configured via
-`kiln pi-setup` to use `qwen-3.5-4b-kiln`.
+`kiln pi-setup` to use `Qwen3.5-4B`.
 
 ## Rollout source
 
@@ -48,7 +48,7 @@ trainer requires it. See
 ## Pi configuration (verified during Phase 0 pi-smoke)
 
 - Pi binary: `/usr/bin/pi` (built from earendil-works/pi `npm link`).
-- Model id served by kiln: `qwen-3.5-4b-kiln`.
+- Model id served by kiln: `Qwen3.5-4B`.
 - Session JSONL location: `~/.pi/agent/sessions/<workdir-encoded>/<uuid>.jsonl`
   (per pi v0.75.1 README §Sessions).
 - Session end signal: pi exits with code 0 on success; the final

@@ -725,7 +725,7 @@ shutdown_timeout_secs = 30
 
 [model]
 path = "/models/Qwen3.5-4B"        # omit for mock mode
-model_id = "Qwen/Qwen3.5-4B"       # HuggingFace model ID; served as "qwen3.5-4b-kiln" by default
+model_id = "Qwen/Qwen3.5-4B"       # HuggingFace model ID; served as "Qwen3.5-4B" by default
 adapter_dir = "./adapters"
 
 [memory]

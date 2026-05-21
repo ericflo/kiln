@@ -16,7 +16,7 @@
 # Optional env vars:
 #   KILN_REPO_DIR          — Path to kiln repo checkout (default: /workspace/kiln)
 #   KILN_MODEL_ID          — Hugging Face model ID to download (default: Qwen/Qwen3.5-4B)
-#   KILN_MODEL_DIR         — Local model dir (default: /workspace/qwen3.5-4b)
+#   KILN_MODEL_DIR         — Local model dir (default: /workspace/Qwen3.5-4B)
 #
 # Writes env exports to $KILN_REPO_DIR/.build-cache-env (if repo exists) and
 # also to /root/.kiln-build-env for agents to source directly.
@@ -25,7 +25,7 @@ set -euo pipefail
 
 KILN_REPO_DIR="${KILN_REPO_DIR:-/workspace/kiln}"
 KILN_MODEL_ID="${KILN_MODEL_ID:-Qwen/Qwen3.5-4B}"
-KILN_MODEL_DIR="${KILN_MODEL_DIR:-/workspace/qwen3.5-4b}"
+KILN_MODEL_DIR="${KILN_MODEL_DIR:-/workspace/Qwen3.5-4B}"
 B2_BUCKET="clouderic"
 B2_ENDPOINT="https://s3.us-west-002.backblazeb2.com"
 B2_REGION="us-west-002"

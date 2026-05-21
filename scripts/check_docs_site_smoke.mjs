@@ -80,7 +80,7 @@ const expectedQuickstartSections = [
   { label: 'prerequisites', terms: ['prerequisites'] },
   { label: 'start server', terms: ['run the server', 'kiln serve'] },
   { label: 'test inference', terms: ['send chat', '/v1/chat/completions'] },
-  { label: 'pi agent setup', terms: ['configure pi', 'kiln pi-setup', 'qwen-3.5-4b-kiln'] },
+  { label: 'pi agent setup', terms: ['configure pi', 'kiln pi-setup', 'Qwen3.5-4B'] },
   { label: 'open UI', terms: ['open the ui', '/ui'] },
   { label: 'first inference checkpoint', terms: ['first inference checkpoint'] },
   { label: 'SFT next step', terms: ['sft corrections', '/v1/train/sft'] },
@@ -206,10 +206,10 @@ const expectedApiCodeExamples = [
 
 const expectedCliSections = [
   { label: 'command chooser', terms: ['if you want to'] },
-  { label: 'serve/start-server path', terms: ['start serving qwen3.5-4b', 'kiln_model_path', 'kiln serve'] },
+  { label: 'serve/start-server path', terms: ['start serving Qwen3.5-4B', 'kiln_model_path', 'kiln serve'] },
   { label: 'no-subcommand serve path', terms: ['running kiln with no subcommand starts the server'] },
   { label: 'health/readiness path', terms: ['check server readiness', 'kiln health'] },
-  { label: 'pi setup path', terms: ['pi integration', 'kiln pi-setup', 'qwen-3.5-4b-kiln'] },
+  { label: 'pi setup path', terms: ['pi integration', 'kiln pi-setup', 'Qwen3.5-4B'] },
   { label: 'SFT/GRPO training path', terms: ['submit sft and grpo jobs', 'kiln train sft', 'kiln train grpo'] },
   { label: 'SFT payload shape', terms: ['sft reads jsonl', 'one chat correction example per line', 'messages array'] },
   { label: 'GRPO payload shape', terms: ['grpo reads one json request/batch', 'groups', 'messages', 'candidate completions', 'text', 'reward scores'] },
@@ -221,7 +221,7 @@ const expectedCliSections = [
 ];
 
 const expectedCliCodeExamples = [
-  { label: 'serve command', terms: ['kiln_model_path=./qwen3.5-4b', 'kiln serve'] },
+  { label: 'serve command', terms: ['kiln_model_path=./Qwen3.5-4B', 'kiln serve'] },
   { label: 'health commands', terms: ['kiln health', 'kiln health --json'] },
   { label: 'pi setup command', terms: ['kiln pi-setup', '--kiln-url http://office-kiln:8420'] },
   { label: 'SFT training command', terms: ['kiln train sft', '--file corrections.jsonl', '--adapter support-bot'] },
@@ -257,7 +257,7 @@ const expectedCliPageFragments = [
 
 const expectedCliModelSetupCue = {
   label: 'Qwen/Qwen3.5-4B setup cue',
-  terms: ['qwen/qwen3.5-4b', 'quickstart', 'setup', 'model download'],
+  terms: ['Qwen/Qwen3.5-4B', 'quickstart', 'setup', 'model download'],
   href: 'quickstart.html',
 };
 
@@ -266,7 +266,7 @@ const expectedArchitectureSections = [
   { label: 'request path and batching', terms: ['request path and batching', 'iteration-level scheduler', 'continuous batching'] },
   { label: 'Gated DeltaNet/GDN hybrid', terms: ['gated deltanet', 'gdn', 'hybrid'] },
   { label: 'paged KV/block manager', terms: ['paged kv', 'block manager'] },
-  { label: 'Qwen3.5-4B', terms: ['qwen3.5-4b'] },
+  { label: 'Qwen3.5-4B', terms: ['Qwen3.5-4B'] },
   { label: 'LoRA hot-swap', terms: ['lora hot-swap', 'iteration boundary'] },
   { label: 'training queue', terms: ['training queue', 'fifo background queue'] },
   { label: 'GPU backend crates', terms: ['gpu backend crates', 'kiln-flash-attn', 'kiln-vulkan-kernel'] },
@@ -277,7 +277,7 @@ const expectedArchitectureFlowTerms = [
   'http/api',
   'scheduler',
   'block manager',
-  'qwen/qwen3.5-4b engine',
+  'Qwen/Qwen3.5-4B engine',
   'lora training queue',
   'hot-swapped adapter',
 ];
@@ -1627,7 +1627,17 @@ async function loadPuppeteer() {
     });
   }
   const require = createRequire(packageJson);
-  return require('puppeteer');
+  try {
+    return require('puppeteer');
+  } catch (error) {
+    if (error?.code !== 'ERR_REQUIRE_ESM') throw error;
+  }
+
+  const module = await import(pathToFileURL(join(
+    installDir,
+    'node_modules/puppeteer/lib/puppeteer/puppeteer.js',
+  )).href);
+  return module.default || module;
 }
 
 function chromiumPath() {
@@ -2069,7 +2079,7 @@ async function runSmoke() {
         });
 
         const missingModelSetupCueTerms = expectedCliModelSetupCue.terms
-          .filter((term) => !cliResult.heroText.includes(term));
+          .filter((term) => !cliResult.heroText.includes(term.toLowerCase()));
         if (missingModelSetupCueTerms.length > 0) {
           fail(`${sitePage.path}: missing ${expectedCliModelSetupCue.label}: ${missingModelSetupCueTerms.join(', ')}`);
         }

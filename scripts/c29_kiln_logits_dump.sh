@@ -39,7 +39,7 @@
 set -euo pipefail
 
 KILN_BENCH="${KILN_BENCH:-./target/release/kiln-bench}"
-MODEL_PATH="${MODEL_PATH:-/workspace/qwen3.5-4b}"
+MODEL_PATH="${MODEL_PATH:-/workspace/Qwen3.5-4B}"
 OUT_ROOT="${OUT_ROOT:-/workspace/captures-c29}"
 SEEDS="${SEEDS:-0 1 2 3}"
 MAX_STEPS="${MAX_STEPS:-2}"

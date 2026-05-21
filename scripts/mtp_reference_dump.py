@@ -8,7 +8,7 @@ Usage
 -----
 
     python3 scripts/mtp_reference_dump.py \\
-        --checkpoint /workspace/qwen3.5-4b \\
+        --checkpoint /workspace/Qwen3.5-4B \\
         --kiln-dump /tmp/mtp-kiln.safetensors \\
         --out /tmp/mtp-ref.safetensors
 

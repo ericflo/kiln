@@ -91,7 +91,7 @@ pub struct ModelConfig {
     pub tokenizer_path: Option<String>,
     pub adapter_dir: Option<String>,
     /// Override the string exposed at `/v1/models` and echoed in chat completion responses.
-    /// When `None`, derived from `model_id` (strip up to last `/`, lowercase, append `-kiln`).
+    /// When `None`, derived from `model_id` by stripping up to the last `/`.
     pub served_model_id: Option<String>,
 }
 
@@ -99,14 +99,16 @@ impl ModelConfig {
     /// Resolve the served model identifier.
     ///
     /// Returns the explicit `served_model_id` override when set; otherwise derives
-    /// it from `model_id` by stripping everything up to and including the last `/`,
-    /// lowercasing the remainder, and appending `-kiln`.
+    /// it from `model_id` by stripping everything up to and including the last `/`.
     pub fn effective_served_model_id(&self) -> String {
         if let Some(ref id) = self.served_model_id {
             return id.clone();
         }
-        let base = self.model_id.rsplit('/').next().unwrap_or(&self.model_id);
-        format!("{}-kiln", base.to_lowercase())
+        self.model_id
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.model_id)
+            .to_string()
     }
 }
 
@@ -1415,16 +1417,16 @@ level = "warn"
     #[test]
     fn test_served_model_id_default_derivation() {
         let config = ModelConfig::default();
-        assert_eq!(config.effective_served_model_id(), "qwen3.5-4b-kiln");
+        assert_eq!(config.effective_served_model_id(), "Qwen3.5-4B");
     }
 
     #[test]
-    fn test_served_model_id_derives_from_lowercase_no_slash() {
+    fn test_served_model_id_preserves_no_slash() {
         let config = ModelConfig {
-            model_id: "qwen3.5-4b".into(),
+            model_id: "Qwen3.5-4B".into(),
             ..ModelConfig::default()
         };
-        assert_eq!(config.effective_served_model_id(), "qwen3.5-4b-kiln");
+        assert_eq!(config.effective_served_model_id(), "Qwen3.5-4B");
     }
 
     #[test]
@@ -1433,7 +1435,7 @@ level = "warn"
             model_id: "Org/Subdir/Model-Foo_7B".into(),
             ..ModelConfig::default()
         };
-        assert_eq!(config.effective_served_model_id(), "model-foo_7b-kiln");
+        assert_eq!(config.effective_served_model_id(), "Model-Foo_7B");
     }
 
     #[test]

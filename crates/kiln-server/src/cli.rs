@@ -1777,14 +1777,8 @@ pub async fn run_train_sft(
         style(adapter).white().bold()
     );
 
-    let body = build_sft_training_payload(
-        examples,
-        adapter,
-        lr,
-        epochs,
-        lora_rank,
-        adapter_smoke_test,
-    );
+    let body =
+        build_sft_training_payload(examples, adapter, lr, epochs, lora_rank, adapter_smoke_test);
 
     let client = reqwest::Client::new();
     let resp = client
@@ -2140,7 +2134,7 @@ fn print_job_line(job: &serde_json::Value) {
 // ===========================================================================
 
 const PI_PROVIDER_ID: &str = "kiln-local";
-const PI_MODEL_ID: &str = "qwen-3.5-4b-kiln";
+const PI_MODEL_ID: &str = "Qwen3.5-4B";
 
 /// §10.14 `kiln pi-setup` — merge kiln into pi's models/settings config.
 pub async fn run_pi_setup(url: &str, out: Option<&str>) -> anyhow::Result<()> {
@@ -2990,7 +2984,10 @@ mod tests {
                 prompt,
             })) => {
                 assert_eq!(name_or_path, "support-bot");
-                assert_eq!(adapter_dir.unwrap(), std::path::PathBuf::from("/tmp/adapters"));
+                assert_eq!(
+                    adapter_dir.unwrap(),
+                    std::path::PathBuf::from("/tmp/adapters")
+                );
                 assert_eq!(url, None);
                 assert_eq!(prompt, None);
             }
@@ -3108,7 +3105,7 @@ mod tests {
             "status": "ok",
             "version": "0.1.0",
             "uptime_seconds": 4984,
-            "model": "qwen3.5-4b-kiln (32L, 16H, 4KV)",
+            "model": "Qwen3.5-4B (32L, 16H, 4KV)",
             "backend": "model",
             "active_adapter": "my-adapter",
             "adapters_loaded": 3,
@@ -3141,7 +3138,7 @@ mod tests {
         assert!(out.contains("Uptime:"), "got: {out}");
         assert!(out.contains("1h 23m 4s"), "got: {out}");
         assert!(out.contains("Model:"), "got: {out}");
-        assert!(out.contains("qwen3.5-4b-kiln"), "got: {out}");
+        assert!(out.contains("Qwen3.5-4B"), "got: {out}");
         assert!(out.contains("Backend:"), "got: {out}");
         assert!(out.contains("model"), "got: {out}");
         assert!(out.contains("Adapter:"), "got: {out}");
@@ -3219,7 +3216,7 @@ mod tests {
             "status": "ok",
             "version": "0.1.0",
             "uptime_seconds": 60,
-            "model": "qwen3.5-4b-kiln",
+            "model": "Qwen3.5-4B",
             "backend": "model",
             "active_adapter": null,
             "adapters_loaded": 0,
@@ -3253,7 +3250,7 @@ mod tests {
             "status": "ok",
             "version": "0.1.0",
             "uptime_seconds": 60,
-            "model": "qwen3.5-4b-kiln",
+            "model": "Qwen3.5-4B",
             "backend": "model",
             "active_adapter": null,
             "adapters_loaded": 0,

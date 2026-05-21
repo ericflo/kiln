@@ -2,7 +2,7 @@
   "schema_version": 2,
   "slug": "math-broad",
   "paradigm": "sft",
-  "base_model_path": "/workspace/qwen3.5-4b",
+  "base_model_path": "/workspace/Qwen3.5-4B",
   "kiln_url": "http://localhost:8420",
   "adapter_dir": "/workspace/adapters",
   "kiln_features_required": [

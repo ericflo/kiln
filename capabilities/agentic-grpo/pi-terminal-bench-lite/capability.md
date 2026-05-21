@@ -23,7 +23,7 @@ clean: same rubric, same task budget, same recipe across runs; only
 
 ## Pi configuration
 - Pi binary: `/usr/bin/pi` on the kiln-runpod image.
-- Model id served by kiln: `qwen-3.5-4b-kiln` (production target).
+- Model id served by kiln: `Qwen3.5-4B` (production target).
 - Session JSONL location: `~/.pi/sessions/<uuid>.jsonl`.
 - Turn budget: **16 turns per rollout** (matches paper §4).
 - Wall-clock budget: **120 s per rollout** (kiln's standard ceiling).

@@ -28,7 +28,7 @@ This guide is the operational companion to the integration plan
 ```bash
 # Default — ECHO on at λ=0.05.
 cuda_grpo_ablation \
-    --data train.jsonl --model /workspace/qwen3.5-4b \
+    --data train.jsonl --model /workspace/Qwen3.5-4B \
     --output adapter --mode phase1
 
 # Override λ.

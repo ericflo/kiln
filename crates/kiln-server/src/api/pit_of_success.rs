@@ -282,7 +282,7 @@ pub fn builtin_compatibility_table() -> Vec<CompatibilityRow> {
             let cost = cost_per_1k.map(|c| c * 15_000.0 * 1.0); // ~$5 for canonical pump
             rows.push(row(
                 teacher,
-                "qwen3.5-4b@kiln",
+                "Qwen3.5-4B@kiln",
                 domain,
                 *overlap,
                 *rank,
@@ -509,11 +509,7 @@ pub fn builtin_tier_defaults() -> BTreeMap<String, TierDefaults> {
             cold_start_overlap_threshold: 0.5,
             mixture_distillation_golden_fraction: 0.25,
             eval_gate_required: true,
-            notifications_channels: vec![
-                "desktop_tray".into(),
-                "email".into(),
-                "webhook".into(),
-            ],
+            notifications_channels: vec!["desktop_tray".into(), "email".into(), "webhook".into()],
         },
     );
     map.insert(
@@ -569,9 +565,7 @@ async fn tier_defaults_endpoint(
     Ok(Json(TierDefaultsResponse { tier, defaults }))
 }
 
-async fn tier_defaults_list(
-    State(_state): State<AppState>,
-) -> Json<TierDefaultsListResponse> {
+async fn tier_defaults_list(State(_state): State<AppState>) -> Json<TierDefaultsListResponse> {
     Json(TierDefaultsListResponse {
         tiers: builtin_tier_defaults().into_values().collect(),
     })
@@ -610,12 +604,13 @@ mod tests {
         assert_eq!(map.get("laptop").unwrap().lora_rank, 16);
         assert_eq!(map.get("prosumer").unwrap().lora_rank, 32);
         assert_eq!(map.get("corporate").unwrap().lora_rank, 128);
-        assert_eq!(map.get("corporate").unwrap().auto_checkpoint_cadence_steps, 5);
+        assert_eq!(
+            map.get("corporate").unwrap().auto_checkpoint_cadence_steps,
+            5
+        );
         assert!(map.get("corporate").unwrap().cost_cap_default_usd.is_none());
         assert!((map.get("laptop").unwrap().cost_cap_default_usd.unwrap() - 10.0).abs() < 1e-9);
-        assert!(
-            (map.get("prosumer").unwrap().cost_cap_default_usd.unwrap() - 25.0).abs() < 1e-9
-        );
+        assert!((map.get("prosumer").unwrap().cost_cap_default_usd.unwrap() - 25.0).abs() < 1e-9);
     }
 
     #[test]
@@ -648,9 +643,7 @@ mod tests {
         .unwrap();
         assert!(resp.capacity_ratio >= 0.3);
         assert!(
-            resp.warnings
-                .iter()
-                .all(|w| !w.contains("overflows")),
+            resp.warnings.iter().all(|w| !w.contains("overflows")),
             "no overflow warning expected; got: {:?}",
             resp.warnings
         );

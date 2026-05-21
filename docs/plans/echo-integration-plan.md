@@ -1565,7 +1565,7 @@ OUTPUT="/workspace/adapters/echo-verifier-free"
 
 cuda_grpo_ablation \
     --data /workspace/pyterm-train.filtered.jsonl \
-    --model /workspace/qwen3.5-4b \
+    --model /workspace/Qwen3.5-4B \
     --base-adapter "$CHECKPOINT" \
     --output "$OUTPUT" \
     --mode phase1 \

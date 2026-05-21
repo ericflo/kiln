@@ -45,7 +45,7 @@ fn make_state(adapter_dir: std::path::PathBuf) -> AppState {
         Arc::new(engine),
         test_tokenizer(),
         300,
-        "qwen3.5-4b-kiln".to_string(),
+        "Qwen3.5-4B".to_string(),
     );
     state.adapter_dir = adapter_dir;
     state
@@ -88,11 +88,10 @@ async fn adapters_registry_reports_loaded_available_and_invalid_entries() {
     let state = make_state(tmp.path().to_path_buf());
     *state.active_adapter_name.write().unwrap() = Some("active-adapter".to_string());
     *state.loaded_adapter_name.write().unwrap() = Some("runtime-only".to_string());
-    state
-        .adapter_load_errors
-        .write()
-        .unwrap()
-        .insert("invalid-empty".to_string(), "previous load failed".to_string());
+    state.adapter_load_errors.write().unwrap().insert(
+        "invalid-empty".to_string(),
+        "previous load failed".to_string(),
+    );
 
     let app = api::router(state);
     let resp = app
@@ -114,8 +113,14 @@ async fn adapters_registry_reports_loaded_available_and_invalid_entries() {
     assert_eq!(body["active_adapter"], "active-adapter");
     assert_eq!(body["active"], "active-adapter");
     assert_eq!(body["loaded_adapter"], "runtime-only");
-    assert_eq!(body["loaded_adapters"], json!(["active-adapter", "runtime-only"]));
-    assert_eq!(body["adapter_dir"], tmp.path().canonicalize().unwrap().to_str().unwrap());
+    assert_eq!(
+        body["loaded_adapters"],
+        json!(["active-adapter", "runtime-only"])
+    );
+    assert_eq!(
+        body["adapter_dir"],
+        tmp.path().canonicalize().unwrap().to_str().unwrap()
+    );
 
     let active = entry_by_name(&body, "active-adapter");
     assert_eq!(active["status"], "loaded");
@@ -137,7 +142,12 @@ async fn adapters_registry_reports_loaded_available_and_invalid_entries() {
     let invalid = entry_by_name(&body, "invalid-empty");
     assert_eq!(invalid["status"], "invalid");
     assert_eq!(invalid["last_load_error"], "previous load failed");
-    assert!(invalid["error"].as_str().unwrap().contains("adapter_config.json"));
+    assert!(
+        invalid["error"]
+            .as_str()
+            .unwrap()
+            .contains("adapter_config.json")
+    );
     assert!(
         invalid["error"]
             .as_str()

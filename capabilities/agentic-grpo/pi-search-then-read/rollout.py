@@ -126,7 +126,7 @@ def _run_pi_one(task: dict, cfg: dict, adapter: str, sandbox_root: Path, mode: s
     session_dir.mkdir()
 
     pi_bin = cfg.get("pi_bin", "/usr/bin/pi")
-    pi_model_id = cfg.get("pi_model_id", "qwen-3.5-4b-kiln")
+    pi_model_id = cfg.get("pi_model_id", "Qwen3.5-4B")
     rollout_cfg = cfg.get("rollout", {})
     max_wall = int(rollout_cfg.get("max_wall_clock_s", 120))
 

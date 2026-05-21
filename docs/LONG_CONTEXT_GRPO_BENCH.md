@@ -14,7 +14,7 @@ cargo run -p kiln-train --example long_context_grpo_bench -- \
   --output /tmp/long-context-grpo-dry.json
 ```
 
-Pass `--model /workspace/qwen3.5-4b` to use the real Qwen tokenizer. When
+Pass `--model /workspace/Qwen3.5-4B` to use the real Qwen tokenizer. When
 `--model` is omitted in dry mode, the benchmark uses a built-in byte tokenizer
 with a Qwen-shaped chat template so normal CPU-only dev environments can run a
 small smoke without model assets.
@@ -24,7 +24,7 @@ CUDA one-step GRPO run:
 ```bash
 KILN_CUDA_ARCHS=86 cargo run --release -p kiln-train --features cuda \
   --example long_context_grpo_bench -- \
-  --model /workspace/qwen3.5-4b \
+  --model /workspace/Qwen3.5-4B \
   --cuda \
   --lengths 8192,16384,32768,65536 \
   --segments 4 \

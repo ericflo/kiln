@@ -49,7 +49,7 @@ B/C-phase audits.
 Usage on a RunPod A6000 with HF transformers + safetensors installed:
 
     python3 scripts/h18_hf_alpha_dump.py \\
-        --checkpoint /workspace/qwen3.5-4b \\
+        --checkpoint /workspace/Qwen3.5-4B \\
         --prompt-tokens 512 --max-output-tokens 16 \\
         --seeds 0 1 2 \\
         --out docs/archive/phase-c/phase-c29-v3-hf/hf_alpha_per_seed.json
@@ -458,7 +458,7 @@ def run_single_seed(
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default="/workspace/qwen3.5-4b")
+    ap.add_argument("--checkpoint", default="/workspace/Qwen3.5-4B")
     ap.add_argument("--prompt-tokens", type=int, default=512)
     ap.add_argument("--max-output-tokens", type=int, default=16)
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])

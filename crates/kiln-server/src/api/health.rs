@@ -638,7 +638,7 @@ mod tests {
             Arc::new(engine),
             tokenizer,
             300,
-            "qwen3.5-4b-kiln".to_string(),
+            "Qwen3.5-4B".to_string(),
         )
     }
 
@@ -666,7 +666,7 @@ mod tests {
 
         assert_eq!(json["status"], "ok");
         assert!(json["uptime_seconds"].is_number());
-        assert!(json["model"].as_str().unwrap().contains("qwen3.5-4b-kiln"));
+        assert!(json["model"].as_str().unwrap().contains("Qwen3.5-4B"));
         assert_eq!(json["backend"], "mock");
         assert_eq!(json["eval_mode"], false);
         assert!(json["default_thinking_enabled"].is_null());
@@ -715,9 +715,7 @@ mod tests {
         state.default_thinking_enabled = Some(false);
         state.fold_reasoning_into_content = true;
         *state.active_adapter_name.write().unwrap() = Some("eval-adapter".to_string());
-        state
-            .metrics
-            .inc_request(crate::metrics::RequestStatus::Ok);
+        state.metrics.inc_request(crate::metrics::RequestStatus::Ok);
         state
             .metrics
             .inc_request(crate::metrics::RequestStatus::Timeout);

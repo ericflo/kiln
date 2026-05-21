@@ -176,10 +176,10 @@ Single source of truth for hyperparameters. New round defaults:
 ```json
 {
   "schema_version": 2,
-  "base_model_path": "/workspace/qwen3.5-4b",
+  "base_model_path": "/workspace/Qwen3.5-4B",
   "kiln_url": "http://localhost:8420",
   "pi_bin": "/usr/bin/pi",
-  "pi_model_id": "qwen-3.5-4b-kiln",
+  "pi_model_id": "Qwen3.5-4B",
   "adapter_dir": "/workspace/adapters",
   "sandbox_root": "/tmp/<cap>-rollouts",
   "rollout": {
@@ -377,7 +377,7 @@ kiln trajectory inspect "$ROLLOUT_DIR/grpo-train.jsonl" --json \
 # 3. Dry-run validation BEFORE any GPU work.
 KILN_CUDA_ARCHS=86 /workspace/kiln/target/release/examples/cuda_grpo_ablation \
   --data "$ROLLOUT_DIR/grpo-train.jsonl" \
-  --model /workspace/qwen3.5-4b \
+  --model /workspace/Qwen3.5-4B \
   --output "$OUT_ROOT/adapter" \
   --adapter "$ADAPTER_NAME" \
   --mode phase1 \
@@ -390,7 +390,7 @@ KILN_CUDA_ARCHS=86 /workspace/kiln/target/release/examples/cuda_grpo_ablation \
 # 4. Real training. Auto-installs into the registry.
 KILN_CUDA_ARCHS=86 /workspace/kiln/target/release/examples/cuda_grpo_ablation \
   --data "$ROLLOUT_DIR/grpo-train.jsonl" \
-  --model /workspace/qwen3.5-4b \
+  --model /workspace/Qwen3.5-4B \
   --output "$OUT_ROOT/adapter" \
   --adapter "$ADAPTER_NAME" \
   --mode phase1 \

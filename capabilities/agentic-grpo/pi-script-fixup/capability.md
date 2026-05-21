@@ -38,7 +38,7 @@ python rollout.py --tasks datasets/pyterm.tasks.jsonl \
 # 3. Train 100 steps with --no-policy-loss (no GRPO term, only ECHO).
 cuda_grpo_ablation \
     --data /tmp/pyterm-train.clean.jsonl \
-    --model /workspace/qwen3.5-4b \
+    --model /workspace/Qwen3.5-4B \
     --base-adapter $CHECKPOINT \
     --output /workspace/adapters/echo-verifier-free \
     --adapter echo-verifier-free \

@@ -135,7 +135,7 @@ the worked example.
 
 - **Model:** Qwen3.5-4B served by kiln on `http://localhost:8420`.
   Round-2 kiln has a first-class Qwen3.5-4B defaults profile (kiln #31).
-- **Pi:** `/usr/bin/pi` with model id `qwen-3.5-4b-kiln`. Session
+- **Pi:** `/usr/bin/pi` with model id `Qwen3.5-4B`. Session
   JSONLs land at `~/.pi/agent/sessions/<workdir-encoded>/<uuid>.jsonl`.
 - **GPU:** RunPod A6000 on-demand (never spot — see
   `kiln-skill/SKILL.md` "money-burning anti-patterns"). For pod

@@ -2,7 +2,7 @@
   "schema_version": 2,
   "slug": "pi-tool-call-efficiency",
   "paradigm": "agentic-grpo",
-  "base_model_path": "/workspace/qwen3.5-4b",
+  "base_model_path": "/workspace/Qwen3.5-4B",
   "kiln_url": "http://localhost:8420",
   "adapter_dir": "/workspace/adapters",
   "kiln_features_required": [
@@ -19,7 +19,7 @@
     "adapter_manifest.json + kiln adapter restore (#36)"
   ],
   "pi_bin": "/usr/bin/pi",
-  "pi_model_id": "qwen-3.5-4b-kiln",
+  "pi_model_id": "Qwen3.5-4B",
   "sandbox_root": "/tmp/pi-tool-call-efficiency-rollouts",
   "rollout": {
     "num_generations_train": 4,

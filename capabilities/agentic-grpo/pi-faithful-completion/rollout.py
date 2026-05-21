@@ -52,7 +52,7 @@ def kiln_chat_completion(
     timeout: int = 180,
 ) -> dict:
     body = {
-        "model": "qwen3.5-4b-kiln",
+        "model": "Qwen3.5-4B",
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,

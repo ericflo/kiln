@@ -3,11 +3,11 @@
 # named modes, capturing one log per mode for later analysis.
 #
 # Expected to run on a kiln pod with the repo checked out at /workspace/kiln
-# and the model weights at /workspace/qwen3.5-4b/.
+# and the model weights at /workspace/Qwen3.5-4B/.
 set -euo pipefail
 
 REPO_DIR=${REPO_DIR:-/workspace/kiln}
-MODEL_DIR=${MODEL_DIR:-/workspace/qwen3.5-4b}
+MODEL_DIR=${MODEL_DIR:-/workspace/Qwen3.5-4B}
 DATASET=${DATASET:-$REPO_DIR/capabilities/sft/python-algo/datasets/grpo-humaneval.jsonl}
 MAX_GROUPS=${MAX_GROUPS:-20}
 OUTPUT_ROOT=${OUTPUT_ROOT:-/workspace/grpo-ablation-$(date +%Y%m%d-%H%M%S)}

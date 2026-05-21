@@ -104,7 +104,7 @@ client = openai.OpenAI(base_url="http://localhost:8420/v1", api_key="unused")
 # 1. Generate candidates
 responses = [
     client.chat.completions.create(
-        model="qwen3.5-4b-kiln",
+        model="Qwen3.5-4B",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7
     )
@@ -300,7 +300,7 @@ curl http://localhost:8420/v1/train/status
 # Remote office/server box
 ./kiln pi-setup --kiln-url http://office-kiln:8420
 
-# pi now uses model qwen-3.5-4b-kiln through http://.../v1
+# pi now uses model Qwen3.5-4B through http://.../v1
 pi -p "Use the bash tool to run: pwd"
 ```
 

@@ -18,7 +18,7 @@ for LEN in 128 256 512 1024; do
     OUT=/tmp/c36/c36_L${LEN}_s${SEED}.json
     echo "[$(date '+%H:%M:%S')] LEN=${LEN} SEED=${SEED} -> ${OUT}" | tee -a /tmp/c36.log
     ./target/release/kiln-bench \
-      --model-path /workspace/qwen3.5-4b \
+      --model-path /workspace/Qwen3.5-4B \
       --paged --chat-template \
       --prompt-tokens 512 --max-output-tokens "${LEN}" \
       --skip-training --seed "${SEED}" \

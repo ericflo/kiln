@@ -79,7 +79,7 @@ Usage
 -----
 
     python3 scripts/mtp_c10_splice_bisect.py \\
-        --checkpoint /workspace/qwen3.5-4b \\
+        --checkpoint /workspace/Qwen3.5-4B \\
         --pair seed42-pos1:/tmp/kiln-seed42-pos1.safetensors \\
         --pair seed42-pos2:/tmp/kiln-seed42-pos2.safetensors \\
         [--pair ...]

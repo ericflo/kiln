@@ -23,7 +23,7 @@ Usage
 -----
 
     python3 scripts/c15_h_main_drift_audit.py \\
-        --checkpoint /workspace/qwen3.5-4b \\
+        --checkpoint /workspace/Qwen3.5-4B \\
         --captures-root /workspace/c15_out/captures \\
         --out /workspace/c15_out/audit \\
         [--fp32] [--device cuda]

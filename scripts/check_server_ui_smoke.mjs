@@ -480,7 +480,7 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
       return;
     }
     if (url.pathname === '/v1/models') {
-      json(res, { object: 'list', data: [{ id: 'qwen3.5-4b', object: 'model', owned_by: 'kiln' }] });
+      json(res, { object: 'list', data: [{ id: 'Qwen3.5-4B', object: 'model', owned_by: 'kiln' }] });
       return;
     }
     if (url.pathname === '/v1/stats/decode') {

@@ -276,7 +276,7 @@ kiln serve</code></pre>
 kiln config --file kiln.toml
 kiln serve -c kiln.toml
 kiln serve --config kiln.toml
-kiln serve --served-model-id qwen3.5-4b-local</code></pre>
+kiln serve --served-model-id Qwen3.5-4B-local</code></pre>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">Use <code>kiln config</code> to validate built-in defaults plus <code>KILN_*</code> environment overrides, or <code>kiln config --file</code> / <code>kiln config -f</code> to validate a TOML file before starting the server.</p>
       </div>
       <div class="card p-6 lg:col-span-2">
@@ -316,7 +316,7 @@ kiln health --url http://localhost:8420</code></pre>
       <p class="label mb-2">pi integration</p>
       <h2 class="text-2xl font-semibold tracking-tight mb-4">Merge Kiln into pi's provider config</h2>
       <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">
-        <code>kiln pi-setup</code> updates pi's OpenAI-compatible provider config without replacing the whole file. It writes a <code>kiln-local</code> provider with <code>baseUrl</code> ending in <code>/v1</code>, <code>api: "openai-completions"</code>, and model id <code>qwen-3.5-4b-kiln</code>. It also preserves existing <code>settings.json</code> keys while setting pi's default provider and model to Kiln.
+        <code>kiln pi-setup</code> updates pi's OpenAI-compatible provider config without replacing the whole file. It writes a <code>kiln-local</code> provider with <code>baseUrl</code> ending in <code>/v1</code>, <code>api: "openai-completions"</code>, and model id <code>Qwen3.5-4B</code>. It also preserves existing <code>settings.json</code> keys while setting pi's default provider and model to Kiln.
       </p>
       <div class="grid lg:grid-cols-2 gap-6">
         <div class="card p-6">

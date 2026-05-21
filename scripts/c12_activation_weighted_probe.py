@@ -62,7 +62,7 @@ Usage
 -----
 
     python3 scripts/c12_activation_weighted_probe.py \\
-        --checkpoint /workspace/qwen3.5-4b \\
+        --checkpoint /workspace/Qwen3.5-4B \\
         --c11-json docs/archive/phase-c/phase-c11/c11-marlin-audit.json \\
         --out docs/archive/phase-c/phase-c12/c12-weighted-drift.md \\
         --out-json docs/archive/phase-c/phase-c12/c12-weighted-drift.json \\

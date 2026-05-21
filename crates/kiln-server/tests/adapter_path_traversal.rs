@@ -51,7 +51,7 @@ fn make_state(adapter_dir: std::path::PathBuf) -> AppState {
         Arc::new(engine),
         test_tokenizer(),
         300,
-        "qwen3.5-4b-kiln".to_string(),
+        "Qwen3.5-4B".to_string(),
     );
     state.adapter_dir = adapter_dir;
     state
@@ -224,11 +224,19 @@ async fn test_load_rejects_missing_adapter_config_without_changing_active() {
     assert!(message.contains("adapter_config.json"));
     assert!(message.contains(broken.canonicalize().unwrap().to_str().unwrap()));
     assert_eq!(
-        state_for_assert.active_adapter_name.read().unwrap().as_deref(),
+        state_for_assert
+            .active_adapter_name
+            .read()
+            .unwrap()
+            .as_deref(),
         Some("previous")
     );
     assert_eq!(
-        state_for_assert.loaded_adapter_name.read().unwrap().as_deref(),
+        state_for_assert
+            .loaded_adapter_name
+            .read()
+            .unwrap()
+            .as_deref(),
         Some("previous")
     );
 }
@@ -266,11 +274,19 @@ async fn test_load_rejects_missing_adapter_weights_without_changing_active() {
     assert!(message.contains("adapter_model.safetensors"));
     assert!(message.contains(broken.canonicalize().unwrap().to_str().unwrap()));
     assert_eq!(
-        state_for_assert.active_adapter_name.read().unwrap().as_deref(),
+        state_for_assert
+            .active_adapter_name
+            .read()
+            .unwrap()
+            .as_deref(),
         Some("previous")
     );
     assert_eq!(
-        state_for_assert.loaded_adapter_name.read().unwrap().as_deref(),
+        state_for_assert
+            .loaded_adapter_name
+            .read()
+            .unwrap()
+            .as_deref(),
         Some("previous")
     );
 }

@@ -255,6 +255,8 @@ struct Args {
     install_adapter_dir: Option<PathBuf>,
     /// Optional install name used with --install-adapter-dir.
     install_adapter_name: Option<String>,
+    /// Run the trainer's adapter-effect smoke check after successful training.
+    adapter_smoke_test: bool,
     /// Validate data, masks, filters, and adapter inputs without loading
     /// model weights or running forward/backward.
     dry_run: bool,
@@ -296,6 +298,7 @@ impl Args {
         let mut allow_high_lora_scale = false;
         let mut install_adapter_dir: Option<PathBuf> = None;
         let mut install_adapter_name: Option<String> = None;
+        let mut adapter_smoke_test = false;
         let mut dry_run = false;
         let mut allow_empty_dry_run = false;
         let mut filter_var_min: Option<f64> = None;
@@ -389,6 +392,7 @@ impl Args {
                             .context("--install-adapter-name needs a value")?,
                     )
                 }
+                "--adapter-smoke-test" => adapter_smoke_test = true,
                 "--dry-run" => dry_run = true,
                 "--allow-empty-dry-run" => allow_empty_dry_run = true,
                 "--filter-var-min" => {
@@ -440,6 +444,7 @@ impl Args {
                          [--base-adapter DIR] [--allow-adapter-shape-conversion] \
                          [--allow-high-lora-scale] \
                          [--install-adapter-dir DIR] [--install-adapter-name NAME] \
+                         [--adapter-smoke-test] \
                          [--dry-run] [--allow-empty-dry-run] \
                          [--filter-var-min F] [--filter-var-max F] [--min-groups N] \
                          [--on-empty-filter fail|train-all|skip] \
@@ -519,6 +524,7 @@ impl Args {
             allow_high_lora_scale,
             install_adapter_dir,
             install_adapter_name,
+            adapter_smoke_test,
             dry_run,
             allow_empty_dry_run,
             filter_var_min,
@@ -565,6 +571,7 @@ fn effective_config_record(
             "no_policy_loss": args.no_policy_loss,
             "allow_adapter_shape_conversion": args.allow_adapter_shape_conversion,
             "allow_high_lora_scale": args.allow_high_lora_scale,
+            "adapter_smoke_test": args.adapter_smoke_test,
             "dry_run": args.dry_run,
             "allow_empty_dry_run": args.allow_empty_dry_run,
             "filter_var_min": args.filter_var_min,
@@ -583,11 +590,7 @@ fn effective_config_record(
 }
 
 #[cfg(feature = "cuda")]
-fn print_effective_config(
-    args: &Args,
-    dataset_path: &PathBuf,
-    config: &GrpoConfig,
-) -> Result<()> {
+fn print_effective_config(args: &Args, dataset_path: &PathBuf, config: &GrpoConfig) -> Result<()> {
     let record = effective_config_record(args, dataset_path, config);
     if args.print_effective_config_json {
         println!("{}", serde_json::to_string(&record)?);
@@ -681,6 +684,12 @@ fn main() -> Result<()> {
     let tokenizer = load_tokenizer(&args.model_path)?;
     let dataset_path = maybe_subset_dataset(&args.data, args.max_groups)?;
     let model_config = ModelConfig::qwen3_5_4b();
+    // TrainReceipt records model.path from the shared KILN_MODEL_PATH env.
+    // This example accepts the model path as a CLI arg, so mirror it before
+    // dry-run/training receipt construction.
+    unsafe {
+        std::env::set_var("KILN_MODEL_PATH", args.model_path.as_os_str());
+    }
 
     std::fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("creating {}", args.output_dir.display()))?;
@@ -693,6 +702,7 @@ fn main() -> Result<()> {
         lora_alpha: args.lora_alpha,
         output_name: Some(args.adapter_name.clone()),
         auto_load: false,
+        adapter_smoke_test: args.adapter_smoke_test,
         seed: Some(args.seed),
         optimizer: Optimizer::default(),
         allow_adapter_shape_conversion: args.allow_adapter_shape_conversion,

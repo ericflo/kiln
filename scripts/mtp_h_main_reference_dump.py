@@ -49,13 +49,13 @@ Usage
 
     # B10-only boundary taps (original flow)
     python3 scripts/mtp_h_main_reference_dump.py \\
-        --checkpoint /workspace/qwen3.5-4b \\
+        --checkpoint /workspace/Qwen3.5-4B \\
         --kiln-dump /tmp/h-kiln.safetensors \\
         --out /tmp/h-ref.safetensors
 
     # B10 boundary taps + B11b layer-0 GDN sub-op taps
     python3 scripts/mtp_h_main_reference_dump.py \\
-        --checkpoint /workspace/qwen3.5-4b \\
+        --checkpoint /workspace/Qwen3.5-4B \\
         --kiln-dump /tmp/h-kiln.safetensors \\
         --out /tmp/h-ref.safetensors \\
         --b11-taps

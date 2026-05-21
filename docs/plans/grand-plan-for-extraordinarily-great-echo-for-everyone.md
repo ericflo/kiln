@@ -339,7 +339,7 @@ Mirrors grand-OPD-plan §8 design principle.
 - **Warnings excluded by default.** Paper §3.2 says warning tokens memorize quickly and stop teaching; `MaskConfig::warning_filter = true` is the default.
 - **Auto-anneal.** Paper §3.3 says λ=0.05 self-anneals as the model learns terminal structure. No λ-schedule needed; the receipt `lambda_effective_final` exposes the anneal trajectory.
 - **Disjointness invariant.** `MaskedRollout::assert_masks_disjoint()` fires on every mask build — a token can't be both an Action and an Observation.
-- **Mask boundary validation.** `build_masks_against_real_qwen_tokenizer` test runs on every PR via CI when `/workspace/qwen3.5-4b/tokenizer.json` is available.
+- **Mask boundary validation.** `build_masks_against_real_qwen_tokenizer` test runs on every PR via CI when `/workspace/Qwen3.5-4B/tokenizer.json` is available.
 - **Compositional safety.** `LossConfig::default()` has ECHO on, OPD off. When OPD rebases, it slots in with `opd: Some(OpdAuxConfig)` — never replaces ECHO.
 
 ---

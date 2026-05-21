@@ -35,7 +35,7 @@ Quick orientation if you ran round 1 and are picking up round 2:
 
 ```bash
 # 0. Server
-kiln serve --eval-mode --model-path /workspace/qwen3.5-4b \
+kiln serve --eval-mode --model-path /workspace/Qwen3.5-4B \
   --adapter-dir /workspace/adapters &
 
 # 1. Pick a cap
@@ -133,7 +133,7 @@ in `docs/TRAIN_RECEIPT_SCHEMA.md`. Key fields:
   "failure_reason": null | "<standard reason>",
   "kiln_commit": "<sha>",
   "kiln_dirty": false,
-  "model_path": "/workspace/qwen3.5-4b",
+  "model_path": "/workspace/Qwen3.5-4B",
   "model_config_hash": "<sha256>",
   "tokenizer_config_hash": "<sha256>",
   "training_data_path": "...",
@@ -325,7 +325,7 @@ Standard call (in `run_iter.sh`):
 ```bash
 cuda_opd_remote \
   --prompts prompts/train.jsonl \
-  --model /workspace/qwen3.5-4b \
+  --model /workspace/Qwen3.5-4B \
   --teacher-url http://localhost:8002 \
   --teacher-name qwen3.6-27b-awq \
   --output /tmp/.../adapter \
@@ -349,7 +349,7 @@ use `cuda_sft_file`. Standard call:
 ```bash
 cuda_sft_file \
   --data datasets/train.jsonl \
-  --model /workspace/qwen3.5-4b \
+  --model /workspace/Qwen3.5-4B \
   --output /tmp/.../adapter \
   --adapter <name> \
   --rank 4 --alpha 8 --lr 1e-4 --epochs 1 \

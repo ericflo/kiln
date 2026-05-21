@@ -26,7 +26,7 @@ Usage
 -----
 
     python3 scripts/c14_hf_reference_dump.py \\
-        --checkpoint /workspace/qwen3.5-4b \\
+        --checkpoint /workspace/Qwen3.5-4B \\
         --kiln-root /workspace/kiln/c14-out/splice-dump \\
         --out-root  /workspace/kiln/c14-out/splice-dump-ref \\
         --summary   /workspace/kiln/c14-out/splice-summary.json

@@ -6,7 +6,7 @@ set -u
 cd /workspace/kiln
 OUTDIR=/workspace/c37-results-v2
 mkdir -p $OUTDIR
-MODEL_PATH=/workspace/qwen3.5-4b
+MODEL_PATH=/workspace/Qwen3.5-4B
 for seed in 0 1 2 3 4 5 6 7 8 9; do
   OUT=$OUTDIR/seed-$seed.json
   LOG=$OUTDIR/seed-$seed.log

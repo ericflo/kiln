@@ -16,6 +16,7 @@ use candle_core::{CpuStorage, CustomOp1, DType, Device, Layout, Shape, Tensor, V
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
+use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
 #[cfg(test)]
@@ -25,7 +26,6 @@ use kiln_flce_kernel::{
     fused_linear_cross_entropy_dispatch_with_provider,
 };
 use kiln_model::backend::{self, BackendRuntime};
-use kiln_core::block::BlockTable;
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
     gdn_attention_in_projections, gdn_attention_input_norm, gdn_attention_residual_block,
@@ -40,8 +40,8 @@ use kiln_model::forward::{
     transformer_mlp_down_from_gated, transformer_mlp_gated_hidden,
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
-use kiln_model::sampling::greedy_sample;
 use kiln_model::paged_kv_cache::PagedKvCache;
+use kiln_model::sampling::greedy_sample;
 
 use crate::replay::{
     self, BaseModel, Lineage, OutcomeRecord, OutcomeStatus, ParentLora, ReplayKind, ReplayLog,
@@ -733,39 +733,34 @@ impl TrainableLoraParams {
     /// `validate_base_adapter_compatibility` before this method so missing,
     /// extra, rank-mismatched, or shape-mismatched tensors fail before
     /// optimizer setup instead of leaving seeded-init gaps.
-    pub fn load_from_safetensors(
-        &self,
-        adapter_dir: &Path,
-        device: &Device,
-    ) -> Result<usize> {
+    pub fn load_from_safetensors(&self, adapter_dir: &Path, device: &Device) -> Result<usize> {
         let st_path = adapter_dir.join("adapter_model.safetensors");
-        let tensors = candle_core::safetensors::load(&st_path, device).with_context(|| {
-            format!("loading adapter safetensors from {}", st_path.display())
-        })?;
+        let tensors = candle_core::safetensors::load(&st_path, device)
+            .with_context(|| format!("loading adapter safetensors from {}", st_path.display()))?;
 
         let mut loaded = 0usize;
         for (layer_idx, layer) in self.layers.iter().enumerate() {
-            let mut load_proj = |name: &str, pair: &Option<(Var, Var)>, is_attn: bool| -> Result<()> {
-                if let Some((a, b)) = pair {
-                    let sub = if is_attn { "self_attn" } else { "mlp" };
-                    let prefix = format!("base_model.model.model.layers.{layer_idx}.{sub}.{name}");
-                    let a_key = format!("{prefix}.lora_A.weight");
-                    let b_key = format!("{prefix}.lora_B.weight");
-                    if let Some(a_t) = tensors.get(&a_key) {
-                        a.set(a_t).with_context(|| {
-                            format!("setting Var for {a_key}")
-                        })?;
-                        loaded += 1;
+            let mut load_proj =
+                |name: &str, pair: &Option<(Var, Var)>, is_attn: bool| -> Result<()> {
+                    if let Some((a, b)) = pair {
+                        let sub = if is_attn { "self_attn" } else { "mlp" };
+                        let prefix =
+                            format!("base_model.model.model.layers.{layer_idx}.{sub}.{name}");
+                        let a_key = format!("{prefix}.lora_A.weight");
+                        let b_key = format!("{prefix}.lora_B.weight");
+                        if let Some(a_t) = tensors.get(&a_key) {
+                            a.set(a_t)
+                                .with_context(|| format!("setting Var for {a_key}"))?;
+                            loaded += 1;
+                        }
+                        if let Some(b_t) = tensors.get(&b_key) {
+                            b.set(b_t)
+                                .with_context(|| format!("setting Var for {b_key}"))?;
+                            loaded += 1;
+                        }
                     }
-                    if let Some(b_t) = tensors.get(&b_key) {
-                        b.set(b_t).with_context(|| {
-                            format!("setting Var for {b_key}")
-                        })?;
-                        loaded += 1;
-                    }
-                }
-                Ok(())
-            };
+                    Ok(())
+                };
 
             load_proj("q_proj", &layer.q_proj, true)?;
             load_proj("k_proj", &layer.k_proj, true)?;
@@ -842,10 +837,7 @@ impl TrainableLoraParams {
             .unwrap_or("adapter");
         crate::adapter_output::write_adapter_output_receipt(output_dir, adapter_name, None)
             .with_context(|| {
-                format!(
-                    "writing adapter output receipt to {}",
-                    output_dir.display()
-                )
+                format!("writing adapter output receipt to {}", output_dir.display())
             })?;
 
         tracing::info!(
@@ -1065,7 +1057,8 @@ fn grpo_settings_receipt(
         clip_eps_high: config.clip_eps_high,
         dynamic_sampling: config.dynamic_sampling,
         dynamic_groups_filtered,
-        advantage_mode: serde_json::to_value(config.advantage_mode).unwrap_or(serde_json::Value::Null),
+        advantage_mode: serde_json::to_value(config.advantage_mode)
+            .unwrap_or(serde_json::Value::Null),
         loss_aggregation: serde_json::to_value(config.loss_aggregation)
             .unwrap_or(serde_json::Value::Null),
         kl_estimator: serde_json::to_value(config.kl_estimator).unwrap_or(serde_json::Value::Null),
@@ -1235,7 +1228,8 @@ fn build_reward_filter_plan(
                 dropped_ids = groups.iter().map(|group| group.id.clone()).collect();
                 for decision in &mut decisions {
                     decision.kept = false;
-                    decision.reject_reason
+                    decision
+                        .reject_reason
                         .get_or_insert_with(|| "below_min_groups".to_string());
                 }
                 failure_reason = Some(format!(
@@ -1262,7 +1256,8 @@ fn build_reward_filter_plan(
                 dropped_ids = groups.iter().map(|group| group.id.clone()).collect();
                 for decision in &mut decisions {
                     decision.kept = false;
-                    decision.reject_reason
+                    decision
+                        .reject_reason
                         .get_or_insert_with(|| "below_min_groups".to_string());
                 }
             }
@@ -1369,39 +1364,19 @@ fn run_adapter_smoke_test(
             "adapter smoke prompt tokenized to zero tokens: {prompt:?}"
         );
 
-        let base_logits = model_forward(
-            backend,
-            &prompt_ids,
-            weights,
-            model_config,
-            None,
-            None,
-            None,
-        )
-        .with_context(|| format!("base forward for adapter smoke prompt {prompt:?}"))?;
-        let adapter_logits = model_forward(
-            backend,
-            &prompt_ids,
-            weights,
-            model_config,
-            None,
-            None,
-            Some(&lora),
-        )
-        .with_context(|| format!("adapter forward for adapter smoke prompt {prompt:?}"))?;
+        let base_logits =
+            adapter_smoke_forward_logits(backend, &prompt_ids, weights, model_config, None)
+                .with_context(|| format!("base forward for adapter smoke prompt {prompt:?}"))?;
+        let adapter_logits =
+            adapter_smoke_forward_logits(backend, &prompt_ids, weights, model_config, Some(&lora))
+                .with_context(|| format!("adapter forward for adapter smoke prompt {prompt:?}"))?;
         let (finite_logits, logit_delta_l2) =
             adapter_smoke_logit_delta_l2(&base_logits, &adapter_logits)
                 .with_context(|| format!("compare adapter smoke logits for {prompt:?}"))?;
 
-        let base_generation = adapter_smoke_greedy_generate(
-            backend,
-            weights,
-            model_config,
-            tokenizer,
-            prompt,
-            None,
-        )
-        .with_context(|| format!("base generation for adapter smoke prompt {prompt:?}"))?;
+        let base_generation =
+            adapter_smoke_greedy_generate(backend, weights, model_config, tokenizer, prompt, None)
+                .with_context(|| format!("base generation for adapter smoke prompt {prompt:?}"))?;
         let adapter_generation = adapter_smoke_greedy_generate(
             backend,
             weights,
@@ -1424,7 +1399,41 @@ fn run_adapter_smoke_test(
         });
     }
 
-    Ok(crate::train_receipt::build_adapter_smoke_test_receipt(prompts))
+    Ok(crate::train_receipt::build_adapter_smoke_test_receipt(
+        prompts,
+    ))
+}
+
+fn adapter_smoke_linear_state(
+    backend: &dyn BackendRuntime,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+) -> Result<LinearAttentionState> {
+    LinearAttentionState::new_with_batch_for_inference_backend(
+        model_config,
+        1,
+        weights.embed_tokens.device(),
+        Some(backend.name()),
+    )
+}
+
+fn adapter_smoke_forward_logits(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    let mut linear_state = adapter_smoke_linear_state(backend, weights, model_config)?;
+    model_forward(
+        backend,
+        token_ids,
+        weights,
+        model_config,
+        None,
+        Some(&mut linear_state),
+        lora,
+    )
 }
 
 fn adapter_smoke_logit_delta_l2(
@@ -1440,7 +1449,10 @@ fn adapter_smoke_logit_delta_l2(
         adapter.len()
     );
 
-    let finite_logits = base.iter().chain(adapter.iter()).all(|value| value.is_finite());
+    let finite_logits = base
+        .iter()
+        .chain(adapter.iter())
+        .all(|value| value.is_finite());
     if !finite_logits {
         return Ok((false, None));
     }
@@ -1465,7 +1477,10 @@ fn adapter_smoke_last_logits(logits: &Tensor) -> Result<Vec<f32>> {
     );
     let seq_dim = dims.len() - 2;
     let seq_len = dims[seq_dim];
-    anyhow::ensure!(seq_len > 0, "adapter smoke logits have zero sequence length");
+    anyhow::ensure!(
+        seq_len > 0,
+        "adapter smoke logits have zero sequence length"
+    );
     Ok(logits
         .narrow(seq_dim, seq_len - 1, 1)?
         .squeeze(seq_dim)?
@@ -1493,15 +1508,7 @@ fn adapter_smoke_greedy_generate(
 
     let mut generated = Vec::with_capacity(ADAPTER_SMOKE_TEST_MAX_NEW_TOKENS);
     for _ in 0..ADAPTER_SMOKE_TEST_MAX_NEW_TOKENS {
-        let logits = model_forward(
-            backend,
-            &context,
-            weights,
-            model_config,
-            None,
-            None,
-            lora,
-        )?;
+        let logits = adapter_smoke_forward_logits(backend, &context, weights, model_config, lora)?;
         let token = greedy_sample(&logits)?;
         generated.push(token);
         context.push(token);
@@ -1899,9 +1906,10 @@ pub fn sft_train(
                     let action_tokens = label_mask.iter().filter(|&&mask| mask).count() as u64;
                     one_epoch_counts.action_tokens =
                         one_epoch_counts.action_tokens.saturating_add(action_tokens);
-                    one_epoch_counts.context_tokens = one_epoch_counts
-                        .context_tokens
-                        .saturating_add(input_ids.len().saturating_sub(action_tokens as usize) as u64);
+                    one_epoch_counts.context_tokens =
+                        one_epoch_counts.context_tokens.saturating_add(
+                            input_ids.len().saturating_sub(action_tokens as usize) as u64,
+                        );
                     valid_indices.push(idx);
                 }
                 Err(e) => {
@@ -2000,11 +2008,7 @@ pub fn sft_train(
                         flce_provider,
                     )?;
                     loss_val = lv;
-                    observe_lora_grad_norms_from_grad_store(
-                        &mut lora_grad_norms,
-                        &params,
-                        &grads,
-                    )?;
+                    observe_lora_grad_norms_from_grad_store(&mut lora_grad_norms, &params, &grads)?;
                     optimizer_step(
                         &*backend,
                         &params,
@@ -2388,8 +2392,9 @@ pub fn grpo_train(
         )?;
         if let Some(plan) = reward_filter_plan.as_ref() {
             record_reward_filter_plan(&mut data_stats, plan);
-            data_stats.groups_filtered =
-                data_stats.groups_filtered.saturating_add(plan.groups_dropped);
+            data_stats.groups_filtered = data_stats
+                .groups_filtered
+                .saturating_add(plan.groups_dropped);
             tracing::info!(
                 kept = plan.groups_kept,
                 dropped = plan.groups_dropped,
@@ -2448,8 +2453,7 @@ pub fn grpo_train(
             .saturating_add(dynamic_dropped)
             .saturating_add(tokenization_failed);
         data_stats.groups_trained = tokenized_groups.len();
-        data_stats.completions_trained =
-            tokenized_groups.iter().map(|g| g.completions.len()).sum();
+        data_stats.completions_trained = tokenized_groups.iter().map(|g| g.completions.len()).sum();
         token_counts = token_counts_for_grpo_groups(&tokenized_groups);
         tracing::info!(
             groups = tokenized_groups.len(),
@@ -2511,7 +2515,10 @@ pub fn grpo_train(
         // group's reference forward already runs against a frozen snapshot
         // rather than the live policy.
         let mut ema_ref_state = match &config.reference_policy {
-            ReferencePolicy::Ema { decay, refresh_every } => {
+            ReferencePolicy::Ema {
+                decay,
+                refresh_every,
+            } => {
                 let snapshot = lora_snapshot_capture_or_blend(&params, None, *decay)
                     .context("initial EMA reference snapshot")?;
                 Some(EmaReferenceState {
@@ -2540,7 +2547,7 @@ pub fn grpo_train(
                 &mut lora_grad_norms,
                 &lora_grad_index,
                 ema_ref_state.as_ref().map(|s| &s.snapshot),
-                None,
+                Some(&mut phase_timings),
             )?;
             let avg_group_loss = step_report.loss;
             echo_metrics.observe_env_ce(step_report.echo_env_ce);
@@ -2813,8 +2820,9 @@ pub fn grpo_dry_run_jsonl(
         )?;
         if let Some(plan) = reward_filter_plan.as_ref() {
             record_reward_filter_plan(&mut data_stats, plan);
-            data_stats.groups_filtered =
-                data_stats.groups_filtered.saturating_add(plan.groups_dropped);
+            data_stats.groups_filtered = data_stats
+                .groups_filtered
+                .saturating_add(plan.groups_dropped);
             tracing::info!(
                 kept = plan.groups_kept,
                 dropped = plan.groups_dropped,
@@ -2844,11 +2852,10 @@ pub fn grpo_dry_run_jsonl(
             }
 
             let group_idx = processed_groups + 1;
-            let tgroup =
-                tokenize_grpo_group_timed(&group, tokenizer, Some(&mut phase_timings))
-                    .with_context(|| {
-                        format!("tokenize GRPO dry-run group {group_idx} at line {line_no}")
-                    })?;
+            let tgroup = tokenize_grpo_group_timed(&group, tokenizer, Some(&mut phase_timings))
+                .with_context(|| {
+                    format!("tokenize GRPO dry-run group {group_idx} at line {line_no}")
+                })?;
             validate_grpo_dry_run_masks(&tgroup, group_idx, *line_no)?;
             let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(&tgroup));
             token_counts.action_tokens = token_counts
@@ -2861,8 +2868,7 @@ pub fn grpo_dry_run_jsonl(
                 .context_tokens
                 .saturating_add(group_counts.context_tokens);
             processed_groups = processed_groups.saturating_add(1);
-            processed_completions =
-                processed_completions.saturating_add(tgroup.completions.len());
+            processed_completions = processed_completions.saturating_add(tgroup.completions.len());
         }
 
         data_stats.groups_trained = processed_groups;
@@ -3204,8 +3210,9 @@ pub fn grpo_train_jsonl(
                 build_reward_filter_plan(config, &output_dir, "jsonl_grpo_groups", filter_inputs)?
                     .expect("reward filter enabled should build a plan");
             record_reward_filter_plan(&mut data_stats, &plan);
-            data_stats.groups_filtered =
-                data_stats.groups_filtered.saturating_add(plan.groups_dropped);
+            data_stats.groups_filtered = data_stats
+                .groups_filtered
+                .saturating_add(plan.groups_dropped);
             tracing::info!(
                 kept = plan.groups_kept,
                 dropped = plan.groups_dropped,
@@ -3258,7 +3265,10 @@ pub fn grpo_train_jsonl(
         // identical pattern; streaming JSONL just iterates one group at a
         // time).
         let mut ema_ref_state = match &config.reference_policy {
-            ReferencePolicy::Ema { decay, refresh_every } => {
+            ReferencePolicy::Ema {
+                decay,
+                refresh_every,
+            } => {
                 let snapshot = lora_snapshot_capture_or_blend(&params, None, *decay)
                     .context("initial EMA reference snapshot")?;
                 Some(EmaReferenceState {
@@ -3325,14 +3335,13 @@ pub fn grpo_train_jsonl(
                 "streamed GRPO tokenize start"
             );
             let tokenize_start = Instant::now();
-            let tgroup =
-                tokenize_grpo_group_timed(&group, tokenizer, Some(&mut phase_timings))
-                    .with_context(|| {
-                        format!(
-                            "tokenize GRPO JSONL group {} at line {}",
-                            processed_groups, line_no
-                        )
-                    })?;
+            let tgroup = tokenize_grpo_group_timed(&group, tokenizer, Some(&mut phase_timings))
+                .with_context(|| {
+                    format!(
+                        "tokenize GRPO JSONL group {} at line {}",
+                        processed_groups, line_no
+                    )
+                })?;
             let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(&tgroup));
             token_counts.action_tokens = token_counts
                 .action_tokens
@@ -3367,7 +3376,7 @@ pub fn grpo_train_jsonl(
                 &mut lora_grad_norms,
                 &lora_grad_index,
                 ema_ref_state.as_ref().map(|s| &s.snapshot),
-                None,
+                Some(&mut phase_timings),
             )?;
             let avg_group_loss = step_report.loss;
             echo_metrics.observe_env_ce(step_report.echo_env_ce);
@@ -3748,7 +3757,11 @@ fn validate_grpo_dry_run_masks(
             completion.env_mask.len(),
             completion.input_ids.len()
         );
-        let action_tokens = completion.action_mask.iter().filter(|&&active| active).count();
+        let action_tokens = completion
+            .action_mask
+            .iter()
+            .filter(|&&active| active)
+            .count();
         anyhow::ensure!(
             action_tokens > 0,
             "GRPO dry run: group {group_idx} line {line_no} completion {completion_idx} has empty action_mask"
@@ -3831,9 +3844,7 @@ fn compute_ref_log_probs_shared_prefix(
         .position(|&m| m)
         .with_context(|| "GRPO completion has no action tokens (action_mask is all false)")?;
     if prompt_len < 1 {
-        anyhow::bail!(
-            "GRPO shared-prefix ref forward requires prompt_len >= 1, got {prompt_len}"
-        );
+        anyhow::bail!("GRPO shared-prefix ref forward requires prompt_len >= 1, got {prompt_len}");
     }
 
     // Validate the prefix invariant — every completion must share the same
@@ -3873,8 +3884,7 @@ fn compute_ref_log_probs_shared_prefix(
         kiln_core::config::DType::FP32 => DType::F32,
     };
 
-    let num_blocks =
-        (max_total + GRPO_REF_PAGED_BLOCK_SIZE - 1) / GRPO_REF_PAGED_BLOCK_SIZE;
+    let num_blocks = (max_total + GRPO_REF_PAGED_BLOCK_SIZE - 1) / GRPO_REF_PAGED_BLOCK_SIZE;
     let paged_cache = PagedKvCache::new(
         model_config.num_full_attention_layers,
         num_blocks,
@@ -3942,9 +3952,9 @@ fn compute_ref_log_probs_shared_prefix(
         // implicitly reset by passing start_pos = prompt_len. Each completion
         // overwrites the cache slots at [prompt_len..prompt_len+comp_len), but
         // that region is throw-away — we never read another completion's K/V.
-        linear_state
-            .restore_from(&linear_snap)
-            .with_context(|| format!("GRPO shared-prefix: restore linear state for completion {comp_idx}"))?;
+        linear_state.restore_from(&linear_snap).with_context(|| {
+            format!("GRPO shared-prefix: restore linear state for completion {comp_idx}")
+        })?;
 
         let completion_ids = &comp.input_ids[prompt_len..];
 
@@ -3975,11 +3985,12 @@ fn compute_ref_log_probs_shared_prefix(
         let active_hidden = if comp_len == 1 {
             last_prompt_hidden.clone()
         } else {
-            let comp_prefix = comp_hidden
-                .narrow(1, 0, comp_len - 1)
-                .with_context(|| format!("GRPO shared-prefix: narrow comp prefix completion {comp_idx}"))?;
-            Tensor::cat(&[&last_prompt_hidden, &comp_prefix], 1)
-                .with_context(|| format!("GRPO shared-prefix: concat active hidden completion {comp_idx}"))?
+            let comp_prefix = comp_hidden.narrow(1, 0, comp_len - 1).with_context(|| {
+                format!("GRPO shared-prefix: narrow comp prefix completion {comp_idx}")
+            })?;
+            Tensor::cat(&[&last_prompt_hidden, &comp_prefix], 1).with_context(|| {
+                format!("GRPO shared-prefix: concat active hidden completion {comp_idx}")
+            })?
         };
         drop(comp_hidden);
 
@@ -4037,9 +4048,7 @@ fn chunked_log_probs_for_completion(
         );
     }
 
-    let hidden_2d = active_hidden
-        .squeeze(0)?
-        .to_dtype(DType::F32)?;
+    let hidden_2d = active_hidden.squeeze(0)?.to_dtype(DType::F32)?;
     let head_t_f32 = head_t.to_dtype(DType::F32)?;
     let vocab_size = head_t_f32.dim(1)?;
     if vocab_size == 0 {
@@ -4286,15 +4295,9 @@ fn train_tokenized_grpo_group_with_grad_norms(
             // single-turn rollouts the action_mask is true at every
             // completion-span position and this filter is a no-op.
             let span = &shared[comp_idx];
-            let comp_prompt_len = comp
-                .action_mask
-                .iter()
-                .position(|&m| m)
-                .with_context(|| {
-                    format!(
-                        "completion {comp_idx} has no action tokens (action_mask all false)"
-                    )
-                })?;
+            let comp_prompt_len = comp.action_mask.iter().position(|&m| m).with_context(|| {
+                format!("completion {comp_idx} has no action tokens (action_mask all false)")
+            })?;
             let active_indices: Vec<u32> = (0..span.dim(0)?)
                 .filter(|&i| {
                     comp.action_mask
@@ -4410,11 +4413,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
             if token_level {
                 merge_grad_maps(&mut group_accum, accumulated_grads)?;
             } else {
-                observe_lora_grad_norms_from_map(
-                    grad_norms,
-                    lora_grad_index,
-                    &accumulated_grads,
-                )?;
+                observe_lora_grad_norms_from_map(grad_norms, lora_grad_index, &accumulated_grads)?;
                 let optimizer_started = Instant::now();
                 tracing::info!(
                     comp_idx,
@@ -4484,12 +4483,8 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 "GRPO policy forward end"
             );
 
-            let policy_log_probs = token_log_probs(
-                &policy_logits,
-                &comp.input_ids,
-                &comp.action_mask,
-                device,
-            )?;
+            let policy_log_probs =
+                token_log_probs(&policy_logits, &comp.input_ids, &comp.action_mask, device)?;
 
             let grpo_loss_val = grpo_loss(&policy_log_probs, &ref_log_probs, loss_params, device)?;
 
@@ -4517,12 +4512,8 @@ fn train_tokenized_grpo_group_with_grad_norms(
             };
             let loss = if let Some(echo_cfg) = &config.loss.echo {
                 if config.loss.echo_enabled() && comp_env_count > 0 && comp.total_obs_len > 0 {
-                    let env_log_probs = token_log_probs(
-                        &policy_logits,
-                        &comp.input_ids,
-                        &comp.env_mask,
-                        device,
-                    )?;
+                    let env_log_probs =
+                        token_log_probs(&policy_logits, &comp.input_ids, &comp.env_mask, device)?;
                     // sum(log p) over env positions
                     let env_log_prob_sum = env_log_probs.sum_all()?;
                     // mean_ce = -sum / |O| (paper §3.1 normalization)
@@ -4994,7 +4985,9 @@ fn deepcopy_tensor_for_snapshot(t: &Tensor) -> Result<Tensor> {
 fn ema_blend_tensor(old: &Tensor, current: &Tensor, decay: f32) -> Result<Tensor> {
     let dtype = old.dtype();
     let a = old.to_dtype(DType::F32)?.affine(decay as f64, 0.0)?;
-    let b = current.to_dtype(DType::F32)?.affine((1.0 - decay) as f64, 0.0)?;
+    let b = current
+        .to_dtype(DType::F32)?
+        .affine((1.0 - decay) as f64, 0.0)?;
     let blended = (a + b)?;
     let out = if dtype == DType::F32 {
         blended
@@ -6016,8 +6009,7 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
             return None;
         }
         neg_logps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let idx =
-            ((q as f64) * (neg_logps.len() - 1) as f64).round() as usize;
+        let idx = ((q as f64) * (neg_logps.len() - 1) as f64).round() as usize;
         Some(neg_logps[idx.min(neg_logps.len() - 1)])
     });
 
@@ -6028,37 +6020,32 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
     // uniformly and skip the per-token IS math.
     // GSPO sequence-level setup uses only action positions; env positions
     // don't contribute to the IS ratio.
-    let (seq_surrogate_per_token, seq_d_surrogate_per_token) =
-        if loss_params.reinforce {
-            (0.0, 0.0)
-        } else if matches!(loss_params.is_level, IsLevel::Sequence) {
-            let log_ratios: Vec<f64> = policy_values
-                .iter()
-                .take(num_action)
-                .zip(ref_values.iter())
-                .map(|(p, r)| *p as f64 - *r as f64)
-                .collect();
-            let inv_n = 1.0 / num_action as f64;
-            let u = log_ratios.iter().sum::<f64>() * inv_n;
-            let s = u.exp();
-            let s_clipped = s.clamp(lo, hi);
-            let surr1 = s * advantage;
-            let surr2 = s_clipped * advantage;
-            let surrogate = surr1.min(surr2);
-            // d/du [min(surr1, surr2)] = s * advantage when the unclipped
-            // branch is chosen, 0 otherwise. d/d(log_pi_t) [u] = 1/|y|.
-            let d_u = if surr1 <= surr2 {
-                advantage * s
-            } else {
-                0.0
-            };
-            // Distributed scalars: per-token surrogate contribution to
-            // loss_sum is `surrogate/|y|` so summing gives `surrogate`.
-            // Per-token gradient coefficient is `d_u / |y|`.
-            (surrogate * inv_n, d_u * inv_n)
-        } else {
-            (0.0, 0.0)
-        };
+    let (seq_surrogate_per_token, seq_d_surrogate_per_token) = if loss_params.reinforce {
+        (0.0, 0.0)
+    } else if matches!(loss_params.is_level, IsLevel::Sequence) {
+        let log_ratios: Vec<f64> = policy_values
+            .iter()
+            .take(num_action)
+            .zip(ref_values.iter())
+            .map(|(p, r)| *p as f64 - *r as f64)
+            .collect();
+        let inv_n = 1.0 / num_action as f64;
+        let u = log_ratios.iter().sum::<f64>() * inv_n;
+        let s = u.exp();
+        let s_clipped = s.clamp(lo, hi);
+        let surr1 = s * advantage;
+        let surr2 = s_clipped * advantage;
+        let surrogate = surr1.min(surr2);
+        // d/du [min(surr1, surr2)] = s * advantage when the unclipped
+        // branch is chosen, 0 otherwise. d/d(log_pi_t) [u] = 1/|y|.
+        let d_u = if surr1 <= surr2 { advantage * s } else { 0.0 };
+        // Distributed scalars: per-token surrogate contribution to
+        // loss_sum is `surrogate/|y|` so summing gives `surrogate`.
+        // Per-token gradient coefficient is `d_u / |y|`.
+        (surrogate * inv_n, d_u * inv_n)
+    } else {
+        (0.0, 0.0)
+    };
 
     let mut loss_sum = 0.0f64;
     let mut grad_coeffs = Vec::with_capacity(num_active);
@@ -6897,7 +6884,10 @@ impl CheckpointConfig {
 ///
 /// Returns a list of `(start_layer, end_layer)` pairs that partition
 /// `[0..num_layers)` into `num_segments` roughly-equal segments.
-pub(crate) fn compute_segment_boundaries(num_layers: usize, num_segments: usize) -> Vec<(usize, usize)> {
+pub(crate) fn compute_segment_boundaries(
+    num_layers: usize,
+    num_segments: usize,
+) -> Vec<(usize, usize)> {
     let seg_size = num_layers / num_segments;
     let remainder = num_layers % num_segments;
     let mut boundaries = Vec::with_capacity(num_segments);
@@ -10236,7 +10226,9 @@ fn grpo_loss(
         let adv = Tensor::new(params.advantage as f32, device)?.broadcast_as(ratio.shape())?;
         let per_token_loss = (&ratio * &adv)?.neg()?;
         let total = per_token_loss.sum_all()?;
-        return total.affine(params.loss_normalizer, 0.0).map_err(Into::into);
+        return total
+            .affine(params.loss_normalizer, 0.0)
+            .map_err(Into::into);
     }
 
     let log_ratio = (policy_log_probs - ref_log_probs)?;
@@ -10351,7 +10343,9 @@ fn grpo_loss(
 
     let per_token_loss = (&neg_surrogate + &kl_penalty)?;
     let total = per_token_loss.sum_all()?;
-    total.affine(params.loss_normalizer, 0.0).map_err(Into::into)
+    total
+        .affine(params.loss_normalizer, 0.0)
+        .map_err(Into::into)
 }
 
 /// Whether the multi-layer per-layer tile-reverse path is enabled.
@@ -10449,9 +10443,7 @@ fn multi_layer_per_layer_tile_reverse(
                 Some(lora_detached),
             )
             .with_context(|| {
-                format!(
-                    "multi-layer tile reverse: per-layer-input forward at layer {layer_idx}"
-                )
+                format!("multi-layer tile reverse: per-layer-input forward at layer {layer_idx}")
             })?
             .detach();
             layer_inputs.push(current.clone());
@@ -11283,9 +11275,10 @@ mod tests {
 
         assert!(err.to_string().contains("failure_reason=zero_env_tokens"));
         assert!(err.to_string().contains("ECHO is enabled"));
-        let receipt =
-            crate::train_receipt::TrainReceipt::read_from_adapter_dir(&output.join("echo-empty-env"))?
-                .unwrap();
+        let receipt = crate::train_receipt::TrainReceipt::read_from_adapter_dir(
+            &output.join("echo-empty-env"),
+        )?
+        .unwrap();
         assert_eq!(
             receipt.status,
             crate::train_receipt::TrainReceiptStatus::Failed
@@ -11403,10 +11396,9 @@ mod tests {
         assert_eq!(train_all.data.groups_trained, 2);
         assert_eq!(train_all.data.reward_groups_filtered, 0);
         assert_eq!(train_all.data.reward_groups_kept, 2);
-        let train_all_sidecar: crate::train_receipt::RewardFilterSidecar =
-            serde_json::from_slice(&std::fs::read(
-                train_all.data.reward_filter_sidecar.as_ref().unwrap(),
-            )?)?;
+        let train_all_sidecar: crate::train_receipt::RewardFilterSidecar = serde_json::from_slice(
+            &std::fs::read(train_all.data.reward_filter_sidecar.as_ref().unwrap())?,
+        )?;
         assert_eq!(train_all_sidecar.empty_filter_action, "train-all");
         assert_eq!(train_all_sidecar.kept_group_ids, vec!["line:1", "line:2"]);
 
@@ -11634,7 +11626,10 @@ mod tests {
             entropy_aware_kl_quantile: None,
         };
         let loss = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
-        assert!(loss >= 0.0, "K3 per-token KL must be non-negative; got {loss}");
+        assert!(
+            loss >= 0.0,
+            "K3 per-token KL must be non-negative; got {loss}"
+        );
         Ok(())
     }
 
@@ -11718,10 +11713,10 @@ mod tests {
         let policy = Tensor::new(&[-0.05_f32, -3.0, -2.5, -0.10], &device)?;
         let reference = Tensor::new(&[0.0_f32, 0.0, 0.0, 0.0], &device)?; // log_ratio = policy
         let base = GrpoLossParams {
-            advantage: 0.0,            // isolate KL
+            advantage: 0.0, // isolate KL
             clip_low: 0.2,
             clip_high: 0.2,
-            kl_coeff: 1.0,             // identity scaling
+            kl_coeff: 1.0, // identity scaling
             kl_estimator: KlEstimator::K1,
             loss_normalizer: 1.0 / 4.0,
             is_level: IsLevel::Token,
@@ -12077,8 +12072,7 @@ mod tests {
             (1, seq_len, hidden_size),
             &device,
         )?;
-        let final_norm_weight =
-            Tensor::from_vec(vec![0.0_f32; hidden_size], hidden_size, &device)?;
+        let final_norm_weight = Tensor::from_vec(vec![0.0_f32; hidden_size], hidden_size, &device)?;
         let head_t = Tensor::from_vec(
             (0..hidden_size * vocab)
                 .map(|i| ((i as f32) * 0.07).cos() * 0.2)
@@ -12139,8 +12133,7 @@ mod tests {
             (1, seq_len, hidden_size),
             &device,
         )?;
-        let final_norm_weight =
-            Tensor::from_vec(vec![0.0_f32; hidden_size], hidden_size, &device)?;
+        let final_norm_weight = Tensor::from_vec(vec![0.0_f32; hidden_size], hidden_size, &device)?;
         let head_t = Tensor::from_vec(
             (0..hidden_size * vocab)
                 .map(|i| ((i as f32) * 0.09).cos() * 0.2)
@@ -14265,8 +14258,7 @@ mod tests {
         let mode_disabled = "disabled";
         let mode_zero = "lambda_zero";
         let mode_on = "lambda_on";
-        let mut losses: std::collections::HashMap<&str, f64> =
-            std::collections::HashMap::new();
+        let mut losses: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
 
         for mode in [mode_disabled, mode_zero, mode_on] {
             let mut grpo_cfg = GrpoConfig::default();
@@ -14288,15 +14280,7 @@ mod tests {
 
             let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
             let report = train_tokenized_grpo_group(
-                &*backend,
-                &tokenized,
-                &weights,
-                &config,
-                &params,
-                &grpo_cfg,
-                None,
-                &device,
-                None,
+                &*backend, &tokenized, &weights, &config, &params, &grpo_cfg, None, &device, None,
                 None,
             )?;
             let loss = report.loss;
@@ -14417,9 +14401,8 @@ mod tests {
             cfg
         };
 
-        let params_full = TrainableLoraParams::initialize_seeded(
-            &config, &weights, 4, 8.0, &device, Some(seed),
-        )?;
+        let params_full =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
         let report_full = train_tokenized_grpo_group(
             &*backend,
             &tokenized,
@@ -14434,9 +14417,8 @@ mod tests {
         )?;
         let loss_full = report_full.loss;
 
-        let params_vf = TrainableLoraParams::initialize_seeded(
-            &config, &weights, 4, 8.0, &device, Some(seed),
-        )?;
+        let params_vf =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
         let report_vf = train_tokenized_grpo_group(
             &*backend,
             &tokenized,
@@ -14455,9 +14437,8 @@ mod tests {
         // derive the GRPO term magnitude for the linearity invariant.
         let mut cfg_grpo_only = mk_cfg(false);
         cfg_grpo_only.loss.echo = None;
-        let params_grpo_only = TrainableLoraParams::initialize_seeded(
-            &config, &weights, 4, 8.0, &device, Some(seed),
-        )?;
+        let params_grpo_only =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
         let report_grpo_only = train_tokenized_grpo_group(
             &*backend,
             &tokenized,
@@ -14472,8 +14453,14 @@ mod tests {
         )?;
         let loss_grpo_only = report_grpo_only.loss;
 
-        assert!(loss_full.is_finite(), "GRPO+ECHO loss not finite: {loss_full}");
-        assert!(loss_vf.is_finite(), "ECHO-only (verifier-free) loss not finite: {loss_vf}");
+        assert!(
+            loss_full.is_finite(),
+            "GRPO+ECHO loss not finite: {loss_full}"
+        );
+        assert!(
+            loss_vf.is_finite(),
+            "ECHO-only (verifier-free) loss not finite: {loss_vf}"
+        );
         assert!(
             loss_grpo_only.is_finite(),
             "GRPO-only loss not finite: {loss_grpo_only}"
@@ -14588,9 +14575,8 @@ mod tests {
 
         // Uncheckpointed path: segments = None.
         let seed = 0xEC_AC_0DE_u64;
-        let params_unchk = TrainableLoraParams::initialize_seeded(
-            &config, &weights, 4, 8.0, &device, Some(seed),
-        )?;
+        let params_unchk =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
         let report_unchk = train_tokenized_grpo_group(
             &*backend,
             &tokenized,
@@ -14608,9 +14594,8 @@ mod tests {
         // Checkpointed path: segments = Some([(0,2),(2,4)]) for the 4-layer
         // tiny model, fresh LoRA init from the same seed.
         let segments = compute_segment_boundaries(config.num_layers, 2);
-        let params_chk = TrainableLoraParams::initialize_seeded(
-            &config, &weights, 4, 8.0, &device, Some(seed),
-        )?;
+        let params_chk =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
         let report_chk = train_tokenized_grpo_group(
             &*backend,
             &tokenized,
@@ -14625,8 +14610,14 @@ mod tests {
         )?;
         let loss_chk = report_chk.loss;
 
-        assert!(loss_unchk.is_finite(), "uncheckpointed loss not finite: {loss_unchk}");
-        assert!(loss_chk.is_finite(), "checkpointed loss not finite: {loss_chk}");
+        assert!(
+            loss_unchk.is_finite(),
+            "uncheckpointed loss not finite: {loss_unchk}"
+        );
+        assert!(
+            loss_chk.is_finite(),
+            "checkpointed loss not finite: {loss_chk}"
+        );
         assert!(
             report_unchk.echo_env_ce.is_some(),
             "uncheckpointed path should report env CE"
@@ -14680,11 +14671,7 @@ mod tests {
         .to_dtype(DType::F32)?;
 
         // ref_log_probs at action positions (3 entries).
-        let ref_log_probs = Tensor::from_vec(
-            vec![-2.0f32, -1.5, -2.5],
-            3,
-            &device,
-        )?;
+        let ref_log_probs = Tensor::from_vec(vec![-2.0f32, -1.5, -2.5], 3, &device)?;
 
         let params = GrpoLossParams {
             advantage: 1.0,
@@ -14718,18 +14705,19 @@ mod tests {
             total_obs_len,
             lambda: 0.05,
         };
-        let (loss_with_echo, _grad_with_echo, env_ce_with_echo) = analytic_grpo_tail_loss_grad_pre_final_norm(
-            &hidden,
-            &final_norm_weight,
-            &head_t,
-            &input_ids,
-            &action_mask,
-            &ref_log_probs,
-            params,
-            1e-6,
-            4,
-            Some(echo_params),
-        )?;
+        let (loss_with_echo, _grad_with_echo, env_ce_with_echo) =
+            analytic_grpo_tail_loss_grad_pre_final_norm(
+                &hidden,
+                &final_norm_weight,
+                &head_t,
+                &input_ids,
+                &action_mask,
+                &ref_log_probs,
+                params,
+                1e-6,
+                4,
+                Some(echo_params),
+            )?;
 
         // Both should be finite.
         assert!(

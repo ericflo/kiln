@@ -67,7 +67,7 @@ fn make_state(max_tracked: usize, ttl: std::time::Duration) -> AppState {
         Arc::new(engine),
         test_tokenizer(),
         300,
-        "qwen3.5-4b-kiln".to_string(),
+        "Qwen3.5-4B".to_string(),
     );
     // Leave the queue cap permissive so we exercise the tracked-map cap
     // independently of the queue cap from PR #607.

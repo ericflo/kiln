@@ -9,7 +9,7 @@ format, and replaces those messages with that summary so the session can
 continue.
 
 The model that produces the compaction summary is the same one that drives
-the pi session (kiln-served `qwen-3.5-4b-kiln` in our case). A great
+the pi session (kiln-served `Qwen3.5-4B` in our case). A great
 compaction summary lets a fresh agent resume the work seamlessly. A poor
 one drops critical state — file paths, error messages, the user's actual
 request — and the agent restarts from scratch or, worse, hallucinates

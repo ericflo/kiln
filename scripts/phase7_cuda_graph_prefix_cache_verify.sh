@@ -2,7 +2,7 @@
 set -euo pipefail
 
 BASE_URL=${BASE_URL:-http://127.0.0.1:8420}
-MODEL_PATH=${KILN_MODEL_PATH:-/workspace/qwen3.5-4b}
+MODEL_PATH=${KILN_MODEL_PATH:-/workspace/Qwen3.5-4B}
 LOG_FILE=${LOG_FILE:-/tmp/kiln-cuda-graphs-prefix-cache.log}
 KILN_BIN=${KILN_BIN:-target/release/kiln}
 

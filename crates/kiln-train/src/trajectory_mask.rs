@@ -200,9 +200,7 @@ pub fn build_masks_from_trajectory_timed(
         &mut segment_spans,
     );
 
-    if byte_search_result.is_err()
-        || segment_spans.len() != count_supervised_segments(trajectory)
-    {
+    if byte_search_result.is_err() || segment_spans.len() != count_supervised_segments(trajectory) {
         // Step 3b: fall back to cumulative-prefix re-tokenization (mirrors
         // SFT's label_mask_by_prefix_tokenization).
         action_mask.iter_mut().for_each(|b| *b = false);
@@ -261,7 +259,7 @@ fn count_supervised_segments(trajectory: &[TurnSegment]) -> usize {
 /// content range.
 ///
 /// Two chat-template patterns to handle (verified against
-/// `/workspace/qwen3.5-4b/chat_template.jinja` on 2026-05-18):
+/// `/workspace/Qwen3.5-4B/chat_template.jinja` on 2026-05-18):
 ///
 /// - **Standard ChatML role** (`system` / `user` / `assistant`):
 ///   `<|im_start|>{role}\n{content}<|im_end|>`
@@ -304,17 +302,18 @@ fn byte_search_strategy(
 
         // For Observation segments, look for the <tool_response>...</tool_response>
         // wrapper (Qwen-style) rather than a <|im_start|>tool marker.
-        let (content_start, content_end_abs, advance_to) = if matches!(seg.kind, TurnKind::Observation) {
-            let open_rel = full_text[cursor..]
-                .find(TOOL_RESPONSE_OPEN)
-                .with_context(|| {
-                    format!(
-                        "byte-search: could not locate {:?} for tool result after cursor {}",
-                        TOOL_RESPONSE_OPEN, cursor
-                    )
-                })?;
-            let content_start = cursor + open_rel + TOOL_RESPONSE_OPEN.len();
-            let close_rel = full_text[content_start..]
+        let (content_start, content_end_abs, advance_to) =
+            if matches!(seg.kind, TurnKind::Observation) {
+                let open_rel = full_text[cursor..]
+                    .find(TOOL_RESPONSE_OPEN)
+                    .with_context(|| {
+                        format!(
+                            "byte-search: could not locate {:?} for tool result after cursor {}",
+                            TOOL_RESPONSE_OPEN, cursor
+                        )
+                    })?;
+                let content_start = cursor + open_rel + TOOL_RESPONSE_OPEN.len();
+                let close_rel = full_text[content_start..]
                 .find(TOOL_RESPONSE_CLOSE)
                 .with_context(|| {
                     format!(
@@ -322,35 +321,34 @@ fn byte_search_strategy(
                         TOOL_RESPONSE_CLOSE, content_start
                     )
                 })?;
-            let content_end_abs = content_start + close_rel;
-            // Advance past the closing </tool_response>; surrounding
-            // <|im_end|> handled on the next iteration if any.
-            let advance = content_end_abs + TOOL_RESPONSE_CLOSE.len();
-            (content_start, content_end_abs, advance)
-        } else {
-            // Action / standard role: <|im_start|>{role}\n{content}<|im_end|>
-            let role_marker = format!("<|im_start|>{}\n", seg.role);
-            let role_start = full_text[cursor..]
-                .find(&role_marker)
-                .with_context(|| {
+                let content_end_abs = content_start + close_rel;
+                // Advance past the closing </tool_response>; surrounding
+                // <|im_end|> handled on the next iteration if any.
+                let advance = content_end_abs + TOOL_RESPONSE_CLOSE.len();
+                (content_start, content_end_abs, advance)
+            } else {
+                // Action / standard role: <|im_start|>{role}\n{content}<|im_end|>
+                let role_marker = format!("<|im_start|>{}\n", seg.role);
+                let role_start = full_text[cursor..].find(&role_marker).with_context(|| {
                     format!(
                         "byte-search: could not locate role marker {:?} after cursor {}",
                         role_marker, cursor
                     )
                 })?;
-            let content_start = cursor + role_start + role_marker.len();
-            let content_end_rel = full_text[content_start..]
-                .find(MESSAGE_END)
-                .with_context(|| {
-                    format!(
-                        "byte-search: could not locate {} after content start {}",
-                        MESSAGE_END, content_start
-                    )
-                })?;
-            let content_end_abs = content_start + content_end_rel;
-            let advance = content_end_abs + MESSAGE_END.len();
-            (content_start, content_end_abs, advance)
-        };
+                let content_start = cursor + role_start + role_marker.len();
+                let content_end_rel =
+                    full_text[content_start..]
+                        .find(MESSAGE_END)
+                        .with_context(|| {
+                            format!(
+                                "byte-search: could not locate {} after content start {}",
+                                MESSAGE_END, content_start
+                            )
+                        })?;
+                let content_end_abs = content_start + content_end_rel;
+                let advance = content_end_abs + MESSAGE_END.len();
+                (content_start, content_end_abs, advance)
+            };
 
         // Apply warning_filter for Observation segments. `effective_start`
         // is where the env_mask is allowed to begin; `content_start` is the
@@ -453,9 +451,7 @@ fn prefix_tokenization_strategy(
         let txt = tokenizer
             .apply_chat_template(msgs)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        tokenizer
-            .encode(&txt)
-            .map_err(|e| anyhow::anyhow!("{e}"))
+        tokenizer.encode(&txt).map_err(|e| anyhow::anyhow!("{e}"))
     };
 
     for seg in trajectory {
@@ -511,7 +507,7 @@ mod tests {
     /// for all roles EXCEPT tool, which renders inside a user block as:
     ///   <|im_start|>user\n<tool_response>\n{content}\n</tool_response><|im_end|>\n
     /// matching the actual Qwen3.5-4B template at
-    /// /workspace/qwen3.5-4b/chat_template.jinja (verified 2026-05-18).
+    /// /workspace/Qwen3.5-4B/chat_template.jinja (verified 2026-05-18).
     fn qwen_shaped_tokenizer() -> KilnTokenizer {
         // Build a vocab that maps every byte 0..255 to a single token id.
         // BPE with no merges treats each input byte as its own token, so
@@ -628,13 +624,8 @@ mod tests {
     #[test]
     fn build_masks_assistant_only_marks_action_tokens() {
         let tok = qwen_shaped_tokenizer();
-        let traj = vec![
-            ctx("system", "sys"),
-            ctx("user", "ask"),
-            act("REPLY"),
-        ];
-        let result =
-            build_masks_from_trajectory(&traj, &[], &tok, &MaskConfig::default()).unwrap();
+        let traj = vec![ctx("system", "sys"), ctx("user", "ask"), act("REPLY")];
+        let result = build_masks_from_trajectory(&traj, &[], &tok, &MaskConfig::default()).unwrap();
         let n_action_true = result.action_mask.iter().filter(|&&b| b).count();
         let n_env_true = result.env_mask.iter().filter(|&&b| b).count();
         assert_eq!(n_action_true, 5, "REPLY is 5 bytes/tokens");
@@ -665,8 +656,7 @@ mod tests {
             obs("OUTPUT", None),
             act("FINAL"),
         ];
-        let result =
-            build_masks_from_trajectory(&traj, &[], &tok, &MaskConfig::default()).unwrap();
+        let result = build_masks_from_trajectory(&traj, &[], &tok, &MaskConfig::default()).unwrap();
 
         // The two Action segments contribute RUN (3) + FINAL (5) = 8 action tokens.
         let n_action_true = result.action_mask.iter().filter(|&&b| b).count();
@@ -748,11 +738,10 @@ mod tests {
             ctx("user", "u"),
             act("call1"),
             obs("res1", None),
-            obs("res2", None),  // second tool result without an intervening assistant
+            obs("res2", None), // second tool result without an intervening assistant
             act("done"),
         ];
-        let result =
-            build_masks_from_trajectory(&traj, &[], &tok, &MaskConfig::default()).unwrap();
+        let result = build_masks_from_trajectory(&traj, &[], &tok, &MaskConfig::default()).unwrap();
 
         // Both env segments should be marked.
         let n_env = result.env_mask.iter().filter(|&&b| b).count();
@@ -835,7 +824,7 @@ mod tests {
 
     /// Real Qwen3.5-4B tokenizer + chat template fixture. Skipped on CI
     /// when KILN_QWEN_TOKENIZER_PATH isn't set (so this test only runs on
-    /// pods where the model is staged at /workspace/qwen3.5-4b/).
+    /// pods where the model is staged at /workspace/Qwen3.5-4B/).
     ///
     /// Verifies that the byte-search masking strategy correctly handles
     /// the *real* Qwen tool_response wrapper, not just my synthetic
@@ -846,19 +835,19 @@ mod tests {
     fn build_masks_against_real_qwen_tokenizer() -> anyhow::Result<()> {
         let tokenizer_path = match std::env::var("KILN_QWEN_TOKENIZER_PATH") {
             Ok(v) => v,
-            Err(_) => match std::path::Path::new("/workspace/qwen3.5-4b/tokenizer.json")
-                .exists()
-            {
-                true => "/workspace/qwen3.5-4b/tokenizer.json".to_string(),
-                false => {
+            Err(_) => {
+                let canonical = "/workspace/Qwen3.5-4B/tokenizer.json";
+                if std::path::Path::new(canonical).exists() {
+                    canonical.to_string()
+                } else {
                     eprintln!(
                         "skipping build_masks_against_real_qwen_tokenizer — \
                          KILN_QWEN_TOKENIZER_PATH not set and \
-                         /workspace/qwen3.5-4b/tokenizer.json doesn't exist"
+                         /workspace/Qwen3.5-4B/tokenizer.json doesn't exist"
                     );
                     return Ok(());
                 }
-            },
+            }
         };
         let chat_template_path = std::path::Path::new(&tokenizer_path)
             .parent()
@@ -884,7 +873,9 @@ mod tests {
         let traj = vec![
             TurnSegment {
                 role: "assistant".into(),
-                content: "<tool_call>{\"name\":\"bash\",\"arguments\":{\"cmd\":\"ls /tmp\"}}</tool_call>".into(),
+                content:
+                    "<tool_call>{\"name\":\"bash\",\"arguments\":{\"cmd\":\"ls /tmp\"}}</tool_call>"
+                        .into(),
                 kind: TurnKind::Action,
                 tool_call_id: None,
                 warning_prefix_len: None,
@@ -905,8 +896,7 @@ mod tests {
             },
         ];
 
-        let result =
-            build_masks_from_trajectory(&traj, &prompt, &tok, &MaskConfig::default())?;
+        let result = build_masks_from_trajectory(&traj, &prompt, &tok, &MaskConfig::default())?;
 
         // Three supervised segments expected: 2 Action + 1 Observation.
         // If the masker missed the Qwen tool_response wrapper, the
