@@ -102,10 +102,7 @@ impl KilnTokenizer {
     /// Serialize the tokenizer plus kiln's optional external chat template
     /// into a stable JSON value used by training receipts.
     pub fn config_json(&self) -> Result<String, TokenizerError> {
-        let tokenizer_json = self
-            .inner
-            .to_string(false)
-            .map_err(|e| TokenizerError::Load(e.to_string()))?;
+        let tokenizer_json = self.tokenizer_config_json()?;
         let tokenizer_value = serde_json::from_str::<serde_json::Value>(&tokenizer_json)
             .map_err(|e| TokenizerError::Load(e.to_string()))?;
         serde_json::to_string(&serde_json::json!({
@@ -117,12 +114,28 @@ impl KilnTokenizer {
 
     /// SHA-256 digest of [`Self::config_json`] with a `sha256:` prefix.
     pub fn config_sha256(&self) -> Result<String, TokenizerError> {
-        use sha2::{Digest, Sha256};
-
         let json = self.config_json()?;
-        let digest = Sha256::digest(json.as_bytes());
-        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-        Ok(format!("sha256:{hex}"))
+        Ok(crate::config_hashes::sha256_bytes(json.as_bytes()))
+    }
+
+    /// Serialize the tokenizer JSON without Kiln's external chat template.
+    pub fn tokenizer_config_json(&self) -> Result<String, TokenizerError> {
+        self.inner
+            .to_string(false)
+            .map_err(|e| TokenizerError::Load(e.to_string()))
+    }
+
+    /// SHA-256 digest of the tokenizer JSON, excluding the chat template.
+    pub fn tokenizer_config_sha256(&self) -> Result<String, TokenizerError> {
+        let json = self.tokenizer_config_json()?;
+        Ok(crate::config_hashes::sha256_bytes(json.as_bytes()))
+    }
+
+    /// SHA-256 digest of the configured chat template, when one is loaded.
+    pub fn chat_template_sha256(&self) -> Option<String> {
+        self.chat_template
+            .as_ref()
+            .map(|template| crate::config_hashes::sha256_bytes(template.as_bytes()))
     }
 
     /// Encode text into token IDs.
@@ -521,6 +534,26 @@ mod tests {
             .map(|text| tok.encode(text).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(batched, scalar);
+    }
+
+    #[test]
+    fn tokenizer_and_chat_template_hashes_are_separate() {
+        let tok = minimal_tokenizer();
+        let tokenizer_hash = tok.tokenizer_config_sha256().unwrap();
+        let combined_without_template = tok.config_sha256().unwrap();
+        assert!(tokenizer_hash.starts_with("sha256:"));
+        assert!(combined_without_template.starts_with("sha256:"));
+        assert_ne!(tokenizer_hash, combined_without_template);
+        assert!(tok.chat_template_sha256().is_none());
+
+        let templated = tok.with_chat_template("{{ messages | length }}".to_string());
+        assert_eq!(
+            templated.tokenizer_config_sha256().unwrap(),
+            tokenizer_hash,
+            "tokenizer hash must not change when only the chat template changes"
+        );
+        assert!(templated.chat_template_sha256().unwrap().starts_with("sha256:"));
+        assert_ne!(templated.config_sha256().unwrap(), combined_without_template);
     }
 
     #[test]

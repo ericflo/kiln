@@ -1929,6 +1929,73 @@ receipts.
 - Server health includes all hashes.
 - Chat response metadata can include all hashes in debug mode.
 
+**Status:** Completed and validated on RunPod.
+
+**Implementation notes:** Added `kiln_core::config_hashes::ConfigHashes` with
+separate SHA-256 fields for tokenizer JSON, chat template, model config, and
+effective Kiln env/config. `KilnTokenizer` now exposes separate tokenizer-only
+and chat-template hashes while preserving the legacy combined tokenizer config
+hash. Server startup computes stable config hashes from the loaded
+Qwen3.5-4B model config, tokenizer, chat template, and effective server config.
+`/health` includes `config_hashes`, and chat responses can opt into
+`metadata.config_hashes` with `include_config_hashes: true` or the
+`KILN_CHAT_CONFIG_HASH_METADATA=true` server default. Training receipts now
+include a top-level `config_hashes` object and mirror those values under the
+existing `model`, `tokenizer`, and `kiln` receipt sections.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on adopted RTX A6000 pod
+  `qmfxie9izl6lc6`, lease `pod-e6a9a744a671ae965e1c7f36`. The pod was the
+  existing direct pod `kiln-backlog-codex-20260520`, adopted into the lease
+  model after A6000 pool acquire returned retryable capacity failure.
+- Remote setup used clean worktree `/workspace/kiln-issue30` at
+  `origin/main` `482b2a9f3fab01ec7c7b71e00c00bf53d63ff116` plus the issue 30
+  patch; sentinel `/workspace/kiln-validation/issue30/setup-rerun.done`
+  recorded `exit=0`.
+- Focused RunPod checks passed; sentinel
+  `/workspace/kiln-validation/issue30/focused-tests-rerun.done` recorded
+  `exit=0`. Commands run: `cargo test --locked -p kiln-core
+  tokenizer_and_chat_template_hashes_are_separate --lib`; `cargo test
+  --locked -p kiln-server chat_config_hash_metadata --lib`; `cargo test
+  --locked -p kiln-server test_env_var_overrides --lib`; `cargo test --locked
+  -p kiln-server test_parse_full_toml --lib`; `cargo test --locked -p
+  kiln-server health --lib`; `cargo test --locked -p kiln-train
+  train_receipt_success_round_trip --lib`; `cargo check --locked -p
+  kiln-server --tests`; and `cargo check --locked -p kiln-train --examples`.
+- Actual Qwen3.5-4B CUDA validation passed on the same A6000 with canonical
+  model path `/workspace/Qwen3.5-4B`; sentinel
+  `/workspace/kiln-validation/issue30/actual-model-rerun.done` recorded
+  `exit=0` and driver log
+  `/workspace/kiln-validation/issue30/actual-model-rerun.driver.log` ended
+  with `ACTUAL_MODEL_ISSUE30_OK`.
+- Actual-model validation built `kiln-server --bin kiln --features cuda` with
+  `KILN_CUDA_ARCHS=86`, booted the release server against Qwen3.5-4B, verified
+  `/health` returned backend `model` and model `Qwen3.5-4B (32L, 16H, 4KV)`,
+  and verified `/v1/chat/completions` returned model `Qwen3.5-4B` with
+  `metadata.config_hashes`.
+- Real artifacts showed matching health/chat hashes for
+  `tokenizer_config_hash`, `chat_template_hash`, `model_config_hash`, and
+  `kiln_env_config_hash`. The CUDA GRPO dry-run receipt at
+  `/workspace/kiln-validation/issue30/actual-model/dryrun/issue30-config-hash-dryrun/train_receipt.json`
+  recorded status `success`, model/tokenizer/template hashes with `sha256:`
+  prefixes, and matching mirrored receipt fields.
+- Post-format local check passed with `git diff --check`. Post-format RunPod
+  check passed with `git diff --check` and `cargo test --locked -p kiln-train
+  train_receipt_success_round_trip --lib`; sentinel
+  `/workspace/kiln-validation/issue30/post-format-check.done` recorded
+  `exit=0`.
+
+**Commit SHA:** Pending; this status line will be updated in a follow-up
+metadata commit because a commit cannot include its own final SHA.
+
+**Remaining risk:** Full workspace `cargo fmt --all --check` still fails on
+pre-existing unrelated formatting in `crates/kiln-vulkan-kernel/tests/
+vk_opd_parity.rs`, and file-wide rustfmt checks for some touched files would
+also rewrite unrelated older lines. The issue 30 patch itself passed
+`git diff --check`, focused tests, locked checks, and actual Qwen3.5-4B CUDA
+validation.
+
 ### 31. Add Model-Specific Defaults Profile For Qwen3.5-4B
 
 **Area:** `crates/kiln-server`, config

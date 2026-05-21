@@ -7,6 +7,7 @@ use tokio::sync::{Mutex, watch};
 use candle_core::DType;
 use kiln_core::block::BlockManager;
 use kiln_core::config::ModelConfig;
+use kiln_core::config_hashes::ConfigHashes;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
@@ -1287,6 +1288,12 @@ pub struct AppState {
     /// Include per-request performance counters in chat response metadata when
     /// a request does not explicitly opt in or out.
     pub chat_performance_metadata: bool,
+    /// Include config hashes in chat response metadata when a request does not
+    /// explicitly opt in or out.
+    pub chat_config_hash_metadata: bool,
+    /// Stable hashes of the model, tokenizer/template, and effective Kiln
+    /// runtime config.
+    pub config_hashes: ConfigHashes,
     /// Slow chat-completion warning threshold. None disables slow-request logs.
     pub slow_request_warn_threshold: Option<std::time::Duration>,
     /// Prometheus metrics counters.
@@ -1452,6 +1459,7 @@ impl AppState {
         request_timeout_secs: u64,
         served_model_id: String,
     ) -> Self {
+        let config_hashes = ConfigHashes::from_model_tokenizer(&model_config, &tokenizer, None);
         Self {
             model_config,
             backend: Arc::new(ModelBackend::Mock {
@@ -1478,6 +1486,8 @@ impl AppState {
             default_thinking_enabled: None,
             fold_reasoning_into_content: false,
             chat_performance_metadata: false,
+            chat_config_hash_metadata: false,
+            config_hashes,
             slow_request_warn_threshold: None,
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
@@ -1908,6 +1918,7 @@ impl AppState {
             None
         };
 
+        let config_hashes = ConfigHashes::from_model_tokenizer(&model_config, &tokenizer, None);
         Self {
             model_config,
             backend: Arc::new(ModelBackend::Real {
@@ -1935,6 +1946,8 @@ impl AppState {
             default_thinking_enabled: None,
             fold_reasoning_into_content: false,
             chat_performance_metadata: false,
+            chat_config_hash_metadata: false,
+            config_hashes,
             slow_request_warn_threshold: None,
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),

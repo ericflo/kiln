@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
+use kiln_core::config_hashes::ConfigHashes;
 use kiln_scheduler::PrefixCacheStats;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
@@ -21,6 +22,7 @@ struct HealthResponse {
     eval_mode: bool,
     default_thinking_enabled: Option<bool>,
     fold_reasoning_into_content: bool,
+    config_hashes: ConfigHashes,
     active_adapter: Option<String>,
     loaded_adapter: Option<String>,
     loaded_adapter_count: usize,
@@ -389,6 +391,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         eval_mode: state.eval_mode,
         default_thinking_enabled: state.default_thinking_enabled,
         fold_reasoning_into_content: state.fold_reasoning_into_content,
+        config_hashes: state.config_hashes.clone(),
         active_adapter,
         loaded_adapter,
         loaded_adapter_count,
@@ -671,6 +674,16 @@ mod tests {
         assert_eq!(json["eval_mode"], false);
         assert!(json["default_thinking_enabled"].is_null());
         assert_eq!(json["fold_reasoning_into_content"], false);
+        assert!(json["config_hashes"]["model_config_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert!(json["config_hashes"]["tokenizer_config_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert!(json["config_hashes"]["chat_template_hash"].is_null());
+        assert!(json["config_hashes"]["kiln_env_config_hash"].is_null());
         assert!(json["active_adapter"].is_null());
         assert!(json["loaded_adapter"].is_null());
         assert_eq!(json["loaded_adapter_count"], 0);

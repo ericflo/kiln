@@ -12,6 +12,7 @@ use kiln_server::device::select_device_with_options;
 use kiln_server::state;
 
 use kiln_core::config::ModelConfig;
+use kiln_core::config_hashes::{ConfigHashes, kiln_env_config_hash};
 use kiln_core::env_flag::env_tristate;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
@@ -346,6 +347,12 @@ async fn main() -> Result<()> {
     state.default_thinking_enabled = config.server.default_thinking_enabled;
     state.fold_reasoning_into_content = config.server.fold_reasoning_into_content;
     state.chat_performance_metadata = config.server.chat_performance_metadata;
+    state.chat_config_hash_metadata = config.server.chat_config_hash_metadata;
+    state.config_hashes = ConfigHashes::from_model_tokenizer(
+        &state.model_config,
+        state.tokenizer.as_ref(),
+        kiln_env_config_hash(&config),
+    );
     state.slow_request_warn_threshold = if config.server.slow_request_warn_secs == 0 {
         None
     } else {
@@ -372,6 +379,14 @@ async fn main() -> Result<()> {
         threshold_secs = config.server.slow_request_warn_secs,
         enabled = state.slow_request_warn_threshold.is_some(),
         "slow request watchdog configured"
+    );
+    tracing::debug!(
+        enabled = state.chat_config_hash_metadata,
+        model_config_hash = ?state.config_hashes.model_config_hash,
+        tokenizer_config_hash = ?state.config_hashes.tokenizer_config_hash,
+        chat_template_hash = ?state.config_hashes.chat_template_hash,
+        kiln_env_config_hash = ?state.config_hashes.kiln_env_config_hash,
+        "config hashes initialized"
     );
     tracing::debug!(enabled = state.eval_mode, "eval mode configured");
     tracing::debug!(

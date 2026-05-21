@@ -13,6 +13,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 use kiln_core::config::ModelConfig;
+use kiln_core::config_hashes::ConfigHashes;
 use kiln_core::tokenizer::KilnTokenizer;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -93,6 +94,8 @@ pub struct TrainReceipt {
     #[serde(default)]
     pub phase_timings: TrainingPhaseTimingsReceipt,
     pub runtime: RuntimeReceipt,
+    #[serde(default)]
+    pub config_hashes: ConfigHashes,
     pub lora_delta_norms: Vec<LoraDeltaNormSummary>,
     #[serde(default)]
     pub lora_grad_norms: Vec<LoraGradNormSummary>,
@@ -107,6 +110,8 @@ pub struct KilnSourceReceipt {
     pub git_dirty: Option<bool>,
     pub git_source: Option<String>,
     pub package_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_config_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -117,7 +122,12 @@ pub struct ModelReceipt {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TokenizerReceipt {
+    /// Backward-compatible combined hash of tokenizer JSON plus chat template.
     pub config_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_config_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -455,6 +465,11 @@ impl TrainReceipt {
         hyperparameters: HyperparameterReceipt,
         config: serde_json::Value,
     ) -> Self {
+        let config_hashes = ConfigHashes::from_model_tokenizer(
+            model_config,
+            tokenizer,
+            kiln_core::config_hashes::kiln_env_config_hash(&config),
+        );
         Self {
             schema_version: TRAIN_RECEIPT_SCHEMA_VERSION,
             receipt_type: "kiln_train_receipt".to_string(),
@@ -463,13 +478,15 @@ impl TrainReceipt {
             status: TrainReceiptStatus::Success,
             failure_reason: None,
             failure_message: None,
-            kiln: detect_kiln_source(),
+            kiln: detect_kiln_source(config_hashes.kiln_env_config_hash.clone()),
             model: ModelReceipt {
                 path: detect_model_path(),
-                config_hash: sha256_json_serializable(model_config),
+                config_hash: config_hashes.model_config_hash.clone(),
             },
             tokenizer: TokenizerReceipt {
                 config_hash: tokenizer.config_sha256().ok(),
+                tokenizer_config_hash: config_hashes.tokenizer_config_hash.clone(),
+                chat_template_hash: config_hashes.chat_template_hash.clone(),
             },
             adapters: AdapterReceiptSet {
                 base: AdapterFileReceipt::none(),
@@ -492,6 +509,7 @@ impl TrainReceipt {
                 wall_clock_ms: 0,
                 peak_vram_mib: None,
             },
+            config_hashes,
             lora_delta_norms: Vec::new(),
             lora_grad_norms: Vec::new(),
             adapter_smoke_test: None,
@@ -1125,7 +1143,7 @@ pub fn lora_delta_norm_warnings(
     warnings
 }
 
-fn detect_kiln_source() -> KilnSourceReceipt {
+fn detect_kiln_source(env_config_hash: Option<String>) -> KilnSourceReceipt {
     let repo_root = std::env::var("KILN_REPO_ROOT")
         .ok()
         .map(PathBuf::from)
@@ -1165,6 +1183,7 @@ fn detect_kiln_source() -> KilnSourceReceipt {
         git_dirty,
         git_source,
         package_version: env!("CARGO_PKG_VERSION").to_string(),
+        env_config_hash,
     }
 }
 
@@ -1415,6 +1434,22 @@ mod tests {
         assert_eq!(loaded.status, TrainReceiptStatus::Success);
         assert_eq!(loaded.adapter_name, "adapter-a");
         assert_eq!(loaded.hyperparameters.rank, 8);
+        assert!(loaded.config_hashes.model_config_hash.is_some());
+        assert_eq!(
+            loaded.model.config_hash,
+            loaded.config_hashes.model_config_hash
+        );
+        assert!(loaded.config_hashes.tokenizer_config_hash.is_some());
+        assert_eq!(
+            loaded.tokenizer.tokenizer_config_hash,
+            loaded.config_hashes.tokenizer_config_hash
+        );
+        assert!(loaded.config_hashes.chat_template_hash.is_none());
+        assert!(loaded.config_hashes.kiln_env_config_hash.is_some());
+        assert_eq!(
+            loaded.kiln.env_config_hash,
+            loaded.config_hashes.kiln_env_config_hash
+        );
         assert!(loaded.lora_grad_norms.is_empty());
         assert!(loaded.adapter_smoke_test.is_none());
         Ok(())

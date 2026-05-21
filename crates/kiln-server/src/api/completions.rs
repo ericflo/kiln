@@ -9,6 +9,7 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+use kiln_core::config_hashes::ConfigHashes;
 use kiln_core::request::Request;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
@@ -149,6 +150,7 @@ fn chat_completion_metadata_from_prompt(
         final_content_empty: false,
         content_empty_reason: None,
         reasoning_folded_into_content: false,
+        config_hashes: None,
         performance: None,
     }
 }
@@ -172,6 +174,7 @@ fn chat_completion_metadata_from_prompt_and_output(
                 .reasoning_content
                 .as_deref()
                 .is_some_and(|text| !text.is_empty()),
+        config_hashes: None,
         performance: None,
     }
 }
@@ -203,6 +206,7 @@ fn chat_completion_metadata_from_cached_output(
                 .reasoning_content
                 .as_deref()
                 .is_some_and(|text| !text.is_empty()),
+        config_hashes: None,
         performance: None,
     }
 }
@@ -224,6 +228,7 @@ fn chat_completion_metadata_from_request(
         final_content_empty: false,
         content_empty_reason: None,
         reasoning_folded_into_content: false,
+        config_hashes: None,
         performance: None,
     }
 }
@@ -231,6 +236,11 @@ fn chat_completion_metadata_from_request(
 fn chat_performance_metadata_enabled(state: &AppState, req: &ChatCompletionRequest) -> bool {
     req.include_performance
         .unwrap_or(state.chat_performance_metadata)
+}
+
+fn chat_config_hash_metadata_enabled(state: &AppState, req: &ChatCompletionRequest) -> bool {
+    req.include_config_hashes
+        .unwrap_or(state.chat_config_hash_metadata)
 }
 
 fn duration_ms_f64(duration: std::time::Duration) -> f64 {
@@ -280,6 +290,10 @@ fn attach_chat_performance_metadata(
     ttft: Option<std::time::Duration>,
     decode_duration: Option<std::time::Duration>,
 ) {
+    if chat_config_hash_metadata_enabled(state, req) {
+        resp.metadata.config_hashes = Some(state.config_hashes.clone());
+    }
+
     if !chat_performance_metadata_enabled(state, req) {
         return;
     }
@@ -2916,6 +2930,11 @@ pub struct ChatCompletionRequest {
     /// config default decides.
     #[serde(default)]
     pub include_performance: Option<bool>,
+    /// Kiln extension: include model/tokenizer/template/config hashes in the
+    /// stable `metadata.config_hashes` response field. When omitted, the
+    /// server config default decides.
+    #[serde(default)]
+    pub include_config_hashes: Option<bool>,
 }
 
 /// A single source adapter for per-request composition.
@@ -3057,6 +3076,8 @@ pub struct ChatCompletionMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_empty_reason: Option<&'static str>,
     pub reasoning_folded_into_content: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_hashes: Option<ConfigHashes>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub performance: Option<ChatCompletionPerformanceMetadata>,
 }
@@ -7219,6 +7240,7 @@ async fn batch_completions_inner(
                         chat_template_kwargs: chat_template_kwargs.clone(),
                         fold_reasoning_into_content: None,
                         include_performance: None,
+                        include_config_hashes: None,
                     };
                     let resp = if let Some((prompt_text, prompt_tokens)) = prepared_prompt.as_ref()
                     {
@@ -7465,6 +7487,7 @@ async fn generate_multi_chat_response(
             chat_template_kwargs: req.chat_template_kwargs.clone(),
             fold_reasoning_into_content: req.fold_reasoning_into_content,
             include_performance: req.include_performance,
+            include_config_hashes: req.include_config_hashes,
         };
         let resp = generate_one_response(state, synth_req).await?;
         responses.push((completion_idx, resp));
@@ -8752,6 +8775,7 @@ mod tests {
                 final_content_empty: false,
                 content_empty_reason: None,
                 reasoning_folded_into_content: true,
+                config_hashes: None,
                 performance: None,
             },
         };
@@ -9082,6 +9106,7 @@ mod tests {
                 final_content_empty: true,
                 content_empty_reason: Some("tool_call"),
                 reasoning_folded_into_content: false,
+                config_hashes: None,
                 performance: None,
             },
         };
@@ -9713,6 +9738,58 @@ mod tests {
         assert!(
             json["metadata"].get("performance").is_none(),
             "performance metadata should be opt-in by default: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_config_hash_metadata_can_be_enabled_by_request_flag() {
+        let mut state = make_batch_test_state();
+        state.config_hashes.kiln_env_config_hash = Some(format!("sha256:{}", "a".repeat(64)));
+
+        let (status, json) = chat_post(
+            state,
+            r#"{"messages":[{"role":"user","content":"hash request"}],"max_tokens":0,"include_config_hashes":true}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{json}");
+        let hashes = &json["metadata"]["config_hashes"];
+        assert!(hashes["model_config_hash"].as_str().unwrap().starts_with("sha256:"));
+        assert!(
+            hashes["tokenizer_config_hash"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert!(hashes["chat_template_hash"].is_null());
+        assert!(hashes["kiln_env_config_hash"].as_str().unwrap().starts_with("sha256:"));
+        assert!(
+            json["metadata"].get("performance").is_none(),
+            "config hash debug metadata must not imply performance metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_config_hash_metadata_can_be_enabled_by_server_config() {
+        let mut state = make_batch_test_state();
+        state.chat_config_hash_metadata = true;
+
+        let (status, json) = chat_post(
+            state.clone(),
+            r#"{"messages":[{"role":"user","content":"hash server"}],"max_tokens":0}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{json}");
+        assert!(json["metadata"]["config_hashes"].is_object());
+
+        let (status, json) = chat_post(
+            state,
+            r#"{"messages":[{"role":"user","content":"hash server disabled"}],"max_tokens":0,"include_config_hashes":false}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{json}");
+        assert!(
+            json["metadata"].get("config_hashes").is_none(),
+            "request flag should be able to disable the server default"
         );
     }
 

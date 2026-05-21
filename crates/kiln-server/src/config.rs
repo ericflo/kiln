@@ -14,10 +14,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Top-level configuration for kiln.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct KilnConfig {
     pub server: ServerConfig,
@@ -37,7 +37,7 @@ pub struct KilnConfig {
 }
 
 /// Eval subsystem configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct EvalConfig {
     /// Directory where named eval suites are persisted (each as
@@ -61,7 +61,7 @@ impl Default for EvalConfig {
 }
 
 /// HTTP server settings.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ServerConfig {
     pub host: String,
@@ -79,6 +79,9 @@ pub struct ServerConfig {
     /// Include per-request performance counters in chat response metadata by
     /// default. Requests can override this with `include_performance`.
     pub chat_performance_metadata: bool,
+    /// Include config hashes in chat response metadata by default. Requests can
+    /// override this with `include_config_hashes`.
+    pub chat_config_hash_metadata: bool,
     /// Emit a structured warning when a chat completion takes at least this
     /// many seconds. Set to 0 to disable.
     pub slow_request_warn_secs: u64,
@@ -86,7 +89,7 @@ pub struct ServerConfig {
 }
 
 /// Model and tokenizer paths.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelConfig {
     pub path: Option<String>,
@@ -116,7 +119,7 @@ impl ModelConfig {
 }
 
 /// GPU memory allocation settings.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MemoryConfig {
     pub num_blocks: Option<usize>,
@@ -135,7 +138,7 @@ pub struct MemoryConfig {
 }
 
 /// Training-specific settings.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct TrainingConfig {
     pub grad_checkpoint_segments: Option<usize>,
@@ -196,7 +199,7 @@ pub struct TrainingConfig {
 }
 
 /// Logging settings.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LoggingConfig {
     pub level: String,
@@ -204,7 +207,7 @@ pub struct LoggingConfig {
 }
 
 /// Prefix caching settings.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PrefixCacheConfig {
     /// Enable prefix caching for shared prompt prefixes (default: true).
@@ -229,7 +232,7 @@ pub struct PrefixCacheConfig {
 /// - `Mtp` — native Multi-Token Prediction using the model's pretrained MTP
 ///   heads. Requires the checkpoint to contain `mtp.*` tensors (Qwen3.5-4B
 ///   has one MTP layer, k=1).
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SpecMethod {
     Off,
@@ -267,7 +270,7 @@ impl SpecMethod {
 /// `method` selects which path is active when `enabled = true`. For backward
 /// compatibility, setting `enabled = true` with `method = Off` falls back to
 /// `SkipLayer`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SpeculativeDecodingConfig {
     /// Enable speculative decoding (default: false).
@@ -296,7 +299,7 @@ pub struct SpeculativeDecodingConfig {
 /// mirror. The generic config default keeps streaming OFF unless explicitly set,
 /// while runtime device policy enables streaming by default for CUDA prompts at
 /// 8k+ tokens and Metal prompts after device-specific thresholds.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct StreamingPrefillConfig {
     /// Force tiled/streaming prefill on through config/env. Runtime device
@@ -312,7 +315,7 @@ pub struct StreamingPrefillConfig {
 }
 
 /// Adapter-storage settings.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AdaptersConfig {
     /// Maximum total size in bytes for `adapter_dir/` (excluding the
@@ -386,6 +389,7 @@ impl Default for ServerConfig {
             default_thinking_enabled: None,
             fold_reasoning_into_content: false,
             chat_performance_metadata: false,
+            chat_config_hash_metadata: false,
             slow_request_warn_secs: 30,
             // Hard ceiling on graceful-shutdown drain. With proactive
             // engine.stop() on signal, real draining typically completes
@@ -613,6 +617,11 @@ impl KilnConfig {
             && let Some(enabled) = parse_bool_env(&v)
         {
             self.server.chat_performance_metadata = enabled;
+        }
+        if let Ok(v) = std::env::var("KILN_CHAT_CONFIG_HASH_METADATA")
+            && let Some(enabled) = parse_bool_env(&v)
+        {
+            self.server.chat_config_hash_metadata = enabled;
         }
         if let Ok(v) = std::env::var("KILN_SLOW_REQUEST_WARN_SECS") {
             if let Ok(s) = v.parse() {
@@ -874,6 +883,7 @@ mod tests {
         assert_eq!(config.server.default_thinking_enabled, None);
         assert!(!config.server.fold_reasoning_into_content);
         assert!(!config.server.chat_performance_metadata);
+        assert!(!config.server.chat_config_hash_metadata);
         assert_eq!(config.server.slow_request_warn_secs, 30);
         assert_eq!(config.server.shutdown_timeout_secs, 5);
         assert_eq!(config.model.model_id, "Qwen/Qwen3.5-4B");
@@ -928,6 +938,7 @@ eval_mode = true
 default_thinking_enabled = false
 fold_reasoning_into_content = true
 chat_performance_metadata = true
+chat_config_hash_metadata = true
 slow_request_warn_secs = 15
 shutdown_timeout_secs = 10
 
@@ -986,6 +997,7 @@ composed_cache_max_entries = 8
         assert_eq!(config.server.default_thinking_enabled, Some(false));
         assert!(config.server.fold_reasoning_into_content);
         assert!(config.server.chat_performance_metadata);
+        assert!(config.server.chat_config_hash_metadata);
         assert_eq!(config.server.slow_request_warn_secs, 15);
         assert_eq!(config.model.path.as_deref(), Some("/models/qwen"));
         assert_eq!(config.model.model_id, "custom/model");
@@ -1115,6 +1127,7 @@ port = 3000
             std::env::set_var("KILN_DEFAULT_THINKING_ENABLED", "false");
             std::env::set_var("KILN_FOLD_REASONING_INTO_CONTENT", "true");
             std::env::set_var("KILN_CHAT_PERFORMANCE_METADATA", "true");
+            std::env::set_var("KILN_CHAT_CONFIG_HASH_METADATA", "true");
             std::env::set_var("KILN_SLOW_REQUEST_WARN_SECS", "12");
             std::env::set_var("KILN_MODEL_PATH", "/tmp/model");
             std::env::set_var("KILN_INFERENCE_MEMORY_FRACTION", "0.9");
@@ -1146,6 +1159,7 @@ port = 3000
         assert_eq!(config.server.default_thinking_enabled, Some(false));
         assert!(config.server.fold_reasoning_into_content);
         assert!(config.server.chat_performance_metadata);
+        assert!(config.server.chat_config_hash_metadata);
         assert_eq!(config.server.slow_request_warn_secs, 12);
         assert_eq!(config.model.path.as_deref(), Some("/tmp/model"));
         assert_eq!(config.memory.inference_memory_fraction, 0.9);
@@ -1179,6 +1193,7 @@ port = 3000
             std::env::remove_var("KILN_DEFAULT_THINKING_ENABLED");
             std::env::remove_var("KILN_FOLD_REASONING_INTO_CONTENT");
             std::env::remove_var("KILN_CHAT_PERFORMANCE_METADATA");
+            std::env::remove_var("KILN_CHAT_CONFIG_HASH_METADATA");
             std::env::remove_var("KILN_SLOW_REQUEST_WARN_SECS");
             std::env::remove_var("KILN_MODEL_PATH");
             std::env::remove_var("KILN_INFERENCE_MEMORY_FRACTION");
