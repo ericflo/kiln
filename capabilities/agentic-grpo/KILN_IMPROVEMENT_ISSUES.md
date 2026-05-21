@@ -1534,7 +1534,9 @@ lengths.
 - Remote sentinel `/workspace/kiln-validation/issue25.done` recorded `exit=0`;
   remote log is `/workspace/kiln-validation/issue25.log`.
 
-**Commit SHA:** TBD after commit.
+**Commit SHA:** `7b62d451` (`Issue 25: add long-context GRPO benchmark`).
+This status line is recorded in the follow-up metadata commit because a
+commit cannot include its own final SHA.
 
 **Remaining risk:** The active pod does not currently have a Qwen tokenizer/model
 directory, so CUDA runtime smoke was skipped after the CUDA release example
