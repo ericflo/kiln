@@ -59,7 +59,7 @@ struct AdapterDiskEntry {
     files: Vec<String>,
     /// Resolved absolute directory path when available.
     path: Option<String>,
-    /// Registry status: `loaded`, `available`, or `invalid`.
+    /// Registry status: `loaded`, `available`, `quarantined`, or `invalid`.
     status: String,
     /// SHA-256 of adapter_model.safetensors when present.
     adapter_model_sha256: Option<String>,
@@ -77,6 +77,16 @@ struct AdapterDiskEntry {
     base_model_name_or_path: Option<String>,
     /// Parent/base adapter lineage metadata when present.
     parent_adapter_metadata: Option<serde_json::Value>,
+    /// Canary status read from adapter_canary_status.json or train_receipt.json.
+    canary_status: String,
+    /// Human-readable failure reason when the canary quarantined this adapter.
+    canary_failure_reason: Option<String>,
+    /// Canary warnings copied from the training receipt.
+    canary_warnings: Vec<String>,
+    /// Individual canary checks and their pass/fail state.
+    canary_checks: Vec<kiln_train::AdapterCanaryCheckReceipt>,
+    /// Resolved path for the canary status source when available.
+    canary_status_path: Option<String>,
     /// Last load error recorded for this adapter name.
     last_load_error: Option<String>,
     /// Validation error for invalid adapter directories.
@@ -88,6 +98,9 @@ struct AdapterDiskEntry {
 struct LoadAdapterRequest {
     /// Adapter name (subdirectory under adapter_dir) or absolute path.
     name: String,
+    /// Allow loading an adapter whose canary status is quarantined.
+    #[serde(default)]
+    allow_quarantined: bool,
 }
 
 /// Response for POST /v1/adapters/load.
@@ -169,6 +182,27 @@ async fn load_adapter(
         );
         err
     })?;
+
+    let canary = read_adapter_canary_metadata(&resolved_adapter_path);
+    if canary.is_quarantined() && !req.allow_quarantined {
+        let reason = canary
+            .failure_reason
+            .clone()
+            .unwrap_or_else(|| "adapter canary status is quarantined".to_string());
+        state
+            .adapter_load_errors
+            .write()
+            .unwrap()
+            .insert(req.name.clone(), reason.clone());
+        tracing::warn!(
+            adapter = %req.name,
+            path = %resolved_adapter_path.display(),
+            reason = %reason,
+            operation = "load",
+            "adapter load rejected because canary status is quarantined"
+        );
+        return Err(ApiError::adapter_quarantined(&req.name, reason));
+    }
 
     let runner = match state.backend.as_ref() {
         ModelBackend::Real { runner, .. } => runner,
@@ -462,6 +496,7 @@ fn scan_adapter_dir(
 
             let path = path.canonicalize().unwrap_or(path);
             let config = read_adapter_config_metadata(&path);
+            let canary = read_adapter_canary_metadata(&path);
             let weights_path = path.join("adapter_model.safetensors");
             let adapter_model_size_bytes = std::fs::metadata(&weights_path).ok().map(|m| m.len());
             let adapter_model_sha256 = if has_weights {
@@ -474,6 +509,8 @@ fn scan_adapter_dir(
                 .map(|err| err.message);
             let status = if error.is_some() {
                 "invalid"
+            } else if canary.is_quarantined() {
+                "quarantined"
             } else if loaded_adapters.iter().any(|loaded| loaded == &name) {
                 "loaded"
             } else {
@@ -498,6 +535,11 @@ fn scan_adapter_dir(
                 target_modules: config.target_modules,
                 base_model_name_or_path: config.base_model_name_or_path,
                 parent_adapter_metadata: read_parent_adapter_metadata(&path),
+                canary_status: canary.status,
+                canary_failure_reason: canary.failure_reason,
+                canary_warnings: canary.warnings,
+                canary_checks: canary.checks,
+                canary_status_path: canary.status_path,
                 last_load_error: load_errors.get(&name).cloned(),
                 error,
             });
@@ -514,6 +556,63 @@ struct AdapterConfigMetadata {
     alpha_over_rank: Option<f64>,
     target_modules: Vec<String>,
     base_model_name_or_path: Option<String>,
+}
+
+struct AdapterCanaryMetadata {
+    status: String,
+    failure_reason: Option<String>,
+    warnings: Vec<String>,
+    checks: Vec<kiln_train::AdapterCanaryCheckReceipt>,
+    status_path: Option<String>,
+}
+
+impl AdapterCanaryMetadata {
+    fn unknown() -> Self {
+        Self {
+            status: "unknown".to_string(),
+            failure_reason: None,
+            warnings: Vec::new(),
+            checks: Vec::new(),
+            status_path: None,
+        }
+    }
+
+    fn is_quarantined(&self) -> bool {
+        self.status == kiln_train::AdapterCanaryState::Quarantined.as_str()
+    }
+}
+
+fn read_adapter_canary_metadata(path: &Path) -> AdapterCanaryMetadata {
+    let status_path = adapter_canary_status_source_path(path);
+    match kiln_train::read_adapter_canary_status_from_adapter_dir(path) {
+        Ok(Some(status)) => AdapterCanaryMetadata {
+            status: status.status.as_str().to_string(),
+            failure_reason: status.failure_reason,
+            warnings: status.warnings,
+            checks: status.checks,
+            status_path,
+        },
+        Ok(None) => AdapterCanaryMetadata::unknown(),
+        Err(err) => AdapterCanaryMetadata {
+            status: "unknown".to_string(),
+            failure_reason: Some(format!("failed to read adapter canary status: {err:#}")),
+            warnings: Vec::new(),
+            checks: Vec::new(),
+            status_path,
+        },
+    }
+}
+
+fn adapter_canary_status_source_path(path: &Path) -> Option<String> {
+    let sidecar = path.join(kiln_train::ADAPTER_CANARY_STATUS_FILENAME);
+    if sidecar.is_file() {
+        return Some(sidecar.display().to_string());
+    }
+    let receipt = path.join(kiln_train::TRAIN_RECEIPT_FILENAME);
+    if receipt.is_file() {
+        return Some(receipt.display().to_string());
+    }
+    None
 }
 
 fn read_adapter_config_metadata(path: &Path) -> AdapterConfigMetadata {
@@ -1635,6 +1734,35 @@ mod tests {
         .unwrap();
     }
 
+    fn write_quarantined_canary(adapter_dir: &Path, name: &str, reason: &str) {
+        let path = adapter_dir.join(name);
+        std::fs::write(
+            path.join(kiln_train::ADAPTER_CANARY_STATUS_FILENAME),
+            json!({
+                "schema_version": 1,
+                "receipt_type": "kiln_adapter_canary_status",
+                "adapter_name": name,
+                "produced_at": "2026-05-21T00:00:00Z",
+                "source": "adapter_smoke_test",
+                "status": "quarantined",
+                "passed": false,
+                "failure_reason": reason,
+                "warnings": [reason],
+                "notes": [],
+                "checks": [
+                    {
+                        "name": "nonzero_logit_delta_from_base",
+                        "passed": false,
+                        "failure_reason": reason
+                    }
+                ],
+                "prompt_diagnostics": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
     async fn request_json(
         app: &axum::Router,
         method: Method,
@@ -1704,6 +1832,114 @@ mod tests {
             .saturating_sub(1)
             .min(values.len().saturating_sub(1));
         values[idx]
+    }
+
+    #[tokio::test]
+    async fn adapter_registry_reports_quarantined_canary_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_test_adapter(tmp.path(), "bad-canary");
+        write_quarantined_canary(
+            tmp.path(),
+            "bad-canary",
+            "adapter canary observed no nonzero logit delta from base",
+        );
+
+        let state = make_state(tmp.path().to_path_buf());
+        let app = crate::api::router(state);
+        let (status, _, body) = request_json(&app, Method::GET, "/v1/adapters", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let entry = body["available_adapters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == "bad-canary")
+            .unwrap();
+
+        assert_eq!(entry["status"], "quarantined");
+        assert_eq!(entry["canary_status"], "quarantined");
+        assert!(
+            entry["canary_failure_reason"]
+                .as_str()
+                .unwrap()
+                .contains("no nonzero logit delta")
+        );
+        assert_eq!(
+            entry["canary_checks"][0]["name"],
+            "nonzero_logit_delta_from_base"
+        );
+    }
+
+    #[tokio::test]
+    async fn adapter_load_rejects_quarantined_adapter_without_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_test_adapter(tmp.path(), "bad-canary");
+        write_quarantined_canary(
+            tmp.path(),
+            "bad-canary",
+            "adapter canary observed no nonzero logit delta from base",
+        );
+
+        let state = make_state(tmp.path().to_path_buf());
+        let state_for_assert = state.clone();
+        let app = crate::api::router(state);
+        let (status, _, body) = request_json(
+            &app,
+            Method::POST,
+            "/v1/adapters/load",
+            Some(json!({ "name": "bad-canary" })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "adapter_quarantined");
+        assert!(
+            state_for_assert
+                .active_adapter_name
+                .read()
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            state_for_assert
+                .loaded_adapter_name
+                .read()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn adapter_load_override_allows_quarantined_adapter() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_test_adapter(tmp.path(), "bad-canary");
+        write_quarantined_canary(
+            tmp.path(),
+            "bad-canary",
+            "adapter canary observed no nonzero logit delta from base",
+        );
+
+        let state = make_state(tmp.path().to_path_buf());
+        let state_for_assert = state.clone();
+        let app = crate::api::router(state);
+        let (status, _, body) = request_json(
+            &app,
+            Method::POST,
+            "/v1/adapters/load",
+            Some(json!({ "name": "bad-canary", "allow_quarantined": true })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "loaded");
+        assert_eq!(body["name"], "bad-canary");
+        assert_eq!(
+            state_for_assert
+                .active_adapter_name
+                .read()
+                .unwrap()
+                .as_deref(),
+            Some("bad-canary")
+        );
     }
 
     #[tokio::test]

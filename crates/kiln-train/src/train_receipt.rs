@@ -19,9 +19,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const TRAIN_RECEIPT_FILENAME: &str = "train_receipt.json";
+pub const ADAPTER_CANARY_STATUS_FILENAME: &str = "adapter_canary_status.json";
 pub const REWARD_FILTER_SIDECAR_FILENAME: &str = "reward_filter_groups.json";
 pub const TRAIN_RECEIPT_SCHEMA_VERSION: u32 = 1;
+pub const ADAPTER_CANARY_STATUS_SCHEMA_VERSION: u32 = 1;
 pub const ADAPTER_SMOKE_LOGIT_DELTA_EPSILON: f64 = 1e-6;
+pub const ADAPTER_SMOKE_OUTPUT_TOKEN_LIMIT: usize = 4;
+pub const ADAPTER_SMOKE_OUTPUT_CHAR_LIMIT: usize = 512;
+pub const ADAPTER_SMOKE_LATENCY_MULTIPLIER: u64 = 4;
+pub const ADAPTER_SMOKE_LATENCY_ABSOLUTE_MS: u64 = 500;
 pub const LORA_DELTA_NEAR_ZERO_EPSILON: f64 = 1e-12;
 pub const LORA_DELTA_EXTREME_SCALE_MULTIPLIER: f64 = 100.0;
 pub const DEFAULT_REWARD_SATURATION_THRESHOLD: f64 = 0.95;
@@ -419,6 +425,10 @@ pub struct AdapterSmokePromptReceipt {
     pub adapter_output: String,
     pub adapter_output_tokens: usize,
     pub adapter_output_chars: usize,
+    #[serde(default)]
+    pub base_generation_ms: u64,
+    #[serde(default)]
+    pub adapter_generation_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -437,6 +447,57 @@ pub enum AdapterSmokePromptDiagnosis {
     LogitsChangedTextIdentical,
     TextChangedWithoutMeasurableLogitDelta,
     NoLogitChange,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterCanaryState {
+    Passed,
+    Quarantined,
+}
+
+impl AdapterCanaryState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Quarantined => "quarantined",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdapterCanaryStatusReceipt {
+    pub schema_version: u32,
+    pub receipt_type: String,
+    pub adapter_name: String,
+    pub produced_at: String,
+    pub source: String,
+    pub status: AdapterCanaryState,
+    pub passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+    #[serde(default)]
+    pub checks: Vec<AdapterCanaryCheckReceipt>,
+    #[serde(default)]
+    pub prompt_diagnostics: Vec<AdapterSmokePromptDiagnosisReceipt>,
+}
+
+impl AdapterCanaryStatusReceipt {
+    pub fn is_quarantined(&self) -> bool {
+        self.status == AdapterCanaryState::Quarantined
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdapterCanaryCheckReceipt {
+    pub name: String,
+    pub passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
 }
 
 impl Default for RewardStatsReceipt {
@@ -545,6 +606,9 @@ impl TrainReceipt {
         let json = serde_json::to_string_pretty(self).context("serialize train receipt")?;
         std::fs::write(&path, json)
             .with_context(|| format!("write train receipt {}", path.display()))?;
+        if let Some(status) = adapter_canary_status_from_train_receipt(self) {
+            write_adapter_canary_status(adapter_dir, &status)?;
+        }
         Ok(path)
     }
 
@@ -559,6 +623,89 @@ impl TrainReceipt {
             .with_context(|| format!("deserialize train receipt {}", path.display()))?;
         Ok(Some(receipt))
     }
+}
+
+pub fn adapter_canary_status_from_train_receipt(
+    receipt: &TrainReceipt,
+) -> Option<AdapterCanaryStatusReceipt> {
+    receipt.adapter_smoke_test.as_ref().map(|smoke| {
+        build_adapter_canary_status_receipt(&receipt.adapter_name, &receipt.produced_at, smoke)
+    })
+}
+
+pub fn build_adapter_canary_status_receipt(
+    adapter_name: &str,
+    produced_at: &str,
+    smoke: &AdapterSmokeTestReceipt,
+) -> AdapterCanaryStatusReceipt {
+    let checks = adapter_canary_checks_from_smoke_test(smoke);
+    let checks_passed = checks.iter().all(|check| check.passed);
+    let passed = smoke.passed && checks_passed;
+    let status = if passed {
+        AdapterCanaryState::Passed
+    } else {
+        AdapterCanaryState::Quarantined
+    };
+    let failure_reason = if passed {
+        None
+    } else {
+        smoke
+            .warnings
+            .first()
+            .cloned()
+            .or_else(|| checks.iter().find_map(|check| check.failure_reason.clone()))
+            .or_else(|| Some("adapter canary failed".to_string()))
+    };
+
+    AdapterCanaryStatusReceipt {
+        schema_version: ADAPTER_CANARY_STATUS_SCHEMA_VERSION,
+        receipt_type: "kiln_adapter_canary_status".to_string(),
+        adapter_name: adapter_name.to_string(),
+        produced_at: produced_at.to_string(),
+        source: "adapter_smoke_test".to_string(),
+        status,
+        passed,
+        failure_reason,
+        warnings: smoke.warnings.clone(),
+        notes: smoke.notes.clone(),
+        checks,
+        prompt_diagnostics: smoke.prompt_diagnostics.clone(),
+    }
+}
+
+pub fn write_adapter_canary_status(
+    adapter_dir: &Path,
+    status: &AdapterCanaryStatusReceipt,
+) -> Result<PathBuf> {
+    std::fs::create_dir_all(adapter_dir).with_context(|| {
+        format!(
+            "create adapter dir {} for adapter canary status",
+            adapter_dir.display()
+        )
+    })?;
+    let path = adapter_dir.join(ADAPTER_CANARY_STATUS_FILENAME);
+    let json = serde_json::to_string_pretty(status).context("serialize adapter canary status")?;
+    std::fs::write(&path, json)
+        .with_context(|| format!("write adapter canary status {}", path.display()))?;
+    Ok(path)
+}
+
+pub fn read_adapter_canary_status_from_adapter_dir(
+    adapter_dir: &Path,
+) -> Result<Option<AdapterCanaryStatusReceipt>> {
+    let path = adapter_dir.join(ADAPTER_CANARY_STATUS_FILENAME);
+    if path.exists() {
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("read adapter canary status {}", path.display()))?;
+        let status = serde_json::from_slice(&bytes)
+            .with_context(|| format!("deserialize adapter canary status {}", path.display()))?;
+        return Ok(Some(status));
+    }
+
+    let Some(receipt) = TrainReceipt::read_from_adapter_dir(adapter_dir)? else {
+        return Ok(None);
+    };
+    Ok(adapter_canary_status_from_train_receipt(&receipt))
 }
 
 pub fn classify_training_failure(message: &str) -> TrainFailureReason {
@@ -803,6 +950,17 @@ pub fn build_adapter_smoke_test_receipt(
         warnings.push("adapter smoke test observed non-finite logits".to_string());
     }
 
+    let checked_logit_delta = prompts.iter().any(|prompt| {
+        prompt
+            .logit_delta_l2
+            .is_some_and(|delta| delta > ADAPTER_SMOKE_LOGIT_DELTA_EPSILON)
+    });
+    if !checked_logit_delta {
+        warnings.push(format!(
+            "adapter smoke test observed no nonzero logit delta from base (all logit_delta_l2 <= {ADAPTER_SMOKE_LOGIT_DELTA_EPSILON:e})"
+        ));
+    }
+
     let measurable_effect = prompts.iter().any(|prompt| {
         prompt
             .logit_delta_l2
@@ -821,6 +979,18 @@ pub fn build_adapter_smoke_test_receipt(
     {
         warnings
             .push("adapter smoke test produced empty adapter output on canary prompt".to_string());
+    }
+
+    if prompts.iter().any(adapter_smoke_output_too_long) {
+        warnings.push(format!(
+            "adapter smoke test output length sanity failed (adapter output exceeded {ADAPTER_SMOKE_OUTPUT_CHAR_LIMIT} chars or the bounded token budget)"
+        ));
+    }
+
+    if prompts.iter().any(adapter_smoke_latency_regressed) {
+        warnings.push(format!(
+            "adapter smoke test latency sanity failed (adapter generation exceeded base generation by more than {ADAPTER_SMOKE_LATENCY_MULTIPLIER}x + {ADAPTER_SMOKE_LATENCY_ABSOLUTE_MS}ms)"
+        ));
     }
 
     if prompt_diagnostics.iter().any(|diagnostic| {
@@ -847,6 +1017,97 @@ pub fn build_adapter_smoke_test_receipt(
         notes,
         prompt_diagnostics,
         prompts,
+    }
+}
+
+fn adapter_smoke_output_too_long(prompt: &AdapterSmokePromptReceipt) -> bool {
+    prompt.adapter_output_tokens > 0
+        && (prompt.adapter_output_tokens > ADAPTER_SMOKE_OUTPUT_TOKEN_LIMIT
+            || prompt.adapter_output_chars > ADAPTER_SMOKE_OUTPUT_CHAR_LIMIT)
+}
+
+fn adapter_smoke_latency_regressed(prompt: &AdapterSmokePromptReceipt) -> bool {
+    prompt.adapter_generation_ms
+        > prompt
+            .base_generation_ms
+            .saturating_mul(ADAPTER_SMOKE_LATENCY_MULTIPLIER)
+            .saturating_add(ADAPTER_SMOKE_LATENCY_ABSOLUTE_MS)
+}
+
+pub fn adapter_canary_checks_from_smoke_test(
+    smoke: &AdapterSmokeTestReceipt,
+) -> Vec<AdapterCanaryCheckReceipt> {
+    let any_prompt = smoke
+        .prompts
+        .iter()
+        .any(|prompt| prompt.adapter_output_tokens > 0 && !prompt.adapter_output.trim().is_empty());
+    let tool_prompt = smoke.prompts.iter().any(|prompt| {
+        let lower = prompt.prompt.to_ascii_lowercase();
+        (lower.contains("tool") || lower.contains("json"))
+            && prompt.adapter_output_tokens > 0
+            && !prompt.adapter_output.trim().is_empty()
+    });
+    let output_length_ok = !smoke.prompts.is_empty()
+        && smoke.prompts.iter().all(|prompt| {
+            prompt.adapter_output_tokens > 0
+                && prompt.adapter_output_tokens <= ADAPTER_SMOKE_OUTPUT_TOKEN_LIMIT
+                && prompt.adapter_output_chars <= ADAPTER_SMOKE_OUTPUT_CHAR_LIMIT
+        });
+    let finite_logits = !smoke.prompts.is_empty()
+        && smoke
+            .prompts
+            .iter()
+            .all(|prompt| prompt.finite_logits && prompt.logit_delta_l2.is_some());
+    let latency_ok = !smoke.prompts.is_empty()
+        && smoke
+            .prompts
+            .iter()
+            .all(|prompt| !adapter_smoke_latency_regressed(prompt));
+    let nonzero_logit_delta = smoke.prompts.iter().any(|prompt| {
+        prompt
+            .logit_delta_l2
+            .is_some_and(|delta| delta > ADAPTER_SMOKE_LOGIT_DELTA_EPSILON)
+    });
+
+    vec![
+        canary_check(
+            "simple_short_completion",
+            any_prompt,
+            "no canary prompt produced non-empty adapter text",
+        ),
+        canary_check(
+            "simple_tool_call_shaped_prompt",
+            tool_prompt,
+            "no tool-call-shaped canary prompt produced non-empty adapter text",
+        ),
+        canary_check(
+            "output_length_sanity",
+            output_length_ok,
+            "adapter canary output was empty or exceeded the bounded length sanity limit",
+        ),
+        canary_check(
+            "finite_logits",
+            finite_logits,
+            "adapter canary observed non-finite logits",
+        ),
+        canary_check(
+            "latency_sanity",
+            latency_ok,
+            "adapter canary latency exceeded the relative sanity threshold",
+        ),
+        canary_check(
+            "nonzero_logit_delta_from_base",
+            nonzero_logit_delta,
+            "adapter canary observed no nonzero logit delta from base",
+        ),
+    ]
+}
+
+fn canary_check(name: &str, passed: bool, failure_reason: &str) -> AdapterCanaryCheckReceipt {
+    AdapterCanaryCheckReceipt {
+        name: name.to_string(),
+        passed,
+        failure_reason: (!passed).then(|| failure_reason.to_string()),
     }
 }
 
@@ -1456,6 +1717,68 @@ mod tests {
     }
 
     #[test]
+    fn train_receipt_writes_adapter_canary_status_sidecar() -> Result<()> {
+        let dir = tempdir()?;
+        let model = ModelConfig::qwen3_5_4b();
+        let tokenizer = minimal_tokenizer()?;
+        let mut receipt = TrainReceipt::new(
+            "adapter-canary",
+            "sft",
+            &model,
+            &tokenizer,
+            HyperparameterReceipt {
+                mode: "sft".to_string(),
+                rank: 8,
+                alpha: 16.0,
+                alpha_over_rank: Some(2.0),
+                learning_rate: 1e-4,
+                epochs: 1,
+                seed: Some(7),
+            },
+            serde_json::json!({"adapter_smoke_test": true}),
+        );
+        receipt.adapter_smoke_test = Some(build_adapter_smoke_test_receipt(vec![
+            AdapterSmokePromptReceipt {
+                prompt: "In one short sentence, name a primary color:".to_string(),
+                finite_logits: true,
+                logit_delta_l2: Some(0.25),
+                generated_text_different: true,
+                base_output: "Blue".to_string(),
+                adapter_output: "Red".to_string(),
+                adapter_output_tokens: 1,
+                adapter_output_chars: 3,
+                base_generation_ms: 10,
+                adapter_generation_ms: 11,
+            },
+            AdapterSmokePromptReceipt {
+                prompt: "Return a compact JSON tool call for weather.".to_string(),
+                finite_logits: true,
+                logit_delta_l2: Some(0.10),
+                generated_text_different: true,
+                base_output: "{}".to_string(),
+                adapter_output: r#"{"tool":"weather"}"#.to_string(),
+                adapter_output_tokens: 4,
+                adapter_output_chars: 18,
+                base_generation_ms: 12,
+                adapter_generation_ms: 13,
+            },
+        ]));
+
+        receipt.write_to_adapter_dir(dir.path())?;
+        let status = read_adapter_canary_status_from_adapter_dir(dir.path())?.unwrap();
+        assert_eq!(status.status, AdapterCanaryState::Passed);
+        assert!(status.passed);
+        assert!(dir.path().join(ADAPTER_CANARY_STATUS_FILENAME).is_file());
+        assert!(
+            status
+                .checks
+                .iter()
+                .any(|check| check.name == "simple_tool_call_shaped_prompt" && check.passed)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn train_receipt_failed_status_is_stable() -> Result<()> {
         let dir = tempdir()?;
         let model = ModelConfig::qwen3_5_4b();
@@ -1646,6 +1969,8 @@ mod tests {
             adapter_output: "Hi".to_string(),
             adapter_output_tokens: 1,
             adapter_output_chars: 2,
+            base_generation_ms: 10,
+            adapter_generation_ms: 11,
         }]);
 
         assert!(receipt.enabled);
@@ -1668,6 +1993,8 @@ mod tests {
             adapter_output: "Hello".to_string(),
             adapter_output_tokens: 1,
             adapter_output_chars: 5,
+            base_generation_ms: 10,
+            adapter_generation_ms: 11,
         }]);
 
         assert!(!receipt.passed);
@@ -1690,6 +2017,40 @@ mod tests {
     }
 
     #[test]
+    fn failed_adapter_smoke_status_quarantines_adapter() {
+        let receipt = build_adapter_smoke_test_receipt(vec![AdapterSmokePromptReceipt {
+            prompt: "Return a compact JSON tool call for weather.".to_string(),
+            finite_logits: true,
+            logit_delta_l2: Some(0.0),
+            generated_text_different: false,
+            base_output: "{}".to_string(),
+            adapter_output: "{}".to_string(),
+            adapter_output_tokens: 1,
+            adapter_output_chars: 2,
+            base_generation_ms: 10,
+            adapter_generation_ms: 5000,
+        }]);
+        let status =
+            build_adapter_canary_status_receipt("adapter-failed", "2026-05-21T00:00:00Z", &receipt);
+
+        assert_eq!(status.status, AdapterCanaryState::Quarantined);
+        assert!(!status.passed);
+        assert!(
+            status
+                .failure_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no nonzero logit delta")
+        );
+        assert!(
+            status
+                .checks
+                .iter()
+                .any(|check| check.name == "latency_sanity" && !check.passed)
+        );
+    }
+
+    #[test]
     fn adapter_smoke_receipt_notes_logits_changed_but_text_identical() {
         let receipt = build_adapter_smoke_test_receipt(vec![AdapterSmokePromptReceipt {
             prompt: "Say hello.".to_string(),
@@ -1700,6 +2061,8 @@ mod tests {
             adapter_output: "Hello".to_string(),
             adapter_output_tokens: 1,
             adapter_output_chars: 5,
+            base_generation_ms: 10,
+            adapter_generation_ms: 11,
         }]);
 
         assert!(receipt.passed);
@@ -1727,6 +2090,8 @@ mod tests {
             adapter_output: String::new(),
             adapter_output_tokens: 0,
             adapter_output_chars: 0,
+            base_generation_ms: 10,
+            adapter_generation_ms: 11,
         }]);
 
         assert!(!receipt.passed);

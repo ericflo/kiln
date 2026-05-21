@@ -2338,6 +2338,58 @@ adapter registry.
 - `/v1/adapters/load` refuses quarantined adapters unless override flag is set.
 - Registry shows canary status and failure reason.
 
+**Status:** Implemented and validated on RunPod on 2026-05-21.
+
+**Implementation notes:**
+
+- Added train-owned `adapter_canary_status.json` sidecars derived from the
+  existing adapter smoke test receipt. The sidecar records `passed` or
+  `quarantined`, a failure reason, warnings, prompt diagnostics, and six named
+  checks: simple short completion, tool-call-shaped prompt, output length,
+  finite logits, latency, and nonzero logit delta from base.
+- Expanded adapter smoke prompts with a tool-call-shaped JSON prompt, recorded
+  base/adapter generation latency, and made missing logit movement, empty/long
+  output, non-finite logits, and latency regression fail the canary.
+- The adapter registry now exposes `canary_status`, `canary_failure_reason`,
+  `canary_warnings`, `canary_checks`, and `canary_status_path`. Registry
+  `status` becomes `quarantined` for loadable adapters whose canary failed.
+- `/v1/adapters/load` rejects quarantined adapters with
+  `adapter_quarantined` unless the request includes `allow_quarantined: true`.
+- Post-training auto-load skips quarantined adapters instead of serving them
+  immediately after a failed canary.
+
+**Validation evidence:**
+
+- Focused RunPod validation passed on RTX A6000 lease
+  `pod-684fd507d9ca2fb6183af36f` / pod `7cgkz5rvm91eq8`; sentinel
+  `/workspace/kiln-validation/issue35/focused8.ok` recorded `exit=0`.
+- Focused commands: scoped `rustfmt --edition 2024 --check` for
+  `train_receipt.rs`, `trainer.rs`, and `error.rs`; `cargo test -p kiln-train
+  train_receipt --lib`; the three new adapter API quarantine tests in
+  `kiln-server`; and `git diff --check`.
+- Actual Qwen3.5-4B RunPod validation passed on the same A6000 after downloading
+  the model to canonical `/workspace/Qwen3.5-4B`; sentinel
+  `/workspace/kiln-validation/issue35/actual-model2.ok` recorded `exit=0`.
+- Actual-model validation built the patched CUDA release server, booted
+  `/workspace/Qwen3.5-4B` on `KILN_PORT=18435`, verified `/health` reported
+  `Qwen3.5-4B (32L, 16H, 4KV)`, completed a real SFT job with
+  `adapter_smoke_test=true`, verified `train_receipt.json` and
+  `adapter_canary_status.json`, verified registry canary fields, then proved a
+  quarantined real adapter copy was rejected by `/v1/adapters/load` until
+  `allow_quarantined=true`. The real training canary status was `passed`.
+- Earlier validation setup attempt
+  `/workspace/kiln-validation/issue35/actual-model.done` was intentionally
+  marked failed after the validation script's `pkill -f` cleanup matched its
+  own command string before server boot; it is not counted as product
+  validation.
+
+**Commit SHA:** Pending.
+
+**Remaining risk:** File-level rustfmt checks for `adapters.rs`,
+`training_queue.rs`, and all of `kiln-train` are blocked by pre-existing
+formatting drift in unrelated sections/files; issue-owned lines were formatted
+manually and validated by compile/tests plus `git diff --check`.
+
 ### 36. Add Standard Adapter Manifest And Restore Command
 
 **Area:** kiln CLI, adapter format docs

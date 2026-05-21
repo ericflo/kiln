@@ -235,6 +235,7 @@ const DEFAULT_TARGET_MODULES: &[&str] = crate::adapter_shape::TRAINABLE_TARGET_M
 const ADAPTER_SMOKE_TEST_PROMPTS: &[&str] = &[
     "In one short sentence, name a primary color:",
     "Complete this sentence with a brief answer: The capital of France is",
+    "Return a compact JSON tool call for a weather lookup in Paris:",
 ];
 const ADAPTER_SMOKE_TEST_PROMPT_FILE_ENV: &str = "KILN_ADAPTER_SMOKE_PROMPT_FILE";
 const ADAPTER_SMOKE_TEST_MAX_NEW_TOKENS: usize = 4;
@@ -242,6 +243,7 @@ const ADAPTER_SMOKE_TEST_MAX_NEW_TOKENS: usize = 4;
 struct AdapterSmokeGeneration {
     output: String,
     output_tokens: usize,
+    elapsed_ms: u64,
 }
 
 /// Trainable LoRA parameters as candle `Var`s.
@@ -1398,6 +1400,8 @@ fn run_adapter_smoke_test(
             adapter_output_chars: adapter_generation.output.chars().count(),
             adapter_output: adapter_generation.output,
             adapter_output_tokens: adapter_generation.output_tokens,
+            base_generation_ms: base_generation.elapsed_ms,
+            adapter_generation_ms: adapter_generation.elapsed_ms,
         });
     }
 
@@ -1553,6 +1557,7 @@ fn adapter_smoke_greedy_generate(
         "adapter smoke generation prompt tokenized to zero tokens: {prompt:?}"
     );
 
+    let started = Instant::now();
     let mut generated = Vec::with_capacity(ADAPTER_SMOKE_TEST_MAX_NEW_TOKENS);
     for _ in 0..ADAPTER_SMOKE_TEST_MAX_NEW_TOKENS {
         let logits = adapter_smoke_forward_logits(backend, &context, weights, model_config, lora)?;
@@ -1565,9 +1570,11 @@ fn adapter_smoke_greedy_generate(
         .decode(&generated)
         .map_err(|err| anyhow::anyhow!("{err}"))
         .context("decode adapter smoke generated tokens")?;
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok(AdapterSmokeGeneration {
         output,
         output_tokens: generated.len(),
+        elapsed_ms,
     })
 }
 

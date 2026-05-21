@@ -2077,7 +2077,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 fire_completion_webhook(url.clone(), event);
             }
 
-            if auto_load {
+            if auto_load && adapter_canary_allows_auto_load(&adapter_path, &adapter_name, &job_id) {
                 if let Err(e) = auto_load_adapter(
                     &weights_ref,
                     &state.active_adapter_name,
@@ -2223,6 +2223,34 @@ pub fn enqueue_post_training_eval(
         }
     }
     Ok(())
+}
+
+fn adapter_canary_allows_auto_load(
+    adapter_path: &std::path::Path,
+    adapter_name: &str,
+    job_id: &str,
+) -> bool {
+    match kiln_train::read_adapter_canary_status_from_adapter_dir(adapter_path) {
+        Ok(Some(status)) if status.is_quarantined() => {
+            tracing::warn!(
+                job_id = %job_id,
+                adapter = %adapter_name,
+                reason = ?status.failure_reason,
+                "skipping post-training auto-load because adapter canary status is quarantined"
+            );
+            false
+        }
+        Ok(_) => true,
+        Err(err) => {
+            tracing::warn!(
+                job_id = %job_id,
+                adapter = %adapter_name,
+                error = %err,
+                "skipping post-training auto-load because adapter canary status could not be read"
+            );
+            false
+        }
+    }
 }
 
 /// Load a LoRA adapter using the two-phase RwLock pattern.

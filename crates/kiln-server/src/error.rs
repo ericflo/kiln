@@ -152,6 +152,19 @@ impl ApiError {
         }
     }
 
+    pub fn adapter_quarantined(
+        name: impl std::fmt::Display,
+        reason: impl std::fmt::Display,
+    ) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "adapter_quarantined",
+            message: format!("Adapter '{name}' is quarantined by failed canary checks: {reason}"),
+            hint: "Inspect GET /v1/adapters for canary_failure_reason. To load anyway, POST /v1/adapters/load with allow_quarantined=true.",
+            retry_after_seconds: None,
+        }
+    }
+
     pub fn adapter_layout_invalid(detail: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

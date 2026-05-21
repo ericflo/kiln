@@ -57,9 +57,11 @@ pub use lora_scaling::{
     validate_lora_scaling,
 };
 pub use train_receipt::{
-    AdapterSmokePromptDiagnosis, AdapterSmokePromptDiagnosisReceipt, AdapterSmokePromptReceipt,
-    AdapterSmokeTestReceipt, TRAIN_RECEIPT_FILENAME, TRAIN_RECEIPT_SCHEMA_VERSION,
-    TrainFailureReason, TrainReceipt, TrainReceiptStatus,
+    ADAPTER_CANARY_STATUS_FILENAME, AdapterCanaryCheckReceipt, AdapterCanaryState,
+    AdapterCanaryStatusReceipt, AdapterSmokePromptDiagnosis,
+    AdapterSmokePromptDiagnosisReceipt, AdapterSmokePromptReceipt, AdapterSmokeTestReceipt,
+    TRAIN_RECEIPT_FILENAME, TRAIN_RECEIPT_SCHEMA_VERSION, TrainFailureReason, TrainReceipt,
+    TrainReceiptStatus, read_adapter_canary_status_from_adapter_dir,
 };
 pub use opd::{
     AgenticLossInputs, AgenticLossWeights, COLD_START_DEFAULT_EPOCHS, COLD_START_DEFAULT_PROMPTS,
