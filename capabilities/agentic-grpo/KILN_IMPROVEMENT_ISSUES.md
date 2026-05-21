@@ -2138,6 +2138,9 @@ I actually hitting?"
 - The same actual-model smoke sent a chat request containing
   `debug secret marker issue32` and verified the subsequent debug model-state
   response did not contain that prompt text.
+- GitHub Actions on pushed head `df16cefe` passed: CI run `26231212616`
+  completed cargo-deny, Linux default, Linux Vulkan, and macOS/Metal
+  successfully; Release Version Drift run `26231212528` also passed.
 
 **Commit SHA:** `c1ef5b15` (`Issue 32: add debug model state`). The SHA is
 recorded in a follow-up metadata commit because a commit cannot include its own
