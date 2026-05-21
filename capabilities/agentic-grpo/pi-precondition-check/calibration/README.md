@@ -1,39 +1,54 @@
-# calibration/ — rubric sanity fixtures
+# calibration/ — pi-precondition-check rubric sanity fixtures
 
-Round 2 mandates this directory for every cap. `rubric_sanity.py`
-reads:
+Hand-written rollouts. `rubric_sanity.py` asserts min(good_composite)
+> max(bad_composite) + 0.2.
 
-- `good.jsonl` — known-high-quality rollouts (the agent did the right
-  thing). At least 5.
-- `bad.jsonl` — known-low-quality rollouts including each §0 cheat
-  named in `../capability.md`. At least 5.
+## What "good" looks like
 
-The rubric must score the good set above the bad set with separation
-> 0.2 (configurable via `RUBRIC_SANITY_MARGIN`). `run_iter.sh` runs
-the sanity gate BEFORE training, so a broken rubric never reaches
-the GPU.
+For **holds-true** tasks (claim matches workspace):
 
-## How to write a calibration fixture
+1. Read the target file (or grep the symbol).
+2. Confirm the claim's substring is present in the file.
+3. Make the edit.
+4. Final message confirms the change.
 
-Each line is one JSON object with the same shape `rubric.score_one()`
-expects (or `score_rollout(transcript, workdir, task)` for legacy caps
-— in that case the line should be `{"transcript": [...], "workdir":
-"...", "task": {...}}`).
+For **stale** tasks (claim mismatches workspace):
 
-### Good fixture template
+1. Read the target file (or grep the symbol).
+2. Observe the claim's substring is NOT present.
+3. DO NOT mutate the workspace.
+4. Final message includes `precondition_failed:{claim_id}`.
 
-```json
-{"task": {...}, "transcript": [...], "workdir": "..."}
-```
+See `good.jsonl` for examples of both labels across 4 claim templates.
 
-Where the transcript shows the agent:
-- reading appropriate context
-- making the right action
-- verifying the result
-- summarizing cleanly
+## What "bad" looks like — the §0 cheats
 
-### Bad fixture template — one per §0 cheat
+| §0 cheat | bad.jsonl id | Why it scores 0 |
+|----------|--------------|-----------------|
+| mutate without reading first | `calib_bad_mutate_without_read` | verified=0 (multiplicative gate fires) |
+| phantom edit (wrong path) | `calib_bad_phantom_edit` | no_phantom=0 + outcome=0 |
+| always-emit-sentinel on holds_true | `calib_bad_always_sentinel_on_holds` | staleness=0 + outcome=0 |
+| stale task with no sentinel | `calib_bad_stale_no_sentinel` | staleness=0 |
+| stale task with mutation | `calib_bad_stale_with_mutation` | verified=0 (mutation on stale → gate) |
 
-For each cheat enumerated in `../capability.md ## Adversarial design (§0)`,
-write a fixture where the agent executes that cheat. Score should be 0
-or near-zero. This is the round-2 anti-saturation discipline.
+## Triple-multiplicative gate (round-2 design)
+
+This cap uses three multiplicative gates: outcome × format × verified.
+This is more aggressive than other caps (which use outcome × format
+only) because the failure mode this cap targets — mutating without
+verifying — is exactly what we want to make impossible to be rewarded.
+
+If you find the triple gate too punitive (e.g. legitimate small lifts
+get gated to zero), consider relaxing `verified_before_mutation` to
+return 0.3 instead of 0.0 when no read preceded the mutation, so it
+still allows partial credit but heavily penalizes the cheat.
+
+## Refreshing
+
+After changing `../rubric.py`, run `python3 ../rubric_sanity.py`.
+
+## Current calibration state
+
+  good min=1.00, max=1.00  (all-correct trajectories)
+  bad  min=0.00, max=0.00  (triple-gate zeros every cheat)
+  separation: +1.00 — maximum
