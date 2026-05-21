@@ -12,6 +12,68 @@ iterate.
 
 Each item is written so it can become a GitHub issue or task directly.
 
+## Actual Qwen3.5-4B RunPod Validation Checkpoint
+
+This section records the cross-issue real-model gate that was run after the
+issue 1-26 implementation pass, before continuing with issue 27. It exists so
+future sessions can recover the actual-model evidence without relying on chat
+history.
+
+**Status:** Passed on 2026-05-21.
+
+**RunPod:** Direct A6000 pod `qmfxie9izl6lc6`
+(`kiln-backlog-codex-20260520`), `NVIDIA RTX A6000`, 51.5 GB VRAM.
+
+**Source validated:** The validation driver ran with `SKIP_GIT_RESET=1` on the
+pod worktree at base commit `a5b359668173ae66d070a1f02bacd5be55d86d5d` plus
+the issue 1-26 code/doc changes that were later pushed. A post-run comparison
+against current `origin/main` (`fe82909b60d4bab4a49001f9de8abd4cd11cbbc9`)
+showed the only remaining difference was `PROFILING.md`; no Rust, server,
+training, script, or config source differed.
+
+**Model:** `/workspace/Qwen3.5-4B` with `/workspace/qwen3.5-4b` kept only as a
+compatibility symlink. Server model id was `Qwen3.5-4B`.
+
+**Sentinel and artifacts:**
+
+- Sentinel: `/workspace/kiln-validation/actual_model_validation.done` contains
+  `exit=0`.
+- Driver log: `/workspace/kiln-validation/actual-model-validation/driver.log`
+  ends with `ACTUAL_MODEL_VALIDATION_OK`.
+- Artifact directory:
+  `/workspace/kiln-validation/actual-model-validation/`.
+
+**Validation matrix:**
+
+| Gate | Evidence |
+| --- | --- |
+| CUDA release build | Driver built `kiln` and CUDA training examples before runtime checks. |
+| Actual model server boot | `/health` returned `Qwen3.5-4B (32L, 16H, 4KV)`, backend `model`, `eval_mode=true`, `default_thinking_enabled=false`, and `model_loaded`/`scheduler_responsive`/`inference_prewarm_complete` checks passed. |
+| Model registry | `/v1/models` returned `Qwen3.5-4B`. |
+| Non-streaming chat | `/v1/chat/completions` returned model `Qwen3.5-4B` with content `Quality control`. |
+| Streaming chat | SSE stream returned model `Qwen3.5-4B` with content `actual model`. |
+| Server SFT training | `sft_train_receipt.json` recorded successful training on actual model data; `server_sft_verify.json` passed adapter layout, safetensors consistency, and measurable adapter effect checks with 400 tensors and 200 LoRA projection pairs. |
+| Server GRPO training | `grpo_train_receipt.json` recorded 1 group / 2 completions trained, reward filter kept 1 group, adapter smoke enabled and passed, and nonzero LoRA delta norms. |
+| Adapter registry and CRUD | `adapters_after_training.json` showed active/loaded `actual-model-server-grpo-smoke`; unload/delete checks cleared active and loaded adapter state without losing the GRPO adapter artifact. |
+| CUDA GRPO dry run | `cuda_ablation_dry.log` and dry-run receipt validated the actual model tokenizer/data path and reward-filter bookkeeping. |
+| CUDA GRPO real training | `cuda_ablation_train.log` loaded `/workspace/Qwen3.5-4B`, trained `actual-model-cuda-grpo-smoke`, installed it under `cuda-registry`, reached `peak_vram_mib=11432`, and wrote a receipt with adapter smoke enabled and passed. |
+| CUDA adapter verification | `cuda_adapter_verify.json` returned `status=ok`, verified 400 safetensors tensors / 200 LoRA projection pairs, and reported measurable adapter effect (`l2_delta_proxy=1.6661485610034024`). |
+| Long-context CUDA GRPO | `long_context_grpo_bench.json` completed 8K, 16K, 32K, and 64K rows with nonzero reference/policy/backward/optimizer timings. |
+
+**Long-context benchmark results:**
+
+| Requested seq len | Observed seq len | Total tokens | Peak VRAM MiB | Tokens/sec | Total ms | Ref fwd ms | Policy fwd ms | Backward ms | Optimizer ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8192 | 8206 | 16412 | 14344 | 62.0479 | 264505.19 | 9826.96 | 7132.21 | 247327.21 | 6.24 |
+| 16384 | 16396 | 32792 | 15338 | 60.0454 | 546120.51 | 19499.15 | 14295.99 | 511910.93 | 5.51 |
+| 32768 | 32776 | 65552 | 18218 | 58.1327 | 1127627.17 | 39746.51 | 31736.80 | 1055346.33 | 6.15 |
+| 65536 | 65536 | 131072 | 25066 | 54.1206 | 2421852.24 | 86145.10 | 66666.31 | 2267498.04 | 5.82 |
+
+**Remaining risk:** `kernel_launch_count` is still `null`; the benchmark does
+not yet wire a kernel launch counter. Some short adapter smoke prompts produced
+identical sampled text even with nonzero logit deltas, which is the motivation
+for issue 27.
+
 ## P0: Make Correct Experiments Hard To Misrun
 
 ### 1. Define Explicit Adapter Semantics For Chat Completion Requests
