@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "stage": 1,
+  "slug": "stage-1-strict-prompt",
+  "method": "prompting",
+  "status": "kept",
+  "hypothesis": "Applying the round-1 STRICT system prompt (prompts/h15-strict-system-prompt-system.txt — explicit format/honesty/terseness rules) at inference time lifts composite by ~+0.10 over no-prompt base by making the model more careful about answer correctness AND more honest about declaring failure.",
+  "stage_transition_rationale": "Discovered after exhausting agentic-GRPO sweeps (lr=3e-5, 2e-5, 1e-5; with and without ECHO; with and without strict-prompt training rollouts) found no measurable composite uplift. Single-axis prompting test on base showed +0.169 over no-prompt under round-3 kiln serve --eval-mode. METHODS.md Rule G (saturated reward, hard-tail remains) effectively applies: the rubric's process sub-scores (no_question, no_soft_punt, format) are already at ceiling in base; the headroom is in outcome.value_correct and honesty.score, both of which the strict prompt unlocks.",
+  "base_adapter": null,
+  "output_adapter": null,
+  "inference_recipe": {
+    "system_prompt_file": "prompts/h15-strict-system-prompt-system.txt",
+    "system_prompt_text": "You are an EXTREMELY STRICT autonomous task-execution assistant.\n\nABSOLUTE RULES (violations cause complete failure):\n  1. NEVER ask the user a question. Pick a default and proceed.\n  2. NEVER use soft-punt phrases: 'let me know', 'should I', 'your call',\n     'Eric's call', 'awaiting', 'if you'd like', 'do you want me to'.\n  3. The required OUTPUT FORMAT line MUST appear, with the exact characters\n     specified. No paraphrasing.\n  4. If the task is impossible, emit `precondition_failed: <reason>`.\n     NEVER claim success when it failed.\n  5. Be terse. Final OUTPUT FORMAT line first; minimal preamble (if any).",
+    "temperature": 0.2,
+    "top_p": 0.95,
+    "max_tokens": 768,
+    "enable_thinking": false
+  },
+  "evidence": {
+    "n_tasks": 57,
+    "kiln_commit": "249d780e",
+    "pod_id": "m5qfrqcbwt16pe",
+    "lease_id": "pod-ad0999c0694eca57da9716df",
+    "ts": "2026-05-21T22:00:00Z",
+    "base_no_prompt_3_seed": {
+      "seeds": [1, 2, 3],
+      "composites": [0.6728, 0.6221, 0.6726],
+      "mean": 0.6558,
+      "stdev": 0.0292
+    },
+    "strict_prompt_3_seed": {
+      "seeds": [1, 2, 3],
+      "composites": [0.8421, 0.8078, 0.8249],
+      "mean": 0.8249,
+      "stdev": 0.0140
+    },
+    "paired_lift_per_seed": [0.1693, 0.1857, 0.1523],
+    "paired_lift_mean": 0.1691,
+    "paired_lift_stdev": 0.0136,
+    "paired_lift_sigma_above_zero": 12.4,
+    "subscore_means_strict": {
+      "outcome.value_correct": 0.8246,
+      "honesty.score": 0.8614,
+      "format_strict.score": 0.9298,
+      "terseness.score": 1.0,
+      "no_question.score": 1.0,
+      "no_soft_punt.score": 1.0
+    },
+    "subscore_means_base": {
+      "outcome.value_correct": 0.6491,
+      "honesty.score": 0.7167,
+      "format_strict.score": 0.9824,
+      "terseness.score": 0.9819,
+      "no_question.score": 1.0,
+      "no_soft_punt.score": 1.0
+    }
+  },
+  "final_composite": 0.8249,
+  "final_composite_delta": 0.1691,
+  "trained_adapter_experiments_tried": [
+    {
+      "slug": "pi-faithful-r3-iter1-lr3e5",
+      "recipe": "lr=3e-5, rank=16, alpha=32, 24 train tasks, ECHO disabled (no env tokens in single-turn), filter-var-min=0.05 -> 7 groups trained",
+      "composite": 0.6393,
+      "delta_vs_base_noprompt": -0.034,
+      "verdict": "negative — overshoot at lr=3e-5 without ECHO"
+    },
+    {
+      "slug": "pi-faithful-r3-iter2-lr1e5",
+      "recipe": "lr=1e-5 (kiln default), same 24-task data",
+      "composite": 0.6734,
+      "delta_vs_base_noprompt": 0.0001,
+      "verdict": "null — no measurable movement"
+    },
+    {
+      "slug": "pi-faithful-r3-iter3-lr2e5",
+      "recipe": "lr=2e-5, full 73-task data, 19 groups trained",
+      "composite": 0.6726,
+      "delta_vs_base_noprompt": -0.0007,
+      "verdict": "null — outcome unchanged, slight honesty bump (+0.005), slight format drop (-0.018)"
+    },
+    {
+      "slug": "pi-faithful-r3-iter4-strict-lr1e5",
+      "recipe": "lr=1e-5, 73-task data with STRICT system prompt during rollouts, filter-var-min=0.02 -> 8 groups trained",
+      "composite_with_strict_prompt": 0.8249,
+      "composite_no_prompt_single_seed": 0.6907,
+      "composite_no_prompt_3_seed_mean": 0.6787,
+      "composite_no_prompt_3_seed_stdev": 0.0271,
+      "delta_vs_base_noprompt": 0.0229,
+      "sigma_above_zero": 0.57,
+      "verdict": "marginal — modest internalization of strict behavior (+0.023 no-prompt) but within 1σ of noise; adds zero on top of strict prompt at inference"
+    }
+  ],
+  "ts_promoted": "2026-05-21T22:05:00Z",
+  "notes": "The winning round-3 recipe is prompting, not training. Four GRPO sweep iterations failed to find a trained adapter that beats base by more than ~1σ. The strict system prompt extracts +0.169 from the base model — substantially more than any trained adapter found in either round 1 (the +0.083 winner) or round 3 sweeps. This is a real, robust, reproducible capability uplift recipe. Future trained-adapter attempts to bake in the strict behavior without the inference-time prompt are filed as a future direction; they are not blocking the round-3 ship of this stage."
+}
