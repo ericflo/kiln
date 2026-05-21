@@ -2676,7 +2676,7 @@ difference.
 - Verifies `--no-policy-loss` still trains env CE.
 - Verifies `--base-adapter` changes step-1 loss after loading.
 
-**Status:** Completed locally; pending commit and push to `main`.
+**Status:** Completed and pushed to `main`.
 
 **Intended behavior:** Maintain a CI-feasible end-to-end plumbing regression
 that exercises the real `grpo_train` path with synthetic action/observation
@@ -2747,8 +2747,9 @@ per-module LoRA delta signatures.
   base-adapter loss gap `0.0014517338502102461`; chained base path
   `/workspace/kiln-validation/issue39/adapters-actual2/issue39-vf-parent-actual2`.
 
-**Commit SHA:** Pending commit. This status line is recorded before the issue
-commit because a commit cannot include its own final SHA.
+**Commit SHA:** `07cd4a85` (`Issue 39: add agentic GRPO plumbing test`),
+pushed to `origin/main` on 2026-05-21. This status line is recorded in the
+follow-up metadata commit because a commit cannot include its own final SHA.
 
 **Remaining risk:** CI still needs to run on the pushed commit. The full
 actual-model plumbing path passed against `/workspace/Qwen3.5-4B`.
