@@ -650,7 +650,7 @@ the in-repo artifact-size convention; it remains at
 
 **Build / hardware:** `main` `8bd7dd0e` (`8bd7dd0ec047db35b2b48324b0493c1298efe6c7`), RunPod on-demand `NVIDIA RTX A6000, 49140 MiB, driver 550.127.08`, `ghcr.io/ericflo/kiln-runpod:latest`. The requested A6000 was available. The task's literal build command `cargo build --release --features cuda --bin kiln-server` is incompatible with current Cargo targets (`kiln` is the server binary), so the benchmark built `cargo build --release --features cuda --bin kiln`.
 
-**Server config:** real `kiln` server, `model.path = "/workspace/qwen3.5-4b"`, `memory.num_blocks = 4096`, `memory.kv_cache_fp8 = true`, `memory.cuda_graphs = false`, `[prefix_cache] max_blocks = 2048`. The original A/B disabled CUDA graphs to isolate prefix-cache reuse; current CUDA-graph real chat completions now use the same prefix-cache lookup/register path.
+**Server config:** real `kiln` server, `model.path = "/workspace/Qwen3.5-4B"`, `memory.num_blocks = 4096`, `memory.kv_cache_fp8 = true`, `memory.cuda_graphs = false`, `[prefix_cache] max_blocks = 2048`. The original A/B disabled CUDA graphs to isolate prefix-cache reuse; current CUDA-graph real chat completions now use the same prefix-cache lookup/register path.
 
 **Prompt shape:** ChatML content used a 2,048-token block-aligned shared prefix. Suffix variants embedded the ChatML assistant delimiter after the shared text so the warm shared prompt's complete token sequence was an exact prefix of both later variant prompts. Variant A was 2,068 prompt tokens; variant B was 2,069 prompt tokens.
 
@@ -892,7 +892,7 @@ artifacts were copied.
 ```bash
 nsys profile --force-overwrite=true --trace=cuda,nvtx --sample=none --cpuctxsw=none --cuda-memory-usage=false --output /tmp/kiln-c57/c57-mtp-conv-prefill-v2 \
   env KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 KILN_MTP_ARGMAX_FP32=1 KILN_W4A16=1 KILN_CUDA_GRAPHS=true \
-  ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --prompt-subset humaneval --chat-template --latency-only --temperature 0.0 --seed 1
+  ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --prompt-subset humaneval --chat-template --latency-only --temperature 0.0 --seed 1
 ```
 
 **Result:** the profile reached `:kiln/mtp/step`; the C56 prefill status-3
@@ -975,7 +975,7 @@ cargo build --release --features cuda,nvtx --bin kiln-bench
   --force-overwrite=true --trace=cuda,nvtx --sample=none --cpuctxsw=none \
   --output=/workspace/post486-profile/post486_decode \
   ./target/release/kiln-bench \
-    --model-path /workspace/qwen3.5-4b --paged \
+    --model-path /workspace/Qwen3.5-4B --paged \
     --prompt-tokens 512 --max-output-tokens 128 \
     --skip-training --chat-template --latency-only --temperature 0.0 --seed 1
 
@@ -983,7 +983,7 @@ cargo build --release --features cuda,nvtx --bin kiln-bench
   --force-overwrite=true --trace=cuda,nvtx --sample=none --cpuctxsw=none \
   --output=/workspace/post486-profile/post486_prefill \
   ./target/release/kiln-bench \
-    --model-path /workspace/qwen3.5-4b --paged \
+    --model-path /workspace/Qwen3.5-4B --paged \
     --prompt-tokens 8192 --max-output-tokens 2 \
     --skip-training --latency-only --temperature 0.0 --seed 1
 
@@ -1141,7 +1141,7 @@ cargo build --release --features cuda,nvtx --bin kiln-bench
   --force-overwrite=true --trace=cuda,nvtx --sample=none --cpuctxsw=none \
   --output=/workspace/post481-profile/post481_decode \
   ./target/release/kiln-bench \
-    --model-path /workspace/qwen3.5-4b --paged \
+    --model-path /workspace/Qwen3.5-4B --paged \
     --prompt-tokens 512 --max-output-tokens 128 \
     --skip-training --chat-template --latency-only --temperature 0.0 --seed 1
 
@@ -1149,13 +1149,13 @@ cargo build --release --features cuda,nvtx --bin kiln-bench
   --force-overwrite=true --trace=cuda,nvtx --sample=none --cpuctxsw=none \
   --output=/workspace/post481-profile/post481_prefill \
   ./target/release/kiln-bench \
-    --model-path /workspace/qwen3.5-4b --paged \
+    --model-path /workspace/Qwen3.5-4B --paged \
     --prompt-tokens 8192 --max-output-tokens 2 \
     --skip-training --latency-only --temperature 0.0 --seed 1
 
 KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 \
 ./target/release/kiln-bench \
-  --model-path /workspace/qwen3.5-4b --paged \
+  --model-path /workspace/Qwen3.5-4B --paged \
   --prompt-tokens 512 --max-output-tokens 64 \
   --skip-training --prompt-subset humaneval --chat-template \
   --latency-only --temperature 0.0 --seed 1
@@ -1326,12 +1326,12 @@ Prompt-heavy `8192/1` validation on the same H100 fallback:
 
 ```bash
 KILN_SPEC_METHOD=off ./target/release/kiln-bench \
-  --model-path /workspace/qwen3.5-4b --paged \
+  --model-path /workspace/Qwen3.5-4B --paged \
   --prompt-tokens 8192 --max-output-tokens 1 \
   --skip-training --latency-only
 
 KILN_DISABLE_GDN_KERNEL=1 KILN_SPEC_METHOD=off ./target/release/kiln-bench \
-  --model-path /workspace/qwen3.5-4b --paged \
+  --model-path /workspace/Qwen3.5-4B --paged \
   --prompt-tokens 8192 --max-output-tokens 1 \
   --skip-training --latency-only
 ```
@@ -1383,14 +1383,14 @@ cargo build --release --features cuda,nvtx --bin kiln-bench
 python3 scripts/c12_bench_runner.py --help
 ```
 
-The model checkpoint was already present at `/workspace/qwen3.5-4b`.
+The model checkpoint was already present at `/workspace/Qwen3.5-4B`.
 
 **Baseline decode command:**
 
 ```bash
 KILN_SPEC_METHOD=off \
 ./target/release/kiln-bench \
-  --model-path /workspace/qwen3.5-4b \
+  --model-path /workspace/Qwen3.5-4B \
   --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
   > profiling-artifacts/post442_decode_baseline.json
 ```
@@ -1406,7 +1406,7 @@ KILN_SPEC_METHOD=off \
   --sample=none --cpuctxsw=none --delay=70 --duration=20 \
   -o /workspace/post442-decode \
   ./target/release/kiln-bench \
-    --model-path /workspace/qwen3.5-4b \
+    --model-path /workspace/Qwen3.5-4B \
     --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
 
 KILN_SPEC_METHOD=off \
@@ -1414,7 +1414,7 @@ KILN_SPEC_METHOD=off \
   --sample=none --cpuctxsw=none --delay=25 --duration=12 \
   -o /workspace/post442-prefill \
   ./target/release/kiln-bench \
-    --model-path /workspace/qwen3.5-4b \
+    --model-path /workspace/Qwen3.5-4B \
     --paged --prompt-tokens 8192 --max-output-tokens 1 \
     --skip-training --latency-only
 
@@ -1525,10 +1525,10 @@ export KILN_CUDA_ARCHS=86
 export KILN_W4A16=1
 export KILN_CUDA_GRAPHS=true
 cargo build --release --features cuda --bin kiln-bench
-hf download Qwen/Qwen3.5-4B --local-dir /workspace/qwen3.5-4b
+hf download Qwen/Qwen3.5-4B --local-dir /workspace/Qwen3.5-4B
 ```
 
-The pod did not already have `/workspace/qwen3.5-4b`, so the public HF
+The pod did not already have `/workspace/Qwen3.5-4B`, so the public HF
 checkpoint had to be downloaded before the bench sweep.
 
 **Benchmark commands run:**
@@ -1537,19 +1537,19 @@ checkpoint had to be downloaded before the bench sweep.
 for run in 1 2 3; do
   KILN_SPEC_METHOD=off \
   ./target/release/kiln-bench \
-    --model-path /workspace/qwen3.5-4b \
+    --model-path /workspace/Qwen3.5-4B \
     --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
     > profiling-artifacts/post415_20260423_off_run${run}.json
 
   KILN_SPEC_METHOD=skip_layer \
   ./target/release/kiln-bench \
-    --model-path /workspace/qwen3.5-4b \
+    --model-path /workspace/Qwen3.5-4B \
     --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
     > profiling-artifacts/post415_20260423_skip_layer_run${run}.json
 
   KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 \
   ./target/release/kiln-bench \
-    --model-path /workspace/qwen3.5-4b \
+    --model-path /workspace/Qwen3.5-4B \
     --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
     > profiling-artifacts/post415_20260423_mtp_run${run}.json
 done
@@ -2026,7 +2026,7 @@ KILN_MTP_DUMP_HIDDEN_STATES=1 \
 KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
 KILN_MTP_DUMP_PATH=.../mtp_pos-{pos}/step-{step}.safetensors \
 ./target/release/kiln-bench \
-  --model-path /workspace/qwen3.5-4b \
+  --model-path /workspace/Qwen3.5-4B \
   --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
   --seed <0|1>
 ```
@@ -2119,7 +2119,7 @@ KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
 KILN_MTP_DUMP_C41_LAYER1_TAPS=1 \
 KILN_MTP_DUMP_PATH=.../mtp_pos-{pos}/step-{step}.safetensors \
 ./target/release/kiln-bench \
-  --model-path /workspace/qwen3.5-4b \
+  --model-path /workspace/Qwen3.5-4B \
   --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
   --seed <0|1>
 ```
@@ -2128,14 +2128,14 @@ Representative C40 carry-forward positions were re-referenced and compared:
 
 ```bash
 python3 scripts/mtp_h_main_reference_dump.py \
-  --checkpoint /workspace/qwen3.5-4b \
+  --checkpoint /workspace/Qwen3.5-4B \
   --kiln-dump profiling-artifacts/post427_c41_20260423_seed0_captures/mtp_pos-0/step-1.safetensors \
   --out profiling-artifacts/post427_c41_20260423_seed0_ref_bf16.safetensors \
   --device cuda \
   --c41-taps
 
 python3 scripts/mtp_h_main_reference_dump.py \
-  --checkpoint /workspace/qwen3.5-4b \
+  --checkpoint /workspace/Qwen3.5-4B \
   --kiln-dump profiling-artifacts/post427_c41_20260423_seed1_captures/mtp_pos-2/step-1.safetensors \
   --out profiling-artifacts/post427_c41_20260423_seed1_ref_fp32.safetensors \
   --device cuda \
@@ -2227,10 +2227,10 @@ CARGO_PROFILE_DEV_DEBUG=0 cargo test -p kiln-model -p kiln-server --features cud
 **Profiling commands run:**
 
 ```bash
-./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --latency-only
-/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=70 --duration=20 -o /workspace/phase6-profile/post392-decode ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
-./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
-/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=3 --duration=4 -o /workspace/phase6-profile/post392-prefill ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
+./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --latency-only
+/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=70 --duration=20 -o /workspace/phase6-profile/post392-decode ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
+./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
+/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=3 --duration=4 -o /workspace/phase6-profile/post392-prefill ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
 ```
 
 The baked image still ships `nsys 2023.4.4`, so this run upgraded Nsight
@@ -2246,7 +2246,7 @@ same `8192/1 --latency-only` arm with a capture window shifted onto the
 actual prefill span:
 
 ```bash
-/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=26 --duration=4 -o /workspace/phase6-profile/post392-prefill-refined ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
+/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=26 --duration=4 -o /workspace/phase6-profile/post392-prefill-refined ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
 ```
 
 ### Decode uncaptured runs — paged 512/128
@@ -2506,7 +2506,7 @@ I attempted the requested refined prompt-heavy capture on the same pod with:
 nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none \
   --delay=26 --duration=4 \
   -o /workspace/phase6-profile/post399-prefill \
-  ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
+  ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B \
   --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training \
   --latency-only
 ```
@@ -2790,7 +2790,7 @@ cargo test -p kiln-model --release --features cuda \
   forward::tests::test_gdn_full_chunk_forward_matches_fallback \
   -- --exact --nocapture
 
-./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged \
+./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged \
   --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
 ```
 
@@ -2883,16 +2883,16 @@ exportable reports.
 export KILN_CUDA_ARCHS=86
 cargo build --release --features cuda,nvtx --bin kiln-bench
 CARGO_PROFILE_DEV_DEBUG=0 cargo test -p kiln-model -p kiln-server --features cuda --no-run
-hf download Qwen/Qwen3.5-4B --local-dir /workspace/qwen3.5-4b
+hf download Qwen/Qwen3.5-4B --local-dir /workspace/Qwen3.5-4B
 ```
 
 **Profiling commands run:**
 
 ```bash
-./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --latency-only
-nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=70 --duration=20 -o /workspace/phase6-profile/post384-decode-20245 ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
-./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
-nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=22 --duration=8 -o /workspace/phase6-profile/post384-prefill-20245 ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
+./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --latency-only
+nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=70 --duration=20 -o /workspace/phase6-profile/post384-decode-20245 ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
+./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
+nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=22 --duration=8 -o /workspace/phase6-profile/post384-prefill-20245 ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
 ```
 
 The decode command above produced a valid report after upgrading Nsight. The
@@ -2902,7 +2902,7 @@ For the committed prefill summaries below, I reran that same prompt-heavy arm
 with the only change needed to arm the profiler on this faster build:
 
 ```bash
-/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=3 --duration=4 -o /workspace/phase6-profile/post384-prefill-fixed ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
+/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=3 --duration=4 -o /workspace/phase6-profile/post384-prefill-fixed ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
 ```
 
 ### Decode uncaptured runs — paged 512/128
@@ -3034,13 +3034,13 @@ with `KILN_CUDA_ARCHS=86`. Validation completed cleanly on the pod before any
 profiling runs.
 
 **Methodology:** production paged path, `KILN_W4A16=1 KILN_CUDA_GRAPHS=true`,
-Qwen3.5-4B from `/workspace/qwen3.5-4b`.
+Qwen3.5-4B from `/workspace/Qwen3.5-4B`.
 
-- **Decode uncaptured runs:** `./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --latency-only`
+- **Decode uncaptured runs:** `./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --latency-only`
   run 3x back-to-back.
-- **Decode nsys capture:** `nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=70 --duration=20 -o /workspace/phase6-profile/decode-20245-main ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training`
-- **Prompt-heavy prefill timing:** `./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only`
-- **Prefill nsys capture:** `nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=22 --duration=8 -o /workspace/phase6-profile/prefill-20245-main ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only`
+- **Decode nsys capture:** `nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=70 --duration=20 -o /workspace/phase6-profile/decode-20245-main ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training`
+- **Prompt-heavy prefill timing:** `./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only`
+- **Prefill nsys capture:** `nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=22 --duration=8 -o /workspace/phase6-profile/prefill-20245-main ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only`
 
 ### Decode uncaptured runs — canonical paged 512/128
 
@@ -4773,7 +4773,7 @@ graph-replay layer.
 **Build:** release, `--features cuda,nvtx`, `KILN_CUDA_ARCHS=86`,
 `KILN_W4A16=1 KILN_CUDA_GRAPHS=true`, sccache ON (Backblaze B2 bucket).
 
-**Bench & profile:** `kiln-bench --model-path /workspace/qwen3.5-4b --paged
+**Bench & profile:** `kiln-bench --model-path /workspace/Qwen3.5-4B --paged
 --prompt-tokens 512 --max-output-tokens 128 --skip-training`, 3 back-to-back
 clean bench runs (no nsys) followed by a single nsys capture run. nsys
 2024.6.2 with `--trace=cuda,nvtx` (NO `--cuda-graph-trace=node` — that flag
@@ -4988,7 +4988,7 @@ pool-verification run.
 Cold first-clone build on the freshly-spawned pool pod (sccache hit rate
 low on first build; not a hot cache).
 
-**Bench:** `kiln-bench --model-path /workspace/qwen3.5-4b --paged
+**Bench:** `kiln-bench --model-path /workspace/Qwen3.5-4B --paged
 --prompt-tokens 512 --max-output-tokens 128 --skip-training`, 3 back-to-back
 runs in a single nohup'd shell script with sentinel-file completion
 signaling. NVTX-feature build but no nsys capture this run (pool-verification
@@ -5061,7 +5061,7 @@ toolchain, nsys 2024.5.1 — the baked 2023.4.4 still has the
 **Build:** release, `--features cuda`, `KILN_CUDA_ARCHS=86`,
 `KILN_W4A16=1 KILN_CUDA_GRAPHS=true`, sccache ON (backblaze B2 bucket).
 
-**Bench:** `kiln-bench --model-path /workspace/qwen3.5-4b --paged
+**Bench:** `kiln-bench --model-path /workspace/Qwen3.5-4B --paged
 --prompt-tokens 512 --max-output-tokens 128 --skip-training`, 3 back-to-back
 uncaptured runs for tok/s + ITL, 1 separate `nsys profile --delay=110
 --duration=30 --capture-range=nvtx -p 'kiln/*' ...` capture for NVTX +
@@ -5527,7 +5527,7 @@ libcublas-dev-12-8 libcurand-dev-12-8`.
 **Build:** release, `--features cuda`, `KILN_CUDA_ARCHS=86`,
 `KILN_W4A16=1 KILN_CUDA_GRAPHS=true`.
 
-**Bench:** `kiln-bench --model-path /workspace/qwen3.5-4b --paged
+**Bench:** `kiln-bench --model-path /workspace/Qwen3.5-4B --paged
 --prompt-tokens 512 --max-output-tokens 128 --skip-training`, 3 back-to-back
 runs per arm. Decode path = `model_forward_paged` (production
 HTTP/scheduler path). Reporting `decode_tokens_per_sec` and the inter-token
@@ -5588,7 +5588,7 @@ Driver 580.95.05, CUDA 12.4.
 
 **Build:** release, `--features cuda`, `KILN_W4A16=0 KILN_CUDA_GRAPHS=true`.
 
-**Bench:** `kiln-bench --model-path /workspace/qwen3.5-4b --paged
+**Bench:** `kiln-bench --model-path /workspace/Qwen3.5-4B --paged
 --prompt-tokens N --max-output-tokens M --skip-training`, 3 back-to-back runs
 per arm (no nsys attached), reporting `time_to_first_token_ms` from the
 latency phase.
@@ -5663,14 +5663,14 @@ Possible follow-ups if the chunkwise recurrence becomes a hotter target:
 ```bash
 # 1. Pod + weights
 kiln-setup --repo /workspace/kiln
-hf download Qwen/Qwen3.5-4B --local-dir /workspace/qwen3.5-4b
+hf download Qwen/Qwen3.5-4B --local-dir /workspace/Qwen3.5-4B
 
 # 2. Baseline (pre-fusion)
 cd /workspace/kiln && git checkout 395f5f7
 cargo build --release --features cuda -p kiln-server --bin kiln-bench
 for i in 1 2 3; do
   KILN_W4A16=0 KILN_CUDA_GRAPHS=true ./target/release/kiln-bench \
-    --model-path /workspace/qwen3.5-4b --paged \
+    --model-path /workspace/Qwen3.5-4B --paged \
     --prompt-tokens 512 --max-output-tokens 128 --skip-training
 done
 
@@ -5679,7 +5679,7 @@ git checkout ce/phase6-chunk-prep-fusion
 cargo build --release --features cuda -p kiln-server --bin kiln-bench
 for i in 1 2 3; do
   KILN_W4A16=0 KILN_CUDA_GRAPHS=true ./target/release/kiln-bench \
-    --model-path /workspace/qwen3.5-4b --paged \
+    --model-path /workspace/Qwen3.5-4B --paged \
     --prompt-tokens 512 --max-output-tokens 128 --skip-training
 done
 ```
@@ -5917,7 +5917,7 @@ captures. Only environment variables changing between arms are
 - Rust: 1.95.0, `cargo build --release --features cuda,nvtx`
 - Kiln HEAD at capture: `5aa22e1` (bench report from PR #153, which
   sits on top of PR #152's MLP wire-in)
-- Model: Qwen3.5-4B, sharded safetensors in `/workspace/qwen3.5-4b`
+- Model: Qwen3.5-4B, sharded safetensors in `/workspace/Qwen3.5-4B`
 - Prompt: 512 tokens; decode: 128 tokens; paged KV
   (`block_size=16`, `blocks=40`)
 
@@ -6314,17 +6314,17 @@ cd /workspace/kiln && kiln-setup
 cargo build --release --features cuda,nvtx --bin kiln-bench
 
 # 3. Fetch weights
-hf download Qwen/Qwen3.5-4B --local-dir /workspace/qwen3.5-4b
+hf download Qwen/Qwen3.5-4B --local-dir /workspace/Qwen3.5-4B
 
 # 4. Steady-state ITL, three runs per arm (uncaptured)
 for i in 1 2 3; do
   KILN_W4A16=0 KILN_CUDA_GRAPHS=true \
-    ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
+    ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B \
     --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
 done
 for i in 1 2 3; do
   KILN_W4A16=1 KILN_CUDA_GRAPHS=true \
-    ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
+    ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B \
     --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
 done
 
@@ -6332,14 +6332,14 @@ done
 KILN_W4A16=0 KILN_CUDA_GRAPHS=true \
   /usr/local/cuda/bin/nsys profile -t cuda,nvtx --delay=15 --duration=20 \
   -o /tmp/profile_armA --force-overwrite=true \
-  ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
+  ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B \
   --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
 
 # 6. Capture Arm B (W4A16 production) — delay 110s past Marlin packing
 KILN_W4A16=1 KILN_CUDA_GRAPHS=true \
   /usr/local/cuda/bin/nsys profile -t cuda,nvtx --delay=110 --duration=30 \
   -o /tmp/profile_armB --force-overwrite=true \
-  ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
+  ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B \
   --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
 
 # 7. Extract tables
@@ -6612,7 +6612,7 @@ Bench sweep of the native MTP decode arm introduced in PR #247 and patched by PR
 
 - Hardware: RunPod A6000 (SM 86), CUDA 12.4, `ghcr.io/ericflo/kiln-runpod:latest`.
 - Commit: `0443b81` (tip of `main` post-#253).
-- Model: `Qwen/Qwen3.5-4B` weights at `/workspace/qwen3.5-4b` (15 `mtp.*` tensors, `mtp_num_hidden_layers=1`, `tie_word_embeddings=true`).
+- Model: `Qwen/Qwen3.5-4B` weights at `/workspace/Qwen3.5-4B` (15 `mtp.*` tensors, `mtp_num_hidden_layers=1`, `tie_word_embeddings=true`).
 - Build: `cargo build --release --features cuda --bin kiln-bench` (sccache: 94% hit rate on warm pod, 81 s wall clock).
 - Env flags for all runs: `KILN_W4A16=1 KILN_CUDA_GRAPHS=true`.
 - Bench args: `--paged --prompt-tokens 512 --max-output-tokens 128 --skip-training`.
@@ -6870,7 +6870,7 @@ KILN_W4A16=1 KILN_CUDA_GRAPHS=true KILN_SPEC_METHOD=mtp \
   KILN_MTP_DEBUG=1 KILN_MTP_DEBUG_MAX_CALLS=32 \
   RUST_LOG=kiln::mtp_debug=info,info \
   ./target/release/kiln-bench \
-    --model-path /workspace/qwen3.5-4b \
+    --model-path /workspace/Qwen3.5-4B \
     --paged --prompt-tokens 512 --max-output-tokens 16 --skip-training
 ```
 
@@ -6966,7 +6966,7 @@ Pod terminated on task completion.
 
 Follow-up to Phase B. Three-part experiment: (1) byte-equality verification of all 15 MTP tensors against the raw safetensors shards, (2) runtime logging of the two halves of `fc`'s input (pre-norm-embedding on `embed(last_token)` vs pre-norm-hidden on `h_prev`) plus fused output L2, (3) A/B toggle (`KILN_MTP_SWAP_FC_NORMS=1`) that swaps which RMSNorm weight is paired with which half. Goal: isolate whether Phase B's identity bias comes from a byte-level loader bug, a halves-magnitude asymmetry, or the two RMSNorm scales being wired to the wrong halves of the fused input.
 
-All runs on the same A6000 pod (on-demand, `ghcr.io/ericflo/kiln-runpod:latest`, warm sccache B2), same model (`/workspace/qwen3.5-4b`), same prompt used in Phase B, `--paged --skip-training --max-output-tokens 32`, `KILN_MTP_DEBUG=1 KILN_MTP_DEBUG_MAX_CALLS=16`.
+All runs on the same A6000 pod (on-demand, `ghcr.io/ericflo/kiln-runpod:latest`, warm sccache B2), same model (`/workspace/Qwen3.5-4B`), same prompt used in Phase B, `--paged --skip-training --max-output-tokens 32`, `KILN_MTP_DEBUG=1 KILN_MTP_DEBUG_MAX_CALLS=16`.
 
 ### Part A — byte-equality (rules out raw loader bugs)
 
@@ -7117,7 +7117,7 @@ Sweep: 16 runs (8 seeds × {off, on}), paged production path, MTP_DEBUG on:
 ```bash
 for SEED in 0..7; do for ARM in off on; do
   env KILN_MTP_DEBUG=1 KILN_SPEC_METHOD=mtp ${ARM=on:+KILN_MTP_SWAP_FC_NORMS=1} \
-    kiln-bench --model-path .../qwen3.5-4b --paged \
+    kiln-bench --model-path .../Qwen3.5-4B --paged \
       --prompt-tokens 512 --max-output-tokens 128 --skip-training \
       --seed $SEED > mtp-b3-seed${SEED}-${ARM}.log 2>&1
 done; done
@@ -7543,7 +7543,7 @@ Code added on this branch:
   named taps in order. `concat` and `normed` pulled out as named binds so
   the dump can see them without a second forward pass.
 * `scripts/mtp_reference_dump.py` — pure-PyTorch reference. Loads MTP weights
-  from `/workspace/qwen3.5-4b`, reads `h_main` + `draft_token_id` from the
+  from `/workspace/Qwen3.5-4B`, reads `h_main` + `draft_token_id` from the
   kiln dump, runs the full `embed → dual rms_norm → concat → fc →
   single transformer block (with RoPE at mtp_pos, per-head Q/K RMSNorm,
   gated-attn, MLP) → final_layernorm → tied LM head` path, writes the
@@ -7792,7 +7792,7 @@ cd /workspace/kiln
 source /root/.kiln-build-env
 export KILN_CUDA_ARCHS=80
 cargo build --release --features cuda --bin kiln-bench
-hf download Qwen/Qwen3.5-4B --local-dir /workspace/qwen3.5-4b
+hf download Qwen/Qwen3.5-4B --local-dir /workspace/Qwen3.5-4B
 python3 -m pip install transformers safetensors sentencepiece
 ```
 
@@ -7816,7 +7816,7 @@ for seed in 0 1; do
   KILN_MTP_DUMP_C42_LAYER1_NORM_TAPS=1 \
   KILN_MTP_DUMP_PATH=$root/mtp_pos-{pos}/step-{step}.safetensors \
   ./target/release/kiln-bench \
-    --model-path /workspace/qwen3.5-4b \
+    --model-path /workspace/Qwen3.5-4B \
     --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
     --seed ${seed} \
     > /workspace/kiln/profiling-artifacts/post428_c42_20260423_seed${seed}.bench.json \
@@ -8109,7 +8109,7 @@ Actual rerun commands:
 source /root/.kiln-build-env
 cd /workspace/kiln
 
-hf download Qwen/Qwen3.5-4B --local-dir /workspace/qwen3.5-4b
+hf download Qwen/Qwen3.5-4B --local-dir /workspace/Qwen3.5-4B
 python3 -m pip install transformers sentencepiece
 
 KILN_W4A16=1 \
@@ -8124,7 +8124,7 @@ KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
 KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 \
 KILN_MTP_DUMP_PATH=profiling-artifacts/post432_c45_seed0_captures/mtp_pos-{pos}/step-{step}.safetensors \
 ./target/release/kiln-bench \
-  --model-path /workspace/qwen3.5-4b \
+  --model-path /workspace/Qwen3.5-4B \
   --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
   --seed 0 \
   > profiling-artifacts/post432_c45_seed0.bench.json \
@@ -8142,7 +8142,7 @@ KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
 KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 \
 KILN_MTP_DUMP_PATH=profiling-artifacts/post432_c45_seed1_captures/mtp_pos-{pos}/step-{step}.safetensors \
 ./target/release/kiln-bench \
-  --model-path /workspace/qwen3.5-4b \
+  --model-path /workspace/Qwen3.5-4B \
   --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
   --seed 1 \
   > profiling-artifacts/post432_c45_seed1.bench.json \
@@ -8158,7 +8158,7 @@ Reference + compare:
 
 ```bash
 python3 scripts/mtp_h_main_reference_dump.py \
-  --checkpoint /workspace/qwen3.5-4b \
+  --checkpoint /workspace/Qwen3.5-4B \
   --kiln-dump profiling-artifacts/post432_c45_seed0_captures/mtp_pos-0/step-1.safetensors \
   --out profiling-artifacts/post432_c45_seed0_ref.safetensors \
   --device cuda \
@@ -8170,7 +8170,7 @@ python3 scripts/mtp_compare.py --c45 \
   > profiling-artifacts/post432_c45_seed0_compare.txt
 
 python3 scripts/mtp_h_main_reference_dump.py \
-  --checkpoint /workspace/qwen3.5-4b \
+  --checkpoint /workspace/Qwen3.5-4B \
   --kiln-dump profiling-artifacts/post432_c45_seed1_captures/mtp_pos-2/step-1.safetensors \
   --out profiling-artifacts/post432_c45_seed1_ref.safetensors \
   --device cuda \
@@ -8250,7 +8250,7 @@ RunPod outcome:
   `ghcr.io/ericflo/kiln-runpod:latest`, pod `h2gltnqi6qdjb4`
 - the first healthy pod exposed two concrete bootstrap bugs on current `main`:
   - `deploy/runpod/kiln-setup.sh` no longer downloaded the expected
-    `/workspace/qwen3.5-4b` checkpoint, so the first seeded bench failed at
+    `/workspace/Qwen3.5-4B` checkpoint, so the first seeded bench failed at
     model load until the setup helper was restored to pull Qwen3.5-4B
   - `crates/kiln-model/src/mtp_debug.rs` serialized the narrowed splice dump
     but never created the parent directories for
@@ -8282,7 +8282,7 @@ KILN_MTP_DUMP_SPLICE=1 KILN_MTP_DUMP_SPLICE_POS=0,2 KILN_MTP_DUMP_SPLICE_MAX_STE
 KILN_MTP_DUMP_HIDDEN_STATES=1 KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
 KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 \
 KILN_MTP_DUMP_PATH=profiling-artifacts/post435_c45_row_scalar_seed0_captures/mtp_pos-{pos}/step-{step}.safetensors \
-./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged \
+./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged \
   --prompt-tokens 512 --max-output-tokens 128 --skip-training --seed 0 \
   > profiling-artifacts/post435_c45_row_scalar_seed0.bench.json \
   2> profiling-artifacts/post435_c45_row_scalar_seed0.bench.stderr
@@ -8292,13 +8292,13 @@ KILN_MTP_DUMP_SPLICE=1 KILN_MTP_DUMP_SPLICE_POS=0,2 KILN_MTP_DUMP_SPLICE_MAX_STE
 KILN_MTP_DUMP_HIDDEN_STATES=1 KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
 KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 \
 KILN_MTP_DUMP_PATH=profiling-artifacts/post435_c45_row_scalar_seed1_captures/mtp_pos-{pos}/step-{step}.safetensors \
-./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged \
+./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B --paged \
   --prompt-tokens 512 --max-output-tokens 128 --skip-training --seed 1 \
   > profiling-artifacts/post435_c45_row_scalar_seed1.bench.json \
   2> profiling-artifacts/post435_c45_row_scalar_seed1.bench.stderr
 
 python3 scripts/mtp_h_main_reference_dump.py \
-  --checkpoint /workspace/qwen3.5-4b \
+  --checkpoint /workspace/Qwen3.5-4B \
   --kiln-dump profiling-artifacts/post435_c45_row_scalar_seed0_captures/mtp_pos-0/step-1.safetensors \
   --out profiling-artifacts/post435_c45_row_scalar_seed0_ref.safetensors \
   --device cuda \
@@ -8310,7 +8310,7 @@ python3 scripts/mtp_compare.py --c45-row-scalar \
   > profiling-artifacts/post435_c45_row_scalar_seed0_compare.txt
 
 python3 scripts/mtp_h_main_reference_dump.py \
-  --checkpoint /workspace/qwen3.5-4b \
+  --checkpoint /workspace/Qwen3.5-4B \
   --kiln-dump profiling-artifacts/post435_c45_row_scalar_seed1_captures/mtp_pos-2/step-1.safetensors \
   --out profiling-artifacts/post435_c45_row_scalar_seed1_ref.safetensors \
   --device cuda \
@@ -8584,7 +8584,7 @@ NVIDIA CUDA apt repo and used
 `/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys`. The retained
 workload used `KILN_SPEC_METHOD=mtp`, `KILN_BENCH_FORCE_MTP=1`,
 `KILN_MTP_ARGMAX_FP32=1`, `KILN_W4A16=1`, `KILN_CUDA_GRAPHS=true`,
-`--model-path /workspace/qwen3.5-4b`, paged 512-token Humaneval prompt, 128
+`--model-path /workspace/Qwen3.5-4B`, paged 512-token Humaneval prompt, 128
 generated tokens, `--skip-training`, `--chat-template`, `--latency-only`,
 temperature `0.0`, and seed `1`.
 
@@ -8708,7 +8708,7 @@ KILN_KV_CACHE_FP8=1 \
 KILN_CUDA_GRAPHS=true \
 KILN_STREAMING_PREFILL=0 \
 ./target/release/kiln-bench \
-  --model-path /workspace/qwen3.5-4b \
+  --model-path /workspace/Qwen3.5-4B \
   --paged --prompt-tokens 32768 --max-output-tokens 1 --skip-training
 
 KILN_CUDA_ARCHS=86 \
@@ -8717,7 +8717,7 @@ KILN_KV_CACHE_FP8=1 \
 KILN_CUDA_GRAPHS=true \
 KILN_STREAMING_PREFILL=0 \
 ./target/release/kiln-bench \
-  --model-path /workspace/qwen3.5-4b \
+  --model-path /workspace/Qwen3.5-4B \
   --paged --prompt-tokens 65536 --max-output-tokens 1 --skip-training
 ```
 
@@ -8767,7 +8767,7 @@ KILN_CUDA_ARCHS=86 cargo build --release --features cuda,nvtx --bin kiln-bench
 ```bash
 export KILN_W4A16=1 KILN_CUDA_GRAPHS=true
 for i in 1 2 3; do
-  ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
+  ./target/release/kiln-bench --model-path /workspace/Qwen3.5-4B \
     --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
     --prompt-subset humaneval --chat-template --latency-only \
     --temperature 0.0 --seed 1
