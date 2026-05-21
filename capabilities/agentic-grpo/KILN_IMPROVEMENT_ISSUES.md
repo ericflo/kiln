@@ -2872,13 +2872,16 @@ small real SFT adapter, and measures repeated load/eval/unload latency drift.
   `cargo test -p kiln-server --test adapter_path_traversal` passed
   `7 passed; 0 failed`; `cargo test -p kiln-train --lib` passed
   `255 passed; 0 failed`.
+- GitHub CI passed for pushed head
+  `c383d97012a31803e61896ded15f9d3be73bc360` on 2026-05-21: run
+  `26252123713` completed successfully.
 
 **Commit SHA:** `7fcd2281` (`Issue 40: add learned regression tests`),
 pushed to `origin/main` on 2026-05-21. Validation metadata is recorded in
 this follow-up metadata commit.
 
-**Remaining risk:** GitHub CI still needs to run after push; no code-level or
-actual-model validation risk is known for this issue.
+**Remaining risk:** No code-level, CI, or actual-model validation risk is known
+for this issue.
 
 ## Suggested Execution Order
 
