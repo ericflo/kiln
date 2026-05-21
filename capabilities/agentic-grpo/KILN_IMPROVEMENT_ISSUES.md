@@ -684,6 +684,46 @@ formats and normalize them to the canonical trajectory schema.
 - Python and Rust parsers produce equivalent segment sequences on shared
   fixtures.
 
+**Status:** Completed and validated on RunPod.
+
+**Implementation notes:** Added `kiln_train::pi_trajectory` as the shared
+Rust-owned Pi session normalizer. It parses Pi `{"type":"message",
+"message":...}` JSONL events, accepts `tool` and `toolResult` roles, renders
+`text`, `thinking`, `toolCall`, and `toolResult` blocks into canonical kiln
+`TurnSegment`s, reads tool-call arguments from `input`, normalizes tool results
+to `role="tool"`, records warning-prefix lengths, and preserves the legacy
+`ScoredRollout.text` flattening contract. Refactored `trajectory_inspect` to
+reuse this shared parser. Updated `agent_traces` so discovered Pi 0.75.x
+session files fall back to the filename as id when no top-level id exists,
+count user/assistant turns and assistant tool calls from message events, and
+persist the normalized action/observation trajectory on each `AgentTrace`.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-20 on RTX A6000 pod `yu0x0wt25rz8u8`,
+  lease `pod-9d17510419e3a5930b68a4fc`.
+- Remote command sequence: `cargo test -p kiln-train pi_trajectory --lib`;
+  `cargo test -p kiln-train trajectory_inspect --lib`; `cargo test -p
+  kiln-server agent_traces --lib`; `cargo check -p kiln-train --tests`;
+  `cargo check -p kiln-server --tests`; and `python3
+  capabilities/agentic-grpo/lib/test_pi_trajectory.py`.
+- Remote sentinel `/workspace/kiln-validation/issue11.done` recorded `exit=0`;
+  remote log is `/workspace/kiln-validation/issue11.log`.
+- Focused Rust tests cover Pi 0.75.1 fixtures, Pi 0.75.3 `toolResult`
+  normalization, `input`-sourced tool-call arguments, warning-prefix handling,
+  context inclusion, action-text flattening, inspector regression coverage, and
+  agent-trace persistence of normalized trajectories. The existing Python
+  parser suite passed 15/15 on the same pod.
+
+**Commit SHA:** `3fd33909` (`Issue 11: normalize Pi session trajectories`).
+This is the implementation commit; these final metadata notes are recorded in
+the follow-up backlog commit.
+
+**Remaining risk:** The Rust parser now matches the observed Pi 0.75.x session
+event shapes covered by the Python parser fixtures. Future upstream Pi schema
+changes may still require adding new block renderers or metadata extraction
+rules.
+
 ### 12. Make ECHO Activity Observable In Every Training Path
 
 **Area:** `crates/kiln-train`
