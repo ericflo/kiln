@@ -14726,6 +14726,256 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_agentic_grpo_plumbing_trains_echo_variants_and_base_adapter() -> Result<()> {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_shared_prefix = std::env::var("KILN_DISABLE_GRPO_SHARED_PREFIX_REF").ok();
+        let prior_grad_checkpoint = std::env::var("KILN_NO_GRAD_CHECKPOINT").ok();
+        unsafe {
+            std::env::set_var("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", "1");
+            std::env::set_var("KILN_NO_GRAD_CHECKPOINT", "1");
+        }
+
+        let result = (|| -> Result<()> {
+            use crate::ScoredRollout;
+
+            let device = Device::Cpu;
+            let model_config = tiny_config();
+            let weights = tiny_weights(&model_config, &device)?;
+            let tokenizer = make_echo_smoke_tokenizer()?;
+            let tmp = tempfile::tempdir()?;
+            let adapter_root = tmp.path().join("adapters");
+
+            let groups = vec![GrpoGroup {
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: "ask".to_string(),
+                }],
+                completions: vec![
+                    ScoredRollout::from_trajectory(
+                        vec![
+                            dry_run_action("a"),
+                            dry_run_observation("b"),
+                            dry_run_action("ab"),
+                        ],
+                        1.0,
+                    ),
+                    ScoredRollout::from_trajectory(
+                        vec![
+                            dry_run_action("ba"),
+                            dry_run_observation("ab"),
+                            dry_run_action("b"),
+                        ],
+                        0.0,
+                    ),
+                ],
+            }];
+
+            type AgenticGrpoPlumbingRun = (PathBuf, crate::train_receipt::TrainReceipt, Vec<f64>);
+
+            let run = |adapter_name: &str, config: GrpoConfig| -> Result<AgenticGrpoPlumbingRun> {
+                let losses: std::sync::Arc<std::sync::Mutex<Vec<f64>>> =
+                    std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let loss_sink = std::sync::Arc::clone(&losses);
+                let progress: ProgressCallback = Box::new(move |progress| {
+                    loss_sink.lock().unwrap().push(progress.loss);
+                });
+                let dir = grpo_train(
+                    &groups,
+                    &config,
+                    &model_config,
+                    &weights,
+                    &tokenizer,
+                    &adapter_root,
+                    adapter_name,
+                    Some(progress),
+                    None,
+                )?;
+                let receipt = crate::train_receipt::TrainReceipt::read_from_adapter_dir(&dir)?
+                    .ok_or_else(|| anyhow::anyhow!("missing train receipt for {adapter_name}"))?;
+                let losses = losses.lock().unwrap().clone();
+                Ok((dir, receipt, losses))
+            };
+
+            let mk_config = |echo: Option<crate::EchoConfig>,
+                             no_policy_loss: bool,
+                             base_adapter: Option<&str>| {
+                let mut config = GrpoConfig::default();
+                config.dynamic_sampling = false;
+                config.learning_rate = 0.05;
+                config.lora_rank = 4;
+                config.lora_alpha = 8.0;
+                config.optimizer = Optimizer::Sgd;
+                config.seed = Some(0xA6E17C_u64);
+                config.loss.echo = echo;
+                config.loss.no_policy_loss = no_policy_loss;
+                config.base_adapter = base_adapter.map(str::to_string);
+                config
+            };
+
+            let (_off_dir, off_receipt, _) =
+                run("agentic-plumbing-echo-off", mk_config(None, false, None))?;
+            let (_on_dir, on_receipt, _) = run(
+                "agentic-plumbing-echo-on",
+                mk_config(Some(crate::EchoConfig::default()), false, None),
+            )?;
+            let (vf_dir, vf_receipt, _) = run(
+                "agentic-plumbing-vf-parent",
+                mk_config(Some(crate::EchoConfig::default()), true, None),
+            )?;
+
+            assert_eq!(
+                off_receipt.status,
+                crate::train_receipt::TrainReceiptStatus::Success
+            );
+            assert_eq!(
+                on_receipt.status,
+                crate::train_receipt::TrainReceiptStatus::Success
+            );
+            assert_eq!(
+                vf_receipt.status,
+                crate::train_receipt::TrainReceiptStatus::Success
+            );
+            assert!(
+                off_receipt.echo.initial_env_ce.is_none(),
+                "ECHO-off adapter should not record env CE"
+            );
+            assert!(
+                on_receipt.echo.initial_env_ce.is_some(),
+                "ECHO-on adapter should record env CE"
+            );
+            assert!(
+                vf_receipt.echo.initial_env_ce.is_some(),
+                "no-policy-loss ECHO adapter should record env CE"
+            );
+            assert!(
+                vf_receipt.no_policy_loss,
+                "verifier-free adapter must record no_policy_loss=true"
+            );
+            assert!(
+                vf_receipt.token_counts.env_tokens > 0,
+                "verifier-free adapter should train on env tokens"
+            );
+            assert!(
+                max_lora_delta(&vf_receipt) > 1e-9,
+                "verifier-free ECHO adapter should move LoRA weights"
+            );
+
+            let off_sha = off_receipt
+                .adapters
+                .output
+                .adapter_model_sha256
+                .as_deref()
+                .context("ECHO-off adapter sha")?;
+            let on_sha = on_receipt
+                .adapters
+                .output
+                .adapter_model_sha256
+                .as_deref()
+                .context("ECHO-on adapter sha")?;
+            assert_ne!(
+                off_sha, on_sha,
+                "ECHO-on/off should produce different adapter tensors"
+            );
+            let delta_gap = lora_delta_signature_gap(&off_receipt, &on_receipt);
+            assert!(
+                delta_gap > 1e-9,
+                "ECHO-on/off should produce different LoRA delta summaries; gap={delta_gap:e}"
+            );
+
+            assert!(
+                vf_dir.join("adapter_model.safetensors").exists(),
+                "parent adapter must be saved for base-adapter chaining"
+            );
+            let (_, fresh_receipt, fresh_losses) = run(
+                "agentic-plumbing-fresh",
+                mk_config(Some(crate::EchoConfig::default()), false, None),
+            )?;
+            let (_, chained_receipt, chained_losses) = run(
+                "agentic-plumbing-from-parent",
+                mk_config(
+                    Some(crate::EchoConfig::default()),
+                    false,
+                    Some("agentic-plumbing-vf-parent"),
+                ),
+            )?;
+            let fresh_step1 = *fresh_losses
+                .first()
+                .context("missing fresh first-step loss")?;
+            let chained_step1 = *chained_losses
+                .first()
+                .context("missing chained first-step loss")?;
+            let step1_gap = (fresh_step1 - chained_step1).abs();
+            assert!(
+                step1_gap > 1e-9,
+                "loading base_adapter should change step-1 loss; fresh={fresh_step1}, \
+                 chained={chained_step1}, gap={step1_gap:e}"
+            );
+            assert!(
+                chained_receipt.adapters.base.path.is_some(),
+                "chained receipt should record loaded base adapter"
+            );
+            assert!(
+                max_lora_delta(&fresh_receipt) > 1e-9,
+                "fresh adapter should move LoRA weights"
+            );
+            assert!(
+                max_lora_delta(&chained_receipt) > 1e-9,
+                "chained adapter should move LoRA weights"
+            );
+            println!(
+                "agentic_grpo_plumbing: delta_gap={delta_gap:e} \
+                 max_vf_delta={:.6e} fresh_step1={fresh_step1:.6} \
+                 chained_step1={chained_step1:.6} step1_gap={step1_gap:e}",
+                max_lora_delta(&vf_receipt),
+            );
+
+            Ok(())
+        })();
+
+        restore_env("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", prior_shared_prefix);
+        restore_env("KILN_NO_GRAD_CHECKPOINT", prior_grad_checkpoint);
+        result
+    }
+
+    fn max_lora_delta(receipt: &crate::train_receipt::TrainReceipt) -> f64 {
+        receipt
+            .lora_delta_norms
+            .iter()
+            .filter_map(|summary| {
+                summary
+                    .delta_l2_upper_bound_max
+                    .is_finite()
+                    .then_some(summary.delta_l2_upper_bound_max)
+            })
+            .fold(0.0_f64, f64::max)
+    }
+
+    fn lora_delta_signature_gap(
+        left: &crate::train_receipt::TrainReceipt,
+        right: &crate::train_receipt::TrainReceipt,
+    ) -> f64 {
+        let to_map = |receipt: &crate::train_receipt::TrainReceipt| {
+            receipt
+                .lora_delta_norms
+                .iter()
+                .map(|summary| (summary.module.clone(), summary.delta_l2_upper_bound_max))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let left = to_map(left);
+        let right = to_map(right);
+        left.keys()
+            .chain(right.keys())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|module| {
+                let a = left.get(module).copied().unwrap_or_default();
+                let b = right.get(module).copied().unwrap_or_default();
+                (a - b).abs()
+            })
+            .sum()
+    }
+
     /// Appendix C.1 #4 — checkpointed-path ECHO loss agrees with the
     /// uncheckpointed path within float tolerance. Pins the S1 risk
     /// (analytic-tail refactor drifts the GRPO+ECHO numerics).

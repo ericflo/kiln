@@ -2676,6 +2676,83 @@ difference.
 - Verifies `--no-policy-loss` still trains env CE.
 - Verifies `--base-adapter` changes step-1 loss after loading.
 
+**Status:** Completed locally; pending commit and push to `main`.
+
+**Intended behavior:** Maintain a CI-feasible end-to-end plumbing regression
+that exercises the real `grpo_train` path with synthetic action/observation
+trajectories. The test must prove ECHO affects adapter tensors, verifier-free
+`--no-policy-loss` still trains environment CE tokens, and `--base-adapter`
+actually changes the first optimization step after loading a parent adapter.
+
+**Implementation notes:** Added
+`test_agentic_grpo_plumbing_trains_echo_variants_and_base_adapter` in
+`crates/kiln-train/src/trainer.rs`. The test uses the tiny CPU model and
+synthetic action/observation rollouts, trains ECHO-off, ECHO-on,
+verifier-free ECHO, fresh ECHO, and parent-chained ECHO adapters through the
+shared `grpo_train` implementation, then verifies adapter SHA differences,
+LoRA delta summary differences, nonzero environment token counts, nonzero
+verifier-free LoRA deltas, first-step loss differences, and recorded base
+adapter receipt metadata. Helper functions compare maximum LoRA deltas and
+per-module LoRA delta signatures.
+
+**Validation evidence:**
+
+- Focused RunPod validation passed on 2026-05-21 on RTX A6000 pod
+  `m5qfrqcbwt16pe`, lease `pod-ad0999c0694eca57da9716df`.
+- Focused sentinel:
+  `/workspace/kiln-validation/issue39/focused2.ok`; focused log:
+  `/workspace/kiln-validation/issue39/focused2.log`.
+- Focused commands run on RunPod: `rustfmt --edition 2024
+  crates/kiln-train/src/trainer.rs`; `cargo test -p kiln-train
+  test_agentic_grpo_plumbing_trains_echo_variants_and_base_adapter --lib --
+  --nocapture`; `cargo test -p kiln-train
+  test_echo_no_policy_loss_verifier_free_e2e --lib`; `cargo test -p
+  kiln-train grpo_dry_run_success_records_counts_and_receipt --lib`;
+  `cargo check -p kiln-train --lib`; `git diff --check`.
+- Focused test printed
+  `agentic_grpo_plumbing: delta_gap=4.397370688705144e-3
+  max_vf_delta=1.275110e-2 fresh_step1=0.340465
+  chained_step1=0.339980 step1_gap=4.8439204692840576e-4`.
+- Local lightweight `git diff --check` passed after copying the RunPod
+  `rustfmt` result back.
+- Actual-model attempt `actual1` built the CUDA release server and booted
+  `/workspace/Qwen3.5-4B`, but failed before training because the validation
+  harness assumed `/health` returned an object while the endpoint returned a
+  list-shaped payload. This is a harness failure, not accepted completion.
+- Actual Qwen3.5-4B RunPod validation attempt `actual2` passed on 2026-05-21
+  on the same A6000 pod and lease. Script: `/tmp/issue39_actual2.sh`; log:
+  `/workspace/kiln-validation/issue39/actual2.log`; done sentinel:
+  `/workspace/kiln-validation/issue39/actual2.done`; success sentinel:
+  `/workspace/kiln-validation/issue39/actual2.ok`; summary:
+  `/workspace/kiln-validation/issue39/actual2-summary.json`.
+- `actual2` built `kiln-server` with `KILN_CUDA_ARCHS=86 cargo build
+  --locked --release -p kiln-server --bin kiln --features cuda`, booted
+  `KILN_MODEL_PATH=/workspace/Qwen3.5-4B`, and verified `/health` reported
+  `Qwen3.5-4B (32L, 16H, 4KV)`, canonical served model id `Qwen3.5-4B`,
+  `eval_mode=true`, `default_thinking_enabled=false`, and passing
+  `model_loaded`, `scheduler_responsive`, and `inference_prewarm_complete`
+  checks.
+- `actual2` posted and completed five real `/v1/train/grpo` jobs:
+  `issue39-echo-off-actual2`, `issue39-echo-on-actual2`,
+  `issue39-vf-parent-actual2`, `issue39-fresh-actual2`, and
+  `issue39-from-parent-actual2`.
+- `actual2` summary evidence: ECHO-off adapter SHA
+  `sha256:d221e1651f3d91f9f4d2eaaaa3ba9d166a29ee008e82f017793cfed7e6860a77`;
+  ECHO-on adapter SHA
+  `sha256:5071ca861cba39722ca67e6c8b9fa134b937b3e6f84ab92502f8985a93a28962`;
+  ECHO delta gap `9.75317198947329e-05`; verifier-free initial/final env CE
+  `9.781388759613037` / `9.781388759613037`; verifier-free env tokens `6`;
+  verifier-free max LoRA delta `0.022482956839825947`; fresh first-step loss
+  `0.943492263211783`; chained first-step loss `0.9420405293615728`;
+  base-adapter loss gap `0.0014517338502102461`; chained base path
+  `/workspace/kiln-validation/issue39/adapters-actual2/issue39-vf-parent-actual2`.
+
+**Commit SHA:** Pending commit. This status line is recorded before the issue
+commit because a commit cannot include its own final SHA.
+
+**Remaining risk:** CI still needs to run on the pushed commit. The full
+actual-model plumbing path passed against `/workspace/Qwen3.5-4B`.
+
 ### 40. Add Regression Tests For Lessons Already Learned
 
 **Area:** tests across server/train
