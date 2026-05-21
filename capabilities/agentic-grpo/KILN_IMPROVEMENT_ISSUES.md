@@ -2139,7 +2139,9 @@ I actually hitting?"
   `debug secret marker issue32` and verified the subsequent debug model-state
   response did not contain that prompt text.
 
-**Commit SHA:** Pending.
+**Commit SHA:** `c1ef5b15` (`Issue 32: add debug model state`). The SHA is
+recorded in a follow-up metadata commit because a commit cannot include its own
+final hash.
 
 **Remaining risk:** The endpoint is diagnostic and intentionally gated to
 eval/debug mode. It reports aggregate cache counts and selected non-secret
