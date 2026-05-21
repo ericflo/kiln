@@ -882,6 +882,47 @@ diagnostic record tied to the request.
 - Slow requests emit one structured warning.
 - Logs do not include full prompt text by default.
 
+**Status:** Completed 2026-05-21.
+
+**Implementation notes:**
+
+- Added `server.slow_request_warn_secs` and `KILN_SLOW_REQUEST_WARN_SECS`
+  with a default of 30 seconds; `0` disables the watchdog.
+- Slow chat-completion records now emit a single structured warning on target
+  `kiln_server::slow_request` when elapsed time meets the configured threshold.
+- Warning fields include request id, adapter, prompt token count, max output
+  token count, generated tokens, elapsed/threshold milliseconds, batching
+  engine state, thinking mode, CUDA graph state, prefix-cache diagnostic,
+  finish reason, error string, and streaming flag.
+- The structured log path is derived from recent-request metadata and does not
+  include prompt or completion body fields. Non-streaming failure/timeout paths
+  also record an error-bearing request record so slow failures are eligible for
+  the same watchdog warning.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on direct fallback RTX A6000 pod
+  `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo test -p kiln-server
+  slow_request_log_values --lib`; `cargo test -p kiln-server
+  test_env_var_overrides --lib`; `cargo test -p kiln-server
+  test_parse_full_toml --lib`; and `cargo check -p kiln-server --tests`.
+- Remote sentinel `/workspace/kiln-validation/issue14.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue14.log`.
+- Focused unit coverage verifies threshold behavior and that the slow-log value
+  object excludes prompt text even when the recent request record has prompt
+  preview/full fields.
+
+**Commit SHA:** `10452c6f` (`Issue 14: add slow request watchdog`).
+This is the implementation commit; these final metadata notes are recorded in
+the follow-up backlog commit.
+
+**Remaining risk:** The prefix-cache diagnostic is precise on the direct real
+generation paths (`hit`, `miss`, `disabled`, `skipped`, or
+`not_used_speculative`) and labels batched/cached/mock paths separately. Error
+records that fail outside generation retain `prefix_cache = "unknown"` because
+no prefix-cache decision may have happened yet.
+
 ### 15. Add Eval Mode To `kiln serve`
 
 **Area:** `crates/kiln-server`
