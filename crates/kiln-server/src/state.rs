@@ -343,6 +343,7 @@ pub struct DeterministicCompletionCacheKey {
     pub top_p_bits: u32,
     pub top_k: u32,
     pub seed: Option<u64>,
+    pub fold_reasoning_into_content: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1281,6 +1282,8 @@ pub struct AppState {
     /// Server-level default for chat-template thinking mode. `None` preserves
     /// the template's own default.
     pub default_thinking_enabled: Option<bool>,
+    /// Compatibility mode: duplicate separated reasoning into `content`.
+    pub fold_reasoning_into_content: bool,
     /// Slow chat-completion warning threshold. None disables slow-request logs.
     pub slow_request_warn_threshold: Option<std::time::Duration>,
     /// Prometheus metrics counters.
@@ -1470,6 +1473,7 @@ impl AppState {
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             eval_mode: false,
             default_thinking_enabled: None,
+            fold_reasoning_into_content: false,
             slow_request_warn_threshold: None,
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
@@ -1925,6 +1929,7 @@ impl AppState {
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             eval_mode: false,
             default_thinking_enabled: None,
+            fold_reasoning_into_content: false,
             slow_request_warn_threshold: None,
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
@@ -2392,6 +2397,7 @@ mod tests {
             top_p_bits: 1.0f32.to_bits(),
             top_k: 0,
             seed: None,
+            fold_reasoning_into_content: false,
         };
         let value = DeterministicCompletionCacheValue {
             text: "cached".to_string(),

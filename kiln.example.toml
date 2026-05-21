@@ -26,6 +26,10 @@ shutdown_timeout_secs = 5
                                       # chat templates to thinking on/off unless a request
                                       # overrides chat_template_kwargs.enable_thinking.
                                       # Omit to preserve the model template default.
+# fold_reasoning_into_content = false # Optional. Compatibility mode for clients that expect
+                                      # non-empty assistant content: duplicate separated
+                                      # reasoning_content into content. Requests can override
+                                      # this with fold_reasoning_into_content.
 
 [model]
 # path = "/path/to/model"            # Required for real inference (omit for mock mode)

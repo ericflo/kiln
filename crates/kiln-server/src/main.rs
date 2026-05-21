@@ -326,6 +326,7 @@ async fn main() -> Result<()> {
     state.tracked_job_ttl = std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
     state.eval_mode = config.server.eval_mode;
     state.default_thinking_enabled = config.server.default_thinking_enabled;
+    state.fold_reasoning_into_content = config.server.fold_reasoning_into_content;
     state.slow_request_warn_threshold = if config.server.slow_request_warn_secs == 0 {
         None
     } else {
@@ -357,6 +358,10 @@ async fn main() -> Result<()> {
     tracing::debug!(
         default_thinking_enabled = ?state.default_thinking_enabled,
         "chat-template thinking default configured"
+    );
+    tracing::debug!(
+        enabled = state.fold_reasoning_into_content,
+        "reasoning-content compatibility folding configured"
     );
 
     // Restore terminal training jobs persisted from previous runs so the

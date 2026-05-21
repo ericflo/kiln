@@ -65,6 +65,9 @@ const SERVE_EXAMPLES: &str = r#"Examples:
   KILN_DEFAULT_THINKING_ENABLED=false kiln serve
       Default Qwen/DeepSeek-style chat templates to non-thinking mode unless a request overrides chat_template_kwargs.enable_thinking.
 
+  KILN_FOLD_REASONING_INTO_CONTENT=true kiln serve
+      Duplicate separated reasoning into assistant content for compatibility with clients that treat empty content as no response.
+
   kiln serve --config kiln.toml
       Start with a checked TOML config. Run `kiln config --file kiln.toml` first if you want to preview the effective settings.
 

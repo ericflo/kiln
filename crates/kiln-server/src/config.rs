@@ -73,6 +73,9 @@ pub struct ServerConfig {
     /// preserves the model template default; requests can still override via
     /// `chat_template_kwargs.enable_thinking`.
     pub default_thinking_enabled: Option<bool>,
+    /// Copy separated `reasoning_content` into `content` for clients that do
+    /// not understand reasoning channels. Requests can override this.
+    pub fold_reasoning_into_content: bool,
     /// Emit a structured warning when a chat completion takes at least this
     /// many seconds. Set to 0 to disable.
     pub slow_request_warn_secs: u64,
@@ -376,6 +379,7 @@ impl Default for ServerConfig {
             request_timeout_secs: 600,
             eval_mode: false,
             default_thinking_enabled: None,
+            fold_reasoning_into_content: false,
             slow_request_warn_secs: 30,
             // Hard ceiling on graceful-shutdown drain. With proactive
             // engine.stop() on signal, real draining typically completes
@@ -593,6 +597,11 @@ impl KilnConfig {
             && let Some(enabled) = parse_bool_env(&v)
         {
             self.server.default_thinking_enabled = Some(enabled);
+        }
+        if let Ok(v) = std::env::var("KILN_FOLD_REASONING_INTO_CONTENT")
+            && let Some(enabled) = parse_bool_env(&v)
+        {
+            self.server.fold_reasoning_into_content = enabled;
         }
         if let Ok(v) = std::env::var("KILN_SLOW_REQUEST_WARN_SECS") {
             if let Ok(s) = v.parse() {
@@ -852,6 +861,7 @@ mod tests {
         assert_eq!(config.server.request_timeout_secs, 600);
         assert!(!config.server.eval_mode);
         assert_eq!(config.server.default_thinking_enabled, None);
+        assert!(!config.server.fold_reasoning_into_content);
         assert_eq!(config.server.slow_request_warn_secs, 30);
         assert_eq!(config.server.shutdown_timeout_secs, 5);
         assert_eq!(config.model.model_id, "Qwen/Qwen3.5-4B");
@@ -904,6 +914,7 @@ port = 9000
 request_timeout_secs = 60
 eval_mode = true
 default_thinking_enabled = false
+fold_reasoning_into_content = true
 slow_request_warn_secs = 15
 shutdown_timeout_secs = 10
 
@@ -960,6 +971,7 @@ composed_cache_max_entries = 8
         assert_eq!(config.server.request_timeout_secs, 60);
         assert!(config.server.eval_mode);
         assert_eq!(config.server.default_thinking_enabled, Some(false));
+        assert!(config.server.fold_reasoning_into_content);
         assert_eq!(config.server.slow_request_warn_secs, 15);
         assert_eq!(config.model.path.as_deref(), Some("/models/qwen"));
         assert_eq!(config.model.model_id, "custom/model");
@@ -1009,6 +1021,7 @@ port = 3000
         assert_eq!(config.server.request_timeout_secs, 600); // default
         assert!(!config.server.eval_mode); // default
         assert_eq!(config.server.default_thinking_enabled, None); // default
+        assert!(!config.server.fold_reasoning_into_content); // default
         assert_eq!(config.server.slow_request_warn_secs, 30); // default
         assert_eq!(config.model.model_id, "Qwen/Qwen3.5-4B"); // default
         assert_eq!(config.memory.inference_memory_fraction, 0.7); // default
@@ -1086,6 +1099,7 @@ port = 3000
             std::env::set_var("KILN_PORT", "7777");
             std::env::set_var("KILN_EVAL_MODE", "true");
             std::env::set_var("KILN_DEFAULT_THINKING_ENABLED", "false");
+            std::env::set_var("KILN_FOLD_REASONING_INTO_CONTENT", "true");
             std::env::set_var("KILN_SLOW_REQUEST_WARN_SECS", "12");
             std::env::set_var("KILN_MODEL_PATH", "/tmp/model");
             std::env::set_var("KILN_INFERENCE_MEMORY_FRACTION", "0.9");
@@ -1115,6 +1129,7 @@ port = 3000
         assert_eq!(config.server.port, 7777);
         assert!(config.server.eval_mode);
         assert_eq!(config.server.default_thinking_enabled, Some(false));
+        assert!(config.server.fold_reasoning_into_content);
         assert_eq!(config.server.slow_request_warn_secs, 12);
         assert_eq!(config.model.path.as_deref(), Some("/tmp/model"));
         assert_eq!(config.memory.inference_memory_fraction, 0.9);
@@ -1146,6 +1161,7 @@ port = 3000
             std::env::remove_var("KILN_PORT");
             std::env::remove_var("KILN_EVAL_MODE");
             std::env::remove_var("KILN_DEFAULT_THINKING_ENABLED");
+            std::env::remove_var("KILN_FOLD_REASONING_INTO_CONTENT");
             std::env::remove_var("KILN_SLOW_REQUEST_WARN_SECS");
             std::env::remove_var("KILN_MODEL_PATH");
             std::env::remove_var("KILN_INFERENCE_MEMORY_FRACTION");

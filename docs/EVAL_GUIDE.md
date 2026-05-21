@@ -523,6 +523,15 @@ omits it, so individual examples can still opt back into thinking with
 reports the configured default, and chat responses include metadata showing the
 thinking mode used for that response.
 
+For OpenAI-compatible chat clients, separated reasoning is returned as
+`choices[].message.reasoning_content`; `choices[].message.content` is only the
+final answer. If the model stops while still reasoning, `content` can be empty
+and response metadata reports `final_content_empty=true` with
+`content_empty_reason="reasoning_without_final_content"`. Compatibility
+clients can set `fold_reasoning_into_content=true`, or configure
+`server.fold_reasoning_into_content = true`, to duplicate the reasoning block
+into `content` while preserving the separate reasoning field.
+
 ### 2. Tool calls — XML and JSON both score
 
 Qwen3.5's *native* tool-call wire form is XML:

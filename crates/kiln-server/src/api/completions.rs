@@ -93,6 +93,15 @@ fn effective_thinking_enabled_for_request(
     request_thinking_enabled(req).or(state.default_thinking_enabled)
 }
 
+fn fold_reasoning_into_content_for_request(state: &AppState, req: &ChatCompletionRequest) -> bool {
+    req.fold_reasoning_into_content
+        .unwrap_or(state.fold_reasoning_into_content)
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn thinking_source_for_request(state: &AppState, req: &ChatCompletionRequest) -> &'static str {
     match req
         .chat_template_kwargs
@@ -137,6 +146,31 @@ fn chat_completion_metadata_from_prompt(
         thinking_mode: thinking_mode_for_prompt(prompt_text).to_string(),
         thinking_source: thinking_source_for_request(state, req),
         default_thinking_enabled: state.default_thinking_enabled,
+        final_content_empty: false,
+        content_empty_reason: None,
+        reasoning_folded_into_content: false,
+    }
+}
+
+fn chat_completion_metadata_from_prompt_and_output(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    prompt_text: &str,
+    output: &AssistantOutputParts,
+) -> ChatCompletionMetadata {
+    let fold_reasoning = fold_reasoning_into_content_for_request(state, req);
+    ChatCompletionMetadata {
+        thinking_enabled: prompt_starts_in_reasoning(prompt_text),
+        thinking_mode: thinking_mode_for_prompt(prompt_text).to_string(),
+        thinking_source: thinking_source_for_request(state, req),
+        default_thinking_enabled: state.default_thinking_enabled,
+        final_content_empty: output.content.is_empty(),
+        content_empty_reason: content_empty_reason(output),
+        reasoning_folded_into_content: fold_reasoning
+            && output
+                .reasoning_content
+                .as_deref()
+                .is_some_and(|text| !text.is_empty()),
     }
 }
 
@@ -160,6 +194,13 @@ fn chat_completion_metadata_from_cached_output(
         },
         thinking_source: thinking_source_for_request(state, req),
         default_thinking_enabled: state.default_thinking_enabled,
+        final_content_empty: cached_output.content.is_empty(),
+        content_empty_reason: content_empty_reason(cached_output),
+        reasoning_folded_into_content: fold_reasoning_into_content_for_request(state, req)
+            && cached_output
+                .reasoning_content
+                .as_deref()
+                .is_some_and(|text| !text.is_empty()),
     }
 }
 
@@ -177,7 +218,27 @@ fn chat_completion_metadata_from_request(
         },
         thinking_source: thinking_source_for_request(state, req),
         default_thinking_enabled: state.default_thinking_enabled,
+        final_content_empty: false,
+        content_empty_reason: None,
+        reasoning_folded_into_content: false,
     }
+}
+
+fn content_empty_reason(output: &AssistantOutputParts) -> Option<&'static str> {
+    if !output.content.is_empty() {
+        return None;
+    }
+    if output
+        .reasoning_content
+        .as_deref()
+        .is_some_and(|text| !text.is_empty())
+    {
+        return Some("reasoning_without_final_content");
+    }
+    if output.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) {
+        return Some("tool_call");
+    }
+    Some("no_content")
 }
 
 fn ensure_eval_mode_no_think_default(
@@ -654,6 +715,56 @@ impl AssistantOutputParts {
             self.content.as_str()
         }
     }
+}
+
+fn folded_reasoning_content(reasoning: &str, content: &str) -> String {
+    let folded = format!("{REASONING_OPEN_TAG}{reasoning}{REASONING_CLOSE_TAG}");
+    if content.is_empty() {
+        folded
+    } else {
+        format!("{folded}\n\n{content}")
+    }
+}
+
+fn unfold_reasoning_from_content(content: &str, reasoning: &str) -> String {
+    let folded_prefix = format!("{REASONING_OPEN_TAG}{reasoning}{REASONING_CLOSE_TAG}");
+    let Some(rest) = content.strip_prefix(&folded_prefix) else {
+        return content.to_string();
+    };
+    rest.strip_prefix("\n\n").unwrap_or(rest).to_string()
+}
+
+fn response_content_for_cache(content: &str, reasoning: Option<&str>) -> String {
+    match reasoning {
+        Some(reasoning) if !reasoning.is_empty() => unfold_reasoning_from_content(content, reasoning),
+        _ => content.to_string(),
+    }
+}
+
+fn content_with_reasoning_policy(
+    content: String,
+    reasoning: Option<&str>,
+    fold_reasoning_into_content: bool,
+) -> String {
+    if fold_reasoning_into_content
+        && let Some(reasoning) = reasoning
+        && !reasoning.is_empty()
+    {
+        return folded_reasoning_content(reasoning, &content);
+    }
+    content
+}
+
+fn apply_reasoning_content_policy(
+    mut output: AssistantOutputParts,
+    fold_reasoning_into_content: bool,
+) -> AssistantOutputParts {
+    output.content = content_with_reasoning_policy(
+        output.content,
+        output.reasoning_content.as_deref(),
+        fold_reasoning_into_content,
+    );
+    output
 }
 
 struct PrefillProgressGuard(CancelHandle);
@@ -1217,6 +1328,7 @@ fn deterministic_completion_cache_key(
     state: &AppState,
     prompt_tokens: &[TokenId],
     sampling: &SamplingParams,
+    fold_reasoning_into_content: bool,
 ) -> Option<DeterministicCompletionCacheKey> {
     let greedy = sampling.is_effectively_greedy();
     if !greedy && sampling.seed.is_none() {
@@ -1246,6 +1358,7 @@ fn deterministic_completion_cache_key(
         top_p_bits,
         top_k,
         seed,
+        fold_reasoning_into_content,
     })
 }
 
@@ -1258,6 +1371,8 @@ struct DeterministicChatRequestCacheKey<'a> {
     tool_choice: Option<&'a serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chat_template_kwargs: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "is_false")]
+    fold_reasoning_into_content: bool,
     temperature_bits: u32,
     max_tokens: usize,
     stop: Vec<String>,
@@ -1275,6 +1390,8 @@ struct DeterministicChatChoicesCacheKey<'a> {
     tool_choice: Option<&'a serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chat_template_kwargs: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "is_false")]
+    fold_reasoning_into_content: bool,
     n: usize,
     temperature_bits: u32,
     max_tokens: usize,
@@ -1292,10 +1409,25 @@ fn deterministic_chat_request_cache_key(
     deterministic_chat_request_cache_key_with_vocab_size(req, sampling, usize::MAX)
 }
 
+#[cfg(test)]
 fn deterministic_chat_request_cache_key_with_vocab_size(
     req: &ChatCompletionRequest,
     sampling: &SamplingParams,
     vocab_size: usize,
+) -> Result<Option<String>, ApiError> {
+    deterministic_chat_request_cache_key_with_vocab_size_and_fold(
+        req,
+        sampling,
+        vocab_size,
+        req.fold_reasoning_into_content.unwrap_or(false),
+    )
+}
+
+fn deterministic_chat_request_cache_key_with_vocab_size_and_fold(
+    req: &ChatCompletionRequest,
+    sampling: &SamplingParams,
+    vocab_size: usize,
+    fold_reasoning_into_content: bool,
 ) -> Result<Option<String>, ApiError> {
     if req.n.unwrap_or(1) != 1 {
         return Ok(None);
@@ -1332,6 +1464,7 @@ fn deterministic_chat_request_cache_key_with_vocab_size(
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
         chat_template_kwargs: normalized_chat_template_kwargs,
+        fold_reasoning_into_content,
         temperature_bits,
         max_tokens: sampling.max_tokens,
         stop,
@@ -1343,10 +1476,11 @@ fn deterministic_chat_request_cache_key_with_vocab_size(
     .map_err(|err| ApiError::internal(format!("failed to key chat request cache: {err}")))
 }
 
-fn deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size(
+fn deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size_and_fold(
     req: &ChatCompletionRequest,
     seed: Option<u64>,
     vocab_size: usize,
+    fold_reasoning_into_content: bool,
 ) -> Result<Option<String>, ApiError> {
     if req.adapter.is_explicit() || req.adapters.is_some() {
         return Ok(None);
@@ -1385,6 +1519,7 @@ fn deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size(
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
         chat_template_kwargs: normalized_chat_template_kwargs,
+        fold_reasoning_into_content,
         temperature_bits,
         max_tokens,
         stop,
@@ -1405,11 +1540,28 @@ fn deterministic_chat_choices_cache_key(
     deterministic_chat_choices_cache_key_with_vocab_size(req, n_per, sampling, usize::MAX)
 }
 
+#[cfg(test)]
 fn deterministic_chat_choices_cache_key_with_vocab_size(
     req: &ChatCompletionRequest,
     n_per: usize,
     sampling: &SamplingParams,
     vocab_size: usize,
+) -> Result<Option<String>, ApiError> {
+    deterministic_chat_choices_cache_key_with_vocab_size_and_fold(
+        req,
+        n_per,
+        sampling,
+        vocab_size,
+        req.fold_reasoning_into_content.unwrap_or(false),
+    )
+}
+
+fn deterministic_chat_choices_cache_key_with_vocab_size_and_fold(
+    req: &ChatCompletionRequest,
+    n_per: usize,
+    sampling: &SamplingParams,
+    vocab_size: usize,
+    fold_reasoning_into_content: bool,
 ) -> Result<Option<String>, ApiError> {
     if n_per <= 1 || req.adapter.is_explicit() || req.adapters.is_some() {
         return Ok(None);
@@ -1442,6 +1594,7 @@ fn deterministic_chat_choices_cache_key_with_vocab_size(
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
         chat_template_kwargs: normalized_chat_template_kwargs,
+        fold_reasoning_into_content,
         n: n_per,
         temperature_bits,
         max_tokens: sampling.max_tokens,
@@ -1454,27 +1607,30 @@ fn deterministic_chat_choices_cache_key_with_vocab_size(
     .map_err(|err| ApiError::internal(format!("failed to key chat choices cache: {err}")))
 }
 
-fn deterministic_chat_choices_cache_key_from_single_prompt_batch_with_vocab_size(
+fn deterministic_chat_choices_cache_key_from_single_prompt_batch_with_vocab_size_and_fold(
     req: &BatchCompletionRequest,
     vocab_size: usize,
+    fold_reasoning_into_content: bool,
 ) -> Result<Option<String>, ApiError> {
     if req.prompts.len() != 1 || req.adapter.is_some() || req.adapters.is_some() {
         return Ok(None);
     }
 
-    deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size(
+    deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size_and_fold(
         req,
         &req.prompts[0],
         req.seed,
         vocab_size,
+        fold_reasoning_into_content,
     )
 }
 
-fn deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size(
+fn deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size_and_fold(
     req: &BatchCompletionRequest,
     messages: &[Message],
     seed: Option<u64>,
     vocab_size: usize,
+    fold_reasoning_into_content: bool,
 ) -> Result<Option<String>, ApiError> {
     if req.adapter.is_some() || req.adapters.is_some() {
         return Ok(None);
@@ -1518,6 +1674,7 @@ fn deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size(
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
         chat_template_kwargs: normalized_chat_template_kwargs,
+        fold_reasoning_into_content,
         n: n_per,
         temperature_bits,
         max_tokens,
@@ -1543,11 +1700,12 @@ fn batch_synth_message_cache_keys(messages: &[Message]) -> Vec<ChatPromptMessage
         .collect()
 }
 
-fn deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size(
+fn deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size_and_fold(
     req: &BatchCompletionRequest,
     messages: &[Message],
     seed: Option<u64>,
     vocab_size: usize,
+    fold_reasoning_into_content: bool,
 ) -> Result<Option<String>, ApiError> {
     if req.adapter.is_some() || req.adapters.is_some() {
         return Ok(None);
@@ -1586,6 +1744,7 @@ fn deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size(
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
         chat_template_kwargs: normalized_chat_template_kwargs,
+        fold_reasoning_into_content,
         temperature_bits,
         max_tokens,
         stop,
@@ -1752,7 +1911,10 @@ fn chat_request_cache_value_from_choice(
     DeterministicChatRequestCacheValue {
         prompt_tokens,
         completion: DeterministicCompletionCacheValue {
-            text: choice.message.content.clone(),
+            text: response_content_for_cache(
+                &choice.message.content,
+                choice.message.reasoning_content.as_deref(),
+            ),
             reasoning_content: choice.message.reasoning_content.clone(),
             tool_calls: choice.message.tool_calls.clone(),
             finish_reason: choice.finish_reason.clone(),
@@ -1774,9 +1936,13 @@ fn store_chat_request_cache_from_chat_choices_response(
     let mut seen_keys = std::collections::HashSet::new();
     for choice in &resp.choices {
         let seed = req.seed.map(|seed| seed.wrapping_add(choice.index as u64));
-        let Some(key) = deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size(
-            req, seed, vocab_size,
-        )?
+        let Some(key) =
+            deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size_and_fold(
+                req,
+                seed,
+                vocab_size,
+                fold_reasoning_into_content_for_request(state, req),
+            )?
         else {
             continue;
         };
@@ -1806,9 +1972,13 @@ async fn zero_chat_choices_response_from_request_cache_hit(
         return Ok(None);
     }
 
-    let Some(key) = deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size(
-        req, req.seed, vocab_size,
-    )?
+    let Some(key) =
+        deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size_and_fold(
+            req,
+            req.seed,
+            vocab_size,
+            fold_reasoning_into_content_for_request(state, req),
+        )?
     else {
         return Ok(None);
     };
@@ -1836,7 +2006,10 @@ fn chat_choices_cache_value_from_response(
         .choices
         .iter()
         .map(|choice| DeterministicCompletionCacheValue {
-            text: choice.message.content.clone(),
+            text: response_content_for_cache(
+                &choice.message.content,
+                choice.message.reasoning_content.as_deref(),
+            ),
             reasoning_content: choice.message.reasoning_content.clone(),
             tool_calls: choice.message.tool_calls.clone(),
             finish_reason: choice.finish_reason.clone(),
@@ -1872,8 +2045,12 @@ fn response_from_cached_completion(
         cached.tool_calls,
         cached.finish_reason,
     );
-    let preview_source = cached_output.preview_source();
     let metadata = chat_completion_metadata_from_cached_output(state, req, &cached_output);
+    let cached_output = apply_reasoning_content_policy(
+        cached_output,
+        fold_reasoning_into_content_for_request(state, req),
+    );
+    let preview_source = cached_output.preview_source();
     record_recent_request(
         state,
         RequestRecord {
@@ -1944,6 +2121,20 @@ fn response_from_cached_chat_choices(
             (completion_tokens, output)
         })
         .collect::<Vec<_>>();
+    let metadata = cached_completions
+        .first()
+        .map(|(_, output)| chat_completion_metadata_from_cached_output(state, req, output))
+        .unwrap_or_else(|| chat_completion_metadata_from_request(state, req));
+    let fold_reasoning = fold_reasoning_into_content_for_request(state, req);
+    let cached_completions = cached_completions
+        .into_iter()
+        .map(|(completion_tokens, output)| {
+            (
+                completion_tokens,
+                apply_reasoning_content_policy(output, fold_reasoning),
+            )
+        })
+        .collect::<Vec<_>>();
     let preview_source = cached_completions
         .first()
         .map(|(_, output)| output.preview_source())
@@ -1952,11 +2143,6 @@ fn response_from_cached_chat_choices(
         .iter()
         .map(|(completion_tokens, _)| *completion_tokens)
         .sum::<usize>();
-    let metadata = cached_completions
-        .first()
-        .map(|(_, output)| chat_completion_metadata_from_cached_output(state, req, output))
-        .unwrap_or_else(|| chat_completion_metadata_from_request(state, req));
-
     record_recent_request(
         state,
         RequestRecord {
@@ -2214,7 +2400,10 @@ fn cache_value_from_response(
 ) -> Option<DeterministicCompletionCacheValue> {
     let choice = resp.choices.first()?;
     Some(DeterministicCompletionCacheValue {
-        text: choice.message.content.clone(),
+        text: response_content_for_cache(
+            &choice.message.content,
+            choice.message.reasoning_content.as_deref(),
+        ),
         reasoning_content: choice.message.reasoning_content.clone(),
         tool_calls: choice.message.tool_calls.clone(),
         finish_reason: choice.finish_reason.clone(),
@@ -2599,6 +2788,11 @@ pub struct ChatCompletionRequest {
     /// without smuggling control flags through user-visible prompt text.
     #[serde(default)]
     pub chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Kiln extension: duplicate separated reasoning text into `content` for
+    /// compatibility with clients that treat empty content as no response.
+    /// Defaults to the server setting, which is off by default.
+    #[serde(default)]
+    pub fold_reasoning_into_content: Option<bool>,
 }
 
 /// A single source adapter for per-request composition.
@@ -2736,6 +2930,10 @@ pub struct ChatCompletionMetadata {
     pub thinking_source: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_thinking_enabled: Option<bool>,
+    pub final_content_empty: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_empty_reason: Option<&'static str>,
+    pub reasoning_folded_into_content: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2992,11 +3190,12 @@ async fn chat_completions_inner(
     }
 
     if n_per > 1 {
-        let chat_choices_cache_key = deterministic_chat_choices_cache_key_with_vocab_size(
+        let chat_choices_cache_key = deterministic_chat_choices_cache_key_with_vocab_size_and_fold(
             &req,
             n_per,
             &sampling,
             state.model_config.vocab_size,
+            fold_reasoning_into_content_for_request(state, &req),
         )?;
         let can_hit_chat_choices_cache_before_adapter_work =
             state.active_adapter_name.read().unwrap().is_none();
@@ -3074,10 +3273,11 @@ async fn chat_completions_inner(
         return Ok(Json(resp).into_response());
     }
 
-    let chat_request_cache_key = deterministic_chat_request_cache_key_with_vocab_size(
+    let chat_request_cache_key = deterministic_chat_request_cache_key_with_vocab_size_and_fold(
         &req,
         &sampling,
         state.model_config.vocab_size,
+        fold_reasoning_into_content_for_request(state, &req),
     )?;
     let can_hit_chat_request_cache_before_adapter_work =
         state.active_adapter_name.read().unwrap().is_none();
@@ -3208,7 +3408,12 @@ async fn chat_completions_inner(
         }
     }
 
-    let completion_cache_key = deterministic_completion_cache_key(state, &prompt_tokens, &sampling);
+    let completion_cache_key = deterministic_completion_cache_key(
+        state,
+        &prompt_tokens,
+        &sampling,
+        fold_reasoning_into_content_for_request(state, &req),
+    );
     let mut completion_cache_owner = false;
     if let Some(key) = completion_cache_key.as_ref() {
         if req.stream {
@@ -3971,6 +4176,12 @@ async fn generate_real_batched(
         completion_usage_tokens(output.completion_tokens, &output.finish_reason);
     let assistant_output =
         assistant_output_from_model_output(req, &output.text, prompt_text, finish_reason);
+    let metadata =
+        chat_completion_metadata_from_prompt_and_output(state, req, prompt_text, &assistant_output);
+    let assistant_output = apply_reasoning_content_policy(
+        assistant_output,
+        fold_reasoning_into_content_for_request(state, req),
+    );
     let preview_source = assistant_output.preview_source();
     record_recent_request(
         state,
@@ -3987,7 +4198,6 @@ async fn generate_real_batched(
         },
     );
 
-    let metadata = chat_completion_metadata_from_prompt(state, req, prompt_text);
     let finish_reason = assistant_output.finish_reason.clone();
     Ok(ChatCompletionResponse {
         id,
@@ -4679,6 +4889,12 @@ async fn generate_real(
     // is byte-identical to before.
     let assistant_output =
         assistant_output_from_model_output(req, &output.text, prompt_text, finish_reason);
+    let metadata =
+        chat_completion_metadata_from_prompt_and_output(state, req, prompt_text, &assistant_output);
+    let assistant_output = apply_reasoning_content_policy(
+        assistant_output,
+        fold_reasoning_into_content_for_request(state, req),
+    );
 
     // Recent-requests preview wants the user-visible answer, but the
     // reasoning often dominates the first few hundred chars. Show
@@ -4700,7 +4916,6 @@ async fn generate_real(
         },
     );
 
-    let metadata = chat_completion_metadata_from_prompt(state, req, prompt_text);
     let finish_reason = assistant_output.finish_reason.clone();
     Ok(ChatCompletionResponse {
         id,
@@ -5520,6 +5735,12 @@ async fn generate_mock(
         .unwrap_or_else(|| state.served_model_id.clone());
     let completion_tokens = output_tokens.len();
     let assistant_output = assistant_output_from_split_parts(req, None, completion_text, "stop");
+    let metadata =
+        chat_completion_metadata_from_prompt_and_output(state, req, prompt_text, &assistant_output);
+    let assistant_output = apply_reasoning_content_policy(
+        assistant_output,
+        fold_reasoning_into_content_for_request(state, req),
+    );
 
     record_recent_request(
         state,
@@ -5542,7 +5763,6 @@ async fn generate_mock(
         },
     );
 
-    let metadata = chat_completion_metadata_from_prompt(state, req, prompt_text);
     let finish_reason = assistant_output.finish_reason.clone();
     Ok(ChatCompletionResponse {
         id,
@@ -5699,7 +5919,7 @@ pub struct BatchCompletionItem {
     pub prompt_index: usize,
     pub completion_index: usize,
     pub text: String,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<serde_json::Value>>,
@@ -5733,6 +5953,8 @@ struct DeterministicBatchCacheKeyWire<'a> {
     tool_choice: Option<&'a serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chat_template_kwargs: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "is_false")]
+    fold_reasoning_into_content: bool,
     n: usize,
     temperature_bits: u32,
     max_tokens: usize,
@@ -5821,10 +6043,20 @@ fn deterministic_batch_cache_key(
     deterministic_batch_cache_key_with_vocab_size(req, total_outputs, usize::MAX)
 }
 
+#[cfg(test)]
 fn deterministic_batch_cache_key_with_vocab_size(
     req: &BatchCompletionRequest,
     total_outputs: usize,
     vocab_size: usize,
+) -> Option<DeterministicBatchCacheKey> {
+    deterministic_batch_cache_key_with_vocab_size_and_fold(req, total_outputs, vocab_size, false)
+}
+
+fn deterministic_batch_cache_key_with_vocab_size_and_fold(
+    req: &BatchCompletionRequest,
+    total_outputs: usize,
+    vocab_size: usize,
+    fold_reasoning_into_content: bool,
 ) -> Option<DeterministicBatchCacheKey> {
     if total_outputs == 0 || req.adapter.is_some() || req.adapters.is_some() {
         return None;
@@ -5864,6 +6096,7 @@ fn deterministic_batch_cache_key_with_vocab_size(
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
         chat_template_kwargs: normalized_chat_template_kwargs,
+        fold_reasoning_into_content,
         n: req.n.unwrap_or(1),
         temperature_bits,
         max_tokens,
@@ -5887,18 +6120,25 @@ fn batch_response_from_cached_value(
     let completions = cached
         .completions
         .into_iter()
-        .map(|item| BatchCompletionItem {
-            prompt_index: item.prompt_index,
-            completion_index: item.completion_index,
-            text: item.text,
-            reasoning_content: item.reasoning_content,
-            tool_calls: item.tool_calls,
-            finish_reason: item.finish_reason,
-            usage: Usage {
-                prompt_tokens: item.prompt_tokens,
-                completion_tokens: item.completion_tokens,
-                total_tokens: item.prompt_tokens.saturating_add(item.completion_tokens),
-            },
+        .map(|item| {
+            let reasoning_content = item.reasoning_content;
+            BatchCompletionItem {
+                prompt_index: item.prompt_index,
+                completion_index: item.completion_index,
+                text: content_with_reasoning_policy(
+                    item.text,
+                    reasoning_content.as_deref(),
+                    state.fold_reasoning_into_content,
+                ),
+                reasoning_content,
+                tool_calls: item.tool_calls,
+                finish_reason: item.finish_reason,
+                usage: Usage {
+                    prompt_tokens: item.prompt_tokens,
+                    completion_tokens: item.completion_tokens,
+                    total_tokens: item.prompt_tokens.saturating_add(item.completion_tokens),
+                },
+            }
         })
         .collect();
 
@@ -5936,11 +6176,16 @@ fn batch_response_from_cached_chat_choices(
         .map(|(completion_index, completion)| {
             total_completion_tokens =
                 total_completion_tokens.saturating_add(completion.completion_tokens);
+            let reasoning_content = completion.reasoning_content;
             BatchCompletionItem {
                 prompt_index: 0,
                 completion_index,
-                text: completion.text,
-                reasoning_content: completion.reasoning_content,
+                text: content_with_reasoning_policy(
+                    completion.text,
+                    reasoning_content.as_deref(),
+                    state.fold_reasoning_into_content,
+                ),
+                reasoning_content,
                 tool_calls: completion.tool_calls,
                 finish_reason: completion.finish_reason,
                 usage: Usage {
@@ -5994,11 +6239,16 @@ fn batch_response_from_cached_chat_choice_groups(
         for (completion_index, completion) in cached.completions.into_iter().enumerate() {
             total_completion_tokens =
                 total_completion_tokens.saturating_add(completion.completion_tokens);
+            let reasoning_content = completion.reasoning_content;
             completions.push(BatchCompletionItem {
                 prompt_index,
                 completion_index,
-                text: completion.text,
-                reasoning_content: completion.reasoning_content,
+                text: content_with_reasoning_policy(
+                    completion.text,
+                    reasoning_content.as_deref(),
+                    state.fold_reasoning_into_content,
+                ),
+                reasoning_content,
                 tool_calls: completion.tool_calls,
                 finish_reason: completion.finish_reason,
                 usage: Usage {
@@ -6045,11 +6295,16 @@ fn batch_response_from_cached_chat_requests(
             total_prompt_tokens = total_prompt_tokens.saturating_add(cached.prompt_tokens);
             total_completion_tokens =
                 total_completion_tokens.saturating_add(completion.completion_tokens);
+            let reasoning_content = completion.reasoning_content;
             BatchCompletionItem {
                 prompt_index,
                 completion_index: 0,
-                text: completion.text,
-                reasoning_content: completion.reasoning_content,
+                text: content_with_reasoning_policy(
+                    completion.text,
+                    reasoning_content.as_deref(),
+                    state.fold_reasoning_into_content,
+                ),
+                reasoning_content,
                 tool_calls: completion.tool_calls,
                 finish_reason: completion.finish_reason,
                 usage: Usage {
@@ -6089,9 +6344,14 @@ fn batch_response_from_chat_request_cache_hits(
     let mut keys = Vec::with_capacity(req.prompts.len());
     for (prompt_index, messages) in req.prompts.iter().enumerate() {
         let seed = req.seed.map(|seed| seed.wrapping_add(prompt_index as u64));
-        let Some(key) = deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size(
-            req, messages, seed, vocab_size,
-        )?
+        let Some(key) =
+            deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size_and_fold(
+                req,
+                messages,
+                seed,
+                vocab_size,
+                state.fold_reasoning_into_content,
+            )?
         else {
             return Ok(None);
         };
@@ -6130,9 +6390,14 @@ fn batch_response_from_chat_choices_cache_hits(
         let seed = req
             .seed
             .map(|seed| seed.wrapping_add((prompt_index * n_per) as u64));
-        let Some(key) = deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size(
-            req, messages, seed, vocab_size,
-        )?
+        let Some(key) =
+            deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size_and_fold(
+                req,
+                messages,
+                seed,
+                vocab_size,
+                state.fold_reasoning_into_content,
+            )?
         else {
             return Ok(None);
         };
@@ -6171,7 +6436,7 @@ fn cache_value_from_batch_response(resp: &BatchCompletionResponse) -> Determinis
             .map(|item| DeterministicBatchCacheItem {
                 prompt_index: item.prompt_index,
                 completion_index: item.completion_index,
-                text: item.text.clone(),
+                text: response_content_for_cache(&item.text, item.reasoning_content.as_deref()),
                 reasoning_content: item.reasoning_content.clone(),
                 tool_calls: item.tool_calls.clone(),
                 finish_reason: item.finish_reason.clone(),
@@ -6190,7 +6455,7 @@ fn chat_request_cache_value_from_batch_item(
     Some(DeterministicChatRequestCacheValue {
         prompt_tokens: item.usage.prompt_tokens,
         completion: DeterministicCompletionCacheValue {
-            text: item.text.clone(),
+            text: response_content_for_cache(&item.text, item.reasoning_content.as_deref()),
             reasoning_content: item.reasoning_content.clone(),
             tool_calls: item.tool_calls.clone(),
             finish_reason: item.finish_reason.clone(),
@@ -6237,12 +6502,14 @@ fn store_chat_request_cache_from_batch_response(
             let seed = req
                 .seed
                 .map(|seed| seed.wrapping_add((prompt_index * n_per + expected) as u64));
-            let Some(key) = deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size(
-                req,
-                &req.prompts[prompt_index],
-                seed,
-                vocab_size,
-            )?
+            let Some(key) =
+                deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size_and_fold(
+                    req,
+                    &req.prompts[prompt_index],
+                    seed,
+                    vocab_size,
+                    state.fold_reasoning_into_content,
+                )?
             else {
                 continue;
             };
@@ -6286,7 +6553,7 @@ fn chat_choices_cache_value_from_batch_items(
         completions: items
             .into_iter()
             .map(|item| DeterministicCompletionCacheValue {
-                text: item.text.clone(),
+                text: response_content_for_cache(&item.text, item.reasoning_content.as_deref()),
                 reasoning_content: item.reasoning_content.clone(),
                 tool_calls: item.tool_calls.clone(),
                 finish_reason: item.finish_reason.clone(),
@@ -6325,12 +6592,14 @@ fn store_chat_choices_cache_from_batch_response(
         let seed = req
             .seed
             .map(|seed| seed.wrapping_add((prompt_index * n_per) as u64));
-        let Some(key) = deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size(
-            req,
-            &req.prompts[prompt_index],
-            seed,
-            vocab_size,
-        )?
+        let Some(key) =
+            deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size_and_fold(
+                req,
+                &req.prompts[prompt_index],
+                seed,
+                vocab_size,
+                state.fold_reasoning_into_content,
+            )?
         else {
             continue;
         };
@@ -6436,10 +6705,11 @@ async fn batch_completions_inner(
 
     apply_eval_mode_batch_defaults(state, &mut req);
 
-    let batch_cache_key = deterministic_batch_cache_key_with_vocab_size(
+    let batch_cache_key = deterministic_batch_cache_key_with_vocab_size_and_fold(
         &req,
         total_outputs,
         state.model_config.vocab_size,
+        state.fold_reasoning_into_content,
     );
     let can_hit_batch_cache_before_adapter_work =
         state.active_adapter_name.read().unwrap().is_none();
@@ -6479,9 +6749,10 @@ async fn batch_completions_inner(
     }
 
     let chat_choices_cache_key =
-        deterministic_chat_choices_cache_key_from_single_prompt_batch_with_vocab_size(
+        deterministic_chat_choices_cache_key_from_single_prompt_batch_with_vocab_size_and_fold(
             &req,
             state.model_config.vocab_size,
+            state.fold_reasoning_into_content,
         )?;
     if can_hit_batch_cache_before_adapter_work && let Some(key) = chat_choices_cache_key.as_ref() {
         let probe = state.chat_choices_cache.lock().unwrap().probe(key);
@@ -6767,6 +7038,7 @@ async fn batch_completions_inner(
                         tools: tools.clone(),
                         tool_choice: tool_choice.clone(),
                         chat_template_kwargs: chat_template_kwargs.clone(),
+                        fold_reasoning_into_content: None,
                     };
                     let resp = if let Some((prompt_text, prompt_tokens)) = prepared_prompt.as_ref()
                     {
@@ -6996,6 +7268,7 @@ async fn generate_multi_chat_response(
             tools: tools.clone(),
             tool_choice: tool_choice.clone(),
             chat_template_kwargs: req.chat_template_kwargs.clone(),
+            fold_reasoning_into_content: req.fold_reasoning_into_content,
         };
         let resp = generate_one_response(state, synth_req).await?;
         responses.push((completion_idx, resp));
@@ -7152,10 +7425,11 @@ async fn generate_one_response(
     apply_eval_mode_chat_defaults(state, &mut req);
     let sampling = sampling_params_for_chat_request(&req);
 
-    let chat_request_cache_key = deterministic_chat_request_cache_key_with_vocab_size(
+    let chat_request_cache_key = deterministic_chat_request_cache_key_with_vocab_size_and_fold(
         &req,
         &sampling,
         state.model_config.vocab_size,
+        fold_reasoning_into_content_for_request(state, &req),
     )?;
     let can_hit_chat_request_cache_before_prompt_work =
         state.loaded_adapter_name.read().unwrap().is_none();
@@ -7224,10 +7498,11 @@ async fn generate_one_prepared_prompt_response(
     apply_eval_mode_chat_defaults(state, &mut req);
     let sampling = sampling_params_for_chat_request(&req);
 
-    let chat_request_cache_key = deterministic_chat_request_cache_key_with_vocab_size(
+    let chat_request_cache_key = deterministic_chat_request_cache_key_with_vocab_size_and_fold(
         &req,
         &sampling,
         state.model_config.vocab_size,
+        fold_reasoning_into_content_for_request(state, &req),
     )?;
     let can_hit_chat_request_cache_before_prompt_work =
         state.loaded_adapter_name.read().unwrap().is_none();
@@ -7288,7 +7563,12 @@ async fn generate_one_prepared_response(
     prompt_text: &str,
     prompt_tokens: &[TokenId],
 ) -> Result<ChatCompletionResponse, ApiError> {
-    let completion_cache_key = deterministic_completion_cache_key(state, &prompt_tokens, &sampling);
+    let completion_cache_key = deterministic_completion_cache_key(
+        state,
+        prompt_tokens,
+        sampling,
+        fold_reasoning_into_content_for_request(state, req),
+    );
     let mut completion_cache_owner = false;
     if let Some(key) = completion_cache_key.as_ref() {
         let claim = state.completion_cache.lock().unwrap().claim(key);
@@ -8095,6 +8375,186 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_only_output_serializes_reasoning_channel_and_empty_reason_metadata() {
+        let state = make_qwen_template_test_state();
+        let req = parse_request(
+            r#"{"messages":[{"role":"user","content":"think only"}],"temperature":0.0,"max_tokens":4}"#,
+        );
+        let prompt_text = "<|im_start|>assistant\n<think>\n";
+        let assistant_output = assistant_output_from_split_parts(
+            &req,
+            Some("Need one more step.".to_string()),
+            String::new(),
+            "length",
+        );
+        let metadata =
+            chat_completion_metadata_from_prompt_and_output(&state, &req, prompt_text, &assistant_output);
+        let resp = ChatCompletionResponse {
+            id: "chatcmpl-test".to_string(),
+            object: "chat.completion",
+            created: 0,
+            model: "kiln-test".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: "assistant".to_string(),
+                    content: assistant_output.content,
+                    reasoning_content: assistant_output.reasoning_content,
+                    tool_calls: assistant_output.tool_calls,
+                    name: None,
+                    tool_call_id: None,
+                },
+                finish_reason: assistant_output.finish_reason,
+                completion_tokens: 4,
+            }],
+            usage: Usage {
+                prompt_tokens: 3,
+                completion_tokens: 4,
+                total_tokens: 7,
+            },
+            metadata,
+        };
+
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["choices"][0]["message"]["content"], "");
+        assert_eq!(
+            json["choices"][0]["message"]["reasoning_content"],
+            "Need one more step."
+        );
+        assert_eq!(json["metadata"]["final_content_empty"], true);
+        assert_eq!(
+            json["metadata"]["content_empty_reason"],
+            "reasoning_without_final_content"
+        );
+        assert_eq!(json["metadata"]["reasoning_folded_into_content"], false);
+    }
+
+    #[test]
+    fn reasoning_folding_duplicates_reasoning_into_content_without_hiding_channel() {
+        let state = make_qwen_template_test_state();
+        let req = parse_request(
+            r#"{
+                "messages":[{"role":"user","content":"think only"}],
+                "fold_reasoning_into_content":true,
+                "temperature":0.0,
+                "max_tokens":4
+            }"#,
+        );
+        let prompt_text = "<|im_start|>assistant\n<think>\n";
+        let assistant_output = assistant_output_from_split_parts(
+            &req,
+            Some("Need one more step.".to_string()),
+            String::new(),
+            "length",
+        );
+        let metadata =
+            chat_completion_metadata_from_prompt_and_output(&state, &req, prompt_text, &assistant_output);
+        let assistant_output = apply_reasoning_content_policy(
+            assistant_output,
+            fold_reasoning_into_content_for_request(&state, &req),
+        );
+
+        assert_eq!(
+            assistant_output.content,
+            "<think>\nNeed one more step.</think>"
+        );
+        assert_eq!(
+            assistant_output.reasoning_content.as_deref(),
+            Some("Need one more step.")
+        );
+        assert!(metadata.final_content_empty);
+        assert_eq!(
+            metadata.content_empty_reason,
+            Some("reasoning_without_final_content")
+        );
+        assert!(metadata.reasoning_folded_into_content);
+    }
+
+    #[test]
+    fn request_reasoning_fold_override_wins_over_server_default() {
+        let mut state = make_qwen_template_test_state();
+        state.fold_reasoning_into_content = true;
+        let req = parse_request(
+            r#"{
+                "messages":[{"role":"user","content":"think only"}],
+                "fold_reasoning_into_content":false,
+                "temperature":0.0,
+                "max_tokens":4
+            }"#,
+        );
+        let assistant_output = assistant_output_from_split_parts(
+            &req,
+            Some("Private scratchpad.".to_string()),
+            String::new(),
+            "length",
+        );
+        let metadata = chat_completion_metadata_from_prompt_and_output(
+            &state,
+            &req,
+            "<|im_start|>assistant\n<think>\n",
+            &assistant_output,
+        );
+        let assistant_output = apply_reasoning_content_policy(
+            assistant_output,
+            fold_reasoning_into_content_for_request(&state, &req),
+        );
+
+        assert_eq!(assistant_output.content, "");
+        assert_eq!(
+            assistant_output.reasoning_content.as_deref(),
+            Some("Private scratchpad.")
+        );
+        assert!(!metadata.reasoning_folded_into_content);
+    }
+
+    #[test]
+    fn folded_reasoning_is_unfolded_before_cache_storage() {
+        let content = folded_reasoning_content("Scratchpad", "Final answer");
+        assert_eq!(
+            response_content_for_cache(&content, Some("Scratchpad")),
+            "Final answer"
+        );
+
+        let response = ChatCompletionResponse {
+            id: "chatcmpl-test".to_string(),
+            object: "chat.completion",
+            created: 0,
+            model: "kiln-test".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: "assistant".to_string(),
+                    content,
+                    reasoning_content: Some("Scratchpad".to_string()),
+                    tool_calls: None,
+                    name: None,
+                    tool_call_id: None,
+                },
+                finish_reason: "stop".to_string(),
+                completion_tokens: 3,
+            }],
+            usage: Usage {
+                prompt_tokens: 2,
+                completion_tokens: 3,
+                total_tokens: 5,
+            },
+            metadata: ChatCompletionMetadata {
+                thinking_enabled: true,
+                thinking_mode: "reasoning".to_string(),
+                thinking_source: "template_default",
+                default_thinking_enabled: None,
+                final_content_empty: false,
+                content_empty_reason: None,
+                reasoning_folded_into_content: true,
+            },
+        };
+
+        let cached = cache_value_from_response(&response).unwrap();
+        assert_eq!(cached.text, "Final answer");
+        assert_eq!(cached.reasoning_content.as_deref(), Some("Scratchpad"));
+    }
+
+    #[test]
     fn message_tool_calls_round_trip_preserved() {
         let json = r#"{
             "messages":[
@@ -8412,6 +8872,9 @@ mod tests {
                 thinking_mode: "non_reasoning".to_string(),
                 thinking_source: "template_default",
                 default_thinking_enabled: None,
+                final_content_empty: true,
+                content_empty_reason: Some("tool_call"),
+                reasoning_folded_into_content: false,
             },
         };
 
@@ -8527,8 +8990,29 @@ mod tests {
         assert_eq!(args["command"], "pwd");
         assert!(
             json.get("reasoning_content").is_none(),
-            "batch responses should not expose the internal reasoning cache field"
+            "batch responses should omit reasoning_content when absent"
         );
+    }
+
+    #[test]
+    fn batch_items_serialize_reasoning_content_when_present() {
+        let item = BatchCompletionItem {
+            prompt_index: 0,
+            completion_index: 0,
+            text: String::new(),
+            reasoning_content: Some("Still thinking.".to_string()),
+            tool_calls: None,
+            finish_reason: "length".to_string(),
+            usage: Usage {
+                prompt_tokens: 5,
+                completion_tokens: 7,
+                total_tokens: 12,
+            },
+        };
+
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["text"], "");
+        assert_eq!(json["reasoning_content"], "Still thinking.");
     }
 
     #[test]
@@ -9350,7 +9834,8 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            deterministic_completion_cache_key(&state, &prompt_tokens, &unseeded_sampled).is_none(),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &unseeded_sampled, false)
+                .is_none(),
             "unseeded sampled decoding must stay uncached because it is intentionally random"
         );
 
@@ -9371,20 +9856,22 @@ mod tests {
             ..seeded_sampled_1.clone()
         };
         assert!(
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_sampled_1).is_some(),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_sampled_1, false)
+                .is_some(),
             "seeded sampled decoding is replayable and can use the completion cache"
         );
         assert_ne!(
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_sampled_1),
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_sampled_2),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_sampled_1, false),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_sampled_2, false),
             "sampled decoding must split cache entries by seed"
         );
         assert_ne!(
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_sampled_1),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_sampled_1, false),
             deterministic_completion_cache_key(
                 &state,
                 &prompt_tokens,
-                &seeded_sampled_different_temperature
+                &seeded_sampled_different_temperature,
+                false
             ),
             "sampled decoding must split cache entries by temperature"
         );
@@ -9413,23 +9900,43 @@ mod tests {
             ..seeded_full_distribution.clone()
         };
         assert_eq!(
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_full_distribution),
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_top_p_above_one),
+            deterministic_completion_cache_key(
+                &state,
+                &prompt_tokens,
+                &seeded_full_distribution,
+                false
+            ),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_top_p_above_one, false),
             "top_p >= 1.0 disables nucleus filtering, so full-distribution seeded sampling should share completion-cache entries"
         );
         assert_eq!(
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_full_distribution),
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_top_p_zero),
+            deterministic_completion_cache_key(
+                &state,
+                &prompt_tokens,
+                &seeded_full_distribution,
+                false
+            ),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_top_p_zero, false),
             "top_p=0 disables nucleus filtering, so full-distribution seeded sampling should share completion-cache entries"
         );
         assert_eq!(
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_full_distribution),
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_top_p_negative),
+            deterministic_completion_cache_key(
+                &state,
+                &prompt_tokens,
+                &seeded_full_distribution,
+                false
+            ),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_top_p_negative, false),
             "negative top_p disables nucleus filtering, so full-distribution seeded sampling should share completion-cache entries"
         );
         assert_eq!(
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_full_distribution),
-            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_top_k_disabled),
+            deterministic_completion_cache_key(
+                &state,
+                &prompt_tokens,
+                &seeded_full_distribution,
+                false
+            ),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &seeded_top_k_disabled, false),
             "top_k >= model vocab size is disabled, so full-distribution seeded sampling should share completion-cache entries"
         );
 
@@ -9451,8 +9958,8 @@ mod tests {
         };
 
         assert_eq!(
-            deterministic_completion_cache_key(&state, &prompt_tokens, &greedy_seed_1),
-            deterministic_completion_cache_key(&state, &prompt_tokens, &greedy_seed_2),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &greedy_seed_1, false),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &greedy_seed_2, false),
             "greedy decoding is seed/filter-independent, so seed/top-p/top-k must not split cache entries"
         );
         let top_k_one = SamplingParams {
@@ -9463,8 +9970,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            deterministic_completion_cache_key(&state, &prompt_tokens, &greedy_seed_1),
-            deterministic_completion_cache_key(&state, &prompt_tokens, &top_k_one),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &greedy_seed_1, false),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &top_k_one, false),
             "top_k=1 is effectively greedy, so seed/top-p/temperature must not split completion-cache entries"
         );
     }
@@ -10122,6 +10629,48 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_cache_keys_include_reasoning_fold_mode() {
+        let state = make_qwen_template_test_state();
+        let prompt_tokens = vec![1, 2, 3];
+        let sampling = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 4,
+            ..Default::default()
+        };
+        let plain = parse_request(
+            r#"{"messages":[{"role":"user","content":"same prompt"}],"temperature":0.0,"max_tokens":4}"#,
+        );
+        let folded = parse_request(
+            r#"{"messages":[{"role":"user","content":"same prompt"}],"fold_reasoning_into_content":true,"temperature":0.0,"max_tokens":4}"#,
+        );
+
+        assert_ne!(
+            deterministic_chat_request_cache_key(&plain, &sampling).unwrap(),
+            deterministic_chat_request_cache_key(&folded, &sampling).unwrap(),
+            "request-cache entries must split when content folding changes response shape"
+        );
+        assert_ne!(
+            deterministic_chat_choices_cache_key(&plain, 2, &sampling).unwrap(),
+            deterministic_chat_choices_cache_key(&folded, 2, &sampling).unwrap(),
+            "choices-cache entries must split when content folding changes response shape"
+        );
+        assert_ne!(
+            deterministic_completion_cache_key(&state, &prompt_tokens, &sampling, false),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &sampling, true),
+            "completion-cache entries must split when content folding changes response shape"
+        );
+
+        let batch = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"same batch prompt"}]],"temperature":0.0,"max_tokens":4}"#,
+        );
+        assert_ne!(
+            deterministic_batch_cache_key_with_vocab_size_and_fold(&batch, 1, usize::MAX, false),
+            deterministic_batch_cache_key_with_vocab_size_and_fold(&batch, 1, usize::MAX, true),
+            "batch-cache entries must split when server folding changes response shape"
+        );
+    }
+
+    #[test]
     fn deterministic_chat_request_cache_key_normalizes_text_content_parts() {
         let sampling = SamplingParams {
             temperature: 0.0,
@@ -10254,8 +10803,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            deterministic_completion_cache_key(&state, &prompt_tokens, &completion_a),
-            deterministic_completion_cache_key(&state, &prompt_tokens, &completion_b),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &completion_a, false),
+            deterministic_completion_cache_key(&state, &prompt_tokens, &completion_b, false),
             "stop sequence order and duplicates should not split completion-cache entries"
         );
 
@@ -13351,7 +13900,7 @@ mod tests {
         .unwrap();
         let prompt_tokens = encode_prompt_tokens(&state, &prompt_text).unwrap();
         let completion_cache_key =
-            deterministic_completion_cache_key(&state, &prompt_tokens, &sampling)
+            deterministic_completion_cache_key(&state, &prompt_tokens, &sampling, false)
                 .expect("greedy request should be deterministic");
         state
             .completion_cache
