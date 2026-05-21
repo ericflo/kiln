@@ -35,6 +35,39 @@ pub enum TrainReceiptStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainFailureReason {
+    DataSchemaError,
+    AdapterLoadFailed,
+    ZeroGroups,
+    ZeroActionTokens,
+    ZeroEnvTokens,
+    NanLoss,
+    Oom,
+    ShapeMismatch,
+    UnsafeLoraScale,
+    BaseAdapterMissing,
+    TrainingError,
+}
+
+impl TrainFailureReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DataSchemaError => "data_schema_error",
+            Self::AdapterLoadFailed => "adapter_load_failed",
+            Self::ZeroGroups => "zero_groups",
+            Self::ZeroActionTokens => "zero_action_tokens",
+            Self::ZeroEnvTokens => "zero_env_tokens",
+            Self::NanLoss => "nan_loss",
+            Self::Oom => "oom",
+            Self::ShapeMismatch => "shape_mismatch",
+            Self::UnsafeLoraScale => "unsafe_lora_scale",
+            Self::BaseAdapterMissing => "base_adapter_missing",
+            Self::TrainingError => "training_error",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TrainReceipt {
     pub schema_version: u32,
@@ -43,6 +76,8 @@ pub struct TrainReceipt {
     pub produced_at: String,
     pub status: TrainReceiptStatus,
     pub failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_message: Option<String>,
     pub kiln: KilnSourceReceipt,
     pub model: ModelReceipt,
     pub tokenizer: TokenizerReceipt,
@@ -335,6 +370,7 @@ impl TrainReceipt {
             produced_at: chrono::Utc::now().to_rfc3339(),
             status: TrainReceiptStatus::Success,
             failure_reason: None,
+            failure_message: None,
             kiln: detect_kiln_source(),
             model: ModelReceipt {
                 path: detect_model_path(),
@@ -370,9 +406,20 @@ impl TrainReceipt {
         }
     }
 
-    pub fn mark_failed(mut self, reason: impl Into<String>) -> Self {
+    pub fn mark_failed(self, message: impl Into<String>) -> Self {
+        let message = message.into();
+        let reason = classify_training_failure(&message);
+        self.mark_failed_with_reason(reason, message)
+    }
+
+    pub fn mark_failed_with_reason(
+        mut self,
+        reason: TrainFailureReason,
+        message: impl Into<String>,
+    ) -> Self {
         self.status = TrainReceiptStatus::Failed;
-        self.failure_reason = Some(reason.into());
+        self.failure_reason = Some(reason.as_str().to_string());
+        self.failure_message = Some(message.into());
         self
     }
 
@@ -401,6 +448,105 @@ impl TrainReceipt {
             .with_context(|| format!("deserialize train receipt {}", path.display()))?;
         Ok(Some(receipt))
     }
+}
+
+pub fn classify_training_failure(message: &str) -> TrainFailureReason {
+    let lower = message.to_ascii_lowercase();
+
+    if lower.contains("unsafe lora scaling") || lower.contains("lora rank must") {
+        return TrainFailureReason::UnsafeLoraScale;
+    }
+    if lower.contains("out of memory")
+        || lower.contains("cuda error: out of memory")
+        || lower.contains("cudnn_status_alloc_failed")
+        || lower.contains("cublas_status_alloc_failed")
+        || lower.contains("allocation failed")
+        || lower.contains("oom")
+    {
+        return TrainFailureReason::Oom;
+    }
+    if lower.contains("echo is enabled")
+        && (lower.contains("env_mask is empty")
+            || lower.contains("no environment tokens")
+            || lower.contains("env tokens")
+            || lower.contains("environment tokens"))
+    {
+        return TrainFailureReason::ZeroEnvTokens;
+    }
+    if lower.contains("no action tokens")
+        || lower.contains("zero action tokens")
+        || lower.contains("empty action_mask")
+        || lower.contains("action_mask is empty")
+        || lower.contains("no supervised assistant tokens")
+    {
+        return TrainFailureReason::ZeroActionTokens;
+    }
+    if lower.contains("no valid grpo groups")
+        || lower.contains("zero valid grpo groups")
+        || lower.contains("no grpo groups")
+        || lower.contains("no valid training examples")
+        || lower.contains("prompts must be non-empty")
+        || lower.contains("no valid prompts")
+        || lower.contains("no valid grpo completions")
+        || lower.contains("no valid completions")
+        || lower.contains("reward variance filter kept")
+        || lower.contains("below --min-groups")
+    {
+        return TrainFailureReason::ZeroGroups;
+    }
+    if lower.contains("base adapter")
+        && (lower.contains("shape mismatch")
+            || lower.contains("rank mismatch")
+            || lower.contains("target_modules mismatch")
+            || lower.contains("missing tensor")
+            || lower.contains("unexpected tensor")
+            || lower.contains("shape conversion"))
+    {
+        return TrainFailureReason::ShapeMismatch;
+    }
+    if lower.contains("base adapter")
+        && (lower.contains("no such file")
+            || lower.contains("not found")
+            || lower.contains("does not exist")
+            || lower.contains("read base adapter config")
+            || lower.contains("read base adapter tensors"))
+    {
+        return TrainFailureReason::BaseAdapterMissing;
+    }
+    if (lower.contains("adapter") || lower.contains("safetensors"))
+        && (lower.contains("load")
+            || lower.contains("read")
+            || lower.contains("parse")
+            || lower.contains("deserialize"))
+    {
+        return TrainFailureReason::AdapterLoadFailed;
+    }
+    if lower.contains("non-finite loss")
+        || lower.contains("nan loss")
+        || lower.contains("loss nan")
+        || lower.contains("infinite loss")
+    {
+        return TrainFailureReason::NanLoss;
+    }
+    if lower.contains("malformed trajectory role")
+        || lower.contains("invalid trajectory")
+        || lower.contains("data schema")
+        || lower.contains("missing field")
+        || (lower.contains("json") && (lower.contains("parse") || lower.contains("deserialize")))
+    {
+        return TrainFailureReason::DataSchemaError;
+    }
+
+    TrainFailureReason::TrainingError
+}
+
+pub fn training_failure_error_message(message: &str) -> String {
+    let reason = classify_training_failure(message);
+    format!("failure_reason={}: {message}", reason.as_str())
+}
+
+pub fn annotate_training_error(err: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!("{}", training_failure_error_message(&format!("{err:#}")))
 }
 
 pub fn write_reward_filter_sidecar(
@@ -1104,8 +1250,56 @@ mod tests {
         receipt.write_to_adapter_dir(dir.path())?;
         let json = std::fs::read_to_string(dir.path().join(TRAIN_RECEIPT_FILENAME))?;
         assert!(json.contains("\"status\": \"failed\""));
-        assert!(json.contains("no valid GRPO groups"));
+        assert!(json.contains("\"failure_reason\": \"zero_groups\""));
+        assert!(json.contains("\"failure_message\": \"no valid GRPO groups after tokenization\""));
         Ok(())
+    }
+
+    #[test]
+    fn training_failure_reason_classifier_covers_standard_reasons() {
+        let cases = [
+            (
+                "parse GRPO JSONL dataset line 7: missing field `completions`",
+                TrainFailureReason::DataSchemaError,
+            ),
+            (
+                "load adapter tensors: safetensors deserialize failed",
+                TrainFailureReason::AdapterLoadFailed,
+            ),
+            (
+                "GRPO dry run: zero valid GRPO groups after filtering",
+                TrainFailureReason::ZeroGroups,
+            ),
+            (
+                "GRPO dry run: dataset has no action tokens after mask construction",
+                TrainFailureReason::ZeroActionTokens,
+            ),
+            (
+                "GRPO dry run: ECHO is enabled but env_mask is empty across all valid groups",
+                TrainFailureReason::ZeroEnvTokens,
+            ),
+            (
+                "grpo_train_jsonl: non-finite loss NaN at group 2",
+                TrainFailureReason::NanLoss,
+            ),
+            ("CUDA error: out of memory", TrainFailureReason::Oom),
+            (
+                "base adapter tensor shape mismatch for q_proj",
+                TrainFailureReason::ShapeMismatch,
+            ),
+            (
+                "read base adapter config /tmp/missing/adapter_config.json",
+                TrainFailureReason::BaseAdapterMissing,
+            ),
+            (
+                "unsafe LoRA scaling: alpha/rank = 3.000 exceeds the default limit",
+                TrainFailureReason::UnsafeLoraScale,
+            ),
+        ];
+
+        for (message, reason) in cases {
+            assert_eq!(classify_training_failure(message), reason, "{message}");
+        }
     }
 
     #[test]

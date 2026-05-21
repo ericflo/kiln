@@ -1718,7 +1718,7 @@ pub fn sft_train(
                 None,
                 Some(message),
             );
-            return Err(err);
+            return Err(crate::train_receipt::annotate_training_error(err));
         }
     };
     tracing::info!(
@@ -1771,7 +1771,7 @@ pub fn sft_train(
                 None,
                 Some(message),
             );
-            return Err(err);
+            return Err(crate::train_receipt::annotate_training_error(err));
         }
     };
 
@@ -2080,7 +2080,9 @@ pub fn sft_train(
         adapter_smoke_test,
         status_error,
     );
-    result.map(|(dir, _)| dir)
+    result
+        .map(|(dir, _)| dir)
+        .map_err(crate::train_receipt::annotate_training_error)
 }
 
 /// Run GRPO training on the provided groups using the already-loaded model.
@@ -2168,7 +2170,7 @@ pub fn grpo_train(
                 Vec::new(),
                 Some(message),
             );
-            return Err(err);
+            return Err(crate::train_receipt::annotate_training_error(err));
         }
     };
     tracing::info!(
@@ -2227,7 +2229,7 @@ pub fn grpo_train(
                 Vec::new(),
                 Some(message),
             );
-            return Err(err);
+            return Err(crate::train_receipt::annotate_training_error(err));
         }
     };
 
@@ -2599,7 +2601,9 @@ pub fn grpo_train(
         lora_grad_norms.finish(),
         status_error,
     );
-    result.map(|(dir, _)| dir)
+    result
+        .map(|(dir, _)| dir)
+        .map_err(crate::train_receipt::annotate_training_error)
 }
 
 /// Validate a streamed GRPO JSONL dataset and training configuration without
@@ -2836,14 +2840,14 @@ pub fn grpo_dry_run_jsonl(
     match (result, receipt_write) {
         (Ok(report), Ok(_)) => Ok(report),
         (Ok(_), Err(err)) => Err(err),
-        (Err(err), Ok(_)) => Err(err),
+        (Err(err), Ok(_)) => Err(crate::train_receipt::annotate_training_error(err)),
         (Err(err), Err(write_err)) => {
             tracing::warn!(
                 adapter = adapter_name,
                 error = %write_err,
                 "failed to write GRPO dry-run receipt after validation failure"
             );
-            Err(err)
+            Err(crate::train_receipt::annotate_training_error(err))
         }
     }
 }
@@ -2926,7 +2930,7 @@ pub fn grpo_train_jsonl(
                 Vec::new(),
                 Some(message),
             );
-            return Err(err);
+            return Err(crate::train_receipt::annotate_training_error(err));
         }
     };
     tracing::info!(
@@ -2979,7 +2983,7 @@ pub fn grpo_train_jsonl(
                 Vec::new(),
                 Some(message),
             );
-            return Err(err);
+            return Err(crate::train_receipt::annotate_training_error(err));
         }
     };
 
@@ -3419,7 +3423,9 @@ pub fn grpo_train_jsonl(
         lora_grad_norms.finish(),
         status_error,
     );
-    result.map(|(dir, _)| dir)
+    result
+        .map(|(dir, _)| dir)
+        .map_err(crate::train_receipt::annotate_training_error)
 }
 
 /// Tokenized data for a single completion within a GRPO group.
@@ -10740,6 +10746,7 @@ mod tests {
         )
         .unwrap_err();
 
+        assert!(err.to_string().contains("failure_reason=zero_env_tokens"));
         assert!(err.to_string().contains("ECHO is enabled"));
         let receipt =
             crate::train_receipt::TrainReceipt::read_from_adapter_dir(&output.join("echo-empty-env"))?
@@ -10749,7 +10756,14 @@ mod tests {
             crate::train_receipt::TrainReceiptStatus::Failed
         );
         assert_eq!(receipt.token_counts.env_tokens, 0);
-        assert!(receipt.failure_reason.unwrap().contains("ECHO is enabled"));
+        assert_eq!(receipt.failure_reason.as_deref(), Some("zero_env_tokens"));
+        assert!(
+            receipt
+                .failure_message
+                .as_deref()
+                .unwrap()
+                .contains("ECHO is enabled")
+        );
         Ok(())
     }
 
@@ -10775,6 +10789,7 @@ mod tests {
             false,
         )
         .unwrap_err();
+        assert!(err.to_string().contains("failure_reason=zero_groups"));
         assert!(err.to_string().contains("zero valid GRPO groups"));
 
         let report = grpo_dry_run_jsonl(
@@ -10823,6 +10838,7 @@ mod tests {
             false,
         )
         .unwrap_err();
+        assert!(err.to_string().contains("failure_reason=zero_groups"));
         assert!(err.to_string().contains("reward variance filter"));
         let fail_receipt =
             crate::train_receipt::TrainReceipt::read_from_adapter_dir(&output.join("filter-fail"))?
@@ -10831,6 +10847,7 @@ mod tests {
             fail_receipt.status,
             crate::train_receipt::TrainReceiptStatus::Failed
         );
+        assert_eq!(fail_receipt.failure_reason.as_deref(), Some("zero_groups"));
         assert_eq!(fail_receipt.data.reward_groups_filtered, 2);
         let fail_sidecar: crate::train_receipt::RewardFilterSidecar = serde_json::from_slice(
             &std::fs::read(fail_receipt.data.reward_filter_sidecar.as_ref().unwrap())?,

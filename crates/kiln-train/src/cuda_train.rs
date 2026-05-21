@@ -1371,7 +1371,7 @@ pub fn cuda_native_sft_train(
                 None,
                 Some(format!("{err:#}")),
             );
-            return Err(err);
+            return Err(crate::train_receipt::annotate_training_error(err));
         }
     };
 
@@ -1392,7 +1392,7 @@ pub fn cuda_native_sft_train(
             Some(alpha_over_rank),
             Some(message.clone()),
         );
-        anyhow::bail!(message);
+        anyhow::bail!("{}", crate::train_receipt::training_failure_error_message(&message));
     }
 
     let model = CudaModelWeights::from_gpu_weights(weights, model_config)
@@ -1452,7 +1452,7 @@ pub fn cuda_native_sft_train(
             Some(alpha_over_rank),
             Some(message.to_string()),
         );
-        anyhow::bail!(message);
+        anyhow::bail!("{}", crate::train_receipt::training_failure_error_message(message));
     }
 
     let total_steps = config.epochs * tokenized.len();

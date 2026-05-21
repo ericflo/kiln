@@ -1687,6 +1687,7 @@ pub fn opd_train(
     use std::collections::HashMap;
 
     if prompts.is_empty() {
+        let message = "opd_train: prompts must be non-empty";
         write_opd_train_receipt_best_effort(
             adapter_name,
             model_config,
@@ -1699,9 +1700,9 @@ pub fn opd_train(
             token_counts,
             run_started.elapsed().as_millis() as u64,
             None,
-            Some("opd_train: prompts must be non-empty".to_string()),
+            Some(message.to_string()),
         );
-        anyhow::bail!("opd_train: prompts must be non-empty");
+        anyhow::bail!("{}", crate::train_receipt::training_failure_error_message(message));
     }
 
     let device = weights.embed_tokens.device().clone();
@@ -1759,7 +1760,7 @@ pub fn opd_train(
                 None,
                 Some(format!("{err:#}")),
             );
-            return Err(err);
+            return Err(crate::train_receipt::annotate_training_error(err));
         }
     };
 
@@ -1801,6 +1802,7 @@ pub fn opd_train(
     }
     if tokenized.is_empty() {
         data_stats.examples_filtered = prompts.len();
+        let message = "opd_train: no valid prompts after tokenization";
         write_opd_train_receipt_best_effort(
             adapter_name,
             model_config,
@@ -1813,9 +1815,9 @@ pub fn opd_train(
             token_counts,
             run_started.elapsed().as_millis() as u64,
             Some(alpha_over_rank),
-            Some("opd_train: no valid prompts after tokenization".to_string()),
+            Some(message.to_string()),
         );
-        anyhow::bail!("opd_train: no valid prompts after tokenization");
+        anyhow::bail!("{}", crate::train_receipt::training_failure_error_message(message));
     }
     data_stats.examples_filtered = prompts.len().saturating_sub(tokenized.len());
 

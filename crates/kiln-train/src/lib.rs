@@ -57,7 +57,7 @@ pub use lora_scaling::{
 };
 pub use train_receipt::{
     AdapterSmokePromptReceipt, AdapterSmokeTestReceipt, TRAIN_RECEIPT_FILENAME,
-    TRAIN_RECEIPT_SCHEMA_VERSION, TrainReceipt, TrainReceiptStatus,
+    TRAIN_RECEIPT_SCHEMA_VERSION, TrainFailureReason, TrainReceipt, TrainReceiptStatus,
 };
 pub use opd::{
     AgenticLossInputs, AgenticLossWeights, COLD_START_DEFAULT_EPOCHS, COLD_START_DEFAULT_PROMPTS,
