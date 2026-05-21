@@ -2177,6 +2177,65 @@ kiln eval-adapter --adapter NAME --tasks eval.tasks.jsonl --seeds 3 \
 - Warns if sigma is comparable to lift.
 - Records adapter and config hashes.
 
+**Status:** Implemented and validated on RunPod on 2026-05-21.
+
+**Implementation notes:** Added top-level `kiln eval-adapter` with the accepted
+command shape plus optional `--url` and `--output` flags. The command reads
+task JSONL, renders a chat-completions request template with placeholders such
+as `{{prompt}}`, `{{task.prompt}}`, `{{seed}}`, and `{{adapter_label}}`, then
+forces paired requests with the same task/seed: `adapter: null` for base and
+`adapter: NAME` for the candidate. The scorer executable receives a paired JSON
+object on stdin containing the task, seed, base response/content, and candidate
+response/content. Scorer output may be a numeric lift, a JSON object with
+`lift`/`delta`/`score`, or a JSON object with `base_score` and
+`adapter_score`. `eval_summary.json` records per-pair rows, mean lift, sample
+stdev, zero count, base/adapter means when available, wall-clock stats, task /
+template / scorer hashes, config hashes, adapter hashes from
+`/v1/debug/model-state`, and a warning when stdev is comparable to lift.
+
+**Validation evidence:**
+
+- Focused RunPod checks passed on RTX A6000 pod `qmfxie9izl6lc6`, lease
+  `pod-e6a9a744a671ae965e1c7f36`; sentinel
+  `/workspace/kiln-validation/issue33/focused-clean.done` recorded `exit=0`.
+- Focused commands run on a clean `origin/main` worktree with the issue 33
+  patch applied: `git diff --check`; `cargo test --locked -p kiln-server
+  eval_adapter_cli --lib`; `cargo test --locked -p kiln-server
+  parses_eval_adapter_command --lib`; and `cargo check --locked -p
+  kiln-server --bin kiln`. The three `eval_adapter_cli` unit tests and the CLI
+  parse test passed.
+- The first RunPod compile attempt caught a digest formatting bug in
+  `eval_adapter_cli.rs`; the code was fixed to hex-encode SHA-256 digests
+  explicitly, then the clean focused validation above was rerun.
+- Actual Qwen3.5-4B CUDA validation passed on the same A6000; sentinel
+  `/workspace/kiln-validation/issue33/actual-model.done` recorded `exit=0`.
+  The validation built `cargo build --locked --release -p kiln-server --bin
+  kiln --features cuda` with `KILN_CUDA_ARCHS=86`, booted the server with
+  `KILN_MODEL_PATH=/workspace/Qwen3.5-4B` and `KILN_EVAL_MODE=true`, copied the
+  previously trained real-Qwen adapter to
+  `/workspace/Qwen3.5-4B/adapters/issue33-eval-adapter`, and ran
+  `./target/release/kiln eval-adapter --adapter issue33-eval-adapter --tasks
+  ... --seeds 1 --request-template ... --scorer ... --output ... --url
+  http://127.0.0.1:8420`.
+- Real `eval_summary.json` artifact:
+  `/workspace/kiln-validation/issue33/actual-model/eval_summary.json`. Summary
+  check artifact:
+  `/workspace/kiln-validation/issue33/actual-model/summary_check.json`.
+- The actual-model summary recorded `pair_count=1`, `mean_lift=0.0`,
+  `stdev_lift=0.0`, `zero_count=1`, config hashes with `sha256:` prefixes, and
+  adapter hash
+  `sha256:4231c3eb3e65ffeea5aaf791309369fe230cd364518d955ee88d5f09715c80fb`
+  for `issue33-eval-adapter`. Both real base and adapter completions returned
+  `issue thirty three`, proving the command exercised the actual Qwen3.5-4B
+  chat path and the paired adapter request path.
+
+**Commit SHA:** Pending follow-up after commit.
+
+**Remaining risk:** The actual-model smoke proves the generic paired CLI,
+summary writing, config-hash capture, adapter-hash capture, and scorer
+contract. It intentionally used a one-task/one-seed smoke scorer and does not
+claim a capability lift for the copied adapter.
+
 ### 34. Add Direct HTTP Rollout Generation Utility
 
 **Area:** kiln CLI or `crates/kiln-server` client tooling

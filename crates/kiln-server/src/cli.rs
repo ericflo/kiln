@@ -176,6 +176,29 @@ const ADAPTERS_EXAMPLES: &str = r#"Examples:
       Validate the installed adapter, load it through the running server, confirm registry state, and compare a fixed base-vs-adapter prompt.
 "#;
 
+const EVAL_ADAPTER_OVERVIEW: &str = r#"Run a paired base-vs-adapter eval through a running Kiln server.
+
+The tasks file is JSONL, one task object per line. The request template is a
+chat-completions JSON body; string placeholders like {{prompt}}, {{task.prompt}},
+{{seed}}, and {{adapter_label}} are rendered for each task/seed pair. The CLI
+then forces `adapter: null` for the base request and `adapter: NAME` for the
+candidate request so both sides use the same task and seed.
+
+The scorer executable receives one JSON object on stdin with the task, seed,
+base response/content, and candidate response/content. It may print a JSON
+object with `base_score` and `adapter_score`, a JSON object with `lift`, or a
+single numeric lift. The summary records mean lift, stdev, zero-count,
+wall-clock stats, config hashes, and adapter hashes from /v1/debug/model-state.
+"#;
+
+const EVAL_ADAPTER_EXAMPLES: &str = r#"Examples:
+  kiln eval-adapter --adapter support-bot --tasks eval.tasks.jsonl --seeds 3 --request-template request.json --scorer ./score_one.py
+      Run paired base/support-bot requests for every task and seed, score each pair, and write eval_summary.json.
+
+  kiln eval-adapter --adapter support-bot --tasks eval.tasks.jsonl --seeds 5 --request-template request.json --scorer ./score_one.py --output support-bot.eval_summary.json --url http://127.0.0.1:8420
+      Write the summary to a named file against a specific server.
+"#;
+
 const CONFIG_OVERVIEW: &str = r#"Validate a Kiln TOML config file without starting the server.
 
 Use this before `kiln serve` to catch invalid values, confirm resolved model settings, and preview feature toggles such as prefix cache, CUDA graphs, and speculative decoding.
@@ -397,6 +420,38 @@ pub enum Commands {
         /// Emit raw JSON instead of the pretty-printed tree
         #[arg(long, default_value_t = false)]
         json: bool,
+    },
+
+    /// Run a paired base-vs-adapter eval with an external scorer
+    #[command(name = "eval-adapter", long_about = EVAL_ADAPTER_OVERVIEW, after_help = EVAL_ADAPTER_EXAMPLES)]
+    EvalAdapter {
+        /// Adapter name to compare against the base model
+        #[arg(long)]
+        adapter: String,
+
+        /// JSONL task file, one task object per line
+        #[arg(long)]
+        tasks: PathBuf,
+
+        /// Number of paired seeds to run for each task
+        #[arg(long, default_value_t = 1)]
+        seeds: usize,
+
+        /// Chat-completions request template JSON
+        #[arg(long = "request-template")]
+        request_template: PathBuf,
+
+        /// Executable scorer. Receives pair JSON on stdin and prints JSON or a numeric lift.
+        #[arg(long)]
+        scorer: PathBuf,
+
+        /// Output summary path
+        #[arg(long, default_value = "eval_summary.json")]
+        output: PathBuf,
+
+        /// Server URL; defaults to the local kiln serve instance
+        #[arg(long, default_value = "http://localhost:8420")]
+        url: String,
     },
 
     /// Validate a config file without starting the server
@@ -2441,6 +2496,44 @@ pub async fn run_self_improve(
     print_simple_json_response("self-improve", resp).await
 }
 
+/// Run the `kiln eval-adapter` CLI subcommand.
+pub async fn run_eval_adapter(
+    url: &str,
+    adapter: &str,
+    tasks: &Path,
+    seeds: usize,
+    request_template: &Path,
+    scorer: &Path,
+    output: &Path,
+) -> anyhow::Result<()> {
+    let summary = crate::eval_adapter_cli::run_eval_adapter(
+        crate::eval_adapter_cli::EvalAdapterOptions {
+            url: url.to_string(),
+            adapter: adapter.to_string(),
+            tasks: tasks.to_path_buf(),
+            seeds,
+            request_template: request_template.to_path_buf(),
+            scorer: scorer.to_path_buf(),
+            output: output.to_path_buf(),
+        },
+    )
+    .await?;
+
+    println!(
+        "{} eval-adapter completed: {} pair(s), mean lift {:.6}, stdev {:.6}, zero_count {}, wrote {}",
+        style("✓").green().bold(),
+        summary.pair_count,
+        summary.stats.mean_lift,
+        summary.stats.stdev_lift,
+        summary.stats.zero_count,
+        output.display()
+    );
+    for warning in &summary.warnings {
+        eprintln!("{} {warning}", style("warning:").yellow().bold());
+    }
+    Ok(())
+}
+
 async fn print_simple_json_response(label: &str, resp: reqwest::Response) -> anyhow::Result<()> {
     let status = resp.status();
     let body: serde_json::Value = resp.json().await?;
@@ -2510,6 +2603,45 @@ mod tests {
             }
             _ => panic!("expected serve command"),
         }
+    }
+
+    #[test]
+    fn parses_eval_adapter_command() {
+        let cli = Cli::parse_from([
+            "kiln",
+            "eval-adapter",
+            "--adapter",
+            "support-bot",
+            "--tasks",
+            "eval.tasks.jsonl",
+            "--seeds",
+            "3",
+            "--request-template",
+            "request.json",
+            "--scorer",
+            "./score_one.py",
+        ]);
+
+        let Some(Commands::EvalAdapter {
+            adapter,
+            tasks,
+            seeds,
+            request_template,
+            scorer,
+            output,
+            url,
+        }) = cli.command
+        else {
+            panic!("expected eval-adapter command");
+        };
+
+        assert_eq!(adapter, "support-bot");
+        assert_eq!(tasks, PathBuf::from("eval.tasks.jsonl"));
+        assert_eq!(seeds, 3);
+        assert_eq!(request_template, PathBuf::from("request.json"));
+        assert_eq!(scorer, PathBuf::from("./score_one.py"));
+        assert_eq!(output, PathBuf::from("eval_summary.json"));
+        assert_eq!(url, "http://localhost:8420");
     }
 
     #[test]

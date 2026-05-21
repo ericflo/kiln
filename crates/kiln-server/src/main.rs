@@ -31,6 +31,26 @@ async fn main() -> Result<()> {
         Some(Commands::Health { ref url, json }) => {
             return cli::run_health(url, json).await;
         }
+        Some(Commands::EvalAdapter {
+            ref url,
+            ref adapter,
+            ref tasks,
+            seeds,
+            ref request_template,
+            ref scorer,
+            ref output,
+        }) => {
+            return cli::run_eval_adapter(
+                url,
+                adapter,
+                tasks,
+                seeds,
+                request_template,
+                scorer,
+                output,
+            )
+            .await;
+        }
         Some(Commands::ConfigCheck { ref file }) => {
             return cli::run_config_check(file.as_deref().or(args.config.as_deref()));
         }
