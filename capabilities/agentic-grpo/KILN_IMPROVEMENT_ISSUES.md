@@ -1187,6 +1187,39 @@ smoke test.
 - Warns if adapter appears to have no measurable effect.
 - Warns if adapter produces empty outputs on canary prompt.
 
+**Implementation status:** Complete. SFT and GRPO configs now accept
+`adapter_smoke_test`, and `kiln train sft|grpo --adapter-smoke-test` sets it
+in the submitted training payload, including streamed GRPO JSONL payloads. On
+successful generic SFT/GRPO training, the trainer runs fixed canary prompts
+through the base model and trained LoRA, records finite-logit status,
+base-vs-adapter logit delta L2, short greedy output differences, and adapter
+output length in `train_receipt.json`, and emits warnings when logits are
+non-finite, the adapter has no measurable effect, or the canary output is
+empty. The receipt schema remains backward-compatible for older receipts.
+
+**Validation evidence:**
+
+- RunPod validation passed on 2026-05-21 on RTX A6000 pod `qmfxie9izl6lc6`.
+- Remote command sequence: `git diff --check`; `cargo test -p kiln-train
+  adapter_smoke --lib`; `cargo test -p kiln-server adapter_smoke --lib`;
+  `cargo check -p kiln-train --tests`; `cargo check -p kiln-server --tests`;
+  plus `cargo test -p kiln-server build_grpo --lib`.
+- Remote sentinel `/workspace/kiln-validation/issue19d.done` recorded
+  `exit=0`; remote log is `/workspace/kiln-validation/issue19d.log`.
+- Additional GRPO payload validation sentinel
+  `/workspace/kiln-validation/issue19e.done` recorded `exit=0`; remote log is
+  `/workspace/kiln-validation/issue19e.log`.
+
+**Commit SHA:** `b9fed4c7` (`Issue 19: add adapter effect smoke test`),
+pushed to `origin/main` on 2026-05-21. Note: the commit contains the
+implementation and docs; this status line is recorded in the follow-up
+metadata commit because a commit cannot include its own final SHA.
+
+**Remaining risk:** Native CUDA/Vulkan training paths continue to write normal
+training receipts but do not run the generic post-training canary; the
+`--adapter-smoke-test` canary currently covers the generic trainer path used
+by default SFT/GRPO submissions.
+
 ### 20. Report LoRA Delta And Gradient Norms
 
 **Area:** `crates/kiln-train`
