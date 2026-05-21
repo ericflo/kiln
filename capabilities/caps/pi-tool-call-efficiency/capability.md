@@ -146,9 +146,9 @@ config defaults to 60s.)
 
 ## References
 
-- `capabilities/agentic-grpo/pi-doctest/capability.md` — the source of
+- `capabilities/caps/pi-doctest/capability.md` — the source of
   the headroom estimate and the v1 rubric pattern.
-- `capabilities/opd/tool-call-arg-fidelity/` — OPD sibling (argument
+- `capabilities/caps/tool-call-arg-fidelity/` — OPD sibling (argument
   *correctness*, not call *count*).
 
 

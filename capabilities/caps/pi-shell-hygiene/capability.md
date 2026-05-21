@@ -241,7 +241,7 @@ Highest-leverage improvements:
    - sleep-then-poll without timeout
 
 2. **Anchor against the kiln-skill anti-pattern doc.** The
-   `capabilities/agentic-grpo/kiln-skill` reference (and the kiln
+   `capabilities/lib/agentic-grpo-notes.md` reference (and the kiln
    skill body in clouderic) enumerate exactly these patterns. Make
    the rubric scoring align with that doc rather than inventing
    new categories.

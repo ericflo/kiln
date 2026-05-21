@@ -1,7 +1,7 @@
 """Build pi-doctest train + eval task JSONL from kiln's humaneval pool.
 
 Inputs:
-  capabilities/sft/python-algo/datasets/grpo-humaneval-best.jsonl
+  capabilities/caps/python-algo/datasets/grpo-humaneval-best.jsonl
   (or grpo-humaneval.jsonl, grpo-humaneval-big.jsonl)
 
 For each prompt in the source, we extract:
@@ -10,8 +10,8 @@ For each prompt in the source, we extract:
   - any preceding `from typing import ...` lines
 
 We emit:
-  capabilities/agentic-grpo/pi-doctest/datasets/train.tasks.jsonl
-  capabilities/agentic-grpo/pi-doctest/datasets/eval.tasks.jsonl
+  capabilities/caps/pi-doctest/datasets/train.tasks.jsonl
+  capabilities/caps/pi-doctest/datasets/eval.tasks.jsonl
 
 Each task line:
   {"task_id": str, "function_signature": str, "imports": str}
@@ -28,7 +28,7 @@ import re
 import sys
 from pathlib import Path
 
-SRC = Path(__file__).parent.parent.parent.parent / "capabilities/sft/python-algo/datasets"
+SRC = Path(__file__).parent.parent.parent.parent / "capabilities/caps/python-algo/datasets"
 DST = Path(__file__).parent / "datasets"
 
 

@@ -188,7 +188,7 @@ See [`kiln-polish-prerequisites.md`](kiln-polish-prerequisites.md).
 via the ECHO trajectory schema (`trajectory.rs` + `trajectory_mask.rs`).
 This cap continues to use single-turn rollouts because the task
 spec calls for one-shot solutions, but multi-turn agentic GRPO is
-now first-class — see `capabilities/agentic-grpo/pi-terminal-bench-lite/`
+now first-class — see `capabilities/caps/pi-terminal-bench-lite/`
 for the canonical multi-turn paper-reproduction cap.
 
 

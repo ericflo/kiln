@@ -183,7 +183,7 @@ prior clone to lean on.
 - Saved notes: `task-completion-must-reach-canonical-repo`,
   `source-mod-verify-repo-before-editing`.
 - kiln PR conventions (no `CE:` prefix, no deploy-request) —
-  `capabilities/agentic-grpo/README.md` and the kiln skill section
+  `capabilities/lib/agentic-grpo-notes.md` and the kiln skill section
   "PR conventions (kiln ≠ clouderic)".
 
 

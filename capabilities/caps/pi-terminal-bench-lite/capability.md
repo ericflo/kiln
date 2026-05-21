@@ -88,7 +88,7 @@ dynamics-holdout score even if composite is similar.
 ## Files
 
 ```
-capabilities/agentic-grpo/pi-terminal-bench-lite/
+capabilities/caps/pi-terminal-bench-lite/
 ├── capability.md                 — this file
 ├── capability.config.json        — kiln + pi paths, hyperparams
 ├── capability.jsonl              — iter log (one JSON line per iter)

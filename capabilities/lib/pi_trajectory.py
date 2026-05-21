@@ -16,7 +16,7 @@ Observation segments are ECHO's env-CE targets (tool results / environment).
 Context segments are system/user prompts — no gradient.
 
 This module reads pi's `~/.pi/sessions/<uuid>.jsonl` format. The format
-(verified against capabilities/agentic-grpo/pi-doctest/rollout.py on
+(verified against capabilities/caps/pi-doctest/rollout.py on
 2026-05-18):
 
     {"type": "message", "message": {

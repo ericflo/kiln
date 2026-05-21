@@ -1,7 +1,7 @@
 """Tests for pi_trajectory.parse_pi_session.
 
 Run from the repo root:
-    cd capabilities/agentic-grpo/lib && python3 test_pi_trajectory.py
+    cd capabilities/lib && python3 test_pi_trajectory.py
 """
 from __future__ import annotations
 

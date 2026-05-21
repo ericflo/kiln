@@ -75,7 +75,7 @@ visible only through commands).
 ## Files
 
 ```
-capabilities/agentic-grpo/pi-script-fixup/
+capabilities/caps/pi-script-fixup/
 ├── capability.md                — this file
 ├── capability.config.json       — config with --no-policy-loss default
 ├── capability.oracle.sh         — blind eval across val100/ITD/PyTerm/TBLite

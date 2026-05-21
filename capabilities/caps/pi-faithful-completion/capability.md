@@ -259,7 +259,7 @@ requires the format string present; missing → 0.
   `tasks-must-execute-not-confirm`, `task-or-inline-not-both`.
 - Clouderic skill: `project-planning.md` § "Never Soft-Punt to Eric in
   Prose" and § "The Job Is Never Done".
-- `capabilities/opd/code-fence-language-fidelity/` — OPD sibling for
+- `capabilities/caps/code-fence-language-fidelity/` — OPD sibling for
   format adherence on a single dimension.
 
 

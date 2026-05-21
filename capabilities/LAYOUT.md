@@ -1,299 +1,451 @@
 # Uniform Capability Layout
 
 This document defines the canonical layout that every capability dir under
-`capabilities/{agentic-grpo,opd,sft}/<cap>/` follows. It supersedes the
-ad-hoc shapes the first experimental round produced.
+`capabilities/caps/<cap>/` follows. Round 3 unifies the previously
+methodology-keyed buckets (`agentic-grpo/`, `opd/`, `sft/`) into a single
+flat `caps/` tree because **methodology is per-stage metadata, not per-cap
+identity**.
 
 Companion docs:
 
-- `capabilities/README.md` — top-level intro and tree map.
-- `capabilities/agentic-grpo/README.md` — agentic-GRPO ECHO defaults and
-  the pi-rollout shared library.
-- `capabilities/agentic-grpo/KILN_IMPROVEMENT_ISSUES.md` — the 40 kiln
-  improvements this layout assumes are landed.
+- [`README.md`](README.md) — top-level entry and tree map.
+- [`METHODS.md`](METHODS.md) — when to choose SFT / OPD / GRPO / agentic-GRPO at any stage.
+- [`PIPELINE.md`](PIPELINE.md) — multi-stage operating manual.
+- [`DISTILLATION.md`](DISTILLATION.md) — cluster → new base flywheel.
+- [`KILN_IMPROVEMENT_ISSUES.md`](KILN_IMPROVEMENT_ISSUES.md) — the 40 kiln features this layout assumes are landed (all complete).
+- [`CONSOLIDATED_REPORT.md`](CONSOLIDATED_REPORT.md) — round-1 lessons.
+- [`lib/agentic-grpo-notes.md`](lib/agentic-grpo-notes.md) — ECHO defaults and the pi-rollout shape.
 
-## Round-2 strategic updates (2026-05-21)
+## Round-3 strategic updates
 
-After analyzing round-1 results across all 23 capabilities, four
-strategic changes were applied to this layout:
+Round 3 carries the round-2 hardening (mandatory `rubric_sanity.py`,
+multiplicative format gates, `integration/cross-cap-coherence`,
+`hard_eval.tasks.jsonl`) and adds two new structural changes:
 
-1. **`rubric_sanity.py` is now MANDATORY.** Round 1 hit "rubric too lax"
-   three times. `run_iter.sh` runs `rubric_sanity.py` BEFORE training and
-   fails the iter if the calibration set doesn't separate good from bad
-   with margin > 0.2. Bypass with `KILN_SKIP_RUBRIC_SANITY=1` only for
-   early-development scaffolds.
+### 1. Flat capability tree (no paradigm split)
 
-2. **Multiplicative format gate is the default rubric pattern.** Round 1
-   found that additive composites trap signal when outcome is saturated
-   (`pi-failure-triage` moved format +12.5pp but composite only +0.6pp).
-   New caps use `composite = outcome × format × (process_weights + base)`.
-   Reshaped caps: `pi-diff-patch-apply`, `pi-failure-triage`.
+Round 2:
+```
+capabilities/
+├── agentic-grpo/<cap>/
+├── opd/<cap>/
+├── sft/<cap>/
+└── integration/
+```
 
-3. **`integration/` track added.** A per-cap win can mask a cross-cap
-   regression. Round 1 hinted that `pi-faithful-completion` may have
-   hurt `pi-code-comprehension` but nothing measured it. The new
-   `integration/cross-cap-coherence/` cap is an eval-only suite that
-   runs any adapter against held-out slices of every member cap and
-   flags `per_cap_delta < -0.02` as regressions.
+Round 3:
+```
+capabilities/
+├── caps/<cap>/             ← every capability lives here
+├── lib/                    ← shared helpers (was agentic-grpo/lib/)
+├── integration/
+└── rounds/                 ← round history + cluster manifests
+```
 
-4. **`datasets/hard_eval.tasks.jsonl` pattern.** Each cap now reserves
-   a "hard-eval pool" built from round-1 failed-task IDs (or hand-marked
-   adversarial tasks). Composite on hard-eval is the cleanest evidence
-   of capability uplift vs. lucky-tasks. Documented in
-   `datasets/hard_eval.README.md` per cap.
+A cap's directory no longer encodes which trainer it uses. The trainer
+choice is per-stage metadata inside the cap.
 
-Together these changes raise the bar: a positive round-2 iter must
-pass calibration, gate format multiplicatively, demonstrate hard-eval
-lift, and not regress sibling caps in the integration suite.
+### 2. Multi-stage pipelines
+
+Round 2 caps were single-method (whichever bucket they lived in). Round 3
+caps may be multi-method, in **stages**:
+
+- `stages/stage-<N>-<slug>.json` records each kept stage.
+- `pipeline.md` is the front-and-center recipe (the chain that won).
+- `methods/<method>.config.json` holds per-method recipe defaults.
+- `run_stage.sh <method> <slug>` runs a single stage.
+- `run_pipeline.sh` re-runs the whole chain (e.g. after a base refresh).
+
+`METHODS.md` decides which method to use at each stage; `PIPELINE.md`
+governs stage transitions, validation gates, and base-adapter chaining.
+
+Most round-2 caps migrate as single-stage pipelines. Multi-stage is the
+*option* unlocked by round 3, not the default.
 
 ## Why a uniform layout
 
-The first experimental round produced 23 capabilities with wildly different
-file shapes. Some had `WRITEUP.md`, others `FINAL_RESULTS.md`, others
-`closeout.md`. Some scripts called `cuda_grpo_ablation` with hand-computed
-`output/adapter/` paths; one cap symlinked the parent and silently ran evals
-on stale weights. Multi-seed eval was a free-text section of the spec in one
-cap and a `for` loop in another.
+Round 1 produced 23 capabilities with wildly different file shapes. Round 2
+normalized the file tree per-paradigm. Round 3 unifies across paradigms
+because the same cap can use multiple paradigms across stages.
 
-A second round can do better. The kiln improvements in `KILN_IMPROVEMENT_ISSUES.md`
-make a tighter contract possible:
+The kiln improvements in
+[`KILN_IMPROVEMENT_ISSUES.md`](KILN_IMPROVEMENT_ISSUES.md) make a single
+tight contract possible:
 
-- training writes `train_receipt.json` and `adapter_receipt.json` (#5, #8)
-- `kiln adapter verify` proves an adapter is loadable, has measurable effect (#4)
+- training writes `train_receipt.json` and `adapter_manifest.json` (#5, #8, #36)
+- `kiln adapter verify` proves an adapter is loadable + behavioral (#4)
 - `kiln eval-adapter` is the standard multi-seed paired eval driver (#33)
 - `kiln trajectory inspect` is the standard rollout-debugging tool (#10)
 - `cuda_grpo_ablation --dry-run` catches data/mask bugs before GPU work (#9)
-- `cuda_grpo_ablation --filter-var-min` is the official strong-signal filter (#22)
-- `--install-adapter-dir / --install-adapter-name` removes the path-symlink class of bugs (#5)
+- `--filter-var-min` is the official strong-signal filter (#22)
+- `--install-adapter-dir`/`--install-adapter-name` removes path-symlink bugs (#5)
 - `--adapter-smoke-test` is the standard post-train sanity check (#19)
 - `kiln serve --eval-mode` is the standard during eval (#15)
-- `adapter_manifest.json` + `kiln adapter restore` replaces ad-hoc B2 backup scripts (#36)
+- `cuda_opd_remote` is the OPD trainer (#37)
 
-The uniform layout is designed so each cap script is a thin orchestration of
-these kiln primitives rather than a re-implementation of them.
+Each cap's `run_stage.sh` is a thin orchestration of those primitives,
+plus the stage-validation gates from `PIPELINE.md` §4.
 
 ## File tree
 
-Every cap dir SHOULD look like this. Items marked **R** are required for a
-cap to be runnable; items marked **O** are optional but conventional.
+Every cap dir SHOULD look like this. Items marked **R** are required for
+a cap to be runnable; items marked **O** are optional but conventional;
+**S** are stage-aware additions introduced in round 3.
 
 ```
-<paradigm>/<cap>/
-├── capability.md                # R   The contract (goal, task shape, rubric, hypotheses)
-├── capability.config.json       # R   Trainer + rollout defaults (versioned)
-├── capability.jsonl             # R   Append-only iter log (one row per iter)
+caps/<cap>/
+├── capability.md                # R   The contract (description, rubric, §0, baseline, headroom, hypotheses)
+├── capability.config.json       # R   Per-method configs (schema_version=3, see §"capability.config.json")
+├── capability.jsonl             # R   Append-only iter log (stage/method/base_adapter/output_adapter fields)
+├── pipeline.md                  # S   The chosen pipeline: header + per-stage prose (see PIPELINE.md §3)
+├── stages/                      # S   One file per kept stage (see PIPELINE.md §2.3)
+│   ├── stage-1-<slug>.json
+│   ├── stage-2-<slug>.json
+│   └── ...
+├── methods/                     # S   Per-method recipe defaults
+│   ├── sft.config.json          #     ← present if SFT used in any stage
+│   ├── opd.config.json          #     ← present if OPD used
+│   ├── grpo.config.json
+│   └── agentic-grpo.config.json
 ├── rubric.py                    # R   Composite reward function
-├── rubric_sanity.py             # R   Calibration sanity check (MANDATORY round 2)
-├── build_corpus.py              # R   Task generator → datasets/{train,eval}.tasks.jsonl
+├── rubric_sanity.py             # R   Calibration sanity check (MANDATORY)
+├── build_corpus.py              # R   Task generator → datasets/{train,eval,hard_eval}.tasks.jsonl, sft/opd/grpo training data
 ├── rollout.py                   # R*  Agentic only: pi-runner → rollout JSONL
 ├── capability.oracle.sh         # R   Wraps `kiln eval-adapter` for blind eval
-├── run_iter.sh                  # R   Full iter recipe (rollouts → train → eval)
+├── run_stage.sh                 # S   `./run_stage.sh <method> <slug> [--base-adapter <prev>]`
+├── run_pipeline.sh              # S   Re-runs the chain from pipeline.md
+├── capability.anchor.sh         # O   SFT-only: regression watch on a non-target domain
 ├── README.md                    # O   Cap-specific quickstart (links capability.md)
 ├── archive/                     # O   Old experimental artifacts (read-only history)
 │   ├── README.md                #     Index of archived material
-│   ├── capability.jsonl         #     The prior iter log (preserved verbatim)
+│   ├── round-1.jsonl            #     Prior iter logs by round
+│   ├── round-2.jsonl
 │   ├── writeups/                #     Old WRITEUP.md / FINAL_*.md / closeout.md
-│   ├── datasets/                #     Old datasets that may inform fresh corpus
-│   ├── scripts/                 #     Old drive_iters.sh / record_iter.py / etc.
-│   └── kiln-polish.jsonl        #     Old kiln-polish issue list (now in KILN_IMPROVEMENT_ISSUES.md)
+│   └── scripts/                 #     Old drive_iters.sh etc.
 ├── hypotheses/                  # O   Alternative experiments + verdicts
 │   └── <slug>.md
-├── calibration/                 # R   Rubric sanity fixtures (MANDATORY round 2)
-│   ├── README.md                #     How to write fixtures
-│   ├── good.jsonl               #     >=5 known-high-quality rollouts
-│   └── bad.jsonl                #     >=5 known-low-quality rollouts (each §0 cheat)
-├── datasets/                    # R   Task data
-│   ├── train.tasks.jsonl        # R   Committed
+├── calibration/                 # R   Rubric sanity fixtures (MANDATORY)
+│   ├── README.md
+│   ├── good.jsonl               #     ≥5 known-high-quality rollouts
+│   └── bad.jsonl                #     ≥5 known-low-quality rollouts (one per §0 cheat)
+├── datasets/                    # R   Task data + method-specific training data
+│   ├── train.tasks.jsonl        # R   Source corpus, committed
 │   ├── eval.tasks.jsonl         #     GITIGNORED — blind-eval firewall
-│   ├── hard_eval.tasks.jsonl    #     GITIGNORED — round-1-failures-derived hard pool
-│   └── hard_eval.README.md      #     How to build the hard pool
+│   ├── hard_eval.tasks.jsonl    #     GITIGNORED — round-failures-derived hard pool
+│   ├── hard_eval.README.md      #     How to build the hard pool
+│   ├── sft.train.jsonl          # S   Method-specific training data (built by build_corpus.py)
+│   ├── opd.prompts.jsonl        # S
+│   └── grpo.tasks.jsonl         # S
 ├── manifest/                    # O   Per-iter reproducibility manifests
 │   └── README.md
-└── prompts/                     # O*  OPD/SFT only: training prompts (committed)
+└── prompts/                     # O   Legacy round-2 OPD/SFT location; new caps use datasets/*.{train,prompts}.jsonl instead
     └── train.jsonl
 ```
 
-## Bucket layout (3 paradigms + integration track)
+### Top-level (under `capabilities/`)
 
 ```
 capabilities/
-├── LAYOUT.md           ← this file
 ├── README.md
-├── NEXT_ROUND.md
-├── agentic-grpo/       ← multi-turn agentic GRPO (14 caps round 2 + 4 new)
-│   ├── lib/
-│   ├── pi-doctest/             (round-1 winner +4.2pp 3-seed)
-│   ├── pi-code-comprehension/  (round-1 winner +12.9pp)
-│   ├── pi-faithful-completion/ (round-1 winner +8.3pp)
-│   ├── pi-code-search/         (round-1 winner +2.4pp)
+├── LAYOUT.md                ← this file
+├── METHODS.md               ← when to choose which methodology
+├── PIPELINE.md              ← multi-stage operating manual
+├── DISTILLATION.md          ← cluster → new base flywheel (Phase G, deferred)
+├── NEXT_ROUND.md            ← round-3 operating manual
+├── CONSOLIDATED_REPORT.md   ← round-1 lessons (promoted from agentic-grpo/)
+├── KILN_IMPROVEMENT_ISSUES.md  ← canonical kiln backlog (promoted from agentic-grpo/)
+├── caps/                    ← every capability (flat — no paradigm split)
 │   ├── pi-doctest/
-│   ├── pi-terminal-bench-lite/ (paper-track integration)
-│   ├── pi-script-fixup/        (verifier-free §5.5)
-│   ├── pi-compaction/          (long-context; gated on kiln #25)
-│   ├── pi-precondition-check/  (rank-1 round-2 priority)
-│   ├── pi-diff-patch-apply/    (RESHAPED: multiplicative format gate)
-│   ├── pi-failure-triage/      (RESHAPED: multiplicative format gate)
-│   ├── pi-shell-hygiene/
-│   ├── pi-source-mod-workflow/ (REFRAMED: integration test)
-│   ├── pi-test-interpretation/
-│   ├── pi-tool-call-efficiency/ (REPURPOSED: transfer eval only)
-│   ├── pi-error-recovery/       (NEW round 2)
-│   ├── pi-context-aware-edits/  (NEW round 2)
-│   ├── pi-incremental-progress/ (NEW round 2)
-│   └── pi-search-then-read/     (NEW round 2)
-├── opd/                ← on-policy distillation (6 caps)
-├── sft/                ← supervised fine-tuning (3 caps)
-└── integration/        ← cross-cap eval (NEW round 2)
-    └── cross-cap-coherence/
+│   ├── code-symbol-extraction/
+│   ├── math-broad/
+│   └── ...
+├── lib/                     ← shared helpers (promoted from agentic-grpo/lib/)
+│   ├── README.md
+│   ├── pi_trajectory.py
+│   ├── test_pi_trajectory.py
+│   ├── stage_manifest.py    ← NEW: read/write/validate pipeline.md ↔ stages/
+│   ├── method_router.py     ← NEW: apply METHODS.md decision tree
+│   ├── headroom.py          ← NEW: per-sub-score headroom analysis
+│   ├── cluster_summary.py   ← NEW: aggregate pipeline winners for distillation
+│   └── agentic-grpo-notes.md  ← agentic-specific lore (ECHO defaults, pi shape)
+├── integration/             ← cross-cap evaluation track
+│   ├── README.md
+│   ├── cross-cap-coherence/
+│   ├── pi-tool-call-efficiency/  ← repurposed as transfer-eval-only
+│   └── pi-source-mod-workflow/   ← repurposed as integration test
+└── rounds/                  ← round history + cluster manifests
+    ├── round-1/
+    ├── round-2/
+    └── round-3/             ← current
 ```
 
 ## Roles per file
 
 ### `capability.md` — The contract (committed)
 
-Authoritative for the cap. Must include the sections below. The
-`pi-doctest/capability.md` is the established reference for agentic-GRPO;
-`opd/code-symbol-extraction/capability.md` for OPD; `sft/math-broad/capability.md`
-for SFT.
-
-Required sections (in this order):
+Authoritative for the cap. Sections (in this order):
 
 1. `# Capability: <name>`
 2. `## Description` — what the model has to do; concrete failure modes.
 3. `## Base model` — Qwen3.5-4B served by kiln on :8420.
-4. `## Rollout source` — pi/HTTP/teacher; how trajectories are gathered.
+4. `## Rollout source` — pi / direct HTTP / teacher; how data is gathered.
 5. `## Rubric (v<N>)` — sub-score table with weights and cheat resistance.
-6. `## Adversarial design (§0)` — at least 3 named cheats and their mitigations.
-7. `## Baseline + Headroom` — measured baseline composite, headroom number, target sub-score.
-8. `## Hypotheses` — list of H1, H2, … (design intent; verdicts go in `capability.jsonl`).
-9. `## Standard workflow` — pointer to `run_iter.sh` and `kiln`-CLI usage.
+6. `## Adversarial design (§0)` — at least 3 named cheats and mitigations.
+7. `## Baseline + Headroom` — measured baseline composite, headroom number,
+   target sub-score(s).
+8. `## Hypotheses` — H1, H2, … (design intent; verdicts go in `capability.jsonl`).
+9. `## Standard workflow` — pointer to `run_stage.sh`/`run_pipeline.sh` and
+   `kiln`-CLI usage.
 10. `## Kiln features used` — explicit list (verify, eval-adapter, dry-run, etc.).
 
-### `capability.config.json` — Trainer + rollout defaults (committed)
+`capability.md` describes the **goal**, not the methodology. Methodology
+choice is in `pipeline.md` and `stages/`.
 
-Single source of truth for hyperparameters. New round defaults:
+### `capability.config.json` — Per-method configs (committed, schema_version=3)
+
+Single source of truth for hyperparameters. Schema:
 
 ```json
 {
-  "schema_version": 2,
-  "base_model_path": "/workspace/Qwen3.5-4B",
-  "kiln_url": "http://localhost:8420",
-  "pi_bin": "/usr/bin/pi",
-  "pi_model_id": "Qwen3.5-4B",
-  "adapter_dir": "/workspace/adapters",
-  "sandbox_root": "/tmp/<cap>-rollouts",
-  "rollout": {
-    "num_generations_train": 4,
-    "num_generations_eval": 1,
-    "max_wall_clock_s": 120,
-    "max_turns": 8,
-    "max_tokens_per_turn": 1024,
-    "temperature": 0.8,
-    "top_p": 0.95,
-    "parallel": 1
+  "schema_version": 3,
+  "shared": {
+    "base_model_path": "/workspace/Qwen3.5-4B",
+    "kiln_url": "http://localhost:8420",
+    "adapter_dir": "/workspace/adapters",
+    "sandbox_root": "/tmp/<cap>-stages",
+    "eval": {
+      "seeds": 3,
+      "max_tasks": null,
+      "thinking_mode": "off"
+    }
   },
-  "training_phase1_defaults": {
-    "mode": "phase1",
-    "advantage_mode": "dr_grpo",
-    "loss_aggregation": "token_level",
-    "kl_estimator": "k1",
-    "kl_coeff": 0.1,
-    "clip_epsilon": 0.20,
-    "dynamic_sampling": true,
-    "is_level": "token",
-    "reference_policy": "base_per_step",
-    "lr": 1e-5,
-    "rank": 16,
-    "alpha": 32,
-    "seed": 3141592653,
-    "filter_var_min": null,
-    "loss": {
-      "echo": {
-        "lambda": 0.05,
-        "env_mask_mode": "env_only",
-        "warning_filter": true
-      },
-      "opd": null,
-      "no_policy_loss": false
+  "methods": {
+    "sft": {
+      "trainer": "cuda_sft_file",
+      "data_file": "datasets/sft.train.jsonl",
+      "defaults": {
+        "rank": 4,
+        "alpha": 8,
+        "lr": 1e-4,
+        "epochs": 1,
+        "dataset_cap": 128,
+        "seed": 3141592653,
+        "adapter_smoke_test": true
+      }
     },
-    "adapter_smoke_test": true
+    "opd": {
+      "trainer": "cuda_opd_remote",
+      "prompts_file": "datasets/opd.prompts.jsonl",
+      "teacher_url": "http://localhost:8002",
+      "teacher_name": "qwen3.6-27b-awq",
+      "defaults": {
+        "rank": 16,
+        "alpha": 32,
+        "lr": 1e-4,
+        "epochs": 6,
+        "samples_per_prompt": 2,
+        "seed": 3141592653,
+        "adapter_smoke_test": true
+      }
+    },
+    "grpo": {
+      "trainer": "cuda_grpo_ablation",
+      "data_file": "datasets/grpo.tasks.jsonl",
+      "defaults": {
+        "mode": "phase1",
+        "advantage_mode": "dr_grpo",
+        "loss_aggregation": "token_level",
+        "kl_estimator": "k1",
+        "kl_coeff": 0.1,
+        "clip_epsilon": 0.20,
+        "dynamic_sampling": true,
+        "is_level": "token",
+        "reference_policy": "base_per_step",
+        "lr": 1e-5,
+        "rank": 16,
+        "alpha": 32,
+        "seed": 3141592653,
+        "filter_var_min": 0.05,
+        "adapter_smoke_test": true
+      }
+    },
+    "agentic-grpo": {
+      "trainer": "cuda_grpo_ablation",
+      "data_file": "datasets/grpo.tasks.jsonl",
+      "rollout": {
+        "pi_bin": "/usr/bin/pi",
+        "pi_model_id": "Qwen3.5-4B",
+        "num_generations_train": 4,
+        "num_generations_eval": 1,
+        "max_wall_clock_s": 120,
+        "max_turns": 8,
+        "max_tokens_per_turn": 1024,
+        "temperature": 0.8,
+        "top_p": 0.95,
+        "parallel": 1
+      },
+      "defaults": {
+        "mode": "phase1",
+        "advantage_mode": "dr_grpo",
+        "loss_aggregation": "token_level",
+        "kl_estimator": "k1",
+        "kl_coeff": 0.1,
+        "clip_epsilon": 0.20,
+        "dynamic_sampling": true,
+        "lr": 1e-5,
+        "rank": 16,
+        "alpha": 32,
+        "seed": 3141592653,
+        "filter_var_min": 0.05,
+        "loss": {
+          "echo": {
+            "lambda": 0.05,
+            "env_mask_mode": "env_only",
+            "warning_filter": true
+          },
+          "no_policy_loss": false
+        },
+        "adapter_smoke_test": true
+      }
+    }
   },
-  "eval": {
-    "seeds": 3,
-    "max_tasks": null,
-    "thinking_mode": "off"
+  "pipeline": {
+    "max_stages": 5,
+    "between_stages": {
+      "run_sibling_check": true,
+      "stop_on_sibling_regression": true,
+      "sibling_threshold": -0.02,
+      "preserve_prior_stage_threshold": -0.02
+    },
+    "transitions": {
+      "criterion_format_floor": 0.7,
+      "criterion_process_headroom_min": 0.08,
+      "criterion_reward_variance_min": 0.05
+    }
   }
 }
 ```
 
-OPD caps replace `training_phase1_defaults` with `training_defaults` keyed by
-OPD knobs (`rank`, `alpha`, `lr`, `epochs`, `samples_per_prompt`, etc.).
-SFT caps use a similar shape with `epochs` and `dataset_size_cap`.
+A method appears in `methods.<name>` ONLY if the cap's pipeline currently
+uses that method (in any stage) or could plausibly use it. Most caps will
+have 1-3 methods listed.
 
 ### `capability.jsonl` — The iter log (committed, append-only)
 
-One JSON object per line, one line per iter. Required fields:
+One JSON object per line, one line per iter. Round-3 row schema:
 
 ```json
 {
-  "iter": 0,
-  "slug": "baseline",
-  "ts": "2026-05-21T00:00:00Z",
-  "status": "kept" | "kept-with-caveat" | "ablation" | "infra-fail" | "negative",
-  "family": "baseline" | "H1" | "H2" | ...,
+  "iter": 7,
+  "stage": 2,
+  "method": "opd",
+  "slug": "stage-2-opd-polish",
+  "ts": "2026-06-08T...",
+  "status": "kept",
+  "family": "stage-transition",
   "hypothesis": "<one-sentence claim under test>",
-  "rubric_version": "v0",
-  "composite": 0.0,
-  "composite_delta": 0.0,
-  "sub_scores": { "<name>": 0.0 },
-  "verdict": "positive" | "null" | "negative" | "inconclusive",
-  "training": { "...": "..." },
-  "rollout_stats": { "...": "..." },
+  "rubric_version": "v1",
+
+  "base_adapter": "<cap>-stage-1-sft-bootstrap",
+  "output_adapter": "<cap>-stage-2-opd-polish",
+  "stage_transition_rationale": "METHODS.md Rule E fired: format=0.78 stable, process headroom=0.32 of total, teacher available.",
+
+  "composite": 0.852,
+  "composite_delta": 0.104,
+  "sub_scores": {...},
+  "verdict": "positive",
+  "sigma_warning": null,
+
+  "method_specific": {
+    "opd": {"effective_steps": 32, "teacher_calls_made": 64, "env_ce_delta": -0.45, "skip_rate": 0.21}
+  },
+
+  "sibling_regression_check": {"max_delta": -0.008, "sigma": 0.011, "passed": true},
+  "prior_stage_preservation_check": {"prev_stage_composite_now": 0.752, "prev_stage_composite_orig": 0.748, "delta": 0.004, "passed": true},
+
   "kiln_commit": "<sha>",
-  "adapter_manifest": "<path or null>",
-  "train_receipt": "<path or null>",
+  "train_receipt": "<path>",
+  "adapter_manifest": "<path>",
   "notes": "..."
 }
 ```
 
-For a fresh round, start with a single header row (iter 0 = scaffold) or
-leave empty. Do NOT carry the previous round's rows into the new log;
-archive them.
+The 5 round-3-new fields are `stage`, `method`, `base_adapter`,
+`output_adapter`, `stage_transition_rationale`. Plus `method_specific`,
+`sibling_regression_check`, `prior_stage_preservation_check`.
+
+Old round-2 rows without these fields are interpreted as
+`stage: 1, method: <inferred-from-archive>`. Migration is non-destructive.
+
+### `pipeline.md` — The chosen pipeline (committed, round-3-new)
+
+See [`PIPELINE.md`](PIPELINE.md) §3 for the full schema. Header is YAML
+front matter parseable by `lib/stage_manifest.py`; body is human-written
+per-stage rationale and evidence.
+
+A cap without `pipeline.md` is **not yet shipped**. Even single-stage caps
+write a one-stage `pipeline.md`.
+
+### `stages/stage-<N>-<slug>.json` — Per-stage record (round-3-new)
+
+See [`PIPELINE.md`](PIPELINE.md) §2.3. Every kept iter that becomes a stage
+gets a corresponding `stages/` file. The invariant is:
+
+> Every file in `stages/` corresponds to exactly one kept iter in
+> `capability.jsonl`. Their `output_adapter`, `composite`, and slug match.
+
+`lib/stage_manifest.py --validate <cap>` checks this.
+
+### `methods/<method>.config.json` — Per-method recipe defaults (round-3-new)
+
+Optional override of `capability.config.json::methods.<method>.defaults`
+for cap-specific tuning. Used when the same cap has different
+hyperparameters per stage that don't fit cleanly in the
+`capability.config.json` model.
 
 ### `rubric.py` — Composite reward (committed)
 
 Pure function. Must expose:
 
-- `score_one(rollout: dict) -> dict[str, float]` returning every sub-score and `composite`.
+- `score_one(rollout: dict) -> dict[str, float]` returning every sub-score
+  and `composite`.
 - A top-level `RUBRIC_VERSION` constant string.
 - A `CHEAT_PROBES: list[Callable]` list (optional) for `rubric_sanity.py`.
 
-`rubric.py` must be importable on a CPU-only dev box without network or a
-running kiln server.
+Importable on a CPU-only dev box without network or a running kiln server.
 
-### `rubric_sanity.py` — Calibration (committed, optional)
+### `rubric_sanity.py` — Calibration (committed, MANDATORY)
 
-Loads `calibration/good.jsonl` and `calibration/bad.jsonl`, scores both with
-`rubric.score_one`, and asserts the good set scores cleanly above the bad
-set. If your cap doesn't have one, start from `pi-doctest/calibration/sanity.py`.
+Loads `calibration/good.jsonl` and `calibration/bad.jsonl`, scores both
+with `rubric.score_one`, asserts the good set scores cleanly above the bad
+set with margin > 0.2. `run_stage.sh` runs this BEFORE any GPU work.
 
 ### `build_corpus.py` — Task generator (committed)
 
-Reads seed data + writes `datasets/train.tasks.jsonl` and
-`datasets/eval.tasks.jsonl`. `eval.tasks.jsonl` is **gitignored** per
-`.gitignore` — once it exists the agent must not read it. Use a deterministic
-seed so the eval split is reproducible.
+Reads seed data + writes:
 
-### `rollout.py` — Pi runner (agentic-grpo only, committed)
+- `datasets/train.tasks.jsonl` (the task corpus; committed)
+- `datasets/eval.tasks.jsonl` (held-out eval; gitignored — blind firewall)
+- `datasets/hard_eval.tasks.jsonl` (round-failures-derived; gitignored)
+- `datasets/sft.train.jsonl` (built lazily when SFT is used)
+- `datasets/opd.prompts.jsonl` (built lazily when OPD is used)
+- `datasets/grpo.tasks.jsonl` (built lazily when GRPO is used; usually
+  the same as `train.tasks.jsonl` with grpo-specific shape)
+
+Method-specific data files MAY be built lazily by `run_stage.sh` when the
+corresponding method is invoked, to avoid building data the cap doesn't
+need yet.
+
+### `rollout.py` — Pi runner (agentic-GRPO only, committed)
 
 Reads a task JSONL, drives pi to produce session JSONLs, scores them via
 `rubric.py`, writes `rollout.jsonl` (raw) and `grpo-train.jsonl`
-(GRPO-trainer-shaped). For new caps, prefer importing from
-`capabilities/agentic-grpo/lib/pi_trajectory.py` until `kiln rollout` (#34)
+(GRPO-trainer-shaped). For new caps, import from
+[`lib/pi_trajectory.py`](lib/pi_trajectory.py) until `kiln rollout` (#34)
 is exercised as the canonical path.
 
-OPD and SFT caps do not need a `rollout.py`. The teacher response data is
-the rollout for OPD; SFT trains directly from `prompts/`.
+OPD and SFT methods don't need a `rollout.py`. The teacher response data
+is the rollout for OPD; SFT trains directly from `datasets/sft.train.jsonl`.
 
 ### `capability.oracle.sh` — Blind eval (committed)
 
@@ -303,136 +455,46 @@ A thin wrapper around `kiln eval-adapter` (#33). Signature:
 ./capability.oracle.sh <adapter-name-or-empty> [--seeds N] [--tasks PATH]
 ```
 
-Reference implementation:
+Reference implementation lives in
+`.agents/skills/capability-creator/templates/capability.oracle.sh`.
+
+### `run_stage.sh` — Single-stage runner (round-3-new)
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-ADAPTER="${1:-}"
-shift || true
-TASKS="${TASKS:-datasets/eval.tasks.jsonl}"
-KILN_URL="${KILN_URL:-http://localhost:8420}"
-SEEDS="${SEEDS:-3}"
-ADAPTER_DIR="${ADAPTER_DIR:-/workspace/adapters}"
-
-if ! curl -sf "$KILN_URL/v1/health" > /dev/null 2>&1; then
-  echo "ORACLE_ERROR: kiln-server not reachable at $KILN_URL" >&2
-  exit 2
-fi
-
-# kiln eval-adapter handles base vs adapter, multi-seed, summary writing.
-kiln eval-adapter \
-  --url "$KILN_URL" \
-  --adapter "$ADAPTER" \
-  --adapter-dir "$ADAPTER_DIR" \
-  --tasks "$TASKS" \
-  --seeds "$SEEDS" \
-  --scorer "./rubric.py" \
-  --output "/tmp/<cap>-eval-${ADAPTER:-base}.json" \
-  --thinking off \
-  "$@"
-
-# Standard contract: print SCORE=<composite> for the orchestrator.
-python3 - <<PY
-import json
-d = json.load(open("/tmp/<cap>-eval-${ADAPTER:-base}.json"))
-print(f"SCORE={d['mean_composite']:.4f}")
-print(f"N={d['n_tasks']}")
-for k, v in d['sub_scores_mean'].items():
-    print(f"{k}={v:.4f}")
-PY
+./run_stage.sh <method> <slug> [--base-adapter <name>] [--iter <N>]
 ```
 
-### `run_iter.sh` — Iter recipe (committed)
+See [`PIPELINE.md`](PIPELINE.md) §5 for the full contract. Reference
+implementations per method in
+`.agents/skills/capability-creator/templates/run_stage_<method>.sh`.
 
-Parameterized iter recipe. Argument: optional iter slug.
-
-Reference shape for agentic-GRPO:
+### `run_pipeline.sh` — Full pipeline runner (round-3-new)
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-cd "$(dirname "$0")"
-SLUG="${1:-h1-default-recipe}"
-CFG="capability.config.json"
-OUT_ROOT="/tmp/<cap>-iter-${SLUG}"
-ROLLOUT_DIR="$OUT_ROOT/rollouts"
-ADAPTER_NAME="<cap>-${SLUG}"
-ADAPTER_REGISTRY="${ADAPTER_DIR:-/workspace/adapters}"
-mkdir -p "$ROLLOUT_DIR"
-
-# 1. Gather training rollouts via pi.
-python3 rollout.py \
-  --tasks datasets/train.tasks.jsonl \
-  --out-dir "$ROLLOUT_DIR" \
-  --config "$CFG" \
-  --num-generations 4 \
-  --mode train \
-  --limit 30
-
-# 2. Sanity-check the trajectories. Fails if no trainable action tokens.
-kiln trajectory inspect "$ROLLOUT_DIR/grpo-train.jsonl" --json \
-  > "$OUT_ROOT/trajectory_inspect.json"
-
-# 3. Dry-run validation BEFORE any GPU work.
-KILN_CUDA_ARCHS=86 /workspace/kiln/target/release/examples/cuda_grpo_ablation \
-  --data "$ROLLOUT_DIR/grpo-train.jsonl" \
-  --model /workspace/Qwen3.5-4B \
-  --output "$OUT_ROOT/adapter" \
-  --adapter "$ADAPTER_NAME" \
-  --mode phase1 \
-  --rank 16 --alpha 32 --lr 1e-5 \
-  --num-generations 4 \
-  --seed 3141592653 \
-  --filter-var-min 0.05 \
-  --dry-run
-
-# 4. Real training. Auto-installs into the registry.
-KILN_CUDA_ARCHS=86 /workspace/kiln/target/release/examples/cuda_grpo_ablation \
-  --data "$ROLLOUT_DIR/grpo-train.jsonl" \
-  --model /workspace/Qwen3.5-4B \
-  --output "$OUT_ROOT/adapter" \
-  --adapter "$ADAPTER_NAME" \
-  --mode phase1 \
-  --rank 16 --alpha 32 --lr 1e-5 \
-  --num-generations 4 \
-  --seed 3141592653 \
-  --filter-var-min 0.05 \
-  --adapter-smoke-test \
-  --install-adapter-dir "$ADAPTER_REGISTRY" \
-  --install-adapter-name "$ADAPTER_NAME"
-
-# 5. Verify the installed adapter is loadable and behavioral.
-kiln adapter verify "$ADAPTER_NAME" --adapter-dir "$ADAPTER_REGISTRY" --url http://localhost:8420
-
-# 6. Blind eval.
-SEEDS=3 ./capability.oracle.sh "$ADAPTER_NAME"
-
-# 7. Append a row to capability.jsonl referencing the train_receipt.json.
-python3 record_iter.py \
-  --iter-slug "$SLUG" \
-  --train-receipt "$OUT_ROOT/adapter/train_receipt.json" \
-  --eval-summary "/tmp/<cap>-eval-${ADAPTER_NAME}.json" \
-  >> capability.jsonl
+./run_pipeline.sh [--from-stage N] [--validate-only]
 ```
 
-OPD `run_iter.sh` is the same minus rollouts; SFT is the same minus rollouts
-and ECHO.
+Re-runs all stages in `pipeline.md` from `--from-stage` (default 1).
+`--validate-only` runs eval + adapter verify on each stage without
+re-training. See [`PIPELINE.md`](PIPELINE.md) §6.
 
 ### `archive/` — Read-only history (optional)
 
-Holds whatever experimental data the prior round produced. The contract:
+Holds whatever experimental data prior rounds produced. The contract:
 
-- The agent picking up a fresh round does **NOT** need to read anything in
-  `archive/` to run the cap.
-- Anything that would otherwise be at the cap root but predates this layout
-  goes here.
-- Includes a `README.md` summarising the archived material so a curious
-  reader can find prior context without spelunking.
+- A fresh-round agent does **not** need to read anything in `archive/`
+  to run the cap.
+- Anything that would otherwise clutter the cap root but predates this
+  round goes here.
+- Include a `README.md` summarising the archived material so a curious
+  reader can find prior context.
+
+Round-3 migration adds `archive/round-2.jsonl` capturing the prior
+`capability.jsonl` verbatim.
 
 ## Kiln CLIs the layout depends on
 
-Every cap script depends on these being available on `$PATH`:
+Every cap script depends on these being on `$PATH`:
 
 | Command | Purpose | Issue # |
 | --- | --- | --- |
@@ -449,39 +511,46 @@ Every cap script depends on these being available on `$PATH`:
 | `cuda_opd_remote ...` | Off-policy distillation trainer | 37 |
 | `cuda_sft_file ...` | SFT trainer | (pre-existing) |
 
-Cap scripts SHOULD NOT re-implement any of the above. If a kiln CLI is
-missing a feature your cap needs, file an item against `KILN_IMPROVEMENT_ISSUES.md`
-and use a stop-gap in the cap until it lands.
+Cap scripts SHOULD NOT re-implement any of the above. Missing features
+go in `KILN_IMPROVEMENT_ISSUES.md` with a stop-gap in the cap until they
+land.
 
-## What changed vs. round 1
+## What changed vs. round 2
 
-| Round 1 | Round 2 |
+| Round 2 | Round 3 |
 | --- | --- |
-| Each cap re-implements eval driver | `kiln eval-adapter` + `capability.oracle.sh` shim |
-| Adapter paths hand-computed (`output/adapter/`) | `--install-adapter-dir` + `kiln adapter verify` |
-| Per-cap `backup_to_b2.py` | `adapter_manifest.json` + `kiln adapter restore` |
-| Per-cap `record_iter.py` | Read `train_receipt.json` (canonical fields) |
-| `kiln-polish.jsonl` per cap | Single `KILN_IMPROVEMENT_ISSUES.md` (now resolved) |
-| `lib/pi_trajectory.py` (Python) | `kiln trajectory inspect` (Rust, canonical) |
-| Custom strong-signal filtering | `--filter-var-min` flag |
-| Wide variation in writeup filenames | One cap-level closeout in `capability.md` §Hypotheses + `capability.jsonl` |
-| Ad-hoc dry-run logic | `cuda_grpo_ablation --dry-run` |
-| ECHO observability via grep | `train_receipt.json::echo_metrics` |
+| Caps live under `capabilities/{agentic-grpo,opd,sft}/<cap>/` | All caps live under `capabilities/caps/<cap>/` |
+| `lib/` lives at `capabilities/agentic-grpo/lib/` | `lib/` lives at `capabilities/lib/` |
+| `KILN_IMPROVEMENT_ISSUES.md` and `CONSOLIDATED_REPORT.md` under `agentic-grpo/` | At `capabilities/` top level |
+| `run_iter.sh` (method baked in by paradigm dir) | `run_stage.sh <method> <slug>` (method is explicit) |
+| No notion of stages; `capability.jsonl` rows are flat | `stage`/`method`/`base_adapter`/`output_adapter` are first-class row fields |
+| Pipeline shape implicit in archive narrative | `pipeline.md` + `stages/<N>.json` are committed first-class artifacts |
+| Methodology choice baked into directory | METHODS.md decision tree routes per stage |
+| Multi-stage = abandoned cap + new cap in different paradigm dir | Multi-stage = additional row in `capability.jsonl` + new `stages/<N>.json` |
+| Four overlapping methodology skills (3152 lines) | One `.agents/skills/capability-creator/` skill (~700 lines + per-method resources) |
+| Distillation is unscoped future work | `DISTILLATION.md` defines the flywheel contract (Phase G, deferred) |
+| `rounds/` doesn't exist | `rounds/round-N/` snapshots cluster manifests + distillation recipes |
 
 ## When in doubt
 
-The reference caps are:
+The reference caps are (after round-3 migration):
 
-- `agentic-grpo/pi-doctest` — most mature multi-component rubric and a
-  three-seed reproducibility result. Use it as the agentic template.
-- `agentic-grpo/pi-terminal-bench-lite` — multi-turn paper-track recipe and
+- **`caps/pi-doctest`** — most mature multi-component rubric and a
+  three-seed reproducibility result. Reference template for agentic stages.
+- **`caps/pi-terminal-bench-lite`** — multi-turn paper-track recipe and
   the `--no-policy-loss` verifier-free shape.
-- `opd/code-symbol-extraction` — OPD reference (clean closeout + concrete
-  next-iter recipe).
-- `sft/math-broad` — SFT reference with anchor suite for regression.
+- **`caps/code-symbol-extraction`** — OPD reference (clean closeout
+  + concrete next-iter recipe).
+- **`caps/math-broad`** — SFT reference with anchor suite for regression.
+- **`caps/pi-faithful-completion`** — first round-3 multi-stage pilot
+  (SFT bootstrap → OPD polish → agentic-GRPO final, planned).
 
 The reference docs are:
 
-- `capabilities/agentic-grpo/README.md` — ECHO defaults and pi-rollout shape.
-- `capabilities/agentic-grpo/KILN_IMPROVEMENT_ISSUES.md` — the kiln features
-  this layout assumes are landed (all 40 are done in the next round).
+- [`METHODS.md`](METHODS.md) — methodology decision tree.
+- [`PIPELINE.md`](PIPELINE.md) — multi-stage operating manual.
+- [`DISTILLATION.md`](DISTILLATION.md) — cluster → new base flywheel.
+- [`lib/agentic-grpo-notes.md`](lib/agentic-grpo-notes.md) — agentic
+  defaults + ECHO design.
+- [`KILN_IMPROVEMENT_ISSUES.md`](KILN_IMPROVEMENT_ISSUES.md) — the kiln
+  features this layout assumes.

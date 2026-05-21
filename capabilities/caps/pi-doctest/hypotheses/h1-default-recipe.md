@@ -68,7 +68,7 @@ softly mask out tool-result gradient.
 schema (`TurnKind` / `TurnSegment` / `ScoredRollout`) and
 `build_masks_from_trajectory` produces correct per-turn `action_mask`
 + `env_mask` arrays. Rollouts emitted via the canonical schema
-(`capabilities/agentic-grpo/lib/pi_trajectory.build_scored_rollout`)
+(`capabilities/lib/pi_trajectory.build_scored_rollout`)
 get per-turn assistant-token masking *and* the ECHO env-CE auxiliary
 loss as the default. The iter 1 result above predates that landing;
 iter 5 (`f4ff31d9`) ran on the new path and produced the 3-seed verified

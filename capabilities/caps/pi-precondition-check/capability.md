@@ -189,9 +189,10 @@ Each family should have ≥20 training tasks balanced stale/holds-true.
 
 ## Next steps for the agent picking this up
 
-1. Read `capabilities/agentic-grpo/README.md` for the shared workflow.
+1. Read `capabilities/lib/agentic-grpo-notes.md` for the shared agentic
+   workflow plus `capabilities/METHODS.md` for the round-3 decision tree.
 2. Read this whole file.
-3. Read `capabilities/agentic-grpo/pi-doctest/capability.md` for the
+3. Read `capabilities/caps/pi-doctest/capability.md` for the
    most mature reference and `pi-doctest/rubric.py` for the trajectory
    iteration pattern.
 4. Build `calibration/{good,bad}.jsonl` *first* (5 examples each).
@@ -209,7 +210,7 @@ Each family should have ≥20 training tasks balanced stale/holds-true.
 ## References
 
 - `docs/plans/echo-integration-plan.md` §3.1, §3.4 — ECHO defaults.
-- `capabilities/agentic-grpo/pi-doctest/capability.md` — v1 rubric pattern.
+- `capabilities/caps/pi-doctest/capability.md` — v1 rubric pattern.
 - Saved clouderic notes: `verify-before-implementing`,
   `verify-bugs-before-fixing`, `verify-data-shape-before-implementing`,
   `verify-architecture-claims-in-source`, `verify-app-changes-persisted`,
