@@ -107,15 +107,21 @@ const TRAIN_OVERVIEW: &str = r#"Submit SFT or GRPO training jobs to the running 
 
 SFT reads JSONL: one chat correction example per line with a messages array. GRPO reads either one JSON request/batch with groups or JSONL with one group per line; each group has prompt messages plus candidate completions containing text and reward scores.
 
+Add --adapter-smoke-test to record a small base-vs-adapter canary check in train_receipt.json after successful training.
+
 Prefer http://127.0.0.1:8420/ui for guided submission and status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
 "#;
 
 const TRAIN_SFT_OVERVIEW: &str = r#"Train from SFT JSONL: one chat correction example per line with a messages array.
 
+Use --adapter-smoke-test to compare base vs trained adapter logits and short greedy outputs before running a full eval.
+
 Open http://127.0.0.1:8420/ui for guided submission and training status.
 "#;
 
 const TRAIN_GRPO_OVERVIEW: &str = r#"Train from GRPO data: either one JSON request/batch with groups, or JSONL with one group per line.
+
+Use --adapter-smoke-test to compare base vs trained adapter logits and short greedy outputs before running a full eval.
 
 Open http://127.0.0.1:8420/ui for guided submission and training status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
 "#;
@@ -123,6 +129,9 @@ Open http://127.0.0.1:8420/ui for guided submission and training status. See doc
 const TRAIN_EXAMPLES: &str = r#"Examples:
   kiln train sft --file corrections.jsonl --adapter support-bot
       Train from SFT JSONL: one chat correction example per line with a messages array.
+
+  kiln train sft --file corrections.jsonl --adapter support-bot --adapter-smoke-test
+      Train and record adapter-effect smoke metrics in train_receipt.json.
 
   kiln train grpo --file grpo-batch.json --adapter support-bot
       Train from one GRPO JSON request/batch with groups.
@@ -515,6 +524,10 @@ pub enum TrainCommands {
         #[arg(long)]
         lora_rank: Option<usize>,
 
+        /// Run an adapter-effect smoke test after successful training
+        #[arg(long)]
+        adapter_smoke_test: bool,
+
         /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
@@ -533,6 +546,10 @@ pub enum TrainCommands {
         /// LoRA rank for the trained adapter
         #[arg(long)]
         lora_rank: Option<usize>,
+
+        /// Run an adapter-effect smoke test after successful training
+        #[arg(long)]
+        adapter_smoke_test: bool,
 
         /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value = "http://localhost:8420")]
@@ -1737,6 +1754,7 @@ pub async fn run_train_sft(
     lr: f64,
     epochs: u32,
     lora_rank: Option<usize>,
+    adapter_smoke_test: bool,
 ) -> anyhow::Result<()> {
     let content =
         std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
@@ -1759,7 +1777,14 @@ pub async fn run_train_sft(
         style(adapter).white().bold()
     );
 
-    let body = build_sft_training_payload(examples, adapter, lr, epochs, lora_rank);
+    let body = build_sft_training_payload(
+        examples,
+        adapter,
+        lr,
+        epochs,
+        lora_rank,
+        adapter_smoke_test,
+    );
 
     let client = reqwest::Client::new();
     let resp = client
@@ -1805,9 +1830,10 @@ pub async fn run_train_grpo(
     file: &str,
     adapter: &str,
     lora_rank: Option<usize>,
+    adapter_smoke_test: bool,
 ) -> anyhow::Result<()> {
     let body = if is_grpo_jsonl_path(file) {
-        build_grpo_jsonl_training_payload(file, adapter, lora_rank)?
+        build_grpo_jsonl_training_payload(file, adapter, lora_rank, adapter_smoke_test)?
     } else {
         let content = std::fs::read_to_string(file)
             .map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
@@ -1815,7 +1841,7 @@ pub async fn run_train_grpo(
         let body: serde_json::Value = serde_json::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Invalid JSON in {file}: {e}"))?;
 
-        build_grpo_training_payload(body, adapter, lora_rank)?
+        build_grpo_training_payload(body, adapter, lora_rank, adapter_smoke_test)?
     };
 
     println!(
@@ -1874,6 +1900,7 @@ fn build_grpo_jsonl_training_payload(
     file: &str,
     adapter: &str,
     lora_rank: Option<usize>,
+    adapter_smoke_test: bool,
 ) -> anyhow::Result<serde_json::Value> {
     let dataset_path = std::fs::canonicalize(file)
         .map_err(|e| anyhow::anyhow!("Failed to resolve GRPO JSONL file {file}: {e}"))?;
@@ -1887,6 +1914,9 @@ fn build_grpo_jsonl_training_payload(
     if let Some(rank) = lora_rank {
         config["lora_rank"] = serde_json::json!(rank);
     }
+    if adapter_smoke_test {
+        config["adapter_smoke_test"] = serde_json::json!(true);
+    }
     Ok(serde_json::json!({
         "dataset_path": dataset_path,
         "config": config,
@@ -1899,6 +1929,7 @@ fn build_sft_training_payload(
     lr: f64,
     epochs: u32,
     lora_rank: Option<usize>,
+    adapter_smoke_test: bool,
 ) -> serde_json::Value {
     let mut config = serde_json::json!({
         "output_name": adapter,
@@ -1907,6 +1938,9 @@ fn build_sft_training_payload(
     });
     if let Some(rank) = lora_rank {
         config["lora_rank"] = serde_json::json!(rank);
+    }
+    if adapter_smoke_test {
+        config["adapter_smoke_test"] = serde_json::json!(true);
     }
 
     serde_json::json!({
@@ -1919,6 +1953,7 @@ fn build_grpo_training_payload(
     mut body: serde_json::Value,
     adapter: &str,
     lora_rank: Option<usize>,
+    adapter_smoke_test: bool,
 ) -> anyhow::Result<serde_json::Value> {
     let obj = body.as_object_mut().ok_or_else(|| {
         anyhow::anyhow!("GRPO request must be a JSON object with groups and config")
@@ -1934,6 +1969,9 @@ fn build_grpo_training_payload(
     config_obj.insert("output_name".into(), serde_json::json!(adapter));
     if let Some(rank) = lora_rank {
         config_obj.insert("lora_rank".into(), serde_json::json!(rank));
+    }
+    if adapter_smoke_test {
+        config_obj.insert("adapter_smoke_test".into(), serde_json::json!(true));
     }
 
     Ok(body)
@@ -2698,6 +2736,7 @@ mod tests {
             2e-4,
             3,
             Some(8),
+            false,
         );
 
         assert_eq!(body["config"]["output_name"], "sft-adapter");
@@ -2710,10 +2749,18 @@ mod tests {
 
     #[test]
     fn build_sft_training_payload_omits_unset_lora_rank() {
-        let body = build_sft_training_payload(vec![], "sft-adapter", 1e-4, 1, None);
+        let body = build_sft_training_payload(vec![], "sft-adapter", 1e-4, 1, None, false);
 
         assert_eq!(body["config"]["output_name"], "sft-adapter");
         assert!(body["config"].get("lora_rank").is_none());
+        assert!(body["config"].get("adapter_smoke_test").is_none());
+    }
+
+    #[test]
+    fn build_sft_training_payload_sets_adapter_smoke_test_when_requested() {
+        let body = build_sft_training_payload(vec![], "sft-adapter", 1e-4, 1, None, true);
+
+        assert_eq!(body["config"]["adapter_smoke_test"], true);
     }
 
     #[test]
@@ -2733,11 +2780,12 @@ mod tests {
             .unwrap()
             .insert("adapter_name".to_string(), json!("legacy-top-level"));
 
-        let body = build_grpo_training_payload(body, "grpo-adapter", Some(16)).unwrap();
+        let body = build_grpo_training_payload(body, "grpo-adapter", Some(16), true).unwrap();
 
         assert_eq!(body["config"]["output_name"], "grpo-adapter");
         assert_eq!(body["config"]["learning_rate"], 5e-5);
         assert_eq!(body["config"]["lora_rank"], 16);
+        assert_eq!(body["config"]["adapter_smoke_test"], true);
         assert!(body.get("adapter_name").is_none());
         assert!(body["config"].get("epochs").is_none());
         assert!(body["config"].get("num_epochs").is_none());
@@ -2752,10 +2800,11 @@ mod tests {
             }],
         });
 
-        let body = build_grpo_training_payload(body, "grpo-adapter", None).unwrap();
+        let body = build_grpo_training_payload(body, "grpo-adapter", None, false).unwrap();
 
         assert_eq!(body["config"]["output_name"], "grpo-adapter");
         assert!(body["config"].get("lora_rank").is_none());
+        assert!(body["config"].get("adapter_smoke_test").is_none());
     }
 
     #[test]
@@ -2770,11 +2819,12 @@ mod tests {
 
         assert!(is_grpo_jsonl_path(path.to_str().unwrap()));
         let body =
-            build_grpo_jsonl_training_payload(path.to_str().unwrap(), "grpo-jsonl", Some(12))
+            build_grpo_jsonl_training_payload(path.to_str().unwrap(), "grpo-jsonl", Some(12), true)
                 .unwrap();
         assert!(body.get("groups").is_none());
         assert_eq!(body["config"]["output_name"], "grpo-jsonl");
         assert_eq!(body["config"]["lora_rank"], 12);
+        assert_eq!(body["config"]["adapter_smoke_test"], true);
         assert!(body["dataset_path"].as_str().unwrap().ends_with(".jsonl"));
         let _ = std::fs::remove_file(path);
     }

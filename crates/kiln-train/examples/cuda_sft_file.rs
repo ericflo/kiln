@@ -357,6 +357,7 @@ fn main() -> Result<()> {
         checkpoint_interval: args.checkpoint_interval,
         seed: Some(0xC0DA_5EED),
         optimizer: Optimizer::default(),
+        adapter_smoke_test: false,
     };
     println!(
         "output_dir={} adapter_name={} checkpoint_interval={:?} vram_poll_millis={}",

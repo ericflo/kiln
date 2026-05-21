@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 
 pub const TRAIN_RECEIPT_FILENAME: &str = "train_receipt.json";
 pub const TRAIN_RECEIPT_SCHEMA_VERSION: u32 = 1;
+pub const ADAPTER_SMOKE_LOGIT_DELTA_EPSILON: f64 = 1e-6;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -49,6 +50,8 @@ pub struct TrainReceipt {
     pub token_counts: TokenCountReceipt,
     pub runtime: RuntimeReceipt,
     pub lora_delta_norms: Vec<LoraDeltaNormSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_smoke_test: Option<AdapterSmokeTestReceipt>,
     pub config: serde_json::Value,
 }
 
@@ -213,6 +216,26 @@ pub struct LoraDeltaNormSummary {
     pub delta_l2_upper_bound_max: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdapterSmokeTestReceipt {
+    pub enabled: bool,
+    pub passed: bool,
+    pub warnings: Vec<String>,
+    pub prompts: Vec<AdapterSmokePromptReceipt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdapterSmokePromptReceipt {
+    pub prompt: String,
+    pub finite_logits: bool,
+    pub logit_delta_l2: Option<f64>,
+    pub generated_text_different: bool,
+    pub base_output: String,
+    pub adapter_output: String,
+    pub adapter_output_tokens: usize,
+    pub adapter_output_chars: usize,
+}
+
 impl Default for RewardStatsReceipt {
     fn default() -> Self {
         Self {
@@ -269,6 +292,7 @@ impl TrainReceipt {
                 peak_vram_mib: None,
             },
             lora_delta_norms: Vec::new(),
+            adapter_smoke_test: None,
             config,
         }
     }
@@ -352,6 +376,62 @@ pub fn warn_echo_enabled_without_env_tokens(
             context_tokens = token_counts.context_tokens,
             "ECHO is enabled but no environment tokens were observed; env-CE is inactive"
         );
+    }
+}
+
+pub fn build_adapter_smoke_test_receipt(
+    prompts: Vec<AdapterSmokePromptReceipt>,
+) -> AdapterSmokeTestReceipt {
+    let mut warnings = Vec::new();
+
+    if prompts.is_empty() {
+        warnings.push("adapter smoke test did not run any prompts".to_string());
+    }
+
+    if prompts
+        .iter()
+        .any(|prompt| !prompt.finite_logits || prompt.logit_delta_l2.is_none())
+    {
+        warnings.push("adapter smoke test observed non-finite logits".to_string());
+    }
+
+    let measurable_effect = prompts.iter().any(|prompt| {
+        prompt
+            .logit_delta_l2
+            .is_some_and(|delta| delta > ADAPTER_SMOKE_LOGIT_DELTA_EPSILON)
+            || prompt.generated_text_different
+    });
+    if !measurable_effect {
+        warnings.push(format!(
+            "adapter smoke test observed no measurable adapter effect (all logit_delta_l2 <= {ADAPTER_SMOKE_LOGIT_DELTA_EPSILON:e} and generated text matched base)"
+        ));
+    }
+
+    if prompts.iter().any(|prompt| {
+        prompt.adapter_output_tokens == 0 || prompt.adapter_output.trim().is_empty()
+    }) {
+        warnings.push(
+            "adapter smoke test produced empty adapter output on canary prompt".to_string(),
+        );
+    }
+
+    AdapterSmokeTestReceipt {
+        enabled: true,
+        passed: warnings.is_empty(),
+        warnings,
+        prompts,
+    }
+}
+
+pub fn failed_adapter_smoke_test_receipt(error: impl Into<String>) -> AdapterSmokeTestReceipt {
+    AdapterSmokeTestReceipt {
+        enabled: true,
+        passed: false,
+        warnings: vec![format!(
+            "adapter smoke test failed before metrics were recorded: {}",
+            error.into()
+        )],
+        prompts: Vec::new(),
     }
 }
 
@@ -709,6 +789,7 @@ mod tests {
         assert_eq!(loaded.status, TrainReceiptStatus::Success);
         assert_eq!(loaded.adapter_name, "adapter-a");
         assert_eq!(loaded.hyperparameters.rank, 8);
+        assert!(loaded.adapter_smoke_test.is_none());
         Ok(())
     }
 
@@ -762,6 +843,74 @@ mod tests {
         assert_eq!(receipt.initial_env_ce, Some(2.5));
         assert_eq!(receipt.final_env_ce, Some(1.25));
         assert_eq!(metrics.measurements, 2);
+    }
+
+    #[test]
+    fn adapter_smoke_receipt_passes_when_effect_is_measurable() {
+        let receipt = build_adapter_smoke_test_receipt(vec![AdapterSmokePromptReceipt {
+            prompt: "Say hello.".to_string(),
+            finite_logits: true,
+            logit_delta_l2: Some(0.25),
+            generated_text_different: true,
+            base_output: "Hello".to_string(),
+            adapter_output: "Hi".to_string(),
+            adapter_output_tokens: 1,
+            adapter_output_chars: 2,
+        }]);
+
+        assert!(receipt.enabled);
+        assert!(receipt.passed);
+        assert!(receipt.warnings.is_empty());
+    }
+
+    #[test]
+    fn adapter_smoke_receipt_warns_on_no_effect() {
+        let receipt = build_adapter_smoke_test_receipt(vec![AdapterSmokePromptReceipt {
+            prompt: "Say hello.".to_string(),
+            finite_logits: true,
+            logit_delta_l2: Some(0.0),
+            generated_text_different: false,
+            base_output: "Hello".to_string(),
+            adapter_output: "Hello".to_string(),
+            adapter_output_tokens: 1,
+            adapter_output_chars: 5,
+        }]);
+
+        assert!(!receipt.passed);
+        assert!(
+            receipt
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("no measurable adapter effect"))
+        );
+    }
+
+    #[test]
+    fn adapter_smoke_receipt_warns_on_non_finite_or_empty_output() {
+        let receipt = build_adapter_smoke_test_receipt(vec![AdapterSmokePromptReceipt {
+            prompt: "Say hello.".to_string(),
+            finite_logits: false,
+            logit_delta_l2: None,
+            generated_text_different: true,
+            base_output: "Hello".to_string(),
+            adapter_output: String::new(),
+            adapter_output_tokens: 0,
+            adapter_output_chars: 0,
+        }]);
+
+        assert!(!receipt.passed);
+        assert!(
+            receipt
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("non-finite logits"))
+        );
+        assert!(
+            receipt
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("empty adapter output"))
+        );
     }
 
     #[test]

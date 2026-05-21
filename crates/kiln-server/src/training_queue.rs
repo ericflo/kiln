@@ -1165,6 +1165,7 @@ fn run_distill_refresh(
         checkpoint_interval: None,
         seed: req.config.seed,
         optimizer: req.config.optimizer,
+        adapter_smoke_test: false,
     };
     tracing::info!(job_id = %job_id, adapter = %midtrain_name, "phase 1 — SFT midtrain");
     trainer::sft_train(

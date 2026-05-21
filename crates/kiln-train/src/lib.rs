@@ -56,8 +56,8 @@ pub use lora_scaling::{
     validate_lora_scaling,
 };
 pub use train_receipt::{
-    TRAIN_RECEIPT_FILENAME, TRAIN_RECEIPT_SCHEMA_VERSION, TrainReceipt,
-    TrainReceiptStatus,
+    AdapterSmokePromptReceipt, AdapterSmokeTestReceipt, TRAIN_RECEIPT_FILENAME,
+    TRAIN_RECEIPT_SCHEMA_VERSION, TrainReceipt, TrainReceiptStatus,
 };
 pub use opd::{
     AgenticLossInputs, AgenticLossWeights, COLD_START_DEFAULT_EPOCHS, COLD_START_DEFAULT_PROMPTS,
@@ -196,6 +196,10 @@ pub struct SftConfig {
     /// `{"optimizer": {"kind": "sgd"}}` for backwards-compatible runs.
     #[serde(default)]
     pub optimizer: Optimizer,
+    /// After successful training, run a small base-vs-adapter canary check and
+    /// record the result in `train_receipt.json`.
+    #[serde(default)]
+    pub adapter_smoke_test: bool,
 }
 
 fn default_auto_load() -> bool {
@@ -229,6 +233,7 @@ impl Default for SftConfig {
             checkpoint_interval: None,
             seed: None,
             optimizer: Optimizer::default(),
+            adapter_smoke_test: false,
         }
     }
 }
@@ -526,6 +531,10 @@ pub struct GrpoConfig {
     /// Optimizer selection — see `SftConfig::optimizer`.
     #[serde(default)]
     pub optimizer: Optimizer,
+    /// After successful training, run a small base-vs-adapter canary check and
+    /// record the result in `train_receipt.json`.
+    #[serde(default)]
+    pub adapter_smoke_test: bool,
     /// Composition of per-token training objectives. ECHO is on by default
     /// (paper §3.3 λ=0.05); OPD's slot is reserved but empty until the OPD
     /// branch rebases. See `LossConfig` for the full design.
@@ -788,6 +797,7 @@ impl Default for GrpoConfig {
             checkpoint_interval: None,
             seed: None,
             optimizer: Optimizer::default(),
+            adapter_smoke_test: false,
             loss: LossConfig::default(),
         }
     }

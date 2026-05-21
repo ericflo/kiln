@@ -40,6 +40,7 @@ use kiln_model::forward::{
     transformer_mlp_down_from_gated, transformer_mlp_gated_hidden,
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
+use kiln_model::sampling::greedy_sample;
 use kiln_model::paged_kv_cache::PagedKvCache;
 
 use crate::replay::{
@@ -231,6 +232,16 @@ fn to_core_messages(msgs: &[ChatMessage]) -> Vec<kiln_core::tokenizer::ChatMessa
 
 /// Which linear projections to train LoRA on.
 const DEFAULT_TARGET_MODULES: &[&str] = crate::adapter_shape::TRAINABLE_TARGET_MODULES;
+const ADAPTER_SMOKE_TEST_PROMPTS: &[&str] = &[
+    "In one short sentence, name a primary color:",
+    "Complete this sentence with a brief answer: The capital of France is",
+];
+const ADAPTER_SMOKE_TEST_MAX_NEW_TOKENS: usize = 4;
+
+struct AdapterSmokeGeneration {
+    output: String,
+    output_tokens: usize,
+}
 
 /// Trainable LoRA parameters as candle `Var`s.
 ///
@@ -988,6 +999,204 @@ fn grpo_settings_receipt(
     }
 }
 
+fn run_adapter_smoke_test_best_effort(
+    adapter_name: &str,
+    backend: &dyn BackendRuntime,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    params: &TrainableLoraParams,
+) -> crate::train_receipt::AdapterSmokeTestReceipt {
+    let receipt = run_adapter_smoke_test(backend, weights, model_config, tokenizer, params)
+        .unwrap_or_else(|err| {
+            crate::train_receipt::failed_adapter_smoke_test_receipt(format!("{err:#}"))
+        });
+    if receipt.passed {
+        tracing::info!(
+            adapter = adapter_name,
+            prompts = receipt.prompts.len(),
+            "adapter smoke test passed"
+        );
+    } else {
+        for warning in &receipt.warnings {
+            tracing::warn!(
+                adapter = adapter_name,
+                warning = %warning,
+                "adapter smoke test warning"
+            );
+        }
+    }
+    receipt
+}
+
+fn run_adapter_smoke_test(
+    backend: &dyn BackendRuntime,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    params: &TrainableLoraParams,
+) -> Result<crate::train_receipt::AdapterSmokeTestReceipt> {
+    let lora = lora_weights_detached(params);
+    let mut prompts = Vec::with_capacity(ADAPTER_SMOKE_TEST_PROMPTS.len());
+
+    for prompt in ADAPTER_SMOKE_TEST_PROMPTS {
+        let prompt_ids = tokenizer
+            .encode(prompt)
+            .map_err(|err| anyhow::anyhow!("{err}"))
+            .with_context(|| format!("tokenize adapter smoke prompt {prompt:?}"))?;
+        anyhow::ensure!(
+            !prompt_ids.is_empty(),
+            "adapter smoke prompt tokenized to zero tokens: {prompt:?}"
+        );
+
+        let base_logits = model_forward(
+            backend,
+            &prompt_ids,
+            weights,
+            model_config,
+            None,
+            None,
+            None,
+        )
+        .with_context(|| format!("base forward for adapter smoke prompt {prompt:?}"))?;
+        let adapter_logits = model_forward(
+            backend,
+            &prompt_ids,
+            weights,
+            model_config,
+            None,
+            None,
+            Some(&lora),
+        )
+        .with_context(|| format!("adapter forward for adapter smoke prompt {prompt:?}"))?;
+        let (finite_logits, logit_delta_l2) =
+            adapter_smoke_logit_delta_l2(&base_logits, &adapter_logits)
+                .with_context(|| format!("compare adapter smoke logits for {prompt:?}"))?;
+
+        let base_generation = adapter_smoke_greedy_generate(
+            backend,
+            weights,
+            model_config,
+            tokenizer,
+            prompt,
+            None,
+        )
+        .with_context(|| format!("base generation for adapter smoke prompt {prompt:?}"))?;
+        let adapter_generation = adapter_smoke_greedy_generate(
+            backend,
+            weights,
+            model_config,
+            tokenizer,
+            prompt,
+            Some(&lora),
+        )
+        .with_context(|| format!("adapter generation for adapter smoke prompt {prompt:?}"))?;
+
+        prompts.push(crate::train_receipt::AdapterSmokePromptReceipt {
+            prompt: (*prompt).to_string(),
+            finite_logits,
+            logit_delta_l2,
+            generated_text_different: base_generation.output != adapter_generation.output,
+            base_output: base_generation.output,
+            adapter_output_chars: adapter_generation.output.chars().count(),
+            adapter_output: adapter_generation.output,
+            adapter_output_tokens: adapter_generation.output_tokens,
+        });
+    }
+
+    Ok(crate::train_receipt::build_adapter_smoke_test_receipt(prompts))
+}
+
+fn adapter_smoke_logit_delta_l2(
+    base_logits: &Tensor,
+    adapter_logits: &Tensor,
+) -> Result<(bool, Option<f64>)> {
+    let base = adapter_smoke_last_logits(base_logits)?;
+    let adapter = adapter_smoke_last_logits(adapter_logits)?;
+    anyhow::ensure!(
+        base.len() == adapter.len(),
+        "base and adapter logits have different vocab sizes: {} vs {}",
+        base.len(),
+        adapter.len()
+    );
+
+    let finite_logits = base.iter().chain(adapter.iter()).all(|value| value.is_finite());
+    if !finite_logits {
+        return Ok((false, None));
+    }
+
+    let sum_sq = base
+        .iter()
+        .zip(adapter.iter())
+        .map(|(base, adapter)| {
+            let delta = *adapter as f64 - *base as f64;
+            delta * delta
+        })
+        .sum::<f64>();
+    let l2 = sum_sq.sqrt();
+    Ok((l2.is_finite(), l2.is_finite().then_some(l2)))
+}
+
+fn adapter_smoke_last_logits(logits: &Tensor) -> Result<Vec<f32>> {
+    let dims = logits.dims();
+    anyhow::ensure!(
+        dims.len() >= 2,
+        "adapter smoke logits must have at least 2 dimensions, got {dims:?}"
+    );
+    let seq_dim = dims.len() - 2;
+    let seq_len = dims[seq_dim];
+    anyhow::ensure!(seq_len > 0, "adapter smoke logits have zero sequence length");
+    Ok(logits
+        .narrow(seq_dim, seq_len - 1, 1)?
+        .squeeze(seq_dim)?
+        .flatten_all()?
+        .to_dtype(DType::F32)?
+        .to_vec1::<f32>()?)
+}
+
+fn adapter_smoke_greedy_generate(
+    backend: &dyn BackendRuntime,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    prompt: &str,
+    lora: Option<&LoraWeights>,
+) -> Result<AdapterSmokeGeneration> {
+    let mut context = tokenizer
+        .encode(prompt)
+        .map_err(|err| anyhow::anyhow!("{err}"))
+        .with_context(|| format!("tokenize adapter smoke generation prompt {prompt:?}"))?;
+    anyhow::ensure!(
+        !context.is_empty(),
+        "adapter smoke generation prompt tokenized to zero tokens: {prompt:?}"
+    );
+
+    let mut generated = Vec::with_capacity(ADAPTER_SMOKE_TEST_MAX_NEW_TOKENS);
+    for _ in 0..ADAPTER_SMOKE_TEST_MAX_NEW_TOKENS {
+        let logits = model_forward(
+            backend,
+            &context,
+            weights,
+            model_config,
+            None,
+            None,
+            lora,
+        )?;
+        let token = greedy_sample(&logits)?;
+        generated.push(token);
+        context.push(token);
+    }
+
+    let output = tokenizer
+        .decode(&generated)
+        .map_err(|err| anyhow::anyhow!("{err}"))
+        .context("decode adapter smoke generated tokens")?;
+    Ok(AdapterSmokeGeneration {
+        output,
+        output_tokens: generated.len(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_sft_train_receipt_best_effort(
     adapter_name: &str,
@@ -1002,6 +1211,7 @@ fn write_sft_train_receipt_best_effort(
     data: crate::train_receipt::DataStatsReceipt,
     token_counts: crate::train_receipt::TokenCountReceipt,
     wall_clock_ms: u64,
+    adapter_smoke_test: Option<crate::train_receipt::AdapterSmokeTestReceipt>,
     status_error: Option<String>,
 ) {
     let mut receipt = crate::train_receipt::TrainReceipt::new(
@@ -1022,6 +1232,7 @@ fn write_sft_train_receipt_best_effort(
     receipt.data = data;
     receipt.token_counts = token_counts;
     receipt.runtime.wall_clock_ms = wall_clock_ms;
+    receipt.adapter_smoke_test = adapter_smoke_test;
     crate::train_receipt::log_training_token_counts("sft", &receipt.token_counts);
     if status_error.is_none() {
         receipt.lora_delta_norms =
@@ -1059,6 +1270,7 @@ fn build_grpo_train_receipt(
     echo_metrics: crate::train_receipt::EchoActivityMetrics,
     wall_clock_ms: u64,
     dynamic_groups_filtered: usize,
+    adapter_smoke_test: Option<crate::train_receipt::AdapterSmokeTestReceipt>,
     status_error: Option<String>,
 ) -> crate::train_receipt::TrainReceipt {
     let mut receipt = crate::train_receipt::TrainReceipt::new(
@@ -1080,6 +1292,7 @@ fn build_grpo_train_receipt(
     receipt.rewards = rewards;
     receipt.token_counts = token_counts;
     receipt.runtime.wall_clock_ms = wall_clock_ms;
+    receipt.adapter_smoke_test = adapter_smoke_test;
     crate::train_receipt::log_training_token_counts("grpo", &receipt.token_counts);
     crate::train_receipt::warn_echo_enabled_without_env_tokens(
         "grpo",
@@ -1120,6 +1333,7 @@ fn write_grpo_train_receipt_best_effort(
     echo_metrics: crate::train_receipt::EchoActivityMetrics,
     wall_clock_ms: u64,
     dynamic_groups_filtered: usize,
+    adapter_smoke_test: Option<crate::train_receipt::AdapterSmokeTestReceipt>,
     status_error: Option<String>,
 ) {
     let receipt = build_grpo_train_receipt(
@@ -1138,6 +1352,7 @@ fn write_grpo_train_receipt_best_effort(
         echo_metrics,
         wall_clock_ms,
         dynamic_groups_filtered,
+        adapter_smoke_test,
         status_error,
     );
     if let Err(err) = receipt.write_to_adapter_dir(output_dir) {
@@ -1215,6 +1430,7 @@ pub fn sft_train(
                 data_stats,
                 token_counts,
                 run_started.elapsed().as_millis() as u64,
+                None,
                 Some(message),
             );
             return Err(err);
@@ -1266,6 +1482,7 @@ pub fn sft_train(
                 data_stats,
                 token_counts,
                 run_started.elapsed().as_millis() as u64,
+                None,
                 Some(message),
             );
             return Err(err);
@@ -1518,6 +1735,18 @@ pub fn sft_train(
 
     let result = train_body();
     drop(train_body);
+    let adapter_smoke_test = if config.adapter_smoke_test && result.is_ok() {
+        Some(run_adapter_smoke_test_best_effort(
+            adapter_name,
+            &*backend,
+            weights,
+            model_config,
+            tokenizer,
+            &params,
+        ))
+    } else {
+        None
+    };
     // Phase 4.1 cleanup: evict the LoRA Vars from the registry so a
     // long-running server doesn't accumulate stale entries from past
     // training jobs (each job creates fresh Vars with new TensorIds).
@@ -1550,6 +1779,7 @@ pub fn sft_train(
         data_stats,
         token_counts,
         run_started.elapsed().as_millis() as u64,
+        adapter_smoke_test,
         status_error,
     );
     result.map(|(dir, _)| dir)
@@ -1635,6 +1865,7 @@ pub fn grpo_train(
                 crate::train_receipt::EchoActivityMetrics::default(),
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
+                None,
                 Some(message),
             );
             return Err(err);
@@ -1692,6 +1923,7 @@ pub fn grpo_train(
                 crate::train_receipt::EchoActivityMetrics::default(),
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
+                None,
                 Some(message),
             );
             return Err(err);
@@ -1948,6 +2180,18 @@ pub fn grpo_train(
 
     let result = train_body();
     drop(train_body);
+    let adapter_smoke_test = if config.adapter_smoke_test && result.is_ok() {
+        Some(run_adapter_smoke_test_best_effort(
+            adapter_name,
+            &*backend,
+            weights,
+            model_config,
+            tokenizer,
+            &params,
+        ))
+    } else {
+        None
+    };
     // Phase 4.1 cleanup: same as sft_train — evict the LoRA Vars
     // and any optimizer-state moment Vars from the registry on
     // completion so stale entries don't accumulate across jobs.
@@ -1985,6 +2229,7 @@ pub fn grpo_train(
         echo_metrics,
         run_started.elapsed().as_millis() as u64,
         dynamic_groups_filtered,
+        adapter_smoke_test,
         status_error,
     );
     result.map(|(dir, _)| dir)
@@ -2157,6 +2402,7 @@ pub fn grpo_dry_run_jsonl(
         crate::train_receipt::EchoActivityMetrics::default(),
         run_started.elapsed().as_millis() as u64,
         dynamic_groups_filtered,
+        None,
         status_error,
     );
     let receipt_write = receipt
@@ -2251,6 +2497,7 @@ pub fn grpo_train_jsonl(
                 crate::train_receipt::EchoActivityMetrics::default(),
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
+                None,
                 Some(message),
             );
             return Err(err);
@@ -2302,6 +2549,7 @@ pub fn grpo_train_jsonl(
                 crate::train_receipt::EchoActivityMetrics::default(),
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
+                None,
                 Some(message),
             );
             return Err(err);
@@ -2593,6 +2841,18 @@ pub fn grpo_train_jsonl(
 
     let result = train_body();
     drop(train_body);
+    let adapter_smoke_test = if config.adapter_smoke_test && result.is_ok() {
+        Some(run_adapter_smoke_test_best_effort(
+            adapter_name,
+            &*backend,
+            weights,
+            model_config,
+            tokenizer,
+            &params,
+        ))
+    } else {
+        None
+    };
     if let Some(state) = opt_state.as_ref() {
         state.evict_from_backend(&*backend);
     }
@@ -2623,6 +2883,7 @@ pub fn grpo_train_jsonl(
         echo_metrics,
         run_started.elapsed().as_millis() as u64,
         dynamic_groups_filtered,
+        adapter_smoke_test,
         status_error,
     );
     result.map(|(dir, _)| dir)
