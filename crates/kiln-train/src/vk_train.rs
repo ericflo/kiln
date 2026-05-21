@@ -114,16 +114,25 @@ fn vk_grpo_receipt_settings(
     }
 }
 
-fn vk_grpo_echo_receipt(config: &GrpoConfig) -> crate::train_receipt::EchoReceipt {
+fn vk_grpo_echo_receipt(
+    config: &GrpoConfig,
+    echo_metrics: &crate::train_receipt::EchoActivityMetrics,
+) -> crate::train_receipt::EchoReceipt {
     match config.loss.echo.as_ref() {
-        Some(echo) if config.loss.echo_enabled() => crate::train_receipt::EchoReceipt {
-            enabled: true,
-            lambda: Some(echo.lambda),
-            env_mask_mode: serde_json::to_value(echo.env_mask_mode)
-                .ok()
-                .and_then(|v| v.as_str().map(ToString::to_string)),
-            warning_filter: Some(echo.warning_filter),
-        },
+        Some(echo) if config.loss.echo_enabled() => {
+            let mut receipt = crate::train_receipt::EchoReceipt {
+                enabled: true,
+                lambda: Some(echo.lambda),
+                env_mask_mode: serde_json::to_value(echo.env_mask_mode)
+                    .ok()
+                    .and_then(|v| v.as_str().map(ToString::to_string)),
+                warning_filter: Some(echo.warning_filter),
+                initial_env_ce: None,
+                final_env_ce: None,
+            };
+            echo_metrics.apply_to_echo_receipt(&mut receipt);
+            receipt
+        }
         _ => crate::train_receipt::EchoReceipt::disabled(),
     }
 }
@@ -139,6 +148,7 @@ fn write_vk_grpo_train_receipt_best_effort(
     data: crate::train_receipt::DataStatsReceipt,
     rewards: crate::train_receipt::RewardStatsReceipt,
     token_counts: crate::train_receipt::TokenCountReceipt,
+    echo_metrics: crate::train_receipt::EchoActivityMetrics,
     wall_clock_ms: u64,
     dynamic_groups_filtered: usize,
     alpha_over_rank: Option<f32>,
@@ -163,12 +173,18 @@ fn write_vk_grpo_train_receipt_best_effort(
     receipt.training_data = training_data;
     receipt.adapters.output = crate::train_receipt::adapter_file_receipt(Some(output_dir));
     receipt.grpo = Some(vk_grpo_receipt_settings(config, dynamic_groups_filtered));
-    receipt.echo = vk_grpo_echo_receipt(config);
+    receipt.echo = vk_grpo_echo_receipt(config, &echo_metrics);
     receipt.no_policy_loss = config.loss.no_policy_loss;
     receipt.data = data;
     receipt.rewards = rewards;
     receipt.token_counts = token_counts;
     receipt.runtime.wall_clock_ms = wall_clock_ms;
+    crate::train_receipt::log_training_token_counts("vk_grpo", &receipt.token_counts);
+    crate::train_receipt::warn_echo_enabled_without_env_tokens(
+        "vk_grpo",
+        config.loss.echo_enabled(),
+        &receipt.token_counts,
+    );
     receipt.lora_delta_norms =
         crate::train_receipt::lora_delta_norm_summary_from_adapter(
             output_dir,
@@ -219,6 +235,7 @@ fn write_vk_sft_train_receipt_best_effort(
     receipt.data = data;
     receipt.token_counts = token_counts;
     receipt.runtime.wall_clock_ms = wall_clock_ms;
+    crate::train_receipt::log_training_token_counts("vk_sft", &receipt.token_counts);
     receipt.lora_delta_norms =
         crate::train_receipt::lora_delta_norm_summary_from_adapter(
             output_dir,
@@ -2438,6 +2455,12 @@ pub struct VkEchoStepParams<'a> {
     pub lambda: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct VkGrpoStepReport {
+    pub loss: f32,
+    pub echo_env_ce: Option<f32>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn vk_recompute_grpo_train_step_with_state(
     weights: &VkModelWeights,
@@ -2456,7 +2479,7 @@ pub fn vk_recompute_grpo_train_step_with_state(
     optimizer: Optimizer,
     step: u32,
     echo: Option<VkEchoStepParams<'_>>,
-) -> Result<f32> {
+) -> Result<VkGrpoStepReport> {
     use kiln_model::vk_forward::{
         vk_compute_rope_tables, vk_full_attention_attention_block_with_rope,
         vk_full_attention_mlp_down_from_gated, vk_full_attention_mlp_gated,
@@ -2591,6 +2614,7 @@ pub fn vk_recompute_grpo_train_step_with_state(
     use kiln_vulkan_kernel::vk_ops::elementwise::vk_add;
     use kiln_vulkan_kernel::vk_ops::flce::vk_flce_loss;
     use kiln_vulkan_kernel::vk_ops::mask::vk_scale;
+    let mut echo_env_ce = None;
     let loss = if let Some(echo_params) = echo {
         if echo_params.env_rows.is_empty()
             || echo_params.env_labels.is_empty()
@@ -2619,6 +2643,10 @@ pub fn vk_recompute_grpo_train_step_with_state(
                 echo_params.env_labels,
                 flce_recommended_chunk_len_for_tensors(&env_h, &weights.lm_head),
             )?;
+            echo_env_ce = Some(
+                env_loss_raw.to_vec_f32()?[0] * echo_params.env_rows.len() as f32
+                    / echo_params.total_obs_len as f32,
+            );
             let env_scale = (echo_params.lambda * echo_params.env_rows.len() as f32)
                 / echo_params.total_obs_len as f32;
             let env_loss_scaled = vk_scale(&env_loss_raw, env_scale)?;
@@ -2918,7 +2946,10 @@ pub fn vk_recompute_grpo_train_step_with_state(
         "vk_recompute_grpo_train_step",
     )?;
 
-    Ok(loss_val)
+    Ok(VkGrpoStepReport {
+        loss: loss_val,
+        echo_env_ce,
+    })
 }
 
 /// Exact layerwise reverse-recompute OPD step — the gradient-checkpointed
@@ -3841,6 +3872,7 @@ pub fn vk_native_grpo_train(
         ..Default::default()
     };
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+    let mut echo_metrics = crate::train_receipt::EchoActivityMetrics::default();
     let mut reward_groups: Vec<Vec<f64>> = Vec::new();
     let mut dynamic_groups_filtered = 0usize;
     let alpha_over_rank =
@@ -3893,6 +3925,8 @@ pub fn vk_native_grpo_train(
         )?;
         let advantages = compute_vk_grpo_advantages(&tgroup.rewards, config.advantage_mode);
         let mut group_loss_sum = 0.0f64;
+        let mut group_echo_ce_sum = 0.0f64;
+        let mut group_echo_ce_weight = 0usize;
         let ref_prefix = if grpo_group_needs_prefix_reference(&tgroup) {
             Some(
                 vk_grpo_reference_prefill_prompt(
@@ -3949,7 +3983,7 @@ pub fn vk_native_grpo_train(
             let (env_rows, env_labels) =
                 grpo_active_rows_and_labels(&comp.input_ids, &comp.env_mask)?;
             let echo_params = config.loss.echo.as_ref().and_then(|cfg| {
-                if env_rows.is_empty() || comp.total_obs_len == 0 {
+                if !config.loss.echo_enabled() || env_rows.is_empty() || comp.total_obs_len == 0 {
                     None
                 } else {
                     Some(VkEchoStepParams {
@@ -3961,7 +3995,7 @@ pub fn vk_native_grpo_train(
                 }
             });
 
-            let loss = vk_recompute_grpo_train_step_with_state(
+            let step_report = vk_recompute_grpo_train_step_with_state(
                 &vk_weights,
                 &lora_layers,
                 &comp.input_ids,
@@ -3986,6 +4020,13 @@ pub fn vk_native_grpo_train(
                     comp_idx + 1
                 )
             })?;
+            let loss = step_report.loss;
+            if let Some(echo_env_ce) = step_report.echo_env_ce {
+                if comp.total_obs_len > 0 {
+                    group_echo_ce_sum += f64::from(echo_env_ce) * comp.total_obs_len as f64;
+                    group_echo_ce_weight = group_echo_ce_weight.saturating_add(comp.total_obs_len);
+                }
+            }
             anyhow::ensure!(
                 loss.is_finite(),
                 "vk_native_grpo_train: non-finite loss {loss} at optimizer step {optimizer_step}"
@@ -3999,6 +4040,12 @@ pub fn vk_native_grpo_train(
         } else {
             group_loss_sum / tgroup.completions.len() as f64
         };
+        let group_echo_env_ce = if group_echo_ce_weight > 0 {
+            Some(group_echo_ce_sum / group_echo_ce_weight as f64)
+        } else {
+            None
+        };
+        echo_metrics.observe_env_ce(group_echo_env_ce);
         if let Some(ref cb) = progress_cb {
             cb(TrainingProgress {
                 epoch: 1,
@@ -4013,9 +4060,21 @@ pub fn vk_native_grpo_train(
             group = group_step,
             total_groups = groups.len(),
             completions = tgroup.completions.len(),
+            action_tokens = group_counts.action_tokens,
+            env_tokens = group_counts.env_tokens,
             loss = format!("{avg_group_loss:.6}"),
             "vk-native GRPO group step"
         );
+        if let Some(echo_env_ce) = group_echo_env_ce {
+            tracing::info!(
+                group = group_step,
+                total_groups = groups.len(),
+                action_tokens = group_counts.action_tokens,
+                env_tokens = group_counts.env_tokens,
+                echo_env_ce,
+                "vk-native GRPO ECHO group metrics"
+            );
+        }
 
         if let Some(interval) = config.checkpoint_interval {
             if interval > 0 && group_step % interval == 0 && group_step < groups.len() {
@@ -4065,6 +4124,7 @@ pub fn vk_native_grpo_train(
         data_stats,
         crate::train_receipt::reward_stats_from_groups(reward_groups.iter().map(Vec::as_slice)),
         token_counts,
+        echo_metrics,
         run_started.elapsed().as_millis() as u64,
         dynamic_groups_filtered,
         alpha_over_rank,
@@ -4200,6 +4260,7 @@ pub fn vk_native_grpo_train_jsonl(
     let mut line = String::new();
     let mut data_stats = crate::train_receipt::DataStatsReceipt::default();
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+    let mut echo_metrics = crate::train_receipt::EchoActivityMetrics::default();
     let mut reward_groups: Vec<Vec<f64>> = Vec::new();
     let mut dynamic_groups_filtered = 0usize;
     let alpha_over_rank =
@@ -4278,6 +4339,8 @@ pub fn vk_native_grpo_train_jsonl(
         );
         let advantages = compute_vk_grpo_advantages(&tgroup.rewards, config.advantage_mode);
         let mut group_loss_sum = 0.0f64;
+        let mut group_echo_ce_sum = 0.0f64;
+        let mut group_echo_ce_weight = 0usize;
         let ref_prefix = if grpo_group_needs_prefix_reference(&tgroup) {
             tracing::info!(
                 group = processed_groups,
@@ -4413,7 +4476,7 @@ pub fn vk_native_grpo_train_jsonl(
             let (env_rows, env_labels) =
                 grpo_active_rows_and_labels(&comp.input_ids, &comp.env_mask)?;
             let echo_params = config.loss.echo.as_ref().and_then(|cfg| {
-                if env_rows.is_empty() || comp.total_obs_len == 0 {
+                if !config.loss.echo_enabled() || env_rows.is_empty() || comp.total_obs_len == 0 {
                     None
                 } else {
                     Some(VkEchoStepParams {
@@ -4426,7 +4489,7 @@ pub fn vk_native_grpo_train_jsonl(
             });
 
             let policy_start = std::time::Instant::now();
-            let loss = vk_recompute_grpo_train_step_with_state(
+            let step_report = vk_recompute_grpo_train_step_with_state(
                 &vk_weights,
                 &lora_layers,
                 &comp.input_ids,
@@ -4451,6 +4514,13 @@ pub fn vk_native_grpo_train_jsonl(
                     comp_idx + 1
                 )
             })?;
+            let loss = step_report.loss;
+            if let Some(echo_env_ce) = step_report.echo_env_ce {
+                if comp.total_obs_len > 0 {
+                    group_echo_ce_sum += f64::from(echo_env_ce) * comp.total_obs_len as f64;
+                    group_echo_ce_weight = group_echo_ce_weight.saturating_add(comp.total_obs_len);
+                }
+            }
             tracing::info!(
                 group = processed_groups,
                 completion = comp_idx + 1,
@@ -4491,6 +4561,12 @@ pub fn vk_native_grpo_train_jsonl(
         } else {
             group_loss_sum / tgroup.completions.len() as f64
         };
+        let group_echo_env_ce = if group_echo_ce_weight > 0 {
+            Some(group_echo_ce_sum / group_echo_ce_weight as f64)
+        } else {
+            None
+        };
+        echo_metrics.observe_env_ce(group_echo_env_ce);
         if let Some(ref cb) = progress_cb {
             let (step, total_steps, progress) = jsonl_byte_progress(total_bytes, bytes_read);
             cb(TrainingProgress {
@@ -4506,11 +4582,23 @@ pub fn vk_native_grpo_train_jsonl(
             group = processed_groups,
             completions_seen = processed_completions,
             completions = tgroup.completions.len(),
+            action_tokens = group_counts.action_tokens,
+            env_tokens = group_counts.env_tokens,
             byte_offset = bytes_read,
             total_bytes,
             loss = format!("{avg_group_loss:.6}"),
             "streamed vk-native GRPO group step"
         );
+        if let Some(echo_env_ce) = group_echo_env_ce {
+            tracing::info!(
+                group = processed_groups,
+                completions_seen = processed_completions,
+                action_tokens = group_counts.action_tokens,
+                env_tokens = group_counts.env_tokens,
+                echo_env_ce,
+                "streamed vk-native GRPO ECHO group metrics"
+            );
+        }
 
         if let Some(interval) = config.checkpoint_interval {
             if interval > 0 && processed_groups % interval == 0 && bytes_read < total_bytes {
@@ -4569,6 +4657,7 @@ pub fn vk_native_grpo_train_jsonl(
         data_stats,
         crate::train_receipt::reward_stats_from_groups(reward_groups.iter().map(Vec::as_slice)),
         token_counts,
+        echo_metrics,
         run_started.elapsed().as_millis() as u64,
         dynamic_groups_filtered,
         alpha_over_rank,

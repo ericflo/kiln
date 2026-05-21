@@ -123,6 +123,10 @@ pub struct EchoReceipt {
     pub lambda: Option<f64>,
     pub env_mask_mode: Option<String>,
     pub warning_filter: Option<bool>,
+    #[serde(default)]
+    pub initial_env_ce: Option<f64>,
+    #[serde(default)]
+    pub final_env_ce: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -158,6 +162,37 @@ pub struct TokenCountReceipt {
     pub action_tokens: u64,
     pub env_tokens: u64,
     pub context_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EchoActivityMetrics {
+    pub initial_env_ce: Option<f64>,
+    pub final_env_ce: Option<f64>,
+    pub measurements: usize,
+}
+
+impl EchoActivityMetrics {
+    pub fn observe_env_ce(&mut self, env_ce: Option<f64>) {
+        let Some(env_ce) = env_ce else {
+            return;
+        };
+        if !env_ce.is_finite() {
+            return;
+        }
+        if self.initial_env_ce.is_none() {
+            self.initial_env_ce = Some(env_ce);
+        }
+        self.final_env_ce = Some(env_ce);
+        self.measurements = self.measurements.saturating_add(1);
+    }
+
+    pub fn apply_to_echo_receipt(&self, receipt: &mut EchoReceipt) {
+        if self.measurements == 0 {
+            return;
+        }
+        receipt.initial_env_ce = self.initial_env_ce;
+        receipt.final_env_ce = self.final_env_ce;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -288,7 +323,35 @@ impl EchoReceipt {
             lambda: None,
             env_mask_mode: None,
             warning_filter: None,
+            initial_env_ce: None,
+            final_env_ce: None,
         }
+    }
+}
+
+pub fn log_training_token_counts(mode: &str, token_counts: &TokenCountReceipt) {
+    tracing::info!(
+        mode,
+        action_tokens = token_counts.action_tokens,
+        env_tokens = token_counts.env_tokens,
+        context_tokens = token_counts.context_tokens,
+        "training token counts"
+    );
+}
+
+pub fn warn_echo_enabled_without_env_tokens(
+    mode: &str,
+    echo_enabled: bool,
+    token_counts: &TokenCountReceipt,
+) {
+    if echo_enabled && token_counts.env_tokens == 0 {
+        tracing::warn!(
+            mode,
+            action_tokens = token_counts.action_tokens,
+            env_tokens = token_counts.env_tokens,
+            context_tokens = token_counts.context_tokens,
+            "ECHO is enabled but no environment tokens were observed; env-CE is inactive"
+        );
     }
 }
 
@@ -676,6 +739,29 @@ mod tests {
         assert!(json.contains("\"status\": \"failed\""));
         assert!(json.contains("no valid GRPO groups"));
         Ok(())
+    }
+
+    #[test]
+    fn echo_activity_metrics_populate_receipt_env_ce_bounds() {
+        let mut metrics = EchoActivityMetrics::default();
+        metrics.observe_env_ce(Some(2.5));
+        metrics.observe_env_ce(None);
+        metrics.observe_env_ce(Some(f64::NAN));
+        metrics.observe_env_ce(Some(1.25));
+
+        let mut receipt = EchoReceipt {
+            enabled: true,
+            lambda: Some(0.05),
+            env_mask_mode: Some("env_only".to_string()),
+            warning_filter: Some(true),
+            initial_env_ce: None,
+            final_env_ce: None,
+        };
+        metrics.apply_to_echo_receipt(&mut receipt);
+
+        assert_eq!(receipt.initial_env_ce, Some(2.5));
+        assert_eq!(receipt.final_env_ce, Some(1.25));
+        assert_eq!(metrics.measurements, 2);
     }
 
     #[test]

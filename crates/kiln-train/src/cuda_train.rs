@@ -1616,6 +1616,7 @@ fn write_cuda_sft_train_receipt_best_effort(
     receipt.data = data;
     receipt.token_counts = token_counts;
     receipt.runtime.wall_clock_ms = wall_clock_ms;
+    crate::train_receipt::log_training_token_counts("cuda_sft", &receipt.token_counts);
     if status_error.is_none() {
         receipt.lora_delta_norms =
             crate::train_receipt::lora_delta_norm_summary_from_adapter(

@@ -2310,7 +2310,7 @@ fn vk_recompute_grpo_step_updates_full_attention_lora_targets() -> Result<()> {
         .collect();
     let ref_log_probs = grpo_ref_log_probs(&model, &input_ids, &active_rows, &labels, None)?;
 
-    let loss = vk_recompute_grpo_train_step_with_state(
+    let report = vk_recompute_grpo_train_step_with_state(
         &model,
         &lora_layers,
         &input_ids,
@@ -2328,7 +2328,9 @@ fn vk_recompute_grpo_step_updates_full_attention_lora_targets() -> Result<()> {
         1,
         None, // ECHO disabled in vk_train_smoke
     )?;
+    let loss = report.loss;
     assert!(loss.is_finite(), "non-finite full-attn GRPO recompute loss");
+    assert!(report.echo_env_ce.is_none());
 
     let layer = &lora_layers[0];
     for (name, pair) in [
@@ -2477,7 +2479,7 @@ fn vk_recompute_grpo_step_updates_gdn_lora_targets() -> Result<()> {
         Some(&mut ref_state),
     )?;
 
-    let loss = vk_recompute_grpo_train_step_with_state(
+    let report = vk_recompute_grpo_train_step_with_state(
         &model,
         &lora_layers,
         &input_ids,
@@ -2493,8 +2495,11 @@ fn vk_recompute_grpo_step_updates_gdn_lora_targets() -> Result<()> {
         &cfg,
         Optimizer::default(),
         1,
+        None,
     )?;
+    let loss = report.loss;
     assert!(loss.is_finite(), "non-finite GDN GRPO recompute loss");
+    assert!(report.echo_env_ce.is_none());
 
     let layer = &lora_layers[0];
     for (name, pair) in [

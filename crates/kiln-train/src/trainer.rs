@@ -960,6 +960,8 @@ fn grpo_echo_receipt(config: &GrpoConfig) -> crate::train_receipt::EchoReceipt {
                 .ok()
                 .and_then(|v| v.as_str().map(ToString::to_string)),
             warning_filter: Some(echo.warning_filter),
+            initial_env_ce: None,
+            final_env_ce: None,
         },
         _ => crate::train_receipt::EchoReceipt::disabled(),
     }
@@ -1020,6 +1022,7 @@ fn write_sft_train_receipt_best_effort(
     receipt.data = data;
     receipt.token_counts = token_counts;
     receipt.runtime.wall_clock_ms = wall_clock_ms;
+    crate::train_receipt::log_training_token_counts("sft", &receipt.token_counts);
     if status_error.is_none() {
         receipt.lora_delta_norms =
             crate::train_receipt::lora_delta_norm_summary_from_adapter(
@@ -1053,6 +1056,7 @@ fn build_grpo_train_receipt(
     data: crate::train_receipt::DataStatsReceipt,
     rewards: crate::train_receipt::RewardStatsReceipt,
     token_counts: crate::train_receipt::TokenCountReceipt,
+    echo_metrics: crate::train_receipt::EchoActivityMetrics,
     wall_clock_ms: u64,
     dynamic_groups_filtered: usize,
     status_error: Option<String>,
@@ -1070,11 +1074,18 @@ fn build_grpo_train_receipt(
     receipt.adapters.output = crate::train_receipt::adapter_file_receipt(Some(output_dir));
     receipt.grpo = Some(grpo_settings_receipt(config, dynamic_groups_filtered));
     receipt.echo = grpo_echo_receipt(config);
+    echo_metrics.apply_to_echo_receipt(&mut receipt.echo);
     receipt.no_policy_loss = config.loss.no_policy_loss;
     receipt.data = data;
     receipt.rewards = rewards;
     receipt.token_counts = token_counts;
     receipt.runtime.wall_clock_ms = wall_clock_ms;
+    crate::train_receipt::log_training_token_counts("grpo", &receipt.token_counts);
+    crate::train_receipt::warn_echo_enabled_without_env_tokens(
+        "grpo",
+        config.loss.echo_enabled(),
+        &receipt.token_counts,
+    );
     if status_error.is_none() {
         receipt.lora_delta_norms =
             crate::train_receipt::lora_delta_norm_summary_from_adapter(
@@ -1106,6 +1117,7 @@ fn write_grpo_train_receipt_best_effort(
     data: crate::train_receipt::DataStatsReceipt,
     rewards: crate::train_receipt::RewardStatsReceipt,
     token_counts: crate::train_receipt::TokenCountReceipt,
+    echo_metrics: crate::train_receipt::EchoActivityMetrics,
     wall_clock_ms: u64,
     dynamic_groups_filtered: usize,
     status_error: Option<String>,
@@ -1123,6 +1135,7 @@ fn write_grpo_train_receipt_best_effort(
         data,
         rewards,
         token_counts,
+        echo_metrics,
         wall_clock_ms,
         dynamic_groups_filtered,
         status_error,
@@ -1579,6 +1592,7 @@ pub fn grpo_train(
         ..Default::default()
     };
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+    let mut echo_metrics = crate::train_receipt::EchoActivityMetrics::default();
     let mut reward_stats = crate::train_receipt::RewardStatsReceipt::default();
     let mut dynamic_groups_filtered = 0usize;
     tracing::info!(
@@ -1618,6 +1632,7 @@ pub fn grpo_train(
                 data_stats,
                 reward_stats,
                 token_counts,
+                crate::train_receipt::EchoActivityMetrics::default(),
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
                 Some(message),
@@ -1674,6 +1689,7 @@ pub fn grpo_train(
                 data_stats,
                 reward_stats,
                 token_counts,
+                crate::train_receipt::EchoActivityMetrics::default(),
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
                 Some(message),
@@ -1754,6 +1770,11 @@ pub fn grpo_train(
             tokenized_groups.iter().map(|g| g.rewards.as_slice()),
         );
         token_counts = token_counts_for_grpo_groups(&tokenized_groups);
+        crate::train_receipt::warn_echo_enabled_without_env_tokens(
+            "grpo",
+            config.loss.echo_enabled(),
+            &token_counts,
+        );
 
         if dynamic_dropped > 0 {
             tracing::info!(
@@ -1815,7 +1836,8 @@ pub fn grpo_train(
 
         for (group_idx, tgroup) in tokenized_groups.iter().enumerate() {
             let num_completions = tgroup.completions.len();
-            let avg_group_loss = train_tokenized_grpo_group(
+            let group_counts = token_counts_for_grpo_groups(std::slice::from_ref(tgroup));
+            let step_report = train_tokenized_grpo_group(
                 &*backend,
                 tgroup,
                 weights,
@@ -1827,6 +1849,8 @@ pub fn grpo_train(
                 opt_state.as_mut(),
                 ema_ref_state.as_ref().map(|s| &s.snapshot),
             )?;
+            let avg_group_loss = step_report.loss;
+            echo_metrics.observe_env_ce(step_report.echo_env_ce);
             last_loss = avg_group_loss;
             global_step += 1;
 
@@ -1878,9 +1902,21 @@ pub fn grpo_train(
                 group = group_idx + 1,
                 total_groups = total_steps,
                 num_completions,
+                action_tokens = group_counts.action_tokens,
+                env_tokens = group_counts.env_tokens,
                 loss = format!("{avg_group_loss:.6}"),
                 "GRPO group step"
             );
+            if let Some(echo_env_ce) = step_report.echo_env_ce {
+                tracing::info!(
+                    group = group_idx + 1,
+                    total_groups = total_steps,
+                    action_tokens = group_counts.action_tokens,
+                    env_tokens = group_counts.env_tokens,
+                    echo_env_ce,
+                    "GRPO ECHO group metrics"
+                );
+            }
 
             if let Some(pb) = &pb {
                 pb.set_message(format!("{avg_group_loss:.6}"));
@@ -1946,6 +1982,7 @@ pub fn grpo_train(
         data_stats,
         reward_stats,
         token_counts,
+        echo_metrics,
         run_started.elapsed().as_millis() as u64,
         dynamic_groups_filtered,
         status_error,
@@ -2117,6 +2154,7 @@ pub fn grpo_dry_run_jsonl(
         data_stats,
         reward_stats,
         token_counts,
+        crate::train_receipt::EchoActivityMetrics::default(),
         run_started.elapsed().as_millis() as u64,
         dynamic_groups_filtered,
         status_error,
@@ -2171,6 +2209,7 @@ pub fn grpo_train_jsonl(
         .map(|name| crate::adapter_shape::resolve_base_adapter_dir(name, adapter_dir));
     let mut data_stats = crate::train_receipt::DataStatsReceipt::default();
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+    let mut echo_metrics = crate::train_receipt::EchoActivityMetrics::default();
     let mut reward_stats = crate::train_receipt::RewardStatsReceipt::default();
     let mut dynamic_groups_filtered = 0usize;
 
@@ -2209,6 +2248,7 @@ pub fn grpo_train_jsonl(
                 data_stats,
                 reward_stats,
                 token_counts,
+                crate::train_receipt::EchoActivityMetrics::default(),
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
                 Some(message),
@@ -2259,6 +2299,7 @@ pub fn grpo_train_jsonl(
                 data_stats,
                 reward_stats,
                 token_counts,
+                crate::train_receipt::EchoActivityMetrics::default(),
                 run_started.elapsed().as_millis() as u64,
                 dynamic_groups_filtered,
                 Some(message),
@@ -2420,7 +2461,7 @@ pub fn grpo_train_jsonl(
                 "streamed GRPO group tokenized"
             );
 
-            let avg_group_loss = train_tokenized_grpo_group(
+            let step_report = train_tokenized_grpo_group(
                 &*backend,
                 &tgroup,
                 weights,
@@ -2432,6 +2473,8 @@ pub fn grpo_train_jsonl(
                 opt_state.as_mut(),
                 ema_ref_state.as_ref().map(|s| &s.snapshot),
             )?;
+            let avg_group_loss = step_report.loss;
+            echo_metrics.observe_env_ce(step_report.echo_env_ce);
             anyhow::ensure!(
                 avg_group_loss.is_finite(),
                 "grpo_train_jsonl: non-finite loss {avg_group_loss} at group {processed_groups}"
@@ -2470,11 +2513,23 @@ pub fn grpo_train_jsonl(
             tracing::info!(
                 group = processed_groups,
                 completions_seen = processed_completions,
+                action_tokens = group_counts.action_tokens,
+                env_tokens = group_counts.env_tokens,
                 byte_offset = bytes_read,
                 total_bytes,
                 loss = format!("{avg_group_loss:.6}"),
                 "streamed GRPO group step"
             );
+            if let Some(echo_env_ce) = step_report.echo_env_ce {
+                tracing::info!(
+                    group = processed_groups,
+                    completions_seen = processed_completions,
+                    action_tokens = group_counts.action_tokens,
+                    env_tokens = group_counts.env_tokens,
+                    echo_env_ce,
+                    "streamed GRPO ECHO group metrics"
+                );
+            }
 
             if let Some(interval) = config.checkpoint_interval {
                 if interval > 0 && processed_groups % interval == 0 && bytes_read < total_bytes {
@@ -2509,6 +2564,11 @@ pub fn grpo_train_jsonl(
         data_stats.completions_trained = processed_completions;
         reward_stats = crate::train_receipt::reward_stats_from_groups(
             reward_groups.iter().map(Vec::as_slice),
+        );
+        crate::train_receipt::warn_echo_enabled_without_env_tokens(
+            "streamed_grpo",
+            config.loss.echo_enabled(),
+            &token_counts,
         );
 
         let synced = params.sync_to_candle(&*backend).unwrap_or(0);
@@ -2560,6 +2620,7 @@ pub fn grpo_train_jsonl(
         data_stats,
         reward_stats,
         token_counts,
+        echo_metrics,
         run_started.elapsed().as_millis() as u64,
         dynamic_groups_filtered,
         status_error,
@@ -2596,6 +2657,12 @@ struct TokenizedGrpoCompletion {
 struct TokenizedGrpoGroup {
     completions: Vec<TokenizedGrpoCompletion>,
     rewards: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct GrpoGroupStepReport {
+    loss: f64,
+    echo_env_ce: Option<f64>,
 }
 
 fn token_counts_for_grpo_groups(
@@ -3041,7 +3108,7 @@ fn train_tokenized_grpo_group(
     // reference forward runs without any LoRA (base model — historical
     // `BasePerStep`) or is skipped entirely (`ReferencePolicy::None`).
     ema_ref_lora: Option<&LoraWeights>,
-) -> Result<f64> {
+) -> Result<GrpoGroupStepReport> {
     let skip_reference = matches!(config.reference_policy, ReferencePolicy::None);
 
     let advantages = compute_advantages(&tgroup.rewards, config.advantage_mode);
@@ -3061,11 +3128,16 @@ fn train_tokenized_grpo_group(
         .collect();
     let group_total_active: usize = per_comp_active.iter().sum();
     if group_total_active == 0 {
-        return Ok(0.0);
+        return Ok(GrpoGroupStepReport {
+            loss: 0.0,
+            echo_env_ce: None,
+        });
     }
 
     let token_level = matches!(config.loss_aggregation, LossAggregation::TokenLevel);
     let mut group_accum: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
+    let mut group_echo_ce_sum = 0.0f64;
+    let mut group_echo_ce_weight = 0usize;
 
     // Shared-prefix optimization: when the reference policy is active and the
     // group has more than one completion, run the prompt forward exactly once
@@ -3110,6 +3182,11 @@ fn train_tokenized_grpo_group(
         };
         let loss_params =
             GrpoLossParams::from_config(config, advantages[comp_idx], loss_normalizer);
+        let comp_env_count = comp
+            .env_mask
+            .get(1..)
+            .map_or(0, |m| m.iter().filter(|&&v| v).count());
+        let mut comp_echo_env_ce: Option<f64> = None;
 
         let ref_log_probs = if skip_reference {
             // ReferencePolicy::None: no reference forward; ratio is forced
@@ -3188,17 +3265,13 @@ fn train_tokenized_grpo_group(
             // pass None so the analytic tail short-circuits the env
             // branch and behaves bit-identically to pre-ECHO.
             let echo_tail = config.loss.echo.as_ref().and_then(|cfg| {
-                let env_count = comp
-                    .env_mask
-                    .get(1..)
-                    .map_or(0, |m| m.iter().filter(|&&v| v).count());
-                if env_count > 0 && comp.total_obs_len > 0 {
+                if config.loss.echo_enabled() && comp_env_count > 0 && comp.total_obs_len > 0 {
                     tracing::debug!(
                         comp_idx,
-                        env_count,
+                        env_tokens = comp_env_count,
                         total_obs_len = comp.total_obs_len,
                         echo_lambda = cfg.lambda,
-                        "GRPO checkpointed path: ECHO env-CE active"
+                        "GRPO checkpointed path: ECHO env CE active"
                     );
                     Some(EchoTailParams {
                         env_mask: &comp.env_mask,
@@ -3209,7 +3282,7 @@ fn train_tokenized_grpo_group(
                     None
                 }
             });
-            let (lv, accumulated_grads) = checkpointed_grpo_forward_backward(
+            let (lv, accumulated_grads, env_ce) = checkpointed_grpo_forward_backward(
                 backend,
                 &comp.input_ids,
                 weights,
@@ -3223,6 +3296,7 @@ fn train_tokenized_grpo_group(
                 echo_tail,
             )?;
             loss_val = lv;
+            comp_echo_env_ce = env_ce;
             if token_level {
                 merge_grad_maps(&mut group_accum, accumulated_grads)?;
             } else {
@@ -3281,11 +3355,7 @@ fn train_tokenized_grpo_group(
                 grpo_loss_val
             };
             let loss = if let Some(echo_cfg) = &config.loss.echo {
-                let env_count = comp
-                    .env_mask
-                    .get(1..)
-                    .map_or(0, |m| m.iter().filter(|&&v| v).count());
-                if env_count > 0 && comp.total_obs_len > 0 {
+                if config.loss.echo_enabled() && comp_env_count > 0 && comp.total_obs_len > 0 {
                     let env_log_probs = token_log_probs(
                         &policy_logits,
                         &comp.input_ids,
@@ -3305,14 +3375,15 @@ fn train_tokenized_grpo_group(
                     // checkpointed path already emits this from
                     // train_tokenized_grpo_group; this matches it for
                     // the standard path.
-                    let mean_ce_val = echo_mean_ce.to_scalar::<f32>().ok();
+                    let mean_ce_val = echo_mean_ce.to_scalar::<f32>().ok().map(f64::from);
+                    comp_echo_env_ce = mean_ce_val;
                     tracing::debug!(
                         comp_idx,
-                        env_count,
+                        env_tokens = comp_env_count,
                         total_obs_len = comp.total_obs_len,
                         echo_lambda = echo_cfg.lambda,
-                        mean_ce = mean_ce_val,
-                        "GRPO uncheckpointed path: ECHO env-CE active"
+                        echo_env_ce = mean_ce_val,
+                        "GRPO uncheckpointed path: ECHO env CE active"
                     );
                     scaled_grpo.add(&echo_scaled)?
                 } else {
@@ -3346,6 +3417,12 @@ fn train_tokenized_grpo_group(
         }
 
         group_loss_sum += loss_val;
+        if let Some(env_ce) = comp_echo_env_ce {
+            if comp.total_obs_len > 0 {
+                group_echo_ce_sum += env_ce * comp.total_obs_len as f64;
+                group_echo_ce_weight = group_echo_ce_weight.saturating_add(comp.total_obs_len);
+            }
+        }
     }
 
     if token_level && !group_accum.is_empty() {
@@ -3359,16 +3436,22 @@ fn train_tokenized_grpo_group(
         )?;
     }
 
-    if tgroup.completions.is_empty() {
-        Ok(0.0)
+    let loss = if tgroup.completions.is_empty() {
+        0.0
     } else if token_level {
         // Per-completion loss_val is already its share of the group-level mean
         // (each was scaled by 1/group_total_active). Sum across completions
         // gives the true group-level mean.
-        Ok(group_loss_sum)
+        group_loss_sum
     } else {
-        Ok(group_loss_sum / tgroup.completions.len() as f64)
-    }
+        group_loss_sum / tgroup.completions.len() as f64
+    };
+    let echo_env_ce = if group_echo_ce_weight > 0 {
+        Some(group_echo_ce_sum / group_echo_ce_weight as f64)
+    } else {
+        None
+    };
+    Ok(GrpoGroupStepReport { loss, echo_env_ce })
 }
 
 /// Merge `src` HashMap of gradient tensors into `dst`, accumulating where a
@@ -4367,7 +4450,7 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
     rms_norm_eps: f64,
     chunk_size: usize,
     echo: Option<EchoTailParams<'_>>,
-) -> Result<(f64, Tensor)> {
+) -> Result<(f64, Tensor, Option<f64>)> {
     let device = hidden.device();
     let seq_len = input_ids.len();
     if seq_len < 2 {
@@ -4726,6 +4809,11 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
     // (matches the existing token_log_probs path). The ECHO env-CE term
     // uses its own |O| normalization built into env_loss_normalizer.
     let env_loss = -env_loss_normalizer * env_log_prob_sum;
+    let echo_env_ce = if num_env > 0 && total_obs_len > 0 {
+        Some(-env_log_prob_sum / total_obs_len as f64)
+    } else {
+        None
+    };
     let loss_val = loss_sum * normalizer + env_loss;
     let grad_coeffs = Tensor::from_vec(grad_coeffs, (num_active, 1), device)?;
 
@@ -4771,7 +4859,7 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
 
     let mut grad_hidden_2d = Tensor::zeros((seq_len, hidden_size), DType::F32, device)?;
     grad_hidden_2d = grad_hidden_2d.index_add(&active_indices, &grad_active_hidden, 0)?;
-    Ok((loss_val, grad_hidden_2d.unsqueeze(0)?))
+    Ok((loss_val, grad_hidden_2d.unsqueeze(0)?, echo_env_ce))
 }
 
 /// Read `KILN_USE_FLCE` env var. When enabled, SFT training takes the
@@ -9121,7 +9209,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
     segments: &[(usize, usize)],
     device: &Device,
     echo: Option<EchoTailParams<'echo>>,
-) -> Result<(f64, HashMap<candle_core::TensorId, Tensor>)> {
+) -> Result<(f64, HashMap<candle_core::TensorId, Tensor>, Option<f64>)> {
     let num_segments = segments.len();
     anyhow::ensure!(
         num_segments > 0,
@@ -9274,7 +9362,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         )?
     };
 
-    let (loss_val, mut upstream_grad) = analytic_grpo_tail_loss_grad_pre_final_norm(
+    let (loss_val, mut upstream_grad, echo_env_ce) = analytic_grpo_tail_loss_grad_pre_final_norm(
         &final_hidden,
         &weights.final_norm,
         &weights.embed_tokens_t,
@@ -9502,7 +9590,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         }
     }
 
-    Ok((loss_val, accumulated_grads))
+    Ok((loss_val, accumulated_grads, echo_env_ce))
 }
 
 #[cfg(test)]
@@ -10458,7 +10546,7 @@ mod tests {
                 reinforce: false,
                 entropy_aware_kl_quantile: None,
             };
-            let (loss_val, _grad) = analytic_grpo_tail_loss_grad_pre_final_norm(
+            let (loss_val, _grad, _env_ce) = analytic_grpo_tail_loss_grad_pre_final_norm(
                 &hidden,
                 &final_norm_weight,
                 &head_t,
@@ -10521,7 +10609,7 @@ mod tests {
             reinforce: true,
             entropy_aware_kl_quantile: None,
         };
-        let (loss_val, _grad) = analytic_grpo_tail_loss_grad_pre_final_norm(
+        let (loss_val, _grad, _env_ce) = analytic_grpo_tail_loss_grad_pre_final_norm(
             &hidden,
             &final_norm_weight,
             &head_t,
@@ -11684,7 +11772,7 @@ mod tests {
         let grads_std = loss.backward().context("standard GRPO backward")?;
 
         let segments = compute_segment_boundaries(config.num_layers, 2);
-        let (loss_ckpt, grads_ckpt) = checkpointed_grpo_forward_backward(
+        let (loss_ckpt, grads_ckpt, _env_ce) = checkpointed_grpo_forward_backward(
             &*backend,
             &input_ids,
             &weights,
@@ -12641,7 +12729,7 @@ mod tests {
             };
 
             let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
-            let loss = train_tokenized_grpo_group(
+            let report = train_tokenized_grpo_group(
                 &*backend,
                 &tokenized,
                 &weights,
@@ -12653,8 +12741,20 @@ mod tests {
                 None,
                 None,
             )?;
+            let loss = report.loss;
 
             assert!(loss.is_finite(), "loss must be finite ({mode}); got {loss}");
+            if mode == mode_on {
+                assert!(
+                    report.echo_env_ce.is_some(),
+                    "ECHO-on run should report env CE"
+                );
+            } else {
+                assert!(
+                    report.echo_env_ce.is_none(),
+                    "ECHO-off run should not report env CE ({mode})"
+                );
+            }
             losses.insert(mode, loss);
         }
 
@@ -12762,7 +12862,7 @@ mod tests {
         let params_full = TrainableLoraParams::initialize_seeded(
             &config, &weights, 4, 8.0, &device, Some(seed),
         )?;
-        let loss_full = train_tokenized_grpo_group(
+        let report_full = train_tokenized_grpo_group(
             &*backend,
             &tokenized,
             &weights,
@@ -12774,11 +12874,12 @@ mod tests {
             None,
             None,
         )?;
+        let loss_full = report_full.loss;
 
         let params_vf = TrainableLoraParams::initialize_seeded(
             &config, &weights, 4, 8.0, &device, Some(seed),
         )?;
-        let loss_vf = train_tokenized_grpo_group(
+        let report_vf = train_tokenized_grpo_group(
             &*backend,
             &tokenized,
             &weights,
@@ -12790,6 +12891,7 @@ mod tests {
             None,
             None,
         )?;
+        let loss_vf = report_vf.loss;
 
         // GRPO-only baseline: echo=None, no_policy_loss=false. Used to
         // derive the GRPO term magnitude for the linearity invariant.
@@ -12798,7 +12900,7 @@ mod tests {
         let params_grpo_only = TrainableLoraParams::initialize_seeded(
             &config, &weights, 4, 8.0, &device, Some(seed),
         )?;
-        let loss_grpo_only = train_tokenized_grpo_group(
+        let report_grpo_only = train_tokenized_grpo_group(
             &*backend,
             &tokenized,
             &weights,
@@ -12810,12 +12912,25 @@ mod tests {
             None,
             None,
         )?;
+        let loss_grpo_only = report_grpo_only.loss;
 
         assert!(loss_full.is_finite(), "GRPO+ECHO loss not finite: {loss_full}");
         assert!(loss_vf.is_finite(), "ECHO-only (verifier-free) loss not finite: {loss_vf}");
         assert!(
             loss_grpo_only.is_finite(),
             "GRPO-only loss not finite: {loss_grpo_only}"
+        );
+        assert!(
+            report_full.echo_env_ce.is_some(),
+            "GRPO+ECHO should report env CE"
+        );
+        assert!(
+            report_vf.echo_env_ce.is_some(),
+            "no-policy-loss ECHO run should report env CE"
+        );
+        assert!(
+            report_grpo_only.echo_env_ce.is_none(),
+            "GRPO-only run should not report env CE"
         );
 
         // Linearity of loss components — the load-bearing invariant for
@@ -12918,7 +13033,7 @@ mod tests {
         let params_unchk = TrainableLoraParams::initialize_seeded(
             &config, &weights, 4, 8.0, &device, Some(seed),
         )?;
-        let loss_unchk = train_tokenized_grpo_group(
+        let report_unchk = train_tokenized_grpo_group(
             &*backend,
             &tokenized,
             &weights,
@@ -12930,6 +13045,7 @@ mod tests {
             None,
             None,
         )?;
+        let loss_unchk = report_unchk.loss;
 
         // Checkpointed path: segments = Some([(0,2),(2,4)]) for the 4-layer
         // tiny model, fresh LoRA init from the same seed.
@@ -12937,7 +13053,7 @@ mod tests {
         let params_chk = TrainableLoraParams::initialize_seeded(
             &config, &weights, 4, 8.0, &device, Some(seed),
         )?;
-        let loss_chk = train_tokenized_grpo_group(
+        let report_chk = train_tokenized_grpo_group(
             &*backend,
             &tokenized,
             &weights,
@@ -12949,9 +13065,18 @@ mod tests {
             None,
             None,
         )?;
+        let loss_chk = report_chk.loss;
 
         assert!(loss_unchk.is_finite(), "uncheckpointed loss not finite: {loss_unchk}");
         assert!(loss_chk.is_finite(), "checkpointed loss not finite: {loss_chk}");
+        assert!(
+            report_unchk.echo_env_ce.is_some(),
+            "uncheckpointed path should report env CE"
+        );
+        assert!(
+            report_chk.echo_env_ce.is_some(),
+            "checkpointed path should report env CE"
+        );
 
         // Tolerance matches the legacy GRPO parity test (1e-5 loss-level;
         // backend reductions accumulate at different orders so single-step
@@ -13016,7 +13141,7 @@ mod tests {
         };
 
         // Path A: GRPO only (no ECHO).
-        let (loss_grpo, _grad_grpo) = analytic_grpo_tail_loss_grad_pre_final_norm(
+        let (loss_grpo, _grad_grpo, _env_ce_grpo) = analytic_grpo_tail_loss_grad_pre_final_norm(
             &hidden,
             &final_norm_weight,
             &head_t,
@@ -13035,7 +13160,7 @@ mod tests {
             total_obs_len,
             lambda: 0.05,
         };
-        let (loss_with_echo, _grad_with_echo) = analytic_grpo_tail_loss_grad_pre_final_norm(
+        let (loss_with_echo, _grad_with_echo, env_ce_with_echo) = analytic_grpo_tail_loss_grad_pre_final_norm(
             &hidden,
             &final_norm_weight,
             &head_t,
@@ -13056,6 +13181,10 @@ mod tests {
         assert!(
             loss_with_echo.is_finite(),
             "GRPO+ECHO loss not finite: {loss_with_echo}"
+        );
+        assert!(
+            env_ce_with_echo.is_some(),
+            "analytic tail should report env CE when ECHO is active"
         );
 
         // ECHO contribution = -λ/|O| · Σ log p_θ at env positions.
@@ -13114,7 +13243,7 @@ mod tests {
         };
 
         // ECHO disabled → original behaviour.
-        let (loss_off, _grads_off) = checkpointed_grpo_forward_backward(
+        let (loss_off, _grads_off, _env_ce_off) = checkpointed_grpo_forward_backward(
             &*backend,
             &input_ids,
             &weights,
@@ -13131,7 +13260,7 @@ mod tests {
 
         // ECHO enabled at λ=0.05.
         let params2 = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
-        let (loss_on, _grads_on) = checkpointed_grpo_forward_backward(
+        let (loss_on, _grads_on, env_ce_on) = checkpointed_grpo_forward_backward(
             &*backend,
             &input_ids,
             &weights,
@@ -13149,6 +13278,10 @@ mod tests {
             }),
         )?;
         assert!(loss_on.is_finite(), "ECHO-on loss not finite: {loss_on}");
+        assert!(
+            env_ce_on.is_some(),
+            "checkpointed GRPO should report env CE when ECHO is active"
+        );
         assert_ne!(
             loss_off, loss_on,
             "ECHO should change the checkpointed loss when env_mask is active"
