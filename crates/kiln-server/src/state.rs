@@ -1241,6 +1241,8 @@ pub struct AppState {
     pub shutdown: ShutdownFlag,
     /// Per-request timeout duration. Configurable via KILN_REQUEST_TIMEOUT_SECS (default 600).
     pub request_timeout: std::time::Duration,
+    /// Slow chat-completion warning threshold. None disables slow-request logs.
+    pub slow_request_warn_threshold: Option<std::time::Duration>,
     /// Prometheus metrics counters.
     pub metrics: Arc<Metrics>,
     /// Server startup time — used to compute uptime in health checks.
@@ -1416,6 +1418,7 @@ impl AppState {
             },
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
+            slow_request_warn_threshold: None,
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
             inference_prewarm_complete: Arc::new(AtomicBool::new(true)),
@@ -1868,6 +1871,7 @@ impl AppState {
             vram_info,
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
+            slow_request_warn_threshold: None,
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
             inference_prewarm_complete: Arc::new(AtomicBool::new(!device_needs_inference_prewarm(

@@ -46,6 +46,10 @@ pub struct RequestRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix_cache: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_full: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_full: Option<String>,

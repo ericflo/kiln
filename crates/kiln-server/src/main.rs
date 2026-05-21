@@ -317,6 +317,13 @@ async fn main() -> Result<()> {
     state.max_queued_training_jobs = config.training.max_queued_jobs;
     state.max_tracked_jobs = config.training.max_tracked_jobs;
     state.tracked_job_ttl = std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
+    state.slow_request_warn_threshold = if config.server.slow_request_warn_secs == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_secs(
+            config.server.slow_request_warn_secs,
+        ))
+    };
     state.adapter_max_disk_bytes = config.adapters.max_disk_bytes;
     state.composed_cache_max_bytes = config.adapters.composed_cache_max_bytes;
     state.composed_cache_max_entries = config.adapters.composed_cache_max_entries;
@@ -331,6 +338,11 @@ async fn main() -> Result<()> {
         cap = state.max_tracked_jobs,
         ttl_secs = config.training.tracked_job_ttl_secs,
         "training tracked-jobs cap and TTL configured"
+    );
+    tracing::debug!(
+        threshold_secs = config.server.slow_request_warn_secs,
+        enabled = state.slow_request_warn_threshold.is_some(),
+        "slow request watchdog configured"
     );
 
     // Restore terminal training jobs persisted from previous runs so the

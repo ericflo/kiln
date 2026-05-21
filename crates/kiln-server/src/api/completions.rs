@@ -66,6 +66,27 @@ fn last_user_message_text(req: &ChatCompletionRequest) -> String {
         .unwrap_or_default()
 }
 
+fn thinking_mode_for_request(req: &ChatCompletionRequest) -> &'static str {
+    match req
+        .chat_template_kwargs
+        .as_ref()
+        .and_then(|kwargs| kwargs.get("enable_thinking"))
+    {
+        Some(serde_json::Value::Bool(true)) => "explicit_enabled",
+        Some(serde_json::Value::Bool(false)) => "explicit_disabled",
+        Some(_) => "custom",
+        None => "template_default",
+    }
+}
+
+fn thinking_mode_for_prompt(prompt_text: &str) -> &'static str {
+    if prompt_starts_in_reasoning(prompt_text) {
+        "reasoning"
+    } else {
+        "non_reasoning"
+    }
+}
+
 /// Build a [`RequestRecord`] pre-populated with everything we know from the
 /// request side: id, model, adapter, sampling knobs, prompt preview + full
 /// body. Each call site overrides the response-side fields (completion text,
@@ -87,7 +108,9 @@ fn request_record_from_req(
         adapter: req.adapter.request_adapter_name(),
         temperature: req.temperature,
         top_p: req.top_p,
-        max_tokens: req.max_tokens.map(|n| n as u32),
+        max_tokens: Some(chat_request_max_tokens(req).min(u32::MAX as usize) as u32),
+        thinking_mode: Some(thinking_mode_for_request(req).to_string()),
+        prefix_cache: Some("unknown".to_string()),
         ..RequestRecord::default()
     }
 }
@@ -648,9 +671,143 @@ fn tool_call_deltas_from_openai_calls(calls: &[serde_json::Value]) -> Vec<serde_
 /// warning if the lock is poisoned but otherwise never panics — request
 /// recording must not fail the user's request.
 fn record_recent_request(state: &AppState, record: RequestRecord) {
+    maybe_log_slow_chat_completion(state, &record);
     match state.recent_requests.lock() {
         Ok(mut ring) => ring.record(record),
         Err(poisoned) => poisoned.into_inner().record(record),
+    }
+}
+
+fn record_failed_chat_completion(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    model: &str,
+    request_start: std::time::Instant,
+    prompt_tokens: usize,
+    error: &ApiError,
+) {
+    let id = format!("chatcmpl-{}", Uuid::new_v4());
+    record_recent_request(
+        state,
+        RequestRecord {
+            prompt_tokens: prompt_tokens.min(u32::MAX as usize) as u32,
+            completion_tokens: 0,
+            duration_ms: request_start.elapsed().as_millis() as u64,
+            finish_reason: "error".to_string(),
+            error: Some(error.to_string()),
+            thinking_mode: Some(thinking_mode_for_request(req).to_string()),
+            prefix_cache: Some("unknown".to_string()),
+            ..request_record_from_req(req, &id, model, false)
+        },
+    );
+}
+
+fn maybe_log_slow_chat_completion(state: &AppState, record: &RequestRecord) {
+    let Some(values) = slow_request_log_values(state, record) else {
+        return;
+    };
+    tracing::warn!(
+        target: "kiln_server::slow_request",
+        request_id = %values.request_id,
+        adapter = %values.adapter,
+        prompt_tokens = values.prompt_tokens,
+        max_output_tokens = values.max_output_tokens,
+        generated_tokens = values.generated_tokens,
+        elapsed_ms = values.elapsed_ms,
+        threshold_ms = values.threshold_ms,
+        batching_engine_state = %values.batching_engine_state,
+        thinking_mode = %values.thinking_mode,
+        cuda_graph_state = %values.cuda_graph_state,
+        prefix_cache = %values.prefix_cache,
+        finish_reason = %values.finish_reason,
+        error = %values.error,
+        streamed = values.streamed,
+        "slow chat completion"
+    );
+}
+
+#[derive(Debug)]
+struct SlowRequestLogValues {
+    request_id: String,
+    adapter: String,
+    prompt_tokens: u32,
+    max_output_tokens: u32,
+    generated_tokens: u32,
+    elapsed_ms: u64,
+    threshold_ms: u64,
+    batching_engine_state: &'static str,
+    thinking_mode: String,
+    cuda_graph_state: &'static str,
+    prefix_cache: String,
+    finish_reason: String,
+    error: String,
+    streamed: bool,
+}
+
+fn slow_request_log_values(
+    state: &AppState,
+    record: &RequestRecord,
+) -> Option<SlowRequestLogValues> {
+    let Some(threshold) = state.slow_request_warn_threshold else {
+        return None;
+    };
+    let elapsed = std::time::Duration::from_millis(record.duration_ms);
+    if elapsed < threshold {
+        return None;
+    }
+
+    let (batching_engine_state, cuda_graph_state) = slow_request_runtime_state(state);
+    Some(SlowRequestLogValues {
+        request_id: record.id.clone(),
+        adapter: record
+            .adapter
+            .clone()
+            .unwrap_or_else(|| "server_default_or_base".to_string()),
+        prompt_tokens: record.prompt_tokens,
+        max_output_tokens: record.max_tokens.unwrap_or(0),
+        generated_tokens: record.completion_tokens,
+        elapsed_ms: record.duration_ms,
+        threshold_ms: threshold.as_millis() as u64,
+        batching_engine_state,
+        thinking_mode: record
+            .thinking_mode
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        cuda_graph_state,
+        prefix_cache: record
+            .prefix_cache
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        finish_reason: record.finish_reason.clone(),
+        error: record.error.clone().unwrap_or_default(),
+        streamed: record.streamed,
+    })
+}
+
+fn slow_request_runtime_state(state: &AppState) -> (&'static str, &'static str) {
+    match state.backend.as_ref() {
+        ModelBackend::Mock { .. } => ("mock", "not_applicable"),
+        ModelBackend::Real {
+            runner,
+            batching_engine,
+            ..
+        } => {
+            let batching = if batching_engine.is_some() {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            let cuda_graph = runner
+                .try_read()
+                .ok()
+                .and_then(|runner| runner.cuda_graph_enabled().ok());
+            let cuda_graph = match cuda_graph {
+                Some(true) => "enabled",
+                Some(false) => "disabled",
+                None => "busy",
+            };
+            (batching, cuda_graph)
+        }
     }
 }
 
@@ -1545,6 +1702,7 @@ fn response_from_cached_completion(
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
             finish_reason: cached_output.finish_reason.clone(),
+            prefix_cache: Some("completion_cache_hit".to_string()),
             ..request_record_from_req(req, &id, &model, false)
         },
     );
@@ -1625,6 +1783,7 @@ fn response_from_cached_chat_choices(
                 .first()
                 .map(|(_, output)| output.finish_reason.clone())
                 .unwrap_or_else(|| "length".to_string()),
+            prefix_cache: Some("chat_choices_cache_hit".to_string()),
             ..request_record_from_req(req, &id, &model, false)
         },
     );
@@ -1693,6 +1852,7 @@ fn streaming_response_from_cached_completion(
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
             finish_reason: cached_output.finish_reason.clone(),
+            prefix_cache: Some("completion_cache_hit".to_string()),
             ..request_record_from_req(req, &id, &model, true)
         },
     );
@@ -3011,6 +3171,18 @@ async fn chat_completions_inner(
                 let resp = match generation {
                     Ok(resp) => resp,
                     Err(err) => {
+                        let model = req
+                            .model
+                            .clone()
+                            .unwrap_or_else(|| state.served_model_id.clone());
+                        record_failed_chat_completion(
+                            state,
+                            &req,
+                            &model,
+                            request_start,
+                            prompt_tokens.len(),
+                            &err,
+                        );
                         if completion_cache_owner && let Some(key) = completion_cache_key.as_ref() {
                             fail_deterministic_completion_owner(state, key);
                         }
@@ -3050,6 +3222,18 @@ async fn chat_completions_inner(
                 let resp = match generation {
                     Ok(resp) => resp,
                     Err(err) => {
+                        let model = req
+                            .model
+                            .clone()
+                            .unwrap_or_else(|| state.served_model_id.clone());
+                        record_failed_chat_completion(
+                            state,
+                            &req,
+                            &model,
+                            request_start,
+                            prompt_tokens.len(),
+                            &err,
+                        );
                         if completion_cache_owner && let Some(key) = completion_cache_key.as_ref() {
                             fail_deterministic_completion_owner(state, key);
                         }
@@ -3556,7 +3740,6 @@ async fn generate_real_batched(
         kiln_model::FinishReason::MaxTokens => "length",
         kiln_model::FinishReason::StopSequence(_) => "stop",
     };
-
     let now = now_epoch();
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let model = req
@@ -3577,6 +3760,8 @@ async fn generate_real_batched(
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
             finish_reason: assistant_output.finish_reason.clone(),
+            thinking_mode: Some(thinking_mode_for_prompt(prompt_text).to_string()),
+            prefix_cache: Some("batching_engine".to_string()),
             ..request_record_from_req(req, &id, &model, false)
         },
     );
@@ -3643,14 +3828,15 @@ async fn generate_real_batched_streaming(
     let timeout = state.request_timeout;
     let tokenizer = state.tokenizer.clone();
     let metrics = state.metrics.clone();
-    let recent_requests = state.recent_requests.clone();
+    let state_for_record = state.clone();
     let prompt_text_full = last_user_message_text(req);
     let prompt_preview = truncate_chars(&prompt_text_full, PROMPT_PREVIEW_MAX_CHARS);
     let prompt_full = truncate_chars(&prompt_text_full, FULL_BODY_MAX_CHARS);
     let req_adapter = req.adapter.request_adapter_name();
     let req_temperature = req.temperature;
     let req_top_p = req.top_p;
-    let req_max_tokens = req.max_tokens.map(|n| n as u32);
+    let req_max_tokens = Some(chat_request_max_tokens(req).min(u32::MAX as usize) as u32);
+    let thinking_mode = thinking_mode_for_prompt(prompt_text).to_string();
     let prompt_starts_in_reasoning = prompt_starts_in_reasoning(prompt_text);
     let buffer_tool_content = request_allows_tool_call_parsing(req);
     let batching_engine = batching_engine.clone();
@@ -3682,6 +3868,8 @@ async fn generate_real_batched_streaming(
                     duration_ms: request_start.elapsed().as_millis() as u64,
                     streamed: true,
                     finish_reason,
+                    thinking_mode: Some(thinking_mode.clone()),
+                    prefix_cache: Some("batching_engine".to_string()),
                     adapter: req_adapter.clone(),
                     temperature: req_temperature,
                     top_p: req_top_p,
@@ -3689,10 +3877,7 @@ async fn generate_real_batched_streaming(
                     ttft_ms: None,
                     error: None,
                 };
-                match recent_requests.lock() {
-                    Ok(mut ring) => ring.record(record),
-                    Err(poisoned) => poisoned.into_inner().record(record),
-                }
+                record_recent_request(&state_for_record, record);
             };
 
             let role_chunk = ChatCompletionChunk {
@@ -4044,6 +4229,8 @@ async fn generate_real(
     let memory_budget = state.memory_budget.clone();
     let metrics = state.metrics.clone();
     let timeout = state.request_timeout;
+    let prefix_cache_diagnostic = std::sync::Arc::new(std::sync::Mutex::new("unknown"));
+    let prefix_cache_diagnostic_inner = prefix_cache_diagnostic.clone();
     // Cooperative cancellation: `tokio::time::timeout` cancels the outer
     // future, but `spawn_blocking` does not honor that — the closure keeps
     // running on the blocking pool, holding `runner.read()` and
@@ -4067,6 +4254,7 @@ async fn generate_real(
                     cache.is_enabled()
                 };
                 if !prefix_enabled {
+                    *prefix_cache_diagnostic_inner.lock().unwrap() = "disabled";
                     runner_guard.generate_paged_shared_tokens(
                         &prompt_tokens,
                         &params,
@@ -4087,6 +4275,7 @@ async fn generate_real(
                         (hit, should_register)
                     };
                     if hit.is_none() && !should_register_on_miss {
+                        *prefix_cache_diagnostic_inner.lock().unwrap() = "skipped";
                         return runner_guard.generate_paged_shared_tokens(
                             &prompt_tokens,
                             &params,
@@ -4096,6 +4285,11 @@ async fn generate_real(
                         );
                     }
 
+                    *prefix_cache_diagnostic_inner.lock().unwrap() = if hit.is_some() {
+                        "hit"
+                    } else {
+                        "miss"
+                    };
                     let hit_entry_id = hit.as_ref().map(|hit| hit.entry_id);
                     let cached_prefix = hit.map(|hit| PagedPrefixReuse {
                         cached_tokens: hit.cached_tokens,
@@ -4174,6 +4368,7 @@ async fn generate_real(
                 }
             }
             ResolvedSpeculativeMode::SkipLayer(spec_config) => {
+                *prefix_cache_diagnostic_inner.lock().unwrap() = "not_used_speculative";
                 if params.temperature == 0.0 {
                     runner_guard.generate_paged_speculative_shared_tokens(
                         &prompt_tokens,
@@ -4192,6 +4387,7 @@ async fn generate_real(
                 }
             }
             ResolvedSpeculativeMode::Mtp => {
+                *prefix_cache_diagnostic_inner.lock().unwrap() = "not_used_speculative";
                 let output = runner_guard.generate_mtp_speculative(&prompt, &params)?;
                 Ok(GenerationOutput {
                     text: output.text,
@@ -4250,6 +4446,7 @@ async fn generate_real(
         .clone()
         .unwrap_or_else(|| state.served_model_id.clone());
     let completion_tokens = completion_usage_tokens(output.token_ids.len(), &output.finish_reason);
+    let prefix_cache = *prefix_cache_diagnostic.lock().unwrap();
     // Qwen3.5's chat template prefills `<think>\n` into the assistant turn,
     // so the model emits chain-of-thought directly and closes with
     // `</think>` before the actual answer. Split into the llama.cpp /
@@ -4274,6 +4471,8 @@ async fn generate_real(
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
             finish_reason: assistant_output.finish_reason.clone(),
+            thinking_mode: Some(thinking_mode_for_prompt(prompt_text).to_string()),
+            prefix_cache: Some(prefix_cache.to_string()),
             ..request_record_from_req(req, &id, &model, false)
         },
     );
@@ -4368,7 +4567,7 @@ async fn generate_real_streaming(
     let timeout = state.request_timeout;
     let decode_stats = state.decode_stats.clone();
     let metrics = state.metrics.clone();
-    let recent_requests = state.recent_requests.clone();
+    let state_for_record = state.clone();
     let completion_cache = state.completion_cache.clone();
     let chat_request_cache = state.chat_request_cache.clone();
     let prompt_text_full = last_user_message_text(req);
@@ -4377,8 +4576,10 @@ async fn generate_real_streaming(
     let req_adapter = req.adapter.request_adapter_name();
     let req_temperature = req.temperature;
     let req_top_p = req.top_p;
-    let req_max_tokens = req.max_tokens.map(|n| n as u32);
+    let req_max_tokens = Some(chat_request_max_tokens(req).min(u32::MAX as usize) as u32);
     let buffer_tool_content = request_allows_tool_call_parsing(req);
+    let thinking_mode = thinking_mode_for_prompt(&prompt).to_string();
+    let prefix_cache_diagnostic = std::sync::Arc::new(std::sync::Mutex::new("unknown"));
 
     // Use a tokio mpsc channel to bridge sync generation -> async SSE stream.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -4411,6 +4612,8 @@ async fn generate_real_streaming(
                     duration_ms: request_start.elapsed().as_millis() as u64,
                     streamed: true,
                     finish_reason,
+                    thinking_mode: Some(thinking_mode.clone()),
+                    prefix_cache: Some((*prefix_cache_diagnostic.lock().unwrap()).to_string()),
                     adapter: req_adapter.clone(),
                     temperature: req_temperature,
                     top_p: req_top_p,
@@ -4418,10 +4621,7 @@ async fn generate_real_streaming(
                     ttft_ms: None,
                     error: None,
                 };
-                match recent_requests.lock() {
-                    Ok(mut ring) => ring.record(record),
-                    Err(poisoned) => poisoned.into_inner().record(record),
-                }
+                record_recent_request(&state_for_record, record);
             };
 
             // Send initial role chunk
@@ -4466,6 +4666,7 @@ async fn generate_real_streaming(
 
             let sync_rx = match speculative_mode {
                 ResolvedSpeculativeMode::Off => {
+                    let prefix_cache_diagnostic = prefix_cache_diagnostic.clone();
                     // Spawn-via-blocking so that prefill (which is itself a
                     // blocking GPU call) runs off the async runtime, then
                     // hands the receiver back. The actual decode loop runs on
@@ -4482,6 +4683,7 @@ async fn generate_real_streaming(
                             cache.is_enabled()
                         };
                         if !prefix_enabled {
+                            *prefix_cache_diagnostic.lock().unwrap() = "disabled";
                             kiln_model::ModelRunner::spawn_streaming_paged_shared_tokens(
                                 runner.clone(),
                                 prompt_tokens.clone(),
@@ -4503,6 +4705,7 @@ async fn generate_real_streaming(
                                 (hit, should_register)
                             };
                             if hit.is_none() && !should_register_on_miss {
+                                *prefix_cache_diagnostic.lock().unwrap() = "skipped";
                                 return kiln_model::ModelRunner::spawn_streaming_paged_shared_tokens(
                                     runner.clone(),
                                     prompt_tokens.clone(),
@@ -4512,6 +4715,11 @@ async fn generate_real_streaming(
                                     decode_batcher.clone(),
                                 );
                             }
+                            *prefix_cache_diagnostic.lock().unwrap() = if hit.is_some() {
+                                "hit"
+                            } else {
+                                "miss"
+                            };
                             let hit_entry_id = hit.as_ref().map(|hit| hit.entry_id);
                             let cached_prefix = hit.map(|hit| PagedPrefixReuse {
                                 cached_tokens: hit.cached_tokens,
@@ -4626,9 +4834,11 @@ async fn generate_real_streaming(
                     }
                 }
                 ResolvedSpeculativeMode::SkipLayer(spec_config) => {
+                    let prefix_cache_diagnostic = prefix_cache_diagnostic.clone();
                     match tokio::task::spawn_blocking(move || {
                         let _gpu_guard = gpu_lock.read().unwrap();
                         let runner_guard = runner.read().unwrap();
+                        *prefix_cache_diagnostic.lock().unwrap() = "not_used_speculative";
                         if params.temperature == 0.0 {
                             runner_guard.generate_streaming_paged_speculative_shared_tokens(
                                 &prompt_tokens,
@@ -4660,9 +4870,11 @@ async fn generate_real_streaming(
                     }
                 }
                 ResolvedSpeculativeMode::Mtp => {
+                    let prefix_cache_diagnostic = prefix_cache_diagnostic.clone();
                     match tokio::task::spawn_blocking(move || {
                         let _gpu_guard = gpu_lock.read().unwrap();
                         let runner_guard = runner.read().unwrap();
+                        *prefix_cache_diagnostic.lock().unwrap() = "not_used_speculative";
                         runner_guard.generate_streaming_mtp_speculative(&prompt, &params)
                     })
                     .await
@@ -5098,6 +5310,8 @@ async fn generate_mock(
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
             finish_reason: assistant_output.finish_reason.clone(),
+            thinking_mode: Some("mock".to_string()),
+            prefix_cache: Some("not_applicable".to_string()),
             ..request_record_from_req(req, &id, &model, false)
         },
     );
@@ -6917,6 +7131,18 @@ async fn generate_one_prepared_response(
             let resp = match generation {
                 Ok(resp) => resp,
                 Err(err) => {
+                    let model = req
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| state.served_model_id.clone());
+                    record_failed_chat_completion(
+                        state,
+                        req,
+                        &model,
+                        request_start,
+                        prompt_tokens.len(),
+                        &err,
+                    );
                     if completion_cache_owner && let Some(key) = completion_cache_key.as_ref() {
                         fail_deterministic_completion_owner(state, key);
                     }
@@ -6955,6 +7181,18 @@ async fn generate_one_prepared_response(
             let resp = match generation {
                 Ok(resp) => resp,
                 Err(err) => {
+                    let model = req
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| state.served_model_id.clone());
+                    record_failed_chat_completion(
+                        state,
+                        req,
+                        &model,
+                        request_start,
+                        prompt_tokens.len(),
+                        &err,
+                    );
                     if completion_cache_owner && let Some(key) = completion_cache_key.as_ref() {
                         fail_deterministic_completion_owner(state, key);
                     }
@@ -8277,6 +8515,49 @@ mod tests {
             300,
             "kiln-test".to_string(),
         )
+    }
+
+    #[test]
+    fn slow_request_log_values_respect_threshold_and_redact_prompt_text() {
+        let mut state = make_batch_test_state();
+        state.slow_request_warn_threshold = Some(std::time::Duration::from_millis(50));
+        let mut record = RequestRecord {
+            id: "chatcmpl-test".to_string(),
+            timestamp_unix_ms: 0,
+            model: "kiln-test".to_string(),
+            prompt_preview: "secret prompt".to_string(),
+            completion_preview: "ok".to_string(),
+            prompt_tokens: 12,
+            completion_tokens: 4,
+            duration_ms: 49,
+            streamed: false,
+            finish_reason: "stop".to_string(),
+            adapter: Some("adapter-a".to_string()),
+            max_tokens: Some(8),
+            thinking_mode: Some("reasoning".to_string()),
+            prefix_cache: Some("hit".to_string()),
+            prompt_full: Some("secret full prompt".to_string()),
+            ..RequestRecord::default()
+        };
+
+        assert!(slow_request_log_values(&state, &record).is_none());
+
+        record.duration_ms = 50;
+        let values = slow_request_log_values(&state, &record).unwrap();
+        assert_eq!(values.request_id, "chatcmpl-test");
+        assert_eq!(values.adapter, "adapter-a");
+        assert_eq!(values.prompt_tokens, 12);
+        assert_eq!(values.max_output_tokens, 8);
+        assert_eq!(values.generated_tokens, 4);
+        assert_eq!(values.elapsed_ms, 50);
+        assert_eq!(values.threshold_ms, 50);
+        assert_eq!(values.thinking_mode, "reasoning");
+        assert_eq!(values.prefix_cache, "hit");
+        assert_eq!(values.finish_reason, "stop");
+
+        let debug = format!("{values:?}");
+        assert!(!debug.contains("secret prompt"));
+        assert!(!debug.contains("secret full prompt"));
     }
 
     /// Build a minimal request body, invoke the route, and return (status, body).
