@@ -2804,7 +2804,7 @@ tests so they do not recur.
 - Tests are included in the normal Rust test suite where feasible.
 - CUDA-only tests are marked and documented separately.
 
-**Status:** Completed and pending push to `main`.
+**Status:** Completed and pushed to `main`.
 
 **Intended behavior:** Preserve the lessons from issues 1-39 as named,
 maintained regressions. Normal Rust tests should cover parser, routing,
@@ -2873,7 +2873,9 @@ small real SFT adapter, and measures repeated load/eval/unload latency drift.
   `7 passed; 0 failed`; `cargo test -p kiln-train --lib` passed
   `255 passed; 0 failed`.
 
-**Commit SHA:** Pending metadata update after commit.
+**Commit SHA:** `7fcd2281` (`Issue 40: add learned regression tests`),
+pushed to `origin/main` on 2026-05-21. Validation metadata is recorded in
+this follow-up metadata commit.
 
 **Remaining risk:** GitHub CI still needs to run after push; no code-level or
 actual-model validation risk is known for this issue.
