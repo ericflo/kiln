@@ -528,7 +528,7 @@ pub fn recommended_checkpoint_segments(vram: &GpuVramInfo) -> Option<usize> {
 /// * [`CheckpointPlan::Enabled`] — activations would crowd available VRAM at
 ///   one or more segment counts; pick the smallest segment count that keeps
 ///   per-segment activation memory under the headroom budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CheckpointPlan {
     /// User overrode via env (`KILN_GRAD_CHECKPOINT_SEGMENTS` or
     /// `KILN_NO_GRAD_CHECKPOINT`). Caller should fall back to the env-driven
