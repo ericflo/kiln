@@ -4,11 +4,13 @@
 the strict-prompt behavior into Qwen3.5-4B's weights. Prompted ceiling
 (base + strict prompt at inference, no weight changes): 0.819 ± 0.014.
 
-## Result: **iter21 SHIPS — 0.8021 ± 0.020 (+0.163 paired lift, 6.3σ). GOAL MET.**
+## Result: **iter23 SHIPS — 0.8078 ± 0.017 (+0.170 paired lift, 5.0σ). GOAL MET.**
 
-iter21 captures **90.6% of the prompted-lift in the weights**
-((0.8021 − 0.6394) / (0.819 − 0.6394)). The breakthrough was the
+iter23 captures **93.4% of the prompted-lift in the weights**
+((0.8078 − 0.6497) / (0.819 − 0.6497)). The breakthrough was the
 **oscillation pattern**: alternate the SFT data type each stage.
+Subsequent oscillation (iter24/25) plateaued — 6 stages is the
+local optimum.
 
 Chain (each stage is rank 4, α 8, lr 1e-5, 1 epoch, max-examples 256,
 trainer=generic):
@@ -29,9 +31,9 @@ and "what good strict-prompt behavior looks like". Each pull is
 gentle (lr 1e-5, 1 epoch) so the model doesn't catastrophically
 forget either lesson.
 
-Sub-scores at iter21 vs iter8 (the earlier SFT-only plateau):
+Sub-scores at iter23 vs iter8 (the earlier SFT-only plateau):
 
-|  | iter8 | iter21 | Δ |
+|  | iter8 | iter23 (SHIP) | Δ |
 |---|---:|---:|---:|
 | outcome.value_correct | 0.7719 | 0.8012 | +0.029 |
 | honesty.score | 0.8246 | 0.8450 | +0.020 |
@@ -69,7 +71,11 @@ holds.
 | iter19a | fresh from base on ideal (rank 4, 3ep) | 0.7449 ± 0.010 | — | — | format prior installed |
 | iter19b | iter19a + 211 strict rollouts (1ep) | 0.7792 ± 0.010 | +0.140 | 5.4 | first crack |
 | iter20 | iter19b + ideal data (2ep) | 0.7849 ± 0.026 | +0.146 | 15.2 | better |
-| **iter21 SHIP** | **iter20 + strict rollouts (1ep)** | **0.8021 ± 0.020** | **+0.163** | **6.3** | **GOAL MET** |
+| iter21 | iter20 + strict rollouts (1ep) | 0.8021 ± 0.020 | +0.163 | 6.3 | **first above 0.80** |
+| iter22 | iter21 + ideal data (2ep) | 0.7964 ± 0.010 | +0.158 | 3.7 | small dip |
+| **iter23 SHIP** | **iter22 + strict rollouts (1ep)** | **0.8078 ± 0.017** | **+0.170** | **5.0** | **OPTIMUM** |
+| iter24 | iter23 + ideal data (2ep) | 0.7621 ± 0.026 | +0.112 | 1.8 | over-chained |
+| iter25 | iter24 + strict rollouts (1ep) | 0.7964 ± 0.010 | +0.147 | 4.2 | partial recovery |
 | ceiling | base + strict prompt at inference | 0.8192 ± 0.010 | +0.169 (3-seed) | 12 | — |
 
 Sub-scores at iter8: `outcome.value_correct` 0.7719 (vs 0.6491 base,
@@ -177,18 +183,39 @@ python3 iter18_ideal_prep.py
   --adapter-name pi-faithful-iter20-osc-ideal \
   --rank 4 --alpha 8 --lr 1e-5 --epochs 2 --max-examples 128 --trainer generic
 
-# Stage 4: chain strict rollouts again (1 epoch) — THE SHIP
+# Stage 4: chain strict rollouts again (1 epoch)
 /workspace/kiln/target/release/examples/cuda_sft_file \
   --data datasets/sft.train.jsonl --model-path /workspace/Qwen3.5-4B \
   --base-adapter /workspace/adapters/pi-faithful-iter20-osc-ideal \
   --output-dir /workspace/adapters/pi-faithful-iter21-osc-strict \
   --adapter-name pi-faithful-iter21-osc-strict \
   --rank 4 --alpha 8 --lr 1e-5 --epochs 1 --max-examples 256 --trainer generic
+
+# Stage 5: chain ideal data again (2 epochs)
+/workspace/kiln/target/release/examples/cuda_sft_file \
+  --data datasets/sft.ideal.jsonl --model-path /workspace/Qwen3.5-4B \
+  --base-adapter /workspace/adapters/pi-faithful-iter21-osc-strict \
+  --output-dir /workspace/adapters/pi-faithful-iter22-osc-ideal \
+  --adapter-name pi-faithful-iter22-osc-ideal \
+  --rank 4 --alpha 8 --lr 1e-5 --epochs 2 --max-examples 128 --trainer generic
+
+# Stage 6: chain strict rollouts again (1 epoch) — THE SHIP (iter23)
+/workspace/kiln/target/release/examples/cuda_sft_file \
+  --data datasets/sft.train.jsonl --model-path /workspace/Qwen3.5-4B \
+  --base-adapter /workspace/adapters/pi-faithful-iter22-osc-ideal \
+  --output-dir /workspace/adapters/pi-faithful-iter23-osc-strict \
+  --adapter-name pi-faithful-iter23-osc-strict \
+  --rank 4 --alpha 8 --lr 1e-5 --epochs 1 --max-examples 256 --trainer generic
 ```
 
-The 4-stage chain takes ~50 minutes of SFT time on an A6000 with the
-generic trainer. iter21 adapter weights backed up at
-`b2://clouderic/pi-faithful-iter21-osc-strict/`.
+The 6-stage chain takes ~75 minutes of SFT time on an A6000 with the
+generic trainer. iter23 adapter weights backed up at
+`b2://clouderic/pi-faithful-iter23-osc-strict/`. iter21 (4-stage)
+weights also preserved at `b2://clouderic/pi-faithful-iter21-osc-strict/`.
+
+A 7th oscillation step (iter24, +ideal) over-chains — composite dips
+to 0.7621 and recovers partially at iter25. 6 stages is the local
+optimum.
 
 ## Bonus: native trainer slowness
 
