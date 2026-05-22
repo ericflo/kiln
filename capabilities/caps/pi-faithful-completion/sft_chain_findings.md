@@ -26,6 +26,8 @@ two fresh pods.
 | iter11 | iter8 + (r4, α8, lr 5e-6, 1ep, 211 ex) | 0.7729 ± 0.016 | +0.117 | 3.4 | neutral |
 | iter12 | iter8 + (r4, α8, lr 1e-5, 1ep, 422 mixed-prompt) | 0.7564 ± 0.000 | +0.100 | 3.3 | regress |
 | iter13 | OPD self-distill chain on iter8 | n/a | n/a | n/a | infrastructure mismatch — see below |
+| iter14 | r8, α16, lr 1e-5, 1ep, 211 ex (fresh) | 0.7735 ± 0.017 | +0.130 | 3.5 | **ties iter8** — plateau confirmed |
+| iter15 | iter14 + (r8, α16, lr 1e-5, 1ep, 211) | 0.7564 ± 0.017 | +0.113 | 4.7 | regression (over-chain) |
 | ceiling | base + strict prompt at inference | 0.8192 ± 0.010 | +0.169 (3-seed) | 12 | — |
 
 Sub-scores at iter8: `outcome.value_correct` 0.7719 (vs 0.6491 base,
@@ -53,8 +55,13 @@ outcome and honesty; format pays a moderate cost.
 - **Mixed prompts during training** (default + strict as inputs,
   same strict output). iter12 regressed to 0.7564.
 
-The chain-SFT regime saturates around iter8. Same-rubric data has no
-more diverse signal to give; further training just overfits.
+The chain-SFT regime saturates around 0.7735. iter14 (rank 8 fresh
+in one epoch) and iter8 (rank 4 chained over two epochs) BOTH hit
+**exactly 0.7735** — same data, same plateau, regardless of how
+the capacity is distributed. The training data itself caps the
+achievable lift; the model has already learned everything the
+strict-prompt rollouts can teach it. More parameters or more
+training just re-arranges the same fit.
 
 ## Untried angles to break past 0.7735
 
