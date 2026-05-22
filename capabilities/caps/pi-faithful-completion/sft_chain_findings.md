@@ -28,6 +28,7 @@ two fresh pods.
 | iter13 | OPD self-distill chain on iter8 | n/a | n/a | n/a | infrastructure mismatch — see below |
 | iter14 | r8, α16, lr 1e-5, 1ep, 211 ex (fresh) | 0.7735 ± 0.017 | +0.130 | 3.5 | **ties iter8** — plateau confirmed |
 | iter15 | iter14 + (r8, α16, lr 1e-5, 1ep, 211) | 0.7564 ± 0.017 | +0.113 | 4.7 | regression (over-chain) |
+| iter16 | iter8 + (r4, α8, lr 1e-5, 1ep, threshold>0.5: ~400 ex) | 0.7678 ± 0.010 | +0.123 | 4.8 | same plateau |
 | ceiling | base + strict prompt at inference | 0.8192 ± 0.010 | +0.169 (3-seed) | 12 | — |
 
 Sub-scores at iter8: `outcome.value_correct` 0.7719 (vs 0.6491 base,
@@ -55,13 +56,18 @@ outcome and honesty; format pays a moderate cost.
 - **Mixed prompts during training** (default + strict as inputs,
   same strict output). iter12 regressed to 0.7564.
 
-The chain-SFT regime saturates around 0.7735. iter14 (rank 8 fresh
-in one epoch) and iter8 (rank 4 chained over two epochs) BOTH hit
-**exactly 0.7735** — same data, same plateau, regardless of how
-the capacity is distributed. The training data itself caps the
-achievable lift; the model has already learned everything the
-strict-prompt rollouts can teach it. More parameters or more
-training just re-arranges the same fit.
+The chain-SFT regime saturates around 0.77. iter8 (rank 4 chain),
+iter14 (rank 8 fresh), and iter16 (lower-threshold data) all hit
+the SAME plateau **regardless of capacity (rank 4 vs 8), schedule
+(fresh vs chain), or data filter (>0.7 vs >0.5)**. The training
+data itself caps the achievable lift; the model has already learned
+everything the strict-prompt rollouts can teach it. The plateau is
+not a training-recipe artifact — it is a data-signal ceiling.
+
+To break past, the training data must change (richer signal, hard-
+tail examples, larger teacher) or the method must change (OPD
+reverse-KL once kiln gets `/v1/completions`, larger-teacher
+distillation, KL-regularized SFT).
 
 ## Untried angles to break past 0.7735
 
