@@ -202,11 +202,18 @@ applied to a different cap would pick different distributions.
 
 ## Practical gotchas
 
-- **Use `--trainer generic`.** The native trainer
-  (`cuda_native_sft_train`) is currently ~50× slower than generic on
-  Qwen3.5-4B; the generic path (`sft_train` in `trainer.rs`) routes
-  through `BackendRuntime` and gets the production-tuned kernels. See
-  kiln issue #1063 for the backport tracking the native trainer.
+- **`--trainer native` and `--trainer generic` are both supported.**
+  `cuda_sft_file` defaults to `--trainer native`. Since the layerwise
+  reverse-recompute backport (kiln issue #1063) the native path runs
+  at comparable step times to generic on Qwen3.5-4B, so both are
+  acceptable production choices. `generic` routes through
+  `BackendRuntime` (`sft_train` in `trainer.rs`) and is the most
+  exercised path; `native` is the composable CUDA-resident path used
+  by the GRPO hot-swap LoRA loop and by recipes that don't fit
+  `sft_train`. If you suspect a step-time regression on the native
+  path, set `KILN_CUDA_RECOMPUTE_SFT=0` to fall back to the legacy
+  monolithic-graph kernel for parity testing and file a follow-up
+  issue.
 - **Flatten the adapter directory after training.** `cuda_sft_file`
   writes to `<output-dir>/<adapter-name>/...` but kiln serve expects
   `<output-dir>/...` directly. After training, `mv` the inner files up

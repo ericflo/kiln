@@ -1477,6 +1477,10 @@ pub fn cuda_recompute_train_step_with_state_masked(
         lora_layers.len(),
         model.layers.len()
     );
+    ensure!(
+        cuda_lora_pairs(lora_layers).next().is_some(),
+        "cuda_recompute_train_step_with_state_masked requires at least one LoRA parameter"
+    );
 
     let device = model.token_embedding.as_tensor().device();
     let seq_len = token_ids.len();
@@ -3731,14 +3735,14 @@ mod tests {
             vocab: 4,
             hidden: 2,
         };
-        // Two-token input with an active label position on the second
-        // token. Shifted CE conventionally predicts token_ids[t+1] from
-        // hidden[t]; the last position has no label so we mark mask[n-1]
-        // false. This is the smallest shape that exercises FLCE through
-        // the autograd path while still passing through the GDN
-        // recurrence end-to-end.
+        // Two-token input with an active label at position 1.
+        // `cuda_shifted_linear_cross_entropy_loss` iterates
+        // `label_mask[1..]`, so `mask[k] = true` means "predict
+        // `input_ids[k]` from `hidden[k-1]`". With seq_len=2 the only
+        // valid active position is k=1; mark `mask[0]` false (the first
+        // position can't be a label target under shifted CE).
         let token_ids = vec![0usize, 1usize];
-        let label_mask = vec![true, false];
+        let label_mask = vec![false, true];
         Ok((model, Vec::new(), token_ids, label_mask))
     }
 
