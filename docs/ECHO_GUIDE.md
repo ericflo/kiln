@@ -187,7 +187,7 @@ When writing a new agentic-GRPO cap, you basically don't need to do anything ECH
 - **Blog post:** [`docs/papers/echo/echo_blog_post.md`](papers/echo/echo_blog_post.md) (Markdown of the X/Twitter thread)
 - **Integration plan:** [`docs/plans/echo-integration-plan.md`](plans/echo-integration-plan.md) (~1750 lines, full design + risk register + acceptance tests)
 - **Long-form companion:** [`docs/plans/grand-plan-for-extraordinarily-great-echo-for-everyone.md`](plans/grand-plan-for-extraordinarily-great-echo-for-everyone.md) (the OPD-plan-style aspirational write-up; Phase 3)
-- **Skill update:** [`.agents/skills/agentic-grpo-capability-creator/SKILL.md`](../.agents/skills/agentic-grpo-capability-creator/SKILL.md) §0 (cap authors)
+- **Skill update:** `.agents/skills/agentic-grpo-capability-creator/SKILL.md` §0 (cap authors)
 
 ## Versioning notes
 
