@@ -1,5 +1,94 @@
 # Kiln Server Changelog
 
+## Unreleased — cuda_native_sft_train: layerwise reverse-recompute (closes #1063)
+
+Closes #1063 (cuda_native_sft_train ~50x slower than `--trainer
+generic`). Implements the *structural* fix called out by the issue —
+"backport `vk_native_sft_train`'s layerwise recompute" — rather than
+the user-visible workaround in #1070 (default the trainer flag to
+`generic`).
+
+The legacy `cuda_lora_model_adamw_step_with_gdn_state_with_arena`
+builds a single per-step autograd graph spanning all 32 transformer
+layers and ~50 ops per layer. `cuda_backward` then walks ~1.6K nodes
+linearly, allocating per-grad CudaTrainTensors via candle ops; that
+traversal cost is what produces the 50x gap with the candle-routed
+`sft_train` path, which dispatches each layer through `BackendRuntime`
+and lets candle's autograd run a much smaller per-step graph.
+
+### Added
+
+- `kiln_train::cuda_train::cuda_recompute_train_step_with_state_masked`
+  — exact layerwise reverse-recompute step matching
+  `vk_recompute_train_step_with_state_masked`. Forwards every layer
+  once with *detached* LoRA (no autograd graph) caching layer-input
+  boundaries plus GDN entry states; wraps the final hidden as a fresh
+  parameter for the RMSNorm+FLCE backward; then replays one layer at a
+  time with the live LoRA so each `cuda_backward` walks a tiny graph
+  (per-layer, not whole-model). Drops AdamW grads into a shared
+  `TensorId`-keyed map and applies the optimizer once at the end via
+  the existing `cuda_adamw_step_from_store`.
+- `cuda_forward_to_layer_input` / `cuda_forward_layer_boundaries`
+  helpers (private, in cuda_train.rs) that handle the detached LoRA
+  forward and the per-GDN-layer state snapshots.
+- `cuda_gdn_lora_layer_with_entry_state` helper that wraps the
+  reshape/transpose plumbing the legacy step kernel inlined, so the
+  forward, boundary-cache, and reverse-replay paths agree byte-for-byte
+  on the recurrence formulation.
+- New env knobs (mirrors of the vk-side flags):
+  - `KILN_CUDA_RECOMPUTE_SFT` (tristate, default ON) — set `=0` to
+    force the legacy monolithic-graph path for parity testing.
+  - `KILN_CUDA_RECOMPUTE_BOUNDARY_CACHE` (tristate, default auto) —
+    cache layer-input boundaries in GPU memory; auto-engages when the
+    cache fits within the per-host budget. Falls back to exact
+    per-layer replay when memory is tight.
+  - `KILN_CUDA_RECOMPUTE_BOUNDARY_CACHE_GB` (float) — explicit memory
+    budget override for the boundary cache.
+  - `KILN_PROFILE_CUDA_RECOMPUTE` (bool) — per-layer
+    forward/reverse begin/end tracing, matching
+    `KILN_PROFILE_VK_RECOMPUTE`.
+
+### Changed
+
+- `cuda_native_sft_train` now selects the recompute path by default
+  for both Full-Attn and hybrid models. The legacy path is reachable
+  via `KILN_CUDA_RECOMPUTE_SFT=0`.
+- Per-step `info!` lines now include `seq_len` and `step_ms` so the
+  ~50x slow path is diagnosable from a tail of the training log (this
+  generalises the format change PR #1070 added behind the legacy
+  warn).
+
+### Tests
+
+- New parity test `cuda_recompute_step_loss_parity_with_legacy_step`
+  builds a tiny mixed Full+GDN model, runs one step through both the
+  legacy `cuda_lora_model_adamw_step_with_gdn_state_with_arena` and
+  `cuda_recompute_train_step_with_state_masked` on the same starting
+  weights / LoRA init / seed, and asserts the returned loss values
+  agree to within 1e-3 relative.
+- New functional test
+  `cuda_recompute_step_updates_lora_weights` confirms the recompute
+  path actually mutates `lora.a` and `lora.b` (defends against a
+  silent no-op if grad accumulation regresses).
+- New parity test
+  `cuda_recompute_step_boundary_cache_vs_no_cache_parity` exercises
+  both `KILN_CUDA_RECOMPUTE_BOUNDARY_CACHE=on` and `=off` and asserts
+  identical losses.
+
+### Performance
+
+Bench numbers from the PR description (median of last 3 steps on
+A6000, Qwen3.5-4B hybrid, rank-4 LoRA, single 1.5K-token example):
+
+| Path                                 | step_ms (median) |
+|--------------------------------------|------------------|
+| legacy `cuda_native` (#1063 baseline)| ~180000          |
+| `cuda_native` + recompute (this PR)  | TBD (see PR)     |
+| `--trainer generic` (BackendRuntime) | ~3500            |
+
+This PR supersedes #1070 (which deferred the structural fix in favor
+of flipping the `--trainer` default).
+
 ## Unreleased — ECHO: agentic multi-turn GRPO loss term
 
 Wires the ECHO technique (Shrivastava, Awadallah, Papailiopoulos — MSR
