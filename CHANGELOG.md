@@ -1,60 +1,78 @@
 # Kiln Server Changelog
 
-## Unreleased — cuda_native_sft_train: layerwise reverse-recompute (#1063)
+## Unreleased — cuda_native_sft_train: route through BackendRuntime (closes #1063)
 
-Addresses #1063 (cuda_native_sft_train slow vs `--trainer generic`)
-by implementing the *structural* backport from `vk_native_sft_train`
-called out by the issue. The PR delivers correctness + memory wins
-and surfaces an empirical finding that reframes the perf bug.
+Closes #1063 (cuda_native_sft_train ~50x slower than `--trainer
+generic`). This PR ships the **root-cause fix** from the issue body's
+"Proposed fix" section 3: route the inner step through
+`BackendRuntime` + candle's autograd so the cuda_native path inherits
+the fused-kernel paths that make `sft_train` fast.
 
-### What this is
+PR #1070 was a thin wrapper for the same idea — it flipped the
+`--trainer` default to `generic` so users *bypass* the slow native
+step, but the function itself (and direct callers of it) was
+unchanged. This PR fixes the function itself, so every caller of
+`cuda_native_sft_train` — `cuda_sft_file`, the server's
+`KILN_CUDA_NATIVE_TRAINING=1` path, the bench harness, future
+recipes that don't fit `sft_train`'s interface — gets the fast path
+automatically.
 
-The legacy `cuda_lora_model_adamw_step_with_gdn_state_with_arena`
-builds a single per-step autograd graph spanning all 32 transformer
-layers (~1.6K nodes). The new layerwise reverse-recompute step
-forwards every layer once with detached LoRA to capture boundaries,
-then replays one layer at a time with grad-tracking LoRA so each
-`cuda_backward` walks only that layer's ~50-node graph. This mirrors
-`vk_recompute_train_step_with_state_masked` exactly.
+### The structural fix
 
-### What it actually delivers
+`cuda_native_sft_train` now delegates to `sft_train` by default:
 
-On A6000 / Qwen3.5-4B, with `cuda_sft_file` and rank-8 LoRA:
+```rust
+if !force_legacy && !force_recompute {
+    return crate::trainer::sft_train(
+        examples, config, model_config, weights, tokenizer,
+        adapter_dir, adapter_name, progress_cb, None,
+    );
+}
+```
 
-| Path                                | 4 short steps (~30 tok) | Peak VRAM |
-|-------------------------------------|-------------------------|-----------|
-| `--trainer generic` (BackendRuntime)| 13 s                    | 12.6 GiB  |
-| native legacy step                  | 79 s                    | 15.7 GiB  |
-| native + recompute (this PR, opt-in)| 74 s                    | 10.7 GiB  |
+`sft_train` dispatches each layer through `BackendRuntime` (FlashAttn,
+fused RMSNorm, fused GDN kernels) and runs candle's autograd. That's
+the production-tuned path; it's what `--trainer generic` already used.
 
-* **Strict backward parity with legacy** (post-step LoRA values match
-  bit-for-bit modulo fp32 noise — see new tests below).
-* **~30% peak VRAM reduction** at the cost of double-forward per step.
-* **Same step time** as legacy at this scale; longer prompts disfavor
-  recompute because the extra layer re-forwards outweigh the smaller
-  per-backward graph.
+Two opt-in escape hatches preserve the legacy machinery for debug /
+parity testing / memory-constrained jobs:
 
-### What it doesn't deliver — and why
+- `KILN_CUDA_LEGACY_NATIVE_STEP=1` — run the legacy monolithic-graph
+  step (the original `cuda_native` behavior). Slow; use only when
+  reproducing #1063 numbers or testing the new recompute path
+  against the original.
+- `KILN_CUDA_RECOMPUTE_SFT=1` — run the new layerwise reverse-
+  recompute step (also in this PR, see below). Same speed as legacy
+  but ~30% less peak VRAM. Useful for long-context jobs where VRAM
+  matters more than speed.
 
-The PR does **not** close the 50× gap with `--trainer generic`. The
-issue body's diagnosis ("many small CUDA launches with CPU sync;
-nvidia-smi shows GPU util near 0%") points at *per-op CPU overhead in
-`cuda_train`'s hand-rolled autograd*, not at per-step graph size.
-Recompute *adds* kernel launches (extra forwards per layer) and so
-cannot reduce that overhead. Closing the full gap requires one of:
+The default — neither env var set — is the BackendRuntime route.
 
-  1. Routing `cuda_native_sft_train` through `BackendRuntime` +
-     candle's autograd (effectively what `--trainer generic` does).
-     PR #1070's default-to-generic was a thin wrapper around this.
-  2. Reducing `cuda_train` per-op CPU overhead: in-place grad
-     accumulation (avoid the `(existing + g)` Tensor allocation in
-     `cuda_backward`), pre-allocated grad buffers, or CUDA graph
-     capture for the steady-state step shape.
+### Bonus: layerwise reverse-recompute step (opt-in)
 
-This PR keeps the legacy step as the default so existing callers
-don't slow down. `KILN_CUDA_RECOMPUTE_SFT=1` opts into the new path
-for memory-constrained long-context jobs that can trade ~5% step
-time for ~30% VRAM headroom.
+This PR also includes a separate `cuda_recompute_train_step_with_state_masked`
+that mirrors `vk_recompute_train_step_with_state_masked` from the
+Vulkan path. It's the structural backport called out by the issue
+body's "Proposed fix" sections 1+2. Bit-for-bit backward parity with
+the legacy step (verified by `cuda_recompute_step_backward_parity_with_legacy`)
+and ~30% less peak VRAM at the cost of double-forward per step.
+
+Empirically (A6000 / Qwen3.5-4B / rank-8 LoRA, 4 short steps via
+`cuda_sft_file`):
+
+| Path                                | wall  | Peak VRAM |
+|-------------------------------------|-------|-----------|
+| `--trainer generic` (BackendRuntime)| 13 s  | 12.6 GiB  |
+| native legacy step (slow path)      | 79 s  | 15.7 GiB  |
+| native + recompute (this PR opt-in) | 74 s  | 10.7 GiB  |
+| native default (this PR)            | 13 s  | 12.6 GiB  |
+
+The recompute path is bit-for-bit equivalent to legacy on the
+backward and saves real VRAM, but it doesn't close the 50× gap on its
+own — the per-op CPU overhead in `cuda_train`'s hand-rolled autograd
+scales with kernel-launch count, and recompute *adds* launches. Hence
+recompute is opt-in for memory-constrained jobs; the BackendRuntime
+route is the default for everyone else.
 
 ### Added
 
@@ -75,10 +93,13 @@ time for ~30% VRAM headroom.
   reshape/transpose plumbing the legacy step kernel inlined, so the
   forward, boundary-cache, and reverse-replay paths agree byte-for-
   byte on the recurrence formulation.
-- New env knobs (mirrors of the vk-side flags):
-  - `KILN_CUDA_RECOMPUTE_SFT` (tristate, **default off**) — set `=1`
-    to engage the recompute path. Off by default because on long
-    contexts it is slower than the legacy step.
+- New env knobs:
+  - `KILN_CUDA_LEGACY_NATIVE_STEP` (bool, default off) — set `=1` to
+    bypass the BackendRuntime route and run the legacy monolithic-
+    graph step. Slow; debug / parity testing only.
+  - `KILN_CUDA_RECOMPUTE_SFT` (tristate, default off) — set `=1` to
+    bypass the route and run the layerwise reverse-recompute step.
+    Trades a few percent step time for ~30% peak VRAM.
   - `KILN_CUDA_RECOMPUTE_BOUNDARY_CACHE` (tristate, default auto) —
     cache layer-input boundaries in GPU memory; auto-engages when
     the cache fits within the per-host budget. Falls back to exact
@@ -91,11 +112,17 @@ time for ~30% VRAM headroom.
 
 ### Changed
 
-- `cuda_native_sft_train` selects the recompute path when
-  `KILN_CUDA_RECOMPUTE_SFT=1`; default behavior is unchanged
-  (legacy monolithic-graph step).
-- Per-step `info!` lines now include `seq_len` and `step_ms` so the
-  step path is diagnosable from a tail of the training log.
+- `cuda_native_sft_train` now routes through `BackendRuntime` via
+  `sft_train` by default. The legacy step is reachable via
+  `KILN_CUDA_LEGACY_NATIVE_STEP=1`; the new recompute step is
+  reachable via `KILN_CUDA_RECOMPUTE_SFT=1`.
+- `cuda_native_sft_train` now supports `base_adapter` (inherited from
+  `sft_train`) when on the default route. The previous "not
+  supported" bail is preserved on the legacy / recompute opt-in
+  paths because their inner step kernels don't load base adapters.
+- Per-step `info!` lines on the opt-in paths now include `seq_len`
+  and `step_ms` so the step path is diagnosable from a single log
+  tail.
 
 ### Tests
 

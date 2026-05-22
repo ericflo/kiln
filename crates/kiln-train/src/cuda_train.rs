@@ -1907,6 +1907,64 @@ pub fn cuda_native_sft_train(
     adapter_name: &str,
     progress_cb: Option<ProgressCallback>,
 ) -> Result<PathBuf> {
+    // Issue #1063 (root-cause fix): the legacy cuda_native step is
+    // ~50x slower than `sft_train` because cuda_train's hand-rolled
+    // autograd does many small CUDA launches with per-op CPU overhead
+    // (HashMap walk + per-grad candle Tensor allocation), and that
+    // overhead scales linearly with kernel-launch count. The structural
+    // backport from vk_native (layerwise recompute, also in this file)
+    // confirmed via bench that recompute *adds* launches and so cannot
+    // reduce per-op CPU overhead — see the recompute step's module
+    // comment for the empirical numbers.
+    //
+    // The actual fix is to route the inner step through `BackendRuntime`
+    // + candle's autograd, which is what `sft_train` already does and
+    // which uses the production-tuned fused FlashAttn / GDN / RMSNorm
+    // kernels. This default-routing brings cuda_native_sft_train down
+    // to the same step time as `--trainer generic` (~3.5 s/step on
+    // Qwen3.5-4B per the issue numbers), for every caller of this
+    // function — not just users who happen to flip a flag.
+    //
+    // The legacy `cuda_train`-side step kernels remain reachable for
+    // parity testing and the memory-saving recompute path:
+    //
+    //   - KILN_CUDA_LEGACY_NATIVE_STEP=1 — bypass the route, run the
+    //     legacy monolithic-graph step. Slow; use only for parity tests
+    //     against the new recompute step.
+    //   - KILN_CUDA_RECOMPUTE_SFT=1 — bypass the route, run the
+    //     layerwise reverse-recompute step. Same speed as legacy but
+    //     ~30% less peak VRAM (see PR for the bench).
+    //
+    // The default path (neither env var set) is the route through
+    // sft_train.
+    let force_legacy =
+        kiln_core::env_flag::env_flag("KILN_CUDA_LEGACY_NATIVE_STEP", false);
+    let force_recompute =
+        kiln_core::env_flag::env_tristate("KILN_CUDA_RECOMPUTE_SFT").unwrap_or(false);
+    if !force_legacy && !force_recompute {
+        tracing::info!(
+            num_examples = examples.len(),
+            epochs = config.epochs,
+            lr = config.learning_rate,
+            rank = config.lora_rank,
+            alpha = config.lora_alpha,
+            adapter_name,
+            path = "backend_runtime_via_sft_train",
+            "cuda_native_sft_train: routing through BackendRuntime + candle autograd (fixes #1063)"
+        );
+        return crate::trainer::sft_train(
+            examples,
+            config,
+            model_config,
+            weights,
+            tokenizer,
+            adapter_dir,
+            adapter_name,
+            progress_cb,
+            None,
+        );
+    }
+
     let run_started = std::time::Instant::now();
     let output_dir = adapter_dir.join(adapter_name);
     let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&examples);
@@ -1916,14 +1974,21 @@ pub fn cuda_native_sft_train(
     };
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
 
-    tracing::info!(
+    tracing::warn!(
         num_examples = examples.len(),
         epochs = config.epochs,
         lr = config.learning_rate,
         rank = config.lora_rank,
         alpha = config.lora_alpha,
         adapter_name,
-        "starting cuda-native SFT training"
+        path = if force_recompute {
+            "layerwise_recompute"
+        } else {
+            "legacy_monolithic"
+        },
+        "cuda_native_sft_train: BYPASSING the BackendRuntime route via env flag; \
+         this is the slow path. Unset KILN_CUDA_LEGACY_NATIVE_STEP / \
+         KILN_CUDA_RECOMPUTE_SFT to use the production path"
     );
 
     let alpha_over_rank = match crate::lora_scaling::validate_lora_scaling(
@@ -2036,36 +2101,20 @@ pub fn cuda_native_sft_train(
         .iter()
         .any(|layer| matches!(layer, CudaLayerWeights::LinearAttention(_)));
 
-    // Issue #1063: backport `vk_native_sft_train`'s layerwise reverse-
-    // recompute structure to CUDA. The recompute path is bit-for-bit
-    // parity with the legacy step (verified by parity tests) and saves
-    // ~30% peak VRAM by not retaining a 32-layer-wide autograd graph
-    // during backward.
-    //
-    // On Qwen3.5-4B with realistic sequence lengths, the recompute path
-    // does NOT close the 50x gap with `--trainer generic`. The PR
-    // benchmark shows recompute at roughly the same step time as legacy
-    // on short prompts and meaningfully slower on long prompts: the
-    // extra per-layer re-forward inside recompute dominates the savings
-    // from the smaller per-backward graph. The root cause flagged by
-    // the issue body — many small CUDA launches with CPU sync between
-    // them — is per-op overhead in `cuda_train`'s hand-rolled autograd,
-    // and it scales with kernel-launch count, so adding launches (as
-    // recompute does) cannot reduce it. Recompute is therefore opt-in:
-    // `KILN_CUDA_RECOMPUTE_SFT=1` engages it for memory-constrained
-    // long-context jobs; default stays on the legacy step so existing
-    // callers don't regress on speed.
-    let use_recompute =
-        kiln_core::env_flag::env_tristate("KILN_CUDA_RECOMPUTE_SFT").unwrap_or(false);
+    // We're on the legacy/recompute opt-in path here (the default path
+    // returned early via sft_train). `force_recompute` and
+    // `force_legacy` were read before the early return; honor whichever
+    // the caller asked for, defaulting to legacy if both were set.
+    let use_recompute = force_recompute && !force_legacy;
     tracing::info!(
         path = if use_recompute {
-            "recompute"
+            "layerwise_recompute"
         } else {
             "legacy_monolithic"
         },
         has_gdn,
         flce_chunk = CUDA_NATIVE_SFT_FLCE_CHUNK,
-        "cuda-native SFT step path selected"
+        "cuda-native SFT step path selected (env-bypass)"
     );
 
     let mut global_step = 0usize;

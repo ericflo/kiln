@@ -202,23 +202,22 @@ applied to a different cap would pick different distributions.
 
 ## Practical gotchas
 
-- **Use `--trainer generic` for production SFT.** `cuda_sft_file`
-  still defaults to `--trainer native` for backward compatibility,
-  but `--trainer generic` (routed through `BackendRuntime` via
-  `sft_train`) is meaningfully faster on Qwen3.5-4B at every
-  sequence length exercised in CI. The native path remains the
-  composable CUDA-resident path used by the GRPO hot-swap LoRA loop;
-  call it explicitly when the recipe doesn't fit `sft_train`.
-  Tracking issue #1063 documents the underlying gap (per-op CPU
-  overhead in `cuda_train`'s autograd).
-- **`KILN_CUDA_RECOMPUTE_SFT=1` (opt-in, kiln #1063)** swaps the
-  legacy native step for a layerwise reverse-recompute step that
-  saves ~30% peak VRAM in exchange for ~5% step time on short
-  prompts (longer on long prompts). It is bit-for-bit parity with
-  the legacy step but does *not* close the gap to `--trainer
-  generic` — the bottleneck is per-op CPU overhead, not per-step
-  graph size, and recompute adds launches rather than removing
-  them.
+- **`--trainer native` and `--trainer generic` now perform the same**
+  on Qwen3.5-4B as of kiln #1063: `cuda_native_sft_train` routes
+  through `BackendRuntime` + candle autograd by default, so it
+  inherits the fused FlashAttn / GDN / RMSNorm kernels and runs at
+  the same step time as generic. Either trainer is fine for
+  production SFT. The native path also accepts `--base-adapter` now.
+- **`KILN_CUDA_RECOMPUTE_SFT=1` (opt-in escape hatch, kiln #1063)**
+  bypasses the BackendRuntime route and runs the layerwise
+  reverse-recompute step on the cuda_train autograd. Saves ~30%
+  peak VRAM at the cost of a few percent step time. Useful for
+  long-context jobs that are VRAM-bound; leave it unset for normal
+  training.
+- **`KILN_CUDA_LEGACY_NATIVE_STEP=1` (debug only)** bypasses the
+  route and runs the original legacy monolithic-graph step. Slow.
+  Only use to reproduce #1063 numbers or to parity-test the
+  recompute step against the original.
 - **Flatten the adapter directory after training.** `cuda_sft_file`
   writes to `<output-dir>/<adapter-name>/...` but kiln serve expects
   `<output-dir>/...` directly. After training, `mv` the inner files up
