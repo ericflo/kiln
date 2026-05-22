@@ -16,9 +16,9 @@ fi
 # Source the build env
 source /root/.kiln-build-env
 
-# Pull the latest kiln main (in case base image is older)
+# Pull the iter5 branch (carries iter5_prep_sft_data.py + stage scripts)
 cd /workspace/kiln
-git fetch --depth=1 origin main && git reset --hard origin/main
+git fetch --depth=1 origin iter5-sft-strict-rollouts && git checkout -f iter5-sft-strict-rollouts && git reset --hard origin/iter5-sft-strict-rollouts
 
 # Build the cuda release binaries (kiln serve, cuda_sft_file, kiln eval-adapter, etc.)
 echo "=== building kiln (cuda release) ==="
