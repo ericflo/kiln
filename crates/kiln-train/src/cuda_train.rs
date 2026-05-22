@@ -2284,7 +2284,9 @@ pub fn cuda_native_grpo_train(
 ) -> Result<PathBuf> {
     tracing::info!(
         num_groups = groups.len(),
-        epochs = config.epochs,
+        learning_rate = config.learning_rate,
+        kl_coeff = config.kl_coeff,
+        rank = config.lora_rank,
         adapter_name,
         path = "backend_runtime_via_grpo_train",
         "cuda_native_grpo_train: routing through BackendRuntime + candle autograd"
@@ -2318,7 +2320,9 @@ pub fn cuda_native_grpo_train_jsonl(
 ) -> Result<PathBuf> {
     tracing::info!(
         dataset_path = %dataset_path.display(),
-        epochs = config.epochs,
+        learning_rate = config.learning_rate,
+        kl_coeff = config.kl_coeff,
+        rank = config.lora_rank,
         adapter_name,
         path = "backend_runtime_via_grpo_train_jsonl",
         "cuda_native_grpo_train_jsonl: routing through BackendRuntime + candle autograd"
