@@ -123,6 +123,15 @@ RUN chmod +x /etc/profile.d/kiln-motd.sh
 COPY kiln-setup.sh /usr/local/bin/kiln-setup
 RUN chmod +x /usr/local/bin/kiln-setup
 
+# --- kiln-smoke-check: post-build sanity check for fused CUDA kernels ---
+# Exercises every kernel on the inference hot path so the issue #1066
+# failure mode (corrupted sccache object: build succeeds but inference
+# returns HTTP 500 with "kiln_<kernel> failed with status <N>") is caught
+# at build time instead of by the first user request. Returns non-zero
+# with concrete SCCACHE_RECACHE=1 recovery instructions on failure.
+COPY kiln-smoke-check.sh /usr/local/bin/kiln-smoke-check
+RUN chmod +x /usr/local/bin/kiln-smoke-check
+
 # --- kiln-heartbeat: pod-wedge watchdog (Phase A) ---
 # Writes /workspace/heartbeat.txt atomically every 30s with GPU util, load,
 # top procs, build-tree mtime, and build log sizes. Started by entrypoint.sh
@@ -145,7 +154,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 #      missing PATH, missing RUSTUP_HOME/CARGO_HOME (rustup default won't
 #      resolve), etc.
 RUN set -e; \
-    TOOLS="nvcc rustc cargo cargo-nextest sccache nsys gh git curl jq cmake ninja protoc clang rg tmux b2 huggingface-cli python3 kiln-heartbeat"; \
+    TOOLS="nvcc rustc cargo cargo-nextest sccache nsys gh git curl jq cmake ninja protoc clang rg tmux b2 huggingface-cli python3 kiln-heartbeat kiln-setup kiln-smoke-check"; \
     for bin in $TOOLS; do \
         if ! command -v "$bin" >/dev/null 2>&1; then \
             echo "FAIL (interactive env): '$bin' not on PATH" >&2; exit 1; \

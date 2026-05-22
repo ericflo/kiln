@@ -11,4 +11,5 @@ printf '  sccache: %s | nextest: %s\n' "$(sccache --version 2>/dev/null | awk '{
 printf '  torch: %s (cuda=%s)\n' "$(python3 -c 'import torch; print(torch.__version__)' 2>/dev/null)" "$(python3 -c 'import torch; print(torch.version.cuda)' 2>/dev/null)"
 printf '\n'
 printf 'Quick start: \033[32mkiln-setup\033[0m (configures sccache+B2) then clone kiln & build.\n'
+printf 'After build:  \033[32mkiln-smoke-check\033[0m (verifies fused CUDA kernels — see issue #1066).\n'
 printf '\n'
