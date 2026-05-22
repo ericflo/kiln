@@ -323,10 +323,11 @@ universal answer:
 - For a code-generation task, **canonical idiomatic solutions** vs
   **edge-case stress tests** might pair well.
 
-Many capabilities won't need this at all — single-distribution SFT or
-OPD is enough. But when you've genuinely run out of single-distribution
-recipe ideas and the composite hasn't moved, consider whether a second
-distribution exists that you haven't fed in.
+Reach for this when you've genuinely run out of single-distribution
+recipe ideas and the composite hasn't moved. We don't have a frequency
+estimate for how often this applies — early in the round-3 cycle,
+treat each capability on its own evidence rather than presuming it
+will or won't need a second distribution.
 
 **Reference example:** `caps/pi-faithful-completion` (round-3, 2026-05).
 Twelve single-distribution variants (rank 4-16, lr 1e-4 to 5e-6,

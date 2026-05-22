@@ -165,10 +165,12 @@ Diagnostic:
    epochs) so the model never catastrophically forgets the other
    lesson. Stop when an additional swap stops adding lift.
 
-Many capabilities won't need this — single-distribution SFT or OPD is
-plenty. Only reach for it when the parameter sweep has clearly
-plateaued. The technique trades simplicity for one more knob (the
-schedule) and should be justified by evidence, not adopted by default.
+Reach for this when the parameter sweep has clearly plateaued. The
+technique trades simplicity for one more knob (the schedule); justify
+the trade by the evidence (a plateau across recipes you'd otherwise
+have expected to separate), not by habit in either direction. We
+don't have a frequency estimate for how often caps need it — early
+in the round-3 cycle, treat each cap on its own evidence.
 
 **Synthesizing a second distribution.** If the rubric is programmatic
 (format_regex + expected_value), you can often **synthesize**
