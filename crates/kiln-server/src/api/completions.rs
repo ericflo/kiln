@@ -1,3 +1,4 @@
+use anyhow::Context;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -21,6 +22,7 @@ use kiln_model::{
     CancelHandle, GenerationOutput, ModelRunner, PagedPrefixReuse, SpeculativeConfig, StreamEvent,
 };
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::batching_engine::{EngineEvent, EngineRequest};
@@ -3126,6 +3128,62 @@ pub struct Usage {
     pub total_tokens: usize,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum TextCompletionPrompt {
+    Text(String),
+    TokenIds(Vec<TokenId>),
+}
+
+/// vLLM-compatible text-completions request subset.
+///
+/// Kiln supports this endpoint's prompt-logprobs mode so `RemoteTeacher`
+/// clients can query a kiln-served teacher through the same `/v1/completions`
+/// shape they use for vLLM/sglang.
+#[derive(Debug, Deserialize)]
+pub struct TextCompletionRequest {
+    /// When omitted, the server falls back to its configured `served_model_id`.
+    #[serde(default)]
+    pub model: Option<String>,
+    pub prompt: TextCompletionPrompt,
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+    #[serde(default)]
+    pub prompt_logprobs: Option<usize>,
+    #[serde(default)]
+    pub n: Option<usize>,
+    #[serde(default)]
+    pub stream: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TextCompletionResponse {
+    pub id: String,
+    pub object: &'static str,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<TextCompletionChoice>,
+    pub usage: Usage,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TextCompletionChoice {
+    pub index: usize,
+    pub text: String,
+    pub finish_reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_logprobs: Option<Vec<Option<PromptLogprobMap>>>,
+}
+
+pub type PromptLogprobMap = BTreeMap<String, PromptLogprobEntry>;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptLogprobEntry {
+    pub logprob: f32,
+    pub rank: usize,
+    pub decoded_token: String,
+}
+
 fn completion_usage_tokens(
     visible_token_count: usize,
     finish_reason: &kiln_model::FinishReason,
@@ -3308,6 +3366,273 @@ async fn chat_completions(
     }
 
     result.map(|response| response_with_runtime_headers(&state, response))
+}
+
+async fn completions(
+    State(state): State<AppState>,
+    Json(req): Json<TextCompletionRequest>,
+) -> Result<Response, ApiError> {
+    let start = std::time::Instant::now();
+    state.metrics.inc_active();
+
+    let result = completions_inner(&state, req).await;
+
+    state.metrics.dec_active();
+    let elapsed = start.elapsed().as_secs_f64();
+    state.metrics.observe_duration(elapsed);
+
+    match &result {
+        Ok(_) => state.metrics.inc_request(RequestStatus::Ok),
+        Err(e) => {
+            if e.status == StatusCode::REQUEST_TIMEOUT {
+                state.metrics.inc_request(RequestStatus::Timeout);
+            } else {
+                state.metrics.inc_request(RequestStatus::Error);
+            }
+        }
+    }
+
+    result.map(|response| response_with_runtime_headers(&state, response))
+}
+
+async fn completions_inner(
+    state: &AppState,
+    req: TextCompletionRequest,
+) -> Result<Response, ApiError> {
+    if req.stream {
+        return Err(ApiError::completion_invalid_request(
+            "stream=true is not supported on /v1/completions prompt-logprobs requests",
+        ));
+    }
+    if req.n.unwrap_or(1) != 1 {
+        return Err(ApiError::completion_invalid_request(
+            "'n' must be 1 when set; batched text completions are not supported",
+        ));
+    }
+    let max_tokens = req.max_tokens.unwrap_or(1);
+    if max_tokens > 1 {
+        return Err(ApiError::completion_invalid_request(
+            "only prompt-logprobs mode is supported; set max_tokens to 0 or 1",
+        ));
+    }
+    let top_k = req.prompt_logprobs.ok_or_else(|| {
+        ApiError::completion_invalid_request(
+            "prompt_logprobs is required; generation-only text completions are not supported",
+        )
+    })?;
+    validate_prompt_logprobs_top_k(state, top_k)?;
+    let prompt_tokens = tokens_for_text_completion_prompt(state, &req.prompt)?;
+    if prompt_tokens.is_empty() {
+        return Err(ApiError::completion_invalid_request(
+            "prompt must tokenize to at least one token",
+        ));
+    }
+
+    let prompt_logprobs = match state.backend.as_ref() {
+        ModelBackend::Mock { .. } => mock_prompt_logprobs(state, &prompt_tokens, top_k),
+        ModelBackend::Real { runner, .. } => {
+            real_prompt_logprobs(state, runner, &prompt_tokens, top_k).await?
+        }
+    };
+
+    let model = req
+        .model
+        .clone()
+        .unwrap_or_else(|| state.served_model_id.clone());
+    let response = TextCompletionResponse {
+        id: format!("cmpl-{}", Uuid::new_v4()),
+        object: "text_completion",
+        created: now_epoch(),
+        model,
+        choices: vec![TextCompletionChoice {
+            index: 0,
+            text: String::new(),
+            finish_reason: "length".to_string(),
+            prompt_logprobs: Some(prompt_logprobs),
+        }],
+        usage: Usage {
+            prompt_tokens: prompt_tokens.len(),
+            completion_tokens: 0,
+            total_tokens: prompt_tokens.len(),
+        },
+    };
+    Ok(Json(response).into_response())
+}
+
+const MAX_COMPLETION_PROMPT_LOGPROBS: usize = 256;
+
+fn validate_prompt_logprobs_top_k(state: &AppState, top_k: usize) -> Result<(), ApiError> {
+    if top_k == 0 {
+        return Err(ApiError::completion_invalid_request(
+            "prompt_logprobs must be greater than 0",
+        ));
+    }
+    if top_k > MAX_COMPLETION_PROMPT_LOGPROBS {
+        return Err(ApiError::completion_invalid_request(format!(
+            "prompt_logprobs {top_k} exceeds kiln's cap of {MAX_COMPLETION_PROMPT_LOGPROBS}"
+        )));
+    }
+    if top_k > state.model_config.vocab_size {
+        return Err(ApiError::completion_invalid_request(format!(
+            "prompt_logprobs {top_k} exceeds vocab size {}",
+            state.model_config.vocab_size
+        )));
+    }
+    Ok(())
+}
+
+fn tokens_for_text_completion_prompt(
+    state: &AppState,
+    prompt: &TextCompletionPrompt,
+) -> Result<Vec<TokenId>, ApiError> {
+    match prompt {
+        TextCompletionPrompt::TokenIds(tokens) => Ok(tokens.clone()),
+        TextCompletionPrompt::Text(text) => state
+            .tokenizer
+            .encode(text)
+            .map_err(ApiError::tokenization_failed),
+    }
+}
+
+fn decoded_token_for_logprob(state: &AppState, token_id: TokenId) -> String {
+    state.tokenizer.decode(&[token_id]).unwrap_or_default()
+}
+
+fn top_k_logprob_map(state: &AppState, row: &[f32], top_k: usize) -> PromptLogprobMap {
+    let mut pairs: Vec<(TokenId, f32)> = row
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(idx, logprob)| (idx as TokenId, logprob))
+        .collect();
+    if top_k < pairs.len() {
+        pairs.select_nth_unstable_by(top_k, |a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        pairs.truncate(top_k);
+    }
+    pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut out = BTreeMap::new();
+    for (rank, (token_id, logprob)) in pairs.into_iter().enumerate() {
+        out.insert(
+            token_id.to_string(),
+            PromptLogprobEntry {
+                logprob,
+                rank: rank + 1,
+                decoded_token: decoded_token_for_logprob(state, token_id),
+            },
+        );
+    }
+    out
+}
+
+fn prompt_logprobs_from_rows(
+    state: &AppState,
+    prompt_tokens: &[TokenId],
+    logprob_rows: &[Vec<f32>],
+    top_k: usize,
+) -> Result<Vec<Option<PromptLogprobMap>>, ApiError> {
+    if logprob_rows.len() != prompt_tokens.len() {
+        return Err(ApiError::generation_failed(anyhow::anyhow!(
+            "prompt-logprobs row count {} did not match prompt token count {}",
+            logprob_rows.len(),
+            prompt_tokens.len()
+        )));
+    }
+
+    let mut out = Vec::with_capacity(prompt_tokens.len());
+    out.push(None);
+    for pos in 1..prompt_tokens.len() {
+        out.push(Some(top_k_logprob_map(
+            state,
+            &logprob_rows[pos - 1],
+            top_k,
+        )));
+    }
+    Ok(out)
+}
+
+fn mock_prompt_logprobs(
+    state: &AppState,
+    prompt_tokens: &[TokenId],
+    top_k: usize,
+) -> Vec<Option<PromptLogprobMap>> {
+    let vocab_size = state.model_config.vocab_size.max(1);
+    let mut out = Vec::with_capacity(prompt_tokens.len());
+    out.push(None);
+    for pos in 1..prompt_tokens.len() {
+        let mut map = BTreeMap::new();
+        for rank in 0..top_k {
+            let token_id = prompt_tokens[pos].wrapping_add(rank as u32) as usize % vocab_size;
+            let token_id = token_id as TokenId;
+            map.insert(
+                token_id.to_string(),
+                PromptLogprobEntry {
+                    logprob: -(rank as f32),
+                    rank: rank + 1,
+                    decoded_token: decoded_token_for_logprob(state, token_id),
+                },
+            );
+        }
+        out.push(Some(map));
+    }
+    out
+}
+
+fn log_softmax_last_dim(x: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
+    let lse = x
+        .log_sum_exp(candle_core::D::Minus1)?
+        .unsqueeze(candle_core::D::Minus1)?;
+    let broadcast = lse.broadcast_as(x.shape())?;
+    Ok((x - broadcast)?)
+}
+
+async fn real_prompt_logprobs(
+    state: &AppState,
+    runner: &std::sync::Arc<std::sync::RwLock<ModelRunner>>,
+    prompt_tokens: &[TokenId],
+    top_k: usize,
+) -> Result<Vec<Option<PromptLogprobMap>>, ApiError> {
+    let runner = runner.clone();
+    let prompt_tokens_owned = prompt_tokens.to_vec();
+    let gpu_lock = state.gpu_lock.clone();
+    let timeout = state.request_timeout;
+    let handle = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Vec<f32>>> {
+        let _gpu_guard = gpu_lock.read().unwrap();
+        let runner_guard = runner.read().unwrap();
+        let device = runner_guard.weights.embed_tokens.device().clone();
+        let backend = kiln_model::backend::for_device(&device);
+        let mut linear_state =
+            kiln_model::forward::LinearAttentionState::new(&runner_guard.config, &device)?;
+        let logits = kiln_model::forward::model_forward(
+            &*backend,
+            &prompt_tokens_owned,
+            &runner_guard.weights,
+            &runner_guard.config,
+            None,
+            Some(&mut linear_state),
+            runner_guard.active_lora(),
+        )
+        .context("prompt-logprobs forward pass")?;
+        let log_probs = log_softmax_last_dim(&logits).context("prompt-logprobs log_softmax")?;
+        let log_probs_2d = log_probs
+            .squeeze(0)
+            .context("prompt-logprobs squeeze batch dim")?
+            .to_dtype(candle_core::DType::F32)
+            .context("prompt-logprobs to_dtype f32")?;
+        log_probs_2d
+            .to_vec2::<f32>()
+            .context("prompt-logprobs to host")
+    });
+
+    let rows = match tokio::time::timeout(timeout, handle).await {
+        Ok(Ok(Ok(rows))) => rows,
+        Ok(Ok(Err(err))) => return Err(ApiError::generation_failed(err)),
+        Ok(Err(err)) => return Err(ApiError::internal(format!("join error: {err}"))),
+        Err(_) => return Err(ApiError::request_timeout(timeout.as_secs())),
+    };
+    prompt_logprobs_from_rows(state, prompt_tokens, &rows, top_k)
 }
 
 async fn chat_completions_inner(
@@ -7988,6 +8313,8 @@ async fn generate_one_prepared_response(
 /// Body-size cap for /v1/chat/completions (audit LOW §1).
 /// 8 MiB is generous for chat payloads while bounding memory DoS via JSON extraction.
 const CHAT_BODY_LIMIT: usize = 8 * 1024 * 1024;
+/// Body-size cap for /v1/completions (vLLM-compatible prompt-logprobs).
+const COMPLETIONS_BODY_LIMIT: usize = 8 * 1024 * 1024;
 /// Body-size cap for /v1/completions/batch (audit LOW §1).
 /// 8 MiB accommodates batched prompts; per-request adapter composition is separately capped at 16.
 const BATCH_BODY_LIMIT: usize = 8 * 1024 * 1024;
@@ -7997,6 +8324,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/v1/chat/completions",
             post(chat_completions).layer(DefaultBodyLimit::max(CHAT_BODY_LIMIT)),
+        )
+        .route(
+            "/v1/completions",
+            post(completions).layer(DefaultBodyLimit::max(COMPLETIONS_BODY_LIMIT)),
         )
         .route(
             "/v1/completions/batch",
@@ -9764,6 +10095,33 @@ mod tests {
         .unwrap()
     }
 
+    async fn completion_post(
+        state: AppState,
+        body_json: &str,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use axum::body::{Body, to_bytes};
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = routes().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body_json.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, body)
+    }
+
     async fn chat_post_text(state: AppState, body_json: &str) -> (axum::http::StatusCode, String) {
         use axum::body::{Body, to_bytes};
         use axum::http::Request;
@@ -9807,6 +10165,63 @@ mod tests {
         .await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["code"], "chat_invalid_request");
+    }
+
+    #[tokio::test]
+    async fn completions_prompt_logprobs_accepts_token_id_prompt() {
+        let body = serde_json::json!({
+            "model": "Qwen3.5-4B",
+            "prompt": [11, 22, 33],
+            "max_tokens": 1,
+            "temperature": 0.0,
+            "prompt_logprobs": 3
+        })
+        .to_string();
+
+        let (status, json) = completion_post(make_batch_test_state(), &body).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{json}");
+        assert_eq!(json["object"], "text_completion");
+        assert_eq!(json["usage"]["prompt_tokens"], 3);
+        assert_eq!(json["usage"]["completion_tokens"], 0);
+        let prompt_logprobs = json["choices"][0]["prompt_logprobs"].as_array().unwrap();
+        assert_eq!(prompt_logprobs.len(), 3);
+        assert!(prompt_logprobs[0].is_null());
+        assert_eq!(prompt_logprobs[1].as_object().unwrap().len(), 3);
+        assert_eq!(prompt_logprobs[2].as_object().unwrap().len(), 3);
+        assert!(
+            prompt_logprobs[1]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|entry| entry["logprob"].is_number() && entry["rank"].is_number())
+        );
+    }
+
+    #[tokio::test]
+    async fn completions_prompt_logprobs_rejects_missing_prompt_logprobs() {
+        let body = serde_json::json!({
+            "prompt": [11, 22, 33],
+            "max_tokens": 1
+        })
+        .to_string();
+
+        let (status, json) = completion_post(make_batch_test_state(), &body).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "completion_invalid_request");
+    }
+
+    #[tokio::test]
+    async fn completions_prompt_logprobs_rejects_topk_above_cap() {
+        let body = serde_json::json!({
+            "prompt": [11, 22, 33],
+            "max_tokens": 1,
+            "prompt_logprobs": MAX_COMPLETION_PROMPT_LOGPROBS + 1
+        })
+        .to_string();
+
+        let (status, json) = completion_post(make_batch_test_state(), &body).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "completion_invalid_request");
     }
 
     #[tokio::test]

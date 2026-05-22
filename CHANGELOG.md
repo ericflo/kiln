@@ -54,6 +54,10 @@ See `docs/papers/echo/` (paper + blog conversion) and
   `GrpoRequest::groups` accepts the `agentic_groups` JSON alias for
   the same reason. Legacy `/v1/train/grpo` + `groups` clients are
   unaffected.
+- HTTP route `POST /v1/completions` for vLLM-compatible
+  `prompt_logprobs` queries. `kiln-train::RemoteTeacher` can now use a
+  kiln-served model as its OPD teacher via the same token-id prompt
+  request shape it already uses for vLLM/sglang.
 - Receipt schema additions in `kiln-train::receipt`:
   `DiagnosticSummary.echo: Option<EchoDiagnosticSummary>` with
   `lambda`, `env_ce_initial`, `env_ce_final`, `env_ce_drop_pct`,

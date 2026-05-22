@@ -110,6 +110,16 @@ impl ApiError {
         }
     }
 
+    pub fn completion_invalid_request(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "completion_invalid_request",
+            message: format!("Invalid completion request: {detail}"),
+            hint: "POST /v1/completions with {prompt, prompt_logprobs: K}. The prompt may be a string or a token-id array.",
+            retry_after_seconds: None,
+        }
+    }
+
     // ── Adapters ────────────────────────────────────────────────────
 
     pub fn adapter_not_found(name: impl std::fmt::Display) -> Self {
