@@ -566,9 +566,12 @@ pub enum CheckpointPlan {
 /// * MLP per layer: `3 * hidden * intermediate` (gate, up, down).
 /// * Embedding + LM head: `2 * vocab * hidden`.
 ///
-/// Multiplied by 2 bytes/param (BF16). The estimate matches the
-/// `model_loaded_vram_mib=9943` we observe for Qwen3.5-4B in the
-/// kiln-server training bench (within ~5%).
+/// Multiplied by `bytes_per_param` and then by a 1.2× working-buffer
+/// overhead factor (RoPE tables, attention masks, paged-KV scratch,
+/// candle's own intermediate tensor pool, the LoRA Vars and AdamW state
+/// registry). The 1.2× lands the Qwen3.5-4B estimate at ~9.5 GiB,
+/// matching the observed `model_loaded_vram_mib=9943` from the
+/// kiln-server training bench within ±5%.
 pub fn estimate_base_model_bytes(
     num_layers: usize,
     hidden_size: usize,
@@ -581,7 +584,24 @@ pub fn estimate_base_model_bytes(
     let layer_total = per_layer_params.saturating_mul(num_layers);
     let head_total = 2usize.saturating_mul(vocab_size).saturating_mul(hidden_size);
     let total_params = layer_total.saturating_add(head_total);
-    (total_params as u64).saturating_mul(bytes_per_param as u64)
+    let raw_bytes = (total_params as u64).saturating_mul(bytes_per_param as u64);
+    // 1.2× working-buffer overhead. Implemented as (raw * 6) / 5 to stay
+    // in integer math.
+    raw_bytes.saturating_mul(6) / 5
+}
+
+/// Multiplier from "forward activation tape" to "peak training memory for
+/// activations + grads + scratch". Forward saves activations once; backward
+/// materializes grads of the same shape and uses transient scratch matmul
+/// buffers of similar size during the chain rule. Empirically peak is
+/// ~2-3× the forward tape; 2.5× is a conservative middle that doesn't pull
+/// aggressive checkpointing for short prompts but engages it before
+/// backward OOMs on long ones. Implemented as `* 5 / 2` to stay in u64.
+const ACTIVATION_PEAK_NUMER: u64 = 5;
+const ACTIVATION_PEAK_DENOM: u64 = 2;
+
+fn peak_activation_bytes(forward_tape_bytes: u64) -> u64 {
+    forward_tape_bytes.saturating_mul(ACTIVATION_PEAK_NUMER) / ACTIVATION_PEAK_DENOM
 }
 
 /// Auto-decide a gradient-checkpoint plan for a training workload, factoring
@@ -635,13 +655,19 @@ pub fn recommended_checkpoint_plan(
         return None;
     }
 
-    // F32 activation tape (one element per layer-token pair). Even on a
-    // BF16 model, the trainer keeps activations and grads in F32 for
+    // F32 forward activation tape (one element per layer-token pair).
+    // Even on a BF16 model, the trainer keeps activations in F32 for
     // numerical stability, so this matches what we'd actually allocate.
-    let max_act_bytes = (num_layers as u64)
+    let forward_tape_bytes = (num_layers as u64)
         .saturating_mul(max_seq_len_tokens as u64)
         .saturating_mul(hidden_size as u64)
         .saturating_mul(4);
+
+    // Peak training memory for activations + grads + scratch. The forward
+    // tape alone under-estimates peak — backward doubles the activation
+    // footprint and matmul scratch adds ~50% on top. Compare the *peak*,
+    // not the forward, against headroom.
+    let max_act_bytes = peak_activation_bytes(forward_tape_bytes);
 
     // 2 GiB safety for working buffers (RoPE tables, attention masks,
     // intermediate matmul outputs that aren't on the activation tape).
@@ -661,8 +687,11 @@ pub fn recommended_checkpoint_plan(
         return Some(CheckpointPlan::UserOverride);
     }
 
-    // Comfortable headroom: skip checkpointing. The 0.5 threshold leaves
-    // plenty of room for grads + AdamW state on top of activations.
+    // Comfortable headroom: skip checkpointing. The 0.5 threshold compares
+    // *peak* activation memory (forward tape × 2.5 amplification for
+    // backward + scratch) against available headroom, so "Disabled" means
+    // we have ≥2× the peak on hand — comfortable across CUDA's caching
+    // allocator fragmentation.
     if max_act_bytes <= (available_bytes / 2) {
         return Some(CheckpointPlan::Disabled {
             max_act_gib,
