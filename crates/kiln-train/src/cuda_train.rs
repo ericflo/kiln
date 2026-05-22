@@ -3874,57 +3874,62 @@ mod tests {
         };
 
         let (model, _, token_ids, _label_mask) = build_recompute_test_model_and_lora(&device)?;
-        let lora_layers = build_recompute_test_lora(&device)?;
-        let before = lora_snapshot(&lora_layers)?;
-        let mut adamw = allocate_cuda_lora_adamw_state(&lora_layers)?;
         let cfg = CudaAdamWConfig {
             lr: 0.1,
             ..CudaAdamWConfig::default()
         };
         let token_vec: Vec<usize> = token_ids.clone();
 
-        let loss = cuda_recompute_train_step_with_state_masked(
+        // Compare LoRA movement under legacy vs recompute starting from
+        // identical init. If both fail to move, the test's data + lr is
+        // degenerate (no real grad signal). If only recompute fails, the
+        // bug is in the new path.
+        let max_movement = |before: &[(Vec<f32>, Vec<f32>)],
+                            after: &[(Vec<f32>, Vec<f32>)]| -> (Vec<(usize, f32, f32)>, f32) {
+            let mut diffs = Vec::new();
+            let mut max = 0.0f32;
+            for (i, ((ab, bb), (aa, ba))) in before.iter().zip(after.iter()).enumerate() {
+                let ad = ab.iter().zip(aa).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max);
+                let bd = bb.iter().zip(ba).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max);
+                diffs.push((i, ad, bd));
+                max = max.max(ad).max(bd);
+            }
+            (diffs, max)
+        };
+
+        // Legacy run
+        let lora_legacy = build_recompute_test_lora(&device)?;
+        let legacy_before = lora_snapshot(&lora_legacy)?;
+        let mut adamw_legacy = allocate_cuda_lora_adamw_state(&lora_legacy)?;
+        let mut gdn_state = cuda_linear_attention_state_zeros_for_model(&model, 1)?;
+        let mut arena = CudaTrainArena::new(&device)?;
+        let loss_legacy = cuda_lora_model_adamw_step_with_gdn_state_with_arena(
             &model,
-            &lora_layers,
+            &lora_legacy,
             &token_vec,
             None,
-            &mut adamw,
+            &mut gdn_state,
+            &mut adamw_legacy,
             cfg,
+            &mut arena,
         )?;
-        assert!(loss.is_finite(), "non-finite recompute loss: {loss}");
+        let (legacy_diffs, legacy_max) = max_movement(&legacy_before, &lora_snapshot(&lora_legacy)?);
 
-        let after = lora_snapshot(&lora_layers)?;
-        // Diagnostic: dump the max-delta per pair so we can see which (if
-        // any) projections moved when the assertion fires.
-        let mut any_moved = false;
-        let mut diffs: Vec<(usize, f32, f32)> = Vec::new();
-        for (i, ((a_before, b_before), (a_after, b_after))) in
-            before.iter().zip(after.iter()).enumerate()
-        {
-            let a_diff = a_before
-                .iter()
-                .zip(a_after.iter())
-                .map(|(x, y)| (x - y).abs())
-                .fold(0.0f32, f32::max);
-            let b_diff = b_before
-                .iter()
-                .zip(b_after.iter())
-                .map(|(x, y)| (x - y).abs())
-                .fold(0.0f32, f32::max);
-            diffs.push((i, a_diff, b_diff));
-            if a_diff > 1e-9 || b_diff > 1e-9 {
-                any_moved = true;
-            }
-        }
-        // Also surface the AdamW state's step counter so we can tell
-        // whether the kernel was called at all.
-        let any_state_stepped = adamw.values().any(|s| s.step > 0);
-        let step_summary: Vec<u32> = adamw.values().map(|s| s.step).collect();
+        // Recompute run
+        let lora_rec = build_recompute_test_lora(&device)?;
+        let rec_before = lora_snapshot(&lora_rec)?;
+        let mut adamw_rec = allocate_cuda_lora_adamw_state(&lora_rec)?;
+        let loss_rec = cuda_recompute_train_step_with_state_masked(
+            &model, &lora_rec, &token_vec, None, &mut adamw_rec, cfg,
+        )?;
+        let (rec_diffs, rec_max) = max_movement(&rec_before, &lora_snapshot(&lora_rec)?);
+
+        assert!(loss_legacy.is_finite() && loss_rec.is_finite());
         assert!(
-            any_moved,
-            "recompute step left every LoRA A/B unchanged; AdamW likely received an empty grad map. \
-             per-pair max |delta| = {diffs:?}; adamw step counters = {step_summary:?}; \
-             any_state_stepped = {any_state_stepped}"
+            legacy_max > 1e-9 && rec_max > 1e-9,
+            "expected both paths to move LoRA weights. legacy_loss={loss_legacy} rec_loss={loss_rec} \
+             legacy_max={legacy_max} legacy_per_pair={legacy_diffs:?} \
+             rec_max={rec_max} rec_per_pair={rec_diffs:?}"
         );
         Ok(())
     }
