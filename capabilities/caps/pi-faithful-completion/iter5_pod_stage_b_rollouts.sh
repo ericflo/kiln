@@ -17,9 +17,6 @@ mkdir -p /workspace/adapters
 echo "=== starting kiln serve ==="
 export KILN_MODEL_PATH=/workspace/Qwen3.5-4B
 export KILN_ADAPTER_DIR=/workspace/adapters
-# Disable fused GDN gates kernel — broken on this pod's build (sccache cache hit returns
-# kernel that crashes with status 500). Tested with kiln-bench: setting just this is enough.
-export KILN_DISABLE_FUSED_GDN_GATES=1
 nohup ./target/release/kiln serve --eval-mode \
   > /workspace/iter5-kiln-serve.log 2>&1 &
 echo "kiln serve pid: $!"

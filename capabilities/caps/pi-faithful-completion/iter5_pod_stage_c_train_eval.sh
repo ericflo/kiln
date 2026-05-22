@@ -46,7 +46,6 @@ pkill -f 'target/release/kiln serve' 2>/dev/null || true
 sleep 3
 export KILN_MODEL_PATH=/workspace/Qwen3.5-4B
 export KILN_ADAPTER_DIR=/workspace/adapters
-export KILN_DISABLE_FUSED_GDN_GATES=1
 nohup /workspace/kiln/target/release/kiln serve --eval-mode \
   > /workspace/iter5-kiln-serve.log 2>&1 &
 echo "kiln serve pid: $!"
