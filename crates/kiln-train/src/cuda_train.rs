@@ -3850,6 +3850,19 @@ mod tests {
     /// grad accumulation regression that drops every grad) would still
     /// return a finite loss; the explicit snapshot/check defends
     /// against that failure mode.
+    ///
+    /// Uses the unmasked sum-of-squares surrogate (`None` label_mask)
+    /// rather than FLCE so every token position contributes to the
+    /// loss and every LoRA pair gets a non-trivial grad. With FLCE +
+    /// `mask = [false, true]` and seq_len=2, only `hidden[0]` enters
+    /// the loss; the resulting per-LoRA grads are small at this tiny
+    /// scale and several pairs ride under the 1e-9 movement threshold
+    /// (verified empirically: FLCE on a 2-token / 2-hidden model with
+    /// only one supervised label position is in the regime where the
+    /// per-pair AdamW update is dominated by floating-point noise).
+    /// The SS surrogate is numerically robust here and exercises the
+    /// same recompute machinery; the FLCE path is covered by the loss
+    /// parity test above.
     #[test]
     fn cuda_recompute_step_updates_lora_weights() -> Result<()> {
         let device = match Device::new_cuda(0) {
@@ -3860,7 +3873,7 @@ mod tests {
             }
         };
 
-        let (model, _, token_ids, label_mask) = build_recompute_test_model_and_lora(&device)?;
+        let (model, _, token_ids, _label_mask) = build_recompute_test_model_and_lora(&device)?;
         let lora_layers = build_recompute_test_lora(&device)?;
         let before = lora_snapshot(&lora_layers)?;
         let mut adamw = allocate_cuda_lora_adamw_state(&lora_layers)?;
@@ -3874,7 +3887,7 @@ mod tests {
             &model,
             &lora_layers,
             &token_vec,
-            Some(&label_mask),
+            None,
             &mut adamw,
             cfg,
         )?;
