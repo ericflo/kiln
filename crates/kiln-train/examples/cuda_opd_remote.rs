@@ -84,6 +84,7 @@ struct Args {
     max_tokens: usize,
     samples_per_prompt: usize,
     checkpoint_interval: Option<usize>,
+    base_adapter: Option<String>,
 }
 
 #[cfg(feature = "cuda")]
@@ -107,6 +108,7 @@ impl Args {
         let mut max_tokens = 256usize;
         let mut samples_per_prompt = 1usize;
         let mut checkpoint_interval: Option<usize> = None;
+        let mut base_adapter: Option<String> = None;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -153,6 +155,9 @@ impl Args {
                 "--no-checkpoint" => {
                     checkpoint_interval = Some(0);
                 }
+                "--base-adapter" => {
+                    base_adapter = Some(args.next().context("--base-adapter value")?);
+                }
                 "--help" | "-h" => {
                     println!(
                         "usage: cuda_opd_remote --data <jsonl> --model-path <dir> \
@@ -195,6 +200,7 @@ impl Args {
             max_tokens,
             samples_per_prompt,
             checkpoint_interval,
+            base_adapter,
         })
     }
 }
@@ -307,6 +313,10 @@ fn main() -> Result<()> {
     cfg.seed = Some(0xC0DA_5EED);
     if let Some(ci) = args.checkpoint_interval {
         cfg.checkpoint_interval = if ci == 0 { None } else { Some(ci) };
+    }
+    cfg.base_adapter = args.base_adapter.clone();
+    if let Some(ref ba) = cfg.base_adapter {
+        println!("base_adapter={ba}");
     }
     if let Some(ci) = cfg.checkpoint_interval {
         println!("checkpoint_interval={} steps", ci);
