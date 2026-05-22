@@ -138,8 +138,75 @@ turn or take it from a teacher rollout).
   quality + OPD regressed. Sample teacher rollouts, SFT on those. See
   METHODS.md §4.3.
 
+## When SFT plateaus on parameter tweaks (the multi-distribution diagnostic)
+
+If you've run 5+ SFT variants — different ranks, learning rates, epochs,
+filter thresholds, chain depths — and they all converge at the same
+composite within σ, you've probably hit a **data-signal plateau**, not
+a model-capability ceiling. The training distribution has already told
+the model everything it can.
+
+Diagnostic:
+
+1. Look at the sub-scores at the plateau. Which axes are pinned?
+   Which are flexing? A pinned sub-score is usually one the training
+   data doesn't carry signal for.
+2. Ask: is there a second, qualitatively different distribution that
+   would carry signal for the pinned axes? Common pairings — by no
+   means exhaustive:
+   - rubric-perfect synthesized outputs (drives format precision)
+     paired with high-scoring rollouts (drives outcome correctness on
+     varied prompt shapes)
+   - terse final-answer-only examples paired with worked-through
+     derivations
+   - canonical idiomatic examples paired with edge-case stress tests
+3. If yes: chain SFT stages that **alternate** between the two
+   distributions. Each stage stays small (rank 4 / α 8 / lr 1e-5, 1-3
+   epochs) so the model never catastrophically forgets the other
+   lesson. Stop when an additional swap stops adding lift.
+
+Many capabilities won't need this — single-distribution SFT or OPD is
+plenty. Only reach for it when the parameter sweep has clearly
+plateaued. The technique trades simplicity for one more knob (the
+schedule) and should be justified by evidence, not adopted by default.
+
+**Synthesizing a second distribution.** If the rubric is programmatic
+(format_regex + expected_value), you can often **synthesize**
+rubric-perfect examples deterministically from the task scaffold
+rather than sampling them — every example scores 1.0 by construction.
+See `caps/pi-faithful-completion/iter18_ideal_prep.py` for a working
+shape. This is a useful complement to rollout-derived data because the
+distributions differ in what kind of noise they expose the model to.
+
+**Reference case study.** `caps/pi-faithful-completion` round-3 hit a
+0.77 plateau across 12 single-distribution variants and broke it with
+a 6-stage alternating chain that reached 0.808 (capturing 93.4% of the
+prompted-lift ceiling). See its `sft_chain_findings.md` for the full
+trace. The specific data pairing there (synthesized ideal outputs vs
+strict-prompt rollouts) was *one instantiation* — the same diagnostic
+applied to a different cap would pick different distributions.
+
+## Practical gotchas
+
+- **Use `--trainer generic`.** The native trainer
+  (`cuda_native_sft_train`) is currently ~50× slower than generic on
+  Qwen3.5-4B; the generic path (`sft_train` in `trainer.rs`) routes
+  through `BackendRuntime` and gets the production-tuned kernels. See
+  kiln issue #1063 for the backport tracking the native trainer.
+- **Flatten the adapter directory after training.** `cuda_sft_file`
+  writes to `<output-dir>/<adapter-name>/...` but kiln serve expects
+  `<output-dir>/...` directly. After training, `mv` the inner files up
+  and `rmdir` the nested directory or kiln will refuse to load the
+  adapter. Tracked in kiln issue #1065.
+- **Kill kiln serve before training.** Both the serve process and
+  `cuda_sft_file` load the full model — running both at once OOMs the
+  A6000. Restart kiln serve after the SFT step completes for eval.
+
 ## References
 
 - `caps/math-broad/` — round-1 reference cap, 32 meta + 32 numeric winner
 - `caps/json-schema-adherence/` — JSON shape SFT reference
 - `caps/python-algo/` — algorithmic SFT reference
+- `caps/pi-faithful-completion/sft_chain_findings.md` — round-3
+  alternating-chain trace (12 mono-distribution variants plateaued
+  before the multi-distribution chain broke through)
