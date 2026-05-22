@@ -286,10 +286,60 @@ this base model. Accept it. The next round's distillation may lift it.
 | --- | --- |
 | `GRPO → OPD` | Rare; only if a brand-new teacher becomes available. Otherwise OPD on top of GRPO often undoes the sharpening. |
 | `OPD → OPD chain` | OPD chains tend to drift; restart from base instead. Within-method warm-best is OK but not common. |
-| `SFT → SFT chain` | SFT chains overfit. Use a single larger SFT instead. |
+| `SFT → SFT chain on the *same* distribution` | Mono-distribution SFT chains overfit. The exception is `SFT → SFT chain alternating distributions` (§4.5). |
 | `non-target method on multi-turn task` | If task is multi-turn tool-calling, agentic-GRPO with ECHO is mandatory. SFT or OPD on multi-turn data without ECHO masking is a known footgun. |
 
-### §4.5 Cross-stage validation (mandatory)
+### §4.5 Multi-distribution chains: when a plateau won't break on parameter tweaks alone
+
+Sometimes a series of recipe variants converges on the same composite
+across many sweeps — different ranks, learning rates, epochs, filter
+thresholds, and chain depths all land within σ of each other. When that
+happens, the constraint is rarely the recipe; it is the **training
+signal**. The single distribution you have been training on has already
+told the model everything it can.
+
+The diagnostic: if 5+ recipes spanning a wide hyperparameter space all
+sit at the same composite, treat it as a **data-signal plateau** rather
+than a model-capability ceiling. Read the sub-scores. Which axes are
+pinned, which are flexing? A pinned axis usually means the training data
+doesn't carry signal for that axis at all.
+
+The technique: add a **complementary second distribution** whose signal
+is orthogonal to the original one, and chain SFT stages that alternate
+between them. Each stage is small (rank 4, lr 1e-5, 1-3 epochs) so the
+model never catastrophically forgets the other lesson. Stop when one
+direction stops adding lift over the other.
+
+What "complementary" means is capability-dependent — there is no
+universal answer:
+
+- For a task with a strict output format and an unbounded set of inputs,
+  one distribution might be **rubric-perfect synthesized outputs**
+  (drives format precision) and the other **high-scoring model rollouts
+  under richer conditioning** (drives outcome correctness on real prompt
+  shapes).
+- For a reasoning task, the axes might be **worked-through derivations**
+  vs **terse final answers**.
+- For a code-generation task, **canonical idiomatic solutions** vs
+  **edge-case stress tests** might pair well.
+
+Many capabilities won't need this at all — single-distribution SFT or
+OPD is enough. But when you've genuinely run out of single-distribution
+recipe ideas and the composite hasn't moved, consider whether a second
+distribution exists that you haven't fed in.
+
+**Reference example:** `caps/pi-faithful-completion` (round-3, 2026-05).
+Twelve single-distribution variants (rank 4-16, lr 1e-4 to 5e-6,
+threshold >0.5 and >0.7, hard-tail and ideal-only, both SFT and OPD
+chains) all plateaued at composite ≈ 0.77. A 6-stage SFT chain
+alternating synthesized rubric-perfect outputs with high-scoring
+strict-prompt rollouts reached 0.808 — 93.4% of the prompted ceiling.
+Sub-score breakdown and per-stage trace in
+`caps/pi-faithful-completion/sft_chain_findings.md`. The specific data
+pairing there was *one instantiation* of the technique; do not lift
+the recipe wholesale, lift the diagnostic.
+
+### §4.6 Cross-stage validation (mandatory)
 
 Between any two stages, `run_pipeline.sh` MUST:
 
@@ -355,6 +405,12 @@ These were either round-1 mistakes or skill-lore failure modes. Do not repeat.
    six months later or against a new base.
 10. **Don't pick a method before measuring inputs in §1.** A premature method
     choice is a wasted GPU run.
+11. **Don't conclude "ceiling" from a parameter sweep alone.** If 5+ recipes
+    spanning ranks, learning rates, epochs, and filter thresholds all land
+    at the same composite, the constraint is likely the training signal,
+    not the model. Re-read the sub-scores; check whether a complementary
+    data distribution exists that you haven't fed in (§4.5). Distinct
+    from rule 7 (which is about rubric saturation, not data saturation).
 
 ---
 
