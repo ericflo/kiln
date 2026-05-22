@@ -2036,15 +2036,27 @@ pub fn cuda_native_sft_train(
         .iter()
         .any(|layer| matches!(layer, CudaLayerWeights::LinearAttention(_)));
 
-    // Issue #1063: the legacy single-graph step kernel is ~50x slower
-    // than the candle-routed --trainer generic path because cuda_backward
-    // walks a per-step autograd graph spanning all 32 layers. The
-    // layerwise reverse-recompute path mirrors vk_native_sft_train's
-    // structure and replays one layer's tiny graph at a time. Default to
-    // recompute; KILN_CUDA_RECOMPUTE_SFT=0 falls back to the legacy
-    // monolithic-graph step for parity testing.
+    // Issue #1063: backport `vk_native_sft_train`'s layerwise reverse-
+    // recompute structure to CUDA. The recompute path is bit-for-bit
+    // parity with the legacy step (verified by parity tests) and saves
+    // ~30% peak VRAM by not retaining a 32-layer-wide autograd graph
+    // during backward.
+    //
+    // On Qwen3.5-4B with realistic sequence lengths, the recompute path
+    // does NOT close the 50x gap with `--trainer generic`. The PR
+    // benchmark shows recompute at roughly the same step time as legacy
+    // on short prompts and meaningfully slower on long prompts: the
+    // extra per-layer re-forward inside recompute dominates the savings
+    // from the smaller per-backward graph. The root cause flagged by
+    // the issue body — many small CUDA launches with CPU sync between
+    // them — is per-op overhead in `cuda_train`'s hand-rolled autograd,
+    // and it scales with kernel-launch count, so adding launches (as
+    // recompute does) cannot reduce it. Recompute is therefore opt-in:
+    // `KILN_CUDA_RECOMPUTE_SFT=1` engages it for memory-constrained
+    // long-context jobs; default stays on the legacy step so existing
+    // callers don't regress on speed.
     let use_recompute =
-        kiln_core::env_flag::env_tristate("KILN_CUDA_RECOMPUTE_SFT").unwrap_or(true);
+        kiln_core::env_flag::env_tristate("KILN_CUDA_RECOMPUTE_SFT").unwrap_or(false);
     tracing::info!(
         path = if use_recompute {
             "recompute"

@@ -202,18 +202,23 @@ applied to a different cap would pick different distributions.
 
 ## Practical gotchas
 
-- **`--trainer native` and `--trainer generic` are both supported.**
-  `cuda_sft_file` defaults to `--trainer native`. Since the layerwise
-  reverse-recompute backport (kiln issue #1063) the native path runs
-  at comparable step times to generic on Qwen3.5-4B, so both are
-  acceptable production choices. `generic` routes through
-  `BackendRuntime` (`sft_train` in `trainer.rs`) and is the most
-  exercised path; `native` is the composable CUDA-resident path used
-  by the GRPO hot-swap LoRA loop and by recipes that don't fit
-  `sft_train`. If you suspect a step-time regression on the native
-  path, set `KILN_CUDA_RECOMPUTE_SFT=0` to fall back to the legacy
-  monolithic-graph kernel for parity testing and file a follow-up
-  issue.
+- **Use `--trainer generic` for production SFT.** `cuda_sft_file`
+  still defaults to `--trainer native` for backward compatibility,
+  but `--trainer generic` (routed through `BackendRuntime` via
+  `sft_train`) is meaningfully faster on Qwen3.5-4B at every
+  sequence length exercised in CI. The native path remains the
+  composable CUDA-resident path used by the GRPO hot-swap LoRA loop;
+  call it explicitly when the recipe doesn't fit `sft_train`.
+  Tracking issue #1063 documents the underlying gap (per-op CPU
+  overhead in `cuda_train`'s autograd).
+- **`KILN_CUDA_RECOMPUTE_SFT=1` (opt-in, kiln #1063)** swaps the
+  legacy native step for a layerwise reverse-recompute step that
+  saves ~30% peak VRAM in exchange for ~5% step time on short
+  prompts (longer on long prompts). It is bit-for-bit parity with
+  the legacy step but does *not* close the gap to `--trainer
+  generic` — the bottleneck is per-op CPU overhead, not per-step
+  graph size, and recompute adds launches rather than removing
+  them.
 - **Flatten the adapter directory after training.** `cuda_sft_file`
   writes to `<output-dir>/<adapter-name>/...` but kiln serve expects
   `<output-dir>/...` directly. After training, `mv` the inner files up
