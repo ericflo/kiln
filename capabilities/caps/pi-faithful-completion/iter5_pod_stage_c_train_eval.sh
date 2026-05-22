@@ -18,6 +18,12 @@ echo "=== sft.train.jsonl check ==="
 ls -la datasets/sft.train.jsonl
 wc -l datasets/sft.train.jsonl
 
+# 1b. Kill any running kiln serve to free VRAM for training (we'll restart it after)
+echo "=== killing existing kiln serve to free VRAM ==="
+pkill -f 'target/release/kiln serve' 2>/dev/null || true
+sleep 10
+nvidia-smi --query-gpu=memory.used,memory.free --format=csv,noheader
+
 # 2. Train SFT (cuda_sft_file)
 #    Defaults: rank=8 alpha=16 lr=1e-4 epochs=1. Per METHODS.md §3.1 the canonical
 #    SFT recipe is rank=4 alpha=8 lr=1e-4 epochs=1 dataset_cap=128 — let's match that.
