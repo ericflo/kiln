@@ -3894,27 +3894,37 @@ mod tests {
         assert!(loss.is_finite(), "non-finite recompute loss: {loss}");
 
         let after = lora_snapshot(&lora_layers)?;
+        // Diagnostic: dump the max-delta per pair so we can see which (if
+        // any) projections moved when the assertion fires.
         let mut any_moved = false;
+        let mut diffs: Vec<(usize, f32, f32)> = Vec::new();
         for (i, ((a_before, b_before), (a_after, b_after))) in
             before.iter().zip(after.iter()).enumerate()
         {
-            let a_moved = a_before
+            let a_diff = a_before
                 .iter()
                 .zip(a_after.iter())
-                .any(|(x, y)| (x - y).abs() > 1e-9);
-            let b_moved = b_before
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max);
+            let b_diff = b_before
                 .iter()
                 .zip(b_after.iter())
-                .any(|(x, y)| (x - y).abs() > 1e-9);
-            if a_moved || b_moved {
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max);
+            diffs.push((i, a_diff, b_diff));
+            if a_diff > 1e-9 || b_diff > 1e-9 {
                 any_moved = true;
-                break;
             }
-            let _ = i;
         }
+        // Also surface the AdamW state's step counter so we can tell
+        // whether the kernel was called at all.
+        let any_state_stepped = adamw.values().any(|s| s.step > 0);
+        let step_summary: Vec<u32> = adamw.values().map(|s| s.step).collect();
         assert!(
             any_moved,
-            "recompute step left every LoRA A/B unchanged; AdamW likely received an empty grad map"
+            "recompute step left every LoRA A/B unchanged; AdamW likely received an empty grad map. \
+             per-pair max |delta| = {diffs:?}; adamw step counters = {step_summary:?}; \
+             any_state_stepped = {any_state_stepped}"
         );
         Ok(())
     }
