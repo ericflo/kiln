@@ -1189,10 +1189,15 @@ pub fn cuda_lora_train_token_sequences_with_gdn_state(
     );
     let device = model.token_embedding.as_tensor().device();
     let mut losses = Vec::with_capacity(epochs * token_sequences.len());
+    // Hoist allocations out of the per-step loop (kiln issue #1063).
+    let mut arena = CudaTrainArena::new(device)?;
+    let mut gdn_state = cuda_linear_attention_state_zeros_for_model(model, 1)?;
     for _epoch in 0..epochs {
         for token_ids in token_sequences {
-            let mut arena = CudaTrainArena::new(device)?;
-            let mut gdn_state = cuda_linear_attention_state_zeros_for_model(model, 1)?;
+            arena.clear();
+            gdn_state.zero_in_place().context(
+                "cuda_lora_train_token_sequences_with_gdn_state: zero GDN state",
+            )?;
             let loss = cuda_lora_model_adamw_step_with_gdn_state_with_arena(
                 model,
                 lora_layers,
@@ -1261,9 +1266,11 @@ pub fn cuda_full_attention_lora_train_token_sequences(
     );
     let device = model.token_embedding.as_tensor().device();
     let mut losses = Vec::with_capacity(epochs * token_sequences.len());
+    // Hoist arena allocation out of the per-step loop (kiln issue #1063).
+    let mut arena = CudaTrainArena::new(device)?;
     for _epoch in 0..epochs {
         for token_ids in token_sequences {
-            let mut arena = CudaTrainArena::new(device)?;
+            arena.clear();
             let loss = cuda_full_attention_lora_model_adamw_step_with_arena(
                 model,
                 lora_layers,
@@ -1349,6 +1356,17 @@ pub fn cuda_native_sft_train(
         alpha = config.lora_alpha,
         adapter_name,
         "starting cuda-native SFT training"
+    );
+    // Surface the known performance gap (kiln issue #1063) so anyone watching
+    // logs sees the slowdown explained rather than as silent degradation.
+    // The generic trainer (`sft_train`) routes through `BackendRuntime` and
+    // inherits the production-tuned fused-kernel paths; this path does not
+    // yet, and runs ~50× slower on Qwen3.5-4B in current benchmarks.
+    tracing::warn!(
+        trainer = "cuda_native_sft_train",
+        issue = "https://github.com/ericflo/kiln/issues/1063",
+        "cuda_native_sft_train is currently ~50× slower than --trainer generic on \
+         Qwen3.5-4B; prefer the generic trainer for production runs"
     );
 
     let alpha_over_rank = match crate::lora_scaling::validate_lora_scaling(
@@ -1460,21 +1478,78 @@ pub fn cuda_native_sft_train(
         .layers
         .iter()
         .any(|layer| matches!(layer, CudaLayerWeights::LinearAttention(_)));
+
+    // Length-sorted iteration mirrors `vk_native_sft_train`: sort once so
+    // shorter, full-context examples reach finite progress before the
+    // longest O(T^2) attention examples. Tristate env override matches the
+    // VK side (`KILN_VK_LENGTH_SORT_SFT`), with the same default heuristic:
+    // auto-enable when at least one example is >= 8K tokens AND there is
+    // more than one example to reorder. The trainer never truncates;
+    // length sort only changes step order.
+    let mut step_order: Vec<usize> = (0..tokenized.len()).collect();
+    let min_seq_len = tokenized
+        .iter()
+        .map(|(ids, _)| ids.len())
+        .min()
+        .unwrap_or(0);
+    let max_seq_len = tokenized
+        .iter()
+        .map(|(ids, _)| ids.len())
+        .max()
+        .unwrap_or(0);
+    let length_sorted = kiln_core::env_flag::env_tristate("KILN_CUDA_LENGTH_SORT_SFT")
+        .unwrap_or(max_seq_len >= 8192 && tokenized.len() > 1);
+    if length_sorted {
+        step_order.sort_by_key(|&i| (tokenized[i].0.len(), i));
+    }
+    tracing::info!(
+        examples = tokenized.len(),
+        min_seq_len,
+        max_seq_len,
+        first_seq_len = tokenized[step_order[0]].0.len(),
+        first_original_index = step_order[0],
+        length_sorted,
+        "cuda-native tokenized full SFT examples"
+    );
+
+    // Hoist per-step allocations out of the loop (kiln issue #1063). The
+    // arena's `clear()` drops the per-step tracked tensors so candle's CUDA
+    // caching allocator can reuse the device buffers across steps. The GDN
+    // state, when present, is zero-reset in place at the top of each step
+    // via `CudaLinearAttentionState::zero_in_place`, avoiding a fresh
+    // `Vec<CudaGdnLayerState>` and the per-step `Tensor::zeros` malloc
+    // pressure that motivated the issue.
+    let device = model.token_embedding.as_tensor().device().clone();
+    let mut arena = CudaTrainArena::new(&device)?;
+    let mut gdn_state = if has_gdn {
+        Some(cuda_linear_attention_state_zeros_for_model(&model, 1)?)
+    } else {
+        None
+    };
+
     let mut global_step = 0usize;
     let mut last_loss = 0.0f32;
     for epoch in 0..config.epochs {
         let mut epoch_loss = 0.0f32;
-        for (token_ids, label_mask) in &tokenized {
+        for &example_idx in &step_order {
+            let (token_ids, label_mask) = &tokenized[example_idx];
             global_step += 1;
-            let mut arena = CudaTrainArena::new(model.token_embedding.as_tensor().device())?;
-            let loss = if has_gdn {
-                let mut gdn_state = cuda_linear_attention_state_zeros_for_model(&model, 1)?;
+            let step_started = std::time::Instant::now();
+            arena.clear();
+            let loss = if let Some(gdn_state) = gdn_state.as_mut() {
+                gdn_state.zero_in_place().with_context(|| {
+                    format!(
+                        "cuda_native_sft_train: zero GDN state at step {} epoch {}",
+                        global_step,
+                        epoch + 1
+                    )
+                })?;
                 cuda_lora_model_adamw_step_with_gdn_state_with_arena(
                     &model,
                     &lora_layers,
                     token_ids,
                     Some(label_mask),
-                    &mut gdn_state,
+                    gdn_state,
                     &mut adamw,
                     cfg,
                     &mut arena,
@@ -1535,6 +1610,9 @@ pub fn cuda_native_sft_train(
                     epoch = epoch + 1,
                     step = global_step,
                     total_steps,
+                    seq_len = token_ids.len(),
+                    original_index = example_idx,
+                    step_ms = step_started.elapsed().as_millis() as u64,
                     loss = format!("{loss:.6}"),
                     "cuda-native training step"
                 );

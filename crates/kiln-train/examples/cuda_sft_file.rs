@@ -26,7 +26,14 @@ use kiln_train::{Optimizer, SftConfig, SftExample};
 #[cfg(feature = "cuda")]
 #[derive(Debug)]
 enum TrainerKind {
-    Native,
+    /// The experimental `cuda_native_sft_train` path. ~50× slower than
+    /// `Generic` on Qwen3.5-4B today (kiln issue #1063). Kept for
+    /// development of the native CUDA training stack and bench parity, but
+    /// never the default for production training.
+    NativeExperimental,
+    /// `kiln_train::trainer::sft_train` — production trainer that routes
+    /// through `BackendRuntime` and inherits the fused-kernel paths used by
+    /// the inference server.
     Generic,
 }
 
@@ -34,17 +41,23 @@ enum TrainerKind {
 impl TrainerKind {
     fn parse(value: &str) -> Result<Self> {
         match value {
-            "native" => Ok(Self::Native),
+            // Legacy `native` alias kept so existing scripts/capabilities do
+            // not break overnight, but it now routes to the experimental
+            // path and the caller is loudly warned at startup.
+            "native" | "native-experimental" => Ok(Self::NativeExperimental),
             "generic" | "server" | "default" => Ok(Self::Generic),
             other => {
-                anyhow::bail!("--trainer must be native, generic, server, or default; got {other}")
+                anyhow::bail!(
+                    "--trainer must be generic, server, default, or native-experimental \
+                     (legacy alias: native); got {other}"
+                )
             }
         }
     }
 
     fn as_str(&self) -> &'static str {
         match self {
-            Self::Native => "native",
+            Self::NativeExperimental => "native-experimental",
             Self::Generic => "generic",
         }
     }
@@ -83,7 +96,11 @@ impl Args {
         let mut skip_examples = 0usize;
         let mut checkpoint_interval = None;
         let mut vram_poll_millis = 1_000u64;
-        let mut trainer = TrainerKind::Native;
+        // Default to the production-tuned generic trainer. The experimental
+        // CUDA-native path (`cuda_native_sft_train`) is currently ~50×
+        // slower on Qwen3.5-4B (kiln issue #1063); callers must opt into
+        // it explicitly with `--trainer native-experimental`.
+        let mut trainer = TrainerKind::Generic;
         let mut lora_rank = 8usize;
         let mut lora_alpha = 16.0f32;
         let mut learning_rate = 1e-4f64;
@@ -170,9 +187,10 @@ impl Args {
                 }
                 "--trainer" => {
                     trainer = TrainerKind::parse(
-                        &args
-                            .next()
-                            .context("--trainer requires native, generic, server, or default")?,
+                        &args.next().context(
+                            "--trainer requires generic, server, default, or \
+                             native-experimental (legacy: native)",
+                        )?,
                     )?
                 }
                 "--help" | "-h" => {
@@ -183,7 +201,17 @@ impl Args {
                          [--checkpoint-interval <n>] [--vram-poll-millis <n>] \
                          [--base-adapter <dir>] [--allow-adapter-shape-conversion] \
                          [--allow-high-lora-scale] \
-                         [--trainer native|generic|server|default]\n\
+                         [--trainer generic|server|default|native-experimental]\n\
+                         \n\
+                         Trainer selection:\n  \
+                         `generic` (default, recommended): routes through the \
+                         production `sft_train` -> BackendRuntime path and inherits \
+                         the fused-kernel paths used by the inference server. \
+                         `native-experimental` (legacy alias: `native`): the \
+                         in-progress CUDA-native SFT path \
+                         (`cuda_native_sft_train`). Currently ~50× slower than \
+                         `generic` on Qwen3.5-4B; use only for development of \
+                         the native CUDA training stack. See kiln issue #1063.\n\
                          \n\
                          Output layout:\n  \
                          The adapter is written to <output-dir>/<adapter-name>/ \
@@ -320,10 +348,22 @@ fn main() -> Result<()> {
         args.max_examples,
         args.trainer.as_str()
     );
-    if matches!(args.trainer, TrainerKind::Native) && args.base_adapter.is_some() {
+    if matches!(args.trainer, TrainerKind::NativeExperimental) && args.base_adapter.is_some() {
         anyhow::bail!(
             "--base-adapter requires --trainer generic until CUDA-native base-adapter loading is implemented"
         );
+    }
+    if matches!(args.trainer, TrainerKind::NativeExperimental) {
+        // The user explicitly opted into the experimental native trainer.
+        // Re-state the perf gap loudly so this can never be mistaken for
+        // the default path; on a real training run this is the single
+        // most expensive misconfiguration in cuda_sft_file today.
+        eprintln!(
+            "WARNING: --trainer native-experimental selected. cuda_native_sft_train \
+             is currently ~50× slower than --trainer generic on Qwen3.5-4B \
+             (see kiln issue #1063). Production runs should use --trainer generic."
+        );
+        println!("trainer_warning=cuda_native_experimental_50x_slower issue=1063");
     }
 
     let tokenizer = load_tokenizer(&args.model_path)?;
@@ -432,7 +472,7 @@ fn main() -> Result<()> {
     }) as kiln_train::trainer::ProgressCallback);
 
     let result = match args.trainer {
-        TrainerKind::Native => kiln_train::cuda_train::cuda_native_sft_train(
+        TrainerKind::NativeExperimental => kiln_train::cuda_train::cuda_native_sft_train(
             &examples,
             &config,
             &model_config,

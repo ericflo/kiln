@@ -1,5 +1,67 @@
 # Kiln Server Changelog
 
+## Unreleased — cuda_sft_file defaults to --trainer generic (issue #1063)
+
+`cuda_sft_file` no longer silently picks the ~50× slower CUDA-native
+SFT path. The legacy CUDA-native trainer (`cuda_native_sft_train`) is
+exposed as `--trainer native-experimental` and runs ~180 s/step on
+Qwen3.5-4B (rank 4, lr 1e-5) vs ~3.5 s/step for the generic trainer
+(`sft_train` -> `BackendRuntime`); the default now matches the
+recommended workflow used by `caps/pi-faithful-completion` and other
+production SFT capabilities.
+
+### Changed
+- `cuda_sft_file` `--trainer` now defaults to `generic` rather than the
+  experimental CUDA-native path. New CLI value
+  `--trainer native-experimental` opts into `cuda_native_sft_train`;
+  the legacy `--trainer native` is accepted as an alias for backwards
+  compatibility but now routes to the same experimental path and
+  prints a clear startup warning citing kiln issue #1063.
+- `--help` text on `cuda_sft_file` now documents the trainer choices,
+  marks `generic` as the recommended/default path, and labels
+  `native-experimental` as ~50× slower today.
+
+### Performance
+- `cuda_native_sft_train` (the experimental path) hoists the
+  per-step `CudaTrainArena::new()` and
+  `cuda_linear_attention_state_zeros_for_model()` allocations out of
+  the inner training loop. The arena is now reused via
+  `CudaTrainArena::clear()` per step, and the GDN state is reset via
+  the new `CudaLinearAttentionState::zero_in_place()` method.
+  `cuda_lora_train_token_sequences_with_gdn_state` and
+  `cuda_full_attention_lora_train_token_sequences` receive the same
+  hoist. These changes close the malloc/zeros pressure in
+  cuda_native_sft_train but do not close the 50× gap on their own —
+  the remaining gap is the small-launch + CPU-sync structure of the
+  inner step kernel, tracked as future work on the issue.
+- `cuda_native_sft_train` now supports length-sorted iteration via
+  the new `KILN_CUDA_LENGTH_SORT_SFT` env tristate, mirroring the
+  Vulkan side's `KILN_VK_LENGTH_SORT_SFT`. Default heuristic: enable
+  when any example is at least 8K tokens AND there is more than one
+  example to reorder. Sort changes step order only; the trainer never
+  truncates.
+- `cuda_native_sft_train` now logs `seq_len`, `original_index`, and
+  per-step `step_ms` on the periodic info line so the slow path is
+  diagnosable from a single tail.
+
+### Added
+- `CudaLinearAttentionState::zero_in_place(&mut self)` on
+  `kiln-model` — per-step reset hook used by the training loops that
+  hoist GDN-state allocation out of their inner loop. Today it
+  re-`Tensor::zeros(...)`s into the same shapes (CUDA caching
+  allocator reuses the device buffers); the call site is structured
+  so a future in-place memset kernel can drop in without touching
+  callers.
+- Unit test for `CudaLinearAttentionState::zero_in_place` verifies
+  zero, shape, dtype, and metadata preservation across two
+  consecutive resets (idempotence).
+
+### Docs
+- `.agents/skills/capability-creator/resources/sft-mode.md` updated:
+  `--trainer generic` is now the default rather than just the
+  recommended workaround. Existing `--trainer generic` in capability
+  scripts continues to work and is the clearer signal of intent.
+
 ## Unreleased — ECHO: agentic multi-turn GRPO loss term
 
 Wires the ECHO technique (Shrivastava, Awadallah, Papailiopoulos — MSR

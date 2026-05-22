@@ -1408,6 +1408,50 @@ impl CudaLinearAttentionState {
         }
         Ok(Self { layers })
     }
+
+    /// Reset all per-layer GDN tensors to zero, preserving shapes/dtypes.
+    ///
+    /// This is the per-step reset hook used by training loops that hoist the
+    /// state allocation out of their inner loop (kiln issue #1063). Today the
+    /// implementation issues a fresh `Tensor::zeros(...)` per tensor; candle's
+    /// CUDA caching allocator will reuse the same device buffer in steady
+    /// state, so the cost converges to one cudaMemset per tensor instead of
+    /// `malloc + memset`. A future change can swap the body for a single
+    /// fused in-place memset kernel without touching call sites.
+    pub fn zero_in_place(&mut self) -> Result<()> {
+        for (idx, layer) in self.layers.iter_mut().enumerate() {
+            // Clone device + capture shapes/dtypes up front so the immutable
+            // borrows of `layer.recurrent_state` / `layer.conv_state` end
+            // before we reassign them below.
+            let device = layer.recurrent_state.as_tensor().device().clone();
+            ensure!(
+                matches!(&device, Device::Cuda(_)),
+                "CudaLinearAttentionState::zero_in_place: layer {idx} recurrent_state \
+                 is not on CUDA (got {device:?})",
+            );
+            let recurrent_dims: Vec<usize> = layer.recurrent_state.as_tensor().dims().to_vec();
+            let recurrent_dtype = layer.recurrent_state.as_tensor().dtype();
+            let conv_dims: Vec<usize> = layer.conv_state.as_tensor().dims().to_vec();
+            let conv_dtype = layer.conv_state.as_tensor().dtype();
+            layer.recurrent_state = CudaTrainTensor::new(
+                Tensor::zeros(recurrent_dims, recurrent_dtype, &device).with_context(|| {
+                    format!(
+                        "CudaLinearAttentionState::zero_in_place: reset recurrent_state \
+                         for layer {idx}"
+                    )
+                })?,
+            )?;
+            layer.conv_state = CudaTrainTensor::new(
+                Tensor::zeros(conv_dims, conv_dtype, &device).with_context(|| {
+                    format!(
+                        "CudaLinearAttentionState::zero_in_place: reset conv_state \
+                         for layer {idx}"
+                    )
+                })?,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// Count how many imported CUDA layers are GDN (LinearAttention).
@@ -5316,6 +5360,83 @@ mod tests {
             assert_eq!(layer.recurrent_state.dims(), &[3, 4, 5, 6]);
             assert_eq!(layer.conv_n_elements, 3 * 7 * 3);
             assert_eq!(layer.conv_state.dims(), &[3, 7, 3]);
+            assert!(
+                layer
+                    .recurrent_state
+                    .to_vec_f32()?
+                    .iter()
+                    .all(|v| *v == 0.0)
+            );
+            assert!(layer.conv_state.to_vec_f32()?.iter().all(|v| *v == 0.0));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_linear_attention_state_zero_in_place_resets_layer_state() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping cuda GDN state zero_in_place smoke: {err}"
+                );
+                return Ok(());
+            }
+        };
+
+        // Build a small state, perturb it to non-zero values, then verify
+        // that zero_in_place restores all tensors to zero while preserving
+        // shapes, dtypes, and the per-layer scalar metadata. This is the
+        // contract relied on by cuda_native_sft_train's per-step reset.
+        let mut state = CudaLinearAttentionState::zeros(&device, 2, 1, 2, 3, 4, 5, 4)?;
+        let recurrent_dims = state.layers[0].recurrent_state.dims().to_vec();
+        let conv_dims = state.layers[0].conv_state.dims().to_vec();
+        let recurrent_n = state.layers[0].recurrent_n_elements;
+        let conv_n = state.layers[0].conv_n_elements;
+        for layer in state.layers.iter_mut() {
+            let perturbed_recurrent = (layer.recurrent_state.as_tensor() + 1.0f64)?;
+            layer.recurrent_state = CudaTrainTensor::new(perturbed_recurrent)?;
+            let perturbed_conv = (layer.conv_state.as_tensor() + 2.0f64)?;
+            layer.conv_state = CudaTrainTensor::new(perturbed_conv)?;
+        }
+        assert!(
+            state.layers[0]
+                .recurrent_state
+                .to_vec_f32()?
+                .iter()
+                .all(|v| (*v - 1.0).abs() < 1e-6)
+        );
+        assert!(
+            state.layers[0]
+                .conv_state
+                .to_vec_f32()?
+                .iter()
+                .all(|v| (*v - 2.0).abs() < 1e-6)
+        );
+
+        state.zero_in_place()?;
+        assert_eq!(state.layers.len(), 2);
+        for layer in &state.layers {
+            assert_eq!(layer.recurrent_state.dims(), recurrent_dims.as_slice());
+            assert_eq!(layer.conv_state.dims(), conv_dims.as_slice());
+            assert_eq!(layer.recurrent_n_elements, recurrent_n);
+            assert_eq!(layer.conv_n_elements, conv_n);
+            assert_eq!(layer.recurrent_state.dtype(), DType::F32);
+            assert_eq!(layer.conv_state.dtype(), DType::F32);
+            assert!(
+                layer
+                    .recurrent_state
+                    .to_vec_f32()?
+                    .iter()
+                    .all(|v| *v == 0.0)
+            );
+            assert!(layer.conv_state.to_vec_f32()?.iter().all(|v| *v == 0.0));
+        }
+
+        // Repeat once: the reset must be idempotent so multi-step training
+        // can call it at the top of every step without accumulating state.
+        state.zero_in_place()?;
+        for layer in &state.layers {
             assert!(
                 layer
                     .recurrent_state
