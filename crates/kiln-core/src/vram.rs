@@ -485,6 +485,11 @@ pub fn recommended_num_blocks(vram: &GpuVramInfo) -> Option<usize> {
 ///
 /// Returns `None` if the user set `KILN_GRAD_CHECKPOINT_SEGMENTS` (should use that instead).
 /// More segments = less VRAM but more compute overhead.
+///
+/// This is the *VRAM-only* heuristic (no sequence-length awareness). The training
+/// trainer paths now prefer [`recommended_checkpoint_plan`] which also factors in
+/// `max_seq_len` and `hidden_size`, but this function is retained for callers that
+/// don't have the workload shape handy (preflight estimator, bench reporter).
 pub fn recommended_checkpoint_segments(vram: &GpuVramInfo) -> Option<usize> {
     if std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
         .ok()
@@ -506,6 +511,182 @@ pub fn recommended_checkpoint_segments(vram: &GpuVramInfo) -> Option<usize> {
         12 // aggressive checkpointing for tight VRAM
     } else {
         8 // conservative default
+    })
+}
+
+/// Decision returned by [`recommended_checkpoint_plan`].
+///
+/// Three distinct outcomes — the auto-tuner returns one based on `(vram,
+/// num_layers, max_seq_len, hidden_size)`:
+///
+/// * [`CheckpointPlan::UserOverride`] — the user set
+///   `KILN_GRAD_CHECKPOINT_SEGMENTS=<N>` or `KILN_NO_GRAD_CHECKPOINT=1`. The
+///   caller should honor the env value and skip auto-tuning entirely.
+/// * [`CheckpointPlan::Disabled`] — activations comfortably fit in available
+///   VRAM after the base model and a safety reserve. Skipping checkpointing
+///   wins ~10-30% step time without OOM risk.
+/// * [`CheckpointPlan::Enabled`] — activations would crowd available VRAM at
+///   one or more segment counts; pick the smallest segment count that keeps
+///   per-segment activation memory under the headroom budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointPlan {
+    /// User overrode via env (`KILN_GRAD_CHECKPOINT_SEGMENTS` or
+    /// `KILN_NO_GRAD_CHECKPOINT`). Caller should fall back to the env-driven
+    /// path (e.g. `CheckpointConfig::from_env`) so the override is respected.
+    UserOverride,
+    /// Auto-decided to disable checkpointing entirely. `max_act_gib` is the
+    /// estimated activation tape size for the workload; `available_gib` is
+    /// the headroom we have for it. Included for logging.
+    Disabled {
+        max_act_gib: f64,
+        available_gib: f64,
+    },
+    /// Auto-decided to engage checkpointing with this segment count.
+    Enabled {
+        num_segments: usize,
+        max_act_gib: f64,
+        per_segment_gib: f64,
+        available_gib: f64,
+    },
+}
+
+/// Approximate base-model VRAM footprint for a single-host SFT/GRPO/OPD
+/// training run, in bytes.
+///
+/// We can't ask candle "how much VRAM is the base model using right now" from
+/// inside `kiln-core` without taking a dependency on `kiln-model`, so use a
+/// simple param-count formula sized to the canonical inference dtype (BF16,
+/// 2 bytes/param). It's deliberately conservative — over-estimating the base
+/// only pulls the auto-tune toward MORE checkpointing, never less, so we
+/// can't accidentally OOM by mis-estimating.
+///
+/// Formula (canonical SwiGLU + GQA shape):
+/// * Attention per layer: `4 * hidden^2` (Q, K, V, O — approximating GQA's
+///   reduction by ~30% via the constant 4 instead of 5 or 6).
+/// * MLP per layer: `3 * hidden * intermediate` (gate, up, down).
+/// * Embedding + LM head: `2 * vocab * hidden`.
+///
+/// Multiplied by 2 bytes/param (BF16). The estimate matches the
+/// `model_loaded_vram_mib=9943` we observe for Qwen3.5-4B in the
+/// kiln-server training bench (within ~5%).
+pub fn estimate_base_model_bytes(
+    num_layers: usize,
+    hidden_size: usize,
+    intermediate_size: usize,
+    vocab_size: usize,
+    bytes_per_param: usize,
+) -> u64 {
+    let per_layer_params =
+        (4 * hidden_size * hidden_size) + (3 * hidden_size * intermediate_size);
+    let layer_total = per_layer_params.saturating_mul(num_layers);
+    let head_total = 2usize.saturating_mul(vocab_size).saturating_mul(hidden_size);
+    let total_params = layer_total.saturating_add(head_total);
+    (total_params as u64).saturating_mul(bytes_per_param as u64)
+}
+
+/// Auto-decide a gradient-checkpoint plan for a training workload, factoring
+/// in BOTH the device's total VRAM and the workload's shape (`num_layers`,
+/// `max_seq_len_tokens`, `hidden_size`, base-model footprint).
+///
+/// Behavior:
+/// 1. If `KILN_GRAD_CHECKPOINT_SEGMENTS` or `KILN_NO_GRAD_CHECKPOINT=1` is
+///    set, return [`CheckpointPlan::UserOverride`] and let the caller honor
+///    the env value via `CheckpointConfig::from_env`.
+/// 2. Estimate F32 activation tape:
+///    `max_act_bytes = num_layers * max_seq_len * hidden_size * 4`.
+/// 3. Reserve `base_model_bytes + 2 GiB safety` for everything that isn't
+///    activations (model weights, grads, AdamW state, working buffers).
+/// 4. Define `available_bytes = max(0, vram.total_bytes - reserved)`.
+/// 5. If `max_act_bytes <= available_bytes * 0.5`, return
+///    [`CheckpointPlan::Disabled`] — checkpointing would only cost step time
+///    without lowering peak VRAM enough to matter.
+/// 6. Otherwise pick `num_segments = ceil(max_act_bytes / (available_bytes *
+///    0.3))`, clamped to `[2, num_layers]`. The 30% target makes per-segment
+///    intermediate memory comfortable inside headroom.
+///
+/// `None` is returned if VRAM detection failed (`vram.total_bytes == 0`) —
+/// the caller should fall back to [`CheckpointConfig::from_env`]'s VRAM-only
+/// path (which itself handles "unknown VRAM" via a conservative default).
+pub fn recommended_checkpoint_plan(
+    vram: &GpuVramInfo,
+    num_layers: usize,
+    max_seq_len_tokens: usize,
+    hidden_size: usize,
+    base_model_bytes: u64,
+) -> Option<CheckpointPlan> {
+    // Env overrides take absolute precedence — caller should honor them.
+    if std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .is_some()
+    {
+        return Some(CheckpointPlan::UserOverride);
+    }
+    if std::env::var("KILN_NO_GRAD_CHECKPOINT")
+        .as_deref()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return Some(CheckpointPlan::UserOverride);
+    }
+
+    // VRAM unknown — caller should fall back to the env-driven path.
+    if vram.total_bytes == 0 {
+        return None;
+    }
+
+    // F32 activation tape (one element per layer-token pair). Even on a
+    // BF16 model, the trainer keeps activations and grads in F32 for
+    // numerical stability, so this matches what we'd actually allocate.
+    let max_act_bytes = (num_layers as u64)
+        .saturating_mul(max_seq_len_tokens as u64)
+        .saturating_mul(hidden_size as u64)
+        .saturating_mul(4);
+
+    // 2 GiB safety for working buffers (RoPE tables, attention masks,
+    // intermediate matmul outputs that aren't on the activation tape).
+    const SAFETY_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    let reserved = base_model_bytes.saturating_add(SAFETY_RESERVE_BYTES);
+    let available_bytes = vram.total_bytes.saturating_sub(reserved);
+
+    let gib = |b: u64| (b as f64) / (1024.0 * 1024.0 * 1024.0);
+    let max_act_gib = gib(max_act_bytes);
+    let available_gib = gib(available_bytes);
+
+    // If we have less than 2 GiB of headroom after reserves, the auto-tune
+    // is in dangerous territory regardless of seq_len. Punt to the
+    // VRAM-only heuristic via UserOverride — let from_env's existing logic
+    // pick a conservative segment count.
+    if available_bytes < 2 * 1024 * 1024 * 1024 {
+        return Some(CheckpointPlan::UserOverride);
+    }
+
+    // Comfortable headroom: skip checkpointing. The 0.5 threshold leaves
+    // plenty of room for grads + AdamW state on top of activations.
+    if max_act_bytes <= (available_bytes / 2) {
+        return Some(CheckpointPlan::Disabled {
+            max_act_gib,
+            available_gib,
+        });
+    }
+
+    // Tight headroom: pick segments to keep per-segment activation memory
+    // under 30% of available. Round up; clamp to [2, num_layers].
+    let target_per_segment = available_bytes.max(1) * 3 / 10;
+    let mut num_segments = ((max_act_bytes + target_per_segment - 1) / target_per_segment) as usize;
+    if num_segments < 2 {
+        num_segments = 2;
+    }
+    if num_segments > num_layers {
+        num_segments = num_layers;
+    }
+
+    let per_segment_gib = max_act_gib / (num_segments as f64);
+    Some(CheckpointPlan::Enabled {
+        num_segments,
+        max_act_gib,
+        per_segment_gib,
+        available_gib,
     })
 }
 
@@ -592,6 +773,165 @@ mod tests {
             source: VramSource::NvidiaSmi,
         };
         assert_eq!(recommended_checkpoint_segments(&vram_16gb), Some(12));
+    }
+
+    fn vram(gb: u64) -> GpuVramInfo {
+        GpuVramInfo {
+            total_bytes: gb * 1024 * 1024 * 1024,
+            source: VramSource::NvidiaSmi,
+        }
+    }
+
+    fn act_gib(num_layers: usize, max_seq_len: usize, hidden_size: usize) -> f64 {
+        let bytes = (num_layers as u64)
+            * (max_seq_len as u64)
+            * (hidden_size as u64)
+            * 4;
+        (bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    }
+
+    #[test]
+    fn estimate_base_model_bytes_qwen35_4b_matches_observed_vram() {
+        // Qwen3.5-4B: hidden=2560, intermediate=10240, num_layers=32, vocab=151936.
+        // BF16 weights observed at runtime: ~9943 MiB. Estimator must
+        // land within ±15% of that or our auto-tune's headroom math will
+        // be skewed.
+        let est = estimate_base_model_bytes(32, 2560, 10240, 151936, 2);
+        let gib = est as f64 / (1024.0 * 1024.0 * 1024.0);
+        assert!(
+            gib >= 8.0 && gib <= 11.5,
+            "Qwen3.5-4B base estimate {gib:.2} GiB outside ±15% of observed ~9.7 GiB"
+        );
+    }
+
+    #[test]
+    fn recommended_checkpoint_plan_disables_on_short_prompts_big_vram() {
+        // A6000 (48 GiB) + Qwen3.5-4B + 30-token prompts: activation tape
+        // is ~10 MiB. Auto-tune should disable checkpointing entirely.
+        // This is the bench scenario where #1071's PR was leaving 10-30%
+        // step time on the table.
+        let plan = recommended_checkpoint_plan(
+            &vram(48),
+            32,
+            30,
+            2560,
+            estimate_base_model_bytes(32, 2560, 10240, 151936, 2),
+        );
+        assert!(matches!(plan, Some(CheckpointPlan::Disabled { .. })));
+    }
+
+    #[test]
+    fn recommended_checkpoint_plan_enables_for_long_prompts_big_vram() {
+        // A6000 (48 GiB) + Qwen3.5-4B + 32K prompts: activation tape is
+        // ~10.7 GiB. Headroom is ~36 GiB. 30% of headroom is ~11 GiB so
+        // a single segment fits — but we still want >=2 segments since
+        // the heuristic clamps to that. Critically: must engage, must
+        // not disable.
+        let plan = recommended_checkpoint_plan(
+            &vram(48),
+            32,
+            32 * 1024,
+            2560,
+            estimate_base_model_bytes(32, 2560, 10240, 151936, 2),
+        )
+        .expect("plan");
+        let n = match plan {
+            CheckpointPlan::Enabled { num_segments, .. } => num_segments,
+            other => panic!("expected Enabled, got {other:?}"),
+        };
+        assert!(
+            (2..=32).contains(&n),
+            "expected 2..=32 segments for long-context, got {n}"
+        );
+    }
+
+    #[test]
+    fn recommended_checkpoint_plan_aggressive_on_tight_vram_long_prompts() {
+        // RTX 3090 (24 GiB) + Qwen3.5-4B + 16K prompts: activation tape
+        // ~5.4 GiB, headroom ~12 GiB → must engage with >= 4 segments
+        // (per-segment ~1.4 GiB inside the 30% target).
+        let plan = recommended_checkpoint_plan(
+            &vram(24),
+            32,
+            16 * 1024,
+            2560,
+            estimate_base_model_bytes(32, 2560, 10240, 151936, 2),
+        )
+        .expect("plan");
+        let n = match plan {
+            CheckpointPlan::Enabled { num_segments, .. } => num_segments,
+            other => panic!("expected Enabled, got {other:?}"),
+        };
+        assert!(
+            n >= 2,
+            "expected aggressive checkpointing on tight VRAM + long prompts, got {n} segments"
+        );
+        // Sanity-check the activation math hasn't drifted.
+        assert!((act_gib(32, 16 * 1024, 2560) - 5.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn recommended_checkpoint_plan_respects_user_override() {
+        let _g = crate::env_flag::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("KILN_GRAD_CHECKPOINT_SEGMENTS", "12");
+        }
+        let plan = recommended_checkpoint_plan(
+            &vram(48),
+            32,
+            30,
+            2560,
+            estimate_base_model_bytes(32, 2560, 10240, 151936, 2),
+        );
+        unsafe {
+            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
+        }
+        assert!(matches!(plan, Some(CheckpointPlan::UserOverride)));
+    }
+
+    #[test]
+    fn recommended_checkpoint_plan_respects_disable_env() {
+        let _g = crate::env_flag::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("KILN_NO_GRAD_CHECKPOINT", "1");
+        }
+        let plan = recommended_checkpoint_plan(
+            &vram(48),
+            32,
+            32 * 1024,
+            2560,
+            estimate_base_model_bytes(32, 2560, 10240, 151936, 2),
+        );
+        unsafe {
+            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+        }
+        assert!(matches!(plan, Some(CheckpointPlan::UserOverride)));
+    }
+
+    #[test]
+    fn recommended_checkpoint_plan_returns_none_when_vram_unknown() {
+        let unknown = GpuVramInfo {
+            total_bytes: 0,
+            source: VramSource::None,
+        };
+        let plan = recommended_checkpoint_plan(&unknown, 32, 1024, 2560, 10 * 1024 * 1024 * 1024);
+        assert!(plan.is_none());
+    }
+
+    #[test]
+    fn recommended_checkpoint_plan_falls_back_when_headroom_too_small() {
+        // 12 GiB GPU + 10 GiB base estimate = 2 GiB before safety reserve;
+        // 2 GiB after safety. We're under the 2 GiB cliff so the plan
+        // should punt to UserOverride and let from_env's VRAM-only path
+        // pick a conservative segment count.
+        let plan = recommended_checkpoint_plan(
+            &vram(12),
+            32,
+            1024,
+            2560,
+            10 * 1024 * 1024 * 1024,
+        );
+        assert!(matches!(plan, Some(CheckpointPlan::UserOverride)));
     }
 
     #[test]

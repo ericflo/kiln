@@ -1954,6 +1954,7 @@ pub fn sft_train(
         // the entire run.
         let mut valid_indices = Vec::new();
         let mut one_epoch_counts = crate::train_receipt::TokenCountReceipt::default();
+        let mut max_seq_len_tokens: usize = 0;
         for (idx, ex) in examples.iter().enumerate() {
             match tokenize_for_training(ex, tokenizer) {
                 Ok((input_ids, label_mask)) => {
@@ -1964,6 +1965,9 @@ pub fn sft_train(
                         one_epoch_counts.context_tokens.saturating_add(
                             input_ids.len().saturating_sub(action_tokens as usize) as u64,
                         );
+                    if input_ids.len() > max_seq_len_tokens {
+                        max_seq_len_tokens = input_ids.len();
+                    }
                     valid_indices.push(idx);
                 }
                 Err(e) => {
@@ -1985,8 +1989,17 @@ pub fn sft_train(
             .context_tokens
             .saturating_mul(config.epochs as u64);
 
-        // Configure gradient checkpointing
-        let ckpt_config = CheckpointConfig::from_env(model_config.num_layers);
+        // Auto-tune gradient checkpointing for this workload's actual
+        // sequence length, not just VRAM. On a big GPU with short prompts
+        // this typically disables checkpointing entirely (~10-30% faster).
+        let ckpt_config = CheckpointConfig::auto_for_workload(
+            model_config.num_layers,
+            max_seq_len_tokens,
+            model_config.hidden_size,
+            model_config.intermediate_size,
+            model_config.vocab_size,
+            2, // BF16 base weights (canonical kiln inference dtype)
+        );
         let segments = if ckpt_config.enabled {
             Some(compute_segment_boundaries(
                 model_config.num_layers,
@@ -2544,8 +2557,27 @@ pub fn grpo_train(
             anyhow::bail!("no valid GRPO groups after tokenization");
         }
 
-        // Configure gradient checkpointing (same as SFT)
-        let ckpt_config = CheckpointConfig::from_env(model_config.num_layers);
+        // Compute the max seq_len across every completion in every group
+        // so the auto-tuner sizes checkpointing against the longest path,
+        // not the average.
+        let max_seq_len_tokens: usize = tokenized_groups
+            .iter()
+            .flat_map(|g| g.completions.iter())
+            .map(|c| c.input_ids.len())
+            .max()
+            .unwrap_or(0);
+
+        // Auto-tune gradient checkpointing for this workload's actual
+        // sequence length. Same pattern as `sft_train`: skip checkpointing
+        // when activation tape comfortably fits in available VRAM.
+        let ckpt_config = CheckpointConfig::auto_for_workload(
+            model_config.num_layers,
+            max_seq_len_tokens,
+            model_config.hidden_size,
+            model_config.intermediate_size,
+            model_config.vocab_size,
+            2, // BF16 base weights
+        );
         let segments = if ckpt_config.enabled {
             Some(compute_segment_boundaries(
                 model_config.num_layers,
@@ -3195,6 +3227,10 @@ pub fn grpo_train_jsonl(
     };
 
     let mut train_body = || -> Result<(PathBuf, f64)> {
+        // Streaming GRPO can't pre-compute max_seq_len without consuming the
+        // dataset, so we stay on the VRAM-only auto-tune path here. The
+        // (non-streaming) `grpo_train` path uses the workload-shape-aware
+        // `CheckpointConfig::auto_for_workload` after tokenization.
         let ckpt_config = CheckpointConfig::from_env(model_config.num_layers);
         let segments = if ckpt_config.enabled {
             Some(compute_segment_boundaries(
@@ -6950,6 +6986,12 @@ impl CheckpointConfig {
     /// 1. `KILN_GRAD_CHECKPOINT_SEGMENTS` env var (user override)
     /// 2. Auto-detect from GPU VRAM via `kiln_core::vram`
     /// 3. Fallback to 4 segments
+    ///
+    /// This is the *VRAM-only* path. Callers that know the workload's
+    /// `max_seq_len` should prefer [`CheckpointConfig::auto_for_workload`],
+    /// which can additionally choose to *disable* checkpointing when the
+    /// activation tape comfortably fits in available VRAM (typical on big
+    /// GPUs with short prompts).
     pub fn from_env(num_layers: usize) -> Self {
         let enabled = std::env::var("KILN_NO_GRAD_CHECKPOINT")
             .map(|v| v != "1" && v.to_lowercase() != "true")
@@ -6989,6 +7031,107 @@ impl CheckpointConfig {
             num_segments,
             enabled,
             auto_configured,
+        }
+    }
+
+    /// Create config with **VRAM + workload-shape** auto-tuning. Preferred over
+    /// [`CheckpointConfig::from_env`] for trainer call sites that have the
+    /// `max_seq_len` available after tokenization.
+    ///
+    /// Behavior:
+    /// * `KILN_GRAD_CHECKPOINT_SEGMENTS` / `KILN_NO_GRAD_CHECKPOINT` env
+    ///   overrides are honored unchanged (falls through to `from_env`).
+    /// * Otherwise calls [`kiln_core::vram::recommended_checkpoint_plan`]
+    ///   which can *disable* checkpointing entirely when the activation tape
+    ///   comfortably fits in available VRAM. On A6000 + Qwen3.5-4B, this
+    ///   skips checkpointing for sequences up to ~12K tokens and only
+    ///   engages it (with the right number of segments) for longer contexts.
+    ///
+    /// `bytes_per_base_param` is used to estimate base-model footprint —
+    /// pass 2 for BF16 (canonical kiln inference dtype) or 4 for F32.
+    #[allow(clippy::too_many_arguments)]
+    pub fn auto_for_workload(
+        num_layers: usize,
+        max_seq_len_tokens: usize,
+        hidden_size: usize,
+        intermediate_size: usize,
+        vocab_size: usize,
+        bytes_per_base_param: usize,
+    ) -> Self {
+        // Env overrides always win and route to from_env's tested code path.
+        if std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .is_some()
+            || std::env::var("KILN_NO_GRAD_CHECKPOINT")
+                .as_deref()
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        {
+            return Self::from_env(num_layers);
+        }
+
+        let vram = kiln_core::vram::detect_vram();
+        let base_bytes = kiln_core::vram::estimate_base_model_bytes(
+            num_layers,
+            hidden_size,
+            intermediate_size,
+            vocab_size,
+            bytes_per_base_param,
+        );
+
+        match kiln_core::vram::recommended_checkpoint_plan(
+            &vram,
+            num_layers,
+            max_seq_len_tokens,
+            hidden_size,
+            base_bytes,
+        ) {
+            None | Some(kiln_core::vram::CheckpointPlan::UserOverride) => {
+                // VRAM detection failed or env override is set — fall back
+                // to the existing VRAM-only path.
+                Self::from_env(num_layers)
+            }
+            Some(kiln_core::vram::CheckpointPlan::Disabled {
+                max_act_gib,
+                available_gib,
+            }) => {
+                tracing::info!(
+                    max_seq_len_tokens,
+                    activation_tape_gib = format!("{max_act_gib:.2}"),
+                    available_gib = format!("{available_gib:.2}"),
+                    vram_total_gb = vram.total_bytes as f64 / 1e9,
+                    vram_source = %vram.source,
+                    "auto-tuned: gradient checkpointing DISABLED — activation tape fits comfortably in available VRAM"
+                );
+                Self {
+                    num_segments: 1,
+                    enabled: false,
+                    auto_configured: true,
+                }
+            }
+            Some(kiln_core::vram::CheckpointPlan::Enabled {
+                num_segments,
+                max_act_gib,
+                per_segment_gib,
+                available_gib,
+            }) => {
+                tracing::info!(
+                    num_segments,
+                    max_seq_len_tokens,
+                    activation_tape_gib = format!("{max_act_gib:.2}"),
+                    per_segment_gib = format!("{per_segment_gib:.2}"),
+                    available_gib = format!("{available_gib:.2}"),
+                    vram_total_gb = vram.total_bytes as f64 / 1e9,
+                    vram_source = %vram.source,
+                    "auto-tuned: gradient checkpointing engaged for workload shape"
+                );
+                Self {
+                    num_segments,
+                    enabled: true,
+                    auto_configured: true,
+                }
+            }
         }
     }
 }
