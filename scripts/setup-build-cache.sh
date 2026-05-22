@@ -10,6 +10,15 @@
 # Optional env vars:
 #   KILN_REPO_DIR          — Path to kiln repo checkout (default: /workspace/kiln)
 #   SCCACHE_VERSION        — sccache release tag (default: v0.9.1)
+#   KILN_SCCACHE_SALT      — Extra string appended to SCCACHE_S3_KEY_PREFIX, e.g.
+#                            a content hash or git SHA. Isolates the sccache
+#                            namespace per build group so a corrupted object
+#                            (issue #1066) cannot haunt unrelated pods.
+#
+# Optional flags:
+#   --per-sha-cache        Auto-derive KILN_SCCACHE_SALT from `git rev-parse
+#                          --short HEAD` in $KILN_REPO_DIR (issue #1066
+#                          containment; slower first build, safer cache).
 
 set -euo pipefail
 
@@ -18,6 +27,17 @@ SCCACHE_VERSION="${SCCACHE_VERSION:-v0.9.1}"
 B2_BUCKET="clouderic"
 B2_ENDPOINT="https://s3.us-west-002.backblazeb2.com"
 B2_REGION="us-west-002"
+
+# Argument parsing — kept minimal so this stays a drop-in setup script.
+PER_SHA_CACHE=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --per-sha-cache) PER_SHA_CACHE=1; shift ;;
+        --repo)          KILN_REPO_DIR="$2"; shift 2 ;;
+        -h|--help)       sed -n '2,21p' "$0"; exit 0 ;;
+        *) echo "setup-build-cache: unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
 
 # --- Detect architecture string ---
 detect_arch() {
@@ -47,6 +67,24 @@ detect_arch() {
 
 ARCH="$(detect_arch)"
 CACHE_PREFIX="build-cache/kiln/${ARCH}"
+
+# Optional cache salt — see deploy/runpod/kiln-setup.sh for full rationale
+# (issue #1066: per-SHA isolation bounds the blast radius of a corrupted
+# cached object). Resolution: explicit KILN_SCCACHE_SALT > --per-sha-cache.
+CACHE_SALT="${KILN_SCCACHE_SALT:-}"
+if [ -z "${CACHE_SALT}" ] && [ "${PER_SHA_CACHE}" = "1" ]; then
+    if [ -d "${KILN_REPO_DIR}/.git" ]; then
+        CACHE_SALT="$(git -C "${KILN_REPO_DIR}" rev-parse --short=12 HEAD 2>/dev/null || true)"
+    fi
+    if [ -z "${CACHE_SALT}" ]; then
+        echo "WARN: --per-sha-cache requested but ${KILN_REPO_DIR} is not a git checkout;" >&2
+        echo "      falling back to the shared cache namespace." >&2
+    fi
+fi
+if [ -n "${CACHE_SALT}" ]; then
+    CACHE_SALT="$(printf '%s' "${CACHE_SALT}" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9.-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//')"
+    CACHE_PREFIX="${CACHE_PREFIX}/sha-${CACHE_SALT}"
+fi
 
 # --- Ensure CUDA is on PATH ---
 if [ -d /usr/local/cuda/bin ] && [[ ":$PATH:" != *":/usr/local/cuda/bin:"* ]]; then
@@ -171,6 +209,18 @@ echo "  export AWS_SECRET_ACCESS_KEY=${B2_APPLICATION_KEY}"
 echo "  export RUSTC_WRAPPER=sccache"
 echo ""
 echo "Then run: cargo build --release --features cuda"
+echo ""
+echo "After the build, run a smoke check (issue #1066 prevention):"
+echo "  ./deploy/runpod/kiln-smoke-check.sh   # in a cloned kiln repo"
+echo "  # or, on a pod: kiln-smoke-check"
+echo ""
+echo "Troubleshooting"
+echo "  Build succeeds but inference returns HTTP 500 with"
+echo "  'kiln_<kernel> failed with status <N>'?"
+echo "  → The remote sccache returned a corrupted object. Heal the cache:"
+echo "       SCCACHE_RECACHE=1 cargo build --release --features cuda --bin kiln-bench"
+echo "    To scope: SCCACHE_RECACHE=1 cargo build ... -p kiln-gdn-kernel"
+echo "    To bound the blast radius on fresh pods, re-run setup with --per-sha-cache."
 
 # Write env to a sourceable file
 ENV_FILE="${KILN_REPO_DIR}/.build-cache-env"
