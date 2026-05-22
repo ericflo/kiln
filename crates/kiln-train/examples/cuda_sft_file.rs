@@ -183,7 +183,18 @@ impl Args {
                          [--checkpoint-interval <n>] [--vram-poll-millis <n>] \
                          [--base-adapter <dir>] [--allow-adapter-shape-conversion] \
                          [--allow-high-lora-scale] \
-                         [--trainer native|generic|server|default]"
+                         [--trainer native|generic|server|default]\n\
+                         \n\
+                         Output layout:\n  \
+                         The adapter is written to <output-dir>/<adapter-name>/ \
+                         (registry layout), suitable for `kiln serve --adapter-dir \
+                         <output-dir>`. If the basename of <output-dir> already \
+                         equals <adapter-name>, the adapter is written directly \
+                         to <output-dir>/ so the layout matches the flat shape \
+                         kiln serve's adapter loader requires. In practice that \
+                         means `--output-dir /workspace/adapters/foo --adapter-name \
+                         foo` puts the adapter at /workspace/adapters/foo/ — no \
+                         post-train `mv`/`rmdir` flatten dance needed."
                     );
                     std::process::exit(0);
                 }
@@ -342,8 +353,16 @@ fn main() -> Result<()> {
     drop(model_weights);
     println!("model_loaded_vram_mib={}", current_vram_mib());
 
-    std::fs::create_dir_all(&args.output_dir)
-        .with_context(|| format!("creating {}", args.output_dir.display()))?;
+    // Resolve the user-facing `--output-dir`/`--adapter-name` pair into the
+    // arguments the library training entrypoints actually consume. This makes
+    // `--output-dir /foo --adapter-name foo` produce `/foo/` (flat, loadable
+    // by `kiln serve`) instead of `/foo/foo/` (nested, rejected). Registry
+    // usage (`--output-dir /workspace/adapters --adapter-name foo`) is
+    // unchanged. See issue #1065.
+    let layout =
+        kiln_train::resolve_sft_output_layout(&args.output_dir, &args.adapter_name);
+    std::fs::create_dir_all(&layout.adapter_dir)
+        .with_context(|| format!("creating {}", layout.adapter_dir.display()))?;
     let config = SftConfig {
         epochs: args.epochs,
         learning_rate: args.learning_rate,
@@ -352,19 +371,33 @@ fn main() -> Result<()> {
         base_adapter: args.base_adapter.clone(),
         allow_adapter_shape_conversion: args.allow_adapter_shape_conversion,
         allow_high_lora_scale: args.allow_high_lora_scale,
-        output_name: Some(args.adapter_name.clone()),
+        output_name: Some(layout.adapter_name.clone()),
         auto_load: false,
         checkpoint_interval: args.checkpoint_interval,
         seed: Some(0xC0DA_5EED),
         optimizer: Optimizer::default(),
         adapter_smoke_test: false,
     };
+    if layout.flattened {
+        println!(
+            "output_layout=flat output_dir={} adapter_name={} final_adapter_dir={} \
+             (basename of --output-dir matches --adapter-name; writing flat layout \
+             so `kiln serve --adapter-dir <output-dir>` can load it directly)",
+            args.output_dir.display(),
+            layout.adapter_name,
+            layout.final_adapter_dir.display(),
+        );
+    } else {
+        println!(
+            "output_layout=registry output_dir={} adapter_name={} final_adapter_dir={}",
+            args.output_dir.display(),
+            layout.adapter_name,
+            layout.final_adapter_dir.display(),
+        );
+    }
     println!(
-        "output_dir={} adapter_name={} checkpoint_interval={:?} vram_poll_millis={}",
-        args.output_dir.display(),
-        args.adapter_name,
-        args.checkpoint_interval,
-        args.vram_poll_millis
+        "checkpoint_interval={:?} vram_poll_millis={}",
+        args.checkpoint_interval, args.vram_poll_millis
     );
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -405,8 +438,8 @@ fn main() -> Result<()> {
             &model_config,
             &gpu_weights,
             &tokenizer,
-            &args.output_dir,
-            &args.adapter_name,
+            &layout.adapter_dir,
+            &layout.adapter_name,
             progress,
         ),
         TrainerKind::Generic => kiln_train::trainer::sft_train(
@@ -415,8 +448,8 @@ fn main() -> Result<()> {
             &model_config,
             &gpu_weights,
             &tokenizer,
-            &args.output_dir,
-            &args.adapter_name,
+            &layout.adapter_dir,
+            &layout.adapter_name,
             progress,
             None,
         ),

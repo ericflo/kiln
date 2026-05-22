@@ -73,6 +73,87 @@ struct AdapterOutputConfig {
     lora_alpha: f32,
 }
 
+/// Result of resolving a `--output-dir`/`--adapter-name` CLI pair into the
+/// `(adapter_dir, adapter_name)` arguments expected by `sft_train` and the
+/// other library training entry points.
+///
+/// The trainer always writes the adapter to `<adapter_dir>/<adapter_name>/`
+/// — correct for a "registry" use where `--adapter-dir /workspace/adapters`
+/// holds many adapter subdirectories. Users frequently pass
+/// `--output-dir /workspace/adapters/foo --adapter-name foo` expecting the
+/// adapter to land at `/workspace/adapters/foo/`, but get
+/// `/workspace/adapters/foo/foo/` instead, which `kiln serve`'s adapter
+/// loader rejects. `resolve_sft_output_layout` detects that case from the
+/// user-facing arguments and returns the pair to forward to the library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSftOutputLayout {
+    /// Value to pass as `adapter_dir` to the library training entry point.
+    pub adapter_dir: PathBuf,
+    /// Value to pass as `adapter_name` to the library training entry point.
+    pub adapter_name: String,
+    /// Final on-disk directory the adapter will be written to:
+    /// `adapter_dir.join(&adapter_name)`. Provided for convenient logging.
+    pub final_adapter_dir: PathBuf,
+    /// `true` when the user-supplied layout was rewritten to avoid the
+    /// nested-directory pitfall. `false` when the user-supplied layout was
+    /// preserved verbatim (registry pattern).
+    pub flattened: bool,
+}
+
+/// Resolve a user-facing `--output-dir` / `--adapter-name` pair into the
+/// `(adapter_dir, adapter_name)` that should actually be forwarded to
+/// `sft_train` / `cuda_native_sft_train` / `grpo_train_jsonl`, so that the
+/// adapter lands at exactly the directory the user named when their intent is
+/// unambiguous.
+///
+/// Policy: if the last path component of `output_dir` equals `adapter_name`,
+/// rewrite the pair so the adapter is written directly into `output_dir`. The
+/// rewrite passes `output_dir.parent()` as `adapter_dir` so the library's
+/// `adapter_dir.join(adapter_name)` lands at `output_dir`. Otherwise the
+/// arguments are returned unchanged so the existing registry layout
+/// (`<output_dir>/<adapter_name>/`) is preserved.
+///
+/// This is a pure function on the user-facing arguments; it does not look at
+/// the filesystem and so behaves identically whether `output_dir` exists or
+/// not.
+pub fn resolve_sft_output_layout(
+    output_dir: &Path,
+    adapter_name: &str,
+) -> ResolvedSftOutputLayout {
+    let basename_matches = output_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == adapter_name);
+
+    if basename_matches {
+        // `Path::parent` returns `Some("")` for a single-component relative
+        // path (e.g. "foo") and `None` only for the root or an empty path.
+        // In both edge cases we substitute "." so the resulting adapter_dir
+        // is always non-empty and joining it with `adapter_name` still
+        // yields the user-supplied `output_dir`.
+        let parent = output_dir
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let final_adapter_dir = parent.join(adapter_name);
+        ResolvedSftOutputLayout {
+            adapter_dir: parent,
+            adapter_name: adapter_name.to_string(),
+            final_adapter_dir,
+            flattened: true,
+        }
+    } else {
+        let final_adapter_dir = output_dir.join(adapter_name);
+        ResolvedSftOutputLayout {
+            adapter_dir: output_dir.to_path_buf(),
+            adapter_name: adapter_name.to_string(),
+            final_adapter_dir,
+            flattened: false,
+        }
+    }
+}
+
 pub fn validate_adapter_output_dir(adapter_dir: &Path) -> Result<PathBuf> {
     if !adapter_dir.exists() || !adapter_dir.is_dir() {
         bail!("adapter directory does not exist: {}", adapter_dir.display());
@@ -733,6 +814,118 @@ mod tests {
         .to_string();
 
         assert!(err.contains("safetensors_hash mismatch"));
+    }
+
+    #[test]
+    fn resolve_sft_output_layout_flattens_when_basename_matches_adapter_name() {
+        // The pi-faithful-completion repro from the issue:
+        // `--output-dir /workspace/adapters/foo --adapter-name foo`.
+        let layout =
+            resolve_sft_output_layout(Path::new("/workspace/adapters/foo"), "foo");
+        assert!(layout.flattened);
+        assert_eq!(layout.adapter_dir, PathBuf::from("/workspace/adapters"));
+        assert_eq!(layout.adapter_name, "foo");
+        // The trainer joins `adapter_dir.join(adapter_name)` to produce the
+        // final adapter directory — verify that path equals the user's
+        // original `--output-dir`.
+        assert_eq!(
+            layout.adapter_dir.join(&layout.adapter_name),
+            PathBuf::from("/workspace/adapters/foo")
+        );
+        assert_eq!(
+            layout.final_adapter_dir,
+            PathBuf::from("/workspace/adapters/foo")
+        );
+    }
+
+    #[test]
+    fn resolve_sft_output_layout_preserves_registry_layout_when_basename_differs() {
+        // Classic registry usage: --output-dir is the parent registry,
+        // --adapter-name is the specific adapter under it.
+        let layout = resolve_sft_output_layout(Path::new("/workspace/adapters"), "foo");
+        assert!(!layout.flattened);
+        assert_eq!(layout.adapter_dir, PathBuf::from("/workspace/adapters"));
+        assert_eq!(layout.adapter_name, "foo");
+        assert_eq!(
+            layout.final_adapter_dir,
+            PathBuf::from("/workspace/adapters/foo")
+        );
+    }
+
+    #[test]
+    fn resolve_sft_output_layout_handles_relative_single_component_output_dir() {
+        // `--output-dir foo --adapter-name foo`: `foo.parent()` is `Some("")`,
+        // which we substitute with "." so joining still produces `./foo`,
+        // pointing at the user's intended adapter directory.
+        let layout = resolve_sft_output_layout(Path::new("foo"), "foo");
+        assert!(layout.flattened);
+        assert_eq!(layout.adapter_dir, PathBuf::from("."));
+        assert_eq!(layout.adapter_name, "foo");
+        assert_eq!(layout.final_adapter_dir, PathBuf::from("./foo"));
+    }
+
+    #[test]
+    fn resolve_sft_output_layout_handles_relative_dotted_path() {
+        let layout = resolve_sft_output_layout(Path::new("./foo"), "foo");
+        assert!(layout.flattened);
+        assert_eq!(layout.adapter_dir, PathBuf::from("."));
+        assert_eq!(layout.adapter_name, "foo");
+        assert_eq!(layout.final_adapter_dir, PathBuf::from("./foo"));
+    }
+
+    #[test]
+    fn resolve_sft_output_layout_handles_trailing_slash_in_output_dir() {
+        // Path::file_name strips a trailing slash, so "/workspace/adapters/foo/"
+        // still matches adapter-name "foo" and is flattened correctly.
+        let layout =
+            resolve_sft_output_layout(Path::new("/workspace/adapters/foo/"), "foo");
+        assert!(layout.flattened);
+        assert_eq!(layout.adapter_dir, PathBuf::from("/workspace/adapters"));
+        assert_eq!(
+            layout.final_adapter_dir,
+            PathBuf::from("/workspace/adapters/foo")
+        );
+    }
+
+    #[test]
+    fn resolve_sft_output_layout_preserves_layout_when_basename_is_partial_match() {
+        // `foo-bar` is not equal to `foo` — registry layout preserved.
+        let layout =
+            resolve_sft_output_layout(Path::new("/workspace/adapters/foo-bar"), "foo");
+        assert!(!layout.flattened);
+        assert_eq!(
+            layout.adapter_dir,
+            PathBuf::from("/workspace/adapters/foo-bar")
+        );
+        assert_eq!(
+            layout.final_adapter_dir,
+            PathBuf::from("/workspace/adapters/foo-bar/foo")
+        );
+    }
+
+    #[test]
+    fn resolve_sft_output_layout_round_trip_after_flatten_is_loadable_layout() {
+        // After flattening, writing the adapter files at `final_adapter_dir`
+        // produces a directory that `validate_adapter_output_dir` accepts.
+        let tmp = tempfile::tempdir().unwrap();
+        let output_dir = tmp.path().join("my-adapter");
+        let layout = resolve_sft_output_layout(&output_dir, "my-adapter");
+        assert!(layout.flattened);
+        assert_eq!(layout.final_adapter_dir, output_dir);
+        write_minimal_adapter(&layout.final_adapter_dir);
+        // The flattened layout passes the same validation `kiln serve` uses.
+        validate_adapter_output_dir(&layout.final_adapter_dir)
+            .expect("flattened layout must satisfy validate_adapter_output_dir");
+    }
+
+    #[test]
+    fn resolve_sft_output_layout_handles_root_only_path() {
+        // Defensive: `/` has no file_name, so layout falls through to the
+        // registry branch. Don't crash, don't lose adapter_name.
+        let layout = resolve_sft_output_layout(Path::new("/"), "foo");
+        assert!(!layout.flattened);
+        assert_eq!(layout.adapter_dir, PathBuf::from("/"));
+        assert_eq!(layout.final_adapter_dir, PathBuf::from("/foo"));
     }
 
     #[test]
