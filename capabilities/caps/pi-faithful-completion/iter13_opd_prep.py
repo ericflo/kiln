@@ -24,10 +24,11 @@ n = 0
 with IN.open() as f, OUT.open("w") as out:
     for line in f:
         d = json.loads(line)
-        # Drop the assistant message — OPD doesn't want it (student samples its own rollout)
-        msgs = [m for m in d["messages"] if m["role"] != "assistant"]
+        # KEEP the assistant message — OPD tokenizer uses it to compute the action_mask
+        # (the student still samples its OWN rollout at training time; the assistant
+        # message is just the schema for "where the action tokens go")
         prompt = {
-            "messages": msgs,
+            "messages": d["messages"],
             "teacher_extra_messages": [{"role": "system", "content": STRICT}],
         }
         out.write(json.dumps(prompt, ensure_ascii=False) + "\n")
