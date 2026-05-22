@@ -138,19 +138,31 @@ turn or take it from a teacher rollout).
   quality + OPD regressed. Sample teacher rollouts, SFT on those. See
   METHODS.md §4.3.
 
-## When SFT plateaus on parameter tweaks (the multi-distribution diagnostic)
+## When SFT plateaus on parameter tweaks
 
-If you've run 5+ SFT variants — different ranks, learning rates, epochs,
-filter thresholds, chain depths — and they all converge at the same
-composite within σ, you've probably hit a **data-signal plateau**, not
+If you've run 5+ SFT variants — different ranks, learning rates,
+epochs, filter thresholds, chain depths — and they all converge at the
+same composite within σ, you've probably hit a **signal plateau**, not
 a model-capability ceiling. The training distribution has already told
 the model everything it can.
 
-Diagnostic:
+The first move is to check whether you're still on the right method.
+METHODS.md §4.5 covers the full picture: a plateau is new evidence,
+and re-running §2's decision tree against the plateau's sub-score
+profile may fire a different rule than your original choice. Maybe the
+right next move isn't more SFT at all — it's GRPO with a redesigned
+reward, OPD with different teacher conditioning, or
+agentic-GRPO/`--no-policy-loss` if your task has multi-turn structure
+you weren't using.
+
+If the tree still points at SFT (often the case when the headroom is
+in a sub-score the model already knows how to produce but doesn't do
+reliably), one technique that's worked is a **chained alternating
+SFT schedule**:
 
 1. Look at the sub-scores at the plateau. Which axes are pinned?
-   Which are flexing? A pinned sub-score is usually one the training
-   data doesn't carry signal for.
+   Which are flexing? A pinned sub-score is usually one the current
+   training distribution doesn't carry signal for.
 2. Ask: is there a second, qualitatively different distribution that
    would carry signal for the pinned axes? Common pairings — by no
    means exhaustive:
@@ -165,12 +177,12 @@ Diagnostic:
    epochs) so the model never catastrophically forgets the other
    lesson. Stop when an additional swap stops adding lift.
 
-Reach for this when the parameter sweep has clearly plateaued. The
-technique trades simplicity for one more knob (the schedule); justify
-the trade by the evidence (a plateau across recipes you'd otherwise
-have expected to separate), not by habit in either direction. We
-don't have a frequency estimate for how often caps need it — early
-in the round-3 cycle, treat each cap on its own evidence.
+Reach for this when the SFT parameter sweep has clearly plateaued AND
+the decision tree still points at SFT. The technique trades simplicity
+for one more knob (the schedule); justify the trade by the evidence,
+not by habit in either direction. We don't have a frequency estimate
+for how often caps need it — early in the round-3 cycle, treat each
+cap on its own evidence.
 
 **Synthesizing a second distribution.** If the rubric is programmatic
 (format_regex + expected_value), you can often **synthesize**

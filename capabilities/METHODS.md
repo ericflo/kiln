@@ -289,56 +289,98 @@ this base model. Accept it. The next round's distillation may lift it.
 | `SFT → SFT chain on the *same* distribution` | Mono-distribution SFT chains overfit. The exception is `SFT → SFT chain alternating distributions` (§4.5). |
 | `non-target method on multi-turn task` | If task is multi-turn tool-calling, agentic-GRPO with ECHO is mandatory. SFT or OPD on multi-turn data without ECHO masking is a known footgun. |
 
-### §4.5 Multi-distribution chains: when a plateau won't break on parameter tweaks alone
+### §4.5 The signal-saturation diagnostic (and one response — chained alternating SFT)
+
+This section is two ideas: a method-agnostic diagnostic, and one
+concrete response that's worked for SFT-driven caps. The diagnostic is
+the universal part; the response is one possible move among several.
+
+#### The diagnostic (any method)
 
 Sometimes a series of recipe variants converges on the same composite
 across many sweeps — different ranks, learning rates, epochs, filter
-thresholds, and chain depths all land within σ of each other. When that
-happens, the constraint is rarely the recipe; it is the **training
-signal**. The single distribution you have been training on has already
-told the model everything it can.
+thresholds, reward variants, and chain depths all land within σ of
+each other. When that happens, the constraint is rarely the recipe; it
+is the **training signal**. Whatever the current method has been
+extracting from its data — SFT from a rollout pool, GRPO from a single
+reward, OPD from one teacher's conditioning — has already told the
+model everything it can.
 
 The diagnostic: if 5+ recipes spanning a wide hyperparameter space all
-sit at the same composite, treat it as a **data-signal plateau** rather
-than a model-capability ceiling. Read the sub-scores. Which axes are
-pinned, which are flexing? A pinned axis usually means the training data
-doesn't carry signal for that axis at all.
+sit at the same composite, treat it as a **signal plateau** rather than
+a model-capability ceiling. Read the sub-scores. Which axes are
+pinned, which are flexing? A pinned axis usually means the current
+signal doesn't carry information for that axis at all.
 
-The technique: add a **complementary second distribution** whose signal
-is orthogonal to the original one, and chain SFT stages that alternate
-between them. Each stage is small (rank 4, lr 1e-5, 1-3 epochs) so the
-model never catastrophically forgets the other lesson. Stop when one
-direction stops adding lift over the other.
+What changes when you read the plateau as signal-bound rather than
+model-bound: instead of tuning the recipe, you go look for a *different*
+signal. That's a fork:
+
+1. **Switch method.** Re-run §2's decision tree with the plateau's
+   sub-score profile in mind. If reward variance has collapsed under
+   the current GRPO reward, maybe SFT on a small curated set unlocks
+   the next move. If SFT has overfit the surface form of one rollout
+   pool, maybe GRPO with a redesigned reward (or `--no-policy-loss` +
+   ECHO on agentic data) drives the pinned axis. If neither, OPD with
+   a teacher conditioned to expose the pinned axis may carry signal
+   the current path doesn't.
+2. **Stay with the current method but feed it a complementary
+   distribution.** When the method itself is still the right one
+   (decision tree still points here), the lever is the data, not the
+   choice of optimizer. For SFT this looks like a chained alternating
+   schedule (see below). GRPO has analogs (alternate between two
+   reward functions targeting different sub-scores; alternate between
+   easy-tail and hard-tail rollout pools; combine policy-gradient and
+   ECHO env-CE in alternating epochs). OPD has analogs (alternate
+   teachers; alternate between symmetric and asymmetric
+   `teacher_extra_messages` conditioning).
+
+Both forks come back to the same underlying principle: **add a
+qualitatively different source of signal that targets the axis your
+parameter sweep couldn't move**. Which fork is right is decided by
+§1's inputs and §2's tree, with the plateau adding new evidence about
+where the headroom actually lives.
+
+#### One concrete response that worked: chained alternating SFT
+
+A specific instantiation of "stay with SFT, feed it a complementary
+distribution" — chain small SFT stages that alternate between two
+distributions whose signals are orthogonal. Each stage stays small
+(rank 4 / α 8 / lr 1e-5, 1-3 epochs) so the model doesn't
+catastrophically forget the other lesson between swaps. Stop when an
+additional swap stops adding lift.
 
 What "complementary" means is capability-dependent — there is no
 universal answer:
 
-- For a task with a strict output format and an unbounded set of inputs,
-  one distribution might be **rubric-perfect synthesized outputs**
-  (drives format precision) and the other **high-scoring model rollouts
-  under richer conditioning** (drives outcome correctness on real prompt
+- For a task with a strict output format and unbounded inputs, one
+  distribution might be **rubric-perfect synthesized outputs** (drives
+  format precision) and the other **high-scoring model rollouts under
+  richer conditioning** (drives outcome correctness on real prompt
   shapes).
-- For a reasoning task, the axes might be **worked-through derivations**
-  vs **terse final answers**.
+- For a reasoning task, the axes might be **worked-through
+  derivations** vs **terse final answers**.
 - For a code-generation task, **canonical idiomatic solutions** vs
   **edge-case stress tests** might pair well.
 
 Reach for this when you've genuinely run out of single-distribution
-recipe ideas and the composite hasn't moved. We don't have a frequency
-estimate for how often this applies — early in the round-3 cycle,
-treat each capability on its own evidence rather than presuming it
-will or won't need a second distribution.
+SFT recipe ideas, the composite hasn't moved, AND §2's tree still
+points at SFT for your inputs. We don't have a frequency estimate for
+how often this technique applies — early in the round-3 cycle, treat
+each capability on its own evidence rather than presuming it will or
+won't need it.
 
 **Reference example:** `caps/pi-faithful-completion` (round-3, 2026-05).
 Twelve single-distribution variants (rank 4-16, lr 1e-4 to 5e-6,
-threshold >0.5 and >0.7, hard-tail and ideal-only, both SFT and OPD
-chains) all plateaued at composite ≈ 0.77. A 6-stage SFT chain
+threshold >0.5 and >0.7, hard-tail and ideal-only, both SFT and one
+OPD attempt) all plateaued at composite ≈ 0.77. A 6-stage SFT chain
 alternating synthesized rubric-perfect outputs with high-scoring
 strict-prompt rollouts reached 0.808 — 93.4% of the prompted ceiling.
 Sub-score breakdown and per-stage trace in
 `caps/pi-faithful-completion/sft_chain_findings.md`. The specific data
-pairing there was *one instantiation* of the technique; do not lift
-the recipe wholesale, lift the diagnostic.
+pairing there was *one instantiation*; for a different cap the right
+move might be method switching (fork 1) or a different complementary
+pairing.
 
 ### §4.6 Cross-stage validation (mandatory)
 
@@ -407,11 +449,15 @@ These were either round-1 mistakes or skill-lore failure modes. Do not repeat.
 10. **Don't pick a method before measuring inputs in §1.** A premature method
     choice is a wasted GPU run.
 11. **Don't conclude "ceiling" from a parameter sweep alone.** If 5+ recipes
-    spanning ranks, learning rates, epochs, and filter thresholds all land
-    at the same composite, the constraint is likely the training signal,
-    not the model. Re-read the sub-scores; check whether a complementary
-    data distribution exists that you haven't fed in (§4.5). Distinct
-    from rule 7 (which is about rubric saturation, not data saturation).
+    spanning ranks, learning rates, epochs, reward variants, and chain
+    depths all land at the same composite, the constraint is likely the
+    training *signal*, not the model. Re-read the sub-scores — which
+    axes are pinned, which are flexing? — and ask whether a qualitatively
+    different signal source exists: a different method (§2's tree may
+    fire a new rule given the plateau's evidence), a different reward
+    function or teacher conditioning within the current method, or a
+    complementary data distribution (§4.5). Distinct from rule 7, which
+    is about rubric saturation, not signal saturation.
 
 ---
 
