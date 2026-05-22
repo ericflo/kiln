@@ -1,6 +1,6 @@
 # Kiln Server Changelog
 
-## Unreleased — cuda_native_sft_train: route through BackendRuntime (closes #1063)
+## Unreleased — cuda_native: route SFT *and* GRPO through BackendRuntime (closes #1063)
 
 Closes #1063 (cuda_native_sft_train ~50x slower than `--trainer
 generic`). This PR ships the **root-cause fix** from the issue body's
@@ -73,6 +73,35 @@ own — the per-op CPU overhead in `cuda_train`'s hand-rolled autograd
 scales with kernel-launch count, and recompute *adds* launches. Hence
 recompute is opt-in for memory-constrained jobs; the BackendRuntime
 route is the default for everyone else.
+
+### GRPO: same fix on the parallel path
+
+The server's `run_grpo` path previously rejected
+`KILN_CUDA_NATIVE_TRAINING=1 + GRPO` outright with `"does not yet
+support GRPO - unset it for GRPO jobs"`. That was because
+`cuda_train` never had its own GRPO step kernel — only the SFT step
+kernel. With the root-cause fix above, the symmetric thing for GRPO
+is just to route the cuda_native GRPO request through `grpo_train`
+(which already uses `BackendRuntime` + candle autograd, same as the
+fixed `cuda_native_sft_train`).
+
+This PR adds:
+
+- `kiln_train::cuda_train::cuda_native_grpo_train` — thin wrapper that
+  delegates to `trainer::grpo_train`. Matches `cuda_native_sft_train`'s
+  shape so the server's cuda-native flag can be uniform across SFT
+  and GRPO.
+- `kiln_train::cuda_train::cuda_native_grpo_train_jsonl` — streaming
+  variant, delegates to `trainer::grpo_train_jsonl`. For the server's
+  `dataset_path` GRPO path.
+- `kiln-server::training_queue::run_grpo` now calls
+  `cuda_native_grpo_train{,_jsonl}` when `KILN_CUDA_NATIVE_TRAINING=1`
+  instead of returning the legacy rejection error. The vk_native path
+  is unchanged.
+
+After this PR, `KILN_CUDA_NATIVE_TRAINING=1` is a uniform flag for
+the server — both SFT and GRPO get the same `BackendRuntime` route,
+both run at the production-tuned step time.
 
 ### Added
 

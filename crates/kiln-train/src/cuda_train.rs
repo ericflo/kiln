@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::trainer::{ProgressCallback, TrainingProgress, tokenize_for_training};
-use crate::{SftConfig, SftExample};
+use crate::{GrpoConfig, GrpoGroup, SftConfig, SftExample};
 
 pub type CudaAdamWBook = HashMap<TensorId, CudaAdamWState>;
 
@@ -2253,6 +2253,87 @@ pub fn cuda_native_sft_train(
         None,
     );
     Ok(output_dir)
+}
+
+/// CUDA-native GRPO entry point — mirrors `cuda_native_sft_train` for
+/// the GRPO path. Delegates to `trainer::grpo_train`, which dispatches
+/// each layer through `BackendRuntime` and runs candle's autograd.
+///
+/// Why this is a thin wrapper, same as `cuda_native_sft_train`: the
+/// `cuda_train` module has no separate GRPO step kernel of its own.
+/// Before #1063 the server's `KILN_CUDA_NATIVE_TRAINING=1` GRPO path
+/// returned an explicit error (`"KILN_CUDA_NATIVE_TRAINING=1 does not
+/// yet support GRPO - unset it for GRPO jobs"`) because there was
+/// nothing to route to. With the route-through-BackendRuntime fix in
+/// place for SFT, the symmetric thing for GRPO is just to call
+/// `grpo_train` and pick up the same fused-kernel autograd path. The
+/// `cuda_native_grpo_train` symbol exists so external callers (the
+/// server, future recipes that want to opt in via env, direct
+/// downstream consumers) have a stable function to call without
+/// needing to know that GRPO never had a slow path of its own.
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_native_grpo_train(
+    groups: &[GrpoGroup],
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+) -> Result<PathBuf> {
+    tracing::info!(
+        num_groups = groups.len(),
+        epochs = config.epochs,
+        adapter_name,
+        path = "backend_runtime_via_grpo_train",
+        "cuda_native_grpo_train: routing through BackendRuntime + candle autograd"
+    );
+    crate::trainer::grpo_train(
+        groups,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        adapter_name,
+        progress_cb,
+        None,
+    )
+}
+
+/// Streaming-dataset variant of [`cuda_native_grpo_train`]. Mirrors
+/// `trainer::grpo_train_jsonl` so the server's `dataset_path` GRPO
+/// path also has a CUDA-native entry point.
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_native_grpo_train_jsonl(
+    dataset_path: &Path,
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+) -> Result<PathBuf> {
+    tracing::info!(
+        dataset_path = %dataset_path.display(),
+        epochs = config.epochs,
+        adapter_name,
+        path = "backend_runtime_via_grpo_train_jsonl",
+        "cuda_native_grpo_train_jsonl: routing through BackendRuntime + candle autograd"
+    );
+    crate::trainer::grpo_train_jsonl(
+        dataset_path,
+        config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        adapter_name,
+        progress_cb,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
