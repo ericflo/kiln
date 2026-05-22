@@ -28,8 +28,15 @@ cd /workspace/kiln
 git fetch --depth=1 origin iter5-sft-strict-rollouts && git checkout -f iter5-sft-strict-rollouts && git reset --hard origin/iter5-sft-strict-rollouts
 
 # Build the cuda release binaries (kiln serve, cuda_sft_file, kiln eval-adapter, etc.)
-echo "=== building kiln (cuda release) ==="
-KILN_CUDA_ARCHS=86 cargo build --release --features cuda 2>&1 | tail -100
+# SCCACHE_RECACHE=1: force fresh compile + WRITE back to B2 cache. Previous build
+# pulled a corrupted gdn_gates.o from B2 cache — kiln_gdn_gates_bf16 crashed on every
+# inference. Fresh nvcc compile produces a working kernel; RECACHE=1 also heals B2
+# for future pods.
+echo "=== building kiln (cuda release, SCCACHE_RECACHE=1) ==="
+SCCACHE_RECACHE=1 KILN_CUDA_ARCHS=86 cargo build --release --features cuda 2>&1 | tail -100
+echo "exit=$?"
+echo "=== building examples (cuda_sft_file etc.) ==="
+SCCACHE_RECACHE=1 KILN_CUDA_ARCHS=86 cargo build --release --features cuda --examples 2>&1 | tail -30
 echo "exit=$?"
 
 # Verify the binaries we need exist
