@@ -5,12 +5,19 @@ set -euo pipefail
 mkdir -p /workspace
 cd /workspace
 
-# Setup: clone kiln, download model, configure sccache
-if [ ! -d /workspace/kiln/.git ]; then
-  kiln-setup --clone --repo /workspace/kiln
+# Setup: clone kiln + download model + configure sccache (only if not already done)
+if [ ! -f /root/.kiln-build-env ]; then
+  if [ -z "${B2_APPLICATION_KEY_ID:-}" ] || [ -z "${B2_APPLICATION_KEY:-}" ]; then
+    echo "FATAL: B2_APPLICATION_KEY_ID and B2_APPLICATION_KEY required for first-time setup"
+    exit 1
+  fi
+  if [ ! -d /workspace/kiln/.git ]; then
+    kiln-setup --clone --repo /workspace/kiln
+  else
+    kiln-setup --repo /workspace/kiln
+  fi
 else
-  echo "kiln already cloned; just running setup"
-  kiln-setup --repo /workspace/kiln
+  echo "build env already set up; skipping kiln-setup"
 fi
 
 # Source the build env
