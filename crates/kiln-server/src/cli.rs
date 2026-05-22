@@ -932,7 +932,7 @@ pub fn print_banner(host: &str, port: u16, model_path: Option<&str>, config_path
     let _ = writeln!(stderr);
     let _ = writeln!(
         stderr,
-        "  {} /ui, /v1/chat/completions, /v1/train/sft, /health, /metrics",
+        "  {} /ui, /v1/chat/completions, /v1/completions, /v1/train/sft, /health, /metrics",
         style("Endpoints:").dim()
     );
     let _ = writeln!(stderr);
