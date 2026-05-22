@@ -1,112 +1,172 @@
 #!/usr/bin/env bash
-# iter5 stage C: train SFT adapter, eval no-prompt 3-seed paired
+# iter5 stage C: train SFT adapter, eval no-prompt 3-seed paired (base vs adapter)
 set -euo pipefail
 
 cd /workspace/kiln
 source /root/.kiln-build-env
 
 ADAPTER_NAME="pi-faithful-iter5-sft-strict"
-OUT_ROOT="/tmp/iter5-sft-out"
-rm -rf "$OUT_ROOT" && mkdir -p "$OUT_ROOT"
+ADAPTER_OUT="/workspace/adapters/${ADAPTER_NAME}"
+mkdir -p /workspace/adapters
+rm -rf "$ADAPTER_OUT"
 
-cd /workspace/kiln/capabilities/caps/pi-faithful-completion
+CAPS_DIR=/workspace/kiln/capabilities/caps/pi-faithful-completion
+cd "$CAPS_DIR"
 
-# 1. Train SFT
+# 1. Verify the SFT dataset is there
+echo "=== sft.train.jsonl check ==="
+ls -la datasets/sft.train.jsonl
+wc -l datasets/sft.train.jsonl
+
+# 2. Train SFT (cuda_sft_file)
+#    Defaults: rank=8 alpha=16 lr=1e-4 epochs=1. Per METHODS.md §3.1 the canonical
+#    SFT recipe is rank=4 alpha=8 lr=1e-4 epochs=1 dataset_cap=128 — let's match that.
 echo "=== cuda_sft_file (SFT training) ==="
-KILN_CUDA_ARCHS=86 /workspace/kiln/target/release/cuda_sft_file \
-  --data datasets/sft.train.jsonl \
-  --model /workspace/Qwen3.5-4B \
-  --output "$OUT_ROOT/adapter" \
-  --adapter "$ADAPTER_NAME" \
-  --rank 4 --alpha 8 --lr 1e-4 --epochs 1 \
-  --dataset-cap 128 \
-  --seed 3141592653 \
-  --adapter-smoke-test \
-  --install-adapter-dir /workspace/adapters \
-  --install-adapter-name "$ADAPTER_NAME" 2>&1 | tail -50
+KILN_CUDA_ARCHS=86 /workspace/kiln/target/release/examples/cuda_sft_file \
+  --data "$CAPS_DIR/datasets/sft.train.jsonl" \
+  --model-path /workspace/Qwen3.5-4B \
+  --output-dir "$ADAPTER_OUT" \
+  --adapter-name "$ADAPTER_NAME" \
+  --rank 4 --alpha 8 --lr 1e-4 \
+  --epochs 1 \
+  --max-examples 128 2>&1 | tee /tmp/iter5-sft-train.log | tail -80
 
-# 2. Verify adapter loads + has behavioral effect
-echo "=== kiln adapter verify ==="
-/workspace/kiln/target/release/kiln adapter verify "$ADAPTER_NAME" \
+echo "=== adapter output ==="
+ls -la "$ADAPTER_OUT"
+
+# 3. (Re)start kiln serve so it picks up the new adapter
+echo "=== restart kiln serve ==="
+pkill -f 'target/release/kiln serve' 2>/dev/null || true
+sleep 3
+nohup /workspace/kiln/target/release/kiln serve --eval-mode \
+  --model-path /workspace/Qwen3.5-4B \
   --adapter-dir /workspace/adapters \
-  --url http://localhost:8420 2>&1 | tail -20
+  > /workspace/iter5-kiln-serve.log 2>&1 &
+echo "kiln serve pid: $!"
+for i in $(seq 1 120); do
+  if curl -sf http://localhost:8420/v1/health > /dev/null 2>&1; then
+    echo "kiln serve up at iter=$i"
+    break
+  fi
+  sleep 2
+  if [ "$i" -eq 120 ]; then
+    echo "FATAL: kiln serve did not become healthy"; tail -100 /workspace/iter5-kiln-serve.log
+    exit 1
+  fi
+done
 
-# 3. Eval no-prompt 3-seed paired (the goal: lift no-prompt composite)
-echo "=== eval-adapter no-prompt 3-seed ==="
-/workspace/kiln/target/release/kiln eval-adapter \
-  --url http://localhost:8420 \
-  --adapter "$ADAPTER_NAME" \
-  --adapter-dir /workspace/adapters \
-  --tasks datasets/eval.tasks.jsonl \
-  --seeds 3 \
-  --scorer ./rubric.py \
-  --output /tmp/iter5-eval-no-prompt.json \
-  --thinking off 2>&1 | tail -40
+# Confirm adapter is registered
+curl -s http://localhost:8420/v1/adapters | python3 -m json.tool || true
 
-# 4. Eval no-prompt 3-seed BASE for paired baseline
-echo "=== eval-adapter no-prompt 3-seed (BASE) ==="
-/workspace/kiln/target/release/kiln eval-adapter \
-  --url http://localhost:8420 \
-  --adapter base \
-  --adapter-dir /workspace/adapters \
-  --tasks datasets/eval.tasks.jsonl \
-  --seeds 3 \
-  --scorer ./rubric.py \
-  --output /tmp/iter5-eval-base-no-prompt.json \
-  --thinking off 2>&1 | tail -20
-
-# 5. ALSO eval with strict prompt to confirm the prompt+adapter still works
-# (if the SFT adapter destroyed the strict-prompt distribution, we know the LoRA
-# is destructive and we need to back off rank/lr)
-echo "=== eval-adapter WITH strict prompt 3-seed (ceiling reference) ==="
-# kiln eval-adapter doesn't support system_prompt override directly — use rollout.py
-for seed in 1 2 3; do
-  echo "--- seed $seed strict-prompt eval ---"
+# 4. Eval no-prompt 3-seed adapter
+echo "=== ADAPTER no-prompt eval (3 seeds, paired) ==="
+for s in 1 2 3; do
+  echo "  --- seed $s ---"
   python3 rollout.py \
     --tasks datasets/eval.tasks.jsonl \
-    --out-dir /tmp/iter5-eval-strict-seed-$seed \
+    --out-dir /tmp/iter5-eval-adapter-seed-$s \
     --mode eval \
     --num-generations 1 \
     --kiln-base http://localhost:8420 \
     --temperature 0.2 --top-p 0.95 --max-tokens 768 \
-    --seed $((3141592653 + seed)) \
+    --seed $((100 + s)) \
     --concurrency 4 \
-    --system-prompt-file prompts/h15-strict-system-prompt-system.txt \
-    --adapter "$ADAPTER_NAME" 2>&1 | tail -10
+    --adapter "$ADAPTER_NAME" 2>&1 | tail -8
 done
 
-# Compute mean
+# 5. Eval no-prompt 3-seed BASE
+echo "=== BASE no-prompt eval (3 seeds, paired) ==="
+for s in 1 2 3; do
+  echo "  --- seed $s ---"
+  python3 rollout.py \
+    --tasks datasets/eval.tasks.jsonl \
+    --out-dir /tmp/iter5-eval-base-seed-$s \
+    --mode eval \
+    --num-generations 1 \
+    --kiln-base http://localhost:8420 \
+    --temperature 0.2 --top-p 0.95 --max-tokens 768 \
+    --seed $((100 + s)) \
+    --concurrency 4 \
+    --adapter base 2>&1 | tail -8
+done
+
+# 6. ALSO eval base + strict prompt (ceiling reference, paired)
+echo "=== BASE+strict-prompt eval (3 seeds, paired) ==="
+for s in 1 2 3; do
+  python3 rollout.py \
+    --tasks datasets/eval.tasks.jsonl \
+    --out-dir /tmp/iter5-eval-strict-seed-$s \
+    --mode eval \
+    --num-generations 1 \
+    --kiln-base http://localhost:8420 \
+    --temperature 0.2 --top-p 0.95 --max-tokens 768 \
+    --seed $((100 + s)) \
+    --concurrency 4 \
+    --system-prompt-file prompts/h15-strict-system-prompt-system.txt \
+    --adapter base 2>&1 | tail -5
+done
+
+# 7. Compute paired summary
 echo "=== iter5 results summary ==="
 python3 - <<'PY'
 import json, statistics
 from pathlib import Path
 
-print("\n=== ADAPTER no-prompt 3-seed ===")
-try:
-    es = json.loads(Path("/tmp/iter5-eval-no-prompt.json").read_text())
-    print(json.dumps(es, indent=2, default=str)[:1500])
-except Exception as e:
-    print(f"ERROR loading adapter eval: {e}")
+def load(arm, seed):
+    p = Path(f"/tmp/iter5-eval-{arm}-seed-{seed}/summary.json")
+    if not p.exists():
+        return None
+    return json.loads(p.read_text())
 
-print("\n=== BASE no-prompt 3-seed ===")
-try:
-    es = json.loads(Path("/tmp/iter5-eval-base-no-prompt.json").read_text())
-    print(json.dumps(es, indent=2, default=str)[:1500])
-except Exception as e:
-    print(f"ERROR loading base eval: {e}")
+def mean(field, arm):
+    vals = [load(arm, s).get(field) for s in [1,2,3] if load(arm, s)]
+    vals = [v for v in vals if v is not None]
+    if not vals:
+        return None, None
+    if len(vals) < 2:
+        return vals[0], 0.0
+    return statistics.mean(vals), statistics.stdev(vals)
 
-print("\n=== ADAPTER + strict prompt 3-seed (mean composite) ===")
-seeds_means = []
-for s in [1, 2, 3]:
-    f = Path(f"/tmp/iter5-eval-strict-seed-{s}/summary.json")
-    if f.exists():
-        d = json.loads(f.read_text())
-        seeds_means.append(d.get("mean_composite", 0.0))
-        print(f"  seed {s}: {d.get('mean_composite', 0.0):.4f}")
-if seeds_means:
-    m = statistics.mean(seeds_means)
-    sd = statistics.stdev(seeds_means) if len(seeds_means) > 1 else 0.0
-    print(f"  mean = {m:.4f}, stdev = {sd:.4f}")
+arms = ["adapter", "base", "strict"]
+print(f"{'arm':10s} {'mean':>8s} {'stdev':>8s}")
+results = {}
+for arm in arms:
+    m, sd = mean("mean_composite", arm)
+    if m is not None:
+        print(f"{arm:10s} {m:8.4f} {sd:8.4f}")
+        results[arm] = (m, sd)
+    else:
+        print(f"{arm:10s} MISSING")
+
+# Paired per-seed lift
+print()
+print("=== ADAPTER vs BASE paired per-seed lift (no-prompt) ===")
+lifts = []
+for s in [1,2,3]:
+    a = load("adapter", s)
+    b = load("base", s)
+    if a and b:
+        delta = a["mean_composite"] - b["mean_composite"]
+        lifts.append(delta)
+        print(f"  seed {s}: adapter={a['mean_composite']:.4f} base={b['mean_composite']:.4f} lift={delta:+.4f}")
+if lifts:
+    m = statistics.mean(lifts)
+    sd = statistics.stdev(lifts) if len(lifts) > 1 else 0.0
+    print(f"  PAIRED LIFT: {m:+.4f} ± {sd:.4f}")
+    if sd > 0:
+        print(f"  SIGMA: {abs(m)/sd:.1f}σ")
+
+# Show subscores for adapter vs base
+print()
+print("=== Sub-score means (adapter no-prompt) ===")
+a = load("adapter", 1)
+if a:
+    for k in ['outcome.value_correct', 'honesty.score', 'format_strict.score', 'terseness.score',
+              'no_question.score', 'no_soft_punt.score']:
+        seeds_means = [load("adapter", s).get("subscore_means",{}).get(k) for s in [1,2,3]]
+        seeds_means = [v for v in seeds_means if v is not None]
+        if seeds_means:
+            print(f"  {k}: {statistics.mean(seeds_means):.4f}")
 PY
 
 touch /workspace/iter5-stage-c.done
