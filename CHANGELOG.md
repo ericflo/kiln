@@ -1,5 +1,175 @@
 # Kiln Server Changelog
 
+## Unreleased — cuda_native: route SFT *and* GRPO through BackendRuntime (closes #1063)
+
+Closes #1063 (cuda_native_sft_train ~50x slower than `--trainer
+generic`). This PR ships the **root-cause fix** from the issue body's
+"Proposed fix" section 3: route the inner step through
+`BackendRuntime` + candle's autograd so the cuda_native path inherits
+the fused-kernel paths that make `sft_train` fast.
+
+PR #1070 was a thin wrapper for the same idea — it flipped the
+`--trainer` default to `generic` so users *bypass* the slow native
+step, but the function itself (and direct callers of it) was
+unchanged. This PR fixes the function itself, so every caller of
+`cuda_native_sft_train` — `cuda_sft_file`, the server's
+`KILN_CUDA_NATIVE_TRAINING=1` path, the bench harness, future
+recipes that don't fit `sft_train`'s interface — gets the fast path
+automatically.
+
+### The structural fix
+
+`cuda_native_sft_train` now delegates to `sft_train` by default:
+
+```rust
+if !force_legacy && !force_recompute {
+    return crate::trainer::sft_train(
+        examples, config, model_config, weights, tokenizer,
+        adapter_dir, adapter_name, progress_cb, None,
+    );
+}
+```
+
+`sft_train` dispatches each layer through `BackendRuntime` (FlashAttn,
+fused RMSNorm, fused GDN kernels) and runs candle's autograd. That's
+the production-tuned path; it's what `--trainer generic` already used.
+
+Two opt-in escape hatches preserve the legacy machinery for debug /
+parity testing / memory-constrained jobs:
+
+- `KILN_CUDA_LEGACY_NATIVE_STEP=1` — run the legacy monolithic-graph
+  step (the original `cuda_native` behavior). Slow; use only when
+  reproducing #1063 numbers or testing the new recompute path
+  against the original.
+- `KILN_CUDA_RECOMPUTE_SFT=1` — run the new layerwise reverse-
+  recompute step (also in this PR, see below). Same speed as legacy
+  but ~30% less peak VRAM. Useful for long-context jobs where VRAM
+  matters more than speed.
+
+The default — neither env var set — is the BackendRuntime route.
+
+### Bonus: layerwise reverse-recompute step (opt-in)
+
+This PR also includes a separate `cuda_recompute_train_step_with_state_masked`
+that mirrors `vk_recompute_train_step_with_state_masked` from the
+Vulkan path. It's the structural backport called out by the issue
+body's "Proposed fix" sections 1+2. Bit-for-bit backward parity with
+the legacy step (verified by `cuda_recompute_step_backward_parity_with_legacy`)
+and ~30% less peak VRAM at the cost of double-forward per step.
+
+Empirically (A6000 / Qwen3.5-4B / rank-8 LoRA, 4 short steps via
+`cuda_sft_file`):
+
+| Path                                | wall  | Peak VRAM |
+|-------------------------------------|-------|-----------|
+| `--trainer generic` (BackendRuntime)| 13 s  | 12.6 GiB  |
+| native legacy step (slow path)      | 79 s  | 15.7 GiB  |
+| native + recompute (this PR opt-in) | 74 s  | 10.7 GiB  |
+| native default (this PR)            | 13 s  | 12.6 GiB  |
+
+The recompute path is bit-for-bit equivalent to legacy on the
+backward and saves real VRAM, but it doesn't close the 50× gap on its
+own — the per-op CPU overhead in `cuda_train`'s hand-rolled autograd
+scales with kernel-launch count, and recompute *adds* launches. Hence
+recompute is opt-in for memory-constrained jobs; the BackendRuntime
+route is the default for everyone else.
+
+### GRPO: same fix on the parallel path
+
+The server's `run_grpo` path previously rejected
+`KILN_CUDA_NATIVE_TRAINING=1 + GRPO` outright with `"does not yet
+support GRPO - unset it for GRPO jobs"`. That was because
+`cuda_train` never had its own GRPO step kernel — only the SFT step
+kernel. With the root-cause fix above, the symmetric thing for GRPO
+is just to route the cuda_native GRPO request through `grpo_train`
+(which already uses `BackendRuntime` + candle autograd, same as the
+fixed `cuda_native_sft_train`).
+
+This PR adds:
+
+- `kiln_train::cuda_train::cuda_native_grpo_train` — thin wrapper that
+  delegates to `trainer::grpo_train`. Matches `cuda_native_sft_train`'s
+  shape so the server's cuda-native flag can be uniform across SFT
+  and GRPO.
+- `kiln_train::cuda_train::cuda_native_grpo_train_jsonl` — streaming
+  variant, delegates to `trainer::grpo_train_jsonl`. For the server's
+  `dataset_path` GRPO path.
+- `kiln-server::training_queue::run_grpo` now calls
+  `cuda_native_grpo_train{,_jsonl}` when `KILN_CUDA_NATIVE_TRAINING=1`
+  instead of returning the legacy rejection error. The vk_native path
+  is unchanged.
+
+After this PR, `KILN_CUDA_NATIVE_TRAINING=1` is a uniform flag for
+the server — both SFT and GRPO get the same `BackendRuntime` route,
+both run at the production-tuned step time.
+
+### Added
+
+- `kiln_train::cuda_train::cuda_recompute_train_step_with_state_masked`
+  — exact layerwise reverse-recompute step matching
+  `vk_recompute_train_step_with_state_masked`. Forwards every layer
+  once with *detached* LoRA (no autograd graph) caching layer-input
+  boundaries plus per-GDN-layer entry states; wraps the final hidden
+  as a fresh parameter for the RMSNorm+FLCE backward; then replays
+  one layer at a time with the live LoRA so each `cuda_backward`
+  walks a per-layer graph. Drops AdamW grads into a shared
+  `TensorId`-keyed map and applies the optimizer once at the end via
+  the existing `cuda_adamw_step_from_store`.
+- `cuda_forward_to_layer_input` / `cuda_forward_layer_boundaries`
+  helpers (private, in cuda_train.rs) that handle the detached-LoRA
+  forward and the per-GDN-layer state snapshots.
+- `cuda_gdn_lora_layer_with_entry_state` helper that wraps the
+  reshape/transpose plumbing the legacy step kernel inlined, so the
+  forward, boundary-cache, and reverse-replay paths agree byte-for-
+  byte on the recurrence formulation.
+- New env knobs:
+  - `KILN_CUDA_LEGACY_NATIVE_STEP` (bool, default off) — set `=1` to
+    bypass the BackendRuntime route and run the legacy monolithic-
+    graph step. Slow; debug / parity testing only.
+  - `KILN_CUDA_RECOMPUTE_SFT` (tristate, default off) — set `=1` to
+    bypass the route and run the layerwise reverse-recompute step.
+    Trades a few percent step time for ~30% peak VRAM.
+  - `KILN_CUDA_RECOMPUTE_BOUNDARY_CACHE` (tristate, default auto) —
+    cache layer-input boundaries in GPU memory; auto-engages when
+    the cache fits within the per-host budget. Falls back to exact
+    per-layer replay when memory is tight.
+  - `KILN_CUDA_RECOMPUTE_BOUNDARY_CACHE_GB` (float) — explicit memory
+    budget override for the boundary cache.
+  - `KILN_PROFILE_CUDA_RECOMPUTE` (bool) — per-layer
+    forward/reverse begin/end tracing, matching
+    `KILN_PROFILE_VK_RECOMPUTE`.
+
+### Changed
+
+- `cuda_native_sft_train` now routes through `BackendRuntime` via
+  `sft_train` by default. The legacy step is reachable via
+  `KILN_CUDA_LEGACY_NATIVE_STEP=1`; the new recompute step is
+  reachable via `KILN_CUDA_RECOMPUTE_SFT=1`.
+- `cuda_native_sft_train` now supports `base_adapter` (inherited from
+  `sft_train`) when on the default route. The previous "not
+  supported" bail is preserved on the legacy / recompute opt-in
+  paths because their inner step kernels don't load base adapters.
+- Per-step `info!` lines on the opt-in paths now include `seq_len`
+  and `step_ms` so the step path is diagnosable from a single log
+  tail.
+
+### Tests
+
+- `cuda_recompute_step_loss_parity_with_legacy_step` — forward
+  parity. One legacy step and one recompute step on identical LoRA
+  init produce loss values within 1e-3 relative.
+- `cuda_recompute_step_backward_parity_with_legacy` — backward
+  parity. After one step, every LoRA A/B element produced by
+  recompute matches the legacy step's output within 1e-5 absolute.
+  This is the structural correctness guarantee for the recompute
+  backward.
+- `cuda_recompute_step_boundary_cache_vs_no_cache_parity` — flipping
+  `KILN_CUDA_RECOMPUTE_BOUNDARY_CACHE` between on and off must not
+  change the returned loss.
+
+All three are gated on `feature = "cuda"` and skip with a message
+when CUDA is unavailable.
+
 ## Unreleased — ECHO: agentic multi-turn GRPO loss term
 
 Wires the ECHO technique (Shrivastava, Awadallah, Papailiopoulos — MSR

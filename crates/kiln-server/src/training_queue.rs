@@ -453,12 +453,6 @@ fn run_grpo(
     #[cfg(not(feature = "vulkan"))]
     let _ = job_id;
 
-    if cuda_native {
-        return Err(
-            "KILN_CUDA_NATIVE_TRAINING=1 does not yet support GRPO - unset it for GRPO jobs"
-                .to_string(),
-        );
-    }
     if let Some(dataset_path) = req.dataset_path.as_deref() {
         if dataset_path.trim().is_empty() {
             return Err("GRPO dataset_path streaming requires a non-empty path".to_string());
@@ -467,6 +461,36 @@ fn run_grpo(
             return Err(
                 "GRPO request must use either groups or dataset_path, not both".to_string(),
             );
+        }
+        if cuda_native {
+            #[cfg(feature = "cuda")]
+            {
+                tracing::info!(
+                    job_id = %job_id,
+                    dataset_path,
+                    "KILN_CUDA_NATIVE_TRAINING=1 - routing streamed GRPO dataset to \
+                     cuda_native_grpo_train_jsonl"
+                );
+                return kiln_train::cuda_train::cuda_native_grpo_train_jsonl(
+                    std::path::Path::new(dataset_path),
+                    &req.config,
+                    model_config,
+                    weights,
+                    tokenizer,
+                    adapter_dir,
+                    adapter_name,
+                    Some(progress_cb),
+                )
+                .map_err(|e| format!("{e:#}"));
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                tracing::warn!(
+                    job_id = %job_id,
+                    "KILN_CUDA_NATIVE_TRAINING=1 set but kiln-server was built without \
+                     --features cuda - falling back to candle GRPO trainer"
+                );
+            }
         }
         if vk_native {
             #[cfg(feature = "vulkan")]
@@ -515,6 +539,34 @@ fn run_grpo(
                 Some(replay_ctx),
             )
             .map_err(|e| format!("{e:#}"));
+        }
+    }
+    if cuda_native {
+        #[cfg(feature = "cuda")]
+        {
+            tracing::info!(
+                job_id = %job_id,
+                "KILN_CUDA_NATIVE_TRAINING=1 - routing GRPO to cuda_native_grpo_train"
+            );
+            return kiln_train::cuda_train::cuda_native_grpo_train(
+                &req.groups,
+                &req.config,
+                model_config,
+                weights,
+                tokenizer,
+                adapter_dir,
+                adapter_name,
+                Some(progress_cb),
+            )
+            .map_err(|e| format!("{e:#}"));
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            tracing::warn!(
+                job_id = %job_id,
+                "KILN_CUDA_NATIVE_TRAINING=1 set but kiln-server was built without \
+                 --features cuda - falling back to candle GRPO trainer"
+            );
         }
     }
     if vk_native {
