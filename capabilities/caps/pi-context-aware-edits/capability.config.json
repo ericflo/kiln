@@ -18,8 +18,8 @@
     "kiln eval-adapter --seeds N (#33)",
     "adapter_manifest.json + kiln adapter restore (#36)"
   ],
-  "pi_bin": "/usr/bin/pi",
-  "pi_model_id": "Qwen3.5-4B",
+  "pi_bin": "pi",
+  "pi_model_id": "qwen-3.5-4b-kiln-pi1024",
   "sandbox_root": "/tmp/pi-context-aware-edits-rollouts",
   "rollout": {
     "num_generations_train": 4,
