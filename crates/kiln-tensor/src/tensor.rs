@@ -252,6 +252,44 @@ impl Tensor {
         })
     }
 
+    /// Insert a size-1 axis at position `axis` (`0..=rank`). Zero-copy.
+    ///
+    /// Inverse of [`Tensor::squeeze`]. Convenient for promoting a
+    /// `[D]` tensor to `[1, D]` for matmul, or adding a head-axis
+    /// before attention masking.
+    pub fn unsqueeze(&self, axis: usize) -> Result<Self> {
+        let mut new_shape = self.shape().to_vec();
+        if axis > new_shape.len() {
+            return Err(crate::Error::Msg(format!(
+                "unsqueeze: axis {axis} > rank {}",
+                new_shape.len()
+            )));
+        }
+        new_shape.insert(axis, 1);
+        self.reshape(new_shape)
+    }
+
+    /// Remove the size-1 axis at position `axis`. Errors if the axis
+    /// is not exactly size 1. Zero-copy.
+    pub fn squeeze(&self, axis: usize) -> Result<Self> {
+        let shape = self.shape();
+        if axis >= shape.len() {
+            return Err(crate::Error::Msg(format!(
+                "squeeze: axis {axis} out of range for rank {}",
+                shape.len()
+            )));
+        }
+        if shape[axis] != 1 {
+            return Err(crate::Error::Msg(format!(
+                "squeeze: axis {axis} has size {}, expected 1",
+                shape[axis]
+            )));
+        }
+        let mut new_shape = shape.to_vec();
+        new_shape.remove(axis);
+        self.reshape(new_shape)
+    }
+
     /// Produce a contiguous copy of this tensor. **Always allocates
     /// when called on a non-contiguous tensor** (the fast path returns
     /// the clone on already-contiguous inputs without a copy).
@@ -592,5 +630,51 @@ mod tests {
         assert_eq!(h.load(Ordering::Relaxed), 1);
         h.fetch_add(10, Ordering::Relaxed);
         assert_eq!(t.current_version(), 11);
+    }
+
+    #[test]
+    fn unsqueeze_promotes_rank() {
+        let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0], vec![3]).unwrap();
+        let u = t.unsqueeze(0).unwrap();
+        assert_eq!(u.shape(), &[1, 3]);
+        let u1 = t.unsqueeze(1).unwrap();
+        assert_eq!(u1.shape(), &[3, 1]);
+    }
+
+    #[test]
+    fn unsqueeze_at_end_is_inclusive() {
+        // axis = rank is valid (insert at the tail).
+        let t = Tensor::from_slice(&[1.0f32, 2.0], vec![2]).unwrap();
+        let u = t.unsqueeze(1).unwrap();
+        assert_eq!(u.shape(), &[2, 1]);
+    }
+
+    #[test]
+    fn unsqueeze_out_of_range_errors() {
+        let t = Tensor::from_slice(&[1.0f32], vec![1]).unwrap();
+        let e = t.unsqueeze(5).unwrap_err();
+        assert!(e.to_string().contains("unsqueeze"));
+    }
+
+    #[test]
+    fn squeeze_removes_size_1_axis() {
+        let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0], vec![1, 3]).unwrap();
+        let s = t.squeeze(0).unwrap();
+        assert_eq!(s.shape(), &[3]);
+    }
+
+    #[test]
+    fn squeeze_non_size_1_errors() {
+        let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0], vec![3]).unwrap();
+        let e = t.squeeze(0).unwrap_err();
+        assert!(e.to_string().contains("squeeze"));
+    }
+
+    #[test]
+    fn squeeze_unsqueeze_roundtrip() {
+        let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0], vec![3]).unwrap();
+        let u = t.unsqueeze(0).unwrap();
+        let s = u.squeeze(0).unwrap();
+        assert_eq!(s.shape(), t.shape());
     }
 }
