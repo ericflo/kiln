@@ -126,6 +126,30 @@ pub fn huber_loss(pred: &Tensor, target: &Tensor, delta: f32) -> Result<Tensor> 
     scalar_tensor(pred.dtype(), sum / n)
 }
 
+/// KL divergence `D_KL(p || q) = Σ p * (log p - log q)` along the
+/// trailing axis. Inputs `p_log_probs` and `q_log_probs` are
+/// log-probabilities (output of `log_softmax_last_dim`). Returns
+/// a per-row scalar (axis removed), then averaged across rows.
+pub fn kl_div_log_probs(p_log: &Tensor, q_log: &Tensor) -> Result<Tensor> {
+    validate_pair(p_log, q_log, "kl_div_log_probs")?;
+    if p_log.rank() < 1 {
+        bail!("kl_div_log_probs: input must have rank ≥ 1");
+    }
+    let shape = p_log.shape();
+    let last = *shape.last().unwrap();
+    let outer: usize = shape[..shape.len() - 1].iter().product::<usize>().max(1);
+    let (p_lp, q_lp) = load_pair_f32(p_log, q_log)?;
+    let mut sum = 0.0_f32;
+    for r in 0..outer {
+        for i in 0..last {
+            let idx = r * last + i;
+            let p_val = p_lp[idx].exp();
+            sum += p_val * (p_lp[idx] - q_lp[idx]);
+        }
+    }
+    scalar_tensor(p_log.dtype(), sum / outer as f32)
+}
+
 /// Binary cross-entropy loss with logits (numerically stable
 /// log-sum-exp form). `logits` and `targets` are same-shape; targets
 /// are real-valued in `[0, 1]` (typical: binary {0, 1}).
@@ -310,6 +334,34 @@ mod tests {
         let targets = Tensor::from_slice(&[0i64, 2], vec![2]).unwrap();
         let loss = scalar_f32(&nll_loss(&log_probs, &targets).unwrap());
         assert!(loss.abs() < 1e-6);
+    }
+
+    #[test]
+    fn kl_div_self_is_zero() {
+        // D_KL(p || p) = 0 always.
+        let lp = (1.0_f32 / 3.0).ln();
+        let p = Tensor::from_slice(&[lp, lp, lp], vec![1, 3]).unwrap();
+        let kl = scalar_f32(&kl_div_log_probs(&p, &p).unwrap());
+        assert!(kl.abs() < 1e-5);
+    }
+
+    #[test]
+    fn kl_div_known_distributions() {
+        // p = uniform[3]; q = uniform[3]. Same → KL = 0.
+        let lp = (1.0_f32 / 3.0).ln();
+        let p_log = Tensor::from_slice(&[lp, lp, lp], vec![1, 3]).unwrap();
+        let q_log = Tensor::from_slice(&[lp, lp, lp], vec![1, 3]).unwrap();
+        let kl = scalar_f32(&kl_div_log_probs(&p_log, &q_log).unwrap());
+        assert!(kl.abs() < 1e-5);
+    }
+
+    #[test]
+    fn kl_div_positive_when_distributions_differ() {
+        // p peaks at 0; q is uniform.
+        let p_log = Tensor::from_slice(&[(0.9_f32).ln(), (0.05_f32).ln(), (0.05_f32).ln()], vec![1, 3]).unwrap();
+        let q_log = Tensor::from_slice(&[(1.0_f32 / 3.0).ln(); 3], vec![1, 3]).unwrap();
+        let kl = scalar_f32(&kl_div_log_probs(&p_log, &q_log).unwrap());
+        assert!(kl > 0.0);
     }
 
     #[test]
