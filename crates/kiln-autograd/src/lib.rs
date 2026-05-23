@@ -61,5 +61,7 @@ pub use backwards::mask::MaskedFillBackward;
 pub use backwards::matmul::MatmulBackward;
 pub use backwards::reduce::{ReduceBackward, ReduceKind, ReduceScope};
 pub use backwards::rmsnorm::RmsNormBackward;
+pub use backwards::rope::RopeBackward;
+pub use backwards::swiglu::MulSigmoidGateBackward;
 pub use grad_store::GradStore;
 pub use tape::{Tape, TapeNode};

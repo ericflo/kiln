@@ -20,3 +20,5 @@ pub mod mask;
 pub mod matmul;
 pub mod reduce;
 pub mod rmsnorm;
+pub mod rope;
+pub mod swiglu;
