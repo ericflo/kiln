@@ -1,8 +1,13 @@
 # kiln-tensor substrate status
 
+**🎉 First all-green substrate validate on RunPod A6000
+(2026-05-23): 1,403 tests passing, 35 test binaries, exit 0.** See
+`substrate-validate-2026-05-23.md` for the full report.
+
 **211 / 211 deliverables shipped** — substrate complete; per-backend
 matmul trait + Phase 7 migration plumbing in place; cross-op
-integration parity test landed.
+integration parity test landed and confirmed passing on GPU
+hardware.
 
 - **94 kiln-tensor forward op families** (add since prior dashboard:
   interpolate_1d w/ AlignCorners modes; all the prior PyTorch-parity
