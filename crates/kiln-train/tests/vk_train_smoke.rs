@@ -2280,7 +2280,7 @@ fn vk_native_grpo_jsonl_smoke_streams_large_dataset() -> Result<()> {
 /// land in the right shape.
 #[test]
 fn vk_native_opd_train_smoke_saves_adapter() -> Result<()> {
-    use kiln_core::tokenizer::ChatMessage;
+    use kiln_train::ChatMessage;
     use kiln_train::logit_source::{DeterministicUniformLogitSource, LogitSource};
     use kiln_train::opd::{
         OpdConfig, OpdLossGranularity, OpdObjective, OpdPrompt, OpdTrainingMode,
@@ -2442,7 +2442,7 @@ fn vk_native_opd_train_smoke_saves_adapter() -> Result<()> {
 /// prompts. Mirrors `vk_native_grpo_train`'s shape-preflight tests.
 #[test]
 fn vk_native_opd_train_rejects_on_policy_in_v1() -> Result<()> {
-    use kiln_core::tokenizer::ChatMessage;
+    use kiln_train::ChatMessage;
     use kiln_train::logit_source::{DeterministicUniformLogitSource, LogitSource};
     use kiln_train::opd::{
         OpdConfig, OpdLossGranularity, OpdObjective, OpdPrompt, OpdTrainingMode,
