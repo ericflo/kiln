@@ -1,14 +1,19 @@
 # kiln-tensor substrate status
 
-**170 / 170 deliverables shipped** — substrate side is complete.
+**184 / 184 deliverables shipped** — substrate side is complete and
+growing.
 
-- **89 kiln-tensor forward op families** + **46 BackwardOps**
-  in kiln-autograd (every differentiable forward has a backward;
-  non-differentiable ops correctly omit one)
+- **87 kiln-tensor forward op families** (chunk/split, unbind, tile,
+  roll, flip, gather, masked_select, nonzero, bincount, unique,
+  sort/argsort, searchsorted, cumprod, meshgrid, pad — all PyTorch-
+  parity primitives shipped on top of the original 70+) + **46
+  BackwardOps** in kiln-autograd (every differentiable forward has a
+  backward; non-differentiable ops correctly omit one)
 - **Phase 4 sampler chain end-to-end** (12 LogitProcessors + Gumbel
   terminal sampler)
 - **All four optimizers shipped end-to-end** (AdamW, SGD, Lion, Muon)
   with master-write to Parameter and anti-pattern 11 preserved
+- **GradAccumulator** for micro-batch gradient accumulation (Phase 6.5)
 - **Per-backend Allocator scaffolds** (CUDA, Metal, Vulkan) feature-
   gated and ready for Phase 7
 - **Per-backend CapturedGraph scaffolds** (`kiln-graph-cuda/metal/vulkan`)
