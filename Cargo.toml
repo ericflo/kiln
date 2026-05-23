@@ -22,6 +22,7 @@ members = [
     "crates/kiln-server",
     "crates/kiln-tensor",
     "crates/kiln-train",
+    "crates/kiln-vulkan-blas",
     "crates/kiln-vulkan-kernel",
 ]
 # kiln-conv1d-kernel, kiln-flash-attn, kiln-gdn-kernel, kiln-marlin-gemm,
@@ -53,6 +54,7 @@ default-members = [
     "crates/kiln-server",
     "crates/kiln-tensor",
     "crates/kiln-train",
+    "crates/kiln-vulkan-blas",
 ]
 
 [workspace.package]
