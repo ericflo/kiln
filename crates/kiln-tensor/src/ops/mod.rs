@@ -85,6 +85,7 @@ pub mod trace;
 pub mod triangular;
 pub mod trig;
 pub mod unary_arith;
+pub mod unbind;
 pub mod where_select;
 
 pub use activation::{gelu, relu, sigmoid, silu, tanh, ActivationOp, UnaryKind};
@@ -155,4 +156,5 @@ pub use trace::trace;
 pub use triangular::{tril, tril_mask, triu, triu_mask};
 pub use trig::{acos, asin, atan, cos, sin, tan, TrigKind};
 pub use unary_arith::{abs, exp, ln, neg, sqrt, UnaryArithKind};
+pub use unbind::unbind;
 pub use where_select::where_select;
