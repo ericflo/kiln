@@ -1,9 +1,10 @@
 # kiln-tensor substrate status
 
-**108 / 108 deliverables shipped** — substrate side is complete.
+**115 / 115 deliverables shipped** — substrate side is complete.
 
-- **27 kiln-tensor forward op families** + matching **27 BackwardOps**
-  in kiln-autograd
+- **33 kiln-tensor forward op families** + matching **35 BackwardOps**
+  in kiln-autograd (every differentiable forward has a backward;
+  non-differentiable ops correctly omit one)
 - **Phase 4 sampler chain end-to-end** (12 LogitProcessors + Gumbel
   terminal sampler)
 - **All four optimizers shipped end-to-end** (AdamW, SGD, Lion, Muon)
@@ -100,7 +101,15 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 1.64 | broadcast_to forward + backward | ✓ |
 | 1.65 | LayerNorm forward + backward | ✓ |
 | 1.66 | GELU activation forward + backward | ✓ |
-| 1.67 | substrate-status dashboard refresh (this PR) | ✓ |
+| 1.67 | substrate-status dashboard refresh (Phase 1.62-1.66 + 6.5.5-6.5.6) | ✓ |
+| 1.68 | Phase 1.62-1.66 new-ops compose integration test | ✓ |
+| 1.69 | realistic transformer FFN block training test | ✓ |
+| 1.70 | top_k op (values + indices) | ✓ |
+| 1.71 | where_select op + backward | ✓ |
+| 1.72 | unary arithmetic (abs/neg/exp/ln/sqrt) ops + backwards | ✓ |
+| 1.73 | clamp + pow ops + backwards | ✓ |
+| 1.74 | one_hot encoding op | ✓ |
+| 1.75 | substrate-status dashboard refresh (this PR) | ✓ |
 
 ## Phase 2 — kiln-blas / kiln-mps / kiln-vulkan-blas / kiln-param
 
@@ -165,7 +174,7 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 
 (Only grammar-mask remains — separate schema-compiler effort.)
 
-## Phase 6a backward ops — 27 / 27 differentiable forward ops covered
+## kiln-autograd BackwardOps — 35 ops covering every differentiable forward
 
 | Phase | BackwardOps |
 |-------|-------------|
@@ -181,6 +190,13 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 1.64 | BroadcastToBackward |
 | 1.65 | LayerNormBackward |
 | 1.66 | GeluBackward |
+| 1.71 | WhereSelectBackward |
+| 1.72 | AbsBackward, NegBackward, ExpBackward, LnBackward, SqrtBackward |
+| 1.73 | ClampBackward, PowBackward |
+
+Non-differentiable forward ops (correctly return `bwd: None`):
+`argmax_last_dim`, `causal_mask`, `top_k`, `one_hot`, every
+LogitProcessor + GumbelSampler in the sampler chain.
 
 Each is parity-tested against finite-difference reference values
 where applicable. Non-differentiable ops (argmax, causal_mask, the
