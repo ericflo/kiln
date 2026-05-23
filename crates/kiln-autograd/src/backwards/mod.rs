@@ -28,6 +28,7 @@ pub mod lerp;
 pub mod log_variants;
 pub mod mask;
 pub mod matmul;
+pub mod precision;
 pub mod reduce;
 pub mod repeat;
 pub mod rmsnorm;
