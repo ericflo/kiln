@@ -50,7 +50,7 @@ pub mod trig;
 pub mod unary_arith;
 pub mod where_select;
 
-pub use activation::{gelu, sigmoid, silu, ActivationOp, UnaryKind};
+pub use activation::{gelu, relu, sigmoid, silu, tanh, ActivationOp, UnaryKind};
 pub use argmax::{argmax_last_dim, ArgmaxLastDimOp};
 pub use broadcast::broadcast_to;
 pub use cast::{cast, CastOp};
