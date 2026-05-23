@@ -11,6 +11,9 @@ build = "build.rs"
 [dependencies]
 candle-core = { workspace = true, features = ["cuda"] }
 half = "2"
+# Phase 7 prep — kiln-tensor-typed surface alongside candle-typed.
+# Both call the same FFI; Phase 7 deletes the candle path.
+kiln-tensor = { workspace = true, features = ["cuda"] }
 
 [build-dependencies]
 cc = "1"
