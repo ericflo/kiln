@@ -38,9 +38,11 @@
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
 
+mod backend_matmul;
 mod tile_policy;
 mod uma;
 
+pub use backend_matmul::MpsBackendMatmul;
 pub use tile_policy::MpsTilePolicy;
 pub use uma::MpsUmaHint;
 
