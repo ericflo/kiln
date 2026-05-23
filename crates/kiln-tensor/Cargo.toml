@@ -61,3 +61,9 @@ metal = ["dep:candle-core", "candle-core?/metal", "dep:candle-metal-kernels"]
 # kiln-vulkan-kernel's already-candle-free VulkanBuffer + VulkanDevice.
 # This is a permanent dependency (Phase 7 does not change it).
 vulkan = ["dep:kiln-vulkan-kernel"]
+
+[dev-dependencies]
+# Phase 1.131's `training_full_block` integration test threads
+# kiln-autograd backwards through the substrate end-to-end. Mirrors
+# the dev-dep wiring already used by kiln-optim's training tests.
+kiln-autograd = { workspace = true }
