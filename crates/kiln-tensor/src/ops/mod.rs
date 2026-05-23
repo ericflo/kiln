@@ -58,6 +58,7 @@ pub mod logit_processor;
 pub mod logit_xtc;
 pub mod losses;
 pub mod mask;
+pub mod masked_select;
 pub mod matmul;
 pub mod max_min_axis;
 pub mod mha;
@@ -133,6 +134,7 @@ pub use losses::{
     mse_loss, nll_loss,
 };
 pub use mask::{causal_mask, masked_fill, MaskedFillOp};
+pub use masked_select::masked_select;
 pub use matmul::{matmul, MatmulOp};
 pub use max_min_axis::{max_axis, min_axis, MinMaxKind};
 pub use mha::multi_head_attention;
