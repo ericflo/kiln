@@ -2719,8 +2719,14 @@ pub fn gdn_chunk_scan(
     let beta_c = beta.contiguous()?;
     let dlast_c = decay_last_col.contiguous()?;
 
-    let out_chunk = Tensor::zeros((b, h, c, dv), DType::BF16, device)?;
-    let w_weighted = Tensor::zeros((b, h, c, dv), DType::BF16, device)?;
+    // Both buffers are fully overwritten by the GDN chunk-scan kernel
+    // before any downstream read, so the cudaMemset that `Tensor::zeros`
+    // issues is wasted bandwidth. At seq_len=2048 across 24 GDN layers
+    // this allocation site fires once per tail chunk plus all fallback
+    // paths; switching to `Tensor::empty` keeps the bf16 outputs
+    // bit-identical and drops the stream-blocking memset.
+    let out_chunk = unsafe { Tensor::empty((b, h, c, dv), DType::BF16, device)? };
+    let w_weighted = unsafe { Tensor::empty((b, h, c, dv), DType::BF16, device)? };
 
     {
         let (a_storage, a_layout) = a_c.storage_and_layout();
@@ -2949,7 +2955,12 @@ pub fn gdn_full_chunk_forward(
     let kt_c = k_t.contiguous()?;
     let state_c = state.contiguous()?;
 
-    let out_chunk = Tensor::zeros((b, h, c, dv), DType::BF16, device)?;
+    // The chunk kernel writes every element of `out_chunk` before any
+    // downstream code reads it, so `Tensor::empty` (uninitialized) is
+    // bit-identical to `Tensor::zeros` here — and avoids one cudaMemset
+    // per chunk. At seq_len=2048 across 24 GDN layers that's 768 fewer
+    // stream-blocking ops per prefill.
+    let out_chunk = unsafe { Tensor::empty((b, h, c, dv), DType::BF16, device)? };
 
     {
         let (g_storage, g_layout) = g_c.storage_and_layout();
