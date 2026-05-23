@@ -25,11 +25,22 @@ half = "2"
 # Safe byte-cast for typed CPU constructors (from_slice / to_vec).
 bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 
+# Optional — pulled in under the `cuda` / `metal` features only. This is
+# the workspace's candle dep so the cudarc version stays coherent with
+# the rest of the crates. Phase 7 of #1082 (candle removal) replaces
+# this with a direct cudarc dependency.
+candle-core = { workspace = true, optional = true }
+
 [features]
 default = []
-# Reserved feature names for future PRs in Phase 1; declared early so
-# downstream `kiln-tensor = { features = ["cuda"] }` invocations don't
-# break when added.
-cuda = []
-metal = []
+# Phase 1.6 — CUDA storage. The `cuda` feature pulls candle-core (cuda)
+# as the cudarc vendor; we reach the driver types as
+# `candle_core::cuda_backend::cudarc::driver::*` matching the pattern in
+# kiln-conv1d-kernel / kiln-flash-attn / kiln-model::cuda_graph. This is
+# the SINGLE candle hook in kiln-tensor; Phase 7 replaces it.
+cuda = ["dep:candle-core", "candle-core?/cuda"]
+# Reserved for Phase 1.7. Same pattern as `cuda`.
+metal = ["dep:candle-core", "candle-core?/metal"]
+# Reserved for Phase 1.8. Vulkan does not go through candle — it lifts
+# from kiln-vulkan-kernel which has its own ash-based backend.
 vulkan = []
