@@ -43,7 +43,11 @@ mod cuda_allocator;
 #[cfg(feature = "cuda")]
 mod cuda_storage;
 #[cfg(feature = "metal")]
+mod metal_allocator;
+#[cfg(feature = "metal")]
 mod metal_storage;
+#[cfg(feature = "vulkan")]
+mod vulkan_allocator;
 #[cfg(feature = "vulkan")]
 mod vulkan_storage;
 
@@ -70,6 +74,10 @@ pub use cuda_allocator::CudaAllocator;
 #[cfg(feature = "cuda")]
 pub use cuda_storage::{cuda_zeros, CudaStorage};
 #[cfg(feature = "metal")]
+pub use metal_allocator::MetalAllocator;
+#[cfg(feature = "metal")]
 pub use metal_storage::{metal_zeros, MetalStorage};
+#[cfg(feature = "vulkan")]
+pub use vulkan_allocator::VulkanAllocator;
 #[cfg(feature = "vulkan")]
 pub use vulkan_storage::{vulkan_zeros, VulkanStorage};
