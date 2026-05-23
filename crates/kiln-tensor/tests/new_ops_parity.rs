@@ -9,12 +9,60 @@
 use kiln_tensor::ops;
 use kiln_tensor::{CpuStorage, DType, Tensor};
 
+/// Read all f32 bytes from the underlying storage. Use this only when
+/// the tensor's layout is guaranteed contiguous AND start_offset=0
+/// (the only case where storage bytes == tensor's logical bytes).
+/// For narrow views or sliced tensors, use [`read_f32_view`] instead.
 fn read_f32(t: &Tensor) -> Vec<f32> {
     let cpu = t.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
     cpu.as_bytes()
         .chunks(4)
         .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
         .collect()
+}
+
+/// Layout-aware f32 reader: walks the tensor's logical shape with
+/// `start_offset` + strides and returns exactly `element_count` floats
+/// in row-major order. Works for narrow views and other non-contiguous
+/// layouts where `read_f32` would over-read.
+fn read_f32_view(t: &Tensor) -> Vec<f32> {
+    let cpu = t.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
+    let bytes = cpu.as_bytes();
+    let shape: Vec<usize> = t.shape().to_vec();
+    let strides: Vec<usize> = t.layout().strides().to_vec();
+    let start = t.layout().start_offset();
+    let n = t.element_count();
+    if shape.is_empty() {
+        // Scalar.
+        let off = start * 4;
+        return vec![f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap())];
+    }
+    let rank = shape.len();
+    let mut out = Vec::with_capacity(n);
+    let mut idx = vec![0usize; rank];
+    loop {
+        let mut phys = start;
+        for d in 0..rank {
+            phys += idx[d] * strides[d];
+        }
+        let off = phys * 4;
+        out.push(f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()));
+        // Increment idx as a multi-dim counter; break when carry past dim 0.
+        let mut carry = 1;
+        for d in (0..rank).rev() {
+            idx[d] += carry;
+            if idx[d] < shape[d] {
+                carry = 0;
+                break;
+            }
+            idx[d] = 0;
+            carry = 1;
+        }
+        if carry == 1 {
+            break;
+        }
+    }
+    out
 }
 fn read_i64(t: &Tensor) -> Vec<i64> {
     let cpu = t.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
@@ -73,12 +121,13 @@ fn roll_full_period_is_identity() {
 
 #[test]
 fn tile_then_chunk_recovers_original() {
-    // tile(x, [2]) then chunk(_, 2, 0) → two copies of x.
-    // chunks are narrow views; the first chunk's start_offset is 0
-    // and the layout reports contiguous=true, so contiguous() is a
-    // no-op clone that still shares the underlying [1,2,3,1,2,3]
-    // storage. Use `add` against a zero tensor of the same shape
-    // to force a fresh element-wise materialization.
+    // tile(x, [2]) then chunk(_, 2, 0) → two copies of x. chunks
+    // are narrow views; the first chunk's start_offset is 0 and the
+    // layout reports contiguous=true, so contiguous() is a no-op
+    // clone that still shares the underlying [1,2,3,1,2,3] storage.
+    // The second chunk has start_offset=3 and contiguous() rejects
+    // it as the input to add_scalar. read_f32_view walks the layout
+    // explicitly and reads exactly element_count() values.
     let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0], vec![3]).unwrap();
     let tiled = ops::tile(&x, &[2]).unwrap();
     let chunks = ops::chunk(&tiled, 2, 0).unwrap();
@@ -86,10 +135,7 @@ fn tile_then_chunk_recovers_original() {
     for c in &chunks {
         assert_eq!(c.shape(), &[3]);
         assert_eq!(c.element_count(), 3);
-        // Materialize via add_scalar(0.0) — produces a fresh storage
-        // sized to the layout's element count.
-        let materialized = ops::add_scalar(c, 0.0).unwrap();
-        assert_eq!(read_f32(&materialized), vec![1.0, 2.0, 3.0]);
+        assert_eq!(read_f32_view(c), vec![1.0, 2.0, 3.0]);
     }
 }
 
