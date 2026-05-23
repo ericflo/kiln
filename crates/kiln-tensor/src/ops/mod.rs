@@ -14,6 +14,7 @@
 //! (RMSNorm, residual add, final norm + LM head, sampling).
 
 pub mod activation;
+pub mod argmax;
 pub mod elementwise;
 pub mod embedding;
 pub mod matmul;
@@ -21,6 +22,7 @@ pub mod rmsnorm;
 pub mod softmax;
 
 pub use activation::{sigmoid, silu, ActivationOp, UnaryKind};
+pub use argmax::{argmax_last_dim, ArgmaxLastDimOp};
 pub use elementwise::{add, div, mul, sub, BinaryKind, ElementwiseOp};
 pub use embedding::{embedding, EmbeddingOp};
 pub use matmul::{matmul, MatmulOp};
