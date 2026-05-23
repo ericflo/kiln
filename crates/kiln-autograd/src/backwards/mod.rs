@@ -11,5 +11,7 @@
 //! reference values.
 
 pub mod activation;
+pub mod cross_entropy;
 pub mod elementwise;
+pub mod embedding;
 pub mod matmul;
