@@ -141,6 +141,13 @@ tool call. The next local iteration should preserve successful thinking-on
 solutions as an anchor instead of training only on lean high-variance failure
 loops.
 
+H16 tested that anchor idea mechanically, but was aborted for throughput before
+producing an adapter. Filtering by outcome and text length was not enough; the
+server-native GRPO path still became impractical on a selected completion with
+830 action tokens. The next dataset builder must use `kiln trajectory inspect
+--json` to enforce a per-completion action-token cap before submitting a train
+job.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
