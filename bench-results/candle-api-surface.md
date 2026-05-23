@@ -10,12 +10,55 @@ removing in Phase 7, not surface we have to migrate.
 
 ## Headline numbers
 
-- 55 distinct candle API paths used across `crates/`
-- 1,799 total call sites
-- Top buckets by count concentrate in error machinery (`bail!`, `Error::Msg`,
-  `Result`), backend storage variants (`Storage::Metal`, `Storage::Cuda`),
-  and a handful of identity types (`Tensor`, `Device`, `DType`, `TensorId`,
-  `Var`).
+- **66 distinct candle API paths** used across `crates/` (post-Phase-6
+  substrate; up from 55 in the Phase 0.1 baseline as the new
+  substrate doc-references additional candle APIs for cross-linking).
+- **1,845 total call sites** (vs 1,799 baseline — the delta is
+  doc-comment references in kiln-tensor / kiln-autograd / kiln-optim,
+  not real imports).
+- Top buckets unchanged: error machinery, backend storage variants,
+  identity types.
+
+### Phase 7 refresh (post-Phase-1-through-6 substrate)
+
+After the Phase 1–6 substrate work landed, here's where each migration
+target stands:
+
+| Migration target | API count | Status |
+|------------------|-----------|--------|
+| `kiln_tensor::{bail, Error, Result}` | ✓ shipped (Phase 1.1) | Phase 7 strips ~640 `candle_core::{bail, Error::Msg, Result}` import sites |
+| `kiln_tensor::{Tensor, Device, DType, TensorId}` | ✓ shipped (Phase 1.2-1.5) | Phase 7 swaps ~150 type references |
+| `kiln_tensor::Storage` with downcast | ✓ shipped (Phase 1.4) | Phase 7 transforms ~429 `Storage::{Cuda,Metal}` match arms |
+| `kiln_tensor::safetensors::load_cpu` | ✓ shipped (Phase 1.9) | Phase 7 swaps 16 sites |
+| `kiln_param::Parameter` | ✓ shipped (Phase 2.5) | Phase 7 lifts 28 `candle_core::Var{::from_tensor}` sites |
+| `kiln_autograd::{GradStore, BackwardOp}` | ✓ shipped (Phase 6a) | Phase 7 lifts 11 autograd-surface sites |
+| `kiln_tensor::{CudaStorage, MetalStorage, VulkanStorage}` allocators | ✓ shipped (Phase 2.1.1, 2.1.2) | Phase 7 swaps device handle types |
+
+The substrate side is **complete**. Phase 7 is now strictly a refactor
+pass — no new contracts to design, just mechanical migration of
+existing call sites onto the kiln_tensor surface.
+
+### Phase 7 PR sequencing
+
+1. **Phase 7.1** — Strip `use candle_core::{bail, Error, Result}` from
+   any `crates/kiln-*` source files that already use kiln_tensor's
+   versions (the doc references stay; the imports go).
+2. **Phase 7.2** — Migrate `crates/kiln-train`'s
+   `HashMap<candle_core::TensorId, ...>` to `kiln_tensor::TensorId`
+   (32 sites).
+3. **Phase 7.3** — Swap `candle_core::Var` → `kiln_param::Parameter`
+   in kiln-train (28 sites).
+4. **Phase 7.4** — Storage variant matches → downcast pattern (429
+   sites, mostly mechanical).
+5. **Phase 7.5** — Lift `Arc<candle_core::MetalDevice>` →
+   `Arc<metal::Device>` in the MetalStorage + MetalAllocator (only
+   ~50 site cleanup, but needs GPU validation).
+6. **Phase 7.6** — Lift `Arc<CudaDevice>` → `Arc<cudarc::CudaContext>`
+   similarly.
+7. **Phase 7.7** — Delete `vendor/candle-core/` and remove all
+   `candle-core` lines from `[workspace.dependencies]`.
+
+Each step independently mergeable. Substrate-level contracts settled.
 
 ## Migration buckets (the shape of the work, not the order)
 

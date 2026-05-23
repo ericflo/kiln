@@ -1,4 +1,49 @@
 api	crate	path_line	snippet
+candle_core::metal_backend::MetalDevice	kiln-tensor	crates/kiln-tensor/src/metal_storage.rs:4	//! `Arc<candle_core::metal_backend::MetalDevice>` for command-queue
+candle_core::Tensor	kiln-tensor	crates/kiln-tensor/src/metal_storage.rs:17	//! `MetalStorage` does not hold a `candle_core::Tensor`. The buffer is
+candle_core::metal_backend::MetalDevice	kiln-tensor	crates/kiln-tensor/src/metal_storage.rs:43	use candle_core::metal_backend::MetalDevice;
+candle_core::metal_backend::buffer_o	kiln-tensor	crates/kiln-tensor/src/metal_storage.rs:123	/// accessor (mirrors `candle_core::metal_backend::buffer_o` 232
+candle_core::Device	kiln-tensor	crates/kiln-tensor/src/metal_storage.rs:185	use candle_core::Device as CandleDevice;
+candle_core::Storage::Cuda	kiln-tensor	crates/kiln-tensor/src/storage.rs:4	//! `candle_core::Storage::Cuda` (195), `candle_core::Storage::Metal`
+candle_core::Storage::Metal	kiln-tensor	crates/kiln-tensor/src/storage.rs:4	//! `candle_core::Storage::Cuda` (195), `candle_core::Storage::Metal`
+candle_core::CpuStorage	kiln-tensor	crates/kiln-tensor/src/storage.rs:5	//! (232), `candle_core::CpuStorage` (6), etc. — together over 600 of
+candle_nn::loss::cross_entropy	kiln-tensor	crates/kiln-tensor/src/ops/cross_entropy.rs:4	//! `candle_nn::loss::cross_entropy` and `kiln-flce-kernel`'s
+candle_core::Tensor::index_select	kiln-tensor	crates/kiln-tensor/src/ops/embedding.rs:20	//! Migration target: `candle_core::Tensor::index_select(...)` and
+candle_nn::Embedding	kiln-tensor	crates/kiln-tensor/src/ops/embedding.rs:21	//! `candle_nn::Embedding`. Phase 0.1's audit grouped these under
+candle_nn::rotary_emb::rope	kiln-tensor	crates/kiln-tensor/src/ops/rope.rs:3	//! Replaces candle's `candle_nn::rotary_emb::rope` at the RoPE call
+candle_nn::ops::softmax_last_dim	kiln-tensor	crates/kiln-tensor/src/ops/softmax.rs:3	//! Replaces candle's `candle_nn::ops::softmax_last_dim` at every call
+candle_core::Tensor::argmax	kiln-tensor	crates/kiln-tensor/src/ops/argmax.rs:16	//! standard Rust and `candle_core::Tensor::argmax`.
+candle_core::Error	kiln-tensor	crates/kiln-tensor/src/error.rs:3	//! These are the migration target for `candle_core::Error` (106 sites),
+candle_core::Result	kiln-tensor	crates/kiln-tensor/src/error.rs:4	//! `candle_core::Result` (43 sites), `candle_core::bail!` (491 sites), and
+candle_core::bail	kiln-tensor	crates/kiln-tensor/src/error.rs:4	//! `candle_core::Result` (43 sites), `candle_core::bail!` (491 sites), and
+candle_core::ensure	kiln-tensor	crates/kiln-tensor/src/error.rs:5	//! `candle_core::ensure!` — together over 640 of the 1,799 candle call sites
+candle_core::Error::Msg	kiln-tensor	crates/kiln-tensor/src/error.rs:28	//! `Error::Msg` is the analogue of `candle_core::Error::Msg`; the typed
+candle_core::Error::Msg	kiln-tensor	crates/kiln-tensor/src/error.rs:38	///   substitute for `candle_core::Error::Msg`.
+candle_core::Result	kiln-tensor	crates/kiln-tensor/src/error.rs:73	/// Replaces `candle_core::Result<T>` at the 43+ call sites that name it
+candle_core::bail	kiln-tensor	crates/kiln-tensor/src/error.rs:79	/// Mirrors `candle_core::bail!` ergonomically:
+candle_core::ensure	kiln-tensor	crates/kiln-tensor/src/error.rs:96	/// Mirrors `candle_core::ensure!`:
+candle_core::DType	kiln-tensor	crates/kiln-tensor/src/dtype.rs:170	/// `candle_core::DType` via `parse()`.
+candle_core::Device	kiln-tensor	crates/kiln-tensor/src/device.rs:3	//! Replaces `candle_core::Device` at the 91 call sites the Phase 0.1 audit
+candle_core::Tensor	kiln-tensor	crates/kiln-tensor/src/tensor.rs:18	//! - No `candle_core::Tensor` field. Storage is `Arc<dyn StorageBackend>`
+candle_core::Tensor	kiln-tensor	crates/kiln-tensor/src/tensor.rs:27	//! At the 20 `candle_core::Tensor` call sites the Phase 0.1 audit
+candle_core::TensorId	kiln-tensor	crates/kiln-tensor/src/tensor_id.rs:3	//! The id is the migration target for `candle_core::TensorId` (30 call sites
+candle_core::CustomOp1	kiln-tensor	crates/kiln-tensor/src/device_op.rs:41	/// Single-input op (replaces `candle_core::CustomOp1`).
+candle_core::CustomOp2	kiln-tensor	crates/kiln-tensor/src/device_op.rs:81	/// Two-input op (replaces `candle_core::CustomOp2`).
+candle_core::CustomOp3	kiln-tensor	crates/kiln-tensor/src/device_op.rs:104	/// Three-input op (replaces `candle_core::CustomOp3`).
+candle_core::MetalDevice	kiln-tensor	crates/kiln-tensor/src/metal_allocator.rs:17	use candle_core::MetalDevice;
+candle_core::Device	kiln-tensor	crates/kiln-tensor/src/metal_allocator.rs:137	use candle_core::Device as CandleDevice;
+candle_core::cuda_backend::CudaDevice	kiln-tensor	crates/kiln-tensor/src/cuda_storage.rs:4	//! `Arc<candle_core::cuda_backend::CudaDevice>` for stream affinity.
+candle_core::Tensor	kiln-tensor	crates/kiln-tensor/src/cuda_storage.rs:11	//! > `cudarc::CudaSlice` directly. No `candle_core::Tensor` field on
+candle_core::Tensor	kiln-tensor	crates/kiln-tensor/src/cuda_storage.rs:14	//! `CudaStorage` does **not** hold a `candle_core::Tensor`. The buffer
+candle_core::cuda_backend::CudaDevice	kiln-tensor	crates/kiln-tensor/src/cuda_storage.rs:37	use candle_core::cuda_backend::CudaDevice;
+candle_core::cuda_backend::cudarc::driver::CudaSlice	kiln-tensor	crates/kiln-tensor/src/cuda_storage.rs:38	use candle_core::cuda_backend::cudarc::driver::CudaSlice;
+candle_core::Device	kiln-tensor	crates/kiln-tensor/src/cuda_storage.rs:184	use candle_core::Device as CandleDevice;
+candle_core::safetensors::load	kiln-tensor	crates/kiln-tensor/src/safetensors.rs:3	//! Replaces `candle_core::safetensors::load` at the 14 call sites the
+candle_core::safetensors::load	kiln-tensor	crates/kiln-tensor/src/safetensors.rs:27	//! let model = candle_core::safetensors::load(path, &candle_core::Device::Cpu)?;
+candle_core::Device::Cpu	kiln-tensor	crates/kiln-tensor/src/safetensors.rs:27	//! let model = candle_core::safetensors::load(path, &candle_core::Device::Cpu)?;
+candle_core::cuda_backend::CudaDevice	kiln-tensor	crates/kiln-tensor/src/cuda_allocator.rs:3	//! Wraps an `Arc<candle_core::cuda_backend::CudaDevice>` (the same
+candle_core::cuda_backend::CudaDevice	kiln-tensor	crates/kiln-tensor/src/cuda_allocator.rs:26	use candle_core::cuda_backend::CudaDevice;
+candle_core::Device	kiln-tensor	crates/kiln-tensor/src/cuda_allocator.rs:170	use candle_core::Device as CandleDevice;
 candle_core::Device	kiln-server	crates/kiln-server/examples/flce_preflight_bench.rs:23	use candle_core::Device;
 candle_core::Device	kiln-server	crates/kiln-server/examples/phase10_rmsnorm_bench.rs:37	use candle_core::Device;
 candle_core::Device	kiln-server	crates/kiln-server/examples/flce_phase_a_validation_bench.rs:48	use candle_core::Device;
@@ -56,20 +101,16 @@ candle_core::Device::Cpu	kiln-server	crates/kiln-server/src/state.rs:2980	let de
 candle_core::Device::Cpu	kiln-server	crates/kiln-server/src/state.rs:3051	let device = candle_core::Device::Cpu;
 candle_core::Device::Cpu	kiln-server	crates/kiln-server/src/state.rs:3325	&candle_core::Device::Cpu,
 candle_core::utils::cuda_is_available	kiln-server	crates/kiln-server/src/cli.rs:902	let cuda_status = if candle_core::utils::cuda_is_available() {
-candle_core::Var	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/tests.rs:535	use candle_core::Var;
-candle_core::Var	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/tests.rs:611	use candle_core::Var;
-candle_core::op::BackpropOp	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:68	use candle_core::op::BackpropOp;
-candle_core::Result	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:325	) -> candle_core::Result<(CpuStorage, Shape)> {
-candle_core::Error::Msg	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:331	.map_err(|e| candle_core::Error::Msg(format!("opd-loss phase b cpu_fwd: {e:#}")))?;
-candle_core::Result	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:340	) -> candle_core::Result<(CudaStorage, Shape)> {
-candle_core::Error::Msg	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:362	candle_core::Error::Msg(format!(
-candle_core::Error::Msg	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:370	candle_core::Error::Msg(format!("opd-loss phase b cuda_fwd: {e:#}"))
-candle_core::Result	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:386	) -> candle_core::Result<Option<Tensor>> {
-candle_core::Error::Msg	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:417	.map_err(|e| candle_core::Error::Msg(format!("opd-loss phase b bwd: {e:#}")))
-candle_core::cuda_backend::cudarc::driver::DevicePtr	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:673	use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-candle_core::cuda_backend::cudarc::driver::DevicePtr	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:907	use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-candle_core::cuda_backend::cudarc::driver::DevicePtr	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:1377	use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-candle_nn::ops::log_softmax	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/lib.rs:444	/// `candle_nn::ops::log_softmax` but we re-implement it here to avoid an
+candle_core::Device::Cpu	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/examples/dispatch_test.rs:22	let device = candle_core::Device::Cpu;
+candle_core::Var	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs:42	) -> Result<(candle_core::Var, VkTensor)> {
+candle_core::Var::from_tensor	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs:44	let var = candle_core::Var::from_tensor(&t)?;
+candle_core::Var	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs:40	) -> Result<(candle_core::Var, VkTensor)> {
+candle_core::Var::from_tensor	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs:42	let var = candle_core::Var::from_tensor(&t)?;
+candle_core::Var	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/vk_opd_parity.rs:41	use candle_core::Var;
+candle_core::Var	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/vk_rmsnorm_parity.rs:33	) -> Result<(candle_core::Var, VkTensor)> {
+candle_core::Var::from_tensor	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/vk_rmsnorm_parity.rs:35	let var = candle_core::Var::from_tensor(&t)?;
+candle_core::D::Minus1	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/gdn_parity.rs:2227	.sum_keepdim(candle_core::D::Minus1)?;
+candle_core::D::Minus1	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/gdn_parity.rs:2231	.sum_keepdim(candle_core::D::Minus1)?;
 candle_core::Device::Metal	kiln-server	crates/kiln-server/src/api/completions.rs:3252	candle_core::Device::Metal(_) => native_mtp_enabled_for_metal(),
 candle_core::Device::Metal	kiln-server	crates/kiln-server/src/api/completions.rs:3263	candle_core::Device::Metal(_) => LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
 candle_core::Tensor	kiln-server	crates/kiln-server/src/api/completions.rs:3583	fn log_softmax_last_dim(x: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
@@ -80,7 +121,7 @@ candle_core::D::Minus1	kiln-server	crates/kiln-server/src/api/completions.rs:358
 candle_core::DType::F32	kiln-server	crates/kiln-server/src/api/completions.rs:3622	.to_dtype(candle_core::DType::F32)
 candle_core::Result	kiln-rmsnorm-kernel	crates/kiln-rmsnorm-kernel/examples/phase10_microbench.rs:13	use candle_core::Result;
 candle_core::D::Minus1	kiln-rmsnorm-kernel	crates/kiln-rmsnorm-kernel/examples/phase10_microbench.rs:18	let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
-candle_core::Device::Cpu	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/examples/dispatch_test.rs:22	let device = candle_core::Device::Cpu;
+candle_core::TensorId	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/src/vk_autograd.rs:21	use candle_core::TensorId;
 candle_core::CustomOp2	kiln-rmsnorm-kernel	crates/kiln-rmsnorm-kernel/src/lib.rs:11	//!    [`candle_core::CustomOp2`] so the autograd engine saves only `x` and
 candle_core::bail	kiln-rmsnorm-kernel	crates/kiln-rmsnorm-kernel/src/lib.rs:401	candle_core::bail!(
 candle_core::Error::Msg	kiln-rmsnorm-kernel	crates/kiln-rmsnorm-kernel/src/lib.rs:410	candle_core::Error::Msg("kiln-rmsnorm-kernel: x must have rank >= 1".to_string())
@@ -411,20 +452,11 @@ candle_core::D::Minus1	kiln-rmsnorm-kernel	crates/kiln-rmsnorm-kernel/src/lib.rs
 candle_core::Error::Msg	kiln-rmsnorm-kernel	crates/kiln-rmsnorm-kernel/src/lib.rs:4711	.ok_or_else(|| candle_core::Error::Msg("missing x grad".to_string()))?;
 candle_core::Error::Msg	kiln-rmsnorm-kernel	crates/kiln-rmsnorm-kernel/src/lib.rs:4715	.ok_or_else(|| candle_core::Error::Msg("missing w grad".to_string()))?;
 candle_core::Var	kiln-rmsnorm-kernel	crates/kiln-rmsnorm-kernel/src/lib.rs:4806	use candle_core::Var;
-candle_core::Var	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs:42	) -> Result<(candle_core::Var, VkTensor)> {
-candle_core::Var::from_tensor	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs:44	let var = candle_core::Var::from_tensor(&t)?;
-candle_core::Var	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs:40	) -> Result<(candle_core::Var, VkTensor)> {
-candle_core::Var::from_tensor	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs:42	let var = candle_core::Var::from_tensor(&t)?;
 candle_nn::ops::sigmoid	kiln-gdn-kernel	crates/kiln-gdn-kernel/examples/gates_bench.rs:60	// beta = sigmoid(b) — stays in bf16. candle_nn::ops::sigmoid has no
-candle_core::Var	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/vk_opd_parity.rs:41	use candle_core::Var;
-candle_core::Var	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/vk_rmsnorm_parity.rs:33	) -> Result<(candle_core::Var, VkTensor)> {
-candle_core::Var::from_tensor	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/vk_rmsnorm_parity.rs:35	let var = candle_core::Var::from_tensor(&t)?;
 candle_core::Result	kiln-gdn-kernel	crates/kiln-gdn-kernel/tests/gated_rms_norm_parity.rs:23	fn sigmoid(x: &Tensor) -> candle_core::Result<Tensor> {
 candle_core::Result	kiln-gdn-kernel	crates/kiln-gdn-kernel/tests/gated_rms_norm_parity.rs:30	fn silu(x: &Tensor) -> candle_core::Result<Tensor> {
 candle_core::Result	kiln-gdn-kernel	crates/kiln-gdn-kernel/tests/gated_rms_norm_parity.rs:34	fn reference(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) -> candle_core::Result<Tensor> {
 candle_core::D::Minus1	kiln-gdn-kernel	crates/kiln-gdn-kernel/tests/gated_rms_norm_parity.rs:38	let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
-candle_core::D::Minus1	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/gdn_parity.rs:2227	.sum_keepdim(candle_core::D::Minus1)?;
-candle_core::D::Minus1	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/tests/gdn_parity.rs:2231	.sum_keepdim(candle_core::D::Minus1)?;
 candle_core::bail	kiln-gdn-kernel	crates/kiln-gdn-kernel/src/lib.rs:398	candle_core::bail!(
 candle_core::bail	kiln-gdn-kernel	crates/kiln-gdn-kernel/src/lib.rs:405	candle_core::bail!(
 candle_core::bail	kiln-gdn-kernel	crates/kiln-gdn-kernel/src/lib.rs:412	candle_core::bail!(
@@ -695,47 +727,13 @@ candle_core::Device	kiln-gdn-kernel	crates/kiln-gdn-kernel/src/lib.rs:3320	use c
 candle_core::D::Minus1	kiln-gdn-kernel	crates/kiln-gdn-kernel/src/lib.rs:3349	let q_sq = q_f32.sqr()?.sum_keepdim(candle_core::D::Minus1)?;
 candle_core::D::Minus1	kiln-gdn-kernel	crates/kiln-gdn-kernel/src/lib.rs:3355	let k_sq = k_f32.sqr()?.sum_keepdim(candle_core::D::Minus1)?;
 candle_core::D::Minus1	kiln-gdn-kernel	crates/kiln-gdn-kernel/src/lib.rs:3920	.mean_keepdim(candle_core::D::Minus1)?;
-candle_core::TensorId	kiln-vulkan-kernel	crates/kiln-vulkan-kernel/src/vk_autograd.rs:21	use candle_core::TensorId;
 candle_core::Device	kiln-model	crates/kiln-model/tests/vk_resident_decode_parity.rs:27	use candle_core::Device;
 candle_core::DType	kiln-model	crates/kiln-model/tests/vk_resident_decode_parity.rs:196	// Map kiln_core::config::DType → candle_core::DType.
 candle_core::DType::BF16	kiln-model	crates/kiln-model/tests/vk_resident_decode_parity.rs:198	kiln_core::config::DType::BF16 => candle_core::DType::BF16,
 candle_core::DType::F16	kiln-model	crates/kiln-model/tests/vk_resident_decode_parity.rs:199	kiln_core::config::DType::FP16 => candle_core::DType::F16,
 candle_core::DType::F32	kiln-model	crates/kiln-model/tests/vk_resident_decode_parity.rs:200	kiln_core::config::DType::FP32 => candle_core::DType::F32,
+candle_core::TensorId	kiln-optim	crates/kiln-optim/src/adamw.rs:12	//! `candle_core::TensorId` references in the existing AdamW
 candle_core::Device	kiln-model	crates/kiln-model/src/mtp_debug.rs:2422	use candle_core::Device;
-candle_core::Tensor	kiln-model	crates/kiln-model/src/generate.rs:1112	logits: &candle_core::Tensor,
-candle_core::Device::Metal	kiln-model	crates/kiln-model/src/generate.rs:2224	&& matches!(self.backend.device(), candle_core::Device::Metal(_))
-candle_core::Tensor	kiln-model	crates/kiln-model/src/generate.rs:2979	logits: candle_core::Tensor,
-candle_core::Device::Metal	kiln-model	crates/kiln-model/src/generate.rs:3354	&& matches!(self.backend.device(), candle_core::Device::Metal(_))
-candle_core::Device::Metal	kiln-model	crates/kiln-model/src/generate.rs:3672	&& matches!(self.backend.device(), candle_core::Device::Metal(_))
-candle_core::Device::Metal	kiln-model	crates/kiln-model/src/generate.rs:3765	&& matches!(self.backend.device(), candle_core::Device::Metal(_))
-candle_core::Device::Metal	kiln-model	crates/kiln-model/src/generate.rs:4032	&& matches!(self.backend.device(), candle_core::Device::Metal(_))
-candle_core::Device::Metal	kiln-model	crates/kiln-model/src/generate.rs:4130	&& matches!(self.backend.device(), candle_core::Device::Metal(_))
-candle_core::Tensor	kiln-model	crates/kiln-model/src/generate.rs:5435	candle_core::Tensor,
-candle_core::Tensor	kiln-model	crates/kiln-model/src/generate.rs:6002	logits: candle_core::Tensor,
-candle_core::Device::Metal	kiln-model	crates/kiln-model/src/generate.rs:6417	&& matches!(self.backend.device(), candle_core::Device::Metal(_))
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6535	let final_norm = Tensor::zeros((h,), candle_core::DType::F32, device).unwrap();
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6558	q_norm: Tensor::zeros((head_dim,), candle_core::DType::F32, device).unwrap(),
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6559	k_norm: Tensor::zeros((head_dim,), candle_core::DType::F32, device).unwrap(),
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6586	let norm = Tensor::ones((v_dim,), candle_core::DType::F32, device).unwrap();
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6587	let a_log = Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6588	let a_log_gates = Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6589	let dt_bias = Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6626	input_layernorm: Tensor::zeros((h,), candle_core::DType::F32, device).unwrap(),
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6627	post_attention_layernorm: Tensor::zeros((h,), candle_core::DType::F32, device)
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7459	candle_core::DType::F32,
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7507	candle_core::DType::F32,
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7560	candle_core::DType::F32,
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7600	candle_core::DType::F32,
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7647	candle_core::DType::F32,
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7724	candle_core::DType::F32,
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7800	candle_core::DType::F32,
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7888	candle_core::DType::F32,
-candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7984	candle_core::DType::F32,
-candle_core::Device::Cpu	kiln-model	crates/kiln-model/src/speculative.rs:1053	let device = candle_core::Device::Cpu;
-candle_core::Device::Cpu	kiln-model	crates/kiln-model/src/speculative.rs:1071	let device = candle_core::Device::Cpu;
-candle_core::Device::Cpu	kiln-model	crates/kiln-model/src/speculative.rs:1089	let device = candle_core::Device::Cpu;
-candle_core::Device	kiln-model	crates/kiln-model/src/adapter_merge.rs:1356	use candle_core::Device;
-candle_core::Device	kiln-model	crates/kiln-model/src/adapter_merge.rs:1686	use candle_core::Device;
 candle_core::Device	kiln-model	crates/kiln-model/src/cuda_graph.rs:99	use candle_core::Device;
 candle_core::Tensor	kiln-model	crates/kiln-model/src/cuda_graph.rs:101	use candle_core::Tensor;
 candle_core::cuda_backend::cudarc::driver::CudaGraph	kiln-model	crates/kiln-model/src/cuda_graph.rs:222	graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
@@ -767,12 +765,6 @@ candle_core::DType	kiln-model	crates/kiln-model/src/cuda_graph.rs:1999	dtype: ca
 candle_core::DType::F32	kiln-model	crates/kiln-model/src/cuda_graph.rs:2017	candle_core::DType::F32,
 candle_core::DType::BF16	kiln-model	crates/kiln-model/src/cuda_graph.rs:2048	candle_core::DType::BF16,
 candle_core::Tensor	kiln-model	crates/kiln-model/src/cuda_graph.rs:2072	) -> Result<candle_core::Tensor> {
-candle_core::Device	kiln-model	crates/kiln-model/src/lora_loader.rs:410	use candle_core::Device;
-candle_core::DType	kiln-model	crates/kiln-model/src/marlin_proj.rs:26	use candle_core::DType;
-candle_core::Device	kiln-model	crates/kiln-model/src/marlin_proj.rs:28	use candle_core::Device;
-candle_core::Tensor	kiln-model	crates/kiln-model/src/marlin_proj.rs:29	use candle_core::Tensor;
-candle_core::Device::Cpu	kiln-model	crates/kiln-model/src/marlin_proj.rs:166	&candle_core::Device::Cpu,
-candle_core::Device::Cpu	kiln-model	crates/kiln-model/src/marlin_proj.rs:171	let scales = Tensor::from_vec(scales_vec, (num_groups, n), &candle_core::Device::Cpu)
 candle_core::Device	kiln-model	crates/kiln-model/src/backend/cpu.rs:6	use candle_core::Device;
 candle_core::op::BackpropOp	kiln-model	crates/kiln-model/src/backend/vulkan_lora_op.rs:35	use candle_core::op::BackpropOp;
 candle_core::Result	kiln-model	crates/kiln-model/src/backend/vulkan_lora_op.rs:80	) -> candle_core::Result<(CpuStorage, Shape)> {
@@ -800,25 +792,33 @@ candle_core::Error::Msg	kiln-model	crates/kiln-model/src/backend/vulkan_lora_op.
 candle_core::Device	kiln-model	crates/kiln-model/src/backend/vulkan_lora_op.rs:291	use candle_core::Device;
 candle_core::Var::from_tensor	kiln-model	crates/kiln-model/src/backend/vulkan_lora_op.rs:393	let a_var = candle_core::Var::from_tensor(
 candle_core::Var::from_tensor	kiln-model	crates/kiln-model/src/backend/vulkan_lora_op.rs:396	let b_var = candle_core::Var::from_tensor(
+candle_core::Var	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/tests.rs:535	use candle_core::Var;
+candle_core::Var	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/tests.rs:611	use candle_core::Var;
+candle_core::op::BackpropOp	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:68	use candle_core::op::BackpropOp;
+candle_core::Result	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:325	) -> candle_core::Result<(CpuStorage, Shape)> {
+candle_core::Error::Msg	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:331	.map_err(|e| candle_core::Error::Msg(format!("opd-loss phase b cpu_fwd: {e:#}")))?;
+candle_core::Result	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:340	) -> candle_core::Result<(CudaStorage, Shape)> {
+candle_core::Error::Msg	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:362	candle_core::Error::Msg(format!(
+candle_core::Error::Msg	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:370	candle_core::Error::Msg(format!("opd-loss phase b cuda_fwd: {e:#}"))
+candle_core::Result	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:386	) -> candle_core::Result<Option<Tensor>> {
+candle_core::Error::Msg	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:417	.map_err(|e| candle_core::Error::Msg(format!("opd-loss phase b bwd: {e:#}")))
+candle_core::cuda_backend::cudarc::driver::DevicePtr	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:673	use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+candle_core::cuda_backend::cudarc::driver::DevicePtr	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:907	use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+candle_core::cuda_backend::cudarc::driver::DevicePtr	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/phase_b.rs:1377	use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+candle_nn::ops::log_softmax	kiln-opd-loss-kernel	crates/kiln-opd-loss-kernel/src/lib.rs:444	/// `candle_nn::ops::log_softmax` but we re-implement it here to avoid an
+candle_core::Device::Cpu	kiln-model	crates/kiln-model/src/speculative.rs:1053	let device = candle_core::Device::Cpu;
+candle_core::Device::Cpu	kiln-model	crates/kiln-model/src/speculative.rs:1071	let device = candle_core::Device::Cpu;
+candle_core::Device::Cpu	kiln-model	crates/kiln-model/src/speculative.rs:1089	let device = candle_core::Device::Cpu;
+candle_core::Device	kiln-model	crates/kiln-model/src/adapter_merge.rs:1356	use candle_core::Device;
+candle_core::Device	kiln-model	crates/kiln-model/src/adapter_merge.rs:1686	use candle_core::Device;
+candle_core::Device	kiln-model	crates/kiln-model/src/lora_loader.rs:410	use candle_core::Device;
+candle_core::DType	kiln-model	crates/kiln-model/src/marlin_proj.rs:26	use candle_core::DType;
+candle_core::Device	kiln-model	crates/kiln-model/src/marlin_proj.rs:28	use candle_core::Device;
+candle_core::Tensor	kiln-model	crates/kiln-model/src/marlin_proj.rs:29	use candle_core::Tensor;
+candle_core::Device::Cpu	kiln-model	crates/kiln-model/src/marlin_proj.rs:166	&candle_core::Device::Cpu,
+candle_core::Device::Cpu	kiln-model	crates/kiln-model/src/marlin_proj.rs:171	let scales = Tensor::from_vec(scales_vec, (num_groups, n), &candle_core::Device::Cpu)
 candle_core::DType::F32	kiln-model	crates/kiln-model/src/vk_forward.rs:1685	.to_dtype(candle_core::DType::F32)?
 candle_core::Device::Cpu	kiln-model	crates/kiln-model/src/vk_forward.rs:1686	.to_device(&candle_core::Device::Cpu)?;
-candle_core::cuda_backend::cudarc::driver::DevicePtr	kiln-model	crates/kiln-model/src/decode_buffers.rs:11	use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-candle_core::Storage::Cuda	kiln-model	crates/kiln-model/src/decode_buffers.rs:182	candle_core::Storage::Cuda(cuda) => cuda,
-candle_core::backend	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:49	use candle_core::backend::{BackendDevice, BackendStorage};
-candle_core::op::BackpropOp	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:50	use candle_core::op::BackpropOp;
-candle_core::Result	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:194	) -> candle_core::Result<(CpuStorage, Shape)> {
-candle_core::Error::Msg	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:211	.map_err(|e| candle_core::Error::Msg(format!("flce phase b cpu_fwd: {e:#}")))?;
-candle_core::Result	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:220	) -> candle_core::Result<(CudaStorage, Shape)> {
-candle_core::Error::Msg	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:224	return Err(candle_core::Error::Msg(
-candle_core::Error::Msg	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:246	.map_err(|e| candle_core::Error::Msg(format!("flce phase b cuda_fwd: {e:#}")))?;
-candle_core::Result	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:261	) -> candle_core::Result<(MetalStorage, Shape)> {
-candle_core::Error::Msg	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:274	.map_err(|e| candle_core::Error::Msg(format!("flce phase b metal_fwd: {e:#}")))?;
-candle_core::Result	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:286	) -> candle_core::Result<Option<Tensor>> {
-candle_core::Error::Msg	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:297	.map_err(|e| candle_core::Error::Msg(format!("flce phase b bwd: {e:#}")))
-candle_core::Var	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:666	use candle_core::Var;
-candle_core::CustomOp1	kiln-flce-kernel	crates/kiln-flce-kernel/src/lib.rs:22	//! graph with a [`candle_core::CustomOp1`] whose `bwd()` recomputes each
-candle_core::utils::cuda_is_available	kiln-train	crates/kiln-train/examples/cuda_opd_remote.rs:266	candle_core::utils::cuda_is_available(),
-candle_core::Device::new_cuda	kiln-train	crates/kiln-train/examples/cuda_opd_remote.rs:269	let device = candle_core::Device::new_cuda(0)?;
 candle_nn::ops::sdpa	kiln-model	crates/kiln-model/src/backend/metal.rs:4	//! candle-metal ships `candle_nn::ops::sdpa` — an MLX-style fused scaled-dot-
 candle_core::D::Minus1	kiln-model	crates/kiln-model/src/backend/metal.rs:450	let head_dim = q.dim(candle_core::D::Minus1)?;
 candle_nn::ops::sdpa	kiln-model	crates/kiln-model/src/backend/metal.rs:465	let out = candle_nn::ops::sdpa(&q_t, &k_t, &v_t, None, causal, softmax_scale, 1.0)
@@ -1390,16 +1390,9 @@ candle_core::Result	kiln-model	crates/kiln-model/src/backend/metal.rs:15665	.col
 candle_core::Result	kiln-model	crates/kiln-model/src/backend/metal.rs:15668	.collect::<candle_core::Result<Vec<_>>>()?;
 candle_nn::ops::sdpa	kiln-model	crates/kiln-model/src/backend/metal.rs:18076	let reference = candle_nn::ops::sdpa(&q, &k_ref, &v_ref, None, true, scale, 1.0)?
 candle_nn::ops::sdpa	kiln-model	crates/kiln-model/src/backend/metal.rs:19635	let ref_out = candle_nn::ops::sdpa(&q_ref, &k_ref, &v_ref, None, true, softmax_scale, 1.0)?;
-candle_core::utils::cuda_is_available	kiln-train	crates/kiln-train/examples/cuda_grpo_ablation.rs:854	candle_core::utils::cuda_is_available(),
-candle_core::Device::new_cuda	kiln-train	crates/kiln-train/examples/cuda_grpo_ablation.rs:857	let device = candle_core::Device::new_cuda(0).context("create CUDA device 0")?;
+candle_core::cuda_backend::cudarc::driver::DevicePtr	kiln-model	crates/kiln-model/src/decode_buffers.rs:11	use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+candle_core::Storage::Cuda	kiln-model	crates/kiln-model/src/decode_buffers.rs:182	candle_core::Storage::Cuda(cuda) => cuda,
 candle_core::Tensor	kiln-model	crates/kiln-model/src/backend/mod.rs:3	//! Most of the forward pass is expressed as `candle_core::Tensor` ops that
-candle_core::utils::cuda_is_available	kiln-train	crates/kiln-train/examples/cuda_grpo_behavioral_eval.rs:299	candle_core::utils::cuda_is_available(),
-candle_core::Device::new_cuda	kiln-train	crates/kiln-train/examples/cuda_grpo_behavioral_eval.rs:302	let device = candle_core::Device::new_cuda(0).context("create CUDA device 0")?;
-candle_core::utils::cuda_is_available	kiln-train	crates/kiln-train/examples/cuda_sft_file.rs:339	candle_core::utils::cuda_is_available(),
-candle_core::Device::new_cuda	kiln-train	crates/kiln-train/examples/cuda_sft_file.rs:342	let device = candle_core::Device::new_cuda(0).context("create CUDA device 0")?;
-candle_core::Device	kiln-train	crates/kiln-train/examples/long_context_grpo_bench.rs:359	device: candle_core::Device,
-candle_core::utils::cuda_is_available	kiln-train	crates/kiln-train/examples/long_context_grpo_bench.rs:367	candle_core::utils::cuda_is_available(),
-candle_core::Device::new_cuda	kiln-train	crates/kiln-train/examples/long_context_grpo_bench.rs:370	let device = candle_core::Device::new_cuda(0).context("create CUDA device 0")?;
 candle_core::Device	kiln-model	crates/kiln-model/src/backend/vulkan.rs:3729	use candle_core::Device;
 candle_core::Var::from_tensor	kiln-model	crates/kiln-model/src/backend/vulkan.rs:3784	let v = candle_core::Var::from_tensor(&initial)?;
 candle_core::Var::from_tensor	kiln-model	crates/kiln-model/src/backend/vulkan.rs:3855	let a_var = candle_core::Var::from_tensor(
@@ -1440,28 +1433,25 @@ candle_core::Var::from_tensor	kiln-model	crates/kiln-model/src/backend/vulkan_li
 candle_core::D::Minus1	kiln-model	crates/kiln-model/src/backend/vulkan_linear_op.rs:964	let variance = x.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
 candle_core::Var::from_tensor	kiln-model	crates/kiln-model/src/backend/vulkan_linear_op.rs:1018	let x_var = candle_core::Var::from_tensor(&x)?;
 candle_core::D::Minus1	kiln-model	crates/kiln-model/src/backend/vulkan_linear_op.rs:1022	.mean_keepdim(candle_core::D::Minus1)?;
-candle_core::shape::ShapeWithOneHole	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:20	use candle_core::shape::ShapeWithOneHole;
-candle_core::DType::F32	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:366	weights.embed_tokens = Tensor::zeros((1usize,), candle_core::DType::F32, &Device::Cpu)?;
-candle_core::safetensors::load	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:1794	let loaded = candle_core::safetensors::load(&tmp, &candle_core::Device::Cpu)?;
-candle_core::Device::Cpu	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:1794	let loaded = candle_core::safetensors::load(&tmp, &candle_core::Device::Cpu)?;
-candle_core::safetensors::load	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:2085	candle_core::safetensors::load(out.join("adapter_model.safetensors"), &Device::Cpu)?;
-candle_core::safetensors::load	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:2107	let checkpoint_loaded = candle_core::safetensors::load(&checkpoint, &Device::Cpu)?;
-candle_core::safetensors::load	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:2397	let loaded = candle_core::safetensors::load(&adapter_path, &Device::Cpu)?;
-candle_core::safetensors::load	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:2860	let loaded = candle_core::safetensors::load(&tmp, &candle_core::Device::Cpu)?;
-candle_core::Device::Cpu	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:2860	let loaded = candle_core::safetensors::load(&tmp, &candle_core::Device::Cpu)?;
 candle_core::TensorId	kiln-model	crates/kiln-model/src/backend/cuda.rs:15	static CUDA_RESIDENT_TENSOR_IDS: OnceLock<Mutex<HashSet<candle_core::TensorId>>> = OnceLock::new();
 candle_core::TensorId	kiln-model	crates/kiln-model/src/backend/cuda.rs:75	fn with_cuda_resident_ids<R>(f: impl FnOnce(&mut HashSet<candle_core::TensorId>) -> R) -> R {
 candle_core::Var::from_tensor	kiln-model	crates/kiln-model/src/backend/cuda.rs:1155	let q_var = candle_core::Var::from_tensor(&q_base)?;
 candle_core::Var::from_tensor	kiln-model	crates/kiln-model/src/backend/cuda.rs:1169	let q_decode_var = candle_core::Var::from_tensor(&q_decode_base)?;
 candle_core::Device::Cpu	kiln-model	crates/kiln-model/src/loader.rs:1799	let device = candle_core::Device::Cpu;
 candle_core::Device::Cpu	kiln-model	crates/kiln-model/src/loader.rs:1844	let device = candle_core::Device::Cpu;
-candle_core::safetensors::save	kiln-train	crates/kiln-train/src/cuda_train.rs:2424	candle_core::safetensors::save(&tensors, output_path)
-candle_core::safetensors::save	kiln-train	crates/kiln-train/src/cuda_train.rs:2477	candle_core::safetensors::save(&tensors, output_path)
-candle_core::safetensors::load	kiln-train	crates/kiln-train/src/cuda_train.rs:2978	let saved = candle_core::safetensors::load(
-candle_core::safetensors::load	kiln-train	crates/kiln-train/src/cuda_train.rs:3645	let loaded = candle_core::safetensors::load(&tmp, &Device::Cpu)?;
-candle_core::safetensors::load	kiln-train	crates/kiln-train/src/cuda_train.rs:3686	let loaded = candle_core::safetensors::load(&tmp, &Device::Cpu)?;
-candle_core::safetensors::load	kiln-train	crates/kiln-train/src/cuda_train.rs:3759	let loaded = candle_core::safetensors::load(
-candle_core::safetensors::save	kiln-train	crates/kiln-train/src/adapter_shape.rs:319	candle_core::safetensors::save(&tensors, dir.join("adapter_model.safetensors"))?;
+candle_core::backend	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:49	use candle_core::backend::{BackendDevice, BackendStorage};
+candle_core::op::BackpropOp	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:50	use candle_core::op::BackpropOp;
+candle_core::Result	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:194	) -> candle_core::Result<(CpuStorage, Shape)> {
+candle_core::Error::Msg	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:211	.map_err(|e| candle_core::Error::Msg(format!("flce phase b cpu_fwd: {e:#}")))?;
+candle_core::Result	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:220	) -> candle_core::Result<(CudaStorage, Shape)> {
+candle_core::Error::Msg	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:224	return Err(candle_core::Error::Msg(
+candle_core::Error::Msg	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:246	.map_err(|e| candle_core::Error::Msg(format!("flce phase b cuda_fwd: {e:#}")))?;
+candle_core::Result	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:261	) -> candle_core::Result<(MetalStorage, Shape)> {
+candle_core::Error::Msg	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:274	.map_err(|e| candle_core::Error::Msg(format!("flce phase b metal_fwd: {e:#}")))?;
+candle_core::Result	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:286	) -> candle_core::Result<Option<Tensor>> {
+candle_core::Error::Msg	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:297	.map_err(|e| candle_core::Error::Msg(format!("flce phase b bwd: {e:#}")))
+candle_core::Var	kiln-flce-kernel	crates/kiln-flce-kernel/src/phase_b.rs:666	use candle_core::Var;
+candle_core::CustomOp1	kiln-flce-kernel	crates/kiln-flce-kernel/src/lib.rs:22	//! graph with a [`candle_core::CustomOp1`] whose `bwd()` recomputes each
 candle_core::backend::BackendDevice	kiln-model	crates/kiln-model/src/forward.rs:8	use candle_core::backend::BackendDevice;
 candle_core::backend::BackendStorage	kiln-model	crates/kiln-model/src/forward.rs:10	use candle_core::backend::BackendStorage;
 candle_core::op::BackpropOp	kiln-model	crates/kiln-model/src/forward.rs:12	use candle_core::op::BackpropOp;
@@ -1590,12 +1580,50 @@ candle_core::D::Minus1	kiln-model	crates/kiln-model/src/forward.rs:17511	let var
 candle_core::D::Minus1	kiln-model	crates/kiln-model/src/forward.rs:18099	let gate_up_t = Tensor::cat(&[&gate_t, &up_t], candle_core::D::Minus1)?
 candle_core::D::Minus1	kiln-model	crates/kiln-model/src/forward.rs:18160	let gate_up_t = Tensor::cat(&[&gate_t, &up_t], candle_core::D::Minus1)?
 candle_core::D::Minus1	kiln-model	crates/kiln-model/src/forward.rs:21876	let big_g = g_f32.cumsum(candle_core::D::Minus1)?; // [B, nv, C] F32
-candle_core::TensorId	kiln-train	crates/kiln-train/src/vk_train.rs:25	use candle_core::TensorId;
 candle_nn::sampling::gumbel_softmax	kiln-model	crates/kiln-model/src/sampling.rs:24	use candle_nn::sampling::gumbel_softmax;
 candle_core::Device	kiln-model	crates/kiln-model/src/sampling.rs:628	use candle_core::Device;
 candle_core::cuda_backend::cudarc::driver::DevicePtr	kiln-model	crates/kiln-model/src/packed_weight_registry.rs:11	use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 candle_core::Storage::Cuda	kiln-model	crates/kiln-model/src/packed_weight_registry.rs:171	candle_core::Storage::Cuda(cuda) => cuda,
-candle_core::Tensor	kiln-train	crates/kiln-train/src/echo.rs:53	use candle_core::Tensor;
+candle_core::utils::cuda_is_available	kiln-train	crates/kiln-train/examples/cuda_opd_remote.rs:266	candle_core::utils::cuda_is_available(),
+candle_core::Device::new_cuda	kiln-train	crates/kiln-train/examples/cuda_opd_remote.rs:269	let device = candle_core::Device::new_cuda(0)?;
+candle_core::utils::cuda_is_available	kiln-train	crates/kiln-train/examples/cuda_grpo_ablation.rs:854	candle_core::utils::cuda_is_available(),
+candle_core::Device::new_cuda	kiln-train	crates/kiln-train/examples/cuda_grpo_ablation.rs:857	let device = candle_core::Device::new_cuda(0).context("create CUDA device 0")?;
+candle_core::Tensor	kiln-model	crates/kiln-model/src/generate.rs:1112	logits: &candle_core::Tensor,
+candle_core::Device::Metal	kiln-model	crates/kiln-model/src/generate.rs:2224	&& matches!(self.backend.device(), candle_core::Device::Metal(_))
+candle_core::Tensor	kiln-model	crates/kiln-model/src/generate.rs:2979	logits: candle_core::Tensor,
+candle_core::Device::Metal	kiln-model	crates/kiln-model/src/generate.rs:3354	&& matches!(self.backend.device(), candle_core::Device::Metal(_))
+candle_core::Device::Metal	kiln-model	crates/kiln-model/src/generate.rs:3672	&& matches!(self.backend.device(), candle_core::Device::Metal(_))
+candle_core::Device::Metal	kiln-model	crates/kiln-model/src/generate.rs:3765	&& matches!(self.backend.device(), candle_core::Device::Metal(_))
+candle_core::Device::Metal	kiln-model	crates/kiln-model/src/generate.rs:4032	&& matches!(self.backend.device(), candle_core::Device::Metal(_))
+candle_core::Device::Metal	kiln-model	crates/kiln-model/src/generate.rs:4130	&& matches!(self.backend.device(), candle_core::Device::Metal(_))
+candle_core::Tensor	kiln-model	crates/kiln-model/src/generate.rs:5435	candle_core::Tensor,
+candle_core::Tensor	kiln-model	crates/kiln-model/src/generate.rs:6002	logits: candle_core::Tensor,
+candle_core::Device::Metal	kiln-model	crates/kiln-model/src/generate.rs:6417	&& matches!(self.backend.device(), candle_core::Device::Metal(_))
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6535	let final_norm = Tensor::zeros((h,), candle_core::DType::F32, device).unwrap();
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6558	q_norm: Tensor::zeros((head_dim,), candle_core::DType::F32, device).unwrap(),
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6559	k_norm: Tensor::zeros((head_dim,), candle_core::DType::F32, device).unwrap(),
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6586	let norm = Tensor::ones((v_dim,), candle_core::DType::F32, device).unwrap();
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6587	let a_log = Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6588	let a_log_gates = Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6589	let dt_bias = Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6626	input_layernorm: Tensor::zeros((h,), candle_core::DType::F32, device).unwrap(),
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:6627	post_attention_layernorm: Tensor::zeros((h,), candle_core::DType::F32, device)
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7459	candle_core::DType::F32,
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7507	candle_core::DType::F32,
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7560	candle_core::DType::F32,
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7600	candle_core::DType::F32,
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7647	candle_core::DType::F32,
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7724	candle_core::DType::F32,
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7800	candle_core::DType::F32,
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7888	candle_core::DType::F32,
+candle_core::DType::F32	kiln-model	crates/kiln-model/src/generate.rs:7984	candle_core::DType::F32,
+candle_core::utils::cuda_is_available	kiln-train	crates/kiln-train/examples/cuda_grpo_behavioral_eval.rs:299	candle_core::utils::cuda_is_available(),
+candle_core::Device::new_cuda	kiln-train	crates/kiln-train/examples/cuda_grpo_behavioral_eval.rs:302	let device = candle_core::Device::new_cuda(0).context("create CUDA device 0")?;
+candle_core::utils::cuda_is_available	kiln-train	crates/kiln-train/examples/cuda_sft_file.rs:339	candle_core::utils::cuda_is_available(),
+candle_core::Device::new_cuda	kiln-train	crates/kiln-train/examples/cuda_sft_file.rs:342	let device = candle_core::Device::new_cuda(0).context("create CUDA device 0")?;
+candle_core::Device	kiln-train	crates/kiln-train/examples/long_context_grpo_bench.rs:359	device: candle_core::Device,
+candle_core::utils::cuda_is_available	kiln-train	crates/kiln-train/examples/long_context_grpo_bench.rs:367	candle_core::utils::cuda_is_available(),
+candle_core::Device::new_cuda	kiln-train	crates/kiln-train/examples/long_context_grpo_bench.rs:370	let device = candle_core::Device::new_cuda(0).context("create CUDA device 0")?;
 candle_core::bail	kiln-conv1d-kernel	crates/kiln-conv1d-kernel/src/lib.rs:204	candle_core::bail!(
 candle_core::bail	kiln-conv1d-kernel	crates/kiln-conv1d-kernel/src/lib.rs:213	candle_core::bail!("kiln-conv1d-kernel: decode path requires seq_len=1 (got {t})");
 candle_core::bail	kiln-conv1d-kernel	crates/kiln-conv1d-kernel/src/lib.rs:222	candle_core::bail!(
@@ -1632,6 +1660,89 @@ candle_core::bail	kiln-conv1d-kernel	crates/kiln-conv1d-kernel/src/lib.rs:444	_ 
 candle_core::Storage::Cuda	kiln-conv1d-kernel	crates/kiln-conv1d-kernel/src/lib.rs:447	candle_core::Storage::Cuda(c) => c,
 candle_core::bail	kiln-conv1d-kernel	crates/kiln-conv1d-kernel/src/lib.rs:448	_ => candle_core::bail!("kiln-conv1d-kernel: out must be on CUDA"),
 candle_core::bail	kiln-conv1d-kernel	crates/kiln-conv1d-kernel/src/lib.rs:487	candle_core::bail!(
+candle_core::shape::ShapeWithOneHole	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:20	use candle_core::shape::ShapeWithOneHole;
+candle_core::DType::F32	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:366	weights.embed_tokens = Tensor::zeros((1usize,), candle_core::DType::F32, &Device::Cpu)?;
+candle_core::safetensors::load	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:1794	let loaded = candle_core::safetensors::load(&tmp, &candle_core::Device::Cpu)?;
+candle_core::Device::Cpu	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:1794	let loaded = candle_core::safetensors::load(&tmp, &candle_core::Device::Cpu)?;
+candle_core::safetensors::load	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:2085	candle_core::safetensors::load(out.join("adapter_model.safetensors"), &Device::Cpu)?;
+candle_core::safetensors::load	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:2107	let checkpoint_loaded = candle_core::safetensors::load(&checkpoint, &Device::Cpu)?;
+candle_core::safetensors::load	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:2397	let loaded = candle_core::safetensors::load(&adapter_path, &Device::Cpu)?;
+candle_core::safetensors::load	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:2860	let loaded = candle_core::safetensors::load(&tmp, &candle_core::Device::Cpu)?;
+candle_core::Device::Cpu	kiln-train	crates/kiln-train/tests/vk_train_smoke.rs:2860	let loaded = candle_core::safetensors::load(&tmp, &candle_core::Device::Cpu)?;
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:141	candle_core::bail!("kiln-flash-attn only supports bf16, got {:?}", q.dtype());
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:144	candle_core::bail!("kiln-flash-attn only supports head_dim=128,256, got {head_dim}");
+candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:165	candle_core::Storage::Cuda(c) => c,
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:166	_ => candle_core::bail!("q must be a CUDA tensor"),
+candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:169	candle_core::Storage::Cuda(c) => c,
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:170	_ => candle_core::bail!("k must be a CUDA tensor"),
+candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:173	candle_core::Storage::Cuda(c) => c,
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:174	_ => candle_core::bail!("v must be a CUDA tensor"),
+candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:177	candle_core::Storage::Cuda(c) => c,
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:178	_ => candle_core::bail!("out must be a CUDA tensor"),
+candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:181	candle_core::Storage::Cuda(c) => c,
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:182	_ => candle_core::bail!("softmax_lse must be a CUDA tensor"),
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:225	candle_core::bail!("kiln_flash_attn_fwd failed with status {status}");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:258	candle_core::bail!("flash_attn_paged_decode requires query_len==1, got {q_len}");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:262	candle_core::bail!("k_pool head_dim ({hd_k}) does not match q head_dim ({head_dim})");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:265	candle_core::bail!("v_pool head_dim mismatch");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:268	candle_core::bail!(
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:273	candle_core::bail!("flash_attn_paged_decode requires bf16 q/k/v");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:276	candle_core::bail!(
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:282	candle_core::bail!(
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:287	candle_core::bail!(
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:295	candle_core::bail!("block_table batch dim ({bt_batch}) must match q batch ({b})");
+candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:319	candle_core::Storage::Cuda(c) => c,
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:320	_ => candle_core::bail!(concat!($name, " must be a CUDA tensor")),
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:386	candle_core::bail!("kiln_flash_attn_fwd_paged_decode failed with status {status}");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:417	candle_core::bail!("kiln-flash-attn only supports bf16, got {:?}", q.dtype());
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:420	candle_core::bail!("kiln-flash-attn only supports head_dim=128,256, got {head_dim}");
+candle_core::Error::Msg	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:436	candle_core::Error::Msg(format!(
+candle_core::Error::Msg	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:443	candle_core::Error::Msg(format!(
+candle_core::Error::Msg	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:450	candle_core::Error::Msg(format!(
+candle_core::Error::Msg	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:459	candle_core::Error::Msg(format!(
+candle_core::Error::Msg	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:469	candle_core::Error::Msg(format!(
+candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:491	candle_core::Storage::Cuda(c) => c,
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:492	_ => candle_core::bail!("tensor must be on CUDA"),
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:574	candle_core::bail!("kiln_flash_attn_bwd failed with status {status}");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:846	candle_core::bail!("flash_attn_paged_decode_dyn_seqlen requires query_len==1, got {q_len}");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:850	candle_core::bail!("paged decode dyn seqlen head_dim mismatch");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:853	candle_core::bail!(
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:858	candle_core::bail!("flash_attn_paged_decode_dyn_seqlen requires bf16 q/k/v");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:861	candle_core::bail!(
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:866	candle_core::bail!(
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:871	candle_core::bail!(
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:877	candle_core::bail!(
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:884	candle_core::bail!("block_table batch dim ({bt_batch}) must match q batch ({b})");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:887	candle_core::bail!("seqused_k shape {:?} must be [{b}]", seqused_k.dims());
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:899	candle_core::bail!(
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:906	candle_core::bail!(
+candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:931	candle_core::Storage::Cuda(c) => c,
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:932	_ => candle_core::bail!(concat!($name, " must be a CUDA tensor")),
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:997	candle_core::bail!(
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1017	candle_core::bail!("paged_kv_write_token_major_bf16 k/v pool dims mismatch");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1024	candle_core::bail!("paged_kv_write_token_major_bf16 requires bf16 tensors");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1027	candle_core::bail!(
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1033	candle_core::bail!(
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1040	candle_core::bail!("paged_kv_write_token_major_bf16 slot {slot} exceeds u32");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1043	candle_core::bail!(
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1048	candle_core::bail!("paged_kv_write_token_major_bf16 head_dim {head_dim} exceeds i32");
+candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1061	candle_core::Storage::Cuda(c) => c,
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1062	_ => candle_core::bail!(concat!($name, " must be a CUDA tensor")),
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1100	candle_core::bail!("kiln_paged_kv_write_token_major_bf16 failed with status {status}");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1117	candle_core::bail!("paged_kv_write_token_major_bf16_slot k/v pool dims mismatch");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1124	candle_core::bail!("paged_kv_write_token_major_bf16_slot requires bf16 tensors");
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1127	candle_core::bail!(
+candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1145	candle_core::Storage::Cuda(c) => c,
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1146	_ => candle_core::bail!(concat!($name, " must be a CUDA tensor")),
+candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1189	candle_core::bail!(
+candle_core::safetensors::save	kiln-train	crates/kiln-train/src/cuda_train.rs:2424	candle_core::safetensors::save(&tensors, output_path)
+candle_core::safetensors::save	kiln-train	crates/kiln-train/src/cuda_train.rs:2477	candle_core::safetensors::save(&tensors, output_path)
+candle_core::safetensors::load	kiln-train	crates/kiln-train/src/cuda_train.rs:2978	let saved = candle_core::safetensors::load(
+candle_core::safetensors::load	kiln-train	crates/kiln-train/src/cuda_train.rs:3645	let loaded = candle_core::safetensors::load(&tmp, &Device::Cpu)?;
+candle_core::safetensors::load	kiln-train	crates/kiln-train/src/cuda_train.rs:3686	let loaded = candle_core::safetensors::load(&tmp, &Device::Cpu)?;
+candle_core::safetensors::load	kiln-train	crates/kiln-train/src/cuda_train.rs:3759	let loaded = candle_core::safetensors::load(
+candle_core::safetensors::save	kiln-train	crates/kiln-train/src/adapter_shape.rs:319	candle_core::safetensors::save(&tensors, dir.join("adapter_model.safetensors"))?;
+candle_core::TensorId	kiln-train	crates/kiln-train/src/vk_train.rs:25	use candle_core::TensorId;
 candle_core::CudaStorage	kiln-train	crates/kiln-train/src/trainer.rs:12	use candle_core::CudaStorage;
 candle_core::backend::BackendStorage	kiln-train	crates/kiln-train/src/trainer.rs:14	use candle_core::backend::BackendStorage;
 candle_core::TensorId	kiln-train	crates/kiln-train/src/trainer.rs:555	let mut moments: HashMap<candle_core::TensorId, AdamWMoments> = HashMap::new();
@@ -1700,72 +1811,6 @@ candle_core::TensorId	kiln-train	crates/kiln-train/src/trainer.rs:15852	let mut 
 candle_core::TensorId	kiln-train	crates/kiln-train/src/trainer.rs:15932	let mut grads: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
 candle_core::safetensors::load	kiln-train	crates/kiln-train/src/trainer.rs:15979	let saved = candle_core::safetensors::load(
 candle_core::safetensors::load	kiln-train	crates/kiln-train/src/train_receipt.rs:1357	let tensors = candle_core::safetensors::load(&adapter_model, &Device::Cpu)
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:141	candle_core::bail!("kiln-flash-attn only supports bf16, got {:?}", q.dtype());
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:144	candle_core::bail!("kiln-flash-attn only supports head_dim=128,256, got {head_dim}");
-candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:165	candle_core::Storage::Cuda(c) => c,
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:166	_ => candle_core::bail!("q must be a CUDA tensor"),
-candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:169	candle_core::Storage::Cuda(c) => c,
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:170	_ => candle_core::bail!("k must be a CUDA tensor"),
-candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:173	candle_core::Storage::Cuda(c) => c,
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:174	_ => candle_core::bail!("v must be a CUDA tensor"),
-candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:177	candle_core::Storage::Cuda(c) => c,
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:178	_ => candle_core::bail!("out must be a CUDA tensor"),
-candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:181	candle_core::Storage::Cuda(c) => c,
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:182	_ => candle_core::bail!("softmax_lse must be a CUDA tensor"),
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:225	candle_core::bail!("kiln_flash_attn_fwd failed with status {status}");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:258	candle_core::bail!("flash_attn_paged_decode requires query_len==1, got {q_len}");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:262	candle_core::bail!("k_pool head_dim ({hd_k}) does not match q head_dim ({head_dim})");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:265	candle_core::bail!("v_pool head_dim mismatch");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:268	candle_core::bail!(
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:273	candle_core::bail!("flash_attn_paged_decode requires bf16 q/k/v");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:276	candle_core::bail!(
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:282	candle_core::bail!(
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:287	candle_core::bail!(
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:295	candle_core::bail!("block_table batch dim ({bt_batch}) must match q batch ({b})");
-candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:319	candle_core::Storage::Cuda(c) => c,
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:320	_ => candle_core::bail!(concat!($name, " must be a CUDA tensor")),
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:386	candle_core::bail!("kiln_flash_attn_fwd_paged_decode failed with status {status}");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:417	candle_core::bail!("kiln-flash-attn only supports bf16, got {:?}", q.dtype());
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:420	candle_core::bail!("kiln-flash-attn only supports head_dim=128,256, got {head_dim}");
-candle_core::Error::Msg	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:436	candle_core::Error::Msg(format!(
-candle_core::Error::Msg	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:443	candle_core::Error::Msg(format!(
-candle_core::Error::Msg	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:450	candle_core::Error::Msg(format!(
-candle_core::Error::Msg	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:459	candle_core::Error::Msg(format!(
-candle_core::Error::Msg	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:469	candle_core::Error::Msg(format!(
-candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:491	candle_core::Storage::Cuda(c) => c,
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:492	_ => candle_core::bail!("tensor must be on CUDA"),
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:574	candle_core::bail!("kiln_flash_attn_bwd failed with status {status}");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:846	candle_core::bail!("flash_attn_paged_decode_dyn_seqlen requires query_len==1, got {q_len}");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:850	candle_core::bail!("paged decode dyn seqlen head_dim mismatch");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:853	candle_core::bail!(
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:858	candle_core::bail!("flash_attn_paged_decode_dyn_seqlen requires bf16 q/k/v");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:861	candle_core::bail!(
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:866	candle_core::bail!(
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:871	candle_core::bail!(
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:877	candle_core::bail!(
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:884	candle_core::bail!("block_table batch dim ({bt_batch}) must match q batch ({b})");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:887	candle_core::bail!("seqused_k shape {:?} must be [{b}]", seqused_k.dims());
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:899	candle_core::bail!(
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:906	candle_core::bail!(
-candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:931	candle_core::Storage::Cuda(c) => c,
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:932	_ => candle_core::bail!(concat!($name, " must be a CUDA tensor")),
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:997	candle_core::bail!(
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1017	candle_core::bail!("paged_kv_write_token_major_bf16 k/v pool dims mismatch");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1024	candle_core::bail!("paged_kv_write_token_major_bf16 requires bf16 tensors");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1027	candle_core::bail!(
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1033	candle_core::bail!(
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1040	candle_core::bail!("paged_kv_write_token_major_bf16 slot {slot} exceeds u32");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1043	candle_core::bail!(
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1048	candle_core::bail!("paged_kv_write_token_major_bf16 head_dim {head_dim} exceeds i32");
-candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1061	candle_core::Storage::Cuda(c) => c,
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1062	_ => candle_core::bail!(concat!($name, " must be a CUDA tensor")),
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1100	candle_core::bail!("kiln_paged_kv_write_token_major_bf16 failed with status {status}");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1117	candle_core::bail!("paged_kv_write_token_major_bf16_slot k/v pool dims mismatch");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1124	candle_core::bail!("paged_kv_write_token_major_bf16_slot requires bf16 tensors");
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1127	candle_core::bail!(
-candle_core::Storage::Cuda	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1145	candle_core::Storage::Cuda(c) => c,
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1146	_ => candle_core::bail!(concat!($name, " must be a CUDA tensor")),
-candle_core::bail	kiln-flash-attn	crates/kiln-flash-attn/src/lib.rs:1189	candle_core::bail!(
 candle_core::Tensor	kiln-train	crates/kiln-train/src/opd.rs:63	use candle_core::Tensor;
 candle_core::Var	kiln-train	crates/kiln-train/src/opd.rs:1703	use candle_core::Var;
 candle_nn::Optimizer	kiln-train	crates/kiln-train/src/opd.rs:1704	use candle_nn::Optimizer;
@@ -1777,6 +1822,7 @@ candle_core::DType::F32	kiln-train	crates/kiln-train/src/opd.rs:1869	.to_dtype(c
 candle_core::Var	kiln-train	crates/kiln-train/src/opd.rs:2061	use candle_core::Var;
 candle_core::TensorId	kiln-train	crates/kiln-train/src/opd.rs:2737	let mut accumulated_grads: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
 candle_core::TensorId	kiln-train	crates/kiln-train/src/opd.rs:2778	let grads_on_device: HashMap<candle_core::TensorId, Tensor> = accumulated_grads
+candle_core::Tensor	kiln-train	crates/kiln-train/src/echo.rs:53	use candle_core::Tensor;
 candle_core::bail	kiln-marlin-gemm	crates/kiln-marlin-gemm/src/lib.rs:105	candle_core::bail!("kiln-marlin-gemm: a must be on CUDA");
 candle_core::bail	kiln-marlin-gemm	crates/kiln-marlin-gemm/src/lib.rs:113	candle_core::bail!("kiln-marlin-gemm: k must be a multiple of 128 (got {k})");
 candle_core::bail	kiln-marlin-gemm	crates/kiln-marlin-gemm/src/lib.rs:116	candle_core::bail!("kiln-marlin-gemm: n must be a multiple of 256 (got {n})");
