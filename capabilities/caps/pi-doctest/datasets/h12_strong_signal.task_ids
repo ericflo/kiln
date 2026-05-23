@@ -1,0 +1,14 @@
+# Round-1 H12/iter5 strong-signal training subset.
+# These are train task IDs, not eval task IDs.
+task_0025
+task_0033
+task_0036
+task_0041
+task_0042
+task_0044
+task_0054
+task_0057
+task_0058
+task_0060
+task_0061
+task_0063

@@ -38,7 +38,7 @@ from pathlib import Path
 
 # Re-export the helpers from the archived v0 module
 # (archive/rubric_v0_outcome_only.py).
-sys.path.insert(0, str(Path(__file__).parent / "archive"))
+sys.path.append(str(Path(__file__).parent / "archive"))
 from rubric_v0_outcome_only import (  # type: ignore
     _iter_messages,
     _tool_calls_in,
@@ -46,6 +46,19 @@ from rubric_v0_outcome_only import (  # type: ignore
     _tool_call_efficiency,
     _format_compliance,
 )
+
+
+def _thinking_stats(transcript: list) -> dict:
+    chars = 0
+    blocks = 0
+    for _, msg in _iter_messages(transcript):
+        if msg.get("role") != "assistant":
+            continue
+        for block in msg.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "thinking":
+                blocks += 1
+                chars += len(block.get("thinking") or "")
+    return {"chars": chars, "blocks": blocks}
 
 
 def score_rollout(transcript: list, workdir: str, task: dict) -> dict:
@@ -77,6 +90,12 @@ def score_rollout(transcript: list, workdir: str, task: dict) -> dict:
     tbd = _tested_before_done(transcript)
     tce = _tool_call_efficiency(transcript, expected=4)
     fc = _format_compliance(transcript)
+    thinking = _thinking_stats(transcript)
+    n_tool_calls = sum(
+        len(_tool_calls_in(m))
+        for _, m in _iter_messages(transcript)
+        if m.get("role") == "assistant"
+    )
 
     agentic = 0.30 * tce + 0.20 * tbd + 0.10 * fc + 0.40
     composite = outcome_val * agentic
@@ -87,10 +106,11 @@ def score_rollout(transcript: list, workdir: str, task: dict) -> dict:
         "tested_before_done": tbd,
         "format_compliance": fc,
         "composite": composite,
-        "_n_tool_calls": sum(
-            len(_tool_calls_in(m))
-            for _, m in _iter_messages(transcript)
-            if m.get("role") == "assistant"
+        "_n_tool_calls": n_tool_calls,
+        "_thinking_blocks": thinking["blocks"],
+        "_thinking_chars": thinking["chars"],
+        "_thinking_chars_per_tool_call": (
+            thinking["chars"] / n_tool_calls if n_tool_calls else thinking["chars"]
         ),
     }
 

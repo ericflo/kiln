@@ -20,11 +20,30 @@ import sys
 from pathlib import Path
 
 
+def _normalize_doctest_examples(signature: str) -> str:
+    """Convert assertion-style example lines into executable doctests."""
+    out = []
+    for line in signature.splitlines():
+        stripped = line.strip()
+        indent = line[: len(line) - len(line.lstrip())]
+        if (
+            " == " in stripped
+            and "(" in stripped
+            and not stripped.startswith(("if ", "while ", "return "))
+        ):
+            expr, expected = stripped.rsplit(" == ", 1)
+            out.append(f"{indent}>>> {expr}")
+            out.append(f"{indent}{expected}")
+        else:
+            out.append(line)
+    return "\n".join(out) + ("\n" if signature.endswith("\n") else "")
+
+
 def init_workdir(task: dict, dir: str) -> None:
     dir = Path(dir)
     dir.mkdir(parents=True, exist_ok=True)
     imports = task.get("imports", "")
-    sig = task["function_signature"]
+    sig = _normalize_doctest_examples(task["function_signature"])
     stub = f"{imports}\n{sig}    raise NotImplementedError\n"
     (dir / "solution.py").write_text(stub)
     (dir / "README.md").write_text(
@@ -38,6 +57,9 @@ def pi_prompt(task: dict) -> str:
         "In the file `solution.py` there is a stub Python function with a "
         "docstring containing doctest examples. Replace the function body "
         "so the doctests pass.\n\n"
+        "Reason only as much as needed to choose the implementation; keep "
+        "internal thinking brief and move to tool calls as soon as the next "
+        "action is clear.\n\n"
         "Steps:\n"
         "1. Read solution.py to see the function signature and doctests.\n"
         "2. Use the `edit` or `write` tool to replace the function body with "

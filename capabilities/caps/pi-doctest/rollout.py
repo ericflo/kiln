@@ -35,15 +35,20 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-# Also import the shared agentic-grpo lib (one level up).
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib"))
+CAP_DIR = Path(__file__).parent
+LIB_DIR = Path(__file__).resolve().parent.parent.parent / "lib"
+# Import cap-local helpers first; the shared agentic-GRPO lib also has helper
+# names such as task_scaffold.py, so it must not shadow this cap's prompt.
+sys.path.insert(0, str(LIB_DIR))
+sys.path.insert(0, str(CAP_DIR))
 import rubric  # noqa: E402
 import task_scaffold  # noqa: E402
 import pi_trajectory  # noqa: E402
 
 
 PI_BIN = os.environ.get("PI_BIN", "pi")
+PI_MODEL = os.environ.get("PI_MODEL", "qwen-3.5-4b-kiln-pi1024")
+PI_THINKING = os.environ.get("PI_THINKING", "")
 
 
 def kiln_active_adapter(url: str, adapter: str | None) -> None:
@@ -108,6 +113,8 @@ def run_one_rollout(
     kiln_url: str,
     max_wall_clock_s: int,
     seed: int | None,
+    pi_model: str = "",
+    thinking: str = "",
     verbose: bool = False,
 ) -> dict:
     """Run a single pi session for one (task, gen). Returns the per-rollout
@@ -133,9 +140,10 @@ def run_one_rollout(
         "--no-themes",
         "--offline",
     ]
-    # Model selection is via the kiln-local provider config that
-    # `kiln pi-setup` writes into ~/.pi/agent/settings.json. We don't
-    # set --provider / --model here — let pi pick up its defaults.
+    if pi_model:
+        cmd.extend(["--model", pi_model])
+    if thinking:
+        cmd.extend(["--thinking", thinking])
 
     started = time.time()
     proc = subprocess.run(
@@ -177,12 +185,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tasks", required=True)
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--config", default="",
+                    help="Optional capability config JSON. Accepted for run_iter.sh "
+                         "compatibility; CLI flags remain authoritative.")
     ap.add_argument("--adapter", default="",
                     help="If 'current', skip the kiln-side switch and use whatever "
                          "adapter is already active. Otherwise switch to this name.")
     ap.add_argument("--num-generations", type=int, default=4)
     ap.add_argument("--mode", choices=["train", "eval"], default="train")
     ap.add_argument("--kiln-url", default=os.environ.get("KILN_URL", "http://localhost:8420"))
+    ap.add_argument("--pi-model", default=PI_MODEL,
+                    help="Optional Pi model alias, e.g. qwen-3.5-4b-kiln.")
+    ap.add_argument("--thinking", default=PI_THINKING,
+                    help="Optional Pi thinking level. Empty means use the "
+                         "server/provider default; for Qwen3.5 local runs the "
+                         "Kiln KILN_DEFAULT_THINKING_ENABLED env var is the "
+                         "effective on/off control.")
     ap.add_argument("--max-wall-clock-s", type=int, default=120)
     ap.add_argument("--parallel", type=int, default=1,
                     help="Number of concurrent pi rollouts. Pi shares the kiln "
@@ -190,6 +208,9 @@ def main():
                          "scheduler. Start with 1 and raise carefully.")
     ap.add_argument("--seed-base", type=int, default=None)
     ap.add_argument("--limit", type=int, default=0, help="Limit task count (0 = all)")
+    ap.add_argument("--task-ids", default="",
+                    help="Optional comma-separated task IDs or path to a newline-separated "
+                         "ID list. Applied before --limit; intended for training subsets.")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -204,6 +225,21 @@ def main():
             if not line:
                 continue
             tasks.append(json.loads(line))
+    if args.task_ids:
+        ids_arg = Path(args.task_ids)
+        if ids_arg.exists():
+            wanted = {
+                line.strip()
+                for line in ids_arg.read_text().splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            }
+        else:
+            wanted = {x.strip() for x in args.task_ids.split(",") if x.strip()}
+        tasks = [t for t in tasks if t.get("task_id") in wanted]
+        missing = sorted(wanted - {t.get("task_id") for t in tasks})
+        if missing:
+            print(f"WARN: requested task IDs not present in {args.tasks}: {missing}",
+                  flush=True)
     if args.limit > 0:
         tasks = tasks[: args.limit]
 
@@ -225,15 +261,26 @@ def main():
 
     started = time.time()
     records: list[dict] = []
+    rec_path = out_root / "rollouts.jsonl"
+    rec_path.write_text("")
+
+    def keep_record(record: dict) -> None:
+        records.append(record)
+        with rec_path.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+            f.flush()
+
     work_items = [
         (task, gen) for task in tasks for gen in range(args.num_generations)
     ]
     if args.parallel <= 1:
         for task, gen in work_items:
-            records.append(run_one_rollout(
+            keep_record(run_one_rollout(
                 task, gen, out_root, args.kiln_url,
                 args.max_wall_clock_s,
                 (args.seed_base + gen) if args.seed_base else None,
+                pi_model=args.pi_model,
+                thinking=args.thinking,
                 verbose=args.verbose,
             ))
     else:
@@ -243,17 +290,19 @@ def main():
                     run_one_rollout, task, gen, out_root, args.kiln_url,
                     args.max_wall_clock_s,
                     (args.seed_base + gen) if args.seed_base else None,
+                    args.pi_model,
+                    args.thinking,
                     args.verbose,
                 )
                 for task, gen in work_items
             ]
             for f in futs:
-                records.append(f.result())
+                keep_record(f.result())
 
     elapsed = time.time() - started
 
-    # Always write per-rollout records.
-    rec_path = out_root / "rollouts.jsonl"
+    # Per-rollout records are streamed during execution; rewrite once at the
+    # end to preserve the in-memory ordering if parallel mode was used.
     with rec_path.open("w") as f:
         for r in records:
             f.write(json.dumps(r) + "\n")

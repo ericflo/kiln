@@ -96,6 +96,40 @@ in `capability.jsonl` for the closeout.
 
 The cap is in the healthy headroom band. **Target sub-score: `tool_call_efficiency`** — has the most movable mass.
 
+### Local WSL harness note (2026-05-23)
+
+The first round-2 local oracle run is recorded in `capability.jsonl` as
+`local-0a/base-normal-serve-reasoning-drift`, but it is **not** a valid
+baseline. It used the user-started normal server command while the rollout
+harness also passed Pi `--thinking off`. Pi recorded `thinkingLevel=off`, but
+for this `openai-completions` provider that flag did not reliably map to
+`chat_template_kwargs.enable_thinking=false`, so server-side thinking mode was
+ambiguous across requests and the run timed out heavily.
+
+Symptom: the blind eval aggregate fell to composite 0.2205 over 24 tasks × 3
+rollouts, with mean wall-clock 105.9s and 54/72 zero rollouts. Server logs
+showed `thinking_mode="reasoning"` on the slow requests. A no-thinking
+eval-mode smoke confirmed the harness could run quickly, but the target policy
+for this cap is **thinking enabled**: thinking usually raises task scores, and
+the useful optimization problem is to make that thinking efficient rather than
+to disable it.
+
+Current local server policy:
+`KILN_MODEL_PATH=./Qwen3.5-4B KILN_DEFAULT_THINKING_ENABLED=true ./target/release/kiln serve`.
+Health should show `eval_mode=false`, `default_thinking_enabled=true`. The
+rollout harness now leaves `--thinking` unset by default so the server env var
+is the source of truth. Pi uses the local model alias
+`qwen-3.5-4b-kiln-pi1024`, which keeps thinking enabled but caps each turn at
+1024 output tokens instead of the provider's 32768-token ceiling. The prompt
+also asks for brief internal reasoning before acting. The v1 composite remains
+unchanged, and the rubric now emits aggregate diagnostics for `thinking_chars`,
+`thinking_blocks`, and `thinking_chars_per_tool_call` so training/eval reports
+can track the score vs. thinking-efficiency tradeoff without changing the blind
+score definition.
+
+Next valid measurement: rerun the blind baseline under thinking-on server
+defaults before any local H15 training claim.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
