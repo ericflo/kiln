@@ -16,6 +16,7 @@
 pub mod activation;
 pub mod argmax;
 pub mod binary_minmax;
+pub mod bincount;
 pub mod bool_reduce;
 pub mod broadcast;
 pub mod cast;
@@ -97,6 +98,7 @@ pub mod where_select;
 pub use activation::{gelu, relu, sigmoid, silu, tanh, ActivationOp, UnaryKind};
 pub use argmax::{argmax_last_dim, ArgmaxLastDimOp};
 pub use binary_minmax::{maximum, minimum};
+pub use bincount::bincount;
 pub use bool_reduce::{all_axis, all_reduce, any_axis, any_reduce, BoolReduce};
 pub use broadcast::broadcast_to;
 pub use cast::{cast, CastOp};
