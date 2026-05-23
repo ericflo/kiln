@@ -158,6 +158,32 @@ pub fn hinge_loss(pred: &Tensor, y: &Tensor) -> Result<Tensor> {
     scalar_tensor(pred.dtype(), sum / n)
 }
 
+/// InfoNCE-style contrastive loss (a.k.a. NT-Xent without
+/// temperature). Inputs are precomputed similarity scores
+/// `sim: [B, B]` and targets `targets: [B]` (positive partner index
+/// per row). Returns mean cross-entropy.
+///
+/// The temperature divisor should be applied to `sim` before this
+/// call. Typical SimCLR pipeline: cosine_similarity → mul_scalar
+/// (1/τ) → info_nce.
+pub fn info_nce(sim: &Tensor, targets: &Tensor) -> Result<Tensor> {
+    if sim.rank() != 2 {
+        bail!("info_nce: sim must be rank-2, got {:?}", sim.shape());
+    }
+    if targets.rank() != 1 {
+        bail!("info_nce: targets must be rank-1, got {:?}", targets.shape());
+    }
+    if sim.shape()[0] != targets.shape()[0] {
+        bail!(
+            "info_nce: batch mismatch: sim.B={} vs targets.B={}",
+            sim.shape()[0],
+            targets.shape()[0]
+        );
+    }
+    // Standard cross-entropy on similarity matrix.
+    super::cross_entropy(sim, targets)
+}
+
 /// KL divergence `D_KL(p || q) = Σ p * (log p - log q)` along the
 /// trailing axis. Inputs `p_log_probs` and `q_log_probs` are
 /// log-probabilities (output of `log_softmax_last_dim`). Returns
