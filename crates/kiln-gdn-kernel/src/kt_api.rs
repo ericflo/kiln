@@ -23,10 +23,10 @@ use crate::{
     kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16,
     kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16,
     kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16,
-    kiln_gdn_decode_qk_norm_gates_recurrent_vf32_bf16, kiln_gdn_forward_substitution,
-    kiln_gdn_full_chunk_forward, kiln_gdn_full_chunk_forward_multiblock,
-    kiln_gdn_gated_rms_norm_bf16, kiln_gdn_gates_bf16, kiln_gdn_gates_bf16_f32_bf16_params,
-    kiln_gdn_gates_bf16_f32_params, kiln_gdn_recurrent_forward,
+    kiln_gdn_chunk_prep, kiln_gdn_chunk_scan, kiln_gdn_decode_qk_norm_gates_recurrent_vf32_bf16,
+    kiln_gdn_forward_substitution, kiln_gdn_full_chunk_forward,
+    kiln_gdn_full_chunk_forward_multiblock, kiln_gdn_gated_rms_norm_bf16, kiln_gdn_gates_bf16,
+    kiln_gdn_gates_bf16_f32_bf16_params, kiln_gdn_gates_bf16_f32_params, kiln_gdn_recurrent_forward,
 };
 
 #[derive(Debug)]
@@ -2018,4 +2018,296 @@ pub fn gdn_gates_bf16_f32_bf16_params_kt(
         )));
     }
     Ok((beta, g))
+}
+
+/// `kiln_gdn_chunk_prep` over kt operands.
+///
+/// Prepares the auxiliary matrices that `kiln_gdn_chunk_scan` consumes.
+///
+/// Inputs (all BF16, all CUDA, all contiguous):
+/// - `g`:        `[B, H, C]`
+/// - `v`:        `[B, H, C, dv]`
+/// - `kkt`,`qkt`: `[B, H, C, C]`
+/// - `ks_entry`,`q_s`: `[B, H, C, dv]`
+///
+/// Returns a tuple of six BF16 outputs:
+/// `(a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last)`
+/// with shapes:
+/// - `a_strict`, `b_mask`: `[B, H, C, C]`
+/// - `v_prime`, `q_s_scaled`: `[B, H, C, dv]`
+/// - `decay_last_col`: `[B, H, C]`
+/// - `p_last`: `[B, H]`
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_prep_kt(
+    g: &KtTensor,
+    v: &KtTensor,
+    kkt: &KtTensor,
+    qkt: &KtTensor,
+    ks_entry: &KtTensor,
+    q_s: &KtTensor,
+) -> Result<(KtTensor, KtTensor, KtTensor, KtTensor, KtTensor, KtTensor), GdnError> {
+    let g_shape = g.shape();
+    if g_shape.len() != 3 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk-prep g must be [B, H, C], got {g_shape:?}"
+        )));
+    }
+    let (b, h, c) = (g_shape[0], g_shape[1], g_shape[2]);
+
+    let v_shape = v.shape();
+    if v_shape.len() != 4 || (v_shape[0], v_shape[1], v_shape[2]) != (b, h, c) {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk-prep v {v_shape:?} != [{b}, {h}, {c}, dv]"
+        )));
+    }
+    let dv = v_shape[3];
+
+    if kkt.shape() != [b, h, c, c] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk-prep kkt {:?} != [{b}, {h}, {c}, {c}]",
+            kkt.shape()
+        )));
+    }
+    if qkt.shape() != [b, h, c, c] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk-prep qkt {:?} != [{b}, {h}, {c}, {c}]",
+            qkt.shape()
+        )));
+    }
+    if ks_entry.shape() != [b, h, c, dv] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk-prep ks_entry {:?} != [{b}, {h}, {c}, {dv}]",
+            ks_entry.shape()
+        )));
+    }
+    if q_s.shape() != [b, h, c, dv] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk-prep q_s {:?} != [{b}, {h}, {c}, {dv}]",
+            q_s.shape()
+        )));
+    }
+
+    let (g_st, g_off) = cuda_storage_and_byte_offset(g, KtDType::BF16, "g")?;
+    let (v_st, v_off) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
+    let (kkt_st, kkt_off) = cuda_storage_and_byte_offset(kkt, KtDType::BF16, "kkt")?;
+    let (qkt_st, qkt_off) = cuda_storage_and_byte_offset(qkt, KtDType::BF16, "qkt")?;
+    let (ks_st, ks_off) = cuda_storage_and_byte_offset(ks_entry, KtDType::BF16, "ks_entry")?;
+    let (qs_st, qs_off) = cuda_storage_and_byte_offset(q_s, KtDType::BF16, "q_s")?;
+
+    let a_strict = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h, c, c])?;
+    let b_mask = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h, c, c])?;
+    let v_prime = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h, c, dv])?;
+    let q_s_scaled = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h, c, dv])?;
+    let decay_last_col = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h, c])?;
+    let p_last = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h])?;
+
+    let a_cuda = a_strict
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let bm_cuda = b_mask
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let vp_cuda = v_prime
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let qss_cuda = q_s_scaled
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let dl_cuda = decay_last_col
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let pl_cuda = p_last
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = g_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let g_slice = g_st.slice().slice(g_off..);
+    let v_slice = v_st.slice().slice(v_off..);
+    let kkt_slice = kkt_st.slice().slice(kkt_off..);
+    let qkt_slice = qkt_st.slice().slice(qkt_off..);
+    let ks_slice = ks_st.slice().slice(ks_off..);
+    let qs_slice = qs_st.slice().slice(qs_off..);
+    let a_slice = a_cuda.slice().slice(0..);
+    let bm_slice = bm_cuda.slice().slice(0..);
+    let vp_slice = vp_cuda.slice().slice(0..);
+    let qss_slice = qss_cuda.slice().slice(0..);
+    let dl_slice = dl_cuda.slice().slice(0..);
+    let pl_slice = pl_cuda.slice().slice(0..);
+
+    let status = unsafe {
+        let (g_ptr, _g1) = g_slice.device_ptr(&stream);
+        let (v_ptr, _g2) = v_slice.device_ptr(&stream);
+        let (kkt_ptr, _g3) = kkt_slice.device_ptr(&stream);
+        let (qkt_ptr, _g4) = qkt_slice.device_ptr(&stream);
+        let (ks_ptr, _g5) = ks_slice.device_ptr(&stream);
+        let (qs_ptr, _g6) = qs_slice.device_ptr(&stream);
+        let (a_ptr, _g7) = a_slice.device_ptr(&stream);
+        let (bm_ptr, _g8) = bm_slice.device_ptr(&stream);
+        let (vp_ptr, _g9) = vp_slice.device_ptr(&stream);
+        let (qss_ptr, _g10) = qss_slice.device_ptr(&stream);
+        let (dl_ptr, _g11) = dl_slice.device_ptr(&stream);
+        let (pl_ptr, _g12) = pl_slice.device_ptr(&stream);
+        kiln_gdn_chunk_prep(
+            g_ptr as *const _,
+            v_ptr as *const _,
+            kkt_ptr as *const _,
+            qkt_ptr as *const _,
+            ks_ptr as *const _,
+            qs_ptr as *const _,
+            a_ptr as *mut _,
+            bm_ptr as *mut _,
+            vp_ptr as *mut _,
+            qss_ptr as *mut _,
+            dl_ptr as *mut _,
+            pl_ptr as *mut _,
+            (b * h) as i32,
+            c as i32,
+            dv as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk_prep FFI returned {status}"
+        )));
+    }
+    Ok((a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last))
+}
+
+/// `kiln_gdn_chunk_scan` over kt operands.
+///
+/// The companion to [`gdn_chunk_prep_kt`]. Consumes the prepared
+/// matrices plus `beta` and computes the chunk-scan output.
+///
+/// Inputs (all BF16):
+/// - `a_strict`, `b_mask`: `[B, H, C, C]`
+/// - `v_prime`, `q_s_scaled`: `[B, H, C, dv]`
+/// - `beta`: `[B, H, C]`
+/// - `decay_last_col`: `[B, H, C]`
+///
+/// Returns `(out_chunk, w_weighted)`, both BF16 `[B, H, C, dv]`.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_scan_kt(
+    a_strict: &KtTensor,
+    b_mask: &KtTensor,
+    v_prime: &KtTensor,
+    q_s_scaled: &KtTensor,
+    beta: &KtTensor,
+    decay_last_col: &KtTensor,
+) -> Result<(KtTensor, KtTensor), GdnError> {
+    let a_shape = a_strict.shape();
+    if a_shape.len() != 4 || a_shape[2] != a_shape[3] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk-scan a_strict must be [B, H, C, C], got {a_shape:?}"
+        )));
+    }
+    let (b, h, c) = (a_shape[0], a_shape[1], a_shape[2]);
+    if b_mask.shape() != [b, h, c, c] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk-scan b_mask {:?} != [{b}, {h}, {c}, {c}]",
+            b_mask.shape()
+        )));
+    }
+    let vp_shape = v_prime.shape();
+    if vp_shape.len() != 4 || (vp_shape[0], vp_shape[1], vp_shape[2]) != (b, h, c) {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk-scan v_prime {vp_shape:?} != [{b}, {h}, {c}, dv]"
+        )));
+    }
+    let dv = vp_shape[3];
+    if q_s_scaled.shape() != [b, h, c, dv] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk-scan q_s_scaled {:?} != [{b}, {h}, {c}, {dv}]",
+            q_s_scaled.shape()
+        )));
+    }
+    if beta.shape() != [b, h, c] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk-scan beta {:?} != [{b}, {h}, {c}]",
+            beta.shape()
+        )));
+    }
+    if decay_last_col.shape() != [b, h, c] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk-scan decay_last_col {:?} != [{b}, {h}, {c}]",
+            decay_last_col.shape()
+        )));
+    }
+
+    let (a_st, a_off) = cuda_storage_and_byte_offset(a_strict, KtDType::BF16, "a_strict")?;
+    let (bm_st, bm_off) = cuda_storage_and_byte_offset(b_mask, KtDType::BF16, "b_mask")?;
+    let (vp_st, vp_off) = cuda_storage_and_byte_offset(v_prime, KtDType::BF16, "v_prime")?;
+    let (qss_st, qss_off) = cuda_storage_and_byte_offset(q_s_scaled, KtDType::BF16, "q_s_scaled")?;
+    let (bt_st, bt_off) = cuda_storage_and_byte_offset(beta, KtDType::BF16, "beta")?;
+    let (dl_st, dl_off) =
+        cuda_storage_and_byte_offset(decay_last_col, KtDType::BF16, "decay_last_col")?;
+
+    let out_chunk = alloc_cuda_tensor(a_st, KtDType::BF16, vec![b, h, c, dv])?;
+    let w_weighted = alloc_cuda_tensor(a_st, KtDType::BF16, vec![b, h, c, dv])?;
+    let out_cuda = out_chunk
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let ww_cuda = w_weighted
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = a_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let a_slice = a_st.slice().slice(a_off..);
+    let bm_slice = bm_st.slice().slice(bm_off..);
+    let vp_slice = vp_st.slice().slice(vp_off..);
+    let qss_slice = qss_st.slice().slice(qss_off..);
+    let bt_slice = bt_st.slice().slice(bt_off..);
+    let dl_slice = dl_st.slice().slice(dl_off..);
+    let out_slice = out_cuda.slice().slice(0..);
+    let ww_slice = ww_cuda.slice().slice(0..);
+
+    let status = unsafe {
+        let (a_ptr, _g1) = a_slice.device_ptr(&stream);
+        let (bm_ptr, _g2) = bm_slice.device_ptr(&stream);
+        let (vp_ptr, _g3) = vp_slice.device_ptr(&stream);
+        let (qss_ptr, _g4) = qss_slice.device_ptr(&stream);
+        let (bt_ptr, _g5) = bt_slice.device_ptr(&stream);
+        let (dl_ptr, _g6) = dl_slice.device_ptr(&stream);
+        let (out_ptr, _g7) = out_slice.device_ptr(&stream);
+        let (ww_ptr, _g8) = ww_slice.device_ptr(&stream);
+        kiln_gdn_chunk_scan(
+            a_ptr as *const _,
+            bm_ptr as *const _,
+            vp_ptr as *const _,
+            qss_ptr as *const _,
+            bt_ptr as *const _,
+            dl_ptr as *const _,
+            out_ptr as *mut _,
+            ww_ptr as *mut _,
+            (b * h) as i32,
+            c as i32,
+            dv as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk_scan FFI returned {status}"
+        )));
+    }
+    Ok((out_chunk, w_weighted))
 }
