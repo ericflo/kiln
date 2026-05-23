@@ -1,0 +1,34 @@
+{
+  "stage": "1c",
+  "name": "strict-rubric-in-prompt-ceiling",
+  "iter_slug": "strict-prompt-diag-no-adapter",
+  "session": "2026-05-23",
+  "hypothesis": "Pi-faithful-completion pattern: insert the strict rubric into the system prompt (no training) and measure whether the BASE model has headroom. If ceiling unlocks (+0.10+), distill onto base via SFT under normal prompt.",
+  "modified": "task_scaffold.py with rubric-aware prompt prepended (strict_task_scaffold.py); restored after diag",
+  "base_3seed_mean": 0.6194845679012345,
+  "base_3seed_stdev": 0.02002231446249317,
+  "strict_3seed_mean": 0.6120703813932981,
+  "strict_3seed_stdev": 0.047412343379759844,
+  "paired_lifts": [-0.0305820105820106, -0.03086607142857145, 0.03920552248677245],
+  "paired_lift_mean": -0.007414186507936534,
+  "paired_lift_stdev": 0.0403741021287737,
+  "sigma_above_zero": -0.18363718614197025,
+  "ceiling_unlocked": false,
+  "sub_scores_mean_strict": {
+    "outcome": 0.7464285714285714,
+    "grounding": 0.5005787037037037,
+    "cross_file_caller_recall": 0.75,
+    "invariant_coverage": 0.3287037037037037,
+    "format_compliance": 0.7731481481481481
+  },
+  "sub_scores_mean_base": {
+    "outcome": 0.7319708994708995,
+    "grounding": 0.5065586419753086,
+    "cross_file_caller_recall": 0.9444444444444444,
+    "invariant_coverage": 0.41203703703703703,
+    "format_compliance": 0.9675925925925926
+  },
+  "verdict": "no-ceiling — strict prompt slightly hurts (-0.18σ). Outcome up +0.015, BUT format_compliance -0.195 and cross_file_caller_recall -0.194. Strict rubric distracts model from format/structure.",
+  "key_insight": "Unlike pi-faithful-completion (where strict prompt unlocked +0.169), code-comprehension does NOT have a prompted-ceiling gap. The base model already operates near its rubric ceiling on the composite axes that respond to prompt changes. Outcome can lift, but other sub-scores compensate downward.",
+  "implication": "Prompted-ceiling distillation (the listed methodology) has limited upside here — the high-composite filtered examples will be few and similar to the base's current behavior. Recommend pivoting to GRPO with shaped reward OR documenting the ceiling."
+}
