@@ -13,6 +13,7 @@ members = [
     "crates/kiln-nvtx",
     "crates/kiln-autograd",
     "crates/kiln-opd-loss-kernel",
+    "crates/kiln-optim",
     "crates/kiln-param",
     "crates/kiln-rmsnorm-kernel",
     "crates/kiln-scheduler",
@@ -38,6 +39,7 @@ default-members = [
     "crates/kiln-model",
     "crates/kiln-nvtx",
     "crates/kiln-opd-loss-kernel",
+    "crates/kiln-optim",
     "crates/kiln-param",
     "crates/kiln-scheduler",
     "crates/kiln-server",
@@ -129,6 +131,7 @@ kiln-autograd = { path = "crates/kiln-autograd" }
 kiln-core = { path = "crates/kiln-core" }
 kiln-eval = { path = "crates/kiln-eval" }
 kiln-model = { path = "crates/kiln-model" }
+kiln-optim = { path = "crates/kiln-optim" }
 kiln-param = { path = "crates/kiln-param" }
 kiln-scheduler = { path = "crates/kiln-scheduler" }
 kiln-server = { path = "crates/kiln-server" }
