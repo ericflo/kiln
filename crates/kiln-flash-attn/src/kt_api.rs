@@ -20,7 +20,7 @@
 //! pattern.
 
 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
+use kiln_tensor::{CudaStorage, DType as KtDType, StorageBackend, Tensor as KtTensor};
 
 use crate::kiln_flash_attn_fwd;
 
