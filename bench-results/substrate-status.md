@@ -1,8 +1,8 @@
 # kiln-tensor substrate status
 
-**122 / 122 deliverables shipped** — substrate side is complete.
+**126 / 126 deliverables shipped** — substrate side is complete.
 
-- **41 kiln-tensor forward op families** + matching **41 BackwardOps**
+- **45 kiln-tensor forward op families** + matching **42 BackwardOps**
   in kiln-autograd (every differentiable forward has a backward;
   non-differentiable ops correctly omit one)
 - **Phase 4 sampler chain end-to-end** (12 LogitProcessors + Gumbel
@@ -114,7 +114,11 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 1.77 | linspace + arange tensor constructors | ✓ |
 | 1.78 | stack op + backward | ✓ |
 | 1.79 | tanh + relu activations + backwards | ✓ |
-| 1.80 | substrate-status dashboard refresh (this PR) | ✓ |
+| 1.80 | substrate-status dashboard refresh (Phase 1.76-1.79) | ✓ |
+| 1.81 | repeat op (tile along axis) + backward | ✓ |
+| 1.82 | max_axis + min_axis reduce ops | ✓ |
+| 1.83 | cumsum op | ✓ |
+| 1.84 | substrate-status dashboard refresh (this PR — final session) | ✓ |
 
 ## Phase 2 — kiln-blas / kiln-mps / kiln-vulkan-blas / kiln-param
 
@@ -201,11 +205,13 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 1.76 | SinBackward, CosBackward, TanBackward |
 | 1.78 | StackBackward |
 | 1.79 | TanhBackward, ReluBackward |
+| 1.81 | RepeatBackward |
 
 Non-differentiable forward ops (correctly return `bwd: None`):
 `argmax_last_dim`, `causal_mask`, `top_k`, `one_hot`, `linspace`,
-`arange`, every LogitProcessor + GumbelSampler in the sampler
-chain.
+`arange`, `max_axis`, `min_axis`, `cumsum` (cumsum could have a
+backward — reverse cumsum of dy — but isn't shipped yet), every
+LogitProcessor + GumbelSampler in the sampler chain.
 
 Each is parity-tested against finite-difference reference values
 where applicable. Non-differentiable ops (argmax, causal_mask, the
