@@ -20,6 +20,7 @@
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
 
+mod activation_registry;
 mod determinism;
 mod device;
 mod device_op;
@@ -41,6 +42,10 @@ mod metal_storage;
 #[cfg(feature = "vulkan")]
 mod vulkan_storage;
 
+pub use activation_registry::{
+    selective_recompute_recommendation, Activation, ActivationId, ActivationKind, ActivationRef,
+    OffloadPolicy, RecomputeRecommendation,
+};
 pub use determinism::{deterministic_enabled, Determinism, DeterministicCache, DETERMINISTIC_CACHED};
 pub use device::{Backend, Device};
 pub use device_op::{dispatch1, dispatch2, dispatch3, BackwardOp, DeviceOp1, DeviceOp2, DeviceOp3};
