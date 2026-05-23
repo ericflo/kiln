@@ -1764,12 +1764,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-autograd"
+version = "0.2.19"
+dependencies = [
+ "half",
+ "kiln-tensor",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "kiln-blas"
+version = "0.2.19"
+dependencies = [
+ "candle-core",
+ "cc",
+ "half",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kiln-conv1d-kernel"
 version = "0.2.19"
 dependencies = [
  "candle-core",
  "cc",
  "half",
+ "kiln-kt-bridge",
+ "kiln-tensor",
 ]
 
 [[package]]
@@ -1814,6 +1836,8 @@ dependencies = [
  "candle-core",
  "cc",
  "half",
+ "kiln-kt-bridge",
+ "kiln-tensor",
 ]
 
 [[package]]
@@ -1834,6 +1858,51 @@ dependencies = [
  "candle-nn",
  "cc",
  "half",
+ "kiln-kt-bridge",
+ "kiln-tensor",
+]
+
+[[package]]
+name = "kiln-graph"
+version = "0.2.19"
+dependencies = [
+ "kiln-tensor",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "kiln-graph-cuda"
+version = "0.2.19"
+dependencies = [
+ "kiln-graph",
+ "kiln-tensor",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "kiln-graph-metal"
+version = "0.2.19"
+dependencies = [
+ "kiln-graph",
+ "kiln-tensor",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "kiln-graph-vulkan"
+version = "0.2.19"
+dependencies = [
+ "kiln-graph",
+ "kiln-tensor",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "kiln-kt-bridge"
+version = "0.2.19"
+dependencies = [
+ "candle-core",
+ "kiln-tensor",
 ]
 
 [[package]]
@@ -1843,6 +1912,8 @@ dependencies = [
  "candle-core",
  "cc",
  "half",
+ "kiln-kt-bridge",
+ "kiln-tensor",
 ]
 
 [[package]]
@@ -1878,6 +1949,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-mps"
+version = "0.2.19"
+dependencies = [
+ "candle-core",
+ "cc",
+ "half",
+ "kiln-blas",
+ "kiln-tensor",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kiln-nvtx"
 version = "0.2.19"
 
@@ -1894,12 +1978,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-optim"
+version = "0.2.19"
+dependencies = [
+ "bytemuck",
+ "half",
+ "kiln-autograd",
+ "kiln-param",
+ "kiln-tensor",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "kiln-param"
+version = "0.2.19"
+dependencies = [
+ "kiln-tensor",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "kiln-rmsnorm-kernel"
 version = "0.2.19"
 dependencies = [
  "candle-core",
  "cc",
  "half",
+ "kiln-kt-bridge",
+ "kiln-tensor",
 ]
 
 [[package]]
@@ -1953,6 +2059,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-tensor"
+version = "0.2.19"
+dependencies = [
+ "bytemuck",
+ "candle-core",
+ "candle-metal-kernels",
+ "half",
+ "kiln-autograd",
+ "kiln-vulkan-kernel",
+ "memmap2",
+ "safetensors 0.7.0",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "kiln-train"
 version = "0.2.19"
 dependencies = [
@@ -1984,6 +2105,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-vulkan-blas"
+version = "0.2.19"
+dependencies = [
+ "half",
+ "kiln-blas",
+ "kiln-tensor",
+ "kiln-vulkan-kernel",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kiln-vulkan-kernel"
 version = "0.2.19"
 dependencies = [
@@ -1994,6 +2127,7 @@ dependencies = [
  "half",
  "libc",
  "libloading 0.9.0",
+ "serde_json",
  "tracing",
 ]
 
