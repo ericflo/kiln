@@ -135,6 +135,87 @@ impl BackwardOp for CosBackward {
 }
 
 #[derive(Debug)]
+pub struct AsinBackward {
+    pub x: Tensor,
+}
+impl BackwardOp for AsinBackward {
+    fn name(&self) -> &'static str {
+        "asin_backward"
+    }
+    fn input_count(&self) -> usize {
+        1
+    }
+    fn apply(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
+        validate_same(&self.x, grad_output, "AsinBackward")?;
+        let x = load_f32(&self.x)?;
+        let dy = load_f32(grad_output)?;
+        let dx: Vec<f32> = x
+            .iter()
+            .zip(dy.iter())
+            .map(|(&xi, &dyi)| dyi / (1.0 - xi * xi).sqrt())
+            .collect();
+        Ok(vec![Some(store_f32(self.x.dtype(), self.x.shape(), &dx)?)])
+    }
+    fn requires_input(&self, _idx: usize) -> bool {
+        true
+    }
+}
+
+#[derive(Debug)]
+pub struct AcosBackward {
+    pub x: Tensor,
+}
+impl BackwardOp for AcosBackward {
+    fn name(&self) -> &'static str {
+        "acos_backward"
+    }
+    fn input_count(&self) -> usize {
+        1
+    }
+    fn apply(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
+        validate_same(&self.x, grad_output, "AcosBackward")?;
+        let x = load_f32(&self.x)?;
+        let dy = load_f32(grad_output)?;
+        let dx: Vec<f32> = x
+            .iter()
+            .zip(dy.iter())
+            .map(|(&xi, &dyi)| -dyi / (1.0 - xi * xi).sqrt())
+            .collect();
+        Ok(vec![Some(store_f32(self.x.dtype(), self.x.shape(), &dx)?)])
+    }
+    fn requires_input(&self, _idx: usize) -> bool {
+        true
+    }
+}
+
+#[derive(Debug)]
+pub struct AtanBackward {
+    pub x: Tensor,
+}
+impl BackwardOp for AtanBackward {
+    fn name(&self) -> &'static str {
+        "atan_backward"
+    }
+    fn input_count(&self) -> usize {
+        1
+    }
+    fn apply(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
+        validate_same(&self.x, grad_output, "AtanBackward")?;
+        let x = load_f32(&self.x)?;
+        let dy = load_f32(grad_output)?;
+        let dx: Vec<f32> = x
+            .iter()
+            .zip(dy.iter())
+            .map(|(&xi, &dyi)| dyi / (1.0 + xi * xi))
+            .collect();
+        Ok(vec![Some(store_f32(self.x.dtype(), self.x.shape(), &dx)?)])
+    }
+    fn requires_input(&self, _idx: usize) -> bool {
+        true
+    }
+}
+
+#[derive(Debug)]
 pub struct TanBackward {
     pub x: Tensor,
 }

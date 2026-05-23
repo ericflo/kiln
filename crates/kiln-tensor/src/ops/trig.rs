@@ -16,6 +16,9 @@ pub enum TrigKind {
     Sin,
     Cos,
     Tan,
+    Asin,
+    Acos,
+    Atan,
 }
 
 impl TrigKind {
@@ -24,6 +27,9 @@ impl TrigKind {
             TrigKind::Sin => "sin",
             TrigKind::Cos => "cos",
             TrigKind::Tan => "tan",
+            TrigKind::Asin => "asin",
+            TrigKind::Acos => "acos",
+            TrigKind::Atan => "atan",
         }
     }
 
@@ -32,6 +38,9 @@ impl TrigKind {
             TrigKind::Sin => x.sin(),
             TrigKind::Cos => x.cos(),
             TrigKind::Tan => x.tan(),
+            TrigKind::Asin => x.asin(),
+            TrigKind::Acos => x.acos(),
+            TrigKind::Atan => x.atan(),
         }
     }
 }
@@ -89,6 +98,15 @@ pub fn cos(x: &Tensor) -> Result<Tensor> {
 }
 pub fn tan(x: &Tensor) -> Result<Tensor> {
     apply(TrigKind::Tan, x)
+}
+pub fn asin(x: &Tensor) -> Result<Tensor> {
+    apply(TrigKind::Asin, x)
+}
+pub fn acos(x: &Tensor) -> Result<Tensor> {
+    apply(TrigKind::Acos, x)
+}
+pub fn atan(x: &Tensor) -> Result<Tensor> {
+    apply(TrigKind::Atan, x)
 }
 
 #[cfg(test)]
