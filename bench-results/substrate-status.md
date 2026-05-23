@@ -1,8 +1,8 @@
 # kiln-tensor substrate status
 
-**165 / 165 deliverables shipped** — substrate side is complete.
+**170 / 170 deliverables shipped** — substrate side is complete.
 
-- **85 kiln-tensor forward op families** + **46 BackwardOps**
+- **89 kiln-tensor forward op families** + **46 BackwardOps**
   in kiln-autograd (every differentiable forward has a backward;
   non-differentiable ops correctly omit one)
 - **Phase 4 sampler chain end-to-end** (12 LogitProcessors + Gumbel
@@ -161,7 +161,12 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 1.122 | diagonal + diag | ✓ |
 | 1.123 | trace | ✓ |
 | 1.124 | normalize (L_p with eps) | ✓ |
-| 1.125 | substrate-status dashboard refresh (this PR) | ✓ |
+| 1.125 | substrate-status dashboard refresh (Phase 1.118-1.124) | ✓ |
+| 1.126 | end-to-end transformer block forward test | ✓ |
+| 1.127 | repeat_interleave (GQA head expansion) | ✓ |
+| 1.128 | margin_ranking + hinge_loss | ✓ |
+| 1.129 | info_nce contrastive loss | ✓ |
+| 1.130 | substrate-status dashboard refresh (this PR) | ✓ |
 
 ## Phase 2 — kiln-blas / kiln-mps / kiln-vulkan-blas / kiln-param
 
