@@ -15,6 +15,7 @@ members = [
     "crates/kiln-rmsnorm-kernel",
     "crates/kiln-scheduler",
     "crates/kiln-server",
+    "crates/kiln-tensor",
     "crates/kiln-train",
     "crates/kiln-vulkan-kernel",
 ]
@@ -36,6 +37,7 @@ default-members = [
     "crates/kiln-opd-loss-kernel",
     "crates/kiln-scheduler",
     "crates/kiln-server",
+    "crates/kiln-tensor",
     "crates/kiln-train",
 ]
 
@@ -124,6 +126,7 @@ kiln-eval = { path = "crates/kiln-eval" }
 kiln-model = { path = "crates/kiln-model" }
 kiln-scheduler = { path = "crates/kiln-scheduler" }
 kiln-server = { path = "crates/kiln-server" }
+kiln-tensor = { path = "crates/kiln-tensor" }
 kiln-train = { path = "crates/kiln-train" }
 
 [patch.crates-io]
