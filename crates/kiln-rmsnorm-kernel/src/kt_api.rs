@@ -14,10 +14,11 @@ use kiln_kt_bridge::BridgeError;
 use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 
 use crate::{
-    kiln_adamw_step_f32, kiln_fused_l2_qk_norm, kiln_fused_l2_qk_norm_gqa,
-    kiln_fused_mlp_silu_mul_bf16, kiln_fused_rmsnorm, kiln_fused_rmsnorm_bwd,
-    kiln_fused_rotary_one, kiln_fused_rotary_qk, kiln_fused_sigmoid_mul_bf16,
-    kiln_lora_decode_add_bf16, kiln_lora_decode_hidden_bf16, kiln_sgd_step_f32,
+    kiln_adamw_step_f32, kiln_attn_decode_qkv_split_qk_norm_rope_bf16, kiln_fused_l2_qk_norm,
+    kiln_fused_l2_qk_norm_gqa, kiln_fused_mlp_silu_mul_bf16, kiln_fused_rmsnorm,
+    kiln_fused_rmsnorm_bwd, kiln_fused_rotary_one, kiln_fused_rotary_qk,
+    kiln_fused_sigmoid_mul_bf16, kiln_lora_decode_add_bf16, kiln_lora_decode_hidden_bf16,
+    kiln_sgd_step_f32,
 };
 
 #[derive(Debug)]
@@ -933,4 +934,137 @@ pub fn fused_sigmoid_mul_kt(
         )));
     }
     Ok(out)
+}
+
+/// `attn_decode_qkv_split_qk_norm_rope_bf16` over `kiln_tensor::Tensor`
+/// operands.
+///
+/// The decode-time mega-fused attention pre-projection kernel.
+/// Splits the QKV-packed Q/gate inputs, applies QK-norm (with eps),
+/// then applies RoPE — all in one launch. Optionally writes the
+/// gate output if `has_gate` is true.
+///
+/// Shapes (production decode):
+/// - `q_raw`: BF16 `[batch, 1, q_heads * head_dim + (q_heads * head_dim if has_gate)]`
+/// - `k_raw`: BF16 `[batch, 1, k_heads * head_dim]`
+/// - `q_weight`, `k_weight`: BF16 `[head_dim]`
+/// - `cos`, `sin`: F32 `[1, rotary_dim / 2]`
+///
+/// Returns `(q_out, k_out, gate_out)` where:
+/// - `q_out`: BF16 `[batch, 1, q_heads, head_dim]`
+/// - `k_out`: BF16 `[batch, 1, k_heads, head_dim]`
+/// - `gate_out`: Some(BF16 `[batch, 1, q_heads * head_dim]`) if has_gate, else None
+#[allow(clippy::too_many_arguments)]
+pub fn attn_decode_qkv_split_qk_norm_rope_kt(
+    q_raw: &KtTensor,
+    k_raw: &KtTensor,
+    q_weight: &KtTensor,
+    k_weight: &KtTensor,
+    cos: &KtTensor,
+    sin: &KtTensor,
+    q_heads: usize,
+    k_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    has_gate: bool,
+    eps: f32,
+) -> Result<(KtTensor, KtTensor, Option<KtTensor>), RmsNormError> {
+    let qr_shape = q_raw.shape();
+    if qr_shape.len() != 3 || qr_shape[1] != 1 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-attn-decode-prep: q_raw must be [B, 1, hidden_q], got {qr_shape:?}"
+        )));
+    }
+    let batch = qr_shape[0];
+
+    let (qr_st, qr_off) = cuda_storage_and_byte_offset(q_raw, KtDType::BF16, "q_raw")?;
+    let (kr_st, kr_off) = cuda_storage_and_byte_offset(k_raw, KtDType::BF16, "k_raw")?;
+    let (qw_st, qw_off) = cuda_storage_and_byte_offset(q_weight, KtDType::BF16, "q_weight")?;
+    let (kw_st, kw_off) = cuda_storage_and_byte_offset(k_weight, KtDType::BF16, "k_weight")?;
+    let (cos_st, cos_off) = cuda_storage_and_byte_offset(cos, KtDType::F32, "cos")?;
+    let (sin_st, sin_off) = cuda_storage_and_byte_offset(sin, KtDType::F32, "sin")?;
+
+    let q_out = alloc_cuda_tensor(qr_st, KtDType::BF16, vec![batch, 1, q_heads, head_dim])?;
+    let k_out = alloc_cuda_tensor(qr_st, KtDType::BF16, vec![batch, 1, k_heads, head_dim])?;
+    let gate_out = if has_gate {
+        Some(alloc_cuda_tensor(
+            qr_st,
+            KtDType::BF16,
+            vec![batch, 1, q_heads * head_dim],
+        )?)
+    } else {
+        None
+    };
+    let qo_cuda = q_out
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let ko_cuda = k_out
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = qr_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let qr_slice = qr_st.slice().slice(qr_off..);
+    let kr_slice = kr_st.slice().slice(kr_off..);
+    let qw_slice = qw_st.slice().slice(qw_off..);
+    let kw_slice = kw_st.slice().slice(kw_off..);
+    let cos_slice = cos_st.slice().slice(cos_off..);
+    let sin_slice = sin_st.slice().slice(sin_off..);
+    let qo_slice = qo_cuda.slice().slice(0..);
+    let ko_slice = ko_cuda.slice().slice(0..);
+
+    let status = unsafe {
+        let (qr_ptr, _g1) = qr_slice.device_ptr(&stream);
+        let (kr_ptr, _g2) = kr_slice.device_ptr(&stream);
+        let (qw_ptr, _g3) = qw_slice.device_ptr(&stream);
+        let (kw_ptr, _g4) = kw_slice.device_ptr(&stream);
+        let (cos_ptr, _g5) = cos_slice.device_ptr(&stream);
+        let (sin_ptr, _g6) = sin_slice.device_ptr(&stream);
+        let (qo_ptr, _g7) = qo_slice.device_ptr(&stream);
+        let (ko_ptr, _g8) = ko_slice.device_ptr(&stream);
+
+        let go_ptr = if let Some(go) = gate_out.as_ref() {
+            let go_cuda = go
+                .storage()
+                .as_any()
+                .downcast_ref::<CudaStorage>()
+                .expect("alloc CUDA");
+            let go_slice = go_cuda.slice().slice(0..);
+            let (p, _g9) = go_slice.device_ptr(&stream);
+            p as *mut _
+        } else {
+            core::ptr::null_mut()
+        };
+
+        kiln_attn_decode_qkv_split_qk_norm_rope_bf16(
+            qr_ptr as *const _,
+            kr_ptr as *const _,
+            qw_ptr as *const _,
+            kw_ptr as *const _,
+            cos_ptr as *const f32,
+            sin_ptr as *const f32,
+            qo_ptr as *mut _,
+            ko_ptr as *mut _,
+            go_ptr,
+            batch as i32,
+            q_heads as i32,
+            k_heads as i32,
+            head_dim as i32,
+            rotary_dim as i32,
+            if has_gate { 1 } else { 0 },
+            eps,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-attn-decode-prep: FFI returned {status}"
+        )));
+    }
+    Ok((q_out, k_out, gate_out))
 }
