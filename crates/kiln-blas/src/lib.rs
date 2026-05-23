@@ -17,6 +17,10 @@
 //!   `(shape, dtype, layout, concurrent_streams, kiln_version_major)`.
 //! - [`WorkspacePool`] — per-handle workspace cap (default 32 MiB) +
 //!   peak-bytes / call-count tracking.
+//! - [`BackendMatmul`] + [`MatmulRequest`] + [`Epilogue`] —
+//!   backend-agnostic matmul trait. CUDA / Metal / Vulkan handles
+//!   implement this single trait; forward.rs reaches for
+//!   `dyn BackendMatmul` and is free of per-backend conditionals.
 //! - [`probe_ffi`] — Phase 0.8 probe FFI (kept for the probe example).
 //!
 //! # CPU-buildable
@@ -26,10 +30,14 @@
 //! subsequent PR.
 
 mod algo_cache;
+mod backend_matmul;
 mod workspace_pool;
 
 pub use algo_cache::{
     save_to_path, serialize_to_json, AlgoCache, AlgoCacheKey, AlgoCacheValue,
+};
+pub use backend_matmul::{
+    BackendMatmul, Epilogue, MatmulLayout, MatmulOutcome, MatmulRequest,
 };
 pub use workspace_pool::WorkspacePool;
 
