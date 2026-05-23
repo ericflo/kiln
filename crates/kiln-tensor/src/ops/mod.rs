@@ -14,5 +14,7 @@
 //! (RMSNorm, residual add, final norm + LM head, sampling).
 
 pub mod embedding;
+pub mod rmsnorm;
 
 pub use embedding::{embedding, EmbeddingOp};
+pub use rmsnorm::{rms_norm, RmsNormOp};
