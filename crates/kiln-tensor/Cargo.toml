@@ -1,0 +1,29 @@
+[package]
+name = "kiln-tensor"
+description = "In-house Tensor + Storage substrate for kiln. Phase 0/1 scaffold; backends fill in over Phases 1-7."
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# kiln-tensor is internal-only — no semver commitment.
+# Other kiln-* crates may break against minor version bumps until candle
+# is removed and the surface stabilizes (Phase 7 of #1082).
+# See `src/lib.rs` for the public-API stability statement.
+
+[dependencies]
+# Error machinery — Result wraps a thiserror enum, but a public callable
+# bail! macro mirrors candle's ergonomic shape so 491+ migration sites
+# can mechanically swap `candle_core::bail!(...)` -> `kiln_tensor::bail!(...)`.
+thiserror = { workspace = true }
+# anyhow is intentionally absent — kiln_tensor::Error owns its variants.
+
+[features]
+default = []
+# Reserved feature names for future PRs in Phase 1; declared early so
+# downstream `kiln-tensor = { features = ["cuda"] }` invocations don't
+# break when added.
+cuda = []
+metal = []
+vulkan = []
