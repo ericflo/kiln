@@ -1,8 +1,8 @@
 # kiln-tensor substrate status
 
-**158 / 158 deliverables shipped** — substrate side is complete.
+**165 / 165 deliverables shipped** — substrate side is complete.
 
-- **77 kiln-tensor forward op families** + **46 BackwardOps**
+- **85 kiln-tensor forward op families** + **46 BackwardOps**
   in kiln-autograd (every differentiable forward has a backward;
   non-differentiable ops correctly omit one)
 - **Phase 4 sampler chain end-to-end** (12 LogitProcessors + Gumbel
@@ -152,7 +152,16 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 1.115 | scaled_dot_product_attention | ✓ |
 | 1.116 | causal_scaled_dot_product_attention | ✓ |
 | 6.5.7 | LR schedules — cosine / linear / linear_warmup_cosine | ✓ |
-| 1.117 | substrate-status dashboard refresh (this PR) | ✓ |
+| 1.117 | substrate-status dashboard refresh (Phase 1.108-1.116) | ✓ |
+| 1.118 | multi_head_attention | ✓ |
+| 1.119 | linear convenience op | ✓ |
+| 1.120 | precompute_rope_freqs | ✓ |
+| 6.5.8 | More LR schedules (warmup/step/exp/inv-sqrt) | ✓ |
+| 1.121 | precision cast helpers (to_f32/to_bf16/to_f16) | ✓ |
+| 1.122 | diagonal + diag | ✓ |
+| 1.123 | trace | ✓ |
+| 1.124 | normalize (L_p with eps) | ✓ |
+| 1.125 | substrate-status dashboard refresh (this PR) | ✓ |
 
 ## Phase 2 — kiln-blas / kiln-mps / kiln-vulkan-blas / kiln-param
 
