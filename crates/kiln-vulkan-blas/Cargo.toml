@@ -1,0 +1,33 @@
+[package]
+name = "kiln-vulkan-blas"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "kiln-tensor's Vulkan BLAS layer (extending kiln-vulkan-kernel::vk_ops/matmul*). Phase 2.3 backend-agnostic types."
+
+# Sibling to kiln-blas (CUDA) and kiln-mps (Metal). Unlike those two,
+# kiln-vulkan-blas does NOT carry a candle dependency — kiln-vulkan-kernel
+# is already candle-free.
+#
+# Phase 2.3 ships only the backend-agnostic Vulkan-specific extensions
+# (workgroup-size cache key + pipeline cache hash); Phase 2.x adds the
+# actual matmul wrapper extending the existing compute pipelines.
+
+[features]
+default = []
+# Pulls kiln-vulkan-kernel for the actual matmul dispatch path.
+vulkan = ["dep:kiln-vulkan-kernel"]
+
+[dependencies]
+# Backend-agnostic types from kiln-blas.
+kiln-blas = { workspace = true }
+kiln-tensor = { workspace = true }
+
+# Optional under the `vulkan` feature.
+kiln-vulkan-kernel = { workspace = true, optional = true }
+
+half = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
