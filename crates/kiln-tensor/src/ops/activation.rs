@@ -1,17 +1,18 @@
-//! Single-input activation ops: `silu`, `sigmoid`, `gelu`.
+//! Single-input activation ops: `silu`, `sigmoid`, `gelu`, `tanh`,
+//! `relu`.
 //!
-//! Replaces candle's `Tensor::{silu, sigmoid, gelu}` and the candle
-//! `Activation::{SiLU, Gelu}` enum dispatch.
+//! Replaces candle's `Tensor::{silu, sigmoid, gelu, tanh, relu}` and
+//! the candle `Activation::{SiLU, Gelu, Tanh, Relu}` enum dispatch.
 //!
 //! # Semantics
 //!
-//! All three are pointwise:
+//! All five are pointwise:
 //!
 //! - `sigmoid(x) = 1 / (1 + exp(-x))`
 //! - `silu(x) = x * sigmoid(x)` (a.k.a. swish)
 //! - `gelu(x) = 0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715 * x³)))`
-//!   (tanh approximation — the variant used by every modern
-//!   transformer codebase)
+//! - `tanh(x) = (e^x - e^-x) / (e^x + e^-x)`
+//! - `relu(x) = max(0, x)`
 //!
 //! F32-promoted compute for BF16/F16 inputs.
 //!
@@ -34,6 +35,10 @@ pub enum UnaryKind {
     Sigmoid,
     /// `f(x) = 0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715*x^3)))`
     Gelu,
+    /// `f(x) = tanh(x) = (e^x - e^-x) / (e^x + e^-x)`
+    Tanh,
+    /// `f(x) = max(0, x)`
+    Relu,
 }
 
 impl UnaryKind {
@@ -42,6 +47,8 @@ impl UnaryKind {
             UnaryKind::Silu => "silu",
             UnaryKind::Sigmoid => "sigmoid",
             UnaryKind::Gelu => "gelu",
+            UnaryKind::Tanh => "tanh",
+            UnaryKind::Relu => "relu",
         }
     }
 
@@ -57,6 +64,8 @@ impl UnaryKind {
                 let inner = SQRT_2_OVER_PI * (x + 0.044715 * x * x * x);
                 0.5 * x * (1.0 + inner.tanh())
             }
+            UnaryKind::Tanh => x.tanh(),
+            UnaryKind::Relu => x.max(0.0),
         }
     }
 }
@@ -147,6 +156,16 @@ pub fn sigmoid(x: &Tensor) -> Result<Tensor> {
 /// GELU (tanh approximation).
 pub fn gelu(x: &Tensor) -> Result<Tensor> {
     dispatch1(&ActivationOp::new(UnaryKind::Gelu), x)
+}
+
+/// `out = tanh(x) = (e^x - e^-x) / (e^x + e^-x)`.
+pub fn tanh(x: &Tensor) -> Result<Tensor> {
+    dispatch1(&ActivationOp::new(UnaryKind::Tanh), x)
+}
+
+/// `out = max(0, x)` — rectified linear unit.
+pub fn relu(x: &Tensor) -> Result<Tensor> {
+    dispatch1(&ActivationOp::new(UnaryKind::Relu), x)
 }
 
 fn validate(x: &Tensor, kind: UnaryKind) -> Result<()> {
@@ -243,6 +262,40 @@ mod tests {
         assert_eq!(UnaryKind::Silu.name(), "silu");
         assert_eq!(UnaryKind::Sigmoid.name(), "sigmoid");
         assert_eq!(UnaryKind::Gelu.name(), "gelu");
+        assert_eq!(UnaryKind::Tanh.name(), "tanh");
+        assert_eq!(UnaryKind::Relu.name(), "relu");
+    }
+
+    #[test]
+    fn tanh_known_values() {
+        // tanh(0) = 0; tanh(±1) ≈ ±0.7616; tanh(10) ≈ 1; tanh(-10) ≈ -1.
+        let x = Tensor::from_slice(&[0.0f32, 1.0, -1.0, 10.0, -10.0], vec![5]).unwrap();
+        let y = read_f32(&tanh(&x).unwrap());
+        assert!((y[0]).abs() < 1e-6);
+        assert!((y[1] - 0.7616).abs() < 1e-3);
+        assert!((y[2] + 0.7616).abs() < 1e-3);
+        assert!((y[3] - 1.0).abs() < 1e-3);
+        assert!((y[4] + 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn relu_clamps_negatives() {
+        let x = Tensor::from_slice(&[-1.0f32, 0.0, 1.0, -5.0, 5.0], vec![5]).unwrap();
+        let y = read_f32(&relu(&x).unwrap());
+        assert_eq!(y, vec![0.0, 0.0, 1.0, 0.0, 5.0]);
+    }
+
+    #[test]
+    fn tanh_relu_bf16_round_trip() {
+        for op in [UnaryKind::Tanh, UnaryKind::Relu] {
+            let bf: Vec<half::bf16> = [-1.0f32, 0.0, 1.0]
+                .iter()
+                .map(|&v| half::bf16::from_f32(v))
+                .collect();
+            let x = Tensor::from_slice(&bf, vec![3]).unwrap();
+            let y = ActivationOp::new(op).cpu_fwd(&x).unwrap().unwrap();
+            assert_eq!(y.dtype(), DType::BF16);
+        }
     }
 
     #[test]

@@ -5,6 +5,8 @@
 //!   Saves `x`.
 //! - **GeluBackward** — `dx = dy * d(gelu)/dx` (tanh approximation).
 //!   Saves `x` and recomputes `tanh(arg)` in backward.
+//! - **TanhBackward** — `dx = dy * (1 - y²)`. Saves forward `y`.
+//! - **ReluBackward** — `dx = dy * (x > 0 ? 1 : 0)`. Saves forward `x`.
 //! - **SoftmaxLastDimBackward** — `dx_i = y_i * (dy_i - sum_j(y_j * dy_j))`
 //!   per row over the trailing axis. Saves forward `y`.
 //!
@@ -233,6 +235,74 @@ impl BackwardOp for GeluBackward {
 }
 
 // ----------------------------------------------------------------------
+// TanhBackward
+// ----------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct TanhBackward {
+    /// Forward output `y = tanh(x)`.
+    pub y: Tensor,
+}
+
+impl BackwardOp for TanhBackward {
+    fn name(&self) -> &'static str {
+        "tanh_backward"
+    }
+    fn input_count(&self) -> usize {
+        1
+    }
+    fn apply(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
+        validate_same(&self.y, grad_output, "TanhBackward")?;
+        let y = load_f32(&self.y)?;
+        let dy = load_f32(grad_output)?;
+        let dx: Vec<f32> = y
+            .iter()
+            .zip(dy.iter())
+            .map(|(&yi, &dyi)| dyi * (1.0 - yi * yi))
+            .collect();
+        let out = store_f32(self.y.dtype(), self.y.shape(), &dx)?;
+        Ok(vec![Some(out)])
+    }
+    fn requires_input(&self, _idx: usize) -> bool {
+        false // saves y not x
+    }
+}
+
+// ----------------------------------------------------------------------
+// ReluBackward
+// ----------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct ReluBackward {
+    /// Forward input `x`.
+    pub x: Tensor,
+}
+
+impl BackwardOp for ReluBackward {
+    fn name(&self) -> &'static str {
+        "relu_backward"
+    }
+    fn input_count(&self) -> usize {
+        1
+    }
+    fn apply(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
+        validate_same(&self.x, grad_output, "ReluBackward")?;
+        let x = load_f32(&self.x)?;
+        let dy = load_f32(grad_output)?;
+        let dx: Vec<f32> = x
+            .iter()
+            .zip(dy.iter())
+            .map(|(&xi, &dyi)| if xi > 0.0 { dyi } else { 0.0 })
+            .collect();
+        let out = store_f32(self.x.dtype(), self.x.shape(), &dx)?;
+        Ok(vec![Some(out)])
+    }
+    fn requires_input(&self, _idx: usize) -> bool {
+        true
+    }
+}
+
+// ----------------------------------------------------------------------
 // SoftmaxLastDimBackward
 // ----------------------------------------------------------------------
 
@@ -440,11 +510,60 @@ mod tests {
     }
 
     #[test]
+    fn tanh_backward_uses_saved_y() {
+        // y = tanh(x); dx = dy * (1 - y²).
+        // At y=0 (x=0): dx = dy.
+        // At y=0.5: dx = dy * (1 - 0.25) = 0.75 * dy.
+        let y = Tensor::from_slice(&[0.0f32, 0.5, -0.5], vec![3]).unwrap();
+        let dy = Tensor::from_slice(&[1.0f32, 1.0, 2.0], vec![3]).unwrap();
+        let bo = TanhBackward { y };
+        let dx = load_f32(bo.apply(&dy).unwrap()[0].as_ref().unwrap()).unwrap();
+        approx(&dx, &[1.0, 0.75, 1.5], 1e-6);
+    }
+
+    #[test]
+    fn relu_backward_zeros_negatives() {
+        let x = Tensor::from_slice(&[-1.0f32, 0.0, 1.0, -5.0, 5.0], vec![5]).unwrap();
+        let dy = Tensor::from_slice(&[1.0f32, 1.0, 1.0, 1.0, 1.0], vec![5]).unwrap();
+        let bo = ReluBackward { x };
+        let dx = load_f32(bo.apply(&dy).unwrap()[0].as_ref().unwrap()).unwrap();
+        // x=0 is exactly the boundary; subgradient pick is 0 here.
+        assert_eq!(dx, vec![0.0, 0.0, 1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn tanh_backward_finite_difference() {
+        use kiln_tensor::ops::tanh;
+        let x_data = vec![0.3f32, -0.7, 1.2];
+        let x = Tensor::from_slice(&x_data, vec![3]).unwrap();
+        let y = tanh(&x).unwrap();
+        let dy = Tensor::from_slice(&[1.0f32; 3], vec![3]).unwrap();
+        let bo = TanhBackward { y: y.clone() };
+        let dx = load_f32(bo.apply(&dy).unwrap()[0].as_ref().unwrap()).unwrap();
+        let loss = |xv: &[f32]| -> f32 {
+            let xt = Tensor::from_slice(xv, vec![3]).unwrap();
+            load_f32(&tanh(&xt).unwrap()).unwrap().iter().sum()
+        };
+        let step = 1e-3;
+        let mut fd = Vec::with_capacity(3);
+        for i in 0..3 {
+            let mut up = x_data.clone();
+            up[i] += step;
+            let mut dn = x_data.clone();
+            dn[i] -= step;
+            fd.push((loss(&up) - loss(&dn)) / (2.0 * step));
+        }
+        approx(&dx, &fd, 1e-3);
+    }
+
+    #[test]
     fn op_metadata() {
         let one = Tensor::from_slice(&[0.5f32], vec![1]).unwrap();
         assert_eq!(SigmoidBackward { y: one.clone() }.name(), "sigmoid_backward");
         assert_eq!(SiluBackward { x: one.clone() }.name(), "silu_backward");
         assert_eq!(GeluBackward { x: one.clone() }.name(), "gelu_backward");
+        assert_eq!(TanhBackward { y: one.clone() }.name(), "tanh_backward");
+        assert_eq!(ReluBackward { x: one.clone() }.name(), "relu_backward");
         assert_eq!(
             SoftmaxLastDimBackward { y: one.clone() }.name(),
             "softmax_last_dim_backward"
