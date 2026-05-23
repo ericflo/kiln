@@ -20,6 +20,7 @@
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
 
+mod determinism;
 mod device;
 mod dtype;
 mod element;
@@ -38,6 +39,7 @@ mod metal_storage;
 #[cfg(feature = "vulkan")]
 mod vulkan_storage;
 
+pub use determinism::{deterministic_enabled, Determinism, DeterministicCache, DETERMINISTIC_CACHED};
 pub use device::{Backend, Device};
 pub use dtype::DType;
 pub use element::Element;
