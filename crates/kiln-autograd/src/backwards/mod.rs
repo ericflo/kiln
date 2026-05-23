@@ -24,6 +24,7 @@ pub mod layernorm;
 pub mod mask;
 pub mod matmul;
 pub mod reduce;
+pub mod repeat;
 pub mod rmsnorm;
 pub mod rope;
 pub mod stack;
