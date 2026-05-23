@@ -10,17 +10,17 @@
 //! thread-local tape handle for parity with PyTorch's `torch.autograd`
 //! ergonomics if the explicit-pass turns out clumsy in practice.
 //!
-//! # Per-node version tracking (anti-pattern 16 hook)
+//! # Per-node version tracking (anti-pattern 16 hook) — wired in Phase 1.32
 //!
-//! Each [`TapeNode`] records the **version** of every input at record
-//! time. [`Tape::backward`] re-reads each input's current version and
-//! asserts equality before calling the op's `bwd`. Today's
-//! `kiln_tensor::Tensor` has no version field, so versions are
-//! always `0` and the assertion is a no-op. When in-place ops land
-//! (optimizer step, residual fuse), the version + this assertion
-//! together enforce the invariant.
+//! Each [`TapeNode`] records the version of every input at record time
+//! AND keeps an `Arc<AtomicU64>` handle to the live version. On backward,
+//! the live value is loaded and compared against the snapshot; if they
+//! differ, in-place mutation happened between forward and backward and
+//! the tape is stale (anti-pattern 16 violation).
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use kiln_tensor::{Error, Result, Tensor, TensorId};
 
@@ -34,8 +34,12 @@ pub struct TapeNode {
     /// `TensorId`s of the op's inputs, in declaration order.
     pub input_ids: Vec<TensorId>,
     /// Input version counters at record time. See module doc.
-    /// Length matches `input_ids`. Today always `0`.
+    /// Length matches `input_ids`.
     pub input_versions: Vec<u64>,
+    /// Live handles to each input's version counter. The tape walker
+    /// loads from these on backward and compares against
+    /// `input_versions` to enforce anti-pattern 16.
+    pub input_version_handles: Vec<Arc<AtomicU64>>,
     /// Owning backward closure.
     pub op: BoxedBackwardOp,
 }
@@ -77,15 +81,18 @@ impl Tape {
 
     /// Record a forward op.
     ///
-    /// Captures `output_id`, `input_ids`, and the current `input_versions`
-    /// (always `0` until Tensor gets a version field in Phase 1.x).
+    /// Captures `output_id`, `input_ids`, the current `input_versions`,
+    /// and `Arc<AtomicU64>` handles to each input's live version.
     pub fn record(&mut self, output: &Tensor, inputs: &[&Tensor], op: BoxedBackwardOp) {
-        let input_ids = inputs.iter().map(|t| t.id()).collect::<Vec<_>>();
-        let input_versions = inputs.iter().map(|_| 0u64).collect::<Vec<_>>();
+        let input_ids: Vec<TensorId> = inputs.iter().map(|t| t.id()).collect();
+        let input_versions: Vec<u64> = inputs.iter().map(|t| t.current_version()).collect();
+        let input_version_handles: Vec<Arc<AtomicU64>> =
+            inputs.iter().map(|t| t.version_handle()).collect();
         self.nodes.push(TapeNode {
             output_id: output.id(),
             input_ids,
             input_versions,
+            input_version_handles,
             op,
         });
     }
@@ -132,12 +139,10 @@ impl Tape {
         // already topo-sorted producer-before-consumer because each
         // forward op records before its consumers.)
         for node in self.nodes.iter().rev() {
-            // 1. Anti-pattern 16: input version check. Today's
-            //    `current_version()` is a stub returning 0; once
-            //    Tensor has a real version counter, this asserts that
-            //    no in-place mutation happened since `record()`.
+            // 1. Anti-pattern 16: input version check via the live
+            //    Arc<AtomicU64> handles captured at record() time.
             for (i, recorded_version) in node.input_versions.iter().enumerate() {
-                let current = current_version_for_id(node.input_ids[i]);
+                let current = node.input_version_handles[i].load(Ordering::Relaxed);
                 if current != *recorded_version {
                     return Err(Error::Msg(format!(
                         "kiln_autograd: tape node {} input {} version drifted \
@@ -218,17 +223,10 @@ impl TapeNode {
     }
 }
 
-/// **Stub**: returns the current version counter for a `TensorId`.
-///
-/// Today there is no version field on `Tensor`, so this always returns 0
-/// and the anti-pattern 16 assertion in `Tape::backward` is a no-op.
-///
-/// Phase 1.x adds the version field; the stub gets replaced with a
-/// real lookup. The signature stays the same so this PR's tape walker
-/// is forward-compatible.
-fn current_version_for_id(_id: TensorId) -> u64 {
-    0
-}
+// The Phase 1.12 stub `current_version_for_id` was replaced in Phase
+// 1.32: `Tape::backward` now loads the live version directly from each
+// node's `input_version_handles` Arc<AtomicU64>. No process-wide
+// registry needed.
 
 #[cfg(test)]
 mod tests {
@@ -418,6 +416,61 @@ mod tests {
         assert!(r.contains(&a.id()));
         assert!(r.contains(&b.id()));
         assert!(r.contains(&c.id()));
+    }
+
+    #[test]
+    fn backward_detects_anti_pattern_16_version_drift() {
+        // Wire the Phase 1.32 version counter end-to-end:
+        // record an op, bump the input's version (simulating in-place
+        // mutation between forward and backward), then call backward.
+        // Expected: error message mentions anti-pattern 16 + the op name.
+        let mut tape = Tape::new();
+        let out = cpu_tensor();
+        let inp = cpu_tensor();
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        tape.record(
+            &out,
+            &[&inp],
+            Box::new(CountingOp {
+                name: "test/some_op",
+                input_count: 1,
+                calls,
+            }),
+        );
+        // Simulate in-place mutation of `inp` between forward and backward.
+        inp.bump_version();
+        let e = tape
+            .backward(out.id(), cpu_tensor(), passthrough_accumulator)
+            .unwrap_err();
+        let msg = e.to_string();
+        assert!(
+            msg.contains("Anti-pattern 16"),
+            "expected anti-pattern 16 error, got: {msg}"
+        );
+        assert!(msg.contains("test/some_op"));
+    }
+
+    #[test]
+    fn backward_ok_when_versions_unchanged() {
+        // No in-place mutation between forward and backward -> backward succeeds.
+        let mut tape = Tape::new();
+        let out = cpu_tensor();
+        let inp = cpu_tensor();
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        tape.record(
+            &out,
+            &[&inp],
+            Box::new(CountingOp {
+                name: "test/clean_op",
+                input_count: 1,
+                calls: calls.clone(),
+            }),
+        );
+        // No bump — versions stay at 0.
+        let _ = tape
+            .backward(out.id(), cpu_tensor(), passthrough_accumulator)
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
