@@ -567,10 +567,12 @@ mod tests {
         // anti-pattern 2 contract: the fast-path clone must NOT bump
         // the counter; the materializing branch MUST.
         //
-        // Serialize via a process-global mutex because the counter
-        // is shared across tests.
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap();
+        // Serialize via the crate-wide test lock (shared with
+        // `profile::tests::*`) so a parallel `emit_contiguous_copy`
+        // from those tests can't bump the counter between our reset
+        // and our assert. A per-module local mutex (the prior code)
+        // doesn't synchronize across modules.
+        let _g = crate::profile::counter_test_lock();
 
         crate::profile::reset_contiguous_copy_count();
 

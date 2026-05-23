@@ -90,15 +90,25 @@ impl CopyScope {
     }
 }
 
+/// Process-global mutex that serializes any test which touches the
+/// `contiguous_copy_count` counter. Exposed at crate visibility under
+/// `#[cfg(test)]` so tests in OTHER modules (e.g. `tensor::tests`)
+/// can grab the same lock — otherwise per-module local locks race
+/// against each other and a parallel `emit_contiguous_copy()` from
+/// one test bumps the counter that another test is asserting on.
+#[cfg(test)]
+pub(crate) fn counter_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Serialize tests that mutate the global counter so they don't
-    /// race. Rust's test harness runs tests in parallel by default.
+    /// Local alias for the crate-wide test lock.
     fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap()
+        counter_test_lock()
     }
 
     #[test]
