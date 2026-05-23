@@ -172,20 +172,6 @@ fn accuracy(x: &Tensor, target: &Tensor, w1: &Tensor, w2: &Tensor) -> Result<f32
     Ok(correct as f32 / batch as f32)
 }
 
-// FIXME(#1082): With the configured hyperparameters (lr=0.05, 80 steps,
-// initial weights in ±0.2, dropout p=0.1), the loss descends only ~2.8%
-// (0.7118 → 0.6920) — short of the 15% threshold this test asserts and
-// the >85% accuracy. The substrate components (MatmulBackward,
-// GeluBackward, DropoutBackward, CrossEntropyBackward) all have passing
-// closed-form / finite-difference unit tests; the issue is purely
-// hyperparameter tuning of the integration scenario, not a correctness
-// regression. The test never ran in CI before bc8cee8c (it was hidden
-// behind a `half` crate compile error from phase 1.6x through 1.83), so
-// the originally-checked-in thresholds are an unverified assumption.
-// Marked #[ignore] until the test author re-tunes lr / step count;
-// keeping CI green for the rest of the workspace is more valuable than
-// a stuck integration test that blocks every other PR.
-#[ignore = "FIXME(#1082): hyperparameters need re-tuning; see comment above"]
 #[test]
 fn ffn_block_trains_synthetic_binary_classifier() {
     // Synthetic 2D-to-class-{0,1} dataset: y = 1 iff x1 + x2 > 0.
@@ -203,22 +189,33 @@ fn ffn_block_trains_synthetic_binary_classifier() {
     let target = Tensor::from_slice(&y_data, vec![n]).unwrap();
 
     // FFN: [2, 4] → gelu → dropout → [4, 2].
+    //
+    // Init weights at ~0.5 magnitude — small enough to be in the
+    // active GELU regime but large enough that initial logits are
+    // meaningfully non-zero, so the cross-entropy gradient flows
+    // back through W2 (and the chain rule back to W1) on step one.
+    // With the earlier ±0.1–0.2 init the cascade was numerically
+    // squashed and 80 SGD steps barely moved the loss off log(2).
     let hidden = 4;
     let n_classes = 2;
     let mut w1 = Tensor::from_slice(
-        &[0.1f32, -0.1, 0.05, -0.05, 0.2, -0.2, 0.15, -0.15],
+        &[0.5f32, -0.5, 0.4, -0.4, 0.6, -0.6, 0.3, -0.3],
         vec![2, hidden],
     )
     .unwrap();
     let mut w2 = Tensor::from_slice(
-        &[0.1f32, -0.1, -0.1, 0.1, 0.05, -0.05, -0.05, 0.05],
+        &[0.5f32, -0.5, -0.4, 0.4, 0.3, -0.3, -0.6, 0.6],
         vec![hidden, n_classes],
     )
     .unwrap();
 
-    let lr = 0.05_f32;
-    let mut losses = Vec::with_capacity(80);
-    for step in 0..80 {
+    // lr=0.2 over 400 steps: enough total weight movement to drive
+    // the loss meaningfully below log(2) and the classifier above
+    // 85% on this linearly-separable (x1+x2>0) task.
+    let lr = 0.2_f32;
+    let n_steps = 400;
+    let mut losses = Vec::with_capacity(n_steps);
+    for step in 0..n_steps {
         let (new_w1, new_w2, loss) = train_step(
             &x,
             &target,
@@ -235,7 +232,7 @@ fn ffn_block_trains_synthetic_binary_classifier() {
     }
 
     let first = losses[0];
-    let last = losses[79];
+    let last = losses[n_steps - 1];
     assert!(
         last < first * 0.85,
         "loss did not descend enough: first={first}, last={last}"

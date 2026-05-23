@@ -120,19 +120,6 @@ fn step(
     Ok((new_w, new_b, loss_val))
 }
 
-// FIXME(#1082): Loss descends correctly (asserts `last < first * 0.05`
-// passes — the substrate's SGD path works), but the weight-recovery
-// thresholds (`(w[i] - target).abs() < 0.2`) are too tight for the
-// configured hyperparameters: with lr=0.01 over 50 steps, w[0] reaches
-// ~1.012 toward target 2.0 (50% recovery) — directionally correct but
-// short of the 90% required. Same root cause as the ffn_block test
-// (d5dfd129): test never ran in CI before the half-crate fix landed,
-// so the originally-checked-in thresholds are an unverified assumption.
-// Marked #[ignore] until the test author re-tunes lr / step count;
-// the loss-descent half of the test still validates the SGD substrate
-// end-to-end (we just need the weight thresholds aligned with the
-// chosen optimizer settings).
-#[ignore = "FIXME(#1082): weight thresholds need re-tuning; see comment above"]
 #[test]
 fn linear_regression_descent() {
     // Synthetic dataset: y_i = 2*x1_i + 3*x2_i + 1 + small noise-free.
@@ -159,19 +146,26 @@ fn linear_regression_descent() {
     // pull every entry the same direction.
     let mut b = Tensor::from_slice(&[0.0f32; 16], vec![n_samples, 1]).unwrap();
 
-    let lr = 0.01_f32;
-    let mut losses = Vec::with_capacity(50);
-    for _ in 0..50 {
+    // lr × steps tuned so a least-squares-shape problem with X bounded
+    // in [-0.8, 0.7] converges within the post-loop weight tolerances
+    // (|w - target| < 0.2). Per-step error factor is ~(1 - lr·λ_max)
+    // with λ_max ≈ X^T X / N ≈ 0.25; 500 SGD steps at lr=0.05 give
+    // ~(1 - 0.0125)^500 ≈ 0.002 residual error, which is well under the
+    // 10% threshold the post-loop assertions need.
+    let lr = 0.05_f32;
+    let n_steps = 500;
+    let mut losses = Vec::with_capacity(n_steps);
+    for _ in 0..n_steps {
         let (new_w, new_b, loss) = step(&x, &target, &w, &b, lr).unwrap();
         losses.push(loss);
         w = new_w;
         b = new_b;
     }
 
-    // Loss must strictly trend down over 50 steps. Allow a 5% tail
-    // smoothing — the last few losses should be < 1% of the first.
+    // Loss must strictly trend down. The last loss should be < 5% of
+    // the first.
     let first = losses[0];
-    let last = losses[49];
+    let last = losses[n_steps - 1];
     assert!(
         last < first * 0.05,
         "loss did not descend enough: first={first}, last={last}"
