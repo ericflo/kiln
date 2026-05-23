@@ -265,7 +265,7 @@ def main():
 
     rollouts = []
     grpo_rows = []
-    n_gen = max(1, args.num_generations if args.mode == "train" else 1)
+    n_gen = max(1, args.num_generations)
     for task in tasks:
         for g in range(n_gen):
             r = _run_pi_one(task, cfg, args.adapter, sandbox_root, args.mode)
