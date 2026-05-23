@@ -14,9 +14,10 @@ use kiln_kt_bridge::BridgeError;
 use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 
 use crate::{
-    kiln_adamw_step_f32, kiln_fused_mlp_silu_mul_bf16, kiln_fused_rmsnorm,
-    kiln_fused_rmsnorm_bwd, kiln_fused_rotary_qk, kiln_lora_decode_add_bf16,
-    kiln_lora_decode_hidden_bf16, kiln_sgd_step_f32,
+    kiln_adamw_step_f32, kiln_fused_l2_qk_norm, kiln_fused_l2_qk_norm_gqa,
+    kiln_fused_mlp_silu_mul_bf16, kiln_fused_rmsnorm, kiln_fused_rmsnorm_bwd,
+    kiln_fused_rotary_one, kiln_fused_rotary_qk, kiln_fused_sigmoid_mul_bf16,
+    kiln_lora_decode_add_bf16, kiln_lora_decode_hidden_bf16, kiln_sgd_step_f32,
 };
 
 #[derive(Debug)]
@@ -645,6 +646,290 @@ pub fn lora_decode_add_kt(
     if status != 0 {
         return Err(RmsNormError::Msg(format!(
             "kt-lora-add: FFI returned {status}"
+        )));
+    }
+    Ok(out)
+}
+
+/// `fused_l2_qk_norm` over `kiln_tensor::Tensor` operands.
+///
+/// L2-normalize each row of `q_in` and `k_in` (shape `[rows, hidden]`,
+/// BF16) and scale `q` by `q_scale`. Used by the QK-norm pass in
+/// attention pre-projection. Returns `(q_out, k_out)`.
+pub fn fused_l2_qk_norm_kt(
+    q_in: &KtTensor,
+    k_in: &KtTensor,
+    q_scale: f32,
+    eps: f32,
+) -> Result<(KtTensor, KtTensor), RmsNormError> {
+    if q_in.shape() != k_in.shape() {
+        return Err(RmsNormError::Msg(format!(
+            "kt-l2-qk-norm: q {:?} != k {:?}",
+            q_in.shape(),
+            k_in.shape()
+        )));
+    }
+    let q_shape = q_in.shape().to_vec();
+    if q_shape.len() != 2 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-l2-qk-norm: q must be [rows, hidden], got {q_shape:?}"
+        )));
+    }
+    let (rows, hidden) = (q_shape[0], q_shape[1]);
+
+    let (q_st, q_off) = cuda_storage_and_byte_offset(q_in, KtDType::BF16, "q_in")?;
+    let (k_st, k_off) = cuda_storage_and_byte_offset(k_in, KtDType::BF16, "k_in")?;
+    let q_out = alloc_cuda_tensor(q_st, KtDType::BF16, q_shape.clone())?;
+    let k_out = alloc_cuda_tensor(q_st, KtDType::BF16, q_shape)?;
+    let qo_cuda = q_out
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let ko_cuda = k_out
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = q_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let q_slice = q_st.slice().slice(q_off..);
+    let k_slice = k_st.slice().slice(k_off..);
+    let qo_slice = qo_cuda.slice().slice(0..);
+    let ko_slice = ko_cuda.slice().slice(0..);
+
+    let status = unsafe {
+        let (q_ptr, _g1) = q_slice.device_ptr(&stream);
+        let (k_ptr, _g2) = k_slice.device_ptr(&stream);
+        let (qo_ptr, _g3) = qo_slice.device_ptr(&stream);
+        let (ko_ptr, _g4) = ko_slice.device_ptr(&stream);
+        kiln_fused_l2_qk_norm(
+            q_ptr as *const _,
+            k_ptr as *const _,
+            qo_ptr as *mut _,
+            ko_ptr as *mut _,
+            rows as i32,
+            hidden as i32,
+            q_scale,
+            eps,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-l2-qk-norm: FFI returned {status}"
+        )));
+    }
+    Ok((q_out, k_out))
+}
+
+/// GQA variant of `fused_l2_qk_norm`. K has `nk` distinct heads per
+/// `ratio` (group size) Q heads. Shapes:
+/// - `q_in`, `q_out`: BF16 `[rows, hidden_q]` where `hidden_q = nk*ratio*head_dim`
+/// - `k_in`, `k_out`: BF16 `[rows, hidden_k]` where `hidden_k = nk*head_dim`
+pub fn fused_l2_qk_norm_gqa_kt(
+    q_in: &KtTensor,
+    k_in: &KtTensor,
+    nk: usize,
+    ratio: usize,
+    head_dim: usize,
+    q_scale: f32,
+    eps: f32,
+) -> Result<(KtTensor, KtTensor), RmsNormError> {
+    let q_shape = q_in.shape();
+    if q_shape.len() != 2 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-l2-qk-norm-gqa: q must be [rows, hidden_q], got {q_shape:?}"
+        )));
+    }
+    let rows = q_shape[0];
+    let hidden_q = q_shape[1];
+    if hidden_q != nk * ratio * head_dim {
+        return Err(RmsNormError::Msg(format!(
+            "kt-l2-qk-norm-gqa: q hidden {hidden_q} != nk({nk}) * ratio({ratio}) * head_dim({head_dim})"
+        )));
+    }
+    let k_shape = k_in.shape();
+    if k_shape != [rows, nk * head_dim] {
+        return Err(RmsNormError::Msg(format!(
+            "kt-l2-qk-norm-gqa: k {k_shape:?} != [{rows}, {}]",
+            nk * head_dim
+        )));
+    }
+
+    let (q_st, q_off) = cuda_storage_and_byte_offset(q_in, KtDType::BF16, "q_in")?;
+    let (k_st, k_off) = cuda_storage_and_byte_offset(k_in, KtDType::BF16, "k_in")?;
+    let q_out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![rows, hidden_q])?;
+    let k_out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![rows, nk * head_dim])?;
+    let qo_cuda = q_out
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let ko_cuda = k_out
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = q_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let q_slice = q_st.slice().slice(q_off..);
+    let k_slice = k_st.slice().slice(k_off..);
+    let qo_slice = qo_cuda.slice().slice(0..);
+    let ko_slice = ko_cuda.slice().slice(0..);
+
+    let status = unsafe {
+        let (q_ptr, _g1) = q_slice.device_ptr(&stream);
+        let (k_ptr, _g2) = k_slice.device_ptr(&stream);
+        let (qo_ptr, _g3) = qo_slice.device_ptr(&stream);
+        let (ko_ptr, _g4) = ko_slice.device_ptr(&stream);
+        kiln_fused_l2_qk_norm_gqa(
+            q_ptr as *const _,
+            k_ptr as *const _,
+            qo_ptr as *mut _,
+            ko_ptr as *mut _,
+            rows as i32,
+            nk as i32,
+            ratio as i32,
+            head_dim as i32,
+            q_scale,
+            eps,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-l2-qk-norm-gqa: FFI returned {status}"
+        )));
+    }
+    Ok((q_out, k_out))
+}
+
+/// `fused_rotary_one` over `kiln_tensor::Tensor` operands.
+///
+/// Single-tensor rotary application (used for Q or K, but not both
+/// in one launch — see [`fused_rotary_qk_kt`] for the fused pair).
+/// Shape: `[batch, seq_len, heads, head_dim]` BF16; rotary applied
+/// to the first `rotary_dim` of head_dim. Returns the rotated tensor.
+pub fn fused_rotary_one_kt(
+    x: &KtTensor,
+    cos: &KtTensor,
+    sin: &KtTensor,
+    rotary_dim: usize,
+) -> Result<KtTensor, RmsNormError> {
+    let x_shape = x.shape();
+    if x_shape.len() != 4 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-rotary-one: x must be [B, S, H, D], got {x_shape:?}"
+        )));
+    }
+    let (batch, seq_len, heads, head_dim) = (x_shape[0], x_shape[1], x_shape[2], x_shape[3]);
+    if rotary_dim > head_dim {
+        return Err(RmsNormError::Msg(format!(
+            "kt-rotary-one: rotary_dim {rotary_dim} > head_dim {head_dim}"
+        )));
+    }
+    if cos.shape() != [seq_len, rotary_dim] || sin.shape() != [seq_len, rotary_dim] {
+        return Err(RmsNormError::Msg(format!(
+            "kt-rotary-one: cos/sin must be [{seq_len}, {rotary_dim}]"
+        )));
+    }
+
+    let (x_st, x_off) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
+    let (cos_st, cos_off) = cuda_storage_and_byte_offset(cos, KtDType::F32, "cos")?;
+    let (sin_st, sin_off) = cuda_storage_and_byte_offset(sin, KtDType::F32, "sin")?;
+
+    let out = alloc_cuda_tensor(x_st, KtDType::BF16, vec![batch, seq_len, heads, head_dim])?;
+    let o_cuda = out
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = x_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let x_slice = x_st.slice().slice(x_off..);
+    let cos_slice = cos_st.slice().slice(cos_off..);
+    let sin_slice = sin_st.slice().slice(sin_off..);
+    let o_slice = o_cuda.slice().slice(0..);
+
+    let status = unsafe {
+        let (x_ptr, _g1) = x_slice.device_ptr(&stream);
+        let (cos_ptr, _g2) = cos_slice.device_ptr(&stream);
+        let (sin_ptr, _g3) = sin_slice.device_ptr(&stream);
+        let (o_ptr, _g4) = o_slice.device_ptr(&stream);
+        kiln_fused_rotary_one(
+            x_ptr as *const _,
+            cos_ptr as *const f32,
+            sin_ptr as *const f32,
+            o_ptr as *mut _,
+            batch as i32,
+            seq_len as i32,
+            heads as i32,
+            head_dim as i32,
+            rotary_dim as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-rotary-one: FFI returned {status}"
+        )));
+    }
+    Ok(out)
+}
+
+/// `fused_sigmoid_mul_bf16` over `kiln_tensor::Tensor` operands.
+///
+/// Element-wise: `out = sigmoid(gate) * x`. Both BF16, same shape.
+/// Used by gated activation paths. Like `fused_mlp_silu_mul` but
+/// with sigmoid instead of silu.
+pub fn fused_sigmoid_mul_kt(
+    x: &KtTensor,
+    gate: &KtTensor,
+) -> Result<KtTensor, RmsNormError> {
+    if x.shape() != gate.shape() {
+        return Err(RmsNormError::Msg(format!(
+            "kt-sigmoid-mul: x {:?} != gate {:?}",
+            x.shape(),
+            gate.shape()
+        )));
+    }
+    let elems = x.element_count();
+    let shape = x.shape().to_vec();
+
+    let (x_st, x_off) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
+    let (g_st, g_off) = cuda_storage_and_byte_offset(gate, KtDType::BF16, "gate")?;
+    let out = alloc_cuda_tensor(x_st, KtDType::BF16, shape)?;
+    let o_cuda = out
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = x_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let x_slice = x_st.slice().slice(x_off..);
+    let g_slice = g_st.slice().slice(g_off..);
+    let o_slice = o_cuda.slice().slice(0..);
+
+    let status = unsafe {
+        let (x_ptr, _g1) = x_slice.device_ptr(&stream);
+        let (g_ptr, _g2) = g_slice.device_ptr(&stream);
+        let (o_ptr, _g3) = o_slice.device_ptr(&stream);
+        kiln_fused_sigmoid_mul_bf16(
+            x_ptr as *const _,
+            g_ptr as *const _,
+            o_ptr as *mut _,
+            elems as i64,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-sigmoid-mul: FFI returned {status}"
         )));
     }
     Ok(out)
