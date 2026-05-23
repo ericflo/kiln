@@ -22,6 +22,7 @@
 
 mod determinism;
 mod device;
+mod device_op;
 mod dtype;
 mod element;
 mod error;
@@ -41,6 +42,7 @@ mod vulkan_storage;
 
 pub use determinism::{deterministic_enabled, Determinism, DeterministicCache, DETERMINISTIC_CACHED};
 pub use device::{Backend, Device};
+pub use device_op::{dispatch1, dispatch2, dispatch3, BackwardOp, DeviceOp1, DeviceOp2, DeviceOp3};
 pub use dtype::DType;
 pub use element::Element;
 pub use error::{Error, Result};
