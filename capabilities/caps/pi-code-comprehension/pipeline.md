@@ -64,6 +64,10 @@ Prerequisites (handled by `lib/pod_bootstrap.sh`):
 - B2 creds available in the env (`pod_export_b2_creds`)
 - kiln built with `--features cuda --bin kiln --bin kiln-bench`
 
+## Cross-cap-coherence
+
+Cross-cap-coherence (the goal's "<0.02 regression on any sibling cap" gate) is **not applicable** for this round-3 closure because no new adapter is being shipped or deployed. The recommended recipe is iter4 ECHO, an adapter from round-1 that already passed earlier sibling-cap regression checks during its original landing (`adapter b2://clouderic/kiln/pi-code-comprehension/BEST_ADAPTER_iter4/adapter.tgz`). The three new training arms in round-3 (stages 1b, 2c) are documented as no-ship; they were not promoted into any registry that sibling caps share. The strict-prompt diagnostic (1c) and iter4 re-eval (2a) are eval-only and made no model changes. If a future round lands a new ship-worthy adapter for this cap, that round must include a sibling-regression sweep across the cap registry before promotion.
+
 ## Round-3 artifacts
 
 - `stages/stage-0-baseline.json` — session-1 base 3-seed (0.6293 ± 0.022)
