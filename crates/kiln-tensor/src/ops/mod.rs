@@ -42,6 +42,7 @@ pub mod scatter_add;
 pub mod silu_mul;
 pub mod softmax;
 pub mod top_k;
+pub mod unary_arith;
 pub mod where_select;
 
 pub use activation::{gelu, sigmoid, silu, ActivationOp, UnaryKind};
@@ -66,4 +67,5 @@ pub use scatter_add::{scatter_add, ScatterAddOp};
 pub use silu_mul::{mul_sigmoid_gate, MulSigmoidGateOp};
 pub use softmax::{softmax_last_dim, SoftmaxLastDimOp};
 pub use top_k::top_k;
+pub use unary_arith::{abs, exp, ln, neg, sqrt, UnaryArithKind};
 pub use where_select::where_select;
