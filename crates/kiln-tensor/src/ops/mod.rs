@@ -42,7 +42,7 @@ pub mod scatter_add;
 pub mod silu_mul;
 pub mod softmax;
 
-pub use activation::{sigmoid, silu, ActivationOp, UnaryKind};
+pub use activation::{gelu, sigmoid, silu, ActivationOp, UnaryKind};
 pub use argmax::{argmax_last_dim, ArgmaxLastDimOp};
 pub use broadcast::broadcast_to;
 pub use cast::{cast, CastOp};

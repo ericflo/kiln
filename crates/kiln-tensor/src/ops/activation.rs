@@ -1,14 +1,17 @@
-//! Single-input activation ops: `silu`, `sigmoid`.
+//! Single-input activation ops: `silu`, `sigmoid`, `gelu`.
 //!
-//! Replaces candle's `Tensor::{silu, sigmoid}` and the candle
-//! `Activation::SiLU` enum dispatch.
+//! Replaces candle's `Tensor::{silu, sigmoid, gelu}` and the candle
+//! `Activation::{SiLU, Gelu}` enum dispatch.
 //!
 //! # Semantics
 //!
-//! Both ops are pointwise:
+//! All three are pointwise:
 //!
 //! - `sigmoid(x) = 1 / (1 + exp(-x))`
 //! - `silu(x) = x * sigmoid(x)` (a.k.a. swish)
+//! - `gelu(x) = 0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715 * x³)))`
+//!   (tanh approximation — the variant used by every modern
+//!   transformer codebase)
 //!
 //! F32-promoted compute for BF16/F16 inputs.
 //!
@@ -29,6 +32,8 @@ pub enum UnaryKind {
     Silu,
     /// `f(x) = 1 / (1 + exp(-x))`
     Sigmoid,
+    /// `f(x) = 0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715*x^3)))`
+    Gelu,
 }
 
 impl UnaryKind {
@@ -36,6 +41,7 @@ impl UnaryKind {
         match self {
             UnaryKind::Silu => "silu",
             UnaryKind::Sigmoid => "sigmoid",
+            UnaryKind::Gelu => "gelu",
         }
     }
 
@@ -43,6 +49,14 @@ impl UnaryKind {
         match self {
             UnaryKind::Silu => x / (1.0 + (-x).exp()),
             UnaryKind::Sigmoid => 1.0 / (1.0 + (-x).exp()),
+            UnaryKind::Gelu => {
+                // tanh approximation; matches PyTorch's
+                // `F.gelu(x, approximate="tanh")` and candle's
+                // `Activation::Gelu`.
+                const SQRT_2_OVER_PI: f32 = 0.7978845608_f32;
+                let inner = SQRT_2_OVER_PI * (x + 0.044715 * x * x * x);
+                0.5 * x * (1.0 + inner.tanh())
+            }
         }
     }
 }
@@ -127,6 +141,12 @@ pub fn silu(x: &Tensor) -> Result<Tensor> {
 /// `out = 1 / (1 + exp(-x))`.
 pub fn sigmoid(x: &Tensor) -> Result<Tensor> {
     dispatch1(&ActivationOp::new(UnaryKind::Sigmoid), x)
+}
+
+/// `out = 0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715 * x³)))` —
+/// GELU (tanh approximation).
+pub fn gelu(x: &Tensor) -> Result<Tensor> {
+    dispatch1(&ActivationOp::new(UnaryKind::Gelu), x)
 }
 
 fn validate(x: &Tensor, kind: UnaryKind) -> Result<()> {
@@ -222,6 +242,39 @@ mod tests {
     fn unary_kind_name_strings() {
         assert_eq!(UnaryKind::Silu.name(), "silu");
         assert_eq!(UnaryKind::Sigmoid.name(), "sigmoid");
+        assert_eq!(UnaryKind::Gelu.name(), "gelu");
+    }
+
+    #[test]
+    fn gelu_f32_known_values() {
+        // GELU tanh-approx known references (PyTorch
+        // F.gelu(approximate="tanh") values):
+        // gelu(0)    = 0
+        // gelu(1)    ≈ 0.8412
+        // gelu(-1)   ≈ -0.1588
+        // gelu(2)    ≈ 1.9546
+        // gelu(-2)   ≈ -0.0454
+        let x = Tensor::from_slice(&[0.0f32, 1.0, -1.0, 2.0, -2.0], vec![5]).unwrap();
+        let y = gelu(&x).unwrap();
+        let got = read_f32(&y);
+        let expected = [0.0_f32, 0.8412, -0.1588, 1.9546, -0.0454];
+        for (i, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-3,
+                "gelu[{i}]={g}, expected {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn gelu_bf16_round_trips() {
+        let xv: Vec<half::bf16> = [0.0f32, 1.0, -1.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v))
+            .collect();
+        let x = Tensor::from_slice(&xv, vec![3]).unwrap();
+        let y = gelu(&x).unwrap();
+        assert_eq!(y.dtype(), DType::BF16);
     }
 
     #[test]
