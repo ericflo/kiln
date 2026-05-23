@@ -1,0 +1,19 @@
+[package]
+name = "kiln-optim"
+description = "Fused per-backend optimizer step for kiln. AdamW / SGD / Lion / Muon over kiln-param::Parameter."
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Phase 6.5 of #1082. The CPU AdamW reference path lands in this PR;
+# per-backend GPU impls (kiln-blas / kiln-mps / kiln-vulkan-blas) plug
+# in via the same OptimStep trait in subsequent PRs.
+#
+# Internal-only — no semver commitment until Phase 7 ships.
+
+[dependencies]
+kiln-tensor = { workspace = true }
+kiln-param = { workspace = true }
+thiserror = { workspace = true }
