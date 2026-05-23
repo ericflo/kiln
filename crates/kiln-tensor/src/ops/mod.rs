@@ -70,6 +70,7 @@ pub mod reduce;
 pub mod repeat;
 pub mod repeat_interleave;
 pub mod rmsnorm;
+pub mod roll;
 pub mod rope;
 pub mod rope_init;
 pub mod scalar;
@@ -142,6 +143,7 @@ pub use reduce::{mean_all, mean_axis, sum_all, sum_axis, ReduceOp, ReductionKind
 pub use repeat::repeat;
 pub use repeat_interleave::repeat_interleave;
 pub use rmsnorm::{rms_norm, RmsNormOp};
+pub use roll::roll;
 pub use rope::{rope, RopeOp};
 pub use rope_init::precompute_rope_freqs;
 pub use scalar::{add_scalar, div_scalar, mul_scalar, sub_scalar};
