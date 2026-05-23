@@ -15,7 +15,7 @@ half = "2"
 # candle-typed one. Both call the same FFI; callers migrate one
 # call site at a time, and the candle path is deleted when no
 # call sites remain.
-kiln-tensor = { workspace = true }
+kiln-tensor = { workspace = true, features = ["cuda"] }
 
 [build-dependencies]
 cc = "1"
