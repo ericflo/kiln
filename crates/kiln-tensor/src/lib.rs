@@ -20,12 +20,16 @@
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
 
+mod device;
 mod dtype;
 mod error;
 mod layout;
+mod storage;
 mod tensor_id;
 
+pub use device::{Backend, Device};
 pub use dtype::DType;
 pub use error::{Error, Result};
 pub use layout::Layout;
+pub use storage::{cpu_zeros, CpuStorage, Storage, StorageBackend};
 pub use tensor_id::TensorId;
