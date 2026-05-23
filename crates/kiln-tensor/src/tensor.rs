@@ -290,6 +290,32 @@ impl Tensor {
         self.reshape(new_shape)
     }
 
+    /// Swap the trailing two axes (matrix-style transpose). Zero-copy.
+    /// Errors on rank < 2.
+    pub fn t(&self) -> Result<Self> {
+        if self.rank() < 2 {
+            return Err(crate::Error::Msg(format!(
+                "t: rank must be ≥ 2, got {}",
+                self.rank()
+            )));
+        }
+        self.transpose(self.rank() - 2, self.rank() - 1)
+    }
+
+    /// Move a single axis from `from` to `to`. Zero-copy via permute.
+    pub fn move_axis(&self, from: usize, to: usize) -> Result<Self> {
+        let rank = self.rank();
+        if from >= rank || to >= rank {
+            return Err(crate::Error::Msg(format!(
+                "move_axis: from={from} to={to} out of range for rank-{rank}"
+            )));
+        }
+        let mut axes: Vec<usize> = (0..rank).collect();
+        let moved = axes.remove(from);
+        axes.insert(to, moved);
+        self.permute(&axes)
+    }
+
     /// Flatten to a rank-1 tensor of `element_count()` elements.
     /// Zero-copy if input is contiguous.
     pub fn flatten(&self) -> Result<Self> {
@@ -731,5 +757,51 @@ mod tests {
         let t = Tensor::zeros_cpu(vec![2, 3], DType::F32);
         let e = t.flatten_range(5, 6).unwrap_err();
         assert!(e.to_string().contains("flatten_range"));
+    }
+
+    #[test]
+    fn t_swaps_trailing_two_axes() {
+        // [2, 3] → [3, 2].
+        let t = Tensor::zeros_cpu(vec![2, 3], DType::F32);
+        let tt = t.t().unwrap();
+        assert_eq!(tt.shape(), &[3, 2]);
+    }
+
+    #[test]
+    fn t_higher_rank_swaps_last_two() {
+        // [2, 3, 4] → [2, 4, 3]
+        let t = Tensor::zeros_cpu(vec![2, 3, 4], DType::F32);
+        let tt = t.t().unwrap();
+        assert_eq!(tt.shape(), &[2, 4, 3]);
+    }
+
+    #[test]
+    fn t_rank_1_errors() {
+        let t = Tensor::zeros_cpu(vec![3], DType::F32);
+        let e = t.t().unwrap_err();
+        assert!(e.to_string().contains("rank"));
+    }
+
+    #[test]
+    fn move_axis_forward() {
+        // [A, B, C, D]; move 0→3 → [B, C, D, A]
+        let t = Tensor::zeros_cpu(vec![2, 3, 4, 5], DType::F32);
+        let m = t.move_axis(0, 3).unwrap();
+        assert_eq!(m.shape(), &[3, 4, 5, 2]);
+    }
+
+    #[test]
+    fn move_axis_backward() {
+        // [A, B, C, D]; move 3→0 → [D, A, B, C]
+        let t = Tensor::zeros_cpu(vec![2, 3, 4, 5], DType::F32);
+        let m = t.move_axis(3, 0).unwrap();
+        assert_eq!(m.shape(), &[5, 2, 3, 4]);
+    }
+
+    #[test]
+    fn move_axis_out_of_range_errors() {
+        let t = Tensor::zeros_cpu(vec![2, 3], DType::F32);
+        let e = t.move_axis(5, 0).unwrap_err();
+        assert!(e.to_string().contains("out of range"));
     }
 }
