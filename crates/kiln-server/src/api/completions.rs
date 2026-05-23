@@ -5269,6 +5269,7 @@ async fn generate_real(
                         }
                     };
                     let registration = output.registration.take();
+                    let extra_registrations = std::mem::take(&mut output.extra_registrations);
                     let allocated_blocks = std::mem::take(&mut output.allocated_blocks);
                     let mut retained_blocks = Vec::new();
                     let mut evicted_blocks = Vec::new();
@@ -5279,8 +5280,13 @@ async fn generate_real(
                         }
                         if let Some(registration) = registration {
                             let outcome = cache.register(adapter.clone(), registration);
-                            retained_blocks = outcome.retained_blocks;
-                            evicted_blocks = outcome.evicted_blocks;
+                            retained_blocks.extend(outcome.retained_blocks);
+                            evicted_blocks.extend(outcome.evicted_blocks);
+                        }
+                        for registration in extra_registrations {
+                            let outcome = cache.register(adapter.clone(), registration);
+                            retained_blocks.extend(outcome.retained_blocks);
+                            evicted_blocks.extend(outcome.evicted_blocks);
                         }
                     }
 
@@ -5725,6 +5731,8 @@ async fn generate_real_streaming(
                                 }
                             };
                             let registration = output.registration.take();
+                            let extra_registrations =
+                                std::mem::take(&mut output.extra_registrations);
                             let allocated_blocks = std::mem::take(&mut output.allocated_blocks);
                             let block_free_signal = output.block_free_signal.take();
                             let mut retained_blocks = Vec::new();
@@ -5736,8 +5744,13 @@ async fn generate_real_streaming(
                                 }
                                 if let Some(registration) = registration {
                                     let outcome = cache.register(adapter.clone(), registration);
-                                    retained_blocks = outcome.retained_blocks;
-                                    evicted_blocks = outcome.evicted_blocks;
+                                    retained_blocks.extend(outcome.retained_blocks);
+                                    evicted_blocks.extend(outcome.evicted_blocks);
+                                }
+                                for registration in extra_registrations {
+                                    let outcome = cache.register(adapter.clone(), registration);
+                                    retained_blocks.extend(outcome.retained_blocks);
+                                    evicted_blocks.extend(outcome.evicted_blocks);
                                 }
                             }
 

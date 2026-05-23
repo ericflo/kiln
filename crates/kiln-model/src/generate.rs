@@ -374,6 +374,18 @@ fn build_extended_registration(
     })
 }
 
+fn strict_prompt_prefix_split_pos(
+    prompt_len: usize,
+    cached_tokens: usize,
+    block_size: usize,
+) -> Option<usize> {
+    if block_size == 0 || prompt_len <= 1 {
+        return None;
+    }
+    let split_pos = ((prompt_len - 1) / block_size) * block_size;
+    (split_pos > cached_tokens && split_pos < prompt_len).then_some(split_pos)
+}
+
 fn decode_buffer_max_batch() -> usize {
     let explicit = std::env::var("KILN_DECODE_BUFFER_MAX_BATCH")
         .ok()
@@ -413,6 +425,7 @@ impl PrefillSampleSource {
 pub struct PrefixCachedStreamingOutput {
     pub receiver: mpsc::Receiver<StreamEvent>,
     pub registration: Option<PagedPrefixRegistration>,
+    pub extra_registrations: Vec<PagedPrefixRegistration>,
     pub allocated_blocks: Vec<u32>,
     /// Channel the API layer uses to hand the *final* "blocks to free" list
     /// to the spawned decode thread, AFTER prefix-cache registration has
@@ -2210,14 +2223,18 @@ impl ModelRunner {
         let use_greedy_prefill_token = params.is_effectively_greedy()
             && matches!(self.backend.device(), candle_core::Device::Metal(_))
             && !streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len());
+        let split_pos =
+            strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size);
+        let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
         let prefill_start = std::time::Instant::now();
         let prefill_source = {
             let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len()) {
-                PrefillSampleSource::Logits(
-                    model_forward_paged_streaming_with_progress(
+                if let Some(split_pos) = split_pos {
+                    let head_tokens = &prompt_tokens[cached_tokens..split_pos];
+                    let _ = model_forward_paged_streaming_with_progress(
                         &*self.backend,
-                        prefill_tokens,
+                        head_tokens,
                         &self.weights,
                         &self.config,
                         pc_guard,
@@ -2227,8 +2244,49 @@ impl ModelRunner {
                         self.active_lora.as_ref(),
                         cancel,
                     )
-                    .context("prefill forward pass (paged prefix cache, streaming) failed")?,
-                )
+                    .context("prefill forward pass (paged prefix cache, streaming head)")?;
+                    prefill_split_snapshot = Some(RollingPrefixSnapshot {
+                        position: split_pos,
+                        linear_state: linear_state
+                            .snapshot()
+                            .context("snapshot linear state at streaming prefill split")?,
+                    });
+
+                    let tail_tokens = &prompt_tokens[split_pos..];
+                    let logits = model_forward_paged_streaming_with_progress(
+                        &*self.backend,
+                        tail_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_table,
+                        split_pos,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        None,
+                    )
+                    .context("prefill forward pass (paged prefix cache, streaming tail)")?;
+                    if let Some(cancel) = cancel {
+                        cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
+                    }
+                    PrefillSampleSource::Logits(logits)
+                } else {
+                    PrefillSampleSource::Logits(
+                        model_forward_paged_streaming_with_progress(
+                            &*self.backend,
+                            prefill_tokens,
+                            &self.weights,
+                            &self.config,
+                            pc_guard,
+                            block_table,
+                            cached_tokens,
+                            Some(&mut linear_state),
+                            self.active_lora.as_ref(),
+                            cancel,
+                        )
+                        .context("prefill forward pass (paged prefix cache, streaming) failed")?,
+                    )
+                }
             } else if use_greedy_prefill_token {
                 PrefillSampleSource::GreedyToken(
                     model_forward_paged_last_token_greedy(
@@ -2299,11 +2357,21 @@ impl ModelRunner {
         };
 
         let decode_duration = decode_start.elapsed();
+        let mut extra_registrations = Vec::new();
+        if let Some(reg) = build_extended_registration(
+            prompt_tokens,
+            &output.token_ids,
+            block_table,
+            block_size,
+            prefill_split_snapshot,
+        ) {
+            extra_registrations.push(reg);
+        }
 
         Ok(PrefixCachedGenerationOutput {
             output,
             registration,
-            extra_registrations: Vec::new(),
+            extra_registrations,
             allocated_blocks: Vec::new(),
             prefill_duration,
             decode_duration,
@@ -2379,32 +2447,69 @@ impl ModelRunner {
         // every subsequent turn's prompt does NOT contain — without this
         // snapshot, multi-turn lookups miss because the cached entry's
         // last block contains generation-prompt-only tokens.
-        let split_pos = (prompt_tokens.len() / block_size) * block_size;
-        let split_inside =
-            block_size > 0 && split_pos > cached_tokens && split_pos < prompt_tokens.len();
+        let split_pos =
+            strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size);
         let mut prefill_split_snapshot: Option<LinearAttentionState> = None;
 
         let prefill_start = std::time::Instant::now();
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len()) {
-                // Streaming prefill processes the suffix as one unit; the
-                // intermediate snapshot is a micro-optimization vs the
-                // already-amortized streaming cost, so skip the split here.
-                model_forward_paged_streaming_with_progress(
-                    &*self.backend,
-                    prefill_tokens,
-                    &self.weights,
-                    &self.config,
-                    pc_guard,
-                    &block_table,
-                    cached_tokens,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                    cancel,
-                )
-                .context("batched-engine prefill forward pass (streaming) failed")?
-            } else if split_inside {
+                if let Some(split_pos) = split_pos {
+                    let head_tokens = &prompt_tokens[cached_tokens..split_pos];
+                    let _ = model_forward_paged_streaming_with_progress(
+                        &*self.backend,
+                        head_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        &block_table,
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        cancel,
+                    )
+                    .context("batched-engine prefill forward pass (streaming head) failed")?;
+                    prefill_split_snapshot = Some(
+                        linear_state
+                            .snapshot()
+                            .context("snapshot linear state at streaming prefill split")?,
+                    );
+
+                    let tail_tokens = &prompt_tokens[split_pos..];
+                    let logits = model_forward_paged_streaming_with_progress(
+                        &*self.backend,
+                        tail_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        &block_table,
+                        split_pos,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        None,
+                    )
+                    .context("batched-engine prefill forward pass (streaming tail) failed")?;
+                    if let Some(cancel) = cancel {
+                        cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
+                    }
+                    logits
+                } else {
+                    model_forward_paged_streaming_with_progress(
+                        &*self.backend,
+                        prefill_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        &block_table,
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        cancel,
+                    )
+                    .context("batched-engine prefill forward pass (streaming) failed")?
+                }
+            } else if let Some(split_pos) = split_pos {
                 // Split the prefill at the last block boundary so we can
                 // snapshot the linear-attention state at the cross-turn-safe
                 // position. The first call's logits are discarded.
@@ -2447,7 +2552,7 @@ impl ModelRunner {
                 )
                 .context("batched-engine prefill forward pass (tail) failed")?;
                 if let Some(cancel) = cancel {
-                    cancel.report_prefill_tokens_completed(tail_tokens.len() as u64);
+                    cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
                 }
                 logits
             } else {
@@ -2488,10 +2593,13 @@ impl ModelRunner {
         // token sequence stops *before* the generation-prompt tail; the
         // split position is the largest block-aligned offset ≤ prompt_len,
         // which for typical prompts lands just before that tail.
-        let prefill_split_snapshot = prefill_split_snapshot.map(|state| RollingPrefixSnapshot {
-            position: split_pos,
-            linear_state: state,
-        });
+        let prefill_split_snapshot = match (split_pos, prefill_split_snapshot) {
+            (Some(position), Some(state)) => Some(RollingPrefixSnapshot {
+                position,
+                linear_state: state,
+            }),
+            _ => None,
+        };
 
         Ok(PagedBatchedDecodeState {
             block_table,
@@ -5299,7 +5407,9 @@ impl ModelRunner {
             }
         };
 
-        let (next_token, registration) = if let Some(next_token) = exact_next_token {
+        let (next_token, registration, extra_registrations) = if let Some(next_token) =
+            exact_next_token
+        {
             let next_token = match next_token {
                 PagedPrefixNextToken::Logits(logits) => {
                     match sample_first_decode_token(&logits, &params) {
@@ -5318,10 +5428,14 @@ impl ModelRunner {
                     token
                 }
             };
-            (next_token, None)
+            (next_token, None, Vec::new())
         } else {
             let prefill_result =
-                (|| -> Result<(candle_core::Tensor, Option<PagedPrefixRegistration>)> {
+                (|| -> Result<(
+                    candle_core::Tensor,
+                    Option<PagedPrefixRegistration>,
+                    Vec<PagedPrefixRegistration>,
+                )> {
                     let prefill_tokens = &prompt_tokens[cached_tokens..];
                     anyhow::ensure!(
                         !prefill_tokens.is_empty(),
@@ -5331,24 +5445,69 @@ impl ModelRunner {
                     let runner_guard = runner_lock
                         .read()
                         .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
+                    let split_pos =
+                        strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size);
+                    let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
                     let logits = {
                         let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
                         if streaming_prefill_enabled_for(
                             runner_guard.backend.device(),
                             prompt_tokens.len(),
                         ) {
-                            model_forward_paged_streaming(
-                                &*runner_guard.backend,
-                                prefill_tokens,
-                                &runner_guard.weights,
-                                &runner_guard.config,
-                                pc_guard,
-                                &block_table,
-                                cached_tokens,
-                                Some(&mut linear_state),
-                                runner_guard.active_lora.as_ref(),
-                            )
-                            .context("prefill forward pass (streaming paged prefix cache) failed")?
+                            if let Some(split_pos) = split_pos {
+                                let head_tokens = &prompt_tokens[cached_tokens..split_pos];
+                                let _ = model_forward_paged_streaming(
+                                    &*runner_guard.backend,
+                                    head_tokens,
+                                    &runner_guard.weights,
+                                    &runner_guard.config,
+                                    pc_guard,
+                                    &block_table,
+                                    cached_tokens,
+                                    Some(&mut linear_state),
+                                    runner_guard.active_lora.as_ref(),
+                                )
+                                .context(
+                                    "prefill forward pass (streaming paged prefix cache head)",
+                                )?;
+                                prefill_split_snapshot = Some(RollingPrefixSnapshot {
+                                    position: split_pos,
+                                    linear_state: linear_state.snapshot().context(
+                                        "snapshot linear state at streaming prefix-cache split",
+                                    )?,
+                                });
+
+                                let tail_tokens = &prompt_tokens[split_pos..];
+                                model_forward_paged_streaming(
+                                    &*runner_guard.backend,
+                                    tail_tokens,
+                                    &runner_guard.weights,
+                                    &runner_guard.config,
+                                    pc_guard,
+                                    &block_table,
+                                    split_pos,
+                                    Some(&mut linear_state),
+                                    runner_guard.active_lora.as_ref(),
+                                )
+                                .context(
+                                    "prefill forward pass (streaming paged prefix cache tail)",
+                                )?
+                            } else {
+                                model_forward_paged_streaming(
+                                    &*runner_guard.backend,
+                                    prefill_tokens,
+                                    &runner_guard.weights,
+                                    &runner_guard.config,
+                                    pc_guard,
+                                    &block_table,
+                                    cached_tokens,
+                                    Some(&mut linear_state),
+                                    runner_guard.active_lora.as_ref(),
+                                )
+                                .context(
+                                    "prefill forward pass (streaming paged prefix cache) failed",
+                                )?
+                            }
                         } else {
                             model_forward_paged_last_token(
                                 &*runner_guard.backend,
@@ -5372,10 +5531,20 @@ impl ModelRunner {
                         block_size,
                         Some(PagedPrefixNextToken::Logits(logits.clone())),
                     )?;
-                    Ok((logits, registration))
+                    let mut extra_registrations = Vec::new();
+                    if let Some(reg) = build_extended_registration(
+                        &prompt_tokens,
+                        &[],
+                        &block_table,
+                        block_size,
+                        prefill_split_snapshot,
+                    ) {
+                        extra_registrations.push(reg);
+                    }
+                    Ok((logits, registration, extra_registrations))
                 })();
 
-            let (logits, registration) = match prefill_result {
+            let (logits, registration, extra_registrations) = match prefill_result {
                 Ok(t) => t,
                 Err(err) => {
                     free_allocated(&allocated_blocks);
@@ -5390,7 +5559,7 @@ impl ModelRunner {
                 }
             };
             drop(logits);
-            (next_token, registration)
+            (next_token, registration, extra_registrations)
         };
 
         let (tx, rx) = mpsc::channel();
@@ -5466,6 +5635,7 @@ impl ModelRunner {
         Ok(PrefixCachedStreamingOutput {
             receiver: rx,
             registration,
+            extra_registrations,
             allocated_blocks,
             block_free_signal: Some(free_tx),
         })
@@ -5666,21 +5836,60 @@ impl ModelRunner {
             "streaming prefix cache hit must leave at least one suffix token"
         );
 
+        let split_pos =
+            strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size);
+        let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
-                model_forward_paged_streaming(
-                    &*self.backend,
-                    prefill_tokens,
-                    &self.weights,
-                    &self.config,
-                    pc_guard,
-                    block_table,
-                    cached_tokens,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                )
-                .context("prefill forward pass (streaming paged prefix cache) failed")?
+                if let Some(split_pos) = split_pos {
+                    let head_tokens = &prompt_tokens[cached_tokens..split_pos];
+                    let _ = model_forward_paged_streaming(
+                        &*self.backend,
+                        head_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_table,
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                    )
+                    .context("prefill forward pass (streaming paged prefix cache head)")?;
+                    prefill_split_snapshot = Some(RollingPrefixSnapshot {
+                        position: split_pos,
+                        linear_state: linear_state
+                            .snapshot()
+                            .context("snapshot linear state at streaming prefix-cache split")?,
+                    });
+
+                    let tail_tokens = &prompt_tokens[split_pos..];
+                    model_forward_paged_streaming(
+                        &*self.backend,
+                        tail_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_table,
+                        split_pos,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                    )
+                    .context("prefill forward pass (streaming paged prefix cache tail)")?
+                } else {
+                    model_forward_paged_streaming(
+                        &*self.backend,
+                        prefill_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_table,
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                    )
+                    .context("prefill forward pass (streaming paged prefix cache) failed")?
+                }
             } else {
                 model_forward_paged_last_token(
                     &*self.backend,
@@ -5705,6 +5914,16 @@ impl ModelRunner {
             block_size,
             Some(PagedPrefixNextToken::Logits(logits.clone())),
         )?;
+        let mut extra_registrations = Vec::new();
+        if let Some(reg) = build_extended_registration(
+            prompt_tokens,
+            &[],
+            block_table,
+            block_size,
+            prefill_split_snapshot,
+        ) {
+            extra_registrations.push(reg);
+        }
 
         let receiver = self.stream_decode_from_prefill_logits(
             logits,
@@ -5721,6 +5940,7 @@ impl ModelRunner {
         Ok(PrefixCachedStreamingOutput {
             receiver,
             registration,
+            extra_registrations,
             allocated_blocks: Vec::new(),
             block_free_signal: None,
         })
@@ -7814,6 +8034,18 @@ mod tests {
     }
 
     #[test]
+    fn strict_prompt_prefix_split_is_inside_prompt() {
+        assert_eq!(strict_prompt_prefix_split_pos(9, 0, 4), Some(8));
+        assert_eq!(
+            strict_prompt_prefix_split_pos(8, 0, 4),
+            Some(4),
+            "block-aligned prompts still need an inside split before the final prompt block"
+        );
+        assert_eq!(strict_prompt_prefix_split_pos(8, 4, 4), None);
+        assert_eq!(strict_prompt_prefix_split_pos(3, 0, 4), None);
+    }
+
+    #[test]
     fn extended_registration_skipped_when_not_block_aligned() {
         let bt = block_table_with(&[10, 11, 12, 13]);
         let snap = Some(RollingPrefixSnapshot {
@@ -7839,9 +8071,8 @@ mod tests {
             position: 4,
             linear_state: empty_linear_state(),
         });
-        let reg =
-            build_extended_registration(&[1, 2, 3, 4, 5, 6, 7, 8], &[], &bt, 4, snap)
-                .expect("expected strict-prefix registration");
+        let reg = build_extended_registration(&[1, 2, 3, 4, 5, 6, 7, 8], &[], &bt, 4, snap)
+            .expect("expected strict-prefix registration");
         assert_eq!(reg.prompt_tokens, vec![1, 2, 3, 4]);
         assert_eq!(reg.block_ids, vec![10]);
         assert!(reg.next_token.is_none());
@@ -7864,7 +8095,10 @@ mod tests {
             snap,
         )
         .expect("expected extended registration");
-        assert_eq!(reg.prompt_tokens, vec![1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(
+            reg.prompt_tokens,
+            vec![1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16]
+        );
         assert_eq!(reg.block_ids, vec![10, 11, 12]);
         assert!(reg.next_token.is_none());
     }
