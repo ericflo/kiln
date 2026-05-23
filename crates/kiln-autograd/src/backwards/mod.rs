@@ -13,6 +13,7 @@
 pub mod activation;
 pub mod concat;
 pub mod cross_entropy;
+pub mod dropout;
 pub mod elementwise;
 pub mod embedding;
 pub mod index_ops;

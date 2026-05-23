@@ -54,6 +54,7 @@ pub use backward_op::{BackwardOp, BoxedBackwardOp};
 pub use backwards::activation::{SigmoidBackward, SiluBackward, SoftmaxLastDimBackward};
 pub use backwards::concat::ConcatBackward;
 pub use backwards::cross_entropy::CrossEntropyBackward;
+pub use backwards::dropout::DropoutBackward;
 pub use backwards::elementwise::{AddBackward, DivBackward, MulBackward, SubBackward};
 pub use backwards::embedding::EmbeddingBackward;
 pub use backwards::index_ops::{CastBackward, IndexSelectBackward, ScatterAddBackward};
