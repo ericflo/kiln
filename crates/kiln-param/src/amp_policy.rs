@@ -24,6 +24,40 @@
 
 use kiln_tensor::DType;
 
+/// Execution context for AMP dtype resolution. Call sites read the
+/// dtype they need by intent (`ForwardCompute`, `BackwardCompute`,
+/// etc.) rather than dispatching on raw policy fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AmpContext {
+    /// Dtype to compute matmul/activation in on the forward pass.
+    ForwardCompute,
+    /// Dtype to read weights as during forward (typically equals
+    /// `ForwardCompute` but a future Marlin path may differ).
+    ForwardWeightRead,
+    /// Dtype to compute the backward pass arithmetic in.
+    BackwardCompute,
+    /// Master / canonical dtype that the optimizer updates.
+    Master,
+    /// Dtype of inner accumulators (reductions, AdamW moments).
+    Accumulator,
+    /// Dtype of the forward output (defaults to `ForwardCompute`).
+    Output,
+}
+
+/// Rough ordering for "wider than" comparisons. Higher rank = wider
+/// (more bits per element).
+fn backward_rank(d: DType) -> u8 {
+    match d {
+        DType::F32 => 5,
+        DType::BF16 => 4,
+        DType::F16 => 4,
+        DType::F8E4M3 => 3,
+        DType::F8E5M2 => 3,
+        _ => 0,
+    }
+}
+
 /// Per-Parameter dtype policy.
 ///
 /// `kiln-optim` (Phase 6.5) reads the policy off each Parameter and
@@ -84,6 +118,39 @@ impl AmpPolicy {
             master_dtype: DType::BF16,
             accumulation_dtype: DType::F32,
         }
+    }
+
+    /// Per-execution-context dtype resolution. Call sites query
+    /// the policy by intent instead of dispatching on the policy
+    /// fields themselves; this lets future variants (FP8, FP4) plug
+    /// in without rewriting every consumer.
+    pub fn resolve_dtype(self, ctx: AmpContext) -> DType {
+        match ctx {
+            AmpContext::ForwardCompute => self.forward_compute_dtype,
+            AmpContext::ForwardWeightRead => self.forward_compute_dtype,
+            AmpContext::BackwardCompute => self.backward_compute_dtype,
+            AmpContext::Master => self.master_dtype,
+            AmpContext::Accumulator => self.accumulation_dtype,
+            // The output dtype defaults to the forward compute dtype;
+            // a future override slot can specialize for the head case
+            // (e.g. LM head always-FP32 logits).
+            AmpContext::Output => self.forward_compute_dtype,
+        }
+    }
+
+    /// True when the policy keeps a separate master copy distinct
+    /// from forward storage. False when master == forward_compute
+    /// (the simple-BF16 case where storage and master are one).
+    pub fn has_separate_master(self) -> bool {
+        self.master_dtype != self.forward_compute_dtype
+    }
+
+    /// True when the backward pass widens its arithmetic relative
+    /// to forward — e.g. forward BF16 / backward F32 (rare here).
+    pub fn backward_is_widened(self) -> bool {
+        // F32 > BF16, F16. Order: F32 > BF16, F16; FP8 etc < BF16.
+        backward_rank(self.backward_compute_dtype)
+            > backward_rank(self.forward_compute_dtype)
     }
 
     /// Sanity check: the four dtypes form a coherent policy.
@@ -174,5 +241,49 @@ mod tests {
             accumulation_dtype: DType::BF16,
         };
         assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn resolve_dtype_routes_by_context() {
+        let p = AmpPolicy::default(); // qwen3.5-4b: BF16 fwd/bwd/master, F32 accum
+        assert_eq!(p.resolve_dtype(AmpContext::ForwardCompute), DType::BF16);
+        assert_eq!(p.resolve_dtype(AmpContext::BackwardCompute), DType::BF16);
+        assert_eq!(p.resolve_dtype(AmpContext::Master), DType::BF16);
+        assert_eq!(p.resolve_dtype(AmpContext::Accumulator), DType::F32);
+        assert_eq!(p.resolve_dtype(AmpContext::Output), DType::BF16);
+    }
+
+    #[test]
+    fn resolve_dtype_handles_fp8_path() {
+        let p = AmpPolicy::fp8_training();
+        assert_eq!(p.resolve_dtype(AmpContext::ForwardCompute), DType::F8E4M3);
+        assert_eq!(p.resolve_dtype(AmpContext::BackwardCompute), DType::BF16);
+        assert_eq!(p.resolve_dtype(AmpContext::Master), DType::BF16);
+        assert_eq!(p.resolve_dtype(AmpContext::Accumulator), DType::F32);
+    }
+
+    #[test]
+    fn has_separate_master_true_for_marlin() {
+        let p = AmpPolicy::marlin_w4a16_training();
+        // master=BF16, forward=Int4Packed → distinct.
+        assert!(p.has_separate_master());
+    }
+
+    #[test]
+    fn has_separate_master_false_for_pure_bf16() {
+        let p = AmpPolicy::default();
+        assert!(!p.has_separate_master());
+    }
+
+    #[test]
+    fn backward_is_widened_true_for_fp8_fwd_bf16_bwd() {
+        let p = AmpPolicy::fp8_training();
+        assert!(p.backward_is_widened());
+    }
+
+    #[test]
+    fn backward_is_widened_false_for_pure_bf16() {
+        let p = AmpPolicy::default();
+        assert!(!p.backward_is_widened());
     }
 }
