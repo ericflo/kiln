@@ -1,8 +1,8 @@
 # kiln-tensor substrate status
 
-**126 / 126 deliverables shipped** — substrate side is complete.
+**148 / 148 deliverables shipped** — substrate side is complete.
 
-- **45 kiln-tensor forward op families** + matching **42 BackwardOps**
+- **67 kiln-tensor forward op families** + **46 BackwardOps**
   in kiln-autograd (every differentiable forward has a backward;
   non-differentiable ops correctly omit one)
 - **Phase 4 sampler chain end-to-end** (12 LogitProcessors + Gumbel
@@ -118,7 +118,30 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 1.81 | repeat op (tile along axis) + backward | ✓ |
 | 1.82 | max_axis + min_axis reduce ops | ✓ |
 | 1.83 | cumsum op | ✓ |
-| 1.84 | substrate-status dashboard refresh (this PR — final session) | ✓ |
+| 1.84 | substrate-status dashboard refresh (Phase 1.81-1.83) | ✓ |
+| 1.85 | CumsumBackward (reverse cumsum) | ✓ |
+| 1.86 | asin / acos / atan + backwards | ✓ |
+| 1.87 | sinh + cosh hyperbolic | ✓ |
+| 1.88 | log2 / log10 / log1p / exp2 / expm1 | ✓ |
+| 1.89 | sign / floor / ceil / round / trunc / reciprocal | ✓ |
+| 1.90 | eq / ne / lt / le / gt / ge comparison ops | ✓ |
+| 1.91 | minimum + maximum binary ops | ✓ |
+| 1.92 | all / any boolean reduce ops | ✓ |
+| 1.93 | compare → bool-reduce → where_select integration | ✓ |
+| 1.94 | add/sub/mul/div scalar shortcuts | ✓ |
+| 1.95 | Tensor::squeeze + Tensor::unsqueeze | ✓ |
+| 1.96 | dot product (1D inner product) | ✓ |
+| 1.97 | outer product (rank-1 ⊗ rank-1) | ✓ |
+| 1.98 | zeros_like / ones_like / full_like | ✓ |
+| 1.99 | rand_uniform + rand_normal seedable | ✓ |
+| 1.100 | Xavier + Kaiming initializers | ✓ |
+| 1.101 | mse / l1 / huber / nll losses | ✓ |
+| 1.102 | log_softmax_last_dim | ✓ |
+| 1.103 | frobenius_norm / vector_norm / mean_squared | ✓ |
+| 1.104 | clip_grad_norm (PyTorch-style) | ✓ |
+| 1.105 | cosine_similarity | ✓ |
+| 1.106 | utility-ops compose integration test | ✓ |
+| 1.107 | substrate-status dashboard refresh (this PR) | ✓ |
 
 ## Phase 2 — kiln-blas / kiln-mps / kiln-vulkan-blas / kiln-param
 
