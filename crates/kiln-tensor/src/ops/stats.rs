@@ -72,6 +72,46 @@ pub fn std_dev(t: &Tensor) -> Result<Tensor> {
     scalar_tensor(t.dtype(), var.sqrt())
 }
 
+/// Median value (50th percentile). Sort + middle pick.
+pub fn median(t: &Tensor) -> Result<Tensor> {
+    let mut v = load_f32(t)?;
+    if v.is_empty() {
+        bail!("median: empty input");
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    let med = if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        0.5 * (v[n / 2 - 1] + v[n / 2])
+    };
+    scalar_tensor(t.dtype(), med)
+}
+
+/// `q`-th quantile by linear interpolation between sorted samples.
+/// `q ∈ [0, 1]`.
+pub fn quantile(t: &Tensor, q: f32) -> Result<Tensor> {
+    if !(0.0..=1.0).contains(&q) {
+        bail!("quantile: q must be in [0, 1], got {q}");
+    }
+    let mut v = load_f32(t)?;
+    if v.is_empty() {
+        bail!("quantile: empty input");
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    let pos = q * ((n - 1) as f32);
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    let frac = pos - lo as f32;
+    let r = if lo == hi {
+        v[lo]
+    } else {
+        v[lo] * (1.0 - frac) + v[hi] * frac
+    };
+    scalar_tensor(t.dtype(), r)
+}
+
 /// `(mean, variance)` of the tensor.
 pub fn mean_variance(t: &Tensor) -> Result<(Tensor, Tensor)> {
     let v = load_f32(t)?;
@@ -128,5 +168,45 @@ mod tests {
         let t = Tensor::from_slice::<f32>(&[], vec![0]).unwrap();
         let e = variance(&t).unwrap_err();
         assert!(e.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn median_odd_length() {
+        let t = Tensor::from_slice(&[5.0f32, 1.0, 3.0, 2.0, 4.0], vec![5]).unwrap();
+        assert!((scalar_f32(&median(&t).unwrap()) - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn median_even_length_averages_middle_pair() {
+        // [1, 2, 3, 4] → mean(2, 3) = 2.5
+        let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
+        assert!((scalar_f32(&median(&t).unwrap()) - 2.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn quantile_0_is_min() {
+        let t = Tensor::from_slice(&[5.0f32, 1.0, 3.0], vec![3]).unwrap();
+        assert!((scalar_f32(&quantile(&t, 0.0).unwrap()) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn quantile_1_is_max() {
+        let t = Tensor::from_slice(&[5.0f32, 1.0, 3.0], vec![3]).unwrap();
+        assert!((scalar_f32(&quantile(&t, 1.0).unwrap()) - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn quantile_half_is_median() {
+        let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0], vec![5]).unwrap();
+        let m = scalar_f32(&median(&t).unwrap());
+        let q = scalar_f32(&quantile(&t, 0.5).unwrap());
+        assert!((m - q).abs() < 1e-5);
+    }
+
+    #[test]
+    fn quantile_out_of_range_errors() {
+        let t = Tensor::from_slice(&[1.0f32], vec![1]).unwrap();
+        let e = quantile(&t, 1.5).unwrap_err();
+        assert!(e.to_string().contains("q must be"));
     }
 }

@@ -145,7 +145,7 @@ pub use sign_and_round::{ceil, floor, reciprocal, round, sign, trunc};
 pub use silu_mul::{mul_sigmoid_gate, MulSigmoidGateOp};
 pub use softmax::{softmax_last_dim, SoftmaxLastDimOp};
 pub use stack::stack;
-pub use stats::{mean_variance, std_dev, variance};
+pub use stats::{mean_variance, median, quantile, std_dev, variance};
 pub use top_k::top_k;
 pub use trace::trace;
 pub use triangular::{tril, tril_mask, triu, triu_mask};
