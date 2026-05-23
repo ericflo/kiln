@@ -21,6 +21,7 @@ pub mod elementwise;
 pub mod embedding;
 pub mod index_select;
 pub mod l2norm;
+pub mod logit_modern;
 pub mod logit_penalties;
 pub mod logit_processor;
 pub mod mask;
