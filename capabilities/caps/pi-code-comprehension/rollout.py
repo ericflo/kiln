@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib"))
 import rubric  # noqa: E402
 import task_scaffold  # noqa: E402
 import pi_trajectory  # noqa: E402

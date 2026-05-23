@@ -35,7 +35,7 @@ mkdir -p "$LOG_DIR"
 echo "=== OPD run_iter $SLUG (iter $ITER_NUM) for code-fence-language-fidelity ==="
 
 if [ ! -f "$PROMPTS" ]; then
-  echo "[0/5] build_corpus…"
+  echo "[0/6] build_corpus…"
   python3 build_corpus.py
 fi
 
@@ -49,50 +49,56 @@ if [ -f rubric_sanity.py ] && [ -z "${KILN_SKIP_RUBRIC_SANITY:-}" ]; then
   }
 fi
 
-echo "[1/5] cuda_opd_remote --dry-run…"
-KILN_CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}" "$OPD_BIN" \
-  --prompts "$PROMPTS" \
-  --model "$MODEL_PATH" \
-  --teacher-url "$TEACHER_URL" \
-  --teacher-name "$TEACHER_NAME" \
-  --output "$OUT_ROOT/adapter" \
-  --adapter "$ADAPTER_NAME" \
-  --rank "$RANK" --alpha "$ALPHA" --lr "$LR" \
-  --epochs "$EPOCHS" \
-  --seed "$SEED" \
-  --dry-run \
-  2>&1 | tee "$LOG_DIR/dry-run.log"
+# NOTE on cuda_opd_remote CLI (verified 2026-05-23):
+# - Flags: --data, --model-path, --output-dir, --adapter-name, --teacher-url,
+#   --teacher-model, --rank, --alpha, --lr, --epochs, --max-examples, --top-k,
+#   --temperature, --top-p, --max-tokens, --samples-per-prompt,
+#   --checkpoint-interval, --no-checkpoint, --base-adapter,
+#   --allow-high-lora-scale.
+# - NO --prompts (use --data), --model (use --model-path), --output (use
+#   --output-dir), --adapter (use --adapter-name), --teacher-name (use
+#   --teacher-model), --seed, --dry-run, --adapter-smoke-test, --install-adapter-*.
+# - Output: --output-dir lands the adapter (same flat-layout rule as cuda_sft_file).
+# - VRAM: kiln serve must be killed first (cuda_opd_remote uses local GPU for
+#   student; teacher is over HTTP, no local GPU footprint).
+echo "[1/4] kill kiln serve to free VRAM (cuda_opd_remote shares the GPU)…"
+pkill -f "kiln serve" 2>/dev/null || true
+sleep 2
 
-echo "[2/5] cuda_opd_remote (training)…"
+echo "[2/4] cuda_opd_remote (training)…"
 KILN_CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}" "$OPD_BIN" \
-  --prompts "$PROMPTS" \
-  --model "$MODEL_PATH" \
+  --data "$PROMPTS" \
+  --model-path "$MODEL_PATH" \
   --teacher-url "$TEACHER_URL" \
-  --teacher-name "$TEACHER_NAME" \
-  --output "$OUT_ROOT/adapter" \
-  --adapter "$ADAPTER_NAME" \
+  --teacher-model "$TEACHER_NAME" \
+  --output-dir "$ADAPTER_REGISTRY/$ADAPTER_NAME" \
+  --adapter-name "$ADAPTER_NAME" \
   --rank "$RANK" --alpha "$ALPHA" --lr "$LR" \
   --epochs "$EPOCHS" \
-  --seed "$SEED" \
-  --adapter-smoke-test \
-  --install-adapter-dir "$ADAPTER_REGISTRY" \
-  --install-adapter-name "$ADAPTER_NAME" \
   2>&1 | tee "$LOG_DIR/train.log"
 
-echo "[3/5] kiln adapter verify…"
+echo "[3/4] restart kiln serve --eval-mode for adapter verify + eval…"
+KILN_MODEL_PATH="$MODEL_PATH" KILN_ADAPTER_DIR="$ADAPTER_REGISTRY" \
+  nohup "$KILN_BIN" serve --eval-mode > "$LOG_DIR/kiln-serve.log" 2>&1 &
+for i in $(seq 1 60); do
+  curl -sf http://localhost:8420/v1/health > /dev/null 2>&1 && break
+  sleep 1
+done
+
+echo "[4/4] kiln adapter verify…"
 "$KILN_BIN" adapter verify "$ADAPTER_NAME" \
   --adapter-dir "$ADAPTER_REGISTRY" \
   --url http://localhost:8420 \
   --json \
   > "$LOG_DIR/verify.json"
 
-echo "[4/5] capability.oracle.sh…"
+echo "[5/6] capability.oracle.sh…"
 OUT_FILE="$LOG_DIR/eval.json" SEEDS="${EVAL_SEEDS:-3}" \
   ./capability.oracle.sh "$ADAPTER_NAME" \
   2>&1 | tee "$LOG_DIR/eval.log"
 
-echo "[5/5] append capability.jsonl…"
-TRAIN_RECEIPT="$OUT_ROOT/adapter/train_receipt.json" \
+echo "[6/6] append capability.jsonl…"
+TRAIN_RECEIPT="$ADAPTER_REGISTRY/$ADAPTER_NAME/train_receipt.json" \
 EVAL_JSON="$LOG_DIR/eval.json" \
 VERIFY_JSON="$LOG_DIR/verify.json" \
 ITER_NUM="$ITER_NUM" \

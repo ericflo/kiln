@@ -25,7 +25,7 @@ mkdir -p "$LOG_DIR"
 echo "=== SFT run_iter $SLUG (iter $ITER_NUM) for math-broad ==="
 
 if [ ! -f "$DATA" ]; then
-  echo "[0/5] build_corpus…"
+  echo "[0/6] build_corpus…"
   python3 build_corpus.py
 fi
 
@@ -39,53 +39,58 @@ if [ -f rubric_sanity.py ] && [ -z "${KILN_SKIP_RUBRIC_SANITY:-}" ]; then
   }
 fi
 
-echo "[1/5] cuda_sft_file --dry-run…"
-KILN_CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}" "$SFT_BIN" \
-  --data "$DATA" \
-  --model "$MODEL_PATH" \
-  --output "$OUT_ROOT/adapter" \
-  --adapter "$ADAPTER_NAME" \
-  --rank "$RANK" --alpha "$ALPHA" --lr "$LR" \
-  --epochs "$EPOCHS" \
-  --dataset-cap "$DATASET_CAP" \
-  --seed "$SEED" \
-  --dry-run \
-  2>&1 | tee "$LOG_DIR/dry-run.log"
+# NOTE on cuda_sft_file CLI (verified 2026-05-23):
+# - Flags: --data, --model-path, --output-dir, --adapter-name, --rank, --alpha,
+#   --lr, --epochs, --max-examples, --skip-examples, --base-adapter,
+#   --allow-adapter-shape-conversion, --allow-high-lora-scale, --trainer.
+# - NO --seed, --dry-run, --adapter-smoke-test, --install-adapter-{dir,name}.
+# - Output: if basename(--output-dir) == --adapter-name, lands flat at output-dir/.
+# - VRAM: kiln serve must be killed first; long seqs (>500 tok) need KILN_CUDA_RECOMPUTE_SFT=1.
+echo "[1/4] kill kiln serve to free VRAM (cuda_sft_file shares the GPU)…"
+pkill -f "kiln serve" 2>/dev/null || true
+sleep 2
 
-echo "[2/5] cuda_sft_file (training)…"
-KILN_CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}" "$SFT_BIN" \
+echo "[2/4] cuda_sft_file (training)…"
+KILN_CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}" \
+KILN_CUDA_RECOMPUTE_SFT="${KILN_CUDA_RECOMPUTE_SFT:-1}" \
+"$SFT_BIN" \
   --data "$DATA" \
-  --model "$MODEL_PATH" \
-  --output "$OUT_ROOT/adapter" \
-  --adapter "$ADAPTER_NAME" \
+  --model-path "$MODEL_PATH" \
+  --output-dir "$ADAPTER_REGISTRY/$ADAPTER_NAME" \
+  --adapter-name "$ADAPTER_NAME" \
   --rank "$RANK" --alpha "$ALPHA" --lr "$LR" \
   --epochs "$EPOCHS" \
-  --dataset-cap "$DATASET_CAP" \
-  --seed "$SEED" \
-  --adapter-smoke-test \
-  --install-adapter-dir "$ADAPTER_REGISTRY" \
-  --install-adapter-name "$ADAPTER_NAME" \
+  --max-examples "$DATASET_CAP" \
+  --trainer native \
   2>&1 | tee "$LOG_DIR/train.log"
 
-echo "[3/5] kiln adapter verify…"
+echo "[3/4] restart kiln serve --eval-mode for adapter verify + eval…"
+KILN_MODEL_PATH="$MODEL_PATH" KILN_ADAPTER_DIR="$ADAPTER_REGISTRY" \
+  nohup "$KILN_BIN" serve --eval-mode > "$LOG_DIR/kiln-serve.log" 2>&1 &
+for i in $(seq 1 60); do
+  curl -sf http://localhost:8420/v1/health > /dev/null 2>&1 && break
+  sleep 1
+done
+
+echo "[4/4] kiln adapter verify…"
 "$KILN_BIN" adapter verify "$ADAPTER_NAME" \
   --adapter-dir "$ADAPTER_REGISTRY" \
   --url http://localhost:8420 \
   --json \
   > "$LOG_DIR/verify.json"
 
-echo "[4/5] capability.oracle.sh…"
+echo "[5/6] capability.oracle.sh…"
 OUT_FILE="$LOG_DIR/eval.json" SEEDS="${EVAL_SEEDS:-3}" \
   ./capability.oracle.sh "$ADAPTER_NAME" \
   2>&1 | tee "$LOG_DIR/eval.log"
 
 if [ -x "./capability.anchor.sh" ]; then
-  echo "[5/5] capability.anchor.sh (regression watch)…"
+  echo "[6/6] capability.anchor.sh (regression watch)…"
   ./capability.anchor.sh "$ADAPTER_NAME" \
     2>&1 | tee "$LOG_DIR/anchor.log"
 fi
 
-TRAIN_RECEIPT="$OUT_ROOT/adapter/train_receipt.json" \
+TRAIN_RECEIPT="$ADAPTER_REGISTRY/$ADAPTER_NAME/train_receipt.json" \
 EVAL_JSON="$LOG_DIR/eval.json" \
 VERIFY_JSON="$LOG_DIR/verify.json" \
 ITER_NUM="$ITER_NUM" \
