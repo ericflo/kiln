@@ -1,0 +1,65 @@
+{
+  "round": 4,
+  "stage": "arm-4-12-failure-modes",
+  "name": "Multiple failure modes discovered in R4 SFT pipeline",
+  "session": "2026-05-23",
+  "failures_discovered": [
+    {
+      "failure": "Teacher data format mismatch",
+      "description": "OpenRouter qwen3-coder teacher data was single-shot rationale+answer, but pi at eval uses multi-turn structured tool calls (toolCall: bash/read, toolResult, final assistant text). SFT on the wrong format gave loss=9.5→6.7 (model learning a new format from scratch instead of refining its existing one).",
+      "fix": "Train on actual pi rollout transcripts: filter base rollouts with composite>=0.6+format=1, convert pi session JSONL entries to multi-turn messages with tool_call markers, SFT on those."
+    },
+    {
+      "failure": "Issue #1066 — sccache corrupted CUDA kernel objects",
+      "description": "On a fresh pod, cargo build pulled cached CUDA kernels from B2 sccache that were corrupted. Symptoms: all chat completions return 'batched-engine prefill forward pass (head) failed'. 188 train rollouts all exit_code=1 with 'Stream ended without finish_reason'.",
+      "fix": "Either: rm -rf target && SCCACHE_RECACHE=1 cargo build (forces fresh nvcc + re-upload), OR use the pre-built kiln release binary from github releases (kiln-v0.2.19-linux-cuda124.tar.gz). The release binary is built clean and works directly."
+    },
+    {
+      "failure": "Pi rollouts have huge stochastic variance across kiln-serve processes",
+      "description": "Re-running base 3-seed eval with same --seed values (101/102/103) on a restarted kiln serve produced composite mean=0.653 vs original 0.613 (delta +0.040 from noise alone, per-seed swings up to +0.081). 3-seed paired eval cannot reliably detect a +0.10 lift above this noise floor.",
+      "fix": "Use 7+ seeds for both base and adapter conditions on the SAME kiln serve process (no restart between conditions). Consider deterministic sampling (temperature=0) for pi if exposed via flag."
+    },
+    {
+      "failure": "Kiln serve killed mid-rollout aborts pipeline",
+      "description": "When eval is running and I kill kiln serve (or a parent shell kills it), in-progress rollouts return exit_code=1 with empty composite. Several seeds in eval may already be partially complete with garbage data.",
+      "fix": "Use a process-tree safe kill (`ps + awk + kill` instead of `pkill -f`), backup intermediate results to B2 between phases."
+    },
+    {
+      "failure": "HTTP /v1/train/sft OOMs alongside KV cache",
+      "description": "kiln serve loads model (13GB) + KV cache (26GB) + training budget (11GB). When HTTP /v1/train/sft starts SFT with rank=16 alpha=32 epochs=3 (defaults), the FLCE forward pass at layer 5 hits OOM: 'training forward pass (FLCE): segment gated deltanet layer 5: cuda_sigmoid exp: CUDA_ERROR_OUT_OF_MEMORY'.",
+      "fix": "Either lower KV cache via env vars (smaller inference_fraction), use cuda_sft_file binary outside kiln serve (kill serve first → train → restart serve), or reduce training memory via shorter sequences / smaller rank."
+    },
+    {
+      "failure": "HTTP /v1/train/sft silently ignores custom params",
+      "description": "Sending {rank: 8, alpha: 16, learning_rate: 1e-4, epochs: 1} resulted in the server training with rank=16 alpha=32 epochs=3 (its defaults). The field names in the request body don't match the API spec.",
+      "fix": "Use correct field names per the kiln SFT API spec (need to inspect kiln-server training endpoint source)."
+    },
+    {
+      "failure": "Pod state evaporates on hibernation/reaping",
+      "description": "Pod 43c2 had ~6 hours of bootstrap+experiments. After leasing, work, releasing, it was REMOVED from the pool ('pod pool entry not found'). All disk state lost. Re-acquiring gave a new pod with empty disk.",
+      "fix": "Backup everything (model, adapters, results) to B2 continuously. Don't rely on pod disk persistence across leases."
+    },
+    {
+      "failure": "Qwen/Qwen3.5-4B model identity on HF varies",
+      "description": "Pod ad09: downloaded multimodal Qwen3.5-4B with weights under model.language_model.* — base composite 0.36. Pod 43c2: had a cached instruct variant — base composite 0.61. Pod d2263c: same multimodal model as ad09 but with vocab/head_dim matching kiln's spec — base composite TBD.",
+      "fix": "Pin to a specific HF revision when downloading. Or restore from a B2-backed checkpoint of a known-working model."
+    }
+  ],
+  "what_works": [
+    "OpenRouter qwen/qwen3-coder (480B) as teacher for cheap data generation — ~$0.45 for 188 tasks",
+    "Pi 0.75.5 + kiln pi-setup --url + rollout.py patched with --provider kiln-local --model Qwen3.5-4B",
+    "ps + awk + kill pattern for safely killing kiln serve without self-kill",
+    "nohup setsid + < /dev/null daemon launch (survives SSH close)",
+    "Pre-built kiln release binary (avoids sccache build issues entirely)",
+    "Continuous B2 backups of train rollouts, SFT data, base eval results"
+  ],
+  "data_for_next_arm": {
+    "b2_path": "b2://clouderic/kiln/pi-code-comprehension/r4/",
+    "files": [
+      "base-3seed.json — original R4 base on 43c2 pod (mean 0.613, but variance discovery shows ±0.04 noise)",
+      "teacher-train-qwen3-coder.jsonl — 169 rationale+answer rows from OpenRouter (single-shot text — FORMAT MISMATCH with pi tool-call eval)",
+      "train-rollouts.jsonl — 188 base rollouts on train tasks (pod d2263c, kiln release binary, working)",
+      "sft.train-rollout.jsonl — 48 filtered pi-trajectory rows (composite>=0.6 + format=1, multi-turn with tool_call markers)"
+    ]
+  }
+}
