@@ -52,7 +52,7 @@ mod content_hash;
 mod parameter;
 mod replay_buffer;
 
-pub use amp_policy::AmpPolicy;
+pub use amp_policy::{AmpContext, AmpPolicy};
 pub use content_hash::content_hash_storage;
 pub use parameter::{ForwardStorage, OutputHead, OutputHeadRole, Parameter};
 pub use replay_buffer::{ReplayBuffer, ReplayEntry, SamplingStrategy};
