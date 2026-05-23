@@ -31,6 +31,7 @@
 //! plus `BackendRuntime::dispatch`; this PR ships only the
 //! Tensor + view-op surface.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::{
@@ -40,12 +41,37 @@ use crate::{
 
 /// kiln-tensor's production tensor handle.
 ///
-/// See the module doc for the layout. Clones are O(1).
+/// See the module doc for the layout. Clones are O(1) — they share
+/// the underlying storage, layout (cheap copy), `TensorId`, and the
+/// version counter. Mutating one clone's storage via [`bump_version`]
+/// is observed by every other clone (the version is `Arc<AtomicU64>`).
+///
+/// # Version counter (anti-pattern 16 hook)
+///
+/// Per the issue's anti-pattern 16:
+///
+/// > In-place mutation invalidates the tape. Any in-place op
+/// > (optimizer step, residual accumulate-in-place, in-place norm)
+/// > bumps a per-tensor version counter; the backward path asserts
+/// > the version is unchanged from when the tape recorded the
+/// > forward. Failing the assertion is a programming error, not a
+/// > tolerated mode.
+///
+/// The version is stored as `Arc<AtomicU64>` so clones of a Tensor
+/// share it: if the optimizer step mutates `param`, the version
+/// stored on the autograd tape's input-list also observes the bump.
+/// `kiln_autograd::Tape::backward` compares the stored snapshot
+/// against the live load and errors on drift.
 #[derive(Debug, Clone)]
 pub struct Tensor {
     storage: Storage,
     layout: Layout,
     id: TensorId,
+    /// In-place mutation version counter. Bumped by callers that
+    /// mutate the underlying storage (optimizer step, residual fuse,
+    /// future in-place norm). Read by `kiln_autograd::Tape::backward`
+    /// to detect anti-pattern 16 violations.
+    version: Arc<AtomicU64>,
 }
 
 impl Tensor {
@@ -63,6 +89,7 @@ impl Tensor {
             storage,
             layout,
             id: TensorId::next(),
+            version: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -85,6 +112,7 @@ impl Tensor {
             storage,
             layout,
             id: TensorId::next(),
+            version: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -115,6 +143,7 @@ impl Tensor {
             storage,
             layout,
             id,
+            version: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -177,11 +206,15 @@ impl Tensor {
     // ------------------------------------------------------------------
 
     /// Narrow along `axis` to `[offset .. offset+length]`. Zero-copy.
+    ///
+    /// View ops share the parent's version counter: if the parent's
+    /// storage is mutated in place, every view sees the bump.
     pub fn narrow(&self, axis: usize, offset: usize, length: usize) -> Result<Self> {
         Ok(Tensor {
             storage: Arc::clone(&self.storage),
             layout: self.layout.narrow_axis(axis, offset, length)?,
             id: TensorId::next(),
+            version: Arc::clone(&self.version),
         })
     }
 
@@ -191,6 +224,7 @@ impl Tensor {
             storage: Arc::clone(&self.storage),
             layout: self.layout.transpose(axis_a, axis_b)?,
             id: TensorId::next(),
+            version: Arc::clone(&self.version),
         })
     }
 
@@ -200,6 +234,7 @@ impl Tensor {
             storage: Arc::clone(&self.storage),
             layout: self.layout.permute(axes)?,
             id: TensorId::next(),
+            version: Arc::clone(&self.version),
         })
     }
 
@@ -213,6 +248,7 @@ impl Tensor {
             storage: Arc::clone(&self.storage),
             layout: self.layout.reshape(new_shape)?,
             id: TensorId::next(),
+            version: Arc::clone(&self.version),
         })
     }
 
@@ -307,7 +343,44 @@ impl Tensor {
             storage: Arc::new(new_cpu),
             layout: Layout::contiguous(shape.to_vec()),
             id: TensorId::next(),
+            // Materializing copy → fresh storage → fresh version.
+            // (View ops share the parent's version; this branch does
+            // not.)
+            version: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    // ------------------------------------------------------------------
+    // Version counter (anti-pattern 16)
+    // ------------------------------------------------------------------
+
+    /// Current version counter. `0` for a fresh tensor; bumps every
+    /// time the storage is mutated in place.
+    ///
+    /// `kiln_autograd::Tape::backward` compares this to the snapshot
+    /// stored on the tape node and errors if they differ.
+    pub fn current_version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
+    }
+
+    /// Borrow the `Arc<AtomicU64>` version handle. Used by
+    /// `kiln_autograd::Tape::record` to store a live pointer so
+    /// backward-time checks see the up-to-date value.
+    pub fn version_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.version)
+    }
+
+    /// Bump the version counter (returns the **new** version). Called
+    /// by in-place ops: optimizer step, residual fuse, future
+    /// in-place norm.
+    ///
+    /// This is the **anti-pattern 16 enforcement seam**: any code
+    /// path that mutates `self.storage()`'s bytes must call this. If
+    /// it doesn't, an autograd backward that reads the pre-mutation
+    /// tensor will silently use the post-mutation bytes — the
+    /// "silent corruption on step 2" the issue warns about.
+    pub fn bump_version(&self) -> u64 {
+        self.version.fetch_add(1, Ordering::Relaxed) + 1
     }
 }
 
@@ -450,5 +523,74 @@ mod tests {
         let layout = Layout::contiguous(vec![100]); // 100 elements != 4
         let e = Tensor::from_parts(storage, layout, TensorId::next()).unwrap_err();
         assert!(e.to_string().contains("requires"));
+    }
+
+    #[test]
+    fn fresh_tensor_version_is_zero() {
+        let t = Tensor::zeros_cpu(vec![2, 3], DType::F32);
+        assert_eq!(t.current_version(), 0);
+    }
+
+    #[test]
+    fn bump_version_returns_new_value() {
+        let t = Tensor::zeros_cpu(vec![2, 3], DType::F32);
+        assert_eq!(t.bump_version(), 1);
+        assert_eq!(t.bump_version(), 2);
+        assert_eq!(t.bump_version(), 3);
+        assert_eq!(t.current_version(), 3);
+    }
+
+    #[test]
+    fn clone_shares_version_counter() {
+        // Clone shares the Arc<AtomicU64>; a bump on one clone is
+        // observed by all clones.
+        let t = Tensor::zeros_cpu(vec![2, 3], DType::F32);
+        let c1 = t.clone();
+        let c2 = t.clone();
+        t.bump_version();
+        assert_eq!(t.current_version(), 1);
+        assert_eq!(c1.current_version(), 1);
+        assert_eq!(c2.current_version(), 1);
+    }
+
+    #[test]
+    fn view_op_shares_version_with_parent() {
+        // Views alias storage; they share the version counter.
+        let t = Tensor::zeros_cpu(vec![4, 5], DType::F32);
+        let v = t.narrow(0, 1, 2).unwrap();
+        t.bump_version();
+        assert_eq!(v.current_version(), 1);
+    }
+
+    #[test]
+    fn contiguous_materialized_has_fresh_version() {
+        // Materializing contiguous() copies bytes; the new tensor
+        // gets a fresh version counter independent of the source.
+        let v = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let t = Tensor::from_slice(&v, vec![2, 3]).unwrap();
+        let tt = t.transpose(0, 1).unwrap();
+        // tt shares t's version counter (view op).
+        t.bump_version();
+        assert_eq!(tt.current_version(), 1);
+        // contiguous() on a non-contig view materializes — fresh
+        // version starts at 0 independent of source.
+        let c = tt.contiguous().unwrap();
+        assert_eq!(c.current_version(), 0);
+        // Subsequent bumps on the source don't affect the materialized
+        // copy.
+        t.bump_version();
+        assert_eq!(t.current_version(), 2);
+        assert_eq!(c.current_version(), 0);
+    }
+
+    #[test]
+    fn version_handle_is_arc_to_same_atomic() {
+        let t = Tensor::zeros_cpu(vec![1], DType::F32);
+        let h = t.version_handle();
+        // The handle is to the same atomic as the tensor.
+        t.bump_version();
+        assert_eq!(h.load(Ordering::Relaxed), 1);
+        h.fetch_add(10, Ordering::Relaxed);
+        assert_eq!(t.current_version(), 11);
     }
 }
