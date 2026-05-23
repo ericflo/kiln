@@ -211,7 +211,7 @@ pub fn kt_tensor_from_candle_cuda_copy(
         }
     };
 
-    let candle_device = cuda_st.device().clone();
+    let candle_device = std::sync::Arc::new(cuda_st.device().clone());
     let device_index = match candle_device.location() {
         DeviceLocation::Cuda { gpu_id } => gpu_id,
         other => {
