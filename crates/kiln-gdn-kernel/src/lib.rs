@@ -69,8 +69,8 @@ use std::cell::RefCell;
 /// kiln-tensor-typed surface alongside candle-typed. Same FFI.
 mod kt_api;
 pub use kt_api::{
-    gdn_decode_gates_recurrent_bf16_kt, gdn_decode_gates_recurrent_vf32_bf16_kt,
-    gdn_decode_qk_norm_gates_recurrent_bf16_kt,
+    gdn_chunk_prep_kt, gdn_chunk_scan_kt, gdn_decode_gates_recurrent_bf16_kt,
+    gdn_decode_gates_recurrent_vf32_bf16_kt, gdn_decode_qk_norm_gates_recurrent_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt,
