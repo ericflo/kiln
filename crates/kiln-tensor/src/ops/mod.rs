@@ -84,6 +84,7 @@ pub mod sdpa;
 pub mod sign_and_round;
 pub mod silu_mul;
 pub mod softmax;
+pub mod sort;
 pub mod stack;
 pub mod stats;
 pub mod tile;
@@ -163,6 +164,7 @@ pub use sdpa::{causal_scaled_dot_product_attention, scaled_dot_product_attention
 pub use sign_and_round::{ceil, floor, reciprocal, round, sign, trunc};
 pub use silu_mul::{mul_sigmoid_gate, MulSigmoidGateOp};
 pub use softmax::{softmax_last_dim, SoftmaxLastDimOp};
+pub use sort::{argsort, sort};
 pub use stack::stack;
 pub use stats::{mean_variance, median, quantile, std_dev, variance};
 pub use tile::tile;
