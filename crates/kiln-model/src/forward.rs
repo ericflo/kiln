@@ -268,10 +268,15 @@ fn vulkan_gdn_recurrent_step_f32_enabled() -> bool {
 }
 
 fn synchronize_for_profile(device: &Device) -> Result<()> {
-    if let Device::Metal(device) = device {
-        device.synchronize()?;
+    // Profiling timing only makes sense after the launching queue has
+    // drained — without this the recorded elapsed time captures kernel
+    // enqueue cost rather than execution cost. Call the device-level
+    // synchronize for any async backend (CUDA, Metal); CPU is already
+    // synchronous so the match-and-skip there avoids the extra call.
+    match device {
+        Device::Cpu => Ok(()),
+        Device::Cuda(_) | Device::Metal(_) => device.synchronize().map_err(Into::into),
     }
-    Ok(())
 }
 
 #[cfg(feature = "metal")]
@@ -6538,6 +6543,61 @@ fn gdn_chunkwise_recurrence(
 
     // Slice full chunks directly. On macOS Metal this avoids the large upfront
     // pre-permute copies that dominated long-prompt GDN recurrence time.
+    //
+    // On CUDA + BF16, however, the per-chunk `narrow(2, …).contiguous()` chain
+    // dominates GDN prefill: each chunk launches 5 strided-copy kernels (one
+    // per tensor) plus another for the K^T transpose inside `matmul_prep`, and
+    // at full_chunks ≈ 32 × 24 GDN layers that's ~4 800 small kernel launches
+    // per prefill. Profiling on RTX 4090 Laptop at seq_len=2042 attributes
+    // 22 % of GDN prefill time to `slice_inputs` alone — measured at
+    // 114 ms aggregate for the 768 chunk slices. Pre-permuting the five
+    // sequence tensors once to chunk-major layout (`[B, num_chunks, nv, C, …]`)
+    // turns each per-chunk slice into a stride-free `narrow + squeeze` view:
+    // 5 launches per layer instead of 160, with the same byte count moved.
+    let pre_permute_chunks = cfg!(feature = "cuda")
+        && matches!(device, Device::Cuda(_))
+        && dtype == DType::BF16
+        && full_chunks > 0
+        && !any_tensor_tracks_op(&[q, k, v, beta, g])
+        && std::env::var("KILN_DISABLE_GDN_CHUNK_PRE_PERMUTE").is_err();
+
+    let pre_permuted: Option<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)> =
+        if pre_permute_chunks {
+            kiln_nvtx::range!(c"kiln/attn/gdn/chunk_pre_permute");
+            let dk = q.dim(3)?;
+            let dv = v.dim(3)?;
+            let pre_t = full_chunks * chunk_size;
+            // View the leading `full_chunks * chunk_size` tokens as
+            // `[B, nv, num_chunks, C, …]` then transpose to
+            // `[B, num_chunks, nv, C, …]`. The `.contiguous()` pays one
+            // memcpy per tensor — the same total bytes as the 32 per-chunk
+            // contig copies it replaces, but with 1/32 the launch overhead.
+            let q_pre = q.narrow(2, 0, pre_t)?
+                .reshape((batch, heads, full_chunks, chunk_size, dk))?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let k_pre = k.narrow(2, 0, pre_t)?
+                .reshape((batch, heads, full_chunks, chunk_size, dk))?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let v_pre = v.narrow(2, 0, pre_t)?
+                .reshape((batch, heads, full_chunks, chunk_size, dv))?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let beta_pre = beta.narrow(2, 0, pre_t)?
+                .reshape((batch, heads, full_chunks, chunk_size))?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let g_pre = g.narrow(2, 0, pre_t)?
+                .reshape((batch, heads, full_chunks, chunk_size))?
+                .transpose(1, 2)?
+                .contiguous()?;
+            // K^T (over chunk dims) used by `matmul_prep`. Precompute once.
+            let k_t_pre = k_pre.transpose(3, 4)?.contiguous()?;
+            Some((q_pre, k_pre, v_pre, beta_pre, g_pre, k_t_pre))
+        } else {
+            None
+        };
 
     let mut out_chunks: Vec<Tensor> = Vec::with_capacity(seq_len.div_ceil(chunk_size));
 
@@ -6546,7 +6606,7 @@ fn gdn_chunkwise_recurrence(
         let c = if is_tail { tail } else { chunk_size };
 
         let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
-        let (q_c, k_c, v_c, beta_c, g_c) = if is_tail {
+        let (q_c, k_c, v_c, beta_c, g_c, k_t_mat_pre) = if is_tail {
             let t_start = full_chunks * chunk_size;
             (
                 q.narrow(2, t_start, tail)?.contiguous()?,
@@ -6554,7 +6614,19 @@ fn gdn_chunkwise_recurrence(
                 v.narrow(2, t_start, tail)?.contiguous()?,
                 beta.narrow(2, t_start, tail)?.contiguous()?,
                 g.narrow(2, t_start, tail)?.contiguous()?,
+                None,
             )
+        } else if let Some((q_pre, k_pre, v_pre, beta_pre, g_pre, k_t_pre)) = pre_permuted.as_ref() {
+            // Slice along the chunk dimension: zero-copy view that's
+            // contiguous because num_chunks is the slowest non-batch
+            // dimension after the pre-permute.
+            let q_c = q_pre.narrow(1, ci, 1)?.squeeze(1)?;
+            let k_c = k_pre.narrow(1, ci, 1)?.squeeze(1)?;
+            let v_c = v_pre.narrow(1, ci, 1)?.squeeze(1)?;
+            let beta_c = beta_pre.narrow(1, ci, 1)?.squeeze(1)?;
+            let g_c = g_pre.narrow(1, ci, 1)?.squeeze(1)?;
+            let k_t_chunk = k_t_pre.narrow(1, ci, 1)?.squeeze(1)?;
+            (q_c, k_c, v_c, beta_c, g_c, Some(k_t_chunk))
         } else {
             let t_start = ci * chunk_size;
             (
@@ -6563,6 +6635,7 @@ fn gdn_chunkwise_recurrence(
                 v.narrow(2, t_start, chunk_size)?.contiguous()?,
                 beta.narrow(2, t_start, chunk_size)?.contiguous()?,
                 g.narrow(2, t_start, chunk_size)?.contiguous()?,
+                None,
             )
         };
         finish_gdn_recurrent_inner_profile(
@@ -6578,9 +6651,14 @@ fn gdn_chunkwise_recurrence(
 
         // Matmuls first — these are well-tuned cuBLAS GEMMs and stay on
         // candle. K^T is reused for KKT (intra-chunk similarities) and the
-        // final outer product into the state update.
+        // final outer product into the state update. When the pre-permute
+        // fast path supplied a chunk-aligned K^T, reuse it to skip the
+        // per-chunk transpose+contiguous.
         let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
-        let k_t_mat = k_c.transpose(2, 3)?.contiguous()?; // [B, nv, dk, C]
+        let k_t_mat = match k_t_mat_pre {
+            Some(t) => t,
+            None => k_c.transpose(2, 3)?.contiguous()?,
+        };
         let ks_entry = k_c.matmul(&*state)?; // [B, nv, C, dv]
         let kkt = k_c.matmul(&k_t_mat)?; // [B, nv, C, C]
         let qkt = q_c.matmul(&k_t_mat)?; // [B, nv, C, C]
@@ -15713,6 +15791,11 @@ fn model_forward_paged_inner(
 ) -> Result<(Option<Tensor>, Option<Tensor>, Option<u32>)> {
     let seq_len = token_ids.len();
     let device = weights.embed_tokens.device();
+    let _profile_sections =
+        std::env::var("KILN_PROFILE_PAGED_SECTIONS").is_ok().then(|| {
+            let _ = synchronize_for_profile(device);
+            (std::time::Instant::now(), seq_len, start_pos)
+        });
 
     // 1. Embedding lookup: [seq_len, hidden_size]
     let mut hidden = match token_ids_gpu {
@@ -15763,6 +15846,20 @@ fn model_forward_paged_inner(
         rope_tables_owned
             .as_ref()
             .map(|(cos, sin)| (cos as &Tensor, sin as &Tensor))
+    });
+
+    if _profile_sections.is_some() {
+        let _ = synchronize_for_profile(device);
+        if let Some((t0, sl, sp)) = _profile_sections.as_ref() {
+            eprintln!(
+                "kiln_profile_section section=embed_and_positions seq_len={sl} start_pos={sp} elapsed_ms={:.3}",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+    let _profile_layers_t0 = _profile_sections.is_some().then(|| {
+        let _ = synchronize_for_profile(device);
+        std::time::Instant::now()
     });
 
     // 2. Loop through all transformer layers
@@ -16015,6 +16112,20 @@ fn model_forward_paged_inner(
         }
     }
 
+    if let Some(t) = _profile_layers_t0.as_ref() {
+        let _ = synchronize_for_profile(device);
+        if let Some((_, sl, sp)) = _profile_sections.as_ref() {
+            eprintln!(
+                "kiln_profile_section section=layer_loop seq_len={sl} start_pos={sp} elapsed_ms={:.3}",
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+    let _profile_lm_head_t0 = _profile_sections.is_some().then(|| {
+        let _ = synchronize_for_profile(device);
+        std::time::Instant::now()
+    });
+
     // 3. Final RMSNorm + 4. LM head projection (weight-tied)
     //
     // `Full` matches the legacy code path exactly. `LastRowOnly` slices the
@@ -16107,6 +16218,21 @@ fn model_forward_paged_inner(
         LmHeadMode::Skip => Ok((None, None, None)),
         LmHeadMode::HiddenOnly => Ok((None, Some(hidden), None)),
     }
+    .inspect(|_| {
+        if let (Some(t), Some((t_outer, sl, sp))) =
+            (_profile_lm_head_t0.as_ref(), _profile_sections.as_ref())
+        {
+            let _ = synchronize_for_profile(device);
+            eprintln!(
+                "kiln_profile_section section=lm_head_tail seq_len={sl} start_pos={sp} elapsed_ms={:.3}",
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+            eprintln!(
+                "kiln_profile_section section=total seq_len={sl} start_pos={sp} elapsed_ms={:.3}",
+                t_outer.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    })
 }
 
 /// Streaming/tiled paged prefill — the Phase 7 long-context entry point.
