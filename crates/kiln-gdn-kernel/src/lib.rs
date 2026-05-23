@@ -78,7 +78,8 @@ pub use kt_api::{
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt, gdn_forward_substitution_kt,
-    gdn_full_chunk_forward_kt, gdn_recurrent_forward_kt, GdnError,
+    gdn_full_chunk_forward_kt, gdn_full_chunk_forward_multiblock_kt, gdn_gated_rms_norm_bf16_kt,
+    gdn_recurrent_forward_kt, GdnError,
 };
 
 unsafe extern "C" {
