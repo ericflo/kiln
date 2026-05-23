@@ -290,6 +290,31 @@ impl Tensor {
         self.reshape(new_shape)
     }
 
+    /// Flatten to a rank-1 tensor of `element_count()` elements.
+    /// Zero-copy if input is contiguous.
+    pub fn flatten(&self) -> Result<Self> {
+        let n = self.element_count();
+        self.reshape(vec![n])
+    }
+
+    /// Flatten contiguous range of axes `[start_axis, end_axis]`
+    /// inclusive. Other axes preserved. PyTorch-style.
+    pub fn flatten_range(&self, start_axis: usize, end_axis: usize) -> Result<Self> {
+        let shape = self.shape();
+        if start_axis > end_axis || end_axis >= shape.len() {
+            return Err(crate::Error::Msg(format!(
+                "flatten_range: invalid range [{start_axis}, {end_axis}] for rank-{}",
+                shape.len()
+            )));
+        }
+        let mut new_shape = Vec::with_capacity(shape.len() - (end_axis - start_axis));
+        new_shape.extend_from_slice(&shape[..start_axis]);
+        let flat_size: usize = shape[start_axis..=end_axis].iter().product();
+        new_shape.push(flat_size);
+        new_shape.extend_from_slice(&shape[end_axis + 1..]);
+        self.reshape(new_shape)
+    }
+
     /// Produce a contiguous copy of this tensor. **Always allocates
     /// when called on a non-contiguous tensor** (the fast path returns
     /// the clone on already-contiguous inputs without a copy).
@@ -676,5 +701,35 @@ mod tests {
         let u = t.unsqueeze(0).unwrap();
         let s = u.squeeze(0).unwrap();
         assert_eq!(s.shape(), t.shape());
+    }
+
+    #[test]
+    fn flatten_to_rank_1() {
+        let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
+        let f = t.flatten().unwrap();
+        assert_eq!(f.shape(), &[6]);
+    }
+
+    #[test]
+    fn flatten_range_collapses_axes() {
+        // [2, 3, 4] flatten_range(0, 1) → [6, 4]
+        let t = Tensor::zeros_cpu(vec![2, 3, 4], DType::F32);
+        let f = t.flatten_range(0, 1).unwrap();
+        assert_eq!(f.shape(), &[6, 4]);
+    }
+
+    #[test]
+    fn flatten_range_collapse_middle() {
+        // [2, 3, 4, 5] flatten_range(1, 2) → [2, 12, 5]
+        let t = Tensor::zeros_cpu(vec![2, 3, 4, 5], DType::F32);
+        let f = t.flatten_range(1, 2).unwrap();
+        assert_eq!(f.shape(), &[2, 12, 5]);
+    }
+
+    #[test]
+    fn flatten_range_invalid_errors() {
+        let t = Tensor::zeros_cpu(vec![2, 3], DType::F32);
+        let e = t.flatten_range(5, 6).unwrap_err();
+        assert!(e.to_string().contains("flatten_range"));
     }
 }
