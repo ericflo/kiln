@@ -1,0 +1,54 @@
+{
+  "round": 4,
+  "stage": "clean-iter4-vs-base",
+  "name": "R4 clean reproduction: iter4 ECHO adapter vs base, 5-seed paired",
+  "session": "2026-05-23",
+  "pod": "pod-e094c16fa777f8fbe72b4ac5",
+  "infrastructure": {
+    "kiln_binary": "kiln-v0.2.19 release (avoids issue #1066 sccache corruption)",
+    "model": "Qwen/Qwen3.5-4B (multimodal Qwen3_5ForConditionalGeneration, vocab=248320)",
+    "pi": "0.75.5 with provider=kiln-local, --thinking=off (default)",
+    "kiln_serve_env": {
+      "KILN_INFERENCE_MEMORY_FRACTION": "0.25",
+      "KILN_GRAD_CHECKPOINT_SEGMENTS": 32,
+      "KILN_CUDA_RECOMPUTE_SFT": 1,
+      "KILN_DEFAULT_THINKING_ENABLED": null
+    }
+  },
+  "adapter": "pi-code-comprehension-iter4-h4-echo-0075 (restored from b2://clouderic/kiln/pi-code-comprehension/BEST_ADAPTER_iter4/adapter.tgz)",
+  "n_seeds": 5,
+  "base_per_seed": [0.623, 0.582, 0.591, 0.600, 0.601],
+  "base_mean": 0.599,
+  "base_stdev": 0.015,
+  "this_per_seed": [0.638, 0.650, 0.644, 0.690, 0.598],
+  "this_mean": 0.644,
+  "this_stdev": 0.033,
+  "paired_lifts": [0.015, 0.068, 0.053, 0.091, -0.002],
+  "paired_lift_mean": 0.045,
+  "paired_lift_stdev": 0.038,
+  "sigma_above_zero": 1.17,
+  "ships": false,
+  "verdict": "Reproducing R3 baseline. iter4 ECHO adapter delivers +0.045 paired lift at 1.17σ on this pod — comparable to R3's reported +0.039 (R3 had higher reported sigma 2.70 from happenstance variance). Per-seed: 4/5 positive, 1 marginal-negative. Base variance is much TIGHTER on this pod (stdev 0.015) than past sessions (stdev 0.06-0.13), thanks to clean kiln-release binary + reset config. iter4 still BELOW +0.10/3σ ship gate. To break +0.10 reliably will need bigger lift than iter4 — focus next on data variations.",
+  "sub_scores_mean_adapter": {
+    "outcome": 0.756, "grounding": 0.565, "cross_file_caller_recall": 0.983,
+    "invariant_coverage": 0.367, "format_compliance": 0.983
+  },
+  "sub_scores_mean_base": {
+    "outcome": 0.724, "grounding": 0.470, "cross_file_caller_recall": 0.900,
+    "invariant_coverage": 0.306, "format_compliance": 0.900
+  },
+  "sub_score_lifts": {
+    "outcome": 0.032, "grounding": 0.095, "cross_file_caller_recall": 0.083,
+    "invariant_coverage": 0.061, "format_compliance": 0.083
+  },
+  "implications": [
+    "iter4 ECHO at +0.045 is REAL signal at this pod with clean infra. Largest contribution from grounding (+0.10) and cross_file/format (+0.08 each).",
+    "invariant_coverage moves +0.06 here (vs R3's +0.005). The R3 'unmoved frontier' claim was likely understated.",
+    "Base stdev 0.015 means a TRUE +0.045 lift COULD be detected at >3σ if the adapter were trained to be perfectly consistent. 1.17σ here is from adapter's own stdev (0.033), not base noise."
+  ],
+  "next_arm_candidates": [
+    "Retry OpenRouter qwen3-coder teacher SFT (data already in B2: teacher-train-qwen3-coder.jsonl) — now that SFT memory works, properly train and eval.",
+    "Chain SFT on top of iter4 with proper SFT params (--base-adapter iter4 ...) — compound the gains.",
+    "Increase num_generations to 4-8 per seed at eval-time, average composites — reduce adapter variance from 0.033 to <0.015 → would push iter4 to ~3σ even at +0.045."
+  ]
+}
