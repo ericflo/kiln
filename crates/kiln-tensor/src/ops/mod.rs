@@ -41,6 +41,7 @@ pub mod rope;
 pub mod scatter_add;
 pub mod silu_mul;
 pub mod softmax;
+pub mod top_k;
 
 pub use activation::{gelu, sigmoid, silu, ActivationOp, UnaryKind};
 pub use argmax::{argmax_last_dim, ArgmaxLastDimOp};
@@ -63,3 +64,4 @@ pub use rope::{rope, RopeOp};
 pub use scatter_add::{scatter_add, ScatterAddOp};
 pub use silu_mul::{mul_sigmoid_gate, MulSigmoidGateOp};
 pub use softmax::{softmax_last_dim, SoftmaxLastDimOp};
+pub use top_k::top_k;
