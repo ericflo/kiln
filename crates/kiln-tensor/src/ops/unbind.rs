@@ -10,6 +10,14 @@
 use crate::{bail, Result, Tensor};
 
 /// Split `axis` into `axis_len` views, each with the axis removed.
+///
+/// Each output is contiguous (materialized via `contiguous()` after
+/// the narrow). `narrow` returns a strided view whose strides don't
+/// match the would-be contiguous layout when the slice spans only
+/// part of a higher axis; `Tensor::reshape` rejects non-contiguous
+/// layouts, so we materialize once per output. This is a copy per
+/// slice — the alternative (squeezing without reshape) would still
+/// expose a strided view downstream consumers may not handle.
 pub fn unbind(t: &Tensor, axis: usize) -> Result<Vec<Tensor>> {
     if axis >= t.rank() {
         bail!(
@@ -20,7 +28,7 @@ pub fn unbind(t: &Tensor, axis: usize) -> Result<Vec<Tensor>> {
     let axis_len = t.shape()[axis];
     let mut out = Vec::with_capacity(axis_len);
     for i in 0..axis_len {
-        let view = t.narrow(axis, i, 1)?;
+        let view = t.narrow(axis, i, 1)?.contiguous()?;
         // narrow gives shape [..., 1, ...]; drop the size-1 axis.
         let mut shape: Vec<usize> = view.shape().to_vec();
         shape.remove(axis);
