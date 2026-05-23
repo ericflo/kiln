@@ -10,5 +10,6 @@
 //! backward is exercised in CPU parity tests against finite-difference
 //! reference values.
 
+pub mod activation;
 pub mod elementwise;
 pub mod matmul;

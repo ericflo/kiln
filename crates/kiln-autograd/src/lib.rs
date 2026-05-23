@@ -51,6 +51,7 @@ mod grad_store;
 mod tape;
 
 pub use backward_op::{BackwardOp, BoxedBackwardOp};
+pub use backwards::activation::{SigmoidBackward, SiluBackward, SoftmaxLastDimBackward};
 pub use backwards::elementwise::{AddBackward, DivBackward, MulBackward, SubBackward};
 pub use backwards::matmul::MatmulBackward;
 pub use grad_store::GradStore;
