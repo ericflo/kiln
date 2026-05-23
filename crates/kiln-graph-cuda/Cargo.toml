@@ -1,0 +1,28 @@
+[package]
+name = "kiln-graph-cuda"
+description = "CUDA CapturedGraph impl — wraps cudarc CudaGraph + CudaGraphExec for the Phase 5 capture/replay surface."
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Per Phase 5 of #1082, kiln-graph-cuda wraps `cudarc::driver::CudaGraph`
+# + `CudaGraphExec` and implements the `kiln_graph::CapturedGraph` trait.
+# Today the impl is a scaffold — backend tag + replay counter + scratch
+# bytes — that compiles on any host. The real cudarc-backed capture +
+# replay lifts the existing CUDA-graph wiring out of
+# `crates/kiln-model/src/forward.rs` (the `KILN_CUDA_GRAPHS=true` path).
+#
+# Internal-only — no semver commitment.
+
+[dependencies]
+kiln-graph = { workspace = true }
+kiln-tensor = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+# Compiles the real cudarc-backed capture pipeline. Without this
+# feature the crate exposes only the scaffold types so it can be
+# built / unit-tested on hosts without the CUDA toolchain.
+cuda = []
