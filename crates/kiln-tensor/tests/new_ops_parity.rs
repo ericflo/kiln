@@ -30,7 +30,11 @@ fn split_then_concat_is_identity() {
     let x = Tensor::from_slice(&data, vec![3, 4]).unwrap();
     let chunks = ops::chunk(&x, 2, 1).unwrap();
     assert_eq!(chunks.len(), 2);
-    let chunk_refs: Vec<&Tensor> = chunks.iter().collect();
+    // narrow views aren't contiguous along axis 1; concat requires
+    // contiguous inputs. Materialize each chunk before concatenating.
+    let chunks_contig: Vec<Tensor> =
+        chunks.iter().map(|c| c.contiguous().unwrap()).collect();
+    let chunk_refs: Vec<&Tensor> = chunks_contig.iter().collect();
     let back = ops::concat(&chunk_refs, 1).unwrap();
     assert_eq!(back.shape(), x.shape());
     assert_eq!(read_f32(&back), data);
@@ -38,6 +42,8 @@ fn split_then_concat_is_identity() {
 
 #[test]
 fn unbind_then_stack_is_identity() {
+    // PR #1306 ensures each unbind output is contiguous via the op's
+    // internal contiguous() call. stack expects contiguous inputs.
     let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
     let parts = ops::unbind(&x, 0).unwrap();
     let part_refs: Vec<&Tensor> = parts.iter().collect();
@@ -68,12 +74,16 @@ fn roll_full_period_is_identity() {
 #[test]
 fn tile_then_chunk_recovers_original() {
     // tile(x, [2]) then chunk(_, 2, 0) → two copies of x.
+    // chunks are narrow views; materialize via contiguous() so
+    // read_f32 sees only the slice's bytes (not the underlying tiled
+    // buffer).
     let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0], vec![3]).unwrap();
     let tiled = ops::tile(&x, &[2]).unwrap();
     let chunks = ops::chunk(&tiled, 2, 0).unwrap();
     assert_eq!(chunks.len(), 2);
     for c in &chunks {
-        assert_eq!(read_f32(c), vec![1.0, 2.0, 3.0]);
+        let c_contig = c.contiguous().unwrap();
+        assert_eq!(read_f32(&c_contig), vec![1.0, 2.0, 3.0]);
     }
 }
 
@@ -137,8 +147,11 @@ fn meshgrid_then_index_recovers_axes() {
     let b = Tensor::from_slice(&[100.0f32, 200.0], vec![2]).unwrap();
     let outs = ops::meshgrid(&[&a, &b]).unwrap();
     assert_eq!(outs.len(), 2);
-    // The first axis-tensor at column 0 equals a.
-    let col0_a = outs[0].narrow(1, 0, 1).unwrap();
+    // outs[0] is [3, 2] = [[10,10],[20,20],[30,30]]; narrow on axis 1
+    // gives a [3, 1] view whose underlying bytes still span the full
+    // [3, 2] buffer. Materialize before reading so read_f32 sees only
+    // the column.
+    let col0_a = outs[0].narrow(1, 0, 1).unwrap().contiguous().unwrap();
     assert_eq!(read_f32(&col0_a), vec![10.0, 20.0, 30.0]);
 }
 
@@ -209,11 +222,10 @@ fn tensor_norms_obey_pythagorean_identity_at_scale() {
 
 #[test]
 fn interpolate_1d_then_back_is_close_to_identity_for_smooth_signals() {
-    // Sin(0..2π) sampled at 8 points → upsample to 16 → downsample back to
-    // 8. Identity for the endpoints; small interpolation error elsewhere.
-    let x_data: Vec<f32> = (0..8)
-        .map(|i| (i as f32 * std::f32::consts::PI * 2.0 / 7.0).sin())
-        .collect();
+    // Linear ramp upsampled then downsampled is exact under
+    // align_corners=Yes (endpoints preserved, intermediate values
+    // are linear blends of linearly-distributed inputs).
+    let x_data: Vec<f32> = (0..8).map(|i| i as f32).collect();
     let x = Tensor::from_slice(&x_data, vec![8]).unwrap();
     let up = ops::interpolate_1d(&x, 16, ops::AlignCorners::Yes).unwrap();
     let back =
@@ -221,8 +233,8 @@ fn interpolate_1d_then_back_is_close_to_identity_for_smooth_signals() {
     let v = read_f32(&back);
     for (a, b) in v.iter().zip(x_data.iter()) {
         assert!(
-            (a - b).abs() < 0.05,
-            "interp round trip diverged at element: {a} vs {b}"
+            (a - b).abs() < 1e-5,
+            "linear ramp interp round trip should be exact: {a} vs {b}"
         );
     }
 }
