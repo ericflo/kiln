@@ -6970,6 +6970,7 @@ pub(crate) fn optimizer_step_from_map(
 }
 
 /// Gradient checkpointing configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckpointConfig {
     /// Number of segments to split layers into.
     pub num_segments: usize,
@@ -16087,5 +16088,320 @@ mod tests {
             std::env::remove_var("KILN_CUDA_FLCE");
         }
         result
+    }
+
+    // =====================================================================
+    // #1077 Tier 1b + 1c — Per-PR perf-regression smoke tests.
+    //
+    // These verify the SFT auto-tune wire stays connected and that the
+    // CPU code path (`backend::for_device(&Device::Cpu)`) keeps running
+    // sft_train end-to-end. They run in the standard `cargo test` invocation
+    // (no GPU required) so every PR exercises them. They do NOT assert wall-
+    // clock numbers — actual perf gating lives in the nightly A6000 workflow
+    // (.github/workflows/perf-regression-nightly.yml).
+    //
+    // What these catch:
+    //   * Tier 1c: a refactor that breaks the auto-tune log emission (e.g.
+    //     someone deletes the tracing::info!("auto-tuned: ...") line).
+    //   * Tier 1b: a refactor that breaks CPU sft_train end-to-end (e.g.
+    //     `backend::for_device(&Device::Cpu)` panics, or the FLCE loss path
+    //     stops working on CPU). A *very* generous upper-bound timer (30s
+    //     on shared GHA runners) catches the 50× class of regression that
+    //     #1063 was without flaking on routine CI noise.
+    //
+    // What these do NOT catch:
+    //   * Sub-50% step-time regressions. Those need stable hardware (A6000)
+    //     and live in the nightly workflow.
+    // =====================================================================
+
+    /// Tiny CPU SFT fixture for the perf-regression smoke tests. Uses the
+    /// pre-existing `tiny_config` / `tiny_weights` helpers from this module
+    /// + a minimal chat-template tokenizer. Returns everything needed to
+    /// drive `sft_train` end-to-end on CPU in well under a second per step.
+    fn build_perf_regression_cpu_fixture()
+    -> Result<(ModelConfig, GpuWeights, KilnTokenizer, Vec<crate::SftExample>)> {
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &Device::Cpu)?;
+        let tokenizer = minimal_training_tokenizer(
+            "{% for message in messages %}{{ message.content }}{% endfor %}",
+        );
+        // Four 2-turn examples — enough to exercise the auto-tune decision
+        // path (which evaluates max_seq_len across the corpus) without
+        // making the test slow.
+        let examples = (0..4)
+            .map(|i| crate::SftExample {
+                messages: vec![
+                    crate::ChatMessage {
+                        role: "user".to_string(),
+                        content: format!("a {i}"),
+                    },
+                    crate::ChatMessage {
+                        role: "assistant".to_string(),
+                        content: format!("b {i}"),
+                    },
+                ],
+            })
+            .collect();
+        Ok((config, weights, tokenizer, examples))
+    }
+
+    /// In-memory tracing capture layer for the auto-tune wire test. Records
+    /// every message body fired through `tracing::info!` / `tracing::warn!`
+    /// so the test can assert the auto-tune log line was emitted. Uses
+    /// stdlib + tracing_subscriber's `with_default` — no extra dev-deps.
+    #[derive(Clone, Default)]
+    struct PerfRegressionTracingCapture {
+        records: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl PerfRegressionTracingCapture {
+        fn records(&self) -> Vec<String> {
+            self.records.lock().unwrap().clone()
+        }
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for PerfRegressionTracingCapture
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            // Collect both the event message and any field key=value pairs
+            // — auto-tune log lines put the human-readable string in the
+            // `message` field, but we also capture structured fields so
+            // tests can assert on workload-shape stats.
+            struct Visitor(String);
+            impl tracing::field::Visit for Visitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if !self.0.is_empty() {
+                        self.0.push(' ');
+                    }
+                    use std::fmt::Write;
+                    let _ = write!(self.0, "{}={:?}", field.name(), value);
+                }
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if !self.0.is_empty() {
+                        self.0.push(' ');
+                    }
+                    self.0.push_str(field.name());
+                    self.0.push('=');
+                    self.0.push_str(value);
+                }
+            }
+            let mut visitor = Visitor(String::new());
+            event.record(&mut visitor);
+            self.records.lock().unwrap().push(visitor.0);
+        }
+    }
+
+    /// #1077 Tier 1b: end-to-end CPU `sft_train` smoke. Confirms the
+    /// `backend::for_device(&Device::Cpu)` path stays runnable through one
+    /// epoch on a tiny model, and that wall-clock-per-step is well under
+    /// 30 seconds. The 30s ceiling is loose enough to never flake on a
+    /// shared GHA runner and tight enough to catch the 50× regression
+    /// class that #1063 was (where step time blew up to ~80s on
+    /// production-sized models).
+    ///
+    /// Wall-clock perf assertion is purely an upper bound — this test is
+    /// not the actual perf gate. That lives in the nightly A6000
+    /// workflow (Tier 2).
+    #[test]
+    fn perf_regression_sft_train_cpu_smoke_completes_under_30s() -> Result<()> {
+        let (config, weights, tokenizer, examples) = build_perf_regression_cpu_fixture()?;
+        let sft_config = crate::SftConfig {
+            epochs: 1,
+            learning_rate: 1e-3,
+            lora_rank: 4,
+            lora_alpha: 8.0,
+            auto_load: false,
+            adapter_smoke_test: false,
+            ..crate::SftConfig::default()
+        };
+        let adapter_dir = tempfile::tempdir()?;
+        let started = std::time::Instant::now();
+        let out = sft_train(
+            &examples,
+            &sft_config,
+            &config,
+            &weights,
+            &tokenizer,
+            adapter_dir.path(),
+            "perf-regression-smoke",
+            None,
+            None,
+        )?;
+        let elapsed = started.elapsed();
+        let elapsed_ms = elapsed.as_millis();
+
+        assert!(
+            out.join("adapter_model.safetensors").exists(),
+            "perf-regression smoke: expected adapter file at {}",
+            out.join("adapter_model.safetensors").display()
+        );
+        // Generous upper bound — catches 50× regressions (#1063 class)
+        // without flaking on GHA Linux runner CPU noise. The tiny model
+        // here runs in ~50-200 ms per step on a normal machine.
+        assert!(
+            elapsed_ms < 30_000,
+            "#1077 perf-regression: SFT CPU smoke took {elapsed_ms} ms (> 30 s upper bound)",
+        );
+        eprintln!(
+            "perf_regression_sft_train_cpu_smoke: {elapsed_ms} ms total ({} examples × 1 epoch)",
+            examples.len(),
+        );
+        Ok(())
+    }
+
+    /// #1077 Tier 1c: confirm the auto-tune actually emits its decision log
+    /// line when sft_train runs. Catches "the auto-tune wire got
+    /// disconnected" (e.g. someone refactored away the `tracing::info!(
+    /// "auto-tuned: ..." )` call or stopped calling `auto_for_workload`
+    /// inside sft_train).
+    ///
+    /// Uses an in-memory tracing-subscriber layer to capture event bodies,
+    /// then asserts the auto-tune phrase appeared in at least one record.
+    /// Either "DISABLED" (short prompts on a normal dev machine where
+    /// `detect_vram` returns a comfortable number) or "engaged for workload
+    /// shape" (tight VRAM or long prompts) is acceptable — the test is
+    /// "did the wire fire", not "what did it decide".
+    #[test]
+    fn perf_regression_sft_train_emits_auto_tune_log_line() -> Result<()> {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // Take the env lock — `auto_for_workload` calls `detect_vram` which
+        // can read `KILN_GPU_MEMORY_GB`, and other tests in this binary may
+        // mutate that. Scrub the override so the auto-tune sees the real
+        // environment.
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let capture = PerfRegressionTracingCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        let result = tracing::subscriber::with_default(subscriber, || -> Result<()> {
+            let (config, weights, tokenizer, examples) = build_perf_regression_cpu_fixture()?;
+            let sft_config = crate::SftConfig {
+                epochs: 1,
+                learning_rate: 1e-3,
+                lora_rank: 4,
+                lora_alpha: 8.0,
+                auto_load: false,
+                adapter_smoke_test: false,
+                ..crate::SftConfig::default()
+            };
+            let adapter_dir = tempfile::tempdir()?;
+            let _ = sft_train(
+                &examples,
+                &sft_config,
+                &config,
+                &weights,
+                &tokenizer,
+                adapter_dir.path(),
+                "perf-regression-tracing-smoke",
+                None,
+                None,
+            )?;
+            Ok(())
+        });
+        result?;
+
+        let records = capture.records();
+        // The auto_for_workload helper emits one of:
+        //   "auto-tuned: gradient checkpointing DISABLED — ..."
+        //   "auto-tuned: gradient checkpointing engaged for workload shape"
+        // Or — when env override is set — no auto-tune log fires at all.
+        // The `_env_guard + KILN_GRAD_CHECKPOINT_SEGMENTS / KILN_NO_GRAD_CHECKPOINT
+        // already scrubbed` invariant above is maintained by the lock holder
+        // for env-mutating tests; we don't ALSO scrub here (which would race
+        // a sibling test mid-set_var). Instead we accept either auto-tune
+        // message OR the `CheckpointConfig` log fallback line.
+        let fired = records.iter().any(|r| {
+            r.contains("auto-tuned: gradient checkpointing")
+                || r.contains("CheckpointConfig::from_env")
+        });
+        if !fired {
+            // Dump a slice of captured records so the failure surfaces
+            // what the trainer actually emitted instead of "didn't see it".
+            let sample: Vec<_> = records.iter().take(40).cloned().collect();
+            panic!(
+                "#1077 Tier 1c: expected an auto-tune decision log line, but \
+                 none of the {} captured records contained it. \
+                 First 40 records:\n{}",
+                records.len(),
+                sample.join("\n"),
+            );
+        }
+        Ok(())
+    }
+
+    /// #1077 Tier 1a (CheckpointConfig::auto_for_workload wrapper): force a
+    /// known VRAM number via env, then assert `auto_for_workload` returns
+    /// the expected `enabled / num_segments` for a representative
+    /// (vram, seq_len) cell. The pure `recommended_checkpoint_plan` matrix
+    /// is already exhaustive (`kiln_core::vram::tests::perf_regression_*_plan_matrix`);
+    /// this just proves the wrapper is wired to it and propagates the
+    /// decision through the `CheckpointConfig` shape correctly.
+    #[test]
+    fn perf_regression_auto_for_workload_wrapper_dispatches_correctly() -> Result<()> {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Snapshot + scrub the env so the wrapper sees the synthetic VRAM
+        // and doesn't pick up a sibling test's mutation.
+        let prev_gb = std::env::var("KILN_GPU_MEMORY_GB").ok();
+        let prev_segs = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS").ok();
+        let prev_disable = std::env::var("KILN_NO_GRAD_CHECKPOINT").ok();
+        unsafe {
+            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
+            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+        }
+
+        // 48 GiB + 30-token prompts on Qwen3.5-4B shape → Disabled.
+        unsafe {
+            std::env::set_var("KILN_GPU_MEMORY_GB", "48");
+        }
+        let cfg = CheckpointConfig::auto_for_workload(32, 30, 2560, 10240, 151936, 2);
+        unsafe {
+            std::env::remove_var("KILN_GPU_MEMORY_GB");
+        }
+        assert!(
+            !cfg.enabled,
+            "expected auto_for_workload(48GB, 30tok) to disable; got {cfg:?}",
+        );
+        assert_eq!(
+            cfg.num_segments, 1,
+            "expected num_segments=1 on Disabled plan, got {}",
+            cfg.num_segments,
+        );
+
+        // 16 GiB + 4K prompts on Qwen3.5-4B shape → Enabled with N >= 2.
+        unsafe {
+            std::env::set_var("KILN_GPU_MEMORY_GB", "16");
+        }
+        let cfg = CheckpointConfig::auto_for_workload(32, 4096, 2560, 10240, 151936, 2);
+        unsafe {
+            std::env::remove_var("KILN_GPU_MEMORY_GB");
+        }
+        assert!(
+            cfg.enabled,
+            "expected auto_for_workload(16GB, 4K tok) to engage; got {cfg:?}",
+        );
+        assert!(
+            cfg.num_segments >= 2,
+            "expected >=2 segments on tight VRAM + 4K, got {}",
+            cfg.num_segments,
+        );
+
+        // Restore the snapshotted env so neighbour tests see consistent
+        // state (uses the existing test-mod helper at line 11313).
+        restore_env("KILN_GPU_MEMORY_GB", prev_gb);
+        restore_env("KILN_GRAD_CHECKPOINT_SEGMENTS", prev_segs);
+        restore_env("KILN_NO_GRAD_CHECKPOINT", prev_disable);
+        Ok(())
     }
 }

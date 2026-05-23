@@ -1,0 +1,292 @@
+name: Perf regression nightly
+
+# #1077 — Per-PR perf coverage is in `ci.yml`'s default test runs
+# (Tier 1a/1b/1c — auto-tune matrix tests + sft_train CPU smoke +
+# tracing wire test, all on GHA-hosted runners with no GPU).
+#
+# This workflow is Tier 2 + Tier 3:
+#   Tier 2 — cron-fired against `main`, picks up the latest merge,
+#            runs the canonical workload corpus on an A6000, and gates
+#            against the baselines in `bench-results/regression/`.
+#   Tier 3 — `workflow_dispatch`-triggered with an optional ref input,
+#            for authors validating a perf-sensitive change before merge
+#            or chasing a regression the nightly caught.
+#
+# Cost model: ~60s of A6000 compute per dispatch × $0.49/hr ≈ $0.01/day
+# at the cron cadence below. The `gate-self-test` job runs on the free
+# GitHub-hosted runner and exercises the regression-check script on
+# synthetic stdout, so the gate's logic is verified on every dispatch
+# even if no self-hosted runner is online yet.
+
+on:
+  schedule:
+    # 06:00 UTC nightly — ~22:00 / 23:00 PT depending on DST, after most
+    # PRs are merged. Move this earlier or later by editing the cron.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Commit ref to bench (default: latest main)'
+        required: false
+        default: ''
+      trainer:
+        description: 'Which trainer flag to bench against (native|generic|both)'
+        required: false
+        default: 'both'
+      write_baseline_if_null:
+        description: 'Seed `null` baseline fields with the observed numbers from this run'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+env:
+  CARGO_TERM_COLOR: always
+  KILN_CUDA_ARCHS: "86"
+
+jobs:
+  # -------------------------------------------------------------------
+  # Tier 1d (de facto): regression-check script self-test.
+  #
+  # Runs on every dispatch on the free GitHub-hosted runner so the
+  # check_sft_train_regression.py logic is mechanically verified even
+  # when the self-hosted CUDA runner is offline.
+  # -------------------------------------------------------------------
+  gate-self-test:
+    name: regression-check script self-test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Verify gate accepts a within-tolerance run (no regression)
+        run: |
+          cat > /tmp/fake_bench_ok.json <<'EOF'
+          {
+            "training": {
+              "num_steps": 5,
+              "total_time_secs": 4.25,
+              "secs_per_step": 0.85,
+              "peak_vram_mb": 12400
+            }
+          }
+          EOF
+          # Seed a baseline file matching the observed numbers.
+          cat > /tmp/baseline.json <<'EOF'
+          {
+            "schema_version": 1,
+            "workload": "sft_default_corpus",
+            "trainer": "native",
+            "gpu": "NVIDIA RTX A6000",
+            "secs_per_step": 0.85,
+            "peak_vram_mb": 12400,
+            "comment": "self-test"
+          }
+          EOF
+          python3 bench-results/check_sft_train_regression.py \
+            --bench-stdout /tmp/fake_bench_ok.json \
+            --baseline /tmp/baseline.json
+
+      - name: Verify gate detects a step-time regression
+        run: |
+          cat > /tmp/fake_bench_slow.json <<'EOF'
+          {
+            "training": {
+              "num_steps": 5,
+              "total_time_secs": 5.50,
+              "secs_per_step": 1.10,
+              "peak_vram_mb": 12400
+            }
+          }
+          EOF
+          # Baseline 0.85 → observed 1.10 = +29% regression. Default 10%
+          # tolerance must fail.
+          cat > /tmp/baseline.json <<'EOF'
+          {
+            "schema_version": 1,
+            "workload": "sft_default_corpus",
+            "trainer": "native",
+            "gpu": "NVIDIA RTX A6000",
+            "secs_per_step": 0.85,
+            "peak_vram_mb": 12400,
+            "comment": "self-test"
+          }
+          EOF
+          if python3 bench-results/check_sft_train_regression.py \
+               --bench-stdout /tmp/fake_bench_slow.json \
+               --baseline /tmp/baseline.json; then
+            echo "ERROR: gate failed to detect the simulated +29% step-time regression" >&2
+            exit 1
+          fi
+          echo "OK — gate correctly returned non-zero on regression"
+
+      - name: Verify gate detects a peak-VRAM regression
+        run: |
+          cat > /tmp/fake_bench_vram_blew.json <<'EOF'
+          {
+            "training": {
+              "num_steps": 5,
+              "total_time_secs": 4.25,
+              "secs_per_step": 0.85,
+              "peak_vram_mb": 15500
+            }
+          }
+          EOF
+          # Baseline 12400 → observed 15500 = +25% VRAM regression. Default
+          # 15% tolerance must fail.
+          cat > /tmp/baseline.json <<'EOF'
+          {
+            "schema_version": 1,
+            "workload": "sft_default_corpus",
+            "trainer": "native",
+            "gpu": "NVIDIA RTX A6000",
+            "secs_per_step": 0.85,
+            "peak_vram_mb": 12400,
+            "comment": "self-test"
+          }
+          EOF
+          if python3 bench-results/check_sft_train_regression.py \
+               --bench-stdout /tmp/fake_bench_vram_blew.json \
+               --baseline /tmp/baseline.json; then
+            echo "ERROR: gate failed to detect the simulated +25% VRAM regression" >&2
+            exit 1
+          fi
+          echo "OK — gate correctly returned non-zero on VRAM regression"
+
+      - name: Verify gate seeds a null baseline with --write-baseline-if-null
+        run: |
+          cat > /tmp/fake_bench_seed.json <<'EOF'
+          {
+            "training": {
+              "num_steps": 5,
+              "total_time_secs": 4.25,
+              "secs_per_step": 0.85,
+              "peak_vram_mb": 12400
+            }
+          }
+          EOF
+          cat > /tmp/null_baseline.json <<'EOF'
+          {
+            "schema_version": 1,
+            "workload": "sft_default_corpus",
+            "trainer": "native",
+            "gpu": "NVIDIA RTX A6000",
+            "secs_per_step": null,
+            "peak_vram_mb": null
+          }
+          EOF
+          python3 bench-results/check_sft_train_regression.py \
+            --bench-stdout /tmp/fake_bench_seed.json \
+            --baseline /tmp/null_baseline.json \
+            --write-baseline-if-null
+          # Confirm the file was updated with the observed values.
+          python3 -c "
+          import json, sys
+          b = json.load(open('/tmp/null_baseline.json'))
+          assert b['secs_per_step'] == 0.85, b
+          assert b['peak_vram_mb'] == 12400, b
+          print('OK — null baseline was seeded:', b)
+          "
+
+  # -------------------------------------------------------------------
+  # Tier 2 / Tier 3: actual perf gate against the A6000 baseline.
+  #
+  # Self-hosted runner labelled `cuda-a6000`. Until one is wired up
+  # this job is conditionally skipped — `gate-self-test` above still
+  # validates the regression-check script on every dispatch.
+  #
+  # When the runner IS online, this job:
+  #   1. Builds kiln-bench --release --features cuda
+  #   2. Runs the training bench on the canonical corpus (the model
+  #      path lives at $KILN_BENCH_MODEL_PATH on the self-hosted host).
+  #   3. Pipes stdout into check_sft_train_regression.py.
+  #   4. Fails if step-time or peak-VRAM regressed beyond tolerance.
+  # -------------------------------------------------------------------
+  cuda-bench:
+    name: A6000 perf gate (${{ matrix.trainer }})
+    runs-on: [self-hosted, linux, cuda-a6000]
+    needs: gate-self-test
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        trainer:
+          - native
+          - generic
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Install Rust stable
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Verify required env vars
+        run: |
+          if [ -z "${KILN_BENCH_MODEL_PATH:-}" ]; then
+            echo "::error::KILN_BENCH_MODEL_PATH must be set on the self-hosted runner" >&2
+            exit 1
+          fi
+          echo "Model path: $KILN_BENCH_MODEL_PATH"
+
+      - name: Build kiln-bench (--release --features cuda)
+        run: |
+          KILN_CUDA_ARCHS=86 cargo build --release --features cuda --bin kiln-bench
+
+      - name: Run training bench (trainer=${{ matrix.trainer }})
+        env:
+          # The `native` matrix value asks for cuda_native_sft_train via
+          # the env knob the bench reads; `generic` leaves it unset so
+          # the trainer dispatches to the BackendRuntime+candle path.
+          KILN_CUDA_NATIVE_TRAINING: ${{ matrix.trainer == 'native' && '1' || '0' }}
+        run: |
+          rm -f /tmp/kiln_bench_stdout.txt
+          # Skip inference/latency benches — perf gate is on training step time.
+          # Take the median of N steps with the first step's compile warmup
+          # already amortised by `kiln-bench`'s internal warmup.
+          ./target/release/kiln-bench \
+            --model-path "$KILN_BENCH_MODEL_PATH" \
+            --training-steps 5 \
+            --skip-inference \
+            --skip-latency \
+            2>&1 | tee /tmp/kiln_bench_stdout.txt
+
+      - name: Compare against baseline
+        run: |
+          BASELINE_FILE="bench-results/regression/sft_${{ matrix.trainer }}_a6000_baseline.json"
+          if [ ! -f "$BASELINE_FILE" ]; then
+            echo "::error::baseline JSON not found at $BASELINE_FILE" >&2
+            exit 1
+          fi
+          EXTRA_FLAGS=""
+          if [ "${{ inputs.write_baseline_if_null }}" = "true" ]; then
+            EXTRA_FLAGS="--write-baseline-if-null"
+          fi
+          python3 bench-results/check_sft_train_regression.py \
+            --bench-stdout /tmp/kiln_bench_stdout.txt \
+            --baseline "$BASELINE_FILE" \
+            $EXTRA_FLAGS
+
+      - name: Upload bench JSON artefact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: sft-${{ matrix.trainer }}-bench-${{ github.run_id }}
+          path: /tmp/kiln_bench_stdout.txt
+          retention-days: 30

@@ -1,5 +1,44 @@
 # Kiln Server Changelog
 
+## Unreleased — perf-regression CI ladder for SFT/GRPO/OPD (#1077)
+
+Three-tier coverage ladder protects step-time + workload-shape auto-tune
+decisions from silent regressions across `cuda_train.rs`, `vk_train.rs`,
+`trainer.rs`, `opd.rs`, `forward.rs`, the `BackendRuntime` trait, and the
+`kiln_core::vram` heuristics:
+
+| Tier | Trigger     | Coverage                                                                                                  | Cost           |
+|------|-------------|----------------------------------------------------------------------------------------------------------|----------------|
+| 1a   | per-PR      | Exhaustive `(GPU class × max_seq_len)` matrix tests in `kiln_core::vram::tests` + `CheckpointConfig::auto_for_workload` wrapper test in `crates/kiln-train/src/trainer.rs` | $0             |
+| 1b   | per-PR      | `perf_regression_sft_train_cpu_smoke_completes_under_30s` — end-to-end CPU SFT smoke catches 50× regressions (#1063 class) | $0             |
+| 1c   | per-PR      | `perf_regression_sft_train_emits_auto_tune_log_line` — tracing-capture confirms auto-tune wire stays connected            | $0             |
+| 2    | nightly cron | `.github/workflows/perf-regression-nightly.yml` → self-hosted A6000 runs `kiln-bench --training-steps 5`, gates `secs_per_step ±10%` + `peak_vram_mb ±15%` against `bench-results/regression/sft_<trainer>_a6000_baseline.json` | ~$0.30/month   |
+| 3    | manual `workflow_dispatch` | Same workflow with `ref`/`trainer`/`write_baseline_if_null` inputs | as-used        |
+
+New artefacts:
+
+- `crates/kiln-core/src/vram.rs` — three `perf_regression_*` matrix tests
+  (Qwen3.5-4B + Llama-3-8B shapes + activation-tape sanity check).
+- `crates/kiln-train/src/trainer.rs` — Tier 1b/1c/auto_for_workload wrapper
+  tests at the end of `mod tests`.
+- `.github/workflows/perf-regression-nightly.yml` — cron + workflow_dispatch
+  with `gate-self-test` (free GHA) and `cuda-bench` (self-hosted A6000) jobs.
+- `bench-results/check_sft_train_regression.py` — mirror of the existing
+  `check_opd_regression.py`, gates the kiln-bench JSON output.
+- `bench-results/regression/{sft_native,sft_generic}_a6000_baseline.json` —
+  placeholder baselines (seed via `--write-baseline-if-null` on the first
+  nightly run on a fresh workload row).
+- `bench-results/regression/README.md` — schema + how to update a baseline
+  after intentional perf changes.
+
+The `gate-self-test` job exercises `check_sft_train_regression.py` on
+synthetic stdout (success, +29% step-time regression, +25% VRAM
+regression, and null-baseline seeding) so the gate's logic is verified
+on every dispatch even when the self-hosted runner is offline.
+
+`docs/skills/kiln/SKILL.md` (auto-synced) documents the per-PR vs nightly
+split, the baseline-update workflow, and the cost model.
+
 ## Unreleased — vk-native GRPO+OPD non-recompute hybrid + workload-shape auto-tune (#1076)
 
 Closes #1076. Wires the existing `vk_grpo_train_step_with_state` (the
