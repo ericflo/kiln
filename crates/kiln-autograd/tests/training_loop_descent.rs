@@ -153,14 +153,19 @@ fn linear_regression_descent() {
     // unmodeled by the constant column).
     let b = Tensor::from_slice(&[0.0f32; 16], vec![n_samples, 1]).unwrap();
 
-    // lr × steps tuned for `loss = sum_all(sq)` (no 1/N scaling).
-    // X^T X has largest eigenvalue ~16 (dominated by the constant
-    // column contributing 16 to its diagonal), so per-step error
-    // factor on that mode is ~(1 - lr·16); lr=0.02 keeps it stable
-    // (1 - 0.32 ≈ 0.68) and 500 steps drive 0.68^500 ≈ 1e-80
-    // residual on every mode — far under the 10% weight tolerance.
-    let lr = 0.02_f32;
-    let n_steps = 500;
+    // lr × steps tuned for `loss = sum_all(sq)` (no 1/N scaling, so
+    // gradient magnitude scales with N=16). X^T X has largest
+    // eigenvalue ~16 (dominated by the constant column). Earlier
+    // attempts at lr=0.02 / 500 steps left w[0] orbiting around 2.4
+    // — loss descended fine but weight modes hadn't settled because
+    // the effective stepsize on the dominant mode (lr·λ_max·N
+    // implicit in the sum gradient) was still too aggressive.
+    // lr=0.005 / 2000 steps gives a per-step error factor of
+    // ~(1 - 0.08) = 0.92 on the dominant mode and ~0.985 on the
+    // slowest mode (λ_min ≈ 3); 2000 steps drive both to <1e-14
+    // residual, well under the 0.2 weight tolerance.
+    let lr = 0.005_f32;
+    let n_steps = 2000;
     let mut losses = Vec::with_capacity(n_steps);
     for _ in 0..n_steps {
         // Note: we DON'T apply SGD to b. The constant column in x
