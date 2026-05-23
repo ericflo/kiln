@@ -25,7 +25,8 @@ use crate::{
     kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16,
     kiln_gdn_decode_qk_norm_gates_recurrent_vf32_bf16, kiln_gdn_forward_substitution,
     kiln_gdn_full_chunk_forward, kiln_gdn_full_chunk_forward_multiblock,
-    kiln_gdn_gated_rms_norm_bf16, kiln_gdn_recurrent_forward,
+    kiln_gdn_gated_rms_norm_bf16, kiln_gdn_gates_bf16, kiln_gdn_gates_bf16_f32_bf16_params,
+    kiln_gdn_gates_bf16_f32_params, kiln_gdn_recurrent_forward,
 };
 
 #[derive(Debug)]
@@ -1735,4 +1736,286 @@ pub fn gdn_gated_rms_norm_bf16_kt(
         )));
     }
     Ok(out)
+}
+
+/// Shared shape/dtype check for the gates family. Returns
+/// `(rows, nv, out_shape)`.
+fn gates_validate_inputs(
+    a: &KtTensor,
+    b: &KtTensor,
+    a_log: &KtTensor,
+    dt_bias: &KtTensor,
+    expected_al_dtype: KtDType,
+    expected_dt_dtype: KtDType,
+) -> Result<(usize, usize, Vec<usize>), GdnError> {
+    let a_shape = a.shape();
+    if a_shape.is_empty() {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gates a must have >= 1 axes, got {a_shape:?}"
+        )));
+    }
+    let nv = *a_shape.last().unwrap();
+    if nv == 0 {
+        return Err(GdnError::Msg("kt-gdn: gates nv must be >= 1".into()));
+    }
+    if nv > 256 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gates nv {nv} exceeds kernel limit (256)"
+        )));
+    }
+    if b.shape() != a_shape {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gates b {:?} != a {a_shape:?}",
+            b.shape()
+        )));
+    }
+    if a_log.shape() != [nv] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gates a_log {:?} != [{nv}]",
+            a_log.shape()
+        )));
+    }
+    if dt_bias.shape() != [nv] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gates dt_bias {:?} != [{nv}]",
+            dt_bias.shape()
+        )));
+    }
+    if a.dtype() != KtDType::BF16 || b.dtype() != KtDType::BF16 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gates a/b must be BF16, got a={}, b={}",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    if a_log.dtype() != expected_al_dtype {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gates a_log must be {}, got {}",
+            expected_al_dtype,
+            a_log.dtype()
+        )));
+    }
+    if dt_bias.dtype() != expected_dt_dtype {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gates dt_bias must be {}, got {}",
+            expected_dt_dtype,
+            dt_bias.dtype()
+        )));
+    }
+    let rows = a_shape.iter().take(a_shape.len() - 1).product::<usize>();
+    Ok((rows, nv, a_shape.to_vec()))
+}
+
+/// `kiln_gdn_gates_bf16` over kt operands.
+///
+/// Fused beta + g gate kernel. Both `A_log` and `dt_bias` are BF16.
+///
+/// Inputs:
+/// - `a`, `b`: BF16, shape `[.., nv]`. Last-axis-contiguous required.
+/// - `A_log`, `dt_bias`: BF16, `[nv]`.
+///
+/// Returns `(beta_out, g_out)`, both BF16 with the same shape as `a`.
+pub fn gdn_gates_bf16_kt(
+    a: &KtTensor,
+    b: &KtTensor,
+    a_log: &KtTensor,
+    dt_bias: &KtTensor,
+) -> Result<(KtTensor, KtTensor), GdnError> {
+    let (rows, nv, out_shape) =
+        gates_validate_inputs(a, b, a_log, dt_bias, KtDType::BF16, KtDType::BF16)?;
+
+    let (a_st, a_off) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
+    let (b_st, b_off) = cuda_storage_and_byte_offset(b, KtDType::BF16, "b")?;
+    let (al_st, al_off) = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
+    let (dt_st, dt_off) = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
+
+    let beta = alloc_cuda_tensor(a_st, KtDType::BF16, out_shape.clone())?;
+    let g = alloc_cuda_tensor(a_st, KtDType::BF16, out_shape)?;
+    let beta_cuda = beta
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let g_cuda = g
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = a_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let a_slice = a_st.slice().slice(a_off..);
+    let b_slice = b_st.slice().slice(b_off..);
+    let al_slice = al_st.slice().slice(al_off..);
+    let dt_slice = dt_st.slice().slice(dt_off..);
+    let beta_slice = beta_cuda.slice().slice(0..);
+    let g_slice = g_cuda.slice().slice(0..);
+
+    let status = unsafe {
+        let (a_ptr, _g1) = a_slice.device_ptr(&stream);
+        let (b_ptr, _g2) = b_slice.device_ptr(&stream);
+        let (al_ptr, _g3) = al_slice.device_ptr(&stream);
+        let (dt_ptr, _g4) = dt_slice.device_ptr(&stream);
+        let (beta_ptr, _g5) = beta_slice.device_ptr(&stream);
+        let (g_ptr, _g6) = g_slice.device_ptr(&stream);
+        kiln_gdn_gates_bf16(
+            a_ptr as *const _,
+            b_ptr as *const _,
+            al_ptr as *const _,
+            dt_ptr as *const _,
+            beta_ptr as *mut _,
+            g_ptr as *mut _,
+            rows as i32,
+            nv as i32,
+            nv as i32,
+            nv as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gates_bf16 FFI returned {status}"
+        )));
+    }
+    Ok((beta, g))
+}
+
+/// `kiln_gdn_gates_bf16_f32_params` over kt operands.
+///
+/// Variant where `A_log` and `dt_bias` are both F32; useful when those
+/// parameters are kept in higher precision (e.g., trained as F32 master).
+pub fn gdn_gates_bf16_f32_params_kt(
+    a: &KtTensor,
+    b: &KtTensor,
+    a_log: &KtTensor,
+    dt_bias: &KtTensor,
+) -> Result<(KtTensor, KtTensor), GdnError> {
+    let (rows, nv, out_shape) =
+        gates_validate_inputs(a, b, a_log, dt_bias, KtDType::F32, KtDType::F32)?;
+
+    let (a_st, a_off) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
+    let (b_st, b_off) = cuda_storage_and_byte_offset(b, KtDType::BF16, "b")?;
+    let (al_st, al_off) = cuda_storage_and_byte_offset(a_log, KtDType::F32, "a_log")?;
+    let (dt_st, dt_off) = cuda_storage_and_byte_offset(dt_bias, KtDType::F32, "dt_bias")?;
+
+    let beta = alloc_cuda_tensor(a_st, KtDType::BF16, out_shape.clone())?;
+    let g = alloc_cuda_tensor(a_st, KtDType::BF16, out_shape)?;
+    let beta_cuda = beta
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let g_cuda = g
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = a_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let a_slice = a_st.slice().slice(a_off..);
+    let b_slice = b_st.slice().slice(b_off..);
+    let al_slice = al_st.slice().slice(al_off..);
+    let dt_slice = dt_st.slice().slice(dt_off..);
+    let beta_slice = beta_cuda.slice().slice(0..);
+    let g_slice = g_cuda.slice().slice(0..);
+
+    let status = unsafe {
+        let (a_ptr, _g1) = a_slice.device_ptr(&stream);
+        let (b_ptr, _g2) = b_slice.device_ptr(&stream);
+        let (al_ptr, _g3) = al_slice.device_ptr(&stream);
+        let (dt_ptr, _g4) = dt_slice.device_ptr(&stream);
+        let (beta_ptr, _g5) = beta_slice.device_ptr(&stream);
+        let (g_ptr, _g6) = g_slice.device_ptr(&stream);
+        kiln_gdn_gates_bf16_f32_params(
+            a_ptr as *const _,
+            b_ptr as *const _,
+            al_ptr as *const _,
+            dt_ptr as *const _,
+            beta_ptr as *mut _,
+            g_ptr as *mut _,
+            rows as i32,
+            nv as i32,
+            nv as i32,
+            nv as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gates_bf16_f32_params FFI returned {status}"
+        )));
+    }
+    Ok((beta, g))
+}
+
+/// `kiln_gdn_gates_bf16_f32_bf16_params` over kt operands.
+///
+/// Mixed-precision variant: `A_log` is F32, `dt_bias` stays BF16.
+pub fn gdn_gates_bf16_f32_bf16_params_kt(
+    a: &KtTensor,
+    b: &KtTensor,
+    a_log: &KtTensor,
+    dt_bias: &KtTensor,
+) -> Result<(KtTensor, KtTensor), GdnError> {
+    let (rows, nv, out_shape) =
+        gates_validate_inputs(a, b, a_log, dt_bias, KtDType::F32, KtDType::BF16)?;
+
+    let (a_st, a_off) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
+    let (b_st, b_off) = cuda_storage_and_byte_offset(b, KtDType::BF16, "b")?;
+    let (al_st, al_off) = cuda_storage_and_byte_offset(a_log, KtDType::F32, "a_log")?;
+    let (dt_st, dt_off) = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
+
+    let beta = alloc_cuda_tensor(a_st, KtDType::BF16, out_shape.clone())?;
+    let g = alloc_cuda_tensor(a_st, KtDType::BF16, out_shape)?;
+    let beta_cuda = beta
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let g_cuda = g
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = a_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let a_slice = a_st.slice().slice(a_off..);
+    let b_slice = b_st.slice().slice(b_off..);
+    let al_slice = al_st.slice().slice(al_off..);
+    let dt_slice = dt_st.slice().slice(dt_off..);
+    let beta_slice = beta_cuda.slice().slice(0..);
+    let g_slice = g_cuda.slice().slice(0..);
+
+    let status = unsafe {
+        let (a_ptr, _g1) = a_slice.device_ptr(&stream);
+        let (b_ptr, _g2) = b_slice.device_ptr(&stream);
+        let (al_ptr, _g3) = al_slice.device_ptr(&stream);
+        let (dt_ptr, _g4) = dt_slice.device_ptr(&stream);
+        let (beta_ptr, _g5) = beta_slice.device_ptr(&stream);
+        let (g_ptr, _g6) = g_slice.device_ptr(&stream);
+        kiln_gdn_gates_bf16_f32_bf16_params(
+            a_ptr as *const _,
+            b_ptr as *const _,
+            al_ptr as *const _,
+            dt_ptr as *const _,
+            beta_ptr as *mut _,
+            g_ptr as *mut _,
+            rows as i32,
+            nv as i32,
+            nv as i32,
+            nv as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gates_bf16_f32_bf16_params FFI returned {status}"
+        )));
+    }
+    Ok((beta, g))
 }
