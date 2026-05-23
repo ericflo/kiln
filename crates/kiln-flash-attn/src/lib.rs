@@ -15,7 +15,11 @@ use half::bf16;
 /// Both call the same FFI. Phase 7 deletes the candle-typed
 /// public functions once all callers migrate.
 mod kt_api;
-pub use kt_api::{flash_attn_fwd_kt, FlashAttnError};
+pub use kt_api::{
+    flash_attn_bwd_kt, flash_attn_fwd_kt, flash_attn_paged_decode_dyn_seqlen_kt,
+    flash_attn_paged_decode_kt, paged_kv_write_token_major_bf16_kt,
+    paged_kv_write_token_major_bf16_slot_kt, FlashAttnError,
+};
 
 // FFI declarations matching flash_api_c.h
 unsafe extern "C" {
@@ -122,7 +126,7 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-fn round_up(x: usize, m: usize) -> usize {
+pub(crate) fn round_up(x: usize, m: usize) -> usize {
     (x + m - 1) / m * m
 }
 
