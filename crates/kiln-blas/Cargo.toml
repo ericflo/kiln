@@ -1,0 +1,39 @@
+[package]
+name = "kiln-blas"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "kiln-tensor's CUDA BLAS layer (cublasLt). Phase 0 ships only the probe; Phase 2 ships the production path."
+build = "build.rs"
+
+# The Phase 0 deliverable for this crate is the `cublaslt_mlp_probe`
+# example, which compares candle's gemm path against an explicit cublasLt
+# heuristic + workspace tuning for the Qwen3.5-4B MLP gate||up shape.
+#
+# The `lib.rs` is intentionally empty — Phase 2 fills it in. The crate is
+# excluded from `default-members` in the workspace manifest because it
+# unconditionally requires a CUDA toolchain.
+
+[features]
+default = []
+# Builds the cublasLt probe binary alongside candle's gemm baseline.
+# Enabled implicitly when running the example; explicit so a downstream
+# crate can opt out of the build.rs cublasLt link if it ever depends on
+# `kiln-blas` for something else.
+probe = []
+
+[dependencies]
+# Candle is used by the probe as the **baseline path** to compare against.
+# Phase 2's production `kiln-blas` removes this dep — for now we need it to
+# show the delta the cublasLt heuristic delivers.
+candle-core = { workspace = true, features = ["cuda"] }
+half = "2"
+
+# Timing + JSON output.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+cc = "1"
