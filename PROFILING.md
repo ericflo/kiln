@@ -18,6 +18,177 @@
 > (or whichever path is cited — `c12-out/`, `profile/`, `profiling/`, or
 > `profiling-artifacts/`).
 
+## Determinism stance (#1082 Phase 0.3)
+
+This section pins the determinism contract for the candle-removal migration.
+**Every parity test the migration ships compares against this contract** — a
+"deterministic by construction" op must be bit-identical across runs; a
+"tolerance-bounded" op must stay within the band documented per dtype below.
+
+Before this section landed, the repo had **zero references to
+`CUBLAS_WORKSPACE_CONFIG`**. Parity tests would have been flaky under
+cuBLAS algorithm autotune. Phase 0.4 (`bench-results/parity-tolerance.csv`)
+operationalizes the bands listed here as a per-`{op, dtype, backend}` cell.
+
+### What is and isn't pinned
+
+The cuBLAS workspace var alone is **insufficient** for the parity contract.
+Four distinct sources of nondeterminism interact:
+
+#### 1. cuBLAS workspace size & algorithm choice — deterministic by construction (when pinned)
+
+Status: **deterministic by construction** under
+`CUBLAS_WORKSPACE_CONFIG=:4096:8`. Parity tests bake this in via a fixture
+that injects the env var before the first cuBLAS call.
+
+Without the pin, cuBLAS's internal autotune can pick different algos
+within a single process lifetime — same shape, same inputs, different
+intermediate layouts, BF16-ULP-level output divergence. The conventional
+pin `:4096:8` reserves 4 KiB workspaces with up to 8 concurrent kernels;
+that constraint forces algorithm selection to a stable subset.
+
+The pin lives in:
+
+- The parity-test harness (a `cargo test` setup hook in `crates/kiln-tensor`
+  once Phase 1 lands; today: ad-hoc per-test).
+- The bench harness (`scripts/bench-*.sh`).
+- The release-builds CI workflow.
+
+A future kiln-tensor `KILN_DETERMINISTIC=1` envelope (Phase 9 item) sets
+this var alongside the other three categories below.
+
+#### 2. atomicAdd in embedding bwd + scatter-add — tolerance-bounded, with deterministic variant
+
+Status: **tolerance-bounded** by default; **deterministic variant
+available** under `KILN_DETERMINISTIC=1`.
+
+Atomic-add inserts into a single backward buffer in arbitrary order on
+the GPU. For BF16 accumulation that lands within the rounding band; the
+order-dependent variation is "real but bounded by 1 ULP near boundaries
+where F32 results straddle a bf16 quantum (e.g. 0.015625 = 2^-6 at
+typical magnitudes)" — verbatim from the existing tolerance comment at
+[`crates/kiln-rmsnorm-kernel/src/lib.rs:5024-5029`](crates/kiln-rmsnorm-kernel/src/lib.rs).
+
+Affected kernels:
+
+- `crates/kiln-rmsnorm-kernel/csrc/fused_rmsnorm_bwd.cu` —
+  `atomicAdd(&grad_w_partial_f32[j], dw_contrib)` on line 123.
+- `crates/kiln-vulkan-kernel/csrc/shaders/vk_index_select_rows_bwd_f32.comp`
+  — embedding-table backward, atomicAdd over a uint reinterpret of f32.
+- `crates/kiln-flash-attn/csrc/flash_attn/src/flash_bwd_kernel.h:124`
+  — already documents a deterministic variant ("each thread block does
+  atomicAdd to a different `dQ_accum` buffer"); the deterministic path
+  is gated by a build-time flag.
+
+The deterministic variants for each must ship in `kiln-tensor`'s
+backward implementations. The toggle is `KILN_DETERMINISTIC=1`; the
+default stays on the perf-preferred non-deterministic variant.
+
+#### 3. Reduction order in softmax / RMSNorm / cross-entropy bwd — deterministic by construction
+
+Status: **deterministic by construction** at the per-op level when the
+reduction tree is fixed-shape.
+
+A reduction tree where the stride/order is a compile-time constant
+produces the same output bit-for-bit across runs on the same input. The
+existing RMSNorm forward kernel does per-row F32 reductions with a
+fixed stride and is byte-deterministic across runs — that property
+**must extend** to the backward path and to softmax / cross-entropy bwd.
+
+The risk is a future kernel writer pulling in a streaming reduction
+(stream-K, stream-M) that introduces inter-block atomics. PR-time review
+rule: any new bwd kernel that uses inter-block reduction must declare
+its determinism category explicitly in the impl docstring.
+
+#### 4. Warp-shuffle reduction non-determinism — deterministic by construction
+
+Status: **deterministic by construction**.
+
+`__shfl_xor_sync` / `__shfl_down_sync` produce identical bit-output
+across runs given identical inputs and lane identity, because the warp
+lane permutation is a function of the warp ID and CUDA's warp scheduling
+is byte-reproducible within a kernel launch.
+
+The risk is "warp-shuffle + atomicAdd" composition (a per-warp partial
+reduced via shuffles, then atomic-added across warps). Category 2's
+tolerance band applies to the cross-warp atomic add; the intra-warp
+shuffle is deterministic.
+
+### Per-dtype tolerance bands (input to Phase 0.4 CSV)
+
+These are the **default** parity-test bands. Specific `{op, dtype,
+backend}` cells override in
+[`bench-results/parity-tolerance.csv`](bench-results/parity-tolerance.csv)
+(Phase 0.4):
+
+| dtype | forward | backward |
+|---|---|---|
+| FP32 | exact (atol = 0, ULP = 0) | atol ≤ 1e-5 ULP, justified per-cell |
+| BF16 | atol ≤ 1e-3 (~ 1 ULP) | atol ≤ 1e-2 (atomicAdd zone) |
+| FP16 | atol ≤ 1e-3 | atol ≤ 5e-3 |
+| FP8 E4M3 / E5M2 | per-cell justification | per-cell justification |
+
+These bands are **looser than the issue's coarse "1e-3 BF16 / 1e-5 FP32"
+because softmax-bwd in BF16 and matmul-bwd in BF16 have structurally
+different tolerance**. The 2e-2 grad_w band documented at
+`rmsnorm-kernel/src/lib.rs:5036` is an example.
+
+### KILN_DETERMINISTIC=1 envelope (Phase 9 item)
+
+A single env var forces every "deterministic by construction" option in
+every category above. The CI training-parity test runs under the
+envelope and validates bit-reproducibility across two runs at the same
+seed.
+
+In code, the envelope is wired in `kiln-core::env_flag::deterministic()`
+and reads:
+
+```rust
+pub fn deterministic() -> bool {
+    env_flag("KILN_DETERMINISTIC", false)
+}
+```
+
+The default is `false` (perf-preferred). When set, the substrate:
+
+- Exports `CUBLAS_WORKSPACE_CONFIG=:4096:8` to the cuBLAS handle context.
+- Selects the deterministic-atomicAdd embedding-bwd variant.
+- Selects the deterministic-reduction-tree softmax/RMSNorm/cross-entropy bwd.
+- Disables any algorithm that uses warp-shuffle + cross-block reduction
+  without a recorded determinism category.
+
+### Migration enforcement
+
+Every kiln-tensor op gets a `Determinism` declaration in its impl
+metadata:
+
+```rust
+#[derive(Clone, Copy)]
+pub enum Determinism {
+    /// Bit-identical across runs on the same hardware + dtype.
+    Constructive,
+    /// Order-dependent; bounded by the per-dtype tolerance row in
+    /// `bench-results/parity-tolerance.csv`.
+    ToleranceBounded { dtype_band_key: &'static str },
+}
+```
+
+A backward op that returns `ToleranceBounded` without a matching
+parity-tolerance row fails the Phase 9 audit.
+
+### Cited prior art in this repo
+
+- [`crates/kiln-rmsnorm-kernel/csrc/fused_rmsnorm_bwd.cu`](crates/kiln-rmsnorm-kernel/csrc/fused_rmsnorm_bwd.cu) — the canonical example
+  of category 2 (atomicAdd cross-row grad_w) co-existing with category 3
+  (per-row deterministic reduction).
+- [`crates/kiln-vulkan-kernel/csrc/shaders/vk_index_select_rows_bwd_f32.comp`](crates/kiln-vulkan-kernel/csrc/shaders/vk_index_select_rows_bwd_f32.comp) —
+  Vulkan-side embedding-table backward using atomic-add on a uint-reinterpret
+  of f32.
+- [`crates/kiln-flash-attn/csrc/flash_attn/src/flash_bwd_kernel.h:124`](crates/kiln-flash-attn/csrc/flash_attn/src/flash_bwd_kernel.h) —
+  flash-attention backward already exposes a deterministic path.
+
+---
+
 ## Phase 10 §3 post-#647 SFT-step re-profile + next-kernel candidate audit (2026-04-29)
 
 **Verdict: `no_kernel_pivot`.** Three back-to-back nsys 2024.5.1
