@@ -27,6 +27,7 @@ mod dtype;
 mod element;
 mod error;
 mod layout;
+pub mod ops;
 pub mod profile;
 pub mod safetensors;
 mod storage;
