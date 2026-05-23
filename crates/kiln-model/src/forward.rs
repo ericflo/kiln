@@ -3564,7 +3564,7 @@ fn marlin_bf16_drop_disabled() -> bool {
 /// device-specific default. Must be a multiple of `GDN_CHUNK_SIZE` (64) so the
 /// chunkwise kernel never sees a partial tail chunk from a tile boundary.
 pub const STREAMING_PREFILL_DEFAULT_TILE: usize = 8192;
-pub const STREAMING_PREFILL_CUDA_DEFAULT_TILE: usize = 2048;
+pub const STREAMING_PREFILL_CUDA_DEFAULT_TILE: usize = 1024;
 pub const STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD: usize = 2048;
 pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 2048;
 pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 2048;
