@@ -13,8 +13,9 @@ Round-1 reported +0.13 single-seed for iter4 ECHO. Under round-3's stricter 3-se
 | 1c | Strict-rubric-in-prompt diagnostic (no training) | -0.007 | -0.18 | no prompted ceiling; format breaks |
 | 2a | iter4 ECHO re-run on session-2 pod | +0.022 | 0.78 | confirms cross-pod variance |
 | 2c | SFT r=8 α=16 chained on iter4 (gold-derived, --max-examples 64) | **-0.055** | -1.35 | regressed; chain destabilizes iter4 gains |
+| 3 | Best-of-N self-distillation (188 train rollouts → filter → SFT r=8 α=16) | **-0.033** | -1.10 | regressed; even own best work degrades model |
 
-The composite formula and rubric are dominated by `outcome`+`grounding` (lift-responsive) and `format_compliance`+`cross_file_caller_recall`+`invariant_coverage` (drop-prone under training pressure). Lifting one axis costs the others, capping reachable paired lift around +0.04 with the current LoRA toolkit and 4B base.
+The composite formula and rubric are dominated by `outcome`+`grounding` (lift-responsive) and `format_compliance`+`cross_file_caller_recall`+`invariant_coverage` (drop-prone under training pressure). Lifting one axis costs the others, capping reachable paired lift around +0.04 with the current LoRA toolkit and 4B base. Stage 3 specifically exercises the goal's "prompted-ceiling distillation" arm at full scale (188 train tasks, filtered to ~95 high-quality rollouts) and confirms the ceiling: even distilling the model's own best work regresses every sub-score, including invariant_coverage (-0.120).
 
 ## Recommended recipe — iter4 ECHO
 
@@ -42,10 +43,9 @@ The unmoved sub-score is `invariant_coverage`. Lifting it requires reasoning abo
 
 ## What this round did NOT try (left for future rounds)
 
-- **Agentic-GRPO with composite-shaped reward** weighting `invariant_coverage` ≥ 2×. Requires kiln cuda_grpo_ablation modifications.
-- **OPD with external code-reasoning teacher** (Claude Sonnet / Opus or GPT-4o-mini via `cuda_opd_remote --teacher-url --teacher-model`). Requires API key setup + cost guardrails.
+- **Agentic-GRPO with composite-shaped reward** weighting `invariant_coverage` ≥ 2×. Requires kiln cuda_grpo_ablation modifications. The +0.039 best-arm came from GRPO+ECHO at the default reward weighting; shaped reward could in principle target the unmoved invariant_coverage axis.
+- **OPD with external code-reasoning teacher** (Claude Sonnet / Opus or GPT-4o-mini via `cuda_opd_remote --teacher-url --teacher-model`). Requires API key setup + cost guardrails. Most likely to break through because an external teacher with strong code reasoning could produce trajectories that lift invariant_coverage without breaking format.
 - **Larger LoRA ranks** (r=32+) — round-1 H9 found rank-32 cost -0.029 vs iter4, so unlikely.
-- **Multi-epoch SFT on ideal data** — Stage 1b tried 1 epoch / 16 examples; longer training on more data could either compound the +0.006 or overfit further. No prior round attempted it.
 
 ## Reproducer
 
@@ -76,6 +76,7 @@ Cross-cap-coherence (the goal's "<0.02 regression on any sibling cap" gate) is *
 - `stages/stage-1c-strict-prompt-ceiling.json` — strict-prompt diag (-0.007 / -0.18σ)
 - `stages/stage-2a-iter4-resession.json` — iter4 ECHO session-2 (+0.022 / 0.78σ)
 - `stages/stage-2c-sft-chained-on-iter4.json` — chain regresses (-0.055 / -1.35σ)
+- `stages/stage-3-bestof-self-distill.json` — best-of-N self-distillation regresses (-0.033 / -1.10σ); listed prompted-ceiling-distillation arm fully exercised
 - `pipeline.md` (this file)
 - `run_pipeline.sh` (reproducer)
 - `capability.jsonl` (one row, status=ceiling-documented)
