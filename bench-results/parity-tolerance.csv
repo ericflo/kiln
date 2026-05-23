@@ -1,0 +1,417 @@
+op,dtype,backend,category,fwd_atol,bwd_atol,fwd_determinism,bwd_determinism,coverage,notes
+reshape,F32,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+reshape,F32,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+reshape,F32,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+reshape,F32,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+reshape,BF16,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+reshape,BF16,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+reshape,BF16,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+reshape,BF16,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+reshape,F16,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+reshape,F16,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+reshape,F16,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+reshape,F16,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+transpose,F32,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+transpose,F32,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+transpose,F32,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+transpose,F32,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+transpose,BF16,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+transpose,BF16,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+transpose,BF16,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+transpose,BF16,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+transpose,F16,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+transpose,F16,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+transpose,F16,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+transpose,F16,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+permute,F32,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+permute,F32,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+permute,F32,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+permute,F32,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+permute,BF16,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+permute,BF16,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+permute,BF16,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+permute,BF16,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+permute,F16,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+permute,F16,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+permute,F16,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+permute,F16,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+narrow,F32,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+narrow,F32,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+narrow,F32,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+narrow,F32,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+narrow,BF16,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+narrow,BF16,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+narrow,BF16,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+narrow,BF16,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+narrow,F16,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+narrow,F16,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+narrow,F16,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+narrow,F16,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+contiguous,F32,cpu,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+contiguous,F32,cuda,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+contiguous,F32,metal,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+contiguous,F32,vulkan,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+contiguous,BF16,cpu,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+contiguous,BF16,cuda,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+contiguous,BF16,metal,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+contiguous,BF16,vulkan,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+contiguous,F16,cpu,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+contiguous,F16,cuda,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+contiguous,F16,metal,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+contiguous,F16,vulkan,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+cast,F32,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+cast,F32,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+cast,F32,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+cast,F32,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+cast,BF16,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+cast,BF16,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+cast,BF16,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+cast,BF16,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+cast,F16,cpu,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+cast,F16,cuda,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+cast,F16,metal,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+cast,F16,vulkan,shape-only,0.0,0.0,constructive,constructive,today,no arithmetic; layout-only.
+add,F32,cpu,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+add,F32,cuda,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+add,F32,metal,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+add,F32,vulkan,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+add,BF16,cpu,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+add,BF16,cuda,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+add,BF16,metal,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+add,BF16,vulkan,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+add,F16,cpu,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+add,F16,cuda,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+add,F16,metal,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+add,F16,vulkan,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sub,F32,cpu,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sub,F32,cuda,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sub,F32,metal,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sub,F32,vulkan,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sub,BF16,cpu,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sub,BF16,cuda,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sub,BF16,metal,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sub,BF16,vulkan,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sub,F16,cpu,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sub,F16,cuda,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sub,F16,metal,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sub,F16,vulkan,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul,F32,cpu,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul,F32,cuda,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul,F32,metal,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul,F32,vulkan,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul,BF16,cpu,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul,BF16,cuda,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul,BF16,metal,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul,BF16,vulkan,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul,F16,cpu,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul,F16,cuda,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul,F16,metal,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul,F16,vulkan,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+div,F32,cpu,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+div,F32,cuda,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+div,F32,metal,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+div,F32,vulkan,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+div,BF16,cpu,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+div,BF16,cuda,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+div,BF16,metal,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+div,BF16,vulkan,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+div,F16,cpu,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+div,F16,cuda,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+div,F16,metal,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+div,F16,vulkan,elementwise,0.001,0.005,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+silu,F32,cpu,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+silu,F32,cuda,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+silu,F32,metal,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+silu,F32,vulkan,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+silu,BF16,cpu,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+silu,BF16,cuda,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+silu,BF16,metal,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+silu,BF16,vulkan,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sigmoid,F32,cpu,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sigmoid,F32,cuda,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sigmoid,F32,metal,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sigmoid,F32,vulkan,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sigmoid,BF16,cpu,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sigmoid,BF16,cuda,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sigmoid,BF16,metal,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+sigmoid,BF16,vulkan,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul_sigmoid_gate,F32,cpu,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul_sigmoid_gate,F32,cuda,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul_sigmoid_gate,F32,metal,elementwise,0.0,1e-05,constructive,constructive,scheduled,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul_sigmoid_gate,F32,vulkan,elementwise,0.0,1e-05,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul_sigmoid_gate,BF16,cpu,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul_sigmoid_gate,BF16,cuda,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul_sigmoid_gate,BF16,metal,elementwise,0.001,0.01,constructive,constructive,scheduled,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+mul_sigmoid_gate,BF16,vulkan,elementwise,0.001,0.01,constructive,constructive,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+softmax_last_dim,F32,cpu,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+softmax_last_dim,F32,cuda,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+softmax_last_dim,F32,metal,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+softmax_last_dim,F32,vulkan,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+softmax_last_dim,BF16,cpu,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+softmax_last_dim,BF16,cuda,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+softmax_last_dim,BF16,metal,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+softmax_last_dim,BF16,vulkan,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+sum_all,F32,cpu,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+sum_all,F32,cuda,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+sum_all,F32,metal,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+sum_all,F32,vulkan,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+sum_all,BF16,cpu,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+sum_all,BF16,cuda,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+sum_all,BF16,metal,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+sum_all,BF16,vulkan,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+mean_all,F32,cpu,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+mean_all,F32,cuda,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+mean_all,F32,metal,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+mean_all,F32,vulkan,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+mean_all,BF16,cpu,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+mean_all,BF16,cuda,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+mean_all,BF16,metal,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+mean_all,BF16,vulkan,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+rmsnorm,F32,cpu,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+rmsnorm,F32,cuda,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+rmsnorm,F32,metal,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+rmsnorm,F32,vulkan,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+rmsnorm,BF16,cpu,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+rmsnorm,BF16,cuda,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+rmsnorm,BF16,metal,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+rmsnorm,BF16,vulkan,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+l2norm,F32,cpu,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+l2norm,F32,cuda,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+l2norm,F32,metal,reduction,0.0,1e-05,constructive,constructive,scheduled,fixed-tree reduction; deterministic.
+l2norm,F32,vulkan,reduction,0.0,1e-05,constructive,constructive,today,fixed-tree reduction; deterministic.
+l2norm,BF16,cpu,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+l2norm,BF16,cuda,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+l2norm,BF16,metal,reduction,0.001,0.01,constructive,constructive,scheduled,fixed-tree reduction; deterministic.
+l2norm,BF16,vulkan,reduction,0.001,0.01,constructive,constructive,today,fixed-tree reduction; deterministic.
+matmul,F32,cpu,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul,F32,cuda,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul,F32,metal,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul,F32,vulkan,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul,BF16,cpu,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul,BF16,cuda,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul,BF16,metal,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul,BF16,vulkan,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul,F16,cpu,matmul-bwd-atomic,0.001,,constructive,n/a,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul,F16,cuda,matmul-bwd-atomic,0.001,,constructive,n/a,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul,F16,metal,matmul-bwd-atomic,0.001,,constructive,n/a,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul,F16,vulkan,matmul-bwd-atomic,0.001,,constructive,n/a,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul_batched,F32,cpu,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul_batched,F32,cuda,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul_batched,F32,metal,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul_batched,F32,vulkan,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul_batched,BF16,cpu,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul_batched,BF16,cuda,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul_batched,BF16,metal,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul_batched,BF16,vulkan,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul_batched,F16,cpu,matmul-bwd-atomic,0.001,,constructive,n/a,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul_batched,F16,cuda,matmul-bwd-atomic,0.001,,constructive,n/a,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul_batched,F16,metal,matmul-bwd-atomic,0.001,,constructive,n/a,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul_batched,F16,vulkan,matmul-bwd-atomic,0.001,,constructive,n/a,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+matmul_bf16w_marlin,BF16,cpu,matmul,0.001,,constructive,n/a,today,deterministic under CUBLAS_WORKSPACE_CONFIG=:4096:8; the workspace pin is mandatory.
+matmul_bf16w_marlin,BF16,cuda,matmul,0.001,,constructive,n/a,today,deterministic under CUBLAS_WORKSPACE_CONFIG=:4096:8; the workspace pin is mandatory.
+matmul_bf16w_marlin,BF16,metal,matmul,0.001,,constructive,n/a,scheduled,deterministic under CUBLAS_WORKSPACE_CONFIG=:4096:8; the workspace pin is mandatory.
+matmul_bf16w_marlin,BF16,vulkan,matmul,0.001,,constructive,n/a,today,deterministic under CUBLAS_WORKSPACE_CONFIG=:4096:8; the workspace pin is mandatory.
+linear,F32,cpu,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+linear,F32,cuda,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+linear,F32,metal,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+linear,F32,vulkan,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,scheduled,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+linear,BF16,cpu,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+linear,BF16,cuda,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+linear,BF16,metal,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+linear,BF16,vulkan,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,scheduled,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_add,F32,cpu,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_add,F32,cuda,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_add,F32,metal,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,scheduled,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_add,F32,vulkan,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,scheduled,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_add,BF16,cpu,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_add,BF16,cuda,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_add,BF16,metal,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,scheduled,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_add,BF16,vulkan,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,scheduled,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_linear,F32,cpu,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_linear,F32,cuda,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_linear,F32,metal,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,scheduled,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_linear,F32,vulkan,matmul-bwd-atomic,0.0,1e-05,constructive,tolerance-bounded,scheduled,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_linear,BF16,cpu,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_linear,BF16,cuda,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,today,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_linear,BF16,metal,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,scheduled,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+lora_linear,BF16,vulkan,matmul-bwd-atomic,0.001,0.02,constructive,tolerance-bounded,scheduled,dW path uses per-column atomic accumulation on some backends; tolerance reflects BF16-ULP band.
+embedding,F32,cpu,atomic-bwd,0.0,5e-05,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+embedding,F32,cuda,atomic-bwd,0.0,5e-05,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+embedding,F32,metal,atomic-bwd,0.0,5e-05,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+embedding,F32,vulkan,atomic-bwd,0.0,5e-05,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+embedding,BF16,cpu,atomic-bwd,0.001,0.02,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+embedding,BF16,cuda,atomic-bwd,0.001,0.02,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+embedding,BF16,metal,atomic-bwd,0.001,0.02,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+embedding,BF16,vulkan,atomic-bwd,0.001,0.02,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+embedding,F16,cpu,atomic-bwd,0.001,,constructive,n/a,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+embedding,F16,cuda,atomic-bwd,0.001,,constructive,n/a,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+embedding,F16,metal,atomic-bwd,0.001,,constructive,n/a,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+embedding,F16,vulkan,atomic-bwd,0.001,,constructive,n/a,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+index_select_rows,F32,cpu,atomic-bwd,0.0,5e-05,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+index_select_rows,F32,cuda,atomic-bwd,0.0,5e-05,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+index_select_rows,F32,metal,atomic-bwd,0.0,5e-05,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+index_select_rows,F32,vulkan,atomic-bwd,0.0,5e-05,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+index_select_rows,BF16,cpu,atomic-bwd,0.001,0.02,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+index_select_rows,BF16,cuda,atomic-bwd,0.001,0.02,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+index_select_rows,BF16,metal,atomic-bwd,0.001,0.02,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+index_select_rows,BF16,vulkan,atomic-bwd,0.001,0.02,constructive,tolerance-bounded,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+index_select_rows,F16,cpu,atomic-bwd,0.001,,constructive,n/a,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+index_select_rows,F16,cuda,atomic-bwd,0.001,,constructive,n/a,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+index_select_rows,F16,metal,atomic-bwd,0.001,,constructive,n/a,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+index_select_rows,F16,vulkan,atomic-bwd,0.001,,constructive,n/a,today,atomic-add bwd; deterministic variant available under KILN_DETERMINISTIC=1.
+rope,F32,cpu,rope,0.0,0.0,constructive,constructive,today,rotate; no reduction.
+rope,F32,cuda,rope,0.0,0.0,constructive,constructive,today,rotate; no reduction.
+rope,F32,metal,rope,0.0,0.0,constructive,constructive,today,rotate; no reduction.
+rope,F32,vulkan,rope,0.0,0.0,constructive,constructive,today,rotate; no reduction.
+rope,BF16,cpu,rope,0.001,0.01,constructive,constructive,today,rotate; no reduction.
+rope,BF16,cuda,rope,0.001,0.01,constructive,constructive,today,rotate; no reduction.
+rope,BF16,metal,rope,0.001,0.01,constructive,constructive,today,rotate; no reduction.
+rope,BF16,vulkan,rope,0.001,0.01,constructive,constructive,today,rotate; no reduction.
+flash_attn,BF16,cpu,attention,0.001,0.01,constructive,tolerance-bounded,today,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+flash_attn,BF16,cuda,attention,0.001,0.01,constructive,tolerance-bounded,today,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+flash_attn,BF16,metal,attention,0.001,0.01,constructive,tolerance-bounded,scheduled,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+flash_attn,BF16,vulkan,attention,0.001,0.01,constructive,tolerance-bounded,today,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+flash_attn_paged,BF16,cpu,attention,0.001,,constructive,n/a,today,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+flash_attn_paged,BF16,cuda,attention,0.001,,constructive,n/a,today,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+flash_attn_paged,BF16,metal,attention,0.001,,constructive,n/a,scheduled,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+flash_attn_paged,BF16,vulkan,attention,0.001,,constructive,n/a,scheduled,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+flash_attn_paged,F8E4M3,cpu,attention,0.05,,constructive,n/a,today,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+flash_attn_paged,F8E4M3,cuda,attention,0.05,,constructive,n/a,today,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+flash_attn_paged,F8E4M3,metal,attention,0.05,,constructive,n/a,scheduled,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+flash_attn_paged,F8E4M3,vulkan,attention,0.05,,constructive,n/a,scheduled,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+sdpa,F32,cpu,attention,0.0,1e-05,constructive,tolerance-bounded,today,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+sdpa,F32,cuda,attention,0.0,1e-05,constructive,tolerance-bounded,today,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+sdpa,F32,metal,attention,0.0,1e-05,constructive,tolerance-bounded,today,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+sdpa,F32,vulkan,attention,0.0,1e-05,constructive,tolerance-bounded,scheduled,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+sdpa,BF16,cpu,attention,0.001,0.01,constructive,tolerance-bounded,today,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+sdpa,BF16,cuda,attention,0.001,0.01,constructive,tolerance-bounded,today,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+sdpa,BF16,metal,attention,0.001,0.01,constructive,tolerance-bounded,today,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+sdpa,BF16,vulkan,attention,0.001,0.01,constructive,tolerance-bounded,scheduled,flash-attn bwd uses a deterministic variant under build flag; default path is tolerance-bounded.
+causal_conv1d_update,F32,cpu,conv1d,0.0,1e-05,constructive,constructive,today,fixed-window stride; deterministic.
+causal_conv1d_update,F32,cuda,conv1d,0.0,1e-05,constructive,constructive,today,fixed-window stride; deterministic.
+causal_conv1d_update,F32,metal,conv1d,0.0,1e-05,constructive,constructive,scheduled,fixed-window stride; deterministic.
+causal_conv1d_update,F32,vulkan,conv1d,0.0,1e-05,constructive,constructive,today,fixed-window stride; deterministic.
+causal_conv1d_update,BF16,cpu,conv1d,0.001,0.01,constructive,constructive,today,fixed-window stride; deterministic.
+causal_conv1d_update,BF16,cuda,conv1d,0.001,0.01,constructive,constructive,today,fixed-window stride; deterministic.
+causal_conv1d_update,BF16,metal,conv1d,0.001,0.01,constructive,constructive,scheduled,fixed-window stride; deterministic.
+causal_conv1d_update,BF16,vulkan,conv1d,0.001,0.01,constructive,constructive,today,fixed-window stride; deterministic.
+causal_conv1d_prefill,F32,cpu,conv1d,0.0,1e-05,constructive,constructive,today,fixed-window stride; deterministic.
+causal_conv1d_prefill,F32,cuda,conv1d,0.0,1e-05,constructive,constructive,today,fixed-window stride; deterministic.
+causal_conv1d_prefill,F32,metal,conv1d,0.0,1e-05,constructive,constructive,scheduled,fixed-window stride; deterministic.
+causal_conv1d_prefill,F32,vulkan,conv1d,0.0,1e-05,constructive,constructive,today,fixed-window stride; deterministic.
+causal_conv1d_prefill,BF16,cpu,conv1d,0.001,0.01,constructive,constructive,today,fixed-window stride; deterministic.
+causal_conv1d_prefill,BF16,cuda,conv1d,0.001,0.01,constructive,constructive,today,fixed-window stride; deterministic.
+causal_conv1d_prefill,BF16,metal,conv1d,0.001,0.01,constructive,constructive,scheduled,fixed-window stride; deterministic.
+causal_conv1d_prefill,BF16,vulkan,conv1d,0.001,0.01,constructive,constructive,today,fixed-window stride; deterministic.
+gdn_chunk_prep,F32,cpu,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_prep,F32,cuda,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_prep,F32,metal,gdn,0.0,1e-05,constructive,constructive,scheduled,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_prep,F32,vulkan,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_prep,BF16,cpu,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_prep,BF16,cuda,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_prep,BF16,metal,gdn,0.001,0.01,constructive,constructive,scheduled,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_prep,BF16,vulkan,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_scan,F32,cpu,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_scan,F32,cuda,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_scan,F32,metal,gdn,0.0,1e-05,constructive,constructive,scheduled,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_scan,F32,vulkan,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_scan,BF16,cpu,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_scan,BF16,cuda,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_scan,BF16,metal,gdn,0.001,0.01,constructive,constructive,scheduled,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunk_scan,BF16,vulkan,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gates,F32,cpu,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gates,F32,cuda,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gates,F32,metal,gdn,0.0,1e-05,constructive,constructive,scheduled,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gates,F32,vulkan,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gates,BF16,cpu,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gates,BF16,cuda,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gates,BF16,metal,gdn,0.001,0.01,constructive,constructive,scheduled,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gates,BF16,vulkan,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gated_rms_norm,F32,cpu,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gated_rms_norm,F32,cuda,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gated_rms_norm,F32,metal,gdn,0.0,1e-05,constructive,constructive,scheduled,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gated_rms_norm,F32,vulkan,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gated_rms_norm,BF16,cpu,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gated_rms_norm,BF16,cuda,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gated_rms_norm,BF16,metal,gdn,0.001,0.01,constructive,constructive,scheduled,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_gated_rms_norm,BF16,vulkan,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunkwise,F32,cpu,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunkwise,F32,cuda,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunkwise,F32,metal,gdn,0.0,1e-05,constructive,constructive,scheduled,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunkwise,F32,vulkan,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunkwise,BF16,cpu,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunkwise,BF16,cuda,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunkwise,BF16,metal,gdn,0.001,0.01,constructive,constructive,scheduled,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_chunkwise,BF16,vulkan,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_recurrent_step,F32,cpu,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_recurrent_step,F32,cuda,gdn,0.0,1e-05,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_recurrent_step,F32,metal,gdn,0.0,1e-05,constructive,constructive,scheduled,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_recurrent_step,F32,vulkan,gdn,0.0,1e-05,constructive,constructive,scheduled,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_recurrent_step,BF16,cpu,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_recurrent_step,BF16,cuda,gdn,0.001,0.01,constructive,constructive,today,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_recurrent_step,BF16,metal,gdn,0.001,0.01,constructive,constructive,scheduled,per-chunk fixed-stride reduction; deterministic within chunk.
+gdn_recurrent_step,BF16,vulkan,gdn,0.001,0.01,constructive,constructive,scheduled,per-chunk fixed-stride reduction; deterministic within chunk.
+flce_loss,F32,cpu,loss,0.0,1e-05,constructive,tolerance-bounded,today,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+flce_loss,F32,cuda,loss,0.0,1e-05,constructive,tolerance-bounded,today,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+flce_loss,F32,metal,loss,0.0,1e-05,constructive,tolerance-bounded,scheduled,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+flce_loss,F32,vulkan,loss,0.0,1e-05,constructive,tolerance-bounded,today,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+flce_loss,BF16,cpu,loss,0.001,0.01,constructive,tolerance-bounded,today,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+flce_loss,BF16,cuda,loss,0.001,0.01,constructive,tolerance-bounded,today,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+flce_loss,BF16,metal,loss,0.001,0.01,constructive,tolerance-bounded,scheduled,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+flce_loss,BF16,vulkan,loss,0.001,0.01,constructive,tolerance-bounded,today,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+opd_loss,F32,cpu,loss,0.0,1e-05,constructive,tolerance-bounded,today,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+opd_loss,F32,cuda,loss,0.0,1e-05,constructive,tolerance-bounded,today,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+opd_loss,F32,metal,loss,0.0,1e-05,constructive,tolerance-bounded,scheduled,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+opd_loss,F32,vulkan,loss,0.0,1e-05,constructive,tolerance-bounded,today,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+opd_loss,BF16,cpu,loss,0.001,0.01,constructive,tolerance-bounded,today,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+opd_loss,BF16,cuda,loss,0.001,0.01,constructive,tolerance-bounded,today,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+opd_loss,BF16,metal,loss,0.001,0.01,constructive,tolerance-bounded,scheduled,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+opd_loss,BF16,vulkan,loss,0.001,0.01,constructive,tolerance-bounded,today,cross-entropy-shaped reduction; bwd uses atomicAdd on the unreduced-grad accumulator.
+paged_kv_read,F32,cpu,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+paged_kv_read,F32,cuda,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+paged_kv_read,F32,metal,shape-only,0.0,,constructive,n/a,scheduled,no arithmetic; layout-only.
+paged_kv_read,F32,vulkan,shape-only,0.0,,constructive,n/a,scheduled,no arithmetic; layout-only.
+paged_kv_read,BF16,cpu,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+paged_kv_read,BF16,cuda,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+paged_kv_read,BF16,metal,shape-only,0.0,,constructive,n/a,scheduled,no arithmetic; layout-only.
+paged_kv_read,BF16,vulkan,shape-only,0.0,,constructive,n/a,scheduled,no arithmetic; layout-only.
+paged_kv_read,F8E4M3,cpu,shape-only,0.05,,constructive,n/a,today,no arithmetic; layout-only.
+paged_kv_read,F8E4M3,cuda,shape-only,0.05,,constructive,n/a,today,no arithmetic; layout-only.
+paged_kv_read,F8E4M3,metal,shape-only,0.05,,constructive,n/a,scheduled,no arithmetic; layout-only.
+paged_kv_read,F8E4M3,vulkan,shape-only,0.05,,constructive,n/a,scheduled,no arithmetic; layout-only.
+paged_kv_write_slot,F32,cpu,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+paged_kv_write_slot,F32,cuda,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+paged_kv_write_slot,F32,metal,shape-only,0.0,,constructive,n/a,scheduled,no arithmetic; layout-only.
+paged_kv_write_slot,F32,vulkan,shape-only,0.0,,constructive,n/a,scheduled,no arithmetic; layout-only.
+paged_kv_write_slot,BF16,cpu,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+paged_kv_write_slot,BF16,cuda,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+paged_kv_write_slot,BF16,metal,shape-only,0.0,,constructive,n/a,scheduled,no arithmetic; layout-only.
+paged_kv_write_slot,BF16,vulkan,shape-only,0.0,,constructive,n/a,scheduled,no arithmetic; layout-only.
+paged_kv_write_slot,F8E4M3,cpu,shape-only,0.05,,constructive,n/a,today,no arithmetic; layout-only.
+paged_kv_write_slot,F8E4M3,cuda,shape-only,0.05,,constructive,n/a,today,no arithmetic; layout-only.
+paged_kv_write_slot,F8E4M3,metal,shape-only,0.05,,constructive,n/a,scheduled,no arithmetic; layout-only.
+paged_kv_write_slot,F8E4M3,vulkan,shape-only,0.05,,constructive,n/a,scheduled,no arithmetic; layout-only.
+argmax,F32,cpu,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+argmax,F32,cuda,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+argmax,F32,metal,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+argmax,F32,vulkan,shape-only,0.0,,constructive,n/a,scheduled,no arithmetic; layout-only.
+argmax,BF16,cpu,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+argmax,BF16,cuda,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+argmax,BF16,metal,shape-only,0.0,,constructive,n/a,today,no arithmetic; layout-only.
+argmax,BF16,vulkan,shape-only,0.0,,constructive,n/a,scheduled,no arithmetic; layout-only.
+topk,F32,cpu,reduction,0.0,,constructive,n/a,today,fixed-tree reduction; deterministic.
+topk,F32,cuda,reduction,0.0,,constructive,n/a,today,fixed-tree reduction; deterministic.
+topk,F32,metal,reduction,0.0,,constructive,n/a,today,fixed-tree reduction; deterministic.
+topk,F32,vulkan,reduction,0.0,,constructive,n/a,scheduled,fixed-tree reduction; deterministic.
+topk,BF16,cpu,reduction,0.001,,constructive,n/a,today,fixed-tree reduction; deterministic.
+topk,BF16,cuda,reduction,0.001,,constructive,n/a,today,fixed-tree reduction; deterministic.
+topk,BF16,metal,reduction,0.001,,constructive,n/a,today,fixed-tree reduction; deterministic.
+topk,BF16,vulkan,reduction,0.001,,constructive,n/a,scheduled,fixed-tree reduction; deterministic.
+apply_penalties,F32,cpu,elementwise,0.0,,constructive,n/a,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+apply_penalties,F32,cuda,elementwise,0.0,,constructive,n/a,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+apply_penalties,F32,metal,elementwise,0.0,,constructive,n/a,scheduled,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+apply_penalties,F32,vulkan,elementwise,0.0,,constructive,n/a,scheduled,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+apply_penalties,BF16,cpu,elementwise,0.001,,constructive,n/a,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+apply_penalties,BF16,cuda,elementwise,0.001,,constructive,n/a,today,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+apply_penalties,BF16,metal,elementwise,0.001,,constructive,n/a,scheduled,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
+apply_penalties,BF16,vulkan,elementwise,0.001,,constructive,n/a,scheduled,bit-stable in forward; atomic-free in backward via bcast-aware reduction.
