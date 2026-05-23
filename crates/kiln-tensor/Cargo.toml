@@ -25,6 +25,11 @@ half = "2"
 # Safe byte-cast for typed CPU constructors (from_slice / to_vec).
 bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 
+# Phase 1.9 — safetensors loader. Pinned to the workspace version so
+# the loader reads the same file format every other crate writes.
+safetensors = { workspace = true }
+memmap2 = { workspace = true }
+
 # Optional — pulled in under the `cuda` / `metal` features only. This is
 # the workspace's candle dep so the cudarc version stays coherent with
 # the rest of the crates. Phase 7 of #1082 (candle removal) replaces
