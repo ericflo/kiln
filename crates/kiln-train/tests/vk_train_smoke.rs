@@ -3463,11 +3463,17 @@ fn vk_opd_train_step_gdn_state_training_loss_decreases() -> Result<()> {
 /// per-mode override has to win over `KILN_NO_GRAD_CHECKPOINT` —
 /// otherwise users can't pin recompute on a single mode without
 /// affecting SFT segmenting too.
+// Local env lock for the dispatch-override test — env vars are
+// process-wide and other tests in this binary mustn't race with our
+// set/remove sequences. We can't use kiln_core::env_flag::TEST_ENV_LOCK
+// since it's `cfg(test)`-gated inside kiln-core and not visible
+// downstream. The risk surface is just the vk_train_smoke test binary;
+// a local Mutex is sufficient.
+static ENV_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
+
 #[test]
 fn vk_recommended_recompute_grpo_opd_env_overrides_are_honored() {
-    // Take the test env lock once at the top — env vars are process-wide
-    // state and other tests in the same binary may touch them.
-    let _lock = kiln_core::env_flag::TEST_ENV_LOCK
+    let _lock = ENV_OVERRIDE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
 
