@@ -22150,6 +22150,7 @@ mod tests {
     /// statement than "matches the candle reference within tolerance": each
     /// output cell is computed by a single thread on both paths with the same
     /// FMA chain and bf16 rounding, so equality is the contract.
+    #[cfg(feature = "cuda")]
     #[test]
     fn test_gdn_full_chunk_forward_multiblock_byte_eq_single_block() -> Result<()> {
         use half::bf16;
