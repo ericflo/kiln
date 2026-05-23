@@ -55,8 +55,20 @@ SUBSTRATE_CRATES=(
 
 cd "$KILN_REPO_DIR"
 
-echo "[1/$([ $GPU_SMOKE -eq 1 ] && echo 3 || echo 2)] cargo check --workspace"
-cargo check --workspace 2>&1 | tee "$LOG_DIR/substrate-validate-check.log"
+# `cargo check --workspace` is intentionally avoided: it pulls in the
+# CUDA kernel crates (kiln-flash-attn, kiln-gdn-kernel,
+# kiln-rmsnorm-kernel, etc.) whose build.rs scripts run nvcc in -G
+# debug mode and consume tens of GB of host RAM (OOM-killed on
+# A6000 host's 48 GB system memory; observed 2026-05-23, exit 137).
+# Substrate crates are CPU-only at the build-script level, so check
+# them directly. The CUDA kernel crates are exercised via the
+# release-mode `--features cuda` build under `--gpu-smoke`.
+echo "[1/$([ $GPU_SMOKE -eq 1 ] && echo 3 || echo 2)] cargo check (substrate crates)"
+CHECK_ARGS=()
+for c in "${SUBSTRATE_CRATES[@]}"; do
+  CHECK_ARGS+=("-p" "$c")
+done
+cargo check "${CHECK_ARGS[@]}" 2>&1 | tee "$LOG_DIR/substrate-validate-check.log"
 
 echo "[2/$([ $GPU_SMOKE -eq 1 ] && echo 3 || echo 2)] cargo test (substrate crates)"
 ARGS=()
