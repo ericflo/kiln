@@ -23,7 +23,13 @@ BIN="${KILN_BENCH_BIN:-target/release/kiln-bench}"
 SEEDS=("${KILN_BENCH_SEED:-42}")
 SEQ_LENS=(1024 2048 4096 8192)
 MAX_OUT="${KILN_BENCH_MAX_OUTPUT:-1}"
-WARMUP="${KILN_BENCH_WARMUP:-1}"
+# Warmup matters a lot: cuBLAS picks a per-(M,N,K) algorithm on the first
+# call and caches it, so the first measurement is ~2× a steady-state run.
+# A single warmup pass leaves several "still warming up" layers in the
+# tail; 4 runs lets the GPU clocks settle and exhausts cuBLAS's algorithm
+# search before the timed run.
+WARMUP="${KILN_BENCH_WARMUP:-4}"
+ITERATIONS="${KILN_BENCH_ITERATIONS:-3}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -93,8 +99,18 @@ run_one() {
 printf '%-8s | %-14s | %-14s | %-10s\n' 'seq_len' 'legacy_ms' 'fused_ms' 'speedup'
 printf -- '---------+----------------+----------------+-----------\n'
 for seq_len in "${SEQ_LENS[@]}"; do
-  legacy_ms=$(run_one legacy "$seq_len" 1)
-  fused_ms=$(run_one fused  "$seq_len" 0)
-  speedup=$(awk -v a="$legacy_ms" -v b="$fused_ms" 'BEGIN{ if (b>0) printf "%.3fx", a/b; else print "n/a" }')
-  printf '%-8s | %14s | %14s | %-10s\n' "$seq_len" "$legacy_ms" "$fused_ms" "$speedup"
+  # Average ITERATIONS runs to suppress cuBLAS algo-cache noise / GPU
+  # clock-up jitter. Each run already does WARMUP passes internally
+  # before the timed prefill.
+  legacy_sum=0; fused_sum=0
+  for ((i=1; i<=ITERATIONS; i++)); do
+    legacy_ms=$(run_one legacy "$seq_len" 1)
+    fused_ms=$(run_one fused  "$seq_len" 0)
+    legacy_sum=$(awk -v a="$legacy_sum" -v b="$legacy_ms" 'BEGIN{ printf "%.6f", a+b }')
+    fused_sum=$(awk -v a="$fused_sum" -v b="$fused_ms" 'BEGIN{ printf "%.6f", a+b }')
+  done
+  legacy_avg=$(awk -v s="$legacy_sum" -v n="$ITERATIONS" 'BEGIN{ printf "%.3f", s/n }')
+  fused_avg=$(awk -v s="$fused_sum" -v n="$ITERATIONS" 'BEGIN{ printf "%.3f", s/n }')
+  speedup=$(awk -v a="$legacy_avg" -v b="$fused_avg" 'BEGIN{ if (b>0) printf "%.3fx", a/b; else print "n/a" }')
+  printf '%-8s | %14s | %14s | %-10s\n' "$seq_len" "$legacy_avg" "$fused_avg" "$speedup"
 done
