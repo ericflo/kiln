@@ -1,0 +1,14 @@
+[package]
+name = "kiln-kt-bridge"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared helpers for Phase 7 kt-API ports (CudaStorage downcast, alloc, device-pointer extraction) used by the kernel crates."
+
+[dependencies]
+# Same CUDA pinning as the kernel crates. kiln-kt-bridge always uses
+# kiln-tensor's cuda feature — there is no non-CUDA build.
+candle-core = { workspace = true, features = ["cuda"] }
+kiln-tensor = { workspace = true, features = ["cuda"] }
