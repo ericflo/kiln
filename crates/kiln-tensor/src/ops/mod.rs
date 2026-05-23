@@ -22,6 +22,7 @@ pub mod l2norm;
 pub mod matmul;
 pub mod rmsnorm;
 pub mod rope;
+pub mod silu_mul;
 pub mod softmax;
 
 pub use activation::{sigmoid, silu, ActivationOp, UnaryKind};
@@ -33,4 +34,5 @@ pub use l2norm::{l2_norm, L2NormOp};
 pub use matmul::{matmul, MatmulOp};
 pub use rmsnorm::{rms_norm, RmsNormOp};
 pub use rope::{rope, RopeOp};
+pub use silu_mul::{mul_sigmoid_gate, MulSigmoidGateOp};
 pub use softmax::{softmax_last_dim, SoftmaxLastDimOp};
