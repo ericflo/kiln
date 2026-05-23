@@ -1,0 +1,14 @@
+dtype,count,first_seen,top_5_crates
+FP32 (F32),1116,crates/kiln-marlin-gemm/tests/parity.rs:106,kiln-model=639;kiln-train=179;kiln-vulkan-kernel=104;kiln-rmsnorm-kernel=71;kiln-opd-loss-kernel=36
+BF16,1038,crates/kiln-marlin-gemm/src/lib.rs:152,kiln-model=667;kiln-gdn-kernel=134;kiln-rmsnorm-kernel=113;kiln-vulkan-kernel=32;kiln-flash-attn=31
+FP16 (F16),28,crates/kiln-marlin-gemm/src/lib.rs:161,kiln-model=16;kiln-server=7;kiln-marlin-gemm=3;kiln-train=1;kiln-vulkan-kernel=1
+U8,9,crates/kiln-model/src/decode_buffers.rs:29,kiln-model=9
+I64,1,crates/kiln-model/src/cuda_train.rs:316,kiln-model=1
+U32,14,crates/kiln-flash-attn/src/lib.rs:286,kiln-model=6;kiln-flash-attn=3;kiln-train=3;kiln-flce-kernel=1;kiln-vulkan-kernel=1
+FP8 E4M3 (candle),0,,
+FP8 E5M2 (candle),0,,
+FP8 E4M3 (kiln-custom),9,crates/kiln-model/src/decode_buffers.rs:21,kiln-model=9
+FP8 E5M2 (kiln-custom),0,,
+FP8 K/V cache scales,24,crates/kiln-model/src/kv_cache.rs:35,kiln-model=24
+INT4 packed (Marlin),112,crates/kiln-marlin-gemm/build.rs:19,kiln-model=80;kiln-marlin-gemm=31;kiln-gdn-kernel=1
+FP4Packed (future),0,,
