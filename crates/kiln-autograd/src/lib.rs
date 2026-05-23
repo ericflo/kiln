@@ -46,9 +46,12 @@
 #![warn(rust_2018_idioms)]
 
 mod backward_op;
+pub mod backwards;
 mod grad_store;
 mod tape;
 
 pub use backward_op::{BackwardOp, BoxedBackwardOp};
+pub use backwards::elementwise::{AddBackward, DivBackward, MulBackward, SubBackward};
+pub use backwards::matmul::MatmulBackward;
 pub use grad_store::GradStore;
 pub use tape::{Tape, TapeNode};
