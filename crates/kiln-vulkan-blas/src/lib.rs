@@ -36,10 +36,12 @@
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
 
+mod backend_matmul;
 mod cooperative_matrix;
 mod pipeline_cache;
 mod workgroup;
 
+pub use backend_matmul::VulkanBackendMatmul;
 pub use cooperative_matrix::VkCooperativeMatrixSupport;
 pub use pipeline_cache::VkPipelineCacheKey;
 pub use workgroup::VkWorkgroupConfig;
