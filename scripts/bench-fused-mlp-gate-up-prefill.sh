@@ -67,9 +67,21 @@ run_one() {
     echo "$out" >&2
     return 1
   }
-  # Match "    Prefill: NN.Nms (NN tok/s)" emitted by the latency path.
+  # Prefer the precise prefill_time_ms from the trailing JSON dump;
+  # fall back to the eprintln line if jq isn't available.
   local prefill_ms
-  prefill_ms=$(echo "$out" | grep -oE 'Prefill: [0-9]+\.[0-9]+ms' | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+  if command -v jq >/dev/null 2>&1; then
+    # The bench prints a trailing JSON object containing
+    # `.latency.prefill_time_ms`. Strip everything before the first `{`
+    # so tracing logs / banners don't break parsing.
+    local json
+    json=$(echo "$out" | awk '/^\{/{flag=1} flag{print}')
+    prefill_ms=$(echo "$json" | jq -r '.latency.prefill_time_ms // empty' 2>/dev/null | head -1)
+  fi
+  if [[ -z "${prefill_ms:-}" ]]; then
+    # eprintln fallback: "    Prefill: NN.Nms" or "    Prefill (paged): NN.Nms"
+    prefill_ms=$(echo "$out" | grep -oE 'Prefill( \(paged\))?: [0-9]+\.[0-9]+ms' | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+  fi
   if [[ -z "$prefill_ms" ]]; then
     echo "[$label seq=$seq_len] could not parse prefill_time_ms" >&2
     echo "$out" | tail -20 >&2

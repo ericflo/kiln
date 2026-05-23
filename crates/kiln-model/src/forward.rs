@@ -5671,99 +5671,109 @@ fn swiglu_ffn_impl_no_chunk(
     }
 
     // CUDA prefill fast path: single [B*T, hidden] @ [hidden, 2*intermediate]
-    // GEMM against the cached `gate_up_proj_t`, then slice gate/up halves out
-    // of the result. Replaces two separate `[B*T, hidden] @ [hidden,
-    // intermediate]` matmuls. Per the PR goal: per-layer gate+up was ~6.3 ms
-    // vs a ~2.5 ms compute roof, because the launch / weight-stream cost was
-    // doubled across the pair. Gated identically to the Marlin/LoRA-aware
+    // GEMM against the cached `gate_up_proj_t`, then either:
+    //   (a) feed the packed result straight into the stride-aware fused
+    //       silu*mul kernel and jump to the down projection (preferred —
+    //       skips the per-half .contiguous() memcpys), or
+    //   (b) fall back to splitting into gate/up halves for the legacy
+    //       hidden builder when the packed silu*mul isn't available (e.g.
+    //       metal builds, dtype mismatch, kill switch off).
+    // Replaces two separate `[B*T, hidden] @ [hidden, intermediate]`
+    // matmuls. Per the PR goal: per-layer gate+up was ~6.3 ms vs a ~2.5 ms
+    // compute roof, because the launch / weight-stream cost was doubled
+    // across the pair. Gated identically to the Marlin/LoRA-aware
     // branches above — those callers still need the standalone projections.
-    let (gate, up): (Tensor, Tensor) = {
-        #[cfg(feature = "cuda")]
-        {
-            let mut fused = None;
-            if !has_mlp_gate_up_lora && !has_marlin && !cuda_fused_mlp_gate_up_prefill_disabled() {
-                if let Some(gate_up_proj_t) = mlp.gate_up_proj_t.as_ref() {
-                    if x.dtype() == DType::BF16
-                        && !x.track_op()
-                        && matches!(x.device(), Device::Cuda(_))
-                        && gate_up_proj_t.dtype() == DType::BF16
-                        && !gate_up_proj_t.track_op()
-                        && matches!(gate_up_proj_t.device(), Device::Cuda(_))
-                        && gate_up_proj_t.is_contiguous()
+    #[cfg(feature = "cuda")]
+    {
+        if !has_mlp_gate_up_lora && !has_marlin && !cuda_fused_mlp_gate_up_prefill_disabled() {
+            if let Some(gate_up_proj_t) = mlp.gate_up_proj_t.as_ref() {
+                if x.dtype() == DType::BF16
+                    && !x.track_op()
+                    && matches!(x.device(), Device::Cuda(_))
+                    && gate_up_proj_t.dtype() == DType::BF16
+                    && !gate_up_proj_t.track_op()
+                    && matches!(gate_up_proj_t.device(), Device::Cuda(_))
+                    && gate_up_proj_t.is_contiguous()
+                {
+                    if let (Ok(g_dim), Ok(u_dim)) =
+                        (mlp.gate_proj_t.dim(1), mlp.up_proj_t.dim(1))
                     {
-                        if let (Ok(g_dim), Ok(u_dim)) =
-                            (mlp.gate_proj_t.dim(1), mlp.up_proj_t.dim(1))
-                        {
-                            let gu_dims = gate_up_proj_t.dims();
-                            if gu_dims.len() == 2 && gu_dims[1] == g_dim + u_dim {
+                        let gu_dims = gate_up_proj_t.dims();
+                        if gu_dims.len() == 2 && gu_dims[1] == g_dim + u_dim && g_dim == u_dim {
+                            let stage_profile =
+                                start_mlp_stage_profile(profile_device, profile_context)?;
+                            let gate_up = {
+                                kiln_nvtx::range!(c"kiln/mlp/gate_up_fused_prefill");
+                                broadcast_matmul_cpu_compatible(x, gate_up_proj_t).context(
+                                    "cuda fused MLP gate+up prefill matmul",
+                                )?
+                            };
+                            finish_mlp_stage_profile(
+                                profile_device,
+                                profile_context,
+                                "gate_up_fused_prefill",
+                                seq_len,
+                                stage_profile,
+                            )?;
+                            if kiln_rmsnorm_kernel::supports_mlp_silu_mul_packed(&gate_up, g_dim) {
                                 let stage_profile =
                                     start_mlp_stage_profile(profile_device, profile_context)?;
-                                let gate_up = {
-                                    kiln_nvtx::range!(c"kiln/mlp/gate_up_fused_prefill");
-                                    broadcast_matmul_cpu_compatible(x, gate_up_proj_t).context(
-                                        "cuda fused MLP gate+up prefill matmul",
+                                let hidden = {
+                                    kiln_nvtx::range!(c"kiln/mlp/gate_silu_hidden_mul_packed");
+                                    kiln_rmsnorm_kernel::fused_mlp_silu_mul_packed(
+                                        &gate_up, g_dim,
+                                    )
+                                    .context(
+                                        "cuda fused MLP packed silu*mul kernel failed",
                                     )?
                                 };
                                 finish_mlp_stage_profile(
                                     profile_device,
                                     profile_context,
-                                    "gate_up_fused_prefill",
+                                    "gate_silu_hidden_mul_packed",
                                     seq_len,
                                     stage_profile,
                                 )?;
-                                // narrow() produces a non-contiguous strided
-                                // view; contiguous() materializes the halves
-                                // so the downstream fused silu*mul / metal
-                                // gemv kernels (which gate on
-                                // `is_contiguous()`) keep their fast path.
-                                // Without this the silu+mul splits into two
-                                // separate kernel launches, eating most of
-                                // the matmul-fusion win.
-                                let g = gate_up
-                                    .narrow(2, 0, g_dim)?
-                                    .contiguous()
-                                    .context("cuda fused MLP gate split contiguous")?;
-                                let u = gate_up
-                                    .narrow(2, g_dim, u_dim)?
-                                    .contiguous()
-                                    .context("cuda fused MLP up split contiguous")?;
-                                fused = Some((g, u));
+                                let stage_profile =
+                                    start_mlp_stage_profile(profile_device, profile_context)?;
+                                let out = {
+                                    kiln_nvtx::range!(c"kiln/mlp/down");
+                                    mlp_proj_forward_decode_if(
+                                        backend,
+                                        use_metal_decode_gemv,
+                                        &hidden,
+                                        &mlp.down_proj_t,
+                                        mlp.down_proj_marlin.as_ref(),
+                                        lora_layer.and_then(|l| l.down_proj.as_ref()),
+                                        lora_scale,
+                                    )?
+                                };
+                                finish_mlp_stage_profile(
+                                    profile_device,
+                                    profile_context,
+                                    "down_proj",
+                                    seq_len,
+                                    stage_profile,
+                                )?;
+                                return Ok(out);
                             }
                         }
                     }
                 }
             }
-            if let Some((g, u)) = fused {
-                (g, u)
-            } else {
-                swiglu_ffn_split_gate_up(
-                    backend,
-                    x,
-                    mlp,
-                    lora_layer,
-                    lora_scale,
-                    use_metal_decode_gemv,
-                    profile_device,
-                    profile_context,
-                    seq_len,
-                )?
-            }
         }
-        #[cfg(not(feature = "cuda"))]
-        {
-            swiglu_ffn_split_gate_up(
-                backend,
-                x,
-                mlp,
-                lora_layer,
-                lora_scale,
-                use_metal_decode_gemv,
-                profile_device,
-                profile_context,
-                seq_len,
-            )?
-        }
-    };
+    }
+    let (gate, up): (Tensor, Tensor) = swiglu_ffn_split_gate_up(
+        backend,
+        x,
+        mlp,
+        lora_layer,
+        lora_scale,
+        use_metal_decode_gemv,
+        profile_device,
+        profile_context,
+        seq_len,
+    )?;
     let hidden = {
         #[cfg(feature = "metal")]
         {

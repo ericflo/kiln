@@ -206,6 +206,14 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_fused_mlp_silu_mul_packed_bf16(
+        gate_up_packed: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        rows: i64,
+        cols: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_fused_sigmoid_mul_bf16(
         x: *const core::ffi::c_void,
         gate: *const core::ffi::c_void,
@@ -2211,6 +2219,95 @@ pub fn fused_mlp_silu_mul(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
             );
             if status != 0 {
                 candle_core::bail!("kiln_fused_mlp_silu_mul_bf16 failed with status {status}");
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Whether the packed fused MLP `silu(gate) * up` kernel can handle this
+/// `gate_up_packed` tensor. The kernel expects a contiguous BF16 tensor
+/// whose last dim is `2 * cols` — it will read gate from the first `cols`
+/// of each row and up from the next `cols`. `cols` is supplied separately
+/// (the model knows the intermediate width via the FFN weight shape) so
+/// the caller can produce a `[B, T, 2*intermediate]` packed tensor and
+/// project it into a `[B, T, intermediate]` output in one launch.
+pub fn supports_mlp_silu_mul_packed(gate_up_packed: &Tensor, cols: usize) -> bool {
+    let dims = gate_up_packed.dims();
+    matches!(gate_up_packed.device(), Device::Cuda(_))
+        && gate_up_packed.dtype() == DType::BF16
+        && gate_up_packed.is_contiguous()
+        && !dims.is_empty()
+        && dims[dims.len() - 1] == cols * 2
+        && cols > 0
+        && gate_up_packed.elem_count() <= i64::MAX as usize
+}
+
+/// Run fused bf16 `silu(gate_packed[..., :cols]) * gate_packed[..., cols:2*cols]`.
+///
+/// Output is BF16 with the same leading shape as `gate_up_packed` and a
+/// trailing dim of `cols`. The kernel reads each output element's gate and
+/// up operands from adjacent halves of the same packed row, avoiding the
+/// explicit `.contiguous()` copy required when splitting the packed matmul
+/// output via `Tensor::narrow` first.
+pub fn fused_mlp_silu_mul_packed(gate_up_packed: &Tensor, cols: usize) -> Result<Tensor> {
+    if !supports_mlp_silu_mul_packed(gate_up_packed, cols) {
+        candle_core::bail!(
+            "kiln-rmsnorm-kernel: mlp_silu_mul_packed unsupported gate_up shape={:?} dtype={:?} cols={cols}",
+            gate_up_packed.shape(),
+            gate_up_packed.dtype(),
+        );
+    }
+    let dims = gate_up_packed.dims();
+    let rows: usize = dims[..dims.len() - 1].iter().product();
+    let mut out_dims: Vec<usize> = dims[..dims.len() - 1].to_vec();
+    out_dims.push(cols);
+    let out = unsafe { Tensor::empty(out_dims.as_slice(), DType::BF16, gate_up_packed.device())? };
+    if rows == 0 {
+        return Ok(out);
+    }
+
+    {
+        let (gate_up_storage, gate_up_layout) = gate_up_packed.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+        let gate_up_cuda = match &*gate_up_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!(
+                "kiln-rmsnorm-kernel: mlp_silu_mul_packed gate_up must be CUDA"
+            ),
+        };
+        let out_cuda = match &*out_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!(
+                "kiln-rmsnorm-kernel: mlp_silu_mul_packed out must be CUDA"
+            ),
+        };
+
+        let stream = gate_up_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        let gate_up_slice = gate_up_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(gate_up_layout.start_offset()..);
+        let out_slice = out_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(out_layout.start_offset()..);
+
+        unsafe {
+            let (gate_up_ptr, _g1) = gate_up_slice.device_ptr(&stream);
+            let (out_ptr, _g2) = out_slice.device_ptr(&stream);
+            let status = kiln_fused_mlp_silu_mul_packed_bf16(
+                gate_up_ptr as *const _,
+                out_ptr as *mut _,
+                rows as i64,
+                cols as i64,
+                raw_stream,
+            );
+            if status != 0 {
+                candle_core::bail!(
+                    "kiln_fused_mlp_silu_mul_packed_bf16 failed with status {status}"
+                );
             }
         }
     }
