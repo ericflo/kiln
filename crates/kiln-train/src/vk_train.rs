@@ -1504,6 +1504,147 @@ pub fn vk_recommended_checkpoint_plan_for_workload(
     }
 }
 
+/// Workload-shape-aware "recompute vs full-tape" decision for the
+/// vk-native GRPO + OPD trainers.
+///
+/// Issue #1076: GRPO and OPD have two production step kernels each — a
+/// recompute step (`vk_recompute_*_train_step_with_state`) that walks
+/// the model forward layer-by-layer reverse-recompute-style, and a
+/// non-recompute step (`vk_grpo_train_step_with_state` /
+/// `vk_opd_train_step_with_state`) that keeps the full activation tape
+/// in GPU memory for a single backward pass. Unlike SFT (which uses
+/// segmented checkpointing as a middle option), GRPO/OPD only have
+/// these two binary modes.
+///
+/// Returns:
+/// * `true`  — recompute (memory-saving, slightly slower).
+/// * `false` — non-recompute / full-tape (faster, more VRAM).
+///
+/// Dispatch order:
+/// 1. **Forced recompute** if `force_recompute_env` env var is `1` /
+///    `true`. (Per-mode override: `KILN_VK_RECOMPUTE_GRPO` /
+///    `KILN_VK_RECOMPUTE_OPD`.)
+/// 2. **Forced non-recompute** if `KILN_NO_GRAD_CHECKPOINT=1`.
+/// 3. **Workload-shape auto-tune** via
+///    [`kiln_core::vram::recommended_checkpoint_plan`]:
+///    - `Plan::Disabled` → non-recompute (activation tape fits
+///      comfortably; recompute would only add forward work).
+///    - `Plan::Enabled` → recompute (activations would crowd VRAM).
+///    - `Plan::UserOverride` → recompute (the user wanted
+///      checkpointing on the SFT path — be conservative on
+///      GRPO/OPD too).
+/// 4. **VRAM unknown** (`None`) → conservative recompute.
+pub fn vk_recommended_recompute_for_grpo_opd(
+    num_layers: usize,
+    max_seq_len_tokens: usize,
+    hidden_size: usize,
+    intermediate_size: usize,
+    vocab_size: usize,
+    bytes_per_base_param: usize,
+    force_recompute_env: &str,
+    mode_label: &str,
+) -> bool {
+    // 1. Per-mode hard override → always recompute.
+    if std::env::var(force_recompute_env)
+        .as_deref()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        tracing::info!(
+            mode = mode_label,
+            env = force_recompute_env,
+            "vk-native {mode_label}: recompute forced via {force_recompute_env}=1",
+        );
+        return true;
+    }
+
+    // 2. KILN_NO_GRAD_CHECKPOINT=1 → force non-recompute (caller is
+    //    asserting they have plenty of VRAM and don't want the per-
+    //    layer reforward cost).
+    if std::env::var("KILN_NO_GRAD_CHECKPOINT")
+        .as_deref()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        tracing::info!(
+            mode = mode_label,
+            "vk-native {mode_label}: non-recompute (full activation tape) forced via KILN_NO_GRAD_CHECKPOINT=1",
+        );
+        return false;
+    }
+
+    // 3. Workload-shape auto-tune via the same plan function the SFT
+    //    side uses (#1073 / #1074).
+    let vram = kiln_core::vram::detect_vram();
+    let base_bytes = kiln_core::vram::estimate_base_model_bytes(
+        num_layers,
+        hidden_size,
+        intermediate_size,
+        vocab_size,
+        bytes_per_base_param,
+    );
+    match kiln_core::vram::recommended_checkpoint_plan(
+        &vram,
+        num_layers,
+        max_seq_len_tokens,
+        hidden_size,
+        base_bytes,
+    ) {
+        Some(kiln_core::vram::CheckpointPlan::Disabled {
+            max_act_gib,
+            available_gib,
+        }) => {
+            tracing::info!(
+                mode = mode_label,
+                max_seq_len_tokens,
+                activation_tape_gib = format!("{max_act_gib:.2}"),
+                available_gib = format!("{available_gib:.2}"),
+                vram_total_gb = vram.total_bytes as f64 / 1e9,
+                vram_source = %vram.source,
+                "vk-native {mode_label} auto-tuned: non-recompute (full activation tape) — fits comfortably in available VRAM",
+            );
+            false
+        }
+        Some(kiln_core::vram::CheckpointPlan::Enabled {
+            num_segments,
+            max_act_gib,
+            per_segment_gib,
+            available_gib,
+        }) => {
+            tracing::info!(
+                mode = mode_label,
+                sft_num_segments_equivalent = num_segments,
+                max_seq_len_tokens,
+                activation_tape_gib = format!("{max_act_gib:.2}"),
+                per_segment_gib = format!("{per_segment_gib:.2}"),
+                available_gib = format!("{available_gib:.2}"),
+                vram_total_gb = vram.total_bytes as f64 / 1e9,
+                vram_source = %vram.source,
+                "vk-native {mode_label} auto-tuned: recompute (activation tape would crowd VRAM)",
+            );
+            true
+        }
+        Some(kiln_core::vram::CheckpointPlan::UserOverride) => {
+            // SFT side honors KILN_GRAD_CHECKPOINT_SEGMENTS to engage
+            // checkpointing. Mirror that intent on GRPO/OPD by picking
+            // the conservative recompute path.
+            tracing::info!(
+                mode = mode_label,
+                "vk-native {mode_label}: user override on SFT checkpointing — picking conservative recompute on GRPO/OPD",
+            );
+            true
+        }
+        None => {
+            // VRAM unknown — conservative recompute.
+            tracing::info!(
+                mode = mode_label,
+                "vk-native {mode_label}: VRAM unknown — picking conservative recompute",
+            );
+            true
+        }
+    }
+}
+
 /// Single-step training (no gradient checkpointing — full forward
 /// tape held in GPU memory).
 ///
@@ -3985,6 +4126,23 @@ pub fn vk_native_grpo_train(
     };
     let num_gdn_layers = vk_count_gdn_layers(&vk_weights);
     let total_completions: usize = groups.iter().map(|g| g.completions.len()).sum();
+
+    // Workload-shape recompute decision (#1076). One up-front pick
+    // based on the model's max context — completions vary length so
+    // this errs conservative; per-completion overrides for ECHO still
+    // apply at dispatch time. ECHO is only supported by the recompute
+    // step, so any ECHO-active completion forces recompute.
+    let workload_use_recompute = vk_recommended_recompute_for_grpo_opd(
+        model_config.num_layers,
+        model_config.max_position_embeddings,
+        model_config.hidden_size,
+        model_config.intermediate_size,
+        model_config.vocab_size,
+        2, // BF16 base weights
+        "KILN_VK_RECOMPUTE_GRPO",
+        "GRPO",
+    );
+
     let mut data_stats = crate::train_receipt::DataStatsReceipt {
         groups_read: groups.len(),
         completions_read: total_completions,
@@ -4109,38 +4267,71 @@ pub fn vk_native_grpo_train(
                 }
             });
 
-            let step_report = vk_recompute_grpo_train_step_with_state(
-                &vk_weights,
-                &lora_layers,
-                &comp.input_ids,
-                &active_rows,
-                &labels,
-                &ref_log_probs,
-                advantages[comp_idx] as f32,
-                config.clip_epsilon as f32,
-                vk_effective_kl_coeff(config) as f32,
-                model_config,
-                num_gdn_layers,
-                &mut adamw,
-                &cfg,
-                config.optimizer,
-                optimizer_step,
-                echo_params,
-            )
-            .with_context(|| {
-                format!(
-                    "vk-native GRPO+ECHO policy step group {} completion {}",
-                    group_step,
-                    comp_idx + 1
+            // Dispatch (#1076): if ECHO is active for this completion,
+            // we MUST use recompute (only the recompute step has the
+            // ECHO env-CE term wired in). Otherwise honor the up-front
+            // workload-shape decision.
+            let force_recompute_echo = echo_params.is_some();
+            let loss = if force_recompute_echo || workload_use_recompute {
+                let step_report = vk_recompute_grpo_train_step_with_state(
+                    &vk_weights,
+                    &lora_layers,
+                    &comp.input_ids,
+                    &active_rows,
+                    &labels,
+                    &ref_log_probs,
+                    advantages[comp_idx] as f32,
+                    config.clip_epsilon as f32,
+                    vk_effective_kl_coeff(config) as f32,
+                    model_config,
+                    num_gdn_layers,
+                    &mut adamw,
+                    &cfg,
+                    config.optimizer,
+                    optimizer_step,
+                    echo_params,
                 )
-            })?;
-            let loss = step_report.loss;
-            if let Some(echo_env_ce) = step_report.echo_env_ce {
-                if comp.total_obs_len > 0 {
-                    group_echo_ce_sum += f64::from(echo_env_ce) * comp.total_obs_len as f64;
-                    group_echo_ce_weight = group_echo_ce_weight.saturating_add(comp.total_obs_len);
+                .with_context(|| {
+                    format!(
+                        "vk-native GRPO+ECHO policy step group {} completion {}",
+                        group_step,
+                        comp_idx + 1
+                    )
+                })?;
+                if let Some(echo_env_ce) = step_report.echo_env_ce {
+                    if comp.total_obs_len > 0 {
+                        group_echo_ce_sum += f64::from(echo_env_ce) * comp.total_obs_len as f64;
+                        group_echo_ce_weight =
+                            group_echo_ce_weight.saturating_add(comp.total_obs_len);
+                    }
                 }
-            }
+                step_report.loss
+            } else {
+                let mut gdn_state = fresh_gdn_state(&vk_device, model_config, num_gdn_layers)?;
+                vk_grpo_train_step_with_state(
+                    &vk_weights,
+                    &lora_layers,
+                    &comp.input_ids,
+                    &active_rows,
+                    &labels,
+                    &ref_log_probs,
+                    advantages[comp_idx] as f32,
+                    config.clip_epsilon as f32,
+                    vk_effective_kl_coeff(config) as f32,
+                    gdn_state.as_mut(),
+                    &mut adamw,
+                    &cfg,
+                    config.optimizer,
+                    optimizer_step,
+                )
+                .with_context(|| {
+                    format!(
+                        "vk-native GRPO non-recompute policy step group {} completion {}",
+                        group_step,
+                        comp_idx + 1
+                    )
+                })?
+            };
             anyhow::ensure!(
                 loss.is_finite(),
                 "vk_native_grpo_train: non-finite loss {loss} at optimizer step {optimizer_step}"
@@ -4355,6 +4546,21 @@ pub fn vk_native_grpo_train_jsonl(
         ..Default::default()
     };
     let num_gdn_layers = vk_count_gdn_layers(&vk_weights);
+
+    // Workload-shape recompute decision (#1076). Streaming JSONL can't
+    // see all completions up front so we conservatively use the
+    // model's max context for the size estimate.
+    let workload_use_recompute = vk_recommended_recompute_for_grpo_opd(
+        model_config.num_layers,
+        model_config.max_position_embeddings,
+        model_config.hidden_size,
+        model_config.intermediate_size,
+        model_config.vocab_size,
+        2, // BF16 base weights
+        "KILN_VK_RECOMPUTE_GRPO",
+        "GRPO-JSONL",
+    );
+
     let file = File::open(dataset_path)
         .with_context(|| format!("open GRPO JSONL dataset {}", dataset_path.display()))?;
     let total_bytes = file.metadata().map(|m| m.len()).unwrap_or(0).max(1);
@@ -4604,38 +4810,70 @@ pub fn vk_native_grpo_train_jsonl(
             });
 
             let policy_start = std::time::Instant::now();
-            let step_report = vk_recompute_grpo_train_step_with_state(
-                &vk_weights,
-                &lora_layers,
-                &comp.input_ids,
-                &active_rows,
-                &labels,
-                &ref_log_probs,
-                advantages[comp_idx] as f32,
-                config.clip_epsilon as f32,
-                vk_effective_kl_coeff(config) as f32,
-                model_config,
-                num_gdn_layers,
-                &mut adamw,
-                &cfg,
-                config.optimizer,
-                optimizer_step,
-                echo_params,
-            )
-            .with_context(|| {
-                format!(
-                    "vk-native GRPO+ECHO JSONL policy step group {} completion {}",
-                    processed_groups,
-                    comp_idx + 1
+            // Dispatch (#1076): force recompute for ECHO-active steps
+            // (only that path has the ECHO env-CE term); otherwise
+            // honor the up-front workload-shape decision.
+            let force_recompute_echo = echo_params.is_some();
+            let loss = if force_recompute_echo || workload_use_recompute {
+                let step_report = vk_recompute_grpo_train_step_with_state(
+                    &vk_weights,
+                    &lora_layers,
+                    &comp.input_ids,
+                    &active_rows,
+                    &labels,
+                    &ref_log_probs,
+                    advantages[comp_idx] as f32,
+                    config.clip_epsilon as f32,
+                    vk_effective_kl_coeff(config) as f32,
+                    model_config,
+                    num_gdn_layers,
+                    &mut adamw,
+                    &cfg,
+                    config.optimizer,
+                    optimizer_step,
+                    echo_params,
                 )
-            })?;
-            let loss = step_report.loss;
-            if let Some(echo_env_ce) = step_report.echo_env_ce {
-                if comp.total_obs_len > 0 {
-                    group_echo_ce_sum += f64::from(echo_env_ce) * comp.total_obs_len as f64;
-                    group_echo_ce_weight = group_echo_ce_weight.saturating_add(comp.total_obs_len);
+                .with_context(|| {
+                    format!(
+                        "vk-native GRPO+ECHO JSONL policy step group {} completion {}",
+                        processed_groups,
+                        comp_idx + 1
+                    )
+                })?;
+                if let Some(echo_env_ce) = step_report.echo_env_ce {
+                    if comp.total_obs_len > 0 {
+                        group_echo_ce_sum += f64::from(echo_env_ce) * comp.total_obs_len as f64;
+                        group_echo_ce_weight =
+                            group_echo_ce_weight.saturating_add(comp.total_obs_len);
+                    }
                 }
-            }
+                step_report.loss
+            } else {
+                let mut gdn_state = fresh_gdn_state(&vk_device, model_config, num_gdn_layers)?;
+                vk_grpo_train_step_with_state(
+                    &vk_weights,
+                    &lora_layers,
+                    &comp.input_ids,
+                    &active_rows,
+                    &labels,
+                    &ref_log_probs,
+                    advantages[comp_idx] as f32,
+                    config.clip_epsilon as f32,
+                    vk_effective_kl_coeff(config) as f32,
+                    gdn_state.as_mut(),
+                    &mut adamw,
+                    &cfg,
+                    config.optimizer,
+                    optimizer_step,
+                )
+                .with_context(|| {
+                    format!(
+                        "vk-native GRPO non-recompute JSONL policy step group {} completion {}",
+                        processed_groups,
+                        comp_idx + 1
+                    )
+                })?
+            };
             tracing::info!(
                 group = processed_groups,
                 completion = comp_idx + 1,
@@ -4964,6 +5202,23 @@ pub fn vk_native_opd_train(
     let num_gdn_layers = vk_count_gdn_layers(&vk_weights);
     let needs_state = num_gdn_layers > 0;
 
+    // Workload-shape recompute decision (#1076). One up-front pick
+    // based on the model's max context — OPD prompts vary length so
+    // this errs conservative. For FullAttn-only models we keep the
+    // existing non-recompute path regardless of VRAM (it's the fast
+    // path that already shipped); the new auto-tune is what gates
+    // the hybrid path between non-recompute and recompute.
+    let workload_use_recompute = vk_recommended_recompute_for_grpo_opd(
+        model_config.num_layers,
+        model_config.max_position_embeddings,
+        model_config.hidden_size,
+        model_config.intermediate_size,
+        model_config.vocab_size,
+        2, // BF16 base weights
+        "KILN_VK_RECOMPUTE_OPD",
+        "OPD",
+    );
+
     // Tokenize every prompt up front — same shape as the candle path
     // (`opd_train` at `opd.rs:2190`). Skip prompts that produce no
     // supervised action tokens; their teacher query would have no
@@ -5125,10 +5380,14 @@ pub fn vk_native_opd_train(
                 (t_prompt.input_ids.len().saturating_sub(active_positions.len())) as u64,
             );
 
-            // Dispatch the per-step kernel. Hybrid (Qwen3.5-4B-style)
-            // models always go through layerwise reverse-recompute —
-            // see #1076 for the future non-recompute fast path.
-            let loss = if needs_state {
+            // Dispatch (#1076):
+            //   - FullAttn-only models: always non-recompute (the
+            //     fast path that already shipped pre-#1076).
+            //   - Hybrid GDN + workload says non-recompute: use the
+            //     non-recompute path with a fresh per-step GDN state.
+            //   - Hybrid GDN + workload says recompute (or
+            //     KILN_VK_RECOMPUTE_OPD=1): use the recompute path.
+            let loss = if needs_state && workload_use_recompute {
                 vk_recompute_opd_train_step_with_state(
                     &vk_weights,
                     &lora_layers,
@@ -5152,6 +5411,11 @@ pub fn vk_native_opd_train(
                     )
                 })?
             } else {
+                let mut gdn_state = if needs_state {
+                    fresh_gdn_state(&vk_device, model_config, num_gdn_layers)?
+                } else {
+                    None
+                };
                 vk_opd_train_step_with_state(
                     &vk_weights,
                     &lora_layers,
@@ -5160,7 +5424,7 @@ pub fn vk_native_opd_train(
                     &topk.indices,
                     &topk.logprobs,
                     resolved_top_k,
-                    None,
+                    gdn_state.as_mut(),
                     &mut adamw,
                     &cfg,
                     config.optimizer,

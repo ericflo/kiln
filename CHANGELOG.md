@@ -1,5 +1,56 @@
 # Kiln Server Changelog
 
+## Unreleased — vk-native GRPO+OPD non-recompute hybrid + workload-shape auto-tune (#1076)
+
+Closes #1076. Wires the existing `vk_grpo_train_step_with_state` (the
+non-recompute hybrid GRPO step kernel) into the `vk_native_grpo_train`
+and `vk_native_grpo_train_jsonl` trainers, and extends
+`vk_native_opd_train` to use `vk_opd_train_step_with_state` with a real
+`VkLinearAttentionState` on hybrid GDN models (not just FullAttn-only).
+
+Until this change, hybrid GDN GRPO and hybrid GDN OPD were *always*
+forced to layerwise reverse-recompute regardless of available VRAM, so
+users on A6000 / H100 paid an extra ~2× per-layer forward cost even
+when they had plenty of memory to hold the full activation tape.
+
+### Dispatch decision
+
+A new helper `vk_recommended_recompute_for_grpo_opd` consults the
+same `kiln_core::vram::recommended_checkpoint_plan` that the SFT side
+uses (#1073 / #1074) and resolves to:
+
+- `Plan::Disabled` → **non-recompute** (full activation tape — fastest).
+- `Plan::Enabled` or `Plan::UserOverride` → **recompute** (memory-saving).
+- `None` (VRAM unknown) → conservative **recompute**.
+
+Per-mode env overrides:
+
+| Override                       | Effect                                      |
+|--------------------------------|---------------------------------------------|
+| `KILN_VK_RECOMPUTE_GRPO=1`     | Pin recompute on GRPO (overrides everything)|
+| `KILN_VK_RECOMPUTE_OPD=1`      | Pin recompute on OPD                        |
+| `KILN_NO_GRAD_CHECKPOINT=1`    | Pin non-recompute (no per-mode override set)|
+
+ECHO env-CE GRPO steps always force recompute — only that path has
+the ECHO term wired in.
+
+### Tests
+
+Four new parity / smoke tests cover both work items:
+
+- `vk_grpo_train_step_full_attn_loss_and_backward_parity_with_recompute`
+  — same loss within 1e-3 + same LoRA.B within 1e-4 between
+  non-recompute and recompute on FullAttn-only after one optimizer step.
+- `vk_grpo_train_step_gdn_loss_parity_with_recompute` — same loss
+  within 1e-3 on a hybrid GDN model.
+- `vk_opd_train_step_gdn_loss_parity_with_recompute` — same loss
+  within 1e-3 on a hybrid GDN model.
+- `vk_opd_train_step_gdn_state_training_loss_decreases` — multi-step
+  training trajectory on hybrid GDN, loss drops monotonically.
+
+Plus a unit test for the new env-override dispatch helper:
+`vk_recommended_recompute_grpo_opd_env_overrides_are_honored`.
+
 ## Unreleased — vk-native OPD training entrypoint (#1075)
 
 Add `vk_native_opd_train`, the off-policy distillation (OPD) analogue
