@@ -21,7 +21,17 @@ sha2 = { workspace = true }
 # training and inference can refer to the same residency primitive.
 # Off by default so non-Vulkan builds keep kiln-core lean.
 kiln-vulkan-kernel = { path = "../kiln-vulkan-kernel", optional = true }
+# Optional: pulls kiln-tensor's CUDA storage into DeviceBuffer so the
+# same residency primitive covers both CUDA training and inference.
+# Off by default so non-CUDA hosts keep kiln-core lean.
+kiln-tensor = { workspace = true, optional = true }
 
 [features]
 default = []
 vulkan = ["dep:kiln-vulkan-kernel"]
+# Phase 1 line 233 of #1082 — DeviceBuffer's `Cuda` variant. Pulls
+# kiln-tensor with its `cuda` feature so the CudaStorage type is in
+# scope. The variant carries `Arc<kiln_tensor::CudaStorage>`; the
+# StorageBackend trait provides byte_len/device/dtype without any
+# additional candle leakage at the kiln-core API surface.
+cuda = ["dep:kiln-tensor", "kiln-tensor/cuda"]

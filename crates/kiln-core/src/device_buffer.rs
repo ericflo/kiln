@@ -1,17 +1,18 @@
 //! Cross-backend handle for a buffer that lives on a compute device.
 //!
-//! Backends keep their own native buffer types ([`kiln_vulkan_kernel::VulkanBuffer`],
-//! and CUDA/Metal slots reserved for parity); [`DeviceBuffer`] is the
+//! Backends keep their own native buffer types
+//! ([`kiln_vulkan_kernel::VulkanBuffer`], [`kiln_tensor::CudaStorage`],
+//! and a Metal slot reserved for parity); [`DeviceBuffer`] is the
 //! common Arc-shaped wrapper that callers in `kiln-model` (the resident
 //! registry) and `kiln-train` (LoRA params, optimizer state, activations)
 //! can pass around without depending directly on a specific backend
 //! crate. Conversion to the underlying buffer happens through the typed
-//! accessors (e.g. [`DeviceBuffer::as_vulkan`]) which return `None` when
-//! the variant doesn't match.
+//! accessors (e.g. [`DeviceBuffer::as_vulkan`], [`DeviceBuffer::as_cuda`])
+//! which return `None` when the variant doesn't match.
 //!
-//! The CUDA and Metal arms are deliberately stubbed — the call sites
-//! that need them are gated behind their own feature flags, so widening
-//! the enum is a separate landing.
+//! The Metal arm is deliberately stubbed — the call sites that need it
+//! are gated behind a future feature flag, so widening the enum further
+//! is a separate landing.
 
 use std::sync::Arc;
 
@@ -25,6 +26,12 @@ pub enum DeviceBuffer {
     /// Vulkan-native buffer. Available with `--features vulkan`.
     #[cfg(feature = "vulkan")]
     Vulkan(Arc<kiln_vulkan_kernel::VulkanBuffer>),
+    /// CUDA-native storage. Available with `--features cuda`. Wraps
+    /// `kiln-tensor`'s `CudaStorage`, which owns a `CudaSlice<u8>`
+    /// allocated on a candle CUDA device — the same primitive the
+    /// kt-API kernel crates pull device pointers from.
+    #[cfg(feature = "cuda")]
+    Cuda(Arc<kiln_tensor::CudaStorage>),
     /// CPU-side fallback buffer. Carries an `Arc<[u8]>` so the same
     /// type-erased flow works when no GPU backend is selected.
     Cpu(Arc<[u8]>),
@@ -36,6 +43,11 @@ impl DeviceBuffer {
         match self {
             #[cfg(feature = "vulkan")]
             Self::Vulkan(buf) => buf.size(),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(st) => {
+                use kiln_tensor::StorageBackend;
+                st.byte_len() as u64
+            }
             Self::Cpu(bytes) => bytes.len() as u64,
         }
     }
@@ -45,6 +57,8 @@ impl DeviceBuffer {
         match self {
             #[cfg(feature = "vulkan")]
             Self::Vulkan(_) => "vulkan",
+            #[cfg(feature = "cuda")]
+            Self::Cuda(_) => "cuda",
             Self::Cpu(_) => "cpu",
         }
     }
@@ -62,12 +76,25 @@ impl DeviceBuffer {
         }
     }
 
+    /// Borrow the inner CUDA storage, if this variant is Cuda.
+    ///
+    /// Returns `None` for any other variant.
+    #[cfg(feature = "cuda")]
+    pub fn as_cuda(&self) -> Option<&Arc<kiln_tensor::CudaStorage>> {
+        match self {
+            Self::Cuda(st) => Some(st),
+            _ => None,
+        }
+    }
+
     /// Borrow the CPU bytes, if this variant is Cpu.
     pub fn as_cpu(&self) -> Option<&Arc<[u8]>> {
         match self {
             Self::Cpu(bytes) => Some(bytes),
             #[cfg(feature = "vulkan")]
             Self::Vulkan(_) => None,
+            #[cfg(feature = "cuda")]
+            Self::Cuda(_) => None,
         }
     }
 
@@ -75,6 +102,12 @@ impl DeviceBuffer {
     #[cfg(feature = "vulkan")]
     pub fn from_vulkan(buf: Arc<kiln_vulkan_kernel::VulkanBuffer>) -> Self {
         Self::Vulkan(buf)
+    }
+
+    /// Construct a CUDA-backed device buffer from an existing Arc.
+    #[cfg(feature = "cuda")]
+    pub fn from_cuda(st: Arc<kiln_tensor::CudaStorage>) -> Self {
+        Self::Cuda(st)
     }
 
     /// Construct a CPU-backed device buffer.
