@@ -126,6 +126,38 @@ pub fn huber_loss(pred: &Tensor, target: &Tensor, delta: f32) -> Result<Tensor> 
     scalar_tensor(pred.dtype(), sum / n)
 }
 
+/// Margin ranking loss: `loss = mean(max(0, -y * (a - b) + margin))`.
+/// `y ∈ {-1, 1}` indicates whether `a` should rank higher (1) or
+/// lower (-1) than `b`.
+pub fn margin_ranking(a: &Tensor, b: &Tensor, y: &Tensor, margin: f32) -> Result<Tensor> {
+    validate_pair(a, b, "margin_ranking")?;
+    validate_pair(a, y, "margin_ranking")?;
+    let (av, bv) = load_pair_f32(a, b)?;
+    let (_, yv) = load_pair_f32(a, y)?;
+    let n = av.len() as f32;
+    let sum: f32 = av
+        .iter()
+        .zip(bv.iter())
+        .zip(yv.iter())
+        .map(|((&ai, &bi), &yi)| (-yi * (ai - bi) + margin).max(0.0))
+        .sum();
+    scalar_tensor(a.dtype(), sum / n)
+}
+
+/// Hinge loss for SVM-style binary classification:
+/// `loss = mean(max(0, 1 - y * pred))` where `y ∈ {-1, 1}`.
+pub fn hinge_loss(pred: &Tensor, y: &Tensor) -> Result<Tensor> {
+    validate_pair(pred, y, "hinge_loss")?;
+    let (p, t) = load_pair_f32(pred, y)?;
+    let n = p.len() as f32;
+    let sum: f32 = p
+        .iter()
+        .zip(t.iter())
+        .map(|(&pi, &yi)| (1.0 - yi * pi).max(0.0))
+        .sum();
+    scalar_tensor(pred.dtype(), sum / n)
+}
+
 /// KL divergence `D_KL(p || q) = Σ p * (log p - log q)` along the
 /// trailing axis. Inputs `p_log_probs` and `q_log_probs` are
 /// log-probabilities (output of `log_softmax_last_dim`). Returns
@@ -399,5 +431,45 @@ mod tests {
         let t = Tensor::from_slice(&[0i64], vec![1]).unwrap();
         let e = nll_loss(&lp, &t).unwrap_err();
         assert!(e.to_string().contains("rank-2"));
+    }
+
+    #[test]
+    fn hinge_loss_correct_classification_is_zero() {
+        // y=1, pred=2 → 1 - 2 = -1 → max(0, -1) = 0
+        // y=-1, pred=-2 → 1 - (-1*-2) = 1 - 2 = -1 → 0
+        let pred = Tensor::from_slice(&[2.0f32, -2.0], vec![2]).unwrap();
+        let y = Tensor::from_slice(&[1.0f32, -1.0], vec![2]).unwrap();
+        let l = scalar_f32(&hinge_loss(&pred, &y).unwrap());
+        assert!(l.abs() < 1e-6);
+    }
+
+    #[test]
+    fn hinge_loss_wrong_classification_is_positive() {
+        // y=1, pred=-1 → 1 - (-1) = 2 → loss = 2
+        let pred = Tensor::from_slice(&[-1.0f32], vec![1]).unwrap();
+        let y = Tensor::from_slice(&[1.0f32], vec![1]).unwrap();
+        let l = scalar_f32(&hinge_loss(&pred, &y).unwrap());
+        assert!((l - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn margin_ranking_known_values() {
+        // y=1 wants a > b; a=2, b=1, margin=0 → -1*(2-1) + 0 = -1 → max(0, -1) = 0
+        // y=1, a=1, b=2 → -(1-2) = 1 → max(0, 1+0) = 1
+        let a = Tensor::from_slice(&[2.0f32, 1.0], vec![2]).unwrap();
+        let b = Tensor::from_slice(&[1.0f32, 2.0], vec![2]).unwrap();
+        let y = Tensor::from_slice(&[1.0f32, 1.0], vec![2]).unwrap();
+        let l = scalar_f32(&margin_ranking(&a, &b, &y, 0.0).unwrap());
+        assert!((l - 0.5).abs() < 1e-6); // mean(0, 1) = 0.5
+    }
+
+    #[test]
+    fn margin_ranking_with_margin() {
+        let a = Tensor::from_slice(&[1.0f32], vec![1]).unwrap();
+        let b = Tensor::from_slice(&[1.0f32], vec![1]).unwrap();
+        let y = Tensor::from_slice(&[1.0f32], vec![1]).unwrap();
+        // -y*(a-b) + margin = 0 + 0.5 = 0.5
+        let l = scalar_f32(&margin_ranking(&a, &b, &y, 0.5).unwrap());
+        assert!((l - 0.5).abs() < 1e-6);
     }
 }
