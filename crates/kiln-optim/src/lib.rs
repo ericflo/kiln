@@ -32,7 +32,7 @@ mod policy;
 mod sgd;
 
 pub use adamw::{AdamW, AdamWHyperparameters, AdamWMoments};
-pub use lion_muon::{Lion, LionEma, Muon};
+pub use lion_muon::{Lion, LionEma, Muon, MuonState};
 pub use optim_step::{OptimStep, StepError};
 pub use policy::{MomentLocation, StochasticRoundingPolicy};
 pub use sgd::{Sgd, SgdHyperparameters, SgdMomentum};
