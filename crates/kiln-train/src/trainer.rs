@@ -6970,6 +6970,7 @@ pub(crate) fn optimizer_step_from_map(
 }
 
 /// Gradient checkpointing configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckpointConfig {
     /// Number of segments to split layers into.
     pub num_segments: usize,
