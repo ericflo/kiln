@@ -55,6 +55,11 @@ use candle_core::{
 };
 use half::bf16;
 
+/// kiln-tensor-typed surface alongside the candle-typed API. Both
+/// call the same FFI symbols. Phase 7 deletes the candle path.
+mod kt_api;
+pub use kt_api::{causal_conv1d_prefill_kt, causal_conv1d_update_kt, Conv1dError};
+
 unsafe extern "C" {
     fn kiln_causal_conv1d_update_bf16_f32(
         x: *const core::ffi::c_void,
