@@ -1,0 +1,19 @@
+[package]
+name = "kiln-param"
+description = "Unified Parameter handle for kiln. One logical parameter, one stable TensorId, multiple physical storages."
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# kiln-param is the surface that fuses today's bookkeeping spread across
+# packed_weight_registry.rs (489 LOC), transposed_weight_cache.rs (730 LOC),
+# marlin_proj.rs, fp8.rs, and lora_loader.rs into one type. See
+# Phase 2.5 of #1082 for the full design.
+#
+# kiln-param is internal-only — no semver commitment until Phase 7 ships.
+
+[dependencies]
+kiln-tensor = { workspace = true }
+thiserror = { workspace = true }
