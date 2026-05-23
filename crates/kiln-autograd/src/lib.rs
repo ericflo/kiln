@@ -60,6 +60,7 @@ pub use backwards::elementwise::{AddBackward, DivBackward, MulBackward, SubBackw
 pub use backwards::embedding::EmbeddingBackward;
 pub use backwards::index_ops::{CastBackward, IndexSelectBackward, ScatterAddBackward};
 pub use backwards::l2norm::L2NormBackward;
+pub use backwards::layernorm::LayerNormBackward;
 pub use backwards::mask::MaskedFillBackward;
 pub use backwards::matmul::MatmulBackward;
 pub use backwards::reduce::{ReduceBackward, ReduceKind, ReduceScope};
