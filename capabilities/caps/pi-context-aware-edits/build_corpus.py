@@ -27,6 +27,15 @@ HERE = Path(__file__).resolve().parent
 DATASETS = HERE / "datasets"
 SEED = int(os.environ.get("SEED", 31417))
 
+FINAL_RESPONSE_CONTRACT = (
+    "After editing and verifying, reply with one concise sentence naming the "
+    "modified file and the style convention(s) you preserved."
+)
+
+
+def _prompt(text: str) -> str:
+    return f"{text}\n\n{FINAL_RESPONSE_CONTRACT}"
+
 
 # Style profiles per workspace. Each profile names a consistent convention
 # across all files.
@@ -94,7 +103,7 @@ def _t_add_function_python_strict(profile, idx) -> dict:
                 "        raise\n"
             ),
         },
-        "prompt": (
+        "prompt": _prompt(
             "Add a `parse_unix(timestamp: int) -> datetime.datetime` function "
             "to `lib/parse.py`. It converts a Unix timestamp (seconds since "
             "epoch) to a UTC datetime. Match the existing style of this file."
@@ -126,7 +135,7 @@ def _t_add_function_python_loose(profile, idx) -> dict:
                 "        raise\n"
             ),
         },
-        "prompt": (
+        "prompt": _prompt(
             "Add a `parseUnix(ts)` function to `lib/parse.py`. It should "
             "convert a Unix timestamp (seconds since epoch) to a datetime. "
             "Match the existing style."
@@ -157,7 +166,7 @@ def _t_add_function_rust(profile, idx) -> dict:
                 "}\n"
             ),
         },
-        "prompt": (
+        "prompt": _prompt(
             "Add a `parse_seconds(s: &str) -> Result<Duration, ParseIntError>` "
             "function to `src/parse.rs`. Match the existing style "
             "(snake_case, Result return, doc comment)."
@@ -195,7 +204,7 @@ def _t_add_function_go(profile, idx) -> dict:
                 "}\n"
             ),
         },
-        "prompt": (
+        "prompt": _prompt(
             "Add a `ParseUnix(ts int64) (time.Time, error)` function to "
             "`parse.go`. Match the existing Go style (PascalCase exported, "
             "explicit error returns, godoc comment)."

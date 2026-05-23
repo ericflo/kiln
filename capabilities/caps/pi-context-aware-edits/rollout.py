@@ -94,6 +94,15 @@ def _gold_state_matches(task: dict, sandbox: Path) -> bool:
     return False
 
 
+def _capture_final_files(task: dict, sandbox: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for rel in (task.get("init_files") or {}):
+        path = sandbox / rel
+        if path.is_file():
+            out[rel] = path.read_text(errors="replace")
+    return out
+
+
 def _load_session_jsonl(session_dir: Path) -> list[dict]:
     """Locate and load the pi session JSONL file pi just wrote."""
     # Pi v0.75.x writes ~/.pi/agent/sessions/<workdir-encoded>/<uuid>.jsonl
@@ -169,6 +178,7 @@ def _run_pi_one(task: dict, cfg: dict, adapter: str, sandbox_root: Path, mode: s
 
     pi_bin = cfg.get("pi_bin", "/usr/bin/pi")
     pi_model_id = cfg.get("pi_model_id", "Qwen3.5-4B")
+    append_system_prompt = cfg.get("pi_append_system_prompt")
     rollout_cfg = cfg.get("rollout", {})
     max_wall = int(rollout_cfg.get("max_wall_clock_s", 120))
 
@@ -184,6 +194,8 @@ def _run_pi_one(task: dict, cfg: dict, adapter: str, sandbox_root: Path, mode: s
         "--session-dir", str(session_dir),
         "--model", pi_model_id,
     ]
+    if append_system_prompt:
+        cmd.extend(["--append-system-prompt", str(append_system_prompt)])
     t0 = time.time()
     try:
         subprocess.run(
@@ -202,6 +214,7 @@ def _run_pi_one(task: dict, cfg: dict, adapter: str, sandbox_root: Path, mode: s
     transcript = _load_session_jsonl(session_dir)
     outcome_passed = _gold_state_matches(task, sb)
     fmt_text = _final_assistant_text(transcript)
+    final_files = _capture_final_files(task, sb)
 
     rollout = {
         "task": task,
@@ -209,6 +222,7 @@ def _run_pi_one(task: dict, cfg: dict, adapter: str, sandbox_root: Path, mode: s
         "workdir": str(sb),
         "outcome_passed": outcome_passed,
         "format_text": fmt_text,
+        "final_files": final_files,
         "wall_clock_s": wall,
     }
     score = rubric.score_one(rollout)

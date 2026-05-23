@@ -69,7 +69,7 @@ def _final_text(transcript):
     return final
 
 
-def _edited_files(transcript) -> dict[str, str]:
+def _edited_files_from_transcript(transcript) -> dict[str, str]:
     """Map of file_path → final content the agent wrote. Last write wins."""
     out = {}
     for _, name, args in _calls_with_idx(transcript):
@@ -79,6 +79,45 @@ def _edited_files(transcript) -> dict[str, str]:
             if isinstance(p, str) and isinstance(c, str):
                 out[p] = c
     return out
+
+
+def _edited_files(rollout_or_transcript) -> dict[str, str]:
+    """Map file_path -> final content, preferring captured sandbox state.
+
+    Pi's edit tool usually stores patch blocks in an `edits` argument rather
+    than whole-file content. The rollout harness captures final file contents
+    so convention checks can score those edits directly.
+    """
+    if isinstance(rollout_or_transcript, dict):
+        task = rollout_or_transcript.get("task") or {}
+        initial = task.get("init_files") or {}
+        final = rollout_or_transcript.get("final_files") or {}
+        changed = {
+            path: content
+            for path, content in final.items()
+            if initial.get(path) != content
+        }
+        if changed:
+            return changed
+        return _edited_files_from_transcript(rollout_or_transcript.get("transcript") or [])
+    return _edited_files_from_transcript(rollout_or_transcript)
+
+
+def _edited_paths(transcript) -> list[str]:
+    out = []
+    for _, name, args in _calls_with_idx(transcript):
+        if name not in ("write", "edit", "replace"):
+            continue
+        p = args.get("path")
+        if isinstance(p, str):
+            out.append(p)
+    return out
+
+
+def _same_or_suffix(a: str, b: str) -> bool:
+    a = a.strip()
+    b = b.strip()
+    return a == b or a.endswith("/" + b) or b.endswith("/" + a)
 
 
 def _is_read(name, args):
@@ -223,7 +262,7 @@ def _format_compliance(rollout) -> float:
         return 0.0
     score = 0.0
     # Mentions the file modified
-    edited = _edited_files(rollout.get("transcript") or [])
+    edited = _edited_files(rollout)
     if edited:
         any_match = False
         for fp in edited:
@@ -243,7 +282,7 @@ def _convention_consistency(rollout) -> float:
     expected = task.get("expected_conventions_in_edit") or {}
     if not expected:
         return 0.5
-    edits = _edited_files(rollout.get("transcript") or [])
+    edits = _edited_files(rollout)
     if not edits:
         return 0.0
     # Concatenate all edits — convention applies across file
@@ -280,16 +319,16 @@ def _read_before_edit(rollout) -> float:
             cmd = (a.get("command") or a.get("cmd") or "")
             read_paths.extend(re.findall(r"[\w./-]+\.(?:py|rs|go|js|ts)", cmd))
     # Did the read cover at least one of the edited files?
-    edits = _edited_files(transcript)
+    edits = _edited_paths(transcript)
     for ef in edits:
         for rp in read_paths:
-            if ef in rp or rp.endswith(ef):
+            if _same_or_suffix(rp, ef):
                 return 1.0
     return 0.0 if not read_paths else 0.4
 
 
 def _no_redundant_imports(rollout) -> float:
-    edits = _edited_files(rollout.get("transcript") or [])
+    edits = _edited_files(rollout)
     if not edits:
         return 1.0
     # Trivial heuristic: did the agent add an import for a function that
@@ -311,7 +350,7 @@ def _no_style_drift(rollout) -> float:
     """
     task = rollout.get("task") or {}
     init = (task.get("init_files") or {})
-    edits = _edited_files(rollout.get("transcript") or [])
+    edits = _edited_files(rollout)
     drift = 0
     total = 0
     for path, new_content in edits.items():

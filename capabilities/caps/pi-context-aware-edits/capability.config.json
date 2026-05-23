@@ -20,6 +20,7 @@
   ],
   "pi_bin": "pi",
   "pi_model_id": "qwen-3.5-4b-kiln-pi1024",
+  "pi_append_system_prompt": "When the edit is complete, always send a final plain-text response. Keep it to one sentence and name the modified file plus the style convention(s) preserved.",
   "sandbox_root": "/tmp/pi-context-aware-edits-rollouts",
   "rollout": {
     "num_generations_train": 4,
