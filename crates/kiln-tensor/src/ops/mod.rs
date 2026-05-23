@@ -16,6 +16,7 @@
 pub mod activation;
 pub mod argmax;
 pub mod cast;
+pub mod concat;
 pub mod cross_entropy;
 pub mod elementwise;
 pub mod embedding;
@@ -41,6 +42,7 @@ pub mod softmax;
 pub use activation::{sigmoid, silu, ActivationOp, UnaryKind};
 pub use argmax::{argmax_last_dim, ArgmaxLastDimOp};
 pub use cast::{cast, CastOp};
+pub use concat::{concat, ConcatOp};
 pub use cross_entropy::{cross_entropy, CrossEntropyOp};
 pub use elementwise::{add, div, mul, sub, BinaryKind, ElementwiseOp};
 pub use embedding::{embedding, EmbeddingOp};
