@@ -26,9 +26,13 @@
 #![warn(rust_2018_idioms)]
 
 mod adamw;
+mod lion_muon;
 mod optim_step;
 mod policy;
+mod sgd;
 
 pub use adamw::{AdamW, AdamWHyperparameters, AdamWMoments};
+pub use lion_muon::{Lion, Muon};
 pub use optim_step::{OptimStep, StepError};
 pub use policy::{MomentLocation, StochasticRoundingPolicy};
+pub use sgd::{Sgd, SgdHyperparameters, SgdMomentum};
