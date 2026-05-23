@@ -18,9 +18,9 @@ the candle-typed twins when call sites in `kiln-model` migrate.
 |---|---|---|
 | `kiln-flash-attn` | `flash_attn_fwd_kt`, `flash_attn_bwd_kt`, `flash_attn_paged_decode_kt`, `flash_attn_paged_decode_dyn_seqlen_kt`, `paged_kv_write_token_major_bf16_kt`, `paged_kv_write_token_major_bf16_slot_kt` | 5 of 5 (100%) |
 | `kiln-conv1d-kernel` | `causal_conv1d_update_kt`, `causal_conv1d_prefill_kt` | 2 of 2 (100%) |
-| `kiln-rmsnorm-kernel` | `fused_rmsnorm_kt` + `_backward_kt`, `fused_rotary_qk_kt` + `_one_kt`, `fused_mlp_silu_mul_kt`, `fused_sigmoid_mul_kt`, `fused_l2_qk_norm_kt` + `_gqa_kt`, `attn_decode_qkv_split_qk_norm_rope_kt` (mega-fused), `sgd_step_f32_kt`, `adamw_step_f32_kt`, `lora_decode_hidden_kt`, `lora_decode_add_kt`, `causal_depthwise_conv1d_kt` + `_inplace_kt` + `_bwd_input_kt` + `_bwd_weight_kt` + `_bwd_state_kt` | 18 of ~30 |
+| `kiln-rmsnorm-kernel` | full kt-API surface: 4 RMSNorm + 4 rotary + 2 L2-qk-norm + mega-fused attn-decode-prep + 2 MLP silu-mul + sigmoid-mul + 2 LoRA-decode + LoRA-add-inplace + 5 depthwise-conv1d + 2 SGD + 2 AdamW + silu-inplace-save-sigmoid + f32→bf16 cast | **25 of 25 (100%)** |
 | `kiln-marlin-gemm` | `marlin_w4a16_gemm_kt` | 1 of 1 (100%) |
-| `kiln-gdn-kernel` | `gdn_forward_substitution_kt`, `gdn_recurrent_forward_kt`, `gdn_decode_gates_recurrent_bf16_kt`, `gdn_decode_qk_norm_gates_recurrent_bf16_kt`, `gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt`, `gdn_full_chunk_forward_kt` | 6 of 17 |
+| `kiln-gdn-kernel` | substitution + recurrent + full_chunk + multiblock + 10 decode variants (all bf16/vf32/qf32 dtype combos × rmsnorm/non-rmsnorm) + gated_rms_norm + 3 fused-gates variants | 18 of 22 (82%) |
 
 **211 / 211 deliverables shipped** — substrate complete; per-backend
 matmul trait + Phase 7 migration plumbing in place; cross-op
