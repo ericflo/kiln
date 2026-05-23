@@ -27,6 +27,7 @@ pub mod logit_misc;
 pub mod logit_modern;
 pub mod logit_penalties;
 pub mod logit_processor;
+pub mod logit_xtc;
 pub mod mask;
 pub mod matmul;
 pub mod reduce;
