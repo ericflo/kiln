@@ -15,6 +15,7 @@
 
 pub mod activation;
 pub mod argmax;
+pub mod broadcast;
 pub mod cast;
 pub mod concat;
 pub mod cross_entropy;
@@ -42,6 +43,7 @@ pub mod softmax;
 
 pub use activation::{sigmoid, silu, ActivationOp, UnaryKind};
 pub use argmax::{argmax_last_dim, ArgmaxLastDimOp};
+pub use broadcast::broadcast_to;
 pub use cast::{cast, CastOp};
 pub use concat::{concat, ConcatOp};
 pub use dropout::dropout;

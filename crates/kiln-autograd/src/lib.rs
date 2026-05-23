@@ -52,6 +52,7 @@ mod tape;
 
 pub use backward_op::{BackwardOp, BoxedBackwardOp};
 pub use backwards::activation::{SigmoidBackward, SiluBackward, SoftmaxLastDimBackward};
+pub use backwards::broadcast::BroadcastToBackward;
 pub use backwards::concat::ConcatBackward;
 pub use backwards::cross_entropy::CrossEntropyBackward;
 pub use backwards::dropout::DropoutBackward;
