@@ -28,6 +28,7 @@ pub mod matmul;
 pub mod reduce;
 pub mod rmsnorm;
 pub mod rope;
+pub mod scatter_add;
 pub mod silu_mul;
 pub mod softmax;
 
@@ -44,5 +45,6 @@ pub use matmul::{matmul, MatmulOp};
 pub use reduce::{mean_all, mean_axis, sum_all, sum_axis, ReduceOp, ReductionKind, ReductionScope};
 pub use rmsnorm::{rms_norm, RmsNormOp};
 pub use rope::{rope, RopeOp};
+pub use scatter_add::{scatter_add, ScatterAddOp};
 pub use silu_mul::{mul_sigmoid_gate, MulSigmoidGateOp};
 pub use softmax::{softmax_last_dim, SoftmaxLastDimOp};
