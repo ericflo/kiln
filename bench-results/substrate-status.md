@@ -1,26 +1,44 @@
 # kiln-tensor substrate status
 
-**184 / 184 deliverables shipped** — substrate side is complete and
-growing.
+**198 / 198 deliverables shipped** — substrate complete; per-backend
+matmul trait + Phase 7 migration plumbing now in place.
 
-- **87 kiln-tensor forward op families** (chunk/split, unbind, tile,
-  roll, flip, gather, masked_select, nonzero, bincount, unique,
-  sort/argsort, searchsorted, cumprod, meshgrid, pad — all PyTorch-
-  parity primitives shipped on top of the original 70+) + **46
-  BackwardOps** in kiln-autograd (every differentiable forward has a
-  backward; non-differentiable ops correctly omit one)
+- **89 kiln-tensor forward op families** (add since #1280: einsum,
+  clip_grad_value, lerp, addmm, tensor-wide norms; on top of all the
+  prior PyTorch-parity primitives) + **52 BackwardOps** in
+  kiln-autograd (add since prior dashboard: log_variants × 5,
+  hyperbolic × 2, leaky_activations × 4, lerp × 1; every
+  differentiable forward has a backward)
+- **Phase 2 BackendMatmul trait + MatmulRequest descriptor**
+  (kiln-blas) — backend-agnostic matmul seam. CUDA / Metal / Vulkan
+  handles all implement one trait; forward.rs reaches for
+  `dyn BackendMatmul` and per-backend conditionals disappear.
+- **MpsBackendMatmul + VulkanBackendMatmul adapters** (Phase 2.2 + 2.3)
+  with shape-bucketed tile / workgroup heuristics
 - **Phase 4 sampler chain end-to-end** (12 LogitProcessors + Gumbel
   terminal sampler)
 - **All four optimizers shipped end-to-end** (AdamW, SGD, Lion, Muon)
   with master-write to Parameter and anti-pattern 11 preserved
-- **GradAccumulator** for micro-batch gradient accumulation (Phase 6.5)
+- **GradAccumulator + accumulate_then_step** (Phase 6.5) — one-call
+  micro-batch training step that drains the accumulator and runs
+  OptimStep per parameter
 - **Per-backend Allocator scaffolds** (CUDA, Metal, Vulkan) feature-
   gated and ready for Phase 7
 - **Per-backend CapturedGraph scaffolds** (`kiln-graph-cuda/metal/vulkan`)
   as three separate workspace crates
 - **End-to-end training demos** (manual SGD + Parameter-based SGD)
   proving loss-curve descent through the full substrate
-- **Phase 7 migration audit refreshed** with concrete PR sequencing
+- **KILN_USE_KILN_TENSOR_* migration flag registry** (kiln-core) —
+  24-cell (6 ops × 4 backends) feature-flag grid for the per-op
+  migration cutover
+- **Phase 7 migration tooling** —
+  `scripts/phase7-candle-removal-plan.py` (bucketing 1,845 candle
+  call sites across 66 distinct APIs by phase) and
+  `scripts/phase7-migrate-candle-bail.py` (dry-run rewriter for the
+  493-site `candle_core::bail!` migration)
+- **RunPod substrate validate orchestrator** — outside-the-pod
+  one-shot acquire + validate + release using the wait-file pattern
+  (no until-ssh-poll hangs per the kiln skill mandate)
 
 Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 
