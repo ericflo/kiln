@@ -55,6 +55,7 @@ pub use backwards::activation::{SigmoidBackward, SiluBackward, SoftmaxLastDimBac
 pub use backwards::cross_entropy::CrossEntropyBackward;
 pub use backwards::elementwise::{AddBackward, DivBackward, MulBackward, SubBackward};
 pub use backwards::embedding::EmbeddingBackward;
+pub use backwards::index_ops::{CastBackward, IndexSelectBackward, ScatterAddBackward};
 pub use backwards::matmul::MatmulBackward;
 pub use backwards::rmsnorm::RmsNormBackward;
 pub use grad_store::GradStore;
