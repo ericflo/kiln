@@ -15,5 +15,8 @@ pub mod cross_entropy;
 pub mod elementwise;
 pub mod embedding;
 pub mod index_ops;
+pub mod l2norm;
+pub mod mask;
 pub mod matmul;
+pub mod reduce;
 pub mod rmsnorm;
