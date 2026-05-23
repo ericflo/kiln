@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/kiln-blas",
     "crates/kiln-core",
     "crates/kiln-conv1d-kernel",
     "crates/kiln-eval",
@@ -17,10 +18,11 @@ members = [
     "crates/kiln-train",
     "crates/kiln-vulkan-kernel",
 ]
-# kiln-conv1d-kernel, kiln-flash-attn, kiln-gdn-kernel, kiln-marlin-gemm,
-# kiln-rmsnorm-kernel, and kiln-vulkan-kernel unconditionally depend on
-# platform-specific GPU runtimes (cudarc, vulkan-rs) which fail to link on
-# hosts without the matching GPU stack. They're only compiled when a downstream
+# kiln-blas, kiln-conv1d-kernel, kiln-flash-attn, kiln-gdn-kernel,
+# kiln-marlin-gemm, kiln-rmsnorm-kernel, and kiln-vulkan-kernel
+# unconditionally depend on platform-specific GPU runtimes
+# (cudarc, cublasLt, vulkan-rs) which fail to link on hosts without the
+# matching GPU stack. They're only compiled when a downstream
 # crate opts in via --features cuda or --features vulkan.
 # Excluding them from default-members lets `cargo check`, `cargo build`, and
 # `cargo test` work on any host; Linux+CUDA/Vulkan builds still pull them via
