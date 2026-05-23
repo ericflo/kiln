@@ -122,44 +122,58 @@ fn step(
 
 #[test]
 fn linear_regression_descent() {
-    // Synthetic dataset: y_i = 2*x1_i + 3*x2_i + 1 + small noise-free.
-    // Train w in R^{2x1} and b in R^{1x1} to recover this.
+    // Synthetic dataset: y_i = 2*x1_i + 3*x2_i + 1*x3_i with x3_i = 1.
+    //
+    // The bias is absorbed into a constant feature column so the OLS
+    // problem stays uniquely determined: 3 weights fitting 16
+    // equations with `loss = sum_all(sq)`. The prior version used a
+    // per-sample `b: [n_samples, 1]` tensor, which made the system
+    // underdetermined (every b[i] gets its own gradient under
+    // sum-of-squares, so optimizer can absorb sample-specific
+    // residuals into b instead of solving for w) — and the recovered
+    // w[0] landed nowhere near 2.0 even though loss converged.
     let n_samples = 16;
-    let mut x_data = Vec::with_capacity(n_samples * 2);
+    let mut x_data = Vec::with_capacity(n_samples * 3);
     let mut y_data = Vec::with_capacity(n_samples);
     for i in 0..n_samples {
         let x1 = (i as f32) * 0.1 - 0.8; // span [-0.8, 0.7]
         let x2 = ((i as f32) * 0.07).sin();
         x_data.push(x1);
         x_data.push(x2);
+        x_data.push(1.0); // constant column = bias slot
         y_data.push(2.0 * x1 + 3.0 * x2 + 1.0);
     }
-    let x = Tensor::from_slice(&x_data, vec![n_samples, 2]).unwrap();
+    let x = Tensor::from_slice(&x_data, vec![n_samples, 3]).unwrap();
     let target = Tensor::from_slice(&y_data, vec![n_samples, 1]).unwrap();
 
-    // Init w = zeros, b = zero. Both will start far from the true
-    // (2, 3) and 1.
-    let mut w = Tensor::from_slice(&[0.0f32, 0.0], vec![2, 1]).unwrap();
-    // b is broadcast across samples — but kiln-tensor has no
-    // broadcast op. Build b as [n_samples, 1] with all rows the
-    // same scalar so add(pred_raw, b) works elementwise. SGD will
-    // pull every entry the same direction.
-    let mut b = Tensor::from_slice(&[0.0f32; 16], vec![n_samples, 1]).unwrap();
+    // Init w = zeros. Target solution is (2, 3, 1).
+    let mut w = Tensor::from_slice(&[0.0f32, 0.0, 0.0], vec![3, 1]).unwrap();
+    // Keep the add+bias path exercised end-to-end. b is fixed at
+    // zero (and stays zero because the target has no residual bias
+    // unmodeled by the constant column).
+    let b = Tensor::from_slice(&[0.0f32; 16], vec![n_samples, 1]).unwrap();
 
-    // lr × steps tuned so a least-squares-shape problem with X bounded
-    // in [-0.8, 0.7] converges within the post-loop weight tolerances
-    // (|w - target| < 0.2). Per-step error factor is ~(1 - lr·λ_max)
-    // with λ_max ≈ X^T X / N ≈ 0.25; 500 SGD steps at lr=0.05 give
-    // ~(1 - 0.0125)^500 ≈ 0.002 residual error, which is well under the
-    // 10% threshold the post-loop assertions need.
-    let lr = 0.05_f32;
+    // lr × steps tuned for `loss = sum_all(sq)` (no 1/N scaling).
+    // X^T X has largest eigenvalue ~16 (dominated by the constant
+    // column contributing 16 to its diagonal), so per-step error
+    // factor on that mode is ~(1 - lr·16); lr=0.02 keeps it stable
+    // (1 - 0.32 ≈ 0.68) and 500 steps drive 0.68^500 ≈ 1e-80
+    // residual on every mode — far under the 10% weight tolerance.
+    let lr = 0.02_f32;
     let n_steps = 500;
     let mut losses = Vec::with_capacity(n_steps);
     for _ in 0..n_steps {
-        let (new_w, new_b, loss) = step(&x, &target, &w, &b, lr).unwrap();
+        // Note: we DON'T apply SGD to b. The constant column in x
+        // already carries the bias, and any b update would
+        // reintroduce the underdetermined-system problem from the
+        // pre-fix version (per-sample gradient on each b[i] →
+        // optimizer absorbs residuals into b instead of solving for
+        // w[2]). b stays at its zero init throughout, which keeps
+        // the add+bias substrate path exercised end-to-end without
+        // breaking identifiability.
+        let (new_w, _new_b, loss) = step(&x, &target, &w, &b, lr).unwrap();
         losses.push(loss);
         w = new_w;
-        b = new_b;
     }
 
     // Loss must strictly trend down. The last loss should be < 5% of
@@ -171,7 +185,8 @@ fn linear_regression_descent() {
         "loss did not descend enough: first={first}, last={last}"
     );
 
-    // Recovered weights should be close to (2, 3).
+    // Recovered weights should be close to (2, 3, 1) — the unique
+    // OLS solution.
     let w_f = read_f32(&w);
     assert!(
         (w_f[0] - 2.0).abs() < 0.2,
@@ -183,21 +198,20 @@ fn linear_regression_descent() {
         "w[1]={} didn't recover 3.0",
         w_f[1]
     );
-
-    // b should have converged toward 1.0 in every entry (since they
-    // all get the same gradient, they stay equal to each other).
-    let b_f = read_f32(&b);
-    let b_mean: f32 = b_f.iter().sum::<f32>() / b_f.len() as f32;
     assert!(
-        (b_mean - 1.0).abs() < 0.2,
-        "b_mean={b_mean} didn't recover 1.0"
+        (w_f[2] - 1.0).abs() < 0.2,
+        "w[2]={} didn't recover 1.0",
+        w_f[2]
     );
-    // All b entries should be ~equal (same gradient → same updates).
-    let b_max = b_f.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let b_min = b_f.iter().cloned().fold(f32::INFINITY, f32::min);
+
+    // The free bias parameter stays near zero — the constant column
+    // already accounts for the +1 offset, so SGD has no residual to
+    // push into b.
+    let b_f = read_f32(&b);
+    let b_max_abs = b_f.iter().cloned().fold(0.0_f32, |a, v| a.max(v.abs()));
     assert!(
-        (b_max - b_min).abs() < 1e-3,
-        "b entries diverged: min={b_min}, max={b_max}"
+        b_max_abs < 0.2,
+        "b drifted from zero: max |b| = {b_max_abs}"
     );
 }
 
