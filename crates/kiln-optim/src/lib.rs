@@ -27,6 +27,7 @@
 
 mod adamw;
 mod lion_muon;
+pub mod lr_schedule;
 mod optim_step;
 mod policy;
 mod sgd;
