@@ -165,8 +165,11 @@ impl OptimStep for Sgd {
             }
         }
 
-        // Master-write hook (no-op today; see kiln-optim::adamw for context).
-        let _ = (master, master_f32);
+        // Write updated master back into the Parameter. Preserves the
+        // parameter's tensor_id per anti-pattern 11 — optimizer state
+        // keyed on `param.tensor_id()` (`self.velocities`) survives.
+        let new_master = write_f32_to_tensor(policy.master_dtype, master.shape(), &master_f32)?;
+        param.replace_backward_storage(Some(new_master));
         Ok(())
     }
 
@@ -179,6 +182,46 @@ impl OptimStep for Sgd {
 // Helpers (duplicated with adamw.rs — Phase 6.5.x will hoist into a
 // shared module once we have a third optimizer that needs them).
 // ----------------------------------------------------------------------
+
+fn write_f32_to_tensor(
+    dtype: DType,
+    shape: &[usize],
+    values: &[f32],
+) -> Result<Tensor, StepError> {
+    use kiln_tensor::{CpuStorage, Layout, Storage, TensorId};
+    use std::sync::Arc;
+    let per = dtype.size_in_bytes();
+    let mut bytes = vec![0u8; values.len() * per];
+    match dtype {
+        DType::F32 => {
+            for (i, &v) in values.iter().enumerate() {
+                bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        DType::BF16 => {
+            for (i, &v) in values.iter().enumerate() {
+                bytes[i * 2..i * 2 + 2]
+                    .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
+            }
+        }
+        DType::F16 => {
+            for (i, &v) in values.iter().enumerate() {
+                bytes[i * 2..i * 2 + 2]
+                    .copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
+            }
+        }
+        other => {
+            return Err(StepError::Tensor(kiln_tensor::Error::Msg(format!(
+                "Sgd CPU: unsupported master dtype {other}"
+            ))))
+        }
+    }
+    let cpu = CpuStorage::from_bytes(dtype, bytes)
+        .map_err(StepError::Tensor)?;
+    let storage: Storage = Arc::new(cpu);
+    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+        .map_err(StepError::Tensor)
+}
 
 fn read_to_f32(t: &Tensor) -> Result<Vec<f32>, StepError> {
     let cpu = t
@@ -249,6 +292,83 @@ mod tests {
     #[test]
     fn name_is_sgd() {
         assert_eq!(Sgd::default_hp().name(), "sgd");
+    }
+
+    #[test]
+    fn sgd_step_writes_updated_master() {
+        // After one step of `param -= lr * grad`, the master tensor on
+        // the Parameter must reflect the update. Tests the
+        // `replace_backward_storage` wiring from Phase 2.5.4.
+        let mut p = fresh_param();
+        // grad = ones; lr = 0.1, no momentum → master := master - 0.1
+        let g = Tensor::from_slice(&[1.0f32, 1.0, 1.0, 1.0], vec![4]).unwrap();
+        let mut opt = Sgd::new(SgdHyperparameters {
+            lr: 0.1,
+            momentum: 0.0,
+            weight_decay: 0.0,
+            nesterov: false,
+        });
+        opt.step(&mut p, &g).unwrap();
+
+        let master = p.backward_storage().expect("master after step");
+        let cpu = master
+            .storage()
+            .as_any()
+            .downcast_ref::<kiln_tensor::CpuStorage>()
+            .unwrap();
+        let values: Vec<f32> = cpu
+            .as_bytes()
+            .chunks(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        // Was [1, 2, 3, 4]; after 0.1*ones subtraction → [0.9, 1.9, 2.9, 3.9].
+        assert!((values[0] - 0.9).abs() < 1e-6);
+        assert!((values[1] - 1.9).abs() < 1e-6);
+        assert!((values[2] - 2.9).abs() < 1e-6);
+        assert!((values[3] - 3.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sgd_step_preserves_tensor_id() {
+        // Anti-pattern 11: master swap must not change `tensor_id`.
+        let mut p = fresh_param();
+        let id_before = p.tensor_id();
+        let g = Tensor::from_slice(&[0.1f32, 0.2, 0.3, 0.4], vec![4]).unwrap();
+        Sgd::default_hp().step(&mut p, &g).unwrap();
+        assert_eq!(p.tensor_id(), id_before);
+    }
+
+    #[test]
+    fn sgd_multi_step_descends_master() {
+        // Three steps of SGD with grad = ones should produce
+        // monotonically decreasing master values.
+        let mut p = fresh_param();
+        let g = Tensor::from_slice(&[1.0f32; 4], vec![4]).unwrap();
+        let mut opt = Sgd::new(SgdHyperparameters {
+            lr: 0.1,
+            ..Default::default()
+        });
+
+        let mut last = [1.0f32, 2.0, 3.0, 4.0];
+        for _ in 0..3 {
+            opt.step(&mut p, &g).unwrap();
+            let cpu = p
+                .backward_storage()
+                .unwrap()
+                .storage()
+                .as_any()
+                .downcast_ref::<kiln_tensor::CpuStorage>()
+                .unwrap();
+            let cur: Vec<f32> = cpu
+                .as_bytes()
+                .chunks(4)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            for (i, (l, c)) in last.iter().zip(cur.iter()).enumerate() {
+                assert!(c < l, "step did not descend at idx {i}: {l} -> {c}");
+            }
+            last.copy_from_slice(&cur);
+        }
     }
 
     #[test]
