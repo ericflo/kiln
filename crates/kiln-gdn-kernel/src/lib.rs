@@ -68,7 +68,7 @@ use std::cell::RefCell;
 
 /// kiln-tensor-typed surface alongside candle-typed. Same FFI.
 mod kt_api;
-pub use kt_api::{gdn_forward_substitution_kt, GdnError};
+pub use kt_api::{gdn_forward_substitution_kt, gdn_recurrent_forward_kt, GdnError};
 
 unsafe extern "C" {
     fn kiln_gdn_forward_substitution(
