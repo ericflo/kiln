@@ -1,0 +1,16 @@
+impl_name,op_arity,file,line,crate,has_cpu_fwd,has_cuda_fwd,has_metal_fwd,has_bwd,body_lines,proposed_kiln_tensor_shape
+FlceCustomOp,1,crates/kiln-flce-kernel/src/phase_b.rs,185,kiln-flce-kernel,yes,yes,yes,yes,115,fwd+bwd-closure
+GdnGateBetaOp,1,crates/kiln-gdn-kernel/src/lib.rs,1821,kiln-gdn-kernel,yes,yes,no,no,51,closure-only
+GdnGateGOp,3,crates/kiln-gdn-kernel/src/lib.rs,1876,kiln-gdn-kernel,yes,yes,no,no,72,closure-only
+VulkanLinearOp,1,crates/kiln-model/src/backend/vulkan_linear_op.rs,180,kiln-model,yes,no,no,yes,330,fwd+bwd-closure
+VulkanLoraOp,3,crates/kiln-model/src/backend/vulkan_lora_op.rs,67,kiln-model,yes,no,no,yes,220,fwd+bwd-closure
+CudaLoraAddF32,3,crates/kiln-model/src/forward.rs,801,kiln-model,yes,yes,no,yes,97,fwd+bwd-closure
+CudaLoraLinearBf16,3,crates/kiln-model/src/forward.rs,923,kiln-model,yes,yes,no,yes,209,fwd+bwd-closure
+CudaLoraAddBf16,3,crates/kiln-model/src/forward.rs,1134,kiln-model,yes,yes,no,yes,128,fwd+bwd-closure
+CudaSigmoidMulTrainingBf16,2,crates/kiln-model/src/forward.rs,1390,kiln-model,yes,yes,no,yes,156,fwd+bwd-closure
+CudaFlashAttentionTrainingBf16,3,crates/kiln-model/src/forward.rs,1790,kiln-model,yes,yes,no,yes,110,fwd+bwd-closure
+VulkanRmsNormOp,1,crates/kiln-model/src/forward.rs,4484,kiln-model,yes,no,no,yes,98,fwd+bwd-closure
+CudaRotaryOneBf16,3,crates/kiln-model/src/forward.rs,5116,kiln-model,yes,yes,no,yes,113,fwd+bwd-closure
+OpdLossCustomOp,1,crates/kiln-opd-loss-kernel/src/phase_b.rs,316,kiln-opd-loss-kernel,yes,yes,no,yes,104,fwd+bwd-closure
+RmsNormCustomOp,2,crates/kiln-rmsnorm-kernel/src/lib.rs,812,kiln-rmsnorm-kernel,yes,yes,no,yes,153,fwd+bwd-closure
+InjectTensorGradient,1,crates/kiln-train/src/trainer.rs,7599,kiln-train,yes,yes,no,yes,49,fwd+bwd-closure
