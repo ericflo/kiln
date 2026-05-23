@@ -38,3 +38,11 @@ serde_json = { workspace = true }
 
 [build-dependencies]
 cc = "1"
+
+# The probe example links the cublasLt FFI and pulls candle-core (cuda),
+# both gated behind --features probe. Mark required-features so plain
+# `cargo build` / `cargo test` on hosts without a CUDA toolchain don't
+# try to compile it.
+[[example]]
+name = "cublaslt_mlp_probe"
+required-features = ["probe"]

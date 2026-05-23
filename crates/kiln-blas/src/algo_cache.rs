@@ -82,7 +82,7 @@ impl AlgoCacheKey {
 /// per-backend impl wants to store (typically a cublasLt
 /// `cublasLtMatmulAlgo_t` serialized to bytes, plus the workspace
 /// size that goes alongside).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AlgoCacheValue {
     /// Algo id reported by cublasLt's heuristic (or per-backend
     /// equivalent). `-1` means "unknown / default".
