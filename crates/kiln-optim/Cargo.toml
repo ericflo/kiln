@@ -17,6 +17,10 @@ repository.workspace = true
 kiln-tensor = { workspace = true }
 kiln-param = { workspace = true }
 thiserror = { workspace = true }
+# bf16/f16 byte decoders for the master-weight unpack path in
+# adamw.rs / sgd.rs / lion.rs / muon.rs. Matches the workspace-wide
+# `half = "2"` pin (see kiln-tensor, kiln-blas, kiln-mps, etc.).
+half = "2"
 
 [dev-dependencies]
 # Phase 1.42's full-training-step integration test pulls kiln-autograd
