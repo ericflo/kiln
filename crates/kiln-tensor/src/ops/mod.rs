@@ -82,6 +82,6 @@ pub use silu_mul::{mul_sigmoid_gate, MulSigmoidGateOp};
 pub use softmax::{softmax_last_dim, SoftmaxLastDimOp};
 pub use stack::stack;
 pub use top_k::top_k;
-pub use trig::{cos, sin, tan, TrigKind};
+pub use trig::{acos, asin, atan, cos, sin, tan, TrigKind};
 pub use unary_arith::{abs, exp, ln, neg, sqrt, UnaryArithKind};
 pub use where_select::where_select;
