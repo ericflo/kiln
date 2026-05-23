@@ -1,33 +1,40 @@
 # kiln-tensor substrate status
 
-**198 / 198 deliverables shipped** — substrate complete; per-backend
-matmul trait + Phase 7 migration plumbing now in place.
+**211 / 211 deliverables shipped** — substrate complete; per-backend
+matmul trait + Phase 7 migration plumbing in place; cross-op
+integration parity test landed.
 
-- **89 kiln-tensor forward op families** (add since #1280: einsum,
-  clip_grad_value, lerp, addmm, tensor-wide norms; on top of all the
-  prior PyTorch-parity primitives) + **52 BackwardOps** in
-  kiln-autograd (add since prior dashboard: log_variants × 5,
-  hyperbolic × 2, leaky_activations × 4, lerp × 1; every
-  differentiable forward has a backward)
+- **94 kiln-tensor forward op families** (add since prior dashboard:
+  interpolate_1d w/ AlignCorners modes; all the prior PyTorch-parity
+  primitives stand) + **57 BackwardOps** in kiln-autograd (add since
+  prior dashboard: precision cast × 1; every differentiable forward
+  has a backward)
 - **Phase 2 BackendMatmul trait + MatmulRequest descriptor**
   (kiln-blas) — backend-agnostic matmul seam. CUDA / Metal / Vulkan
   handles all implement one trait; forward.rs reaches for
   `dyn BackendMatmul` and per-backend conditionals disappear.
 - **MpsBackendMatmul + VulkanBackendMatmul adapters** (Phase 2.2 + 2.3)
   with shape-bucketed tile / workgroup heuristics
+- **AmpPolicy::resolve_dtype + AmpContext** (kiln-param) — call
+  sites query by intent (`ForwardCompute`, `BackwardCompute`, …)
+  rather than dispatching on raw policy fields
 - **Phase 4 sampler chain end-to-end** (12 LogitProcessors + Gumbel
   terminal sampler)
 - **All four optimizers shipped end-to-end** (AdamW, SGD, Lion, Muon)
   with master-write to Parameter and anti-pattern 11 preserved
+- **kiln-optim LR schedules** — cosine, cosine_with_restarts (SGDR),
+  linear, constant_with_warmup, step_decay, exponential_decay,
+  inverse_sqrt, polynomial (8 schedules)
 - **GradAccumulator + accumulate_then_step** (Phase 6.5) — one-call
   micro-batch training step that drains the accumulator and runs
-  OptimStep per parameter
+  OptimStep per parameter. End-to-end microbatch convergence test
+  validates the full Parameter+Accumulator+AdamW stack.
 - **Per-backend Allocator scaffolds** (CUDA, Metal, Vulkan) feature-
   gated and ready for Phase 7
 - **Per-backend CapturedGraph scaffolds** (`kiln-graph-cuda/metal/vulkan`)
   as three separate workspace crates
-- **End-to-end training demos** (manual SGD + Parameter-based SGD)
-  proving loss-curve descent through the full substrate
+- **End-to-end training demos** — manual SGD, Parameter-based SGD,
+  microbatch grad-accumulation with AdamW
 - **KILN_USE_KILN_TENSOR_* migration flag registry** (kiln-core) —
   24-cell (6 ops × 4 backends) feature-flag grid for the per-op
   migration cutover
@@ -39,6 +46,12 @@ matmul trait + Phase 7 migration plumbing now in place.
 - **RunPod substrate validate orchestrator** — outside-the-pod
   one-shot acquire + validate + release using the wait-file pattern
   (no until-ssh-poll hangs per the kiln skill mandate)
+- **Cross-op integration parity test** —
+  `crates/kiln-tensor/tests/new_ops_parity.rs` exercises every op
+  shipped this run in composition (split↔concat, unbind↔stack,
+  flip-twice / roll-full-period identity, einsum=matmul,
+  interpolate_1d smooth round trip, etc.). The Phase 9 parity gate
+  hooks here.
 
 Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 
