@@ -19,6 +19,7 @@ pub mod cumsum;
 pub mod dropout;
 pub mod elementwise;
 pub mod embedding;
+pub mod hyperbolic;
 pub mod index_ops;
 pub mod l2norm;
 pub mod layernorm;
