@@ -1,0 +1,19 @@
+[package]
+name = "kiln-autograd"
+description = "Tape-based reverse-mode autograd for kiln-tensor. Lifted from vk_autograd; backend-generic."
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# kiln-autograd is the Phase 6a lift of `crates/kiln-vulkan-kernel/src/
+# vk_autograd.rs` (173 LOC) into a backend-generic tape over
+# `kiln_tensor::Tensor` + `kiln_tensor::TensorId`. See #1082 for the
+# full design.
+#
+# Internal-only — no semver commitment until Phase 7 ships.
+
+[dependencies]
+kiln-tensor = { workspace = true }
+thiserror = { workspace = true }
