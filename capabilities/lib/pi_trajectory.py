@@ -27,9 +27,9 @@ This module reads pi's `~/.pi/sessions/<uuid>.jsonl` format. The format
         }]
     }}
 
-Tool-call args land under b["input"] (NOT b["arguments"] — verified by
-direct read of the pi 0.75.1 JSONL output). Tool result blocks use
-b["content"] (string) and b["toolCallId"] for correlation.
+Tool-call args have appeared under both b["input"] and b["arguments"]
+across pi versions. Tool result blocks use b["content"] (string) and
+b["toolCallId"] for correlation.
 
 See `docs/plans/echo-integration-plan.md` §3.3 and §B.8 for the design.
 """
@@ -53,9 +53,9 @@ def _render_assistant_block(b: dict) -> Optional[str]:
         return f"<think>{b['thinking']}</think>"
     if bt == "toolCall":
         name = b.get("name", "")
-        # IMPORTANT: pi stores args under "input", not "arguments".
-        # Verified by direct read of pi 0.75.1's session JSONL output.
-        args_obj = b.get("input", {})
+        # Pi version drift: 0.75.1 used "input"; current builds emit
+        # "arguments". Preserve both so action tokens retain tool payloads.
+        args_obj = b.get("input") or b.get("arguments") or {}
         args_json = json.dumps(args_obj)
         return (
             f"<tool_call>"

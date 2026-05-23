@@ -86,28 +86,29 @@ def test_assistant_thinking_wrapped_in_think_tags():
         p.unlink()
 
 
-def test_assistant_tool_call_uses_input_field_not_arguments():
-    p = _write_session(
-        [
-            {"type": "message", "message": {"role": "assistant", "content": [
-                {"type": "toolCall", "name": "read", "input": {"path": "solution.py"}}
-            ]}}
-        ]
-    )
-    try:
-        segs = pt.parse_pi_session(p)
-        assert len(segs) == 1
-        # Verify the rendered XML matches what rollout.py was producing
-        # (so chat-template round-trips bit-identically).
-        content = segs[0]["content"]
-        assert content.startswith("<tool_call>")
-        assert content.endswith("</tool_call>")
-        assert '"name": "read"' in content
-        assert '"arguments"' in content
-        assert '"path"' in content
-        assert '"solution.py"' in content
-    finally:
-        p.unlink()
+def test_assistant_tool_call_accepts_input_and_arguments_fields():
+    for field_name in ("input", "arguments"):
+        p = _write_session(
+            [
+                {"type": "message", "message": {"role": "assistant", "content": [
+                    {"type": "toolCall", "name": "read", field_name: {"path": "solution.py"}}
+                ]}}
+            ]
+        )
+        try:
+            segs = pt.parse_pi_session(p)
+            assert len(segs) == 1
+            # Verify the rendered XML matches what rollout.py was producing
+            # (so chat-template round-trips bit-identically).
+            content = segs[0]["content"]
+            assert content.startswith("<tool_call>")
+            assert content.endswith("</tool_call>")
+            assert '"name": "read"' in content
+            assert '"arguments"' in content
+            assert '"path"' in content
+            assert '"solution.py"' in content
+        finally:
+            p.unlink()
 
 
 def test_tool_result_becomes_observation():

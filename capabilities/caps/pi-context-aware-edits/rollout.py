@@ -8,7 +8,7 @@ reads the pi session JSONL, derives `outcome_passed` from the task's
 passing via `verify_cmd`), and emits:
 
   - rollout.jsonl : per-rollout dict {task, transcript, workdir, outcome_passed, format_text, score}
-  - grpo-train.jsonl : trainer-shaped ScoredRollout JSONL (kiln canonical schema)
+  - grpo-train.jsonl : trainer-shaped AgenticGroup JSONL (one row per task)
   - summary.json : aggregate stats
 
 Reference: ../pi-doctest/rollout.py (the most-mature pi driver). This
@@ -28,9 +28,9 @@ from pathlib import Path
 # Make the shared lib importable for canonical pi → trajectory rendering.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib"))
 try:
-    from pi_trajectory import session_to_trajectory  # type: ignore
+    import pi_trajectory  # type: ignore
 except ImportError:
-    session_to_trajectory = None  # graceful fallback; trainer-shape only
+    pi_trajectory = None  # graceful fallback; trainer-shape only
 
 # Import this cap's rubric.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -103,8 +103,8 @@ def _capture_final_files(task: dict, sandbox: Path) -> dict[str, str]:
     return out
 
 
-def _load_session_jsonl(session_dir: Path) -> list[dict]:
-    """Locate and load the pi session JSONL file pi just wrote."""
+def _find_session_jsonl(session_dir: Path) -> Path | None:
+    """Locate the pi session JSONL file pi just wrote."""
     # Pi v0.75.x writes ~/.pi/agent/sessions/<workdir-encoded>/<uuid>.jsonl
     # If --session-dir is passed, pi writes there directly.
     candidates = sorted(session_dir.glob("*.jsonl"))
@@ -112,10 +112,19 @@ def _load_session_jsonl(session_dir: Path) -> list[dict]:
         # Fall back to a recursive scan.
         candidates = sorted(session_dir.rglob("*.jsonl"))
     if not candidates:
-        return []
+        return None
     # Take the newest.
     candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return [json.loads(line) for line in candidates[0].read_text().splitlines() if line.strip()]
+    return candidates[0]
+
+
+def _load_session_jsonl(session_dir: Path) -> tuple[list[dict], Path | None]:
+    """Locate and load the pi session JSONL file pi just wrote."""
+    path = _find_session_jsonl(session_dir)
+    if path is None:
+        return [], None
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return rows, path
 
 
 def _final_assistant_text(transcript: list) -> str:
@@ -165,8 +174,15 @@ def _trajectory_diagnostics(transcript: list) -> dict:
     }
 
 
-def _run_pi_one(task: dict, cfg: dict, adapter: str, sandbox_root: Path, mode: str) -> dict:
-    sb = sandbox_root / task["task_id"]
+def _run_pi_one(
+    task: dict,
+    cfg: dict,
+    adapter: str,
+    sandbox_root: Path,
+    mode: str,
+    generation_idx: int,
+) -> dict:
+    sb = sandbox_root / f"{task['task_id']}__g{generation_idx:02d}"
     if sb.exists():
         import shutil
         shutil.rmtree(sb)
@@ -211,7 +227,7 @@ def _run_pi_one(task: dict, cfg: dict, adapter: str, sandbox_root: Path, mode: s
         pass
     wall = time.time() - t0
 
-    transcript = _load_session_jsonl(session_dir)
+    transcript, transcript_path = _load_session_jsonl(session_dir)
     outcome_passed = _gold_state_matches(task, sb)
     fmt_text = _final_assistant_text(transcript)
     final_files = _capture_final_files(task, sb)
@@ -220,6 +236,7 @@ def _run_pi_one(task: dict, cfg: dict, adapter: str, sandbox_root: Path, mode: s
         "task": task,
         "transcript": transcript,
         "workdir": str(sb),
+        "transcript_path": str(transcript_path) if transcript_path else "",
         "outcome_passed": outcome_passed,
         "format_text": fmt_text,
         "final_files": final_files,
@@ -232,21 +249,20 @@ def _run_pi_one(task: dict, cfg: dict, adapter: str, sandbox_root: Path, mode: s
 
 
 def _to_scored_rollout(rollout: dict) -> dict | None:
-    """Convert to kiln ScoredRollout JSONL shape (one row of grpo-train.jsonl)."""
-    if session_to_trajectory is None:
+    """Convert to kiln ScoredRollout shape for one group completion."""
+    if pi_trajectory is None:
+        return None
+    transcript_path = rollout.get("transcript_path")
+    if not transcript_path:
         return None
     try:
-        traj = session_to_trajectory(rollout["transcript"])
+        out = pi_trajectory.build_scored_rollout(
+            Path(transcript_path),
+            reward=float(rollout["score"]["composite"]),
+        )
     except Exception:
         return None
-    return {
-        "task_id": rollout["task"]["task_id"],
-        "trajectory": traj,
-        "reward": rollout["score"]["composite"],
-        "sub_scores": {k: v for k, v in rollout["score"].items() if k != "composite"},
-        "diagnostics": rollout.get("diagnostics") or {},
-        "rubric_version": rubric.RUBRIC_VERSION,
-    }
+    return out
 
 
 def main():
@@ -278,15 +294,11 @@ def main():
         tasks = tasks[: args.limit]
 
     rollouts = []
-    grpo_rows = []
     n_gen = max(1, args.num_generations)
     for task in tasks:
         for g in range(n_gen):
-            r = _run_pi_one(task, cfg, args.adapter, sandbox_root, args.mode)
+            r = _run_pi_one(task, cfg, args.adapter, sandbox_root, args.mode, g)
             rollouts.append(r)
-            sr = _to_scored_rollout(r)
-            if sr is not None:
-                grpo_rows.append(sr)
 
     # Write rollout.jsonl (raw, debugging).
     with open(out_dir / "rollout.jsonl", "w") as f:
@@ -297,9 +309,35 @@ def main():
             f.write(json.dumps(row, default=str) + "\n")
 
     # Write trainer-shaped grpo-train.jsonl.
+    by_task = {}
+    for r in rollouts:
+        by_task.setdefault(r["task"]["task_id"], []).append(r)
+    system_prompt = (
+        "You are a coding assistant with read, bash, edit, and write tools. "
+        "Read the relevant file before editing, make the requested change, "
+        "verify it, and then send a final text response."
+    )
+    append_system_prompt = cfg.get("pi_append_system_prompt")
+    if append_system_prompt:
+        system_prompt = f"{system_prompt}\n\n{append_system_prompt}"
+    groups = []
+    for task in tasks:
+        completions = []
+        for r in by_task.get(task["task_id"], []):
+            sr = _to_scored_rollout(r)
+            if sr is not None:
+                completions.append(sr)
+        if len(completions) >= 2:
+            groups.append({
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": task["prompt"]},
+                ],
+                "completions": completions,
+            })
     with open(out_dir / "grpo-train.jsonl", "w") as f:
-        for sr in grpo_rows:
-            f.write(json.dumps(sr) + "\n")
+        for group in groups:
+            f.write(json.dumps(group) + "\n")
 
     # Summary.
     composites = [r["score"]["composite"] for r in rollouts]
