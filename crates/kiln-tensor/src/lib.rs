@@ -22,14 +22,18 @@
 
 mod device;
 mod dtype;
+mod element;
 mod error;
 mod layout;
 mod storage;
+mod tensor;
 mod tensor_id;
 
 pub use device::{Backend, Device};
 pub use dtype::DType;
+pub use element::Element;
 pub use error::{Error, Result};
 pub use layout::Layout;
 pub use storage::{cpu_zeros, CpuStorage, Storage, StorageBackend};
+pub use tensor::Tensor;
 pub use tensor_id::TensorId;
