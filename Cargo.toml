@@ -12,6 +12,7 @@ members = [
     "crates/kiln-model",
     "crates/kiln-nvtx",
     "crates/kiln-autograd",
+    "crates/kiln-graph",
     "crates/kiln-opd-loss-kernel",
     "crates/kiln-optim",
     "crates/kiln-param",
@@ -36,6 +37,7 @@ default-members = [
     "crates/kiln-core",
     "crates/kiln-eval",
     "crates/kiln-flce-kernel",
+    "crates/kiln-graph",
     "crates/kiln-model",
     "crates/kiln-nvtx",
     "crates/kiln-opd-loss-kernel",
@@ -130,6 +132,7 @@ tempfile = "3"
 kiln-autograd = { path = "crates/kiln-autograd" }
 kiln-core = { path = "crates/kiln-core" }
 kiln-eval = { path = "crates/kiln-eval" }
+kiln-graph = { path = "crates/kiln-graph" }
 kiln-model = { path = "crates/kiln-model" }
 kiln-optim = { path = "crates/kiln-optim" }
 kiln-param = { path = "crates/kiln-param" }
