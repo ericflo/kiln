@@ -1,6 +1,6 @@
 # kiln-tensor substrate status
 
-**58 / 58 deliverables shipped** as of latest re-run of `scripts/audit-substrate-status.sh`.
+**65 / 65 deliverables shipped** as of latest re-run of `scripts/audit-substrate-status.sh`.
 
 Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 
@@ -63,6 +63,13 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 1.39 | safetensors save path | ✓ |
 | 1.40 | Parameter::content_hash method | ✓ |
 | 1.42 | full training step demo (tensor + autograd + param + optim) | ✓ |
+| 1.44 | docs/SUBSTRATE_QUICKSTART.md — contributor entry point | ✓ |
+| 1.45 | cross_entropy loss CPU DeviceOp | ✓ |
+| 1.46 | tied-weight integration test (anti-pattern 17) | ✓ |
+| 1.47 | kiln-param ReplayBuffer (off-policy RL data plumbing) | ✓ |
+| 1.48 | LogitProcessor chain skeleton (temp + top-K + top-P) | ✓ |
+| 1.49 | penalty LogitProcessors (rep / freq / presence) | ✓ |
+| 1.50 | sampler chain integration test | ✓ |
 
 ## Phase 2 / 2.5 / 5 / 6a / 6.5 — new crates
 
