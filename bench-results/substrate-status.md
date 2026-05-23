@@ -1,8 +1,8 @@
 # kiln-tensor substrate status
 
-**148 / 148 deliverables shipped** — substrate side is complete.
+**158 / 158 deliverables shipped** — substrate side is complete.
 
-- **67 kiln-tensor forward op families** + **46 BackwardOps**
+- **77 kiln-tensor forward op families** + **46 BackwardOps**
   in kiln-autograd (every differentiable forward has a backward;
   non-differentiable ops correctly omit one)
 - **Phase 4 sampler chain end-to-end** (12 LogitProcessors + Gumbel
@@ -141,7 +141,18 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 1.104 | clip_grad_norm (PyTorch-style) | ✓ |
 | 1.105 | cosine_similarity | ✓ |
 | 1.106 | utility-ops compose integration test | ✓ |
-| 1.107 | substrate-status dashboard refresh (this PR) | ✓ |
+| 1.107 | substrate-status dashboard refresh (Phase 1.85-1.106) | ✓ |
+| 1.108 | bce_with_logits (binary cross-entropy) | ✓ |
+| 1.109 | kl_div_log_probs (KL divergence) | ✓ |
+| 1.110 | leaky_relu / elu / softplus / mish activations | ✓ |
+| 1.111 | GLU family — glu/swiglu/geglu/reglu | ✓ |
+| 1.112 | triu / tril / triu_mask / tril_mask | ✓ |
+| 1.113 | eye (identity matrix) | ✓ |
+| 1.114 | Multinomial (inverse-CDF categorical sampler) | ✓ |
+| 1.115 | scaled_dot_product_attention | ✓ |
+| 1.116 | causal_scaled_dot_product_attention | ✓ |
+| 6.5.7 | LR schedules — cosine / linear / linear_warmup_cosine | ✓ |
+| 1.117 | substrate-status dashboard refresh (this PR) | ✓ |
 
 ## Phase 2 — kiln-blas / kiln-mps / kiln-vulkan-blas / kiln-param
 
