@@ -26,6 +26,7 @@
 #![warn(rust_2018_idioms)]
 
 mod adamw;
+mod grad_accumulator;
 mod lion_muon;
 pub mod lr_schedule;
 mod optim_step;
@@ -33,6 +34,7 @@ mod policy;
 mod sgd;
 
 pub use adamw::{AdamW, AdamWHyperparameters, AdamWMoments};
+pub use grad_accumulator::GradAccumulator;
 pub use lion_muon::{Lion, LionEma, Muon, MuonState};
 pub use optim_step::{OptimStep, StepError};
 pub use policy::{MomentLocation, StochasticRoundingPolicy};
