@@ -165,7 +165,7 @@ fn multi_step_training_loop_preserves_parameter_identity() {
             &[&weight_fwd],
             Box::new(PassthroughBwd {
                 name: "identity",
-                input_count: 1,
+                input_shapes: vec![weight_fwd.shape().to_vec()],
                 apply_count: apply_count.clone(),
             }),
         );
