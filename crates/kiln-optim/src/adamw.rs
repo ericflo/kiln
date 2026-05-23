@@ -314,9 +314,12 @@ mod tests {
             assert!((m.m[i] - expected).abs() < 1e-6, "m[{i}] = {}", m.m[i]);
         }
         // After one step: v[i] = (1 - beta2) * grad[i]^2 = 0.001 * grad[i]^2.
+        // Tolerance is 1e-7 (not 1e-9): the expected values down at 9e-5 lose
+        // ~3 ULPs to f32 rounding depending on the multiplication order, and
+        // 1e-9 is below that noise floor.
         for (i, &g_i) in [0.1_f32, 0.2, 0.3, 0.4].iter().enumerate() {
             let expected = 0.001 * g_i * g_i;
-            assert!((m.v[i] - expected).abs() < 1e-9, "v[{i}] = {}", m.v[i]);
+            assert!((m.v[i] - expected).abs() < 1e-7, "v[{i}] = {}", m.v[i]);
         }
     }
 

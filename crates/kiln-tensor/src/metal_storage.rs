@@ -133,18 +133,20 @@ impl MetalStorage {
     }
 
     /// Returns `true` iff this storage's buffer is in a UMA-compatible
-    /// storage mode (shared / managed). On Apple Silicon today,
-    /// candle's `allocate_zeros` returns a Shared-mode buffer, so this
-    /// returns `true` for storage allocated via [`MetalStorage::zeros`].
+    /// storage mode (shared / managed).
     ///
-    /// Phase 1.x's `Tensor::as_host_slice()` accessor reads this — UMA
-    /// devices return a `&[u8]` directly; non-UMA returns an error.
+    /// On Apple Silicon, every Metal device is UMA and every buffer
+    /// candle's `MetalDevice::allocate_zeros` hands out is in
+    /// `MTLStorageModeShared`; `from_buffer` callers must also pass a
+    /// Shared/Managed buffer (the constructor's contract). Since Metal
+    /// is only supported on Apple Silicon hosts, this is unconditionally
+    /// `true` — querying the buffer's actual storage mode would require
+    /// reaching through `candle_metal_kernels::metal::Buffer` to the
+    /// inner `dyn MTLBuffer` protocol object, which `Buffer` does not
+    /// expose. Revisit when supporting Intel Macs or Private-mode
+    /// buffers becomes a goal.
     pub fn is_unified_memory(&self) -> bool {
-        use candle_metal_kernels::metal::MTLStorageMode;
-        matches!(
-            self.buffer.storage_mode(),
-            MTLStorageMode::Shared | MTLStorageMode::Managed
-        )
+        true
     }
 }
 
