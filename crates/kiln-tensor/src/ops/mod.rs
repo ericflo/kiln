@@ -16,11 +16,13 @@
 pub mod activation;
 pub mod elementwise;
 pub mod embedding;
+pub mod matmul;
 pub mod rmsnorm;
 pub mod softmax;
 
 pub use activation::{sigmoid, silu, ActivationOp, UnaryKind};
 pub use elementwise::{add, div, mul, sub, BinaryKind, ElementwiseOp};
 pub use embedding::{embedding, EmbeddingOp};
+pub use matmul::{matmul, MatmulOp};
 pub use rmsnorm::{rms_norm, RmsNormOp};
 pub use softmax::{softmax_last_dim, SoftmaxLastDimOp};
