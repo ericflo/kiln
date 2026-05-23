@@ -11,6 +11,12 @@ use candle_core::{
 };
 use half::bf16;
 
+/// kiln-tensor-typed surface alongside the candle-typed API.
+/// Both call the same FFI. Phase 7 deletes the candle-typed
+/// public functions once all callers migrate.
+mod kt_api;
+pub use kt_api::{flash_attn_fwd_kt, FlashAttnError};
+
 // FFI declarations matching flash_api_c.h
 unsafe extern "C" {
     fn kiln_flash_attn_fwd(
