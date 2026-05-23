@@ -13,6 +13,7 @@ candle-core = { workspace = true, features = ["cuda"] }
 half = "2"
 # Phase 7 prep — kiln-tensor-typed surface alongside candle-typed.
 kiln-tensor = { workspace = true, features = ["cuda"] }
+kiln-kt-bridge = { workspace = true }
 
 [build-dependencies]
 cc = "1"

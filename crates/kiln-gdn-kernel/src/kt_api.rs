@@ -11,7 +11,8 @@
 //! full_chunk_forward, etc.) follow the same template.
 
 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-use kiln_tensor::{CudaStorage, DType as KtDType, StorageBackend, Tensor as KtTensor};
+use kiln_kt_bridge::BridgeError;
+use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 
 use crate::kiln_gdn_forward_substitution;
 
@@ -30,29 +31,18 @@ impl std::fmt::Display for GdnError {
 
 impl std::error::Error for GdnError {}
 
+impl From<BridgeError> for GdnError {
+    fn from(e: BridgeError) -> Self {
+        GdnError::Msg(e.message)
+    }
+}
+
 fn cuda_storage_and_byte_offset<'a>(
     t: &'a KtTensor,
     expected: KtDType,
     name: &'static str,
 ) -> Result<(&'a CudaStorage, usize), GdnError> {
-    if t.dtype() != expected {
-        return Err(GdnError::Msg(format!(
-            "kt-gdn: {name} must be {expected}, got {}",
-            t.dtype()
-        )));
-    }
-    if !t.is_contiguous() {
-        return Err(GdnError::Msg(format!(
-            "kt-gdn: {name} must be contiguous"
-        )));
-    }
-    let st = t
-        .storage()
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .ok_or_else(|| GdnError::Msg(format!("kt-gdn: {name} must be CUDA")))?;
-    let off = t.layout().start_offset() * expected.size_in_bytes();
-    Ok((st, off))
+    Ok(kiln_kt_bridge::cuda_storage_and_byte_offset(t, expected, name)?)
 }
 
 fn alloc_cuda_tensor(
@@ -60,17 +50,7 @@ fn alloc_cuda_tensor(
     dtype: KtDType,
     shape: Vec<usize>,
 ) -> Result<KtTensor, GdnError> {
-    let candle_device = source.candle_device().clone();
-    let device_index = source.device().index().unwrap_or(0);
-    let n: usize = shape.iter().product();
-    let storage = kiln_tensor::cuda_zeros(candle_device, device_index, dtype, n)
-        .map_err(|e| GdnError::Msg(format!("kt-gdn alloc: {e}")))?;
-    KtTensor::from_parts(
-        storage,
-        kiln_tensor::Layout::contiguous(shape),
-        kiln_tensor::TensorId::next(),
-    )
-    .map_err(|e| GdnError::Msg(format!("kt-gdn alloc wrap: {e}")))
+    Ok(kiln_kt_bridge::alloc_cuda_tensor(source, dtype, shape)?)
 }
 
 /// `gdn_forward_substitution` over `kiln_tensor::Tensor` operands.

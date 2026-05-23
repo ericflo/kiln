@@ -9,7 +9,8 @@
 //! Phase 7 lands.
 
 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-use kiln_tensor::{CudaStorage, DType as KtDType, StorageBackend, Tensor as KtTensor};
+use kiln_kt_bridge::BridgeError;
+use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 
 use crate::{kiln_marlin_w4a16_gemm, DEFAULT_MAX_PAR, WORKSPACE_TILE_N};
 
@@ -28,29 +29,18 @@ impl std::fmt::Display for MarlinError {
 
 impl std::error::Error for MarlinError {}
 
+impl From<BridgeError> for MarlinError {
+    fn from(e: BridgeError) -> Self {
+        MarlinError::Msg(e.message)
+    }
+}
+
 fn cuda_storage_and_byte_offset<'a>(
     t: &'a KtTensor,
     expected: KtDType,
     name: &'static str,
 ) -> Result<(&'a CudaStorage, usize), MarlinError> {
-    if t.dtype() != expected {
-        return Err(MarlinError::Msg(format!(
-            "kt-marlin: {name} must be {expected}, got {}",
-            t.dtype()
-        )));
-    }
-    if !t.is_contiguous() {
-        return Err(MarlinError::Msg(format!(
-            "kt-marlin: {name} must be contiguous"
-        )));
-    }
-    let st = t
-        .storage()
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .ok_or_else(|| MarlinError::Msg(format!("kt-marlin: {name} must be CUDA")))?;
-    let off = t.layout().start_offset() * expected.size_in_bytes();
-    Ok((st, off))
+    Ok(kiln_kt_bridge::cuda_storage_and_byte_offset(t, expected, name)?)
 }
 
 fn alloc_cuda_tensor(
@@ -58,17 +48,7 @@ fn alloc_cuda_tensor(
     dtype: KtDType,
     shape: Vec<usize>,
 ) -> Result<KtTensor, MarlinError> {
-    let candle_device = source.candle_device().clone();
-    let device_index = source.device().index().unwrap_or(0);
-    let n: usize = shape.iter().product();
-    let storage = kiln_tensor::cuda_zeros(candle_device, device_index, dtype, n)
-        .map_err(|e| MarlinError::Msg(format!("kt-marlin alloc: {e}")))?;
-    KtTensor::from_parts(
-        storage,
-        kiln_tensor::Layout::contiguous(shape),
-        kiln_tensor::TensorId::next(),
-    )
-    .map_err(|e| MarlinError::Msg(format!("kt-marlin alloc wrap: {e}")))
+    Ok(kiln_kt_bridge::alloc_cuda_tensor(source, dtype, shape)?)
 }
 
 /// `marlin_w4a16_gemm` over `kiln_tensor::Tensor` operands.
