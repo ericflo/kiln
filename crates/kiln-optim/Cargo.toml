@@ -17,3 +17,9 @@ repository.workspace = true
 kiln-tensor = { workspace = true }
 kiln-param = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# Phase 1.42's full-training-step integration test pulls kiln-autograd
+# alongside kiln-optim. Production callers in kiln-train will do the
+# same.
+kiln-autograd = { workspace = true }
