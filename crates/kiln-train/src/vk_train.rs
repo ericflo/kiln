@@ -1387,6 +1387,12 @@ pub fn vk_compute_segment_boundaries(num_layers: usize, num_segments: usize) -> 
 /// Recommended number of gradient-checkpoint segments for a given
 /// model layer count. Mirrors `trainer::compute_segment_boundaries`'s
 /// default (clamps to 1..=num_layers).
+///
+/// This is the *VRAM-blind* default — kept for callers that don't have the
+/// workload shape handy. Production VK SFT prefers
+/// [`vk_recommended_checkpoint_plan_for_workload`] which factors in
+/// `max_seq_len` and `hidden_size` to optionally skip checkpointing
+/// entirely on big GPUs with short prompts.
 pub fn vk_recommended_checkpoint_segments(num_layers: usize) -> usize {
     std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
         .ok()
@@ -1400,6 +1406,101 @@ pub fn vk_recommended_checkpoint_segments(num_layers: usize) -> usize {
             // ~5 GB.
             4.min(num_layers).max(1)
         })
+}
+
+/// Workload-shape-aware checkpoint decision for the VK SFT trainer.
+///
+/// Mirrors the candle path's [`CheckpointConfig::auto_for_workload`]: routes
+/// through [`kiln_core::vram::recommended_checkpoint_plan`] so the segment
+/// count (or "disabled" decision) is sized against `max_seq_len_tokens` and
+/// `hidden_size`, not just total VRAM.
+///
+/// Returns:
+/// * `Some(n)` with `n >= 2` — engage checkpointing with `n` segments.
+/// * `Some(1)` — explicit "1 segment" override (legacy fallback when env
+///   pins `KILN_GRAD_CHECKPOINT_SEGMENTS=1`).
+/// * `None` — skip checkpointing (Disabled plan, `KILN_NO_GRAD_CHECKPOINT=1`,
+///   or workload-shape estimate says activations fit comfortably in
+///   available VRAM).
+///
+/// `vk_native_sft_train` already special-cases `KILN_NO_GRAD_CHECKPOINT` at
+/// the call site; this function additionally returns `None` for the
+/// auto-Disabled case so the caller can skip both the checkpointed and
+/// recompute paths in favor of the full-tape `vk_train_step` family.
+pub fn vk_recommended_checkpoint_plan_for_workload(
+    num_layers: usize,
+    max_seq_len_tokens: usize,
+    hidden_size: usize,
+    intermediate_size: usize,
+    vocab_size: usize,
+    bytes_per_base_param: usize,
+) -> Option<usize> {
+    // KILN_NO_GRAD_CHECKPOINT=1 → caller already handles this, but mirror
+    // the explicit "skip" here for callers that route only through this
+    // function.
+    if std::env::var("KILN_NO_GRAD_CHECKPOINT")
+        .as_deref()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let vram = kiln_core::vram::detect_vram();
+    let base_bytes = kiln_core::vram::estimate_base_model_bytes(
+        num_layers,
+        hidden_size,
+        intermediate_size,
+        vocab_size,
+        bytes_per_base_param,
+    );
+
+    match kiln_core::vram::recommended_checkpoint_plan(
+        &vram,
+        num_layers,
+        max_seq_len_tokens,
+        hidden_size,
+        base_bytes,
+    ) {
+        Some(kiln_core::vram::CheckpointPlan::Disabled {
+            max_act_gib,
+            available_gib,
+        }) => {
+            tracing::info!(
+                max_seq_len_tokens,
+                activation_tape_gib = format!("{max_act_gib:.2}"),
+                available_gib = format!("{available_gib:.2}"),
+                vram_total_gb = vram.total_bytes as f64 / 1e9,
+                vram_source = %vram.source,
+                "vk-native auto-tuned: gradient checkpointing DISABLED — activation tape fits comfortably in available VRAM"
+            );
+            None
+        }
+        Some(kiln_core::vram::CheckpointPlan::Enabled {
+            num_segments,
+            max_act_gib,
+            per_segment_gib,
+            available_gib,
+        }) => {
+            tracing::info!(
+                num_segments,
+                max_seq_len_tokens,
+                activation_tape_gib = format!("{max_act_gib:.2}"),
+                per_segment_gib = format!("{per_segment_gib:.2}"),
+                available_gib = format!("{available_gib:.2}"),
+                vram_total_gb = vram.total_bytes as f64 / 1e9,
+                vram_source = %vram.source,
+                "vk-native auto-tuned: gradient checkpointing engaged for workload shape"
+            );
+            Some(num_segments)
+        }
+        None | Some(kiln_core::vram::CheckpointPlan::UserOverride) => {
+            // VRAM unknown or user override (KILN_GRAD_CHECKPOINT_SEGMENTS
+            // set) — fall back to the env-driven path.
+            let segs = vk_recommended_checkpoint_segments(num_layers);
+            if segs > 1 { Some(segs) } else { None }
+        }
+    }
 }
 
 /// Single-step training (no gradient checkpointing — full forward
@@ -4852,11 +4953,23 @@ pub fn vk_native_sft_train(
     //
     // The checkpointed path is FullAttn-only for now; hybrid models
     // (with GDN layers) fall back to vk_train_step.
+    // Workload-shape-aware checkpoint segment picker. The decision now
+    // factors in `max_seq_len` (just computed above) and the device's
+    // available VRAM, not just the layer count — so a 30-token job on an
+    // A6000 correctly skips checkpointing while a 16K-token job picks
+    // the right segment count. Mirrors the candle path's
+    // `CheckpointConfig::auto_for_workload` (issue #1063 follow-up).
     let ckpt_segments = if needs_state || std::env::var("KILN_NO_GRAD_CHECKPOINT").is_ok() {
         None
     } else {
-        let segs = vk_recommended_checkpoint_segments(model_config.num_layers);
-        if segs > 1 { Some(segs) } else { None }
+        vk_recommended_checkpoint_plan_for_workload(
+            model_config.num_layers,
+            max_seq_len,
+            model_config.hidden_size,
+            model_config.intermediate_size,
+            model_config.vocab_size,
+            2, // BF16 base weights
+        )
     };
     if let Some(segs) = ckpt_segments {
         tracing::info!(
