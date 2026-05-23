@@ -22,6 +22,10 @@
 
 mod dtype;
 mod error;
+mod layout;
+mod tensor_id;
 
 pub use dtype::DType;
 pub use error::{Error, Result};
+pub use layout::Layout;
+pub use tensor_id::TensorId;
