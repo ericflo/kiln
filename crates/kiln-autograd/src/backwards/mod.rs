@@ -27,5 +27,6 @@ pub mod reduce;
 pub mod rmsnorm;
 pub mod rope;
 pub mod swiglu;
+pub mod trig;
 pub mod unary_arith;
 pub mod where_select;

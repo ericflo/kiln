@@ -68,6 +68,7 @@ pub use backwards::reduce::{ReduceBackward, ReduceKind, ReduceScope};
 pub use backwards::rmsnorm::RmsNormBackward;
 pub use backwards::rope::RopeBackward;
 pub use backwards::swiglu::MulSigmoidGateBackward;
+pub use backwards::trig::{CosBackward, SinBackward, TanBackward};
 pub use backwards::unary_arith::{AbsBackward, ExpBackward, LnBackward, NegBackward, SqrtBackward};
 pub use backwards::where_select::WhereSelectBackward;
 pub use grad_store::GradStore;
