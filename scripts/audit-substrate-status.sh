@@ -120,6 +120,27 @@ ROWS = [
                                     ["crates/kiln-graph/tests/capture_lifetime.rs"]),
     ("1.30", "ARCHITECTURE.md migration substrate section",
                                     ["ARCHITECTURE.md"]),
+    # Phase 1 (continued) — substrate completion.
+    ("1.32", "Tensor version counter (anti-pattern 16 wiring)",
+                                    ["crates/kiln-tensor/src/tensor.rs"]),
+    ("1.33", "reduce_sum + reduce_mean CPU DeviceOps",
+                                    ["crates/kiln-tensor/src/ops/reduce.rs"]),
+    ("1.34", "index_select CPU DeviceOp",
+                                    ["crates/kiln-tensor/src/ops/index_select.rs"]),
+    ("1.35", "masked_fill + causal_mask CPU DeviceOps",
+                                    ["crates/kiln-tensor/src/ops/mask.rs"]),
+    ("1.36", "causal attention block integration test",
+                                    ["crates/kiln-tensor/tests/attention_block.rs"]),
+    ("1.37", "kiln-param + kiln-optim integration test",
+                                    ["crates/kiln-optim/tests/integration.rs"]),
+    ("1.38", "kiln-autograd end-to-end backward integration test",
+                                    ["crates/kiln-autograd/tests/end_to_end.rs"]),
+    ("1.39", "safetensors save path",
+                                    ["crates/kiln-tensor/src/safetensors.rs"]),
+    ("1.40", "Parameter::content_hash method",
+                                    ["crates/kiln-param/src/parameter.rs"]),
+    ("1.42", "full training step demo (tensor + autograd + param + optim)",
+                                    ["crates/kiln-optim/tests/full_training_step.rs"]),
     # Phase 2.5 / 5 / 6a / 6.5 — new crates.
     ("2.1",  "kiln-blas production API sketch (AlgoCache + WorkspacePool)",
                                     ["crates/kiln-blas/src/algo_cache.rs",
@@ -142,6 +163,9 @@ ROWS = [
     ("6.5",  "kiln-optim (OptimStep + AdamW CPU)",
                                     ["crates/kiln-optim/Cargo.toml",
                                      "crates/kiln-optim/src/adamw.rs"]),
+    ("6.5.1", "Sgd + Lion/Muon scaffolds",
+                                    ["crates/kiln-optim/src/sgd.rs",
+                                     "crates/kiln-optim/src/lion_muon.rs"]),
 ]
 
 def is_shipped(paths):
@@ -188,10 +212,14 @@ elif mode == "markdown":
                 f.write(f"| {r['phase']} | {r['label']} | {mark} |\n")
         f.write("\n## Phase 2 / 2.5 / 5 / 6a / 6.5 — new crates\n\n")
         f.write("| Phase | Deliverable | Status |\n|---|---|:-:|\n")
-        for r in rows:
-            if not r["phase"].startswith(("0", "1")):
-                mark = "✓" if r["status"] == "shipped" else "✗"
-                f.write(f"| {r['phase']} | {r['label']} | {mark} |\n")
+        # Sort 2.x / 2.5 / 5 / 6a / 6.5 / 6.5.1 in sensible order.
+        order = {"2.1": 0, "2.2": 1, "2.3": 2, "2.5": 3, "5": 4, "6a": 5,
+                 "6.5": 6, "6.5.1": 7}
+        non_01 = [r for r in rows if not r["phase"].startswith(("0", "1"))]
+        non_01.sort(key=lambda r: order.get(r["phase"], 99))
+        for r in non_01:
+            mark = "✓" if r["status"] == "shipped" else "✗"
+            f.write(f"| {r['phase']} | {r['label']} | {mark} |\n")
     sys.stderr.write(f"wrote {out}\n")
     sys.stdout.write(f"{shipped}/{total} deliverables shipped\n")
 elif mode == "json":

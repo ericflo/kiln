@@ -1,6 +1,6 @@
 # kiln-tensor substrate status
 
-**47 / 47 deliverables shipped** as of latest re-run of `scripts/audit-substrate-status.sh`.
+**58 / 58 deliverables shipped** as of latest re-run of `scripts/audit-substrate-status.sh`.
 
 Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 
@@ -53,6 +53,16 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 1.28 | CpuAllocator | ✓ |
 | 1.29 | Allocator + CaptureSession integration test | ✓ |
 | 1.30 | ARCHITECTURE.md migration substrate section | ✓ |
+| 1.32 | Tensor version counter (anti-pattern 16 wiring) | ✓ |
+| 1.33 | reduce_sum + reduce_mean CPU DeviceOps | ✓ |
+| 1.34 | index_select CPU DeviceOp | ✓ |
+| 1.35 | masked_fill + causal_mask CPU DeviceOps | ✓ |
+| 1.36 | causal attention block integration test | ✓ |
+| 1.37 | kiln-param + kiln-optim integration test | ✓ |
+| 1.38 | kiln-autograd end-to-end backward integration test | ✓ |
+| 1.39 | safetensors save path | ✓ |
+| 1.40 | Parameter::content_hash method | ✓ |
+| 1.42 | full training step demo (tensor + autograd + param + optim) | ✓ |
 
 ## Phase 2 / 2.5 / 5 / 6a / 6.5 — new crates
 
@@ -65,3 +75,4 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 5 | kiln-graph crate (CapturedGraph + CaptureSession) | ✓ |
 | 6a | kiln-autograd (Tape + GradStore + BackwardOp) | ✓ |
 | 6.5 | kiln-optim (OptimStep + AdamW CPU) | ✓ |
+| 6.5.1 | Sgd + Lion/Muon scaffolds | ✓ |
