@@ -103,8 +103,11 @@ fn microbatch_grad_accum_converges_via_accumulate_then_step() {
         ..Default::default()
     });
 
+    // 200 epochs × 4 micro-batches = 800 AdamW steps. Empirical
+    // (validate pod 2026-05-23): 60 epochs left w[0] at 1.54 (the
+    // descent had clearly started but hadn't reached the target).
     let mut losses = Vec::new();
-    for _epoch in 0..60 {
+    for _epoch in 0..200 {
         let mut acc = GradAccumulator::new();
         let mut epoch_loss = 0.0;
         for mi in 0..n_micro {
@@ -138,11 +141,12 @@ fn microbatch_grad_accum_converges_via_accumulate_then_step() {
     }
 
     let first = losses[0];
-    let last = losses[59];
+    let last = losses[losses.len() - 1];
     assert!(
         last < first * 0.10,
-        "loss did not descend enough across 60 epochs of \
-         micro-batch accumulation: first={first}, last={last}"
+        "loss did not descend enough across {} epochs of \
+         micro-batch accumulation: first={first}, last={last}",
+        losses.len()
     );
 
     // Recovered parameters: w → (2, -1), b → 0.5.
