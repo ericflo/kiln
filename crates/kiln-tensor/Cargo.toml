@@ -19,6 +19,12 @@ repository.workspace = true
 thiserror = { workspace = true }
 # anyhow is intentionally absent — kiln_tensor::Error owns its variants.
 
+# bf16 / f16 element types — match the version the other kiln crates use.
+half = "2"
+
+# Safe byte-cast for typed CPU constructors (from_slice / to_vec).
+bytemuck = { version = "1", features = ["extern_crate_alloc"] }
+
 [features]
 default = []
 # Reserved feature names for future PRs in Phase 1; declared early so
