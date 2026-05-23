@@ -1,0 +1,21 @@
+[package]
+name = "kiln-graph"
+description = "Backend-agnostic command-list / graph capture for kiln. CUDA graphs, MTLIndirectCommandBuffer, Vulkan secondary command buffers."
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Phase 5 of #1082. This PR ships the backend-agnostic types
+# (CapturedGraph trait, FrozenAllocator policy, AllocatorMode,
+# CaptureSession lifetime model). Per-backend impls — kiln-graph-cuda
+# over `cudaGraph_t`, kiln-graph-metal over MTLIndirectCommandBuffer,
+# kiln-graph-vulkan extending kiln-vulkan-kernel::cmd_batch.rs — plug
+# in via the same `CapturedGraph` trait in subsequent PRs.
+#
+# Internal-only — no semver commitment until Phase 7 ships.
+
+[dependencies]
+kiln-tensor = { workspace = true }
+thiserror = { workspace = true }
