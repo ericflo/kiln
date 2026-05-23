@@ -31,6 +31,8 @@ mod tensor_id;
 
 #[cfg(feature = "cuda")]
 mod cuda_storage;
+#[cfg(feature = "metal")]
+mod metal_storage;
 
 pub use device::{Backend, Device};
 pub use dtype::DType;
@@ -43,3 +45,5 @@ pub use tensor_id::TensorId;
 
 #[cfg(feature = "cuda")]
 pub use cuda_storage::{cuda_zeros, CudaStorage};
+#[cfg(feature = "metal")]
+pub use metal_storage::{metal_zeros, MetalStorage};
