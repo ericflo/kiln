@@ -49,6 +49,7 @@ pub mod reduce;
 pub mod repeat;
 pub mod rmsnorm;
 pub mod rope;
+pub mod scalar;
 pub mod scatter_add;
 pub mod sign_and_round;
 pub mod silu_mul;
@@ -88,6 +89,7 @@ pub use reduce::{mean_all, mean_axis, sum_all, sum_axis, ReduceOp, ReductionKind
 pub use repeat::repeat;
 pub use rmsnorm::{rms_norm, RmsNormOp};
 pub use rope::{rope, RopeOp};
+pub use scalar::{add_scalar, div_scalar, mul_scalar, sub_scalar};
 pub use scatter_add::{scatter_add, ScatterAddOp};
 pub use sign_and_round::{ceil, floor, reciprocal, round, sign, trunc};
 pub use silu_mul::{mul_sigmoid_gate, MulSigmoidGateOp};
