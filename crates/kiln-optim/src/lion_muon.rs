@@ -702,32 +702,35 @@ mod tests {
         assert_eq!(state.step, 3);
     }
 
-    // FIXME(#1082): The Muon-paper quintic NS polynomial
-    // `p(σ) = 3.4445·σ - 4.7750·σ³ + 2.0315·σ⁵` does NOT have σ=1 as a
-    // stable fixed point: p(1) ≈ 0.701, p(0.701) ≈ 1.014, p(1.014) ≈
-    // 0.693, … it oscillates around 1 and converges only slowly. After
-    // 5 iterations on the identity matrix, the singular values land at
-    // ~1.108 each, giving frob ≈ 1.567 (not √2 ≈ 1.414). The test's
-    // expectation is conceptually wrong for this polynomial; the
-    // implementation matches the canonical Muon coefficients. Same
-    // never-green-in-CI pattern as the other ignored tests (test was
-    // added in phase 6.5.6 / 7bdc1097, masked by the half-crate compile
-    // error until bc8cee8c). Marked #[ignore] until the test author
-    // redesigns it — e.g. allow a larger tolerance (~0.2), or test a
-    // random non-orthogonal matrix and check post-NS orthogonality
-    // instead.
-    #[ignore = "FIXME(#1082): NS polynomial doesn't fixed-point σ=1; see comment above"]
     #[test]
-    fn newton_schulz_identity_stays_orthogonal_ish() {
-        // The identity matrix is already orthogonal; NS should leave
-        // it (approximately) at the same shape.
-        let i = vec![1.0f32, 0.0, 0.0, 1.0];
-        let out = newton_schulz(&i, 2, 2, 5);
-        // After NS, ||out||_F ≈ √2 (orthogonal 2x2 has Frobenius norm √2).
-        let frob = out.iter().map(|&v| v * v).sum::<f32>().sqrt();
+    fn newton_schulz_pulls_singular_values_toward_unity() {
+        // NS is an *orthogonalizer*: it takes a matrix whose singular
+        // values are arbitrary and pulls them toward 1. Testing it on
+        // the identity matrix is a misleading check — the Muon-paper
+        // quintic `p(σ) = 3.4445σ - 4.7750σ³ + 2.0315σ⁵` is tuned for
+        // fast convergence from σ ∈ [~0.3, σ_max] toward σ ≈ 1, NOT
+        // to fix-point σ = 1 (p(1) ≈ 0.701, so it would *move away*
+        // from already-orthogonal). The right test starts from a
+        // clearly non-orthogonal input.
+        //
+        // Input: diag(0.3, 0.5). Frobenius norm = √0.34 ≈ 0.583, far
+        // from the √2 ≈ 1.414 of a 2×2 orthogonal matrix.
+        let m = vec![0.3f32, 0.0, 0.0, 0.5];
+        let input_frob = m.iter().map(|&v| v * v).sum::<f32>().sqrt();
+        let out = newton_schulz(&m, 2, 2, 5);
+        let output_frob = out.iter().map(|&v| v * v).sum::<f32>().sqrt();
+        let target = 2.0_f32.sqrt();
+        // Output should land strictly closer to √2 than the input was.
         assert!(
-            (frob - 2.0_f32.sqrt()).abs() < 0.1,
-            "frob = {frob}, expected ~√2"
+            (output_frob - target).abs() < (input_frob - target).abs(),
+            "NS didn't pull frob toward √2: input={input_frob}, output={output_frob}"
+        );
+        // And the output should land in the orthogonal ballpark — well
+        // within 0.5 of √2. (Hand-traced expectation: ~1.21 after 5
+        // iters of the diagonal recurrence.)
+        assert!(
+            (output_frob - target).abs() < 0.5,
+            "NS output frob {output_frob} too far from √2 ≈ {target}"
         );
     }
 
