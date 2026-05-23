@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "stage": 0,
+  "slug": "stage-0-baseline",
+  "method": "no-adapter",
+  "status": "complete",
+  "hypothesis": "Round-3 base composite under kiln serve --eval-mode is in the 0.55-0.65 range, similar to round-1's 0.6112. If it shifts >0.03, this triggers METHODS.md round-3 follow-up rule.",
+  "result_summary": "Baseline = 0.6293 ± 0.0099 (3-seed), shift +0.018 from round-1's 0.6112 (within noise). No round-3 eval-mode regression for this cap.",
+  "base_adapter": null,
+  "output_adapter": null,
+  "inference_recipe": {
+    "system_prompt_file": null,
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "max_tokens_per_turn": 1536,
+    "max_turns": 10,
+    "max_wall_clock_s": 180,
+    "enable_thinking": false
+  },
+  "evidence": {
+    "n_tasks": 12,
+    "kiln_commit": "2a44953a",
+    "pi_commit": "0.75.4 (@earendil-works/pi-coding-agent published)",
+    "pod_id": "nfi5noknpm9x9j",
+    "lease_id": "pod-e094c16fa777f8fbe72b4ac5",
+    "ts": "2026-05-23T06:40:00Z",
+    "base_no_prompt_3_seed": {
+      "seeds": [101, 102, 103],
+      "composites": [0.63767, 0.61840, 0.63185],
+      "mean": 0.62931,
+      "stdev": 0.00988
+    },
+    "sub_scores_mean_3_seed": {
+      "outcome": 0.7540,
+      "grounding": 0.4826,
+      "cross_file_caller_recall": 0.9444,
+      "invariant_coverage": 0.3704,
+      "format_compliance": 0.9444
+    },
+    "rollout_stats": {
+      "n_rollouts_total": 36,
+      "rollouts_nonzero_total": 36,
+      "rollouts_zero_total": 0
+    },
+    "round_1_baseline_for_comparison": 0.6112,
+    "round_3_shift_vs_round_1": 0.0181,
+    "needs_revalidation_triggered": false
+  },
+  "observations": [
+    "Round-3 baseline is +0.018 above round-1's 0.6112 — within noise (round-3 stdev 0.0099 alone). No regression.",
+    "cross_file_caller_recall is 0.944 at baseline — the model greps naturally under round-3 kiln serve --eval-mode (no-thinking). Round-1 needed training to get this behavior; round-3 base already has it.",
+    "Biggest movable headroom is invariant_coverage (0.370) and grounding (0.483). Implicit invariants are the hardest sub-score.",
+    "format_compliance at 0.944 means the 6-required-field check is mostly satisfied — the model knows the JSON schema."
+  ],
+  "next_stage_implications": "Stage 1 should target outcome.invariants + grounding. SFT on synthesized ideal answers (prep_sft_ideal.py) hits BOTH: ideal answers have exact line citations (grounding) AND the gold invariants the model misses. Pi-faithful's iter18 pattern applies directly."
+}
