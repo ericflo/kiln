@@ -14,7 +14,7 @@ use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 use kiln_kt_bridge::BridgeError;
 use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 
-use crate::kiln_gdn_forward_substitution;
+use crate::{kiln_gdn_forward_substitution, kiln_gdn_recurrent_forward};
 
 #[derive(Debug)]
 pub enum GdnError {
@@ -147,4 +147,120 @@ pub fn gdn_forward_substitution_kt(
         return Err(GdnError::Msg(format!("kt-gdn: FFI returned {status}")));
     }
     Ok(w_out)
+}
+
+/// `gdn_recurrent_forward` over `kiln_tensor::Tensor` operands.
+///
+/// Single-token decode path. Inputs: q/k/v/beta/g BF16, state BF16
+/// `[B, H, dk, dv]` (mutated in place). Returns BF16 `[B, H, dv]`.
+///
+/// `state` is borrowed `&KtTensor`; the FFI mutates its underlying
+/// CUDA buffer through the raw device pointer (same idiom as the
+/// candle-typed wrapper which takes `&mut Tensor`).
+pub fn gdn_recurrent_forward_kt(
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    beta: &KtTensor,
+    g: &KtTensor,
+    state: &KtTensor,
+) -> Result<KtTensor, GdnError> {
+    let q_shape = q.shape();
+    if q_shape.len() != 3 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: recurrent q must be [B, H, dk], got {q_shape:?}"
+        )));
+    }
+    let (b, h, dk) = (q_shape[0], q_shape[1], q_shape[2]);
+    if k.shape() != q_shape {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: recurrent k {:?} != q {q_shape:?}",
+            k.shape()
+        )));
+    }
+    let v_shape = v.shape();
+    if v_shape.len() != 3 || v_shape[0] != b || v_shape[1] != h {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: recurrent v {v_shape:?} must be [{b}, {h}, dv]"
+        )));
+    }
+    let dv = v_shape[2];
+    if beta.shape() != [b, h] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: recurrent beta {:?} != [{b}, {h}]",
+            beta.shape()
+        )));
+    }
+    if g.shape() != [b, h] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: recurrent g {:?} != [{b}, {h}]",
+            g.shape()
+        )));
+    }
+    let st_shape = state.shape();
+    if st_shape.len() != 4 || (st_shape[0], st_shape[1], st_shape[2], st_shape[3]) != (b, h, dk, dv)
+    {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: recurrent state {st_shape:?} != [{b}, {h}, {dk}, {dv}]"
+        )));
+    }
+    if dk > 256 {
+        return Err(GdnError::Msg(format!("kt-gdn: dk must be <= 256, got {dk}")));
+    }
+    if dv > 1024 {
+        return Err(GdnError::Msg(format!("kt-gdn: dv must be <= 1024, got {dv}")));
+    }
+
+    let (q_st, q_off) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
+    let (k_st, k_off) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+    let (v_st, v_off) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
+    let (bt_st, bt_off) = cuda_storage_and_byte_offset(beta, KtDType::BF16, "beta")?;
+    let (g_st, g_off) = cuda_storage_and_byte_offset(g, KtDType::BF16, "g")?;
+    let (s_st, s_off) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+
+    let out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, h, dv])?;
+    let out_cuda = out
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = q_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let q_slice = q_st.slice().slice(q_off..);
+    let k_slice = k_st.slice().slice(k_off..);
+    let v_slice = v_st.slice().slice(v_off..);
+    let bt_slice = bt_st.slice().slice(bt_off..);
+    let g_slice = g_st.slice().slice(g_off..);
+    let s_slice = s_st.slice().slice(s_off..);
+    let o_slice = out_cuda.slice().slice(0..);
+
+    let status = unsafe {
+        let (q_ptr, _g1) = q_slice.device_ptr(&stream);
+        let (k_ptr, _g2) = k_slice.device_ptr(&stream);
+        let (v_ptr, _g3) = v_slice.device_ptr(&stream);
+        let (bt_ptr, _g4) = bt_slice.device_ptr(&stream);
+        let (g_ptr, _g5) = g_slice.device_ptr(&stream);
+        let (s_ptr, _g6) = s_slice.device_ptr(&stream);
+        let (o_ptr, _g7) = o_slice.device_ptr(&stream);
+
+        kiln_gdn_recurrent_forward(
+            q_ptr as *const _,
+            k_ptr as *const _,
+            v_ptr as *const _,
+            bt_ptr as *const _,
+            g_ptr as *const _,
+            s_ptr as *mut _,
+            o_ptr as *mut _,
+            (b * h) as i32,
+            dk as i32,
+            dv as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(GdnError::Msg(format!("kt-gdn: recurrent FFI returned {status}")));
+    }
+    Ok(out)
 }
