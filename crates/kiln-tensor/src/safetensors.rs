@@ -148,13 +148,14 @@ pub fn save_cpu<P: AsRef<Path>, S: AsRef<str>>(
         let wrapper = SerializableTensor::try_from_tensor(tensor)?;
         wrappers.push((name.as_ref().to_string(), wrapper));
     }
-    // safetensors::serialize_to_file takes any `IntoIterator<Item =
-    // (&str, &dyn View)>`, but the exact ergonomics depend on
-    // version. We sort by name so the file is deterministic.
+    // safetensors 0.7's `serialize_to_file` is generic over
+    // `IntoIterator<Item = (S: AsRef<str> + Ord, V: View)>` and takes
+    // `metadata: Option<HashMap<String, String>>` by value. `View` is
+    // implemented for `SerializableTensor`, not `&SerializableTensor`,
+    // so we pass owned wrappers. Sort first so the on-disk layout is
+    // deterministic.
     wrappers.sort_by(|a, b| a.0.cmp(&b.0));
-    let pairs: Vec<(&str, &SerializableTensor<'_>)> =
-        wrappers.iter().map(|(n, w)| (n.as_str(), w)).collect();
-    safetensors::tensor::serialize_to_file(pairs, &None, filename.as_ref()).map_err(|e| {
+    safetensors::tensor::serialize_to_file(wrappers, None, filename.as_ref()).map_err(|e| {
         Error::Msg(format!(
             "safetensors::save_cpu: serialize_to_file failed: {e}"
         ))
