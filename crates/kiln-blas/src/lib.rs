@@ -1,11 +1,37 @@
 //! kiln-blas — CUDA BLAS layer (cublasLt) for kiln-tensor.
 //!
-//! Phase 0 ships the `cublaslt_mlp_probe` example only. Phase 2 fills in
-//! the production matmul path with explicit algo cache, workspace pool,
-//! optional split-K, and optional fused-bias-and-activation epilogue.
+//! Phase 0 shipped the `cublaslt_mlp_probe` example. Phase 2.1
+//! (this revision) adds the backend-agnostic production data
+//! structures: [`AlgoCache`] (disk-persistent autotune cache) +
+//! [`WorkspacePool`] (per-handle workspace policy). Phase 2.x
+//! wires these to a real `cublasLtMatmul` call via a feature-gated
+//! `MatmulHandle` (cublasLt context + per-stream binding).
 //!
 //! See `examples/cublaslt_mlp_probe.rs` and the issue at
 //! <https://github.com/ericflo/kiln/issues/1082>.
+//!
+//! # Phase 2.1 public surface
+//!
+//! - [`AlgoCache`] + [`AlgoCacheKey`] + [`AlgoCacheValue`] — Phase 2's
+//!   disk-persistent autotune cache, keyed on
+//!   `(shape, dtype, layout, concurrent_streams, kiln_version_major)`.
+//! - [`WorkspacePool`] — per-handle workspace cap (default 32 MiB) +
+//!   peak-bytes / call-count tracking.
+//! - [`probe_ffi`] — Phase 0.8 probe FFI (kept for the probe example).
+//!
+//! # CPU-buildable
+//!
+//! All Phase 2.1 types are backend-agnostic — no `--features cuda`
+//! required to use them. The feature-gated `MatmulHandle` lands in a
+//! subsequent PR.
+
+mod algo_cache;
+mod workspace_pool;
+
+pub use algo_cache::{
+    save_to_path, serialize_to_json, AlgoCache, AlgoCacheKey, AlgoCacheValue,
+};
+pub use workspace_pool::WorkspacePool;
 
 /// FFI declarations for the Phase 0 probe.
 ///
@@ -80,7 +106,9 @@ pub mod probe_ffi {
     }
 }
 
-/// Empty placeholder for the Phase 2 production path. See lib doc.
+/// Stable phase tag. Used by the `kiln-bench` JSON reports + Phase 9
+/// audit logs to distinguish Phase 0 (probe-only) numbers from
+/// Phase 2.x (production-path) numbers.
 pub fn phase() -> &'static str {
-    "phase 0 — probe only"
+    "phase 2.1 — backend-agnostic API (AlgoCache + WorkspacePool); cublasLt MatmulHandle Phase 2.x"
 }
