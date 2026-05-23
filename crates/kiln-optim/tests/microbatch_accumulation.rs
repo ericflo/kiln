@@ -11,7 +11,8 @@
 //!   truth; Parameter::tensor_id never drifts (anti-pattern 11).
 
 use kiln_optim::{
-    accumulate_then_step, AdamW, AdamWHyperparameters, GradAccumulator,
+    accumulate_then_step, AdamW, AdamWHyperparameters, GradAccumulator, Sgd,
+    SgdHyperparameters,
 };
 use kiln_param::{AmpPolicy, ForwardStorage, Parameter};
 use kiln_tensor::{CpuStorage, Tensor};
@@ -98,14 +99,17 @@ fn microbatch_grad_accum_converges_via_accumulate_then_step() {
     let w_id = w_param.tensor_id();
     let b_id = b_param.tensor_id();
 
-    let mut opt = AdamW::new(AdamWHyperparameters {
-        lr: 0.05,
+    // SGD is more predictable than AdamW for a small-N linear
+    // regression: AdamW's β2=0.999 second-moment estimate takes
+    // ~1000 steps to stabilize, so the effective lr is small during
+    // most of the run. Empirically: AdamW lr=0.05 over 800 steps
+    // left w[0] at ~1.53 (validate pod 2026-05-23). SGD lr=0.1
+    // converges cleanly within a few hundred steps.
+    let mut opt = Sgd::new(SgdHyperparameters {
+        lr: 0.1,
         ..Default::default()
     });
 
-    // 200 epochs × 4 micro-batches = 800 AdamW steps. Empirical
-    // (validate pod 2026-05-23): 60 epochs left w[0] at 1.54 (the
-    // descent had clearly started but hadn't reached the target).
     let mut losses = Vec::new();
     for _epoch in 0..200 {
         let mut acc = GradAccumulator::new();
