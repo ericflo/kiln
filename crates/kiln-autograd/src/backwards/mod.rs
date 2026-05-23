@@ -14,5 +14,6 @@ pub mod activation;
 pub mod cross_entropy;
 pub mod elementwise;
 pub mod embedding;
+pub mod index_ops;
 pub mod matmul;
 pub mod rmsnorm;
