@@ -27,3 +27,36 @@ Expected composite lift is +0.03 to +0.06 against the local 3-generation thinkin
 - From `pi-doctest` round 1: strong-signal filtering was robust; more groups or extra epochs overtrained.
 - From `pi-code-comprehension`: ECHO helps agentic caps, but chaining SFT/self-distillation on agentic traces can destabilize sub-scores.
 - From `pi-faithful-completion`: successful chains often alternate complementary data distributions gently; if H15 is positive, the next experiment should be an oscillating chain that alternates H12 strong-signal GRPO with a light SFT/GRPO regularizer on efficient successful train rollouts, stopping before over-chain.
+
+## Result
+
+Rejected at smoke gate.
+
+The full partial32 batch kept the intended high-variance groups, but the first
+server-native train attempt stalled on pathological long failure-loop traces.
+The lean32 batch dropped the longest failures while preserving four
+medium-variance groups, then trained successfully through `/v1/train/grpo`.
+
+Training artifact:
+
+- Job: `7e4cf9ce-57ec-4213-b5ea-71c8d20d792f`
+- Adapter: `pi-doctest-h15-thinking-on-pi1024-normalized-lean32`
+- Receipt: `Qwen3.5-4B/adapters/pi-doctest-h15-thinking-on-pi1024-normalized-lean32/train_receipt.json`
+- Train wall-clock: 742678 ms
+- Train tokens: 7449 action, 4684 env
+- Reward groups: 4 non-degenerate groups, 13 completions, mean reward 0.2663
+- Verify: adapter layout/tensors/server load all passed; 400 nonzero LoRA tensors
+
+Blind aggregate smoke, after the normalized thinking-on base smoke:
+
+| Run | Composite | Outcome | Tool efficiency | Mean tool calls | Mean thinking chars | Mean wall-clock |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Base | 0.90625 | 1.00 | 0.6875 | 6.00 | 1984.0 | 34.1s |
+| H15 lean32 | 0.71250 | 0.75 | 0.8438 | 4.75 | 2234.5 | 47.5s |
+
+The adapter improved the intended efficiency metric, but did so by damaging
+outcome and increasing thinking per tool call. This supports a narrower
+diagnosis: the lean high-variance replay over-weighted short/incomplete
+behavior after dropping long failures. Do not promote this adapter. The next
+iteration should include successful thinking-on anchor traces or an explicit
+outcome-preservation regularizer before applying any efficiency pressure.

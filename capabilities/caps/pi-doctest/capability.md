@@ -127,8 +127,19 @@ unchanged, and the rubric now emits aggregate diagnostics for `thinking_chars`,
 can track the score vs. thinking-efficiency tradeoff without changing the blind
 score definition.
 
-Next valid measurement: rerun the blind baseline under thinking-on server
-defaults before any local H15 training claim.
+Valid normalized thinking-on smoke measurement:
+
+- Base, `LIMIT=4 SEEDS=1`: composite 0.90625, outcome 1.0,
+  tool_call_efficiency 0.6875, mean tool calls 6.0, mean thinking chars 1984.0.
+- H15 lean32 adapter: composite 0.7125, delta -0.19375, outcome 0.75,
+  tool_call_efficiency 0.84375, mean tool calls 4.75, mean thinking chars
+  2234.5.
+
+H15 is rejected at the smoke gate. It moved the intended efficiency metric in
+the right direction, but did so by harming outcome and increasing thinking per
+tool call. The next local iteration should preserve successful thinking-on
+solutions as an anchor instead of training only on lean high-variance failure
+loops.
 
 ### Adversarial design (§0)
 
