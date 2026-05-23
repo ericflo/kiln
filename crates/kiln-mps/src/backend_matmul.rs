@@ -107,8 +107,8 @@ mod tests {
 
     #[test]
     fn uma_hint_is_respected() {
-        let h = MpsBackendMatmul::with_uma_hint(MpsUmaHint::ForceShared);
-        assert!(matches!(h.uma_hint, MpsUmaHint::ForceShared));
+        let h = MpsBackendMatmul::with_uma_hint(MpsUmaHint::SharedUma);
+        assert!(matches!(h.uma_hint, MpsUmaHint::SharedUma));
     }
 
     #[test]
