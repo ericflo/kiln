@@ -3,6 +3,8 @@
 //! - **SigmoidBackward** — `dx = dy * y * (1 - y)`. Saves forward `y`.
 //! - **SiluBackward** — `dx = dy * (σ + x*σ*(1-σ))` where `σ = sigmoid(x)`.
 //!   Saves `x`.
+//! - **GeluBackward** — `dx = dy * d(gelu)/dx` (tanh approximation).
+//!   Saves `x` and recomputes `tanh(arg)` in backward.
 //! - **SoftmaxLastDimBackward** — `dx_i = y_i * (dy_i - sum_j(y_j * dy_j))`
 //!   per row over the trailing axis. Saves forward `y`.
 //!
@@ -169,6 +171,57 @@ impl BackwardOp for SiluBackward {
             .map(|(&xi, &dyi)| {
                 let s = sigmoid(xi);
                 dyi * (s + xi * s * (1.0 - s))
+            })
+            .collect();
+        let out = store_f32(self.x.dtype(), self.x.shape(), &dx)?;
+        Ok(vec![Some(out)])
+    }
+    fn requires_input(&self, _idx: usize) -> bool {
+        true
+    }
+}
+
+// ----------------------------------------------------------------------
+// GeluBackward
+// ----------------------------------------------------------------------
+
+/// GELU backward (tanh approximation).
+///
+/// Let `c = √(2/π)`, `arg = c * (x + 0.044715*x³)`, `t = tanh(arg)`.
+/// Then `gelu(x) = 0.5 * x * (1 + t)` and:
+///
+/// ```text
+/// d(gelu)/dx = 0.5 * (1 + t) + 0.5 * x * (1 - t²) * c * (1 + 3*0.044715*x²)
+/// ```
+///
+/// `dx = dy * d(gelu)/dx`. Saves `x`; recomputes `t` in backward.
+#[derive(Debug)]
+pub struct GeluBackward {
+    /// Forward input `x` — same shape as output.
+    pub x: Tensor,
+}
+
+impl BackwardOp for GeluBackward {
+    fn name(&self) -> &'static str {
+        "gelu_backward"
+    }
+    fn input_count(&self) -> usize {
+        1
+    }
+    fn apply(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
+        validate_same(&self.x, grad_output, "GeluBackward")?;
+        let x = load_f32(&self.x)?;
+        let dy = load_f32(grad_output)?;
+        const C: f32 = 0.7978845608_f32; // √(2/π)
+        let dx: Vec<f32> = x
+            .iter()
+            .zip(dy.iter())
+            .map(|(&xi, &dyi)| {
+                let arg = C * (xi + 0.044715 * xi * xi * xi);
+                let t = arg.tanh();
+                let dgdx =
+                    0.5 * (1.0 + t) + 0.5 * xi * (1.0 - t * t) * C * (1.0 + 3.0 * 0.044715 * xi * xi);
+                dyi * dgdx
             })
             .collect();
         let out = store_f32(self.x.dtype(), self.x.shape(), &dx)?;
@@ -352,10 +405,46 @@ mod tests {
     }
 
     #[test]
+    fn gelu_backward_at_zero() {
+        // arg(0) = 0, tanh(0) = 0; d/dx = 0.5 * (1 + 0) + 0 = 0.5.
+        let x = Tensor::from_slice(&[0.0f32, 0.0], vec![2]).unwrap();
+        let dy = Tensor::from_slice(&[1.0f32, 2.0], vec![2]).unwrap();
+        let bo = GeluBackward { x };
+        let dx = load_f32(bo.apply(&dy).unwrap()[0].as_ref().unwrap()).unwrap();
+        approx(&dx, &[0.5, 1.0], 1e-6);
+    }
+
+    #[test]
+    fn gelu_backward_finite_difference() {
+        use kiln_tensor::ops::gelu;
+        let x_data = vec![0.5f32, -1.5, 2.0];
+        let x = Tensor::from_slice(&x_data, vec![3]).unwrap();
+        let dy = Tensor::from_slice(&[1.0f32; 3], vec![3]).unwrap();
+        let bo = GeluBackward { x: x.clone() };
+        let dx = load_f32(bo.apply(&dy).unwrap()[0].as_ref().unwrap()).unwrap();
+        let loss = |xv: &[f32]| -> f32 {
+            let xt = Tensor::from_slice(xv, vec![3]).unwrap();
+            let y = gelu(&xt).unwrap();
+            load_f32(&y).unwrap().iter().sum()
+        };
+        let step = 1e-3;
+        let mut fd = Vec::with_capacity(3);
+        for i in 0..3 {
+            let mut up = x_data.clone();
+            up[i] += step;
+            let mut dn = x_data.clone();
+            dn[i] -= step;
+            fd.push((loss(&up) - loss(&dn)) / (2.0 * step));
+        }
+        approx(&dx, &fd, 5e-3);
+    }
+
+    #[test]
     fn op_metadata() {
         let one = Tensor::from_slice(&[0.5f32], vec![1]).unwrap();
         assert_eq!(SigmoidBackward { y: one.clone() }.name(), "sigmoid_backward");
         assert_eq!(SiluBackward { x: one.clone() }.name(), "silu_backward");
+        assert_eq!(GeluBackward { x: one.clone() }.name(), "gelu_backward");
         assert_eq!(
             SoftmaxLastDimBackward { y: one.clone() }.name(),
             "softmax_last_dim_backward"
