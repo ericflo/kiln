@@ -179,9 +179,16 @@ impl OptimStep for AdamW {
             master_f32[i] -= update;
         }
 
-        // Write back to the master tensor in place (in-place mutation
-        // bumps Tensor version once that field lands — anti-pattern 16).
-        write_from_f32(&master, master_dtype, &master_f32, self.rounding)?;
+        // Build a fresh master Tensor and swap it into the
+        // Parameter. Preserves `param.tensor_id()` per anti-pattern
+        // 11 — `self.moments` keyed on `tensor_id` survives the swap.
+        let new_master = build_master_tensor(master_dtype, master.shape(), &master_f32)?;
+        // The Phase 1.x stochastic-rounding policy lands inside
+        // `build_master_tensor` once the bf16 master-write story is
+        // wired; today the policy is read but its branch is not yet
+        // exercised on CPU.
+        let _ = self.rounding;
+        param.replace_backward_storage(Some(new_master));
         Ok(())
     }
 
@@ -193,6 +200,45 @@ impl OptimStep for AdamW {
 // ----------------------------------------------------------------------
 // CPU helpers
 // ----------------------------------------------------------------------
+
+fn build_master_tensor(
+    dtype: DType,
+    shape: &[usize],
+    values: &[f32],
+) -> Result<Tensor, StepError> {
+    use kiln_tensor::{Layout, Storage, TensorId};
+    use std::sync::Arc;
+    let per = dtype.size_in_bytes();
+    let mut bytes = vec![0u8; values.len() * per];
+    match dtype {
+        DType::F32 => {
+            for (i, &v) in values.iter().enumerate() {
+                bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        DType::BF16 => {
+            for (i, &v) in values.iter().enumerate() {
+                bytes[i * 2..i * 2 + 2]
+                    .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
+            }
+        }
+        DType::F16 => {
+            for (i, &v) in values.iter().enumerate() {
+                bytes[i * 2..i * 2 + 2]
+                    .copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
+            }
+        }
+        other => {
+            return Err(StepError::Tensor(kiln_tensor::Error::Msg(format!(
+                "AdamW CPU: unsupported master dtype {other}"
+            ))))
+        }
+    }
+    let cpu = CpuStorage::from_bytes(dtype, bytes).map_err(StepError::Tensor)?;
+    let storage: Storage = Arc::new(cpu);
+    Tensor::from_parts(storage, Layout::contiguous(shape.to_vec()), TensorId::next())
+        .map_err(StepError::Tensor)
+}
 
 fn read_to_f32(t: &Tensor) -> Result<Vec<f32>, StepError> {
     let cpu = t
@@ -240,35 +286,10 @@ fn read_to_f32(t: &Tensor) -> Result<Vec<f32>, StepError> {
     Ok(out)
 }
 
-fn write_from_f32(
-    t: &Tensor,
-    dtype: DType,
-    values: &[f32],
-    rounding: StochasticRoundingPolicy,
-) -> Result<(), StepError> {
-    // Cheat: since `CpuStorage` is internally `Vec<u8>` behind an
-    // `Arc<dyn StorageBackend>`, we cannot mutate it through the
-    // immutable `Tensor` handle. For Phase 6.5 the master update is
-    // expected to be in place — see the API note below.
-    //
-    // Today's `Tensor` API does not expose `&mut Storage`. The "real"
-    // in-place path lands when `kiln-tensor::Tensor` grows an
-    // explicit interior-mutability story (Phase 1.x's version
-    // counter). Until then, this helper documents the contract and
-    // RETURNS the would-be bytes via the per-rust-test path (the
-    // tests check moments + new-Tensor values rather than mutating).
-    //
-    // Concrete: the CPU reference today produces a fresh f32 buffer
-    // (moments + master_f32); the test asserts moments[..] without
-    // a master-mutate round-trip. The CUDA/Metal/Vulkan impls in
-    // subsequent PRs do mutate device-side via `slice_mut()` /
-    // `buffer_mut()`.
-    let _ = (t, dtype, values, rounding);
-    // No-op write today; not an error. Tests that need to verify the
-    // master mutation read `AdamW::moments(...)` instead, which
-    // contains the canonical state.
-    Ok(())
-}
+// (Phase 6.5.3) `write_from_f32` replaced by `build_master_tensor` +
+// `Parameter::replace_backward_storage`. The CUDA/Metal/Vulkan paths
+// will use their own backend-specific `slice_mut()` / `buffer_mut()`
+// when those land in Phase 2.x.
 
 #[cfg(test)]
 mod tests {
@@ -297,6 +318,76 @@ mod tests {
     fn adamw_name_is_stable() {
         let opt = AdamW::default_hp();
         assert_eq!(opt.name(), "adamw");
+    }
+
+    #[test]
+    fn adamw_step_writes_updated_master() {
+        // Single AdamW step on a [1, 2, 3, 4] master with grad=ones.
+        // m[i] = 0.1 * 1 = 0.1; v[i] = 0.001 * 1 = 0.001.
+        // m_hat = 0.1 / 0.1 = 1; v_hat = 0.001 / 0.001 = 1.
+        // update = lr * 1 / (1 + eps) ≈ lr ≈ 1e-3.
+        // master_new ≈ master - 1e-3.
+        let mut opt = AdamW::default_hp();
+        let mut p = fresh_param();
+        let g = Tensor::from_slice(&[1.0f32, 1.0, 1.0, 1.0], vec![4]).unwrap();
+        opt.step(&mut p, &g).unwrap();
+        let master = p.backward_storage().expect("master");
+        let cpu = master
+            .storage()
+            .as_any()
+            .downcast_ref::<kiln_tensor::CpuStorage>()
+            .unwrap();
+        let values: Vec<f32> = cpu
+            .as_bytes()
+            .chunks(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let expected = [1.0f32 - 1e-3, 2.0 - 1e-3, 3.0 - 1e-3, 4.0 - 1e-3];
+        for (i, (got, want)) in values.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "idx {i}: got {got}, want {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn adamw_step_preserves_tensor_id() {
+        let mut opt = AdamW::default_hp();
+        let mut p = fresh_param();
+        let id_before = p.tensor_id();
+        let g = Tensor::from_slice(&[0.1f32, 0.2, 0.3, 0.4], vec![4]).unwrap();
+        opt.step(&mut p, &g).unwrap();
+        assert_eq!(p.tensor_id(), id_before);
+        // Moments still keyed under the same id.
+        assert!(opt.moments(id_before).is_some());
+    }
+
+    #[test]
+    fn adamw_multi_step_descends_master() {
+        let mut opt = AdamW::default_hp();
+        let mut p = fresh_param();
+        let g = Tensor::from_slice(&[1.0f32; 4], vec![4]).unwrap();
+        let mut last = [1.0f32, 2.0, 3.0, 4.0];
+        for _ in 0..3 {
+            opt.step(&mut p, &g).unwrap();
+            let cpu = p
+                .backward_storage()
+                .unwrap()
+                .storage()
+                .as_any()
+                .downcast_ref::<kiln_tensor::CpuStorage>()
+                .unwrap();
+            let cur: Vec<f32> = cpu
+                .as_bytes()
+                .chunks(4)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            for (i, (l, c)) in last.iter().zip(cur.iter()).enumerate() {
+                assert!(c < l, "idx {i}: step did not descend ({l} -> {c})");
+            }
+            last.copy_from_slice(&cur);
+        }
     }
 
     #[test]
