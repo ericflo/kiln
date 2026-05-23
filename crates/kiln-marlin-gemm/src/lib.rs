@@ -68,10 +68,14 @@ unsafe extern "C" {
 }
 
 /// Marlin's default `max_par` from `marlin/__init__.py`.
-const DEFAULT_MAX_PAR: i32 = 16;
+pub(crate) const DEFAULT_MAX_PAR: i32 = 16;
 
 /// Workspace tile size in `n` (Marlin's smallest `thread_n`).
-const WORKSPACE_TILE_N: usize = 128;
+pub(crate) const WORKSPACE_TILE_N: usize = 128;
+
+/// kiln-tensor-typed surface alongside candle-typed. Same FFI.
+mod kt_api;
+pub use kt_api::{marlin_w4a16_gemm_kt, MarlinError};
 
 /// Run the vendored Marlin W4A16 GEMM with a BF16 activation interface.
 ///
