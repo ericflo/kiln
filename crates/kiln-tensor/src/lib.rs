@@ -39,6 +39,8 @@ mod tensor;
 mod tensor_id;
 
 #[cfg(feature = "cuda")]
+mod cuda_allocator;
+#[cfg(feature = "cuda")]
 mod cuda_storage;
 #[cfg(feature = "metal")]
 mod metal_storage;
@@ -63,6 +65,8 @@ pub use stream_planner::{StreamId, StreamPlanner, StreamRecord};
 pub use tensor::Tensor;
 pub use tensor_id::TensorId;
 
+#[cfg(feature = "cuda")]
+pub use cuda_allocator::CudaAllocator;
 #[cfg(feature = "cuda")]
 pub use cuda_storage::{cuda_zeros, CudaStorage};
 #[cfg(feature = "metal")]
