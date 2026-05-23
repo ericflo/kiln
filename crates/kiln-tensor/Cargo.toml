@@ -31,6 +31,11 @@ bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 # this with a direct cudarc dependency.
 candle-core = { workspace = true, optional = true }
 
+# Optional — pulled in under the `vulkan` feature only. kiln-vulkan-kernel
+# is already candle-free (uses ash + custom GLSL compute) so this is a
+# clean, permanent dependency — Phase 7 does NOT replace it.
+kiln-vulkan-kernel = { path = "../kiln-vulkan-kernel", optional = true }
+
 [features]
 default = []
 # Phase 1.6 — CUDA storage. The `cuda` feature pulls candle-core (cuda)
@@ -41,6 +46,7 @@ default = []
 cuda = ["dep:candle-core", "candle-core?/cuda"]
 # Reserved for Phase 1.7. Same pattern as `cuda`.
 metal = ["dep:candle-core", "candle-core?/metal"]
-# Reserved for Phase 1.8. Vulkan does not go through candle — it lifts
-# from kiln-vulkan-kernel which has its own ash-based backend.
-vulkan = []
+# Phase 1.8 — Vulkan storage. Does NOT go through candle: lifts
+# kiln-vulkan-kernel's already-candle-free VulkanBuffer + VulkanDevice.
+# This is a permanent dependency (Phase 7 does not change it).
+vulkan = ["dep:kiln-vulkan-kernel"]
