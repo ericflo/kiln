@@ -117,8 +117,8 @@ pub use linear::linear;
 pub use log_softmax::log_softmax_last_dim;
 pub use log_variants::{exp2, expm1, log10, log1p, log2};
 pub use losses::{
-    bce_with_logits, hinge_loss, huber_loss, kl_div_log_probs, l1_loss, margin_ranking, mse_loss,
-    nll_loss,
+    bce_with_logits, hinge_loss, huber_loss, info_nce, kl_div_log_probs, l1_loss, margin_ranking,
+    mse_loss, nll_loss,
 };
 pub use mask::{causal_mask, masked_fill, MaskedFillOp};
 pub use matmul::{matmul, MatmulOp};
