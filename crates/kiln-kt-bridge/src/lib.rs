@@ -129,6 +129,31 @@ pub fn cuda_storage_of_output(t: &KtTensor) -> &CudaStorage {
         .expect("kt-bridge: alloc_cuda_tensor output must be CUDA")
 }
 
+/// Map candle's `DType` to kiln-tensor's `DType`. Returns
+/// `BridgeError` for variants that have no kt equivalent today.
+///
+/// This is a building block for the Phase 7 candle→kiln-tensor
+/// adapter; the full `kt_tensor_from_candle_cuda` (zero-copy view
+/// sharing the same CUDA buffer) ships once cudarc exposes the
+/// typed→u8 slice reinterpret we need. For now, callers do their
+/// own per-dtype `as_cuda_slice<T>()` + raw-pointer extraction.
+pub fn candle_dtype_to_kt(d: candle_core::DType) -> Result<KtDType, BridgeError> {
+    use candle_core::DType as C;
+    Ok(match d {
+        C::F32 => KtDType::F32,
+        C::BF16 => KtDType::BF16,
+        C::F16 => KtDType::F16,
+        C::U32 => KtDType::U32,
+        C::U8 => KtDType::U8,
+        C::I64 => KtDType::I64,
+        other => {
+            return Err(BridgeError::new(format!(
+                "kt-bridge: unsupported candle dtype for kt conversion: {other:?}"
+            )));
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,5 +183,15 @@ mod tests {
         let t = Tensor::from_slice(&[1.0f32, 2.0], vec![2]).unwrap();
         let e = cuda_storage_and_byte_offset(&t, KtDType::BF16, "x").unwrap_err();
         assert!(e.to_string().contains("must be"));
+    }
+
+    #[test]
+    fn dtype_mapping_round_trip() {
+        assert_eq!(candle_dtype_to_kt(candle_core::DType::F32).unwrap(), KtDType::F32);
+        assert_eq!(candle_dtype_to_kt(candle_core::DType::BF16).unwrap(), KtDType::BF16);
+        assert_eq!(candle_dtype_to_kt(candle_core::DType::F16).unwrap(), KtDType::F16);
+        assert_eq!(candle_dtype_to_kt(candle_core::DType::U32).unwrap(), KtDType::U32);
+        assert_eq!(candle_dtype_to_kt(candle_core::DType::U8).unwrap(), KtDType::U8);
+        assert_eq!(candle_dtype_to_kt(candle_core::DType::I64).unwrap(), KtDType::I64);
     }
 }
