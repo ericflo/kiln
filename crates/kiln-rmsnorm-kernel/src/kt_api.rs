@@ -15,7 +15,8 @@ use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 
 use crate::{
     kiln_adamw_step_f32, kiln_fused_mlp_silu_mul_bf16, kiln_fused_rmsnorm,
-    kiln_fused_rmsnorm_bwd, kiln_fused_rotary_qk, kiln_sgd_step_f32,
+    kiln_fused_rmsnorm_bwd, kiln_fused_rotary_qk, kiln_lora_decode_add_bf16,
+    kiln_lora_decode_hidden_bf16, kiln_sgd_step_f32,
 };
 
 #[derive(Debug)]
@@ -502,4 +503,149 @@ pub fn adamw_step_f32_kt(
         )));
     }
     Ok(())
+}
+
+/// `lora_decode_hidden_bf16` over `kiln_tensor::Tensor` operands.
+///
+/// Computes the LoRA-A projection at decode time: `hidden = x @ A`,
+/// where:
+/// - `x`: BF16 `[batch, in_dim]`
+/// - `a`: BF16 `[in_dim, rank]` (the LoRA-A matrix)
+///
+/// Returns F32 `[batch, rank]` (the LoRA hidden state, in F32 for
+/// downstream numerical accuracy). Used by the multi-LoRA decode
+/// path (line 307 of #1082).
+pub fn lora_decode_hidden_kt(
+    x: &KtTensor,
+    a: &KtTensor,
+) -> Result<KtTensor, RmsNormError> {
+    let x_shape = x.shape();
+    if x_shape.len() != 2 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-lora-hidden: x must be [batch, in_dim], got {x_shape:?}"
+        )));
+    }
+    let (batch, in_dim) = (x_shape[0], x_shape[1]);
+    let a_shape = a.shape();
+    if a_shape.len() != 2 || a_shape[0] != in_dim {
+        return Err(RmsNormError::Msg(format!(
+            "kt-lora-hidden: a {a_shape:?} != [{in_dim}, rank]"
+        )));
+    }
+    let rank = a_shape[1];
+
+    let (x_st, x_off) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
+    let (a_st, a_off) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
+    let hidden = alloc_cuda_tensor(x_st, KtDType::F32, vec![batch, rank])?;
+    let h_cuda = hidden
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = x_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let x_slice = x_st.slice().slice(x_off..);
+    let a_slice = a_st.slice().slice(a_off..);
+    let h_slice = h_cuda.slice().slice(0..);
+
+    let status = unsafe {
+        let (x_ptr, _g1) = x_slice.device_ptr(&stream);
+        let (a_ptr, _g2) = a_slice.device_ptr(&stream);
+        let (h_ptr, _g3) = h_slice.device_ptr(&stream);
+        kiln_lora_decode_hidden_bf16(
+            x_ptr as *const _,
+            a_ptr as *const _,
+            h_ptr as *mut f32,
+            batch as i32,
+            in_dim as i32,
+            rank as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-lora-hidden: FFI returned {status}"
+        )));
+    }
+    Ok(hidden)
+}
+
+/// `lora_decode_add_bf16` over `kiln_tensor::Tensor` operands.
+///
+/// Adds the LoRA-B contribution to the base projection:
+/// `out = base + scale * (hidden @ B)`, where:
+/// - `base`: BF16 `[batch, out_dim]` (the base linear projection)
+/// - `hidden`: F32 `[batch, rank]` (output of [`lora_decode_hidden_kt`])
+/// - `b`: BF16 `[rank, out_dim]` (the LoRA-B matrix)
+/// - `scale`: f32 LoRA alpha scale
+///
+/// Returns BF16 `[batch, out_dim]`.
+pub fn lora_decode_add_kt(
+    base: &KtTensor,
+    hidden: &KtTensor,
+    b: &KtTensor,
+    scale: f32,
+) -> Result<KtTensor, RmsNormError> {
+    let base_shape = base.shape();
+    if base_shape.len() != 2 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-lora-add: base must be [batch, out_dim], got {base_shape:?}"
+        )));
+    }
+    let (batch, out_dim) = (base_shape[0], base_shape[1]);
+    let h_shape = hidden.shape();
+    if h_shape.len() != 2 || h_shape[0] != batch {
+        return Err(RmsNormError::Msg(format!(
+            "kt-lora-add: hidden {h_shape:?} != [{batch}, rank]"
+        )));
+    }
+    let rank = h_shape[1];
+    let b_shape = b.shape();
+    if b_shape != [rank, out_dim] {
+        return Err(RmsNormError::Msg(format!(
+            "kt-lora-add: b {b_shape:?} != [{rank}, {out_dim}]"
+        )));
+    }
+
+    let (base_st, base_off) = cuda_storage_and_byte_offset(base, KtDType::BF16, "base")?;
+    let (h_st, h_off) = cuda_storage_and_byte_offset(hidden, KtDType::F32, "hidden")?;
+    let (b_st, b_off) = cuda_storage_and_byte_offset(b, KtDType::BF16, "b")?;
+    let out = alloc_cuda_tensor(base_st, KtDType::BF16, vec![batch, out_dim])?;
+    let out_cuda = out
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = base_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let base_slice = base_st.slice().slice(base_off..);
+    let h_slice = h_st.slice().slice(h_off..);
+    let b_slice = b_st.slice().slice(b_off..);
+    let o_slice = out_cuda.slice().slice(0..);
+
+    let status = unsafe {
+        let (base_ptr, _g1) = base_slice.device_ptr(&stream);
+        let (h_ptr, _g2) = h_slice.device_ptr(&stream);
+        let (b_ptr, _g3) = b_slice.device_ptr(&stream);
+        let (o_ptr, _g4) = o_slice.device_ptr(&stream);
+        kiln_lora_decode_add_bf16(
+            base_ptr as *const _,
+            h_ptr as *const f32,
+            b_ptr as *const _,
+            o_ptr as *mut _,
+            scale,
+            batch as i32,
+            out_dim as i32,
+            rank as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-lora-add: FFI returned {status}"
+        )));
+    }
+    Ok(out)
 }
