@@ -239,51 +239,41 @@ pub fn kt_tensor_from_candle_cuda_copy(
     // typed; we need to dispatch on dtype to call as_cuda_slice<T> with
     // the correct T, then `.slice(off..)` and `.device_ptr(&stream)` to
     // get the raw pointer at the right byte offset.
-    let status = unsafe {
-        let (dst_ptr, _dst_g) = dst_slice.device_ptr(&stream);
-        let (src_ptr, _src_g) = match t.dtype() {
-            C::F32 => cuda_st
-                .as_cuda_slice::<f32>()
-                .map_err(|e| BridgeError::new(format!("kt-bridge copy: as_cuda_slice f32: {e}")))?
-                .slice(off..)
-                .device_ptr(&stream),
-            C::BF16 => cuda_st
-                .as_cuda_slice::<bf16>()
-                .map_err(|e| BridgeError::new(format!("kt-bridge copy: as_cuda_slice bf16: {e}")))?
-                .slice(off..)
-                .device_ptr(&stream),
-            C::F16 => cuda_st
-                .as_cuda_slice::<f16>()
-                .map_err(|e| BridgeError::new(format!("kt-bridge copy: as_cuda_slice f16: {e}")))?
-                .slice(off..)
-                .device_ptr(&stream),
-            C::U32 => cuda_st
-                .as_cuda_slice::<u32>()
-                .map_err(|e| BridgeError::new(format!("kt-bridge copy: as_cuda_slice u32: {e}")))?
-                .slice(off..)
-                .device_ptr(&stream),
-            C::U8 => cuda_st
-                .as_cuda_slice::<u8>()
-                .map_err(|e| BridgeError::new(format!("kt-bridge copy: as_cuda_slice u8: {e}")))?
-                .slice(off..)
-                .device_ptr(&stream),
-            C::I64 => cuda_st
-                .as_cuda_slice::<i64>()
-                .map_err(|e| BridgeError::new(format!("kt-bridge copy: as_cuda_slice i64: {e}")))?
-                .slice(off..)
-                .device_ptr(&stream),
-            other => {
-                return Err(BridgeError::new(format!(
-                    "kt-bridge copy: unsupported candle dtype {other:?}"
-                )));
+    // Per-dtype dispatch. The src CudaView and its guard must outlive
+    // the memcpy call, so each arm binds them locally and issues its
+    // own memcpy. Macro keeps each arm to one line of intent.
+    macro_rules! dispatch_copy {
+        ($T:ty, $name:literal) => {{
+            let slice = cuda_st.as_cuda_slice::<$T>().map_err(|e| {
+                BridgeError::new(format!(
+                    "kt-bridge copy: as_cuda_slice {}: {e}",
+                    $name
+                ))
+            })?;
+            let src_view = slice.slice(off..);
+            unsafe {
+                let (dst_ptr, _dst_g) = dst_slice.device_ptr(&stream);
+                let (src_ptr, _src_g) = src_view.device_ptr(&stream);
+                cudarc_result::memcpy_dtod_async(dst_ptr, src_ptr, total_bytes, raw_stream)
+                    .map_err(|e| {
+                        BridgeError::new(format!("kt-bridge copy: memcpy_dtod_async: {e:?}"))
+                    })?;
             }
-        };
-        cudarc_result::memcpy_dtod_async(dst_ptr, src_ptr, total_bytes, raw_stream).map_err(
-            |e| BridgeError::new(format!("kt-bridge copy: memcpy_dtod_async: {e:?}")),
-        )?;
-        0i32
-    };
-    let _ = status; // memcpy_dtod_async already returned Result; keep var to silence
+        }};
+    }
+    match t.dtype() {
+        C::F32 => dispatch_copy!(f32, "f32"),
+        C::BF16 => dispatch_copy!(bf16, "bf16"),
+        C::F16 => dispatch_copy!(f16, "f16"),
+        C::U32 => dispatch_copy!(u32, "u32"),
+        C::U8 => dispatch_copy!(u8, "u8"),
+        C::I64 => dispatch_copy!(i64, "i64"),
+        other => {
+            return Err(BridgeError::new(format!(
+                "kt-bridge copy: unsupported candle dtype {other:?}"
+            )));
+        }
+    }
 
     KtTensor::from_parts(
         dst_storage,
