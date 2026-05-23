@@ -14,6 +14,7 @@
 //! (RMSNorm, residual add, final norm + LM head, sampling).
 
 pub mod activation;
+pub mod addmm;
 pub mod argmax;
 pub mod binary_minmax;
 pub mod bincount;
@@ -105,6 +106,7 @@ pub mod unique;
 pub mod where_select;
 
 pub use activation::{gelu, relu, sigmoid, silu, tanh, ActivationOp, UnaryKind};
+pub use addmm::addmm;
 pub use argmax::{argmax_last_dim, ArgmaxLastDimOp};
 pub use binary_minmax::{maximum, minimum};
 pub use bincount::bincount;
