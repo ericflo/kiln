@@ -26,6 +26,7 @@ pub mod matmul;
 pub mod reduce;
 pub mod rmsnorm;
 pub mod rope;
+pub mod stack;
 pub mod swiglu;
 pub mod trig;
 pub mod unary_arith;

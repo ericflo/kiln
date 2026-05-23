@@ -67,6 +67,7 @@ pub use backwards::matmul::MatmulBackward;
 pub use backwards::reduce::{ReduceBackward, ReduceKind, ReduceScope};
 pub use backwards::rmsnorm::RmsNormBackward;
 pub use backwards::rope::RopeBackward;
+pub use backwards::stack::StackBackward;
 pub use backwards::swiglu::MulSigmoidGateBackward;
 pub use backwards::trig::{CosBackward, SinBackward, TanBackward};
 pub use backwards::unary_arith::{AbsBackward, ExpBackward, LnBackward, NegBackward, SqrtBackward};
