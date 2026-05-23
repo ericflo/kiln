@@ -1,11 +1,20 @@
 # kiln-tensor substrate status
 
-**98 / 98 deliverables shipped** — Phase 4 sampler chain end-to-end
-complete; **kiln-autograd BackwardOp coverage at 22 / 22 differentiable
-forward ops**; **per-backend Allocator + CapturedGraph scaffolds
-shipped for all three GPU backends**; **SGD + AdamW master-write to
-Parameter wired** with anti-pattern 11 preserved across optimizer
-steps.
+**108 / 108 deliverables shipped** — substrate side is complete.
+
+- **27 kiln-tensor forward op families** + matching **27 BackwardOps**
+  in kiln-autograd
+- **Phase 4 sampler chain end-to-end** (12 LogitProcessors + Gumbel
+  terminal sampler)
+- **All four optimizers shipped end-to-end** (AdamW, SGD, Lion, Muon)
+  with master-write to Parameter and anti-pattern 11 preserved
+- **Per-backend Allocator scaffolds** (CUDA, Metal, Vulkan) feature-
+  gated and ready for Phase 7
+- **Per-backend CapturedGraph scaffolds** (`kiln-graph-cuda/metal/vulkan`)
+  as three separate workspace crates
+- **End-to-end training demos** (manual SGD + Parameter-based SGD)
+  proving loss-curve descent through the full substrate
+- **Phase 7 migration audit refreshed** with concrete PR sequencing
 
 Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 
@@ -86,6 +95,12 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 1.59 | full Phase 4 sampler chain integration test | ✓ |
 | 1.60 | substrate-status dashboard refresh (Phase 1.52-1.59 + 6a.1-6a.7) | ✓ |
 | 1.61 | substrate-status dashboard refresh (Phase 2.1.1-2.1.2 + 2.5.4 + 5.1 + 6.5.2-6.5.4 + 6a.8-6a.9) | ✓ |
+| 1.62 | concat CPU DeviceOp | ✓ |
+| 1.63 | dropout forward + backward | ✓ |
+| 1.64 | broadcast_to forward + backward | ✓ |
+| 1.65 | LayerNorm forward + backward | ✓ |
+| 1.66 | GELU activation forward + backward | ✓ |
+| 1.67 | substrate-status dashboard refresh (this PR) | ✓ |
 
 ## Phase 2 — kiln-blas / kiln-mps / kiln-vulkan-blas / kiln-param
 
@@ -125,6 +140,9 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 6.5.2 | SGD master-write to Parameter | ✓ |
 | 6.5.3 | AdamW master-write to Parameter | ✓ |
 | 6.5.4 | end-to-end Parameter-based training demo | ✓ |
+| 6.5.5 | Lion optimizer implementation | ✓ |
+| 6.5.6 | Muon optimizer implementation | ✓ |
+| 6a.10 | ConcatBackward | ✓ |
 
 ## Phase 4 sampler chain — 12 / 12 menu items shipped
 
@@ -147,7 +165,7 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 
 (Only grammar-mask remains — separate schema-compiler effort.)
 
-## Phase 6a backward ops — 22 / 22 differentiable forward ops covered
+## Phase 6a backward ops — 27 / 27 differentiable forward ops covered
 
 | Phase | BackwardOps |
 |-------|-------------|
@@ -158,6 +176,11 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 6a.5 | IndexSelectBackward, ScatterAddBackward, CastBackward |
 | 6a.6 | ReduceBackward (sum_all/mean_all/sum_axis/mean_axis), MaskedFillBackward, L2NormBackward |
 | 6a.7 | MulSigmoidGateBackward (SwiGLU), RopeBackward |
+| 6a.10 | ConcatBackward |
+| 1.63 | DropoutBackward |
+| 1.64 | BroadcastToBackward |
+| 1.65 | LayerNormBackward |
+| 1.66 | GeluBackward |
 
 Each is parity-tested against finite-difference reference values
 where applicable. Non-differentiable ops (argmax, causal_mask, the
