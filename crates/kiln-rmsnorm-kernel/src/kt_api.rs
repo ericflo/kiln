@@ -14,8 +14,8 @@ use kiln_kt_bridge::BridgeError;
 use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 
 use crate::{
-    kiln_fused_mlp_silu_mul_bf16, kiln_fused_rmsnorm, kiln_fused_rmsnorm_bwd,
-    kiln_fused_rotary_qk,
+    kiln_adamw_step_f32, kiln_fused_mlp_silu_mul_bf16, kiln_fused_rmsnorm,
+    kiln_fused_rmsnorm_bwd, kiln_fused_rotary_qk, kiln_sgd_step_f32,
 };
 
 #[derive(Debug)]
@@ -384,4 +384,122 @@ pub fn fused_mlp_silu_mul_kt(
         )));
     }
     Ok(out)
+}
+
+/// `sgd_step_f32` over `kiln_tensor::Tensor` operands.
+///
+/// In-place SGD update: `param -= lr * grad`. F32 only. `param` is
+/// mutated in place through the raw device pointer; the caller must
+/// hold a unique reference (kt-Tensor borrow-check is at the
+/// version-counter layer, anti-pattern 16).
+pub fn sgd_step_f32_kt(
+    param: &KtTensor,
+    grad: &KtTensor,
+    lr: f32,
+) -> Result<(), RmsNormError> {
+    if param.shape() != grad.shape() {
+        return Err(RmsNormError::Msg(format!(
+            "kt-sgd-step: param {:?} != grad {:?}",
+            param.shape(),
+            grad.shape()
+        )));
+    }
+    let n = param.element_count() as i64;
+
+    let (p_st, p_off) = cuda_storage_and_byte_offset(param, KtDType::F32, "param")?;
+    let (g_st, g_off) = cuda_storage_and_byte_offset(grad, KtDType::F32, "grad")?;
+
+    let stream = p_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let p_slice = p_st.slice().slice(p_off..);
+    let g_slice = g_st.slice().slice(g_off..);
+
+    let status = unsafe {
+        let (p_ptr, _g1) = p_slice.device_ptr(&stream);
+        let (g_ptr, _g2) = g_slice.device_ptr(&stream);
+        kiln_sgd_step_f32(p_ptr as *mut f32, g_ptr as *const f32, lr, n, raw_stream)
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-sgd-step: FFI returned {status}"
+        )));
+    }
+    Ok(())
+}
+
+/// `adamw_step_f32` over `kiln_tensor::Tensor` operands.
+///
+/// In-place AdamW update with running moments. F32 only. `param`,
+/// `first_moment`, `second_moment` are all mutated in place. The
+/// caller passes pre-computed bias-correction terms (matches the
+/// candle path's contract).
+#[allow(clippy::too_many_arguments)]
+pub fn adamw_step_f32_kt(
+    param: &KtTensor,
+    grad: &KtTensor,
+    first_moment: &KtTensor,
+    second_moment: &KtTensor,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+    bias_correction1: f32,
+    bias_correction2: f32,
+) -> Result<(), RmsNormError> {
+    if param.shape() != grad.shape()
+        || param.shape() != first_moment.shape()
+        || param.shape() != second_moment.shape()
+    {
+        return Err(RmsNormError::Msg(format!(
+            "kt-adamw-step: shape mismatch — param {:?}, grad {:?}, m1 {:?}, m2 {:?}",
+            param.shape(),
+            grad.shape(),
+            first_moment.shape(),
+            second_moment.shape()
+        )));
+    }
+    let n = param.element_count() as i64;
+
+    let (p_st, p_off) = cuda_storage_and_byte_offset(param, KtDType::F32, "param")?;
+    let (g_st, g_off) = cuda_storage_and_byte_offset(grad, KtDType::F32, "grad")?;
+    let (m1_st, m1_off) =
+        cuda_storage_and_byte_offset(first_moment, KtDType::F32, "first_moment")?;
+    let (m2_st, m2_off) =
+        cuda_storage_and_byte_offset(second_moment, KtDType::F32, "second_moment")?;
+
+    let stream = p_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let p_slice = p_st.slice().slice(p_off..);
+    let g_slice = g_st.slice().slice(g_off..);
+    let m1_slice = m1_st.slice().slice(m1_off..);
+    let m2_slice = m2_st.slice().slice(m2_off..);
+
+    let status = unsafe {
+        let (p_ptr, _g1) = p_slice.device_ptr(&stream);
+        let (g_ptr, _g2) = g_slice.device_ptr(&stream);
+        let (m1_ptr, _g3) = m1_slice.device_ptr(&stream);
+        let (m2_ptr, _g4) = m2_slice.device_ptr(&stream);
+        kiln_adamw_step_f32(
+            p_ptr as *mut f32,
+            g_ptr as *const f32,
+            m1_ptr as *mut f32,
+            m2_ptr as *mut f32,
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            bias_correction1,
+            bias_correction2,
+            n,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-adamw-step: FFI returned {status}"
+        )));
+    }
+    Ok(())
 }

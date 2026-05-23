@@ -84,8 +84,8 @@ use std::sync::OnceLock;
 /// Phase 7 deletes the candle path.
 mod kt_api;
 pub use kt_api::{
-    fused_mlp_silu_mul_kt, fused_rmsnorm_backward_kt, fused_rmsnorm_kt, fused_rotary_qk_kt,
-    RmsNormError,
+    adamw_step_f32_kt, fused_mlp_silu_mul_kt, fused_rmsnorm_backward_kt, fused_rmsnorm_kt,
+    fused_rotary_qk_kt, sgd_step_f32_kt, RmsNormError,
 };
 
 unsafe extern "C" {
