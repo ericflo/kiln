@@ -15,6 +15,7 @@ pub mod broadcast;
 pub mod clamp_pow;
 pub mod concat;
 pub mod cross_entropy;
+pub mod cumsum;
 pub mod dropout;
 pub mod elementwise;
 pub mod embedding;

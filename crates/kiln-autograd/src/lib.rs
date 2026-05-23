@@ -58,6 +58,7 @@ pub use backwards::broadcast::BroadcastToBackward;
 pub use backwards::clamp_pow::{ClampBackward, PowBackward};
 pub use backwards::concat::ConcatBackward;
 pub use backwards::cross_entropy::CrossEntropyBackward;
+pub use backwards::cumsum::CumsumBackward;
 pub use backwards::dropout::DropoutBackward;
 pub use backwards::elementwise::{AddBackward, DivBackward, MulBackward, SubBackward};
 pub use backwards::embedding::EmbeddingBackward;
