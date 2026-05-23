@@ -7,6 +7,21 @@
 a 51MB binary linked against cuBLAS/cuBLASLt/cuRAND. See
 `substrate-validate-2026-05-23.md` for the full report.
 
+**Phase 3 kt-API surface (same day):** five kernel crates now have a
+`kiln_tensor::Tensor`-typed surface alongside their candle-typed
+twins. The kt-API call sites use [`kiln-kt-bridge`](../crates/kiln-kt-bridge/)
+for the shared storage-downcast + alloc helpers; each crate's kt
+errors `impl From<BridgeError>` for `?`-propagation. Phase 7 deletes
+the candle-typed twins when call sites in `kiln-model` migrate.
+
+| Crate | kt-API entry points | Coverage of FFI surface |
+|---|---|---|
+| `kiln-flash-attn` | `flash_attn_fwd_kt`, `flash_attn_bwd_kt`, `flash_attn_paged_decode_kt`, `flash_attn_paged_decode_dyn_seqlen_kt`, `paged_kv_write_token_major_bf16_kt`, `paged_kv_write_token_major_bf16_slot_kt` | 5 of 5 (100%) |
+| `kiln-conv1d-kernel` | `causal_conv1d_update_kt`, `causal_conv1d_prefill_kt` | 2 of 2 (100%) |
+| `kiln-rmsnorm-kernel` | `fused_rmsnorm_kt` + `_backward_kt`, `fused_rotary_qk_kt`, `fused_mlp_silu_mul_kt`, `sgd_step_f32_kt`, `adamw_step_f32_kt`, `lora_decode_hidden_kt`, `lora_decode_add_kt` | 8 of ~30 |
+| `kiln-marlin-gemm` | `marlin_w4a16_gemm_kt` | 1 of 1 (100%) |
+| `kiln-gdn-kernel` | `gdn_forward_substitution_kt`, `gdn_recurrent_forward_kt`, `gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt`, `gdn_full_chunk_forward_kt` | 4 of 17 |
+
 **211 / 211 deliverables shipped** — substrate complete; per-backend
 matmul trait + Phase 7 migration plumbing in place; cross-op
 integration parity test landed and confirmed passing on GPU
