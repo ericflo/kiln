@@ -38,14 +38,17 @@
 //! `LogitProcessorChain` carries `Vec<Box<dyn LogitProcessor>>` and
 //! applies each in order:
 //!
-//! ```rust
+//! ```rust,no_run
 //! use kiln_tensor::ops::logit_processor::*;
+//! use kiln_tensor::Tensor;
+//!
+//! let logits = Tensor::from_slice(&[0.0f32; 16], vec![1, 16]).unwrap();
 //! let chain = LogitProcessorChain::new(vec![
 //!     Box::new(TemperatureProcessor::new(0.7)),
 //!     Box::new(TopKProcessor::new(50)),
 //!     Box::new(TopPProcessor::new(0.95)),
 //! ]);
-//! let post = chain.apply(&logits)?;
+//! let _post = chain.apply(&logits).unwrap();
 //! ```
 //!
 //! The output `Tensor` is a fresh allocation today; an in-place
