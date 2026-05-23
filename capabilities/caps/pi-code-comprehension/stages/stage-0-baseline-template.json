@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "stage": 0,
+  "slug": "stage-0-baseline",
+  "method": "no-adapter",
+  "status": "pending-pod-run",
+  "hypothesis": "Round-3 base composite under kiln serve --eval-mode is in the 0.55-0.65 range, similar to round-1's 0.6112. If it shifts >0.03, this triggers METHODS.md round-3 follow-up rule: prior wins suspect, treat as needs-revalidation.",
+  "stage_transition_rationale": "Round-3 mandatory pre-stage: re-baseline before any training (NEXT_ROUND.md §Round-3 pre-stage gates).",
+  "base_adapter": null,
+  "output_adapter": null,
+  "inference_recipe": {
+    "system_prompt_file": null,
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "max_tokens_per_turn": 1536,
+    "max_turns": 10,
+    "max_wall_clock_s": 180,
+    "enable_thinking": false
+  },
+  "evidence": {
+    "n_tasks": null,
+    "kiln_commit": null,
+    "pod_id": "nfi5noknpm9x9j",
+    "lease_id": "pod-e094c16fa777f8fbe72b4ac5",
+    "ts": null,
+    "base_no_prompt_3_seed": {
+      "seeds": [101, 102, 103],
+      "composites": [],
+      "mean": null,
+      "stdev": null
+    },
+    "comparison_to_round_1": {
+      "round_1_baseline": 0.6112,
+      "shift": null,
+      "needs_revalidation_triggered": null
+    }
+  },
+  "comments": "Filled in after stage_1_baseline.sh completes on pod-e094c16fa777f8fbe72b4ac5."
+}

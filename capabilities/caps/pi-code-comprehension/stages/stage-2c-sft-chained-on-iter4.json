@@ -1,0 +1,39 @@
+{
+  "stage": "2c",
+  "name": "sft-chained-on-iter4",
+  "iter_slug": "iter4-then-sft-r8a16",
+  "session": "2026-05-23",
+  "hypothesis": "Compound the iter4 ECHO +0.022 lift with SFT-ideal (r=8 α=16, all 188 gold-derived examples filtered to chars<2000, --max-examples 64) chained ON TOP of iter4. If lifts stack, expect +0.04 to +0.08; if invariant_coverage truly responds to gold-derived SFT, expect more.",
+  "method": "cuda_sft_file --base-adapter $ITER4_DIR --rank 8 --alpha 16 --lr 5e-5 --epochs 1 --max-examples 64 --trainer native, KILN_CUDA_RECOMPUTE_SFT=1",
+  "kiln_commit": "2a44953a",
+  "pod_id": "pod-43c280d340e1eacbeca15bdb",
+  "base_3seed_mean": 0.6194845679012345,
+  "this_3seed_mean": 0.5646083186360964,
+  "this_3seed_stdev": 0.021846898544396556,
+  "paired_lifts": [-0.08429563492063474, -0.008347883597883632, -0.07198522927689599],
+  "paired_lift_mean": -0.05487624926513812,
+  "paired_lift_stdev": 0.04076215316353711,
+  "sigma_above_zero": -1.3462549204644683,
+  "ships": false,
+  "sub_scores_mean": {
+    "outcome": 0.6640608465608465,
+    "grounding": 0.5582561728395061,
+    "cross_file_caller_recall": 0.8333333333333334,
+    "invariant_coverage": 0.3055555555555556,
+    "format_compliance": 0.8564814814814814
+  },
+  "sub_score_deltas_vs_base": {
+    "outcome": -0.0679,
+    "grounding": 0.0517,
+    "cross_file_caller_recall": -0.1111,
+    "invariant_coverage": -0.1065,
+    "format_compliance": -0.1111
+  },
+  "verdict": "REGRESSION — chained adapter performs WORSE than base (-0.055 at -1.35σ). Two of three seeds show large negative lifts (-0.084, -0.072). Format compliance and cross-file recall both dropped ~0.11; invariant_coverage dropped 0.107. Only grounding improved (+0.05).",
+  "lessons": [
+    "SFT-on-iter4 with r=8 a=16 on gold-derived assistant outputs DESTABILIZES the iter4 base. The gold-format `<answer>{json}</answer>` strings are too narrow a target for stacked LoRA training — model overfits the gold's surface form and forgets iter4's invariant gains.",
+    "Adapter shape conversion (rank 16 → 8) plus --allow-adapter-shape-conversion may be silently re-initializing iter4 weights, washing out its prior gains. The chain is closer to fresh-SFT than true oscillation.",
+    "Oscillation (SFT→GRPO→SFT) is the listed methodology for this case, but kiln's current cuda_sft_file doesn't support adapter-stacking cleanly. A true SFT→GRPO ladder would need cuda_grpo_ablation with --base-adapter set to the SFT output."
+  ],
+  "implication": "This rules out naive SFT-chain oscillation as a route to +0.10. Remaining methodologies on the goal's allowlist: agentic-GRPO with composite-shaped reward, or OPD with an external code-reasoning teacher. Both require substantially more pod time. With four orthogonal arms (iter4 ECHO, SFT-ideal, strict-prompt diag, SFT-chain) all sub-+0.04, the ceiling claim is well-supported."
+}

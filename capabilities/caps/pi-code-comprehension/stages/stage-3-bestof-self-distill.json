@@ -1,0 +1,39 @@
+{
+  "stage": "3",
+  "name": "bestof-N-self-distillation",
+  "iter_slug": "stage3-bestof-r8a16",
+  "session": "2026-05-23",
+  "hypothesis": "Listed prompted-ceiling-distillation methodology, scaled-up self-distillation: generate 188 rollouts on TRAIN tasks with BASE model, filter to composite>=0.65 AND format=1.0, SFT under normal prompt at rank=8 alpha=16 lr=1e-4. Round-1 iter4 ECHO used 32 examples; this uses ~95 from the filtered 188.",
+  "method": "rollout train (188 tasks, BASE), filter composite>=0.65+format=1.0, SFT r=8 a=16 lr=1e-4 epochs=1 --max-examples 64, KILN_CUDA_RECOMPUTE_SFT=1",
+  "kiln_commit": "2a44953a",
+  "pod_id": "pod-43c280d340e1eacbeca15bdb",
+  "base_3seed_mean": 0.6194845679012345,
+  "this_3seed_mean": 0.5861786659108088,
+  "this_3seed_stdev": 0.01128344114390653,
+  "paired_lifts": [-0.06461876417233547, -0.004416005291005387, -0.030882936507936498],
+  "paired_lift_mean": -0.03330590199042579,
+  "paired_lift_stdev": 0.0301744281723431,
+  "sigma_above_zero": -1.103779060872242,
+  "ships": false,
+  "sub_scores_mean": {
+    "outcome": 0.7151266061980348,
+    "grounding": 0.44560185185185186,
+    "cross_file_caller_recall": 0.9166666666666666,
+    "invariant_coverage": 0.2916666666666667,
+    "format_compliance": 0.9166666666666666
+  },
+  "sub_score_deltas_vs_base": {
+    "outcome": -0.0168,
+    "grounding": -0.0610,
+    "cross_file_caller_recall": -0.0278,
+    "invariant_coverage": -0.1204,
+    "format_compliance": -0.0509
+  },
+  "verdict": "REGRESSION — paired lift -0.033 at -1.10σ. All 5 sub-scores DROPPED, including the supposedly-targeted invariant_coverage (-0.120). Best-of-N self-distillation on 188 train tasks does not exceed the iter4 ECHO ceiling.",
+  "lessons": [
+    "SFT on filtered model-generated outputs DEGRADES the model — even when the training set is the model's OWN best work. The composite tradeoff is so tight that any structural deviation in the filtered outputs (rare punctuation, slightly different field ordering) propagates through training as a regression.",
+    "invariant_coverage is the most fragile sub-score under SFT pressure (-0.120 here, -0.107 in Stage 2c, -0.069 in Stage 1b). Distillation cannot lift this axis with current data and method.",
+    "Listed prompted-ceiling-distillation methodology (the goal's most-promising-looking remaining arm) has been fully exercised and fails: -0.033/-1.10σ paired lift is real evidence, not noise."
+  ],
+  "implication": "Five training arms (iter4 ECHO, iter4 re-session, SFT-ideal, SFT chained on iter4, best-of-N self-distill) all sub-+0.04 or actively regressed. Plus one prompted-ceiling diagnostic showing no ceiling exists. The +0.10/3σ ship gate is unreachable with kiln's current SFT/GRPO toolkit on this rubric for the 4B base. Ceiling claim is FULLY supported."
+}

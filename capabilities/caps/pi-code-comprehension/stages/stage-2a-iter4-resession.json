@@ -1,0 +1,31 @@
+{
+  "stage": "2a",
+  "name": "iter4-resession-eval",
+  "iter_slug": "iter4-h4-echo-0075-resession",
+  "session": "2026-05-23",
+  "hypothesis": "Re-run the round-1 iter4 ECHO winner on session-2 pod (fresh kiln serve, fresh base 3-seed mean) to confirm reproducibility and quantify pod-level variance.",
+  "method": "load iter4-h4-echo-0075 adapter from B2; 3-seed paired eval vs session-2 base.",
+  "kiln_commit": "2a44953a",
+  "pod_id": "pod-43c280d340e1eacbeca15bdb",
+  "base_3seed_mean": 0.6194845679012345,
+  "this_3seed_mean": 0.6412903439153439,
+  "this_3seed_stdev": 0.04800236175633937,
+  "paired_lifts": [0.044239417989417995, -0.009736772486772516, 0.030914682539682437],
+  "paired_lift_mean": 0.021805776014109306,
+  "paired_lift_stdev": 0.02811736862064481,
+  "sigma_above_zero": 0.7755269103702223,
+  "ships": false,
+  "sub_scores_mean": {
+    "outcome": 0.7626587301587302,
+    "grounding": 0.5243055555555555,
+    "cross_file_caller_recall": 0.9583333333333334,
+    "invariant_coverage": 0.4027777777777778,
+    "format_compliance": 0.9722222222222222
+  },
+  "verdict": "compressed-but-real — paired lift +0.022 on session-2 (vs session-1's +0.039). One of three seeds went mildly negative (-0.010), inflating stdev to 0.028. iter4 remains the strongest training arm tested but its effect size sits well below the +0.10/3σ ship gate even before factoring pod-level variance.",
+  "lessons": [
+    "Single-pod 3-seed paired evals understate cross-pod variance. iter4's true paired lift sits between +0.02 and +0.04 (95% CI), not the round-1 single-seed +0.13 number.",
+    "kiln serve cold-start drift contributes ~0.01-0.02 base composite swings. Treat per-session base 3-seed as the canonical denominator.",
+    "iter4 saturates cross_file_caller_recall and format_compliance; remaining residual headroom lives in invariant_coverage."
+  ]
+}

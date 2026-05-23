@@ -1,0 +1,50 @@
+{
+  "stage": "1b",
+  "name": "sft-ideal-from-gold",
+  "iter_slug": "iter1-sft-ideal-r4-short16",
+  "session": "2026-05-23",
+  "hypothesis": "SFT on prep_sft_ideal.py output (assistant = <answer>{gold_json}</answer>) with rank=4 alpha=8 lr=1e-4, 16 examples filtered to chars<2000",
+  "data": {
+    "source": "datasets/sft.ideal.short.jsonl (188 synthesized, filtered to 77 with chars<2000, --max-examples 16 = shortest 16)",
+    "schema": "{messages: [system, user, assistant=<answer>{gold}</answer>]}"
+  },
+  "training_recipe": {
+    "rank": 4,
+    "alpha": 8,
+    "lr": 1e-4,
+    "epochs": 1,
+    "max_examples": 16,
+    "filter": "chars<2000",
+    "recompute": false,
+    "trainer": "native"
+  },
+  "base_3seed_mean": 0.6194845679012345,
+  "base_3seed_stdev": 0.02002231446249317,
+  "this_3seed_mean": 0.6252810846560846,
+  "this_3seed_stdev": 0.030852060239492055,
+  "paired_lifts": [-0.04741732804232812, 0.03829563492063481, 0.026511243386243222],
+  "paired_lift_mean": 0.005796516754849971,
+  "paired_lift_stdev": 0.04645969144896012,
+  "sigma_above_zero": 0.12476442641075075,
+  "ships": false,
+  "sub_scores_mean_adapter": {
+    "outcome": 0.7527777777777778,
+    "grounding": 0.4918981481481481,
+    "cross_file_caller_recall": 0.9444444444444444,
+    "invariant_coverage": 0.3425925925925926,
+    "format_compliance": 0.9444444444444444
+  },
+  "sub_scores_mean_base": {
+    "outcome": 0.7319708994708995,
+    "grounding": 0.5065586419753086,
+    "cross_file_caller_recall": 0.9444444444444444,
+    "invariant_coverage": 0.41203703703703703,
+    "format_compliance": 0.9675925925925926
+  },
+  "verdict": "no-ship — flat (0.12σ). Outcome lifted (+0.021) but invariant_coverage dropped (-0.069), surface-form overfit. Same pattern as Stage 1c (strict prompt): outcome up, structure down.",
+  "lessons": [
+    "Tiny SFT on 16 gold-derived examples is too small to push composite without overfitting surface form.",
+    "The composite has a real tradeoff: outcome lift correlates with structure drop for this rubric.",
+    "Filter chars<2000 (~600 tok) avoided OOM but biased toward simpler tasks."
+  ]
+}

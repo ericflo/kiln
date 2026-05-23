@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "stage": 1,
+  "slug": "stage-1-iter4-repro",
+  "method": "agentic-grpo",
+  "status": "evidence-only",
+  "superseded_by": null,
+  "hypothesis": "Round-1 iter4 (h4-echo-0075, GRPO+ECHO λ=0.075, 8 train tasks × 4 gens, lr=1e-5, rank 16/alpha 32) reproduces under round-3 eval-mode with the +0.1293 single-seed lift.",
+  "stage_transition_rationale": "Round-3 pre-stage gate (NEXT_ROUND.md §Round-3 pre-stage gates): round-1 winners must be re-validated under round-3 eval-mode before being trusted as stage backfills. Per pi-faithful-completion precedent, round-1 numbers from single-seed evals tend to compress under 3-seed paired re-eval.",
+  "base_adapter": null,
+  "output_adapter": "pi-code-comprehension-iter4-h4-echo-0075 (restored from B2)",
+  "training_recipe_round_1": {
+    "method": "GRPO Phase 1 + ECHO",
+    "lr": 1e-5,
+    "rank": 16,
+    "alpha": 32,
+    "echo_lambda": 0.075,
+    "num_train_tasks": 8,
+    "num_generations": 4,
+    "seed": 3141592653
+  },
+  "evidence": {
+    "n_tasks": 12,
+    "kiln_commit": "2a44953a",
+    "pi_commit": "0.75.4",
+    "pod_id": "nfi5noknpm9x9j",
+    "lease_id": "pod-e094c16fa777f8fbe72b4ac5",
+    "ts": "2026-05-23T06:55:00Z",
+    "round_1_reported_lift_single_seed": 0.1293,
+    "base_3seed_mean": 0.6293,
+    "iter4_3seed_mean": 0.6687,
+    "iter4_3seed_stdev": 0.0216,
+    "paired_lifts_per_seed": [0.0557, 0.0347, 0.0277],
+    "paired_lift_mean": 0.0394,
+    "paired_lift_stdev": 0.0146,
+    "sigma_above_zero": 2.70,
+    "reproduces_round_1": false,
+    "ships": false,
+    "iter4_sub_scores_mean_3seed": {
+      "outcome": 0.7894,
+      "grounding": 0.5316,
+      "cross_file_caller_recall": 1.0000,
+      "invariant_coverage": 0.3750,
+      "format_compliance": 1.0000
+    },
+    "sub_score_deltas_vs_base": {
+      "outcome": 0.0354,
+      "grounding": 0.0490,
+      "cross_file_caller_recall": 0.0556,
+      "invariant_coverage": 0.0046,
+      "format_compliance": 0.0556
+    }
+  },
+  "observations": [
+    "iter4 produces +0.0394 paired lift at 2.70σ — REAL but ~3.3× smaller than round-1's single-seed +0.1293. The compression is consistent with round-1 single-seed variance, not round-3 eval-mode strictness.",
+    "iter4 SATURATES cross_file_caller_recall (1.0) and format_compliance (1.0) — both already at 0.944 baseline so headroom was small.",
+    "iter4 does NOT move invariant_coverage (0.375 vs base 0.370). The model still misses implicit invariants — that's the open frontier.",
+    "outcome lift +0.035 (0.754→0.789) is driven mostly by fields that ALREADY scored well at baseline; the hard fields (invariants, side_effects) remain weak.",
+    "Sigma 2.70 is below the 3σ ship threshold; lift 0.039 is below the 0.10 ship threshold. iter4 alone does not ship for round-3."
+  ],
+  "next_stage_implications": "Stage 2 must target invariant_coverage and outcome.invariants — the residual headroom unmoved by iter4. SFT on synthesized ideal-from-gold (prep_sft_ideal.py) directly trains these. Two paths: (a) fresh SFT from base for clean signal, (b) SFT chained off iter4 to compound the +0.039 with whatever SFT adds. Path (a) is simpler; pick (b) only if (a) leaves <0.05 headroom."
+}
