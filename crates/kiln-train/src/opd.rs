@@ -2085,6 +2085,22 @@ pub fn opd_train(
     let device = weights.embed_tokens.device().clone();
     let backend_rt = backend::for_device(&device);
 
+    // Cache VRAM + base-model footprint estimate for the per-step
+    // gradient-checkpointing auto-tune below. OPD's input_ids length
+    // varies per step (rollouts are model-sampled), so we feed each
+    // step's actual seq_len into the decision rather than picking a
+    // single segment count up front like SFT/GRPO do. Detection is
+    // cheap (env var or one nvidia-smi spawn) but no reason to
+    // re-detect on every step.
+    let opd_vram_cache = kiln_core::vram::detect_vram();
+    let opd_base_model_bytes = kiln_core::vram::estimate_base_model_bytes(
+        model_config.num_layers,
+        model_config.hidden_size,
+        model_config.intermediate_size,
+        model_config.vocab_size,
+        2, // BF16 base weights
+    );
+
     // §6 data-multiplier: auto-scale samples_per_prompt when the
     // dataset is small. Lu (2025) §3.5.4: 4 if |prompts| ≥ 200,
     // 16 if 50 ≤ |prompts| < 200, 64 if |prompts| < 50. We respect
@@ -2558,7 +2574,31 @@ pub fn opd_train(
                 // on a single 48GB GPU.
                 let positions: Vec<u32> = (0..input_ids.len()).map(|p| p as u32).collect();
                 let lora_detached = lora_weights_detached(&params);
-                let num_segments = 8usize.min(model_config.num_layers);
+                // Per-step auto-tune: pick segment count based on this
+                // step's actual seq_len. Falls back to the legacy
+                // hardcoded 8 if VRAM detection or the auto-tune punts.
+                let num_segments = match kiln_core::vram::recommended_checkpoint_plan(
+                    &opd_vram_cache,
+                    model_config.num_layers,
+                    input_ids.len(),
+                    model_config.hidden_size,
+                    opd_base_model_bytes,
+                ) {
+                    Some(kiln_core::vram::CheckpointPlan::Enabled { num_segments, .. }) => {
+                        num_segments.min(model_config.num_layers).max(1)
+                    }
+                    Some(kiln_core::vram::CheckpointPlan::Disabled { .. }) => {
+                        // Activations fit comfortably — collapse to a
+                        // single segment, which makes the checkpointed
+                        // forward+backward trivially equivalent to the
+                        // non-checkpointed path while preserving this
+                        // branch's existing structure.
+                        1
+                    }
+                    None | Some(kiln_core::vram::CheckpointPlan::UserOverride) => {
+                        8usize.min(model_config.num_layers)
+                    }
+                };
                 let segments = compute_segment_boundaries(model_config.num_layers, num_segments);
 
                 // === Step 1: detached forward; save segment boundaries ===
