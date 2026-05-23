@@ -16,7 +16,7 @@ use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 
 use crate::{
     kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16, kiln_gdn_forward_substitution,
-    kiln_gdn_recurrent_forward,
+    kiln_gdn_full_chunk_forward, kiln_gdn_recurrent_forward,
 };
 
 #[derive(Debug)]
@@ -395,6 +395,169 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
     if status != 0 {
         return Err(GdnError::Msg(format!(
             "kt-gdn: decode_qk_norm_rmsnorm FFI returned {status}"
+        )));
+    }
+    Ok(out)
+}
+
+/// `gdn_full_chunk_forward` over `kiln_tensor::Tensor` operands.
+///
+/// The prefill chunk hot path. Takes 8 BF16 inputs (g/v/kkt/qkt/
+/// ks_entry/q_s/beta/k_t) plus an in-place BF16 `state` tensor; the
+/// kernel writes `out_chunk` BF16 `[B, H, C, dv]`.
+///
+/// Envelope:
+/// - `g`:        `[B, H, C]`
+/// - `v`:        `[B, H, C, dv]`
+/// - `kkt`,`qkt`: `[B, H, C, C]`
+/// - `ks_entry`,`q_s`: `[B, H, C, dv]`
+/// - `beta`:     `[B, H, C]`
+/// - `k_t`:      `[B, H, dk, C]` (`dk <= 128`)
+/// - `state`:    `[B, H, dk, dv]` — mutated in place
+///
+/// Returns BF16 `[B, H, C, dv]`.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_full_chunk_forward_kt(
+    g: &KtTensor,
+    v: &KtTensor,
+    kkt: &KtTensor,
+    qkt: &KtTensor,
+    ks_entry: &KtTensor,
+    q_s: &KtTensor,
+    beta: &KtTensor,
+    k_t: &KtTensor,
+    state: &KtTensor,
+) -> Result<KtTensor, GdnError> {
+    let g_shape = g.shape();
+    if g_shape.len() != 3 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk g must be [B, H, C], got {g_shape:?}"
+        )));
+    }
+    let (b, h, c) = (g_shape[0], g_shape[1], g_shape[2]);
+
+    let v_shape = v.shape();
+    if v_shape.len() != 4
+        || (v_shape[0], v_shape[1], v_shape[2]) != (b, h, c)
+    {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk v {v_shape:?} != [{b}, {h}, {c}, dv]"
+        )));
+    }
+    let dv = v_shape[3];
+
+    if kkt.shape() != [b, h, c, c] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk kkt {:?} != [{b}, {h}, {c}, {c}]",
+            kkt.shape()
+        )));
+    }
+    if qkt.shape() != [b, h, c, c] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk qkt {:?} != [{b}, {h}, {c}, {c}]",
+            qkt.shape()
+        )));
+    }
+    if ks_entry.shape() != [b, h, c, dv] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk ks_entry {:?} != [{b}, {h}, {c}, {dv}]",
+            ks_entry.shape()
+        )));
+    }
+    if q_s.shape() != [b, h, c, dv] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk q_s {:?} != [{b}, {h}, {c}, {dv}]",
+            q_s.shape()
+        )));
+    }
+    if beta.shape() != [b, h, c] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk beta {:?} != [{b}, {h}, {c}]",
+            beta.shape()
+        )));
+    }
+    let kt_shape = k_t.shape();
+    if kt_shape.len() != 4
+        || (kt_shape[0], kt_shape[1], kt_shape[3]) != (b, h, c)
+        || kt_shape[2] == 0
+        || kt_shape[2] > 128
+    {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk k_t {kt_shape:?} != [{b}, {h}, dk in 1..=128, {c}]"
+        )));
+    }
+    let dk = kt_shape[2];
+    if state.shape() != [b, h, dk, dv] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: chunk state {:?} != [{b}, {h}, {dk}, {dv}]",
+            state.shape()
+        )));
+    }
+
+    let (g_st, g_off) = cuda_storage_and_byte_offset(g, KtDType::BF16, "g")?;
+    let (v_st, v_off) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
+    let (kkt_st, kkt_off) = cuda_storage_and_byte_offset(kkt, KtDType::BF16, "kkt")?;
+    let (qkt_st, qkt_off) = cuda_storage_and_byte_offset(qkt, KtDType::BF16, "qkt")?;
+    let (ks_st, ks_off) = cuda_storage_and_byte_offset(ks_entry, KtDType::BF16, "ks_entry")?;
+    let (qs_st, qs_off) = cuda_storage_and_byte_offset(q_s, KtDType::BF16, "q_s")?;
+    let (bt_st, bt_off) = cuda_storage_and_byte_offset(beta, KtDType::BF16, "beta")?;
+    let (kt_st, kt_off) = cuda_storage_and_byte_offset(k_t, KtDType::BF16, "k_t")?;
+    let (s_st, s_off) = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
+
+    let out = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h, c, dv])?;
+    let out_cuda = out
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = g_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let g_slice = g_st.slice().slice(g_off..);
+    let v_slice = v_st.slice().slice(v_off..);
+    let kkt_slice = kkt_st.slice().slice(kkt_off..);
+    let qkt_slice = qkt_st.slice().slice(qkt_off..);
+    let ks_slice = ks_st.slice().slice(ks_off..);
+    let qs_slice = qs_st.slice().slice(qs_off..);
+    let bt_slice = bt_st.slice().slice(bt_off..);
+    let kt_slice = kt_st.slice().slice(kt_off..);
+    let s_slice = s_st.slice().slice(s_off..);
+    let o_slice = out_cuda.slice().slice(0..);
+
+    let status = unsafe {
+        let (g_ptr, _g1) = g_slice.device_ptr(&stream);
+        let (v_ptr, _g2) = v_slice.device_ptr(&stream);
+        let (kkt_ptr, _g3) = kkt_slice.device_ptr(&stream);
+        let (qkt_ptr, _g4) = qkt_slice.device_ptr(&stream);
+        let (ks_ptr, _g5) = ks_slice.device_ptr(&stream);
+        let (qs_ptr, _g6) = qs_slice.device_ptr(&stream);
+        let (bt_ptr, _g7) = bt_slice.device_ptr(&stream);
+        let (kt_ptr, _g8) = kt_slice.device_ptr(&stream);
+        let (s_ptr, _g9) = s_slice.device_ptr(&stream);
+        let (o_ptr, _g10) = o_slice.device_ptr(&stream);
+
+        kiln_gdn_full_chunk_forward(
+            g_ptr as *const _,
+            v_ptr as *const _,
+            kkt_ptr as *const _,
+            qkt_ptr as *const _,
+            ks_ptr as *const _,
+            qs_ptr as *const _,
+            bt_ptr as *const _,
+            kt_ptr as *const _,
+            s_ptr as *mut _,
+            o_ptr as *mut _,
+            (b * h) as i32,
+            c as i32,
+            dk as i32,
+            dv as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: full_chunk_forward FFI returned {status}"
         )));
     }
     Ok(out)
