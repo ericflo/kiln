@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "workload": "sft_default_corpus",
+  "trainer": "generic",
+  "gpu": "NVIDIA RTX A6000",
+  "secs_per_step": null,
+  "peak_vram_mb": null,
+  "comment": "placeholder — first nightly run seeds this via --write-baseline-if-null. The `generic` trainer is the BackendRuntime+candle-autograd path; `native` is cuda_native_sft_train. After #1071, `native` routes through `generic` by default — the two baselines should land within a few percent of each other.",
+  "pinned_at_commit": ""
+}

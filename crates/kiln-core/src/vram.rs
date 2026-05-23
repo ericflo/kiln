@@ -985,6 +985,209 @@ mod tests {
         assert!(matches!(plan, Some(CheckpointPlan::UserOverride)));
     }
 
+    /// Perf-regression matrix (#1077 Tier 1a): exhaustive
+    /// `(GPU class × max_seq_len)` decision table for the Qwen3.5-4B
+    /// shape that the trainer ships on. Drift in the activation
+    /// estimate's `2.5×` peak multiplier or in the `50%` Disable
+    /// threshold will surface here as a single-cell flip even if no
+    /// other test changes.
+    ///
+    /// This is the per-PR cheap detector — if you change the heuristic
+    /// constants, update the table; if a change you didn't intend
+    /// flips a cell, the bench is doing its job.
+    #[test]
+    fn perf_regression_qwen35_4b_plan_matrix() {
+        // recommended_checkpoint_plan reads KILN_GRAD_CHECKPOINT_SEGMENTS
+        // and KILN_NO_GRAD_CHECKPOINT — take the env lock + scrub so a
+        // parallel env-mutating test can't flip our cells to UserOverride.
+        let _g = crate::env_flag::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
+            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+        }
+        #[derive(Debug)]
+        enum Expect {
+            /// Activation tape comfortably fits — disable.
+            Disabled,
+            /// Activations would crowd VRAM — engage; the segment
+            /// count must be at least `n` (we don't pin the exact
+            /// value because the segment-target heuristic is allowed
+            /// to retune within a tolerance).
+            EnabledMin(usize),
+            /// Either decision is acceptable for this cell (borderline
+            /// case — flagged here to surface in the test failure but
+            /// not assert direction).
+            #[allow(dead_code)]
+            Either,
+        }
+        use Expect::*;
+
+        // (vram_gb, max_seq_len, expected) — all Qwen3.5-4B
+        // (num_layers=32, hidden=2560, intermediate=10240,
+        // vocab=151936, BF16 base = 2 bytes/param).
+        let cases: &[(u64, usize, Expect)] = &[
+            // Big VRAM (A6000 48 GB): everything up to 16K disables.
+            (48, 30, Disabled),
+            (48, 1024, Disabled),
+            (48, 4096, Disabled),
+            (48, 16384, Disabled),
+            // 32K and 64K engage on A6000.
+            (48, 32 * 1024, EnabledMin(2)),
+            (48, 64 * 1024, EnabledMin(2)),
+            // Mid VRAM (RTX 3090 24 GB): short disables, long engages.
+            (24, 30, Disabled),
+            (24, 4096, Disabled),
+            (24, 16 * 1024, EnabledMin(2)),
+            // Tight VRAM (RTX 4060 Ti / A4000 16 GB): activations crowd
+            // headroom quickly; long contexts engage.
+            (16, 30, Disabled),
+            (16, 4096, EnabledMin(2)),
+            (16, 8 * 1024, EnabledMin(2)),
+        ];
+
+        let base_bytes = estimate_base_model_bytes(32, 2560, 10240, 151936, 2);
+        let mut failures: Vec<String> = Vec::new();
+        for &(vram_gb, max_seq_len, ref expected) in cases {
+            let plan = recommended_checkpoint_plan(
+                &vram(vram_gb),
+                32,
+                max_seq_len,
+                2560,
+                base_bytes,
+            );
+            let cell_ok = match (expected, plan.as_ref()) {
+                (Disabled, Some(CheckpointPlan::Disabled { .. })) => true,
+                (EnabledMin(n), Some(CheckpointPlan::Enabled { num_segments, .. })) => {
+                    *num_segments >= *n
+                }
+                (Either, Some(_)) => true,
+                _ => false,
+            };
+            if !cell_ok {
+                failures.push(format!(
+                    "  vram={vram_gb}GB  seq_len={max_seq_len}  expected={expected:?}  got={plan:?}",
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "#1077 perf-regression matrix drift detected ({} cells):\n{}",
+            failures.len(),
+            failures.join("\n"),
+        );
+    }
+
+    /// Perf-regression matrix (#1077 Tier 1a) on a smaller Llama-3-8B-like
+    /// shape (num_layers=32, hidden=4096, vocab=32000). Catches drift that
+    /// only shows up at larger hidden sizes — the activation tape scales
+    /// linearly with hidden, so the Disable→Enable boundary shifts.
+    #[test]
+    fn perf_regression_llama_8b_plan_matrix() {
+        let _g = crate::env_flag::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
+            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+        }
+        #[derive(Debug)]
+        enum Expect {
+            Disabled,
+            EnabledMin(usize),
+        }
+        use Expect::*;
+
+        // (vram_gb, max_seq_len, expected) — Llama-3-8B
+        // (num_layers=32, hidden=4096, intermediate=14336,
+        // vocab=128000, BF16 base = 2 bytes/param).
+        let cases: &[(u64, usize, Expect)] = &[
+            (80, 30, Disabled),
+            (80, 4096, Disabled),
+            (80, 16 * 1024, Disabled),
+            (80, 32 * 1024, EnabledMin(2)),
+            (48, 30, Disabled),
+            (48, 4096, Disabled),
+            (48, 16 * 1024, EnabledMin(2)),
+            (24, 4096, EnabledMin(2)),
+        ];
+
+        let base_bytes = estimate_base_model_bytes(32, 4096, 14336, 128000, 2);
+        let mut failures: Vec<String> = Vec::new();
+        for &(vram_gb, max_seq_len, ref expected) in cases {
+            let plan = recommended_checkpoint_plan(
+                &vram(vram_gb),
+                32,
+                max_seq_len,
+                4096,
+                base_bytes,
+            );
+            let cell_ok = match (expected, plan.as_ref()) {
+                (Disabled, Some(CheckpointPlan::Disabled { .. })) => true,
+                (EnabledMin(n), Some(CheckpointPlan::Enabled { num_segments, .. })) => {
+                    *num_segments >= *n
+                }
+                _ => false,
+            };
+            if !cell_ok {
+                failures.push(format!(
+                    "  vram={vram_gb}GB  seq_len={max_seq_len}  expected={expected:?}  got={plan:?}",
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "#1077 perf-regression Llama matrix drift detected ({} cells):\n{}",
+            failures.len(),
+            failures.join("\n"),
+        );
+    }
+
+    /// Perf-regression #1077 Tier 1a: the `Disabled` plan must report
+    /// numbers consistent with the input shape. If a future PR
+    /// changes the activation estimate to e.g. omit a hidden-dim
+    /// dependency, this catches the change as a sign error or a
+    /// constant-factor change in the reported `max_act_gib`.
+    #[test]
+    fn perf_regression_disabled_plan_reports_sane_act_tape() {
+        let _g = crate::env_flag::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
+            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+        }
+        let base_bytes = estimate_base_model_bytes(32, 2560, 10240, 151936, 2);
+        let plan = recommended_checkpoint_plan(&vram(48), 32, 1024, 2560, base_bytes)
+            .expect("plan must resolve for A6000+1K");
+        let (max_act_gib, available_gib) = match plan {
+            CheckpointPlan::Disabled {
+                max_act_gib,
+                available_gib,
+            } => (max_act_gib, available_gib),
+            other => panic!("expected Disabled for A6000+1K, got {other:?}"),
+        };
+        // 32 layers * 1024 tokens * 2560 hidden * 4 bytes = ~320 MiB
+        // ≈ 0.31 GiB. With the 2.5× peak multiplier in the heuristic
+        // the reported max_act_gib should be roughly in the
+        // 0.5..3.0 GiB range — anything outside means the multiplier
+        // drifted by >2x.
+        assert!(
+            (0.3..=3.0).contains(&max_act_gib),
+            "Disabled.max_act_gib = {max_act_gib:.2} GiB is outside the \
+             plausible 0.3..3.0 GiB range for A6000+1K Qwen3.5-4B — \
+             activation peak multiplier likely drifted",
+        );
+        // Available VRAM after base model should be in the 30-40 GiB
+        // range for A6000 + Qwen3.5-4B BF16 (48 - ~10 - safety reserve).
+        assert!(
+            (20.0..=45.0).contains(&available_gib),
+            "Disabled.available_gib = {available_gib:.2} GiB outside \
+             plausible 20..45 GiB for A6000 minus Qwen3.5-4B BF16",
+        );
+    }
+
     #[test]
     fn test_vram_source_display() {
         assert_eq!(VramSource::NvidiaSmi.to_string(), "nvidia-smi");
