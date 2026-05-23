@@ -1,0 +1,29 @@
+{
+  "round": 4,
+  "stage": "DEBUG",
+  "name": "pi-rollout stochastic variance discovery",
+  "session": "2026-05-23",
+  "pod_id": "pod-43c280d340e1eacbeca15bdb",
+  "discovery": "The 3-seed paired eval methodology used in R1-R3 has a fatal flaw: pi rollouts are highly stochastic and produce different composites on the SAME --seed value across kiln serve process restarts. Re-running base eval with seeds 101/102/103 on a fresh kiln serve produced composite 0.633/0.657/0.670 (mean 0.653) vs the original base 0.552/0.672/0.614 (mean 0.613). Difference: +0.040 from noise alone, with per-seed swings up to +0.081.",
+  "implications": [
+    "ALL R3 paired lift numbers <0.05 are within noise range and not reliable evidence of a real effect.",
+    "The 'best arm' iter4 ECHO at +0.039/2.70σ is likely also dominated by sampling variance; the apparent significance is an artifact of variance computed across only 3 seeds.",
+    "To detect a +0.10 lift reliably above pi sampling noise (std ~0.04 per seed), need 7-10+ seeds for both base and adapter conditions, AND/OR temperature=0 sampling in pi, AND/OR same kiln serve process for both conditions.",
+    "Arm 4-12 v5 'paired lift +0.059' is NOT real signal — the adapter dir doesn't even exist on disk (SFT was killed at step 10/16). The +0.059 was the same kind of cross-process drift seen in this debug run."
+  ],
+  "evidence_base_drift": {
+    "original_base_3seed": {
+      "seed_1": 0.552, "seed_2": 0.672, "seed_3": 0.614, "mean": 0.613, "stdev": 0.060
+    },
+    "rerun_base_3seed_same_seeds": {
+      "seed_1": 0.633, "seed_2": 0.657, "seed_3": 0.670, "mean": 0.653, "stdev": 0.019
+    },
+    "per_seed_drift": [0.081, -0.015, 0.055],
+    "kiln_serve_processes": "different — original at 15:01, rerun at 17:32 (restarted)"
+  },
+  "next_steps": [
+    "Fix methodology: use more seeds (7+), match kiln serve process across conditions, consider lower-variance sampling.",
+    "Properly train adapters (no kills, no OOM) before evaluating.",
+    "Investigate whether deterministic sampling (temperature=0) would reduce variance enough."
+  ]
+}
