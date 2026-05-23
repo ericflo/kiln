@@ -18,6 +18,8 @@ static CUDA_ADAMW_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_LINEAR_PREFILL_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_FLASH_ATTN_TRACKED_DECLINES: AtomicU64 = AtomicU64::new(0);
+static CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 
 pub fn optimizer_dispatch_success_counts() -> (u64, u64) {
     (
@@ -49,6 +51,21 @@ pub fn flash_attn_tracked_decline_count() -> u64 {
 
 pub fn reset_flash_attn_tracked_decline_count() {
     CUDA_FLASH_ATTN_TRACKED_DECLINES.store(0, Ordering::Relaxed);
+}
+
+/// `(multiblock_path_successes, single_block_path_successes)` for
+/// `gdn_full_chunk_forward`. Used by tests and bench tooling to confirm which
+/// kernel actually ran under a given env-var configuration.
+pub fn gdn_full_chunk_forward_dispatch_counts() -> (u64, u64) {
+    (
+        CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.load(Ordering::Relaxed),
+        CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.load(Ordering::Relaxed),
+    )
+}
+
+pub fn reset_gdn_full_chunk_forward_dispatch_counts() {
+    CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.store(0, Ordering::Relaxed);
+    CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
 fn any_tracks_op(tensors: &[&Tensor]) -> bool {
@@ -94,6 +111,13 @@ pub struct CudaBackend {
     /// Forward-only CUDA LoRA delta/add for decode. Training declines because
     /// tracked LoRA tensors need autograd.
     lora_decode_add_enabled: bool,
+    /// Multi-block dv-tiled `gdn_full_chunk_forward`. Default ON because the
+    /// single-block kernel only launches `B*H = 32` blocks for Qwen3.5-4B at
+    /// batch=1, leaving ~58% of a 76-SM RTX 4090 Laptop idle. The multi-block
+    /// path is bit-exact with the legacy kernel (same per-output-cell FMA
+    /// chain, same bf16 rounding). Set
+    /// `KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK=1` to fall back.
+    gdn_full_chunk_forward_multiblock_enabled: bool,
 }
 
 impl CudaBackend {
@@ -115,6 +139,8 @@ impl CudaBackend {
         let gdn_decode_qk_norm_recurrent_rmsnorm_enabled = gdn_decode_qk_norm_recurrent_enabled
             && std::env::var("KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM").is_err();
         let lora_decode_add_enabled = std::env::var("KILN_DISABLE_CUDA_LORA_DECODE_ADD").is_err();
+        let gdn_full_chunk_forward_multiblock_enabled = gdn_enabled
+            && std::env::var("KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK").is_err();
         Self {
             device,
             gdn_enabled,
@@ -126,6 +152,7 @@ impl CudaBackend {
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled,
             fused_conv1d_enabled,
             lora_decode_add_enabled,
+            gdn_full_chunk_forward_multiblock_enabled,
         }
     }
 
@@ -482,10 +509,24 @@ impl BackendRuntime for CudaBackend {
         ) {
             return Ok(None);
         }
+        let dv_tile = kiln_gdn_kernel::GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE;
+        if self.gdn_full_chunk_forward_multiblock_enabled
+            && kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_supports(
+                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
+            )
+        {
+            let out = kiln_gdn_kernel::gdn_full_chunk_forward_multiblock(
+                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
+            )
+            .context("gdn_full_chunk_forward_multiblock kernel failed")?;
+            CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+            return Ok(Some(out));
+        }
         let out = kiln_gdn_kernel::gdn_full_chunk_forward(
             g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
         )
         .context("gdn_full_chunk_forward kernel failed")?;
+        CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
         Ok(Some(out))
     }
 
@@ -902,6 +943,7 @@ mod tests {
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled: false,
             fused_conv1d_enabled: false,
             lora_decode_add_enabled: false,
+            gdn_full_chunk_forward_multiblock_enabled: false,
         }
     }
 

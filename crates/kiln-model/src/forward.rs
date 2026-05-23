@@ -21832,6 +21832,150 @@ mod tests {
         Ok(())
     }
 
+    /// Multi-block dv-tiled path must be byte-identical to the single-block
+    /// path at the Qwen3.5-4B GDN envelope. Using random inputs from the same
+    /// distribution as `test_gdn_full_chunk_forward_matches_fallback`, we run
+    /// both kernels and assert every bf16 byte matches. This is a stronger
+    /// statement than "matches the candle reference within tolerance": each
+    /// output cell is computed by a single thread on both paths with the same
+    /// FMA chain and bf16 rounding, so equality is the contract.
+    #[test]
+    fn test_gdn_full_chunk_forward_multiblock_byte_eq_single_block() -> Result<()> {
+        use half::bf16;
+        use rand::rngs::StdRng;
+        use rand::{RngExt, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_gdn_full_chunk_forward_multiblock_byte_eq_single_block"
+                );
+                return Ok(());
+            }
+        };
+
+        let b = 1usize;
+        let nv = 32usize;
+        let c = 64usize;
+        let dk = 128usize;
+        let dv = 128usize;
+
+        let mut rng = StdRng::seed_from_u64(0x5EED_BEEF_u64);
+        let n_c = b * nv * c;
+        let n_cdv = b * nv * c * dv;
+        let n_cc = b * nv * c * c;
+        let n_dkc = b * nv * dk * c;
+        let n_dkdv = b * nv * dk * dv;
+
+        let g_data: Vec<f32> = (0..n_c)
+            .map(|_| rng.random_range(-0.15f32..0.0f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_cdv)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
+        let kkt_data: Vec<f32> = (0..n_cc)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let qkt_data: Vec<f32> = (0..n_cc)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let ks_data: Vec<f32> = (0..n_cdv)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let qs_data: Vec<f32> = (0..n_cdv)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let beta_data: Vec<f32> = (0..n_c).map(|_| rng.random_range(0.3f32..1.1f32)).collect();
+        let kt_data: Vec<f32> = (0..n_dkc)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let state_data: Vec<f32> = (0..n_dkdv)
+            .map(|_| rng.random_range(-0.25f32..0.25f32))
+            .collect();
+
+        let g = Tensor::from_slice(&g_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+        let kkt = Tensor::from_slice(&kkt_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
+        let qkt = Tensor::from_slice(&qkt_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
+        let ks_entry =
+            Tensor::from_slice(&ks_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+        let q_s = Tensor::from_slice(&qs_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
+        let k_t = Tensor::from_slice(&kt_data, (b, nv, dk, c), &device)?.to_dtype(DType::BF16)?;
+        let state0 =
+            Tensor::from_slice(&state_data, (b, nv, dk, dv), &device)?.to_dtype(DType::BF16)?;
+
+        let mut state_single = state0.clone();
+        let out_single = kiln_gdn_kernel::gdn_full_chunk_forward(
+            &g,
+            &v,
+            &kkt,
+            &qkt,
+            &ks_entry,
+            &q_s,
+            &beta,
+            &k_t,
+            &mut state_single,
+        )?;
+
+        let dv_tile = kiln_gdn_kernel::GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE;
+        let mut state_mb = state0.clone();
+        let out_mb = kiln_gdn_kernel::gdn_full_chunk_forward_multiblock(
+            &g,
+            &v,
+            &kkt,
+            &qkt,
+            &ks_entry,
+            &q_s,
+            &beta,
+            &k_t,
+            &mut state_mb,
+            dv_tile,
+        )?;
+
+        let single_out_bits: Vec<u16> = out_single
+            .flatten_all()?
+            .to_vec1::<bf16>()?
+            .into_iter()
+            .map(|x| x.to_bits())
+            .collect();
+        let mb_out_bits: Vec<u16> = out_mb
+            .flatten_all()?
+            .to_vec1::<bf16>()?
+            .into_iter()
+            .map(|x| x.to_bits())
+            .collect();
+        let single_state_bits: Vec<u16> = state_single
+            .flatten_all()?
+            .to_vec1::<bf16>()?
+            .into_iter()
+            .map(|x| x.to_bits())
+            .collect();
+        let mb_state_bits: Vec<u16> = state_mb
+            .flatten_all()?
+            .to_vec1::<bf16>()?
+            .into_iter()
+            .map(|x| x.to_bits())
+            .collect();
+
+        assert_eq!(single_out_bits.len(), mb_out_bits.len());
+        for (i, (a, b)) in single_out_bits.iter().zip(mb_out_bits.iter()).enumerate() {
+            assert_eq!(
+                a, b,
+                "out_chunk byte mismatch at flat index {i}: single=0x{a:04x} mb=0x{b:04x}"
+            );
+        }
+        assert_eq!(single_state_bits.len(), mb_state_bits.len());
+        for (i, (a, b)) in single_state_bits.iter().zip(mb_state_bits.iter()).enumerate() {
+            assert_eq!(
+                a, b,
+                "state byte mismatch at flat index {i}: single=0x{a:04x} mb=0x{b:04x}"
+            );
+        }
+        Ok(())
+    }
+
     /// Parity check for the fused causal_conv1d_update kernel against the
     /// portable `causal_conv1d_decode` + `cuda_silu` chain, at Qwen3.5-4B's
     /// exact decode shape: B=1, C=linear_qkv_dim=8192, K=4.

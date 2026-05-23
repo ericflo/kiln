@@ -41,6 +41,29 @@ kiln_gdn_full_chunk_forward_status_t kiln_gdn_full_chunk_forward(
     void *stream
 );
 
+// Multi-block dv-tiled variant. Identical numerics to
+// `kiln_gdn_full_chunk_forward` but launches `(B*H) * (dv / dv_tile)` blocks
+// instead of `B*H`, so a single launch fills more SMs at small B*H. Currently
+// supports `dv_tile == 32` only.
+kiln_gdn_full_chunk_forward_status_t kiln_gdn_full_chunk_forward_multiblock(
+    const void *g,
+    const void *v,
+    const void *kkt,
+    const void *qkt,
+    const void *ks_entry,
+    const void *q_s,
+    const void *beta,
+    const void *k_t,
+    void *state,
+    void *out_chunk,
+    int batch_heads,
+    int chunk_size,
+    int dk,
+    int dv,
+    int dv_tile,
+    void *stream
+);
+
 #ifdef __cplusplus
 }
 #endif

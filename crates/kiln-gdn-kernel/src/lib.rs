@@ -357,6 +357,25 @@ unsafe extern "C" {
         dv: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_gdn_full_chunk_forward_multiblock(
+        g: *const core::ffi::c_void,
+        v: *const core::ffi::c_void,
+        kkt: *const core::ffi::c_void,
+        qkt: *const core::ffi::c_void,
+        ks_entry: *const core::ffi::c_void,
+        q_s: *const core::ffi::c_void,
+        beta: *const core::ffi::c_void,
+        k_t: *const core::ffi::c_void,
+        state: *mut core::ffi::c_void,
+        out_chunk: *mut core::ffi::c_void,
+        batch_heads: i32,
+        chunk_size: i32,
+        dk: i32,
+        dv: i32,
+        dv_tile: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// Run the fused GDN forward-substitution kernel.
@@ -3088,6 +3107,213 @@ pub fn gdn_full_chunk_forward(
     Ok(out_chunk)
 }
 
+/// Default dv tile size for the multi-block path. 32 columns per block gives
+/// 4 blocks per (B,H) at the Qwen3.5-4B dv=128 envelope, taking the launch
+/// from 32 blocks (~42% occupancy of 76 SMs on RTX 4090 Laptop) to 128 blocks
+/// (~1.7x oversubscription).
+pub const GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE: usize = 32;
+
+/// `true` iff the multi-block path's preconditions are met for the given
+/// tensors at the chosen `dv_tile`. Same checks as
+/// [`gdn_full_chunk_forward_supports`], plus `dv % dv_tile == 0`.
+pub fn gdn_full_chunk_forward_multiblock_supports(
+    g: &Tensor,
+    v: &Tensor,
+    kkt: &Tensor,
+    qkt: &Tensor,
+    ks_entry: &Tensor,
+    q_s: &Tensor,
+    beta: &Tensor,
+    k_t: &Tensor,
+    state: &Tensor,
+    dv_tile: usize,
+) -> bool {
+    if dv_tile != GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE {
+        return false;
+    }
+    if !gdn_full_chunk_forward_supports(g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state) {
+        return false;
+    }
+    let Ok(dv) = v.dim(3) else {
+        return false;
+    };
+    dv >= dv_tile && dv % dv_tile == 0
+}
+
+/// Multi-block dv-tiled variant of [`gdn_full_chunk_forward`]. Identical
+/// numerics — same bf16/F32 rounding and same per-output-cell FMA order —
+/// but launches `(B*H) * (dv / dv_tile)` CUDA blocks. Intended for small
+/// `B*H` envelopes (e.g., Qwen3.5-4B prefill at batch=1, where the
+/// single-block path leaves the 4090 Laptop's 76 SMs ~58% empty).
+pub fn gdn_full_chunk_forward_multiblock(
+    g: &Tensor,
+    v: &Tensor,
+    kkt: &Tensor,
+    qkt: &Tensor,
+    ks_entry: &Tensor,
+    q_s: &Tensor,
+    beta: &Tensor,
+    k_t: &Tensor,
+    state: &mut Tensor,
+    dv_tile: usize,
+) -> Result<Tensor> {
+    if !gdn_full_chunk_forward_multiblock_supports(
+        g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
+    ) {
+        candle_core::bail!(
+            "kiln-gdn-kernel: gdn_full_chunk_forward_multiblock: envelope violation \
+             (g={:?}, v={:?}, dv_tile={dv_tile})",
+            g.shape(),
+            v.shape(),
+        );
+    }
+
+    let (b, h, c) = g.dims3()?;
+    let dk = k_t.dim(2)?;
+    let dv = v.dim(3)?;
+    let device = g.device();
+
+    let g_c = g.contiguous()?;
+    let v_c = v.contiguous()?;
+    let kkt_c = kkt.contiguous()?;
+    let qkt_c = qkt.contiguous()?;
+    let ks_c = ks_entry.contiguous()?;
+    let qs_c = q_s.contiguous()?;
+    let beta_c = beta.contiguous()?;
+    let kt_c = k_t.contiguous()?;
+    let state_c = state.contiguous()?;
+
+    let out_chunk = unsafe { Tensor::empty((b, h, c, dv), DType::BF16, device)? };
+
+    {
+        let (g_storage, g_layout) = g_c.storage_and_layout();
+        let (v_storage, v_layout) = v_c.storage_and_layout();
+        let (kkt_storage, kkt_layout) = kkt_c.storage_and_layout();
+        let (qkt_storage, qkt_layout) = qkt_c.storage_and_layout();
+        let (ks_storage, ks_layout) = ks_c.storage_and_layout();
+        let (qs_storage, qs_layout) = qs_c.storage_and_layout();
+        let (beta_storage, beta_layout) = beta_c.storage_and_layout();
+        let (kt_storage, kt_layout) = kt_c.storage_and_layout();
+        let (state_storage, state_layout) = state_c.storage_and_layout();
+        let (out_storage, out_layout) = out_chunk.storage_and_layout();
+
+        let g_cuda = match &*g_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: g must be on CUDA"),
+        };
+        let v_cuda = match &*v_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: v must be on CUDA"),
+        };
+        let kkt_cuda = match &*kkt_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: kkt must be on CUDA"),
+        };
+        let qkt_cuda = match &*qkt_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: qkt must be on CUDA"),
+        };
+        let ks_cuda = match &*ks_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: ks_entry must be on CUDA"),
+        };
+        let qs_cuda = match &*qs_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: q_s must be on CUDA"),
+        };
+        let beta_cuda = match &*beta_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: beta must be on CUDA"),
+        };
+        let kt_cuda = match &*kt_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: k_t must be on CUDA"),
+        };
+        let state_cuda = match &*state_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: state must be on CUDA"),
+        };
+        let out_cuda = match &*out_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: out_chunk must be on CUDA"),
+        };
+
+        let stream = g_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        let g_slice = g_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(g_layout.start_offset()..);
+        let v_slice = v_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(v_layout.start_offset()..);
+        let kkt_slice = kkt_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(kkt_layout.start_offset()..);
+        let qkt_slice = qkt_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(qkt_layout.start_offset()..);
+        let ks_slice = ks_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(ks_layout.start_offset()..);
+        let qs_slice = qs_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(qs_layout.start_offset()..);
+        let beta_slice = beta_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(beta_layout.start_offset()..);
+        let kt_slice = kt_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(kt_layout.start_offset()..);
+        let state_slice = state_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(state_layout.start_offset()..);
+        let out_slice = out_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(out_layout.start_offset()..);
+
+        unsafe {
+            let (g_ptr, _g1) = g_slice.device_ptr(&stream);
+            let (v_ptr, _g2) = v_slice.device_ptr(&stream);
+            let (kkt_ptr, _g3) = kkt_slice.device_ptr(&stream);
+            let (qkt_ptr, _g4) = qkt_slice.device_ptr(&stream);
+            let (ks_ptr, _g5) = ks_slice.device_ptr(&stream);
+            let (qs_ptr, _g6) = qs_slice.device_ptr(&stream);
+            let (beta_ptr, _g7) = beta_slice.device_ptr(&stream);
+            let (kt_ptr, _g8) = kt_slice.device_ptr(&stream);
+            let (state_ptr, _g9) = state_slice.device_ptr(&stream);
+            let (out_ptr, _g10) = out_slice.device_ptr(&stream);
+
+            let status = kiln_gdn_full_chunk_forward_multiblock(
+                g_ptr as *const _,
+                v_ptr as *const _,
+                kkt_ptr as *const _,
+                qkt_ptr as *const _,
+                ks_ptr as *const _,
+                qs_ptr as *const _,
+                beta_ptr as *const _,
+                kt_ptr as *const _,
+                state_ptr as *mut _,
+                out_ptr as *mut _,
+                (b * h) as i32,
+                c as i32,
+                dk as i32,
+                dv as i32,
+                dv_tile as i32,
+                raw_stream,
+            );
+            if status != 0 {
+                candle_core::bail!(
+                    "kiln_gdn_full_chunk_forward_multiblock failed with status {status}"
+                );
+            }
+        }
+    }
+
+    *state = state_c;
+    Ok(out_chunk)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3753,6 +3979,133 @@ mod tests {
             state_mean < 2e-3,
             "fused qk_norm recurrent+rmsnorm state mean_abs_diff={state_mean:e}"
         );
+
+        Ok(())
+    }
+
+    /// Bit-exact parity between the single-block `gdn_full_chunk_forward`
+    /// kernel and the dv-tiled multi-block variant. Each output cell is
+    /// computed by a single thread on both paths with the same FMA chain and
+    /// same bf16 round-trips, so we expect byte-identical `out_chunk` and
+    /// `state` tensors.
+    #[test]
+    fn test_gdn_full_chunk_forward_multiblock_bit_exact() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping gdn_full_chunk_forward multiblock parity: {err}"
+                );
+                return Ok(());
+            }
+        };
+
+        // Qwen3.5-4B GDN envelope at batch=1.
+        let b = 1usize;
+        let nv = 32usize;
+        let c = 64usize;
+        let dk = 128usize;
+        let dv = 128usize;
+
+        let n_c = b * nv * c;
+        let n_cdv = b * nv * c * dv;
+        let n_cc = b * nv * c * c;
+        let n_dkc = b * nv * dk * c;
+        let n_dkdv = b * nv * dk * dv;
+
+        let g_data = patterned_data(n_c, 0.12, 0.31);
+        // GDN gate g is non-positive (forget rate); shift the sinusoid down.
+        let g_data: Vec<f32> = g_data.iter().map(|x| -(x.abs())).collect();
+        let v_data = patterned_data(n_cdv, 0.8, 0.13);
+        let kkt_data = patterned_data(n_cc, 0.4, 0.55);
+        let qkt_data = patterned_data(n_cc, 0.4, 0.71);
+        let ks_data = patterned_data(n_cdv, 0.3, 0.91);
+        let qs_data = patterned_data(n_cdv, 0.3, 1.17);
+        let beta_data: Vec<f32> = (0..n_c).map(|i| 0.6 + (i as f32 * 0.011).sin() * 0.3).collect();
+        let kt_data = patterned_data(n_dkc, 0.45, 1.41);
+        let state_data = patterned_data(n_dkdv, 0.2, 1.73);
+
+        let g = Tensor::from_slice(&g_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+        let kkt = Tensor::from_slice(&kkt_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
+        let qkt = Tensor::from_slice(&qkt_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
+        let ks_entry =
+            Tensor::from_slice(&ks_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+        let q_s = Tensor::from_slice(&qs_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
+        let k_t = Tensor::from_slice(&kt_data, (b, nv, dk, c), &device)?.to_dtype(DType::BF16)?;
+        let state0 =
+            Tensor::from_slice(&state_data, (b, nv, dk, dv), &device)?.to_dtype(DType::BF16)?;
+
+        let mut state_single = state0.clone();
+        let out_single = gdn_full_chunk_forward(
+            &g, &v, &kkt, &qkt, &ks_entry, &q_s, &beta, &k_t, &mut state_single,
+        )?;
+
+        let mut state_mb = state0.clone();
+        let out_mb = gdn_full_chunk_forward_multiblock(
+            &g,
+            &v,
+            &kkt,
+            &qkt,
+            &ks_entry,
+            &q_s,
+            &beta,
+            &k_t,
+            &mut state_mb,
+            GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE,
+        )?;
+
+        // Compare raw bf16 bit patterns. Both kernels round through
+        // `f32_to_bf16` in identical FMA order, so byte-identical outputs
+        // are the contract.
+        let out_single_bytes: Vec<u16> = out_single
+            .flatten_all()?
+            .to_vec1::<bf16>()?
+            .into_iter()
+            .map(|x| x.to_bits())
+            .collect();
+        let out_mb_bytes: Vec<u16> = out_mb
+            .flatten_all()?
+            .to_vec1::<bf16>()?
+            .into_iter()
+            .map(|x| x.to_bits())
+            .collect();
+        let state_single_bytes: Vec<u16> = state_single
+            .flatten_all()?
+            .to_vec1::<bf16>()?
+            .into_iter()
+            .map(|x| x.to_bits())
+            .collect();
+        let state_mb_bytes: Vec<u16> = state_mb
+            .flatten_all()?
+            .to_vec1::<bf16>()?
+            .into_iter()
+            .map(|x| x.to_bits())
+            .collect();
+
+        assert_eq!(out_single_bytes.len(), out_mb_bytes.len());
+        for (i, (a, b)) in out_single_bytes
+            .iter()
+            .zip(out_mb_bytes.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                a, b,
+                "out_chunk byte mismatch at flat index {i}: single=0x{a:04x} mb=0x{b:04x}"
+            );
+        }
+        assert_eq!(state_single_bytes.len(), state_mb_bytes.len());
+        for (i, (a, b)) in state_single_bytes
+            .iter()
+            .zip(state_mb_bytes.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                a, b,
+                "state byte mismatch at flat index {i}: single=0x{a:04x} mb=0x{b:04x}"
+            );
+        }
 
         Ok(())
     }
