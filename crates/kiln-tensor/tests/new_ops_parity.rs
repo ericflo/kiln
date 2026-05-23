@@ -74,16 +74,22 @@ fn roll_full_period_is_identity() {
 #[test]
 fn tile_then_chunk_recovers_original() {
     // tile(x, [2]) then chunk(_, 2, 0) → two copies of x.
-    // chunks are narrow views; materialize via contiguous() so
-    // read_f32 sees only the slice's bytes (not the underlying tiled
-    // buffer).
+    // chunks are narrow views; the first chunk's start_offset is 0
+    // and the layout reports contiguous=true, so contiguous() is a
+    // no-op clone that still shares the underlying [1,2,3,1,2,3]
+    // storage. Use `add` against a zero tensor of the same shape
+    // to force a fresh element-wise materialization.
     let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0], vec![3]).unwrap();
     let tiled = ops::tile(&x, &[2]).unwrap();
     let chunks = ops::chunk(&tiled, 2, 0).unwrap();
     assert_eq!(chunks.len(), 2);
     for c in &chunks {
-        let c_contig = c.contiguous().unwrap();
-        assert_eq!(read_f32(&c_contig), vec![1.0, 2.0, 3.0]);
+        assert_eq!(c.shape(), &[3]);
+        assert_eq!(c.element_count(), 3);
+        // Materialize via add_scalar(0.0) — produces a fresh storage
+        // sized to the layout's element count.
+        let materialized = ops::add_scalar(c, 0.0).unwrap();
+        assert_eq!(read_f32(&materialized), vec![1.0, 2.0, 3.0]);
     }
 }
 
