@@ -33,6 +33,8 @@ mod tensor_id;
 mod cuda_storage;
 #[cfg(feature = "metal")]
 mod metal_storage;
+#[cfg(feature = "vulkan")]
+mod vulkan_storage;
 
 pub use device::{Backend, Device};
 pub use dtype::DType;
@@ -47,3 +49,5 @@ pub use tensor_id::TensorId;
 pub use cuda_storage::{cuda_zeros, CudaStorage};
 #[cfg(feature = "metal")]
 pub use metal_storage::{metal_zeros, MetalStorage};
+#[cfg(feature = "vulkan")]
+pub use vulkan_storage::{vulkan_zeros, VulkanStorage};
