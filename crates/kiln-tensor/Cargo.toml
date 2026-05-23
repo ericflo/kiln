@@ -36,6 +36,12 @@ memmap2 = { workspace = true }
 # this with a direct cudarc dependency.
 candle-core = { workspace = true, optional = true }
 
+# Optional — only under `metal`. `metal_storage.rs` references
+# `candle_metal_kernels::metal::Buffer` / `MTLStorageMode` directly;
+# candle-core does NOT re-export the `candle_metal_kernels` crate, so
+# we have to depend on it explicitly (matches kiln-model's pin).
+candle-metal-kernels = { version = "0.10", optional = true }
+
 # Optional — pulled in under the `vulkan` feature only. kiln-vulkan-kernel
 # is already candle-free (uses ash + custom GLSL compute) so this is a
 # clean, permanent dependency — Phase 7 does NOT replace it.
@@ -50,7 +56,7 @@ default = []
 # the SINGLE candle hook in kiln-tensor; Phase 7 replaces it.
 cuda = ["dep:candle-core", "candle-core?/cuda"]
 # Reserved for Phase 1.7. Same pattern as `cuda`.
-metal = ["dep:candle-core", "candle-core?/metal"]
+metal = ["dep:candle-core", "candle-core?/metal", "dep:candle-metal-kernels"]
 # Phase 1.8 — Vulkan storage. Does NOT go through candle: lifts
 # kiln-vulkan-kernel's already-candle-free VulkanBuffer + VulkanDevice.
 # This is a permanent dependency (Phase 7 does not change it).

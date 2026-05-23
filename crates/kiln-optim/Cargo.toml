@@ -27,3 +27,6 @@ half = "2"
 # alongside kiln-optim. Production callers in kiln-train will do the
 # same.
 kiln-autograd = { workspace = true }
+# Byte-cast for the tied-weight integration test that reads a CPU
+# gradient back as Vec<f32>. Matches the kiln-tensor pin.
+bytemuck = { version = "1", features = ["extern_crate_alloc"] }

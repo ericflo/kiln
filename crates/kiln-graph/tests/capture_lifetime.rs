@@ -22,6 +22,10 @@ use std::collections::HashSet;
 
 use kiln_graph::{AllocatorMode, CaptureError, CaptureSession};
 use kiln_tensor as kt;
+// `set_mode`, `mode`, `alloc`, `reserved_bytes`, `peak_reserved_bytes`
+// live on the `Allocator` trait; the methods are unreachable through
+// `CpuAllocator` without the trait in scope.
+use kiln_tensor::Allocator;
 
 /// Happy path: pre-warm, begin, pin, alloc-from-warm, finalize,
 /// audit, succeed.

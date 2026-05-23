@@ -41,7 +41,10 @@ use std::any::Any;
 use std::sync::Arc;
 
 use candle_core::metal_backend::MetalDevice;
-use candle_core::metal_backend::candle_metal_kernels::metal::Buffer as MetalBuffer;
+// `candle_metal_kernels` is its own crate — candle-core does NOT
+// re-export it under `metal_backend`. Depend on it directly under the
+// `metal` feature so this path resolves.
+use candle_metal_kernels::metal::Buffer as MetalBuffer;
 
 use crate::{DType, Device, Error, Result, StorageBackend};
 
@@ -137,7 +140,7 @@ impl MetalStorage {
     /// Phase 1.x's `Tensor::as_host_slice()` accessor reads this — UMA
     /// devices return a `&[u8]` directly; non-UMA returns an error.
     pub fn is_unified_memory(&self) -> bool {
-        use candle_core::metal_backend::candle_metal_kernels::metal::MTLStorageMode;
+        use candle_metal_kernels::metal::MTLStorageMode;
         matches!(
             self.buffer.storage_mode(),
             MTLStorageMode::Shared | MTLStorageMode::Managed
