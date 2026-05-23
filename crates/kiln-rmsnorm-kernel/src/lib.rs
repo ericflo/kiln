@@ -83,7 +83,10 @@ use std::sync::OnceLock;
 /// kiln-tensor-typed surface alongside candle-typed. Same FFI.
 /// Phase 7 deletes the candle path.
 mod kt_api;
-pub use kt_api::{fused_rmsnorm_backward_kt, fused_rmsnorm_kt, RmsNormError};
+pub use kt_api::{
+    fused_mlp_silu_mul_kt, fused_rmsnorm_backward_kt, fused_rmsnorm_kt, fused_rotary_qk_kt,
+    RmsNormError,
+};
 
 unsafe extern "C" {
     fn kiln_fused_rmsnorm(
