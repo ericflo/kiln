@@ -11,6 +11,11 @@ build = "build.rs"
 [dependencies]
 candle-core = { workspace = true, features = ["cuda"] }
 half = "2"
+# Phase 7 prep: kiln-tensor-typed API surface ships alongside the
+# candle-typed one. Both call the same FFI; callers migrate one
+# call site at a time, and the candle path is deleted when no
+# call sites remain.
+kiln-tensor = { workspace = true }
 
 [build-dependencies]
 cc = "1"
