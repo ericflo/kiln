@@ -2,6 +2,19 @@ use std::collections::HashMap;
 
 use crate::token::TokenId;
 
+/// By default, let the prefix cache retain half of the KV block pool.
+///
+/// Long agentic turns commonly send the same 16k-32k+ token history back on
+/// every request. A quarter-pool default can be too small to retain those
+/// strict prefixes on consumer CUDA cards, which forces full re-prefill each
+/// turn. Keeping half still leaves half the block pool available for active
+/// suffixes, decode, and concurrent work.
+pub const DEFAULT_PREFIX_CACHE_BLOCK_FRACTION_DIVISOR: usize = 2;
+
+pub fn default_prefix_cache_max_blocks(num_blocks: usize) -> usize {
+    num_blocks / DEFAULT_PREFIX_CACHE_BLOCK_FRACTION_DIVISOR
+}
+
 /// A prefix cache that maps token block sequences to physical KV cache block IDs.
 ///
 /// When multiple requests share a common prefix (e.g. the same system prompt),
@@ -268,6 +281,13 @@ impl RadixNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_prefix_cache_max_blocks_keeps_half_the_pool() {
+        assert_eq!(default_prefix_cache_max_blocks(4_096), 2_048);
+        assert_eq!(default_prefix_cache_max_blocks(100), 50);
+        assert_eq!(default_prefix_cache_max_blocks(1), 0);
+    }
 
     #[test]
     fn test_register_and_lookup() {

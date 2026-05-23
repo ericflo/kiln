@@ -8,6 +8,7 @@ use candle_core::DType;
 use kiln_core::block::BlockManager;
 use kiln_core::config::ModelConfig;
 use kiln_core::config_hashes::ConfigHashes;
+use kiln_core::prefix_cache::default_prefix_cache_max_blocks;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
@@ -1840,7 +1841,9 @@ impl AppState {
         }
 
         let prefix_cache_max_blocks = if prefix_cache_cfg.enabled {
-            prefix_cache_cfg.max_blocks.unwrap_or(num_blocks / 4)
+            prefix_cache_cfg
+                .max_blocks
+                .unwrap_or_else(|| default_prefix_cache_max_blocks(num_blocks))
         } else {
             0
         };

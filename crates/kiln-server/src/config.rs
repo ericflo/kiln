@@ -279,7 +279,7 @@ pub struct PrefixCacheConfig {
     /// When enabled, KV cache blocks for shared prefixes are reused across requests.
     pub enabled: bool,
     /// Maximum number of KV cache blocks the prefix cache may retain.
-    /// Default: 25% of total blocks. Set to 0 to use the default.
+    /// Default: 50% of total blocks. Omit to use the default.
     pub max_blocks: Option<usize>,
     /// Maximum number of real-backend prefix entries to retain.
     /// Each entry owns a GDN linear-attention state snapshot in addition to

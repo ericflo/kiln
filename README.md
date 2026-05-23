@@ -481,6 +481,7 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `memory.kv_cache_fp8` | `KILN_KV_CACHE_FP8` | false | FP8 KV cache (2x context length) |
 | `logging.format` | `KILN_LOG_FORMAT` | auto | `auto` (default; pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, or `human` |
 | `prefix_cache.enabled` | `KILN_PREFIX_CACHE_ENABLED` | true | Reuse KV cache for shared prefixes |
+| `prefix_cache.max_blocks` | `KILN_PREFIX_CACHE_MAX_BLOCKS` | auto | Cap retained KV blocks for shared prefixes (auto = 50% of KV block pool) |
 | `prefix_cache.max_entries` | `KILN_PREFIX_CACHE_MAX_ENTRIES` | auto | Cap cached GDN state snapshots (~49 MiB each; auto budget ≤1 GiB) |
 
 Kiln boots with the built-in `Qwen3.5-4B` defaults profile. That profile

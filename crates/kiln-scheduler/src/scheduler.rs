@@ -1,5 +1,5 @@
 use kiln_core::block::BlockManager;
-use kiln_core::prefix_cache::PrefixCache;
+use kiln_core::prefix_cache::{PrefixCache, default_prefix_cache_max_blocks};
 use kiln_core::request::{Request, RequestId, RequestState};
 use kiln_core::token::TokenId;
 use std::collections::VecDeque;
@@ -21,7 +21,8 @@ pub struct SchedulerConfig {
     /// Enable prefix caching for shared prompt prefixes.
     pub prefix_cache_enabled: bool,
 
-    /// Maximum blocks the prefix cache may retain (0 = unlimited up to num_blocks / 4).
+    /// Maximum blocks the prefix cache may retain. Omit to use the default
+    /// half of the block pool; set `prefix_cache_enabled=false` to disable.
     pub prefix_cache_max_blocks: Option<usize>,
 }
 
@@ -101,7 +102,9 @@ impl Scheduler {
     pub fn new(config: SchedulerConfig, num_blocks: usize) -> Self {
         let block_manager = BlockManager::new(num_blocks, config.block_size);
         let prefix_cache_max_blocks = if config.prefix_cache_enabled {
-            config.prefix_cache_max_blocks.unwrap_or(num_blocks / 4)
+            config
+                .prefix_cache_max_blocks
+                .unwrap_or_else(|| default_prefix_cache_max_blocks(num_blocks))
         } else {
             0
         };
@@ -554,6 +557,21 @@ mod tests {
     }
 
     // --- Prefix caching tests ---
+
+    #[test]
+    fn prefix_cache_default_budget_keeps_half_the_block_pool() {
+        let config = SchedulerConfig {
+            max_batch_tokens: 200,
+            max_batch_size: 8,
+            block_size: 4,
+            prefix_cache_enabled: true,
+            prefix_cache_max_blocks: None,
+        };
+        let sched = Scheduler::new(config, 200);
+
+        let stats = sched.prefix_cache_stats();
+        assert_eq!(stats.max_blocks, 100);
+    }
 
     #[test]
     fn prefix_cache_hit_skips_prefill() {
