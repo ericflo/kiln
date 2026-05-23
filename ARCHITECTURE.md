@@ -13,6 +13,15 @@ This document explains how Kiln works internally. It is aimed at contributors an
 
 ## System Overview
 
+> **Migration note (Phase 1+ of #1082).** The substrate Kiln is being
+> migrated to lives in six new crates that ship in parallel with the
+> existing ones: `kiln-tensor` (Tensor + Storage), `kiln-blas` (CUDA
+> BLAS), `kiln-param` (unified Parameter handle), `kiln-autograd`
+> (tape-based reverse-mode), `kiln-optim` (fused optimizer step), and
+> `kiln-graph` (command-list capture). See the [#1082 migration
+> substrate](#1082-migration-substrate-phase-1-onward) section below
+> for the dispatch flow + per-crate breakdown.
+
 Kiln is a single Rust binary built as a Cargo workspace with thirteen crates — eight portable crates plus five CUDA kernel crates that are only compiled when `--features cuda` is enabled:
 
 ```
@@ -842,3 +851,126 @@ counts.
 ## Phase status (2026-05-13)
 
 Phase 6 (performance optimization) is closed. The post-#534 perf shortlist concluded with PRs #525 / #526 (SGLang RadixAttention), #210 / #206 (Marlin pack determinism + BF16 cleanup), #222 (FP8 KV opt-in), and #536 (native MTP self-spec, null at α=0.69). Phase 11 (eval as a first-class surface — `kiln-eval` crate, `/v1/eval/*` API, dataset → suite synthesis, judgment flywheel, post-training auto-eval, drill-in UI) shipped as a single bundled commit. Active work is now Phase 7 (developer experience). For current decode numbers see `BENCHMARKS.md`; for the live profiling hotspot table see `PROFILING.md`.
+
+## #1082 migration substrate (Phase 1 onward)
+
+The candle removal epic ([#1082](https://github.com/ericflo/kiln/issues/1082))
+introduces six new crates that together replace candle's tensor /
+autograd / optimizer / graph-capture surfaces. They ship in parallel
+with the existing crates; the migration flips per-op call sites onto
+the new substrate over many small PRs while the candle path stays
+buildable behind feature flags. Phase 7 of the issue deletes
+`vendor/candle-core/` once every backend has a matching kiln-tensor
+implementation.
+
+### Six new crates
+
+| Crate | Replaces | What's shipped today |
+|---|---|---|
+| `kiln-tensor` | `candle_core::{Tensor, Storage, Device, DType, TensorId, Layout, Error, Result}` + `bail!` / `ensure!` macros + safetensors load + 11 CPU op families + `StreamPlanner` + `Allocator` trait + `CpuAllocator` + `Activation` registry | Full Phase 1 scaffold, GPU storage impls behind `cuda` / `metal` / `vulkan` features |
+| `kiln-blas` | candle's locked `CUBLAS_GEMM_DEFAULT_TENSOR_OP` GEMM | Phase 0.8 cublasLt probe; production matmul lands in Phase 2 |
+| `kiln-param` | `packed_weight_registry.rs` + `transposed_weight_cache.rs` + `marlin_proj.rs` + `fp8.rs` + `lora_loader.rs`'s weight-side concerns | `Parameter`, `ForwardStorage`, `OutputHead`, `AmpPolicy`, `content_hash_storage` |
+| `kiln-autograd` | `candle_core::{Var, GradStore, BackpropOp}` + `vk_autograd.rs` lift | `Tape`, `GradStore`, `BackwardOp`, reverse-topo walker |
+| `kiln-optim` | `kiln-train::trainer.rs::AdamWMoments` HashMap + Vulkan's `adamw_step_bf16.comp` | `OptimStep` trait, `AdamW` CPU reference, `MomentLocation` + `StochasticRoundingPolicy` |
+| `kiln-graph` | `cuda_graph.rs:33-96` blocked bs>1 path + `vk_cmd_batch.rs` lift | `CapturedGraph` trait, `CaptureSession`, `AllocatorMode` (re-exports kiln-tensor's), `CaptureError::DanglingPointer` |
+
+### Dispatch flow
+
+```
+User call site
+  └─ kiln_tensor::ops::matmul(&a, &b)
+       └─ dispatch2(&MatmulOp, &a, &b)
+            └─ match a.device() {
+                 Device::Cpu     -> op.cpu_fwd(&a, &b),
+                 Device::Cuda(_) -> op.cuda_fwd(&a, &b) (default None ⇒ fallback to cpu_fwd),
+                 Device::Metal(_)-> op.metal_fwd(...),
+                 Device::Vulkan(_)-> op.vulkan_fwd(...),
+               }
+            └─ Op records on the autograd tape (Phase 6a) if requires_grad
+            └─ Forward returns kiln_tensor::Tensor (zero-copy views via Layout)
+```
+
+Training flow:
+
+```
+forward → kiln_autograd::Tape::record per op
+       → loss tensor
+       → tape.backward(loss_id, seed_grad, accumulator) → GradStore
+       → optimizer.step(parameter, grad) per parameter
+            └─ reads parameter.amp_policy() for dispatch dtype
+            └─ updates parameter.backward_storage() in place
+            └─ (later) fused dequant → update → requant kernel for
+              quantized forward_storage (Marlin / FP8)
+       → Tape::clear() (anti-pattern 16: required before next forward)
+```
+
+Graph-capture flow (Phase 5):
+
+```
+allocator.warm(dtype, n, count) for every shape the captured graph needs
+session = CaptureSession::begin()
+allocator.set_mode(AllocatorMode::Frozen)
+... per-backend graph capture ops, each session.pin(&tensor) ...
+session.finalize()
+// On every replay:
+session.audit_pinned(&live) → Err(DanglingPointer{tensor_id}) if pinned id dropped
+captured.replay()
+```
+
+### CPU op families (current)
+
+Eleven `DeviceOp` impls (each with a CPU reference + parity tests):
+
+| Op family | Trait | Migration target |
+|---|---|---|
+| `embedding` | `DeviceOp2` | `candle_core::Tensor::index_select`, `candle_nn::Embedding` |
+| `rmsnorm` | `DeviceOp2` | candle's `RmsNorm` + 16 NVTX call sites |
+| `add` / `sub` / `mul` / `div` (`ElementwiseOp`) | `DeviceOp2` | `Tensor::{add, sub, mul, div}`; 14 `kiln/residual` NVTX sites |
+| `silu` / `sigmoid` (`ActivationOp`) | `DeviceOp1` | `Tensor::{silu, sigmoid}`, `Activation::SiLU` |
+| `softmax_last_dim` | `DeviceOp1` | `candle_nn::ops::softmax_last_dim` |
+| `matmul` | `DeviceOp2` | `Tensor::matmul` (canonical reference for kiln-blas) |
+| `argmax_last_dim` | `DeviceOp1` | `Tensor::argmax_keepdim(-1)` + sampler greedy path |
+| `cast` | `DeviceOp1` | `Tensor::to_dtype` (F32 ↔ BF16 ↔ F16; U32 ↔ I64) |
+| `rope` | `DeviceOp3` | `candle_nn::rotary_emb::rope` (partial-rotary 0.25 for Qwen3.5-4B) |
+| `l2_norm` | `DeviceOp1` | `Tensor::l2_normalize(-1)` (QK-norm path) |
+| `mul_sigmoid_gate` | `DeviceOp2` | the packed silu*mul kernel from the MLP fusion work (PRs e44c2c84/2a44953a/da1b0467) |
+
+Each impl exposes the same shape: `name()`, `determinism()`,
+`cpu_fwd(...) -> Result<Option<Tensor>>` (the canonical reference),
+default-`None` GPU forwards, and `bwd() -> Option<Box<dyn BackwardOp>>`.
+Dispatchers in `kiln_tensor::device_op` (`dispatch1` / `dispatch2` /
+`dispatch3`) pick the right backend method based on `Tensor::device()`
+and fall through to CPU on `Ok(None)`.
+
+### Determinism stance + parity tolerance
+
+`kiln_tensor::Determinism` (Phase 1.11) classifies each op as either
+`Constructive` (bit-identical across runs) or
+`ToleranceBounded { dtype_band_key }`. The band keys reference rows
+in `bench-results/parity-tolerance.csv` (Phase 0.4) which carries 416
+`{op, dtype, backend}` cells. `KILN_DETERMINISTIC=1` selects the
+deterministic variant of every tolerance-bounded op.
+
+Anti-pattern 2 (every materializing `contiguous()` is logged) is wired
+through `kiln_tensor::profile::emit_contiguous_copy()`, which
+`Tensor::contiguous()` bumps on its non-fast-path branch.
+
+### What's NOT yet ported (subsequent PRs)
+
+- Per-backend GPU `DeviceOp` impls — Phase 2 fills these in (CUDA via
+  `kiln-blas` cublasLt, Metal via MPSMatrixMultiplication, Vulkan via
+  `kiln-vulkan-kernel`'s existing compute pipelines + 33 vk_ops
+  backward impls).
+- Per-backend `Allocator` impls (`CudaAllocator` over `cudaMemPool_t`,
+  `MetalAllocator` over `MTLHeap`, `VulkanAllocator` lifting
+  `buffer_pool.rs`).
+- Per-backend `CapturedGraph` impls (`kiln-graph-cuda` over
+  `cudaGraph_t`, etc.).
+- `Tensor` interior-mutability story (in-place ops + per-tensor
+  version counter for anti-pattern 16 runtime enforcement).
+- The actual call-site swaps from `candle_core::*` to
+  `kiln_tensor::*` in `crates/kiln-model/src/`.
+
+Phase 9's bench-gate enforces non-regression on every kiln-tensor
+op's parity test + the per-tier baselines under
+`bench-results/pre-migration-baseline/` (Phase 0.10).
