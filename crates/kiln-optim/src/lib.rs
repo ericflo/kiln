@@ -25,6 +25,7 @@
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
 
+mod accumulate_step;
 mod adamw;
 mod grad_accumulator;
 mod lion_muon;
@@ -33,6 +34,7 @@ mod optim_step;
 mod policy;
 mod sgd;
 
+pub use accumulate_step::accumulate_then_step;
 pub use adamw::{AdamW, AdamWHyperparameters, AdamWMoments};
 pub use grad_accumulator::GradAccumulator;
 pub use lion_muon::{Lion, LionEma, Muon, MuonState};
