@@ -126,6 +126,30 @@ pub fn huber_loss(pred: &Tensor, target: &Tensor, delta: f32) -> Result<Tensor> 
     scalar_tensor(pred.dtype(), sum / n)
 }
 
+/// Binary cross-entropy loss with logits (numerically stable
+/// log-sum-exp form). `logits` and `targets` are same-shape; targets
+/// are real-valued in `[0, 1]` (typical: binary {0, 1}).
+///
+/// ```text
+/// BCE_i = max(logit, 0) - logit*target + log(1 + exp(-|logit|))
+/// ```
+///
+/// Returns the mean.
+pub fn bce_with_logits(logits: &Tensor, target: &Tensor) -> Result<Tensor> {
+    validate_pair(logits, target, "bce_with_logits")?;
+    let (lg, t) = load_pair_f32(logits, target)?;
+    let n = lg.len() as f32;
+    let sum: f32 = lg
+        .iter()
+        .zip(t.iter())
+        .map(|(&l, &y)| {
+            let abs_l = l.abs();
+            l.max(0.0) - l * y + (-abs_l).exp().ln_1p()
+        })
+        .sum();
+    scalar_tensor(logits.dtype(), sum / n)
+}
+
 /// NLL loss for soft probabilities given log_probs + targets.
 /// `log_probs: [B, V]`, `targets: [B]` (I64/U32). Returns -mean of
 /// log_probs at the target indices.
@@ -286,6 +310,35 @@ mod tests {
         let targets = Tensor::from_slice(&[0i64, 2], vec![2]).unwrap();
         let loss = scalar_f32(&nll_loss(&log_probs, &targets).unwrap());
         assert!(loss.abs() < 1e-6);
+    }
+
+    #[test]
+    fn bce_with_logits_zero_logit_target_half_is_log2() {
+        // logit=0, y=0 → BCE = 0 - 0 + log(1 + exp(0)) = log(2)
+        // logit=0, y=1 → BCE = 0 - 0 + log(2) = log(2)
+        // mean = log(2) ≈ 0.6931
+        let logits = Tensor::from_slice(&[0.0f32, 0.0], vec![2]).unwrap();
+        let target = Tensor::from_slice(&[0.0f32, 1.0], vec![2]).unwrap();
+        let l = scalar_f32(&bce_with_logits(&logits, &target).unwrap());
+        assert!((l - 2.0_f32.ln()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn bce_with_logits_perfect_negative_is_zero() {
+        // logit = -10 → sigmoid ≈ 0; target = 0 → loss ≈ 0.
+        let logits = Tensor::from_slice(&[-10.0f32], vec![1]).unwrap();
+        let target = Tensor::from_slice(&[0.0f32], vec![1]).unwrap();
+        let l = scalar_f32(&bce_with_logits(&logits, &target).unwrap());
+        assert!(l < 1e-4, "expected ≈ 0, got {l}");
+    }
+
+    #[test]
+    fn bce_with_logits_perfect_positive_is_zero() {
+        // logit = 10 → sigmoid ≈ 1; target = 1 → loss ≈ 0.
+        let logits = Tensor::from_slice(&[10.0f32], vec![1]).unwrap();
+        let target = Tensor::from_slice(&[1.0f32], vec![1]).unwrap();
+        let l = scalar_f32(&bce_with_logits(&logits, &target).unwrap());
+        assert!(l < 1e-4, "expected ≈ 0, got {l}");
     }
 
     #[test]

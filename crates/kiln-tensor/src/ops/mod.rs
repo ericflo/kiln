@@ -96,7 +96,7 @@ pub use layernorm::{layer_norm, LayerNormOp};
 pub use like::{full_like, ones_like, zeros_like};
 pub use log_softmax::log_softmax_last_dim;
 pub use log_variants::{exp2, expm1, log10, log1p, log2};
-pub use losses::{huber_loss, l1_loss, mse_loss, nll_loss};
+pub use losses::{bce_with_logits, huber_loss, l1_loss, mse_loss, nll_loss};
 pub use mask::{causal_mask, masked_fill, MaskedFillOp};
 pub use matmul::{matmul, MatmulOp};
 pub use max_min_axis::{max_axis, min_axis, MinMaxKind};
