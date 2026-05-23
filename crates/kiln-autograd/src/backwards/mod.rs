@@ -26,3 +26,4 @@ pub mod reduce;
 pub mod rmsnorm;
 pub mod rope;
 pub mod swiglu;
+pub mod where_select;
