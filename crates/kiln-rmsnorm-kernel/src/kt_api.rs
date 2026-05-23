@@ -14,11 +14,13 @@ use kiln_kt_bridge::BridgeError;
 use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 
 use crate::{
-    kiln_adamw_step_f32, kiln_attn_decode_qkv_split_qk_norm_rope_bf16, kiln_fused_l2_qk_norm,
-    kiln_fused_l2_qk_norm_gqa, kiln_fused_mlp_silu_mul_bf16, kiln_fused_rmsnorm,
-    kiln_fused_rmsnorm_bwd, kiln_fused_rotary_one, kiln_fused_rotary_qk,
-    kiln_fused_sigmoid_mul_bf16, kiln_lora_decode_add_bf16, kiln_lora_decode_hidden_bf16,
-    kiln_sgd_step_f32,
+    kiln_adamw_step_f32, kiln_attn_decode_qkv_split_qk_norm_rope_bf16,
+    kiln_causal_depthwise_conv1d_bwd_input_f32, kiln_causal_depthwise_conv1d_bwd_state_f32,
+    kiln_causal_depthwise_conv1d_bwd_weight_f32, kiln_causal_depthwise_conv1d_f32,
+    kiln_causal_depthwise_conv1d_inplace_f32, kiln_fused_l2_qk_norm, kiln_fused_l2_qk_norm_gqa,
+    kiln_fused_mlp_silu_mul_bf16, kiln_fused_rmsnorm, kiln_fused_rmsnorm_bwd,
+    kiln_fused_rotary_one, kiln_fused_rotary_qk, kiln_fused_sigmoid_mul_bf16,
+    kiln_lora_decode_add_bf16, kiln_lora_decode_hidden_bf16, kiln_sgd_step_f32,
 };
 
 #[derive(Debug)]
@@ -1067,4 +1069,320 @@ pub fn attn_decode_qkv_split_qk_norm_rope_kt(
         )));
     }
     Ok((q_out, k_out, gate_out))
+}
+
+// ============================================================================
+// Causal depthwise conv1d family (F32; used by training paths)
+// ============================================================================
+
+/// `causal_depthwise_conv1d_f32` over kt operands.
+///
+/// `input`: F32 `[rows, channels]` (one row per time step).
+/// `weight`: F32 `[channels, kernel]`. `state`: F32 `[channels, kernel-1]`.
+/// Returns F32 `[rows, channels]`.
+pub fn causal_depthwise_conv1d_kt(
+    input: &KtTensor,
+    weight: &KtTensor,
+    state: &KtTensor,
+    kernel: usize,
+) -> Result<KtTensor, RmsNormError> {
+    let input_shape = input.shape();
+    if input_shape.len() != 2 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d: input must be [rows, channels], got {input_shape:?}"
+        )));
+    }
+    let (rows, channels) = (input_shape[0], input_shape[1]);
+    if weight.shape() != [channels, kernel] {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d: weight {:?} != [{channels}, {kernel}]",
+            weight.shape()
+        )));
+    }
+    if state.shape() != [channels, kernel - 1] {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d: state {:?} != [{channels}, {}]",
+            state.shape(),
+            kernel - 1
+        )));
+    }
+    let (i_st, i_off) = cuda_storage_and_byte_offset(input, KtDType::F32, "input")?;
+    let (w_st, w_off) = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
+    let (s_st, s_off) = cuda_storage_and_byte_offset(state, KtDType::F32, "state")?;
+    let out = alloc_cuda_tensor(i_st, KtDType::F32, vec![rows, channels])?;
+    let o_cuda = out
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+
+    let stream = i_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let i_slice = i_st.slice().slice(i_off..);
+    let w_slice = w_st.slice().slice(w_off..);
+    let s_slice = s_st.slice().slice(s_off..);
+    let o_slice = o_cuda.slice().slice(0..);
+    let status = unsafe {
+        let (i_ptr, _g1) = i_slice.device_ptr(&stream);
+        let (w_ptr, _g2) = w_slice.device_ptr(&stream);
+        let (s_ptr, _g3) = s_slice.device_ptr(&stream);
+        let (o_ptr, _g4) = o_slice.device_ptr(&stream);
+        kiln_causal_depthwise_conv1d_f32(
+            i_ptr as *const f32,
+            w_ptr as *const f32,
+            s_ptr as *const f32,
+            o_ptr as *mut f32,
+            rows as i32,
+            channels as i32,
+            kernel as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d: FFI returned {status}"
+        )));
+    }
+    Ok(out)
+}
+
+/// In-place variant of [`causal_depthwise_conv1d_kt`]. `input_out`
+/// is mutated in place; no allocation, no copy. Returns `()`.
+pub fn causal_depthwise_conv1d_inplace_kt(
+    input_out: &KtTensor,
+    weight: &KtTensor,
+    state: &KtTensor,
+    kernel: usize,
+) -> Result<(), RmsNormError> {
+    let shape = input_out.shape();
+    if shape.len() != 2 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d-inplace: input_out must be [rows, channels], got {shape:?}"
+        )));
+    }
+    let (rows, channels) = (shape[0], shape[1]);
+    if weight.shape() != [channels, kernel] {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d-inplace: weight {:?} != [{channels}, {kernel}]",
+            weight.shape()
+        )));
+    }
+    if state.shape() != [channels, kernel - 1] {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d-inplace: state {:?} != [{channels}, {}]",
+            state.shape(),
+            kernel - 1
+        )));
+    }
+    let (i_st, i_off) = cuda_storage_and_byte_offset(input_out, KtDType::F32, "input_out")?;
+    let (w_st, w_off) = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
+    let (s_st, s_off) = cuda_storage_and_byte_offset(state, KtDType::F32, "state")?;
+    let stream = i_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let i_slice = i_st.slice().slice(i_off..);
+    let w_slice = w_st.slice().slice(w_off..);
+    let s_slice = s_st.slice().slice(s_off..);
+    let status = unsafe {
+        let (i_ptr, _g1) = i_slice.device_ptr(&stream);
+        let (w_ptr, _g2) = w_slice.device_ptr(&stream);
+        let (s_ptr, _g3) = s_slice.device_ptr(&stream);
+        kiln_causal_depthwise_conv1d_inplace_f32(
+            i_ptr as *mut f32,
+            w_ptr as *const f32,
+            s_ptr as *const f32,
+            rows as i32,
+            channels as i32,
+            kernel as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d-inplace: FFI returned {status}"
+        )));
+    }
+    Ok(())
+}
+
+/// Backward through `causal_depthwise_conv1d` w.r.t. the input.
+pub fn causal_depthwise_conv1d_bwd_input_kt(
+    grad_out: &KtTensor,
+    weight: &KtTensor,
+    kernel: usize,
+) -> Result<KtTensor, RmsNormError> {
+    let go_shape = grad_out.shape();
+    if go_shape.len() != 2 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d-bwd-input: grad_out must be [rows, channels], got {go_shape:?}"
+        )));
+    }
+    let (rows, channels) = (go_shape[0], go_shape[1]);
+    if weight.shape() != [channels, kernel] {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d-bwd-input: weight {:?} != [{channels}, {kernel}]",
+            weight.shape()
+        )));
+    }
+    let (g_st, g_off) = cuda_storage_and_byte_offset(grad_out, KtDType::F32, "grad_out")?;
+    let (w_st, w_off) = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
+    let gi = alloc_cuda_tensor(g_st, KtDType::F32, vec![rows, channels])?;
+    let gi_cuda = gi
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let stream = g_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let g_slice = g_st.slice().slice(g_off..);
+    let w_slice = w_st.slice().slice(w_off..);
+    let gi_slice = gi_cuda.slice().slice(0..);
+    let status = unsafe {
+        let (g_ptr, _g1) = g_slice.device_ptr(&stream);
+        let (w_ptr, _g2) = w_slice.device_ptr(&stream);
+        let (gi_ptr, _g3) = gi_slice.device_ptr(&stream);
+        kiln_causal_depthwise_conv1d_bwd_input_f32(
+            g_ptr as *const f32,
+            w_ptr as *const f32,
+            gi_ptr as *mut f32,
+            rows as i32,
+            channels as i32,
+            kernel as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d-bwd-input: FFI returned {status}"
+        )));
+    }
+    Ok(gi)
+}
+
+/// Backward w.r.t. the weight. Output shape: `[channels, kernel]`.
+pub fn causal_depthwise_conv1d_bwd_weight_kt(
+    grad_out: &KtTensor,
+    input: &KtTensor,
+    state: &KtTensor,
+    kernel: usize,
+) -> Result<KtTensor, RmsNormError> {
+    let go_shape = grad_out.shape();
+    if go_shape.len() != 2 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d-bwd-weight: grad_out must be [rows, channels], got {go_shape:?}"
+        )));
+    }
+    let (rows, channels) = (go_shape[0], go_shape[1]);
+    if input.shape() != [rows, channels] {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d-bwd-weight: input {:?} != [{rows}, {channels}]",
+            input.shape()
+        )));
+    }
+    if state.shape() != [channels, kernel - 1] {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d-bwd-weight: state {:?} != [{channels}, {}]",
+            state.shape(),
+            kernel - 1
+        )));
+    }
+    let (g_st, g_off) = cuda_storage_and_byte_offset(grad_out, KtDType::F32, "grad_out")?;
+    let (i_st, i_off) = cuda_storage_and_byte_offset(input, KtDType::F32, "input")?;
+    let (s_st, s_off) = cuda_storage_and_byte_offset(state, KtDType::F32, "state")?;
+    let gw = alloc_cuda_tensor(g_st, KtDType::F32, vec![channels, kernel])?;
+    let gw_cuda = gw
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let stream = g_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let g_slice = g_st.slice().slice(g_off..);
+    let i_slice = i_st.slice().slice(i_off..);
+    let s_slice = s_st.slice().slice(s_off..);
+    let gw_slice = gw_cuda.slice().slice(0..);
+    let status = unsafe {
+        let (g_ptr, _g1) = g_slice.device_ptr(&stream);
+        let (i_ptr, _g2) = i_slice.device_ptr(&stream);
+        let (s_ptr, _g3) = s_slice.device_ptr(&stream);
+        let (gw_ptr, _g4) = gw_slice.device_ptr(&stream);
+        kiln_causal_depthwise_conv1d_bwd_weight_f32(
+            g_ptr as *const f32,
+            i_ptr as *const f32,
+            s_ptr as *const f32,
+            gw_ptr as *mut f32,
+            rows as i32,
+            channels as i32,
+            kernel as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d-bwd-weight: FFI returned {status}"
+        )));
+    }
+    Ok(gw)
+}
+
+/// Backward w.r.t. the conv state. Output shape: `[channels, kernel-1]`.
+pub fn causal_depthwise_conv1d_bwd_state_kt(
+    grad_out: &KtTensor,
+    weight: &KtTensor,
+    kernel: usize,
+) -> Result<KtTensor, RmsNormError> {
+    let go_shape = grad_out.shape();
+    if go_shape.len() != 2 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d-bwd-state: grad_out must be [rows, channels], got {go_shape:?}"
+        )));
+    }
+    let (rows, channels) = (go_shape[0], go_shape[1]);
+    if weight.shape() != [channels, kernel] {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d-bwd-state: weight {:?} != [{channels}, {kernel}]",
+            weight.shape()
+        )));
+    }
+    let (g_st, g_off) = cuda_storage_and_byte_offset(grad_out, KtDType::F32, "grad_out")?;
+    let (w_st, w_off) = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
+    let gs = alloc_cuda_tensor(g_st, KtDType::F32, vec![channels, kernel - 1])?;
+    let gs_cuda = gs
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("alloc CUDA");
+    let stream = g_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let g_slice = g_st.slice().slice(g_off..);
+    let w_slice = w_st.slice().slice(w_off..);
+    let gs_slice = gs_cuda.slice().slice(0..);
+    let status = unsafe {
+        let (g_ptr, _g1) = g_slice.device_ptr(&stream);
+        let (w_ptr, _g2) = w_slice.device_ptr(&stream);
+        let (gs_ptr, _g3) = gs_slice.device_ptr(&stream);
+        kiln_causal_depthwise_conv1d_bwd_state_f32(
+            g_ptr as *const f32,
+            w_ptr as *const f32,
+            gs_ptr as *mut f32,
+            rows as i32,
+            channels as i32,
+            kernel as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(RmsNormError::Msg(format!(
+            "kt-depth-conv1d-bwd-state: FFI returned {status}"
+        )));
+    }
+    Ok(gs)
+}
+
+/// Suppresses unused-import warnings for the bwd-state extern import
+/// in builds that don't reference it directly through the kt-API.
+#[allow(dead_code)]
+fn _unused_imports_keep() {
+    let _ = kiln_causal_depthwise_conv1d_bwd_input_f32;
+    let _ = kiln_causal_depthwise_conv1d_bwd_weight_f32;
+    let _ = kiln_causal_depthwise_conv1d_bwd_state_f32;
 }
