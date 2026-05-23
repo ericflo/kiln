@@ -245,9 +245,33 @@ pub enum PagedPrefixNextToken {
 pub struct PrefixCachedGenerationOutput {
     pub output: GenerationOutput,
     pub registration: Option<PagedPrefixRegistration>,
+    /// Additional block-aligned registrations covering positions strictly
+    /// less than the full prompt, captured opportunistically during prefill
+    /// or decode. These exist so multi-turn agentic loops (e.g. pi) can hit
+    /// the cache on subsequent turns when the chat template's generation
+    /// prompt differs from how the same assistant message is rendered in
+    /// history on later turns. For Qwen3.5 with enable_thinking=false the
+    /// generation prompt appends `<|im_start|>assistant\n<think>\n\n</think>\n\n`,
+    /// while later-turn history renders the same assistant turn as just
+    /// `<|im_start|>assistant\n{content}<|im_end|>\n` — the only way to
+    /// share KV across turns there is to register an entry whose token
+    /// sequence stops before that divergent tail.
+    pub extra_registrations: Vec<PagedPrefixRegistration>,
     pub allocated_blocks: Vec<u32>,
     pub prefill_duration: std::time::Duration,
     pub decode_duration: std::time::Duration,
+}
+
+/// Snapshot of the recurrent linear-attention state taken when decode crosses
+/// a block-aligned position. Used at request finish time to register an
+/// extended prefix-cache entry covering the prompt + the assistant tokens
+/// emitted so far. Without this, only the prompt is cached and every
+/// follow-up turn re-prefills the entire growing conversation from scratch.
+pub struct RollingPrefixSnapshot {
+    /// Total position covered by the snapshot (number of leading tokens with
+    /// committed KV state). Always a multiple of the block size.
+    pub position: usize,
+    pub linear_state: LinearAttentionState,
 }
 
 /// Per-request state owned by the server batching actor between prefill and
@@ -263,6 +287,22 @@ pub struct PagedBatchedDecodeState {
     pub allocated_blocks: Vec<u32>,
     pub prefill_duration: std::time::Duration,
     pub decode_duration: std::time::Duration,
+    /// Original prompt tokens, retained so finish-time prefix registration
+    /// can synthesize an "extended" entry covering prompt + decoded tokens.
+    pub prompt_tokens: Vec<TokenId>,
+    /// Block size of the paged KV cache. Stored so the per-step decode
+    /// loop can detect block-aligned positions without re-locking the
+    /// block manager.
+    pub block_size: usize,
+    /// Snapshot of the linear-attention state taken during prefill at the
+    /// largest block-aligned offset strictly less than the prompt length.
+    /// Used to register a cross-turn-safe prefix-cache entry whose token
+    /// sequence stops before any chat-template generation-prompt tail.
+    pub prefill_split_snapshot: Option<RollingPrefixSnapshot>,
+    /// Latest block-aligned snapshot of the linear attention state, taken
+    /// during decode. None until decode first crosses a block boundary;
+    /// replaced (drop+alloc) at each subsequent boundary.
+    pub rolling_snapshot: Option<RollingPrefixSnapshot>,
     /// Stable per-request identity used for caching keys. Assigned at
     /// construction from a process-global atomic counter so the value is
     /// independent of where the `PagedBatchedDecodeState` happens to live
@@ -280,6 +320,58 @@ static PAGED_BATCHED_DECODE_STATE_NEXT_ID: std::sync::atomic::AtomicU64 =
 
 pub(crate) fn next_paged_batched_decode_state_id() -> u64 {
     PAGED_BATCHED_DECODE_STATE_NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Build a strict-prefix prefix-cache registration covering the prompt plus
+/// as many decoded assistant tokens as we have a block-aligned linear-state
+/// snapshot for. Returns `None` when there's nothing useful to register —
+/// e.g. decode never crossed a block boundary, the snapshot's position
+/// doesn't extend past the prompt, or the block table doesn't have enough
+/// blocks committed (which would indicate a bookkeeping bug upstream).
+fn build_extended_registration(
+    prompt_tokens: &[TokenId],
+    generated_tokens: &[TokenId],
+    block_table: &BlockTable,
+    block_size: usize,
+    rolling_snapshot: Option<RollingPrefixSnapshot>,
+) -> Option<PagedPrefixRegistration> {
+    let snapshot = rolling_snapshot?;
+    if block_size == 0 || snapshot.position == 0 || snapshot.position % block_size != 0 {
+        return None;
+    }
+    let total_available = prompt_tokens.len() + generated_tokens.len();
+    if snapshot.position > total_available {
+        // Bookkeeping mismatch: snapshot says we have KV for positions
+        // beyond what we actually emitted. Skip rather than register a
+        // corrupt entry.
+        return None;
+    }
+    let num_blocks = snapshot.position / block_size;
+    if num_blocks == 0 || block_table.blocks.len() < num_blocks {
+        return None;
+    }
+    // Build the prompt-token sequence corresponding to this snapshot. When
+    // the snapshot is inside the prompt, the entry covers a strict prefix
+    // of the prompt (cross-turn-safe — the chat template's generation tail
+    // is usually past this point). When the snapshot is past the prompt,
+    // the entry covers prompt + decoded tokens (only safe when subsequent
+    // turns re-render the assistant message verbatim, i.e. no template
+    // divergence — Qwen3.5 with enable_thinking=false does have such a
+    // divergence, so prefer the prefill-split-side snapshot there).
+    let mut combined = Vec::with_capacity(snapshot.position);
+    let prompt_take = prompt_tokens.len().min(snapshot.position);
+    combined.extend_from_slice(&prompt_tokens[..prompt_take]);
+    let extra_generated = snapshot.position.saturating_sub(prompt_tokens.len());
+    if extra_generated > 0 {
+        combined.extend_from_slice(&generated_tokens[..extra_generated]);
+    }
+    debug_assert_eq!(combined.len(), snapshot.position);
+    Some(PagedPrefixRegistration {
+        prompt_tokens: combined,
+        block_ids: block_table.blocks[..num_blocks].to_vec(),
+        linear_state: snapshot.linear_state,
+        next_token: None,
+    })
 }
 
 fn decode_buffer_max_batch() -> usize {
@@ -1779,6 +1871,7 @@ impl ModelRunner {
                 finish_reason: output.output.finish_reason,
             },
             registration: output.registration,
+            extra_registrations: output.extra_registrations,
             allocated_blocks: output.allocated_blocks,
             prefill_duration: output.prefill_duration,
             decode_duration: output.decode_duration,
@@ -2101,6 +2194,7 @@ impl ModelRunner {
             return Ok(PrefixCachedGenerationOutput {
                 output,
                 registration: None,
+                extra_registrations: Vec::new(),
                 allocated_blocks: Vec::new(),
                 prefill_duration: std::time::Duration::ZERO,
                 decode_duration: decode_start.elapsed(),
@@ -2209,6 +2303,7 @@ impl ModelRunner {
         Ok(PrefixCachedGenerationOutput {
             output,
             registration,
+            extra_registrations: Vec::new(),
             allocated_blocks: Vec::new(),
             prefill_duration,
             decode_duration,
@@ -2261,6 +2356,10 @@ impl ModelRunner {
                 allocated_blocks,
                 prefill_duration: std::time::Duration::ZERO,
                 decode_duration: std::time::Duration::ZERO,
+                prompt_tokens: prompt_tokens.to_vec(),
+                block_size,
+                prefill_split_snapshot: None,
+                rolling_snapshot: None,
                 id: next_paged_batched_decode_state_id(),
             });
         }
@@ -2271,10 +2370,27 @@ impl ModelRunner {
             "prefix cache hit must leave at least one suffix token"
         );
 
+        // Capture an intermediate snapshot at the largest block-aligned
+        // position strictly inside the prefill range. This lets us register
+        // an extra prefix-cache entry whose token sequence stops *before*
+        // the chat template's generation-prompt tail (e.g. Qwen3.5's
+        // `<|im_start|>assistant\n<think>\n\n</think>\n\n` when
+        // enable_thinking=false), which is the divergent portion that
+        // every subsequent turn's prompt does NOT contain — without this
+        // snapshot, multi-turn lookups miss because the cached entry's
+        // last block contains generation-prompt-only tokens.
+        let split_pos = (prompt_tokens.len() / block_size) * block_size;
+        let split_inside =
+            block_size > 0 && split_pos > cached_tokens && split_pos < prompt_tokens.len();
+        let mut prefill_split_snapshot: Option<LinearAttentionState> = None;
+
         let prefill_start = std::time::Instant::now();
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len()) {
+                // Streaming prefill processes the suffix as one unit; the
+                // intermediate snapshot is a micro-optimization vs the
+                // already-amortized streaming cost, so skip the split here.
                 model_forward_paged_streaming_with_progress(
                     &*self.backend,
                     prefill_tokens,
@@ -2288,6 +2404,52 @@ impl ModelRunner {
                     cancel,
                 )
                 .context("batched-engine prefill forward pass (streaming) failed")?
+            } else if split_inside {
+                // Split the prefill at the last block boundary so we can
+                // snapshot the linear-attention state at the cross-turn-safe
+                // position. The first call's logits are discarded.
+                let head_tokens = &prompt_tokens[cached_tokens..split_pos];
+                let _ = model_forward_paged_last_token(
+                    &*self.backend,
+                    head_tokens,
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    &block_table,
+                    cached_tokens,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("batched-engine prefill forward pass (head) failed")?;
+                prefill_split_snapshot = Some(
+                    linear_state
+                        .snapshot()
+                        .context("snapshot linear state at prefill split")?,
+                );
+                if let Some(cancel) = cancel {
+                    cancel.report_prefill_tokens_completed(head_tokens.len() as u64);
+                }
+
+                let tail_tokens = &prompt_tokens[split_pos..];
+                let pc_guard = lock_paged_cache(paged_cache)?;
+                let logits = model_forward_paged_last_token(
+                    &*self.backend,
+                    tail_tokens,
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    &block_table,
+                    split_pos,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("batched-engine prefill forward pass (tail) failed")?;
+                if let Some(cancel) = cancel {
+                    cancel.report_prefill_tokens_completed(tail_tokens.len() as u64);
+                }
+                logits
             } else {
                 let logits = model_forward_paged_last_token(
                     &*self.backend,
@@ -2320,6 +2482,17 @@ impl ModelRunner {
             Some(PagedPrefixNextToken::Logits(logits.clone())),
         )?;
 
+        // Stash the prefill-split snapshot for finish-time registration.
+        // Multi-turn agentic workloads against chat templates (notably
+        // Qwen3.5 with enable_thinking=false) need a cache entry whose
+        // token sequence stops *before* the generation-prompt tail; the
+        // split position is the largest block-aligned offset ≤ prompt_len,
+        // which for typical prompts lands just before that tail.
+        let prefill_split_snapshot = prefill_split_snapshot.map(|state| RollingPrefixSnapshot {
+            position: split_pos,
+            linear_state: state,
+        });
+
         Ok(PagedBatchedDecodeState {
             block_table,
             linear_state,
@@ -2331,6 +2504,10 @@ impl ModelRunner {
             allocated_blocks,
             prefill_duration,
             decode_duration: std::time::Duration::ZERO,
+            prompt_tokens: prompt_tokens.to_vec(),
+            block_size,
+            prefill_split_snapshot,
+            rolling_snapshot: None,
             id: next_paged_batched_decode_state_id(),
         })
     }
@@ -2569,6 +2746,32 @@ impl ModelRunner {
         for state in states.iter_mut() {
             state.seq_len += 1;
             state.decode_duration += decode_duration;
+            // When the new seq_len lands on a block boundary, snapshot the
+            // recurrent linear-attention state. At finish time the most
+            // recent snapshot becomes the basis for an extended prefix-cache
+            // entry covering prompt + decoded tokens, which is the only way
+            // the next agentic turn (whose prompt = previous prompt +
+            // assistant reply + new user input) can hit the cache on
+            // anything beyond the original prompt.
+            if state.block_size > 0 && state.seq_len % state.block_size == 0 {
+                match state.linear_state.snapshot() {
+                    Ok(snap) => {
+                        state.rolling_snapshot = Some(RollingPrefixSnapshot {
+                            position: state.seq_len,
+                            linear_state: snap,
+                        });
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            seq_len = state.seq_len,
+                            block_size = state.block_size,
+                            error = %err,
+                            "failed to snapshot linear state at block boundary; \
+                             extended prefix-cache entry will not be available for this request"
+                        );
+                    }
+                }
+            }
         }
 
         Ok(sampled)
@@ -2579,22 +2782,57 @@ impl ModelRunner {
         state: PagedBatchedDecodeState,
         finish_reason: FinishReason,
     ) -> Result<PrefixCachedGenerationOutput> {
+        let PagedBatchedDecodeState {
+            block_table,
+            generated_tokens,
+            registration,
+            allocated_blocks,
+            prefill_duration,
+            decode_duration,
+            prompt_tokens,
+            block_size,
+            prefill_split_snapshot,
+            rolling_snapshot,
+            ..
+        } = state;
+
         let text = self
             .tokenizer
-            .decode(&state.generated_tokens)
+            .decode(&generated_tokens)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("failed to decode output tokens")?;
+
+        let mut extra_registrations = Vec::new();
+        if let Some(reg) = build_extended_registration(
+            &prompt_tokens,
+            &generated_tokens,
+            &block_table,
+            block_size,
+            prefill_split_snapshot,
+        ) {
+            extra_registrations.push(reg);
+        }
+        if let Some(reg) = build_extended_registration(
+            &prompt_tokens,
+            &generated_tokens,
+            &block_table,
+            block_size,
+            rolling_snapshot,
+        ) {
+            extra_registrations.push(reg);
+        }
 
         Ok(PrefixCachedGenerationOutput {
             output: GenerationOutput {
                 text,
-                token_ids: state.generated_tokens,
+                token_ids: generated_tokens,
                 finish_reason,
             },
-            registration: state.registration,
-            allocated_blocks: state.allocated_blocks,
-            prefill_duration: state.prefill_duration,
-            decode_duration: state.decode_duration,
+            registration,
+            extra_registrations,
+            allocated_blocks,
+            prefill_duration,
+            decode_duration,
         })
     }
 
@@ -7549,5 +7787,124 @@ mod tests {
         assert_eq!(block_manager.num_free(), num_blocks);
 
         Ok(())
+    }
+
+    fn block_table_with(blocks: &[u32]) -> BlockTable {
+        let mut bt = BlockTable::new();
+        bt.blocks = blocks.to_vec();
+        bt
+    }
+
+    fn empty_linear_state() -> LinearAttentionState {
+        LinearAttentionState {
+            recurrent_states: Vec::new(),
+            conv_states: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn extended_registration_requires_snapshot() {
+        let bt = block_table_with(&[10, 11, 12, 13]);
+        assert!(
+            build_extended_registration(&[1, 2, 3, 4, 5], &[6, 7, 8], &bt, 4, None).is_none(),
+            "no snapshot → no extended registration"
+        );
+    }
+
+    #[test]
+    fn extended_registration_skipped_when_not_block_aligned() {
+        let bt = block_table_with(&[10, 11, 12, 13]);
+        let snap = Some(RollingPrefixSnapshot {
+            position: 7,
+            linear_state: empty_linear_state(),
+        });
+        assert!(
+            build_extended_registration(&[1, 2, 3, 4], &[5, 6, 7], &bt, 4, snap).is_none(),
+            "position 7 is not block-aligned at block_size 4"
+        );
+    }
+
+    #[test]
+    fn extended_registration_inside_prompt_covers_prefix() {
+        // Prefill-time snapshot at position 4, prompt is 8 tokens, no
+        // generation yet. The registration should be a strict-prefix entry
+        // covering the first 4 prompt tokens — this is what makes
+        // multi-turn lookups hit when the chat template appends a divergent
+        // generation-prompt tail to the prompt (the tail is past position
+        // 4, so the entry remains valid for subsequent turns).
+        let bt = block_table_with(&[10, 11, 12, 13]);
+        let snap = Some(RollingPrefixSnapshot {
+            position: 4,
+            linear_state: empty_linear_state(),
+        });
+        let reg =
+            build_extended_registration(&[1, 2, 3, 4, 5, 6, 7, 8], &[], &bt, 4, snap)
+                .expect("expected strict-prefix registration");
+        assert_eq!(reg.prompt_tokens, vec![1, 2, 3, 4]);
+        assert_eq!(reg.block_ids, vec![10]);
+        assert!(reg.next_token.is_none());
+    }
+
+    #[test]
+    fn extended_registration_covers_prompt_plus_decoded() {
+        let bt = block_table_with(&[10, 11, 12, 13, 14]);
+        // 5-token prompt + 7 generated. Snapshot lands at position 12
+        // (block-aligned at block_size 4) — covers prompt + 7 generated.
+        let snap = Some(RollingPrefixSnapshot {
+            position: 12,
+            linear_state: empty_linear_state(),
+        });
+        let reg = build_extended_registration(
+            &[1, 2, 3, 4, 5],
+            &[10, 11, 12, 13, 14, 15, 16],
+            &bt,
+            4,
+            snap,
+        )
+        .expect("expected extended registration");
+        assert_eq!(reg.prompt_tokens, vec![1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(reg.block_ids, vec![10, 11, 12]);
+        assert!(reg.next_token.is_none());
+    }
+
+    #[test]
+    fn extended_registration_truncates_to_last_boundary() {
+        let bt = block_table_with(&[10, 11, 12, 13, 14]);
+        // 5-token prompt + 11 generated → position 16 if all written, but
+        // snapshot was only taken at position 12 (last boundary crossed).
+        let snap = Some(RollingPrefixSnapshot {
+            position: 12,
+            linear_state: empty_linear_state(),
+        });
+        let reg = build_extended_registration(
+            &[1, 2, 3, 4, 5],
+            &[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+            &bt,
+            4,
+            snap,
+        )
+        .expect("expected extended registration");
+        // Only the 7 generated tokens up to the snapshotted boundary are
+        // included; the rest of the generation tail is discarded for the
+        // cache entry (no linear-state snapshot for it).
+        assert_eq!(reg.prompt_tokens.len(), 12);
+        assert_eq!(reg.block_ids.len(), 3);
+    }
+
+    #[test]
+    fn extended_registration_bails_when_block_table_short() {
+        // Snapshot says position 12 (3 blocks) but block table only has 2
+        // blocks — bookkeeping bug upstream; refuse to register a corrupt
+        // entry instead of indexing out of bounds.
+        let bt = block_table_with(&[10, 11]);
+        let snap = Some(RollingPrefixSnapshot {
+            position: 12,
+            linear_state: empty_linear_state(),
+        });
+        assert!(
+            build_extended_registration(&[1, 2, 3, 4, 5], &[6, 7, 8, 9, 10, 11, 12], &bt, 4, snap)
+                .is_none(),
+            "must not produce a registration referencing missing blocks"
+        );
     }
 }

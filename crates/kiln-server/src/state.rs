@@ -2697,6 +2697,56 @@ mod tests {
     }
 
     #[test]
+    fn real_prefix_cache_extended_entry_wins_over_prompt_only_on_multi_turn() -> anyhow::Result<()>
+    {
+        // Models the agentic (pi-style) workflow: turn 1 registers two
+        // entries — the prompt at its true length (with a sampled next-token
+        // for exact-hit reuse) and an "extended" block-aligned entry covering
+        // prompt + emitted assistant tokens. Turn 2's prompt extends the
+        // previous transcript with new user input. The extended entry must
+        // win over the prompt-only one because it caches strictly more
+        // tokens — otherwise every multi-turn call re-prefills the entire
+        // growing conversation from scratch.
+        let config = tiny_linear_config();
+        let device = candle_core::Device::Cpu;
+        let mut cache = RealPrefixCache::new(true, 4, 16, 1024, 49);
+
+        // Turn 1 prompt is 5 tokens — non-block-aligned at block_size 4,
+        // matches the common case where the chat template renders to
+        // arbitrary lengths.
+        let turn1_prompt = vec![10u32, 11, 12, 13, 14];
+        let prompt_only = PagedPrefixRegistration {
+            prompt_tokens: turn1_prompt.clone(),
+            block_ids: vec![100, 101],
+            linear_state: LinearAttentionState::new(&config, &device)?,
+            next_token: Some(PagedPrefixNextToken::GreedyToken(42)),
+        };
+        let _ = cache.register(None, prompt_only);
+
+        // Extended entry: prompt + 3 generated tokens = 8 tokens (block-aligned).
+        let extended_tokens = vec![10u32, 11, 12, 13, 14, 200, 201, 202];
+        let extended = PagedPrefixRegistration {
+            prompt_tokens: extended_tokens,
+            block_ids: vec![100, 101],
+            linear_state: LinearAttentionState::new(&config, &device)?,
+            next_token: None,
+        };
+        let _ = cache.register(None, extended);
+
+        // Turn 2 prompt: turn-1 transcript + new user input.
+        let turn2_prompt: Vec<u32> = vec![10, 11, 12, 13, 14, 200, 201, 202, 50, 51];
+        let hit = cache
+            .lookup(&None, &turn2_prompt)?
+            .expect("turn 2 must hit the cache on the extended entry");
+        assert_eq!(
+            hit.cached_tokens, 8,
+            "extended entry covers 8 tokens (prompt + decoded); prompt-only would only cover 5 \
+             and additionally fails strict-prefix because 5 % 4 != 0"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn real_prefix_cache_min_register_tokens_skips_short_prompts() -> anyhow::Result<()> {
         let config = tiny_linear_config();
         let device = candle_core::Device::Cpu;

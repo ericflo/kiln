@@ -253,28 +253,50 @@ impl RealDecodeForward {
         adapter: Option<String>,
     ) {
         let registration = output.registration.take();
+        let extra_registrations = std::mem::take(&mut output.extra_registrations);
         let allocated_blocks = std::mem::take(&mut output.allocated_blocks);
-        let mut retained_blocks = Vec::new();
-        let mut evicted_blocks = Vec::new();
+        let mut retained_blocks: Vec<u32> = Vec::new();
+        let mut evicted_blocks: Vec<u32> = Vec::new();
         {
             let mut cache = self.prefix_cache.lock().unwrap();
             if let Some(registration) = registration {
-                let outcome = cache.register(adapter, registration);
-                retained_blocks = outcome.retained_blocks;
-                evicted_blocks = outcome.evicted_blocks;
+                let outcome = cache.register(adapter.clone(), registration);
+                retained_blocks.extend(outcome.retained_blocks);
+                evicted_blocks.extend(outcome.evicted_blocks);
+            }
+            // Register the extra (block-aligned, strict-prefix-reusable)
+            // entries after the prompt entry so that, when the cache is at
+            // capacity, LRU eviction prefers the older prompt-only entry.
+            // Multi-turn agentic workloads care about these landing — they
+            // are the entries the next turn's prefix lookup will hit on a
+            // length beyond what the bare prompt registration could match.
+            for reg in extra_registrations {
+                let outcome = cache.register(adapter.clone(), reg);
+                retained_blocks.extend(outcome.retained_blocks);
+                evicted_blocks.extend(outcome.evicted_blocks);
             }
         }
 
+        // The two registrations may share blocks (the extended entry is a
+        // strict superset of the original on disjoint prompts, but the
+        // outcome filters out blocks already refcounted by an earlier
+        // entry, so dedup matters here for correctness of the freed set).
+        let retained_set: std::collections::HashSet<u32> = retained_blocks.iter().copied().collect();
+
         let mut blocks_to_free: Vec<u32> = allocated_blocks
             .into_iter()
-            .filter(|block_id| !retained_blocks.contains(block_id))
+            .filter(|block_id| !retained_set.contains(block_id))
             .collect();
+        // Evictions from the second registration can list blocks that the
+        // first registration's retained set contained — strip those before
+        // freeing so we don't hand a still-held block back to the manager.
+        evicted_blocks.retain(|block_id| !retained_set.contains(block_id));
         blocks_to_free.extend(evicted_blocks);
         debug_assert!(
             blocks_to_free
                 .iter()
-                .all(|id| !retained_blocks.contains(id)),
-            "blocks_to_free overlaps retained_blocks: free={blocks_to_free:?} retained={retained_blocks:?}",
+                .all(|id| !retained_set.contains(id)),
+            "blocks_to_free overlaps retained_blocks: free={blocks_to_free:?} retained={retained_set:?}",
         );
         debug_assert!({
             let mut seen = std::collections::HashSet::with_capacity(blocks_to_free.len());
@@ -553,6 +575,7 @@ impl DecodeForward for RealDecodeForward {
                     finish_reason: FinishReason::MaxTokens,
                 },
                 registration: None,
+                extra_registrations: Vec::new(),
                 allocated_blocks: state.allocated_blocks,
                 prefill_duration: state.prefill_duration,
                 decode_duration: state.decode_duration,
@@ -1150,6 +1173,10 @@ mod tests {
                 allocated_blocks: Vec::new(),
                 prefill_duration: Duration::ZERO,
                 decode_duration: Duration::ZERO,
+                prompt_tokens: Vec::new(),
+                block_size: 16,
+                prefill_split_snapshot: None,
+                rolling_snapshot: None,
                 id: 0,
             },
             hit_entry_id: None,
