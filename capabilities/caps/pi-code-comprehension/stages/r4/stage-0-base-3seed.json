@@ -1,0 +1,30 @@
+{
+  "round": 4,
+  "stage": "0",
+  "name": "R4 base 3-seed eval baseline",
+  "session": "2026-05-23",
+  "pod_id": "pod-ad0999c0694eca57da9716df",
+  "note": "Fresh A6000 pod. Qwen3.5-4B from HF (multimodal Qwen3_5ForConditionalGeneration). pi configured with --provider kiln-local --model Qwen3.5-4B explicit in rollout.py (settings.json defaults don't propagate to -p non-interactive mode).",
+  "base_3seed_per_seed_composite": [0.3737607079868985, 0.3598875661375662, 0.35762235449735447],
+  "base_3seed_mean": 0.36375687620727304,
+  "base_3seed_stdev": 0.008737292695682145,
+  "sub_scores_mean_base": {
+    "outcome": 0.5005479969765684,
+    "grounding": 0.2507716049382716,
+    "cross_file_caller_recall": 0.4444444444444445,
+    "invariant_coverage": 0.18055555555555555,
+    "format_compliance": 0.4722222222222222
+  },
+  "comparison_to_r3": {
+    "r3_session2_base_3seed_mean": 0.6195,
+    "r4_base_3seed_mean": 0.3638,
+    "delta": -0.2557,
+    "explanation": "Qwen/Qwen3.5-4B HF model identity has changed since R3 — now serves Base (multimodal Qwen3_5ForConditionalGeneration) wrapper. All sub-scores degraded vs R3, most notably format_compliance (-0.50) and cross_file_caller_recall (-0.50). This R4 base is the true denominator for paired lift in this round."
+  },
+  "infra_learnings": [
+    "pi --provider defaults to 'google' even when settings.json sets defaultProvider=kiln-local. Must pass --provider kiln-local --model Qwen3.5-4B explicitly via cmd args.",
+    "pkill -f matches its own command line (since pkill's args contain the pattern). Use ps + awk + kill to avoid self-kill.",
+    "kiln serve daemon needs nohup setsid + helper script via < /dev/null to survive SSH session close cleanly.",
+    "Qwen/Qwen3.5-4B on HF (May 2026) is the multimodal Base, not the instruct variant that R3 used."
+  ]
+}
