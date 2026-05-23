@@ -13,10 +13,12 @@
 //! Today: `embedding`. Phase 4 fills out the rest of the "glue" ops
 //! (RMSNorm, residual add, final norm + LM head, sampling).
 
+pub mod activation;
 pub mod elementwise;
 pub mod embedding;
 pub mod rmsnorm;
 
+pub use activation::{sigmoid, silu, ActivationOp, UnaryKind};
 pub use elementwise::{add, div, mul, sub, BinaryKind, ElementwiseOp};
 pub use embedding::{embedding, EmbeddingOp};
 pub use rmsnorm::{rms_norm, RmsNormOp};
