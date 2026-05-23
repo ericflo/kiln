@@ -29,6 +29,9 @@ mod storage;
 mod tensor;
 mod tensor_id;
 
+#[cfg(feature = "cuda")]
+mod cuda_storage;
+
 pub use device::{Backend, Device};
 pub use dtype::DType;
 pub use element::Element;
@@ -37,3 +40,6 @@ pub use layout::Layout;
 pub use storage::{cpu_zeros, CpuStorage, Storage, StorageBackend};
 pub use tensor::Tensor;
 pub use tensor_id::TensorId;
+
+#[cfg(feature = "cuda")]
+pub use cuda_storage::{cuda_zeros, CudaStorage};
