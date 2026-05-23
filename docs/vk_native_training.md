@@ -17,16 +17,26 @@ validation on a real model + adapter run.
 - `vk_native_grpo_train` / `vk_native_grpo_train_jsonl` (GRPO loss
   with on-the-fly reference-logprob recompute via frozen-base forward,
   PPO-style ratio clipping, checkpoint cadence). Independently
-  toggleable via `KILN_VK_NATIVE_GRPO`.
+  toggleable via `KILN_VK_NATIVE_GRPO`. **Issue #1076**: workload-shape
+  auto-tunes between non-recompute (`vk_grpo_train_step_with_state` —
+  full activation tape, fastest on comfortable VRAM) and recompute
+  (`vk_recompute_grpo_train_step_with_state` — layerwise reverse-
+  recompute, memory-saving). Pin recompute with `KILN_VK_RECOMPUTE_GRPO=1`;
+  pin non-recompute with `KILN_NO_GRAD_CHECKPOINT=1`. ECHO env-CE
+  forces recompute (only path with the ECHO term).
 - `vk_native_opd_train` (off-policy distillation, reverse-KL against
   teacher top-K logprobs, `top_k ∈ {16, 32}` via the fused
   `vk_opd_top_k_reverse_kl_loss` kernel). Independently toggleable via
   `KILN_VK_NATIVE_OPD`. V1 envelope: `training_mode = off_policy`,
   `objective = reverse_kl`, `loss = teacher_top_k`; on-policy student
   rollouts, cross-entropy, full-vocab KL, ECHO env-CE, and continual
-  `base_adapter` resume all stay on the candle path. See issue #1075
-  for the implementation roadmap and #1076 for the planned
-  non-recompute hybrid GDN follow-up.
+  `base_adapter` resume all stay on the candle path. **Issue #1076**:
+  workload-shape auto-tunes between non-recompute
+  (`vk_opd_train_step_with_state`) and recompute
+  (`vk_recompute_opd_train_step_with_state`), with hybrid GDN models
+  now able to use the non-recompute path when VRAM is comfortable.
+  Pin recompute with `KILN_VK_RECOMPUTE_OPD=1`; pin non-recompute with
+  `KILN_NO_GRAD_CHECKPOINT=1`.
 - FullAttn layer with Qwen3.5 specifics: per-head Q/K-norm,
   `attn_output_gate` (q_proj fused with [Q, gate], sigmoid·attn),
   RoPE precomputed from `rotary_inv_freq` + applied between QK-norm

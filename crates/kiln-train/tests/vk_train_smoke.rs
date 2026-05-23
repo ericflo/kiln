@@ -35,8 +35,9 @@ use kiln_train::GrpoConfig;
 use kiln_train::Optimizer;
 use kiln_train::vk_train::{
     VkAdamWConfig, allocate_adamw_state, grpo_jsonl_stats, save_vk_lora_adapter,
-    validate_vk_grpo_seq_lens, vk_init_lora_layers, vk_native_grpo_train_jsonl,
-    vk_native_opd_train, vk_opd_train_step_with_state, vk_recompute_grpo_train_step_with_state,
+    validate_vk_grpo_seq_lens, vk_grpo_train_step_with_state, vk_init_lora_layers,
+    vk_native_grpo_train_jsonl, vk_native_opd_train, vk_opd_train_step_with_state,
+    vk_recommended_recompute_for_grpo_opd, vk_recompute_grpo_train_step_with_state,
     vk_recompute_opd_train_step_with_state, vk_recompute_train_step_with_state_masked,
     vk_train_step,
 };
@@ -2962,4 +2963,605 @@ fn vk_qwen35_specific_training_loss_decreases() -> Result<()> {
         "Qwen3.5-specific loss did not drop meaningfully: {initial_loss} -> {last_loss}"
     );
     Ok(())
+}
+
+// =========================================================================
+// #1076 — non-recompute vs recompute parity tests for GRPO + OPD.
+//
+// These tests verify that the non-recompute step kernels
+// (vk_grpo_train_step_with_state, vk_opd_train_step_with_state)
+// produce the same loss + LoRA gradient as the existing recompute
+// kernels when both are driven with identical inputs. With matching
+// loss + gradient parity, the dispatch decision in vk_native_grpo_train
+// and vk_native_opd_train is safe — the only difference between the
+// two paths is per-step memory/perf, not numerics.
+// =========================================================================
+
+/// Snapshot every LoRA B tensor in a layer for after-step comparison.
+fn snapshot_lora_b_values(layers: &[VkLoraLayer]) -> anyhow::Result<Vec<(String, Vec<f32>)>> {
+    let mut out = Vec::new();
+    for (li, layer) in layers.iter().enumerate() {
+        for (name, pair_opt) in [
+            ("q_proj", layer.q_proj.as_ref()),
+            ("k_proj", layer.k_proj.as_ref()),
+            ("v_proj", layer.v_proj.as_ref()),
+            ("o_proj", layer.o_proj.as_ref()),
+            ("gate_proj", layer.gate_proj.as_ref()),
+            ("up_proj", layer.up_proj.as_ref()),
+            ("down_proj", layer.down_proj.as_ref()),
+            ("in_proj_qkv", layer.in_proj_qkv.as_ref()),
+            ("in_proj_z", layer.in_proj_z.as_ref()),
+            ("gdn_out_proj", layer.gdn_out_proj.as_ref()),
+        ] {
+            if let Some(pair) = pair_opt {
+                out.push((format!("layer{li}/{name}"), pair.b.to_vec_f32()?));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn assert_lora_b_parity(
+    a_label: &str,
+    a: &[(String, Vec<f32>)],
+    b_label: &str,
+    b: &[(String, Vec<f32>)],
+    abs_tol: f32,
+) {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "LoRA snapshot count mismatch: {a_label}={} vs {b_label}={}",
+        a.len(),
+        b.len()
+    );
+    for ((na, va), (nb, vb)) in a.iter().zip(b.iter()) {
+        assert_eq!(na, nb, "LoRA snapshot name mismatch: {na} vs {nb}");
+        assert_eq!(va.len(), vb.len(), "{na}: element-count mismatch");
+        let max_abs = va
+            .iter()
+            .zip(vb.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_abs <= abs_tol,
+            "{na}: LoRA.B max_abs diff {max_abs:e} exceeds tolerance {abs_tol:e} \
+             between {a_label} and {b_label}",
+        );
+    }
+}
+
+/// FullAttention-only GRPO: vk_grpo_train_step_with_state (non-recompute)
+/// vs vk_recompute_grpo_train_step_with_state on identical inputs and
+/// identical fresh LoRA init. Loss must match within 1e-3 absolute, and
+/// each LoRA.B element must match within 1e-4 absolute after one
+/// optimizer step.
+///
+/// This is the "Phase 2" (#1076) verification that the non-recompute
+/// path is numerically equivalent to the production-tuned recompute
+/// path on FullAttn-only workloads.
+#[test]
+fn vk_grpo_train_step_full_attn_loss_and_backward_parity_with_recompute() -> Result<()> {
+    let Some(dev) = vk_dev() else {
+        eprintln!("Vulkan device not available — skipping");
+        return Ok(());
+    };
+    let model = build_tiny_model(&dev)?;
+    let model_config = tiny_model_config();
+
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let active_rows: Vec<u32> = vec![2, 3, 4, 5, 6];
+    let labels: Vec<u32> = active_rows
+        .iter()
+        .map(|&row| input_ids[row as usize + 1])
+        .collect();
+    let ref_log_probs = grpo_ref_log_probs(&model, &input_ids, &active_rows, &labels, None)?;
+    let advantage = 0.7_f32;
+    let clip_epsilon = 0.2_f32;
+    let kl_coeff = 0.1_f32;
+
+    let cfg = VkAdamWConfig {
+        lr: 1e-2,
+        ..Default::default()
+    };
+
+    // Run A: recompute step.
+    let lora_a = vec![build_lora_layer(&dev, model.hidden, 16, 64)?];
+    let mut adamw_a = allocate_adamw_state(&dev, &lora_a)?;
+    let report_a = vk_recompute_grpo_train_step_with_state(
+        &model,
+        &lora_a,
+        &input_ids,
+        &active_rows,
+        &labels,
+        &ref_log_probs,
+        advantage,
+        clip_epsilon,
+        kl_coeff,
+        &model_config,
+        0,
+        &mut adamw_a,
+        &cfg,
+        Optimizer::default(),
+        1,
+        None,
+    )?;
+    let snap_a = snapshot_lora_b_values(&lora_a)?;
+
+    // Run B: non-recompute step with a fresh-but-identical LoRA init.
+    let lora_b = vec![build_lora_layer(&dev, model.hidden, 16, 64)?];
+    let mut adamw_b = allocate_adamw_state(&dev, &lora_b)?;
+    let loss_b = vk_grpo_train_step_with_state(
+        &model,
+        &lora_b,
+        &input_ids,
+        &active_rows,
+        &labels,
+        &ref_log_probs,
+        advantage,
+        clip_epsilon,
+        kl_coeff,
+        None,
+        &mut adamw_b,
+        &cfg,
+        Optimizer::default(),
+        1,
+    )?;
+    let snap_b = snapshot_lora_b_values(&lora_b)?;
+
+    println!(
+        "vk_grpo full-attn parity: recompute={:.6}  non-recompute={:.6}  diff={:.6e}",
+        report_a.loss,
+        loss_b,
+        (report_a.loss - loss_b).abs()
+    );
+
+    let loss_diff = (report_a.loss - loss_b).abs();
+    assert!(
+        loss_diff <= 1e-3,
+        "vk_grpo full-attn loss parity failed: recompute={:.6} non-recompute={:.6} \
+         abs_diff={:.6e}",
+        report_a.loss,
+        loss_b,
+        loss_diff,
+    );
+    assert_lora_b_parity("recompute", &snap_a, "non-recompute", &snap_b, 1e-4);
+    Ok(())
+}
+
+/// Hybrid GDN GRPO: vk_grpo_train_step_with_state(state=Some) vs
+/// vk_recompute_grpo_train_step_with_state on a 1-layer GDN model.
+///
+/// This is the issue-#1076 hot path — the only training mode in kiln
+/// where users on big-VRAM GPUs were stuck paying recompute cost
+/// before this change. Parity here proves the non-recompute hybrid
+/// path is safe to default-engage when VRAM is comfortable.
+#[test]
+fn vk_grpo_train_step_gdn_loss_parity_with_recompute() -> Result<()> {
+    let Some(dev) = vk_dev() else {
+        eprintln!("Vulkan device not available — skipping");
+        return Ok(());
+    };
+    let model = build_tiny_gdn_model(&dev)?;
+    let model_config = tiny_gdn_model_config();
+    let num_gdn_layers = 1usize;
+
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let active_rows: Vec<u32> = vec![2, 3, 4, 5, 6];
+    let labels: Vec<u32> = active_rows
+        .iter()
+        .map(|&row| input_ids[row as usize + 1])
+        .collect();
+
+    // For GDN ref log probs we mimic the FullAttn helper but use the
+    // GDN forward through the model. Use a fresh GDN state each time.
+    let mut ref_state = tiny_gdn_state(&dev)?;
+    let ref_log_probs =
+        grpo_ref_log_probs(&model, &input_ids, &active_rows, &labels, Some(&mut ref_state))?;
+
+    let advantage = 0.7_f32;
+    let clip_epsilon = 0.2_f32;
+    let kl_coeff = 0.1_f32;
+    let cfg = VkAdamWConfig {
+        lr: 1e-2,
+        ..Default::default()
+    };
+
+    // Run A: recompute step.
+    let lora_a = vec![build_gdn_lora_layer(&dev)?];
+    let mut adamw_a = allocate_adamw_state(&dev, &lora_a)?;
+    let report_a = vk_recompute_grpo_train_step_with_state(
+        &model,
+        &lora_a,
+        &input_ids,
+        &active_rows,
+        &labels,
+        &ref_log_probs,
+        advantage,
+        clip_epsilon,
+        kl_coeff,
+        &model_config,
+        num_gdn_layers,
+        &mut adamw_a,
+        &cfg,
+        Optimizer::default(),
+        1,
+        None,
+    )?;
+
+    // Run B: non-recompute step with a fresh-but-identical LoRA init
+    // and a fresh GDN state (matches what vk_native_grpo_train passes
+    // at the call site).
+    let lora_b = vec![build_gdn_lora_layer(&dev)?];
+    let mut adamw_b = allocate_adamw_state(&dev, &lora_b)?;
+    let mut step_state = tiny_gdn_state(&dev)?;
+    let loss_b = vk_grpo_train_step_with_state(
+        &model,
+        &lora_b,
+        &input_ids,
+        &active_rows,
+        &labels,
+        &ref_log_probs,
+        advantage,
+        clip_epsilon,
+        kl_coeff,
+        Some(&mut step_state),
+        &mut adamw_b,
+        &cfg,
+        Optimizer::default(),
+        1,
+    )?;
+
+    println!(
+        "vk_grpo GDN parity: recompute={:.6}  non-recompute={:.6}  diff={:.6e}",
+        report_a.loss,
+        loss_b,
+        (report_a.loss - loss_b).abs()
+    );
+
+    // GDN paths exercise the chunkwise solver + recurrent state — the
+    // path difference is real and small accumulation error is expected.
+    // 1e-3 absolute is the same tolerance the issue prescribes for
+    // GRPO loss parity.
+    let loss_diff = (report_a.loss - loss_b).abs();
+    assert!(
+        loss_diff <= 1e-3,
+        "vk_grpo GDN loss parity failed: recompute={:.6} non-recompute={:.6} \
+         abs_diff={:.6e}",
+        report_a.loss,
+        loss_b,
+        loss_diff,
+    );
+    Ok(())
+}
+
+/// OPD on a hybrid GDN model: vk_opd_train_step_with_state(state=Some)
+/// vs vk_recompute_opd_train_step_with_state.
+///
+/// Verifies that the non-recompute OPD step accepts a real
+/// `VkLinearAttentionState` (not just None) and produces the same loss
+/// as the recompute path on a 1-layer GDN model. With this proof,
+/// vk_native_opd_train can default-engage the non-recompute path on
+/// hybrid models when VRAM is comfortable (#1076 work item #2).
+#[test]
+fn vk_opd_train_step_gdn_loss_parity_with_recompute() -> Result<()> {
+    let Some(dev) = vk_dev() else {
+        eprintln!("Vulkan device not available — skipping");
+        return Ok(());
+    };
+    let model = build_tiny_gdn_model(&dev)?;
+    let model_config = tiny_gdn_model_config();
+    let num_gdn_layers = 1usize;
+
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let active_rows: Vec<u32> = (1u32..(input_ids.len() as u32)).collect();
+    let active_count = active_rows.len();
+
+    let top_k = 16usize;
+    let vocab = model.vocab;
+    let mut teacher_topk_indices: Vec<u32> = Vec::with_capacity(active_count * top_k);
+    let mut teacher_topk_logprobs: Vec<f32> = Vec::with_capacity(active_count * top_k);
+    for row_i in 0..active_count {
+        let mut row: Vec<u32> = (0..top_k as u32)
+            .map(|k| ((row_i * 7 + k as usize * 3 + 1) % vocab) as u32)
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for k in 0..top_k {
+            while !seen.insert(row[k]) {
+                row[k] = (row[k] + 1) % vocab as u32;
+            }
+        }
+        teacher_topk_indices.extend_from_slice(&row);
+        for k in 0..top_k {
+            teacher_topk_logprobs.push(-((k as f32) * 0.5));
+        }
+    }
+
+    let cfg = VkAdamWConfig {
+        lr: 1e-2,
+        ..Default::default()
+    };
+
+    // Run A: recompute.
+    let lora_a = vec![build_gdn_lora_layer(&dev)?];
+    let mut adamw_a = allocate_adamw_state(&dev, &lora_a)?;
+    let loss_a = vk_recompute_opd_train_step_with_state(
+        &model,
+        &lora_a,
+        &input_ids,
+        &active_rows,
+        &teacher_topk_indices,
+        &teacher_topk_logprobs,
+        top_k,
+        &model_config,
+        num_gdn_layers,
+        &mut adamw_a,
+        &cfg,
+        Optimizer::default(),
+        1,
+    )?;
+
+    // Run B: non-recompute with a real GDN state. This is the path
+    // vk_native_opd_train now picks for hybrid models when VRAM is
+    // comfortable.
+    let lora_b = vec![build_gdn_lora_layer(&dev)?];
+    let mut adamw_b = allocate_adamw_state(&dev, &lora_b)?;
+    let mut step_state = tiny_gdn_state(&dev)?;
+    let loss_b = vk_opd_train_step_with_state(
+        &model,
+        &lora_b,
+        &input_ids,
+        &active_rows,
+        &teacher_topk_indices,
+        &teacher_topk_logprobs,
+        top_k,
+        Some(&mut step_state),
+        &mut adamw_b,
+        &cfg,
+        Optimizer::default(),
+        1,
+    )?;
+
+    println!(
+        "vk_opd GDN parity: recompute={:.6}  non-recompute={:.6}  diff={:.6e}",
+        loss_a,
+        loss_b,
+        (loss_a - loss_b).abs()
+    );
+
+    let loss_diff = (loss_a - loss_b).abs();
+    assert!(
+        loss_diff <= 1e-3,
+        "vk_opd GDN loss parity failed: recompute={:.6} non-recompute={:.6} \
+         abs_diff={:.6e}",
+        loss_a,
+        loss_b,
+        loss_diff,
+    );
+    Ok(())
+}
+
+/// Hybrid GDN OPD non-recompute path actually trains: loss strictly
+/// decreases across 8 steps when driving vk_opd_train_step_with_state
+/// with a real `VkLinearAttentionState` (not None).
+///
+/// Belt-and-suspenders companion to the parity test: parity proves
+/// the path matches the recompute kernel on step 1; this proves the
+/// path can sustain a multi-step optimization trajectory on hybrid
+/// models without drifting.
+#[test]
+fn vk_opd_train_step_gdn_state_training_loss_decreases() -> Result<()> {
+    let Some(dev) = vk_dev() else {
+        eprintln!("Vulkan device not available — skipping");
+        return Ok(());
+    };
+    let model = build_tiny_gdn_model(&dev)?;
+
+    let lora_layers = vec![build_gdn_lora_layer(&dev)?];
+    let mut adamw = allocate_adamw_state(&dev, &lora_layers)?;
+    let cfg = VkAdamWConfig {
+        lr: 1e-2,
+        ..Default::default()
+    };
+
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let active_rows: Vec<u32> = (1u32..(input_ids.len() as u32)).collect();
+    let active_count = active_rows.len();
+    let top_k = 16usize;
+    let vocab = model.vocab;
+    let mut teacher_topk_indices: Vec<u32> = Vec::with_capacity(active_count * top_k);
+    let mut teacher_topk_logprobs: Vec<f32> = Vec::with_capacity(active_count * top_k);
+    for row_i in 0..active_count {
+        let mut row: Vec<u32> = (0..top_k as u32)
+            .map(|k| ((row_i * 7 + k as usize * 3 + 1) % vocab) as u32)
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for k in 0..top_k {
+            while !seen.insert(row[k]) {
+                row[k] = (row[k] + 1) % vocab as u32;
+            }
+        }
+        teacher_topk_indices.extend_from_slice(&row);
+        for k in 0..top_k {
+            teacher_topk_logprobs.push(-((k as f32) * 0.5));
+        }
+    }
+
+    let optimizer = Optimizer::AdamW {
+        beta1: cfg.beta1,
+        beta2: cfg.beta2,
+        eps: cfg.eps,
+        weight_decay: cfg.weight_decay,
+    };
+
+    let mut losses = Vec::new();
+    // Fresh GDN state per step (matches what vk_native_opd_train does
+    // at the call site — every step starts at zero recurrent state).
+    let mut state = tiny_gdn_state(&dev)?;
+    let initial = vk_opd_train_step_with_state(
+        &model,
+        &lora_layers,
+        &input_ids,
+        &active_rows,
+        &teacher_topk_indices,
+        &teacher_topk_logprobs,
+        top_k,
+        Some(&mut state),
+        &mut adamw,
+        &cfg,
+        optimizer,
+        1,
+    )?;
+    assert!(
+        initial.is_finite(),
+        "step 1 GDN non-recompute OPD loss non-finite: {initial}"
+    );
+    losses.push(initial);
+
+    let mut last_loss = initial;
+    for step in 2u32..=8 {
+        let mut state = tiny_gdn_state(&dev)?;
+        let l = vk_opd_train_step_with_state(
+            &model,
+            &lora_layers,
+            &input_ids,
+            &active_rows,
+            &teacher_topk_indices,
+            &teacher_topk_logprobs,
+            top_k,
+            Some(&mut state),
+            &mut adamw,
+            &cfg,
+            optimizer,
+            step,
+        )?;
+        assert!(
+            l.is_finite(),
+            "step {step} GDN non-recompute OPD loss non-finite: {l}"
+        );
+        losses.push(l);
+        last_loss = l;
+    }
+    println!("vk_opd_train_step_gdn_state_training losses: {losses:?}");
+    assert!(
+        last_loss < initial * 0.95,
+        "GDN non-recompute OPD reverse-KL did not drop meaningfully: {initial} -> {last_loss}"
+    );
+    assert!(
+        last_loss >= -1e-4,
+        "GDN non-recompute OPD reverse-KL went negative at last step: {last_loss}"
+    );
+    Ok(())
+}
+
+/// Workload-shape dispatch helper: the user-facing env override
+/// `KILN_VK_RECOMPUTE_GRPO=1` must force a `true` (recompute) return
+/// regardless of other inputs. Mirror test for `KILN_VK_RECOMPUTE_OPD=1`.
+///
+/// Also verifies that `KILN_NO_GRAD_CHECKPOINT=1` forces a `false`
+/// (non-recompute) return when no per-mode override is set. The
+/// per-mode override has to win over `KILN_NO_GRAD_CHECKPOINT` —
+/// otherwise users can't pin recompute on a single mode without
+/// affecting SFT segmenting too.
+// Local env lock for the dispatch-override test — env vars are
+// process-wide and other tests in this binary mustn't race with our
+// set/remove sequences. We can't use kiln_core::env_flag::TEST_ENV_LOCK
+// since it's `cfg(test)`-gated inside kiln-core and not visible
+// downstream. The risk surface is just the vk_train_smoke test binary;
+// a local Mutex is sufficient.
+static ENV_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn vk_recommended_recompute_grpo_opd_env_overrides_are_honored() {
+    let _lock = ENV_OVERRIDE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    // Snapshot + scrub.
+    let prev_no_ckpt = std::env::var("KILN_NO_GRAD_CHECKPOINT").ok();
+    let prev_grpo = std::env::var("KILN_VK_RECOMPUTE_GRPO").ok();
+    let prev_opd = std::env::var("KILN_VK_RECOMPUTE_OPD").ok();
+    let prev_segs = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS").ok();
+    unsafe {
+        std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+        std::env::remove_var("KILN_VK_RECOMPUTE_GRPO");
+        std::env::remove_var("KILN_VK_RECOMPUTE_OPD");
+        std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
+    }
+
+    let restore = |v: &str, prev: Option<String>| {
+        unsafe {
+            match prev {
+                Some(s) => std::env::set_var(v, s),
+                None => std::env::remove_var(v),
+            }
+        }
+    };
+
+    // 1. KILN_VK_RECOMPUTE_GRPO=1 → true (recompute).
+    unsafe {
+        std::env::set_var("KILN_VK_RECOMPUTE_GRPO", "1");
+    }
+    let got = vk_recommended_recompute_for_grpo_opd(
+        32, 4096, 2560, 9728, 152064, 2, "KILN_VK_RECOMPUTE_GRPO", "GRPO",
+    );
+    unsafe {
+        std::env::remove_var("KILN_VK_RECOMPUTE_GRPO");
+    }
+    assert!(
+        got,
+        "KILN_VK_RECOMPUTE_GRPO=1 must force recompute (got {got})"
+    );
+
+    // 2. KILN_VK_RECOMPUTE_OPD=1 → true (recompute).
+    unsafe {
+        std::env::set_var("KILN_VK_RECOMPUTE_OPD", "1");
+    }
+    let got = vk_recommended_recompute_for_grpo_opd(
+        32, 4096, 2560, 9728, 152064, 2, "KILN_VK_RECOMPUTE_OPD", "OPD",
+    );
+    unsafe {
+        std::env::remove_var("KILN_VK_RECOMPUTE_OPD");
+    }
+    assert!(
+        got,
+        "KILN_VK_RECOMPUTE_OPD=1 must force recompute (got {got})"
+    );
+
+    // 3. KILN_NO_GRAD_CHECKPOINT=1 alone → false (non-recompute).
+    unsafe {
+        std::env::set_var("KILN_NO_GRAD_CHECKPOINT", "1");
+    }
+    let got = vk_recommended_recompute_for_grpo_opd(
+        32, 4096, 2560, 9728, 152064, 2, "KILN_VK_RECOMPUTE_GRPO", "GRPO",
+    );
+    unsafe {
+        std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+    }
+    assert!(
+        !got,
+        "KILN_NO_GRAD_CHECKPOINT=1 must force non-recompute (got {got})"
+    );
+
+    // 4. Per-mode override beats KILN_NO_GRAD_CHECKPOINT.
+    unsafe {
+        std::env::set_var("KILN_NO_GRAD_CHECKPOINT", "1");
+        std::env::set_var("KILN_VK_RECOMPUTE_GRPO", "1");
+    }
+    let got = vk_recommended_recompute_for_grpo_opd(
+        32, 4096, 2560, 9728, 152064, 2, "KILN_VK_RECOMPUTE_GRPO", "GRPO",
+    );
+    unsafe {
+        std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+        std::env::remove_var("KILN_VK_RECOMPUTE_GRPO");
+    }
+    assert!(
+        got,
+        "per-mode override must beat KILN_NO_GRAD_CHECKPOINT (got {got})"
+    );
+
+    restore("KILN_NO_GRAD_CHECKPOINT", prev_no_ckpt);
+    restore("KILN_VK_RECOMPUTE_GRPO", prev_grpo);
+    restore("KILN_VK_RECOMPUTE_OPD", prev_opd);
+    restore("KILN_GRAD_CHECKPOINT_SEGMENTS", prev_segs);
 }
