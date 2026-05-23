@@ -111,10 +111,16 @@ A4: Skip the actual edit, claim the function already exists.
 
 ## Headroom estimate
 
-- Baseline composite: **~0.45** (the 4B reads sometimes but rarely
-  preserves conventions across all 6 categories).
-- Headroom: ~0.55.
-- Target sub-score: `convention_consistency` (biggest movable mass).
+- Repaired local baseline (`baseline-0`, 2026-05-23, thinking on,
+  Pi output cap 1024): **0.4800 ± 0.4869** over 12 tasks × 3
+  rollouts.
+- Headroom is dominated by `format_compliance` (0.6528; ~52% of
+  weighted headroom) and `outcome` (0.6944; ~45%).
+- `convention_consistency` is already high (0.9583), so the original
+  scaffold assumption that convention preservation is the biggest
+  movable mass is stale for the repaired oracle.
+- Efficiency baseline: 5.00 tool calls/rollout, 1488.5 thinking chars,
+  302.7 thinking chars/tool call.
 
 ## Hypotheses
 
