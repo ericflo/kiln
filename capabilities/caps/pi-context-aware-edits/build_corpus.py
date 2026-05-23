@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import shutil
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -147,17 +148,17 @@ def _t_add_function_rust(profile, idx) -> dict:
         "profile": profile,
         "init_files": {
             "src/parse.rs": (
-                "use chrono::DateTime;\n"
-                "use chrono::Utc;\n\n"
-                "/// Parse an ISO 8601 timestamp.\n"
-                "pub fn parse_iso(s: &str) -> Result<DateTime<Utc>, chrono::ParseError> {\n"
-                "    let dt: DateTime<Utc> = s.parse()?;\n"
-                "    Ok(dt)\n"
+                "use std::num::ParseIntError;\n"
+                "use std::time::Duration;\n\n"
+                "/// Parse a decimal millisecond duration.\n"
+                "pub fn parse_millis(s: &str) -> Result<Duration, ParseIntError> {\n"
+                "    let millis: u64 = s.parse()?;\n"
+                "    Ok(Duration::from_millis(millis))\n"
                 "}\n"
             ),
         },
         "prompt": (
-            "Add a `parse_unix(ts: i64) -> Result<DateTime<Utc>, ...>` "
+            "Add a `parse_seconds(s: &str) -> Result<Duration, ParseIntError>` "
             "function to `src/parse.rs`. Match the existing style "
             "(snake_case, Result return, doc comment)."
         ),
@@ -168,7 +169,11 @@ def _t_add_function_rust(profile, idx) -> dict:
             "comment_style": "docstrings",
         },
         "gold_state_predicate": "compiles",
-        "verify_cmd": "rustc --crate-type lib src/parse.rs -o /dev/null 2>&1 | grep -q . && exit 1 || exit 0",
+        "verify_cmd": (
+            "grep -q 'pub fn parse_seconds' src/parse.rs "
+            "&& grep -q 'Result<Duration, ParseIntError>' src/parse.rs "
+            "&& rustc --crate-type lib src/parse.rs -o /tmp/pi_context_parse_rs_check.rlib"
+        ),
     }
 
 
@@ -201,7 +206,11 @@ def _t_add_function_go(profile, idx) -> dict:
             "comment_style": "godoc",
         },
         "gold_state_predicate": "compiles",
-        "verify_cmd": "go build ./...",
+        "verify_cmd": (
+            "grep -q 'func ParseUnix' parse.go "
+            "&& grep -q 'time.Unix' parse.go "
+            "&& GO111MODULE=off go test ./..."
+        ),
     }
 
 
@@ -217,14 +226,22 @@ def main():
     DATASETS.mkdir(exist_ok=True)
     rng = random.Random(SEED)
     train, eval_ = [], []
+    available_profiles = []
     for profile in PROFILES:
+        language = profile["language"]
+        if language == "rust" and shutil.which("rustc") is None:
+            print("skip rust profile: rustc is not on PATH")
+            continue
+        if language == "go" and shutil.which("go") is None:
+            print("skip go profile: go is not on PATH")
+            continue
+        available_profiles.append(profile)
+    for profile in available_profiles:
         gen = GENERATORS[profile["name"]]
         for i in range(8):
             train.append(gen(profile, i))
         for i in range(4):
             eval_.append(gen(profile, 100 + i))
-    # Skip Go tasks when go isn't available — but commit them so the
-    # corpus is reproducible; the oracle just won't run them.
     rng.shuffle(train)
     rng.shuffle(eval_)
     with open(DATASETS / "train.tasks.jsonl", "w") as f:

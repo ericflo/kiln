@@ -62,6 +62,6 @@
   "eval": {
     "seeds": 3,
     "max_tasks": null,
-    "thinking_mode": "off"
+    "thinking_mode": "server-default"
   }
 }

@@ -63,12 +63,26 @@ def _gold_state_matches(task: dict, sandbox: Path) -> bool:
             except (UnicodeDecodeError, OSError):
                 return False
         return True
-    pred = task.get("gold_state_predicate")
-    if pred == "tests pass":
-        verify_cmd = task.get("verify_cmd") or "python3 -m pytest -q"
+
+    verify_cmd = task.get("verify_cmd")
+    if verify_cmd:
         try:
             r = subprocess.run(
                 ["bash", "-c", verify_cmd],
+                cwd=str(sandbox),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            return r.returncode == 0
+        except subprocess.TimeoutExpired:
+            return False
+
+    pred = task.get("gold_state_predicate")
+    if pred == "tests pass":
+        try:
+            r = subprocess.run(
+                ["bash", "-c", "python3 -m pytest -q"],
                 cwd=str(sandbox),
                 capture_output=True,
                 text=True,
@@ -112,6 +126,34 @@ def _final_assistant_text(transcript: list) -> str:
             if text:
                 final = text
     return final
+
+
+def _trajectory_diagnostics(transcript: list) -> dict:
+    n_tool_calls = 0
+    thinking_blocks = 0
+    thinking_chars = 0
+    for ev in transcript or []:
+        if not isinstance(ev, dict) or ev.get("type") != "message":
+            continue
+        msg = ev.get("message")
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for block in msg.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "toolCall":
+                n_tool_calls += 1
+            elif block.get("type") == "thinking":
+                thinking_blocks += 1
+                thinking_chars += len(block.get("thinking") or "")
+    return {
+        "_n_tool_calls": n_tool_calls,
+        "_thinking_blocks": thinking_blocks,
+        "_thinking_chars": thinking_chars,
+        "_thinking_chars_per_tool_call": (
+            thinking_chars / n_tool_calls if n_tool_calls else thinking_chars
+        ),
+    }
 
 
 def _run_pi_one(task: dict, cfg: dict, adapter: str, sandbox_root: Path, mode: str) -> dict:
@@ -171,6 +213,7 @@ def _run_pi_one(task: dict, cfg: dict, adapter: str, sandbox_root: Path, mode: s
     }
     score = rubric.score_one(rollout)
     rollout["score"] = score
+    rollout["diagnostics"] = _trajectory_diagnostics(transcript)
     return rollout
 
 
@@ -187,6 +230,7 @@ def _to_scored_rollout(rollout: dict) -> dict | None:
         "trajectory": traj,
         "reward": rollout["score"]["composite"],
         "sub_scores": {k: v for k, v in rollout["score"].items() if k != "composite"},
+        "diagnostics": rollout.get("diagnostics") or {},
         "rubric_version": rubric.RUBRIC_VERSION,
     }
 
@@ -200,11 +244,14 @@ def main():
     ap.add_argument("--mode", choices=["train", "eval"], default="eval")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--adapter", default="")
+    ap.add_argument("--max-wall-clock-s", type=int, default=None)
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg = json.loads(Path(args.config).read_text())
+    if args.max_wall_clock_s is not None:
+        cfg.setdefault("rollout", {})["max_wall_clock_s"] = args.max_wall_clock_s
     sandbox_root = Path(cfg.get("sandbox_root", f"/tmp/{cfg['slug']}-rollouts"))
     sandbox_root.mkdir(parents=True, exist_ok=True)
 
@@ -213,7 +260,7 @@ def main():
         for line in f:
             if line.strip():
                 tasks.append(json.loads(line))
-    if args.limit:
+    if args.limit and args.limit > 0:
         tasks = tasks[: args.limit]
 
     rollouts = []
@@ -243,10 +290,34 @@ def main():
     # Summary.
     composites = [r["score"]["composite"] for r in rollouts]
     mean = sum(composites) / max(1, len(composites))
+    tool_calls = [
+        float((r.get("diagnostics") or {}).get("_n_tool_calls"))
+        for r in rollouts
+        if isinstance((r.get("diagnostics") or {}).get("_n_tool_calls"), (int, float))
+    ]
+    thinking_chars = [
+        float((r.get("diagnostics") or {}).get("_thinking_chars"))
+        for r in rollouts
+        if isinstance((r.get("diagnostics") or {}).get("_thinking_chars"), (int, float))
+    ]
+    thinking_blocks = [
+        float((r.get("diagnostics") or {}).get("_thinking_blocks"))
+        for r in rollouts
+        if isinstance((r.get("diagnostics") or {}).get("_thinking_blocks"), (int, float))
+    ]
+    thinking_chars_per_tool_call = [
+        float((r.get("diagnostics") or {}).get("_thinking_chars_per_tool_call"))
+        for r in rollouts
+        if isinstance(
+            (r.get("diagnostics") or {}).get("_thinking_chars_per_tool_call"),
+            (int, float),
+        )
+    ]
     summary = {
         "n_rollouts": len(rollouts),
         "n_tasks": len(tasks),
         "n_generations": n_gen,
+        "adapter": args.adapter,
         "mean_composite": mean,
         "sub_scores_mean": {
             k: sum(r["score"].get(k, 0.0) for r in rollouts) / max(1, len(rollouts))
@@ -255,6 +326,20 @@ def main():
         },
         "mean_wall_clock_s": sum(r.get("wall_clock_s", 0.0) for r in rollouts)
         / max(1, len(rollouts)),
+        "rollouts_nonzero": sum(1 for x in composites if x > 0),
+        "rollouts_zero": sum(1 for x in composites if x == 0),
+        "mean_tool_calls": sum(tool_calls) / len(tool_calls) if tool_calls else None,
+        "mean_thinking_chars": (
+            sum(thinking_chars) / len(thinking_chars) if thinking_chars else None
+        ),
+        "mean_thinking_blocks": (
+            sum(thinking_blocks) / len(thinking_blocks) if thinking_blocks else None
+        ),
+        "mean_thinking_chars_per_tool_call": (
+            sum(thinking_chars_per_tool_call) / len(thinking_chars_per_tool_call)
+            if thinking_chars_per_tool_call
+            else None
+        ),
         "rubric_version": rubric.RUBRIC_VERSION,
     }
     with open(out_dir / "summary.json", "w") as f:
