@@ -21,6 +21,7 @@
 #![warn(rust_2018_idioms)]
 
 mod activation_registry;
+mod allocator;
 mod determinism;
 mod device;
 mod device_op;
@@ -47,6 +48,7 @@ pub use activation_registry::{
     selective_recompute_recommendation, Activation, ActivationId, ActivationKind, ActivationRef,
     OffloadPolicy, RecomputeRecommendation,
 };
+pub use allocator::{allocator_frozen_error, Allocator, AllocatorMode};
 pub use determinism::{deterministic_enabled, Determinism, DeterministicCache, DETERMINISTIC_CACHED};
 pub use device::{Backend, Device};
 pub use device_op::{dispatch1, dispatch2, dispatch3, BackwardOp, DeviceOp1, DeviceOp2, DeviceOp3};
