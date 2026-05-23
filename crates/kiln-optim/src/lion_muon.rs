@@ -246,20 +246,39 @@ fn build_master_tensor(
 }
 
 /// Muon (Bernstein-Newhouse 2024). Momentum-orthogonalized SGD —
-/// projects the update onto the orthogonal complement of recent
-/// updates via Newton-Schulz iteration.
+/// projects the momentum onto the closest orthogonal matrix via
+/// Newton-Schulz iteration before each step.
 ///
-/// Status: **scaffold only**. `step()` returns Err.
+/// # Algorithm (rank-2 weights)
+///
+/// ```text
+/// m_t = momentum * m_{t-1} + g_t            # heavy-ball momentum
+/// U_t = newton_schulz(m_t, iters)           # ≈ polar U factor of m_t
+/// p_t = p_{t-1} - lr * U_t
+/// ```
+///
+/// Newton-Schulz iteration (paper coefficients a=3.4445, b=-4.7750,
+/// c=2.0315) approximates the polar decomposition for 5 iterations.
+///
+/// # Non-matrix parameters
+///
+/// Muon is defined only for **matrix-shaped weights** (rank-2).
+/// Bias vectors / embeddings / scalar weights fall back to plain
+/// SGD-with-momentum (skip the orthogonalization).
 #[derive(Debug, Default)]
 pub struct Muon {
-    #[allow(dead_code)]
     pub lr: f32,
-    #[allow(dead_code)]
     pub momentum: f32,
-    /// Number of Newton-Schulz iterations for the orthogonalization
-    /// step. Bernstein-Newhouse use 5; Phase 6.5.x bench tunes this.
-    #[allow(dead_code)]
+    /// Number of Newton-Schulz iterations. Paper uses 5.
     pub ns_iters: u32,
+    /// Per-parameter momentum buffer keyed on TensorId.
+    momenta: HashMap<TensorId, MuonState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MuonState {
+    pub m: Vec<f32>,
+    pub step: u64,
 }
 
 impl Muon {
@@ -268,7 +287,20 @@ impl Muon {
             lr,
             momentum,
             ns_iters,
+            momenta: HashMap::new(),
         }
+    }
+
+    pub fn default_hp() -> Self {
+        Muon::new(/*lr=*/ 2e-2, /*momentum=*/ 0.95, /*ns_iters=*/ 5)
+    }
+
+    pub fn momentum_for(&self, id: TensorId) -> Option<&MuonState> {
+        self.momenta.get(&id)
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.momenta.len()
     }
 }
 
@@ -277,17 +309,196 @@ impl OptimStep for Muon {
         "muon"
     }
 
-    fn step(&mut self, _param: &mut Parameter, _grad: &Tensor) -> Result<(), StepError> {
-        Err(StepError::Tensor(kiln_tensor::Error::from_str(
-            "Muon::step is not yet implemented — Phase 6.5.x will ship \
-             the Bernstein-Newhouse 2024 momentum-orthogonalized step \
-             with Newton-Schulz iteration. The struct + trait impl \
-             exist so dispatch sites can pattern-match today.",
-        )))
+    fn step(&mut self, param: &mut Parameter, grad: &Tensor) -> Result<(), StepError> {
+        let master = param
+            .backward_storage()
+            .ok_or(StepError::NoBackwardStorage)?
+            .clone();
+        if grad.shape() != master.shape() {
+            return Err(StepError::GradShapeMismatch {
+                grad_shape: grad.shape().to_vec(),
+                master_shape: master.shape().to_vec(),
+            });
+        }
+        let policy = param.amp_policy();
+        if grad.dtype() != policy.backward_compute_dtype {
+            return Err(StepError::GradDtypeMismatch {
+                grad_dtype: grad.dtype(),
+                policy_dtype: policy.backward_compute_dtype,
+            });
+        }
+        if !matches!(policy.master_dtype, DType::F32 | DType::BF16 | DType::F16) {
+            return Err(StepError::Tensor(kiln_tensor::Error::Msg(format!(
+                "Muon: master dtype must be F32/BF16/F16, got {}",
+                policy.master_dtype
+            ))));
+        }
+
+        let shape = master.shape().to_vec();
+        let n = master.element_count();
+        let mut master_f32 = read_master_to_f32(&master)?;
+        let grad_f32 = read_master_to_f32(grad)?;
+
+        let entry = self
+            .momenta
+            .entry(param.tensor_id())
+            .or_insert_with(|| MuonState {
+                m: vec![0.0; n],
+                step: 0,
+            });
+        if entry.m.len() != n {
+            return Err(StepError::Tensor(kiln_tensor::Error::Msg(format!(
+                "Muon: momentum buffer shape ({}) drifted from master ({})",
+                entry.m.len(),
+                n
+            ))));
+        }
+        entry.step += 1;
+        // Heavy-ball momentum: m = β m + g.
+        for i in 0..n {
+            entry.m[i] = self.momentum * entry.m[i] + grad_f32[i];
+        }
+
+        // Orthogonalize for rank-2 weights; otherwise plain SGD with
+        // the heavy-ball momentum.
+        let update = if shape.len() == 2 {
+            newton_schulz(&entry.m, shape[0], shape[1], self.ns_iters)
+        } else {
+            entry.m.clone()
+        };
+
+        for i in 0..n {
+            master_f32[i] -= self.lr * update[i];
+        }
+
+        let new_master = build_master_tensor(policy.master_dtype, &shape, &master_f32)?;
+        param.replace_backward_storage(Some(new_master));
+        Ok(())
     }
 
     fn reset(&mut self) {
-        // No persistent state in the scaffold.
+        self.momenta.clear();
+    }
+}
+
+/// Newton-Schulz orthogonalization for a row-major `[rows, cols]`
+/// matrix flattened into `data`. Paper coefficients
+/// `(a, b, c) = (3.4445, -4.7750, 2.0315)`. Returns the orthogonalized
+/// matrix flattened back in row-major.
+fn newton_schulz(data: &[f32], rows: usize, cols: usize, iters: u32) -> Vec<f32> {
+    debug_assert_eq!(data.len(), rows * cols);
+    // 1. Frobenius-normalize.
+    let frob: f32 = data.iter().map(|&v| v * v).sum::<f32>().sqrt();
+    if frob == 0.0 {
+        return data.to_vec();
+    }
+    let mut x: Vec<f32> = data.iter().map(|&v| v / frob).collect();
+
+    let (a, b, c) = (3.4445_f32, -4.7750_f32, 2.0315_f32);
+    let mut a_buf = vec![0.0f32; rows.min(cols) * rows.min(cols)];
+    let mut aa = a_buf.clone();
+    let mut aa_x = vec![0.0f32; rows * cols];
+
+    // Convention: if rows >= cols, use X^T X (cols x cols); else X X^T.
+    // This is the paper's recipe — operate on the smaller of the two
+    // gram matrices.
+    let transpose = rows >= cols;
+    let k = if transpose { cols } else { rows };
+
+    for _ in 0..iters {
+        // A = X^T X (when transpose=true, shape [cols, cols])
+        //     or X X^T (when transpose=false, shape [rows, rows])
+        gram(&x, rows, cols, transpose, &mut a_buf);
+        // AA = A @ A
+        matmul_square(&a_buf, k, &mut aa);
+        // Q = b * A + c * AA  (k x k)
+        for i in 0..k * k {
+            aa[i] = b * a_buf[i] + c * aa[i];
+        }
+        // X_new = a * X + Q @ X (when transpose=true)  OR  a * X + X @ Q
+        // Depending on which side the gram was computed.
+        if transpose {
+            // Q is cols x cols → multiply on the right: X = a*X + X @ Q
+            matmul_rhs(&x, &aa, rows, cols, &mut aa_x);
+        } else {
+            // Q is rows x rows → multiply on the left: X = a*X + Q @ X
+            matmul_lhs(&aa, &x, rows, cols, &mut aa_x);
+        }
+        for i in 0..rows * cols {
+            x[i] = a * x[i] + aa_x[i];
+        }
+    }
+    x
+}
+
+/// `A = X^T X` (when transpose) or `X X^T` (otherwise).
+fn gram(x: &[f32], rows: usize, cols: usize, transpose: bool, out: &mut [f32]) {
+    if transpose {
+        // out [cols, cols] = X^T [cols, rows] @ X [rows, cols]
+        debug_assert_eq!(out.len(), cols * cols);
+        for i in 0..cols {
+            for j in 0..cols {
+                let mut s = 0.0_f32;
+                for r in 0..rows {
+                    s += x[r * cols + i] * x[r * cols + j];
+                }
+                out[i * cols + j] = s;
+            }
+        }
+    } else {
+        // out [rows, rows] = X [rows, cols] @ X^T [cols, rows]
+        debug_assert_eq!(out.len(), rows * rows);
+        for i in 0..rows {
+            for j in 0..rows {
+                let mut s = 0.0_f32;
+                for c in 0..cols {
+                    s += x[i * cols + c] * x[j * cols + c];
+                }
+                out[i * rows + j] = s;
+            }
+        }
+    }
+}
+
+fn matmul_square(a: &[f32], n: usize, out: &mut [f32]) {
+    debug_assert_eq!(a.len(), n * n);
+    debug_assert_eq!(out.len(), n * n);
+    for i in 0..n {
+        for j in 0..n {
+            let mut s = 0.0_f32;
+            for k in 0..n {
+                s += a[i * n + k] * a[k * n + j];
+            }
+            out[i * n + j] = s;
+        }
+    }
+}
+
+/// `out = x @ q` where x is `[rows, cols]`, q is `[cols, cols]`.
+fn matmul_rhs(x: &[f32], q: &[f32], rows: usize, cols: usize, out: &mut [f32]) {
+    debug_assert_eq!(out.len(), rows * cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            let mut s = 0.0_f32;
+            for k in 0..cols {
+                s += x[r * cols + k] * q[k * cols + c];
+            }
+            out[r * cols + c] = s;
+        }
+    }
+}
+
+/// `out = q @ x` where q is `[rows, rows]`, x is `[rows, cols]`.
+fn matmul_lhs(q: &[f32], x: &[f32], rows: usize, cols: usize, out: &mut [f32]) {
+    debug_assert_eq!(out.len(), rows * cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            let mut s = 0.0_f32;
+            for k in 0..rows {
+                s += q[r * rows + k] * x[k * cols + c];
+            }
+            out[r * cols + c] = s;
+        }
     }
 }
 
@@ -417,14 +628,101 @@ mod tests {
         assert_eq!(m.ns_iters, 5);
     }
 
+    fn fresh_matrix_param() -> Parameter {
+        // 2x2 identity-ish matrix.
+        let fwd = Tensor::from_slice(&[1.0f32, 0.0, 0.0, 1.0], vec![2, 2]).unwrap();
+        let master = Tensor::from_slice(&[1.0f32, 0.0, 0.0, 1.0], vec![2, 2]).unwrap();
+        Parameter::trainable(ForwardStorage::Plain(fwd), master, AmpPolicy::fp32_reference())
+    }
+
+    fn read_master(p: &Parameter) -> Vec<f32> {
+        let cpu = p
+            .backward_storage()
+            .unwrap()
+            .storage()
+            .as_any()
+            .downcast_ref::<kiln_tensor::CpuStorage>()
+            .unwrap();
+        cpu.as_bytes()
+            .chunks(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect()
+    }
+
     #[test]
-    fn muon_step_returns_not_implemented() {
-        let mut m = Muon::default();
-        let mut p = fresh_param();
-        let g = Tensor::from_slice(&[0.0f32, 0.0], vec![2]).unwrap();
-        let e = m.step(&mut p, &g).unwrap_err();
-        assert!(e.to_string().contains("not yet implemented"));
-        assert!(e.to_string().contains("Bernstein-Newhouse"));
+    fn muon_step_rank1_falls_back_to_sgd_momentum() {
+        // For non-matrix shapes Muon = SGD with heavy-ball momentum.
+        // m_0 = 0; step 1 with grad=ones → m = ones → master -= lr * ones.
+        let mut opt = Muon::new(0.1, 0.9, 5);
+        let mut p = fresh_param(); // shape [2]
+        let g = Tensor::from_slice(&[1.0f32, 1.0], vec![2]).unwrap();
+        opt.step(&mut p, &g).unwrap();
+        let v = read_master(&p);
+        assert!((v[0] - 0.9).abs() < 1e-6, "got {}", v[0]);
+        assert!((v[1] - 1.9).abs() < 1e-6, "got {}", v[1]);
+    }
+
+    #[test]
+    fn muon_step_rank2_runs_newton_schulz() {
+        // For a matrix grad, the orthogonalization changes the update
+        // direction. We just verify the step runs without error,
+        // produces finite outputs, and that the step counter advances.
+        let mut opt = Muon::default_hp();
+        let mut p = fresh_matrix_param();
+        let g = Tensor::from_slice(&[1.0f32, 0.5, 0.5, 1.0], vec![2, 2]).unwrap();
+        opt.step(&mut p, &g).unwrap();
+        let v = read_master(&p);
+        assert_eq!(v.len(), 4);
+        for x in v {
+            assert!(x.is_finite(), "Muon produced non-finite master: {x}");
+        }
+        let state = opt.momentum_for(p.tensor_id()).unwrap();
+        assert_eq!(state.step, 1);
+    }
+
+    #[test]
+    fn muon_preserves_tensor_id() {
+        let mut opt = Muon::default_hp();
+        let mut p = fresh_matrix_param();
+        let id_before = p.tensor_id();
+        let g = Tensor::from_slice(&[0.1f32, 0.1, 0.1, 0.1], vec![2, 2]).unwrap();
+        opt.step(&mut p, &g).unwrap();
+        assert_eq!(p.tensor_id(), id_before);
+    }
+
+    #[test]
+    fn muon_multi_step_advances_state() {
+        let mut opt = Muon::default_hp();
+        let mut p = fresh_matrix_param();
+        let g = Tensor::from_slice(&[1.0f32, 0.5, 0.5, 1.0], vec![2, 2]).unwrap();
+        for _ in 0..3 {
+            opt.step(&mut p, &g).unwrap();
+        }
+        let state = opt.momentum_for(p.tensor_id()).unwrap();
+        assert_eq!(state.step, 3);
+    }
+
+    #[test]
+    fn newton_schulz_identity_stays_orthogonal_ish() {
+        // The identity matrix is already orthogonal; NS should leave
+        // it (approximately) at the same shape.
+        let i = vec![1.0f32, 0.0, 0.0, 1.0];
+        let out = newton_schulz(&i, 2, 2, 5);
+        // After NS, ||out||_F ≈ √2 (orthogonal 2x2 has Frobenius norm √2).
+        let frob = out.iter().map(|&v| v * v).sum::<f32>().sqrt();
+        assert!(
+            (frob - 2.0_f32.sqrt()).abs() < 0.1,
+            "frob = {frob}, expected ~√2"
+        );
+    }
+
+    #[test]
+    fn newton_schulz_zero_matrix_is_zero() {
+        let z = vec![0.0f32; 9];
+        let out = newton_schulz(&z, 3, 3, 5);
+        for v in out {
+            assert_eq!(v, 0.0);
+        }
     }
 
     #[test]
@@ -439,8 +737,13 @@ mod tests {
     }
 
     #[test]
-    fn muon_reset_is_noop() {
-        let mut m = Muon::default();
-        m.reset();
+    fn muon_reset_clears_state() {
+        let mut opt = Muon::default_hp();
+        let mut p = fresh_matrix_param();
+        let g = Tensor::from_slice(&[0.1f32; 4], vec![2, 2]).unwrap();
+        opt.step(&mut p, &g).unwrap();
+        assert_eq!(opt.parameter_count(), 1);
+        opt.reset();
+        assert_eq!(opt.parameter_count(), 0);
     }
 }
