@@ -23,6 +23,7 @@ pub mod hyperbolic;
 pub mod index_ops;
 pub mod l2norm;
 pub mod layernorm;
+pub mod leaky_activations;
 pub mod log_variants;
 pub mod mask;
 pub mod matmul;
