@@ -8,6 +8,7 @@ members = [
     "crates/kiln-flash-attn",
     "crates/kiln-flce-kernel",
     "crates/kiln-gdn-kernel",
+    "crates/kiln-kt-bridge",
     "crates/kiln-marlin-gemm",
     "crates/kiln-model",
     "crates/kiln-nvtx",
@@ -125,6 +126,7 @@ kiln-conv1d-kernel = { path = "crates/kiln-conv1d-kernel" }
 kiln-flash-attn = { path = "crates/kiln-flash-attn" }
 kiln-flce-kernel = { path = "crates/kiln-flce-kernel" }
 kiln-gdn-kernel = { path = "crates/kiln-gdn-kernel" }
+kiln-kt-bridge = { path = "crates/kiln-kt-bridge" }
 kiln-marlin-gemm = { path = "crates/kiln-marlin-gemm" }
 kiln-nvtx = { path = "crates/kiln-nvtx" }
 kiln-opd-loss-kernel = { path = "crates/kiln-opd-loss-kernel" }
