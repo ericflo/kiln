@@ -17,8 +17,9 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::{Storage, Tensor, TensorId};
+use kiln_tensor::{Result, Storage, Tensor, TensorId};
 
+use crate::content_hash::content_hash_storage;
 use crate::AmpPolicy;
 
 /// Forward-storage variant. Drives the `forward()` dispatch.
@@ -257,6 +258,82 @@ impl Parameter {
     pub fn set_name(&mut self, name: impl Into<Arc<str>>) {
         self.name = Some(name.into());
     }
+
+    // ------------------------------------------------------------------
+    // Phase 2.5 content-addressed identity
+    // ------------------------------------------------------------------
+
+    /// Compute a content-addressed fingerprint of the Parameter.
+    ///
+    /// Per the Phase 2.5 issue bullet:
+    ///
+    /// > **Parameter content checksum (xxhash3) for safe hot-swap.**
+    /// > `Parameter::content_hash() -> u64` is a content-addressed
+    /// > fingerprint of `forward_storage` (post-quantization,
+    /// > post-LoRA-merge). Required for: (a) multi-process serving
+    /// > safety ...; (b) hot-swap of a fine-tune over a running
+    /// > serve ...; (c) adapter cache invalidation on the serve side.
+    ///
+    /// The fingerprint mixes:
+    /// - `forward_storage.primary_storage()` bytes
+    /// - `forward_storage.kind_name()` (so Plain vs Marlin vs FP8
+    ///   distinguish even when underlying bytes coincide)
+    /// - `lora_delta`'s bytes (so a delta swap changes the hash)
+    /// - The dtype short-name of every output head's storage (so a
+    ///   value/reward-head attach changes the hash)
+    /// - `amp_policy.master_dtype` and `forward_compute_dtype` short
+    ///   names (so AmpPolicy changes are visible in the hash)
+    ///
+    /// **Today's hash function is stdlib `DefaultHasher`** — Phase
+    /// 2.5.x swaps to xxhash3 for stability across Rust versions and
+    /// faster hashing on the 4 GiB Qwen3.5-4B BF16 master.
+    ///
+    /// CPU-only: requires downcasting the involved storages to
+    /// `CpuStorage`. GPU-storage hashing lands when the Phase 1.12
+    /// pinned-host staging pool ships.
+    pub fn content_hash(&self) -> Result<u64> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
+        // Mix in the forward-storage kind name so packed vs plain
+        // hashes distinctly.
+        self.forward_storage.kind_name().hash(&mut hasher);
+
+        // Hash the primary forward storage bytes.
+        let primary_hash = content_hash_storage(self.forward_storage.primary_storage())?;
+        primary_hash.hash(&mut hasher);
+
+        // Mix in the LoRA delta if present (its absence vs presence
+        // is part of the hash).
+        if let Some(delta) = &self.lora_delta {
+            "lora_delta:present".hash(&mut hasher);
+            let dh = content_hash_storage(delta.storage())?;
+            dh.hash(&mut hasher);
+        } else {
+            "lora_delta:absent".hash(&mut hasher);
+        }
+
+        // Mix in each output head's dtype + role. We don't hash the
+        // head storage bytes — those typically change every step in
+        // training and would invalidate the cache too aggressively.
+        // The head registry's presence/absence still affects the hash
+        // because adding a value head IS a meaningful identity change.
+        for head in &self.heads {
+            head.role.name().hash(&mut hasher);
+            head.head_storage.dtype().short_name().hash(&mut hasher);
+        }
+
+        // Mix in the AMP policy. Two parameters with identical bytes
+        // under different precision policies are distinct identities
+        // for serve-side cache purposes.
+        self.amp_policy.master_dtype.short_name().hash(&mut hasher);
+        self.amp_policy
+            .forward_compute_dtype
+            .short_name()
+            .hash(&mut hasher);
+
+        Ok(hasher.finish())
+    }
 }
 
 #[cfg(test)]
@@ -390,5 +467,77 @@ mod tests {
         assert_eq!(p.amp_policy(), AmpPolicy::default());
         p.set_amp_policy(AmpPolicy::fp32_reference());
         assert_eq!(p.amp_policy(), AmpPolicy::fp32_reference());
+    }
+
+    #[test]
+    fn content_hash_changes_on_forward_storage_swap() {
+        let mut p = Parameter::inference_only(plain_f32());
+        let h0 = p.content_hash().unwrap();
+        // Swap Plain → Marlin (different kind_name + different bytes).
+        let new_fwd = ForwardStorage::Marlin {
+            packed: Tensor::zeros_cpu(vec![4, 4], DType::Int4Packed),
+            scales: Tensor::zeros_cpu(vec![4], DType::BF16),
+        };
+        p.replace_forward_storage(new_fwd);
+        let h1 = p.content_hash().unwrap();
+        assert_ne!(h0, h1);
+    }
+
+    #[test]
+    fn content_hash_changes_on_lora_delta_swap() {
+        let mut p = Parameter::inference_only(plain_f32());
+        let h0 = p.content_hash().unwrap();
+        // Attach LoRA.
+        let delta = Tensor::zeros_cpu(vec![4, 4], DType::F32);
+        p.set_lora_delta(Some(delta));
+        let h1 = p.content_hash().unwrap();
+        assert_ne!(h0, h1);
+        // Detach.
+        p.set_lora_delta(None);
+        let h2 = p.content_hash().unwrap();
+        assert_ne!(h1, h2);
+        // h2 should equal h0 (same state as before LoRA attach).
+        assert_eq!(h0, h2);
+    }
+
+    #[test]
+    fn content_hash_changes_on_head_attach() {
+        let mut p = Parameter::inference_only(plain_f32());
+        let h0 = p.content_hash().unwrap();
+        p.add_head(OutputHead {
+            role: OutputHeadRole::LmHead,
+            head_storage: Tensor::zeros_cpu(vec![4, 16], DType::F32),
+            requires_grad: true,
+        });
+        let h1 = p.content_hash().unwrap();
+        assert_ne!(h0, h1);
+        // Adding a second head changes the hash again.
+        p.add_head(OutputHead {
+            role: OutputHeadRole::MtpHead,
+            head_storage: Tensor::zeros_cpu(vec![4, 16], DType::F32),
+            requires_grad: true,
+        });
+        let h2 = p.content_hash().unwrap();
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn content_hash_changes_on_amp_policy_change() {
+        let mut p = Parameter::inference_only(plain_f32());
+        let h0 = p.content_hash().unwrap();
+        p.set_amp_policy(AmpPolicy::fp32_reference());
+        let h1 = p.content_hash().unwrap();
+        // Plain F32 forward + default AMP (BF16 master) vs Plain F32
+        // + fp32_reference AMP differ in master_dtype short-name.
+        assert_ne!(h0, h1);
+    }
+
+    #[test]
+    fn content_hash_stable_for_identical_state() {
+        // Two parameters with byte-identical forward, no LoRA, same
+        // policy → same content hash.
+        let p1 = Parameter::inference_only(plain_f32());
+        let p2 = Parameter::inference_only(plain_f32());
+        assert_eq!(p1.content_hash().unwrap(), p2.content_hash().unwrap());
     }
 }
