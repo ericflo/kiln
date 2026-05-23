@@ -719,14 +719,20 @@ pub struct PreparedOffPolicyDistillation {
     pub summary: OffPolicyDistillationSummary,
 }
 
-struct TokenizedOpdPrompt {
-    input_ids: Vec<u32>,
-    action_mask: Vec<bool>,
-    env_mask: Vec<bool>,
-    total_obs_len: usize,
+/// Shared OPD tokenization output used by `opd_train` and `vk_native_opd_train`.
+///
+/// `pub(crate)` so the VK-native OPD trainer (`crate::vk_train::vk_native_opd_train`)
+/// can reuse exactly the same tokenization + ECHO env-mask plumbing that the
+/// candle path uses, avoiding two divergent definitions of "what does an OPD
+/// step's active mask mean."
+pub(crate) struct TokenizedOpdPrompt {
+    pub(crate) input_ids: Vec<u32>,
+    pub(crate) action_mask: Vec<bool>,
+    pub(crate) env_mask: Vec<bool>,
+    pub(crate) total_obs_len: usize,
 }
 
-fn tokenize_opd_prompt_for_training(
+pub(crate) fn tokenize_opd_prompt_for_training(
     prompt: &OpdPrompt,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     echo: Option<&crate::EchoConfig>,

@@ -436,6 +436,20 @@ fn vk_native_grpo_enabled(backend_name: &str) -> bool {
     }
 }
 
+/// Whether the OPD job should route through `vk_native_opd_train` instead
+/// of the candle `opd_train` path.
+///
+/// Mirrors `vk_native_grpo_enabled`'s shape (#1075). The explicit
+/// `KILN_VK_NATIVE_OPD` env wins; otherwise we fall back to
+/// `KILN_VK_NATIVE_TRAINING`, so users who set the parent flag get a
+/// uniformly vk-native experience across SFT, GRPO, and OPD.
+fn vk_native_opd_enabled(backend_name: &str) -> bool {
+    match env_tristate("KILN_VK_NATIVE_OPD") {
+        Some(enabled) => enabled,
+        None => vk_native_sft_enabled(backend_name),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_grpo(
     cuda_native: bool,
@@ -638,6 +652,7 @@ fn run_grpo(
 /// produce a much larger PR than this milestone wants.
 #[allow(clippy::too_many_arguments)]
 fn run_opd(
+    vk_native: bool,
     req: &OpdRequest,
     model_config: &kiln_core::config::ModelConfig,
     weights: &kiln_model::forward::GpuWeights,
@@ -648,6 +663,8 @@ fn run_opd(
     teacher_registry: &crate::api::teachers::TeacherRegistry,
     job_id: &str,
 ) -> std::result::Result<PathBuf, String> {
+    #[cfg(not(feature = "vulkan"))]
+    let _ = vk_native;
     if req.prompts.is_empty() && req.dataset_path.is_none() {
         return Err("OPD request must include at least one prompt or a dataset_path".into());
     }
@@ -785,18 +802,60 @@ fn run_opd(
 
     let trainer_progress_cb: trainer::ProgressCallback = progress_cb;
 
-    let output_dir = kiln_train::opd::opd_train(
-        prompts,
-        &req.config,
-        model_config,
-        weights,
-        tokenizer,
-        teacher,
-        adapter_dir,
-        adapter_name,
-        Some(trainer_progress_cb),
-    )
-    .map_err(|e| format!("opd_train failed: {e:#}"))?;
+    let output_dir = if vk_native {
+        #[cfg(feature = "vulkan")]
+        {
+            tracing::info!(
+                job_id = %job_id,
+                "KILN_VK_NATIVE_OPD=1 - routing to vk_native_opd_train"
+            );
+            kiln_train::vk_train::vk_native_opd_train(
+                prompts,
+                &req.config,
+                model_config,
+                weights,
+                tokenizer,
+                teacher,
+                adapter_dir,
+                adapter_name,
+                Some(trainer_progress_cb),
+            )
+            .map_err(|e| format!("vk_native_opd_train failed: {e:#}"))?
+        }
+        #[cfg(not(feature = "vulkan"))]
+        {
+            tracing::warn!(
+                job_id = %job_id,
+                "KILN_VK_NATIVE_OPD=1 set but kiln-server was built without \
+                 --features vulkan - falling back to candle OPD trainer"
+            );
+            kiln_train::opd::opd_train(
+                prompts,
+                &req.config,
+                model_config,
+                weights,
+                tokenizer,
+                teacher,
+                adapter_dir,
+                adapter_name,
+                Some(trainer_progress_cb),
+            )
+            .map_err(|e| format!("opd_train failed: {e:#}"))?
+        }
+    } else {
+        kiln_train::opd::opd_train(
+            prompts,
+            &req.config,
+            model_config,
+            weights,
+            tokenizer,
+            teacher,
+            adapter_dir,
+            adapter_name,
+            Some(trainer_progress_cb),
+        )
+        .map_err(|e| format!("opd_train failed: {e:#}"))?
+    };
 
     if let Some(path) = req.dataset_path.as_deref() {
         match kiln_train::TrainReceipt::read_from_adapter_dir(&output_dir) {
@@ -2157,7 +2216,10 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             }
             let _gpu_guard = state.gpu_lock.write().unwrap();
             let guard = runner_arc.read().unwrap();
+            let backend_name = guard.backend_name();
+            let vk_native = vk_native_opd_enabled(backend_name);
             run_opd(
+                vk_native,
                 &req,
                 &state.model_config,
                 &guard.weights,

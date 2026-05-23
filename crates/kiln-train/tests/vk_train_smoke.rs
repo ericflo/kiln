@@ -36,7 +36,7 @@ use kiln_train::Optimizer;
 use kiln_train::vk_train::{
     VkAdamWConfig, allocate_adamw_state, grpo_jsonl_stats, save_vk_lora_adapter,
     validate_vk_grpo_seq_lens, vk_init_lora_layers, vk_native_grpo_train_jsonl,
-    vk_opd_train_step_with_state, vk_recompute_grpo_train_step_with_state,
+    vk_native_opd_train, vk_opd_train_step_with_state, vk_recompute_grpo_train_step_with_state,
     vk_recompute_opd_train_step_with_state, vk_recompute_train_step_with_state_masked,
     vk_train_step,
 };
@@ -128,6 +128,133 @@ fn build_tiny_model(dev: &Arc<VulkanDevice>) -> Result<VkModelWeights> {
         vocab,
         hidden,
     })
+}
+
+fn tiny_gpu_opd_model_config() -> ModelConfig {
+    // OPD's TeacherTopK loss requires top_k ∈ {16, 32} and the kernel
+    // checks each top-K index against vocab_size. The GRPO smoke uses
+    // vocab=8 which can't fit top_k=16, so OPD gets a 32-vocab variant
+    // with otherwise identical 1-layer FullAttention shape.
+    ModelConfig {
+        hidden_size: 16,
+        num_layers: 1,
+        num_attention_heads: 1,
+        num_kv_heads: 1,
+        head_dim: 16,
+        intermediate_size: 32,
+        vocab_size: 32,
+        max_position_embeddings: 128,
+        rms_norm_eps: 1e-5,
+        rope_theta: 10_000.0,
+        dtype: DType::FP32,
+        num_full_attention_layers: 1,
+        full_attention_interval: 1,
+        attn_output_gate: false,
+        linear_num_key_heads: 1,
+        linear_key_head_dim: 16,
+        linear_num_value_heads: 1,
+        linear_value_head_dim: 16,
+        linear_conv_kernel_dim: 4,
+        partial_rotary_factor: 0.0,
+    }
+}
+
+fn build_tiny_gpu_opd_weights() -> Result<GpuWeights> {
+    let config = tiny_gpu_opd_model_config();
+    let vocab = config.vocab_size;
+    let hidden = config.hidden_size;
+    let intermediate = config.intermediate_size;
+    let head_dim = config.head_dim;
+
+    let embed_tokens = cpu_tensor(small_random(vocab * hidden, 601), (vocab, hidden))?;
+    let embed_tokens_t = transpose_2d(&embed_tokens)?;
+    let q_proj = cpu_tensor(small_random(hidden * hidden, 602), (hidden, hidden))?;
+    let k_proj = cpu_tensor(small_random(hidden * hidden, 603), (hidden, hidden))?;
+    let v_proj = cpu_tensor(small_random(hidden * hidden, 604), (hidden, hidden))?;
+    let o_proj = cpu_tensor(small_random(hidden * hidden, 605), (hidden, hidden))?;
+    let gate_proj = cpu_tensor(
+        small_random(intermediate * hidden, 606),
+        (intermediate, hidden),
+    )?;
+    let up_proj = cpu_tensor(
+        small_random(intermediate * hidden, 607),
+        (intermediate, hidden),
+    )?;
+    let down_proj = cpu_tensor(
+        small_random(hidden * intermediate, 608),
+        (hidden, intermediate),
+    )?;
+
+    Ok(GpuWeights {
+        embed_tokens,
+        embed_tokens_t,
+        layers: vec![GpuLayerWeights {
+            input_layernorm: cpu_tensor(vec![0.0; hidden], (hidden,))?,
+            post_attention_layernorm: cpu_tensor(vec![0.0; hidden], (hidden,))?,
+            attention: GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                q_proj: q_proj.clone(),
+                k_proj: k_proj.clone(),
+                v_proj: v_proj.clone(),
+                o_proj: o_proj.clone(),
+                q_norm: cpu_tensor(vec![0.0; head_dim], (head_dim,))?,
+                k_norm: cpu_tensor(vec![0.0; head_dim], (head_dim,))?,
+                q_proj_t: transpose_2d(&q_proj)?,
+                k_proj_t: transpose_2d(&k_proj)?,
+                v_proj_t: transpose_2d(&v_proj)?,
+                qkv_proj_t: None,
+                o_proj_t: transpose_2d(&o_proj)?,
+                q_proj_marlin: None,
+            }),
+            mlp: GpuFfnWeights {
+                gate_proj: gate_proj.clone(),
+                up_proj: up_proj.clone(),
+                down_proj: down_proj.clone(),
+                gate_proj_t: transpose_2d(&gate_proj)?,
+                up_proj_t: transpose_2d(&up_proj)?,
+                down_proj_t: transpose_2d(&down_proj)?,
+                gate_proj_marlin: None,
+                up_proj_marlin: None,
+                down_proj_marlin: None,
+            },
+        }],
+        final_norm: cpu_tensor(vec![0.0; hidden], (hidden,))?,
+        rotary_inv_freq: cpu_tensor(Vec::<f32>::new(), (0,))?,
+        mtp: None,
+    })
+}
+
+/// Tokenizer with chat-template markers so the OPD trainer's action
+/// mask picks up the assistant span. Vocab is large enough that top-K
+/// over the action positions has room.
+fn tiny_opd_tokenizer() -> Result<KilnTokenizer> {
+    let mut vocab_map = serde_json::Map::new();
+    let chars =
+        "abcdefghijklmnopqrstuvwxyz <|im_start|><|im_end|>user assistantsystemtoolcontent\nrol";
+    let mut seen = std::collections::HashSet::new();
+    let mut id = 0u32;
+    for ch in chars.chars() {
+        let key = ch.to_string();
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        vocab_map.insert(key, serde_json::Value::from(id));
+        id += 1;
+    }
+    let vocab_json = serde_json::Value::Object(vocab_map);
+    let json = serde_json::json!({
+        "version": "1.0",
+        "model": {
+            "type": "BPE",
+            "vocab": vocab_json,
+            "merges": []
+        }
+    });
+    let template =
+        "{% for message in messages -%}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}";
+    Ok(
+        KilnTokenizer::from_bytes(json.to_string().as_bytes())?
+            .with_chat_template(template.to_string()),
+    )
 }
 
 fn tiny_gpu_grpo_model_config() -> ModelConfig {
@@ -2127,6 +2254,298 @@ fn vk_native_grpo_jsonl_smoke_streams_large_dataset() -> Result<()> {
     );
 
     let _ = std::fs::remove_file(dataset);
+    let _ = std::fs::remove_dir_all(adapter_root);
+    Ok(())
+}
+
+/// End-to-end smoke for the new `vk_native_opd_train` entrypoint
+/// introduced in #1075.
+///
+/// Builds the small FullAttention GpuWeights variant, wires up a
+/// deterministic uniform LogitSource as the teacher, runs the trainer
+/// over a few small OffPolicy prompts for 2 epochs, and asserts:
+///
+/// 1. The adapter directory + safetensors land on disk.
+/// 2. `adapter_config.json` enumerates the expected LoRA targets.
+/// 3. A mid-run checkpoint dir was written when checkpoint_interval is set.
+/// 4. The progress callback was invoked at least once per step and
+///    finished at progress ≥ 0.999.
+///
+/// This is the OPD analogue of
+/// `vk_native_grpo_jsonl_smoke_streams_and_saves_adapter` — it proves
+/// that the new dispatch (server → trainer → kernels) is end-to-end
+/// runnable, that the off-policy mask plumbing matches the candle path
+/// (`opd::tokenize_opd_prompt_for_training`), and that the artifacts a
+/// caller relies on (adapter dir, checkpoint dir, progress events) all
+/// land in the right shape.
+#[test]
+fn vk_native_opd_train_smoke_saves_adapter() -> Result<()> {
+    use kiln_core::tokenizer::ChatMessage;
+    use kiln_train::logit_source::{DeterministicUniformLogitSource, LogitSource};
+    use kiln_train::opd::{
+        OpdConfig, OpdLossGranularity, OpdObjective, OpdPrompt, OpdTrainingMode,
+    };
+    use std::sync::Arc;
+
+    let Some(_dev) = vk_dev() else {
+        eprintln!("Vulkan device not available — skipping");
+        return Ok(());
+    };
+
+    let adapter_root = std::env::temp_dir().join(format!(
+        "kiln-vk-native-opd-smoke-adapters-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&adapter_root);
+    std::fs::create_dir_all(&adapter_root)?;
+
+    let model_config = tiny_gpu_opd_model_config();
+    let weights = build_tiny_gpu_opd_weights()?;
+    let tokenizer = tiny_opd_tokenizer()?;
+
+    // Three off-policy prompts — small but each has a non-empty
+    // assistant turn so the action-mask plumbing picks up real
+    // supervised positions.
+    let prompts = vec![
+        OpdPrompt {
+            messages: vec![
+                ChatMessage {
+                    role: "user".into(),
+                    content: "a".into(),
+                },
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "b c".into(),
+                },
+            ],
+            teacher_extra_messages: vec![],
+            trajectory: vec![],
+        },
+        OpdPrompt {
+            messages: vec![
+                ChatMessage {
+                    role: "user".into(),
+                    content: "d e".into(),
+                },
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "f".into(),
+                },
+            ],
+            teacher_extra_messages: vec![],
+            trajectory: vec![],
+        },
+        OpdPrompt {
+            messages: vec![
+                ChatMessage {
+                    role: "user".into(),
+                    content: "g".into(),
+                },
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "h i j".into(),
+                },
+            ],
+            teacher_extra_messages: vec![],
+            trajectory: vec![],
+        },
+    ];
+
+    let config = OpdConfig {
+        training_mode: OpdTrainingMode::OffPolicy,
+        objective: OpdObjective::ReverseKl,
+        loss: OpdLossGranularity::TeacherTopK,
+        top_k: 16,
+        learning_rate: 5e-3,
+        lora_rank: 2,
+        lora_alpha: 4.0,
+        checkpoint_interval: Some(2),
+        seed: Some(7777),
+        epochs: 2,
+        ..Default::default()
+    };
+
+    let teacher: Arc<dyn LogitSource> =
+        Arc::new(DeterministicUniformLogitSource::new("test-teacher", 32, 16));
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let progress_cb = {
+        let progress = Arc::clone(&progress);
+        Box::new(move |p| progress.lock().unwrap().push(p))
+    };
+
+    let out = vk_native_opd_train(
+        &prompts,
+        &config,
+        &model_config,
+        &weights,
+        &tokenizer,
+        teacher,
+        &adapter_root,
+        "vk-opd-smoke",
+        Some(progress_cb),
+    )?;
+
+    let adapter_path = out.join("adapter_model.safetensors");
+    assert!(
+        adapter_path.exists(),
+        "vk-native OPD adapter not found at {}",
+        adapter_path.display()
+    );
+    let loaded = candle_core::safetensors::load(&adapter_path, &Device::Cpu)?;
+    for key in [
+        "self_attn.q_proj.lora_A.weight",
+        "self_attn.o_proj.lora_A.weight",
+        "mlp.gate_proj.lora_A.weight",
+        "mlp.down_proj.lora_A.weight",
+    ] {
+        assert!(
+            loaded.keys().any(|k| k.contains(key)),
+            "missing vk-native OPD adapter key containing {key}"
+        );
+    }
+    assert_vk_adapter_config_targets(&out)?;
+
+    // At least one mid-run checkpoint should have been written — with
+    // 3 prompts × 2 epochs = 6 steps and interval=2, expect checkpoints
+    // at steps 2 and 4 (step 6 is the final save and skipped by
+    // global_step < total_steps).
+    let ckpt2 = adapter_root
+        .join("vk-opd-smoke-checkpoint-2")
+        .join("adapter_model.safetensors");
+    assert!(
+        ckpt2.exists(),
+        "expected vk-native OPD checkpoint at step 2: {}",
+        ckpt2.display()
+    );
+    assert_vk_adapter_config_targets(ckpt2.parent().unwrap())?;
+
+    let updates = progress.lock().unwrap();
+    assert!(
+        updates.len() >= 6,
+        "expected at least one progress update per step (got {})",
+        updates.len()
+    );
+    assert!(
+        updates.last().is_some_and(|p| p.progress >= 0.999),
+        "final progress should reach completion"
+    );
+    for u in updates.iter() {
+        assert!(u.loss.is_finite(), "non-finite OPD loss in progress event");
+    }
+
+    let _ = std::fs::remove_dir_all(adapter_root);
+    Ok(())
+}
+
+/// Preflight rejection: vk_native_opd_train must refuse on-policy
+/// training because v1 only handles teacher-pre-masked off-policy
+/// prompts. Mirrors `vk_native_grpo_train`'s shape-preflight tests.
+#[test]
+fn vk_native_opd_train_rejects_on_policy_in_v1() -> Result<()> {
+    use kiln_core::tokenizer::ChatMessage;
+    use kiln_train::logit_source::{DeterministicUniformLogitSource, LogitSource};
+    use kiln_train::opd::{
+        OpdConfig, OpdLossGranularity, OpdObjective, OpdPrompt, OpdTrainingMode,
+    };
+    use std::sync::Arc;
+
+    let Some(_dev) = vk_dev() else { return Ok(()) };
+    let model_config = tiny_gpu_opd_model_config();
+    let weights = build_tiny_gpu_opd_weights()?;
+    let tokenizer = tiny_opd_tokenizer()?;
+    let prompts = vec![OpdPrompt {
+        messages: vec![
+            ChatMessage {
+                role: "user".into(),
+                content: "a".into(),
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "b".into(),
+            },
+        ],
+        teacher_extra_messages: vec![],
+        trajectory: vec![],
+    }];
+
+    // On-policy is rejected.
+    let mut config = OpdConfig {
+        training_mode: OpdTrainingMode::OnPolicy,
+        objective: OpdObjective::ReverseKl,
+        loss: OpdLossGranularity::TeacherTopK,
+        top_k: 16,
+        learning_rate: 1e-3,
+        lora_rank: 2,
+        lora_alpha: 4.0,
+        seed: Some(11),
+        epochs: 1,
+        ..Default::default()
+    };
+    let teacher: Arc<dyn LogitSource> =
+        Arc::new(DeterministicUniformLogitSource::new("test-teacher", 32, 16));
+    let adapter_root = std::env::temp_dir().join(format!(
+        "kiln-vk-opd-preflight-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&adapter_root);
+    std::fs::create_dir_all(&adapter_root)?;
+    let err = vk_native_opd_train(
+        &prompts,
+        &config,
+        &model_config,
+        &weights,
+        &tokenizer,
+        Arc::clone(&teacher),
+        &adapter_root,
+        "vk-opd-reject-onpolicy",
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("off_policy"),
+        "on-policy preflight message should mention off_policy: {err}"
+    );
+
+    // Cross-entropy is rejected.
+    config.training_mode = OpdTrainingMode::OffPolicy;
+    config.objective = OpdObjective::CrossEntropy;
+    let err = vk_native_opd_train(
+        &prompts,
+        &config,
+        &model_config,
+        &weights,
+        &tokenizer,
+        Arc::clone(&teacher),
+        &adapter_root,
+        "vk-opd-reject-ce",
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("reverse_kl"),
+        "cross-entropy preflight message should mention reverse_kl: {err}"
+    );
+
+    // top_k=8 (outside {16, 32}) is rejected.
+    config.objective = OpdObjective::ReverseKl;
+    config.top_k = 8;
+    let err = vk_native_opd_train(
+        &prompts,
+        &config,
+        &model_config,
+        &weights,
+        &tokenizer,
+        Arc::clone(&teacher),
+        &adapter_root,
+        "vk-opd-reject-topk",
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("top_k"),
+        "top_k preflight message should mention top_k: {err}"
+    );
+
     let _ = std::fs::remove_dir_all(adapter_root);
     Ok(())
 }
