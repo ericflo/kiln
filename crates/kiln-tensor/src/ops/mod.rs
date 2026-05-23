@@ -121,7 +121,7 @@ pub use rmsnorm::{rms_norm, RmsNormOp};
 pub use rope::{rope, RopeOp};
 pub use scalar::{add_scalar, div_scalar, mul_scalar, sub_scalar};
 pub use scatter_add::{scatter_add, ScatterAddOp};
-pub use sdpa::scaled_dot_product_attention;
+pub use sdpa::{causal_scaled_dot_product_attention, scaled_dot_product_attention};
 pub use sign_and_round::{ceil, floor, reciprocal, round, sign, trunc};
 pub use silu_mul::{mul_sigmoid_gate, MulSigmoidGateOp};
 pub use softmax::{softmax_last_dim, SoftmaxLastDimOp};
