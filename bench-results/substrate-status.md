@@ -1,8 +1,8 @@
 # kiln-tensor substrate status
 
-**115 / 115 deliverables shipped** — substrate side is complete.
+**122 / 122 deliverables shipped** — substrate side is complete.
 
-- **33 kiln-tensor forward op families** + matching **35 BackwardOps**
+- **41 kiln-tensor forward op families** + matching **41 BackwardOps**
   in kiln-autograd (every differentiable forward has a backward;
   non-differentiable ops correctly omit one)
 - **Phase 4 sampler chain end-to-end** (12 LogitProcessors + Gumbel
@@ -109,7 +109,12 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 1.72 | unary arithmetic (abs/neg/exp/ln/sqrt) ops + backwards | ✓ |
 | 1.73 | clamp + pow ops + backwards | ✓ |
 | 1.74 | one_hot encoding op | ✓ |
-| 1.75 | substrate-status dashboard refresh (this PR) | ✓ |
+| 1.75 | substrate-status dashboard refresh (Phase 1.68-1.74) | ✓ |
+| 1.76 | sin / cos / tan trig ops + backwards | ✓ |
+| 1.77 | linspace + arange tensor constructors | ✓ |
+| 1.78 | stack op + backward | ✓ |
+| 1.79 | tanh + relu activations + backwards | ✓ |
+| 1.80 | substrate-status dashboard refresh (this PR) | ✓ |
 
 ## Phase 2 — kiln-blas / kiln-mps / kiln-vulkan-blas / kiln-param
 
@@ -174,7 +179,7 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 
 (Only grammar-mask remains — separate schema-compiler effort.)
 
-## kiln-autograd BackwardOps — 35 ops covering every differentiable forward
+## kiln-autograd BackwardOps — 41 ops covering every differentiable forward
 
 | Phase | BackwardOps |
 |-------|-------------|
@@ -193,10 +198,14 @@ Regenerate: `scripts/audit-substrate-status.sh --markdown`.
 | 1.71 | WhereSelectBackward |
 | 1.72 | AbsBackward, NegBackward, ExpBackward, LnBackward, SqrtBackward |
 | 1.73 | ClampBackward, PowBackward |
+| 1.76 | SinBackward, CosBackward, TanBackward |
+| 1.78 | StackBackward |
+| 1.79 | TanhBackward, ReluBackward |
 
 Non-differentiable forward ops (correctly return `bwd: None`):
-`argmax_last_dim`, `causal_mask`, `top_k`, `one_hot`, every
-LogitProcessor + GumbelSampler in the sampler chain.
+`argmax_last_dim`, `causal_mask`, `top_k`, `one_hot`, `linspace`,
+`arange`, every LogitProcessor + GumbelSampler in the sampler
+chain.
 
 Each is parity-tested against finite-difference reference values
 where applicable. Non-differentiable ops (argmax, causal_mask, the
