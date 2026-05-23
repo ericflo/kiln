@@ -74,6 +74,15 @@ fn cuda_fused_mlp_silu_mul_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_MLP_SILU_MUL").is_ok())
 }
 
+/// Kill switch for the CUDA prefill fused `[x] @ [gate||up]` GEMM. Set
+/// `KILN_DISABLE_FUSED_MLP_GATE_UP_PREFILL=1` to fall back to the legacy
+/// two-matmul path (used for A/B parity bench-marking).
+#[cfg(feature = "cuda")]
+fn cuda_fused_mlp_gate_up_prefill_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_MLP_GATE_UP_PREFILL").is_ok())
+}
+
 #[cfg(feature = "cuda")]
 fn cuda_fused_attn_sigmoid_mul_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
@@ -2181,6 +2190,7 @@ fn upload_mtp_gpu_weights(
                 gate_proj_t,
                 up_proj_t,
                 down_proj_t,
+                gate_up_proj_t: None,
                 gate_proj_marlin: None,
                 up_proj_marlin: None,
                 down_proj_marlin: None,
@@ -2308,6 +2318,15 @@ pub struct GpuFfnWeights {
     pub gate_proj_t: Tensor,
     pub up_proj_t: Tensor,
     pub down_proj_t: Tensor,
+    /// Optional cached `[hidden, 2 * intermediate]` transpose combining
+    /// `gate_proj_t` and `up_proj_t` along the output dim. Populated at load
+    /// time on CUDA so prefill can issue a single `[B*T, hidden] @
+    /// [hidden, 2*intermediate]` BF16 GEMM and slice gate/up halves out of the
+    /// result, instead of two separate `[B*T, hidden] @ [hidden, intermediate]`
+    /// matmuls. Mirrors the [`GpuFullAttentionWeights::qkv_proj_t`] decode
+    /// fast path. Skipped when LoRA or Marlin are configured for either of
+    /// the gate/up projections (those paths need the standalone transposes).
+    pub gate_up_proj_t: Option<Tensor>,
     /// Optional Marlin W4A16-packed MLP projections. Populated at load time
     /// when the `KILN_W4A16=1` env var is set on a CUDA build whose projection
     /// shape fits Marlin's tile constraints (k%128 && n%256). When present,
@@ -4058,6 +4077,29 @@ impl GpuWeights {
                     kind: MarlinPackKind::DownProj,
                 });
             }
+            // Cache gate/up concatenated along the output dim for CUDA
+            // prefill: one [B*T, hidden] @ [hidden, 2*intermediate] GEMM
+            // replaces two [B*T, hidden] @ [hidden, intermediate] matmuls.
+            // Skipped when KILN_W4A16 is going to Marlin-pack gate/up (the
+            // packed path needs the separate projections).
+            let gate_up_proj_t = {
+                #[cfg(feature = "cuda")]
+                {
+                    if !w4a16_enabled && matches!(device, Device::Cuda(_)) {
+                        Some(
+                            Tensor::cat(&[&gate_proj_t, &up_proj_t], candle_core::D::Minus1)?
+                                .contiguous()
+                                .context(ctx("gate_up_proj_t contiguous"))?,
+                        )
+                    } else {
+                        None
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    None
+                }
+            };
             let mlp = GpuFfnWeights {
                 gate_proj,
                 up_proj,
@@ -4065,6 +4107,7 @@ impl GpuWeights {
                 gate_proj_t,
                 up_proj_t,
                 down_proj_t,
+                gate_up_proj_t,
                 gate_proj_marlin: None,
                 up_proj_marlin: None,
                 down_proj_marlin: None,
@@ -5460,6 +5503,68 @@ fn swiglu_ffn_impl_chunked(
     Tensor::cat(&output_refs, 1).context("chunked CUDA training MLP cat")
 }
 
+/// Legacy two-matmul split of x against gate_proj_t and up_proj_t with the
+/// existing NVTX ranges + sub-op profiles preserved. The CUDA prefill path now
+/// prefers the cached `gate_up_proj_t` fused GEMM; this helper is the
+/// fallback used when LoRA, Marlin, or backend constraints force the
+/// per-projection codepath.
+#[allow(clippy::too_many_arguments)]
+fn swiglu_ffn_split_gate_up(
+    backend: Option<&dyn BackendRuntime>,
+    x: &Tensor,
+    mlp: &GpuFfnWeights,
+    lora_layer: Option<&LoraLayerWeights>,
+    lora_scale: f32,
+    use_metal_decode_gemv: bool,
+    profile_device: &Device,
+    profile_context: Option<(usize, usize)>,
+    seq_len: usize,
+) -> Result<(Tensor, Tensor)> {
+    // x @ gate_proj_t -> [batch, seq_len, intermediate_size]
+    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+    let gate = {
+        kiln_nvtx::range!(c"kiln/mlp/gate");
+        mlp_proj_forward_decode_if(
+            backend,
+            use_metal_decode_gemv,
+            x,
+            &mlp.gate_proj_t,
+            mlp.gate_proj_marlin.as_ref(),
+            lora_layer.and_then(|l| l.gate_proj.as_ref()),
+            lora_scale,
+        )?
+    };
+    finish_mlp_stage_profile(
+        profile_device,
+        profile_context,
+        "gate_proj",
+        seq_len,
+        stage_profile,
+    )?;
+    // x @ up_proj_t -> [batch, seq_len, intermediate_size]
+    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+    let up = {
+        kiln_nvtx::range!(c"kiln/mlp/up");
+        mlp_proj_forward_decode_if(
+            backend,
+            use_metal_decode_gemv,
+            x,
+            &mlp.up_proj_t,
+            mlp.up_proj_marlin.as_ref(),
+            lora_layer.and_then(|l| l.up_proj.as_ref()),
+            lora_scale,
+        )?
+    };
+    finish_mlp_stage_profile(
+        profile_device,
+        profile_context,
+        "up_proj",
+        seq_len,
+        stage_profile,
+    )?;
+    Ok((gate, up))
+}
+
 fn swiglu_ffn_impl_no_chunk(
     backend: Option<&dyn BackendRuntime>,
     x: &Tensor,
@@ -5565,48 +5670,100 @@ fn swiglu_ffn_impl_no_chunk(
         return Ok(out);
     }
 
-    // x @ gate_proj_t -> [batch, seq_len, intermediate_size]
-    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
-    let gate = {
-        kiln_nvtx::range!(c"kiln/mlp/gate");
-        mlp_proj_forward_decode_if(
-            backend,
-            use_metal_decode_gemv,
-            x,
-            &mlp.gate_proj_t,
-            mlp.gate_proj_marlin.as_ref(),
-            lora_layer.and_then(|l| l.gate_proj.as_ref()),
-            lora_scale,
-        )?
+    // CUDA prefill fast path: single [B*T, hidden] @ [hidden, 2*intermediate]
+    // GEMM against the cached `gate_up_proj_t`, then slice gate/up halves out
+    // of the result. Replaces two separate `[B*T, hidden] @ [hidden,
+    // intermediate]` matmuls. Per the PR goal: per-layer gate+up was ~6.3 ms
+    // vs a ~2.5 ms compute roof, because the launch / weight-stream cost was
+    // doubled across the pair. Gated identically to the Marlin/LoRA-aware
+    // branches above — those callers still need the standalone projections.
+    let (gate, up): (Tensor, Tensor) = {
+        #[cfg(feature = "cuda")]
+        {
+            let mut fused = None;
+            if !has_mlp_gate_up_lora && !has_marlin && !cuda_fused_mlp_gate_up_prefill_disabled() {
+                if let Some(gate_up_proj_t) = mlp.gate_up_proj_t.as_ref() {
+                    if x.dtype() == DType::BF16
+                        && !x.track_op()
+                        && matches!(x.device(), Device::Cuda(_))
+                        && gate_up_proj_t.dtype() == DType::BF16
+                        && !gate_up_proj_t.track_op()
+                        && matches!(gate_up_proj_t.device(), Device::Cuda(_))
+                        && gate_up_proj_t.is_contiguous()
+                    {
+                        if let (Ok(g_dim), Ok(u_dim)) =
+                            (mlp.gate_proj_t.dim(1), mlp.up_proj_t.dim(1))
+                        {
+                            let gu_dims = gate_up_proj_t.dims();
+                            if gu_dims.len() == 2 && gu_dims[1] == g_dim + u_dim {
+                                let stage_profile =
+                                    start_mlp_stage_profile(profile_device, profile_context)?;
+                                let gate_up = {
+                                    kiln_nvtx::range!(c"kiln/mlp/gate_up_fused_prefill");
+                                    broadcast_matmul_cpu_compatible(x, gate_up_proj_t).context(
+                                        "cuda fused MLP gate+up prefill matmul",
+                                    )?
+                                };
+                                finish_mlp_stage_profile(
+                                    profile_device,
+                                    profile_context,
+                                    "gate_up_fused_prefill",
+                                    seq_len,
+                                    stage_profile,
+                                )?;
+                                // narrow() produces a non-contiguous strided
+                                // view; contiguous() materializes the halves
+                                // so the downstream fused silu*mul / metal
+                                // gemv kernels (which gate on
+                                // `is_contiguous()`) keep their fast path.
+                                // Without this the silu+mul splits into two
+                                // separate kernel launches, eating most of
+                                // the matmul-fusion win.
+                                let g = gate_up
+                                    .narrow(2, 0, g_dim)?
+                                    .contiguous()
+                                    .context("cuda fused MLP gate split contiguous")?;
+                                let u = gate_up
+                                    .narrow(2, g_dim, u_dim)?
+                                    .contiguous()
+                                    .context("cuda fused MLP up split contiguous")?;
+                                fused = Some((g, u));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((g, u)) = fused {
+                (g, u)
+            } else {
+                swiglu_ffn_split_gate_up(
+                    backend,
+                    x,
+                    mlp,
+                    lora_layer,
+                    lora_scale,
+                    use_metal_decode_gemv,
+                    profile_device,
+                    profile_context,
+                    seq_len,
+                )?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            swiglu_ffn_split_gate_up(
+                backend,
+                x,
+                mlp,
+                lora_layer,
+                lora_scale,
+                use_metal_decode_gemv,
+                profile_device,
+                profile_context,
+                seq_len,
+            )?
+        }
     };
-    finish_mlp_stage_profile(
-        profile_device,
-        profile_context,
-        "gate_proj",
-        seq_len,
-        stage_profile,
-    )?;
-    // x @ up_proj_t -> [batch, seq_len, intermediate_size]
-    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
-    let up = {
-        kiln_nvtx::range!(c"kiln/mlp/up");
-        mlp_proj_forward_decode_if(
-            backend,
-            use_metal_decode_gemv,
-            x,
-            &mlp.up_proj_t,
-            mlp.up_proj_marlin.as_ref(),
-            lora_layer.and_then(|l| l.up_proj.as_ref()),
-            lora_scale,
-        )?
-    };
-    finish_mlp_stage_profile(
-        profile_device,
-        profile_context,
-        "up_proj",
-        seq_len,
-        stage_profile,
-    )?;
     let hidden = {
         #[cfg(feature = "metal")]
         {
@@ -16699,6 +16856,7 @@ mod tests {
             gate_proj_t: zero_proj_t.clone(),
             up_proj_t: zero_proj_t.clone(),
             down_proj_t: zero_proj_t,
+            gate_up_proj_t: None,
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
@@ -16765,6 +16923,7 @@ mod tests {
             gate_proj_t: zero_proj_t.clone(),
             up_proj_t: zero_proj_t.clone(),
             down_proj_t: zero_proj_t,
+            gate_up_proj_t: None,
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
@@ -17846,6 +18005,7 @@ mod tests {
             gate_proj_t: gate_t,
             up_proj_t: up_t,
             down_proj_t: down_t,
+            gate_up_proj_t: None,
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
@@ -17878,6 +18038,7 @@ mod tests {
             gate_proj_t: gate_t,
             up_proj_t: up_t,
             down_proj_t: down_t,
+            gate_up_proj_t: None,
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
@@ -17892,6 +18053,140 @@ mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    /// Parity test for the CUDA prefill fused `gate_up_proj_t` GEMM.
+    ///
+    /// The fast path replaces two `[B*T, hidden] @ [hidden, intermediate]`
+    /// matmuls with one `[B*T, hidden] @ [hidden, 2*intermediate]` GEMM and
+    /// slices gate/up halves out of the result. This test asserts the
+    /// algebraic identity that drives bit-equivalence: concatenating gate_t
+    /// and up_t along the output dim and matmul'ing once, then narrowing,
+    /// produces the same tensors element-for-element as the two separate
+    /// matmuls. Verified on CPU here so the property holds even without a
+    /// CUDA device — the actual CUDA path uses the exact same broadcast
+    /// matmul helper (`broadcast_matmul_cpu_compatible` →
+    /// `matmul_no_broadcast_copy`), so any drift would have to come from
+    /// cuBLAS's choice of algorithm for different output widths.
+    #[test]
+    fn test_fused_gate_up_proj_matches_split_path() -> Result<()> {
+        let device = Device::Cpu;
+        let batch = 2usize;
+        let seq_len = 7usize;
+        let hidden = 16usize;
+        let intermediate = 24usize;
+
+        // BF16 → CPU promotes to F32 inside broadcast_matmul_cpu_compatible
+        // so all operands here use F32 directly: bit-exact comparison is
+        // meaningful, the device-specific BF16 path is exercised by the
+        // existing real-model integration tests.
+        let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), &device)?;
+        let gate_t = Tensor::randn(0.0_f32, 0.05, (hidden, intermediate), &device)?
+            .contiguous()?;
+        let up_t = Tensor::randn(0.0_f32, 0.05, (hidden, intermediate), &device)?
+            .contiguous()?;
+        let gate_up_t = Tensor::cat(&[&gate_t, &up_t], candle_core::D::Minus1)?
+            .contiguous()?;
+
+        let gate_split = broadcast_matmul_cpu_compatible(&x, &gate_t)?;
+        let up_split = broadcast_matmul_cpu_compatible(&x, &up_t)?;
+
+        let gate_up = broadcast_matmul_cpu_compatible(&x, &gate_up_t)?;
+        let gate_fused = gate_up.narrow(2, 0, intermediate)?;
+        let up_fused = gate_up.narrow(2, intermediate, intermediate)?;
+
+        // CPU F32 matmul is deterministic — assert bit-identical here. The
+        // narrow-into-halves of [B, T, 2I] must equal the two standalone
+        // [B, T, I] matmuls element-for-element.
+        let gate_split_vec = gate_split.flatten_all()?.to_vec1::<f32>()?;
+        let gate_fused_vec = gate_fused.flatten_all()?.to_vec1::<f32>()?;
+        let up_split_vec = up_split.flatten_all()?.to_vec1::<f32>()?;
+        let up_fused_vec = up_fused.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(gate_split_vec.len(), gate_fused_vec.len());
+        for (i, (a, b)) in gate_split_vec
+            .iter()
+            .zip(gate_fused_vec.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "gate parity bit-mismatch at index {i}: split={a} fused={b}"
+            );
+        }
+        for (i, (a, b)) in up_split_vec.iter().zip(up_fused_vec.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "up parity bit-mismatch at index {i}: split={a} fused={b}"
+            );
+        }
+        Ok(())
+    }
+
+    /// End-to-end parity for `swiglu_ffn_impl_no_chunk`: populate
+    /// `gate_up_proj_t` on the FFN weights and confirm the SwiGLU output is
+    /// bit-identical to the same weights with `gate_up_proj_t = None`. CPU
+    /// path doesn't take the cuda-gated fused branch, so on CPU this is
+    /// effectively a regression guard that the field stays inert when the
+    /// device disqualifies the fast path. The CUDA-side parity is covered by
+    /// the algebraic identity in `test_fused_gate_up_proj_matches_split_path`.
+    #[test]
+    fn test_swiglu_with_fused_gate_up_cache_matches_legacy() -> Result<()> {
+        let device = Device::Cpu;
+        let batch = 1usize;
+        let seq_len = 3usize;
+        let hidden = 8usize;
+        let intermediate = 16usize;
+
+        let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), &device)?;
+        let gate = Tensor::randn(0.0_f32, 0.05, (intermediate, hidden), &device)?;
+        let up = Tensor::randn(0.0_f32, 0.05, (intermediate, hidden), &device)?;
+        let down = Tensor::randn(0.0_f32, 0.05, (hidden, intermediate), &device)?;
+        let gate_t = gate.t()?.contiguous()?;
+        let up_t = up.t()?.contiguous()?;
+        let down_t = down.t()?.contiguous()?;
+        let gate_up_t = Tensor::cat(&[&gate_t, &up_t], candle_core::D::Minus1)?
+            .contiguous()?;
+
+        let mlp_legacy = GpuFfnWeights {
+            gate_proj: gate.clone(),
+            up_proj: up.clone(),
+            down_proj: down.clone(),
+            gate_proj_t: gate_t.clone(),
+            up_proj_t: up_t.clone(),
+            down_proj_t: down_t.clone(),
+            gate_up_proj_t: None,
+            gate_proj_marlin: None,
+            up_proj_marlin: None,
+            down_proj_marlin: None,
+        };
+        let mlp_fused = GpuFfnWeights {
+            gate_proj: gate,
+            up_proj: up,
+            down_proj: down,
+            gate_proj_t: gate_t,
+            up_proj_t: up_t,
+            down_proj_t: down_t,
+            gate_up_proj_t: Some(gate_up_t),
+            gate_proj_marlin: None,
+            up_proj_marlin: None,
+            down_proj_marlin: None,
+        };
+
+        let legacy = swiglu_ffn(&x, &mlp_legacy, None)?;
+        let fused = swiglu_ffn(&x, &mlp_fused, None)?;
+        let legacy_vec = legacy.flatten_all()?.to_vec1::<f32>()?;
+        let fused_vec = fused.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(legacy_vec.len(), fused_vec.len());
+        for (i, (a, b)) in legacy_vec.iter().zip(fused_vec.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "swiglu fused/legacy bit-mismatch at index {i}: legacy={a} fused={b}"
+            );
+        }
         Ok(())
     }
 
@@ -18037,6 +18332,7 @@ mod tests {
             gate_proj,
             up_proj,
             down_proj,
+            gate_up_proj_t: None,
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
@@ -19171,6 +19467,7 @@ mod tests {
                 gate_proj_t,
                 up_proj_t,
                 down_proj_t,
+                gate_up_proj_t: None,
                 gate_proj_marlin: None,
                 up_proj_marlin: None,
                 down_proj_marlin: None,
@@ -19239,6 +19536,7 @@ mod tests {
                 gate_proj_t,
                 up_proj_t,
                 down_proj_t,
+                gate_up_proj_t: None,
                 gate_proj_marlin: None,
                 up_proj_marlin: None,
                 down_proj_marlin: None,
@@ -19314,6 +19612,7 @@ mod tests {
                 gate_proj_t: Tensor::zeros((hidden, 1), DType::F32, &device)?,
                 up_proj_t: Tensor::zeros((hidden, 1), DType::F32, &device)?,
                 down_proj_t: Tensor::zeros((1, hidden), DType::F32, &device)?,
+                gate_up_proj_t: None,
                 gate_proj_marlin: None,
                 up_proj_marlin: None,
                 down_proj_marlin: None,
@@ -19564,6 +19863,7 @@ mod tests {
                     gate_proj_t,
                     up_proj_t,
                     down_proj_t,
+                    gate_up_proj_t: None,
                     gate_proj_marlin: None,
                     up_proj_marlin: None,
                     down_proj_marlin: None,
@@ -20023,6 +20323,7 @@ mod tests {
                     gate_proj_t,
                     up_proj_t,
                     down_proj_t,
+                    gate_up_proj_t: None,
                     gate_proj_marlin: None,
                     up_proj_marlin: None,
                     down_proj_marlin: None,

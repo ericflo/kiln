@@ -5265,6 +5265,7 @@ mod tests {
                     gate_proj,
                     up_proj,
                     down_proj,
+                    gate_up_proj_t: None,
                     gate_proj_marlin: None,
                     up_proj_marlin: None,
                     down_proj_marlin: None,

@@ -98,6 +98,7 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
             gate_proj_t,
             up_proj_t,
             down_proj_t,
+            gate_up_proj_t: None,
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
