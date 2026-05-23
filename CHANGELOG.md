@@ -1,5 +1,34 @@
 # Kiln Server Changelog
 
+## Unreleased — vk-native OPD training entrypoint (#1075)
+
+Add `vk_native_opd_train`, the off-policy distillation (OPD) analogue
+of the existing `vk_native_sft_train` and `vk_native_grpo_train`. The
+trainer takes pre-masked `OpdPrompt`s + an `Arc<dyn LogitSource>`
+teacher, fetches top-K logprobs at the action positions, and drives
+either `vk_opd_train_step_with_state` (FullAttn-only) or
+`vk_recompute_opd_train_step_with_state` (hybrid Qwen3.5-4B) per step
+through Vulkan kernels and the existing AdamW state book. Adapter
+artifacts (`adapter_model.safetensors`, `adapter_config.json`),
+checkpoint cadence, and the training receipt all match the
+candle-path `opd_train`'s contract.
+
+The server's `run_opd` now picks between the candle path and the
+new VK path via `KILN_VK_NATIVE_OPD` (falls back to
+`KILN_VK_NATIVE_TRAINING` when unset, mirroring how
+`KILN_VK_NATIVE_GRPO` was wired up). V1 envelope is intentionally
+narrow: `training_mode = off_policy`, `objective = reverse_kl`,
+`loss = teacher_top_k`, `top_k ∈ {16, 32}`, no `base_adapter`, no
+ECHO env-CE — anything outside that envelope returns an explicit
+"use the candle path" error so misconfiguration is loud instead of
+silently wrong.
+
+The hybrid-GDN fast path (no recompute, single-pass forward+backward)
+is tracked as #1076 — the kernel for the OPD step exists but the
+single-pass plumbing matches the GRPO follow-up. For now hybrid
+models always go through layerwise reverse-recompute, which is the
+same speed/memory trade as `vk_recompute_train_step_with_state`.
+
 ## Unreleased — cuda_native: route SFT *and* GRPO through BackendRuntime (closes #1063)
 
 Closes #1063 (cuda_native_sft_train ~50x slower than `--trainer

@@ -14,6 +14,19 @@ validation on a real model + adapter run.
 **Ready to use** (gated behind `KILN_VK_NATIVE_TRAINING=1`):
 - `vk_native_sft_train` (multi-epoch loop, LoRA init, AdamW, adapter
   save in PEFT format) — wired into `kiln-server`'s training queue.
+- `vk_native_grpo_train` / `vk_native_grpo_train_jsonl` (GRPO loss
+  with on-the-fly reference-logprob recompute via frozen-base forward,
+  PPO-style ratio clipping, checkpoint cadence). Independently
+  toggleable via `KILN_VK_NATIVE_GRPO`.
+- `vk_native_opd_train` (off-policy distillation, reverse-KL against
+  teacher top-K logprobs, `top_k ∈ {16, 32}` via the fused
+  `vk_opd_top_k_reverse_kl_loss` kernel). Independently toggleable via
+  `KILN_VK_NATIVE_OPD`. V1 envelope: `training_mode = off_policy`,
+  `objective = reverse_kl`, `loss = teacher_top_k`; on-policy student
+  rollouts, cross-entropy, full-vocab KL, ECHO env-CE, and continual
+  `base_adapter` resume all stay on the candle path. See issue #1075
+  for the implementation roadmap and #1076 for the planned
+  non-recompute hybrid GDN follow-up.
 - FullAttn layer with Qwen3.5 specifics: per-head Q/K-norm,
   `attn_output_gate` (q_proj fused with [Q, gate], sigmoid·attn),
   RoPE precomputed from `rotary_inv_freq` + applied between QK-norm

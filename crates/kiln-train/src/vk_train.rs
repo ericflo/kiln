@@ -44,8 +44,9 @@ use std::sync::Arc;
 
 use crate::trainer::{ProgressCallback, TrainingProgress, tokenize_for_training};
 use crate::{
-    AdvantageMode, GrpoConfig, GrpoGroup, IsLevel, KlEstimator, LossAggregation, Optimizer,
-    ReferencePolicy, SftConfig, SftExample,
+    AdvantageMode, GrpoConfig, GrpoGroup, IsLevel, KlEstimator, LogitSource, LogprobBatch,
+    LossAggregation, OpdConfig, OpdLossGranularity, OpdObjective, OpdPrompt, OpdTrainingMode,
+    Optimizer, ReferencePolicy, SftConfig, SftExample,
 };
 
 struct TokenizedSftExample {
@@ -4791,6 +4792,572 @@ pub fn vk_native_grpo_train_jsonl(
     );
 
     Ok(output_dir)
+}
+
+// ---------------------------------------------------------------------------
+// Vulkan-native OPD training (issue #1075)
+// ---------------------------------------------------------------------------
+
+/// Vulkan-native OPD (off-policy distillation) training loop.
+///
+/// Mirrors `trainer::opd_train()`'s shape (same args + a teacher
+/// `Arc<dyn LogitSource>`) but executes the entire per-step forward →
+/// backward → AdamW chain on `VkTensor` parameters via the existing OPD
+/// step kernels (`vk_recompute_opd_train_step_with_state` for hybrid GDN
+/// models, `vk_opd_train_step_with_state` for FullAttn-only). The
+/// shaders themselves landed in the OPD reverse-KL milestone; this
+/// function wires them into a top-level training entry point so kiln's
+/// `KILN_VK_NATIVE_TRAINING=1` flag becomes uniformly applicable across
+/// SFT, GRPO, and OPD — closing the parity gap tracked in #1075.
+///
+/// # Supported config envelope (v1)
+///
+/// The v1 envelope is deliberately narrow to match the existing OPD
+/// step kernels' contract. Anything outside it bails with a clear error
+/// pointing the user back at the candle path:
+///
+/// * `training_mode == OffPolicy` — on-policy training samples fresh
+///   student rollouts via `sample_student_rollout`, which has no
+///   Vulkan-native counterpart yet.
+/// * `objective == ReverseKl` and `loss == TeacherTopK` — the VK kernel
+///   `vk_opd_top_k_reverse_kl_loss` does top-K reverse KL only.
+///   `CrossEntropy` / `SampledToken` / `FullVocab` need different math
+///   and don't map onto this kernel.
+/// * `top_k ∈ {16, 32}` — the kernel's supported K envelope.
+/// * `base_adapter` unset — loading prior LoRA params into VK tensors
+///   needs the same plumbing the SFT path has but the OPD trainer
+///   doesn't share it yet.
+/// * `echo` unset — the VK-native OPD step kernels don't have an
+///   integrated ECHO env-CE term (GRPO's `vk_recompute_grpo_train_step_with_state`
+///   does, via `VkEchoStepParams`; the analogous parameter on the OPD
+///   step is a follow-up).
+///
+/// # Step kernel selection
+///
+/// Mirrors `vk_native_grpo_train`'s structure: hybrid GDN models go
+/// through the layerwise reverse-recompute step
+/// (`vk_recompute_opd_train_step_with_state`) which auto-engages the
+/// boundary cache via `KILN_VK_RECOMPUTE_BOUNDARY_CACHE` / `MemAvailable
+/// - 4 GiB`. FullAttn-only models use the non-recompute
+/// `vk_opd_train_step_with_state` (full activation tape). A future
+/// follow-up (#1076) adds a non-recompute step for hybrid models so
+/// big-VRAM workloads can skip the recompute cost; until then hybrid
+/// GDN models always recompute.
+#[allow(clippy::too_many_arguments)]
+pub fn vk_native_opd_train(
+    prompts: &[OpdPrompt],
+    config: &OpdConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    teacher: Arc<dyn LogitSource>,
+    adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+) -> Result<PathBuf> {
+    let run_started = std::time::Instant::now();
+    anyhow::ensure!(!prompts.is_empty(), "vk_native_opd_train: no prompts");
+    if !VulkanDevice::probe() {
+        bail!(
+            "vk_native_opd_train: no Vulkan device available - unset \
+             KILN_VK_NATIVE_TRAINING / KILN_VK_NATIVE_OPD to use the candle path"
+        );
+    }
+
+    // Preflight: clamp the v1 envelope. Match `vk_native_grpo_train`'s
+    // shape — fail fast with an explicit "use the candle path" pointer
+    // rather than silently producing wrong gradients.
+    if !matches!(config.training_mode, OpdTrainingMode::OffPolicy) {
+        bail!(
+            "vk-native OPD only supports `training_mode = off_policy` in v1 \
+             (#1075). For on-policy student-rollout OPD use the candle path \
+             (unset KILN_VK_NATIVE_TRAINING / KILN_VK_NATIVE_OPD) or set \
+             training_mode = off_policy."
+        );
+    }
+    if !matches!(config.objective, OpdObjective::ReverseKl) {
+        bail!(
+            "vk-native OPD only supports `objective = reverse_kl` in v1 \
+             (#1075). The VK kernel `vk_opd_top_k_reverse_kl_loss` does \
+             top-K reverse KL only. For `cross_entropy` use the candle path."
+        );
+    }
+    if !matches!(config.loss, OpdLossGranularity::TeacherTopK) {
+        bail!(
+            "vk-native OPD only supports `loss = teacher_top_k` in v1 \
+             (#1075). For `sampled_token` or `full_vocab` use the candle \
+             path."
+        );
+    }
+    if config.top_k != 16 && config.top_k != 32 {
+        bail!(
+            "vk-native OPD requires `top_k` ∈ {{16, 32}} (got {}). The VK \
+             kernel `vk_opd_top_k_reverse_kl_loss` is specialised for those \
+             two support sizes.",
+            config.top_k
+        );
+    }
+    if config.base_adapter.is_some() {
+        bail!(
+            "vk-native OPD does not yet support `base_adapter` (#1075 v1). \
+             For continual-learning resume from a prior adapter, use the \
+             candle path."
+        );
+    }
+    if config.echo.is_some() {
+        bail!(
+            "vk-native OPD does not yet support the ECHO env-CE term \
+             (#1075 v1). For trajectory-mode OPD with ECHO use the candle \
+             path; tracked as a follow-up to the VK OPD step kernel."
+        );
+    }
+
+    let effective_seed = config.seed.unwrap_or_else(|| {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x0fd0_5eed)
+    });
+    let alpha_over_rank =
+        crate::lora_scaling::alpha_over_rank(config.lora_rank, config.lora_alpha).ok();
+
+    // Validate teacher capabilities now so we fail before the
+    // first (expensive) `fetch_logprobs` round-trip.
+    let teacher_caps = teacher.capabilities();
+    if config.top_k > teacher_caps.max_top_k {
+        bail!(
+            "vk-native OPD: requested top_k={} exceeds teacher {:?} max_top_k={}",
+            config.top_k,
+            teacher_caps.teacher_id,
+            teacher_caps.max_top_k
+        );
+    }
+    let resolved_top_k = config.top_k;
+
+    let vk_device = Arc::new(
+        VulkanDevice::new().context("vk_native_opd_train: failed to create Vulkan device")?,
+    );
+
+    let upload_start = std::time::Instant::now();
+    tracing::info!("uploading frozen model weights into vk-native OPD tensors");
+    let vk_weights = VkModelWeights::from_gpu_weights(weights, model_config, &vk_device)
+        .context("vk_native_opd_train: VkModelWeights::from_gpu_weights")?;
+    tracing::info!(
+        elapsed_ms = upload_start.elapsed().as_millis() as u64,
+        "vk-native OPD frozen model weights ready"
+    );
+
+    let lora_layers = vk_init_lora_layers(
+        &vk_device,
+        &vk_weights,
+        model_config,
+        config.lora_rank,
+        config.lora_alpha,
+        effective_seed,
+    )?;
+    let mut adamw = allocate_adamw_state(&vk_device, &lora_layers)?;
+    let cfg = VkAdamWConfig {
+        lr: config.learning_rate as f32,
+        ..Default::default()
+    };
+    let num_gdn_layers = vk_count_gdn_layers(&vk_weights);
+    let needs_state = num_gdn_layers > 0;
+
+    // Tokenize every prompt up front — same shape as the candle path
+    // (`opd_train` at `opd.rs:2190`). Skip prompts that produce no
+    // supervised action tokens; their teacher query would have no
+    // active positions and the step kernel would bail.
+    let tokenize_start = std::time::Instant::now();
+    let mut tokenized: Vec<crate::opd::TokenizedOpdPrompt> = Vec::with_capacity(prompts.len());
+    let mut filtered = 0usize;
+    for (idx, prompt) in prompts.iter().enumerate() {
+        match crate::opd::tokenize_opd_prompt_for_training(prompt, tokenizer, config.echo.as_ref())
+        {
+            Ok(t) => {
+                if !t.action_mask.iter().any(|&m| m) {
+                    tracing::warn!(
+                        prompt_idx = idx,
+                        "vk-native OPD: skipping prompt with no action tokens"
+                    );
+                    filtered += 1;
+                    continue;
+                }
+                if t.input_ids.len() < 2 {
+                    tracing::warn!(
+                        prompt_idx = idx,
+                        len = t.input_ids.len(),
+                        "vk-native OPD: skipping prompt with <2 tokens (recompute step requires >=2)"
+                    );
+                    filtered += 1;
+                    continue;
+                }
+                tokenized.push(t);
+            }
+            Err(e) => {
+                tracing::warn!(prompt_idx = idx, error = %e, "vk-native OPD: skipping prompt");
+                filtered += 1;
+            }
+        }
+    }
+    if tokenized.is_empty() {
+        bail!(
+            "vk_native_opd_train: every prompt was filtered during tokenization \
+             (no action tokens or <2-token prompts)"
+        );
+    }
+    tracing::info!(
+        prompts_total = prompts.len(),
+        prompts_trained = tokenized.len(),
+        prompts_filtered = filtered,
+        elapsed_ms = tokenize_start.elapsed().as_millis() as u64,
+        "vk-native OPD tokenization complete"
+    );
+
+    let mut data_stats = crate::train_receipt::DataStatsReceipt {
+        examples_read: prompts.len(),
+        examples_filtered: filtered,
+        examples_trained: tokenized.len().saturating_mul(config.epochs.max(1)),
+        ..Default::default()
+    };
+    let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
+
+    tracing::info!(
+        num_prompts = tokenized.len(),
+        epochs = config.epochs.max(1),
+        top_k = resolved_top_k,
+        teacher = %teacher_caps.teacher_id,
+        lr = config.learning_rate,
+        rank = config.lora_rank,
+        alpha = config.lora_alpha,
+        adapter_name,
+        "starting vk-native OPD training"
+    );
+
+    let epochs = config.epochs.max(1);
+    let total_steps = epochs.saturating_mul(tokenized.len());
+    let mut optimizer_step = 0u32;
+    let mut global_step = 0usize;
+    let mut last_loss = 0.0f32;
+
+    for epoch in 0..epochs {
+        let mut epoch_loss = 0.0f32;
+        let mut epoch_steps = 0usize;
+        for (prompt_idx, t_prompt) in tokenized.iter().enumerate() {
+            global_step += 1;
+            optimizer_step += 1;
+            let step_started = std::time::Instant::now();
+
+            // Active positions: indices into input_ids where the student
+            // is supervised. Off-policy comes pre-masked via
+            // `tokenize_opd_prompt_for_training`'s action_mask (same
+            // contract `opd_train`'s off-policy branch uses at
+            // `opd.rs:2539`).
+            let active_positions: Vec<usize> = t_prompt
+                .action_mask
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &m)| if m { Some(i) } else { None })
+                .collect();
+            if active_positions.is_empty() {
+                // Should be unreachable since we filtered above, but
+                // defend against teacher / mask drift between
+                // tokenization and step time.
+                tracing::warn!(
+                    prompt_idx,
+                    "vk-native OPD: prompt has no active positions at step time"
+                );
+                continue;
+            }
+
+            // Query teacher for top-K logprobs at the active positions.
+            // Match the candle path's `opd_step_loss` shape exactly so a
+            // future parity test against `opd_train` compares apples to
+            // apples on the same teacher contract.
+            let batch = teacher
+                .fetch_logprobs(&t_prompt.input_ids, &active_positions, Some(resolved_top_k))
+                .with_context(|| {
+                    format!(
+                        "vk-native OPD: fetch_logprobs from teacher {:?} \
+                         (prompt {}, {} active positions, top_k={})",
+                        teacher_caps.teacher_id,
+                        prompt_idx,
+                        active_positions.len(),
+                        resolved_top_k,
+                    )
+                })?;
+            let topk = match batch {
+                LogprobBatch::TopK(t) => t,
+                LogprobBatch::FullVocab { .. } => bail!(
+                    "vk-native OPD: teacher returned full-vocab logprobs but the \
+                     VK kernel requires top-K. Use a teacher that supports top-K \
+                     responses or switch to the candle path."
+                ),
+            };
+            anyhow::ensure!(
+                topk.top_k == resolved_top_k,
+                "vk-native OPD: teacher returned top_k {} but expected {}",
+                topk.top_k,
+                resolved_top_k
+            );
+            let expected_lpq = active_positions.len() * resolved_top_k;
+            anyhow::ensure!(
+                topk.indices.len() == expected_lpq && topk.logprobs.len() == expected_lpq,
+                "vk-native OPD: teacher returned {} indices / {} logprobs but \
+                 expected {} (active_positions={} × top_k={})",
+                topk.indices.len(),
+                topk.logprobs.len(),
+                expected_lpq,
+                active_positions.len(),
+                resolved_top_k,
+            );
+
+            // Convert to the VK kernel's u32 active_rows shape.
+            let active_rows: Vec<u32> = active_positions.iter().map(|&p| p as u32).collect();
+
+            // Account token counts (action tokens supervised by the
+            // teacher; env tokens stay 0 in v1 since ECHO is rejected
+            // up-front).
+            token_counts.action_tokens = token_counts
+                .action_tokens
+                .saturating_add(active_positions.len() as u64);
+            token_counts.context_tokens = token_counts.context_tokens.saturating_add(
+                (t_prompt.input_ids.len().saturating_sub(active_positions.len())) as u64,
+            );
+
+            // Dispatch the per-step kernel. Hybrid (Qwen3.5-4B-style)
+            // models always go through layerwise reverse-recompute —
+            // see #1076 for the future non-recompute fast path.
+            let loss = if needs_state {
+                vk_recompute_opd_train_step_with_state(
+                    &vk_weights,
+                    &lora_layers,
+                    &t_prompt.input_ids,
+                    &active_rows,
+                    &topk.indices,
+                    &topk.logprobs,
+                    resolved_top_k,
+                    model_config,
+                    num_gdn_layers,
+                    &mut adamw,
+                    &cfg,
+                    config.optimizer,
+                    optimizer_step,
+                )
+                .with_context(|| {
+                    format!(
+                        "vk_recompute_opd_train_step_with_state (epoch {}, prompt {})",
+                        epoch + 1,
+                        prompt_idx + 1
+                    )
+                })?
+            } else {
+                vk_opd_train_step_with_state(
+                    &vk_weights,
+                    &lora_layers,
+                    &t_prompt.input_ids,
+                    &active_rows,
+                    &topk.indices,
+                    &topk.logprobs,
+                    resolved_top_k,
+                    None,
+                    &mut adamw,
+                    &cfg,
+                    config.optimizer,
+                    optimizer_step,
+                )
+                .with_context(|| {
+                    format!(
+                        "vk_opd_train_step_with_state (epoch {}, prompt {})",
+                        epoch + 1,
+                        prompt_idx + 1
+                    )
+                })?
+            };
+
+            anyhow::ensure!(
+                loss.is_finite(),
+                "vk_native_opd_train: non-finite loss {loss} at optimizer step {optimizer_step}"
+            );
+            epoch_loss += loss;
+            epoch_steps += 1;
+            last_loss = loss;
+
+            let step_ms = step_started.elapsed().as_millis();
+            tracing::info!(
+                epoch = epoch + 1,
+                step = global_step,
+                total_steps,
+                seq_len = t_prompt.input_ids.len(),
+                active_positions = active_positions.len(),
+                loss = format!("{loss:.6}"),
+                step_ms,
+                "vk-native OPD step"
+            );
+
+            if let Some(ref cb) = progress_cb {
+                cb(TrainingProgress {
+                    epoch: epoch + 1,
+                    total_epochs: epochs,
+                    step: global_step,
+                    total_steps,
+                    loss: loss as f64,
+                    progress: global_step as f32 / total_steps.max(1) as f32,
+                });
+            }
+
+            if let Some(interval) = config.checkpoint_interval {
+                if interval > 0
+                    && global_step % interval == 0
+                    && global_step < total_steps
+                {
+                    let ckpt_dir =
+                        adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                    std::fs::create_dir_all(&ckpt_dir).with_context(|| {
+                        format!("create vk-native OPD checkpoint dir {}", ckpt_dir.display())
+                    })?;
+                    if let Err(err) = save_vk_lora_adapter(
+                        &lora_layers,
+                        config.lora_rank,
+                        config.lora_alpha,
+                        &ckpt_dir.join("adapter_model.safetensors"),
+                    ) {
+                        tracing::warn!(step = global_step, error = %err, "save vk-native OPD checkpoint failed");
+                    }
+                    let _ = write_vk_adapter_config(&ckpt_dir, config.lora_rank, config.lora_alpha);
+                }
+            }
+        }
+        if epoch_steps > 0 {
+            tracing::info!(
+                epoch = epoch + 1,
+                avg_loss = format!("{:.6}", epoch_loss / epoch_steps as f32),
+                "vk-native OPD epoch complete"
+            );
+        }
+    }
+
+    data_stats.examples_trained = tokenized.len().saturating_mul(epochs);
+
+    let output_dir = adapter_dir.join(adapter_name);
+    std::fs::create_dir_all(&output_dir).with_context(|| {
+        format!(
+            "vk_native_opd_train: create adapter dir {}",
+            output_dir.display()
+        )
+    })?;
+    save_vk_lora_adapter(
+        &lora_layers,
+        config.lora_rank,
+        config.lora_alpha,
+        &output_dir.join("adapter_model.safetensors"),
+    )?;
+    write_vk_adapter_config(&output_dir, config.lora_rank, config.lora_alpha)?;
+
+    write_vk_opd_train_receipt_best_effort(
+        adapter_name,
+        model_config,
+        tokenizer,
+        config,
+        &output_dir,
+        crate::train_receipt::TrainingDataReceipt {
+            source: "inline_opd_prompts".to_string(),
+            path: None,
+            sha256: crate::train_receipt::sha256_json_serializable(&prompts),
+        },
+        data_stats,
+        token_counts,
+        run_started.elapsed().as_millis() as u64,
+        alpha_over_rank,
+        Some(last_loss as f64),
+        Some(effective_seed),
+    );
+
+    tracing::info!(
+        adapter = adapter_name,
+        path = %output_dir.display(),
+        final_loss = format!("{last_loss:.6}"),
+        "vk-native OPD training complete"
+    );
+
+    Ok(output_dir)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_vk_opd_train_receipt_best_effort(
+    adapter_name: &str,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    config: &OpdConfig,
+    output_dir: &Path,
+    training_data: crate::train_receipt::TrainingDataReceipt,
+    data: crate::train_receipt::DataStatsReceipt,
+    token_counts: crate::train_receipt::TokenCountReceipt,
+    wall_clock_ms: u64,
+    alpha_over_rank: Option<f32>,
+    final_opd_loss: Option<f64>,
+    seed: Option<u64>,
+) {
+    let mut receipt = crate::train_receipt::TrainReceipt::new(
+        adapter_name,
+        "vk_opd",
+        model_config,
+        tokenizer,
+        crate::train_receipt::HyperparameterReceipt {
+            mode: "vk_opd".to_string(),
+            rank: config.lora_rank,
+            alpha: config.lora_alpha,
+            alpha_over_rank,
+            learning_rate: config.learning_rate,
+            epochs: config.epochs.max(1),
+            seed,
+        },
+        serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
+    );
+    receipt.training_data = training_data;
+    receipt.opd = Some(crate::train_receipt::OpdReceipt {
+        training_mode: serde_json::to_value(config.training_mode)
+            .ok()
+            .and_then(|v| v.as_str().map(ToString::to_string))
+            .unwrap_or_else(|| "off_policy".to_string()),
+        objective: serde_json::to_value(config.objective)
+            .ok()
+            .and_then(|v| v.as_str().map(ToString::to_string))
+            .unwrap_or_else(|| "reverse_kl".to_string()),
+        loss_granularity: serde_json::to_value(config.loss)
+            .ok()
+            .and_then(|v| v.as_str().map(ToString::to_string))
+            .unwrap_or_else(|| "teacher_top_k".to_string()),
+        teacher_id: None,
+        top_k: Some(config.top_k),
+        samples_per_prompt: config.samples_per_prompt,
+        action_tokens: token_counts.action_tokens,
+        env_tokens: token_counts.env_tokens,
+        echo_combined: false,
+        echo_lambda: None,
+        initial_opd_loss: None,
+        final_opd_loss,
+    });
+    receipt.echo = crate::train_receipt::EchoReceipt::disabled();
+    receipt.adapters.output = crate::train_receipt::adapter_file_receipt(Some(output_dir));
+    receipt.data = data;
+    receipt.token_counts = token_counts;
+    receipt.runtime.wall_clock_ms = wall_clock_ms;
+    crate::train_receipt::log_training_token_counts("vk_opd", &receipt.token_counts);
+    receipt.lora_delta_norms = crate::train_receipt::lora_delta_norm_summary_from_adapter(
+        output_dir,
+        alpha_over_rank.unwrap_or(0.0) as f64,
+    )
+    .unwrap_or_default();
+    crate::train_receipt::warn_lora_delta_norms(
+        "vk_opd",
+        adapter_name,
+        &receipt.lora_delta_norms,
+        alpha_over_rank.unwrap_or(0.0) as f64,
+    );
+    if let Err(err) = receipt.write_to_adapter_dir(output_dir) {
+        tracing::warn!(adapter = adapter_name, error = %err, "failed to write vk-native OPD train receipt");
+    }
 }
 
 /// Vulkan-native SFT training loop.
