@@ -206,6 +206,24 @@ impl Parameter {
         self.backward_storage.as_ref()
     }
 
+    /// Replace the backward storage (master tensor) in place. Used by
+    /// optimizer steps after computing the new master values; the
+    /// caller is responsible for constructing `new` with the same
+    /// shape and dtype as the existing master.
+    ///
+    /// **Preserves [`Self::tensor_id`]** per anti-pattern 11 — the
+    /// updated master is the same logical parameter at a new step
+    /// boundary, not a fresh parameter. Downstream optimizer state
+    /// keyed on `tensor_id` (AdamW moments, SGD velocities, etc.)
+    /// survives.
+    ///
+    /// `None` argument drops the backward storage entirely (used by
+    /// LoRA-only frozen-trunk parameters).
+    pub fn replace_backward_storage(&mut self, new: Option<Tensor>) {
+        self.backward_storage = new;
+        // tensor_id intentionally unchanged.
+    }
+
     /// Borrow the transposed cache if present.
     pub fn transposed_cache(&self) -> Option<&Tensor> {
         self.transposed_cache.as_ref()
@@ -381,6 +399,52 @@ mod tests {
         p.replace_forward_storage(new_fwd);
         assert_eq!(p.tensor_id(), original_id);
         assert_eq!(p.forward_storage().kind_name(), "marlin");
+    }
+
+    #[test]
+    fn replace_backward_preserves_tensor_id() {
+        // Anti-pattern 11 contract for the backward (master) slot.
+        // After an optimizer step swaps the master, the parameter's
+        // `tensor_id` must stay the same so optimizer state keyed on
+        // it (AdamW moments / SGD velocities) doesn't orphan.
+        let fwd = ForwardStorage::Plain(Tensor::zeros_cpu(vec![4], DType::F32));
+        let master = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
+        let mut p = Parameter::trainable(fwd, master, AmpPolicy::fp32_reference());
+        let original_id = p.tensor_id();
+        assert_eq!(
+            p.backward_storage().map(|t| t.element_count()),
+            Some(4),
+            "trainable Parameter must carry a master"
+        );
+
+        // Swap to a different-content master (simulating one step of
+        // SGD or AdamW that mutated all entries).
+        let new_master = Tensor::from_slice(&[10.0f32, 20.0, 30.0, 40.0], vec![4]).unwrap();
+        let new_master_id = new_master.id();
+        assert_ne!(
+            new_master_id, original_id,
+            "fresh Tensor must have a fresh TensorId"
+        );
+        p.replace_backward_storage(Some(new_master));
+
+        // Parameter tensor_id is unchanged; backward_storage now
+        // reports the new content.
+        assert_eq!(p.tensor_id(), original_id);
+        assert!(p.backward_storage().is_some());
+    }
+
+    #[test]
+    fn replace_backward_with_none_drops_master() {
+        // Used by LoRA-only flows that freeze the trunk and only train
+        // the delta.
+        let fwd = ForwardStorage::Plain(Tensor::zeros_cpu(vec![4], DType::F32));
+        let master = Tensor::zeros_cpu(vec![4], DType::F32);
+        let mut p = Parameter::trainable(fwd, master, AmpPolicy::fp32_reference());
+        let id = p.tensor_id();
+        assert!(p.backward_storage().is_some());
+        p.replace_backward_storage(None);
+        assert!(p.backward_storage().is_none());
+        assert_eq!(p.tensor_id(), id);
     }
 
     #[test]
