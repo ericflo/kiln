@@ -12,6 +12,7 @@ members = [
     "crates/kiln-model",
     "crates/kiln-nvtx",
     "crates/kiln-opd-loss-kernel",
+    "crates/kiln-param",
     "crates/kiln-rmsnorm-kernel",
     "crates/kiln-scheduler",
     "crates/kiln-server",
@@ -35,6 +36,7 @@ default-members = [
     "crates/kiln-model",
     "crates/kiln-nvtx",
     "crates/kiln-opd-loss-kernel",
+    "crates/kiln-param",
     "crates/kiln-scheduler",
     "crates/kiln-server",
     "crates/kiln-tensor",
@@ -124,6 +126,7 @@ tempfile = "3"
 kiln-core = { path = "crates/kiln-core" }
 kiln-eval = { path = "crates/kiln-eval" }
 kiln-model = { path = "crates/kiln-model" }
+kiln-param = { path = "crates/kiln-param" }
 kiln-scheduler = { path = "crates/kiln-scheduler" }
 kiln-server = { path = "crates/kiln-server" }
 kiln-tensor = { path = "crates/kiln-tensor" }
