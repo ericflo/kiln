@@ -34,8 +34,8 @@
 use std::sync::Arc;
 
 use crate::{
-    cpu_zeros, CpuStorage, DType, Device, Element, Error, Layout, Result, Storage, StorageBackend,
-    TensorId,
+    cpu_zeros, profile, CpuStorage, DType, Device, Element, Error, Layout, Result, Storage,
+    StorageBackend, TensorId,
 };
 
 /// kiln-tensor's production tensor handle.
@@ -216,19 +216,26 @@ impl Tensor {
         })
     }
 
-    /// Produce a contiguous copy of this tensor. **Always allocates** —
-    /// this is the "explicit `contiguous()` that logs" call site per
-    /// anti-pattern 2 (the copy-counter instrumentation lands in
-    /// Phase 1.x and reads this method's invocation count).
+    /// Produce a contiguous copy of this tensor. **Always allocates
+    /// when called on a non-contiguous tensor** (the fast path returns
+    /// the clone on already-contiguous inputs without a copy).
+    ///
+    /// This is the "explicit `contiguous()` that logs" call site per
+    /// anti-pattern 2 — the materializing branch bumps the
+    /// [`profile::contiguous_copy_count`](crate::profile::contiguous_copy_count)
+    /// counter so `bench-results/`'s "copies per token" metric stays
+    /// surfaced. Phase 9's bench-gate reads it.
     ///
     /// On CPU, materializes a fresh `CpuStorage` and walks the strided
     /// view. The CPU backend is the canonical reference; non-CPU
     /// backends override via `BackendRuntime::contiguous` once Phase
-    /// 1.5+ lands.
+    /// 1.x lands.
     pub fn contiguous(&self) -> Result<Self> {
         if self.is_contiguous() {
             return Ok(self.clone());
         }
+        // Anti-pattern 2: this is the materializing branch — count it.
+        profile::emit_contiguous_copy();
         if !self.device().is_cpu() {
             return Err(Error::Msg(format!(
                 "Tensor::contiguous: only CPU contiguous is implemented in Phase 1.5; \
@@ -391,6 +398,33 @@ mod tests {
         let c = t.contiguous().unwrap();
         // The clone optimization should preserve the storage Arc.
         assert!(Arc::ptr_eq(t.storage(), c.storage()));
+    }
+
+    #[test]
+    fn contiguous_emits_copy_counter_only_on_materializing_path() {
+        // anti-pattern 2 contract: the fast-path clone must NOT bump
+        // the counter; the materializing branch MUST.
+        //
+        // Serialize via a process-global mutex because the counter
+        // is shared across tests.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap();
+
+        crate::profile::reset_contiguous_copy_count();
+
+        // Fast path: contiguous tensor -> no copy emitted.
+        let t = Tensor::zeros_cpu(vec![3, 4], DType::F32);
+        let _c = t.contiguous().unwrap();
+        assert_eq!(crate::profile::contiguous_copy_count(), 0);
+
+        // Materializing path: transpose then contiguous -> one copy.
+        let v = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let t = Tensor::from_slice(&v, vec![2, 3]).unwrap();
+        let tt = t.transpose(0, 1).unwrap();
+        let _c = tt.contiguous().unwrap();
+        assert_eq!(crate::profile::contiguous_copy_count(), 1);
+
+        crate::profile::reset_contiguous_copy_count();
     }
 
     #[test]
