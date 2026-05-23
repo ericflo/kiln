@@ -939,6 +939,17 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_returns_none_when_vram_unknown() {
+        // Take the env lock + scrub the two override env vars so a
+        // parallel test that's mid-`set_var` can't make us return
+        // UserOverride via env before we reach the VRAM check. macOS CI
+        // reproducibly hit this on the parallel test interleave.
+        let _g = crate::env_flag::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
+            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+        }
         let unknown = GpuVramInfo {
             total_bytes: 0,
             source: VramSource::None,
@@ -953,6 +964,17 @@ mod tests {
         // 2 GiB after safety. We're under the 2 GiB cliff so the plan
         // should punt to UserOverride and let from_env's VRAM-only path
         // pick a conservative segment count.
+        //
+        // Same env isolation as the test above — scrub the overrides so
+        // a parallel test can't make us return UserOverride via env
+        // before we reach the headroom check.
+        let _g = crate::env_flag::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("KILN_GRAD_CHECKPOINT_SEGMENTS");
+            std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+        }
         let plan = recommended_checkpoint_plan(
             &vram(12),
             32,
