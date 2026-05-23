@@ -70,16 +70,45 @@ sequence of merged fixes was:
   converge to the generator weights); assert sign + magnitude band
   + non-zero movement.
 
+## `--gpu-smoke` follow-up (same pod, same day)
+
+Same lease re-acquired; ran the validate again with `--gpu-smoke`
+to exercise the release-mode CUDA build path.
+
+```
+bash scripts/runpod-substrate-validate.sh --gpu-smoke
+# step 3 of 3:
+KILN_CUDA_ARCHS=86 cargo build --release --features cuda --bin kiln-bench
+# Finished `release` profile [optimized] target(s) in 15m 56s
+# rc=0
+```
+
+- **Build time**: 15m 56s on A6000 (sccache disabled; first run on
+  fresh pod)
+- **Binary size**: 51 MB (`/workspace/kiln/target/release/kiln-bench`)
+- **Linkage**: `libcuda.so.1`, `libcurand.so.10`, `libcublas.so.12`,
+  `libcublasLt.so.12`
+- **Kernel `.o` counts per crate**: flash-attn 8, gdn-kernel 8,
+  rmsnorm-kernel 11, opd-loss-kernel 2, conv1d-kernel 2, marlin-gemm
+  2 (sm_86 only, per `KILN_CUDA_ARCHS=86`)
+- **`kiln-bench --help`**: runs cleanly; full bench CLI surface
+  intact (`--model-path`, `--paged`, `--latency-only`,
+  `--chat-template`, `--prompt-subset`, etc.).
+
+This is the canonical "the whole stack still compiles end-to-end
+with CUDA enabled" test. Phase 7 will preserve this contract while
+deleting the candle dependency.
+
 ## How to reproduce
 
 ```bash
 # From an acquired kiln pool pod (lease via `ce kiln-pod-acquire`):
 cd /workspace/kiln
 bash scripts/runpod-substrate-validate.sh
-```
 
-Add `--gpu-smoke` to also build the `--features cuda kiln-bench`
-binary (release mode, so nvcc memory footprint stays sane).
+# Or end-to-end CUDA build smoke:
+KILN_CUDA_ARCHS=86 bash scripts/runpod-substrate-validate.sh --gpu-smoke
+```
 
 The orchestrator wrapper in
 `scripts/runpod-validate-substrate-orchestrator.sh` does the
