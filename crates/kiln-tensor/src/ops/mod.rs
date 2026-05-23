@@ -54,6 +54,7 @@ pub mod losses;
 pub mod mask;
 pub mod matmul;
 pub mod max_min_axis;
+pub mod mha;
 pub mod norms;
 pub mod one_hot;
 pub mod outer;
@@ -110,6 +111,7 @@ pub use losses::{bce_with_logits, huber_loss, kl_div_log_probs, l1_loss, mse_los
 pub use mask::{causal_mask, masked_fill, MaskedFillOp};
 pub use matmul::{matmul, MatmulOp};
 pub use max_min_axis::{max_axis, min_axis, MinMaxKind};
+pub use mha::multi_head_attention;
 pub use norms::{frobenius_norm, mean_squared, vector_norm};
 pub use one_hot::one_hot;
 pub use outer::outer;
