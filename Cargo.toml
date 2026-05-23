@@ -13,6 +13,9 @@ members = [
     "crates/kiln-nvtx",
     "crates/kiln-autograd",
     "crates/kiln-graph",
+    "crates/kiln-graph-cuda",
+    "crates/kiln-graph-metal",
+    "crates/kiln-graph-vulkan",
     "crates/kiln-mps",
     "crates/kiln-opd-loss-kernel",
     "crates/kiln-optim",
@@ -44,6 +47,9 @@ default-members = [
     "crates/kiln-eval",
     "crates/kiln-flce-kernel",
     "crates/kiln-graph",
+    "crates/kiln-graph-cuda",
+    "crates/kiln-graph-metal",
+    "crates/kiln-graph-vulkan",
     "crates/kiln-model",
     "crates/kiln-mps",
     "crates/kiln-nvtx",
@@ -142,6 +148,9 @@ kiln-blas = { path = "crates/kiln-blas" }
 kiln-core = { path = "crates/kiln-core" }
 kiln-eval = { path = "crates/kiln-eval" }
 kiln-graph = { path = "crates/kiln-graph" }
+kiln-graph-cuda = { path = "crates/kiln-graph-cuda" }
+kiln-graph-metal = { path = "crates/kiln-graph-metal" }
+kiln-graph-vulkan = { path = "crates/kiln-graph-vulkan" }
 kiln-model = { path = "crates/kiln-model" }
 kiln-optim = { path = "crates/kiln-optim" }
 kiln-param = { path = "crates/kiln-param" }

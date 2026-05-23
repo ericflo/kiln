@@ -1,0 +1,25 @@
+[package]
+name = "kiln-graph-metal"
+description = "Metal CapturedGraph impl — wraps MTLIndirectCommandBuffer for the Phase 5 capture/replay surface."
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Per Phase 5 of #1082, kiln-graph-metal wraps
+# `metal::IndirectCommandBuffer` for the production capture/replay
+# path on macOS. Scaffold today; the real ICB wiring lifts the existing
+# Metal-side decode loop in `crates/kiln-model/src/backend/metal.rs`.
+#
+# Internal-only — no semver commitment.
+
+[dependencies]
+kiln-graph = { workspace = true }
+kiln-tensor = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+# Compiles the real metal-rs-backed capture pipeline. Without this
+# feature the crate exposes only the scaffold types.
+metal = []
