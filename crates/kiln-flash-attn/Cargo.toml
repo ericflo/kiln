@@ -16,6 +16,7 @@ half = "2"
 # call site at a time, and the candle path is deleted when no
 # call sites remain.
 kiln-tensor = { workspace = true, features = ["cuda"] }
+kiln-kt-bridge = { workspace = true }
 
 [build-dependencies]
 cc = "1"

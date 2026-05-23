@@ -20,7 +20,8 @@
 //! pattern.
 
 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-use kiln_tensor::{CudaStorage, DType as KtDType, StorageBackend, Tensor as KtTensor};
+use kiln_kt_bridge::BridgeError;
+use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 
 use crate::{
     kiln_flash_attn_bwd, kiln_flash_attn_fwd, kiln_flash_attn_fwd_paged_decode,
@@ -30,7 +31,8 @@ use crate::{
 
 /// Error type for the kiln-tensor-typed flash-attn surface. Stays
 /// independent of candle's error so Phase 7 can delete candle
-/// without rewriting this module.
+/// without rewriting this module. Carries the bridge error message
+/// when storage validation fails.
 #[derive(Debug)]
 pub enum FlashAttnError {
     Msg(String),
@@ -46,6 +48,12 @@ impl std::fmt::Display for FlashAttnError {
 
 impl std::error::Error for FlashAttnError {}
 
+impl From<BridgeError> for FlashAttnError {
+    fn from(e: BridgeError) -> Self {
+        FlashAttnError::Msg(e.message)
+    }
+}
+
 /// Borrow the kiln-tensor's [`CudaStorage`], returning a typed
 /// reference. Errors if the tensor isn't backed by CUDA, isn't
 /// contiguous, or has the wrong dtype.
@@ -54,23 +62,8 @@ fn cuda_storage_of<'a>(
     expected_dtype: KtDType,
     name: &'static str,
 ) -> Result<&'a CudaStorage, FlashAttnError> {
-    if t.dtype() != expected_dtype {
-        return Err(FlashAttnError::Msg(format!(
-            "kt-flash-attn: {name} must be {expected_dtype}, got {}",
-            t.dtype()
-        )));
-    }
-    if !t.is_contiguous() {
-        return Err(FlashAttnError::Msg(format!(
-            "kt-flash-attn: {name} must be contiguous (call .contiguous() first)"
-        )));
-    }
-    t.storage()
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .ok_or_else(|| {
-            FlashAttnError::Msg(format!("kt-flash-attn: {name} must be a CUDA tensor"))
-        })
+    let (st, _) = kiln_kt_bridge::cuda_storage_and_byte_offset(t, expected_dtype, name)?;
+    Ok(st)
 }
 
 /// `flash_attn_fwd` over `kiln_tensor::Tensor` operands.
@@ -116,45 +109,18 @@ pub fn flash_attn_fwd_kt(
         )));
     }
 
-    let q_st = cuda_storage_of(q, KtDType::BF16, "q")?;
-    let k_st = cuda_storage_of(k, KtDType::BF16, "k")?;
-    let v_st = cuda_storage_of(v, KtDType::BF16, "v")?;
+    let (q_st, q_off_bytes) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
+    let (k_st, k_off_bytes) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+    let (v_st, v_off_bytes) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
 
-    // All three operands must share the same CUDA device (cudarc
-    // pointers from different devices are not interchangeable).
-    let candle_device = q_st.candle_device().clone();
-    let device_index = q_st.device().index().unwrap_or(0);
+    // Output + softmax_lse allocated through the shared bridge.
+    let out_t = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, seqlen_q, num_heads, head_dim])?;
+    let lse_t = alloc_cuda_tensor(q_st, KtDType::F32, vec![b, num_heads, seqlen_q])?;
+    let out_cuda = kiln_kt_bridge::cuda_storage_of_output(&out_t);
+    let lse_cuda = kiln_kt_bridge::cuda_storage_of_output(&lse_t);
 
-    // Output + softmax_lse allocated through kiln-tensor's CUDA
-    // helpers. Shapes match the FFI contract exactly.
-    let n_out: usize = b * seqlen_q * num_heads * head_dim;
-    let n_lse: usize = b * num_heads * seqlen_q;
-
-    let out_storage =
-        kiln_tensor::cuda_zeros(candle_device.clone(), device_index, KtDType::BF16, n_out)
-            .map_err(|e| FlashAttnError::Msg(format!("kt-flash-attn: out alloc: {e}")))?;
-    let lse_storage =
-        kiln_tensor::cuda_zeros(candle_device.clone(), device_index, KtDType::F32, n_lse)
-            .map_err(|e| FlashAttnError::Msg(format!("kt-flash-attn: lse alloc: {e}")))?;
-
-    let out_cuda = out_storage
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .expect("cuda_zeros produced non-CUDA storage");
-    let lse_cuda = lse_storage
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .expect("cuda_zeros produced non-CUDA storage");
-
-    // Grab the CUDA stream from the device handle that allocated `q`.
-    let stream = candle_device.cuda_stream();
+    let stream = q_st.candle_device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
-
-    // Slice each operand by its layout's byte offset, then take the
-    // device pointer through the cudarc 0.19 stream-bound API.
-    let q_off_bytes = q.layout().start_offset() * KtDType::BF16.size_in_bytes();
-    let k_off_bytes = k.layout().start_offset() * KtDType::BF16.size_in_bytes();
-    let v_off_bytes = v.layout().start_offset() * KtDType::BF16.size_in_bytes();
 
     let q_slice = q_st.slice().slice(q_off_bytes..);
     let k_slice = k_st.slice().slice(k_off_bytes..);
@@ -192,56 +158,27 @@ pub fn flash_attn_fwd_kt(
         )));
     }
 
-    // Wrap each storage into a kiln-tensor with the appropriate shape.
-    let out_t = KtTensor::from_parts(
-        out_storage,
-        kiln_tensor::Layout::contiguous(vec![b, seqlen_q, num_heads, head_dim]),
-        kiln_tensor::TensorId::next(),
-    )
-    .map_err(|e| FlashAttnError::Msg(format!("kt-flash-attn: out wrap: {e}")))?;
-    let lse_t = KtTensor::from_parts(
-        lse_storage,
-        kiln_tensor::Layout::contiguous(vec![b, num_heads, seqlen_q]),
-        kiln_tensor::TensorId::next(),
-    )
-    .map_err(|e| FlashAttnError::Msg(format!("kt-flash-attn: lse wrap: {e}")))?;
     Ok((out_t, lse_t))
 }
 
 // ============================================================================
-// Internal helpers
+// Internal helpers — delegate to kiln-kt-bridge
 // ============================================================================
 
-/// Convert a kiln_tensor (validated CUDA + dtype) to a (CudaStorage, byte_offset)
-/// pair. The byte offset already includes `start_offset * dtype.size_in_bytes()`.
 fn cuda_storage_and_byte_offset<'a>(
     t: &'a KtTensor,
     expected_dtype: KtDType,
     name: &'static str,
 ) -> Result<(&'a CudaStorage, usize), FlashAttnError> {
-    let st = cuda_storage_of(t, expected_dtype, name)?;
-    let byte_off = t.layout().start_offset() * expected_dtype.size_in_bytes();
-    Ok((st, byte_off))
+    Ok(kiln_kt_bridge::cuda_storage_and_byte_offset(t, expected_dtype, name)?)
 }
 
-/// Allocate a fresh CUDA-backed `kiln_tensor::Tensor` of `dtype`,
-/// `shape`, on the same CUDA device as `device_source`.
 fn alloc_cuda_tensor(
     device_source: &CudaStorage,
     dtype: KtDType,
     shape: Vec<usize>,
 ) -> Result<KtTensor, FlashAttnError> {
-    let candle_device = device_source.candle_device().clone();
-    let device_index = device_source.device().index().unwrap_or(0);
-    let n_elements: usize = shape.iter().product();
-    let storage = kiln_tensor::cuda_zeros(candle_device, device_index, dtype, n_elements)
-        .map_err(|e| FlashAttnError::Msg(format!("kt-flash-attn: alloc {dtype:?} {shape:?}: {e}")))?;
-    KtTensor::from_parts(
-        storage,
-        kiln_tensor::Layout::contiguous(shape),
-        kiln_tensor::TensorId::next(),
-    )
-    .map_err(|e| FlashAttnError::Msg(format!("kt-flash-attn: alloc wrap: {e}")))
+    Ok(kiln_kt_bridge::alloc_cuda_tensor(device_source, dtype, shape)?)
 }
 
 // ============================================================================
