@@ -25,7 +25,7 @@ from pathlib import Path
 
 # Local + shared imports.
 sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib"))
 
 import rubric  # noqa: E402
 import task_scaffold  # noqa: E402

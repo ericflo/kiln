@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 # Make the shared lib importable for canonical pi → trajectory rendering.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib"))
 try:
     from pi_trajectory import session_to_trajectory  # type: ignore
 except ImportError:
