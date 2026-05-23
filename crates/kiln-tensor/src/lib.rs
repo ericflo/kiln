@@ -32,6 +32,7 @@ pub mod ops;
 pub mod profile;
 pub mod safetensors;
 mod storage;
+mod stream_planner;
 mod tensor;
 mod tensor_id;
 
@@ -54,6 +55,7 @@ pub use element::Element;
 pub use error::{Error, Result};
 pub use layout::Layout;
 pub use storage::{cpu_zeros, CpuStorage, Storage, StorageBackend};
+pub use stream_planner::{StreamId, StreamPlanner, StreamRecord};
 pub use tensor::Tensor;
 pub use tensor_id::TensorId;
 
