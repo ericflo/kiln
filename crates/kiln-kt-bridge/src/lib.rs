@@ -133,10 +133,12 @@ pub fn cuda_storage_of_output(t: &KtTensor) -> &CudaStorage {
 /// `BridgeError` for variants that have no kt equivalent today.
 ///
 /// This is a building block for the Phase 7 candle→kiln-tensor
-/// adapter; the full `kt_tensor_from_candle_cuda` (zero-copy view
-/// sharing the same CUDA buffer) ships once cudarc exposes the
-/// typed→u8 slice reinterpret we need. For now, callers do their
-/// own per-dtype `as_cuda_slice<T>()` + raw-pointer extraction.
+/// adapter; the full **zero-copy** `kt_tensor_from_candle_cuda_borrow`
+/// (sharing the same CUDA buffer) ships once cudarc exposes the
+/// typed→u8 slice reinterpret or a kiln-tensor `BorrowedCudaStorage`
+/// variant lands. In the meantime [`kt_tensor_from_candle_cuda_copy`]
+/// provides a correct-but-copying adapter that unblocks call-site
+/// migration.
 pub fn candle_dtype_to_kt(d: candle_core::DType) -> Result<KtDType, BridgeError> {
     use candle_core::DType as C;
     Ok(match d {
@@ -152,6 +154,133 @@ pub fn candle_dtype_to_kt(d: candle_core::DType) -> Result<KtDType, BridgeError>
             )));
         }
     })
+}
+
+/// Phase 7 candle→kt adapter — **copying variant**.
+///
+/// Copies the device data backing a candle CUDA `Tensor` into a freshly
+/// allocated `kiln_tensor::Tensor` of the same shape and dtype. The
+/// returned kt-Tensor owns its own CUDA allocation and is independent of
+/// the candle source. Stream affinity follows the candle tensor's CUDA
+/// device.
+///
+/// Use this as the migration primitive when a call site holds a candle
+/// `Tensor` and needs to call a kt-API function. Each call costs one
+/// device-to-device memcpy; for hot paths, prefer waiting for the
+/// zero-copy borrow variant.
+///
+/// **Requirements**:
+/// - `t.device()` must be a CUDA device
+/// - `t.is_contiguous()` must be true (caller should `.contiguous()?` first)
+/// - `t.dtype()` must round-trip through [`candle_dtype_to_kt`]
+///
+/// Layout: returns a freshly contiguous kt-Tensor (start_offset = 0,
+/// row-major strides). If the candle tensor's `layout.start_offset()` is
+/// non-zero, only the live elements are copied — the kt-Tensor doesn't
+/// inherit any unused prefix from the candle storage.
+#[allow(clippy::needless_pass_by_value)]
+pub fn kt_tensor_from_candle_cuda_copy(
+    t: &candle_core::Tensor,
+) -> Result<KtTensor, BridgeError> {
+    use candle_core::{
+        backend::{BackendDevice, BackendStorage},
+        cuda_backend::cudarc::driver::{result as cudarc_result, DevicePtr},
+        DType as C, DeviceLocation, Storage as CStorage,
+    };
+    use half::{bf16, f16};
+
+    if !t.is_contiguous() {
+        return Err(BridgeError::new(
+            "kt-bridge: kt_tensor_from_candle_cuda_copy: tensor must be contiguous \
+             (caller should .contiguous()? first)",
+        ));
+    }
+    let kt_dtype = candle_dtype_to_kt(t.dtype())?;
+    let shape: Vec<usize> = t.dims().to_vec();
+    let n_elems: usize = shape.iter().product();
+    let bytes_per_elem = kt_dtype.size_in_bytes();
+    let total_bytes = n_elems * bytes_per_elem;
+
+    let (storage_guard, layout) = t.storage_and_layout();
+    let cuda_st = match &*storage_guard {
+        CStorage::Cuda(c) => c,
+        _ => {
+            return Err(BridgeError::new(
+                "kt-bridge: kt_tensor_from_candle_cuda_copy: tensor must be on CUDA",
+            ))
+        }
+    };
+
+    let candle_device = std::sync::Arc::new(cuda_st.device().clone());
+    let device_index = match candle_device.location() {
+        DeviceLocation::Cuda { gpu_id } => gpu_id,
+        other => {
+            return Err(BridgeError::new(format!(
+                "kt-bridge copy: expected Cuda location, got {other:?}"
+            )));
+        }
+    };
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream();
+
+    // Allocate the destination kt-Tensor's storage (zero-init; the
+    // subsequent memcpy overwrites every byte).
+    let dst_storage = kiln_tensor::cuda_zeros(candle_device, device_index, kt_dtype, n_elems)
+        .map_err(|e| BridgeError::new(format!("kt-bridge copy: alloc dst: {e}")))?;
+    let dst_cuda = dst_storage
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .expect("cuda_zeros must produce CudaStorage");
+    let dst_slice = dst_cuda.slice().slice(0..);
+
+    let off = layout.start_offset();
+
+    // Per-dtype src ptr extraction. The slice on candle's side is
+    // typed; we need to dispatch on dtype to call as_cuda_slice<T> with
+    // the correct T, then `.slice(off..)` and `.device_ptr(&stream)` to
+    // get the raw pointer at the right byte offset.
+    // Per-dtype dispatch. The src CudaView and its guard must outlive
+    // the memcpy call, so each arm binds them locally and issues its
+    // own memcpy. Macro keeps each arm to one line of intent.
+    macro_rules! dispatch_copy {
+        ($T:ty, $name:literal) => {{
+            let slice = cuda_st.as_cuda_slice::<$T>().map_err(|e| {
+                BridgeError::new(format!(
+                    "kt-bridge copy: as_cuda_slice {}: {e}",
+                    $name
+                ))
+            })?;
+            let src_view = slice.slice(off..);
+            unsafe {
+                let (dst_ptr, _dst_g) = dst_slice.device_ptr(&stream);
+                let (src_ptr, _src_g) = src_view.device_ptr(&stream);
+                cudarc_result::memcpy_dtod_async(dst_ptr, src_ptr, total_bytes, raw_stream)
+                    .map_err(|e| {
+                        BridgeError::new(format!("kt-bridge copy: memcpy_dtod_async: {e:?}"))
+                    })?;
+            }
+        }};
+    }
+    match t.dtype() {
+        C::F32 => dispatch_copy!(f32, "f32"),
+        C::BF16 => dispatch_copy!(bf16, "bf16"),
+        C::F16 => dispatch_copy!(f16, "f16"),
+        C::U32 => dispatch_copy!(u32, "u32"),
+        C::U8 => dispatch_copy!(u8, "u8"),
+        C::I64 => dispatch_copy!(i64, "i64"),
+        other => {
+            return Err(BridgeError::new(format!(
+                "kt-bridge copy: unsupported candle dtype {other:?}"
+            )));
+        }
+    }
+
+    KtTensor::from_parts(
+        dst_storage,
+        kiln_tensor::Layout::contiguous(shape),
+        kiln_tensor::TensorId::next(),
+    )
+    .map_err(|e| BridgeError::new(format!("kt-bridge copy: wrap: {e}")))
 }
 
 #[cfg(test)]

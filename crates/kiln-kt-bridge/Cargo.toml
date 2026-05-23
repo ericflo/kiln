@@ -12,3 +12,6 @@ description = "Shared helpers for Phase 7 kt-API ports (CudaStorage downcast, al
 # kiln-tensor's cuda feature — there is no non-CUDA build.
 candle-core = { workspace = true, features = ["cuda"] }
 kiln-tensor = { workspace = true, features = ["cuda"] }
+# Half-precision floats — needed for the per-dtype `as_cuda_slice<T>()`
+# dispatch in the candle-to-kt copying adapter.
+half = "2"
