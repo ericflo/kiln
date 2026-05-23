@@ -19,14 +19,16 @@ use kiln_optim::{AdamW, OptimStep};
 use kiln_param::{AmpPolicy, ForwardStorage, Parameter};
 use kiln_tensor as kt;
 
-/// Forward op pretend-derivative: returns the upstream gradient
-/// unchanged for each input. This keeps the test focused on the
-/// substrate composition rather than on real gradient math (which
-/// each kiln-tensor op's `bwd()` will provide in Phase 6b/c).
+/// Forward op pretend-derivative: emits an all-ones gradient of the
+/// correct *input* shape for each recorded input. The actual values
+/// are irrelevant — the test exercises substrate composition, not
+/// gradient math. The shapes must match because AdamW's
+/// `step(param, grad)` rejects shape mismatches (anti-pattern 16
+/// adjacency).
 #[derive(Debug)]
 struct PassthroughBwd {
     name: &'static str,
-    input_count: usize,
+    input_shapes: Vec<Vec<usize>>,
     apply_count: Arc<AtomicUsize>,
 }
 
@@ -35,12 +37,18 @@ impl BackwardOp for PassthroughBwd {
         self.name
     }
     fn input_count(&self) -> usize {
-        self.input_count
+        self.input_shapes.len()
     }
-    fn apply(&self, grad_output: &kt::Tensor) -> kt::Result<Vec<Option<kt::Tensor>>> {
+    fn apply(&self, _grad_output: &kt::Tensor) -> kt::Result<Vec<Option<kt::Tensor>>> {
         self.apply_count.fetch_add(1, Ordering::SeqCst);
-        Ok((0..self.input_count)
-            .map(|_| Some(grad_output.clone()))
+        Ok(self
+            .input_shapes
+            .iter()
+            .map(|shape| {
+                let n: usize = shape.iter().product();
+                let data = vec![1.0f32; n.max(1)];
+                Some(kt::Tensor::from_slice(&data, shape.clone()).unwrap())
+            })
             .collect())
     }
 }
@@ -75,7 +83,7 @@ fn full_training_step_substrate_composes_end_to_end() {
         &[&input, &weight_fwd],
         Box::new(PassthroughBwd {
             name: "matmul",
-            input_count: 2,
+            input_shapes: vec![input.shape().to_vec(), weight_fwd.shape().to_vec()],
             apply_count: apply_count.clone(),
         }),
     );
@@ -87,7 +95,7 @@ fn full_training_step_substrate_composes_end_to_end() {
         &[&out],
         Box::new(PassthroughBwd {
             name: "mean_all",
-            input_count: 1,
+            input_shapes: vec![out.shape().to_vec()],
             apply_count: apply_count.clone(),
         }),
     );

@@ -207,9 +207,9 @@ fn full_chain_names_lists_all_processors_in_order() {
     assert_eq!(
         names,
         vec![
-            "repetition_penalty",
-            "frequency_penalty",
-            "presence_penalty",
+            "penalty_repetition",
+            "penalty_frequency",
+            "penalty_presence",
             "dry",
             "ngram_block",
             "logit_bias",

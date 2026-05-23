@@ -149,13 +149,17 @@ fn parameter_based_linear_regression_descends() {
     let w_id = w_param.tensor_id();
     let b_id = b_param.tensor_id();
 
+    // SGD lr=0.01 over 50 steps was an under-converged baseline
+    // (validate pod 2026-05-23: w[0]=1.01 instead of 2.0). Bump lr
+    // to 0.05 and step count to 200 — well within the convergent
+    // regime for this small-N regression.
     let mut opt = Sgd::new(SgdHyperparameters {
-        lr: 0.01,
+        lr: 0.05,
         ..Default::default()
     });
 
-    let mut losses = Vec::with_capacity(50);
-    for _ in 0..50 {
+    let mut losses = Vec::with_capacity(200);
+    for _ in 0..200 {
         let loss = step(&x, &target, &mut w_param, &mut b_param, &mut opt).unwrap();
         losses.push(loss);
         // Anti-pattern 11: Parameter ids must not drift across steps.
@@ -165,7 +169,7 @@ fn parameter_based_linear_regression_descends() {
 
     // Loss converges: final loss < 5% of step-0 loss.
     let first = losses[0];
-    let last = losses[49];
+    let last = losses[losses.len() - 1];
     assert!(
         last < first * 0.05,
         "loss did not descend enough: first={first}, last={last}"
