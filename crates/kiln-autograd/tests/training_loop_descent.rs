@@ -124,20 +124,34 @@ fn step(
 fn linear_regression_descent() {
     // Synthetic dataset: y_i = 2*x1_i + 3*x2_i + 1*x3_i with x3_i = 1.
     //
-    // The bias is absorbed into a constant feature column so the OLS
-    // problem stays uniquely determined: 3 weights fitting 16
-    // equations with `loss = sum_all(sq)`. The prior version used a
-    // per-sample `b: [n_samples, 1]` tensor, which made the system
-    // underdetermined (every b[i] gets its own gradient under
-    // sum-of-squares, so optimizer can absorb sample-specific
-    // residuals into b instead of solving for w) — and the recovered
-    // w[0] landed nowhere near 2.0 even though loss converged.
+    // Use Hadamard-style ±1 features so X^T X is a multiple of the
+    // identity: x1 alternates per row, x2 alternates in blocks of 2.
+    // With these features:
+    //   sum(x1²) = sum(x2²) = sum(1²) = 16
+    //   sum(x1·x2) = sum(x1·1) = sum(x2·1) = 0
+    // → X^T X = 16 · I  (condition number = 1)
+    //
+    // Earlier ramp+sine features had |corr(x1, x2)| ≈ 1 (x2 was a
+    // monotone function of x1 across the chosen i range), so X^T X
+    // had a tiny λ_min and the slow eigen-mode of OLS hadn't
+    // converged anywhere near (2, 3, 1) even after 2000 steps. The
+    // user's PR #1312 (28dc056f) widened the tolerance to ±0.5, but
+    // empirical w[1] = 2.26 was still 0.74 from target 3.0 — a real
+    // numerical-conditioning issue, not a tolerance issue.
+    //
+    // With the bias absorbed into the constant column and SGD
+    // updating only w (not the 16-vec b), the OLS problem is now
+    // both identifiable AND well-conditioned. lr·λ ≈ lr·16, so even
+    // a modest budget (lr=0.005, 500 steps) drives every mode to
+    // ~(1 - 0.08)^500 ≈ 1e-18 residual.
     let n_samples = 16;
     let mut x_data = Vec::with_capacity(n_samples * 3);
     let mut y_data = Vec::with_capacity(n_samples);
     for i in 0..n_samples {
-        let x1 = (i as f32) * 0.1 - 0.8; // span [-0.8, 0.7]
-        let x2 = ((i as f32) * 0.07).sin();
+        // x1: +1, -1, +1, -1, ...   (period 2)
+        let x1 = if i % 2 == 0 { 1.0_f32 } else { -1.0 };
+        // x2: +1, +1, -1, -1, ...   (period 4)
+        let x2 = if (i / 2) % 2 == 0 { 1.0_f32 } else { -1.0 };
         x_data.push(x1);
         x_data.push(x2);
         x_data.push(1.0); // constant column = bias slot
@@ -153,19 +167,15 @@ fn linear_regression_descent() {
     // unmodeled by the constant column).
     let b = Tensor::from_slice(&[0.0f32; 16], vec![n_samples, 1]).unwrap();
 
-    // lr × steps tuned for `loss = sum_all(sq)` (no 1/N scaling, so
-    // gradient magnitude scales with N=16). X^T X has largest
-    // eigenvalue ~16 (dominated by the constant column). Earlier
-    // attempts at lr=0.02 / 500 steps left w[0] orbiting around 2.4
-    // — loss descended fine but weight modes hadn't settled because
-    // the effective stepsize on the dominant mode (lr·λ_max·N
-    // implicit in the sum gradient) was still too aggressive.
-    // lr=0.005 / 2000 steps gives a per-step error factor of
-    // ~(1 - 0.08) = 0.92 on the dominant mode and ~0.985 on the
-    // slowest mode (λ_min ≈ 3); 2000 steps drive both to <1e-14
-    // residual, well under the 0.2 weight tolerance.
+    // lr × steps for `loss = sum_all(sq)` with X^T X = 16·I.
+    // Per-step error factor on every mode is (1 - 2·lr·16) — set
+    // lr=0.005 so that's (1 - 0.16) = 0.84 (stable, well below the
+    // (1 - 2·lr·λ < 1) divergence boundary). 500 steps drive every
+    // mode to 0.84^500 ≈ 1e-37 residual — far below any sensible
+    // weight tolerance, including the strict ±0.2 the test used
+    // before the user's #1312 relaxation.
     let lr = 0.005_f32;
-    let n_steps = 2000;
+    let n_steps = 500;
     let mut losses = Vec::with_capacity(n_steps);
     for _ in 0..n_steps {
         // Note: we DON'T apply SGD to b. The constant column in x
