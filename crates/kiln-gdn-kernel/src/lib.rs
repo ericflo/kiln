@@ -70,7 +70,7 @@ use std::cell::RefCell;
 mod kt_api;
 pub use kt_api::{
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt, gdn_forward_substitution_kt,
-    gdn_recurrent_forward_kt, GdnError,
+    gdn_full_chunk_forward_kt, gdn_recurrent_forward_kt, GdnError,
 };
 
 unsafe extern "C" {
