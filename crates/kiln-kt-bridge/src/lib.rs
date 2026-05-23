@@ -283,6 +283,146 @@ pub fn kt_tensor_from_candle_cuda_copy(
     .map_err(|e| BridgeError::new(format!("kt-bridge copy: wrap: {e}")))
 }
 
+/// Phase 7 candle→kt adapter — **inverse copying variant**.
+///
+/// Allocates a fresh candle `Tensor` of the same shape and dtype as
+/// the kt-Tensor source and device-to-device memcpys the contents.
+/// The returned candle Tensor owns its own CUDA allocation; the kt
+/// source can drop or live independently.
+///
+/// Symmetric to [`kt_tensor_from_candle_cuda_copy`]; together the two
+/// adapters let call sites round-trip values between the candle and
+/// kt-Tensor type systems while the v2 zero-copy borrow path is
+/// pending. Cost: one device-to-device memcpy per call.
+///
+/// **Requirements**:
+/// - `t` must be backed by `kiln_tensor::CudaStorage`
+/// - `t.is_contiguous()` must be true
+/// - `t.dtype()` must round-trip through [`candle_dtype_to_kt`] in
+///   reverse — `F32/BF16/F16/U32/U8/I64` are supported today.
+///
+/// The candle Tensor's layout is contiguous (start_offset = 0,
+/// row-major strides). Non-contiguous kt sources must be made
+/// contiguous before this call.
+pub fn kt_tensor_to_candle_cuda_copy(
+    t: &KtTensor,
+) -> Result<candle_core::Tensor, BridgeError> {
+    use candle_core::{
+        backend::{BackendDevice, BackendStorage},
+        cuda_backend::cudarc::driver::{result as cudarc_result, DevicePtr},
+        DType as C, DeviceLocation, Device as CDevice,
+    };
+    use half::{bf16, f16};
+
+    if !t.is_contiguous() {
+        return Err(BridgeError::new(
+            "kt-bridge: kt_tensor_to_candle_cuda_copy: tensor must be contiguous",
+        ));
+    }
+    let kt_dtype = t.dtype();
+    let candle_dtype = match kt_dtype {
+        KtDType::F32 => C::F32,
+        KtDType::BF16 => C::BF16,
+        KtDType::F16 => C::F16,
+        KtDType::U32 => C::U32,
+        KtDType::U8 => C::U8,
+        KtDType::I64 => C::I64,
+        other => {
+            return Err(BridgeError::new(format!(
+                "kt-bridge to_candle: unsupported kt dtype {other:?}"
+            )));
+        }
+    };
+    let shape: Vec<usize> = t.shape().to_vec();
+    let n_elems: usize = shape.iter().product();
+    let bytes_per_elem = kt_dtype.size_in_bytes();
+    let total_bytes = n_elems * bytes_per_elem;
+
+    let src_cuda = t
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            BridgeError::new("kt-bridge to_candle: source must be CUDA storage")
+        })?;
+    let src_byte_off = t.layout().start_offset() * bytes_per_elem;
+
+    let candle_device_arc = src_cuda.candle_device().clone();
+    // Validate that the kt source is genuinely CUDA-backed (matches the
+    // BridgeError contract; CPU/Metal kt storages would surface as a
+    // downcast failure higher up).
+    match candle_device_arc.location() {
+        DeviceLocation::Cuda { .. } => {}
+        other => {
+            return Err(BridgeError::new(format!(
+                "kt-bridge to_candle: expected Cuda location, got {other:?}"
+            )));
+        }
+    }
+    let candle_device = CDevice::Cuda((*candle_device_arc).clone());
+
+    // Allocate the destination candle Tensor (zeros; we overwrite via
+    // dtod memcpy). `Tensor::zeros` returns a candle Tensor with its
+    // own freshly-allocated CudaStorage.
+    let dst = candle_core::Tensor::zeros(shape.as_slice(), candle_dtype, &candle_device)
+        .map_err(|e| BridgeError::new(format!("kt-bridge to_candle: alloc dst: {e}")))?;
+
+    let stream = candle_device_arc.cuda_stream();
+    let raw_stream = stream.cu_stream();
+
+    // Extract src + dst raw pointers and memcpy. Use the same per-dtype
+    // dispatch pattern as the inverse adapter so each CudaView lives
+    // long enough to satisfy the device_ptr guard.
+    let (dst_storage_guard, _dst_layout) = dst.storage_and_layout();
+    let dst_cuda = match &*dst_storage_guard {
+        candle_core::Storage::Cuda(c) => c,
+        _ => {
+            return Err(BridgeError::new(
+                "kt-bridge to_candle: candle Tensor::zeros didn't produce Cuda storage",
+            ));
+        }
+    };
+    let src_slice = src_cuda.slice().slice(src_byte_off..);
+
+    macro_rules! dispatch_dst_copy {
+        ($T:ty, $name:literal) => {{
+            let slice = dst_cuda.as_cuda_slice::<$T>().map_err(|e| {
+                BridgeError::new(format!(
+                    "kt-bridge to_candle: dst as_cuda_slice {}: {e}",
+                    $name
+                ))
+            })?;
+            let dst_view = slice.slice(0..);
+            unsafe {
+                let (dst_ptr, _dst_g) = dst_view.device_ptr(&stream);
+                let (src_ptr, _src_g) = src_slice.device_ptr(&stream);
+                cudarc_result::memcpy_dtod_async(dst_ptr, src_ptr, total_bytes, raw_stream)
+                    .map_err(|e| {
+                        BridgeError::new(format!(
+                            "kt-bridge to_candle: memcpy_dtod_async: {e:?}"
+                        ))
+                    })?;
+            }
+        }};
+    }
+    match candle_dtype {
+        C::F32 => dispatch_dst_copy!(f32, "f32"),
+        C::BF16 => dispatch_dst_copy!(bf16, "bf16"),
+        C::F16 => dispatch_dst_copy!(f16, "f16"),
+        C::U32 => dispatch_dst_copy!(u32, "u32"),
+        C::U8 => dispatch_dst_copy!(u8, "u8"),
+        C::I64 => dispatch_dst_copy!(i64, "i64"),
+        other => {
+            return Err(BridgeError::new(format!(
+                "kt-bridge to_candle: unsupported candle dtype {other:?}"
+            )));
+        }
+    }
+    drop(dst_storage_guard);
+
+    Ok(dst)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
