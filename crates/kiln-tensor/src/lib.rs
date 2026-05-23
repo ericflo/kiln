@@ -20,6 +20,8 @@
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
 
+mod dtype;
 mod error;
 
+pub use dtype::DType;
 pub use error::{Error, Result};
