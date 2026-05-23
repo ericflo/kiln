@@ -15,3 +15,4 @@ pub mod cross_entropy;
 pub mod elementwise;
 pub mod embedding;
 pub mod matmul;
+pub mod rmsnorm;
