@@ -80,6 +80,11 @@ use candle_core::{
 use half::bf16;
 use std::sync::OnceLock;
 
+/// kiln-tensor-typed surface alongside candle-typed. Same FFI.
+/// Phase 7 deletes the candle path.
+mod kt_api;
+pub use kt_api::{fused_rmsnorm_backward_kt, fused_rmsnorm_kt, RmsNormError};
+
 unsafe extern "C" {
     fn kiln_fused_rmsnorm(
         x: *const core::ffi::c_void,
