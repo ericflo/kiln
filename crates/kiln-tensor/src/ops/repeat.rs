@@ -15,12 +15,167 @@
 //! - **Attention bias spreading**
 //! - **MoE expert input duplication** when the same hidden state
 //!   feeds multiple experts
+//! - **`addmm` bias broadcast** — `addmm` repeats a `[1, N]` bias
+//!   to `[M, N]` via `repeat(_, 0, M)`. That call site benefits
+//!   directly from the CUDA dispatch path below.
+//!
+//! # Dispatch
+//!
+//! Wrapped as a [`DeviceOp1`] so CUDA tensors route through
+//! `cuda_index_select_dim0` (axis=0 only). Non-zero-axis repeats
+//! fall through to CPU until a more general kernel lands.
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{
+    bail, dispatch1, BackwardOp, CpuStorage, Determinism, DeviceOp1, Error, Layout, Result,
+    Storage, Tensor, TensorId,
+};
 
+/// Repeat op — tiles `x` `n` times along `axis`.
+#[derive(Debug, Clone, Copy)]
+pub struct RepeatOp {
+    axis: usize,
+    n: usize,
+}
+
+impl RepeatOp {
+    pub const fn new(axis: usize, n: usize) -> Self {
+        RepeatOp { axis, n }
+    }
+    pub const fn axis(self) -> usize {
+        self.axis
+    }
+    pub const fn n(self) -> usize {
+        self.n
+    }
+}
+
+impl DeviceOp1 for RepeatOp {
+    fn name(&self) -> &'static str {
+        "repeat"
+    }
+
+    fn determinism(&self) -> Determinism {
+        // Fixed iteration order, no atomics. Each output element
+        // is a byte-copy of a specific input element.
+        Determinism::Constructive
+    }
+
+    fn cpu_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, self.axis, self.n)?;
+
+        let dtype = x.dtype();
+        let per = dtype.size_in_bytes();
+        let shape = x.shape();
+        let outer: usize = shape[..self.axis].iter().product::<usize>().max(1);
+        let axis_in = shape[self.axis];
+        let inner: usize = shape[self.axis + 1..].iter().product::<usize>().max(1);
+
+        let cpu = x
+            .storage()
+            .as_any()
+            .downcast_ref::<CpuStorage>()
+            .ok_or_else(|| Error::from_str("repeat: storage must be CpuStorage"))?;
+        let bytes = cpu.as_bytes();
+        let axis_out = axis_in * self.n;
+        let mut out = vec![0u8; outer * axis_out * inner * per];
+
+        // For each outer slab, copy the axis-block `n` times into
+        // the output's expanded axis dimension.
+        for o in 0..outer {
+            for rep in 0..self.n {
+                let src_start = o * axis_in * inner * per;
+                let src_end = src_start + axis_in * inner * per;
+                let dst_start = (o * axis_out + rep * axis_in) * inner * per;
+                let dst_end = dst_start + axis_in * inner * per;
+                out[dst_start..dst_end].copy_from_slice(&bytes[src_start..src_end]);
+            }
+        }
+        let mut out_shape = shape.to_vec();
+        out_shape[self.axis] = axis_out;
+        let cpu_out = CpuStorage::from_bytes(dtype, out)?;
+        let storage: Storage = Arc::new(cpu_out);
+        Ok(Some(Tensor::from_parts(
+            storage,
+            Layout::contiguous(out_shape),
+            TensorId::next(),
+        )?))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, self.axis, self.n)?;
+
+        // n=1 is identity — no copy needed, just hand back a fresh
+        // tensor id over the same storage. Skips index allocation.
+        if self.n == 1 {
+            return Ok(Some(x.reshape(x.shape().to_vec())?));
+        }
+
+        // We currently only fast-path axis=0. For arbitrary axes,
+        // fall through to CPU until a generic kernel ships.
+        if self.axis != 0 {
+            return Ok(None);
+        }
+        if x.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+
+        let axis_in = x.shape()[0];
+        if axis_in == 0 {
+            // Empty axis-0 — produce an empty output via reshape
+            // (preserving zero rows, just bumping axis-0 to 0 * n = 0).
+            let mut out_shape = x.shape().to_vec();
+            out_shape[0] = 0;
+            return Ok(Some(x.reshape(out_shape)?));
+        }
+
+        // Build tiled indices `[0,1,...,d-1, 0,1,...,d-1, ...]` (n
+        // copies) on CPU, ship to CUDA, gather.
+        let total = axis_in * self.n;
+        let mut indices_host: Vec<u32> = Vec::with_capacity(total);
+        for _ in 0..self.n {
+            for i in 0..axis_in as u32 {
+                indices_host.push(i);
+            }
+        }
+        let indices_cpu = Tensor::from_slice(&indices_host, vec![total])?;
+
+        let x_storage = x
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::CudaStorage>()
+            .ok_or_else(|| crate::Error::from_str("repeat::cuda_fwd: x must be CUDA storage"))?;
+        let candle_device = x_storage.candle_device().clone();
+        let device_index = match x.device() {
+            crate::Device::Cuda(i) => i,
+            _ => return Ok(None),
+        };
+
+        let indices_cuda =
+            crate::host_to_cuda_copy(&indices_cpu, candle_device, device_index)?;
+        Ok(Some(crate::cuda_index_select_dim0(x, &indices_cuda)?))
+    }
+
+    fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
+        None
+    }
+}
+
+/// Convenience: dispatch `RepeatOp(axis, n)` on `x`.
 pub fn repeat(x: &Tensor, axis: usize, n: usize) -> Result<Tensor> {
+    dispatch1(&RepeatOp::new(axis, n), x)
+}
+
+// ----------------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------------
+
+fn validate(x: &Tensor, axis: usize, n: usize) -> Result<()> {
     if x.rank() == 0 {
         bail!("repeat: input must have rank ≥ 1");
     }
@@ -33,49 +188,19 @@ pub fn repeat(x: &Tensor, axis: usize, n: usize) -> Result<Tensor> {
     if n == 0 {
         bail!("repeat: n must be > 0");
     }
-    let dtype = x.dtype();
-    if dtype.is_packed() {
-        bail!("repeat: packed dtype {dtype} not supported");
+    if x.dtype().is_packed() {
+        bail!("repeat: packed dtype {} not supported", x.dtype());
     }
     if !x.is_contiguous() {
         bail!("repeat: input must be contiguous");
     }
-    let per = dtype.size_in_bytes();
-    let shape = x.shape();
-    let outer: usize = shape[..axis].iter().product::<usize>().max(1);
-    let axis_in = shape[axis];
-    let inner: usize = shape[axis + 1..].iter().product::<usize>().max(1);
-
-    let cpu = x
-        .storage()
-        .as_any()
-        .downcast_ref::<CpuStorage>()
-        .ok_or_else(|| Error::from_str("repeat: storage must be CpuStorage"))?;
-    let bytes = cpu.as_bytes();
-    let axis_out = axis_in * n;
-    let mut out = vec![0u8; outer * axis_out * inner * per];
-
-    // For each outer slab, copy the axis-block `n` times into the
-    // output's expanded axis dimension.
-    for o in 0..outer {
-        for rep in 0..n {
-            let src_start = o * axis_in * inner * per;
-            let src_end = src_start + axis_in * inner * per;
-            let dst_start = (o * axis_out + rep * axis_in) * inner * per;
-            let dst_end = dst_start + axis_in * inner * per;
-            out[dst_start..dst_end].copy_from_slice(&bytes[src_start..src_end]);
-        }
-    }
-    let mut out_shape = shape.to_vec();
-    out_shape[axis] = axis_out;
-    let cpu_out = CpuStorage::from_bytes(dtype, out)?;
-    let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(storage, Layout::contiguous(out_shape), TensorId::next())
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DType;
 
     fn read_f32(t: &Tensor) -> Vec<f32> {
         let cpu = t.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
@@ -160,5 +285,15 @@ mod tests {
         let y = repeat(&x, 0, 3).unwrap();
         assert_eq!(y.dtype(), DType::BF16);
         assert_eq!(y.shape(), &[6]);
+    }
+
+    #[test]
+    fn repeat_op_metadata() {
+        let op = RepeatOp::new(0, 3);
+        assert_eq!(op.name(), "repeat");
+        assert!(op.determinism().is_constructive());
+        assert!(op.bwd().is_none());
+        assert_eq!(op.axis(), 0);
+        assert_eq!(op.n(), 3);
     }
 }
