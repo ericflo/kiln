@@ -741,3 +741,27 @@ sequence tokens before training, or use a preconditioning route that avoids
 full policy backward on complete trajectories. Keep
 `KILN_GRAD_CHECKPOINT_SEGMENTS=24`; it is the setting that keeps GRPO inside
 the local VRAM envelope, and reducing checkpointing is not the throughput fix.
+
+### H45: post-read edit workflow
+
+H45 kept H44's complete-workflow direction but made it trainable by changing
+the action surface. From the first three compact H44 success examples, it kept
+the real train-only read context, then trained a post-read contrast that
+preferred `edit` -> doctest -> `DONE` over `edit` -> `DONE` without
+verification and `edit` -> doctest -> redundant doctest -> `DONE`.
+
+The edit-form dataset dry-ran with 3 groups, 9 completions, 1146 action
+tokens, 0 env tokens, 3165 context tokens, and reward stdev 0.408928. Training
+used no ECHO, rank 4 / alpha 4 / lr `1e-6`, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 356.717s observed with
+peak VRAM 15941 MiB. Adapter verify passed with 400 nonzero LoRA tensors and
+LoRA update proxy 0.079543.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected H45: paired base composite was 0.9625
+with mean wall-clock 23.84s, while H45 scored 0.86875 with mean wall-clock
+65.49s. No promotion check was run. Lesson: edit-form compression fixes the
+local throughput issue, but this no-test/retest contrast still harms blind
+reliability and latency. Next attempts should keep the edit-form token budget
+while changing the signal, preferably outcome-preserving pairs that differ only
+in efficient thinking/tool use after full verification, or a mixed anchor set
+that preserves broad task-solving behavior.
