@@ -365,20 +365,22 @@ impl PagedKvCacheKt {
     /// and reshape into `[1, num_kv_heads, seq_len, head_dim]` for
     /// downstream attention.
     ///
-    /// Mirrors [`crate::paged_kv_cache::PagedKvCache::read`] for the
-    /// **contiguous-slot-run case** (block_table's logical positions
-    /// `0..seq_len` map to a single contiguous slot range in the
-    /// pool). Returns an error for the non-contiguous case until a
-    /// CUDA-side `index_select` lands — production decode hits the
-    /// contiguous path the vast majority of the time.
+    /// Mirrors [`crate::paged_kv_cache::PagedKvCache::read`] for both
+    /// the **contiguous-slot-run case** (block_table's positions
+    /// `0..seq_len` map to a single contiguous slot range — fast
+    /// path via `narrow`) and the **gather case** (positions map to
+    /// arbitrary slots — slower path via
+    /// `kiln_tensor::cuda_index_select_dim0`).
     ///
-    /// FP8 caches are rejected here too — the dequant kt-API entries
+    /// FP8 caches are rejected here — the dequant kt-API entries
     /// aren't yet ported.
     ///
-    /// **Cost:** one CUDA `Tensor::contiguous()` per pool (k and v),
-    /// which now lands on the substrate kernel shipped in
-    /// PR #1374. The narrow + transpose + unsqueeze before that are
-    /// zero-copy layout-only ops.
+    /// **Cost:**
+    /// - Fast path: one CUDA `Tensor::contiguous()` per pool (k+v).
+    /// - Gather path: one H2D upload of `seq_len` u32 indices via
+    ///   candle, plus one `cuda_index_select_dim0` per pool, plus
+    ///   the same transpose+contiguous+unsqueeze tail as the fast
+    ///   path.
     pub fn read(
         &self,
         layer_idx: usize,
@@ -393,28 +395,58 @@ impl PagedKvCacheKt {
         }
         let (k_pool, v_pool) = &self.layers[layer_idx];
 
-        let start_slot = crate::paged_kv_cache::contiguous_slot_run_start(
-            block_table,
-            self.block_size,
-            0,
-            seq_len,
-        )
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "kt PagedKvCacheKt::read: non-contiguous slot path not yet wired \
-                 (needs CUDA-side index_select)"
-            )
-        })?;
+        let (k_slice, v_slice) = if let Some(start_slot) =
+            crate::paged_kv_cache::contiguous_slot_run_start(
+                block_table,
+                self.block_size,
+                0,
+                seq_len,
+            ) {
+            // Fast path — single contiguous run; narrow is zero-copy.
+            let k = k_pool
+                .narrow(0, start_slot, seq_len)
+                .map_err(|e| anyhow::anyhow!("kt pkv read: narrow k: {e}"))?;
+            let v = v_pool
+                .narrow(0, start_slot, seq_len)
+                .map_err(|e| anyhow::anyhow!("kt pkv read: narrow v: {e}"))?;
+            (k, v)
+        } else {
+            // Gather path — build u32 indices on host, upload via
+            // candle, wrap as kt-Tensor, call cuda_index_select_dim0.
+            let mut idx_data: Vec<u32> = Vec::with_capacity(seq_len);
+            for pos in 0..seq_len {
+                let slot = block_table.slot_for(pos, self.block_size).ok_or_else(|| {
+                    anyhow::anyhow!("kt pkv read: no slot for position {pos} in block table")
+                })?;
+                let slot_u32 = u32::try_from(slot).map_err(|_| {
+                    anyhow::anyhow!("kt pkv read: slot {slot} exceeds u32")
+                })?;
+                idx_data.push(slot_u32);
+            }
 
-        // narrow → transpose → contiguous → unsqueeze. All zero-copy
-        // until contiguous(), which routes through the CUDA substrate
-        // kernel (PR #1374).
-        let k_slice = k_pool
-            .narrow(0, start_slot, seq_len)
-            .map_err(|e| anyhow::anyhow!("kt pkv read: narrow k: {e}"))?;
-        let v_slice = v_pool
-            .narrow(0, start_slot, seq_len)
-            .map_err(|e| anyhow::anyhow!("kt pkv read: narrow v: {e}"))?;
+            // Build the indices kt-Tensor: candle H2D for the
+            // upload, then wrap as kt-borrowed.
+            let k_pool_storage = k_pool
+                .storage()
+                .as_any()
+                .downcast_ref::<CudaStorage>()
+                .ok_or_else(|| anyhow::anyhow!("kt pkv read: k_pool must be CUDA storage"))?;
+            let candle_device = k_pool_storage.candle_device().clone();
+            let device = candle_core::Device::Cuda((*candle_device).clone());
+            let candle_indices =
+                candle_core::Tensor::new(idx_data.as_slice(), &device).map_err(|e| {
+                    anyhow::anyhow!("kt pkv read: build candle indices: {e}")
+                })?;
+            let kt_indices =
+                kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&candle_indices)
+                    .map_err(|e| anyhow::anyhow!("kt pkv read: borrow indices: {e}"))?;
+
+            let k = kiln_tensor::cuda_index_select_dim0(k_pool, &kt_indices)
+                .map_err(|e| anyhow::anyhow!("kt pkv read: index_select k_pool: {e}"))?;
+            let v = kiln_tensor::cuda_index_select_dim0(v_pool, &kt_indices)
+                .map_err(|e| anyhow::anyhow!("kt pkv read: index_select v_pool: {e}"))?;
+            (k, v)
+        };
 
         // [seq_len, num_kv_heads, head_dim] -> [num_kv_heads, seq_len, head_dim]
         let k_t = k_slice
@@ -425,7 +457,7 @@ impl PagedKvCacheKt {
             .map_err(|e| anyhow::anyhow!("kt pkv read: transpose v: {e}"))?;
 
         // Materialize the transposed layout — the CUDA-side
-        // contiguous kernel kicks in here.
+        // contiguous kernel (PR #1374) kicks in here.
         let k_c = k_t
             .contiguous()
             .map_err(|e| anyhow::anyhow!("kt pkv read: contiguous k: {e}"))?;
