@@ -73,8 +73,8 @@ pub use tensor_id::TensorId;
 pub use cuda_allocator::CudaAllocator;
 #[cfg(feature = "cuda")]
 pub use cuda_storage::{
-    cuda_activation_unary, cuda_contiguous, cuda_elementwise_binary, cuda_index_select_dim0,
-    cuda_zeros, CudaStorage,
+    cuda_activation_unary, cuda_cast, cuda_contiguous, cuda_elementwise_binary,
+    cuda_index_select_dim0, cuda_zeros, CudaStorage,
 };
 #[cfg(feature = "metal")]
 pub use metal_allocator::MetalAllocator;
