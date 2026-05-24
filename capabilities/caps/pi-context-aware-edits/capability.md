@@ -139,12 +139,29 @@ A4: Skip the actual edit, claim the function already exists.
     (`delta=-0.3175`). This rejects scaling the same sparse GRPO signal:
     it preserved conventions but damaged `format_compliance` and
     `outcome`.
-- **H2: mixed-language corpus** (Python + Rust + Go + JS) — does
+- **H2: short positive rollout SFT bootstrap.**
+  - Result: rejected. Built a 14-example train-only SFT dataset from
+    the shortest high-reward H1 rollout completion per group
+    (`reward >= 0.95`, 1341-2005 chars after sandbox path
+    normalization). Default checkpointing OOMed in fused linear
+    cross-entropy; explicit `KILN_GRAD_CHECKPOINT_SEGMENTS=32` trained
+    and verified a rank-4/alpha-8 adapter in 159s. Blind eval collapsed
+    composite from 0.4800 to 0.2208 (`delta=-0.2592`), mostly through
+    `outcome` dropping to 0.3333. This rejects naive SFT on flattened Pi
+    tool-action transcripts: high-reward rollout text still carries
+    brittle execution artifacts, and copying it hurts edit completion.
+- **H3: prompt-conditioned format/outcome ablation** — test whether a
+  stricter runtime contract can improve the dominant format/outcome
+  headroom before training another adapter.
+- **H4: idealized train-only SFT trajectories** — synthesize compact
+  read/edit/verify/final traces from train tasks instead of copying noisy
+  rollout transcripts.
+- **H5: mixed-language corpus** (Python + Rust + Go + JS) — does
   context-awareness generalize across language conventions, or is it
   language-specific?
-- **H3: OPD chained on H1 best** — distill teacher's stronger
+- **H6: OPD chained on best kept adapter** — distill teacher's stronger
   convention-preservation onto the GRPO-trained adapter.
-- **H4: stratified by convention category** — equal task counts per
+- **H7: stratified by convention category** — equal task counts per
   category.
 
 ## Composition with other caps
