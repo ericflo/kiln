@@ -179,6 +179,17 @@ rollouts, worse outcome, worse tested-before-done, worse tool-call efficiency,
 more tool calls, more thinking chars, and slower wall-clock. The smoke lift was
 not stable; H19 is a data-shape/throughput lesson, not a promoted stage.
 
+H20 removed task-solution supervision entirely and trained only bookends:
+read `solution.py` first, and stop with `DONE` after a passing doctest output.
+It trained successfully, but repeated the false-positive pattern. `LIMIT=4`
+smoke scored 0.98125, delta +0.075, with lower wall-clock and fewer tool calls.
+The larger `LIMIT=8` paired check scored 0.7265625 versus base 0.8328125,
+delta -0.10625, with worse outcome, worse tool-call efficiency, more zero
+rollouts, more thinking chars, and slower wall-clock. Tiny SFT pressure is not
+stable here; future adapter attempts need a stronger gate before optimism, and
+should likely move away from SFT unless a qualitatively different signal is
+available.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
