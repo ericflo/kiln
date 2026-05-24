@@ -905,25 +905,23 @@ pub fn fused_sigmoid_mul_kt(
     let elems = x.element_count();
     let shape = x.shape().to_vec();
 
-    let (x_st, x_off) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
-    let (g_st, g_off) = cuda_storage_and_byte_offset(gate, KtDType::BF16, "gate")?;
+    // Owner-agnostic input device pointers: works for both Owned and
+    // Borrowed kt storage (Phase 7 v2 — accepts kt-Tensors built via
+    // `kt_tensor_from_candle_cuda_borrow`). This is the migration
+    // template for the rest of the kt-API surface.
+    let x_ptr = kiln_kt_bridge::cuda_input_device_ptr(x, KtDType::BF16, "x")?;
+    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(gate, KtDType::BF16, "gate")?;
+
+    // Output is always Owned (alloc_cuda_tensor produces owned storage),
+    // so we can reach for the raw pointer the same way.
+    let (x_st, _) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
     let out = alloc_cuda_tensor(x_st, KtDType::BF16, shape)?;
-    let o_cuda = out
-        .storage()
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .expect("alloc CUDA");
+    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
 
     let stream = x_st.candle_device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
-    let x_slice = x_st.slice().slice(x_off..);
-    let g_slice = g_st.slice().slice(g_off..);
-    let o_slice = o_cuda.slice().slice(0..);
 
     let status = unsafe {
-        let (x_ptr, _g1) = x_slice.device_ptr(&stream);
-        let (g_ptr, _g2) = g_slice.device_ptr(&stream);
-        let (o_ptr, _g3) = o_slice.device_ptr(&stream);
         kiln_fused_sigmoid_mul_bf16(
             x_ptr as *const _,
             g_ptr as *const _,

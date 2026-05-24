@@ -129,6 +129,50 @@ pub fn cuda_storage_of_output(t: &KtTensor) -> &CudaStorage {
         .expect("kt-bridge: alloc_cuda_tensor output must be CUDA")
 }
 
+/// Owner-agnostic device-pointer extraction for an input kt-Tensor.
+///
+/// Combines [`cuda_storage_and_byte_offset`] (dtype + contiguity +
+/// CUDA-ness check, plus layout-start-offset → bytes conversion) with
+/// the raw-pointer accessor that works for both `Owned` and
+/// `Borrowed` storage (see `kiln_tensor::CudaStorage::device_ptr_raw`).
+///
+/// Returns the absolute device pointer at the tensor's first live
+/// element. Use this in place of the
+/// `st.slice().slice(off..).device_ptr(&stream)` chain when migrating
+/// a kt-API entry point to accept Borrowed storage (Phase 7 v2).
+///
+/// **What this drops vs. the old chain:** the old chain returned a
+/// `SyncOnDrop` guard that recorded the stream's workload to the
+/// `CudaSlice`'s read event on drop, ensuring cross-stream readers of
+/// the same allocation wait for prior writes. The single-stream
+/// kt-API call pattern doesn't depend on this (every op uses the
+/// candle device's default stream), so dropping the guard is safe in
+/// the current call shapes. Future multi-stream kt-API additions
+/// must re-introduce explicit synchronization at the StreamPlanner
+/// layer.
+pub fn cuda_input_device_ptr(
+    t: &KtTensor,
+    expected: KtDType,
+    name: &'static str,
+) -> Result<u64, BridgeError> {
+    let (st, byte_off) = cuda_storage_and_byte_offset(t, expected, name)?;
+    let (base_ptr, byte_len) = st.device_ptr_raw();
+    if byte_off > byte_len {
+        return Err(BridgeError::new(format!(
+            "kt-bridge: {name} byte_off {byte_off} > storage byte_len {byte_len}"
+        )));
+    }
+    Ok(base_ptr + byte_off as u64)
+}
+
+/// Owner-agnostic device-pointer extraction for an output kt-Tensor
+/// (always `Owned` since [`alloc_cuda_tensor`] produces owned
+/// storage). Returns the base pointer; outputs use start_offset=0.
+pub fn cuda_output_device_ptr(t: &KtTensor) -> u64 {
+    let st = cuda_storage_of_output(t);
+    st.device_ptr_raw().0
+}
+
 /// Map candle's `DType` to kiln-tensor's `DType`. Returns
 /// `BridgeError` for variants that have no kt equivalent today.
 ///
