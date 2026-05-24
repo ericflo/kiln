@@ -224,6 +224,19 @@ Gradient checkpointing is active and necessary, but the next useful step is a
 trainer change that skips reference/policy work for `--no-policy-loss` ECHO or
 adds a dedicated env-token-only ECHO path.
 
+H24 found a no-code throughput workaround: run the one-completion ECHO dataset
+under `--mode baseline --no-policy-loss`, which disables dynamic group
+rejection and uses per-sample optimizer stepping. The dry-run accepted one
+group / one completion with 280 action tokens, 256 env tokens, and 278 context
+tokens. Training finished in 129s, installed
+`pi-doctest-h24-baseline-one-echo-r4a8`, and `kiln adapter verify` passed with
+a nonzero delta proxy. Blind `LIMIT=4 SEEDS=1` smoke rejected it: composite
+0.85 versus the normalized base smoke 0.934375, with outcome preserved at 1.0
+but tool-call efficiency falling to 0.50, mean tool calls rising to 9.0, and
+mean thinking chars rising to 3585.75. Baseline-mode ECHO is now a viable local
+training primitive, but pure env-only training on one success trace should not
+be scaled; the next data signal must directly favor concise action behavior.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
