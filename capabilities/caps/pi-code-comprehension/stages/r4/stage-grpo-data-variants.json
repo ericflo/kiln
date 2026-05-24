@@ -1,0 +1,39 @@
+{
+  "round": 4,
+  "stage": "grpo-data-variants-catalog",
+  "name": "Catalog of GRPO training data variants prepared in R4 for sweep",
+  "session": "2026-05-24",
+  "purpose": "Comprehensive data-shape catalog supporting Eric mandate: 'focus on data, not hyperparams.' All variants use the SAME training recipe (lr=1e-5, rank=16, alpha=32, kl=0.02, dr_grpo) so any signal comes from data shape.",
+  "source_data_inventory": {
+    "iter1-grpo-train.jsonl": {"groups": 16, "completions": 64, "mean_reward": 0.688, "median_spread": 0.121, "source": "R3 iter-1 training rollouts from base"},
+    "iter2-grpo-train.jsonl": {"groups": 24, "completions": 96, "mean_reward": 0.655, "median_spread": 0.139, "source": "R3 iter-2 training rollouts; 3x larger than iter-4"},
+    "iter4-grpo-train.jsonl": {"groups": 8, "completions": 32, "mean_reward": 0.690, "median_spread": 0.118, "source": "R3 iter-4 training rollouts (the R3 winner data)"},
+    "iter4-grpo-train-strong.jsonl": {"groups": 2, "completions": 8, "mean_reward": 0.764, "median_spread": 0.279, "source": "R3 elite filter (--filter-var-min 0.05) of iter-4 data"},
+    "iter11-grpo-train.jsonl": {"groups": 8, "completions": 32, "mean_reward": 0.662, "median_spread": 0.134, "source": "R3 iter-11 training rollouts"}
+  },
+  "r4_derived_variants": {
+    "iter4-train-pow2.jsonl": {"transform": "reward ← reward²", "rationale": "Sharpen gradient between high and low rewards", "groups": 8, "queued_as": "armB"},
+    "iter4-train-recentered.jsonl": {"transform": "reward ← (r - midpoint) / half_range per group → [-1,+1]", "rationale": "DAPO-style uniform per-group contrast", "groups": 8, "status": "CANCELLED (redundant with dr_grpo)"},
+    "iter4-train-binarized.jsonl": {"transform": "reward ← 1.0 if argmax in group else 0.0", "rationale": "Hard preference learning, KTO/best-of-N style", "groups": 8, "queued_as": "armD"},
+    "iter4-train-highvar.jsonl": {"transform": "drop groups where reward range < median (median=0.118)", "rationale": "Reduce training waste on degenerate groups", "groups": 4, "status": "CANCELLED (redundant with dynamic_sampling)"},
+    "iter4-train-ranked.jsonl": {"transform": "reward ← rank-based (1.0, 0.67, 0.33, 0.0) within each group", "rationale": "Pure ordinal — strip absolute reward magnitudes, preserve only ordering", "groups": 8, "candidate_arm": "armH"},
+    "iter4-train-topbottom-pair.jsonl": {"transform": "keep top-2 completions only, rewards={1.0, 0.0}", "rationale": "Reduces GRPO to DPO-style preference learning with maximal contrast", "groups": 8, "candidate_arm": "armI"},
+    "merged-iter-1-4-11.jsonl": {"transform": "concatenate iter-1 + iter-4 + iter-11 (different generations of model)", "rationale": "Multi-source data — different parent generations give different prompt response distributions", "groups": 32, "candidate_arm": "armJ"},
+    "top50-merged-1-4-11.jsonl": {"transform": "merged 1/4/11 filtered to top-50% by group mean composite (threshold=0.688)", "rationale": "Multi-source AND quality-filtered", "groups": 16, "candidate_arm": "armK"},
+    "union-iter2-iter4.jsonl": {"transform": "concatenate iter-2 + iter-4 (32 groups)", "rationale": "Combined breadth (iter-2's 24 groups) + R3-winner data (iter-4's 8 groups)", "groups": 32, "candidate_arm": "armL"}
+  },
+  "queued_now": [
+    {"arm": "B", "data": "iter4-train-pow2.jsonl", "status": "TRAINING"},
+    {"arm": "D", "data": "iter4-train-binarized.jsonl", "status": "QUEUED pos 1"},
+    {"arm": "F", "data": "iter2-grpo-train.jsonl (24 groups)", "status": "QUEUED pos 2"},
+    {"arm": "G", "data": "iter4-grpo-train-strong.jsonl (2 groups)", "status": "QUEUED pos 3"}
+  ],
+  "candidate_arms_if_time": [
+    {"arm": "H", "data": "iter4-train-ranked.jsonl", "size_min_estimate": 30},
+    {"arm": "I", "data": "iter4-train-topbottom-pair.jsonl", "size_min_estimate": 20},
+    {"arm": "J", "data": "merged-iter-1-4-11.jsonl (32 groups)", "size_min_estimate": 60},
+    {"arm": "K", "data": "top50-merged-1-4-11.jsonl (16 groups)", "size_min_estimate": 40},
+    {"arm": "L", "data": "union-iter2-iter4.jsonl (32 groups)", "size_min_estimate": 80}
+  ],
+  "deferred_arms_explanation": "Pod lease ~5:36 expiry leaves room for ~3-4 more arms after current queue completes. Will dynamically pick winners (top H/I or J/K) based on B/D/F/G results once eval data is in."
+}
