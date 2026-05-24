@@ -1087,3 +1087,25 @@ distribution alone is not enough. Future SFT-like work needs either explicit
 regularization against base behavior, a stronger teacher distribution with
 harder/diverse task semantics, or should be moved behind a confirmed positive
 adapter rather than trained directly on base.
+
+### H61: scaled H60 adapter dose
+
+H61 tested whether H60's negative smoke was mostly update size rather than
+update direction. It copied the H60 synthetic ideal SFT adapter and scaled
+every `lora_B.weight` tensor by 0.5, halving the effective LoRA delta while
+leaving rank, alpha, and all `lora_A` tensors unchanged. Adapter verify passed
+with 400 nonzero LoRA tensors and LoRA update proxy 0.006257, exactly half of
+H60's proxy.
+
+Blind `LIMIT=4 SEEDS=1` smoke looked strong: paired base scored 0.925 with no
+zero rollouts and mean wall-clock 41.17s, while H61 scored 0.98125 with no
+zero rollouts and mean wall-clock 35.90s. The wider `LIMIT=8` gate rejected
+it: paired base scored 0.8328125 with no zero rollouts and mean wall-clock
+61.10s, while H61 scored 0.69375 with two zero rollouts and mean wall-clock
+61.27s.
+
+Lesson: adapter-dose scaling can turn H60 into a convincing smoke win, but it
+does not fix the wider reliability failure. The issue is not only excessive
+update magnitude; even a half-strength synthetic ideal SFT direction can
+destabilize terminal reliability on the hard tail. Do not chain from H61. The
+next branch needs a different signal source, not another dose sweep of H60.
