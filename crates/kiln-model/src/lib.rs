@@ -18,6 +18,8 @@ pub mod marlin_proj;
 pub mod mtp_debug;
 pub mod packed_weight_registry;
 pub mod paged_kv_cache;
+#[cfg(feature = "cuda")]
+pub mod paged_kv_cache_kt;
 pub mod quantized;
 pub mod qwen35_shapes;
 pub mod sampling;
