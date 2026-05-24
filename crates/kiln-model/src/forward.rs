@@ -163,6 +163,19 @@ fn cuda_use_kt_api_gdn_full_chunk() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: softmax-last-dim through the kt-API + adapters.
+/// Set `KILN_USE_KT_API_SOFTMAX=1` (or `KILN_USE_KT_API_ALL=1`) to
+/// enable; default off. Routes [`cuda_softmax_last_dim`] through
+/// `kiln_tensor::cuda_softmax_last_axis`. Pays one dtod memcpy on
+/// the output direction (input goes zero-copy through the
+/// kt-bridge borrow adapter).
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_softmax() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SOFTMAX").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -1839,12 +1852,54 @@ fn full_attn_qkv_proj_decode_if(
 ///
 /// `candle_nn::ops::softmax_last_dim` lacks a CUDA kernel, so we implement it
 /// manually: `softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))`.
+///
+/// Phase 7 (#1082): when `KILN_USE_KT_API_SOFTMAX=1` (or
+/// `KILN_USE_KT_API_ALL=1`) is set AND the input is a contiguous CUDA
+/// tensor of {F32, BF16, F16}, route through
+/// `kiln_tensor::cuda_softmax_last_axis` via the kt-bridge borrow
+/// adapter. Falls through to the portable candle composite when any
+/// precondition fails so behavior is identical with the gate off.
 fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if cuda_use_kt_api_softmax()
+        && matches!(x.device(), Device::Cuda(_))
+        && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        && x.is_contiguous()
+    {
+        if let Some(out) = try_kt_softmax_last_dim(x)? {
+            return Ok(out);
+        }
+    }
     let max_val = x.max_keepdim(candle_core::D::Minus1)?;
     let shifted = x.broadcast_sub(&max_val)?;
     let exp_shifted = shifted.exp()?;
     let sum_exp = exp_shifted.sum_keepdim(candle_core::D::Minus1)?;
     Ok(exp_shifted.broadcast_div(&sum_exp)?)
+}
+
+/// Phase 7 (#1082) — kt-API softmax migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_softmax_last_axis`.
+///
+/// Returns `Ok(None)` on any incompatibility so the caller falls
+/// through to the candle composite. NVTX range `kiln/softmax_kt`
+/// brackets the migrated call so nsys traces separate the path
+/// from the baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_softmax_last_dim(x: &Tensor) -> Result<Option<Tensor>> {
+    kiln_nvtx::range!(c"kiln/softmax_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out_kt = match kiln_tensor::cuda_softmax_last_axis(&x_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_softmax_last_dim: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
 }
 
 /// Compute attention using a backend FlashAttention-2 fast path.
