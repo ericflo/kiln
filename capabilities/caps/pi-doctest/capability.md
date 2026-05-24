@@ -1293,3 +1293,26 @@ of ECHO or too much policy dose. ECHO learned the training observations but
 made blind behavior less reliable. Future repair-tail work needs broader
 reliability anchors or a contrast that avoids ranking direct success against
 repaired near-misses.
+
+### H69: H64 half-strength adapter arithmetic
+
+H69 tested the remaining simple-dose explanation for H64 without retraining.
+The original H64 adapter was copied from its training artifact into the local
+adapter registry as `pi-doctest-h69-h64-bscale50`, then every BF16
+`lora_B.weight` tensor was multiplied by 0.5. Because LoRA's effective update
+is `B @ A`, this creates a half-strength H64 update while preserving rank,
+alpha, target modules, and tensor layout.
+
+The surgery scaled 200 BF16 B tensors, 9,043,968 tensor bytes total. Adapter
+verify passed through the running server with 400 LoRA tensors, 200 projection
+pairs, and LoRA update proxy 0.014959, half of H64's recorded 0.029918. The
+resulting safetensors hash was
+`sha256:06469f6ed1bee65ad453170717ad0e1219d6ea8a8ddf429e829cd5d45a118806`.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.75 with one
+zero rollout and mean wall-clock 32.04s. H69 also scored 0.75 with one zero
+rollout, but mean wall-clock rose to 46.82s. Lesson: H64's confirmation failure
+was not a simple over-dosed useful direction that scalar shrinkage can fix.
+Together, H68 and H69 close the obvious dose variants of H64: future repair-tail
+work should change the contrast or add broad reliability anchors instead of
+continuing scalar variants.
