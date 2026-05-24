@@ -923,3 +923,40 @@ still slowed the policy enough to lose composite. The next adapter attempt
 should treat post-failure repair as only one component inside a broader
 mixed-policy corpus, or shift efficiency pressure into runtime/prompt
 constraints rather than another small LoRA update.
+
+### H54: step-local concise thinking
+
+H52/H53 first tested the next H49-style direction at broader scale: rank
+concise thinking above verbose thinking while holding successful tool behavior
+fixed across multiple train-only success anchors. Full-trajectory broad
+versions were not locally trainable under the 900s guard. H52 used full-file
+`write` payloads and timed out before adapter write for both six groups
+(`20179/40901`) and three groups (`12440/20179`). H53 converted the same six
+anchors to short `edit` payloads, reducing action tokens from 2796 to 1570,
+but still timed out before adapter write at `29047/34961`.
+
+H54 kept the same hypothesis but decomposed each successful trajectory into
+one-action suffix groups: post-read edit, post-edit doctest, and post-pass
+DONE. It used four train-only success anchors, giving 12 groups and 24
+completions. Each group ranked a concise assistant action at reward 1.0 above
+the same action with verbose thinking at reward 0.75. ECHO stayed off by
+design: the contrast holds tool behavior fixed and has no env-token target.
+Dry-run shape was 600 action tokens, 0 env tokens, 11714 context tokens, and
+reward stdev 0.125.
+
+Training used rank 4 / alpha 4 / lr `5e-7`, no ECHO, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 729.045s observed, with
+peak observed VRAM 15995 MiB and final loss -0.000651. Adapter verify passed
+with 400 nonzero LoRA tensors and LoRA update proxy 0.174229.
+
+Blind `LIMIT=4 SEEDS=1` smoke was positive: paired base scored 0.69375 with
+one zero rollout and mean wall-clock 40.34s, while H54 scored 0.8875 with no
+zero rollouts and mean wall-clock 40.94s. Because prior concise/stop adapters
+produced smoke false positives, H54 went to a blind `LIMIT=8` promotion check.
+It cleared that gate: paired base scored 0.84296875 with no zero rollouts and
+mean wall-clock 64.68s, while H54 scored 0.903125 with no zero rollouts and
+mean wall-clock 67.75s. Lesson: broad thinking-efficiency data becomes locally
+trainable when represented as one-action suffix ranking instead of full
+trajectory ranking. H54 is kept with a caveat: the gain is meaningful but
+slower, so the next iteration should run a fresh confirmation before chaining
+from it, or train a lower-dose/rank variant to reduce the 0.174 delta proxy.
