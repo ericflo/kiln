@@ -22,6 +22,13 @@
 //! # Determinism
 //!
 //! `Constructive`. Pointwise; no reduction.
+//!
+//! # Dispatch
+//!
+//! - CPU path: per-element byte-wise select.
+//! - CUDA path: `cuda_where_select` (kernel `csrc/where_select.cu`)
+//!   when all three inputs are on the same CUDA device, contiguous,
+//!   and `t`/`f` are F32/BF16/F16. (#1082)
 
 use std::sync::Arc;
 
@@ -30,6 +37,25 @@ use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, Ten
 /// Ternary mask-based select.
 pub fn where_select(mask: &Tensor, t: &Tensor, f: &Tensor) -> Result<Tensor> {
     validate(mask, t, f)?;
+
+    // CUDA fast path: all three inputs on the same CUDA device, contiguous,
+    // and t/f dtype is F32/BF16/F16. (#1082)
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(mask.device(), crate::Device::Cuda(_))
+            && matches!(t.device(), crate::Device::Cuda(_))
+            && matches!(f.device(), crate::Device::Cuda(_))
+            && mask.device() == t.device()
+            && t.device() == f.device()
+            && mask.is_contiguous()
+            && t.is_contiguous()
+            && f.is_contiguous()
+            && matches!(t.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        {
+            return crate::cuda_where_select(mask, t, f);
+        }
+    }
+
     let dtype = t.dtype();
     let per = dtype.size_in_bytes();
     let n = t.element_count();
