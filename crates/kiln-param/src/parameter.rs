@@ -84,6 +84,65 @@ impl ForwardStorage {
     }
 }
 
+/// Typed view of a [`Parameter`]'s forward path, ready for the
+/// backend-specific matmul dispatch.
+///
+/// Returned by [`Parameter::forward_dispatch`]. Each variant carries
+/// the borrowed components the backend matmul needs:
+///
+/// - [`ForwardDispatch::Plain`] — a single weight tensor; backend
+///   runs the standard BF16/F16/F32 matmul.
+/// - [`ForwardDispatch::Marlin`] — packed int4 weights + per-channel
+///   BF16 scales; backend routes through `marlin_w4a16_gemm_kt` (or
+///   the candle equivalent).
+/// - [`ForwardDispatch::Fp8`] — FP8 packed weights + scales; backend
+///   routes through the FP8 matmul once the kernel ships
+///   (Phase 8.4 of #1082).
+/// - [`ForwardDispatch::Fp4Packed`] — Phase 8.10 stub; no impl today.
+///
+/// **Why an enum view instead of a `Parameter::forward(input)`
+/// method:** the actual matmul is backend-specific (cublasLt on
+/// CUDA, MPS on Metal, compute-shader on Vulkan) and the per-backend
+/// handle isn't a kiln-param concern. The dispatch enum lets the
+/// caller match on the variant and route to its own backend's matmul
+/// implementation without kiln-param needing to depend on every
+/// kernel crate.
+///
+/// **Stability:** `#[non_exhaustive]` so adding a new
+/// `ForwardStorage` variant (e.g., MXFP4) doesn't break downstream
+/// matches.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum ForwardDispatch<'a> {
+    Plain {
+        weight: &'a Tensor,
+    },
+    Marlin {
+        packed: &'a Tensor,
+        scales: &'a Tensor,
+    },
+    Fp8 {
+        packed: &'a Tensor,
+        scales: &'a Tensor,
+    },
+    Fp4Packed {
+        packed: &'a Tensor,
+        scales: &'a Tensor,
+    },
+}
+
+impl<'a> ForwardDispatch<'a> {
+    /// Stable variant name matching [`ForwardStorage::kind_name`].
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Plain { .. } => "plain",
+            Self::Marlin { .. } => "marlin",
+            Self::Fp8 { .. } => "fp8",
+            Self::Fp4Packed { .. } => "fp4_packed",
+        }
+    }
+}
+
 /// Role tag for an output head. Composes with anti-pattern 17 (tied
 /// weights — `lm_head` ← `embed_tokens`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -190,6 +249,31 @@ impl Parameter {
     }
 
     /// Borrow forward storage.
+    /// Typed dispatch view of the forward path. Match on the returned
+    /// [`ForwardDispatch`] to route to the backend matmul appropriate
+    /// for the storage variant (Plain BF16 / Marlin W4A16 / FP8 /
+    /// FP4Packed).
+    ///
+    /// This is the Phase 2.5 "Forward dispatches on storage variant"
+    /// item (line 282 of #1082) made type-system-explicit: the caller
+    /// can never forget to handle a variant because the enum is
+    /// exhaustive (`#[non_exhaustive]` only for future-proofing).
+    ///
+    /// Actually running the matmul stays the caller's job — the
+    /// per-backend handle (cublasLt / MPS / compute-shader) isn't a
+    /// kiln-param concern. See [`ForwardDispatch`] for the per-
+    /// variant components and routing notes.
+    pub fn forward_dispatch(&self) -> ForwardDispatch<'_> {
+        match &self.forward_storage {
+            ForwardStorage::Plain(t) => ForwardDispatch::Plain { weight: t },
+            ForwardStorage::Marlin { packed, scales } => ForwardDispatch::Marlin { packed, scales },
+            ForwardStorage::Fp8 { packed, scales } => ForwardDispatch::Fp8 { packed, scales },
+            ForwardStorage::Fp4Packed { packed, scales } => {
+                ForwardDispatch::Fp4Packed { packed, scales }
+            }
+        }
+    }
+
     pub fn forward_storage(&self) -> &ForwardStorage {
         &self.forward_storage
     }
