@@ -181,13 +181,11 @@ and JavaScript camelCase/CommonJS style when available.
     `format_compliance` to 0.5208, `convention_consistency` to 0.9167, and
     `read_before_edit` to 0.9583. Expanding the reward pool did not fix the
     adapter-induced edit-contract regression.
-- **PB-H8: final-only prompt guard, no adapter.** Since every adapter update so
-  far has damaged some part of the edit contract, test a zero-training prompt
-  intervention that only states the final-answer contract: after completing the
-  edit, the final response must name the modified file and one preserved local
-  convention. It must not prescribe read/edit/verify ordering, which PB-H3
-  showed can hurt outcome. This isolates whether format can be recovered
-  without touching the model weights or edit policy.
+- **PB-H8: remove final-only prompt guard, no adapter.** The default
+  postbreach config already appends a final-answer guard. Since PB-H3 showed
+  workflow prompting can damage outcome, run a no-adapter control with no
+  appended system prompt at all. This isolates whether the final-only guard is
+  helping format enough to justify any hidden outcome/read/convention cost.
 
 ## Standard Workflow
 
