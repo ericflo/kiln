@@ -119,6 +119,41 @@ impl DeviceOp2 for MulSigmoidGateOp {
         Ok(Some(t))
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, gate: &Tensor, up: &Tensor) -> Result<Option<Tensor>> {
+        // Shape / dtype validation mirrors cpu_fwd; bail-style errors
+        // surface to the dispatcher, while unsupported configurations
+        // (non-CUDA storage, exotic dtype, non-contiguous layout) return
+        // Ok(None) so the dispatcher falls through to CPU.
+        if gate.shape() != up.shape() {
+            bail!(
+                "MulSigmoidGateOp: shape mismatch {:?} vs {:?}",
+                gate.shape(),
+                up.shape()
+            );
+        }
+        if gate.dtype() != up.dtype() {
+            bail!(
+                "MulSigmoidGateOp: dtype mismatch {} vs {}",
+                gate.dtype(),
+                up.dtype()
+            );
+        }
+        if !matches!(gate.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !gate.is_contiguous() || !up.is_contiguous() {
+            return Ok(None);
+        }
+
+        // Compose substrate ops:
+        //   silu_gate = silu(gate)   via cuda_activation_unary(kind=0)
+        //   out       = silu_gate * up via cuda_elementwise_binary(kind=2)
+        let silu_gate = crate::cuda_activation_unary(gate, 0)?;
+        let out = crate::cuda_elementwise_binary(&silu_gate, up, 2)?;
+        Ok(Some(out))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
