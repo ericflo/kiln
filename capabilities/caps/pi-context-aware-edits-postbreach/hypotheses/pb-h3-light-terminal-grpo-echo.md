@@ -37,4 +37,24 @@ Reject if any of:
 
 ## Result
 
-Pending.
+Rejected.
+
+- Train rollout collection with the PB-H3 prompt produced 16 groups / 48
+  completions, but mean train reward fell to 0.1875. Nine groups survived
+  `--filter-var-min=0.05`.
+- Training completed with gradient checkpointing
+  (`KILN_GRAD_CHECKPOINT_SEGMENTS=32`), `rank=16`, `alpha=32`, `lr=3e-5`, and
+  `echo_lambda=0.05`. Peak observed VRAM from the training log was 19,830 MiB;
+  the train receipt reports 2,161,281 ms wall clock, 9 groups trained, and
+  27 completions trained.
+- Adapter verification passed. The verifier measured a nonzero LoRA effect
+  (`lora_update_l2_upper_bound=19.326994806105844`) with rank 16 / alpha 32.
+- Blind 3-seed eval scored 0.2458, delta -0.0538 from the 0.2996 baseline.
+  `format_compliance` improved (0.5625 -> 0.6042), but `outcome` fell
+  (0.5000 -> 0.4375), so the stricter terminal-state prompt protected final
+  wording at the cost of actually completing edits. Efficiency stayed within
+  the falsification ceiling at 317.8 thinking chars/tool call.
+
+This falsifies the strict read/edit/verify/final prompt as part of the first
+postbreach improvement stage. The useful part of the result is directional:
+format can be moved, but this prompt removes too much outcome behavior.

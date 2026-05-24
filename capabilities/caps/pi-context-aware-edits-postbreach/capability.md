@@ -124,6 +124,17 @@ and JavaScript camelCase/CommonJS style when available.
   train `rank=16`, `alpha=32`, `lr=3e-5`, `echo_lambda=0.05` if reward
   variance remains usable. This targets outcome without letting final format
   regress.
+  - Result: rejected. The prompt/hyperparameter combo trained and verified,
+    but blind eval regressed to 0.2458 (`delta=-0.0538`). It did move
+    `format_compliance` upward (0.5625 to 0.6042), but collapsed `outcome`
+    from 0.5000 to 0.4375. The strict workflow prompt is too outcome-hostile
+    for this cap, even though it teaches the terminal sentence.
+- **PB-H4: default-prompt strong Agentic GRPO/ECHO.** Reuse the clean PB-H2
+  default-prompt train rollout distribution, but apply the stronger
+  `pi-faithful-completion` hyperparameters from PB-H3 (`rank=16`, `alpha=32`,
+  `lr=3e-5`, `echo_lambda=0.05`). This isolates whether PB-H2 failed because
+  the update was too weak, while avoiding PB-H3's strict-prompt outcome
+  damage.
 
 ## Standard Workflow
 
