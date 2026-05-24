@@ -257,6 +257,23 @@ fn cuda_use_kt_api_sum_sq_last_dim() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: `mean_keepdim(-1)` through the kt-API +
+/// adapters. Set `KILN_USE_KT_API_MEAN_LAST_DIM=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// `x_f32.mean_keepdim(D::Minus1)` reduction in the variance step
+/// of [`rms_norm_fallback`] through
+/// `kiln_tensor::cuda_mean_last_axis` plus a zero-cost
+/// `unsqueeze(-1)` to restore the trailing-dim shape. Falls
+/// through to the candle composite when any precondition fails so
+/// behavior is identical with the gate off.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_mean_last_dim() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MEAN_LAST_DIM").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -5045,7 +5062,28 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
 /// `out = (1 + w) * x * rsqrt(mean(x^2) + eps)` with F32 reduction and epilogue.
 pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     let x_f32 = x.to_dtype(DType::F32)?;
-    let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    // Phase 7 (#1082): when `KILN_USE_KT_API_MEAN_LAST_DIM=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND the squared F32 input is
+    // a contiguous CUDA tensor, route the `mean_keepdim(-1)` step
+    // through `kiln_tensor::cuda_mean_last_axis` plus a zero-cost
+    // `unsqueeze(-1)` to restore the trailing-dim shape. Falls
+    // through to the candle composite when any precondition fails
+    // so behavior is identical with the gate off.
+    let sq = x_f32.sqr()?;
+    let variance = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_mean_last_dim_keepdim(&sq)? {
+                out
+            } else {
+                sq.mean_keepdim(candle_core::D::Minus1)?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            sq.mean_keepdim(candle_core::D::Minus1)?
+        }
+    };
     let rms_inv = (variance + eps)?.sqrt()?.recip()?;
     let normed = x_f32.broadcast_mul(&rms_inv)?;
     // Qwen3.5 RMSNorm stores weights centered around 0 and applies as (1 + w) * x_normed.
@@ -5055,6 +5093,48 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
     let w_plus_one = (w_f32.ones_like()? + w_f32)?;
     let out = normed.broadcast_mul(&w_plus_one)?;
     Ok(out.to_dtype(x.dtype())?)
+}
+
+/// Phase 7 (#1082) — kt-API `mean_keepdim(-1)` migration helper.
+/// Routes a contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_mean_last_axis` (which reduces the trailing
+/// axis) and re-applies `unsqueeze(-1)` so the output shape
+/// matches `mean_keepdim(-1)`.
+///
+/// Returns `Ok(None)` on any incompatibility so the caller falls
+/// through to the candle composite. NVTX range
+/// `kiln/mean_last_dim_kt` brackets the migrated call so nsys
+/// traces separate the path from the baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_mean_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_mean_last_dim() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/mean_last_dim_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out_kt = match kiln_tensor::cuda_mean_last_axis(&x_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let reduced = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).map_err(|e| {
+        anyhow::anyhow!("try_kt_mean_last_dim_keepdim: candle copy-back failed: {e}")
+    })?;
+    let out = reduced
+        .unsqueeze(candle_core::D::Minus1)
+        .map_err(|e| anyhow::anyhow!("try_kt_mean_last_dim_keepdim: unsqueeze failed: {e}"))?;
+    Ok(Some(out))
 }
 
 /// Phase C42: capture the minimal layer-1 input-layernorm intermediates needed
