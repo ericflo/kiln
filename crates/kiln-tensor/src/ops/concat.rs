@@ -82,6 +82,98 @@ impl ConcatOp {
         let out = crate::cuda_concat(inputs, self.axis)?;
         Ok(Some(out))
     }
+
+    /// Metal-only forward scaffold: symmetric with `cuda_fwd` but
+    /// currently returns `Ok(None)` so dispatch falls through to the
+    /// CPU path. Phase 4 Metal kernel author drops in
+    /// `crate::metal_concat(inputs, self.axis)` once it ships.
+    #[cfg(feature = "metal")]
+    pub fn metal_fwd(&self, inputs: &[&Tensor]) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd so the future
+        // MSL kernel can drop in without changing the call site:
+        //   - non-empty inputs
+        //   - <= 32 inputs (mirrors CUDA substrate's MAX_INPUTS cap;
+        //     beyond that the CPU path's per-slab byte copy is fine)
+        //   - all inputs on Metal device
+        if inputs.is_empty() {
+            return Ok(None);
+        }
+        if inputs.len() > 32 {
+            return Ok(None);
+        }
+        if !inputs
+            .iter()
+            .all(|t| matches!(t.device(), crate::Device::Metal(_)))
+        {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): implement
+        // `crate::metal_concat(inputs, self.axis)` analogous to
+        // `crate::cuda_concat` above. Until that kernel lands, fall
+        // through to the CPU path so the op still produces correct
+        // results on Mac (numerics-correct, performance-wrong;
+        // requires a per-input CPU staging copy at the dispatch
+        // boundary).
+        // Candidate implementations:
+        //   1. Custom MSL kernel: grid over (outer, axis_total,
+        //      inner); each thread copies one `per`-byte element
+        //      from `inputs[k][o, axis_off + a, i]` to
+        //      `out[o, a, i]`. Resolves the per-input axis offset
+        //      with a small uniform of length `inputs.len()`.
+        //   2. Multi-dispatch fallback: one Metal blit-encoder copy
+        //      per input slab (no kernel needed). Cheaper to wire
+        //      but trades kernel launches for blits — fine for
+        //      attention head concat where N is small.
+        //   3. MPS Graph: `concat(_:dimension:)` for one-shot
+        //      dispatch. Higher per-call overhead than a custom
+        //      kernel.
+        Ok(None)
+    }
+
+    /// Vulkan-only forward scaffold: symmetric with `cuda_fwd` but
+    /// currently returns `Ok(None)` so dispatch falls through to the
+    /// CPU path. Phase 4 Vulkan kernel author drops in
+    /// `crate::vulkan_concat(inputs, self.axis)` once it ships.
+    #[cfg(feature = "vulkan")]
+    pub fn vulkan_fwd(&self, inputs: &[&Tensor]) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / metal_fwd:
+        //   - non-empty inputs
+        //   - <= 32 inputs (mirrors CUDA substrate's MAX_INPUTS cap)
+        //   - all inputs on Vulkan device
+        if inputs.is_empty() {
+            return Ok(None);
+        }
+        if inputs.len() > 32 {
+            return Ok(None);
+        }
+        if !inputs
+            .iter()
+            .all(|t| matches!(t.device(), crate::Device::Vulkan(_)))
+        {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): implement
+        // `crate::vulkan_concat(inputs, self.axis)` analogous to
+        // `crate::cuda_concat` above. Until that wrapper lands, fall
+        // through to the CPU path (numerics-correct,
+        // performance-wrong; requires a per-input CPU staging copy
+        // at the dispatch boundary).
+        // Candidate implementations:
+        //   1. SPIR-V compute shader: grid over (outer, axis_total,
+        //      inner); each invocation copies one `per`-byte element
+        //      from `inputs[k][o, axis_off + a, i]` to
+        //      `out[o, a, i]`. Push the per-input axis offsets via
+        //      push-constants or a uniform buffer.
+        //   2. Multi-dispatch fallback: one `vkCmdCopyBuffer`
+        //      region per (input, outer-slab). No shader needed,
+        //      but trades kernel launches for queue submissions —
+        //      fine for attention head concat where N is small.
+        //   3. Dtype matrix gap: concat is dtype-agnostic (byte
+        //      copy), so the `VkDType` matrix doesn't constrain
+        //      this op. Both shader and copy-region paths work on
+        //      raw bytes.
+        Ok(None)
+    }
 }
 
 /// Concatenate `inputs` along `axis`. All inputs must share rank,

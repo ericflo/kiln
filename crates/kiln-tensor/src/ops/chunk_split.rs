@@ -136,6 +136,65 @@ impl ChunkOp {
         let parts = chunk(t, self.n_chunks, self.axis)?;
         Ok(Some(parts))
     }
+
+    /// Metal-only forward scaffold: symmetric with `cuda_fwd` but
+    /// currently returns `Ok(None)` so dispatch falls through to the
+    /// storage-agnostic `fwd` (which already produces zero-copy
+    /// narrow views).
+    #[cfg(feature = "metal")]
+    pub fn metal_fwd(&self, t: &Tensor) -> Result<Option<Vec<Tensor>>> {
+        // Gate on the same precondition shape as cuda_fwd: only fire
+        // when the input is Metal-backed.
+        if !matches!(t.device(), crate::Device::Metal(_)) {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): once `MetalStorage` views with
+        // adjusted `Layout` are exercised end-to-end, switch this to
+        // `Ok(Some(chunk(t, self.n_chunks, self.axis)?))` — the
+        // storage-agnostic `chunk` already produces zero-copy narrow
+        // views that work on any backend. Until the Metal narrow
+        // path is parity-tested, fall through to the generic `fwd`
+        // call site (which calls the same `chunk` function and so is
+        // correctness-equivalent).
+        // Candidate implementations:
+        //   1. Trivial drop-in:
+        //      `Ok(Some(chunk(t, self.n_chunks, self.axis)?))` —
+        //      same as cuda_fwd, since the op is pure view
+        //      manipulation and doesn't touch storage bytes.
+        //   2. Once `view.contiguous()` is wired through
+        //      `metal_contiguous`, callers that need a contiguous
+        //      Metal slab can follow the view with that call.
+        Ok(None)
+    }
+
+    /// Vulkan-only forward scaffold: symmetric with `cuda_fwd` but
+    /// currently returns `Ok(None)` so dispatch falls through to the
+    /// storage-agnostic `fwd` (which already produces zero-copy
+    /// narrow views).
+    #[cfg(feature = "vulkan")]
+    pub fn vulkan_fwd(&self, t: &Tensor) -> Result<Option<Vec<Tensor>>> {
+        // Gate on the same precondition shape as cuda_fwd: only fire
+        // when the input is Vulkan-backed.
+        if !matches!(t.device(), crate::Device::Vulkan(_)) {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): once `VkTensor` views with
+        // adjusted `Layout` are exercised end-to-end, switch this to
+        // `Ok(Some(chunk(t, self.n_chunks, self.axis)?))` — the
+        // storage-agnostic `chunk` already produces zero-copy narrow
+        // views that work on any backend. Until the Vulkan narrow
+        // path is parity-tested, fall through to the generic `fwd`
+        // call site (correctness-equivalent).
+        // Candidate implementations:
+        //   1. Trivial drop-in:
+        //      `Ok(Some(chunk(t, self.n_chunks, self.axis)?))` —
+        //      same as cuda_fwd, since the op is pure view
+        //      manipulation and doesn't touch storage bytes.
+        //   2. Once `view.contiguous()` is wired through
+        //      `vulkan_contiguous`, callers that need a contiguous
+        //      Vulkan slab can follow the view with that call.
+        Ok(None)
+    }
 }
 
 /// Split-with-sizes op handle. Caller passes the `sizes` slice to
@@ -174,6 +233,40 @@ impl SplitWithSizesOp {
         }
         let parts = split_with_sizes(t, sizes, self.axis)?;
         Ok(Some(parts))
+    }
+
+    /// Metal-only forward scaffold: symmetric with `cuda_fwd` but
+    /// currently returns `Ok(None)` so dispatch falls through to the
+    /// storage-agnostic `fwd` (which already produces zero-copy
+    /// narrow views).
+    #[cfg(feature = "metal")]
+    pub fn metal_fwd(&self, t: &Tensor, _sizes: &[usize]) -> Result<Option<Vec<Tensor>>> {
+        if !matches!(t.device(), crate::Device::Metal(_)) {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): same as `ChunkOp::metal_fwd` —
+        // once `MetalStorage` narrow views are exercised end-to-end,
+        // switch to `Ok(Some(split_with_sizes(t, sizes, self.axis)?))`.
+        // The storage-agnostic `split_with_sizes` already builds
+        // zero-copy views on any backend.
+        Ok(None)
+    }
+
+    /// Vulkan-only forward scaffold: symmetric with `cuda_fwd` but
+    /// currently returns `Ok(None)` so dispatch falls through to the
+    /// storage-agnostic `fwd` (which already produces zero-copy
+    /// narrow views).
+    #[cfg(feature = "vulkan")]
+    pub fn vulkan_fwd(&self, t: &Tensor, _sizes: &[usize]) -> Result<Option<Vec<Tensor>>> {
+        if !matches!(t.device(), crate::Device::Vulkan(_)) {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): same as `ChunkOp::vulkan_fwd`
+        // — once `VkTensor` narrow views are exercised end-to-end,
+        // switch to `Ok(Some(split_with_sizes(t, sizes, self.axis)?))`.
+        // The storage-agnostic `split_with_sizes` already builds
+        // zero-copy views on any backend.
+        Ok(None)
     }
 }
 
