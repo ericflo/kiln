@@ -1134,3 +1134,75 @@ pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         crate::TensorId::next(),
     )
 }
+
+
+/// CUDA-side D2H copy: copy a CUDA-backed kt-Tensor's bytes into a
+/// freshly-allocated CPU-backed kt-Tensor.
+///
+/// Phase 1 substrate op — closes a longstanding test-infrastructure
+/// gap. The previous workaround was `kt-bridge`'s
+/// `kt_tensor_to_candle_cuda_copy(&t).to_dtype(...).to_vec1::<f32>()`
+/// chain. `cuda_to_host_copy` returns a kt-Tensor directly.
+///
+/// The candle-side `CudaStream::memcpy_dtoh` synchronizes against
+/// any pending writes on the device's default stream before
+/// returning. The returned CPU tensor is guaranteed to see the
+/// latest results of any kernel previously launched on that stream.
+///
+/// The output has the same logical shape + dtype as `src`. Layout
+/// is row-major contiguous (`start_offset = 0`); any non-contiguous
+/// input is implicitly contiguified into the destination via
+/// [`cuda_contiguous`].
+///
+/// Errors:
+/// - Source must be CUDA storage.
+/// - Packed dtypes (Marlin / Int4 / Fp4) are not supported.
+#[cfg(feature = "cuda")]
+pub fn cuda_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
+    if src.dtype().is_packed() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_to_host_copy: packed dtype {} not supported",
+            src.dtype()
+        )));
+    }
+
+    // Force a contiguous, start_offset=0 CUDA buffer first.
+    // `cuda_contiguous` handles both Owned and Borrowed inputs and
+    // produces an Owned output, which has a usable `slice()`.
+    let contig = cuda_contiguous(src)?;
+
+    let contig_storage = contig
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg(
+                "cuda_to_host_copy: contiguous'd storage must be CudaStorage".to_string(),
+            )
+        })?;
+
+    let candle_device = contig_storage.candle_device().clone();
+    let dtype = src.dtype();
+    let n_elements = src.element_count();
+    let byte_len = dtype.packed_buffer_bytes(n_elements);
+
+    // Issue the D2H memcpy through candle's stream wrapper. The
+    // stream's `memcpy_dtoh` synchronizes on completion (per cudarc
+    // 0.19's CudaStream semantics).
+    let slice = contig_storage.slice();
+    let mut host_bytes = vec![0u8; byte_len];
+    let stream = candle_device.cuda_stream();
+    stream
+        .memcpy_dtoh(slice, &mut host_bytes)
+        .map_err(|e| {
+            crate::Error::Msg(format!("cuda_to_host_copy: memcpy_dtoh failed: {e:?}"))
+        })?;
+
+    let cpu_storage = crate::CpuStorage::from_bytes(dtype, host_bytes)?;
+    let storage_arc: crate::Storage = Arc::new(cpu_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(src.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+}
