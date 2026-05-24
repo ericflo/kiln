@@ -19,6 +19,13 @@
 //! `inputs[0].shape` with axis inserted at position `axis` of size
 //! `N = inputs.len()`.
 //!
+//! # Dispatch
+//!
+//! - CPU path: byte-wise per-outer-slab copy.
+//! - CUDA path: composes `unsqueeze(axis)` (zero-copy reshape) +
+//!   `cuda_concat(axis)`. No new kernel needed — reuses the existing
+//!   per-(outer, axis, inner) concat kernel. (#1082)
+//!
 //! # Determinism
 //!
 //! `Constructive`. Pointwise; bit-identical at the same input dtype.
@@ -60,6 +67,28 @@ pub fn stack(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
             bail!("stack: input {i} must be contiguous");
         }
     }
+
+    // CUDA fast path: if all inputs are CUDA-backed, unsqueeze each
+    // at `axis` (zero-copy reshape) and route through `cuda_concat`.
+    // The unsqueezed shape has size 1 at `axis`; concat-axis = `axis`
+    // sums those 1s up to `N`, producing the exact stack output shape.
+    // Mirrors the CUDA fast path in `ops::concat` (#1082).
+    #[cfg(feature = "cuda")]
+    {
+        let all_cuda = inputs.len() <= 32
+            && inputs
+                .iter()
+                .all(|t| matches!(t.device(), crate::Device::Cuda(_)));
+        if all_cuda {
+            let unsqueezed: Vec<Tensor> = inputs
+                .iter()
+                .map(|t| t.unsqueeze(axis))
+                .collect::<Result<Vec<_>>>()?;
+            let refs: Vec<&Tensor> = unsqueezed.iter().collect();
+            return crate::cuda_concat(&refs, axis);
+        }
+    }
+
     let n = inputs.len();
     let per = dtype.size_in_bytes();
     let outer: usize = shape[..axis].iter().product::<usize>().max(1);
