@@ -1799,6 +1799,7 @@ name = "kiln-core"
 version = "0.2.19"
 dependencies = [
  "chrono",
+ "kiln-tensor",
  "kiln-vulkan-kernel",
  "minijinja",
  "minijinja-contrib",
@@ -1902,6 +1903,7 @@ name = "kiln-kt-bridge"
 version = "0.2.19"
 dependencies = [
  "candle-core",
+ "half",
  "kiln-tensor",
 ]
 
@@ -1931,9 +1933,11 @@ dependencies = [
  "kiln-core",
  "kiln-flash-attn",
  "kiln-gdn-kernel",
+ "kiln-kt-bridge",
  "kiln-marlin-gemm",
  "kiln-nvtx",
  "kiln-rmsnorm-kernel",
+ "kiln-tensor",
  "kiln-vulkan-kernel",
  "memmap2",
  "objc2",
@@ -2065,6 +2069,7 @@ dependencies = [
  "bytemuck",
  "candle-core",
  "candle-metal-kernels",
+ "cc",
  "half",
  "kiln-autograd",
  "kiln-vulkan-kernel",

@@ -2,11 +2,12 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    let probe = env::var_os("CARGO_FEATURE_PROBE").is_some()
-        || env::var_os("CARGO_PRIMARY_PACKAGE").is_some();
-    if !probe {
-        // Phase 0 ships only the probe; lib.rs is otherwise empty. Skip
-        // the CUDA build if the feature isn't on.
+    let want_probe = env::var_os("CARGO_FEATURE_PROBE").is_some();
+    let want_cublaslt = env::var_os("CARGO_FEATURE_CUBLASLT").is_some();
+    let want_primary_full = env::var_os("CARGO_PRIMARY_PACKAGE").is_some();
+
+    if !want_probe && !want_cublaslt && !want_primary_full {
+        // No CUDA-needing feature on. Skip the nvcc build entirely.
         return;
     }
 
@@ -14,7 +15,7 @@ fn main() {
         Some(p) => p,
         None => {
             println!(
-                "cargo:warning=CUDA not found; kiln-blas probe will not build. Set CUDA_ROOT / CUDA_HOME."
+                "cargo:warning=CUDA not found; kiln-blas CUDA build skipped. Set CUDA_ROOT / CUDA_HOME."
             );
             return;
         }
@@ -47,15 +48,25 @@ fn main() {
         }
     }
 
-    build.file(csrc_dir.join("cublaslt_probe.cu"));
+    // Probe baseline lives under --features probe (or when this is
+    // the primary package, to make `cargo build -p kiln-blas` Just Work).
+    if want_probe || want_primary_full {
+        build.file(csrc_dir.join("cublaslt_probe.cu"));
+    }
 
-    build.compile("kiln_blas_probe");
+    // Production matmul executor — under --features cublaslt.
+    if want_cublaslt || want_primary_full {
+        build.file(csrc_dir.join("cublaslt_matmul.cu"));
+    }
+
+    build.compile("kiln_blas_cuda");
 
     println!(
         "cargo:rustc-link-search=native={}",
         cuda_root.join("lib64").display()
     );
-    // The probe links cublasLt + cublas + cudart (all part of CUDA toolkit).
+    // Both code paths link cublasLt + cublas + cudart (all part of the
+    // CUDA toolkit).
     println!("cargo:rustc-link-lib=cublasLt");
     println!("cargo:rustc-link-lib=cublas");
     println!("cargo:rustc-link-lib=cudart");

@@ -120,3 +120,13 @@ pub mod probe_ffi {
 pub fn phase() -> &'static str {
     "phase 2.1 — backend-agnostic API (AlgoCache + WorkspacePool); cublasLt MatmulHandle Phase 2.x"
 }
+// ----------------------------------------------------------------------
+// Phase 2.x — CublasLtMatmulHandle (production matmul executor).
+// ----------------------------------------------------------------------
+
+#[cfg(feature = "cublaslt")]
+mod cublaslt_handle;
+
+#[cfg(feature = "cublaslt")]
+pub use cublaslt_handle::{CublasLtMatmulHandle, FfiError};
+

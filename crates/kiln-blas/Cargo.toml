@@ -8,27 +8,37 @@ repository.workspace = true
 description = "kiln-tensor's CUDA BLAS layer (cublasLt). Phase 2.1 ships backend-agnostic types; Phase 2.x adds the cublasLt MatmulHandle."
 build = "build.rs"
 
-# Phase 2.1 splits this crate into two layers:
+# Phase 2.1 splits this crate into three layers:
 #
-# - **Backend-agnostic types** (AlgoCache + WorkspacePool) — compile
-#   on every host without `--features probe` or `--features cuda`.
-# - **Probe FFI + cublasLt path** — gated behind `--features probe`.
-#   Pulls candle-core (cuda) as the cudarc vendor.
+# - **Backend-agnostic types** (AlgoCache + WorkspacePool + BackendMatmul
+#   trait + Epilogue + MatmulRequest) — compile on every host without
+#   `--features probe` or `--features cublaslt`.
+# - **Probe FFI + cublasLt baseline** — gated behind `--features probe`.
+#   Pulls candle-core (cuda) as the cudarc vendor for the standalone
+#   probe example.
+# - **CublasLtMatmulHandle** — gated behind `--features cublaslt`. The
+#   production matmul executor that lifts the probe into a reusable
+#   handle with workspace pool + algo cache integration.
 #
 # This lets `kiln-tensor` and other crates depend on `kiln-blas` for
 # the autotune cache + workspace policy without needing the CUDA
-# toolchain to build.
+# toolchain to build, AND lets the CUDA-feature path pull in the real
+# matmul handle without dragging in the probe-only baseline code.
 
 [features]
 default = []
 # Builds the cublasLt probe binary alongside candle's gemm baseline.
 # Pulls candle-core (cuda) + the build.rs cublasLt link.
 probe = ["dep:candle-core"]
+# Builds the production `CublasLtMatmulHandle` (cublasLt context +
+# matmul executor). Also pulls candle-core (cuda) for the shared
+# cudarc version.
+cublaslt = ["dep:candle-core"]
 
 [dependencies]
-# Candle is the cudarc vendor under the `probe` feature; absent on
-# the default build so the backend-agnostic types compile on every
-# host.
+# Candle is the cudarc vendor under the `probe` / `cublaslt` features;
+# absent on the default build so the backend-agnostic types compile on
+# every host.
 candle-core = { workspace = true, features = ["cuda"], optional = true }
 half = "2"
 
