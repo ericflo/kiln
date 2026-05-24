@@ -61,6 +61,7 @@ fn main() {
     build.file(csrc_dir.join("activation.cu"));
     build.file(csrc_dir.join("cast.cu"));
     build.file(csrc_dir.join("softmax.cu"));
+    build.file(csrc_dir.join("reduce_last_axis.cu"));
     build.compile("kiln_tensor_cuda_ops");
 
     println!(
