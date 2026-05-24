@@ -1,0 +1,49 @@
+{
+  "round": 4,
+  "stage": "v4-grpo-chain-eval-first-result",
+  "name": "First v4 eval result returned with mean_composite=0.0 — interpretation pending iter4 baseline",
+  "session": "2026-05-24",
+  "pod": "pod-bacd20aa3760a0b6f0e0e771",
+  "timestamp": "2026-05-24T03:59Z",
+  "v4_eval_seed101": {
+    "n_tasks_scored": 12,
+    "n_tasks_attempted": 50,
+    "mean_composite": 0.0,
+    "mean_outcome": 0.0,
+    "mean_grounding": 0.0,
+    "mean_cross_file_caller_recall": 0.0,
+    "mean_invariant_coverage": 0.0,
+    "mean_format_compliance": 0.0,
+    "rollouts_nonzero": 0,
+    "rollouts_zero": 12,
+    "mean_wall_clock_s": 120.02,
+    "wall_clock_s_total": 720.13,
+    "per_task_timeout_s": 120,
+    "concurrency": 2,
+    "interpretation": "Under 120s per-task timeout with concurrency=2 (heavy GPU contention from Arm B training), v4 completed ZERO successful rollouts across 12 attempted tasks. mean_wall_clock_s == timeout limit suggests all tasks timed out before producing valid <answer> blocks."
+  },
+  "smoke_test_evidence_v4_did_train": {
+    "all_6_canary_checks_passed": true,
+    "nonzero_logit_delta_from_base": true,
+    "training_loss_curve": [0.408, 0.398, 0.379, 0.350],
+    "echo_env_ce_curve": [2.154, 2.143, 1.997, 1.964],
+    "comment": "v4 IS a real trained adapter — logit movement vs base confirmed across all 3 canary probe prompts. The eval-time 0.0 score reflects either (a) timeout under GPU contention OR (b) actual tool-use damage from training."
+  },
+  "iter4_baseline_pending": {
+    "status": "eval running at 03:59",
+    "expected_baseline": "~0.6-0.7 mean_composite from R3 history",
+    "decision_logic": "If iter4 also produces near-zero composite under same timeout+concurrency, the 0.0 is a methodology artifact (timeout too tight given Arm B training contention). If iter4 produces its typical 0.6+ composite, v4 actually catastrophically regressed and the GRPO chain step hurt the adapter."
+  },
+  "implications_if_v4_truly_regressed": [
+    "GRPO chain step with raw composite rewards on iter4 = bad (training pushed model AWAY from useful tool-use behavior)",
+    "Arms B (r2 sharpening), D (binarized), H (ranked), I (top-bot pair) all chain from same parent with reward transforms — likely SAME regression direction",
+    "Arm G (iter4-strong, 2 high-quality groups, conservative) might be safer",
+    "Arm J (no parent, GRPO from base on iter4 data) is the architecturally distinct arm — most likely to differ in outcome",
+    "Arm K (16 top-50% multi-source) tests data diversity hypothesis"
+  ],
+  "implications_if_timeout_artifact": [
+    "Re-run eval with concurrency=1 and per-task timeout=240s+ in next session",
+    "Bootstrap eval script (commit afc20ec6) already specifies 180s timeout — adequate without training contention"
+  ],
+  "next_step_blocked_on": "iter4 baseline eval completion (~17 min more from 03:59)"
+}
