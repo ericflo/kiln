@@ -1343,3 +1343,44 @@ rollouts and mean wall-clock 46.32s. Lesson: continuing H66 with real-success
 SFT softened H66's catastrophic reliability loss, but still lost to base and
 nearly doubled latency. The H66 ideal-SFT direction is not a useful first stage
 for pi-doctest mini-oscillation without a confirmed stabilizer.
+
+### H71: natural post-read edit choice low dose
+
+H71 returned to real train-only reward variance, but removed the repair-tail
+and terminal-stop artifacts from H63-H65. From the two H44 natural variance
+pairs, the context was cut after the successful read action and read
+observation. The preferred completion was the next successful edit action; the
+rejected completion was the real wrong first edit action from the near-miss
+rollout. Rewards were 1.0 versus 0.25.
+
+The resulting dataset was
+`/tmp/pi-doctest-h71-natural-postread-edit-choice/grpo-train.natural-postread-edit-choice.g2.jsonl`.
+Dry-run shape was 2 groups, 4 completions, reward stdev 0.375, 116 action
+tokens, 0 env tokens, and 1618 context tokens. Training used
+`cuda_grpo_ablation --mode phase1`, rank 4 / alpha 4 / lr `5e-8`, no ECHO, seed
+`3141592653`, and `KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 83.435s
+observed with peak observed VRAM 15989 MiB.
+
+H71 was rejected before blind eval. The training canary saw no checked-logit
+movement on any smoke prompt. Offline verify found nonzero LoRA tensors and a
+tiny LoRA update proxy of 0.002750, but the server quarantined the adapter due
+to the failed canary. Lesson: the natural edit-choice shape is compact and
+trainable, but `lr=5e-8` is below useful dose for this GRPO signal.
+
+### H72: natural post-read edit choice
+
+H72 retried H71's exact data with a higher dose, `lr=2e-7`, keeping rank 4 /
+alpha 4, no ECHO, seed `3141592653`, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 92.377s observed with peak
+observed VRAM 15989 MiB. The receipt reported 88.031s wall-clock and the same
+2 groups, 4 completions, 116 action tokens, and 1618 context tokens. Adapter
+verify passed with 400 nonzero LoRA tensors, 200 projection pairs, and LoRA
+update proxy 0.011568.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.925 with no
+zero rollouts and mean wall-clock 27.44s. H72 scored 0.798958 with no zero
+rollouts and mean wall-clock 46.09s. Lesson: local natural wrong-edit
+contrasts avoid zero rollouts at this smoke size, but still damage composite
+and latency. The branch closes the idea that train-only wrong first edits are
+safe when localized to the immediate post-read action; future policy data needs
+a broader confirmed behavior anchor before directly ranking semantic edits.
