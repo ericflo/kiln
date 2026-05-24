@@ -237,6 +237,17 @@ mean thinking chars rising to 3585.75. Baseline-mode ECHO is now a viable local
 training primitive, but pure env-only training on one success trace should not
 be scaled; the next data signal must directly favor concise action behavior.
 
+H25 put that into a policy-side test: baseline-mode per-sample GRPO+ECHO on the
+same two-completion reward-spread group that H23 used, but with policy loss
+enabled. Dry-run passed with 896 action tokens, 759 env tokens, and low but
+nonzero reward variance. Training no longer hit the H23 second-forward
+group-accumulation stall, but it exposed a stricter sequence-length limit: the
+first 1243-token completion's backward pass took 644s, with layers 0-2 alone
+taking 342s. The run timed out after the second completion's policy forward
+started, before any adapter artifact was saved. Policy-on local GRPO needs
+substantially shorter trajectories, likely under 800 sequence tokens and under
+300 action tokens, before it can be a practical data experiment on this laptop.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
