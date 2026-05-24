@@ -93,6 +93,11 @@ and JavaScript camelCase/CommonJS style when available.
   outcome/format tradeoff, test the `pi-faithful-completion` lesson: alternate
   small outcome-focused ideal traces with final-format contrastive groups
   rather than training either distribution alone.
+- **PB-H1: verifier-backed ideal trace SFT.** Because the fresh baseline is
+  just below the router threshold and a train-rollout audit found true outcome
+  and missing-final-response failures, first bootstrap the complete
+  read/edit/verify/final rhythm from train-only ideal traces across all
+  profiles.
 
 ## Standard Workflow
 
