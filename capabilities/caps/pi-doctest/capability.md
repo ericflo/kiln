@@ -617,3 +617,22 @@ wall-clock up to 51.08s. The promotion gate was skipped. Lesson: controlled
 successful thinking-tier pairs are safer than failure negatives but still too
 brittle as one-group GRPO; broader versions need a cheaper method or shorter
 workflow-only payloads before this route is worth another promotion check.
+
+### H40: low-dose short thinking compression
+
+H40 reused H38's one-group train-only short-compression pair, but lowered the
+update dose to rank 4, alpha 4, lr `1e-6`, no ECHO. This tested whether H38's
+promotion failure came from over-strong one-task pressure rather than the data
+shape.
+
+The adapter `pi-doctest-h40-think-compress-lowdose-noecho-r4a4-lr1e6` trained
+successfully in 63458 ms with 337 action tokens, 448 env tokens, 556 context
+tokens, and about 15972 MiB peak VRAM. Adapter verify passed with a much
+smaller LoRA update proxy, 0.05226.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it: composite 0.9000 versus base smoke
+0.934375, outcome 1.0, tested-before-done 0.875, tool-call efficiency 0.75,
+mean tool calls 5.25, mean thinking chars 2893.25, and mean wall-clock 46.01s.
+Lesson: lowering dose does not rescue the H38 compression pair; future
+compression attempts need a changed data distribution, not just smaller
+alpha/lr.
