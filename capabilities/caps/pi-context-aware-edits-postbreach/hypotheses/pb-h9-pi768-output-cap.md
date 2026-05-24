@@ -32,4 +32,18 @@ Reject if any of:
 
 ## Result
 
-Pending.
+Rejected. The 768-token cap reduced thinking cost but also reduced capability:
+
+- composite: 0.2475 (`delta=-0.0521`, stdev 0.4164)
+- `outcome`: 0.4583
+- `format_compliance`: 0.5417
+- `convention_consistency`: 0.9750
+- `read_before_edit`: 1.0000
+- `no_redundant_imports`: 1.0000
+- `no_style_drift`: 1.0000
+- efficiency: 5.90 tool calls/rollout, 1874.9 thinking chars, 306.8 thinking
+  chars/tool call
+
+This confirms that a lower output cap can recover baseline-like thinking
+efficiency, but it cuts off enough reasoning/finalization to miss the outcome
+and format gates. Keep the 1024-token alias for score-seeking runs.

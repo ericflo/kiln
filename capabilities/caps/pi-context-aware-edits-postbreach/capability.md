@@ -197,6 +197,18 @@ and JavaScript camelCase/CommonJS style when available.
   cap. This tests whether the current prompt can preserve outcome and format
   while reducing verbose thinking and excess tool loops before spending more
   GPU time on adapter updates.
+  - Result: rejected. The 768 cap improved thinking efficiency back to
+    baseline-like levels (1874.9 thinking chars, 306.8 thinking chars/tool),
+    but blind composite fell to 0.2475 (`delta=-0.0521`). It preserved
+    `read_before_edit=1.0000` and `convention_consistency=0.9750`, but
+    `outcome` fell to 0.4583 and `format_compliance` to 0.5417. The current
+    1024 cap remains the better default for capability score.
+- **PB-H10: no-ECHO conservative Agentic GRPO.** All postbreach GRPO arms have
+  used ECHO, while `pi-doctest` found no-ECHO can alter outcome/efficiency
+  tradeoffs. Reuse the full-train default-prompt rollout data from PB-H7, but
+  train a smaller conservative policy-only update (`rank=4`, `alpha=8`,
+  `lr=5e-6`, no ECHO). This tests whether ECHO was amplifying environment
+  imitation and damaging the edit contract.
 
 ## Standard Workflow
 
