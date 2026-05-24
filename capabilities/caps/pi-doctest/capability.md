@@ -896,3 +896,30 @@ aggressive shape reduction, but it is too slow and degrades blind reliability.
 The next route should avoid env-only ECHO as a standalone adapter update and
 focus on either mixed real success/failure trajectories with policy signal or
 non-training runtime constraints for efficient stopping.
+
+### H51: post-failure repair policy signal
+
+H51 moved away from generic success anchoring and tiny stop-only contrasts. It
+used two real train-only failure/recovery trajectories from H44's natural
+compact GRPO data: the prompt context ended after an actual failed doctest
+observation, the preferred completion wrote the corrected file, reran doctest,
+and then stopped, while the rejected completion stopped immediately after the
+failure. The dry-run shape was 2 groups, 4 completions, 310 action tokens, 210
+env tokens, 2995 context tokens, reward stdev 0.5, and two kept medium-variance
+groups.
+
+Training used rank 4 / alpha 4 / lr `1e-6`, ECHO lambda 0.025, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 816.080s observed, with
+peak observed VRAM 15986 MiB and final loss -0.289983. ECHO env CE improved
+from 2.70863 to 1.22403. Adapter verify passed with 400 nonzero LoRA tensors
+and LoRA update proxy 0.050735.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it: paired base scored 0.98125 with
+mean wall-clock 16.72s and no zero rollouts, while H51 scored 0.94375 with
+mean wall-clock 45.51s and no zero rollouts. No promotion check was run.
+Lesson: real post-failure repair signal is more semantically aligned than the
+previous stop-only negatives, and it did not introduce zero rollouts, but it
+still slowed the policy enough to lose composite. The next adapter attempt
+should treat post-failure repair as only one component inside a broader
+mixed-policy corpus, or shift efficiency pressure into runtime/prompt
+constraints rather than another small LoRA update.
