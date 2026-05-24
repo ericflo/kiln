@@ -1004,3 +1004,34 @@ update strength fixed the adapter delta proxy but not the reliability problem.
 The next direction should stop training on terse-vs-verbose thinking alone and
 mix suffix ranking with outcome-preserving behavior anchors or a direct
 anti-zero reliability signal.
+
+### H58: mixed reliability plus efficiency suffixes
+
+H58 tested that next direction directly. It reused the locally trainable
+one-action suffix format from H54/H57, but changed the contrast so the update
+was not just terse-vs-verbose thinking. For the first two train-only H54
+success anchors, post-read groups preferred the correct `edit` action over a
+premature `DONE`, post-edit groups preferred the doctest `bash` action over a
+premature `DONE`, and post-pass groups kept a softened concise-vs-verbose
+`DONE` contrast. This gave 6 groups and 12 completions with rewards 1.0 vs
+0.60 for the reliability groups and 1.0 vs 0.85 for the post-pass efficiency
+groups.
+
+The dry-run shape was 300 action tokens, 0 env tokens, 5422 context tokens,
+and reward stdev 0.178924. Training used rank 4 / alpha 4 / lr `1e-7`, no
+ECHO, and `KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 437.093s
+observed, much faster than H57, with peak observed VRAM 15983 MiB. Adapter
+verify passed with 400 nonzero LoRA tensors and LoRA update proxy 0.016932.
+
+Blind `LIMIT=4 SEEDS=1` smoke was positive but slower: paired base scored
+0.896875 with no zero rollouts and mean wall-clock 30.84s, while H58 scored
+0.98125 with no zero rollouts and mean wall-clock 40.37s. The `LIMIT=8`
+promotion gate rejected it: paired base scored 0.86484375 with no zero
+rollouts and mean wall-clock 55.48s, while H58 scored 0.7265625 with two zero
+rollouts and mean wall-clock 67.08s. Lesson: adding a tiny anti-premature-DONE
+signal to the six-group suffix recipe is not enough to stabilize the adapter.
+It preserves the smoke win but still causes wider-gate reliability failures.
+Next work should avoid another narrow suffix-only GRPO contrast and instead
+use a broader outcome-preserving success corpus, a method with less policy
+drift for terminal/action discipline, or a chain only after a confirmed
+general behavior anchor.
