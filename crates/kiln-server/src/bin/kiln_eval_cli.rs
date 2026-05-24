@@ -455,9 +455,7 @@ impl Iterator for TraceInputLines {
                             .as_ref()
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|| "<unknown>".to_string());
-                        return Some(Err(ProductionTraceError::Io(format!(
-                            "read {path}: {e}"
-                        ))));
+                        return Some(Err(ProductionTraceError::Io(format!("read {path}: {e}"))));
                     }
                 }
             }

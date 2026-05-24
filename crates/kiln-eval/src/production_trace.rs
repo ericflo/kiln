@@ -996,11 +996,8 @@ impl TraceTurn {
             id: string_field(value, "id"),
             session_id: string_field(value, "session_id"),
             source_path: input_source_path.map(str::to_string).or_else(|| {
-                string_field(value, "source_path").or_else(|| {
-                    source_metadata
-                        .get("source_path")
-                        .and_then(value_to_string)
-                })
+                string_field(value, "source_path")
+                    .or_else(|| source_metadata.get("source_path").and_then(value_to_string))
             }),
             timestamp: string_field(value, "timestamp")
                 .or_else(|| source_metadata.get("timestamp").and_then(value_to_string)),
@@ -1407,17 +1404,17 @@ mod tests {
         ];
         let (suite, stats) = synthesize_production_trace_suite_from_lines(lines, &cfg).unwrap();
         assert_eq!(suite.examples.len(), 2);
-        assert_eq!(stats.sampled_examples[0].source_path.as_deref(), Some("export-a.jsonl"));
-        assert_eq!(stats.sampled_examples[0].source_line, 7);
-        assert_eq!(stats.sampled_examples[1].source_path.as_deref(), Some("export-b.jsonl"));
-        assert_eq!(stats.sampled_examples[1].source_line, 3);
-        assert!(
-            suite.examples[0]
-                .id
-                .as_deref()
-                .unwrap()
-                .contains("src")
+        assert_eq!(
+            stats.sampled_examples[0].source_path.as_deref(),
+            Some("export-a.jsonl")
         );
+        assert_eq!(stats.sampled_examples[0].source_line, 7);
+        assert_eq!(
+            stats.sampled_examples[1].source_path.as_deref(),
+            Some("export-b.jsonl")
+        );
+        assert_eq!(stats.sampled_examples[1].source_line, 3);
+        assert!(suite.examples[0].id.as_deref().unwrap().contains("src"));
         assert_eq!(
             suite.examples[0].metadata.as_ref().unwrap()["source_path"],
             serde_json::json!("export-a.jsonl")
