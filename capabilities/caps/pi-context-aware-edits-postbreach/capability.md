@@ -209,6 +209,21 @@ and JavaScript camelCase/CommonJS style when available.
   train a smaller conservative policy-only update (`rank=4`, `alpha=8`,
   `lr=5e-6`, no ECHO). This tests whether ECHO was amplifying environment
   imitation and damaging the edit contract.
+  - Result: kept with caveat. The no-ECHO update trained and verified under
+    CUDA 13.2 on the RTX 4090 (`groups_kept=20`, `completions_trained=80`,
+    peak VRAM 20,905 MiB, elapsed 7,093.7s). Blind eval improved composite to
+    0.3404 (`delta=+0.0408`), the first postbreach adapter above baseline.
+    It lifted `outcome` to 0.5208 and `format_compliance` to 0.6042 while
+    keeping `convention_consistency=0.9542` and thinking efficiency near
+    baseline (310.9 thinking chars/tool). It still misses the strict +0.05
+    promotion gate by 0.0092 and `read_before_edit` slipped to 0.9667, so do
+    not promote without a promotion check or follow-up variant.
+- **PB-H11: no-ECHO rank-8 Agentic GRPO.** Reuse the same PB-H7 full-train
+  default-prompt rollout data and keep ECHO disabled, but increase capacity to
+  `rank=8`, `alpha=16` at the same conservative `lr=5e-6`. H10 showed no-ECHO
+  is the first direction that lifts composite, outcome, and format together;
+  this tests whether a modest capacity increase can clear the +0.05 promotion
+  gate without repeating the ECHO-induced convention/read regressions.
 
 ## Standard Workflow
 
