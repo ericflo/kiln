@@ -344,6 +344,16 @@ unsafe extern "C" {
         n_elements: i64,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_index_select_dim0_async(
+        src: *const core::ffi::c_void,
+        dst: *mut core::ffi::c_void,
+        indices_u32: *const core::ffi::c_void,
+        row_bytes: i64,
+        n_indices: i64,
+        src_n_rows: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// CUDA-side stride-aware contiguous() — produces a new kt-Tensor with
@@ -456,6 +466,156 @@ pub fn cuda_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
         crate::TensorId::next(),
     )
     .map_err(|e| crate::Error::Msg(format!("cuda_contiguous: wrap: {e}")))
+}
+
+/// CUDA-side `index_select(src, axis=0, indices)` — gather along the
+/// outer axis of a CUDA tensor.
+///
+/// Both `src` and `indices` must be CUDA-backed and contiguous.
+/// `indices` must be U32 (the kernel reads it as `*const u32`).
+///
+/// Returns a freshly-allocated contiguous output of shape
+/// `[indices.element_count(), src.shape()[1..]]` with the same dtype
+/// as `src`.
+///
+/// Errors:
+/// - src/indices must be CUDA storage
+/// - src/indices must be contiguous
+/// - src.rank() must be >= 1
+/// - indices.dtype() == U32
+/// - packed dtypes not supported
+#[cfg(feature = "cuda")]
+pub fn cuda_index_select_dim0(
+    src: &crate::Tensor,
+    indices: &crate::Tensor,
+) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use std::any::Any as _;
+
+    if src.dtype().is_packed() {
+        return Err(crate::Error::Msg(
+            "cuda_index_select_dim0: packed dtype not supported".to_string(),
+        ));
+    }
+    if indices.dtype() != crate::DType::U32 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_index_select_dim0: indices dtype must be U32, got {}",
+            indices.dtype()
+        )));
+    }
+    if !src.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_index_select_dim0: src must be contiguous (call .contiguous()? first)"
+                .to_string(),
+        ));
+    }
+    if !indices.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_index_select_dim0: indices must be contiguous".to_string(),
+        ));
+    }
+
+    let src_shape = src.shape();
+    if src_shape.is_empty() {
+        return Err(crate::Error::Msg(
+            "cuda_index_select_dim0: src must have rank >= 1".to_string(),
+        ));
+    }
+    let src_n_rows = src_shape[0];
+    let inner: usize = src_shape[1..].iter().product();
+    let bpe = src.dtype().size_in_bytes();
+    let row_bytes = (inner * bpe) as i64;
+
+    let n_indices = indices.element_count();
+    let mut out_shape = vec![n_indices];
+    out_shape.extend_from_slice(&src_shape[1..]);
+    let n_out_elements = n_indices * inner;
+
+    let src_storage = src
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_index_select_dim0: src must be CUDA storage".to_string())
+        })?;
+    let idx_storage = indices
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg(
+                "cuda_index_select_dim0: indices must be CUDA storage".to_string(),
+            )
+        })?;
+
+    let candle_device = src_storage.candle_device.clone();
+    let device_index = match src_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!("CudaStorage::device is always Cuda"),
+    };
+    let dst_storage = CudaStorage::zeros(
+        candle_device.clone(),
+        device_index,
+        src.dtype(),
+        n_out_elements,
+    )?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let src_base = match &src_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let idx_base = match &idx_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let dst_base = match &dst_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+    };
+
+    let src_byte_off = (src.layout().start_offset() * bpe) as u64;
+    let idx_byte_off = (indices.layout().start_offset() * crate::DType::U32.size_in_bytes()) as u64;
+
+    let src_ptr = (src_base + src_byte_off) as *const core::ffi::c_void;
+    let idx_ptr = (idx_base + idx_byte_off) as *const core::ffi::c_void;
+    let dst_ptr = dst_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_index_select_dim0_async(
+            src_ptr,
+            dst_ptr,
+            idx_ptr,
+            row_bytes,
+            n_indices as i64,
+            src_n_rows as i64,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_index_select_dim0: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(dst_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(out_shape),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_index_select_dim0: wrap: {e}")))
 }
 
 // ----------------------------------------------------------------------
