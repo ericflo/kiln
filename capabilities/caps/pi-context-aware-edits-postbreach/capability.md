@@ -186,6 +186,17 @@ and JavaScript camelCase/CommonJS style when available.
   workflow prompting can damage outcome, run a no-adapter control with no
   appended system prompt at all. This isolates whether the final-only guard is
   helping format enough to justify any hidden outcome/read/convention cost.
+  - Result: rejected. Removing the appended prompt regressed blind eval to
+    0.2787 (`delta=-0.0208`). `format_compliance` stayed at 0.5625, but
+    `outcome` fell to 0.4583, `convention_consistency` to 0.8542, and
+    `read_before_edit` to 0.9167. Efficiency also worsened to 6.12 tool
+    calls, 2495 thinking chars, and 372.2 thinking chars/tool call. Keep the
+    final-only guard as part of the default rollout/eval policy.
+- **PB-H9: 768-token thinking cap, no adapter.** Keep the final-only prompt
+  guard but lower the Pi model alias from the 1024 output-token cap to a 768
+  cap. This tests whether the current prompt can preserve outcome and format
+  while reducing verbose thinking and excess tool loops before spending more
+  GPU time on adapter updates.
 
 ## Standard Workflow
 

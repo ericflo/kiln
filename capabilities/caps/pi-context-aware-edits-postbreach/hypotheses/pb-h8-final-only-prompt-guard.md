@@ -30,4 +30,19 @@ Reject if any of:
 
 ## Result
 
-Pending.
+Rejected. Blind three-seed eval with no appended system prompt scored 0.2787
+(`delta=-0.0208`, stdev 0.4398) versus the default prompted baseline at
+0.2996. Removing the guard preserved `format_compliance` at 0.5625, but hurt
+the edit contract:
+
+- `outcome`: 0.4583
+- `convention_consistency`: 0.8542
+- `read_before_edit`: 0.9167
+- `no_redundant_imports`: 1.0000
+- `no_style_drift`: 1.0000
+- efficiency: 6.12 tool calls/rollout, 2495.0 thinking chars, 372.2 thinking
+  chars/tool call
+
+The final-only guard should remain in the default policy. It is not sufficient
+to solve format, but removing it increases tool/thinking cost and damages
+context-sensitive edit behavior.
