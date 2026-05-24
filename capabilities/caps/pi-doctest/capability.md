@@ -306,6 +306,18 @@ behaviorally; it falsifies this fresh-from-base five-group policy-on shape as a
 practical laptop iteration. The next retry should cut the token/group budget or
 precondition with a cheaper no-policy-loss/ECHO pass before policy-on GRPO.
 
+H30 tested the gradient-checkpointing question directly. It retried the same
+fresh-from-base hard-negative route on only two groups, but lowered
+`KILN_GRAD_CHECKPOINT_SEGMENTS` from 24 to 12. The trainer confirmed 12
+segments and it fit in memory, with the first logged CUDA gate around 16376 MiB,
+but larger multi-layer checkpoint blocks made recompute worse: one 3-layer
+block covering layers 12-15 took 82506 ms, followed by 14172 ms for layers
+9-12, 15183 ms for layers 6-9, and 9209 ms for layers 3-6. The run was stopped
+during the first completion's backward pass before adapter write. Conclusion:
+gradient checkpointing remains necessary, but fewer segments are the wrong
+direction for this trainer path. Keep 24 segments for policy-on GRPO and reduce
+data/token shape instead.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
