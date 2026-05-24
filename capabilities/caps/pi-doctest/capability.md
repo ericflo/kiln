@@ -390,6 +390,21 @@ did use fewer tool calls than base (4.625 mean calls, tool-call efficiency
 treated as an unstable candidate rather than a stable kept stage; do not chain
 further from it without a stronger multi-seed confirmation.
 
+H36 tested whether H33's instability was caused by too little no-ECHO
+hard-negative data. It trained fresh from base on the full five train-only
+hard-negative groups from H29, still with `--no-echo`, rank 4 / alpha 8 / lr
+5e-6 / policy loss on / `KILN_GRAD_CHECKPOINT_SEGMENTS=24`. The dry-run shape
+was 5 groups, 10 completions, 936 action tokens, 1177 env tokens, max 554
+sequence tokens, and max 150 action tokens per completion. Training completed
+in 439s observed wall-clock and fit at about 16000 MiB peak VRAM; verification
+passed with a larger delta proxy of 0.577938. Blind `LIMIT=4` smoke rejected it
+hard: H36 scored 0.750000 versus base 0.934375, outcome fell to 0.75,
+tested-before-done fell to 0.875, tool-call efficiency fell to 0.75, mean tool
+calls rose to 5.75, mean thinking chars rose to 2440.75, and one rollout was
+zero. The broader hard-negative/no-ECHO recipe is therefore not a stable
+direction; future data should avoid wrong/no-test terminal negatives rather
+than simply scaling them.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
