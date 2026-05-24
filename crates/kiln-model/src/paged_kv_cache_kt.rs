@@ -34,6 +34,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use candle_core::cuda_backend::CudaDevice;
 
+use kiln_core::block::BlockTable;
 use kiln_tensor::{
     cuda_zeros, DType as KtDType, Layout, Tensor as KtTensor, TensorId,
 };
@@ -152,6 +153,26 @@ impl PagedKvCacheKt {
 
     pub fn block_size(&self) -> usize {
         self.block_size
+    }
+
+    /// Return one physical start slot per batch row when each logical
+    /// window is a contiguous run in the shared KV pool. Mirrors
+    /// [`crate::paged_kv_cache::PagedKvCache::contiguous_slot_run_starts`].
+    ///
+    /// Pure CPU bookkeeping over `BlockTable`s — no kt-Tensor work,
+    /// device-agnostic, can be called from any thread.
+    pub fn contiguous_slot_run_starts(
+        &self,
+        block_tables: &[&BlockTable],
+        start_positions: &[usize],
+        len: usize,
+    ) -> Option<Vec<usize>> {
+        crate::paged_kv_cache::contiguous_slot_run_starts(
+            block_tables,
+            self.block_size,
+            start_positions,
+            len,
+        )
     }
 
     pub fn num_blocks(&self) -> usize {
