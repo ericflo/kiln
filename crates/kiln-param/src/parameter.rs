@@ -327,6 +327,29 @@ impl Parameter {
         self.epoch = self.epoch.saturating_add(1);
     }
 
+    /// Phase 2.5 tied-parameter check (#1082 line 288).
+    ///
+    /// Returns `true` when this Parameter has at least one
+    /// [`OutputHead`] attached — i.e., the parameter is shared
+    /// between its main forward path and one or more head call sites
+    /// (e.g., Qwen3.5-4B's LM head ← embed_tokens tie, or the
+    /// MTP head ← embed_tokens tie).
+    ///
+    /// Tied parameters use **one** Parameter, **one**
+    /// `backward_storage`, with grad accumulation via atomic-add into
+    /// the single master (per the Phase 2.5 invariant). The optimizer
+    /// sees exactly one logical parameter regardless of the number of
+    /// head call sites.
+    pub fn is_tied(&self) -> bool {
+        !self.heads.is_empty()
+    }
+
+    /// Count of attached output heads. Convenience over
+    /// `heads().len()`.
+    pub fn head_count(&self) -> usize {
+        self.heads.len()
+    }
+
     /// Phase 2.7 snapshot — return a cheap clone of this Parameter
     /// that shares the underlying storage Arcs.
     ///
@@ -877,6 +900,44 @@ mod tests {
         let new_master = plain_f32().primary_tensor().clone();
         p.replace_backward_storage(Some(new_master));
         assert!(p.is_forward_stale());
+    }
+
+    #[test]
+    fn is_tied_false_for_fresh_parameter() {
+        let p = Parameter::inference_only(plain_f32());
+        assert!(!p.is_tied());
+        assert_eq!(p.head_count(), 0);
+    }
+
+    #[test]
+    fn is_tied_true_after_head_attach() {
+        let mut p = Parameter::inference_only(plain_f32());
+        let head = OutputHead {
+            role: OutputHeadRole::LmHead,
+            head_storage: plain_f32().primary_tensor().clone(),
+            requires_grad: true,
+        };
+        p.add_head(head);
+        assert!(p.is_tied());
+        assert_eq!(p.head_count(), 1);
+    }
+
+    #[test]
+    fn head_count_tracks_multiple_heads() {
+        let mut p = Parameter::inference_only(plain_f32());
+        for role in [
+            OutputHeadRole::LmHead,
+            OutputHeadRole::MtpHead,
+            OutputHeadRole::ValueHead,
+        ] {
+            p.add_head(OutputHead {
+                role,
+                head_storage: plain_f32().primary_tensor().clone(),
+                requires_grad: false,
+            });
+        }
+        assert_eq!(p.head_count(), 3);
+        assert!(p.is_tied());
     }
 
     #[test]
