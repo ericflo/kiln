@@ -109,6 +109,40 @@ impl DeviceOp2 for IndexSelectOp {
         Ok(Some(Tensor::from_parts(storage, layout, TensorId::next())?))
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, input: &Tensor, indices: &Tensor) -> Result<Option<Tensor>> {
+        // The CUDA substrate currently only provides dim0 gather
+        // (via kernel kiln_index_select_dim0_async). For axis != 0
+        // we fall through to CPU until a generic axis kernel ships.
+        if self.axis != 0 {
+            return Ok(None);
+        }
+        if input.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !input.is_contiguous() || !indices.is_contiguous() {
+            return Ok(None);
+        }
+        //  requires U32 indices. Fall through
+        // to CPU for I64.
+        if indices.dtype() != DType::U32 {
+            return Ok(None);
+        }
+        // Multi-dim indices: flatten → gather → reshape.
+        if indices.rank() == 1 {
+            Ok(Some(crate::cuda_index_select_dim0(input, indices)?))
+        } else {
+            let n_indices = indices.element_count();
+            let flat_ids = indices.reshape(vec![n_indices])?;
+            let gathered = crate::cuda_index_select_dim0(input, &flat_ids)?;
+            // gathered shape: [n_indices, ...rest_of_input_dims_after_dim0]
+            // Final shape: [..indices.shape, ...rest]
+            let mut out_shape = indices.shape().to_vec();
+            out_shape.extend_from_slice(&input.shape()[1..]);
+            Ok(Some(gathered.reshape(out_shape)?))
+        }
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
