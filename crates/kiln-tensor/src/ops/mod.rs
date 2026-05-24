@@ -116,7 +116,7 @@ pub use bool_reduce::{all_axis, all_reduce, any_axis, any_reduce, BoolReduce};
 pub use broadcast::broadcast_to;
 pub use cast::{cast, CastOp};
 pub use categorical::Multinomial;
-pub use chunk_split::{chunk, split_with_sizes};
+pub use chunk_split::{chunk, split_with_sizes, ChunkOp, SplitWithSizesOp};
 pub use clamp_pow::{clamp, pow};
 pub use clip_grad_value::clip_grad_value;
 pub use compare::{eq, ge, gt, le, lt, ne, CmpKind};

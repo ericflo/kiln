@@ -9,6 +9,21 @@
 //!
 //! Both return `Vec<Tensor>` of zero-copy `narrow` views over the
 //! input — no kernel dispatch, no allocation, no copy.
+//!
+//! # Backends
+//!
+//! These are **layout/shape ops**: they don't read or write storage,
+//! they just construct new tensors with adjusted `Layout` over the
+//! parent's storage `Arc`. That means they work for *any* storage
+//! backend (CPU, CUDA, Metal, Vulkan) — the per-device "forward" is
+//! the same path. `ChunkOp::cuda_fwd` / `SplitWithSizesOp::cuda_fwd`
+//! exist on the Op handles for surface-symmetry with the
+//! `DeviceOp{1,2,3}::cuda_fwd` contract and to make explicit that
+//! split-on-CUDA is constant-time zero-copy. Callers who need
+//! CUDA-contiguous outputs (e.g. for kernels that require
+//! `is_contiguous()`) should follow the split with
+//! `Tensor::contiguous()`, which on CUDA routes through
+//! `cuda_contiguous`.
 
 use crate::{bail, Result, Tensor};
 
@@ -67,6 +82,99 @@ pub fn split_with_sizes(t: &Tensor, sizes: &[usize], axis: usize) -> Result<Vec<
         off += len;
     }
     Ok(out)
+}
+
+// ----------------------------------------------------------------------
+// Op handles
+// ----------------------------------------------------------------------
+//
+// Chunk and split are variable-arity in their outputs, so they don't
+// fit the `DeviceOp{1,2,3}` trait surface (which is fixed-arity). We
+// expose Op handles with explicit `fwd` / `cuda_fwd` methods to
+// mirror the surface of the fixed-arity ops, and to make the "this
+// already works on CUDA because narrow is storage-agnostic" guarantee
+// part of the explicit API.
+
+/// Chunk op handle. Carries `n_chunks` + the split axis.
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkOp {
+    n_chunks: usize,
+    axis: usize,
+}
+
+impl ChunkOp {
+    pub const fn new(n_chunks: usize, axis: usize) -> Self {
+        ChunkOp { n_chunks, axis }
+    }
+    pub const fn n_chunks(self) -> usize {
+        self.n_chunks
+    }
+    pub const fn axis(self) -> usize {
+        self.axis
+    }
+    pub fn name(&self) -> &'static str {
+        "chunk"
+    }
+
+    /// Storage-agnostic forward. Same code path on CPU and CUDA —
+    /// returns zero-copy [`Tensor::narrow`] views.
+    pub fn fwd(&self, t: &Tensor) -> Result<Vec<Tensor>> {
+        chunk(t, self.n_chunks, self.axis)
+    }
+
+    /// CUDA-only forward. Returns `Ok(None)` when the input is not
+    /// CUDA-backed (caller falls back to `fwd`). On CUDA inputs,
+    /// returns `Ok(Some(views))` — the views share the input's CUDA
+    /// storage with adjusted `Layout`, zero-copy and constant-time.
+    /// Callers needing contiguous CUDA outputs can follow with
+    /// `view.contiguous()` (which dispatches to `cuda_contiguous`).
+    #[cfg(feature = "cuda")]
+    pub fn cuda_fwd(&self, t: &Tensor) -> Result<Option<Vec<Tensor>>> {
+        if !matches!(t.device(), crate::Device::Cuda(_)) {
+            return Ok(None);
+        }
+        let parts = chunk(t, self.n_chunks, self.axis)?;
+        Ok(Some(parts))
+    }
+}
+
+/// Split-with-sizes op handle. Caller passes the `sizes` slice to
+/// `fwd` / `cuda_fwd`; the handle just carries the axis (so the same
+/// handle can be re-used across calls with different size patterns).
+#[derive(Debug, Clone, Copy)]
+pub struct SplitWithSizesOp {
+    axis: usize,
+}
+
+impl SplitWithSizesOp {
+    pub const fn new(axis: usize) -> Self {
+        SplitWithSizesOp { axis }
+    }
+    pub const fn axis(self) -> usize {
+        self.axis
+    }
+    pub fn name(&self) -> &'static str {
+        "split_with_sizes"
+    }
+
+    /// Storage-agnostic forward. Same code path on CPU and CUDA —
+    /// returns zero-copy [`Tensor::narrow`] views.
+    pub fn fwd(&self, t: &Tensor, sizes: &[usize]) -> Result<Vec<Tensor>> {
+        split_with_sizes(t, sizes, self.axis)
+    }
+
+    /// CUDA-only forward. Returns `Ok(None)` when the input is not
+    /// CUDA-backed (caller falls back to `fwd`). On CUDA inputs,
+    /// returns `Ok(Some(views))` — zero-copy narrow views sharing the
+    /// input's CUDA storage.
+    #[cfg(feature = "cuda")]
+    pub fn cuda_fwd(&self, t: &Tensor, sizes: &[usize]) -> Result<Option<Vec<Tensor>>> {
+        if !matches!(t.device(), crate::Device::Cuda(_)) {
+            return Ok(None);
+        }
+        let parts = split_with_sizes(t, sizes, self.axis)?;
+        Ok(Some(parts))
+    }
 }
 
 #[cfg(test)]
