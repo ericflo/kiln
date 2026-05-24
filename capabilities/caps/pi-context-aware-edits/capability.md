@@ -122,6 +122,17 @@ A4: Skip the actual edit, claim the function already exists.
 - Efficiency baseline: 5.00 tool calls/rollout, 1488.5 thinking chars,
   302.7 thinking chars/tool call.
 
+## Firewall Incident
+
+On 2026-05-24 after H5 was already trained, evaluated, recorded, committed,
+and pushed, a broad `rg` search for prior command examples accidentally
+included `datasets/eval.tasks.jsonl` and printed held-out eval task contents.
+This is a severe information-firewall breach for future work on this slug.
+H5 and earlier results remain pre-breach records, but no further adapter or
+data-design iteration under `pi-context-aware-edits` should be treated as
+blind from this session. Future work must restart under
+`pi-context-aware-edits-postbreach` with a fresh held-out task pool.
+
 ## Hypotheses
 
 - **H1: default GRPO recipe with ECHO λ=0.05.**
