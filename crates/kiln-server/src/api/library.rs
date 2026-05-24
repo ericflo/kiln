@@ -153,14 +153,28 @@ pub fn routes() -> Router<AppState> {
 mod tests {
     use super::*;
 
+    /// Serialize tests in this module that mutate the
+    /// `KILN_ADAPTER_LIBRARY_URL` process-env so they don't race:
+    /// cargo's test harness runs `#[test]`s in parallel by default,
+    /// and a `set_var` from one test will leak into another's
+    /// `library_url()` read otherwise. CI run 26347552033 failed on
+    /// 39555704 with `default_library_url_when_env_unset` seeing
+    /// `https://custom.example/` (the override test's value).
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn default_library_url_when_env_unset() {
+        let _g = env_test_lock();
         unsafe { std::env::remove_var("KILN_ADAPTER_LIBRARY_URL"); }
         assert_eq!(library_url(), DEFAULT_LIBRARY_URL);
     }
 
     #[test]
     fn env_var_override_takes_precedence() {
+        let _g = env_test_lock();
         unsafe { std::env::set_var("KILN_ADAPTER_LIBRARY_URL", "https://custom.example/"); }
         assert_eq!(library_url(), "https://custom.example/");
         unsafe { std::env::remove_var("KILN_ADAPTER_LIBRARY_URL"); }
