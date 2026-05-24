@@ -212,6 +212,18 @@ did not complete before the 900s wrapper. ECHO remains plausible as a method,
 but this local route needs a smaller env-only microbatch or trainer support
 that skips policy/reference work when `--no-policy-loss` is set.
 
+H23 tested that smaller route directly. A one-group / one-completion ECHO
+dry-run was rejected as `zero_groups`, because dynamic GRPO filtering still
+requires a non-degenerate reward group before ECHO can run. A one-group /
+two-completion shape passed dry-run with 896 action tokens, 759 env tokens, and
+598 context tokens. Training with explicit 24-segment checkpointing made real
+progress but timed out at 900s without an adapter artifact: the first
+completion's backward pass took 196s, and the second completion's policy
+forward alone took 426s before the run entered backward and timed out.
+Gradient checkpointing is active and necessary, but the next useful step is a
+trainer change that skips reference/policy work for `--no-policy-loss` ECHO or
+adds a dedicated env-token-only ECHO path.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
