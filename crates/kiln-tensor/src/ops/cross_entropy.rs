@@ -59,6 +59,53 @@ impl DeviceOp2 for CrossEntropyOp {
         Ok(Some(crate::cuda_cross_entropy_loss(logits, targets)?))
     }
 
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, logits: &Tensor, targets: &Tensor) -> Result<Option<Tensor>> {
+        // Same precondition gates as cuda_fwd: validate shape / dtype
+        // first so contract errors surface as Errs. After validation,
+        // soft-fall through to the CPU path if either input lives on
+        // a non-Vulkan device — the kernel only operates on
+        // VkTensor-resident inputs.
+        validate(logits, targets)?;
+        if !matches!(logits.device(), crate::Device::Vulkan(_))
+            || !matches!(targets.device(), crate::Device::Vulkan(_))
+        {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): implement
+        // `crate::vulkan_cross_entropy_loss(logits, targets)`
+        // analogous to `crate::cuda_cross_entropy_loss` above. Until
+        // that wrapper lands, fall through to the CPU path (numerics-
+        // correct, performance-wrong).
+        // Candidate implementations:
+        //   1. Reuse `kiln-vulkan-kernel::vk_ops::flce` — the existing
+        //      "fused linear cross-entropy" kernel is the production
+        //      training-loss hot path (logits=W@x fused with CE on
+        //      device, never materializing the full vocab×batch
+        //      logits tensor). For the simpler non-fused case (where
+        //      `logits` is already materialized), a thin wrapper can
+        //      skip the matmul half and reuse only the CE reduction.
+        //   2. New stand-alone SPIR-V shader: per-batch threadgroup
+        //      reduction over the vocab axis — first pass finds row
+        //      max, second pass computes log-sum-exp + indexes
+        //      `targets[b]` for the target logit. Final batch-mean is
+        //      a single-pass reduction in the same kernel via shared
+        //      memory. Reuse the row-reduction pattern from
+        //      `vk_ops::softmax::dispatch_softmax_fwd`.
+        //   3. Dtype matrix:
+        //      - `logits`: F32 supported via existing VkDType::F32;
+        //        BF16 supported via VkDType::Bf16 (verify flce kernel
+        //        accepts BF16 logits — production training is BF16).
+        //        F16 needs a new VkDType::F16 variant before any
+        //        F16-native shader can land.
+        //      - `targets`: I64 or U32 (see cpu_fwd's
+        //        read_target_ids). Vulkan compute storage buffers
+        //        are u32-aligned; I64 requires two-u32 packing.
+        //        Prefer U32 targets at the dispatch boundary on
+        //        Vulkan to avoid the packing cost.
+        Ok(None)
+    }
+
     fn cpu_fwd(&self, logits: &Tensor, targets: &Tensor) -> Result<Option<Tensor>> {
         validate(logits, targets)?;
         let logits_cpu = downcast_cpu(logits, "logits")?;
