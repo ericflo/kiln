@@ -636,3 +636,27 @@ mean tool calls 5.25, mean thinking chars 2893.25, and mean wall-clock 46.01s.
 Lesson: lowering dose does not rescue the H38 compression pair; future
 compression attempts need a changed data distribution, not just smaller
 alpha/lr.
+
+### H41: post-pass stop g4 no-ECHO
+
+H41 changed the data distribution from full-trace thinking compression to a
+short terminal behavior contrast. Four train-only groups ended after a
+successful doctest tool result; the preferred completion briefly acknowledged
+the pass and emitted `DONE`, while the rejected completion redundantly reran
+doctests. This kept thinking enabled and targeted efficient stopping rather
+than disabling reasoning.
+
+The adapter `pi-doctest-h41-postpass-stop-g4-noecho-r4a8` trained successfully
+in 202119 ms with 260 action tokens, 0 env tokens, 2970 context tokens, and
+about 15965 MiB peak VRAM under `KILN_GRAD_CHECKPOINT_SEGMENTS=24`. Adapter
+verify passed with LoRA update proxy 0.78701.
+
+Blind `LIMIT=4 SEEDS=1` smoke was positive: composite 0.971875 versus base
+smoke 0.934375, outcome/tested/format all 1.0, tool-call efficiency 0.90625,
+mean tool calls 4.0, mean thinking chars 1664.5, and mean wall-clock 33.50s.
+Promotion rejected it: `LIMIT=8` composite 0.7859375 versus base 0.8328125,
+outcome 0.875, tested-before-done 1.0, tool-call efficiency 0.59375, mean tool
+calls 7.25, mean thinking chars 3783.25, mean wall-clock 75.04s, and one zero
+rollout. Lesson: post-pass stopping is a useful target, but the adapter update
+was too narrow; next attempts should combine terminal stop contrast with
+pre-pass workflow coverage or use a lower-impact method.
