@@ -127,48 +127,33 @@ pub fn marlin_w4a16_gemm_kt(
         )));
     }
 
-    let (a_st, a_off) = cuda_storage_and_byte_offset(a_fp16, KtDType::F16, "a_fp16")?;
+    // Owner-agnostic input pointers (Phase 7 v2).
+    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_fp16, KtDType::F16, "a_fp16")?;
     // b_packed is i32 packed; kiln-tensor doesn't have an I32 dtype today,
     // so the canonical Marlin packed tensor is stored as I64 (8 bytes per
     // packed element pair), or callers can pass U32. Accept either.
-    let (b_st, b_off) = if b_packed.dtype() == KtDType::U32 {
-        cuda_storage_and_byte_offset(b_packed, KtDType::U32, "b_packed")?
+    let b_ptr = if b_packed.dtype() == KtDType::U32 {
+        kiln_kt_bridge::cuda_input_device_ptr(b_packed, KtDType::U32, "b_packed")?
     } else {
         return Err(MarlinError::Msg(format!(
             "kt-marlin: b_packed must be U32 (interpreted as packed i32), got {}",
             b_packed.dtype()
         )));
     };
-    let (s_st, s_off) = cuda_storage_and_byte_offset(scales, KtDType::F16, "scales")?;
+    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(scales, KtDType::F16, "scales")?;
+    let (a_st, _) = cuda_storage_and_byte_offset(a_fp16, KtDType::F16, "a_fp16")?;
 
     let c = alloc_cuda_tensor(a_st, KtDType::F16, vec![m, n])?;
     let workspace_len = (n / WORKSPACE_TILE_N) * DEFAULT_MAX_PAR as usize;
     let workspace = alloc_cuda_tensor(a_st, KtDType::U32, vec![workspace_len])?;
-
-    let c_cuda = c.storage().as_any().downcast_ref::<CudaStorage>().unwrap();
-    let w_cuda = workspace
-        .storage()
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .unwrap();
+    let c_ptr = kiln_kt_bridge::cuda_output_device_ptr(&c);
+    let w_ptr = kiln_kt_bridge::cuda_output_device_ptr(&workspace);
 
     let stream = a_st.candle_device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
     let dev_ord: i32 = 0;
 
-    let a_slice = a_st.slice().slice(a_off..);
-    let b_slice = b_st.slice().slice(b_off..);
-    let s_slice = s_st.slice().slice(s_off..);
-    let c_slice = c_cuda.slice().slice(0..);
-    let w_slice = w_cuda.slice().slice(0..);
-
     let status = unsafe {
-        let (a_ptr, _g1) = a_slice.device_ptr(&stream);
-        let (b_ptr, _g2) = b_slice.device_ptr(&stream);
-        let (s_ptr, _g3) = s_slice.device_ptr(&stream);
-        let (c_ptr, _g4) = c_slice.device_ptr(&stream);
-        let (w_ptr, _g5) = w_slice.device_ptr(&stream);
-
         kiln_marlin_w4a16_gemm(
             a_ptr as *const _,
             b_ptr as *const _,
