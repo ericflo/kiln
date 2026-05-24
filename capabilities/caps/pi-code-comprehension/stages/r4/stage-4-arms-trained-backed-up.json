@@ -1,0 +1,64 @@
+{
+  "round": 4,
+  "stage": "4-arms-trained-and-backed-up",
+  "name": "Four GRPO chain-iter4 arms completed training, all canary-passed, all B2-backed",
+  "session": "2026-05-24",
+  "pod": "pod-bacd20aa3760a0b6f0e0e771",
+  "timestamp": "2026-05-24T04:47Z",
+  "arms_completed_training": {
+    "v4_raw_composite": {
+      "adapter": "pi-cc-r4-grpo-chain-iter4-r16a32-v4",
+      "data": "iter4-grpo-train.jsonl (8 groups, raw composite rewards)",
+      "training_duration_min": 29,
+      "loss_curve": [0.408, 0.398, 0.379, 0.350],
+      "echo_env_ce_curve": [2.154, 2.143, 1.997, 1.964],
+      "smoke_test": "PASSED (all 6 canary checks, nonzero logit delta from base)",
+      "b2_backup": "kiln/pi-code-comprehension/r4/pi-cc-r4-grpo-chain-iter4-r16a32-v4.tgz"
+    },
+    "armB_pow2_sharpening": {
+      "adapter": "pi-cc-r4-grpo-armB-pow2-r16a32",
+      "data": "iter4-train-pow2.jsonl (8 groups, reward ← reward²)",
+      "smoke_test": "PASSED",
+      "b2_backup": "kiln/pi-code-comprehension/r4/pi-cc-r4-grpo-armB-pow2-r16a32.tgz"
+    },
+    "armD_binarized": {
+      "adapter": "pi-cc-r4-grpo-armD-binarized-r16a32",
+      "data": "iter4-train-binarized.jsonl (8 groups, argmax=1.0, rest=0.0)",
+      "smoke_test": "PASSED",
+      "b2_backup": "kiln/pi-code-comprehension/r4/pi-cc-r4-grpo-armD-binarized-r16a32.tgz"
+    },
+    "armG_iter4strong": {
+      "adapter": "pi-cc-r4-grpo-armG-iter4strong-r16a32",
+      "data": "iter4-grpo-train-strong.jsonl (2 groups, mean reward 0.764, median spread 0.279)",
+      "smoke_test": "PASSED",
+      "b2_backup": "kiln/pi-code-comprehension/r4/pi-cc-r4-grpo-armG-iter4strong-r16a32.tgz"
+    }
+  },
+  "arms_in_progress_or_queued": {
+    "armH_ranked": {"adapter": "pi-cc-r4-grpo-armH-ranked-r16a32", "status": "training, 32.5% at 04:46"},
+    "armI_topbot_pair": {"status": "queued"},
+    "armJ_base_no_parent": {"status": "queued — only arm with NO base_adapter, GRPO from Qwen3.5-4B base"},
+    "armK_top50_merged": {"status": "queued (16 groups from iter1+4+11)"}
+  },
+  "data_variations_tested_in_training": [
+    "raw composite (v4, control)",
+    "r² sharpening (B)",
+    "binarized top-1=+1 rest=0 (D)",
+    "elite high-variance subset (G, 2 groups only)",
+    "ordinal rank rewards (H, training)",
+    "top-bottom DPO-style pair (I, queued)",
+    "base parent — no iter4 anchor (J, queued)",
+    "multi-source quality-filtered (K, queued)"
+  ],
+  "eval_pending": "Bootstrap eval script (commit afc20ec6) provides paired 5-seed eval for all completed adapters. Must run in fresh pod session under non-contended GPU (no concurrent training).",
+  "pod_lease_status": {
+    "expires_at": "2026-05-24T05:36Z",
+    "minutes_remaining": 49,
+    "expected_outcomes": [
+      "armH likely completes (~30 min from current 32.5%)",
+      "armI might fit (~20 min after H)",
+      "armJ and armK probably do NOT fit"
+    ]
+  },
+  "value_at_pod_end": "MINIMUM 4 trained adapters (v4, B, D, G), MAXIMUM 7 (+ H, I, partial J). All canary-passed. All B2-backed. Eval-ready for next-session bootstrap_eval_session.sh."
+}
