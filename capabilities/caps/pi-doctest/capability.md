@@ -148,6 +148,16 @@ server-native GRPO path still became impractical on a selected completion with
 --json` to enforce a per-completion action-token cap before submitting a train
 job.
 
+H17 enforced that token diagnostic directly with a 650 action-token cap and
+kept only outcome-perfect, non-timeout train completions. It produced a clean
+but tiny batch, 2 groups / 7 completions / 2675 action tokens, with no
+trajectory schema warnings. Training still became too slow on the second group:
+the job reached 44% and loss 0.7438, then remained there until 587s elapsed
+despite 100% GPU utilization. No H17 adapter was promoted or blind-evaluated.
+Another local server-native GRPO attempt needs a much tighter action-token cap
+around 350 per completion, otherwise this cap should switch to a gentler
+non-GRPO data signal instead of burning time on tiny slow preference groups.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
