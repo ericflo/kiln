@@ -867,3 +867,32 @@ larger-sample wall time, but it still increases failure count and loses
 composite at the promotion gate. The next adapter data should stop using tiny
 two-group synthetic contrasts and instead mix concise thinking with complete,
 diverse, train-only successful behavior anchors.
+
+### H50: broad success ECHO-only preconditioning
+
+H50 tested a complementary route after the tiny synthetic contrasts failed:
+use broad complete successful train-only trajectories as verifier-free
+preconditioning, with policy loss disabled and only ECHO env-token CE active.
+The source was H44's complete-success SFT corpus. A first duplicate-pair g4
+shape dry-ran at 1804 action tokens, 1702 env tokens, and 2224 context tokens,
+but timed out before adapter write after reaching step 12006/25820. The
+successful training shape kept one full success trajectory per group and added
+a short no-env dummy completion only to satisfy GRPO grouping, still with
+`no_policy_loss=true`; this dry-ran at 942 action tokens, 851 env tokens, 2056
+context tokens, 4 groups, and 8 completions.
+
+Training used rank 4 / alpha 4 / lr `1e-6`, ECHO lambda 0.025, no policy
+loss, and `KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed just under the
+guardrail in 858.931s observed, with peak observed VRAM 15983 MiB and final
+loss 0.046478. ECHO env CE moved from 1.92166 to 2.07419, so the env-only
+objective did not improve its own CE on this shape. Adapter verify passed with
+400 nonzero LoRA tensors and LoRA update proxy 0.110330.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it: paired base scored 0.934375 with
+mean wall-clock 30.84s and no zero rollouts, while H50 scored 0.69375 with
+mean wall-clock 63.69s and one zero rollout. No promotion check was run.
+Lesson: broad success ECHO-only preconditioning is locally trainable only after
+aggressive shape reduction, but it is too slow and degrades blind reliability.
+The next route should avoid env-only ECHO as a standalone adapter update and
+focus on either mixed real success/failure trajectories with policy signal or
+non-training runtime constraints for efficient stopping.
