@@ -235,6 +235,14 @@ and JavaScript camelCase/CommonJS style when available.
     server errors or timeouts, and observed eval VRAM stayed around 19.3 GiB.
     H10's improvement was not capacity-limited; increasing no-ECHO rank
     overfit/regressed the edit contract.
+- **PB-H12: no-ECHO half-scale Agentic GRPO.** Reuse the same PB-H7 full-train
+  default-prompt rollout data and keep H10's rank, seed, learning rate, and
+  no-ECHO setup, but lower LoRA scale from `alpha=8` to `alpha=4`. H10 is the
+  current best direction, while H11 shows more adapter effect is harmful; this
+  isolates whether a smaller same-direction update can keep H10's outcome and
+  format gains while recovering convention/read-before-edit enough to clear the
+  +0.05 promotion gate.
+  - Result: pending.
 
 ## Standard Workflow
 
