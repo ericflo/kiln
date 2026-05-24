@@ -327,6 +327,34 @@ impl Parameter {
         self.epoch = self.epoch.saturating_add(1);
     }
 
+    /// Phase 2.7 snapshot — return a cheap clone of this Parameter
+    /// that shares the underlying storage Arcs.
+    ///
+    /// **Semantics for the eval-while-training pattern (#1082 line
+    /// "Eval-while-training via Parameter snapshot"):** the snapshot
+    /// records `current_epoch()` at the moment of capture; reads
+    /// through the snapshot go to the storage Arc that was current
+    /// at snapshot time. If the parent Parameter swaps storage via
+    /// [`Self::replace_forward_storage`] or
+    /// [`Self::replace_backward_storage`] after the snapshot, the
+    /// snapshot retains the *original* Arcs and the storage stays
+    /// alive (refcounted via Arc). The trainer's optimizer step is
+    /// expected to use the `replace_*` mutators rather than in-place
+    /// mutation through `slice_mut`-style accessors so the snapshot
+    /// contract holds.
+    ///
+    /// The snapshot's `tensor_id` matches the parent's at snapshot
+    /// time (anti-pattern 11 — TensorId is stable across storage
+    /// swaps, so the snapshot's id is also stable). The optimizer
+    /// state keyed on the snapshot's TensorId is the SAME state as
+    /// the parent's.
+    ///
+    /// **Cost:** O(1). Tensor clones are Arc refcount bumps; no
+    /// device-memory copy.
+    pub fn snapshot(&self) -> Self {
+        self.clone()
+    }
+
     /// Stable identity.
     pub fn tensor_id(&self) -> TensorId {
         self.tensor_id
@@ -849,6 +877,46 @@ mod tests {
         let new_master = plain_f32().primary_tensor().clone();
         p.replace_backward_storage(Some(new_master));
         assert!(p.is_forward_stale());
+    }
+
+    #[test]
+    fn snapshot_shares_tensor_id() {
+        let p = Parameter::inference_only(plain_f32());
+        let s = p.snapshot();
+        assert_eq!(p.tensor_id(), s.tensor_id());
+    }
+
+    #[test]
+    fn snapshot_captures_epoch_at_time_of_capture() {
+        let fs = plain_f32();
+        let master_tensor = fs.primary_tensor().clone();
+        let mut p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        p.bump_epoch();
+        p.bump_epoch();
+        let s = p.snapshot();
+        assert_eq!(s.current_epoch(), 2);
+        // Parent advances; snapshot stays at the captured epoch.
+        p.bump_epoch();
+        assert_eq!(p.current_epoch(), 3);
+        assert_eq!(s.current_epoch(), 2);
+    }
+
+    #[test]
+    fn snapshot_survives_parent_storage_swap() {
+        // Snapshot retains the original Arc to forward_storage even
+        // after parent replaces its forward_storage. Verified via the
+        // primary_tensor's TensorId not changing on the snapshot.
+        let fs = plain_f32();
+        let master_tensor = fs.primary_tensor().clone();
+        let mut p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        let original_fwd_tid = p.forward_storage().primary_tensor().id();
+        let s = p.snapshot();
+        // Parent swaps forward storage to a fresh tensor.
+        p.replace_forward_storage(plain_f32());
+        let new_fwd_tid = p.forward_storage().primary_tensor().id();
+        assert_ne!(original_fwd_tid, new_fwd_tid);
+        // Snapshot still points at the original.
+        assert_eq!(s.forward_storage().primary_tensor().id(), original_fwd_tid);
     }
 
     #[test]
