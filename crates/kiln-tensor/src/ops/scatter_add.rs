@@ -149,6 +149,74 @@ impl DeviceOp2 for ScatterAddOp {
         Ok(Some(out))
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, values: &Tensor, indices: &Tensor) -> Result<Option<Tensor>> {
+        // CUDA substrate currently only handles axis=0 + 1-D U32 indices.
+        // Other axes / multi-D indices / I64 indices fall through to CPU.
+        if self.axis != 0 {
+            return Ok(None);
+        }
+        if indices.rank() != 1 {
+            return Ok(None);
+        }
+        if indices.dtype() != DType::U32 {
+            return Ok(None);
+        }
+        if values.dtype().is_packed() {
+            return Ok(None);
+        }
+        // Kernel supports F32 + BF16 only. Fall through to CPU for F16
+        // until a F16 atomicAdd is wired in.
+        if !matches!(values.dtype(), DType::F32 | DType::BF16) {
+            return Ok(None);
+        }
+        if !values.is_contiguous() || !indices.is_contiguous() {
+            return Ok(None);
+        }
+
+        validate(values, indices, self.axis, self.target_dim)?;
+
+        // Pull the candle_device + device index off the values tensor so we
+        // can allocate a same-device zero-filled output.
+        let cuda_storage = values
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::CudaStorage>()
+            .ok_or_else(|| {
+                crate::Error::Msg(
+                    "ScatterAddOp::cuda_fwd: values must be CUDA storage".to_string(),
+                )
+            })?;
+        let candle_device = cuda_storage.candle_device().clone();
+        let device_index = match values.device() {
+            crate::Device::Cuda(i) => i,
+            other => {
+                return Err(crate::Error::Msg(format!(
+                    "ScatterAddOp::cuda_fwd: expected CUDA device, got {other}"
+                )));
+            }
+        };
+
+        // Output shape: [target_dim, ...values.shape[1..]] (axis==0 +
+        // indices.rank()==1 means the prefix is empty).
+        let mut out_shape: Vec<usize> = Vec::with_capacity(values.rank());
+        out_shape.push(self.target_dim);
+        out_shape.extend_from_slice(&values.shape()[1..]);
+        let n_out_elements: usize = out_shape.iter().product();
+
+        let storage = crate::cuda_zeros(
+            candle_device,
+            device_index,
+            values.dtype(),
+            n_out_elements,
+        )?;
+        let out = Tensor::from_parts(storage, Layout::contiguous(out_shape), TensorId::next())?;
+
+        // In-place atomic scatter-add into the zero-filled output.
+        crate::cuda_scatter_add_dim0(&out, indices, values)?;
+        Ok(Some(out))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         // scatter_add's bwd is index_select. Phase 6b wires this once
         // kiln-autograd's BackwardOp surface accepts the
