@@ -429,6 +429,17 @@ unsafe extern "C" {
         dtype: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_scatter_add_dim0_async(
+        updates: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        indices_u32: *const core::ffi::c_void,
+        n_indices: i64,
+        row_inner: i64,
+        target_dim: i64,
+        dtype_tag: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// CUDA-side stride-aware contiguous() — produces a new kt-Tensor with
@@ -1025,6 +1036,179 @@ pub fn cuda_cast(src: &crate::Tensor, target: crate::DType) -> Result<crate::Ten
 // cudarc + candle's cuda feature compiled in but no actual GPU doesn't
 // spuriously fail.
 // ----------------------------------------------------------------------
+
+
+/// CUDA-side `scatter_add(updates, axis=0, indices, target_dim)` — inverse
+/// of [`cuda_index_select_dim0`]. Mutates a pre-zeroed `out` tensor in
+/// place by atomically adding each `updates` row to the position
+/// indicated by `indices`.
+///
+/// This is the embedding-backward / gather-grad accumulation
+/// primitive. Substrate-only (Phase 4 of #1082): the higher-level
+/// `ScatterAddOp::cuda_fwd` allocates a fresh zero-filled output and
+/// calls this function to perform the scatter.
+///
+/// # Arguments
+///
+/// - `out` — destination tensor, shape `[target_dim, ...inner]`, must
+///   be pre-zeroed and CUDA-backed.
+/// - `indices` — U32 CUDA tensor, shape `[n_indices]`.
+/// - `updates` — values to scatter, shape `[n_indices, ...inner]`,
+///   same dtype as `out`.
+///
+/// # Determinism
+///
+/// Uses `atomicAdd` per output cell. When two index positions collide
+/// on the same target row, the addition order is non-deterministic.
+/// This is the documented "atomic-bwd" tolerance band on
+/// [`crate::ops::scatter_add::ScatterAddOp`].
+///
+/// # Errors
+///
+/// - `out` / `updates` / `indices` must be CUDA storage.
+/// - All inputs must be contiguous.
+/// - `indices.dtype() == U32`.
+/// - `out` / `updates` dtype must be F32 or BF16.
+/// - `out.rank() >= 1`, `updates.rank() >= 1`.
+/// - `out.shape()[1..] == updates.shape()[1..]`.
+/// - `updates.shape()[0] == indices.element_count()`.
+#[cfg(feature = "cuda")]
+pub fn cuda_scatter_add_dim0(
+    out: &crate::Tensor,
+    indices: &crate::Tensor,
+    updates: &crate::Tensor,
+) -> Result<()> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use std::any::Any as _;
+
+    // ---- dtype + shape validation ----
+    if out.dtype() != updates.dtype() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_scatter_add_dim0: out dtype {} != updates dtype {}",
+            out.dtype(),
+            updates.dtype()
+        )));
+    }
+    let dtype_tag: i32 = match out.dtype() {
+        DType::F32 => 0,
+        DType::BF16 => 1,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_scatter_add_dim0: unsupported dtype {other} (F32/BF16 only)"
+            )));
+        }
+    };
+    if indices.dtype() != DType::U32 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_scatter_add_dim0: indices dtype must be U32, got {}",
+            indices.dtype()
+        )));
+    }
+    if !out.is_contiguous() || !updates.is_contiguous() || !indices.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_scatter_add_dim0: out/updates/indices must be contiguous".to_string(),
+        ));
+    }
+    let out_shape = out.shape();
+    let upd_shape = updates.shape();
+    if out_shape.is_empty() || upd_shape.is_empty() {
+        return Err(crate::Error::Msg(
+            "cuda_scatter_add_dim0: out and updates must have rank >= 1".to_string(),
+        ));
+    }
+    if out_shape[1..] != upd_shape[1..] {
+        return Err(crate::Error::Msg(format!(
+            "cuda_scatter_add_dim0: inner shape mismatch out={:?} updates={:?}",
+            out_shape, upd_shape
+        )));
+    }
+    let n_indices = indices.element_count();
+    if upd_shape[0] != n_indices {
+        return Err(crate::Error::Msg(format!(
+            "cuda_scatter_add_dim0: updates.shape[0]={} != indices.len()={}",
+            upd_shape[0], n_indices
+        )));
+    }
+    let target_dim = out_shape[0];
+    let row_inner: usize = out_shape[1..].iter().product::<usize>().max(1);
+
+    // ---- storage downcasts ----
+    let out_storage = out
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_scatter_add_dim0: out must be CUDA storage".to_string())
+        })?;
+    let upd_storage = updates
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_scatter_add_dim0: updates must be CUDA storage".to_string())
+        })?;
+    let idx_storage = indices
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_scatter_add_dim0: indices must be CUDA storage".to_string())
+        })?;
+
+    let candle_device = out_storage.candle_device.clone();
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let upd_base = match &upd_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let idx_base = match &idx_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+
+    let bpe = out.dtype().size_in_bytes();
+    let upd_byte_off = (updates.layout().start_offset() * bpe) as u64;
+    let idx_byte_off = (indices.layout().start_offset() * DType::U32.size_in_bytes()) as u64;
+    let out_byte_off = (out.layout().start_offset() * bpe) as u64;
+
+    let upd_ptr = (upd_base + upd_byte_off) as *const core::ffi::c_void;
+    let idx_ptr = (idx_base + idx_byte_off) as *const core::ffi::c_void;
+    let out_ptr = (out_base + out_byte_off) as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_scatter_add_dim0_async(
+            upd_ptr,
+            out_ptr,
+            idx_ptr,
+            n_indices as i64,
+            row_inner as i64,
+            target_dim as i64,
+            dtype_tag,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_scatter_add_dim0: FFI returned status {status}"
+        )));
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

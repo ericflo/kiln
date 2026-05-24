@@ -64,6 +64,7 @@ fn main() {
     build.file(csrc_dir.join("reduce_last_axis.cu"));
     build.file(csrc_dir.join("argmax_last_axis.cu"));
     build.file(csrc_dir.join("masked_fill.cu"));
+    build.file(csrc_dir.join("scatter_add.cu"));
     build.compile("kiln_tensor_cuda_ops");
 
     println!(
