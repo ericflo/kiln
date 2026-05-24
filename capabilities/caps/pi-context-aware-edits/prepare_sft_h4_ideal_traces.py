@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -95,7 +96,7 @@ def loose_python_new_content() -> str:
         "    if ts is None:\n"
         "        print('failed to parse', ts)\n"
         "        raise ValueError('missing timestamp')\n"
-        "    return datetime.datetime.fromtimestamp(ts)\n"
+        "    return datetime.datetime.utcfromtimestamp(ts)\n"
     )
 
 
@@ -169,9 +170,13 @@ def verify_new_content(task: dict, target_path: str, new_content: str) -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content)
         (root / target_path).write_text(new_content)
+        env = dict(os.environ)
+        cargo_bin = str(Path.home() / ".cargo" / "bin")
+        env["PATH"] = f"{cargo_bin}:{env.get('PATH', '')}"
         result = subprocess.run(
             ["bash", "-c", task["verify_cmd"]],
             cwd=root,
+            env=env,
             text=True,
             capture_output=True,
             timeout=60,
@@ -257,7 +262,7 @@ def main() -> None:
     print(f"wrote={out} examples={len(rows)} profiles={dict(sorted(profiles.items()))}")
     if lengths:
         print(f"chars_min={min(lengths)} chars_max={max(lengths)}")
-    if shutil.which("rustc") is None:
+    if shutil.which("rustc") is None and not (Path.home() / ".cargo" / "bin" / "rustc").exists():
         print("warning=rustc not found during script runtime")
 
 
