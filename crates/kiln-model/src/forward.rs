@@ -218,6 +218,42 @@ pub(crate) fn cuda_use_kt_paged_kv_cache() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: route the Vulkan `linear_prefill_apply` 2D matmul
+/// path through a kt-API equivalent of `kiln_tensor::cuda_matmul`.
+/// Default off; set `KILN_USE_KT_API_MATMUL=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to flip the gate.
+///
+/// Mirrors the CUDA gate [`cuda_use_kt_api_matmul`] so the same
+/// env var lights up *both* backends' production matmul sites
+/// when the kt-API path lands on each. Today this gate is unused
+/// on the Vulkan side: there is no `kiln_tensor::vulkan_matmul`
+/// sibling to `cuda_matmul` yet, because Vulkan's storage layer is
+/// candle-free (`kiln-vulkan-kernel` operates on its own
+/// `VkTensor` type) and the existing
+/// `VulkanBackend::linear_prefill_apply` already dispatches through
+/// `crate::backend::vulkan_linear_op::VulkanLinearOp` against
+/// VkBuffer-backed weight caches.
+///
+/// Landing this env gate ahead of any call-site migration follows
+/// the same playbook as [`cuda_use_kt_paged_kv_cache`] —
+/// wire the bool through a process-cached `OnceLock` so the first
+/// follow-up PR that does add a `vulkan_matmul` sibling has a
+/// stable branch point. Honors both `KILN_USE_KT_API_MATMUL` and
+/// `KILN_USE_KT_API_ALL` directly (not via [`cuda_use_kt_api_all`]
+/// which is `cfg(feature = "cuda")`); this keeps the gate
+/// compilable under `--features vulkan` alone and preserves the
+/// semantic that the meta-flag activates all backends' matmul
+/// routes at once.
+#[cfg(feature = "vulkan")]
+#[allow(dead_code)]
+pub(crate) fn vulkan_use_kt_api_matmul() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_API_MATMUL").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    })
+}
+
 thread_local! {
     static VULKAN_SKIP_GDN_STATE_READBACK_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
