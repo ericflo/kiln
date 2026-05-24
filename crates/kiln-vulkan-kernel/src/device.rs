@@ -598,11 +598,22 @@ impl VulkanDevice {
         }
         .context("failed to create pipeline layout")?;
 
-        let spirv_words: &[u32] = bytemuck::cast_slice(spirv);
+        // `spirv` comes in as `&[u8]` (Vec<u8> from
+        // `ShaderPipeline::compile_shader` or include_bytes!) which only
+        // guarantees u8 alignment. `bytemuck::cast_slice::<u8,u32>` then
+        // panics with `TargetAlignmentGreaterAndInputNotAligned` when
+        // the binary layout happens to land the bytes at an odd
+        // address (observed in CI run 26353268949 on fc495c72). Copy
+        // into a freshly-allocated `Vec<u32>` so the alignment is
+        // guaranteed by Rust's allocator regardless of source layout.
+        let spirv_words: Vec<u32> = spirv
+            .chunks_exact(4)
+            .map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
         let shader_module = unsafe {
             self.device.create_shader_module(
                 &vk::ShaderModuleCreateInfo::default()
-                    .code(spirv_words)
+                    .code(&spirv_words)
                     ,
                 None,
             )

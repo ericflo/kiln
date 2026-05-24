@@ -463,9 +463,15 @@ pub fn dispatch_kernel(
     all_handles.push(output_buffer.handle());
 
     // --- Shader module ---
-    let spirv_words: &[u32] = bytemuck::cast_slice(spirv);
+    // Copy bytes into a fresh Vec<u32> for guaranteed u32 alignment
+    // (see device.rs:601 — `bytemuck::cast_slice::<u8,u32>(spirv)`
+    // panics on misaligned input, hit by CI run 26353268949).
+    let spirv_words: Vec<u32> = spirv
+        .chunks_exact(4)
+        .map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
     let shader_module_info = vk::ShaderModuleCreateInfo::default()
-        .code(spirv_words)
+        .code(&spirv_words)
         ;
     let shader_module = unsafe {
         device
