@@ -364,6 +364,15 @@ unsafe extern "C" {
         dtype: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_activation_unary_async(
+        x: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n_elements: i64,
+        kind: i32,
+        dtype: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// CUDA-side stride-aware contiguous() — produces a new kt-Tensor with
@@ -758,6 +767,101 @@ pub fn cuda_elementwise_binary(
         crate::TensorId::next(),
     )
     .map_err(|e| crate::Error::Msg(format!("cuda_elementwise_binary: wrap: {e}")))
+}
+
+/// CUDA-side unary activation: `out[i] = activation(x[i])`.
+///
+/// `kind` encodes the op (0=Silu, 1=Sigmoid, 2=Gelu, 3=Tanh, 4=Relu).
+/// Dtype inferred from `x.dtype()`; must be F32/BF16/F16. Input must
+/// be contiguous and on CUDA.
+#[cfg(feature = "cuda")]
+pub fn cuda_activation_unary(x: &crate::Tensor, kind: i32) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use std::any::Any as _;
+
+    let dtype = x.dtype();
+    let dtype_tag: i32 = match dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_activation_unary: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !x.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_activation_unary: contiguous input required".to_string(),
+        ));
+    }
+
+    let n = x.element_count();
+    let bpe = dtype.size_in_bytes();
+
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_activation_unary: x must be CUDA".to_string()))?;
+
+    let candle_device = x_storage.candle_device.clone();
+    let device_index = match x_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+    let out_storage = CudaStorage::zeros(
+        candle_device.clone(),
+        device_index,
+        dtype,
+        n,
+    )?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let x_base = match &x_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+    };
+
+    let x_off = (x.layout().start_offset() * bpe) as u64;
+    let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
+    let out_ptr = out_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_activation_unary_async(
+            x_ptr,
+            out_ptr,
+            n as i64,
+            kind,
+            dtype_tag,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_activation_unary: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(x.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_activation_unary: wrap: {e}")))
 }
 
 // ----------------------------------------------------------------------

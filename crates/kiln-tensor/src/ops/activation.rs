@@ -137,6 +137,26 @@ impl DeviceOp1 for ActivationOp {
         Ok(Some(t))
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, self.kind)?;
+        let dtype = x.dtype();
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        let kind_tag: i32 = match self.kind {
+            UnaryKind::Silu => 0,
+            UnaryKind::Sigmoid => 1,
+            UnaryKind::Gelu => 2,
+            UnaryKind::Tanh => 3,
+            UnaryKind::Relu => 4,
+        };
+        Ok(Some(crate::cuda_activation_unary(x, kind_tag)?))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
