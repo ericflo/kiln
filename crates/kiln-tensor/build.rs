@@ -71,6 +71,7 @@ fn main() {
     build.file(csrc_dir.join("dropout.cu"));
     build.file(csrc_dir.join("rmsnorm.cu"));
     build.file(csrc_dir.join("layernorm.cu"));
+    build.file(csrc_dir.join("scalar_op.cu"));
     build.compile("kiln_tensor_cuda_ops");
 
     println!(

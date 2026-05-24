@@ -374,6 +374,16 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_scalar_op_async(
+        x: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n_elements: i64,
+        kind: i32,
+        dtype: i32,
+        c: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_cast_async(
         src: *const core::ffi::c_void,
         dst: *mut core::ffi::c_void,
@@ -3257,4 +3267,117 @@ pub fn cuda_dropout(
     )
     .map_err(|e| crate::Error::Msg(format!("cuda_dropout: wrap mask: {e}")))?;
     Ok((y, mask))
+}
+
+/// CUDA-side tensor-scalar elementwise op: `out[i] = op(x[i], c)`.
+///
+/// `kind` encodes the op:
+/// - `0`: `AddScalar` (`x + c`)
+/// - `1`: `SubScalar` (`x - c`)
+/// - `2`: `MulScalar` (`x * c`)
+/// - `3`: `DivScalar` (`x / c`)
+/// - `4`: `ScalarMinusTensor` (`c - x`)
+/// - `5`: `ScalarDivTensor` (`c / x`)
+/// - `6`: `MaxWithScalar` (`max(x, c)`)
+/// - `7`: `MinWithScalar` (`min(x, c)`)
+///
+/// Dtype inferred from `x.dtype()`; must be F32/BF16/F16. Input must be
+/// contiguous and on CUDA. Output is a fresh contiguous tensor of the same
+/// shape and dtype.
+///
+/// Wired by `ScalarOp::cuda_fwd` in `kiln-tensor/src/ops/scalar.rs` (#1082).
+#[cfg(feature = "cuda")]
+pub fn cuda_scalar_op(x: &crate::Tensor, kind: i32, c: f32) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use std::any::Any as _;
+
+    let dtype = x.dtype();
+    let dtype_tag: i32 = match dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_scalar_op: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !x.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_scalar_op: contiguous input required".to_string(),
+        ));
+    }
+    if !(0..=7).contains(&kind) {
+        return Err(crate::Error::Msg(format!(
+            "cuda_scalar_op: kind {kind} out of range 0..=7"
+        )));
+    }
+
+    let n = x.element_count();
+    let bpe = dtype.size_in_bytes();
+
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_scalar_op: x must be CUDA".to_string()))?;
+
+    let candle_device = x_storage.candle_device.clone();
+    let device_index = match x_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+    let out_storage = CudaStorage::zeros(
+        candle_device.clone(),
+        device_index,
+        dtype,
+        n,
+    )?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let x_base = match &x_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+    };
+
+    let x_off = (x.layout().start_offset() * bpe) as u64;
+    let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
+    let out_ptr = out_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_scalar_op_async(
+            x_ptr,
+            out_ptr,
+            n as i64,
+            kind,
+            dtype_tag,
+            c,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_scalar_op: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(x.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_scalar_op: wrap: {e}")))
 }
