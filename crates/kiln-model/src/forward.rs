@@ -100,6 +100,15 @@ fn cuda_use_kt_api_sigmoid_mul() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SIGMOID_MUL").is_ok())
 }
 
+/// Phase 7 opt-in: route the fused RMSNorm inference forward through
+/// the kt-API + adapters. Set `KILN_USE_KT_API_RMSNORM=1` to enable;
+/// default off. Pays ~3 dtod memcpys per RMSNorm call.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_rmsnorm() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_RMSNORM").is_ok())
+}
+
 thread_local! {
     static VULKAN_SKIP_GDN_STATE_READBACK_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
@@ -4341,6 +4350,17 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
         let bwd_disabled = std::env::var("KILN_DISABLE_RMSNORM_BACKWARD").is_ok();
         if !kernel_disabled && !bwd_disabled && kiln_rmsnorm_kernel::supports(x, weight) {
             if !x.track_op() && !weight.track_op() {
+                // Phase 7 migration: route through kt-API when env-gated.
+                if cuda_use_kt_api_rmsnorm() {
+                    let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(x)
+                        .with_context(|| "kt-adapter: rmsnorm x → kt failed")?;
+                    let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(weight)
+                        .with_context(|| "kt-adapter: rmsnorm weight → kt failed")?;
+                    let out_kt = kiln_rmsnorm_kernel::fused_rmsnorm_kt(&x_kt, &w_kt, eps as f32)
+                        .map_err(|e| anyhow::anyhow!("kt fused_rmsnorm: {e}"))?;
+                    return kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                        .with_context(|| "kt-adapter: rmsnorm out → candle failed");
+                }
                 return kiln_rmsnorm_kernel::fused_rmsnorm(x, weight, eps as f32)
                     .context("fused_rmsnorm inference forward failed");
             }
