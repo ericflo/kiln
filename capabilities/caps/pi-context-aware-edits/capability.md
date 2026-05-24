@@ -173,6 +173,15 @@ A4: Skip the actual edit, claim the function already exists.
   pairs with identical ideal tool traces and only the final sentence
   changed, chained on H4, to isolate the `format_compliance` gate without
   relearning edit completion.
+  - Result: rejected. A 12-group/24-completion synthetic GRPO arm trained
+    and verified locally on top of H4 (`rank=4`, `alpha=8`, `lr=5e-6`,
+    `KILN_GRAD_CHECKPOINT_SEGMENTS=32`, peak VRAM 17,301 MiB). It recovered
+    `format_compliance` above baseline (0.6806 vs. 0.6528) while preserving
+    `convention_consistency` (0.9583) and `read_before_edit` (1.0000), but
+    `outcome` fell to 0.6389 and composite landed at 0.4667
+    (`delta=-0.0133`). This rejects isolated final-format GRPO as a
+    promotion path: it moved the requested gate but did not preserve edit
+    completion.
 - **H6: mixed-language corpus** (Python + Rust + Go + JS) — does
   context-awareness generalize across language conventions, or is it
   language-specific?

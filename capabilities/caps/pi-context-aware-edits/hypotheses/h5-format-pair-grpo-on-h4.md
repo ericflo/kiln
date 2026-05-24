@@ -42,4 +42,37 @@ Reject or do not promote if the 3-seed blind eval shows any of:
 
 ## Result
 
-Pending.
+Rejected.
+
+Dry-run accepted all 12 groups and 24 completions:
+
+- rewards: mean 0.5, stdev 0.5, no degenerate groups;
+- token plan: 876 action tokens, 0 env tokens, 3624 context tokens;
+- base adapter: `pi-context-aware-edits-h4-ideal-trace-sft-r4a8-lr5e6`.
+
+Training completed locally with CUDA 13.2 and explicit checkpointing:
+
+- adapter: `pi-context-aware-edits-h5-format-pair-grpo-on-h4-r4a8`;
+- `rank=4`, `alpha=8`, `lr=5e-6`, seed `3141592653`;
+- `KILN_GRAD_CHECKPOINT_SEGMENTS=32`;
+- 12 groups / 24 completions trained;
+- peak observed VRAM: 17,301 MiB;
+- adapter smoke test passed;
+- installed under `/home/ericflo/.cache/kiln/adapters`;
+- verification status: OK, LoRA update proxy `1.938045`.
+
+Blind 3-seed eval over 12 tasks / 36 rollouts:
+
+- composite: 0.4667 (`delta=-0.0133` vs. baseline 0.4800);
+- stdev: 0.4936;
+- `format_compliance`: 0.6806, recovered above baseline 0.6528;
+- `outcome`: 0.6389, below baseline 0.6944 and below H4 0.7222;
+- `convention_consistency`: 0.9583;
+- `read_before_edit`: 1.0000;
+- mean tool calls: 5.03;
+- thinking chars/tool call: 301.0.
+
+This falsifies the hypothesis. The isolated final-sentence signal moved the
+format gate in the intended direction, but the H4 outcome lift disappeared and
+the composite did not meet the `+0.05` promotion gate. No eval task contents or
+per-example eval transcripts were inspected.
