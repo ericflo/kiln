@@ -106,6 +106,10 @@ and JavaScript camelCase/CommonJS style when available.
     0.9306, and efficiency worsened (5.46 to 5.85 tool calls; 1694.9 to
     1840.8 thinking chars). Single-distribution ideal trace SFT repeats the
     prebreach H4 failure mode.
+- **PB-H2: train-rollout agentic GRPO + light ECHO.** Because synthetic SFT
+  hurt format and efficiency, collect train-only Pi rollouts and train a small
+  distribution-matched GRPO arm (`rank=4`, `alpha=8`, `lr=5e-6`,
+  `echo_lambda=0.02`) on reward-varied groups.
 
 ## Standard Workflow
 
