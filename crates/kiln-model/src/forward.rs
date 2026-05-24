@@ -222,6 +222,24 @@ fn cuda_use_kt_api_embedding() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: last-dim `Tensor::cat` through the kt-API +
+/// adapters. Set `KILN_USE_KT_API_CONCAT_LAST_DIM=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// rotary-embedding output concat in [`apply_rope`] (the
+/// `[r1, r2]` / `[r1, r2, x_pass]` join along the trailing axis)
+/// through `kiln_tensor::cuda_concat` via the kt-bridge borrow
+/// adapter. Pays one dtod memcpy on the output direction (the
+/// kt allocation is freshly-owned). Falls through to the candle
+/// `Tensor::cat` composite when any precondition fails so behavior
+/// is identical with the gate off.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_concat_last_dim() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_CONCAT_LAST_DIM").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -5516,12 +5534,105 @@ fn apply_rope(
     let r1 = (x1.broadcast_mul(&cos)? - x2.broadcast_mul(&sin)?)?;
     let r2 = (x1.broadcast_mul(&sin)? + x2.broadcast_mul(&cos)?)?;
 
-    // Concatenate rotated dims + passthrough dims
+    // Concatenate rotated dims + passthrough dims.
+    //
+    // Phase 7 (#1082): when `KILN_USE_KT_API_CONCAT_LAST_DIM=1`
+    // (or `KILN_USE_KT_API_ALL=1`) is set AND the inputs satisfy
+    // the kt-bridge borrow preconditions, route through
+    // `kiln_tensor::cuda_concat`. Falls through to the candle
+    // `Tensor::cat` composite when any precondition fails.
     let out = match x_pass {
-        Some(pass) => Tensor::cat(&[&r1, &r2, &pass], candle_core::D::Minus1)?,
-        None => Tensor::cat(&[&r1, &r2], candle_core::D::Minus1)?,
+        Some(pass) => {
+            let pieces: [&Tensor; 3] = [&r1, &r2, &pass];
+            #[cfg(feature = "cuda")]
+            {
+                if let Some(out) = try_kt_concat_last_dim(&pieces)? {
+                    out
+                } else {
+                    Tensor::cat(&pieces, candle_core::D::Minus1)?
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                Tensor::cat(&pieces, candle_core::D::Minus1)?
+            }
+        }
+        None => {
+            let pieces: [&Tensor; 2] = [&r1, &r2];
+            #[cfg(feature = "cuda")]
+            {
+                if let Some(out) = try_kt_concat_last_dim(&pieces)? {
+                    out
+                } else {
+                    Tensor::cat(&pieces, candle_core::D::Minus1)?
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                Tensor::cat(&pieces, candle_core::D::Minus1)?
+            }
+        }
     };
     Ok(out.to_dtype(x_dtype)?)
+}
+
+/// Phase 7 (#1082) — kt-API last-dim concat migration helper.
+/// Routes contiguous CUDA candle tensors of a supported dtype
+/// through `kiln_tensor::cuda_concat` along the trailing axis.
+///
+/// Returns `Ok(None)` on any incompatibility (empty input, mixed
+/// devices/dtypes, non-CUDA, non-contiguous, unsupported dtype,
+/// rank-0) so the caller falls through to the candle composite.
+/// NVTX range `kiln/concat_last_dim_kt` brackets the migrated call
+/// so nsys traces separate the path from the baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_concat_last_dim(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_concat_last_dim() {
+        return Ok(None);
+    }
+    if pieces.is_empty() {
+        return Ok(None);
+    }
+    let first = pieces[0];
+    let rank = first.rank();
+    if rank == 0 {
+        return Ok(None);
+    }
+    let axis = rank - 1;
+    let dtype = first.dtype();
+    if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+        return Ok(None);
+    }
+    if !matches!(first.device(), Device::Cuda(_)) {
+        return Ok(None);
+    }
+    for t in pieces.iter() {
+        if !matches!(t.device(), Device::Cuda(_))
+            || t.dtype() != dtype
+            || !t.is_contiguous()
+            || t.rank() != rank
+        {
+            return Ok(None);
+        }
+    }
+
+    kiln_nvtx::range!(c"kiln/concat_last_dim_kt");
+
+    let mut kt_owned = Vec::with_capacity(pieces.len());
+    for t in pieces.iter() {
+        match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t) {
+            Ok(k) => kt_owned.push(k),
+            Err(_) => return Ok(None),
+        }
+    }
+    let kt_refs: Vec<&kiln_tensor::Tensor> = kt_owned.iter().collect();
+    let out_kt = match kiln_tensor::cuda_concat(&kt_refs, axis) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_concat_last_dim: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
 }
 
 #[cfg(feature = "cuda")]
