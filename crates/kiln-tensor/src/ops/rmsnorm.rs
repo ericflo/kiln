@@ -109,6 +109,28 @@ impl DeviceOp2 for RmsNormOp {
         Ok(Some(out))
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, x: &Tensor, weight: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cpu_fwd. Returning Ok(None)
+        // triggers CPU fallthrough in DeviceOp2 dispatch.
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if x.rank() == 0 || weight.rank() != 1 {
+            return Ok(None);
+        }
+        if x.dtype() != weight.dtype() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() || !weight.is_contiguous() {
+            return Ok(None);
+        }
+        if *x.shape().last().unwrap() != weight.shape()[0] {
+            return Ok(None);
+        }
+        Ok(Some(crate::cuda_rmsnorm_last_axis(x, weight, self.eps)?))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         // Backward is in the atomic-bwd tolerance band (the cross-row
         // grad_w sum uses atomicAdd in F32). Lands under kiln-autograd
