@@ -298,6 +298,29 @@ fn cuda_use_kt_api_sum_last_dim() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: `Tensor::cat` along axis 0 through the kt-API +
+/// adapters. Set `KILN_USE_KT_API_CAT_DIM0=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// `Tensor::cat(&refs, 0)` call sites (per-tile gradient
+/// accumulation in CudaLoraAddBf16 backward, batch-state assembly
+/// in `from_batch_rows`, debug instrumentation) through
+/// `kiln_tensor::cuda_concat` with axis=0 via the kt-bridge borrow
+/// adapter. Pays one dtod memcpy on the output direction (the kt
+/// allocation is freshly-owned). Falls through to the candle
+/// `Tensor::cat` composite when any precondition fails so behavior
+/// is identical with the gate off.
+///
+/// Distinct from `KILN_USE_KT_API_CONCAT_LAST_DIM` which targets
+/// last-axis concat (the rotary-embedding output join in
+/// `apply_rope`) — this gate covers the axis-0 join, which is the
+/// other common cat axis in `forward.rs`.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_cat_dim0() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_CAT_DIM0").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -1551,7 +1574,33 @@ impl CustomOp3 for CudaLoraAddBf16 {
         }
 
         let grad_hidden_refs = grad_hidden_tiles.iter().collect::<Vec<_>>();
-        let grad_hidden = Tensor::cat(&grad_hidden_refs, 0)?;
+        // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM0=1` (or
+        // `KILN_USE_KT_API_ALL=1`) is set AND every tile is a
+        // contiguous CUDA tensor of a supported dtype, route the
+        // axis-0 concat through `kiln_tensor::cuda_concat(_, 0)`.
+        // Falls through to the candle composite when any
+        // precondition fails so behavior is identical with the
+        // gate off.
+        let grad_hidden = {
+            #[cfg(feature = "cuda")]
+            {
+                let pieces: Vec<&Tensor> =
+                    grad_hidden_refs.iter().map(|t| &**t).collect();
+                if let Some(out) = try_kt_cat_dim0(&pieces)
+                    .map_err(|e| candle_core::Error::Msg(format!(
+                        "CudaLoraAddBf16 backward: try_kt_cat_dim0: {e}"
+                    )))?
+                {
+                    out
+                } else {
+                    Tensor::cat(&grad_hidden_refs, 0)?
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                Tensor::cat(&grad_hidden_refs, 0)?
+            }
+        };
         let Some(grad_b_acc) = grad_b_acc else {
             candle_core::bail!("CudaLoraAddBf16 backward produced no B gradient tiles");
         };
@@ -3023,8 +3072,44 @@ impl LinearAttentionState {
             // it shaves a small amount of dispatch overhead off the
             // `batch_state_assemble` stage. The runtime path is identical
             // because cat is the only source feeding these tensors.
-            recurrent_states.push(Tensor::cat(&recurrent_refs, 0)?);
-            conv_states.push(Tensor::cat(&conv_refs, 0)?);
+            //
+            // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM0=1` (or
+            // `KILN_USE_KT_API_ALL=1`) is set AND every input is a
+            // contiguous CUDA tensor of a supported dtype, route the
+            // axis-0 concat through `kiln_tensor::cuda_concat(_, 0)`.
+            // Falls through to the candle composite when any
+            // precondition fails so behavior is identical with the
+            // gate off.
+            let recurrent_cat = {
+                #[cfg(feature = "cuda")]
+                {
+                    if let Some(out) = try_kt_cat_dim0(&recurrent_refs)? {
+                        out
+                    } else {
+                        Tensor::cat(&recurrent_refs, 0)?
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    Tensor::cat(&recurrent_refs, 0)?
+                }
+            };
+            let conv_cat = {
+                #[cfg(feature = "cuda")]
+                {
+                    if let Some(out) = try_kt_cat_dim0(&conv_refs)? {
+                        out
+                    } else {
+                        Tensor::cat(&conv_refs, 0)?
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    Tensor::cat(&conv_refs, 0)?
+                }
+            };
+            recurrent_states.push(recurrent_cat);
+            conv_states.push(conv_cat);
         }
 
         Ok(Self {
@@ -5816,6 +5901,65 @@ fn try_kt_concat_last_dim(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_concat_last_dim: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API axis-0 concat migration helper. Routes
+/// contiguous CUDA candle tensors of a supported dtype through
+/// `kiln_tensor::cuda_concat(_, 0)`.
+///
+/// Returns `Ok(None)` on any incompatibility (empty input, mixed
+/// devices/dtypes, non-CUDA, non-contiguous, unsupported dtype,
+/// rank-0, or mismatched non-axis-0 dim) so the caller falls
+/// through to the candle composite. NVTX range
+/// `kiln/cat_dim0_kt` brackets the migrated call so nsys traces
+/// separate the path from the baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_cat_dim0(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_cat_dim0() {
+        return Ok(None);
+    }
+    if pieces.is_empty() {
+        return Ok(None);
+    }
+    let first = pieces[0];
+    let rank = first.rank();
+    if rank == 0 {
+        return Ok(None);
+    }
+    let dtype = first.dtype();
+    if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+        return Ok(None);
+    }
+    if !matches!(first.device(), Device::Cuda(_)) {
+        return Ok(None);
+    }
+    for t in pieces.iter() {
+        if !matches!(t.device(), Device::Cuda(_))
+            || t.dtype() != dtype
+            || !t.is_contiguous()
+            || t.rank() != rank
+        {
+            return Ok(None);
+        }
+    }
+
+    kiln_nvtx::range!(c"kiln/cat_dim0_kt");
+
+    let mut kt_owned = Vec::with_capacity(pieces.len());
+    for t in pieces.iter() {
+        match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t) {
+            Ok(k) => kt_owned.push(k),
+            Err(_) => return Ok(None),
+        }
+    }
+    let kt_refs: Vec<&kiln_tensor::Tensor> = kt_owned.iter().collect();
+    let out_kt = match kiln_tensor::cuda_concat(&kt_refs, 0) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_cat_dim0: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
