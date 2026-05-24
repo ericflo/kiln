@@ -1206,3 +1206,92 @@ pub fn cuda_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
         crate::TensorId::next(),
     )
 }
+
+
+/// Host → CUDA copy: copy a CPU-backed kt-Tensor's bytes onto a
+/// CUDA device, returning a new CUDA-backed kt-Tensor.
+///
+/// Phase 1 substrate op — the sibling of [`cuda_to_host_copy`].
+/// Together they close the host↔device round-trip surface.
+///
+/// `candle_device` and `device_index` together identify the
+/// destination CUDA device. The output layout is row-major
+/// contiguous (`start_offset = 0`); non-contiguous inputs are
+/// silently contiguified into the destination.
+///
+/// Errors:
+/// - Source must be CPU storage.
+/// - Packed dtypes (Marlin / Int4 / Fp4) are not supported.
+#[cfg(feature = "cuda")]
+pub fn host_to_cuda_copy(
+    src: &crate::Tensor,
+    candle_device: Arc<CudaDevice>,
+    device_index: usize,
+) -> Result<crate::Tensor> {
+    if src.dtype().is_packed() {
+        return Err(crate::Error::Msg(format!(
+            "host_to_cuda_copy: packed dtype {} not supported",
+            src.dtype()
+        )));
+    }
+    let cpu_storage = src
+        .storage()
+        .as_any()
+        .downcast_ref::<crate::CpuStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("host_to_cuda_copy: source must be CPU storage".to_string())
+        })?;
+
+    let dtype = src.dtype();
+    let n_elements = src.element_count();
+    let byte_len = dtype.packed_buffer_bytes(n_elements);
+
+    // Materialize contiguous host bytes. For non-contiguous CPU
+    // inputs we'd need a stride-aware copy; cpu_storage.as_bytes()
+    // is the raw byte buffer, valid only for contiguous start_offset=0
+    // tensors. If the source isn't already that shape, do the
+    // contiguify on host first via the existing CPU op.
+    let contig_src = if src.is_contiguous() && src.layout().start_offset() == 0 {
+        src.clone()
+    } else {
+        // CPU `Tensor::contiguous()` — does a strided byte copy on
+        // the host into a fresh CpuStorage.
+        src.contiguous()?
+    };
+    let contig_cpu = contig_src
+        .storage()
+        .as_any()
+        .downcast_ref::<crate::CpuStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("host_to_cuda_copy: contig src must be CPU storage".to_string())
+        })?;
+    let bytes = contig_cpu.as_bytes();
+    if bytes.len() != byte_len {
+        return Err(crate::Error::Msg(format!(
+            "host_to_cuda_copy: src byte_len {} != expected {}",
+            bytes.len(),
+            byte_len
+        )));
+    }
+
+    // Allocate the device buffer + issue H2D memcpy. We use
+    // candle's `clone_htod` which wraps cudarc's H2D for a slice;
+    // it returns a fresh CudaSlice<u8> ready to wrap.
+    let device_slice = {
+        let stream = candle_device.cuda_stream();
+        stream
+            .clone_htod(bytes)
+            .map_err(|e| {
+                crate::Error::Msg(format!("host_to_cuda_copy: clone_htod failed: {e:?}"))
+            })?
+    };
+    let cuda_storage =
+        CudaStorage::from_slice(candle_device, device_index, dtype, device_slice)?;
+
+    let storage_arc: crate::Storage = Arc::new(cuda_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(src.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+}
