@@ -1109,3 +1109,27 @@ does not fix the wider reliability failure. The issue is not only excessive
 update magnitude; even a half-strength synthetic ideal SFT direction can
 destabilize terminal reliability on the hard tail. Do not chain from H61. The
 next branch needs a different signal source, not another dose sweep of H60.
+
+### H62: mixed synthetic plus base-success SFT
+
+H62 tested explicit SFT regularization by mixing the two failed distributions
+instead of training either alone. The dataset alternated two H60 synthetic
+teacher-style concise traces with two H59 train-only base-success concise
+traces. This kept the update small and added base-success anchors meant to
+regularize the synthetic direction.
+
+The four examples tokenized to 507, 508, 525, and 613 tokens. Training used
+native `cuda_sft_file`, rank 4 / alpha 4 / lr `1e-7`, 1 epoch, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 82.883s observed with
+peak observed VRAM 15999 MiB. The receipt reported 563 action tokens and 1590
+context tokens. Adapter verify passed with 400 nonzero LoRA tensors and LoRA
+update proxy 0.011946.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.971875 with no
+zero rollouts and mean wall-clock 23.56s. H62 scored 0.925 with no zero
+rollouts and mean wall-clock 38.60s. Lesson: mixing synthetic ideal examples
+with base-success anchors avoids the zero-rollout failure seen in H59 and the
+hard smoke loss seen in H60, but it still loses score and adds latency. The
+simple SFT-distribution axis appears exhausted for now; the next experiment
+should move back to real reward variance or a genuinely stronger teacher-style
+signal rather than more tiny SFT mixtures.
