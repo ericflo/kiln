@@ -75,11 +75,12 @@ pub use tensor_id::TensorId;
 pub use cuda_allocator::CudaAllocator;
 #[cfg(feature = "cuda")]
 pub use cuda_storage::{
-    cuda_activation_unary, cuda_argmax_last_axis, cuda_cast, cuda_concat, cuda_contiguous,
-    cuda_cross_entropy_loss, cuda_dropout, cuda_elementwise_binary, cuda_index_select_dim0,
-    cuda_l2norm_last_axis, cuda_masked_fill, cuda_layernorm_last_axis, cuda_rmsnorm_last_axis, cuda_mean_last_axis, cuda_rope,
-    cuda_scalar_op, cuda_scatter_add_dim0, cuda_softmax_last_axis, cuda_sum_last_axis,
-    cuda_sum_squared_last_axis, cuda_to_host_copy, cuda_zeros, host_to_cuda_copy, CudaStorage,
+    cuda_activation_unary, cuda_argmax_last_axis, cuda_cast, cuda_clamp_pow, cuda_concat,
+    cuda_contiguous, cuda_cross_entropy_loss, cuda_dropout, cuda_elementwise_binary,
+    cuda_index_select_dim0, cuda_l2norm_last_axis, cuda_layernorm_last_axis, cuda_masked_fill,
+    cuda_mean_last_axis, cuda_rmsnorm_last_axis, cuda_rope, cuda_scalar_op, cuda_scatter_add_dim0,
+    cuda_softmax_last_axis, cuda_sum_last_axis, cuda_sum_squared_last_axis, cuda_to_host_copy,
+    cuda_zeros, host_to_cuda_copy, CudaStorage,
 };
 #[cfg(feature = "cuda")]
 pub use cuda_matmul::{cuda_matmul, cuda_matmul_with_bias, snapshot_algo_cache};

@@ -9,19 +9,52 @@
 //!   Schulz iteration support.
 //!
 //! Both ops F32-promote BF16/F16 inputs.
+//!
+//! # Dispatch
+//!
+//! - CPU path: byte-wise F32-promoted apply.
+//! - CUDA path: dispatches through `cuda_clamp_pow` (one per-element
+//!   kernel in `csrc/clamp_pow.cu`) when input is CUDA-resident,
+//!   contiguous, and F32/BF16/F16. (#1082)
 
 use std::sync::Arc;
 
 use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
 
+/// Kind tag for the CUDA kernel. Must match `KIND_CLAMP` / `KIND_POW`
+/// in `csrc/clamp_pow.cu`.
+#[cfg(feature = "cuda")]
+const KIND_CLAMP: i32 = 0;
+#[cfg(feature = "cuda")]
+const KIND_POW: i32 = 1;
+
 pub fn clamp(x: &Tensor, lo: f32, hi: f32) -> Result<Tensor> {
     if lo > hi {
         bail!("clamp: lo ({lo}) > hi ({hi})");
+    }
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(x.device(), crate::Device::Cuda(_))
+            && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+            && x.is_contiguous()
+        {
+            return crate::cuda_clamp_pow(x, KIND_CLAMP, lo, hi);
+        }
     }
     apply_unary(x, |v| v.clamp(lo, hi), "clamp")
 }
 
 pub fn pow(x: &Tensor, p: f32) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(x.device(), crate::Device::Cuda(_))
+            && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+            && x.is_contiguous()
+        {
+            // `b` is ignored by the POW kind; pass 0.0 for clarity.
+            return crate::cuda_clamp_pow(x, KIND_POW, p, 0.0);
+        }
+    }
     apply_unary(x, |v| v.powf(p), "pow")
 }
 
