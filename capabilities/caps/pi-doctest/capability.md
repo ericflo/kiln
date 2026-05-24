@@ -1410,3 +1410,37 @@ and mean wall-clock 49.04s. Lesson: H33's reliability direction did not
 stabilize H58-style suffix data. The chain reintroduced a zero rollout and
 lost composite, so an outcome-reliability base is not enough to make narrow
 single-action suffix ranking safe.
+
+### H74: natural success suffix
+
+H74 tested whether H32's safe natural-success ranking could be made more
+trainable with H54's one-action suffix representation. From the H15 strong-ID
+train-only rollout collection, it selected two source groups with multiple
+successful completions and meaningful length contrast: one 1762-char success
+over a 6752-char success, and one 1390-char success over a 2697-char success.
+The contrast avoided failed rollouts, wrong edits, and premature `DONE`
+negatives. It ranked the shorter successful action above the longer successful
+action at suffix positions.
+
+The initial seven-suffix shape dry-inspected at 580 action tokens and 13,262
+context tokens, so it was narrowed before training. The trained-attempt data
+kept only post-read edit and final `DONE` suffixes for each source group, with
+soft rewards 1.0 vs 0.8. The final dataset was
+`/tmp/pi-doctest-h74-natural-success-suffix/grpo-train.natural-success-suffix.g2x2-soft.jsonl`:
+4 groups, 8 completions, 348 action tokens, 0 env tokens, 7580 context tokens,
+reward stdev 0.100000, and hash
+`sha256:54f87530e76ade6247266ad58417850332253a1874ce05168e43ff94971e80b0`.
+
+Training used `cuda_grpo_ablation --mode phase1`, rank 4 / alpha 4 / lr
+`2e-7`, no ECHO, seed `3141592653`, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. The run fit in memory and emitted one
+progress line at `9674/26211`, loss `-0.000489`, VRAM 15,992 MiB. After roughly
+37 minutes observed wall-clock it still had not written adapter files, so it
+was manually terminated and no blind eval was run.
+
+Verdict: rejected as throughput-aborted. The natural success-only suffix idea
+remains semantically cleaner than failure-negative suffixes, but this
+long-prefix representation is not locally practical. Action-token count alone
+is an insufficient throughput proxy; context tokens dominate this backward
+path. Future suffix work should compress/canonicalize the prior successful
+context or collect fresh short successful rollouts before training.
