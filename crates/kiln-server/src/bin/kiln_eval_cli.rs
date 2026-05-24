@@ -131,7 +131,7 @@ struct ProbeArgs {
 #[derive(Parser, Debug)]
 struct TraceSuiteArgs {
     /// Production trace JSONL. Supports prompt_chosen_jsonl, openai_jsonl,
-    /// and anthropic_jsonl rows from any exporter.
+    /// openai_trajectory_jsonl, and anthropic_jsonl rows from any exporter.
     #[arg(long)]
     input: PathBuf,
     /// Output EvalSuite JSON file. Required unless --stdout is set.
@@ -147,7 +147,8 @@ struct TraceSuiteArgs {
     /// Optional suite description.
     #[arg(long)]
     description: Option<String>,
-    /// Input format: auto | prompt_chosen_jsonl | openai_jsonl | anthropic_jsonl.
+    /// Input format: auto | prompt_chosen_jsonl | openai_jsonl |
+    /// openai_trajectory_jsonl | anthropic_jsonl.
     #[arg(long, default_value = "auto", value_parser = parse_trace_format)]
     format: ProductionTraceFormat,
     /// Reservoir sample size. Omit to use the production-trace default.
@@ -188,11 +189,14 @@ fn parse_trace_format(s: &str) -> std::result::Result<ProductionTraceFormat, Str
             Ok(ProductionTraceFormat::PromptChosenJsonl)
         }
         "openai_jsonl" | "openai-jsonl" => Ok(ProductionTraceFormat::OpenAiJsonl),
+        "openai_trajectory_jsonl" | "openai-trajectory-jsonl" | "openai_trajectory" => {
+            Ok(ProductionTraceFormat::OpenAiTrajectoryJsonl)
+        }
         "anthropic_jsonl" | "anthropic-jsonl" | "jsonl" => {
             Ok(ProductionTraceFormat::AnthropicJsonl)
         }
         other => Err(format!(
-            "unknown trace format `{other}` (try auto | prompt_chosen_jsonl | openai_jsonl | anthropic_jsonl)"
+            "unknown trace format `{other}` (try auto | prompt_chosen_jsonl | openai_jsonl | openai_trajectory_jsonl | anthropic_jsonl)"
         )),
     }
 }

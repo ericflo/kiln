@@ -8,6 +8,8 @@
 //! - `prompt-chosen-jsonl`: `prompt_messages` + `chosen` assistant message.
 //! - `openai-jsonl`: `messages` contains prompt history plus the current
 //!   assistant response as the final message.
+//! - `openai-trajectory-jsonl`: `messages` contains a full OpenAI-style
+//!   trajectory; every assistant tool-call message becomes one eval turn.
 //! - `anthropic-jsonl`: Anthropic-style `messages` + `assistant_response` blocks.
 //!
 //! Sampling is reservoir-based, so large exports can be streamed without
@@ -37,7 +39,13 @@ pub enum ProductionTraceFormat {
     /// Rows with `prompt_messages` plus a separate `chosen` assistant message.
     PromptChosenJsonl,
     /// Rows with OpenAI-style `messages` where the final assistant is target.
+    #[serde(rename = "openai_jsonl", alias = "open_ai_jsonl")]
     OpenAiJsonl,
+    /// Rows with full OpenAI-style trajectories. Every assistant message with
+    /// a tool call is materialized into a separate eval example whose prompt
+    /// is the exact message prefix before that assistant turn.
+    #[serde(rename = "openai_trajectory_jsonl", alias = "open_ai_trajectory_jsonl")]
+    OpenAiTrajectoryJsonl,
     /// Rows with Anthropic-style `messages` plus `assistant_response` blocks.
     AnthropicJsonl,
 }
@@ -182,6 +190,8 @@ pub struct ProductionTraceSampleRecord {
     pub production_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_message_index: Option<usize>,
     #[serde(default)]
     pub target_tools: Vec<String>,
     pub prompt_chars: usize,
@@ -192,6 +202,28 @@ pub struct ProductionTraceSampleRecord {
 struct SampledTraceExample {
     example: EvalExample,
     sample: ProductionTraceSampleRecord,
+}
+
+#[derive(Debug)]
+struct ParsedTraceRow {
+    source_format: &'static str,
+    turns: Vec<TraceTurn>,
+}
+
+impl ParsedTraceRow {
+    fn one(turn: TraceTurn) -> Self {
+        Self {
+            source_format: turn.source_format,
+            turns: vec![turn],
+        }
+    }
+
+    fn many(source_format: &'static str, turns: Vec<TraceTurn>) -> Self {
+        Self {
+            source_format,
+            turns,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -253,8 +285,8 @@ pub fn synthesize_production_trace_suite<R: BufRead>(
             continue;
         }
 
-        let turn = match parse_trace_turn(trimmed, line_no, config.input_format) {
-            Ok(turn) => turn,
+        let parsed_row = match parse_trace_row(trimmed, line_no, config.input_format) {
+            Ok(row) => row,
             Err(err) => {
                 stats.skipped_parse_error += 1;
                 if stats.parse_error_examples.len() < 5 {
@@ -266,85 +298,92 @@ pub fn synthesize_production_trace_suite<R: BufRead>(
         stats.rows_parsed += 1;
         *stats
             .source_format_counts
-            .entry(turn.source_format.to_string())
+            .entry(parsed_row.source_format.to_string())
             .or_default() += 1;
-
-        let Some((target, target_tools)) = target_tool_call_json(&turn.chosen) else {
+        if parsed_row.turns.is_empty() {
             stats.skipped_no_tool_call += 1;
             continue;
-        };
-        stats.eligible_tool_turns += 1;
+        }
 
-        if turn.prompt_messages.is_empty() {
-            stats.skipped_empty_prompt += 1;
-            continue;
-        }
-        let prompt_char_count = prompt_chars(&turn.prompt_messages);
-        let target_char_count = target.chars().count();
-        if prompt_char_count > config.sampling.max_prompt_chars {
-            stats.skipped_prompt_too_long += 1;
-            continue;
-        }
-        if target_char_count > config.sampling.max_target_chars {
-            stats.skipped_target_too_long += 1;
-            continue;
-        }
-        if config.sampling.dedupe {
-            let key = example_hash(&turn.prompt_messages, &target);
-            if !dedupe_keys.insert(key) {
-                stats.skipped_duplicate += 1;
+        for turn in parsed_row.turns {
+            let Some((target, target_tools)) = target_tool_call_json(&turn.chosen) else {
+                stats.skipped_no_tool_call += 1;
+                continue;
+            };
+            stats.eligible_tool_turns += 1;
+
+            if turn.prompt_messages.is_empty() {
+                stats.skipped_empty_prompt += 1;
                 continue;
             }
-        }
-
-        let id = stable_example_id(line_no, turn.id.as_deref(), &turn.prompt_messages, &target);
-        let mut tags = vec!["production_trace".to_string(), "kind:tool_call".to_string()];
-        for tool in &target_tools {
-            tags.push(format!("tool:{tool}"));
-            *stats.target_tool_histogram.entry(tool.clone()).or_default() += 1;
-        }
-
-        let metadata = turn.metadata(&target_tools, prompt_char_count, target_char_count);
-        let sample = ProductionTraceSampleRecord {
-            example_id: id.clone(),
-            source_line: turn.source_line,
-            source_format: turn.source_format.to_string(),
-            turn_id: turn.id.clone(),
-            session_id: turn.session_id.clone(),
-            timestamp: turn.timestamp.clone(),
-            production_model: turn.model.clone(),
-            split: turn.split.clone(),
-            target_tools: target_tools.clone(),
-            prompt_chars: prompt_char_count,
-            target_chars: target_char_count,
-        };
-        let example = EvalExample {
-            id: Some(id),
-            messages: turn.prompt_messages,
-            target: Some(target),
-            aliases: Vec::new(),
-            tags,
-            metadata: Some(metadata),
-            scorer: None,
-            generation: None,
-            weight: 1.0,
-            tools: if turn.tools.is_empty() {
-                None
-            } else {
-                Some(turn.tools)
-            },
-        };
-
-        stats.examples_generated += 1;
-        let sampled = SampledTraceExample { example, sample };
-        match config.sampling.max_examples {
-            Some(cap) if reservoir.len() >= cap => {
-                let r = (rng.next_u64() % stats.examples_generated) as usize;
-                if r < cap {
-                    reservoir[r] = sampled;
+            let prompt_char_count = prompt_chars(&turn.prompt_messages);
+            let target_char_count = target.chars().count();
+            if prompt_char_count > config.sampling.max_prompt_chars {
+                stats.skipped_prompt_too_long += 1;
+                continue;
+            }
+            if target_char_count > config.sampling.max_target_chars {
+                stats.skipped_target_too_long += 1;
+                continue;
+            }
+            if config.sampling.dedupe {
+                let key = example_hash(&turn.prompt_messages, &target);
+                if !dedupe_keys.insert(key) {
+                    stats.skipped_duplicate += 1;
+                    continue;
                 }
             }
-            _ => reservoir.push(sampled),
+
+            let id = stable_example_id(line_no, turn.id.as_deref(), &turn.prompt_messages, &target);
+            let mut tags = vec!["production_trace".to_string(), "kind:tool_call".to_string()];
+            for tool in &target_tools {
+                tags.push(format!("tool:{tool}"));
+                *stats.target_tool_histogram.entry(tool.clone()).or_default() += 1;
+            }
+
+            let metadata = turn.metadata(&target_tools, prompt_char_count, target_char_count);
+            let sample = ProductionTraceSampleRecord {
+                example_id: id.clone(),
+                source_line: turn.source_line,
+                source_format: turn.source_format.to_string(),
+                turn_id: turn.id.clone(),
+                session_id: turn.session_id.clone(),
+                timestamp: turn.timestamp.clone(),
+                production_model: turn.model.clone(),
+                split: turn.split.clone(),
+                source_message_index: turn.source_message_index,
+                target_tools: target_tools.clone(),
+                prompt_chars: prompt_char_count,
+                target_chars: target_char_count,
+            };
+            let example = EvalExample {
+                id: Some(id),
+                messages: turn.prompt_messages,
+                target: Some(target),
+                aliases: Vec::new(),
+                tags,
+                metadata: Some(metadata),
+                scorer: None,
+                generation: None,
+                weight: 1.0,
+                tools: if turn.tools.is_empty() {
+                    None
+                } else {
+                    Some(turn.tools)
+                },
+            };
+
+            stats.examples_generated += 1;
+            let sampled = SampledTraceExample { example, sample };
+            match config.sampling.max_examples {
+                Some(cap) if reservoir.len() >= cap => {
+                    let r = (rng.next_u64() % stats.examples_generated) as usize;
+                    if r < cap {
+                        reservoir[r] = sampled;
+                    }
+                }
+                _ => reservoir.push(sampled),
+            }
         }
     }
 
@@ -392,11 +431,11 @@ pub fn synthesize_production_trace_suite<R: BufRead>(
     Ok((suite, stats))
 }
 
-fn parse_trace_turn(
+fn parse_trace_row(
     line: &str,
     line_no: usize,
     requested: ProductionTraceFormat,
-) -> Result<TraceTurn, ProductionTraceError> {
+) -> Result<ParsedTraceRow, ProductionTraceError> {
     let value: serde_json::Value =
         serde_json::from_str(line).map_err(|e| ProductionTraceError::Parse {
             line: line_no,
@@ -406,6 +445,7 @@ fn parse_trace_turn(
         ProductionTraceFormat::Auto => parse_auto(&value, line_no),
         ProductionTraceFormat::PromptChosenJsonl => parse_prompt_chosen(&value, line_no),
         ProductionTraceFormat::OpenAiJsonl => parse_openai_messages(&value, line_no),
+        ProductionTraceFormat::OpenAiTrajectoryJsonl => parse_openai_trajectory(&value, line_no),
         ProductionTraceFormat::AnthropicJsonl => parse_anthropic_turn(&value, line_no),
     }
 }
@@ -413,7 +453,18 @@ fn parse_trace_turn(
 fn parse_auto(
     value: &serde_json::Value,
     line_no: usize,
-) -> Result<TraceTurn, ProductionTraceError> {
+) -> Result<ParsedTraceRow, ProductionTraceError> {
+    if let Some(format) = explicit_row_format(value)? {
+        match format {
+            ProductionTraceFormat::Auto => {}
+            ProductionTraceFormat::PromptChosenJsonl => return parse_prompt_chosen(value, line_no),
+            ProductionTraceFormat::OpenAiJsonl => return parse_openai_messages(value, line_no),
+            ProductionTraceFormat::OpenAiTrajectoryJsonl => {
+                return parse_openai_trajectory(value, line_no);
+            }
+            ProductionTraceFormat::AnthropicJsonl => return parse_anthropic_turn(value, line_no),
+        }
+    }
     if value.get("prompt_messages").is_some() && value.get("chosen").is_some() {
         return parse_prompt_chosen(value, line_no);
     }
@@ -429,10 +480,39 @@ fn parse_auto(
     })
 }
 
+fn explicit_row_format(
+    value: &serde_json::Value,
+) -> Result<Option<ProductionTraceFormat>, ProductionTraceError> {
+    let Some(label) = value
+        .get("format")
+        .or_else(|| value.get("trace_format"))
+        .or_else(|| value.get("production_trace_format"))
+        .and_then(|v| v.as_str())
+    else {
+        return Ok(None);
+    };
+    let normalized = label.replace('-', "_");
+    let format = match normalized.as_str() {
+        "auto" => ProductionTraceFormat::Auto,
+        "prompt_chosen_jsonl" => ProductionTraceFormat::PromptChosenJsonl,
+        "openai_jsonl" | "open_ai_jsonl" => ProductionTraceFormat::OpenAiJsonl,
+        "openai_trajectory_jsonl" | "open_ai_trajectory_jsonl" | "openai_trajectory" => {
+            ProductionTraceFormat::OpenAiTrajectoryJsonl
+        }
+        "anthropic_jsonl" => ProductionTraceFormat::AnthropicJsonl,
+        _ => {
+            return Err(ProductionTraceError::InvalidConfig(format!(
+                "unknown explicit row format `{label}`"
+            )));
+        }
+    };
+    Ok(Some(format))
+}
+
 fn parse_prompt_chosen(
     value: &serde_json::Value,
     line_no: usize,
-) -> Result<TraceTurn, ProductionTraceError> {
+) -> Result<ParsedTraceRow, ProductionTraceError> {
     let prompt_values = value
         .get("prompt_messages")
         .and_then(|v| v.as_array())
@@ -455,20 +535,21 @@ fn parse_prompt_chosen(
         prompt_values.len(),
     )?;
     let tools = normalized_tools(value.get("tools"));
-    Ok(TraceTurn::from_export(
+    Ok(ParsedTraceRow::one(TraceTurn::from_export(
         value,
         line_no,
         "prompt_chosen_jsonl",
         prompt_messages,
         chosen,
         tools,
-    ))
+        None,
+    )))
 }
 
 fn parse_openai_messages(
     value: &serde_json::Value,
     line_no: usize,
-) -> Result<TraceTurn, ProductionTraceError> {
+) -> Result<ParsedTraceRow, ProductionTraceError> {
     let messages = value
         .get("messages")
         .and_then(|v| v.as_array())
@@ -490,14 +571,49 @@ fn parse_openai_messages(
     let chosen = parsed[chosen_idx].clone();
     let prompt_messages = parsed[..chosen_idx].to_vec();
     let tools = normalized_tools(value.get("tools"));
-    Ok(TraceTurn::from_export(
+    Ok(ParsedTraceRow::one(TraceTurn::from_export(
         value,
         line_no,
         "openai_jsonl",
         prompt_messages,
         chosen,
         tools,
-    ))
+        Some(chosen_idx),
+    )))
+}
+
+fn parse_openai_trajectory(
+    value: &serde_json::Value,
+    line_no: usize,
+) -> Result<ParsedTraceRow, ProductionTraceError> {
+    let messages = value
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| ProductionTraceError::Parse {
+            line: line_no,
+            message: "`messages` must be an array".into(),
+        })?;
+    let mut parsed = Vec::with_capacity(messages.len());
+    for (i, msg) in messages.iter().enumerate() {
+        parsed.push(value_to_chat_message(msg, line_no, i)?);
+    }
+    let tools = normalized_tools(value.get("tools"));
+    let mut turns = Vec::new();
+    for (chosen_idx, chosen) in parsed.iter().enumerate() {
+        if chosen.role != "assistant" || target_tool_call_json(chosen).is_none() {
+            continue;
+        }
+        turns.push(TraceTurn::from_export(
+            value,
+            line_no,
+            "openai_trajectory_jsonl",
+            parsed[..chosen_idx].to_vec(),
+            chosen.clone(),
+            tools.clone(),
+            Some(chosen_idx),
+        ));
+    }
+    Ok(ParsedTraceRow::many("openai_trajectory_jsonl", turns))
 }
 
 #[derive(Debug, Deserialize)]
@@ -515,7 +631,7 @@ struct RawAnthropicTurn {
 fn parse_anthropic_turn(
     value: &serde_json::Value,
     line_no: usize,
-) -> Result<TraceTurn, ProductionTraceError> {
+) -> Result<ParsedTraceRow, ProductionTraceError> {
     let raw: RawAnthropicTurn =
         serde_json::from_value(value.clone()).map_err(|e| ProductionTraceError::Parse {
             line: line_no,
@@ -543,14 +659,15 @@ fn parse_anthropic_turn(
         .iter()
         .map(sft_to_chat_message)
         .collect();
-    Ok(TraceTurn::from_export(
+    Ok(ParsedTraceRow::one(TraceTurn::from_export(
         value,
         line_no,
         "anthropic_jsonl",
         prompt_messages,
         chosen,
         tools,
-    ))
+        Some(chosen_idx),
+    )))
 }
 
 fn value_to_chat_message(
@@ -744,6 +861,7 @@ struct TraceTurn {
     split: Option<String>,
     source_line: usize,
     source_format: &'static str,
+    source_message_index: Option<usize>,
     prompt_messages: Vec<EvalChatMessage>,
     chosen: EvalChatMessage,
     tools: Vec<serde_json::Value>,
@@ -758,6 +876,7 @@ impl TraceTurn {
         prompt_messages: Vec<EvalChatMessage>,
         chosen: EvalChatMessage,
         tools: Vec<serde_json::Value>,
+        source_message_index: Option<usize>,
     ) -> Self {
         let mut source_metadata = serde_json::Map::new();
         if let Some(meta) = value.get("metadata").and_then(|v| v.as_object()) {
@@ -774,6 +893,7 @@ impl TraceTurn {
             split: string_field(value, "split"),
             source_line: line_no,
             source_format,
+            source_message_index,
             prompt_messages,
             chosen,
             tools,
@@ -793,6 +913,12 @@ impl TraceTurn {
             "source_format".into(),
             serde_json::json!(self.source_format),
         );
+        if let Some(source_message_index) = self.source_message_index {
+            obj.insert(
+                "source_message_index".into(),
+                serde_json::json!(source_message_index),
+            );
+        }
         obj.insert("target_tools".into(), serde_json::json!(target_tools));
         obj.insert("prompt_chars".into(), serde_json::json!(prompt_chars));
         obj.insert("target_chars".into(), serde_json::json!(target_chars));
@@ -921,12 +1047,77 @@ mod tests {
         assert_eq!(stats.skipped_no_tool_call, 0);
         assert_eq!(suite.examples[0].messages.len(), 2);
         assert_eq!(suite.examples[0].messages.last().unwrap().role, "user");
+        assert_eq!(stats.sampled_examples[0].source_message_index, Some(2));
         assert!(
             suite.examples[0]
                 .target
                 .as_deref()
                 .unwrap()
                 .contains("\"Bash\"")
+        );
+    }
+
+    #[test]
+    fn openai_trajectory_jsonl_materializes_each_tool_call_turn() {
+        let line = serde_json::json!({
+            "format": "openai_trajectory_jsonl",
+            "id": "trajectory-1",
+            "session_id": "sess-full",
+            "messages": [
+                {"role":"system", "content":"You are a coding agent."},
+                {"role":"user", "content":"Inspect files, then run tests."},
+                {"role":"assistant", "content":"", "tool_calls":[{
+                    "id":"call_read",
+                    "type":"function",
+                    "function":{"name":"Read", "arguments":"{\"path\":\"Cargo.toml\"}"}
+                }]},
+                {"role":"tool", "tool_call_id":"call_read", "name":"Read", "content":"[workspace]"},
+                {"role":"assistant", "content":"Need the tests now."},
+                {"role":"user", "content":"Go ahead."},
+                {"role":"assistant", "content":"", "tool_calls":[{
+                    "id":"call_bash",
+                    "type":"function",
+                    "function":{"name":"Bash", "arguments":"{\"command\":\"cargo test -p kiln-eval\"}"}
+                }]},
+                {"role":"tool", "tool_call_id":"call_bash", "name":"Bash", "content":"ok"},
+                {"role":"assistant", "content":"Tests passed."}
+            ],
+            "tools": [
+                {"type":"function","function":{"name":"Read","parameters":{"type":"object"}}},
+                {"type":"function","function":{"name":"Bash","parameters":{"type":"object"}}}
+            ]
+        });
+        let mut cfg = ProductionTraceSuiteConfig::new("full-trajectory");
+        cfg.sampling.seed = Some(9);
+        cfg.sampling.max_examples = None;
+        let (suite, stats) =
+            synthesize_production_trace_suite(std::io::Cursor::new(format!("{line}\n")), &cfg)
+                .unwrap();
+        assert_eq!(stats.rows_seen, 1);
+        assert_eq!(stats.rows_parsed, 1);
+        assert_eq!(stats.eligible_tool_turns, 2);
+        assert_eq!(suite.examples.len(), 2);
+        assert_eq!(suite.examples[0].messages.len(), 2);
+        assert_eq!(suite.examples[0].messages.last().unwrap().role, "user");
+        assert_eq!(suite.examples[1].messages.len(), 6);
+        assert_eq!(suite.examples[1].messages.last().unwrap().content, "Go ahead.");
+        let first = extract_first_tool_call(suite.examples[0].target.as_deref().unwrap()).unwrap();
+        let second = extract_first_tool_call(suite.examples[1].target.as_deref().unwrap()).unwrap();
+        assert_eq!(first.name, "Read");
+        assert_eq!(second.name, "Bash");
+        assert_eq!(
+            stats
+                .sampled_examples
+                .iter()
+                .map(|s| s.source_message_index)
+                .collect::<Vec<_>>(),
+            vec![Some(2), Some(6)]
+        );
+        assert_eq!(
+            stats
+                .sampled_source_format_counts
+                .get("openai_trajectory_jsonl"),
+            Some(&2)
         );
     }
 
