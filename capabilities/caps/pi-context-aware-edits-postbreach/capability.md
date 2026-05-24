@@ -254,6 +254,13 @@ and JavaScript camelCase/CommonJS style when available.
     destroyed the outcome/format movement that made H10 useful. H10 remains
     the current best caveated adapter; further rank/alpha scaling around this
     same full-train no-ECHO recipe is not promising.
+- **PB-H13: clean-binary no-ECHO Agentic GRPO.** Filter the PB-H7 full-train
+  rollout data to groups with exactly binary rewards (`0.0` and `1.0`), dropping
+  partial-credit groups before rerunning H10's `rank=4`, `alpha=8`, `lr=5e-6`,
+  no-ECHO recipe. This tests whether H10's useful outcome/format movement came
+  from clean success/failure contrast while partial groups introduced the
+  convention/read drift.
+  - Result: pending.
 
 ## Standard Workflow
 
