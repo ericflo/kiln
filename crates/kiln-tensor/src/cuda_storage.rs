@@ -36,8 +36,51 @@ use std::sync::Arc;
 
 use candle_core::cuda_backend::CudaDevice;
 use candle_core::cuda_backend::cudarc::driver::CudaSlice;
+use candle_core::cuda_backend::cudarc::driver::sys::CUdeviceptr;
 
 use crate::{DType, Device, Error, Result, StorageBackend};
+
+/// Owner of a CUDA byte buffer. Either kt owns the allocation
+/// outright (`Owned`) or kt is sharing a buffer that some other type
+/// owns (`Borrowed` — e.g. a candle `CudaStorage` held alive via the
+/// `_keep_alive` Arc).
+///
+/// The Borrowed variant is the foundation for the Phase 7 zero-copy
+/// candle→kt adapter: it lets a kt-Tensor wrap a candle Tensor's
+/// device buffer without copying, while the Arc keeps the candle side
+/// alive for as long as the kt side needs the bytes. Drop semantics:
+/// dropping a Borrowed `CudaStorage` just decrements the keep-alive
+/// Arc — it never frees the device memory directly.
+pub(crate) enum SliceOwner {
+    Owned(CudaSlice<u8>),
+    /// Borrowed view over an externally-owned CUDA buffer.
+    ///
+    /// `_keep_alive` is an opaque Arc that must outlive every read
+    /// from `ptr`. Typically holds an Arc-wrapped `candle::Storage` so
+    /// the candle side's CudaSlice<T> Drop runs only after kt drops
+    /// its references.
+    Borrowed {
+        ptr: CUdeviceptr,
+        byte_len: usize,
+        _keep_alive: Arc<dyn Any + Send + Sync>,
+    },
+}
+
+impl std::fmt::Debug for SliceOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Owned(s) => f
+                .debug_struct("Owned")
+                .field("len", &s.len())
+                .finish(),
+            Self::Borrowed { ptr, byte_len, .. } => f
+                .debug_struct("Borrowed")
+                .field("ptr", &format_args!("0x{ptr:x}"))
+                .field("byte_len", byte_len)
+                .finish(),
+        }
+    }
+}
 
 /// CUDA-backed storage. Byte-typed; dtype carried alongside for dispatch.
 ///
@@ -45,6 +88,9 @@ use crate::{DType, Device, Error, Result, StorageBackend};
 /// `CudaDevice` accessor today; Phase 7 swaps that for a direct cudarc
 /// `CudaContext::default_stream().alloc_zeros::<u8>` once the candle
 /// dep is gone.
+///
+/// Storage can be either owned (allocated by kt) or borrowed (sharing
+/// an external CUDA buffer with a keep-alive Arc) — see [`SliceOwner`].
 #[derive(Debug)]
 pub struct CudaStorage {
     /// Device-index variant of [`Device`]. Stored explicitly so
@@ -52,8 +98,8 @@ pub struct CudaStorage {
     device: Device,
     /// Element dtype tag.
     dtype: DType,
-    /// The actual byte buffer on the GPU.
-    slice: CudaSlice<u8>,
+    /// The byte buffer (owned or borrowed).
+    slice: SliceOwner,
     /// Candle CUDA device handle. Held for stream affinity (Phase 1.x
     /// `StreamPlanner` reads it) and for the in-flight kernel-crate
     /// FFI calls that take `&CudaDevice` as their first argument.
@@ -83,7 +129,7 @@ impl CudaStorage {
         Ok(CudaStorage {
             device: Device::Cuda(device_index),
             dtype,
-            slice,
+            slice: SliceOwner::Owned(slice),
             candle_device,
         })
     }
@@ -114,23 +160,127 @@ impl CudaStorage {
         Ok(CudaStorage {
             device: Device::Cuda(device_index),
             dtype,
-            slice,
+            slice: SliceOwner::Owned(slice),
             candle_device,
         })
+    }
+
+    /// Wrap an externally-owned CUDA buffer as a kt `CudaStorage`
+    /// without copying.
+    ///
+    /// `keep_alive` is an opaque Arc that must outlive every read
+    /// from `device_ptr`. Typical pattern: pass an Arc-wrapped candle
+    /// `Storage::Cuda(...)` so the candle Tensor's underlying
+    /// `CudaSlice<T>` drop runs after this storage's last reference.
+    ///
+    /// `device_ptr` + `byte_len` describe the borrowed region. The
+    /// caller is responsible for the byte_len matching dtype × element
+    /// count (this constructor does the same alignment check as
+    /// [`Self::from_slice`]).
+    ///
+    /// The Phase 7 zero-copy candle→kt adapter is the canonical
+    /// caller. Kernel-crate kt-API sites that reach `.slice()` will
+    /// panic on a borrowed storage — they must migrate to the
+    /// dtype/owner-aware accessor that lands alongside the adapter.
+    pub fn from_borrowed(
+        candle_device: Arc<CudaDevice>,
+        device_index: usize,
+        dtype: DType,
+        device_ptr: CUdeviceptr,
+        byte_len: usize,
+        keep_alive: Arc<dyn Any + Send + Sync>,
+    ) -> Result<Self> {
+        if !dtype.is_packed() {
+            let per = dtype.size_in_bytes();
+            if per > 0 && !byte_len.is_multiple_of(per) {
+                return Err(Error::Msg(format!(
+                    "CudaStorage::from_borrowed: byte_len {byte_len} is not a multiple of \
+                     size_in_bytes({dtype:?}) = {per}"
+                )));
+            }
+        }
+        Ok(CudaStorage {
+            device: Device::Cuda(device_index),
+            dtype,
+            slice: SliceOwner::Borrowed {
+                ptr: device_ptr,
+                byte_len,
+                _keep_alive: keep_alive,
+            },
+            candle_device,
+        })
+    }
+
+    /// Whether this storage owns its underlying CUDA buffer (`true`)
+    /// or just borrows it from an external Arc keep-alive (`false`).
+    pub fn is_owned(&self) -> bool {
+        matches!(self.slice, SliceOwner::Owned(_))
+    }
+
+    /// Whether this storage borrows its underlying CUDA buffer from
+    /// an external owner (Phase 7 candle adapter), as opposed to
+    /// owning its own allocation.
+    pub fn is_borrowed(&self) -> bool {
+        matches!(self.slice, SliceOwner::Borrowed { .. })
     }
 
     /// Borrow the underlying byte slice. The existing kernel-crate
     /// FFI sites that want the raw device pointer reach this then
     /// call `.device_ptr(&stream)` per the cudarc 0.19 pattern.
+    ///
+    /// **Panics** if this is a `Borrowed` storage (there is no
+    /// `CudaSlice<u8>` to return — call sites must use the dtype/
+    /// owner-aware raw-pointer accessor that lands alongside the
+    /// Phase 7 zero-copy adapter migration).
     pub fn slice(&self) -> &CudaSlice<u8> {
-        &self.slice
+        match &self.slice {
+            SliceOwner::Owned(s) => s,
+            SliceOwner::Borrowed { .. } => panic!(
+                "CudaStorage::slice() called on Borrowed storage; call sites must use the \
+                 raw-pointer accessor that supports both owners"
+            ),
+        }
     }
 
     /// Mutable borrow for in-place ops. Bumps no version counter at
     /// this layer (anti-pattern 16 versioning is a Tensor-level concern,
     /// enforced once `kiln-autograd` lands).
+    ///
+    /// **Panics** if this is a `Borrowed` storage — borrowed buffers
+    /// are not safe to mutate through the kt side (the external owner
+    /// dictates write semantics).
     pub fn slice_mut(&mut self) -> &mut CudaSlice<u8> {
-        &mut self.slice
+        match &mut self.slice {
+            SliceOwner::Owned(s) => s,
+            SliceOwner::Borrowed { .. } => panic!(
+                "CudaStorage::slice_mut() called on Borrowed storage; borrowed buffers are \
+                 read-only through kt"
+            ),
+        }
+    }
+
+    /// Raw device pointer at the start of the storage's byte buffer.
+    /// Works for both `Owned` and `Borrowed` variants.
+    ///
+    /// Returns `(ptr, byte_len)`. Callers typically add the
+    /// kt-Tensor's `layout.start_offset() * dtype.size_in_bytes()` to
+    /// reach the active region.
+    ///
+    /// Note: this returns a raw `CUdeviceptr` without a sync guard.
+    /// Callers writing through the pointer must respect kiln's stream
+    /// affinity — they are already in `unsafe` FFI territory.
+    pub fn device_ptr_raw(&self) -> (CUdeviceptr, usize) {
+        match &self.slice {
+            SliceOwner::Owned(s) => {
+                use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+                // Use a default-stream device_ptr just to extract the raw bits;
+                // the SyncOnDrop is dropped immediately, recording nothing.
+                let stream = self.candle_device.cuda_stream();
+                let (ptr, _g) = s.device_ptr(&stream);
+                (ptr, s.len())
+            }
+            SliceOwner::Borrowed { ptr, byte_len, .. } => (*ptr, *byte_len),
+        }
     }
 
     /// The candle CUDA device handle this storage was allocated on.
@@ -151,7 +301,10 @@ impl StorageBackend for CudaStorage {
     }
 
     fn byte_len(&self) -> usize {
-        self.slice.len()
+        match &self.slice {
+            SliceOwner::Owned(s) => s.len(),
+            SliceOwner::Borrowed { byte_len, .. } => *byte_len,
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
