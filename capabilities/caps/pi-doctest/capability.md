@@ -1217,3 +1217,31 @@ still creates reliability drift. The systems lesson is also useful: 116 action
 tokens still took over ten minutes because the failed-doctest contexts were
 large. Avoid more failed-state micro-contrast GRPO unless the context can be
 compressed substantially or paired with a broader behavior anchor.
+
+### H66: direct-solver ideal SFT
+
+H66 tested the broader behavior-anchor route after H65 closed the failed-state
+micro-contrast branch. Instead of copying base agent trajectories or using four
+hand-authored synthetic examples, it asked the local base model for direct
+function bodies on train-only tasks, with per-request
+`chat_template_kwargs.enable_thinking=false` for the direct body generation
+only. The generated bodies were independently inserted into the train stubs and
+validated with doctest. The eight successful bodies were then rendered as
+concise ideal read -> edit -> doctest -> `DONE` tool traces.
+
+The corpus used train task IDs `task_0024` through `task_0031`. Body lengths
+were 43, 123, 121, 308, 36, 28, 143, and 93 chars. The rendered examples
+tokenized to 487-615 tokens. Training used native `cuda_sft_file`, rank 4 /
+alpha 4 / lr `5e-8`, 1 epoch, and `KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It
+completed in 164.923s observed with peak observed VRAM 15986 MiB. The receipt
+reported 1445 action tokens and 3001 context tokens. Adapter verify passed
+with 400 nonzero LoRA tensors and LoRA update proxy 0.011464.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.990625 with no
+zero rollouts and mean wall-clock 26.05s. H66 scored 0.7125 with one zero
+rollout and mean wall-clock 62.74s. Lesson: broader validated ideal SFT is
+cheap to generate and train, but it still worsens the live thinking-enabled
+agent. This points away from positive-only idealized SFT for pi-doctest unless
+it is chained behind a confirmed stabilizing adapter. Future work should favor
+prompt/harness controls, stronger external teacher data, or reward learning
+that explicitly preserves successful base behavior.
