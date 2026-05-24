@@ -111,8 +111,60 @@ impl DeviceOp2 for EmbeddingOp {
         Ok(Some(tensor))
     }
 
-    // cuda_fwd / metal_fwd / vulkan_fwd inherit the default Ok(None) ->
+    // metal_fwd / vulkan_fwd inherit the default Ok(None) ->
     // dispatcher falls through to cpu_fwd. Phase 2+ overrides each.
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, weights: &Tensor, token_ids: &Tensor) -> Result<Option<Tensor>> {
+        validate_inputs(weights, token_ids)?;
+        if weights.dtype().is_packed() {
+            // Packed weights (Marlin / Int4 / Fp4) have no per-element
+            // byte size — index_select can't gather them directly.
+            // Fall through to CPU which already errors on this case.
+            return Ok(None);
+        }
+        if !weights.is_contiguous() {
+            return Ok(None);
+        }
+        if !token_ids.is_contiguous() {
+            return Ok(None);
+        }
+        // index_select_dim0 wants U32 indices. Cast I64 -> U32 if
+        // needed (Phase 4 substrate cast kernel handles this).
+        // For multi-dim token_ids ([B, T]), flatten to [B*T], gather,
+        // reshape to [B, T, hidden].
+        let n_indices = token_ids.element_count();
+        let hidden = weights.shape()[1];
+
+        let ids_u32 = if token_ids.dtype() == DType::U32 {
+            // Already U32 — but might need a reshape to 1-D first.
+            if token_ids.rank() == 1 {
+                token_ids.clone()
+            } else {
+                token_ids.reshape(vec![n_indices])?
+            }
+        } else if token_ids.dtype() == DType::I64 {
+            // I64 -> U32 cast (Phase 4 substrate cast kernel
+            // currently supports F32 <-> BF16 <-> F16 only).
+            // Fall through to CPU for I64 indices until the cast
+            // kernel is extended.
+            return Ok(None);
+        } else {
+            return Ok(None);
+        };
+
+        let gathered = crate::cuda_index_select_dim0(weights, &ids_u32)?;
+
+        // gathered has shape [n_indices, hidden]. If the original
+        // token_ids were multi-dim, reshape back.
+        if token_ids.rank() == 1 {
+            Ok(Some(gathered))
+        } else {
+            let mut out_shape = token_ids.shape().to_vec();
+            out_shape.push(hidden);
+            Ok(Some(gathered.reshape(out_shape)?))
+        }
+    }
 
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         // See module doc — wired up under kiln-autograd in a follow-up.
