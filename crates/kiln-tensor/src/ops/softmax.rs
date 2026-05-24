@@ -119,6 +119,37 @@ impl DeviceOp1 for SoftmaxLastDimOp {
         Ok(Some(crate::cuda_softmax_last_axis(x)?))
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as the CUDA path so future MSL
+        // kernel work can drop in without changing the call site:
+        //   - F32 / BF16 / F16 only (matches cpu_fwd's accepted dtypes)
+        //   - rank ≥ 1
+        //   - contiguous input (row-major over the trailing axis)
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if x.rank() == 0 {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): implement
+        // `crate::metal_softmax_last_axis(x)` analogous to
+        // `crate::cuda_softmax_last_axis` above. Until that kernel
+        // lands, fall through to the CPU path so the op still produces
+        // correct results on Mac (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. MPS Graph `softMax(_:axis:)` for one-shot dispatch
+        //      (rank-aware, fused max/sub/exp/sum/div).
+        //   2. Custom MSL kernel: per-row threadgroup reduction over
+        //      the trailing dim, two-pass max → exp+sum → divide.
+        //   3. Reuse the metal kernels in `kiln-model::backend::metal`
+        //      (the existing softmax there is the production hot path).
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
