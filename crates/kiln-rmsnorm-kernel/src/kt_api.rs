@@ -89,29 +89,21 @@ pub fn fused_rmsnorm_kt(
     }
     let rows: usize = x_shape[..x_shape.len() - 1].iter().product();
 
-    let (x_st, x_off) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
-    let (w_st, w_off) = cuda_storage_and_byte_offset(weight, KtDType::BF16, "weight")?;
+    // Owner-agnostic input pointers — accepts both Owned and
+    // Borrowed kt storage (Phase 7 v2).
+    let x_ptr = kiln_kt_bridge::cuda_input_device_ptr(x, KtDType::BF16, "x")?;
+    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::BF16, "weight")?;
+    let (x_st, _) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
     let out = alloc_cuda_tensor(x_st, KtDType::BF16, x_shape.clone())?;
     if rows == 0 {
         return Ok(out);
     }
-    let out_cuda = out
-        .storage()
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .expect("alloc CUDA");
+    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
 
     let stream = x_st.candle_device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
-    let x_slice = x_st.slice().slice(x_off..);
-    let w_slice = w_st.slice().slice(w_off..);
-    let o_slice = out_cuda.slice().slice(0..);
-
     let status = unsafe {
-        let (x_ptr, _g1) = x_slice.device_ptr(&stream);
-        let (w_ptr, _g2) = w_slice.device_ptr(&stream);
-        let (o_ptr, _g3) = o_slice.device_ptr(&stream);
         kiln_fused_rmsnorm(
             x_ptr as *const _,
             w_ptr as *const _,
@@ -280,41 +272,22 @@ pub fn fused_rotary_qk_kt(
         )));
     }
 
-    let (q_st, q_off) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-    let (k_st, k_off) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let (cos_st, cos_off) = cuda_storage_and_byte_offset(cos, KtDType::F32, "cos")?;
-    let (sin_st, sin_off) = cuda_storage_and_byte_offset(sin, KtDType::F32, "sin")?;
+    // Owner-agnostic input pointers (Phase 7 v2).
+    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let cos_ptr = kiln_kt_bridge::cuda_input_device_ptr(cos, KtDType::F32, "cos")?;
+    let sin_ptr = kiln_kt_bridge::cuda_input_device_ptr(sin, KtDType::F32, "sin")?;
+    let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
 
     let q_out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![batch, seq_len, q_heads, head_dim])?;
     let k_out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![batch, seq_len, k_heads, head_dim])?;
-    let qo_cuda = q_out
-        .storage()
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .expect("alloc CUDA");
-    let ko_cuda = k_out
-        .storage()
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .expect("alloc CUDA");
+    let qo_ptr = kiln_kt_bridge::cuda_output_device_ptr(&q_out);
+    let ko_ptr = kiln_kt_bridge::cuda_output_device_ptr(&k_out);
 
     let stream = q_st.candle_device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
-    let q_slice = q_st.slice().slice(q_off..);
-    let k_slice = k_st.slice().slice(k_off..);
-    let cos_slice = cos_st.slice().slice(cos_off..);
-    let sin_slice = sin_st.slice().slice(sin_off..);
-    let qo_slice = qo_cuda.slice().slice(0..);
-    let ko_slice = ko_cuda.slice().slice(0..);
 
     let status = unsafe {
-        let (q_ptr, _g1) = q_slice.device_ptr(&stream);
-        let (k_ptr, _g2) = k_slice.device_ptr(&stream);
-        let (cos_ptr, _g3) = cos_slice.device_ptr(&stream);
-        let (sin_ptr, _g4) = sin_slice.device_ptr(&stream);
-        let (qo_ptr, _g5) = qo_slice.device_ptr(&stream);
-        let (ko_ptr, _g6) = ko_slice.device_ptr(&stream);
-
         kiln_fused_rotary_qk(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -358,25 +331,17 @@ pub fn fused_mlp_silu_mul_kt(
     let elems = gate.element_count();
     let shape = gate.shape().to_vec();
 
-    let (g_st, g_off) = cuda_storage_and_byte_offset(gate, KtDType::BF16, "gate")?;
-    let (u_st, u_off) = cuda_storage_and_byte_offset(up, KtDType::BF16, "up")?;
+    // Owner-agnostic input pointers (Phase 7 v2).
+    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(gate, KtDType::BF16, "gate")?;
+    let u_ptr = kiln_kt_bridge::cuda_input_device_ptr(up, KtDType::BF16, "up")?;
+    let (g_st, _) = cuda_storage_and_byte_offset(gate, KtDType::BF16, "gate")?;
     let out = alloc_cuda_tensor(g_st, KtDType::BF16, shape)?;
-    let out_cuda = out
-        .storage()
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .expect("alloc CUDA");
+    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
 
     let stream = g_st.candle_device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
-    let g_slice = g_st.slice().slice(g_off..);
-    let u_slice = u_st.slice().slice(u_off..);
-    let o_slice = out_cuda.slice().slice(0..);
 
     let status = unsafe {
-        let (g_ptr, _g1) = g_slice.device_ptr(&stream);
-        let (u_ptr, _g2) = u_slice.device_ptr(&stream);
-        let (o_ptr, _g3) = o_slice.device_ptr(&stream);
         kiln_fused_mlp_silu_mul_bf16(
             g_ptr as *const _,
             u_ptr as *const _,
@@ -682,33 +647,19 @@ pub fn fused_l2_qk_norm_kt(
     }
     let (rows, hidden) = (q_shape[0], q_shape[1]);
 
-    let (q_st, q_off) = cuda_storage_and_byte_offset(q_in, KtDType::BF16, "q_in")?;
-    let (k_st, k_off) = cuda_storage_and_byte_offset(k_in, KtDType::BF16, "k_in")?;
+    // Owner-agnostic input pointers (Phase 7 v2).
+    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q_in, KtDType::BF16, "q_in")?;
+    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_in, KtDType::BF16, "k_in")?;
+    let (q_st, _) = cuda_storage_and_byte_offset(q_in, KtDType::BF16, "q_in")?;
     let q_out = alloc_cuda_tensor(q_st, KtDType::BF16, q_shape.clone())?;
     let k_out = alloc_cuda_tensor(q_st, KtDType::BF16, q_shape)?;
-    let qo_cuda = q_out
-        .storage()
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .expect("alloc CUDA");
-    let ko_cuda = k_out
-        .storage()
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .expect("alloc CUDA");
+    let qo_ptr = kiln_kt_bridge::cuda_output_device_ptr(&q_out);
+    let ko_ptr = kiln_kt_bridge::cuda_output_device_ptr(&k_out);
 
     let stream = q_st.candle_device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
-    let q_slice = q_st.slice().slice(q_off..);
-    let k_slice = k_st.slice().slice(k_off..);
-    let qo_slice = qo_cuda.slice().slice(0..);
-    let ko_slice = ko_cuda.slice().slice(0..);
 
     let status = unsafe {
-        let (q_ptr, _g1) = q_slice.device_ptr(&stream);
-        let (k_ptr, _g2) = k_slice.device_ptr(&stream);
-        let (qo_ptr, _g3) = qo_slice.device_ptr(&stream);
-        let (ko_ptr, _g4) = ko_slice.device_ptr(&stream);
         kiln_fused_l2_qk_norm(
             q_ptr as *const _,
             k_ptr as *const _,
