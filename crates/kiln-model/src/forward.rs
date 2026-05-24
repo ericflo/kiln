@@ -206,6 +206,22 @@ fn cuda_use_kt_api_l2_normalize() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: token-embedding lookup (dim-0 `index_select`)
+/// through the kt-API + adapters. Set
+/// `KILN_USE_KT_API_EMBEDDING=1` (or `KILN_USE_KT_API_ALL=1`) to
+/// enable; default off. Routes the `embed_weights.index_select(&index, 0)`
+/// call inside [`embedding_lookup`] and
+/// [`embedding_lookup_with_index`] through
+/// `kiln_tensor::cuda_index_select_dim0` via the kt-bridge borrow
+/// adapter. Pays one dtod memcpy on the output direction (the
+/// gathered embedding rows).
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_embedding() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_EMBEDDING").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -4532,14 +4548,79 @@ impl GpuWeights {
 /// `embed_weights`: [vocab_size, hidden_size] embedding matrix.
 ///
 /// Returns: [seq_len, hidden_size] tensor.
+///
+/// Phase 7 (#1082): when `KILN_USE_KT_API_EMBEDDING=1` (or
+/// `KILN_USE_KT_API_ALL=1`) is set AND inputs are contiguous CUDA
+/// tensors of a supported dtype, route the dim-0 `index_select`
+/// through `kiln_tensor::cuda_index_select_dim0`. Falls through to
+/// candle's `index_select` when any precondition fails.
 pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Tensor> {
     let index = Tensor::new(token_ids, embed_weights.device())?;
+    #[cfg(feature = "cuda")]
+    if let Some(out) = try_kt_embedding_lookup(embed_weights, &index)? {
+        return promote_cpu_activation(out);
+    }
     let out = embed_weights.index_select(&index, 0)?;
     promote_cpu_activation(out)
 }
 
 fn embedding_lookup_with_index(index: &Tensor, embed_weights: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if let Some(out) = try_kt_embedding_lookup(embed_weights, index)? {
+        return promote_cpu_activation(out);
+    }
     promote_cpu_activation(embed_weights.index_select(index, 0)?)
+}
+
+/// Phase 7 (#1082) — kt-API embedding-lookup migration helper.
+/// Routes the dim-0 `index_select` underlying token-embedding
+/// gather through `kiln_tensor::cuda_index_select_dim0`.
+///
+/// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
+/// non-contiguous, unsupported dtype, indices not U32) so the
+/// caller falls through to candle's `index_select`. NVTX range
+/// `kiln/embedding_kt` brackets the migrated call so nsys traces
+/// separate the path from the candle baseline.
+#[cfg(feature = "cuda")]
+fn try_kt_embedding_lookup(
+    embed_weights: &Tensor,
+    index: &Tensor,
+) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_embedding() {
+        return Ok(None);
+    }
+    if !matches!(embed_weights.device(), Device::Cuda(_))
+        || !matches!(index.device(), Device::Cuda(_))
+        || !embed_weights.is_contiguous()
+        || !index.is_contiguous()
+        || index.dtype() != DType::U32
+    {
+        return Ok(None);
+    }
+    if !matches!(
+        embed_weights.dtype(),
+        DType::F32 | DType::BF16 | DType::F16
+    ) {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/embedding_kt");
+
+    let w_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(embed_weights) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let idx_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(index) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out_kt = match kiln_tensor::cuda_index_select_dim0(&w_kt, &idx_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_embedding_lookup: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
 }
 
 fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Result<Tensor> {
