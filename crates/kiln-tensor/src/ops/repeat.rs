@@ -161,6 +161,96 @@ impl DeviceOp1 for RepeatOp {
         Ok(Some(crate::cuda_index_select_dim0(x, &indices_cuda)?))
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd so future MSL
+        // kernel work can drop in without changing the call site:
+        //   - validate(x, axis, n) (rank-bounded, n >= 1)
+        //   - n == 1 is identity (cheap reshape, no copy)
+        //   - axis == 0 only (matches the CUDA tiled-gather strategy)
+        //   - non-packed dtype, contiguous input
+        validate(x, self.axis, self.n)?;
+        if self.n == 1 {
+            return Ok(Some(x.reshape(x.shape().to_vec())?));
+        }
+        if self.axis != 0 {
+            return Ok(None);
+        }
+        if x.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        let axis_in = x.shape()[0];
+        if axis_in == 0 {
+            let mut out_shape = x.shape().to_vec();
+            out_shape[0] = 0;
+            return Ok(Some(x.reshape(out_shape)?));
+        }
+        // TODO(#1082, phase 4 Metal): implement
+        // `crate::metal_repeat_dim0(x, n)` (or reuse a generic
+        // repeat kernel analogous to the CUDA tiled-gather above).
+        // Until that kernel lands, fall through to the CPU path
+        // (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. Custom MSL kernel: one threadgroup per output row,
+        //      one thread per inner-element; out[i, ...] copies
+        //      from in[i % axis_in, ...]. Single dispatch, no
+        //      index buffer round-trip.
+        //   2. Reuse `metal_index_select_dim0` once it lands —
+        //      build a tiled-index buffer
+        //      ([0..d-1] repeated n times) and gather. Mirrors the
+        //      CUDA strategy.
+        //   3. MPS Graph: `tile(_:withMultiplier:)` for one-shot
+        //      dispatch. Higher per-call overhead than a custom
+        //      kernel.
+        Ok(None)
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / metal_fwd:
+        //   - validate(x, axis, n) (rank-bounded, n >= 1)
+        //   - n == 1 is identity (cheap reshape, no copy)
+        //   - axis == 0 only
+        //   - non-packed dtype, contiguous input
+        validate(x, self.axis, self.n)?;
+        if self.n == 1 {
+            return Ok(Some(x.reshape(x.shape().to_vec())?));
+        }
+        if self.axis != 0 {
+            return Ok(None);
+        }
+        if x.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        let axis_in = x.shape()[0];
+        if axis_in == 0 {
+            let mut out_shape = x.shape().to_vec();
+            out_shape[0] = 0;
+            return Ok(Some(x.reshape(out_shape)?));
+        }
+        // TODO(#1082, phase 4 Vulkan): implement
+        // `crate::vulkan_repeat_dim0(x, n)` analogous to the CUDA
+        // tiled-gather above. Until that wrapper lands, fall through
+        // to CPU (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. SPIR-V compute shader: one workgroup per output row,
+        //      one invocation per inner-element; out[i, ...] copies
+        //      from in[i % axis_in, ...].
+        //   2. Reuse `vulkan_index_select_dim0` once it lands —
+        //      build a tiled-index buffer and gather. Mirrors the
+        //      CUDA strategy.
+        //   3. Dtype matrix gap: `VkDType` exposes F32 / BF16 today;
+        //      other dtypes need widening or a cast wrapper at the
+        //      dispatch boundary.
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }

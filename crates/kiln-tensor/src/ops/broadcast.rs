@@ -231,6 +231,91 @@ impl DeviceOp1 for BroadcastOp {
         Ok(Some(gathered.reshape(self.target_shape.clone())?))
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd so future MSL
+        // kernel work can drop in without changing the call site:
+        //   - non-packed dtype
+        //   - contiguous input
+        //   - non-empty target shape
+        //   - valid broadcast factors (delegated to broadcast_factors)
+        let in_shape = x.shape();
+        let _bf = self.broadcast_factors(in_shape)?;
+        if x.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        if in_shape == self.target_shape.as_slice() {
+            return Ok(Some(x.reshape(x.shape().to_vec())?));
+        }
+        let target_total: usize = self.target_shape.iter().product();
+        if target_total == 0 {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): implement
+        // `crate::metal_broadcast_to(x, target_shape)` analogous to
+        // the CUDA gather-via-index-select strategy above. Until that
+        // kernel lands, fall through to the CPU path
+        // (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. Custom MSL kernel: grid over `target_total`; each
+        //      thread computes its source linear index via the same
+        //      broadcast-factor math as the CPU path, then copies
+        //      `block_bytes`. Avoids the index-buffer round-trip
+        //      that the CUDA gather-emulation pays.
+        //   2. Reuse `metal_index_select_dim0` once it lands —
+        //      mirrors the CUDA approach by building a CPU index
+        //      buffer, uploading, and gathering. Higher latency but
+        //      simpler to wire if a gather kernel already exists.
+        //   3. MPS Graph: `broadcast(_:shape:)` for one-shot
+        //      dispatch. Cheap to wire but heavier per-call overhead.
+        Ok(None)
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / metal_fwd:
+        //   - non-packed dtype
+        //   - contiguous input
+        //   - non-empty target shape
+        //   - valid broadcast factors (delegated to broadcast_factors)
+        let in_shape = x.shape();
+        let _bf = self.broadcast_factors(in_shape)?;
+        if x.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        if in_shape == self.target_shape.as_slice() {
+            return Ok(Some(x.reshape(x.shape().to_vec())?));
+        }
+        let target_total: usize = self.target_shape.iter().product();
+        if target_total == 0 {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): implement
+        // `crate::vulkan_broadcast_to(x, target_shape)` analogous to
+        // the CUDA gather-via-index-select strategy above. Until
+        // that wrapper lands, fall through to the CPU path
+        // (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. SPIR-V compute shader: grid over `target_total`;
+        //      each invocation computes its source linear index via
+        //      broadcast-factor math and copies `block_bytes`. The
+        //      shape metadata can be pushed via push-constants or a
+        //      small uniform buffer.
+        //   2. Reuse `vulkan_index_select_dim0` once it lands —
+        //      build a CPU index buffer, upload, gather. Mirrors
+        //      the current CUDA strategy.
+        //   3. Dtype matrix gap: `VkDType` exposes F32 / BF16 today;
+        //      other dtypes need either widening or a cast wrapper
+        //      at the dispatch boundary.
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }

@@ -154,6 +154,94 @@ impl DeviceOp1 for FlipOp {
         Ok(Some(crate::cuda_index_select_dim0(x, &indices_cuda)?))
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd so future MSL
+        // kernel work can drop in without changing the call site:
+        //   - axes validate cleanly (rank-bounded, no duplicates)
+        //   - empty axes is identity (cheap reshape)
+        //   - single-axis axis==0 only (matches the CUDA reversed-
+        //     gather strategy); multi-axis / non-zero-axis flips
+        //     fall through to CPU
+        //   - non-packed dtype, contiguous input
+        validate(x, &self.axes)?;
+        if self.axes.is_empty() {
+            return Ok(Some(x.reshape(x.shape().to_vec())?));
+        }
+        if self.axes.len() != 1 || self.axes[0] != 0 {
+            return Ok(None);
+        }
+        if x.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        let n = x.shape()[0];
+        if n == 0 {
+            return Ok(Some(x.reshape(x.shape().to_vec())?));
+        }
+        // TODO(#1082, phase 4 Metal): implement
+        // `crate::metal_flip_dim0(x)` (or reuse a generic flip kernel
+        // analogous to the CUDA reversed-gather above). Until that
+        // kernel lands, fall through to the CPU path
+        // (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. Custom MSL kernel: one threadgroup per output row, one
+        //      thread per inner-element; output[i, ...] copies from
+        //      input[n - 1 - i, ...]. Single kernel, no index buffer.
+        //   2. Reuse `metal_index_select_dim0` once it lands — build a
+        //      reversed-index buffer (`n-1..0`) and gather. Mirrors
+        //      the CUDA strategy and avoids writing a flip-specific
+        //      kernel.
+        //   3. MPS Graph: `flip(_:axes:)` for one-shot dispatch.
+        //      Heavier per-call overhead than a custom kernel.
+        Ok(None)
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / metal_fwd:
+        //   - axes validate cleanly
+        //   - empty axes is identity (cheap reshape)
+        //   - single-axis axis==0 only (matches the CUDA strategy)
+        //   - non-packed dtype, contiguous input
+        validate(x, &self.axes)?;
+        if self.axes.is_empty() {
+            return Ok(Some(x.reshape(x.shape().to_vec())?));
+        }
+        if self.axes.len() != 1 || self.axes[0] != 0 {
+            return Ok(None);
+        }
+        if x.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        let n = x.shape()[0];
+        if n == 0 {
+            return Ok(Some(x.reshape(x.shape().to_vec())?));
+        }
+        // TODO(#1082, phase 4 Vulkan): implement
+        // `crate::vulkan_flip_dim0(x)` (or reuse a generic flip
+        // wrapper analogous to the CUDA reversed-gather above).
+        // Until that wrapper lands, fall through to CPU
+        // (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. SPIR-V compute shader: one workgroup per output row,
+        //      one invocation per inner-element; output[i, ...]
+        //      copies from input[n - 1 - i, ...]. Single dispatch,
+        //      no index buffer round-trip.
+        //   2. Reuse `vulkan_index_select_dim0` once it lands —
+        //      build a reversed-index buffer and gather. Mirrors
+        //      the CUDA strategy.
+        //   3. Dtype matrix gap: `VkDType` exposes F32 / BF16 today;
+        //      F16 / I64 / U32 inputs need either widening or a
+        //      cast wrapper at the dispatch boundary.
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
