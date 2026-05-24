@@ -153,6 +153,12 @@ A4: Skip the actual edit, claim the function already exists.
 - **H3: prompt-conditioned format/outcome ablation** — test whether a
   stricter runtime contract can improve the dominant format/outcome
   headroom before training another adapter.
+  - Result: rejected. A no-adapter strict workflow prompt reduced tool
+    calls (5.00 to 4.03) and thinking chars/tool (302.7 to 284.2), but
+    blind eval composite fell to 0.2778 (`delta=-0.2022`). It hurt
+    `format_compliance` (0.4861) and did not recover `outcome`
+    (0.6111). This rejects prompt distillation for this cap: stricter
+    wording buys efficiency by prematurely narrowing the workflow.
 - **H4: idealized train-only SFT trajectories** — synthesize compact
   read/edit/verify/final traces from train tasks instead of copying noisy
   rollout transcripts.

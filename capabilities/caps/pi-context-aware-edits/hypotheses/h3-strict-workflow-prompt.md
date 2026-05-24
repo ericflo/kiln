@@ -34,4 +34,19 @@ Reject prompt distillation if the full blind eval shows any of:
 
 ## Result
 
-Pending.
+Status: rejected.
+
+- Full 12-task x 3-seed blind aggregate eval scored 0.2778 versus the
+  0.4800 baseline (`delta=-0.2022`, stdev 0.4479).
+- The prompt reduced cost: mean tool calls fell from 5.00 to 4.03, mean
+  thinking chars fell from 1488.5 to 1165.2, and thinking chars/tool fell
+  from 302.7 to 284.2.
+- The target sub-scores regressed. `format_compliance` fell from 0.6528 to
+  0.4861 and `outcome` fell from 0.6944 to 0.6111. Nonzero rollouts fell
+  from 18 to 10.
+
+Conclusion: strict prompting is an efficiency lever, not a capability lever
+for this cap. It narrows the workflow enough to reduce thinking and tool use,
+but it also suppresses the final-response contract and does not improve edit
+completion. Do not distill this prompt. Move to idealized train-only traces
+that preserve completion while teaching compact workflow shape.
