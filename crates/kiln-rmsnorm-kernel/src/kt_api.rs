@@ -1212,7 +1212,6 @@ pub fn f32_to_bf16_kt(src: &KtTensor) -> Result<KtTensor, RmsNormError> {
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let status = unsafe {
-        let (o_ptr, _g2) = o_slice.device_ptr(&stream);
         kiln_f32_to_bf16(s_ptr as *const f32, o_ptr as *mut _, n as i32, raw_stream)
     };
     if status != 0 {
