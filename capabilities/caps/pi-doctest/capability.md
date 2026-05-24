@@ -1384,3 +1384,29 @@ contrasts avoid zero rollouts at this smoke size, but still damage composite
 and latency. The branch closes the idea that train-only wrong first edits are
 safe when localized to the immediate post-read action; future policy data needs
 a broader confirmed behavior anchor before directly ranking semantic edits.
+
+### H73: H33 then mixed suffix
+
+H73 tested an actual composition rather than another standalone micro-contrast.
+H33 was the strongest earlier reliability signal: it passed a `LIMIT=8` gate
+with outcome 1.0 and no zero rollouts, but was slower. H58's mixed suffix data
+failed from base, but it directly targeted premature `DONE` and verbose
+post-pass behavior. H73 trained H58's suffix data as a low-dose continuation
+from the H33 adapter.
+
+The base adapter was `pi-doctest-h33-hardneg-g2-noecho-r4a8`. The suffix data
+was
+`/tmp/pi-doctest-h58-mixed-reliability-efficiency/grpo-train.mixed-reliability-efficiency.g2x3.jsonl`:
+6 groups, 12 completions, reward stdev 0.178924, 300 action tokens, 0 env
+tokens, and 5422 context tokens. Training used `cuda_grpo_ablation --mode
+phase1`, rank 4 / alpha 8 / lr `5e-8`, no ECHO, seed `3141592653`, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 344.653s observed with
+peak observed VRAM 15961 MiB. Adapter verify passed with 400 nonzero LoRA
+tensors, 200 projection pairs, and LoRA update proxy 0.256005.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.8875 with no
+zero rollouts and mean wall-clock 46.50s. H73 scored 0.75 with one zero rollout
+and mean wall-clock 49.04s. Lesson: H33's reliability direction did not
+stabilize H58-style suffix data. The chain reintroduced a zero rollout and
+lost composite, so an outcome-reliability base is not enough to make narrow
+single-action suffix ranking safe.
