@@ -818,3 +818,25 @@ ECHO still over-conditioned the model toward slower, less reliable broader
 behavior. The next attempt should keep verified-only data but reduce or remove
 ECHO, or switch to a non-adapter/prompt-side stop policy rather than another
 realistic ECHO workflow update.
+
+### H48: verified-only no-ECHO workflow
+
+H48 reused the exact H47 verified-only dataset but disabled ECHO to isolate
+whether H47's env-prediction loss caused the latency and reliability
+regression. The dry-run shape was unchanged: 2 groups, 4 completions, 506
+action tokens, 587 env tokens, 1646 context tokens, and reward stdev 0.175.
+
+Training used rank 4 / alpha 4 / lr `1e-6`, no ECHO, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 112.478s observed, much
+faster than H47's 275.301s, with peak observed VRAM 15978 MiB and final loss
+0.026854. Adapter verify passed with 400 nonzero LoRA tensors and LoRA update
+proxy 0.062328.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it decisively: paired base scored
+0.98125 with mean wall-clock 19.36s and no zero rollouts, while H48 scored
+0.75 with mean wall-clock 38.10s and one zero rollout. No promotion check was
+run. Lesson: removing ECHO fixed training throughput but not blind behavior.
+The verified-only edit/test/stop micro-contrast is still too narrow as an
+adapter update; the next route should either use complete successful behavior
+anchors with a smaller policy update, or move efficient stopping into the
+runtime/prompt policy rather than another LoRA.
