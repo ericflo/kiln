@@ -357,7 +357,10 @@ fn score_name(
     }
 }
 
-fn score_structural(predicted: &serde_json::Value, target: &serde_json::Value) -> (f32, Option<String>) {
+fn score_structural(
+    predicted: &serde_json::Value,
+    target: &serde_json::Value,
+) -> (f32, Option<String>) {
     let p_keys: BTreeSet<&str> = predicted
         .as_object()
         .map(|m| m.keys().map(|s| s.as_str()).collect())
@@ -385,8 +388,18 @@ fn score_structural(predicted: &serde_json::Value, target: &serde_json::Value) -
     } else {
         Some(format!(
             "missing=[{}] extra=[{}]",
-            missing.iter().copied().copied().collect::<Vec<&str>>().join(","),
-            extra.iter().copied().copied().collect::<Vec<&str>>().join(",")
+            missing
+                .iter()
+                .copied()
+                .copied()
+                .collect::<Vec<&str>>()
+                .join(","),
+            extra
+                .iter()
+                .copied()
+                .copied()
+                .collect::<Vec<&str>>()
+                .join(",")
         ))
     };
     (score, detail)
@@ -552,7 +565,11 @@ fn score_arg_value_auto(
             }
         }
         (serde_json::Value::Bool(a), serde_json::Value::Bool(b)) => {
-            if a == b { 1.0 } else { 0.0 }
+            if a == b {
+                1.0
+            } else {
+                0.0
+            }
         }
         _ => {
             if canonicalize(target) == canonicalize(predicted) {
@@ -750,8 +767,10 @@ mod tests {
 
     #[test]
     fn full_score_passes_on_canonical_target() {
-        let target = r#"{"tool_calls":[{"name":"get_weather","arguments":{"city":"Paris","units":"c"}}]}"#;
-        let pred = r#"{"tool_call":{"name":"get_weather","arguments":{"city":"Paris","units":"c"}}}"#;
+        let target =
+            r#"{"tool_calls":[{"name":"get_weather","arguments":{"city":"Paris","units":"c"}}]}"#;
+        let pred =
+            r#"{"tool_call":{"name":"get_weather","arguments":{"city":"Paris","units":"c"}}}"#;
         let (s, kind, _) = score(
             &ex(target),
             pred,
@@ -839,9 +858,7 @@ mod tests {
             "content".to_string(),
             Scorer::Code {
                 language: Some("python".into()),
-                style: crate::scorers::CodeStyle::TokenSimilarity {
-                    min_jaccard: 0.6,
-                },
+                style: crate::scorers::CodeStyle::TokenSimilarity { min_jaccard: 0.6 },
             },
         );
         let (s, _, _) = score(
@@ -917,8 +934,7 @@ mod tests {
 
     #[test]
     fn auto_args_recursively_score_bash_python_heredoc() {
-        let target_command =
-            "bash -lc \"python3 - <<'PY'\nimport os\nprint(os.getcwd())\nPY\"";
+        let target_command = "bash -lc \"python3 - <<'PY'\nimport os\nprint(os.getcwd())\nPY\"";
         let pred_command = "python3 -c 'import os\nprint(os.getcwd())'";
         let target = serde_json::json!({
             "tool_calls": [{
@@ -946,8 +962,7 @@ mod tests {
 
     #[test]
     fn auto_args_fail_wrong_nested_python_body() {
-        let target_command =
-            "bash -lc \"python3 - <<'PY'\nimport os\nprint(os.getcwd())\nPY\"";
+        let target_command = "bash -lc \"python3 - <<'PY'\nimport os\nprint(os.getcwd())\nPY\"";
         let pred_command = "python3 -c 'print(\"hello\")'";
         let target = serde_json::json!({
             "tool_calls": [{
@@ -1015,8 +1030,7 @@ mod tests {
 
     #[test]
     fn multi_call_target_pairs_in_order() {
-        let target =
-            r#"{"tool_calls":[{"name":"a","arguments":{}},{"name":"b","arguments":{}}]}"#;
+        let target = r#"{"tool_calls":[{"name":"a","arguments":{}},{"name":"b","arguments":{}}]}"#;
         let pred = "<tool_call>\n<function=a>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>";
         let (_, kind, _) = score(
             &ex(target),
@@ -1033,8 +1047,7 @@ mod tests {
 
     #[test]
     fn missing_second_call_drops_score() {
-        let target =
-            r#"{"tool_calls":[{"name":"a","arguments":{}},{"name":"b","arguments":{}}]}"#;
+        let target = r#"{"tool_calls":[{"name":"a","arguments":{}},{"name":"b","arguments":{}}]}"#;
         let pred = "<tool_call>\n<function=a>\n</function>\n</tool_call>";
         let (s, kind, detail) = score(
             &ex(target),
@@ -1048,7 +1061,12 @@ mod tests {
         .unwrap();
         assert_eq!(kind, EvalOutcomeKind::Fail);
         assert!(s < 0.6, "score was {s}");
-        assert!(detail.as_deref().unwrap().contains("missing predicted call"));
+        assert!(
+            detail
+                .as_deref()
+                .unwrap()
+                .contains("missing predicted call")
+        );
     }
 
     #[test]
