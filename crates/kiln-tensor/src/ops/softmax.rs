@@ -105,6 +105,20 @@ impl DeviceOp1 for SoftmaxLastDimOp {
         Ok(Some(out))
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if x.rank() == 0 {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        Ok(Some(crate::cuda_softmax_last_axis(x)?))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
