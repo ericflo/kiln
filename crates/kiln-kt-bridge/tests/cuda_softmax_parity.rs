@@ -4,7 +4,7 @@
 //! `csrc/softmax.cu` produces per-row probability distributions
 //! matching the canonical CPU reference (kt's own naive triple-loop).
 
-#![cfg(feature = "cuda")]
+
 
 use candle_core::backend::BackendDevice;
 use candle_core::{DType as CandleDType, Device as CandleDevice, Tensor as CandleTensor};

@@ -5,7 +5,7 @@
 //! produces byte-identical output to the CPU reference for both
 //! 1-D and 2-D token_ids shapes.
 
-#![cfg(feature = "cuda")]
+
 
 use candle_core::backend::BackendDevice;
 use candle_core::{DType as CandleDType, Device as CandleDevice, Tensor as CandleTensor};

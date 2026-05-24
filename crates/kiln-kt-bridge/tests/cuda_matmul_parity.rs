@@ -9,7 +9,7 @@
 //! Gated on `--features cuda`; silently skips when no CUDA device is
 //! reachable so it runs unmodified on the `linux-default` CI profile.
 
-#![cfg(feature = "cuda")]
+
 
 use candle_core::backend::BackendDevice;
 use candle_core::{DType as CandleDType, Device as CandleDevice, Tensor as CandleTensor};

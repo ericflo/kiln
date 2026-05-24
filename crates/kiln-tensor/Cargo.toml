@@ -80,7 +80,3 @@ vulkan = ["dep:kiln-vulkan-kernel"]
 # kiln-autograd backwards through the substrate end-to-end. Mirrors
 # the dev-dep wiring already used by kiln-optim's training tests.
 kiln-autograd = { workspace = true }
-
-# Phase 2.x parity test routes through kt-bridge to drive the kt CUDA
-# matmul path from candle-side inputs/outputs.
-kiln-kt-bridge = { workspace = true }
