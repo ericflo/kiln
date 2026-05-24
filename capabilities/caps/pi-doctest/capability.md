@@ -405,6 +405,20 @@ zero. The broader hard-negative/no-ECHO recipe is therefore not a stable
 direction; future data should avoid wrong/no-test terminal negatives rather
 than simply scaling them.
 
+H37 pivoted from hard negatives to the user's thinking-efficiency tradeoff. It
+kept successful train-only workflows intact, then created compressed-thinking
+versions of two successful H17 traces and ranked each compressed version above
+its original verbose counterpart, with `--no-echo` and policy loss enabled. The
+dry-run was valid at 2 groups, 4 completions, 815 action tokens, 1298 env
+tokens, max 1010 sequence tokens, and max 325 action tokens per completion.
+The full train timed out at 900s before adapter write. Group 1 completed, but
+the original verbose counterpart took 393243 ms in backward, with checkpoint
+segment 7 alone taking 93361 ms. Group 2 then hit a worse throughput wall:
+reference forward alone took 366307 ms for the 1010-token max-sequence group,
+and the timeout fired before any adapter artifact was saved. The idea is safer
+behaviorally than wrong/no-test negatives, but the next retry must keep every
+completion below roughly 850 sequence tokens and below 300 action tokens.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
