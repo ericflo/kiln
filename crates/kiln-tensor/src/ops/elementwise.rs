@@ -138,6 +138,28 @@ impl DeviceOp2 for ElementwiseOp {
         Ok(Some(out))
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        validate(a, b, self.kind)?;
+        let dtype = a.dtype();
+        if !a.is_contiguous() || !b.is_contiguous() {
+            // CUDA path requires contiguous inputs; fallback to CPU
+            // dispatch by returning None — caller can also `.contiguous()`
+            // first via PR #1374's CUDA contiguous kernel.
+            return Ok(None);
+        }
+        if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        let kind_tag: i32 = match self.kind {
+            BinaryKind::Add => 0,
+            BinaryKind::Sub => 1,
+            BinaryKind::Mul => 2,
+            BinaryKind::Div => 3,
+        };
+        Ok(Some(crate::cuda_elementwise_binary(a, b, kind_tag)?))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
