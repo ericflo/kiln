@@ -107,6 +107,10 @@ const BASH_SAME_PROGRAM_DIFF_SUBCOMMAND: f32 = 0.35;
 /// Score awarded when the predicted bash command's classification doesn't
 /// match the target's at all (e.g. `python_inline` vs `pip_install`).
 const BASH_WRONG_FAMILY: f32 = 0.1;
+/// Max shell-wrapper recursion while scoring command args. Production agents
+/// often wrap the real operation in `bash -lc`, which then invokes Python or
+/// another shell. A shallow bound avoids pathological self-similar strings.
+const BASH_RECURSION_LIMIT: usize = 4;
 
 impl Default for ToolCallWeights {
     fn default() -> Self {
@@ -570,15 +574,26 @@ fn is_command_key(key: &str) -> bool {
 /// Score two bash command strings. Strategy:
 ///
 /// 1. Introspect both.
-/// 2. If classifications differ (e.g. `python_inline` vs `pip_install`),
+/// 2. Recursively unwrap shell wrappers like `bash -lc` when they carry the
+///    real command.
+/// 3. If classifications differ (e.g. `python_inline` vs `pip_install`),
 ///    return a low score (0.1) — the model picked the wrong tool entirely.
-/// 3. If classifications match but inline languages differ, return 0.2.
 /// 4. If both are inline programs of the same language, sub-score the
 ///    inner code with token similarity (lenient — variable renames OK).
 /// 5. Otherwise return token jaccard over the full command tail.
 fn score_bash_command(target: &str, predicted: &str) -> f32 {
+    score_bash_command_depth(target, predicted, 0)
+}
+
+fn score_bash_command_depth(target: &str, predicted: &str, depth: usize) -> f32 {
     let t_intro = bash::introspect(target);
     let p_intro = bash::introspect(predicted);
+    if depth < BASH_RECURSION_LIMIT {
+        if let Some(score) = score_shell_wrapper_pair(&t_intro, &p_intro, target, predicted, depth)
+        {
+            return score;
+        }
+    }
     if t_intro.classification() != p_intro.classification() {
         if t_intro.program == p_intro.program {
             return BASH_SAME_PROGRAM_DIFF_SUBCOMMAND;
@@ -589,6 +604,16 @@ fn score_bash_command(target: &str, predicted: &str) -> f32 {
         t_intro.inline_code.as_deref(),
         p_intro.inline_code.as_deref(),
     ) {
+        if t_intro.inline_language.as_deref() == Some("bash")
+            && p_intro.inline_language.as_deref() == Some("bash")
+            && depth < BASH_RECURSION_LIMIT
+        {
+            return code_token_similarity(t_code, p_code).max(score_bash_command_depth(
+                t_code,
+                p_code,
+                depth + 1,
+            ));
+        }
         return code_token_similarity(t_code, p_code);
     }
     // Same family, no inline code — compare argument tails as token sets.
@@ -600,6 +625,34 @@ fn score_bash_command(target: &str, predicted: &str) -> f32 {
     let inter = t_tokens.intersection(&p_tokens).count();
     let uni = t_tokens.union(&p_tokens).count().max(1);
     inter as f32 / uni as f32
+}
+
+fn score_shell_wrapper_pair(
+    target_intro: &bash::BashIntrospection,
+    predicted_intro: &bash::BashIntrospection,
+    target_raw: &str,
+    predicted_raw: &str,
+    depth: usize,
+) -> Option<f32> {
+    let target_shell = shell_wrapper_inner(target_intro);
+    let predicted_shell = shell_wrapper_inner(predicted_intro);
+    match (target_shell, predicted_shell) {
+        (Some(t_inner), Some(p_inner)) => {
+            let raw_similarity = code_token_similarity(t_inner, p_inner);
+            let recursive = score_bash_command_depth(t_inner, p_inner, depth + 1);
+            Some(raw_similarity.max(recursive))
+        }
+        (Some(t_inner), None) => Some(score_bash_command_depth(t_inner, predicted_raw, depth + 1)),
+        (None, Some(p_inner)) => Some(score_bash_command_depth(target_raw, p_inner, depth + 1)),
+        (None, None) => None,
+    }
+}
+
+fn shell_wrapper_inner(intro: &bash::BashIntrospection) -> Option<&str> {
+    match intro.inline_language.as_deref() {
+        Some("bash") => intro.inline_code.as_deref(),
+        _ => None,
+    }
 }
 
 /// Lightweight code similarity used both for arg-level bash inline code
@@ -860,6 +913,64 @@ mod tests {
         .unwrap();
         assert!(s > 0.95, "score was {s}");
         assert_eq!(kind, EvalOutcomeKind::Pass);
+    }
+
+    #[test]
+    fn auto_args_recursively_score_bash_python_heredoc() {
+        let target_command =
+            "bash -lc \"python3 - <<'PY'\nimport os\nprint(os.getcwd())\nPY\"";
+        let pred_command = "python3 -c 'import os\nprint(os.getcwd())'";
+        let target = serde_json::json!({
+            "tool_calls": [{
+                "name": "Bash",
+                "arguments": {"command": target_command}
+            }]
+        })
+        .to_string();
+        let pred = format!(
+            "<tool_call>\n<function=Bash>\n<parameter=command>\n{pred_command}\n</parameter>\n</function>\n</tool_call>"
+        );
+        let (s, kind, detail) = score(
+            &ex(&target),
+            &pred,
+            &NameMatch::CaseInsensitive,
+            &ArgsScoring::Auto,
+            None,
+            false,
+            &NoopJudgeRunner,
+        )
+        .unwrap();
+        assert_eq!(kind, EvalOutcomeKind::Pass, "{detail:?}");
+        assert!(s > 0.95, "score was {s}; detail={detail:?}");
+    }
+
+    #[test]
+    fn auto_args_fail_wrong_nested_python_body() {
+        let target_command =
+            "bash -lc \"python3 - <<'PY'\nimport os\nprint(os.getcwd())\nPY\"";
+        let pred_command = "python3 -c 'print(\"hello\")'";
+        let target = serde_json::json!({
+            "tool_calls": [{
+                "name": "Bash",
+                "arguments": {"command": target_command}
+            }]
+        })
+        .to_string();
+        let pred = format!(
+            "<tool_call>\n<function=Bash>\n<parameter=command>\n{pred_command}\n</parameter>\n</function>\n</tool_call>"
+        );
+        let (s, kind, _) = score(
+            &ex(&target),
+            &pred,
+            &NameMatch::CaseInsensitive,
+            &ArgsScoring::Auto,
+            None,
+            false,
+            &NoopJudgeRunner,
+        )
+        .unwrap();
+        assert_eq!(kind, EvalOutcomeKind::Fail);
+        assert!(s < 0.8, "score was {s}");
     }
 
     #[test]

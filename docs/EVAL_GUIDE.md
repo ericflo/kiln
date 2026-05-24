@@ -148,6 +148,13 @@ inline JSON, and fenced tool-call blocks by default. Use
 `--require-qwen-xml` only when you intentionally want to grade native Qwen
 output formatting in addition to tool-call semantics.
 
+For shell-heavy traces, the tool-call scorer compares beneath common wrappers:
+`bash -lc`, `python -c`, and Python here-doc/stdin forms are normalized before
+the command argument is scored. That means a production target like
+`bash -lc "python3 - <<'PY' ... PY"` can score against a model prediction that
+uses an equivalent direct `python3 -c ...` call, while a different inner Python
+program still fails.
+
 ## The judgment flywheel (training a local judge LoRA, no frontier LLM)
 
 The eval system also captures *user preferences* into a separate kind of
@@ -609,6 +616,14 @@ subtract `0.25 / target_count` from the score, and missing calls fail
 the corresponding pair. The scorer detail string surfaces the actual
 on-the-wire formats (`formats=[xml,json]`) so you can spot a model that
 regressed from native XML to JSON.
+
+Command-like arguments (`command`, `cmd`, `script`, `shell`, `bash`, `code`)
+receive recursive bash introspection in `auto` mode. The scorer unwraps common
+shell layers (`bash -c` / `bash -lc`) and compares inline code from
+`python -c` or `python - <<'PY' ... PY` by token similarity instead of raw
+string equality. This catches the production pattern where the real action is
+buried inside a shell call without turning inconsequential wrapping changes
+into eval failures.
 
 ### 3. Tools belong on the suite
 

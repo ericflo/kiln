@@ -17,10 +17,10 @@
 //!    name, optional inline-language script, remaining args).
 //!
 //! The classifier handles the languages we see most in agent trajectories:
-//! python (`python -c`, `python3 -c`, `uv run python -c`), node (`node -e`),
-//! bash (`bash -c`), zsh (`zsh -c`), ruby (`ruby -e`), perl (`perl -e`),
-//! plus generic `<lang> script.<ext>` runs that extract the script path
-//! and language inference from the suffix.
+//! python (`python -c`, `python3 -c`, `python - <<'PY'`, `uv run python -c`),
+//! node (`node -e`), bash (`bash -c`, `bash -lc`), zsh (`zsh -c`), ruby
+//! (`ruby -e`), perl (`perl -e`), plus generic `<lang> script.<ext>` runs
+//! that extract the script path and language inference from the suffix.
 
 use serde::{Deserialize, Serialize};
 
@@ -240,6 +240,21 @@ pub fn introspect(command: &str) -> BashIntrospection {
         (None, rest.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     };
 
+    if inline_code.is_none() {
+        if let Some(lang) = runtime_language_for(&program) {
+            if let Some(code) = extract_heredoc_body(command) {
+                return BashIntrospection {
+                    program,
+                    inline_language: Some(lang.to_string()),
+                    inline_code: Some(code),
+                    tail,
+                    is_pipeline,
+                    ..Default::default()
+                };
+            }
+        }
+    }
+
     let (script_language, script_path) = if inline_code.is_none() {
         script_info(&program, rest)
     } else {
@@ -263,11 +278,16 @@ fn inline_language_for(program: &str, rest: &[&str]) -> Option<String> {
         "node" | "nodejs" => "-e",
         "ruby" => "-e",
         "perl" => "-e",
-        "bash" | "sh" | "zsh" | "dash" => "-c",
+        "bash" | "sh" | "zsh" | "dash" => "",
         "php" => "-r",
         _ => return None,
     };
-    if rest.iter().any(|t| *t == flag) {
+    let has_inline_flag = if is_shell_program(program) {
+        rest.iter().any(|t| is_shell_c_flag(t))
+    } else {
+        rest.iter().any(|t| *t == flag)
+    };
+    if has_inline_flag {
         let lang = match program {
             "python" | "python3" | "python3.11" | "python3.12" | "python3.13" => "python",
             "node" | "nodejs" => "node",
@@ -284,19 +304,9 @@ fn inline_language_for(program: &str, rest: &[&str]) -> Option<String> {
 }
 
 fn extract_inline_program(rest: &[&str], lang: &str) -> (Option<String>, Vec<String>) {
-    let flag = match lang {
-        "python" | "ruby" | "perl" => match lang {
-            "python" => "-c",
-            _ => "-e",
-        },
-        "node" => "-e",
-        "bash" => "-c",
-        "php" => "-r",
-        _ => "-c",
-    };
     let mut iter = rest.iter().enumerate();
     while let Some((i, tok)) = iter.next() {
-        if *tok == flag && i + 1 < rest.len() {
+        if is_inline_program_flag(lang, tok) && i + 1 < rest.len() {
             let code = rest[i + 1].to_string();
             let mut tail: Vec<String> = Vec::new();
             for (j, t) in rest.iter().enumerate() {
@@ -309,6 +319,118 @@ fn extract_inline_program(rest: &[&str], lang: &str) -> (Option<String>, Vec<Str
         }
     }
     (None, rest.iter().map(|s| s.to_string()).collect())
+}
+
+fn runtime_language_for(program: &str) -> Option<&'static str> {
+    match program {
+        "python" | "python3" | "python3.11" | "python3.12" | "python3.13" => Some("python"),
+        "node" | "nodejs" => Some("node"),
+        "ruby" => Some("ruby"),
+        "perl" => Some("perl"),
+        "bash" | "sh" | "zsh" | "dash" => Some("bash"),
+        "php" => Some("php"),
+        _ => None,
+    }
+}
+
+fn is_shell_program(program: &str) -> bool {
+    matches!(program, "bash" | "sh" | "zsh" | "dash")
+}
+
+fn is_shell_c_flag(token: &str) -> bool {
+    token.starts_with('-') && token[1..].chars().any(|c| c == 'c')
+}
+
+fn is_inline_program_flag(lang: &str, token: &str) -> bool {
+    match lang {
+        "python" => token == "-c",
+        "node" | "ruby" | "perl" => token == "-e",
+        "bash" => is_shell_c_flag(token),
+        "php" => token == "-r",
+        _ => token == "-c",
+    }
+}
+
+fn extract_heredoc_body(command: &str) -> Option<String> {
+    let marker = parse_heredoc_marker(command)?;
+    let body_start = marker.body_start;
+    let body = &command[body_start..];
+    let mut lines = Vec::new();
+    for line in body.lines() {
+        let candidate = if marker.strip_tabs {
+            line.trim_start_matches('\t')
+        } else {
+            line
+        };
+        if candidate == marker.name {
+            return Some(lines.join("\n"));
+        }
+        lines.push(line);
+    }
+    None
+}
+
+struct HeredocMarker {
+    name: String,
+    body_start: usize,
+    strip_tabs: bool,
+}
+
+fn parse_heredoc_marker(command: &str) -> Option<HeredocMarker> {
+    let redirect_idx = command.find("<<")?;
+    let mut idx = redirect_idx + 2;
+    let bytes = command.as_bytes();
+    let strip_tabs = if bytes.get(idx) == Some(&b'-') {
+        idx += 1;
+        true
+    } else {
+        false
+    };
+    while bytes
+        .get(idx)
+        .is_some_and(|b| *b == b' ' || *b == b'\t')
+    {
+        idx += 1;
+    }
+    let quote = match bytes.get(idx) {
+        Some(&b'\'') => {
+            idx += 1;
+            Some(b'\'')
+        }
+        Some(&b'"') => {
+            idx += 1;
+            Some(b'"')
+        }
+        _ => None,
+    };
+    let name_start = idx;
+    while idx < bytes.len() {
+        let b = bytes[idx];
+        if let Some(q) = quote {
+            if b == q {
+                break;
+            }
+        } else if b.is_ascii_whitespace() || matches!(b, b';' | b'|' | b'&') {
+            break;
+        }
+        idx += 1;
+    }
+    if idx == name_start {
+        return None;
+    }
+    let name = command[name_start..idx].to_string();
+    if quote.is_some() {
+        if idx >= bytes.len() {
+            return None;
+        }
+        idx += 1;
+    }
+    let newline_rel = command[idx..].find('\n')?;
+    Some(HeredocMarker {
+        name,
+        body_start: idx + newline_rel + 1,
+        strip_tabs,
+    })
 }
 
 fn script_info(program: &str, rest: &[&str]) -> (Option<String>, Option<String>) {
@@ -409,6 +531,30 @@ mod tests {
     fn introspect_recognizes_bash_inline() {
         let intro = introspect(r#"bash -c "echo hi; ls""#);
         assert_eq!(intro.inline_language.as_deref(), Some("bash"));
+    }
+
+    #[test]
+    fn introspect_recognizes_bash_lc_inline() {
+        let intro = introspect(r#"bash -lc "python3 -c 'print(1)'""#);
+        assert_eq!(intro.inline_language.as_deref(), Some("bash"));
+        assert_eq!(
+            intro.inline_code.as_deref(),
+            Some("python3 -c 'print(1)'")
+        );
+    }
+
+    #[test]
+    fn introspect_recognizes_python_heredoc() {
+        let intro = introspect("python3 - <<'PY'\nimport os\nprint(os.getcwd())\nPY");
+        assert_eq!(intro.inline_language.as_deref(), Some("python"));
+        assert_eq!(intro.classification(), "python_inline");
+        assert!(
+            intro
+                .inline_code
+                .as_deref()
+                .unwrap()
+                .contains("os.getcwd")
+        );
     }
 
     #[test]
