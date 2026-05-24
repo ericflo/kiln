@@ -840,3 +840,30 @@ The verified-only edit/test/stop micro-contrast is still too narrow as an
 adapter update; the next route should either use complete successful behavior
 anchors with a smaller policy update, or move efficient stopping into the
 runtime/prompt policy rather than another LoRA.
+
+### H49: same-actions concise thinking
+
+H49 changed the target from tool selection to thinking efficiency while
+holding behavior fixed. It used H47's successful verified completions only:
+the preferred completion kept the concise edit -> doctest -> `DONE` trajectory,
+and the rejected completion copied the same tool calls and observations but
+expanded each `<think>` block into verbose deliberation. ECHO stayed off. The
+dry-run shape was 2 groups, 4 completions, 580 action tokens, 358 env tokens,
+1688 context tokens, and reward stdev 0.25.
+
+Training used rank 4 / alpha 4 / lr `1e-6`, no ECHO, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 102.232s observed, with
+peak observed VRAM 15964 MiB and final loss 0.065274. Adapter verify passed
+with 400 nonzero LoRA tensors and LoRA update proxy 0.060037.
+
+Blind `LIMIT=4 SEEDS=1` smoke looked promising on score but not latency:
+paired base scored 0.75 with mean wall-clock 16.49s and one zero rollout,
+while H49 scored 0.90 with mean wall-clock 48.29s and no zero rollouts. That
+earned a `LIMIT=8` promotion check. Promotion rejected it: paired base scored
+0.7140625 with mean wall-clock 66.47s and one zero rollout, while H49 scored
+0.6671875 with mean wall-clock 63.41s and two zero rollouts. Lesson: same-tool
+concise-thinking contrast can move the short smoke score and slightly reduce
+larger-sample wall time, but it still increases failure count and loses
+composite at the promotion gate. The next adapter data should stop using tiny
+two-group synthetic contrasts and instead mix concise thinking with complete,
+diverse, train-only successful behavior anchors.
