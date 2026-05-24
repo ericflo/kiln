@@ -563,6 +563,22 @@ unsafe extern "C" {
         dtype: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_diagonal_extract_async(
+        x: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n: i64,
+        dtype: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_diag_build_async(
+        v: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n: i64,
+        dtype: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// CUDA-side stride-aware contiguous() — produces a new kt-Tensor with
@@ -3778,4 +3794,185 @@ pub fn cuda_where_select(
         crate::TensorId::next(),
     )
     .map_err(|e| crate::Error::Msg(format!("cuda_where_select: wrap: {e}")))
+}
+
+/// CUDA-side extract of the main diagonal of an `[n, n]` square matrix.
+///
+/// Input `x` must be CUDA-resident, contiguous, square rank-2, dtype
+/// F32/BF16/F16. Returns a fresh `[n]` tensor. (#1082)
+#[cfg(feature = "cuda")]
+pub fn cuda_diagonal_extract(x: &crate::Tensor) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use std::any::Any as _;
+
+    if x.rank() != 2 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_diagonal_extract: input must be rank-2, got {:?}",
+            x.shape()
+        )));
+    }
+    let n = x.shape()[0];
+    if x.shape()[1] != n {
+        return Err(crate::Error::Msg(format!(
+            "cuda_diagonal_extract: input must be square, got {:?}",
+            x.shape()
+        )));
+    }
+    let dtype = x.dtype();
+    let dtype_tag: i32 = match dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_diagonal_extract: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !x.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_diagonal_extract: input must be contiguous".to_string(),
+        ));
+    }
+
+    let bpe = dtype.size_in_bytes();
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_diagonal_extract: x must be CUDA".to_string()))?;
+    let candle_device = x_storage.candle_device.clone();
+    let device_index = match x_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+    let out_storage =
+        CudaStorage::zeros(candle_device.clone(), device_index, dtype, n)?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let x_base = match &x_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+    };
+
+    let x_off = (x.layout().start_offset() * bpe) as u64;
+    let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
+    let out_ptr = out_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_diagonal_extract_async(x_ptr, out_ptr, n as i64, dtype_tag, raw_stream)
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_diagonal_extract: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(vec![n]),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_diagonal_extract: wrap: {e}")))
+}
+
+/// CUDA-side construction of a diagonal matrix from a rank-1 vector.
+///
+/// Input `v` of length `n` produces a fresh `[n, n]` zero-initialized
+/// tensor with `v` placed on the main diagonal. F32/BF16/F16. (#1082)
+#[cfg(feature = "cuda")]
+pub fn cuda_diag_build(v: &crate::Tensor) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use std::any::Any as _;
+
+    if v.rank() != 1 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_diag_build: input must be rank-1, got {:?}",
+            v.shape()
+        )));
+    }
+    let dtype = v.dtype();
+    let dtype_tag: i32 = match dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_diag_build: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !v.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_diag_build: input must be contiguous".to_string(),
+        ));
+    }
+
+    let n = v.element_count();
+    let bpe = dtype.size_in_bytes();
+    let v_storage = v
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_diag_build: v must be CUDA".to_string()))?;
+    let candle_device = v_storage.candle_device.clone();
+    let device_index = match v_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+    // Pre-zero the output; the kernel only writes the n diagonal entries.
+    let out_storage =
+        CudaStorage::zeros(candle_device.clone(), device_index, dtype, n * n)?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let v_base = match &v_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+    };
+
+    let v_off = (v.layout().start_offset() * bpe) as u64;
+    let v_ptr = (v_base + v_off) as *const core::ffi::c_void;
+    let out_ptr = out_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_diag_build_async(v_ptr, out_ptr, n as i64, dtype_tag, raw_stream)
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_diag_build: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(vec![n, n]),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_diag_build: wrap: {e}")))
 }

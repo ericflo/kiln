@@ -75,6 +75,7 @@ fn main() {
     build.file(csrc_dir.join("clamp_pow.cu"));
     build.file(csrc_dir.join("compare.cu"));
     build.file(csrc_dir.join("where_select.cu"));
+    build.file(csrc_dir.join("diag.cu"));
     build.compile("kiln_tensor_cuda_ops");
 
     println!(

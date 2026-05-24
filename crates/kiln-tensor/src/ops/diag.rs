@@ -1,5 +1,14 @@
 //! `diagonal` — extract the main diagonal of a rank-2 tensor.
 //! `diag` — build a rank-2 tensor with a vector on the diagonal.
+//!
+//! # Dispatch
+//!
+//! - CPU path: per-element byte copy of the diagonal entries.
+//! - CUDA path: dedicated kernels `kiln_diagonal_extract_async` and
+//!   `kiln_diag_build_async` in `csrc/diag.cu`. For `diag`, the
+//!   output is first zero-initialized via `cuda_zeros` then the
+//!   diagonal is written in a single pass. F32/BF16/F16, contiguous.
+//!   (#1082)
 
 use std::sync::Arc;
 
@@ -21,6 +30,15 @@ pub fn diagonal(t: &Tensor) -> Result<Tensor> {
     if !t.is_contiguous() {
         bail!("diagonal: input must be contiguous");
     }
+
+    // CUDA fast path. (#1082)
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(t.device(), crate::Device::Cuda(_)) {
+            return crate::cuda_diagonal_extract(t);
+        }
+    }
+
     let dtype = t.dtype();
     let per = dtype.size_in_bytes();
     let bytes = t
@@ -51,6 +69,15 @@ pub fn diag(v: &Tensor) -> Result<Tensor> {
     if !v.is_contiguous() {
         bail!("diag: input must be contiguous");
     }
+
+    // CUDA fast path. (#1082)
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(v.device(), crate::Device::Cuda(_)) {
+            return crate::cuda_diag_build(v);
+        }
+    }
+
     let dtype = v.dtype();
     let per = dtype.size_in_bytes();
     let n = v.element_count();
