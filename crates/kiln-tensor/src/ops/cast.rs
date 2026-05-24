@@ -102,6 +102,34 @@ impl DeviceOp1 for CastOp {
         Ok(Some(out))
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        let from = x.dtype();
+        let to = self.target;
+        // CUDA path covers F32 ↔ BF16 ↔ F16. Integer round-trips
+        // stay on the CPU fallback (their few call sites have host
+        // data anyway).
+        let cuda_supported = matches!(
+            (from, to),
+            (DType::F32, DType::BF16)
+                | (DType::F32, DType::F16)
+                | (DType::BF16, DType::F32)
+                | (DType::BF16, DType::F16)
+                | (DType::F16, DType::F32)
+                | (DType::F16, DType::BF16)
+                | (DType::F32, DType::F32)
+                | (DType::BF16, DType::BF16)
+                | (DType::F16, DType::F16)
+        );
+        if !cuda_supported {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        Ok(Some(crate::cuda_cast(x, to)?))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }

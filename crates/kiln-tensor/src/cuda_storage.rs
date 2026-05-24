@@ -373,6 +373,14 @@ unsafe extern "C" {
         dtype: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_cast_async(
+        src: *const core::ffi::c_void,
+        dst: *mut core::ffi::c_void,
+        n_elements: i64,
+        cast_tag: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// CUDA-side stride-aware contiguous() — produces a new kt-Tensor with
@@ -862,6 +870,106 @@ pub fn cuda_activation_unary(x: &crate::Tensor, kind: i32) -> Result<crate::Tens
         crate::TensorId::next(),
     )
     .map_err(|e| crate::Error::Msg(format!("cuda_activation_unary: wrap: {e}")))
+}
+
+/// CUDA-side dtype cast: `dst[i] = (TargetDType)(src[i])`.
+///
+/// Supports the same float↔float matrix as the CPU CastOp:
+/// F32↔BF16↔F16 (6 directions). Integer round-trips (U32↔I64) stay
+/// CPU-only since the few call sites have host data.
+///
+/// Source must be contiguous and CUDA-backed; output is contiguous
+/// with the target dtype.
+#[cfg(feature = "cuda")]
+pub fn cuda_cast(src: &crate::Tensor, target: crate::DType) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use std::any::Any as _;
+
+    let from = src.dtype();
+    if from == target {
+        return src
+            .contiguous()
+            .map_err(|e| crate::Error::Msg(format!("cuda_cast: no-op contiguous: {e}")));
+    }
+    let cast_tag: i32 = match (from, target) {
+        (crate::DType::F32, crate::DType::BF16) => 0,
+        (crate::DType::F32, crate::DType::F16) => 1,
+        (crate::DType::BF16, crate::DType::F32) => 2,
+        (crate::DType::BF16, crate::DType::F16) => 3,
+        (crate::DType::F16, crate::DType::F32) => 4,
+        (crate::DType::F16, crate::DType::BF16) => 5,
+        _ => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_cast: unsupported pair {from} -> {target} \
+                 (CUDA path supports F32↔BF16↔F16 only)"
+            )));
+        }
+    };
+    if !src.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_cast: contiguous input required".to_string(),
+        ));
+    }
+
+    let n = src.element_count();
+    let from_bpe = from.size_in_bytes();
+
+    let src_storage = src
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_cast: src must be CUDA".to_string()))?;
+
+    let candle_device = src_storage.candle_device.clone();
+    let device_index = match src_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+    let dst_storage = CudaStorage::zeros(
+        candle_device.clone(),
+        device_index,
+        target,
+        n,
+    )?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let src_base = match &src_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let dst_base = match &dst_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+    };
+
+    let src_off = (src.layout().start_offset() * from_bpe) as u64;
+    let src_ptr = (src_base + src_off) as *const core::ffi::c_void;
+    let dst_ptr = dst_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_cast_async(src_ptr, dst_ptr, n as i64, cast_tag, raw_stream)
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_cast: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(dst_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(src.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_cast: wrap: {e}")))
 }
 
 // ----------------------------------------------------------------------
