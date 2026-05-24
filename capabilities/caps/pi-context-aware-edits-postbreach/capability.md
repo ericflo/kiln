@@ -173,6 +173,21 @@ and JavaScript camelCase/CommonJS style when available.
   more reward-variant train groups can stabilize the useful H5 outcome/format
   movement without the convention/read/style slips seen on the small PB-H2
   rollout set.
+  - Result: rejected. Full-train collection produced more reward-variant
+    groups (20/32 kept; 80/128 completions), and the gradient-checkpointed CUDA
+    13.2 GRPO run completed on the RTX 4090 with peak VRAM 19,710 MiB, including
+    a 12k-token trajectory through boundary spooling. Blind eval regressed to
+    0.2483 (`delta=-0.0513`): `outcome` fell to 0.4375,
+    `format_compliance` to 0.5208, `convention_consistency` to 0.9167, and
+    `read_before_edit` to 0.9583. Expanding the reward pool did not fix the
+    adapter-induced edit-contract regression.
+- **PB-H8: final-only prompt guard, no adapter.** Since every adapter update so
+  far has damaged some part of the edit contract, test a zero-training prompt
+  intervention that only states the final-answer contract: after completing the
+  edit, the final response must name the modified file and one preserved local
+  convention. It must not prescribe read/edit/verify ordering, which PB-H3
+  showed can hurt outcome. This isolates whether format can be recovered
+  without touching the model weights or edit policy.
 
 ## Standard Workflow
 
