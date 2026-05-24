@@ -112,6 +112,42 @@ Most users never hand-author a suite. The canonical flow is:
 3. **Stash + re-run.** Suites live in `<adapter_dir>/.eval/suites/<name>/`
    on disk. Re-run the same suite against any adapter in 1 click.
 
+## Production trace tool-call evals
+
+For production agent workloads, use `kiln-eval trace-suite` to turn a JSONL
+export of recorded tool-calling turns into an eval suite:
+
+```bash
+kiln-eval trace-suite \
+  --input production-turns.jsonl \
+  --output production-tool-calls.json \
+  --suite-name production-tool-calls \
+  --max-examples 1000 \
+  --seed 42
+
+kiln-eval run --file production-tool-calls.json --adapter my-agent-lora --watch
+```
+
+The importer is source-agnostic. Your production pipeline only needs to emit
+one JSON object per row in one of these shapes:
+
+- **`prompt_chosen_jsonl`**: `{ "prompt_messages": [...], "chosen": {...}, "tools": [...] }`
+- **`openai_jsonl`**: `{ "messages": [...prompt..., assistant_with_tool_calls], "tools": [...] }`
+- **`anthropic_jsonl`**: `{ "system_prompt": "...", "messages": [...], "assistant_response": [...], "tools": [...] }`
+
+Rows without a current-turn tool call are skipped. Eligible rows are
+reservoir-sampled, so large exports can stream through without loading the
+whole file. Dedupe is off by default because repeated production turns are
+workload-frequency signal.
+
+The target is canonical semantic tool-call JSON, not the source model's wire
+format. At eval time, Kiln renders the saved `messages` and `tools` through
+the model backend's chat template, so Qwen3.5 sees its native `<tools>` prompt
+and is free to emit Qwen XML. The scorer accepts Qwen XML, OpenAI tool calls,
+inline JSON, and fenced tool-call blocks by default. Use
+`--require-qwen-xml` only when you intentionally want to grade native Qwen
+output formatting in addition to tool-call semantics.
+
 ## The judgment flywheel (training a local judge LoRA, no frontier LLM)
 
 The eval system also captures *user preferences* into a separate kind of

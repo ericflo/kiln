@@ -11,6 +11,8 @@
 //!       submit an eval and (optionally) wait for results
 //!   - `kiln-eval compare --suite NAME --adapter NAME [NAME ...] [--watch]`
 //!       run a compare across multiple adapters and print a head-to-head
+//!   - `kiln-eval trace-suite --input TRACE.jsonl --output SUITE.json`
+//!       sample production tool-call turns from a generic JSONL export
 //!
 //! All commands respect `KILN_SERVER_URL` and the `--server` flag (default
 //! `http://localhost:8420`). Output is human-readable by default; pass
@@ -22,7 +24,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use kiln_eval::{
-    EvalChatMessage, EvalCompareSpec, EvalExample, EvalGenerationParams, EvalSuite, SuiteResult,
+    EvalChatMessage, EvalCompareSpec, EvalExample, EvalGenerationParams, EvalSuite,
+    ProductionTraceFormat, ProductionTraceSuiteConfig, SuiteResult,
 };
 use serde::Deserialize;
 
@@ -58,6 +61,8 @@ enum Command {
     /// Quick-eval helper: build a single-example suite from CLI flags
     /// (great for sanity checks during development).
     Probe(ProbeArgs),
+    /// Build a tool-call eval suite from production trace JSONL.
+    TraceSuite(TraceSuiteArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -123,6 +128,71 @@ struct ProbeArgs {
     json: bool,
 }
 
+#[derive(Parser, Debug)]
+struct TraceSuiteArgs {
+    /// Production trace JSONL. Supports prompt_chosen_jsonl, openai_jsonl,
+    /// and anthropic_jsonl rows from any exporter.
+    #[arg(long)]
+    input: PathBuf,
+    /// Output EvalSuite JSON file. Required unless --stdout is set.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Suite name to write into the EvalSuite.
+    #[arg(long)]
+    suite_name: String,
+    /// Optional suite description.
+    #[arg(long)]
+    description: Option<String>,
+    /// Input format: auto | prompt_chosen_jsonl | openai_jsonl | anthropic_jsonl.
+    #[arg(long, default_value = "auto", value_parser = parse_trace_format)]
+    format: ProductionTraceFormat,
+    /// Reservoir sample size. Omit to use the production-trace default.
+    #[arg(long)]
+    max_examples: Option<usize>,
+    /// Deterministic sampling seed.
+    #[arg(long)]
+    seed: Option<u64>,
+    /// Prompt size guard in chars.
+    #[arg(long)]
+    max_prompt_chars: Option<usize>,
+    /// Target size guard in chars.
+    #[arg(long)]
+    max_target_chars: Option<usize>,
+    /// Dedupe exact prompt+target pairs. Off by default because repetition
+    /// is workload-frequency signal.
+    #[arg(long)]
+    dedupe: bool,
+    /// Require Qwen3.5 native XML output when scoring. Off by default so the
+    /// eval measures semantic tool-call correctness, not format differences.
+    #[arg(long)]
+    require_qwen_xml: bool,
+    /// Override suite generation max_tokens.
+    #[arg(long)]
+    max_tokens: Option<usize>,
+    /// Override suite generation temperature.
+    #[arg(long)]
+    temperature: Option<f32>,
+    /// Print the generated suite JSON to stdout instead of writing --output.
+    #[arg(long)]
+    stdout: bool,
+}
+
+fn parse_trace_format(s: &str) -> std::result::Result<ProductionTraceFormat, String> {
+    match s {
+        "auto" => Ok(ProductionTraceFormat::Auto),
+        "prompt_chosen_jsonl" | "prompt-chosen-jsonl" => {
+            Ok(ProductionTraceFormat::PromptChosenJsonl)
+        }
+        "openai_jsonl" | "openai-jsonl" => Ok(ProductionTraceFormat::OpenAiJsonl),
+        "anthropic_jsonl" | "anthropic-jsonl" | "jsonl" => {
+            Ok(ProductionTraceFormat::AnthropicJsonl)
+        }
+        other => Err(format!(
+            "unknown trace format `{other}` (try auto | prompt_chosen_jsonl | openai_jsonl | anthropic_jsonl)"
+        )),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct EvalRunResponse {
     job_id: String,
@@ -156,6 +226,7 @@ async fn main() -> Result<()> {
         Command::Run(args) => cmd_run(&client, &server, args).await,
         Command::Compare(args) => cmd_compare(&client, &server, args).await,
         Command::Probe(args) => cmd_probe(&client, &server, args).await,
+        Command::TraceSuite(args) => cmd_trace_suite(args),
     }
 }
 
@@ -214,6 +285,95 @@ async fn cmd_register(
         bail!("register failed ({status}): {text}");
     }
     println!("{text}");
+    Ok(())
+}
+
+fn cmd_trace_suite(args: TraceSuiteArgs) -> Result<()> {
+    if !args.stdout && args.output.is_none() {
+        bail!("--output is required unless --stdout is set");
+    }
+    let file = std::fs::File::open(&args.input)
+        .with_context(|| format!("open {}", args.input.display()))?;
+    let reader = std::io::BufReader::new(file);
+
+    let mut cfg = ProductionTraceSuiteConfig::new(args.suite_name);
+    cfg.description = args.description;
+    cfg.input_format = args.format;
+    cfg.require_xml_format = args.require_qwen_xml;
+    if let Some(max_examples) = args.max_examples {
+        cfg.sampling.max_examples = Some(max_examples);
+    }
+    if let Some(seed) = args.seed {
+        cfg.sampling.seed = Some(seed);
+    }
+    if let Some(max_prompt_chars) = args.max_prompt_chars {
+        cfg.sampling.max_prompt_chars = max_prompt_chars;
+    }
+    if let Some(max_target_chars) = args.max_target_chars {
+        cfg.sampling.max_target_chars = max_target_chars;
+    }
+    cfg.sampling.dedupe = args.dedupe;
+    if let Some(max_tokens) = args.max_tokens {
+        cfg.generation.max_tokens = max_tokens;
+    }
+    if let Some(temperature) = args.temperature {
+        cfg.generation.temperature = temperature;
+    }
+
+    let (suite, stats) =
+        kiln_eval::synthesize_production_trace_suite(reader, &cfg).with_context(|| {
+            format!(
+                "building production trace suite from {}",
+                args.input.display()
+            )
+        })?;
+    let suite_json = serde_json::to_string_pretty(&suite)?;
+    if args.stdout {
+        println!("{suite_json}");
+    } else if let Some(output) = args.output.as_ref() {
+        if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        std::fs::write(output, suite_json).with_context(|| format!("write {}", output.display()))?;
+    }
+
+    eprintln!(
+        "trace-suite: rows={} parsed={} eligible_tool_turns={} kept={} seed={}",
+        stats.rows_seen,
+        stats.rows_parsed,
+        stats.eligible_tool_turns,
+        stats.sample_kept,
+        stats.effective_seed,
+    );
+    if !stats.target_tool_histogram.is_empty() {
+        eprintln!("target tools:");
+        for (tool, count) in &stats.target_tool_histogram {
+            eprintln!("  {tool}: {count}");
+        }
+    }
+    if stats.skipped_parse_error > 0
+        || stats.skipped_no_tool_call > 0
+        || stats.skipped_prompt_too_long > 0
+        || stats.skipped_target_too_long > 0
+        || stats.skipped_duplicate > 0
+    {
+        eprintln!(
+            "skipped: parse_error={} no_tool_call={} empty_prompt={} prompt_too_long={} target_too_long={} duplicate={}",
+            stats.skipped_parse_error,
+            stats.skipped_no_tool_call,
+            stats.skipped_empty_prompt,
+            stats.skipped_prompt_too_long,
+            stats.skipped_target_too_long,
+            stats.skipped_duplicate,
+        );
+    }
+    if !stats.parse_error_examples.is_empty() {
+        eprintln!("first parse errors:");
+        for err in &stats.parse_error_examples {
+            eprintln!("  {err}");
+        }
+    }
     Ok(())
 }
 
