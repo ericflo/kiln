@@ -125,6 +125,13 @@ A4: Skip the actual edit, claim the function already exists.
 ## Hypotheses
 
 - **H1: default GRPO recipe with ECHO λ=0.05.**
+  - Result: rejected. Full rank-16, max-groups=4 rank-8, and
+    max-groups=1 rank-4 arms OOMed on RTX 4090 during checkpointed
+    GRPO backward. A two-completion rank-4 micro arm trained and
+    verified, but regressed blind eval composite from 0.4800 to
+    0.4528. Thinking efficiency improved slightly (302.7 → 291.5
+    chars/tool), but format, outcome, convention, and read-before-edit
+    all dropped.
 - **H2: mixed-language corpus** (Python + Rust + Go + JS) — does
   context-awareness generalize across language conventions, or is it
   language-specific?

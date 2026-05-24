@@ -84,7 +84,6 @@ KILN_CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}" "$CUDA_GRPO_BIN" \
   --adapter "$ADAPTER_NAME" \
   --mode phase1 \
   --rank "$RANK" --alpha "$ALPHA" --lr "$LR" \
-  --num-generations "$NUM_GEN" \
   --seed "$SEED" \
   --filter-var-min "$FILTER_VAR_MIN" \
   $ECHO_FLAGS $BASE_FLAGS \
@@ -100,7 +99,6 @@ KILN_CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}" "$CUDA_GRPO_BIN" \
   --adapter "$ADAPTER_NAME" \
   --mode phase1 \
   --rank "$RANK" --alpha "$ALPHA" --lr "$LR" \
-  --num-generations "$NUM_GEN" \
   --seed "$SEED" \
   --filter-var-min "$FILTER_VAR_MIN" \
   $ECHO_FLAGS $BASE_FLAGS \
@@ -111,10 +109,10 @@ KILN_CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}" "$CUDA_GRPO_BIN" \
 
 # 5. Verify.
 echo "[5/7] kiln adapter verify…"
-"$KILN_BIN" adapter verify "$ADAPTER_NAME" \
+"$KILN_BIN" adapters verify \
   --adapter-dir "$ADAPTER_REGISTRY" \
   --url http://localhost:8420 \
-  --json \
+  "$ADAPTER_NAME" \
   > "$LOG_DIR/verify.json"
 
 # 6. Eval.
