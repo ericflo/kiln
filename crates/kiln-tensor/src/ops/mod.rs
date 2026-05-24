@@ -176,7 +176,7 @@ pub use rmsnorm::{rms_norm, RmsNormOp};
 pub use roll::roll;
 pub use rope::{rope, RopeOp};
 pub use rope_init::precompute_rope_freqs;
-pub use scalar::{add_scalar, div_scalar, mul_scalar, sub_scalar};
+pub use scalar::{add_scalar, div_scalar, mul_scalar, sub_scalar, ScalarKind, ScalarOp};
 pub use scatter_add::{scatter_add, ScatterAddOp};
 pub use sdpa::{causal_scaled_dot_product_attention, scaled_dot_product_attention};
 pub use searchsorted::searchsorted;
