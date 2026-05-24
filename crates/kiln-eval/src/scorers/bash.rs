@@ -386,10 +386,7 @@ fn parse_heredoc_marker(command: &str) -> Option<HeredocMarker> {
     } else {
         false
     };
-    while bytes
-        .get(idx)
-        .is_some_and(|b| *b == b' ' || *b == b'\t')
-    {
+    while bytes.get(idx).is_some_and(|b| *b == b' ' || *b == b'\t') {
         idx += 1;
     }
     let quote = match bytes.get(idx) {
@@ -537,10 +534,7 @@ mod tests {
     fn introspect_recognizes_bash_lc_inline() {
         let intro = introspect(r#"bash -lc "python3 -c 'print(1)'""#);
         assert_eq!(intro.inline_language.as_deref(), Some("bash"));
-        assert_eq!(
-            intro.inline_code.as_deref(),
-            Some("python3 -c 'print(1)'")
-        );
+        assert_eq!(intro.inline_code.as_deref(), Some("python3 -c 'print(1)'"));
     }
 
     #[test]
@@ -548,13 +542,7 @@ mod tests {
         let intro = introspect("python3 - <<'PY'\nimport os\nprint(os.getcwd())\nPY");
         assert_eq!(intro.inline_language.as_deref(), Some("python"));
         assert_eq!(intro.classification(), "python_inline");
-        assert!(
-            intro
-                .inline_code
-                .as_deref()
-                .unwrap()
-                .contains("os.getcwd")
-        );
+        assert!(intro.inline_code.as_deref().unwrap().contains("os.getcwd"));
     }
 
     #[test]

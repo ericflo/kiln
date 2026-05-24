@@ -81,9 +81,7 @@ impl Default for ArgsScoring {
 impl ArgsScoring {
     pub(super) fn requires_judge(&self) -> bool {
         match self {
-            ArgsScoring::PerKey { scorers, .. } => {
-                scorers.values().any(|s| s.requires_judge())
-            }
+            ArgsScoring::PerKey { scorers, .. } => scorers.values().any(|s| s.requires_judge()),
             _ => false,
         }
     }
@@ -135,9 +133,10 @@ pub(super) fn score(
     require_xml_format: bool,
     judge_runner: &dyn JudgeRunner,
 ) -> Result<(f32, EvalOutcomeKind, Option<String>), ScorerError> {
-    let target_raw = example.target.as_deref().ok_or(ScorerError::MissingTarget {
-        kind: "tool_call",
-    })?;
+    let target_raw = example
+        .target
+        .as_deref()
+        .ok_or(ScorerError::MissingTarget { kind: "tool_call" })?;
     let target_calls = extract_tool_calls(target_raw);
     if target_calls.is_empty() {
         return Err(ScorerError::MissingTarget {
@@ -159,9 +158,7 @@ pub(super) fn score(
         return Ok((
             0.0,
             EvalOutcomeKind::Invalid,
-            Some(
-                "non-XML tool call emitted (require_xml_format=true)".to_string(),
-            ),
+            Some("non-XML tool call emitted (require_xml_format=true)".to_string()),
         ));
     }
     if predicted_calls.is_empty() {
@@ -188,7 +185,11 @@ pub(super) fn score(
     let pair_count = pairs.len() as f32;
     let weights = weights.copied().unwrap_or_default();
     let total_weight = weights.name + weights.structure + weights.content;
-    let total_weight = if total_weight <= 0.0 { 1.0 } else { total_weight };
+    let total_weight = if total_weight <= 0.0 {
+        1.0
+    } else {
+        total_weight
+    };
     let n_w = weights.name / total_weight;
     let s_w = weights.structure / total_weight;
     let c_w = weights.content / total_weight;
@@ -287,7 +288,11 @@ fn score_pair(
     judge_runner: &dyn JudgeRunner,
 ) -> Result<(f32, bool, String), ScorerError> {
     let total_weight = weights.name + weights.structure + weights.content;
-    let total_weight = if total_weight <= 0.0 { 1.0 } else { total_weight };
+    let total_weight = if total_weight <= 0.0 {
+        1.0
+    } else {
+        total_weight
+    };
     let n_w = weights.name / total_weight;
     let s_w = weights.structure / total_weight;
     let c_w = weights.content / total_weight;
@@ -318,11 +323,7 @@ fn score_pair(
     Ok((combined, name_score >= 1.0, detail))
 }
 
-fn score_name(
-    predicted: &str,
-    target: &str,
-    match_mode: &NameMatch,
-) -> (f32, Option<String>) {
+fn score_name(predicted: &str, target: &str, match_mode: &NameMatch) -> (f32, Option<String>) {
     match match_mode {
         NameMatch::Exact => {
             if predicted == target {
@@ -339,9 +340,7 @@ fn score_name(
             }
         }
         NameMatch::OneOf { allowed } => {
-            let ok = allowed
-                .iter()
-                .any(|a| a.eq_ignore_ascii_case(predicted));
+            let ok = allowed.iter().any(|a| a.eq_ignore_ascii_case(predicted));
             if ok {
                 (1.0, None)
             } else {
