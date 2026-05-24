@@ -89,6 +89,17 @@ fn cuda_fused_attn_sigmoid_mul_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_ATTN_SIGMOID_MUL").is_ok())
 }
 
+/// Phase 7 opt-in: route the attn-output sigmoid/mul fused kernel
+/// through the kt-API + kt-bridge copying adapters. Default off so
+/// production perf is unchanged; set
+/// `KILN_USE_KT_API_SIGMOID_MUL=1` to exercise the migration path
+/// for parity testing. Pays ~3 dtod memcpys per call.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_sigmoid_mul() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SIGMOID_MUL").is_ok())
+}
+
 thread_local! {
     static VULKAN_SKIP_GDN_STATE_READBACK_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
@@ -1358,6 +1369,25 @@ fn attention_output_gate_decode_if(
             && !gate.track_op()
             && kiln_rmsnorm_kernel::supports_sigmoid_mul(&attn_output, gate)
         {
+            // Phase 7 migration: route through the kt-API path when
+            // `KILN_USE_KT_API_SIGMOID_MUL` is set. Uses the kt-bridge
+            // copying adapters (3 dtod memcpys per call) so the same
+            // kernel implementation runs end-to-end on kt-Tensors —
+            // gives us A/B parity coverage of the adapter pair on a
+            // real production call site. Default-off so production
+            // perf is unchanged.
+            if cuda_use_kt_api_sigmoid_mul() {
+                kiln_nvtx::range!(c"kiln/attn/output_gate_cuda_fused_kt");
+                let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&attn_output)
+                    .with_context(|| "kt-adapter: attn_output → kt failed")?;
+                let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(gate)
+                    .with_context(|| "kt-adapter: gate → kt failed")?;
+                let out_kt = kiln_rmsnorm_kernel::fused_sigmoid_mul_kt(&x_kt, &g_kt)
+                    .map_err(|e| anyhow::anyhow!("kt sigmoid/mul: {e}"))?;
+                let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                    .with_context(|| "kt-adapter: out → candle failed")?;
+                return Ok(out);
+            }
             kiln_nvtx::range!(c"kiln/attn/output_gate_cuda_fused");
             return kiln_rmsnorm_kernel::fused_sigmoid_mul(&attn_output, gate)
                 .context("cuda attn gate sigmoid/mul failed");
