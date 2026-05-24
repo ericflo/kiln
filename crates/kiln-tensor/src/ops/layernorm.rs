@@ -36,7 +36,7 @@ impl LayerNormOp {
     }
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 impl crate::DeviceOp3 for LayerNormOp {
     fn name(&self) -> &'static str {
         "layernorm"
@@ -50,6 +50,7 @@ impl crate::DeviceOp3 for LayerNormOp {
         Ok(Some(layer_norm_cpu(x, weight, bias, self.eps)?))
     }
 
+    #[cfg(feature = "cuda")]
     fn cuda_fwd(&self, x: &Tensor, weight: &Tensor, bias: &Tensor) -> Result<Option<Tensor>> {
         // Gate on the same preconditions as cpu_fwd. Returning Ok(None)
         // triggers CPU fallthrough in DeviceOp3 dispatch.
@@ -73,20 +74,109 @@ impl crate::DeviceOp3 for LayerNormOp {
             x, weight, bias, self.eps,
         )?))
     }
+
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, x: &Tensor, weight: &Tensor, bias: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / cpu_fwd so the
+        // dispatch surface matches across backends:
+        //   - F32 / BF16 / F16 only
+        //   - rank(x) >= 1, rank(weight) == 1, rank(bias) == 1
+        //   - x, weight, bias all share dtype
+        //   - contiguous inputs
+        //   - last-dim length of x == weight.shape()[0] == bias.shape()[0]
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if x.rank() == 0 || weight.rank() != 1 || bias.rank() != 1 {
+            return Ok(None);
+        }
+        if x.dtype() != weight.dtype() || x.dtype() != bias.dtype() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() || !weight.is_contiguous() || !bias.is_contiguous() {
+            return Ok(None);
+        }
+        let d = *x.shape().last().unwrap();
+        if weight.shape()[0] != d || bias.shape()[0] != d {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): implement
+        // `crate::metal_layernorm_last_axis(x, weight, bias, self.eps)`
+        // analogous to `crate::cuda_layernorm_last_axis` above. Until
+        // that kernel lands, fall through to the CPU path so the op
+        // still produces correct results on Mac (numerics-correct,
+        // performance-wrong).
+        // Candidate implementations:
+        //   1. Custom MSL kernel: per-row threadgroup reduction over
+        //      the trailing dim, two-pass — first pass computes
+        //      mean(x) and var(x) in F32 (Welford or sum-of-squares),
+        //      second pass scales by `(x - mean) * inv_std * weight +
+        //      bias` and casts back to dtype.
+        //   2. MPS Graph: compose `mean(x) -> var(x) -> normalize ->
+        //      scale -> bias` for one-shot dispatch. Higher per-call
+        //      overhead than a custom kernel but easier to wire.
+        //   3. Reuse a Metal layernorm kernel from
+        //      `kiln-model::backend::metal` if/when one is added there.
+        Ok(None)
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor, weight: &Tensor, bias: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / metal_fwd:
+        //   - F32 / BF16 / F16 only
+        //   - rank(x) >= 1, rank(weight) == 1, rank(bias) == 1
+        //   - x, weight, bias all share dtype
+        //   - contiguous inputs
+        //   - last-dim length of x == weight.shape()[0] == bias.shape()[0]
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if x.rank() == 0 || weight.rank() != 1 || bias.rank() != 1 {
+            return Ok(None);
+        }
+        if x.dtype() != weight.dtype() || x.dtype() != bias.dtype() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() || !weight.is_contiguous() || !bias.is_contiguous() {
+            return Ok(None);
+        }
+        let d = *x.shape().last().unwrap();
+        if weight.shape()[0] != d || bias.shape()[0] != d {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): implement
+        // `crate::vulkan_layernorm_last_axis(x, weight, bias, self.eps)`
+        // analogous to `crate::cuda_layernorm_last_axis` above. Until
+        // that wrapper lands, fall through to the CPU path
+        // (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. SPIR-V compute shader: per-row workgroup reduction
+        //      over the trailing dim, two-pass — first pass computes
+        //      mean and var in F32, second pass applies
+        //      `(x - mean) * inv_std * weight + bias` and casts back.
+        //   2. BF16/F16 inputs need either widening `VkDType` (today
+        //      exposes F32 / BF16; F16 needs a new variant) or a
+        //      cast-to-F32 / cast-back wrapper at the dispatch
+        //      boundary; the cast kernels live in `vk_ops::cast`.
+        //   3. Compose existing primitives (mean, var, affine) via
+        //      `vk_ops` for a less optimal but straightforward path
+        //      until a fused kernel ships.
+        Ok(None)
+    }
 }
 
 /// `y = ((x - mean) / sqrt(var + eps)) * weight + bias` per trailing-axis row.
 ///
 /// `x: [..., D]`, `weight: [D]`, `bias: [D]`. All F32/BF16/F16; dtypes
 /// must match across the three inputs.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 pub fn layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Result<Tensor> {
     crate::dispatch3(&LayerNormOp::new(eps), x, weight, bias)
 }
 
 /// CPU-only build: no DeviceOp3 dispatch needed; `layer_norm` lowers
 /// directly to the CPU path.
-#[cfg(not(feature = "cuda"))]
+#[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
 pub fn layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Result<Tensor> {
     layer_norm_cpu(x, weight, bias, eps)
 }

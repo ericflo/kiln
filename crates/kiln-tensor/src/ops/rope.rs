@@ -146,6 +146,93 @@ impl DeviceOp3 for RopeOp {
         Ok(Some(crate::cuda_rope(x, cos, sin, self.rotary_dim)?))
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd so future MSL
+        // kernel work can drop in without changing the call site:
+        //   - F32 / BF16 / F16 only (matches cpu_fwd's accepted dtypes)
+        //   - contiguous x / cos / sin
+        //   - cos / sin restricted to the float dtype family
+        validate(x, cos, sin, self.rotary_dim)?;
+        if !x.is_contiguous() || !cos.is_contiguous() || !sin.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(
+            x.dtype(),
+            crate::DType::F32 | crate::DType::BF16 | crate::DType::F16
+        ) {
+            return Ok(None);
+        }
+        if !matches!(
+            cos.dtype(),
+            crate::DType::F32 | crate::DType::BF16 | crate::DType::F16
+        ) {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): implement
+        // `crate::metal_rope(x, cos, sin, self.rotary_dim)` analogous
+        // to `crate::cuda_rope` above. Until that kernel lands, fall
+        // through to the CPU path so the op still produces correct
+        // results on Mac (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. Custom MSL kernel: grid over (..., seq, pair) with one
+        //      thread per pair; load (x_2i, x_2i+1) and (cos[s,i],
+        //      sin[s,i]); fuse the 2x2 rotation and the partial-rotary
+        //      passthrough for indices >= rotary_dim.
+        //   2. MPS Graph: build a small subgraph composing
+        //      multiply/subtract/add over reshaped (..., seq, pair, 2)
+        //      tensors. Simpler to wire but heavier per-call overhead
+        //      than a one-shot kernel.
+        //   3. Reuse the rotary kernel in `kiln-model::backend::metal`
+        //      if/when that lifts the partial-rotary support found in
+        //      the CUDA implementation.
+        Ok(None)
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / metal_fwd so
+        // future SPIR-V kernel work can drop in without changing the
+        // call site:
+        //   - F32 / BF16 / F16 only (matches cpu_fwd's accepted dtypes)
+        //   - contiguous x / cos / sin
+        //   - cos / sin restricted to the float dtype family
+        validate(x, cos, sin, self.rotary_dim)?;
+        if !x.is_contiguous() || !cos.is_contiguous() || !sin.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(
+            x.dtype(),
+            crate::DType::F32 | crate::DType::BF16 | crate::DType::F16
+        ) {
+            return Ok(None);
+        }
+        if !matches!(
+            cos.dtype(),
+            crate::DType::F32 | crate::DType::BF16 | crate::DType::F16
+        ) {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): implement
+        // `crate::vulkan_rope(x, cos, sin, self.rotary_dim)` analogous
+        // to `crate::cuda_rope` above. Until that wrapper lands, fall
+        // through to the CPU path so the op still produces correct
+        // results on Vulkan-only systems (numerics-correct,
+        // performance-wrong).
+        // Candidate implementations:
+        //   1. SPIR-V compute shader: grid over (..., seq, pair) with
+        //      one invocation per pair; load (x_2i, x_2i+1) and
+        //      (cos[s,i], sin[s,i]); fuse the 2x2 rotation and the
+        //      partial-rotary passthrough for indices >= rotary_dim.
+        //   2. BF16/F16 inputs require either a widened `VkDType`
+        //      (today exposes F32 / BF16; F16 needs a new variant) or
+        //      a cast-to-F32 / cast-back wrapper at the dispatch
+        //      boundary; the cast kernels live in `vk_ops::cast`.
+        //   3. Reuse the rotary kernel in `kiln-vulkan-kernel::vk_ops`
+        //      if/when one is added there.
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }

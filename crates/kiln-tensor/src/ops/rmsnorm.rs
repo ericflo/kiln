@@ -131,6 +131,98 @@ impl DeviceOp2 for RmsNormOp {
         Ok(Some(crate::cuda_rmsnorm_last_axis(x, weight, self.eps)?))
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, x: &Tensor, weight: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / cpu_fwd so the
+        // dispatch surface matches across backends:
+        //   - F32 / BF16 / F16 only
+        //   - rank(x) >= 1, rank(weight) == 1
+        //   - x and weight share dtype (no mixed-precision today)
+        //   - contiguous inputs
+        //   - last-dim length of x == weight.shape()[0]
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if x.rank() == 0 || weight.rank() != 1 {
+            return Ok(None);
+        }
+        if x.dtype() != weight.dtype() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() || !weight.is_contiguous() {
+            return Ok(None);
+        }
+        if *x.shape().last().unwrap() != weight.shape()[0] {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): implement
+        // `crate::metal_rmsnorm_last_axis(x, weight, self.eps)`
+        // analogous to `crate::cuda_rmsnorm_last_axis` above. Until
+        // that kernel lands, fall through to the CPU path so the op
+        // still produces correct results on Mac (numerics-correct,
+        // performance-wrong).
+        // Candidate implementations:
+        //   1. Custom MSL kernel: per-row threadgroup reduction over
+        //      the trailing dim, two-pass — first pass sums x^2 to
+        //      compute inv_rms in F32, second pass scales by
+        //      inv_rms * weight and casts back to dtype.
+        //   2. MPS Graph: compose `mean(x*x) -> rsqrt -> x * inv_rms *
+        //      w` for one-shot dispatch. Heavier per-call overhead
+        //      than a custom kernel but easier to wire.
+        //   3. Reuse the rmsnorm kernel in `kiln-model::backend::metal`
+        //      (the existing rmsnorm there is the production hot path).
+        Ok(None)
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor, weight: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / metal_fwd:
+        //   - F32 / BF16 / F16 only
+        //   - rank(x) >= 1, rank(weight) == 1
+        //   - x and weight share dtype
+        //   - contiguous inputs
+        //   - last-dim length of x == weight.shape()[0]
+        //
+        // Note: an existing `VulkanRmsNormOp` lives in
+        // `kiln-vulkan-kernel`. The natural drop-in routes through
+        // that kernel for the F32 case; BF16/F16 inputs need either
+        // `VkDType` widening (F16 isn't currently exposed) or a
+        // cast-to-F32 / cast-back wrapper at the dispatch boundary.
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if x.rank() == 0 || weight.rank() != 1 {
+            return Ok(None);
+        }
+        if x.dtype() != weight.dtype() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() || !weight.is_contiguous() {
+            return Ok(None);
+        }
+        if *x.shape().last().unwrap() != weight.shape()[0] {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): implement
+        // `crate::vulkan_rmsnorm_last_axis(x, weight, self.eps)`
+        // analogous to `crate::cuda_rmsnorm_last_axis` above. Until
+        // that wrapper lands, fall through to the CPU path
+        // (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. Reuse `kiln_vulkan_kernel::VulkanRmsNormOp` — the
+        //      production rmsnorm kernel. Requires moving `x` /
+        //      `weight` to `VkTensor` storage at the dispatch
+        //      boundary; see `Tensor::to_device` (phase 1) +
+        //      `VkTensor::from_*` constructors in `vk_tensor.rs`.
+        //   2. For BF16/F16 inputs, cast to F32, run kernel #1, cast
+        //      back. The cast kernels live in `vk_ops::cast`.
+        //   3. Add a BF16/F16-specific SPIR-V rmsnorm shader that
+        //      promotes to F32 inside the threadgroup and casts on
+        //      store — pattern matches the `__nv_bfloat16` path in
+        //      `cuda_rmsnorm_last_axis`.
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         // Backward is in the atomic-bwd tolerance band (the cross-row
         // grad_w sum uses atomicAdd in F32). Lands under kiln-autograd
