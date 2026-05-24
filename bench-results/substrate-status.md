@@ -41,9 +41,16 @@ The Phase 7 migration vehicle landed in **two waves**:
 - kt-bridge adds owner-agnostic `cuda_input_device_ptr` and
   `cuda_output_device_ptr` accessors that work for both Owned and
   Borrowed storage (PR #1353).
-- 5 kt-API entry points migrated to accept Borrowed inputs:
-  `fused_sigmoid_mul_kt`, `fused_rmsnorm_kt`, `fused_rotary_qk_kt`,
-  `fused_mlp_silu_mul_kt`, `fused_l2_qk_norm_kt` (PRs #1353, #1354).
+- **kt-API entry points migrated to accept Borrowed inputs**
+  (`cuda_input_device_ptr` / `cuda_output_device_ptr` template):
+  - `kiln-rmsnorm-kernel`: **25 of 25 (100%)** — PRs #1353/#1354/#1357/#1358
+  - `kiln-flash-attn`: **5 of 5 (100%)** — PR #1360
+  - `kiln-conv1d-kernel`: **2 of 2 (100%)** — PR #1359
+  - `kiln-marlin-gemm`: **1 of 1 (100%)** — PR #1359
+  - `kiln-gdn-kernel`: **0 of 20** (still uses slice() chains; mass
+    migration attempted via script but reverted — see PR #1361 closure
+    comment; needs careful per-function manual migration as the
+    slice/cuda naming convention is irregular)
 - All 18 kiln-model pilot call sites flipped from v1 copy to v2
   borrow (PR #1355). Inputs now pay **zero** dtod memcpys when the
   env flag is set; outputs still go through the copying adapter
@@ -72,10 +79,13 @@ drops away once the call-site caller is also kt-API-typed.
 
 ### What's next
 
-- **More kt-API entry-point migrations** (~70 remaining of the 100+
-  kt-API surface): mechanical, ~10 line diff each, follows the
-  `cuda_input_device_ptr`/`cuda_output_device_ptr` template in PRs
-  #1353 / #1354.
+- **gdn-kernel kt-API migration** (~20 remaining entry points): the
+  slice/cuda naming convention in gdn-kernel is irregular (e.g.,
+  `o_slice` from `out_cuda` ← `out` tensor) which broke the regex-
+  based mass-migration script (PR #1361 reverted). Each function
+  needs a hand-crafted migration; total ~3-4 hours of mechanical
+  work. Non-blocking for production since gdn kt-API isn't yet
+  called from kiln-model.
 - **`PagedKvCache` port** (line 110/167/324 of #1082): 1505 LOC in
   `paged_kv_cache.rs`. Scaffold the kt-Tensor twin first
   (constructors + accessors), then writers, then the CUDA-graph
