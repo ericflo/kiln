@@ -453,6 +453,16 @@ unsafe extern "C" {
         targets_tag: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_sum_last_axis_async(
+        x: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n_rows: i64,
+        n_cols: i64,
+        divisor: f32,
+        dtype_tag: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// CUDA-side stride-aware contiguous() — produces a new kt-Tensor with
@@ -2219,5 +2229,126 @@ pub fn cuda_cross_entropy_loss(
         crate::TensorId::next(),
     )
 }
+
+/// CUDA per-row sum/mean over the trailing axis (Phase 4 substrate op).
+///
+/// For a contiguous `[..., D]` input, produces a contiguous output
+/// of shape `[...]` (axis removed) at the same dtype. F32 accumulation
+/// internally, cast back to input dtype on store. F32/BF16/F16
+/// supported.
+///
+/// Routes through `kiln_sum_last_axis_async` in
+/// `csrc/reduce_last_axis.cu`. `divisor` is applied in F32 before
+/// the cast (so the mean path passes `1.0 / n_cols` and gets bit-
+/// identical results to a separate divide kernel).
+fn cuda_reduce_last_axis_impl(x: &crate::Tensor, divisor: f32, label: &str) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+
+    let dtype = x.dtype();
+    let dtype_tag: i32 = match dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "{label}: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !x.is_contiguous() {
+        return Err(crate::Error::Msg(format!(
+            "{label}: input must be contiguous"
+        )));
+    }
+    let rank = x.rank();
+    if rank == 0 {
+        return Err(crate::Error::Msg(format!(
+            "{label}: input must have rank >= 1"
+        )));
+    }
+    let shape = x.shape();
+    let n_cols = shape[rank - 1] as i64;
+    let n_rows = (x.element_count() / shape[rank - 1]) as i64;
+
+    let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
+        || crate::Error::Msg(format!("{label}: input must be CUDA")),
+    )?;
+    let candle_device = x_storage.candle_device.clone();
+    let device_index = match x_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+    // Output: same dtype as input, shape = leading axes.
+    let out_shape: Vec<usize> = shape[..rank - 1].to_vec();
+    let out_elem_count: usize = out_shape.iter().product::<usize>().max(1);
+    let out_storage =
+        CudaStorage::zeros(candle_device.clone(), device_index, dtype, out_elem_count)?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let x_base = match &x_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+    };
+
+    let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
+    let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
+    let out_ptr = out_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_sum_last_axis_async(x_ptr, out_ptr, n_rows, n_cols, divisor, dtype_tag, raw_stream)
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "{label}: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(out_shape),
+        crate::TensorId::next(),
+    )
+}
+
+/// `out = sum(x, axis=-1)` on CUDA — produces a tensor of shape
+/// `x.shape[..-1]` at the same dtype as `x`. F32 accumulation.
+#[cfg(feature = "cuda")]
+pub fn cuda_sum_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
+    cuda_reduce_last_axis_impl(x, 1.0, "cuda_sum_last_axis")
+}
+
+/// `out = mean(x, axis=-1)` on CUDA — produces a tensor of shape
+/// `x.shape[..-1]` at the same dtype as `x`. F32 accumulation;
+/// divide-by-N applied in F32 before the cast back.
+#[cfg(feature = "cuda")]
+pub fn cuda_mean_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
+    if x.rank() == 0 {
+        return Err(crate::Error::Msg(
+            "cuda_mean_last_axis: input must have rank >= 1".to_string(),
+        ));
+    }
+    let n_cols = x.shape()[x.rank() - 1];
+    if n_cols == 0 {
+        return Err(crate::Error::Msg(
+            "cuda_mean_last_axis: trailing dim is 0; mean is undefined".to_string(),
+        ));
+    }
+    let inv = 1.0_f32 / (n_cols as f32);
+    cuda_reduce_last_axis_impl(x, inv, "cuda_mean_last_axis")
+}
+
 
 

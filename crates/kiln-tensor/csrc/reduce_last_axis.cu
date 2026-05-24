@@ -233,3 +233,110 @@ extern "C" int kiln_l2norm_apply_async(
     cudaError_t err = cudaGetLastError();
     return err == cudaSuccess ? 0 : -1;
 }
+
+// ----------------------------------------------------------------------
+// Per-row sum + mean over the last axis. Same launch shape as the
+// sum-of-squares kernel above (one block per row, warp-shuffle +
+// shared-mem reduction). The result is written back at the *input*
+// dtype (matches the CPU reduce_axis store-back convention).
+//
+// `divisor`:
+//   - For sum, pass 1.0f.
+//   - For mean, pass `1.0f / n_cols` so the kernel can apply the
+//     scale once in F32 before casting back to T.
+
+namespace {
+
+template <typename T>
+__device__ inline T cast_from_f32(float v);
+template <>
+__device__ inline float cast_from_f32<float>(float v) { return v; }
+template <>
+__device__ inline __nv_bfloat16 cast_from_f32<__nv_bfloat16>(float v) { return __float2bfloat16(v); }
+template <>
+__device__ inline __half cast_from_f32<__half>(float v) { return __float2half(v); }
+
+template <typename T>
+__global__ void reduce_last_axis_sum_kernel(
+    const T* __restrict__ x,
+    T* __restrict__ out,
+    int64_t n_cols,
+    float divisor) {
+    int64_t row = blockIdx.x;
+    int tid = threadIdx.x;
+    int blk = blockDim.x;
+
+    const T* row_in = x + row * n_cols;
+
+    // Per-thread strided sum (F32).
+    float local_sum = 0.0f;
+    for (int64_t c = tid; c < n_cols; c += blk) {
+        local_sum += to_f32<T>(row_in[c]);
+    }
+
+    __shared__ float shared_sum[32];
+    for (int offset = 16; offset > 0; offset /= 2) {
+        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
+    }
+    int warp_id = tid / 32;
+    int lane = tid & 31;
+    if (lane == 0) shared_sum[warp_id] = local_sum;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float v = lane < (blk + 31) / 32 ? shared_sum[lane] : 0.0f;
+        for (int offset = 16; offset > 0; offset /= 2) {
+            v += __shfl_xor_sync(0xFFFFFFFF, v, offset);
+        }
+        if (lane == 0) {
+            out[row] = cast_from_f32<T>(v * divisor);
+        }
+    }
+}
+
+}  // anonymous namespace
+
+extern "C" int kiln_sum_last_axis_async(
+    const void* x,
+    void* out,
+    int64_t n_rows,
+    int64_t n_cols,
+    float divisor,
+    int32_t dtype_tag,  // 0=F32, 1=BF16, 2=F16
+    void* stream_raw) {
+    if (n_rows == 0 || n_cols == 0) return 0;
+    cudaStream_t stream = static_cast<cudaStream_t>(stream_raw);
+
+    int threads = MAX_THREADS;
+    while (threads > n_cols && threads > 32) {
+        threads /= 2;
+    }
+    if (threads < 32) threads = 32;
+    dim3 grid((unsigned int)n_rows);
+    dim3 block(threads);
+
+    switch (dtype_tag) {
+        case 0:
+            reduce_last_axis_sum_kernel<float><<<grid, block, 0, stream>>>(
+                reinterpret_cast<const float*>(x),
+                reinterpret_cast<float*>(out),
+                n_cols, divisor);
+            break;
+        case 1:
+            reduce_last_axis_sum_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(x),
+                reinterpret_cast<__nv_bfloat16*>(out),
+                n_cols, divisor);
+            break;
+        case 2:
+            reduce_last_axis_sum_kernel<__half><<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __half*>(x),
+                reinterpret_cast<__half*>(out),
+                n_cols, divisor);
+            break;
+        default:
+            return -2;
+    }
+    cudaError_t err = cudaGetLastError();
+    return err == cudaSuccess ? 0 : -1;
+}

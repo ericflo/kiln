@@ -129,6 +129,39 @@ impl DeviceOp1 for ReduceOp {
         }
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // CUDA backend currently supports only sum/mean over the
+        // trailing axis. Other scopes/kinds fall through to the CPU
+        // path via `Ok(None)`.
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        let rank = x.rank();
+        if rank == 0 {
+            return Ok(None);
+        }
+        // Only Axis(rank-1) is supported on CUDA. All / non-last-axis
+        // fall back to CPU.
+        let last = rank - 1;
+        match self.scope {
+            ReductionScope::Axis(axis) if axis == last => {}
+            _ => return Ok(None),
+        }
+        let n_cols = x.shape()[last];
+        if n_cols == 0 {
+            return Ok(None);
+        }
+        let out = match self.kind {
+            ReductionKind::Sum => crate::cuda_sum_last_axis(x)?,
+            ReductionKind::Mean => crate::cuda_mean_last_axis(x)?,
+        };
+        Ok(Some(out))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
