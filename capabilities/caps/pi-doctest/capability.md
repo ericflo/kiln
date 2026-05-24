@@ -364,6 +364,22 @@ wall-clock rose to 62.65s. H33 is therefore an outcome-reliability win, not an
 efficiency win. It should be kept with caveat and either confirmed with another
 seed or used as the base for a small efficiency-recovery stage.
 
+H34 tried that small efficiency-recovery stage by chaining from H33 and
+reusing H32's natural same-task successful pair, with ECHO still disabled. The
+data was intentionally tiny: one group, two completions, 579 action tokens, 480
+env tokens, reward stdev 0.5 after rank rescaling, and max 814 sequence tokens.
+Training used rank 4 / alpha 8 / lr 5e-6 / policy loss on /
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`, completed in 318s observed wall-clock, and
+fit at about 15994 MiB peak VRAM. Verification passed with delta proxy
+0.343389. Blind `LIMIT=4` smoke rejected the chain: H34 scored 0.750000 versus
+base 0.934375 and H33 smoke 0.981250. It improved base-smoke mean tool calls
+to 4.5 and mean thinking chars to 1740.75, but outcome fell to 0.75 and one
+rollout was zero. The larger gate was skipped. The lesson is that a tiny
+natural-rank efficiency signal can erase H33's reliability benefit when chained
+directly; the next H33 follow-up should either confirm H33 with another seed or
+use a broader, reliability-preserving data signal rather than one narrow
+preference pair.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
