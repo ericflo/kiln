@@ -6,18 +6,125 @@
 //! - **log1p**: numerically stable `log(1 + x)` for small `x`
 //! - **exp2 / expm1**: inverse counterparts; `expm1` is the
 //!   numerically stable `exp(x) - 1`.
+//!
+//! # Determinism
+//!
+//! `Constructive`. Pointwise; no reduction; bit-identical at the
+//! same input dtype.
+//!
+//! # CUDA wiring (#1082)
+//!
+//! `log2`, `log10`, `log1p` route through the shared
+//! `cuda_activation_unary` kernel (kind tags 15/16/17 — see
+//! `csrc/activation.cu`). `exp2` / `expm1` stay CPU-only for now —
+//! they don't appear in the model hot path and the kernel kind
+//! tags can be added in a follow-up if a call site needs them.
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{
+    bail, dispatch1, BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result,
+    Storage, Tensor, TensorId,
+};
 
-fn apply(f: impl Fn(f32) -> f32, x: &Tensor, name: &str) -> Result<Tensor> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogExpKind {
+    Log2,
+    Log10,
+    Log1p,
+    Exp2,
+    Expm1,
+}
+
+impl LogExpKind {
+    pub const fn name(self) -> &'static str {
+        match self {
+            LogExpKind::Log2 => "log2",
+            LogExpKind::Log10 => "log10",
+            LogExpKind::Log1p => "log1p",
+            LogExpKind::Exp2 => "exp2",
+            LogExpKind::Expm1 => "expm1",
+        }
+    }
+
+    pub fn apply_f32(self, v: f32) -> f32 {
+        match self {
+            LogExpKind::Log2 => v.log2(),
+            LogExpKind::Log10 => v.log10(),
+            LogExpKind::Log1p => v.ln_1p(),
+            LogExpKind::Exp2 => v.exp2(),
+            LogExpKind::Expm1 => v.exp_m1(),
+        }
+    }
+
+    /// CUDA kernel kind tag matching the `KIND_*` constants in
+    /// `csrc/activation.cu` (#1082). `Exp2` and `Expm1` are CPU-only
+    /// today — they don't have kind tags in the shared kernel.
+    #[cfg(feature = "cuda")]
+    const fn cuda_kind_tag(self) -> Option<i32> {
+        match self {
+            LogExpKind::Log2 => Some(15),
+            LogExpKind::Log10 => Some(16),
+            LogExpKind::Log1p => Some(17),
+            LogExpKind::Exp2 | LogExpKind::Expm1 => None,
+        }
+    }
+}
+
+/// `DeviceOp1` adapter for the log/exp-variant family. CPU path is
+/// the canonical reference; CUDA forward path routes through
+/// `cuda_activation_unary` for `log2 / log10 / log1p` (#1082).
+#[derive(Debug, Clone, Copy)]
+struct LogExpOp {
+    kind: LogExpKind,
+}
+
+impl DeviceOp1 for LogExpOp {
+    fn name(&self) -> &'static str {
+        self.kind.name()
+    }
+
+    fn determinism(&self) -> Determinism {
+        Determinism::Constructive
+    }
+
+    fn cpu_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, self.kind.name())?;
+        let t = cpu_apply(self.kind, x)?;
+        Ok(Some(t))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        match self.kind.cuda_kind_tag() {
+            Some(tag) => Ok(Some(crate::cuda_activation_unary(x, tag)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
+        None
+    }
+}
+
+fn validate(x: &Tensor, name: &str) -> Result<()> {
     if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
         bail!("{name}: dtype must be F32/BF16/F16, got {}", x.dtype());
     }
     if !x.is_contiguous() {
         bail!("{name}: input must be contiguous");
     }
+    Ok(())
+}
+
+fn cpu_apply(kind: LogExpKind, x: &Tensor) -> Result<Tensor> {
     let dtype = x.dtype();
     let cpu = x
         .storage()
@@ -37,7 +144,7 @@ fn apply(f: impl Fn(f32) -> f32, x: &Tensor, name: &str) -> Result<Tensor> {
                 .to_f32(),
             _ => unreachable!(),
         };
-        let y = f(v);
+        let y = kind.apply_f32(v);
         match dtype {
             DType::F32 => out[i * 4..i * 4 + 4].copy_from_slice(&y.to_le_bytes()),
             DType::BF16 => out[i * 2..i * 2 + 2]
@@ -53,19 +160,19 @@ fn apply(f: impl Fn(f32) -> f32, x: &Tensor, name: &str) -> Result<Tensor> {
 }
 
 pub fn log2(x: &Tensor) -> Result<Tensor> {
-    apply(|v| v.log2(), x, "log2")
+    dispatch1(&LogExpOp { kind: LogExpKind::Log2 }, x)
 }
 pub fn log10(x: &Tensor) -> Result<Tensor> {
-    apply(|v| v.log10(), x, "log10")
+    dispatch1(&LogExpOp { kind: LogExpKind::Log10 }, x)
 }
 pub fn log1p(x: &Tensor) -> Result<Tensor> {
-    apply(|v| v.ln_1p(), x, "log1p")
+    dispatch1(&LogExpOp { kind: LogExpKind::Log1p }, x)
 }
 pub fn exp2(x: &Tensor) -> Result<Tensor> {
-    apply(|v| v.exp2(), x, "exp2")
+    dispatch1(&LogExpOp { kind: LogExpKind::Exp2 }, x)
 }
 pub fn expm1(x: &Tensor) -> Result<Tensor> {
-    apply(|v| v.exp_m1(), x, "expm1")
+    dispatch1(&LogExpOp { kind: LogExpKind::Expm1 }, x)
 }
 
 #[cfg(test)]
@@ -124,5 +231,14 @@ mod tests {
         let y = read_f32(&expm1(&x).unwrap());
         assert!(y[0].abs() < 1e-6);
         assert!((y[1] - (std::f32::consts::E - 1.0)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn kind_names() {
+        assert_eq!(LogExpKind::Log2.name(), "log2");
+        assert_eq!(LogExpKind::Log10.name(), "log10");
+        assert_eq!(LogExpKind::Log1p.name(), "log1p");
+        assert_eq!(LogExpKind::Exp2.name(), "exp2");
+        assert_eq!(LogExpKind::Expm1.name(), "expm1");
     }
 }
