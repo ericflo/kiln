@@ -2,17 +2,173 @@
 //!
 //! `flip(x, axes)` reverses `x` along each axis in `axes`. PyTorch /
 //! NumPy parity with `torch.flip(x, dims)` / `np.flip(x, axes)`.
+//!
+//! # Dispatch
+//!
+//! Wrapped as a [`DeviceOp1`] so CUDA tensors route through
+//! `cuda_index_select_dim0` (for the single-axis `axes=[0]` case)
+//! instead of falling through the byte-level CPU loop. Multi-axis
+//! or non-zero axis flips fall through to CPU; the bytes are read
+//! from CPU storage only in that path.
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, Layout, Result, Storage, Tensor, TensorId};
+use crate::{
+    bail, dispatch1, BackwardOp, CpuStorage, Determinism, DeviceOp1, Layout, Result, Storage,
+    Tensor, TensorId,
+};
 
-pub fn flip(x: &Tensor, axes: &[usize]) -> Result<Tensor> {
-    if axes.is_empty() {
-        // No-op clone of the shape; still allocate a fresh tensor id
-        // for a clean parity contract.
-        return x.reshape(x.shape().to_vec());
+/// Flip op — reverses element order along each axis in `axes`.
+#[derive(Debug, Clone)]
+pub struct FlipOp {
+    axes: Vec<usize>,
+}
+
+impl FlipOp {
+    pub fn new(axes: &[usize]) -> Self {
+        FlipOp { axes: axes.to_vec() }
     }
+    pub fn axes(&self) -> &[usize] {
+        &self.axes
+    }
+}
+
+impl DeviceOp1 for FlipOp {
+    fn name(&self) -> &'static str {
+        "flip"
+    }
+
+    fn determinism(&self) -> Determinism {
+        // Each output element is a byte-copy of a specific input
+        // element — fixed iteration order, no atomics.
+        Determinism::Constructive
+    }
+
+    fn cpu_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, &self.axes)?;
+
+        if self.axes.is_empty() {
+            // No-op clone with a fresh tensor id.
+            return Ok(Some(x.reshape(x.shape().to_vec())?));
+        }
+
+        let dtype = x.dtype();
+        let shape: Vec<usize> = x.shape().to_vec();
+        let rank = shape.len();
+        let per = dtype.size_in_bytes();
+        let n_elem: usize = shape.iter().product();
+        let mut out = vec![0u8; n_elem * per];
+
+        // Compute strides (== input strides since shape unchanged).
+        let mut strides = vec![1usize; rank];
+        for d in (0..rank.saturating_sub(1)).rev() {
+            strides[d] = strides[d + 1] * shape[d + 1];
+        }
+
+        let cpu = x.storage();
+        let cpu = cpu
+            .as_any()
+            .downcast_ref::<CpuStorage>()
+            .ok_or_else(|| crate::Error::from_str("flip: storage must be CpuStorage"))?;
+        let src = cpu.as_bytes();
+
+        // For each linear input index, decode to coord, flip selected
+        // axes, re-encode, copy one element.
+        let mut coord = vec![0usize; rank];
+        for in_idx in 0..n_elem {
+            let mut rem = in_idx;
+            for d in 0..rank {
+                coord[d] = rem / strides[d];
+                rem %= strides[d];
+            }
+            for &a in &self.axes {
+                coord[a] = shape[a] - 1 - coord[a];
+            }
+            let mut out_off = 0usize;
+            for d in 0..rank {
+                out_off += coord[d] * strides[d];
+            }
+            let src_byte = in_idx * per;
+            let dst_byte = out_off * per;
+            out[dst_byte..dst_byte + per].copy_from_slice(&src[src_byte..src_byte + per]);
+        }
+
+        let cpu_out = CpuStorage::from_bytes(dtype, out)?;
+        let storage: Storage = Arc::new(cpu_out);
+        Ok(Some(Tensor::from_parts(
+            storage,
+            Layout::contiguous(shape),
+            TensorId::next(),
+        )?))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, &self.axes)?;
+
+        // No-op fast path: empty axes ⇒ identity reshape (no data
+        // movement, stays on device).
+        if self.axes.is_empty() {
+            return Ok(Some(x.reshape(x.shape().to_vec())?));
+        }
+
+        // We currently only route through CUDA when flipping a
+        // single axis-0 reversal. Multi-axis and non-zero-axis flips
+        // fall through to CPU until the more general kernel lands.
+        if self.axes.len() != 1 || self.axes[0] != 0 {
+            return Ok(None);
+        }
+        if x.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+
+        let n = x.shape()[0];
+        if n == 0 {
+            // Empty axis-0 — produce an empty output via reshape.
+            return Ok(Some(x.reshape(x.shape().to_vec())?));
+        }
+
+        // Build reversed indices [n-1, n-2, ..., 1, 0] on CPU as U32,
+        // then ship to the same CUDA device as `x` and gather.
+        let indices_host: Vec<u32> = (0..n as u32).rev().collect();
+        let indices_cpu = Tensor::from_slice(&indices_host, vec![n])?;
+
+        // Resolve the candle CudaDevice from `x`'s storage so the
+        // indices land on the matching device.
+        let x_storage = x
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::CudaStorage>()
+            .ok_or_else(|| crate::Error::from_str("flip::cuda_fwd: x must be CUDA storage"))?;
+        let candle_device = x_storage.candle_device().clone();
+        let device_index = match x.device() {
+            crate::Device::Cuda(i) => i,
+            _ => return Ok(None),
+        };
+
+        let indices_cuda =
+            crate::host_to_cuda_copy(&indices_cpu, candle_device, device_index)?;
+        Ok(Some(crate::cuda_index_select_dim0(x, &indices_cuda)?))
+    }
+
+    fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
+        None
+    }
+}
+
+/// Convenience: dispatch `FlipOp` on the given axes.
+pub fn flip(x: &Tensor, axes: &[usize]) -> Result<Tensor> {
+    dispatch1(&FlipOp::new(axes), x)
+}
+
+// ----------------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------------
+
+fn validate(x: &Tensor, axes: &[usize]) -> Result<()> {
     let rank = x.rank();
     for &a in axes {
         if a >= rank {
@@ -26,62 +182,19 @@ pub fn flip(x: &Tensor, axes: &[usize]) -> Result<Tensor> {
         }
         seen[a] = true;
     }
-
-    let dtype = x.dtype();
-    if dtype.is_packed() {
-        bail!("flip: packed dtype {dtype} not supported");
+    if x.dtype().is_packed() {
+        bail!("flip: packed dtype {} not supported", x.dtype());
     }
     if !x.is_contiguous() {
         bail!("flip: input must be contiguous");
     }
-
-    let shape: Vec<usize> = x.shape().to_vec();
-    let per = dtype.size_in_bytes();
-    let n_elem: usize = shape.iter().product();
-    let mut out = vec![0u8; n_elem * per];
-
-    // Compute output strides (== input strides since shape unchanged).
-    let mut strides = vec![1usize; rank];
-    for d in (0..rank.saturating_sub(1)).rev() {
-        strides[d] = strides[d + 1] * shape[d + 1];
-    }
-
-    let cpu = x.storage();
-    let cpu = cpu
-        .as_any()
-        .downcast_ref::<CpuStorage>()
-        .ok_or_else(|| crate::Error::from_str("flip: storage must be CpuStorage"))?;
-    let src = cpu.as_bytes();
-
-    // For each linear input index, decode to coord, flip selected
-    // axes, re-encode, copy one element.
-    let mut coord = vec![0usize; rank];
-    for in_idx in 0..n_elem {
-        let mut rem = in_idx;
-        for d in 0..rank {
-            coord[d] = rem / strides[d];
-            rem %= strides[d];
-        }
-        for &a in axes {
-            coord[a] = shape[a] - 1 - coord[a];
-        }
-        let mut out_off = 0usize;
-        for d in 0..rank {
-            out_off += coord[d] * strides[d];
-        }
-        let src_byte = in_idx * per;
-        let dst_byte = out_off * per;
-        out[dst_byte..dst_byte + per].copy_from_slice(&src[src_byte..src_byte + per]);
-    }
-
-    let cpu_out = CpuStorage::from_bytes(dtype, out)?;
-    let storage: Storage = Arc::new(cpu_out);
-    Tensor::from_parts(storage, Layout::contiguous(shape), TensorId::next())
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DType;
 
     fn read_f32(t: &Tensor) -> Vec<f32> {
         let cpu = t.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
@@ -166,5 +279,27 @@ mod tests {
             10.0, 11.0, 8.0, 9.0, 6.0, 7.0, // second slab axis1 reversed
         ];
         assert_eq!(read_f32(&y), expected);
+    }
+
+    #[test]
+    fn flip_op_metadata() {
+        let op = FlipOp::new(&[0]);
+        assert_eq!(op.name(), "flip");
+        assert!(op.determinism().is_constructive());
+        assert!(op.bwd().is_none());
+        assert_eq!(op.axes(), &[0]);
+    }
+
+    #[test]
+    fn flip_bf16_axis_0() {
+        // Round-trip through bf16 storage on axis 0.
+        let bf: Vec<half::bf16> = [1.0f32, 2.0, 3.0, 4.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v))
+            .collect();
+        let x = Tensor::from_slice(&bf, vec![4]).unwrap();
+        let y = flip(&x, &[0]).unwrap();
+        assert_eq!(y.dtype(), DType::BF16);
+        assert_eq!(y.shape(), &[4]);
     }
 }
