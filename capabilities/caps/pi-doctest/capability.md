@@ -707,3 +707,37 @@ tool-call efficiency 0.8125, mean tool calls 4.875, mean thinking chars
 tool-choice micro-contrast GRPO continues to create smoke false positives; the
 next route should stop adding isolated micro-contrast rows and instead preserve
 complete task-solving behavior.
+
+### H44: complete-behavior throughput probe
+
+H44 moved away from micro-contrasts and tried to preserve complete train-only
+task-solving behavior. The first branch built a broad SFT corpus from fresh
+successful base rollouts: 10 reward-1.0 examples, task-diverse, normalized to
+compact read, write, test, DONE steps while preserving real initial files,
+final solutions, and doctest outputs. The examples tokenized between 565 and
+925 tokens. Native SFT with rank 4 / alpha 4 / lr `1e-6` and
+`KILN_CUDA_RECOMPUTE_SFT=1` fit in memory but was too slow: the first step
+completed only after roughly twenty minutes at about 15975 MiB VRAM. Generic
+SFT on the six most compact examples failed with CUDA OOM at gated deltanet
+layer 26. No SFT adapter was saved.
+
+The second branch collected 3 fresh generations on 8 compact-success train
+tasks. The collection was highly saturated, mean train composite 0.990625, but
+two natural variance groups remained (`task_0028` and `task_0039`) with
+reward-1.0 successes and 0.8875 near-misses. Raw complete GRPO dry-ran at 3278
+action tokens, 2859 env tokens, and 1780 context tokens, which was too large.
+After stripping verbose thinking while preserving tool-call sequence and
+original rewards, the 2-group pair dry-run was 1116 action / 1292 env / 1224
+context tokens. It trained with no ECHO, rank 4 / alpha 4 / lr `1e-6`, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`, reached a mid-run progress point, then hit
+the 900s guard before saving an adapter. The smallest one-group `task_0039`
+variant dry-ran at 458 action / 798 env / 612 context tokens and also timed out
+before adapter save.
+
+Lesson: complete-behavior data is the right direction, but local policy-on
+training needs a stricter throughput cap than H44 met. Future attempts should
+require sub-300 action tokens per negative completion and sub-800 total
+sequence tokens before training, or use a preconditioning route that avoids
+full policy backward on complete trajectories. Keep
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`; it is the setting that keeps GRPO inside
+the local VRAM envelope, and reducing checkpointing is not the throughput fix.
