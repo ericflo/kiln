@@ -260,6 +260,21 @@ outcome fell to 0.8125. This is the first completed policy-on local GRPO shape
 that moved the targeted efficiency axis, but the tiny saturated reward spread
 was not a safe action-side signal.
 
+H27 synthesized a stronger same-task contrast from train-only H17 tasks: each
+group paired one concise passing trace with one still-passing but inefficient
+repair trace. The first synthetic negatives were too long, so they were trimmed
+to one read, one bad edit, one failing doctest, one fix, one passing doctest,
+and `DONE`. The final dry-run shape was 2 groups / 4 completions / 838 action
+tokens / 764 env tokens, with completion lengths 650-762 sequence tokens and
+150-266 action tokens. Explicit `KILN_GRAD_CHECKPOINT_SEGMENTS=24` was active;
+training completed in 167s with peak observed VRAM about 15980 MiB and a
+verified adapter delta proxy of 0.332205. Blind `LIMIT=4` smoke rejected it:
+H27 scored 0.915625 versus base 0.934375. Outcome and tested-before-done
+remained 1.0, but tool-call efficiency fell to 0.71875, mean tool calls rose
+to 5.75, and mean thinking chars rose to 2102.75. The local throughput shape is
+good, but synthetic repair negatives appear to teach extra tool use; do not
+run the larger gate.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
