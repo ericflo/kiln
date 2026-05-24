@@ -24,7 +24,10 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{
+    bail, dispatch1, BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result,
+    Storage, Tensor, TensorId,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryArithKind {
@@ -55,19 +58,73 @@ impl UnaryArithKind {
             UnaryArithKind::Sqrt => x.sqrt(),
         }
     }
+
+    /// Kind tag matching the `KIND_*` constants in `csrc/activation.cu`.
+    /// CUDA path routes through `cuda_activation_unary` per #1082.
+    #[cfg(feature = "cuda")]
+    const fn cuda_kind_tag(self) -> i32 {
+        match self {
+            // 0..=4 reserved for activation.rs (silu/sigmoid/gelu/tanh/relu).
+            UnaryArithKind::Exp => 6,
+            UnaryArithKind::Ln => 5, // ln == natural log == KIND_LOG
+            UnaryArithKind::Neg => 12,
+            UnaryArithKind::Abs => 13,
+            UnaryArithKind::Sqrt => 14,
+        }
+    }
 }
 
-fn apply(kind: UnaryArithKind, x: &Tensor) -> Result<Tensor> {
+/// `DeviceOp1` adapter for the unary-arithmetic family. CPU path is
+/// the canonical reference; CUDA path routes through the shared
+/// `cuda_activation_unary` kernel (#1082).
+#[derive(Debug, Clone, Copy)]
+struct UnaryArithOp {
+    kind: UnaryArithKind,
+}
+
+impl DeviceOp1 for UnaryArithOp {
+    fn name(&self) -> &'static str {
+        self.kind.name()
+    }
+
+    fn determinism(&self) -> Determinism {
+        Determinism::Constructive
+    }
+
+    fn cpu_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, self.kind.name())?;
+        let t = cpu_apply(self.kind, x)?;
+        Ok(Some(t))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        Ok(Some(crate::cuda_activation_unary(x, self.kind.cuda_kind_tag())?))
+    }
+
+    fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
+        None
+    }
+}
+
+fn validate(x: &Tensor, name: &str) -> Result<()> {
     if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
-        bail!(
-            "{}: dtype must be F32/BF16/F16, got {}",
-            kind.name(),
-            x.dtype()
-        );
+        bail!("{name}: dtype must be F32/BF16/F16, got {}", x.dtype());
     }
     if !x.is_contiguous() {
-        bail!("{}: input must be contiguous", kind.name());
+        bail!("{name}: input must be contiguous");
     }
+    Ok(())
+}
+
+fn cpu_apply(kind: UnaryArithKind, x: &Tensor) -> Result<Tensor> {
     let dtype = x.dtype();
     let cpu = x
         .storage()
@@ -104,19 +161,19 @@ fn apply(kind: UnaryArithKind, x: &Tensor) -> Result<Tensor> {
 }
 
 pub fn abs(x: &Tensor) -> Result<Tensor> {
-    apply(UnaryArithKind::Abs, x)
+    dispatch1(&UnaryArithOp { kind: UnaryArithKind::Abs }, x)
 }
 pub fn neg(x: &Tensor) -> Result<Tensor> {
-    apply(UnaryArithKind::Neg, x)
+    dispatch1(&UnaryArithOp { kind: UnaryArithKind::Neg }, x)
 }
 pub fn exp(x: &Tensor) -> Result<Tensor> {
-    apply(UnaryArithKind::Exp, x)
+    dispatch1(&UnaryArithOp { kind: UnaryArithKind::Exp }, x)
 }
 pub fn ln(x: &Tensor) -> Result<Tensor> {
-    apply(UnaryArithKind::Ln, x)
+    dispatch1(&UnaryArithOp { kind: UnaryArithKind::Ln }, x)
 }
 pub fn sqrt(x: &Tensor) -> Result<Tensor> {
-    apply(UnaryArithKind::Sqrt, x)
+    dispatch1(&UnaryArithOp { kind: UnaryArithKind::Sqrt }, x)
 }
 
 #[cfg(test)]
@@ -204,7 +261,13 @@ mod tests {
                 .map(|&v| half::bf16::from_f32(v))
                 .collect();
             let x = Tensor::from_slice(&bf, vec![2]).unwrap();
-            let y = apply(kind, &x).unwrap();
+            let y = match kind {
+                UnaryArithKind::Abs => abs(&x).unwrap(),
+                UnaryArithKind::Neg => neg(&x).unwrap(),
+                UnaryArithKind::Exp => exp(&x).unwrap(),
+                UnaryArithKind::Ln => ln(&x).unwrap(),
+                UnaryArithKind::Sqrt => sqrt(&x).unwrap(),
+            };
             assert_eq!(y.dtype(), DType::BF16, "kind {}", kind.name());
         }
     }
