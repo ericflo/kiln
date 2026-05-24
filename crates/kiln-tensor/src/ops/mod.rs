@@ -132,7 +132,7 @@ pub use einsum::einsum;
 pub use elementwise::{add, div, mul, sub, BinaryKind, ElementwiseOp};
 pub use embedding::{embedding, EmbeddingOp};
 pub use expand::expand_dims;
-pub use eye::eye;
+pub use eye::{eye, eye_on_device};
 pub use flip::flip;
 pub use gather::gather;
 pub use glu::{geglu, glu, reglu, swiglu};

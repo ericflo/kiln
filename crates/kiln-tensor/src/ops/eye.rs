@@ -4,6 +4,15 @@
 //! diagonal and `0.0` elsewhere. Used in regularizers (residual
 //! identity terms), initialization (identity-as-init for residual
 //! blocks), and unit-test fixtures.
+//!
+//! # Dispatch
+//!
+//! - `eye(n, dtype)` always returns a CPU tensor.
+//! - `eye_on_device(n, dtype, device, candle_device)` returns an
+//!   identity matrix on the requested device. For CUDA, the bytes
+//!   are built on the host and copied across via `host_to_cuda_copy`
+//!   (a single cudaMemcpy — far simpler than a diagonal-fill kernel
+//!   on top of `cuda_zeros`, and cheap enough at typical `n`). (#1082)
 
 use std::sync::Arc;
 
@@ -31,6 +40,41 @@ pub fn eye(n: usize, dtype: DType) -> Result<Tensor> {
     let cpu = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu);
     Tensor::from_parts(storage, Layout::contiguous(vec![n, n]), TensorId::next())
+}
+
+
+
+/// Build an identity matrix on the requested device.
+///
+/// For CPU, this is identical to [`eye`]. For CUDA, the matrix is
+/// built on the host first then copied via `host_to_cuda_copy`
+/// (a single cudaMemcpy — simpler than a `cuda_zeros` + diagonal
+/// kernel, and the cost is dominated by the H→D transfer anyway).
+/// (#1082)
+#[cfg(feature = "cuda")]
+pub fn eye_on_device(
+    n: usize,
+    dtype: DType,
+    device: crate::Device,
+    candle_device: std::sync::Arc<candle_core::cuda_backend::CudaDevice>,
+) -> Result<Tensor> {
+    let host = eye(n, dtype)?;
+    match device {
+        crate::Device::Cpu => Ok(host),
+        crate::Device::Cuda(i) => crate::host_to_cuda_copy(&host, candle_device, i),
+        other => bail!("eye_on_device: unsupported device {other}"),
+    }
+}
+
+/// Non-CUDA build of [`eye_on_device`]: only CPU is supported.
+#[cfg(not(feature = "cuda"))]
+pub fn eye_on_device(n: usize, dtype: DType, device: crate::Device) -> Result<Tensor> {
+    match device {
+        crate::Device::Cpu => eye(n, dtype),
+        other => bail!(
+            "eye_on_device: device {other} requires a GPU feature (cuda/metal/vulkan)"
+        ),
+    }
 }
 
 #[cfg(test)]
