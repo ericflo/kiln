@@ -112,6 +112,52 @@ impl DeviceOp1 for L2NormOp {
         Ok(Some(crate::cuda_l2norm_last_axis(x, self.eps)?))
     }
 
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as the CUDA path so a future
+        // SPIR-V wrapper can drop in without changing the call site:
+        //   - F32 / BF16 / F16 only (matches cpu_fwd's accepted dtypes)
+        //   - rank ≥ 1
+        //   - contiguous input (row-major over the trailing axis)
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if x.rank() == 0 {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): implement
+        // `crate::vulkan_l2norm_last_axis(x, self.eps)` analogous to
+        // `crate::cuda_l2norm_last_axis` above. Until that wrapper
+        // lands, fall through to the CPU path so the op still produces
+        // correct results on Vulkan-only systems (numerics-correct,
+        // performance-wrong).
+        // Candidate implementations:
+        //   1. Reuse `kiln_vulkan_kernel::vk_ops::l2norm::
+        //      vk_l2_norm_lastdim_no_grad` — the production l2-norm
+        //      kernel. Note its signature carries an extra `scale`
+        //      parameter (for fused scale+norm at the QK-norm call
+        //      site); pass `1.0` for a pure L2-norm. Requires moving
+        //      `x` to `VkTensor` storage at the dispatch boundary;
+        //      see `Tensor::to_device` (phase 1) + `VkTensor::from_*`
+        //      constructors in `vk_tensor.rs`.
+        //   2. For BF16/F16 inputs, either:
+        //      a. Cast to F32 via `vk_ops::cast`, run kernel #1, cast
+        //         back. Adds two extra dispatches per call — bench
+        //         against pure CPU before adopting.
+        //      b. Add a BF16/F16-specific SPIR-V shader that promotes
+        //         to F32 inside the threadgroup reduction and casts
+        //         on store — matches the CUDA `__nv_bfloat16` path.
+        //   3. Dtype matrix gap: `VkDType` currently exposes only F32
+        //      and Bf16; F16 needs a new variant added in
+        //      `kiln-vulkan-kernel::vk_tensor::VkDType` before any
+        //      F16-native shader can land. BF16 is plumbed for some
+        //      kernels but not all — verify l2norm kernel accepts it.
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
