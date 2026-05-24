@@ -291,6 +291,21 @@ chains should start from an adapter that clears the larger gate, or test the
 broad hard-negative contrast fresh from base before stacking any efficiency
 prior. `LIMIT=4` is now only a throughput smoke, not a decision gate.
 
+H29 tried that isolation test by training the same five train-only
+hard-negative groups fresh from base, with no H26 adapter in the chain. The
+dry-run matched H28's data shape: 10 completions, 936 action tokens, 1177 env
+tokens, max 554 sequence tokens, max 150 action tokens per completion, and
+reward stdev 0.5. The full run used rank 4 / alpha 8, lr 5e-6, policy loss
+enabled, ECHO lambda 0.05, and explicit `KILN_GRAD_CHECKPOINT_SEGMENTS=24`.
+It completed four of five groups but hit the 900s guard during group 5
+reference forward before writing an adapter. Group 4 showed the cost profile:
+176070 ms reference forward, 211237 ms first policy forward, 119011 ms first
+backward, and 136273 ms second backward, with observed CUDA memory around
+15978 MiB. No blind eval was run. H29 does not falsify the hard-negative data
+behaviorally; it falsifies this fresh-from-base five-group policy-on shape as a
+practical laptop iteration. The next retry should cut the token/group budget or
+precondition with a cheaper no-policy-loss/ECHO pass before policy-on GRPO.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
