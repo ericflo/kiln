@@ -110,6 +110,20 @@ and JavaScript camelCase/CommonJS style when available.
   hurt format and efficiency, collect train-only Pi rollouts and train a small
   distribution-matched GRPO arm (`rank=4`, `alpha=8`, `lr=5e-6`,
   `echo_lambda=0.02`) on reward-varied groups.
+  - Result: rejected. The clean base train collection had enough reward
+    variance (10/16 groups survived `--filter-var-min=0.05`) and the adapter
+    trained and verified with gradient checkpointing, but blind eval was flat:
+    0.2994 vs. 0.2996 baseline (`delta=-0.0001`). Outcome rose slightly
+    (0.5000 to 0.5208), while `format_compliance` fell from 0.5625 to 0.5104.
+    Low-rank, low-lambda GRPO moved the edit-completion signal a little but did
+    not protect the final-response contract.
+- **PB-H3: light terminal-state prompt + stronger Agentic GRPO/ECHO.** Apply
+  the `pi-faithful-completion` lesson that a light explicit prompt plus
+  stronger GRPO hyperparameters can move terminal behavior: collect fresh
+  train-only rollouts with the stricter read/edit/verify/final prompt, then
+  train `rank=16`, `alpha=32`, `lr=3e-5`, `echo_lambda=0.05` if reward
+  variance remains usable. This targets outcome without letting final format
+  regress.
 
 ## Standard Workflow
 
