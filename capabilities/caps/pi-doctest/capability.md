@@ -591,3 +591,29 @@ Highest-leverage improvements:
 4. **Replicate the iter-5 H12 recipe at the larger eval pool** before
    trying new hyperparameter axes. The 3-seed reproducibility result
    should hold; if it doesn't, the larger eval pool exposed a fragility.
+
+## Local continuation notes
+
+### H39: thinking-tier g1 no-ECHO
+
+H39 tested a safer thinking-compression contrast: train-only successful traces
+were rewritten into brief-vs-medium thinking tiers while preserving the same
+verified workflow and tool payload. The broader three-group/two-group shapes
+dry-ran correctly but were rejected as local throughput routes: gradient
+checkpointing kept VRAM inside the 16GB envelope, yet lower/mid layer recompute
+made the runs too slow, and reducing checkpoint segments to 16 or 8 did not fix
+wall-clock.
+
+The bounded one-group variant trained successfully from base as
+`pi-doctest-h39-thinking-tier-g1-noecho-r4a8` with rank 4, alpha 8, lr `5e-6`,
+no ECHO, and `KILN_GRAD_CHECKPOINT_SEGMENTS=24`. Training took 277518 ms with
+314 action tokens, 588 env tokens, 556 context tokens, and about 15982 MiB peak
+VRAM. Adapter verify passed.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it: composite 0.925 versus base smoke
+0.934375, with outcome/tested/format all 1.0 but tool-call efficiency down to
+0.75, mean tool calls up to 5.5, mean thinking chars up to 2703, and mean
+wall-clock up to 51.08s. The promotion gate was skipped. Lesson: controlled
+successful thinking-tier pairs are safer than failure negatives but still too
+brittle as one-group GRPO; broader versions need a cheaper method or shorter
+workflow-only payloads before this route is worth another promotion check.
