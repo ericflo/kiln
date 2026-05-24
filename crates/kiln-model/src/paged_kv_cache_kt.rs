@@ -361,6 +361,89 @@ impl PagedKvCacheKt {
         Ok(())
     }
 
+    /// Read `seq_len` tokens for one sequence out of the paged pool
+    /// and reshape into `[1, num_kv_heads, seq_len, head_dim]` for
+    /// downstream attention.
+    ///
+    /// Mirrors [`crate::paged_kv_cache::PagedKvCache::read`] for the
+    /// **contiguous-slot-run case** (block_table's logical positions
+    /// `0..seq_len` map to a single contiguous slot range in the
+    /// pool). Returns an error for the non-contiguous case until a
+    /// CUDA-side `index_select` lands — production decode hits the
+    /// contiguous path the vast majority of the time.
+    ///
+    /// FP8 caches are rejected here too — the dequant kt-API entries
+    /// aren't yet ported.
+    ///
+    /// **Cost:** one CUDA `Tensor::contiguous()` per pool (k and v),
+    /// which now lands on the substrate kernel shipped in
+    /// PR #1374. The narrow + transpose + unsqueeze before that are
+    /// zero-copy layout-only ops.
+    pub fn read(
+        &self,
+        layer_idx: usize,
+        block_table: &BlockTable,
+        seq_len: usize,
+    ) -> Result<(KtTensor, KtTensor)> {
+        if self.fp8 {
+            anyhow::bail!(
+                "kt PagedKvCacheKt::read: FP8 cache read path not yet wired \
+                 (needs FP8 dequant kt-API)"
+            );
+        }
+        let (k_pool, v_pool) = &self.layers[layer_idx];
+
+        let start_slot = crate::paged_kv_cache::contiguous_slot_run_start(
+            block_table,
+            self.block_size,
+            0,
+            seq_len,
+        )
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "kt PagedKvCacheKt::read: non-contiguous slot path not yet wired \
+                 (needs CUDA-side index_select)"
+            )
+        })?;
+
+        // narrow → transpose → contiguous → unsqueeze. All zero-copy
+        // until contiguous(), which routes through the CUDA substrate
+        // kernel (PR #1374).
+        let k_slice = k_pool
+            .narrow(0, start_slot, seq_len)
+            .map_err(|e| anyhow::anyhow!("kt pkv read: narrow k: {e}"))?;
+        let v_slice = v_pool
+            .narrow(0, start_slot, seq_len)
+            .map_err(|e| anyhow::anyhow!("kt pkv read: narrow v: {e}"))?;
+
+        // [seq_len, num_kv_heads, head_dim] -> [num_kv_heads, seq_len, head_dim]
+        let k_t = k_slice
+            .transpose(0, 1)
+            .map_err(|e| anyhow::anyhow!("kt pkv read: transpose k: {e}"))?;
+        let v_t = v_slice
+            .transpose(0, 1)
+            .map_err(|e| anyhow::anyhow!("kt pkv read: transpose v: {e}"))?;
+
+        // Materialize the transposed layout — the CUDA-side
+        // contiguous kernel kicks in here.
+        let k_c = k_t
+            .contiguous()
+            .map_err(|e| anyhow::anyhow!("kt pkv read: contiguous k: {e}"))?;
+        let v_c = v_t
+            .contiguous()
+            .map_err(|e| anyhow::anyhow!("kt pkv read: contiguous v: {e}"))?;
+
+        // Add leading batch dim → [1, num_kv_heads, seq_len, head_dim].
+        let k_out = k_c
+            .unsqueeze(0)
+            .map_err(|e| anyhow::anyhow!("kt pkv read: unsqueeze k: {e}"))?;
+        let v_out = v_c
+            .unsqueeze(0)
+            .map_err(|e| anyhow::anyhow!("kt pkv read: unsqueeze v: {e}"))?;
+
+        Ok((k_out, v_out))
+    }
+
     /// Host-slot variant: writes a single decode token at a host-known
     /// slot index. Mirrors the host-slot path of
     /// [`crate::paged_kv_cache::PagedKvCache::write_token_major_native`]
