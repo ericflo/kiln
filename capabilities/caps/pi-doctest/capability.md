@@ -1159,3 +1159,36 @@ result, but the particular "wrong edit -> failed doctest -> stop" negative
 still destabilizes the policy. Future real-variance work should keep the
 trainability trick, but avoid teaching failed-doctest terminal stops; use
 preferred repair continuations or softer contrasts instead.
+
+### H64: real repair-continuation GRPO
+
+H64 followed the H63 lesson directly. It reused the same two H44 train-only
+natural variance groups, but replaced the bad terminal branch with a real
+failed edit followed by a concise repair continuation, passing doctest, and
+`DONE`. The direct success trajectory kept reward 1.0; the repaired near-miss
+used a softer reward 0.75. A larger candidate with explicit post-failed-doctest
+repair-vs-DONE rescue groups was also built, but dry-run context grew to 4072
+tokens, so the trained run used the smaller full-trajectory g2 set.
+
+The trained dry-run shape was 2 groups, 4 completions, 828 action tokens, 938
+env tokens, 1168 context tokens, and reward stdev 0.125. Training used rank 4
+/ alpha 4 / lr `5e-7`, no ECHO, and `KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It
+completed in 676.986s observed with peak observed VRAM 15998 MiB. Adapter
+verify passed with 400 nonzero LoRA tensors and LoRA update proxy 0.029918.
+
+Blind `LIMIT=4 SEEDS=1` smoke was positive: paired base scored 0.934375 with
+no zero rollouts and mean wall-clock 39.44s, while H64 scored 0.9625 with no
+zero rollouts and mean wall-clock 44.66s. The first `LIMIT=8` gate also looked
+positive, with base at 0.73125 and two zero rollouts versus H64 at 0.8375 and
+one zero rollout. A confirmation `LIMIT=8` gate rejected the adapter: paired
+base scored 0.722917 with one zero rollout, while H64 scored 0.575 with three
+zero rollouts. Across the two wider gates, base averaged 0.727083 with three
+zero rollouts over 16 total rollouts; H64 averaged 0.70625 with four zero
+rollouts.
+
+Lesson: repair-continuation data is a better direction than H63's terminal
+failed-doctest branch, but full-trajectory direct-success-over-repair still
+penalizes the repair continuation together with the bad first edit. Do not
+chain from H64. The next real-variance attempt should make the failed state a
+local choice -- repair over terminal `DONE` -- while keeping the context short
+enough to train locally.
