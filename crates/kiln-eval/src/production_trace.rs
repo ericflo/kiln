@@ -878,10 +878,7 @@ mod tests {
             stats.sampled_examples[0].session_id.as_deref(),
             Some("sess-1")
         );
-        assert_eq!(
-            stats.sampled_tool_histogram.get("Read"),
-            Some(&1)
-        );
+        assert_eq!(stats.sampled_tool_histogram.get("Read"), Some(&1));
         assert_eq!(suite.examples.len(), 1);
         assert_eq!(suite.examples[0].messages.len(), 2);
         assert!(suite.tools.as_ref().map_or(false, |t| t.len() == 1));
@@ -1056,7 +1053,9 @@ mod tests {
         assert_eq!(stats.sampled_examples.len(), 2);
         assert_eq!(stats.sampled_tool_histogram.values().sum::<u64>(), 2);
         assert_eq!(
-            stats.sampled_source_format_counts.get("prompt_chosen_jsonl"),
+            stats
+                .sampled_source_format_counts
+                .get("prompt_chosen_jsonl"),
             Some(&2)
         );
     }

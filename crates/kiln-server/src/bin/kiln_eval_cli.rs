@@ -253,16 +253,23 @@ async fn cmd_list(client: &reqwest::Client, server: &str) -> Result<()> {
         .cloned()
         .unwrap_or_default();
     if suites.is_empty() {
-        println!("(no registered suites — register one with `kiln-eval register --file SUITE.json`)");
+        println!(
+            "(no registered suites — register one with `kiln-eval register --file SUITE.json`)"
+        );
         return Ok(());
     }
-    println!("{:<32}  {:<10}  {:<18}  description", "name", "examples", "scorer");
+    println!(
+        "{:<32}  {:<10}  {:<18}  description",
+        "name", "examples", "scorer"
+    );
     for s in suites {
         println!(
             "{:<32}  {:<10}  {:<18}  {}",
             s.get("name").and_then(|v| v.as_str()).unwrap_or(""),
             s.get("num_examples").and_then(|v| v.as_u64()).unwrap_or(0),
-            s.get("default_scorer_kind").and_then(|v| v.as_str()).unwrap_or(""),
+            s.get("default_scorer_kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
             s.get("description").and_then(|v| v.as_str()).unwrap_or(""),
         );
     }
@@ -560,7 +567,11 @@ async fn poll_until_done(
             .send()
             .await?;
         if !resp.status().is_success() {
-            bail!("status check failed ({}): {}", resp.status(), resp.text().await?);
+            bail!(
+                "status check failed ({}): {}",
+                resp.status(),
+                resp.text().await?
+            );
         }
         let payload: EvalResultPayload = resp.json().await?;
         match payload.state.as_str() {
@@ -598,7 +609,13 @@ fn print_human(result: &EvalResultPayload) {
         let adapter_label = r
             .adapter
             .as_deref()
-            .map(|s| if s.is_empty() { "<base>".to_string() } else { s.to_string() })
+            .map(|s| {
+                if s.is_empty() {
+                    "<base>".to_string()
+                } else {
+                    s.to_string()
+                }
+            })
             .unwrap_or_else(|| "<base>".to_string());
         println!();
         println!("Suite: {} | Adapter: {}", r.suite_name, adapter_label);
@@ -671,10 +688,7 @@ fn print_human(result: &EvalResultPayload) {
                         println!("  confusion (target → predicted):");
                         printed_header = true;
                     }
-                    println!(
-                        "    {:<20} → {:<20}  ×{}",
-                        target, predicted, count
-                    );
+                    println!("    {:<20} → {:<20}  ×{}", target, predicted, count);
                 }
             }
         }
@@ -700,13 +714,10 @@ fn print_human(result: &EvalResultPayload) {
                 r.metrics.num_non_xml_tool_calls
             );
         }
-        if r.metrics.num_schema_missing_required > 0
-            || r.metrics.num_schema_extra_unknown > 0
-        {
+        if r.metrics.num_schema_missing_required > 0 || r.metrics.num_schema_extra_unknown > 0 {
             println!(
                 "  schema: missing-required={}  extra-unknown={}",
-                r.metrics.num_schema_missing_required,
-                r.metrics.num_schema_extra_unknown,
+                r.metrics.num_schema_missing_required, r.metrics.num_schema_extra_unknown,
             );
         }
     }
@@ -717,12 +728,21 @@ fn print_compare(result: &EvalResultPayload) {
         eprintln!("no runs in compare result");
         return;
     }
-    println!("{:<24}  {:>10}  {:>10}  {:>10}", "adapter", "accuracy", "mean", "p50 ms");
+    println!(
+        "{:<24}  {:>10}  {:>10}  {:>10}",
+        "adapter", "accuracy", "mean", "p50 ms"
+    );
     for r in &result.runs {
         let adapter = r
             .adapter
             .as_deref()
-            .map(|s| if s.is_empty() { "<base>".to_string() } else { s.to_string() })
+            .map(|s| {
+                if s.is_empty() {
+                    "<base>".to_string()
+                } else {
+                    s.to_string()
+                }
+            })
             .unwrap_or_else(|| "<base>".to_string());
         println!(
             "{:<24}  {:>9.1}%  {:>10.3}  {:>10.0}",
