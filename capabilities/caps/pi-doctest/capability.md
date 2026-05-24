@@ -199,6 +199,19 @@ a narrow stop-after-pass extra instruction. None beat the default prompt's
 stop-after-pass extra instruction regressed both outcome and efficiency. Do
 not distill these prompts.
 
+H22 tested a qualitatively different signal: verifier-free ECHO-only training
+with `--no-policy-loss` on the tiny H17 success-anchor train dataset. Dry-run
+validated 2 groups / 7 completions / 2584 action tokens / 2201 env tokens and
+correctly warned that policy-gradient GRPO would be harmful on the saturated
+rewards. The first offline CUDA training command still failed the
+local-throughput gate after model load. An explicit retry with
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`, `RUST_LOG=info`, and `--max-groups 1`
+confirmed that streamed GRPO checkpointing was active, but it also timed out:
+the first completion's backward pass took 270s, the second 178s, and the third
+did not complete before the 900s wrapper. ECHO remains plausible as a method,
+but this local route needs a smaller env-only microbatch or trainer support
+that skips policy/reference work when `--no-policy-loss` is set.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
