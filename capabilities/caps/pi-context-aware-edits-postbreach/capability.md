@@ -224,6 +224,17 @@ and JavaScript camelCase/CommonJS style when available.
   is the first direction that lifts composite, outcome, and format together;
   this tests whether a modest capacity increase can clear the +0.05 promotion
   gate without repeating the ECHO-induced convention/read regressions.
+  - Result: rejected. The rank-8 no-ECHO update trained and verified under
+    CUDA 13.2 on the RTX 4090 (`groups_kept=20`, `completions_trained=80`,
+    peak training VRAM 22,569 MiB, elapsed 7,190.9s), but blind eval regressed
+    to 0.2383 (`delta=-0.0613`). `outcome` stayed at baseline 0.5000, but
+    `format_compliance` fell to 0.5000, `convention_consistency` fell to
+    0.9079, and `read_before_edit` fell to 0.9583. The CUDA-feature server
+    benchmark itself was healthy: `CUDA: available`, W4A16 packed 104/104
+    projections, CUDA graphs enabled, 317/317 eval requests succeeded with no
+    server errors or timeouts, and observed eval VRAM stayed around 19.3 GiB.
+    H10's improvement was not capacity-limited; increasing no-ECHO rank
+    overfit/regressed the edit contract.
 
 ## Standard Workflow
 
