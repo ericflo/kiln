@@ -1192,3 +1192,28 @@ penalizes the repair continuation together with the bad first edit. Do not
 chain from H64. The next real-variance attempt should make the failed state a
 local choice -- repair over terminal `DONE` -- while keeping the context short
 enough to train locally.
+
+### H65: post-failed-doctest local repair GRPO
+
+H65 made that failed-state choice local. From the same H44 train-only
+near-misses, the context ended immediately after the real failed doctest
+observation. The preferred completion was the next real repair action from the
+near-miss; the rejected completion was a synthetic terminal `DONE`. This
+removed the full repair tail and avoided comparing repaired near-misses against
+direct successes.
+
+The dry-run shape was 2 groups, 4 completions, rewards 1.0 vs 0.0, 116 action
+tokens, 0 env tokens, 3132 context tokens, and reward stdev 0.5. Training used
+rank 4 / alpha 4 / lr `1e-7`, no ECHO, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 642.587s observed with
+peak observed VRAM 16002 MiB. Adapter verify passed with 400 nonzero LoRA
+tensors and a small LoRA update proxy of 0.005614.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.925 with no
+zero rollouts and mean wall-clock 34.11s. H65 scored 0.75 with one zero
+rollout and mean wall-clock 40.83s. Lesson: even an extremely local
+repair-over-DONE contrast is too narrow as a standalone adapter update; it
+still creates reliability drift. The systems lesson is also useful: 116 action
+tokens still took over ten minutes because the failed-doctest contexts were
+large. Avoid more failed-state micro-contrast GRPO unless the context can be
+compressed substantially or paired with a broader behavior anchor.
