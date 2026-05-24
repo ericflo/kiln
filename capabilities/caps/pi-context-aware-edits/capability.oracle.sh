@@ -10,6 +10,7 @@ cd "$(dirname "$0")"
 
 ADAPTER="${1:-}"
 TASKS="${TASKS:-datasets/eval.tasks.jsonl}"
+CONFIG="${CONFIG:-capability.config.json}"
 KILN_URL="${KILN_URL:-http://localhost:8420}"
 SEEDS="${SEEDS:-3}"
 OUT_FILE="${OUT_FILE:-/tmp/pi-context-aware-edits-eval-${ADAPTER:-base}.json}"
@@ -31,6 +32,7 @@ fi
 python3 rollout.py \
   --tasks "$TASKS" \
   --out-dir "$EVAL_OUT_ROOT" \
+  --config "$CONFIG" \
   --adapter "${ADAPTER:-}" \
   --num-generations "$SEEDS" \
   --mode eval \
