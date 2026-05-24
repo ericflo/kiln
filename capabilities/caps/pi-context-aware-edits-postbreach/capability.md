@@ -160,6 +160,19 @@ and JavaScript camelCase/CommonJS style when available.
   with a small SFT update. This tests whether distribution-matched successful
   traces can preserve outcome, format, and convention better than synthetic
   ideal SFT or reward-only GRPO.
+  - Result: rejected. The winner-only SFT update trained quickly and verified
+    with a small nonzero LoRA effect, but blind eval regressed to 0.2371
+    (`delta=-0.0625`). It preserved `convention_consistency` (0.9750) and
+    style/import scores, but `outcome` fell to 0.4583 and
+    `format_compliance` fell to 0.4792. Distribution-matched winner imitation
+    is too narrow to preserve the full edit contract.
+- **PB-H7: full-train conservative Agentic GRPO/ECHO.** Collect fresh
+  default-prompt train-only rollouts over the full 32-task train pool with four
+  generations per task, then train a conservative GRPO/ECHO update
+  (`rank=8`, `alpha=16`, `lr=5e-6`, `echo_lambda=0.03`). This tests whether
+  more reward-variant train groups can stabilize the useful H5 outcome/format
+  movement without the convention/read/style slips seen on the small PB-H2
+  rollout set.
 
 ## Standard Workflow
 
