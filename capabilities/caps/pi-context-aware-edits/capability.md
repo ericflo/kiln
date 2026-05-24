@@ -169,12 +169,16 @@ A4: Skip the actual edit, claim the function already exists.
     0.5000, so gated composite regressed to 0.3597 (`delta=-0.1203`).
     Ideal traces are useful for edit completion, but not sufficient for
     the final-response contract.
-- **H5: mixed-language corpus** (Python + Rust + Go + JS) — does
+- **H5: pairwise final-format GRPO on H4.** Use synthetic positive/negative
+  pairs with identical ideal tool traces and only the final sentence
+  changed, chained on H4, to isolate the `format_compliance` gate without
+  relearning edit completion.
+- **H6: mixed-language corpus** (Python + Rust + Go + JS) — does
   context-awareness generalize across language conventions, or is it
   language-specific?
-- **H6: OPD chained on best kept adapter** — distill teacher's stronger
+- **H7: OPD chained on best kept adapter** — distill teacher's stronger
   convention-preservation onto the GRPO-trained adapter.
-- **H7: stratified by convention category** — equal task counts per
+- **H8: stratified by convention category** — equal task counts per
   category.
 
 ## Composition with other caps
