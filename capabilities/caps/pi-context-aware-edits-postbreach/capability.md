@@ -242,7 +242,18 @@ and JavaScript camelCase/CommonJS style when available.
   isolates whether a smaller same-direction update can keep H10's outcome and
   format gains while recovering convention/read-before-edit enough to clear the
   +0.05 promotion gate.
-  - Result: pending.
+  - Result: rejected. The half-scale no-ECHO run trained, installed, and
+    verified cleanly under CUDA 13.2 with gradient checkpointing (`groups_kept=20`,
+    `completions_trained=80`, final loss 0.053483, peak training VRAM
+    20,809 MiB, elapsed 7,500.0s, verify L2 proxy 1.2182). The CUDA eval
+    server was healthy (`CUDA: available`, W4A16 104/104, CUDA graphs enabled,
+    329/329 eval requests ok), but blind eval regressed to 0.2163
+    (`delta=-0.0833`): `outcome=0.4792`, `format_compliance=0.5000`,
+    `convention_consistency=0.9542`, and `read_before_edit=0.9792`.
+    Halving LoRA scale recovered a little read-before-edit versus H10 but
+    destroyed the outcome/format movement that made H10 useful. H10 remains
+    the current best caveated adapter; further rank/alpha scaling around this
+    same full-train no-ECHO recipe is not promising.
 
 ## Standard Workflow
 

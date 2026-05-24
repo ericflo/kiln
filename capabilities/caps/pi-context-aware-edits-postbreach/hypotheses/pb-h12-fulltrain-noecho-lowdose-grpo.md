@@ -38,4 +38,42 @@ Reject if any of:
 
 ## Result
 
-Pending.
+Rejected.
+
+Training completed successfully on the local WSL2 RTX 4090 CUDA 13.2 box with
+`KILN_GRAD_CHECKPOINT_SEGMENTS=32`:
+
+- groups kept/trained: 20/32 reward-variant groups, 80 completions;
+- final loss: 0.053483;
+- token counts: 80,202 action, 42,565 environment, 18,172 context;
+- peak training VRAM: 20,809 MiB;
+- elapsed: 7,500.027s;
+- adapter verification: passed (`rank=4`, `alpha=4`, 400 tensors,
+  nonzero LoRA effect, delta proxy L2 1.2182).
+
+The CUDA eval server was healthy:
+
+- server banner: `CUDA: available`;
+- W4A16 Marlin pack: 104/104 projections;
+- CUDA graphs: enabled;
+- eval model requests: 329/329 ok, 0 errors, 0 timeouts;
+- eval token traffic: 797,925 prefill tokens, 46,111 decode tokens;
+- recent latency at completion: p50 2,424.5 ms, p95 8,873.05 ms,
+  p99 10,923.96 ms.
+
+Blind 3-seed eval regressed below both baseline and PB-H10:
+
+- composite: 0.2163 vs baseline 0.2996 (`delta=-0.0833`);
+- outcome: 0.4792 vs baseline 0.5000 and PB-H10 0.5208;
+- format_compliance: 0.5000 vs baseline 0.5625 and PB-H10 0.6042;
+- convention_consistency: 0.9542, matching PB-H10 but below baseline;
+- read_before_edit: 0.9792, above PB-H10 but below baseline;
+- zero-score rollouts: 37/48;
+- thinking efficiency: 345.8 chars/tool call.
+
+This falsifies the "H10 was simply too large" interpretation. Halving the
+LoRA scale recovered a little read-before-edit but lost the outcome and format
+movement that made H10 useful. H10 remains the current best caveated adapter;
+the next attempt should change data selection, reward/objective, or runtime
+policy rather than continue rank/alpha scaling around the same full-train
+no-ECHO recipe.
