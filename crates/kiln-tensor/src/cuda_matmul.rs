@@ -279,3 +279,193 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let storage_arc: Storage = Arc::new(out_storage);
     Tensor::from_parts(storage_arc, Layout::contiguous(out_shape), TensorId::next())
 }
+
+
+/// Run a CUDA matmul with a fused per-column bias add.
+///
+/// Same shape contract as [`cuda_matmul`]:
+///
+/// - `a`: `[..., M, K]`
+/// - `b`: `[K, N]` (must be 2-D; the bias epilogue requires the
+///   output to be `[B*..., N]` for a single bias vector to apply)
+/// - `bias`: `[N]`, same dtype as `a` and `b`
+///
+/// Computes `C = A @ B + bias` in a single cublasLt call using the
+/// `CUBLASLT_EPILOGUE_BIAS` epilogue. Saves one kernel launch + one
+/// pass over the output vs the separate `matmul` + `add` decomposition.
+///
+/// Bias is broadcast over the last axis of the output (the standard
+/// PyTorch bias semantics).
+pub fn cuda_matmul_with_bias(
+    a: &Tensor,
+    b: &Tensor,
+    bias: &Tensor,
+) -> Result<Tensor> {
+    // ---- validate shapes ----
+    let a_rank = a.rank();
+    if a_rank < 2 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_matmul_with_bias: a must have rank >= 2, got {a_rank}"
+        )));
+    }
+    if b.rank() != 2 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_matmul_with_bias: b must be 2-D (per cublasLt bias-epilogue requirement), got rank {}",
+            b.rank()
+        )));
+    }
+    if bias.rank() != 1 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_matmul_with_bias: bias must be 1-D, got rank {}",
+            bias.rank()
+        )));
+    }
+
+    let a_shape = a.shape();
+    let m = a_shape[a_rank - 2];
+    let k_a = a_shape[a_rank - 1];
+    let k_b = b.shape()[0];
+    let n = b.shape()[1];
+
+    if k_a != k_b {
+        return Err(crate::Error::Msg(format!(
+            "cuda_matmul_with_bias: contraction dim mismatch a.K={k_a} b.K={k_b}"
+        )));
+    }
+    if bias.shape()[0] != n {
+        return Err(crate::Error::Msg(format!(
+            "cuda_matmul_with_bias: bias len {} must equal N={n}",
+            bias.shape()[0]
+        )));
+    }
+    let dtype = a.dtype();
+    if dtype != b.dtype() || dtype != bias.dtype() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_matmul_with_bias: dtype mismatch a={} b={} bias={}",
+            a.dtype(),
+            b.dtype(),
+            bias.dtype()
+        )));
+    }
+    let dtype_str = match dtype {
+        DType::F32 => "f32",
+        DType::BF16 => "bf16",
+        DType::F16 => "f16",
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_matmul_with_bias: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !a.is_contiguous() || !b.is_contiguous() || !bias.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_matmul_with_bias: inputs must be contiguous".to_string(),
+        ));
+    }
+
+    // ---- resolve CUDA storage + device ----
+    let a_storage = a
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_matmul_with_bias: a's storage must be CudaStorage".to_string())
+        })?;
+    let b_storage = b
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_matmul_with_bias: b's storage must be CudaStorage".to_string())
+        })?;
+    let bias_storage = bias
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg(
+                "cuda_matmul_with_bias: bias's storage must be CudaStorage".to_string(),
+            )
+        })?;
+    use crate::StorageBackend;
+    if a_storage.device() != b_storage.device() || a_storage.device() != bias_storage.device() {
+        return Err(crate::Error::Msg(
+            "cuda_matmul_with_bias: all inputs must be on the same CUDA device".to_string(),
+        ));
+    }
+    let device_index = match a_storage.device() {
+        crate::Device::Cuda(i) => i,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_matmul_with_bias: expected CUDA device, got {other}"
+            )));
+        }
+    };
+    let candle_device = a_storage.candle_device().clone();
+
+    // ---- allocate output ----
+    let batch: usize = a_shape[..a_rank - 2].iter().product::<usize>().max(1);
+    let mut out_shape = a_shape[..a_rank - 2].to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    let out_n_elements = batch * m * n;
+    let out_storage =
+        CudaStorage::zeros(candle_device.clone(), device_index, dtype, out_n_elements)?;
+
+    // ---- acquire handle ----
+    let handle = get_or_init_handle(device_index, candle_device.clone())?;
+
+    // ---- per-batch dispatch ----
+    let bpe = dtype.size_in_bytes();
+    let a_batch_stride = (m * k_a * bpe) as u64;
+    let c_batch_stride = (m * n * bpe) as u64;
+    // B is 2-D and shared across batches — no stride.
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream();
+
+    let (a_base, _) = a_storage.device_ptr_raw();
+    let (b_base, _) = b_storage.device_ptr_raw();
+    let (bias_base, _) = bias_storage.device_ptr_raw();
+    let (out_base, _) = out_storage.device_ptr_raw();
+
+    let a_off_root = (a.layout().start_offset() * bpe) as u64;
+    let b_off_root = (b.layout().start_offset() * bpe) as u64;
+    let bias_off_root = (bias.layout().start_offset() * bpe) as u64;
+
+    let request = MatmulRequest {
+        m: m as u64,
+        n: n as u64,
+        k: k_a as u64,
+        dtype: dtype_str.to_string(),
+        a_layout: MatmulLayout::RowMajor,
+        b_layout: MatmulLayout::RowMajor,
+        c_layout: MatmulLayout::RowMajor,
+        epilogue: Epilogue::Bias,
+        concurrent_streams: 1,
+    };
+
+    let b_ptr = (b_base + b_off_root) as *const core::ffi::c_void;
+    let bias_ptr = (bias_base + bias_off_root) as *const core::ffi::c_void;
+
+    for batch_i in 0..batch {
+        let a_off = a_off_root + (batch_i as u64) * a_batch_stride;
+        let c_off = (batch_i as u64) * c_batch_stride;
+
+        let a_ptr = (a_base + a_off) as *const core::ffi::c_void;
+        let c_ptr = (out_base + c_off) as *mut core::ffi::c_void;
+
+        unsafe {
+            handle
+                .matmul(raw_stream, &request, a_ptr, b_ptr, c_ptr, bias_ptr)
+                .map_err(|e| {
+                    crate::Error::Msg(format!(
+                        "cuda_matmul_with_bias: handle.matmul failed: {e}"
+                    ))
+                })?;
+        }
+    }
+
+    let storage_arc: Storage = Arc::new(out_storage);
+    Tensor::from_parts(storage_arc, Layout::contiguous(out_shape), TensorId::next())
+}

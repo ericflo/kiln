@@ -79,7 +79,7 @@ pub use cuda_storage::{
     cuda_index_select_dim0, cuda_softmax_last_axis, cuda_zeros, CudaStorage,
 };
 #[cfg(feature = "cuda")]
-pub use cuda_matmul::{cuda_matmul, snapshot_algo_cache};
+pub use cuda_matmul::{cuda_matmul, cuda_matmul_with_bias, snapshot_algo_cache};
 #[cfg(feature = "metal")]
 pub use metal_allocator::MetalAllocator;
 #[cfg(feature = "metal")]
