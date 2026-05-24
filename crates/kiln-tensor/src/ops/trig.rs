@@ -47,23 +47,27 @@ impl TrigKind {
         }
     }
 
-    /// CUDA kernel kind tag. Only sin/cos/tan are wired to the shared
-    /// activation kernel today (#1082). The inverse trig ops (asin,
-    /// acos, atan) stay CPU-only until a follow-up.
+    /// CUDA kernel kind tag. All six trig ops route through the
+    /// shared `cuda_activation_unary` kernel — sin/cos/tan as kinds
+    /// 7/8/9 (#1082 base set) and asin/acos/atan as kinds 18/19/20
+    /// (#1082 follow-up).
     #[cfg(feature = "cuda")]
     fn cuda_kind_tag(self) -> Option<i32> {
         match self {
             TrigKind::Sin => Some(7),
             TrigKind::Cos => Some(8),
             TrigKind::Tan => Some(9),
-            TrigKind::Asin | TrigKind::Acos | TrigKind::Atan => None,
+            TrigKind::Asin => Some(18),
+            TrigKind::Acos => Some(19),
+            TrigKind::Atan => Some(20),
         }
     }
 }
 
 /// `DeviceOp1` adapter for the trig family. CUDA path routes the
-/// forward sin/cos/tan through the shared `cuda_activation_unary`
-/// kernel; asin/acos/atan fall through to CPU (#1082).
+/// forward sin/cos/tan (kinds 7/8/9) and asin/acos/atan (kinds
+/// 18/19/20) through the shared `cuda_activation_unary` kernel
+/// (#1082).
 #[derive(Debug, Clone, Copy)]
 struct TrigOp {
     kind: TrigKind,
