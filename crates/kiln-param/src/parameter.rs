@@ -210,6 +210,22 @@ pub struct Parameter {
     /// Used by checkpoint save and by Phase 9 diagnostics. Optional —
     /// not every parameter has a meaningful safetensors name.
     name: Option<Arc<str>>,
+    /// Phase 2.5 storage-coherence flag (#1082 line 287).
+    ///
+    /// `true` when the BF16/F32 master (`backward_storage`) has been
+    /// mutated (typically by the optimizer step) and the quantized
+    /// `forward_storage` is therefore stale and must be re-quantized
+    /// before the next forward read.
+    ///
+    /// Mutated through [`Parameter::mark_master_dirty`] /
+    /// [`Parameter::mark_forward_clean`]. The actual re-quantization
+    /// kernel is the caller's responsibility (different on cublasLt /
+    /// MPS / Vulkan) — this slot is the explicit handshake.
+    ///
+    /// For pure-inference Parameters (no `backward_storage`),
+    /// `forward_stale` is always `false` — there is no master to
+    /// invalidate from.
+    forward_stale: bool,
 }
 
 impl Parameter {
@@ -225,6 +241,7 @@ impl Parameter {
             heads: Vec::new(),
             amp_policy: AmpPolicy::default(),
             name: None,
+            forward_stale: false,
         }
     }
 
@@ -240,7 +257,39 @@ impl Parameter {
             heads: Vec::new(),
             amp_policy: policy,
             name: None,
+            forward_stale: false,
         }
+    }
+
+    /// Phase 2.5 storage-coherence (#1082 line 287): whether the
+    /// quantized `forward_storage` is stale relative to the BF16/F32
+    /// master in `backward_storage`. Read by the forward path before
+    /// running matmul; if `true`, the caller must re-quantize before
+    /// the next forward read.
+    ///
+    /// For pure-inference Parameters (no `backward_storage`), this
+    /// always returns `false`.
+    pub fn is_forward_stale(&self) -> bool {
+        self.forward_stale
+    }
+
+    /// Mark the forward storage as stale after the master
+    /// (`backward_storage`) has been mutated, typically by the
+    /// optimizer step. No-op for pure-inference Parameters (forward
+    /// storage is canonical when there is no master).
+    pub fn mark_master_dirty(&mut self) {
+        if self.backward_storage.is_some() {
+            self.forward_stale = true;
+        }
+    }
+
+    /// Mark the forward storage as clean after a re-quantization
+    /// kernel has refreshed it from the master. The kernel itself
+    /// is the caller's responsibility (per-backend); this is the
+    /// explicit handshake the caller flips when the refresh
+    /// completes.
+    pub fn mark_forward_clean(&mut self) {
+        self.forward_stale = false;
     }
 
     /// Stable identity.
@@ -280,8 +329,13 @@ impl Parameter {
 
     /// Mutate the forward storage (e.g. swap BF16 → Marlin in place).
     /// **Preserves `tensor_id`** per anti-pattern 11.
+    ///
+    /// Marks `forward_stale = false` since the caller has just
+    /// provided a fresh forward storage (the storage-coherence
+    /// invariant is satisfied by the replacement itself).
     pub fn replace_forward_storage(&mut self, new: ForwardStorage) {
         self.forward_storage = new;
+        self.forward_stale = false;
         // tensor_id intentionally unchanged.
     }
 
@@ -303,8 +357,15 @@ impl Parameter {
     ///
     /// `None` argument drops the backward storage entirely (used by
     /// LoRA-only frozen-trunk parameters).
+    ///
+    /// Marks `forward_stale = true` when the new master is `Some` —
+    /// the forward storage may now be inconsistent with the master
+    /// the caller just installed. (Dropping the master to `None`
+    /// resets the flag since there's nothing to be stale against.)
     pub fn replace_backward_storage(&mut self, new: Option<Tensor>) {
+        let was_some = new.is_some();
         self.backward_storage = new;
+        self.forward_stale = was_some;
         // tensor_id intentionally unchanged.
     }
 
@@ -687,5 +748,84 @@ mod tests {
         let p1 = Parameter::inference_only(plain_f32());
         let p2 = Parameter::inference_only(plain_f32());
         assert_eq!(p1.content_hash().unwrap(), p2.content_hash().unwrap());
+    }
+
+    #[test]
+    fn forward_stale_default_is_false_for_inference() {
+        let p = Parameter::inference_only(plain_f32());
+        assert!(!p.is_forward_stale());
+    }
+
+    #[test]
+    fn forward_stale_default_is_false_for_trainable() {
+        let fs = plain_f32();
+        let master_tensor = fs.primary_tensor().clone();
+        let p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        assert!(!p.is_forward_stale());
+    }
+
+    #[test]
+    fn mark_master_dirty_is_noop_for_pure_inference() {
+        // No backward_storage → can't be stale.
+        let mut p = Parameter::inference_only(plain_f32());
+        p.mark_master_dirty();
+        assert!(!p.is_forward_stale());
+    }
+
+    #[test]
+    fn mark_master_dirty_sets_stale_for_trainable() {
+        let fs = plain_f32();
+        let master_tensor = fs.primary_tensor().clone();
+        let mut p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        p.mark_master_dirty();
+        assert!(p.is_forward_stale());
+    }
+
+    #[test]
+    fn mark_forward_clean_resets_after_dirty() {
+        let fs = plain_f32();
+        let master_tensor = fs.primary_tensor().clone();
+        let mut p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        p.mark_master_dirty();
+        assert!(p.is_forward_stale());
+        p.mark_forward_clean();
+        assert!(!p.is_forward_stale());
+    }
+
+    #[test]
+    fn replace_forward_storage_resets_stale() {
+        let fs = plain_f32();
+        let master_tensor = fs.primary_tensor().clone();
+        let mut p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        p.mark_master_dirty();
+        assert!(p.is_forward_stale());
+        p.replace_forward_storage(plain_f32());
+        assert!(!p.is_forward_stale());
+    }
+
+    #[test]
+    fn replace_backward_storage_with_some_sets_stale() {
+        let fs = plain_f32();
+        let master_tensor = fs.primary_tensor().clone();
+        let mut p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        // After a fresh trainable construction, stale is false.
+        assert!(!p.is_forward_stale());
+        // Replacing the master with a new tensor sets stale.
+        let new_master = plain_f32().primary_tensor().clone();
+        p.replace_backward_storage(Some(new_master));
+        assert!(p.is_forward_stale());
+    }
+
+    #[test]
+    fn replace_backward_storage_with_none_resets_stale() {
+        let fs = plain_f32();
+        let master_tensor = fs.primary_tensor().clone();
+        let mut p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        p.mark_master_dirty();
+        assert!(p.is_forward_stale());
+        // Dropping the master to None means there's nothing to be
+        // stale against.
+        p.replace_backward_storage(None);
+        assert!(!p.is_forward_stale());
     }
 }
