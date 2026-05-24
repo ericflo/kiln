@@ -17,13 +17,13 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::BufRead;
 
-use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use rand_core::Rng as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::qwen3::{extract_tool_calls, ParsedToolCall};
+use crate::qwen3::{ParsedToolCall, extract_tool_calls};
 use crate::scorers::{ArgsScoring, NameMatch, Scorer};
 use crate::suite::{EvalChatMessage, EvalExample, EvalGenerationParams, EvalSuite};
 use crate::trajectory::{AnthropicBlock, AnthropicMessage, anthropic_turn_to_sft_conversation};
@@ -754,7 +754,7 @@ mod tests {
     use super::*;
     use crate::EvalOutcomeKind;
     use crate::qwen3::extract_first_tool_call;
-    use crate::scorers::{score_completion, NoopJudgeRunner};
+    use crate::scorers::{NoopJudgeRunner, score_completion};
 
     fn build(input: &str, max_examples: Option<usize>) -> (EvalSuite, ProductionTraceSuiteStats) {
         let mut cfg = ProductionTraceSuiteConfig::new("prod-tool-smoke");
