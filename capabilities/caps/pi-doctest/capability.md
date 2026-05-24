@@ -1268,3 +1268,28 @@ of H66's severe score loss and avoids its zero rollout, so the H66 direction
 was genuinely harmful. But the inverse still loses to base and is much slower,
 so H66's opposite is not a useful adapter direction. Avoid more single-axis
 adapter arithmetic from H66 unless it is composed with a confirmed stabilizer.
+
+### H68: repair-continuation ECHO 0.075 low dose
+
+H68 returned to H64, the recent real-variance near-miss that passed smoke and
+one wider gate before failing confirmation. It used the same two train-only
+repair-continuation groups, but added ECHO at `0.075`, borrowing the
+`pi-code-comprehension` lesson that this can be the productive ceiling for
+tool-observation conditioning. The policy dose was lowered from H64's `5e-7`
+to `2e-7`.
+
+Dry-run shape matched H64: 2 groups, 4 completions, 828 action tokens, 938 env
+tokens, 1168 context tokens, and reward stdev 0.125. Training used
+`cuda_grpo_ablation --mode phase1`, rank 4 / alpha 4 / lr `2e-7`, ECHO lambda
+`0.075`, and `KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 176.931s
+observed with peak VRAM 16011 MiB. The local ECHO objective improved sharply:
+env CE dropped from 3.3952 to 2.4413. Adapter verify passed with 400 LoRA
+tensors, 200 projection pairs, and LoRA update proxy 0.011593.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.953125 with no
+zero rollouts and mean wall-clock 27.73s. H68 scored 0.75 with one zero
+rollout and mean wall-clock 45.25s. Lesson: H64's failure was not simply lack
+of ECHO or too much policy dose. ECHO learned the training observations but
+made blind behavior less reliable. Future repair-tail work needs broader
+reliability anchors or a contrast that avoids ranking direct success against
+repaired near-misses.
