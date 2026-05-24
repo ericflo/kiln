@@ -98,6 +98,14 @@ and JavaScript camelCase/CommonJS style when available.
   and missing-final-response failures, first bootstrap the complete
   read/edit/verify/final rhythm from train-only ideal traces across all
   profiles.
+  - Result: rejected. The 32-example, train-only, verifier-backed SFT arm
+    trained and verified locally (`rank=4`, `alpha=8`, `lr=5e-6`, peak VRAM
+    17,399 MiB), but blind 3-seed eval regressed composite to 0.1954
+    (`delta=-0.1042`). Outcome rose only slightly (0.5000 to 0.5417), while
+    `format_compliance` fell to 0.4583, `convention_consistency` fell to
+    0.9306, and efficiency worsened (5.46 to 5.85 tool calls; 1694.9 to
+    1840.8 thinking chars). Single-distribution ideal trace SFT repeats the
+    prebreach H4 failure mode.
 
 ## Standard Workflow
 

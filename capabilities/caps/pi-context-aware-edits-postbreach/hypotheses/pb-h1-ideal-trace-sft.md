@@ -33,4 +33,32 @@ Reject if any of:
 
 ## Result
 
-Pending.
+Rejected.
+
+Training:
+
+- adapter: `pi-context-aware-edits-postbreach-pb-h1-ideal-sft-r4a8`;
+- 32 examples trained, 1 epoch;
+- `rank=4`, `alpha=8`, `lr=5e-6`, seed `3235536621`;
+- `KILN_GRAD_CHECKPOINT_SEGMENTS=32`;
+- token counts: 1530 action tokens, 4644 context tokens;
+- peak observed VRAM: 17,399 MiB;
+- adapter verification: OK, LoRA update proxy `3.679127`.
+
+Blind 3-seed eval:
+
+- composite: 0.1954 (`delta=-0.1042` vs. baseline 0.2996);
+- stdev: 0.3868;
+- `outcome`: 0.5417, only a small lift over baseline 0.5000;
+- `format_compliance`: 0.4583, below baseline 0.5625;
+- `convention_consistency`: 0.9306, below baseline 0.9736;
+- `read_before_edit`: 0.9583, below baseline 1.0000;
+- mean tool calls: 5.85, above baseline 5.46;
+- thinking chars/tool call: 317.3, above baseline 308.8;
+- mean wall-clock: 46.0s, above baseline 20.8s.
+
+This falsifies the hypothesis. Ideal traces taught a bit of edit completion,
+but they damaged the final-response contract and made the agent less efficient.
+This repeats the prebreach H4 pattern and argues against more single-
+distribution SFT. No eval task contents or per-example eval transcripts were
+inspected.
