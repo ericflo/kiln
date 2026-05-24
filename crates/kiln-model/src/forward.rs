@@ -321,6 +321,31 @@ fn cuda_use_kt_api_cat_dim0() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: `Tensor::cat` along axis 2 through the kt-API +
+/// adapters. Set `KILN_USE_KT_API_CAT_DIM2=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// `Tensor::cat(&refs, 2)` call sites in the depthwise conv1d
+/// prefill/decode paths (conv_state + new tokens join along the
+/// time axis) and the GDN backward future-row windowing through
+/// `kiln_tensor::cuda_concat` with axis=2 via the kt-bridge
+/// borrow adapter. Pays one dtod memcpy on the output direction
+/// (the kt allocation is freshly-owned). Falls through to the
+/// candle `Tensor::cat` composite when any precondition fails so
+/// behavior is identical with the gate off.
+///
+/// Distinct from `KILN_USE_KT_API_CONCAT_LAST_DIM` and
+/// `KILN_USE_KT_API_CAT_DIM0` — those cover axis=-1 (rotary qk
+/// join) and axis=0 (batch-state assembly) respectively. This
+/// gate covers axis=2, which is the time axis on the
+/// `[batch, channels, time]` conv1d layout the GDN
+/// `gated_short_conv_*` paths use.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_cat_dim2() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_CAT_DIM2").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -5963,6 +5988,64 @@ fn try_kt_cat_dim0(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
     Ok(Some(out))
 }
 
+/// Phase 7 (#1082) — kt-API axis-2 concat migration helper. Routes
+/// contiguous CUDA candle tensors of a supported dtype through
+/// `kiln_tensor::cuda_concat(_, 2)`.
+///
+/// Returns `Ok(None)` on any incompatibility (empty input, mixed
+/// devices/dtypes, non-CUDA, non-contiguous, unsupported dtype,
+/// rank < 3) so the caller falls through to the candle composite.
+/// NVTX range `kiln/cat_dim2_kt` brackets the migrated call so
+/// nsys traces separate the path from the baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_cat_dim2(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_cat_dim2() {
+        return Ok(None);
+    }
+    if pieces.is_empty() {
+        return Ok(None);
+    }
+    let first = pieces[0];
+    let rank = first.rank();
+    if rank < 3 {
+        return Ok(None);
+    }
+    let dtype = first.dtype();
+    if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+        return Ok(None);
+    }
+    if !matches!(first.device(), Device::Cuda(_)) {
+        return Ok(None);
+    }
+    for t in pieces.iter() {
+        if !matches!(t.device(), Device::Cuda(_))
+            || t.dtype() != dtype
+            || !t.is_contiguous()
+            || t.rank() != rank
+        {
+            return Ok(None);
+        }
+    }
+
+    kiln_nvtx::range!(c"kiln/cat_dim2_kt");
+
+    let mut kt_owned = Vec::with_capacity(pieces.len());
+    for t in pieces.iter() {
+        match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t) {
+            Ok(k) => kt_owned.push(k),
+            Err(_) => return Ok(None),
+        }
+    }
+    let kt_refs: Vec<&kiln_tensor::Tensor> = kt_owned.iter().collect();
+    let out_kt = match kiln_tensor::cuda_concat(&kt_refs, 2) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_cat_dim2: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
 #[cfg(feature = "cuda")]
 fn cuda_rotary_one_training_bf16_supported(
     x: &Tensor,
@@ -7433,7 +7516,30 @@ fn causal_conv1d_prefill_with_dtype(
     let k_minus_1 = kernel_size - 1;
 
     // Left-pad with conv_state (previous K-1 inputs, or zeros for fresh state)
-    let x_padded = Tensor::cat(&[&conv_state.to_dtype(compute_dtype)?, &x_compute], 2)?;
+    //
+    // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM2=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND both pieces are
+    // contiguous CUDA tensors of a supported dtype, route the
+    // time-axis (axis=2) concat through
+    // `kiln_tensor::cuda_concat(_, 2)`. Falls through to the candle
+    // composite when any precondition fails so behavior is
+    // identical with the gate off.
+    let conv_state_compute = conv_state.to_dtype(compute_dtype)?;
+    let x_padded = {
+        let pieces: [&Tensor; 2] = [&conv_state_compute, &x_compute];
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_cat_dim2(&pieces)? {
+                out
+            } else {
+                Tensor::cat(&pieces, 2)?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            Tensor::cat(&pieces, 2)?
+        }
+    };
 
     // Depthwise conv: output[t] = sum_{j=0}^{K-1} weight[j] * x_padded[t+j]
     let mut output = Tensor::zeros_like(&x_compute)?;
@@ -7452,7 +7558,24 @@ fn causal_conv1d_prefill_with_dtype(
         // Fewer new tokens than buffer size: shift old state and append new
         let keep = k_minus_1 - seq_len;
         let old_part = conv_state.narrow(2, seq_len, keep)?;
-        *conv_state = Tensor::cat(&[&old_part, &x_state_f32], 2)?.contiguous()?;
+        // Phase 7 (#1082): same kt-API axis-2 cat migration applied
+        // to the conv-state shift+append path.
+        let shifted = {
+            let pieces: [&Tensor; 2] = [&old_part, &x_state_f32];
+            #[cfg(feature = "cuda")]
+            {
+                if let Some(out) = try_kt_cat_dim2(&pieces)? {
+                    out
+                } else {
+                    Tensor::cat(&pieces, 2)?
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                Tensor::cat(&pieces, 2)?
+            }
+        };
+        *conv_state = shifted.contiguous()?;
     }
 
     Ok(output)
@@ -7476,7 +7599,30 @@ fn causal_conv1d_decode(
         .reshape((channels, kernel_size))?;
 
     // Full window = [conv_state | x] -> [batch, channels, kernel_size]
-    let window = Tensor::cat(&[&conv_state.to_dtype(DType::F32)?, &x_f32], 2)?;
+    //
+    // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM2=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND both pieces are
+    // contiguous CUDA tensors of a supported dtype, route the
+    // decode-path time-axis (axis=2) concat through
+    // `kiln_tensor::cuda_concat(_, 2)`. Falls through to the candle
+    // composite when any precondition fails so behavior is
+    // identical with the gate off.
+    let conv_state_f32 = conv_state.to_dtype(DType::F32)?;
+    let window = {
+        let pieces: [&Tensor; 2] = [&conv_state_f32, &x_f32];
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_cat_dim2(&pieces)? {
+                out
+            } else {
+                Tensor::cat(&pieces, 2)?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            Tensor::cat(&pieces, 2)?
+        }
+    };
 
     // Dot product per channel: sum over kernel dimension
     let w_expanded = w_f32.unsqueeze(0)?; // [1, channels, kernel_size]
