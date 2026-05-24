@@ -107,6 +107,40 @@ impl DeviceOp1 for ArgmaxLastDimOp {
         Ok(Some(crate::cuda_argmax_last_axis(x)?))
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Same precondition gates as cuda_fwd so the dispatch surface
+        // matches across backends:
+        //   - F32 / BF16 / F16 only (matches cpu_fwd's accepted dtypes)
+        //   - rank ≥ 1
+        //   - contiguous input
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if x.rank() == 0 {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): implement
+        // `crate::metal_argmax_last_axis(x)` analogous to
+        // `crate::cuda_argmax_last_axis` above. Until that kernel
+        // lands, fall through to CPU — argmax is a single-pass
+        // reduction, so the CPU path is correctness-equivalent
+        // (lowest-index tie-break preserved). Candidate implementations:
+        //   1. MPS Graph `reductionArgMaximum(_:axis:)` for one-shot
+        //      dispatch; verify its tie-break matches our
+        //      lowest-index-wins convention (MPS may differ — needs a
+        //      parity test before adoption).
+        //   2. Custom MSL kernel: per-row threadgroup
+        //      argmax-reduction over the trailing dim with explicit
+        //      lowest-index tie-break in the reducer.
+        // Output dtype is fixed at I64 (see cpu_fwd); the Metal kernel
+        // must materialize I64 indices, not the I32 that MPS prefers.
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         // argmax has no gradient.
         None
