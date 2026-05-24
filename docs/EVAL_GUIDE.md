@@ -174,6 +174,13 @@ workload eval fails, the result JSON can be inspected directly to recover the
 source export path, source line, session/turn/model fields, and target tool
 set for that failed turn.
 
+Production trace examples are tagged for aggregate slicing. In addition to
+`production_trace`, `kind:tool_call`, and `tool:<name>`, Kiln adds
+`source_format:<format>` plus sanitized `production_model:<model>` and
+`split:<split>` tags when those fields exist in the export. The human CLI and
+raw `SuiteResult.metrics.pass_rate_by_tag` then show which source format,
+teacher model, split, or target tool is breaking for an adapter.
+
 The target is canonical semantic tool-call JSON, not the source model's wire
 format. At eval time, Kiln renders the saved `messages` and `tools` through
 the model backend's chat template, so Qwen3.5 sees its native `<tools>` prompt
@@ -528,8 +535,9 @@ Every example record (`outcomes[]`) carries:
 - `example_id`, `completion_index`, `completion_text`
 - `kind` — `pass | fail | invalid | error`
 - `score`, `detail`
+- `tags`, `metadata` — copied from the source example for aggregate slicing
+  and per-outcome provenance
 - `prompt_tokens`, `completion_tokens`, `latency_ms`
-- `tags` echoed from the example
 
 ## Recipes
 

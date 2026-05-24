@@ -397,7 +397,7 @@ where
                 &turn.prompt_messages,
                 &target,
             );
-            let mut tags = vec!["production_trace".to_string(), "kind:tool_call".to_string()];
+            let mut tags = production_trace_tags(&turn);
             for tool in &target_tools {
                 tags.push(format!("tool:{tool}"));
                 *stats.target_tool_histogram.entry(tool.clone()).or_default() += 1;
@@ -934,6 +934,54 @@ fn canonical_target_json(calls: &[ParsedToolCall]) -> String {
         .unwrap_or_else(|_| "{\"tool_calls\":[]}".to_string())
 }
 
+fn production_trace_tags(turn: &TraceTurn) -> Vec<String> {
+    let mut tags = vec![
+        "production_trace".to_string(),
+        "kind:tool_call".to_string(),
+        format!("source_format:{}", turn.source_format),
+    ];
+    push_sanitized_tag(&mut tags, "production_model", turn.model.as_deref());
+    push_sanitized_tag(&mut tags, "split", turn.split.as_deref());
+    tags
+}
+
+fn push_sanitized_tag(tags: &mut Vec<String>, key: &str, value: Option<&str>) {
+    let Some(value) = value.and_then(sanitize_tag_value) else {
+        return;
+    };
+    tags.push(format!("{key}:{value}"));
+}
+
+fn sanitize_tag_value(value: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut last_was_sep = false;
+    for ch in value.trim().chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if matches!(ch, '.' | '-' | '_') {
+            Some(ch)
+        } else {
+            Some('_')
+        };
+        let Some(mapped) = mapped else {
+            continue;
+        };
+        if mapped == '_' {
+            if last_was_sep || out.is_empty() {
+                continue;
+            }
+            last_was_sep = true;
+        } else {
+            last_was_sep = false;
+        }
+        out.push(mapped);
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
 fn prompt_chars(messages: &[EvalChatMessage]) -> usize {
     messages
         .iter()
@@ -1112,8 +1160,22 @@ impl TraceTurn {
             }),
             timestamp: string_field(value, "timestamp")
                 .or_else(|| source_metadata.get("timestamp").and_then(value_to_string)),
-            model: string_field(value, "model"),
-            split: string_field(value, "split"),
+            model: string_field(value, "model")
+                .or_else(|| string_field(value, "production_model"))
+                .or_else(|| string_field(value, "source_model"))
+                .or_else(|| source_metadata.get("model").and_then(value_to_string))
+                .or_else(|| {
+                    source_metadata
+                        .get("production_model")
+                        .and_then(value_to_string)
+                })
+                .or_else(|| {
+                    source_metadata
+                        .get("source_model")
+                        .and_then(value_to_string)
+                }),
+            split: string_field(value, "split")
+                .or_else(|| source_metadata.get("split").and_then(value_to_string)),
             source_line: line_no,
             source_format,
             source_message_index,
@@ -1217,6 +1279,7 @@ mod tests {
                 "type": "function",
                 "function": {"name": "Read", "parameters": {"type":"object","properties":{"file_path":{"type":"string"}}}}
             }],
+            "split": "holdout/dev",
             "metadata": {"timestamp": "2026-05-01T00:00:00Z"}
         });
         let input = format!("{line}\n");
@@ -1250,6 +1313,21 @@ mod tests {
                 .as_u64()
                 .unwrap()
                 > 0
+        );
+        assert!(
+            suite.examples[0]
+                .tags
+                .contains(&"source_format:prompt_chosen_jsonl".to_string())
+        );
+        assert!(
+            suite.examples[0]
+                .tags
+                .contains(&"production_model:claude-prod".to_string())
+        );
+        assert!(
+            suite.examples[0]
+                .tags
+                .contains(&"split:holdout_dev".to_string())
         );
     }
 
@@ -1624,5 +1702,45 @@ mod tests {
             synthesize_production_trace_suite(std::io::Cursor::new(input), &cfg).unwrap();
         assert_eq!(suite.examples.len(), 1);
         assert_eq!(stats.skipped_duplicate, 1);
+    }
+
+    #[test]
+    fn provenance_tag_values_are_sanitized_for_metric_slicing() {
+        assert_eq!(
+            sanitize_tag_value(" Claude 3.7/Sonnet (prod) "),
+            Some("claude_3.7_sonnet_prod".to_string())
+        );
+        assert_eq!(sanitize_tag_value("   "), None);
+    }
+
+    #[test]
+    fn metadata_model_and_split_feed_provenance_tags() {
+        let row = serde_json::json!({
+            "prompt_messages": [{"role":"user", "content":"run pwd"}],
+            "chosen": {"role":"assistant", "tool_calls":[{
+                "type":"function",
+                "function":{"name":"Bash", "arguments":"{\"command\":\"pwd\"}"}
+            }]},
+            "metadata": {
+                "production_model": "Claude 3.7/Sonnet",
+                "split": "eval/dev"
+            }
+        });
+        let (suite, stats) = build(&format!("{row}\n"), None);
+        assert_eq!(
+            stats.sampled_examples[0].production_model.as_deref(),
+            Some("Claude 3.7/Sonnet")
+        );
+        assert_eq!(stats.sampled_examples[0].split.as_deref(), Some("eval/dev"));
+        assert!(
+            suite.examples[0]
+                .tags
+                .contains(&"production_model:claude_3.7_sonnet".to_string())
+        );
+        assert!(
+            suite.examples[0]
+                .tags
+                .contains(&"split:eval_dev".to_string())
+        );
     }
 }
