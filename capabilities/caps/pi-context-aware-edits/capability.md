@@ -162,6 +162,13 @@ A4: Skip the actual edit, claim the function already exists.
 - **H4: idealized train-only SFT trajectories** — synthesize compact
   read/edit/verify/final traces from train tasks instead of copying noisy
   rollout transcripts.
+  - Result: rejected. A 12-example verifier-backed ideal-trace SFT arm
+    trained and verified locally (`rank=4`, `alpha=8`, `lr=5e-6`, peak
+    VRAM 17,026 MiB). It improved `outcome` from 0.6944 to 0.7222 and
+    drove `read_before_edit` to 1.0000, but `format_compliance` fell to
+    0.5000, so gated composite regressed to 0.3597 (`delta=-0.1203`).
+    Ideal traces are useful for edit completion, but not sufficient for
+    the final-response contract.
 - **H5: mixed-language corpus** (Python + Rust + Go + JS) — does
   context-awareness generalize across language conventions, or is it
   language-specific?

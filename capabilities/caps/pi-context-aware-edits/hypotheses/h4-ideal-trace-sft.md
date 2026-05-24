@@ -42,4 +42,28 @@ Reject or do not promote if the 3-seed blind eval shows any of:
 
 ## Result
 
-Pending.
+Status: rejected.
+
+- Dataset: 12 verifier-backed examples, four per train profile. Completion
+  lengths 1415-2025 chars. Dataset SHA:
+  `sha256:49150da7b194b58b993f5369fa1d903e444708b7d20e9217c22245124a8ff085`.
+- Training succeeded locally in 134s wall clock with observed peak VRAM
+  17,026 MiB. Receipt: 12 examples trained, 570 action tokens, 1812 context
+  tokens, rank 4, alpha 8, `lr=5e-6`, one epoch.
+- Adapter verification passed with nonzero LoRA tensors and offline update
+  proxy `lora_update_l2_upper_bound=1.447610`.
+- Blind 12-task x 3-seed eval scored 0.3597 versus the 0.4800 baseline
+  (`delta=-0.1203`, stdev 0.4785).
+- Sub-score movement was informative: `outcome` improved from 0.6944 to
+  0.7222 and `read_before_edit` improved to 1.0000, but
+  `format_compliance` fell from 0.6528 to 0.5000. `convention_consistency`
+  stayed at 0.9583.
+- Thinking efficiency stayed essentially baseline: 4.86 tool calls,
+  1477.2 thinking chars, 301.3 thinking chars/tool.
+
+Conclusion: ideal traces carry useful edit-completion signal, unlike H2's
+sampled rollout transcripts, but final-response format remains the dominant
+failure. The next iteration should isolate the final-response contract from
+tool-action imitation, for example a tiny final-turn-only or final-bookend SFT
+stage chained after H4, or a GRPO arm that rewards only format on top of the
+H4 completion lift.
