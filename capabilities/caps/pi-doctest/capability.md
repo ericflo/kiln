@@ -1245,3 +1245,26 @@ agent. This points away from positive-only idealized SFT for pi-doctest unless
 it is chained behind a confirmed stabilizing adapter. Future work should favor
 prompt/harness controls, stronger external teacher data, or reward learning
 that explicitly preserves successful base behavior.
+
+### H67: H66 negative adapter arithmetic
+
+H67 tested whether H66's failed ideal-SFT direction was merely too strong or
+actively anti-correlated with the desired behavior. No new training was run.
+The H66 adapter was copied to `pi-doctest-h67-h66-neg1`, and every BF16
+`lora_B.weight` tensor was negated by flipping its sign bit. Because LoRA's
+effective update is `B @ A`, this creates a -1.0 version of the H66 update
+while preserving rank, alpha, module coverage, and tensor layout.
+
+The surgery flipped 200 BF16 B tensors, 9,043,968 tensor bytes total. Adapter
+verify passed through the running server with 400 LoRA tensors, 200 projection
+pairs, and the same LoRA update proxy as H66: 0.011464. The resulting
+safetensors hash was
+`sha256:cb5bef0cdd1786ca4bde180f972f506a79bd84730025edf733e0e00905bf041f`.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.9625 with no
+zero rollouts and mean wall-clock 21.80s. H67 scored 0.94375 with no zero
+rollouts and mean wall-clock 52.97s. Lesson: the inverse of H66 recovers most
+of H66's severe score loss and avoids its zero rollout, so the H66 direction
+was genuinely harmful. But the inverse still loses to base and is much slower,
+so H66's opposite is not a useful adapter direction. Avoid more single-axis
+adapter arithmetic from H66 unless it is composed with a confirmed stabilizer.
