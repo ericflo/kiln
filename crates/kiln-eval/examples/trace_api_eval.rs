@@ -33,7 +33,11 @@ struct Args {
     #[arg(long = "model", required = true)]
     models: Vec<String>,
     /// API base URL, e.g. https://api.openai.com/v1 or a local compatible server.
-    #[arg(long, env = "OPENAI_API_BASE", default_value = "https://api.openai.com/v1")]
+    #[arg(
+        long,
+        env = "OPENAI_API_BASE",
+        default_value = "https://api.openai.com/v1"
+    )]
     api_base: String,
     /// Env var containing the bearer token. Ignored when unset/empty.
     #[arg(long, default_value = "OPENAI_API_KEY")]
@@ -338,12 +342,8 @@ fn score_api_response(
             }
         }
     }
-    let mut outcome = score_completion(
-        scorer,
-        example,
-        &response.completion_text,
-        &NoopJudgeRunner,
-    )?;
+    let mut outcome =
+        score_completion(scorer, example, &response.completion_text, &NoopJudgeRunner)?;
     outcome.completion_index = completion_idx;
     outcome.prompt_tokens = response.prompt_tokens;
     outcome.completion_tokens = response.completion_tokens;
@@ -381,7 +381,9 @@ impl ApiCompletion {
             answer.push('\n');
         }
         if let Some(tool_calls) = tool_calls.filter(|calls| !calls.is_empty()) {
-            answer.push_str(&serde_json::to_string(&json!({ "tool_calls": tool_calls }))?);
+            answer.push_str(&serde_json::to_string(
+                &json!({ "tool_calls": tool_calls }),
+            )?);
         }
         let usage = value.get("usage");
         Ok(Self {
