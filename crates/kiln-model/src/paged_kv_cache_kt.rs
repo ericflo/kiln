@@ -32,11 +32,13 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use candle_core::cuda_backend::cudarc::driver::result as cudarc_result;
 use candle_core::cuda_backend::CudaDevice;
 
 use kiln_core::block::BlockTable;
 use kiln_tensor::{
-    cuda_zeros, DType as KtDType, Layout, Tensor as KtTensor, TensorId,
+    cuda_zeros, CudaStorage, DType as KtDType, Layout, StorageBackend,
+    Tensor as KtTensor, TensorId,
 };
 
 /// Paged KV cache backed by `kiln_tensor::Tensor`. Twin of
@@ -235,6 +237,128 @@ impl PagedKvCacheKt {
         kiln_flash_attn::paged_kv_write_token_major_bf16_slot_kt(k_pool, v_pool, k, v, slot)
             .map_err(|e| anyhow::anyhow!("kt paged_kv_write_token_major_bf16_slot: {e}"))?;
         Ok(true)
+    }
+
+    /// Multi-token writer for the **contiguous slot-run** case.
+    ///
+    /// When the per-sequence `BlockTable` resolves the new write region
+    /// `[start_pos .. start_pos+len]` to one contiguous slot run in
+    /// the shared KV pool (start_slot..start_slot+len), this path
+    /// writes both k and v as a single device-to-device memcpy per
+    /// pool — bypassing the per-slot FFI overhead the candle path
+    /// pays in its loop.
+    ///
+    /// Requirements:
+    /// - `k`, `v`: BF16, contiguous, both with element-count =
+    ///   `len * num_kv_heads * head_dim` (the per-pool row stride).
+    /// - `start_slot + len <= num_blocks * block_size`.
+    ///
+    /// Returns `Ok(())` on success. Returns an error if shapes/dtypes
+    /// don't match or if the cache is FP8 (FP8 needs the quantized
+    /// write path, not yet wired).
+    ///
+    /// **Routes through `cudarc::memcpy_dtod_async`** on the candle
+    /// device's default stream — no kt-API kernel call, no nvcc
+    /// kernel needed. The destination pool's storage is mutated
+    /// in place via the raw device pointer (same idiom as the
+    /// kt-API kernel crates).
+    pub fn write_contiguous_slot_run(
+        &self,
+        layer_idx: usize,
+        start_slot: usize,
+        len: usize,
+        k: &KtTensor,
+        v: &KtTensor,
+    ) -> Result<()> {
+        if self.fp8 {
+            anyhow::bail!(
+                "kt PagedKvCacheKt::write_contiguous_slot_run: FP8 cache write \
+                 path not yet wired"
+            );
+        }
+        if k.dtype() != KtDType::BF16 || v.dtype() != KtDType::BF16 {
+            anyhow::bail!(
+                "kt PagedKvCacheKt::write_contiguous_slot_run requires BF16 inputs"
+            );
+        }
+        let (k_pool, v_pool) = &self.layers[layer_idx];
+        let pool_shape = k_pool.shape();
+        anyhow::ensure!(
+            pool_shape.len() == 3,
+            "kt PagedKvCacheKt: k_pool must be rank-3 [total_slots, num_kv_heads, head_dim]"
+        );
+        let (total_slots, num_kv_heads, head_dim) =
+            (pool_shape[0], pool_shape[1], pool_shape[2]);
+        anyhow::ensure!(
+            start_slot.checked_add(len).map_or(false, |e| e <= total_slots),
+            "kt PagedKvCacheKt: slot range [{start_slot}..{}] exceeds total_slots {total_slots}",
+            start_slot + len
+        );
+        let row_elems = num_kv_heads * head_dim;
+        let expected_elems = len.checked_mul(row_elems).context("len * row_elems overflow")?;
+        anyhow::ensure!(
+            k.element_count() == expected_elems && v.element_count() == expected_elems,
+            "kt PagedKvCacheKt: k/v must have {expected_elems} elements; got k={}, v={}",
+            k.element_count(),
+            v.element_count()
+        );
+        anyhow::ensure!(
+            k.is_contiguous() && v.is_contiguous(),
+            "kt PagedKvCacheKt::write_contiguous_slot_run requires contiguous k/v"
+        );
+
+        let bpe = KtDType::BF16.size_in_bytes();
+        let total_bytes = expected_elems * bpe;
+        let dst_byte_off = start_slot * row_elems * bpe;
+
+        let k_src_cuda = k
+            .storage()
+            .as_any()
+            .downcast_ref::<CudaStorage>()
+            .ok_or_else(|| anyhow::anyhow!("kt PagedKvCacheKt: k must be CUDA storage"))?;
+        let v_src_cuda = v
+            .storage()
+            .as_any()
+            .downcast_ref::<CudaStorage>()
+            .ok_or_else(|| anyhow::anyhow!("kt PagedKvCacheKt: v must be CUDA storage"))?;
+        let k_dst_cuda = k_pool
+            .storage()
+            .as_any()
+            .downcast_ref::<CudaStorage>()
+            .ok_or_else(|| anyhow::anyhow!("kt PagedKvCacheKt: k_pool must be CUDA storage"))?;
+        let v_dst_cuda = v_pool
+            .storage()
+            .as_any()
+            .downcast_ref::<CudaStorage>()
+            .ok_or_else(|| anyhow::anyhow!("kt PagedKvCacheKt: v_pool must be CUDA storage"))?;
+
+        let k_src_off = k.layout().start_offset() * bpe;
+        let v_src_off = v.layout().start_offset() * bpe;
+        let (k_src_base, _) = k_src_cuda.device_ptr_raw();
+        let (v_src_base, _) = v_src_cuda.device_ptr_raw();
+        let (k_dst_base, _) = k_dst_cuda.device_ptr_raw();
+        let (v_dst_base, _) = v_dst_cuda.device_ptr_raw();
+
+        let stream = k_dst_cuda.candle_device().cuda_stream();
+        let raw_stream = stream.cu_stream();
+
+        unsafe {
+            cudarc_result::memcpy_dtod_async(
+                k_dst_base + dst_byte_off as u64,
+                k_src_base + k_src_off as u64,
+                total_bytes,
+                raw_stream,
+            )
+            .map_err(|e| anyhow::anyhow!("kt pkv: memcpy_dtod_async k_pool: {e:?}"))?;
+            cudarc_result::memcpy_dtod_async(
+                v_dst_base + dst_byte_off as u64,
+                v_src_base + v_src_off as u64,
+                total_bytes,
+                raw_stream,
+            )
+            .map_err(|e| anyhow::anyhow!("kt pkv: memcpy_dtod_async v_pool: {e:?}"))?;
+        }
+        Ok(())
     }
 
     /// Host-slot variant: writes a single decode token at a host-known
