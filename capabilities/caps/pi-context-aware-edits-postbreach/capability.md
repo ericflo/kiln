@@ -147,6 +147,19 @@ and JavaScript camelCase/CommonJS style when available.
   (`rank=8`, `alpha=16`, `lr=1e-5`, `echo_lambda=0.03`). This tests whether
   the useful H2 outcome movement and H4 format movement can be balanced without
   the H4 outcome/convention collapse.
+  - Result: rejected. The moderate update trained and verified, and blind eval
+    preserved the PB-H2 outcome lift (`outcome=0.5208`) while improving format
+    (`format_compliance=0.6458`). Composite still fell to 0.2683
+    (`delta=-0.0312`) because `convention_consistency` fell to 0.9417,
+    `read_before_edit` and `no_style_drift` slipped to 0.9792, and zero-score
+    rollouts increased to 34/48. Intermediate GRPO balances outcome and format
+    better than H4, but still fails to preserve the full edit contract.
+- **PB-H6: train-winner trajectory SFT.** Extract train-only successful Pi
+  trajectories from the clean PB-H2 rollout data (reward >= 0.95; 17
+  completions across 11 groups) and imitate those full successful trajectories
+  with a small SFT update. This tests whether distribution-matched successful
+  traces can preserve outcome, format, and convention better than synthetic
+  ideal SFT or reward-only GRPO.
 
 ## Standard Workflow
 
