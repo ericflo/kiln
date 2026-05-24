@@ -453,6 +453,18 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_dropout_async(
+        x: *const core::ffi::c_void,
+        y: *mut core::ffi::c_void,
+        mask: *mut core::ffi::c_void,
+        n_elements: i64,
+        p: f32,
+        inv_keep: f32,
+        seed: u64,
+        dtype: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_scatter_add_dim0_async(
         updates: *const core::ffi::c_void,
         out: *mut core::ffi::c_void,
@@ -3116,3 +3128,133 @@ pub fn cuda_rope(
     .map_err(|e| crate::Error::Msg(format!("cuda_rope: wrap: {e}")))
 }
 
+
+
+/// CUDA inverted dropout (training-time).
+///
+/// Produces `(y, mask)` where `y[i] = (rand_i >= p) ? x[i] / (1 - p) : 0`
+/// and `mask[i]` is the U8 survival indicator. Per-element RNG: a
+/// splitmix64-style hash of `(seed, i)` — fully deterministic given
+/// `seed`. NOT bit-identical to the CPU op's sequential RNG (which
+/// chains splitmix64 state), but matches the same distribution +
+/// scaling contract.
+///
+/// Supports F32 / BF16 / F16 contiguous inputs.
+///
+/// Routes through `kiln_dropout_async` in `csrc/dropout.cu`. Mirrors
+/// the CPU forward in `kiln-tensor/src/ops/dropout.rs`.
+#[cfg(feature = "cuda")]
+pub fn cuda_dropout(
+    x: &crate::Tensor,
+    p: f32,
+    seed: u64,
+) -> Result<(crate::Tensor, crate::Tensor)> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+
+    if !(0.0..1.0).contains(&p) {
+        return Err(crate::Error::Msg(format!(
+            "cuda_dropout: p must be in [0, 1), got {p}"
+        )));
+    }
+    let dtype = x.dtype();
+    let dtype_tag: i32 = match dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_dropout: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !x.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_dropout: input must be contiguous".to_string(),
+        ));
+    }
+
+    let n = x.element_count();
+    let x_bpe = dtype.size_in_bytes();
+    let inv_keep = if p == 0.0 { 1.0 } else { 1.0 / (1.0 - p) };
+
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_dropout: x must be CUDA".to_string()))?;
+
+    let candle_device = x_storage.candle_device.clone();
+    let device_index = match x_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+
+    let y_storage = CudaStorage::zeros(candle_device.clone(), device_index, dtype, n)?;
+    let mask_storage =
+        CudaStorage::zeros(candle_device.clone(), device_index, crate::DType::U8, n)?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let x_base = match &x_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let y_base = match &y_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+    };
+    let mask_base = match &mask_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+    };
+
+    let x_off = (x.layout().start_offset() * x_bpe) as u64;
+    let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
+    let y_ptr = y_base as *mut core::ffi::c_void;
+    let mask_ptr = mask_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_dropout_async(
+            x_ptr,
+            y_ptr,
+            mask_ptr,
+            n as i64,
+            p,
+            inv_keep,
+            seed,
+            dtype_tag,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_dropout: FFI returned status {status}"
+        )));
+    }
+
+    let y_arc: crate::Storage = Arc::new(y_storage);
+    let mask_arc: crate::Storage = Arc::new(mask_storage);
+    let y = crate::Tensor::from_parts(
+        y_arc,
+        crate::Layout::contiguous(x.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_dropout: wrap y: {e}")))?;
+    let mask = crate::Tensor::from_parts(
+        mask_arc,
+        crate::Layout::contiguous(x.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_dropout: wrap mask: {e}")))?;
+    Ok((y, mask))
+}

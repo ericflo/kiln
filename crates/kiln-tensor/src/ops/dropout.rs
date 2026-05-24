@@ -26,6 +26,18 @@
 //!
 //! `Constructive` given the seed. Tests use fixed seeds; production
 //! callers reseed per training step from the global RNG.
+//!
+//! # Dispatch
+//!
+//! `dropout` returns two tensors (`y` + `mask`), which doesn't fit the
+//! single-output `DeviceOp1::cuda_fwd` shape. Instead, the function
+//! itself dispatches on `x.device()`: CUDA inputs route through
+//! `cuda_dropout` (a small element-wise kernel in `csrc/dropout.cu`).
+//! The CPU path uses a sequential splitmix64 chain; the CUDA path uses
+//! a per-element splitmix64 hash of `(seed, i)` — same distribution and
+//! scaling, **NOT bit-identical**. Parity is checked at the
+//! distribution + scale level by
+//! `crates/kiln-kt-bridge/tests/cuda_dropout_parity.rs`.
 
 use std::sync::Arc;
 
@@ -44,6 +56,23 @@ pub fn dropout(x: &Tensor, p: f32, seed: u64) -> Result<(Tensor, Tensor)> {
     if !x.is_contiguous() {
         bail!("dropout: input must be contiguous");
     }
+
+    // Route on device.
+    match x.device() {
+        crate::Device::Cpu => dropout_cpu(x, p, seed),
+        #[cfg(feature = "cuda")]
+        crate::Device::Cuda(_) => crate::cuda_dropout(x, p, seed),
+        #[cfg(not(feature = "cuda"))]
+        crate::Device::Cuda(_) => {
+            bail!("dropout: CUDA backend not compiled in; rebuild with --features cuda")
+        }
+        other => {
+            bail!("dropout: unsupported device {other}")
+        }
+    }
+}
+
+fn dropout_cpu(x: &Tensor, p: f32, seed: u64) -> Result<(Tensor, Tensor)> {
     let dtype = x.dtype();
     let n = x.element_count();
     let per = dtype.size_in_bytes();
