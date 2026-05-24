@@ -32,6 +32,14 @@ pub mod suite;
 pub mod synthesis;
 pub mod trajectory;
 
+pub use builtin::{
+    AGENT_BENCH_SUITE_NAMES, PI_MINI_MCPATLAS, QWEN3_AGENTIC_CORE, REPO_GROUNDED_TASKS,
+    SWE_BENCH_MINI, TERMINAL_BENCH_MINI, qwen3_agentic_core,
+};
+pub use production_trace::{
+    ProductionTraceFormat, ProductionTraceSampling, ProductionTraceSuiteConfig,
+    ProductionTraceSuiteStats, synthesize_production_trace_suite,
+};
 pub use result::{
     AggregateMetrics, EvalJobState, EvalOutcomeKind, EvalProgress, EvalResult, ExampleOutcome,
     FlipDiff, LatencyStats, ReasoningLengthStats, ScorerBreakdown, SuiteResult, ToolBreakdown,
@@ -42,14 +50,6 @@ pub use scorers::{
 pub use suite::{
     EvalChatMessage, EvalCompareSpec, EvalExample, EvalGenerationParams, EvalSuite,
     EvalSuiteSummary, PostEvalConfig, default_max_tokens, default_temperature,
-};
-pub use builtin::{
-    AGENT_BENCH_SUITE_NAMES, PI_MINI_MCPATLAS, QWEN3_AGENTIC_CORE, REPO_GROUNDED_TASKS,
-    SWE_BENCH_MINI, TERMINAL_BENCH_MINI, qwen3_agentic_core,
-};
-pub use production_trace::{
-    ProductionTraceFormat, ProductionTraceSampling, ProductionTraceSuiteConfig,
-    ProductionTraceSuiteStats, synthesize_production_trace_suite,
 };
 pub use synthesis::{
     Sampling, ScorerChoice, SftConversation, SftMessage, SynthesisConfig, SynthesisError,

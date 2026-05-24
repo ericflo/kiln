@@ -17,18 +17,16 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::BufRead;
 
-use rand::SeedableRng;
 use rand::rngs::SmallRng;
+use rand::SeedableRng;
 use rand_core::Rng as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::qwen3::{ParsedToolCall, extract_tool_calls};
+use crate::qwen3::{extract_tool_calls, ParsedToolCall};
 use crate::scorers::{ArgsScoring, NameMatch, Scorer};
 use crate::suite::{EvalChatMessage, EvalExample, EvalGenerationParams, EvalSuite};
-use crate::trajectory::{
-    AnthropicBlock, AnthropicMessage, anthropic_turn_to_sft_conversation,
-};
+use crate::trajectory::{AnthropicBlock, AnthropicMessage, anthropic_turn_to_sft_conversation};
 
 /// JSONL shape to expect in the production trace export.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -375,10 +373,12 @@ fn parse_prompt_chosen(
         prompt_messages.push(value_to_chat_message(msg, line_no, i)?);
     }
     let chosen = value_to_chat_message(
-        value.get("chosen").ok_or_else(|| ProductionTraceError::Parse {
-            line: line_no,
-            message: "missing `chosen` assistant message".into(),
-        })?,
+        value
+            .get("chosen")
+            .ok_or_else(|| ProductionTraceError::Parse {
+                line: line_no,
+                message: "missing `chosen` assistant message".into(),
+            })?,
         line_no,
         prompt_values.len(),
     )?;
@@ -486,10 +486,12 @@ fn value_to_chat_message(
     line_no: usize,
     index: usize,
 ) -> Result<EvalChatMessage, ProductionTraceError> {
-    let obj = value.as_object().ok_or_else(|| ProductionTraceError::Parse {
-        line: line_no,
-        message: format!("message {index} must be a JSON object"),
-    })?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| ProductionTraceError::Parse {
+            line: line_no,
+            message: format!("message {index} must be a JSON object"),
+        })?;
     let role = obj
         .get("role")
         .and_then(|v| v.as_str())
@@ -508,10 +510,7 @@ fn value_to_chat_message(
         .and_then(|v| v.as_array())
         .map(|arr| arr.to_vec())
         .filter(|arr| !arr.is_empty());
-    let name = obj
-        .get("name")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let name = obj.get("name").and_then(|v| v.as_str()).map(str::to_string);
     let tool_call_id = obj
         .get("tool_call_id")
         .and_then(|v| v.as_str())
@@ -566,7 +565,12 @@ fn prompt_chars(messages: &[EvalChatMessage]) -> usize {
                 + m.content.chars().count()
                 + m.tool_calls
                     .as_ref()
-                    .map(|tc| serde_json::to_string(tc).unwrap_or_default().chars().count())
+                    .map(|tc| {
+                        serde_json::to_string(tc)
+                            .unwrap_or_default()
+                            .chars()
+                            .count()
+                    })
                     .unwrap_or(0)
                 + m.name.as_ref().map(|s| s.chars().count()).unwrap_or(0)
                 + m.tool_call_id
@@ -708,7 +712,10 @@ impl TraceTurn {
     fn metadata(&self, target_tools: &[String]) -> serde_json::Value {
         let mut obj = self.source_metadata.clone();
         obj.insert("source_line".into(), serde_json::json!(self.source_line));
-        obj.insert("source_format".into(), serde_json::json!(self.source_format));
+        obj.insert(
+            "source_format".into(),
+            serde_json::json!(self.source_format),
+        );
         obj.insert("target_tools".into(), serde_json::json!(target_tools));
         if let Some(id) = self.id.as_deref() {
             obj.insert("turn_id".into(), serde_json::json!(id));
@@ -745,9 +752,9 @@ fn value_to_string(value: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::qwen3::extract_first_tool_call;
-    use crate::scorers::{NoopJudgeRunner, score_completion};
     use crate::EvalOutcomeKind;
+    use crate::qwen3::extract_first_tool_call;
+    use crate::scorers::{score_completion, NoopJudgeRunner};
 
     fn build(input: &str, max_examples: Option<usize>) -> (EvalSuite, ProductionTraceSuiteStats) {
         let mut cfg = ProductionTraceSuiteConfig::new("prod-tool-smoke");
@@ -890,11 +897,9 @@ mod tests {
         });
         let mut cfg = ProductionTraceSuiteConfig::new("empty");
         cfg.sampling.seed = Some(1);
-        let err = synthesize_production_trace_suite(
-            std::io::Cursor::new(format!("{line}\n")),
-            &cfg,
-        )
-        .unwrap_err();
+        let err =
+            synthesize_production_trace_suite(std::io::Cursor::new(format!("{line}\n")), &cfg)
+                .unwrap_err();
         assert!(matches!(err, ProductionTraceError::NoExamples));
     }
 
