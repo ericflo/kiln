@@ -960,3 +960,19 @@ trainable when represented as one-action suffix ranking instead of full
 trajectory ranking. H54 is kept with a caveat: the gain is meaningful but
 slower, so the next iteration should run a fresh confirmation before chaining
 from it, or train a lower-dose/rank variant to reduce the 0.174 delta proxy.
+
+### H55: H54 fresh confirmation
+
+H55 did not train a new adapter. It reran a fresh blind `LIMIT=8 SEEDS=1`
+paired confirmation for `pi-doctest-h54-step-local-concise-r4a4lr5e7` before
+any chain attempt, because H54's initial win was slower and prior pi-doctest
+adapters have repeatedly produced small-sample false positives.
+
+Confirmation rejected H54 as a chain base. Fresh paired base scored 0.750000
+with one zero rollout and mean wall-clock 50.32s. H54 scored 0.6203125 with
+three zero rollouts and mean wall-clock 64.84s. This overturns the H54
+kept-with-caveat result for chaining. Lesson: one-action suffix ranking is a
+useful trainability pattern, but the H54 dose was too strong or too narrow to
+stabilize reliability. The next attempt should keep the step-local shape while
+reducing update strength, for example a lower learning rate or softer reward
+gap, rather than chaining on H54.
