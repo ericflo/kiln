@@ -401,6 +401,109 @@ pub(crate) fn cuda_use_kt_paged_kv_cache() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Constructor stub for the Phase 7 `PagedKvCacheKt` migration (#1082).
+///
+/// Returns `Ok(Some(cache))` when the `KILN_USE_KT_PAGED_KV_CACHE` gate
+/// (see [`cuda_use_kt_paged_kv_cache`]) is set AND `device` is a CUDA
+/// device. Returns `Ok(None)` in every other case so callers can fall
+/// through to the candle [`PagedKvCache::new`] path unchanged.
+///
+/// # Why this exists
+///
+/// The 11 `PagedKvCache::new` call sites in `forward.rs` are each
+/// tightly coupled to candle-typed writers/readers and to the candle
+/// [`PagedKvCache::new(..., device: &Device)`] signature. The kt twin
+/// [`crate::paged_kv_cache_kt::PagedKvCacheKt::new`] needs an
+/// [`Arc<CudaDevice>`] + `device_index` (see
+/// `crates/kiln-model/src/paged_kv_cache_kt.rs:72`) plus a
+/// [`kiln_tensor::DType`] in place of [`candle_core::DType`]. Wiring
+/// the gate first (commit `eab7f795`) was step 1; this helper is step 2
+/// and gives the next call-site migration a single, well-tested
+/// constructor surface to call instead of repeating the device-arc
+/// extraction + dtype mapping in every branch.
+///
+/// # What it does
+///
+/// 1. Returns `None` immediately when the gate is off — zero overhead
+///    on the default (candle-cache) path.
+/// 2. Returns `None` when `device` is not CUDA — the kt twin only
+///    supports CUDA today, and migrating to non-CUDA backends is out
+///    of scope for #1082.
+/// 3. Extracts the underlying [`Arc<CudaDevice>`] and `device_index`
+///    from `device` using the same pattern as
+///    [`kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow`]:
+///    `Device::as_cuda_device()` + `Device::location()`.
+/// 4. Maps the candle [`DType`] to the kt
+///    [`kiln_tensor::DType`] via [`kiln_kt_bridge::candle_dtype_to_kt`]
+///    (the same conversion every other kt-bridge entry point uses).
+/// 5. Allocates via [`PagedKvCacheKt::new`] — zero-filled pool tensors
+///    with the kt-tensor backing store; identical pool shape and
+///    byte layout to the candle version. FP8 is not yet plumbed
+///    through this stub (the FP8 path is a follow-up; the gate
+///    callers exercising it should keep using
+///    [`PagedKvCache::new_with_fp8`] on the candle side until the kt
+///    FP8 writer lands).
+///
+/// # Why no call site uses this yet
+///
+/// Even with this constructor, the surrounding call sites still need
+/// to keep a `PagedKvCache` around to satisfy the candle-typed writer
+/// signatures (e.g. `write_token_major_native`, `read`, etc.) that
+/// are reached after the cache is constructed. Migrating one full
+/// call site is a separate PR: it has to either (a) hold both
+/// caches and choose at every writer/reader, or (b) port the
+/// surrounding writers/readers to the kt path in the same change.
+/// Landing this constructor stub means that follow-up PR is a much
+/// smaller diff — it only has to touch the writer/reader story, not
+/// re-derive the device-arc / dtype plumbing per call site.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+pub(crate) fn try_kt_paged_kv_cache_new(
+    num_full_attn_layers: usize,
+    num_blocks: usize,
+    block_size: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    dtype: DType,
+    device: &Device,
+) -> Result<Option<crate::paged_kv_cache_kt::PagedKvCacheKt>> {
+    use candle_core::backend::BackendDevice;
+    use candle_core::DeviceLocation;
+    use std::sync::Arc;
+
+    if !cuda_use_kt_paged_kv_cache() {
+        return Ok(None);
+    }
+
+    let cuda_dev_ref = match device {
+        Device::Cuda(d) => d,
+        _ => return Ok(None),
+    };
+    let cuda_device_arc: Arc<candle_core::cuda_backend::CudaDevice> =
+        Arc::new(cuda_dev_ref.clone());
+    let device_index = match cuda_device_arc.location() {
+        DeviceLocation::Cuda { gpu_id } => gpu_id,
+        other => anyhow::bail!(
+            "try_kt_paged_kv_cache_new: expected Cuda location, got {other:?}"
+        ),
+    };
+    let kt_dtype = kiln_kt_bridge::candle_dtype_to_kt(dtype)
+        .map_err(|e| anyhow::anyhow!("try_kt_paged_kv_cache_new: dtype map: {e}"))?;
+
+    let cache = crate::paged_kv_cache_kt::PagedKvCacheKt::new(
+        num_full_attn_layers,
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_dim,
+        kt_dtype,
+        cuda_device_arc,
+        device_index,
+    )
+    .context("try_kt_paged_kv_cache_new: PagedKvCacheKt::new failed")?;
+    Ok(Some(cache))
+}
+
 /// Phase 7 opt-in: route the Vulkan `linear_prefill_apply` 2D matmul
 /// path through a kt-API equivalent of `kiln_tensor::cuda_matmul`.
 /// Default off; set `KILN_USE_KT_API_MATMUL=1` (or
