@@ -1,0 +1,69 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 570.195.03
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (1d5bf1ec9
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+After build:  [32mkiln-smoke-check[0m (verifies fused CUDA kernels — see issue #1066).
+
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 570.195.03
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (1d5bf1ec9
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+After build:  [32mkiln-smoke-check[0m (verifies fused CUDA kernels — see issue #1066).
+
+warning: unused import: `candle_core::backend::BackendDevice`
+ --> crates/kiln-model/src/forward.rs:8:5
+  |
+8 | use candle_core::backend::BackendDevice;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `route_resident`
+     --> crates/kiln-model/src/forward.rs:14406:9
+      |
+14406 |     let route_resident = backend.supports_resident_decode()
+      |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_route_resident`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling kiln-eval v0.2.19 (/workspace/kiln/crates/kiln-eval)
+warning: `kiln-model` (lib) generated 2 warnings (run `cargo fix --lib -p kiln-model` to apply 1 suggestion)
+   Compiling kiln-train v0.2.19 (/workspace/kiln/crates/kiln-train)
+warning: function `tokenize_grpo_group` is never used
+    --> crates/kiln-train/src/trainer.rs:4929:4
+     |
+4929 | fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<TokenizedGrpoGroup> {
+     |    ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling kiln-server v0.2.19 (/workspace/kiln/crates/kiln-server)
+warning: `kiln-train` (lib) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.92s
+     Running `target/debug/kiln-eval trace-suite --format prompt_chosen_jsonl --input /workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.prompt_chosen.jsonl --output /workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.suite.json --stats-output /workspace/pr1383-qwen35-base-eval/analysis_v12_diverse_200.suite_report.json --suite-name production-tool-call-analysis-v12-diverse-200 --description 'Production trajectory tool-call eval from trajectory-trainer analysis-v12-diverse-200 sample materialized with materialize_turn.py' --max-examples 200 --seed 20260524 --max-tokens 1024`
+trace-suite: rows=200 parsed=200 eligible_tool_turns=106 kept=106 seed=20260524
+target tools:
+  Agent: 3
+  Bash: 89
+  Edit: 10
+  Glob: 6
+  Grep: 6
+  Read: 31
+  Skill: 2
+  TaskCreate: 6
+  ToolSearch: 3
+  WebFetch: 21
+  WebSearch: 1
+  Write: 2
+  string: 1
+skipped: parse_error=0 no_tool_call=94 empty_prompt=0 prompt_too_long=0 target_too_long=0 duplicate=0
