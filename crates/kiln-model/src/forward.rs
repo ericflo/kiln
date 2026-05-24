@@ -89,45 +89,78 @@ fn cuda_fused_attn_sigmoid_mul_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_ATTN_SIGMOID_MUL").is_ok())
 }
 
+/// Phase 7 meta-flag: enable ALL the per-family kt-API migrations
+/// at once. Set `KILN_USE_KT_API_ALL=1` to exercise the entire
+/// adapter-routed path end-to-end. Each per-family flag also
+/// short-circuits true when this is set.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_all() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ALL").is_ok())
+}
+
 /// Phase 7 opt-in: route the attn-output sigmoid/mul fused kernel
 /// through the kt-API + kt-bridge copying adapters. Default off so
 /// production perf is unchanged; set
-/// `KILN_USE_KT_API_SIGMOID_MUL=1` to exercise the migration path
-/// for parity testing. Pays ~3 dtod memcpys per call.
+/// `KILN_USE_KT_API_SIGMOID_MUL=1` (or `KILN_USE_KT_API_ALL=1`) to
+/// exercise the migration path for parity testing. Pays ~3 dtod
+/// memcpys per call.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_sigmoid_mul() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SIGMOID_MUL").is_ok())
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SIGMOID_MUL").is_ok());
+    direct || cuda_use_kt_api_all()
 }
 
 /// Phase 7 opt-in: route the fused RMSNorm inference forward through
-/// the kt-API + adapters. Set `KILN_USE_KT_API_RMSNORM=1` to enable;
-/// default off. Pays ~3 dtod memcpys per RMSNorm call.
+/// the kt-API + adapters. Set `KILN_USE_KT_API_RMSNORM=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_rmsnorm() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_RMSNORM").is_ok())
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_RMSNORM").is_ok());
+    direct || cuda_use_kt_api_all()
 }
 
 /// Phase 7 opt-in: fused_rotary_qk through the kt-API + adapters.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_rotary_qk() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ROTARY_QK").is_ok())
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ROTARY_QK").is_ok());
+    direct || cuda_use_kt_api_all()
 }
 
 /// Phase 7 opt-in: fused_mlp_silu_mul through the kt-API + adapters.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_mlp_silu_mul() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MLP_SILU_MUL").is_ok())
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MLP_SILU_MUL").is_ok());
+    direct || cuda_use_kt_api_all()
 }
 
 /// Phase 7 opt-in: fused_l2_qk_norm through the kt-API + adapters.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_l2_qk_norm() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_L2_QK_NORM").is_ok())
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_L2_QK_NORM").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
+/// Phase 7 opt-in: flash_attn_fwd through the kt-API + adapters.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_flash_attn_fwd() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_FLASH_ATTN_FWD").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
+/// Phase 7 opt-in: GDN full_chunk_forward (+ multiblock) through
+/// the kt-API + adapters.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_gdn_full_chunk() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_GDN_FULL_CHUNK").is_ok());
+    direct || cuda_use_kt_api_all()
 }
 
 thread_local! {
