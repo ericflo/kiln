@@ -274,6 +274,30 @@ fn cuda_use_kt_api_mean_last_dim() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: `sum_keepdim(-1)` through the kt-API +
+/// adapters. Set `KILN_USE_KT_API_SUM_LAST_DIM=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// `exp_shifted.sum_keepdim(D::Minus1)` reduction in
+/// [`cuda_softmax_last_dim`] (the candle-composite fallback path
+/// when `KILN_USE_KT_API_SOFTMAX` is off) through
+/// `kiln_tensor::cuda_sum_last_axis` plus a zero-cost
+/// `unsqueeze(-1)` to restore the trailing-dim shape. Falls
+/// through to the candle composite when any precondition fails so
+/// behavior is identical with the gate off.
+///
+/// Distinct from `KILN_USE_KT_API_SUM_SQ_LAST_DIM` (the
+/// `sqr().sum_keepdim(-1)` two-op composite migration): this gate
+/// targets the *plain* `sum_keepdim(-1)` site, which is reached
+/// after a separate `exp()` step on `shifted = x - max(x)` so the
+/// fused sum-squared kernel is not applicable.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_sum_last_dim() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SUM_LAST_DIM").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -1971,8 +1995,71 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
     let max_val = x.max_keepdim(candle_core::D::Minus1)?;
     let shifted = x.broadcast_sub(&max_val)?;
     let exp_shifted = shifted.exp()?;
-    let sum_exp = exp_shifted.sum_keepdim(candle_core::D::Minus1)?;
+    // Phase 7 (#1082): when `KILN_USE_KT_API_SUM_LAST_DIM=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND `exp_shifted` is a
+    // contiguous CUDA tensor of {F32, BF16, F16}, route the
+    // `sum_keepdim(-1)` reduction through
+    // `kiln_tensor::cuda_sum_last_axis` plus a zero-cost
+    // `unsqueeze(-1)`. Falls through to the candle composite when
+    // any precondition fails so behavior is identical with the
+    // gate off.
+    let sum_exp = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_sum_last_dim_keepdim(&exp_shifted)? {
+                out
+            } else {
+                exp_shifted.sum_keepdim(candle_core::D::Minus1)?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            exp_shifted.sum_keepdim(candle_core::D::Minus1)?
+        }
+    };
     Ok(exp_shifted.broadcast_div(&sum_exp)?)
+}
+
+/// Phase 7 (#1082) — kt-API `sum_keepdim(-1)` migration helper.
+/// Routes a contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_sum_last_axis` (which reduces the trailing
+/// axis) and re-applies `unsqueeze(-1)` so the output shape
+/// matches `sum_keepdim`.
+///
+/// Returns `Ok(None)` on any incompatibility so the caller falls
+/// through to the candle composite. NVTX range
+/// `kiln/sum_last_dim_kt` brackets the migrated call so nsys
+/// traces separate the path from the baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_sum_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_sum_last_dim() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/sum_last_dim_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out_kt = match kiln_tensor::cuda_sum_last_axis(&x_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let reduced = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).map_err(|e| {
+        anyhow::anyhow!("try_kt_sum_last_dim_keepdim: candle copy-back failed: {e}")
+    })?;
+    let out = reduced
+        .unsqueeze(candle_core::D::Minus1)
+        .map_err(|e| anyhow::anyhow!("try_kt_sum_last_dim_keepdim: unsqueeze failed: {e}"))?;
+    Ok(Some(out))
 }
 
 /// Phase 7 (#1082) — kt-API softmax migration helper. Routes a
