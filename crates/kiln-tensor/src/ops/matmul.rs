@@ -109,6 +109,31 @@ impl DeviceOp2 for MatmulOp {
         Ok(Some(out))
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        // Mirror cpu_fwd's validation contract — but route the
+        // contracted dispatch to kiln-blas's cublasLt handle via
+        // `crate::cuda_matmul`. Phase 2.x of #1082.
+        //
+        // Note: kt-tensor's CPU matmul path validates inputs (rank,
+        // dtype, equal-ranks, contraction-dim match, contiguous);
+        // `cuda_matmul` re-validates the same contract before
+        // touching device memory. This keeps the two paths in lock-
+        // step and means the error messages on a CUDA-side mismatch
+        // are identical to those on the CPU side.
+        let dtype = a.dtype();
+        if !matches!(dtype, DType::BF16 | DType::F16 | DType::F32) {
+            // Unsupported dtype on this backend — fall through to CPU.
+            return Ok(None);
+        }
+        if !a.is_contiguous() || !b.is_contiguous() {
+            // CUDA path requires contiguous inputs. Caller can
+            // `.contiguous()` first (PR #1374 added that for CUDA).
+            return Ok(None);
+        }
+        Ok(Some(crate::cuda_matmul(a, b)?))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }

@@ -2072,6 +2072,8 @@ dependencies = [
  "cc",
  "half",
  "kiln-autograd",
+ "kiln-blas",
+ "kiln-kt-bridge",
  "kiln-vulkan-kernel",
  "memmap2",
  "safetensors 0.7.0",

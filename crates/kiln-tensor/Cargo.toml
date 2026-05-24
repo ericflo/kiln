@@ -48,6 +48,13 @@ candle-core = { workspace = true, optional = true }
 # we have to depend on it explicitly (matches kiln-model's pin).
 candle-metal-kernels = { version = "0.10", optional = true }
 
+
+# Optional — pulled in under the `cuda` feature only. Provides the
+# Phase 2.x `CublasLtMatmulHandle` that `MatmulOp::cuda_fwd` and
+# `crate::cuda_matmul` dispatch through. Phase 7 retires the candle
+# dep, but kiln-blas stays.
+kiln-blas = { workspace = true, optional = true, features = ["cublaslt"] }
+
 # Optional — pulled in under the `vulkan` feature only. kiln-vulkan-kernel
 # is already candle-free (uses ash + custom GLSL compute) so this is a
 # clean, permanent dependency — Phase 7 does NOT replace it.
@@ -60,7 +67,7 @@ default = []
 # `candle_core::cuda_backend::cudarc::driver::*` matching the pattern in
 # kiln-conv1d-kernel / kiln-flash-attn / kiln-model::cuda_graph. This is
 # the SINGLE candle hook in kiln-tensor; Phase 7 replaces it.
-cuda = ["dep:candle-core", "candle-core?/cuda"]
+cuda = ["dep:candle-core", "candle-core?/cuda", "dep:kiln-blas"]
 # Reserved for Phase 1.7. Same pattern as `cuda`.
 metal = ["dep:candle-core", "candle-core?/metal", "dep:candle-metal-kernels"]
 # Phase 1.8 — Vulkan storage. Does NOT go through candle: lifts
@@ -73,3 +80,7 @@ vulkan = ["dep:kiln-vulkan-kernel"]
 # kiln-autograd backwards through the substrate end-to-end. Mirrors
 # the dev-dep wiring already used by kiln-optim's training tests.
 kiln-autograd = { workspace = true }
+
+# Phase 2.x parity test routes through kt-bridge to drive the kt CUDA
+# matmul path from candle-side inputs/outputs.
+kiln-kt-bridge = { workspace = true }

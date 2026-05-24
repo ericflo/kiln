@@ -42,6 +42,8 @@ mod tensor_id;
 mod cuda_allocator;
 #[cfg(feature = "cuda")]
 mod cuda_storage;
+#[cfg(feature = "cuda")]
+mod cuda_matmul;
 #[cfg(feature = "metal")]
 mod metal_allocator;
 #[cfg(feature = "metal")]
@@ -76,6 +78,8 @@ pub use cuda_storage::{
     cuda_activation_unary, cuda_cast, cuda_contiguous, cuda_elementwise_binary,
     cuda_index_select_dim0, cuda_zeros, CudaStorage,
 };
+#[cfg(feature = "cuda")]
+pub use cuda_matmul::{cuda_matmul, snapshot_algo_cache};
 #[cfg(feature = "metal")]
 pub use metal_allocator::MetalAllocator;
 #[cfg(feature = "metal")]
