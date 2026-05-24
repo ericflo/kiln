@@ -347,6 +347,23 @@ tool calls 5.25, mean thinking chars 1979.25, and wall-clock 36.52s. The larger
 gate was skipped. Rank-amplified natural preferences are safer than hard
 failure negatives, but one tiny-preference group is not enough signal.
 
+H33 tested whether H31's hard-negative failure was partly an ECHO artifact.
+It reused H31's exact two-group hard-negative dataset, but trained with
+`--no-echo`, keeping policy loss on and all other settings at rank 4 / alpha 8
+/ lr 5e-6 / 24 checkpoint segments. Dry-run shape was the same as H31: 4
+completions, 389 action tokens, 526 env tokens, max 554 sequence tokens, max
+150 action tokens per completion. Training completed in 125s observed
+wall-clock with peak VRAM about 15963 MiB; verification passed with delta proxy
+0.256303. Blind `LIMIT=4` smoke was strong: composite 0.98125 versus base
+0.934375, tool-call efficiency 0.9375, mean tool calls 3.75, mean thinking
+chars 1585.0, and wall-clock 28.28s. The larger `LIMIT=8` gate also cleared on
+composite, scoring 0.8921875 versus base 0.8328125, with outcome 1.0 versus
+base 0.875 and zero zero-rollouts versus base one. The caveat is that
+tool-call efficiency fell to 0.640625, mean tool calls rose to 6.75, and
+wall-clock rose to 62.65s. H33 is therefore an outcome-reliability win, not an
+efficiency win. It should be kept with caveat and either confirmed with another
+seed or used as the base for a small efficiency-recovery stage.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
