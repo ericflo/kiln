@@ -179,7 +179,7 @@ fn cuda_use_kt_api_gdn_full_chunk() -> bool {
 /// wrap a kt allocation yet). Inputs go zero-copy through the
 /// kt-bridge borrow adapter.
 #[cfg(feature = "cuda")]
-fn cuda_use_kt_api_matmul() -> bool {
+pub(crate) fn cuda_use_kt_api_matmul() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MATMUL").is_ok());
     direct || cuda_use_kt_api_all()
@@ -3638,7 +3638,7 @@ fn matmul_no_broadcast_copy(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 /// brackets the migrated call so nsys traces separate the path from
 /// the candle baseline.
 #[cfg(feature = "cuda")]
-fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>> {
+pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>> {
     kiln_nvtx::range!(c"kiln/matmul_kt");
 
     let lhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(lhs) {

@@ -781,6 +781,28 @@ impl BackendRuntime for CudaBackend {
         let lead: usize = l_dims[..l_dims.len() - 1].iter().product();
         let out = if x.is_contiguous() {
             let x2d = x.reshape((lead, k))?;
+
+            // Phase 7 opt-in: route through the kt cublasLt handle
+            // when KILN_USE_KT_API_MATMUL=1 and the dtype is supported.
+            // Brings the kt-API into the production CUDA prefill matmul
+            // path (the training/autograd path that goes through
+            // BackendRuntime::linear_prefill_apply before falling back
+            // to matmul_no_broadcast_copy). NVTX range from try_kt_matmul
+            // brackets the call as kiln/matmul_kt in nsys.
+            if crate::forward::cuda_use_kt_api_matmul()
+                && matches!(x2d.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32)
+                && x2d.dtype() == weight_t.dtype()
+                && x2d.is_contiguous()
+                && weight_t.is_contiguous()
+            {
+                if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
+                    let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
+                    out_shape.push(out_n);
+                    CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(Some(kt_out2d.reshape(out_shape)?));
+                }
+            }
+
             let out2d = x2d.matmul(weight_t)?;
             let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
             out_shape.push(out_n);
