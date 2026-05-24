@@ -1,6 +1,10 @@
 // Kiln CUDA-side unary activation kernel.
 //
-// Covers silu / sigmoid / gelu / tanh / relu over F32 + BF16 + F16.
+// Covers silu / sigmoid / gelu / tanh / relu over F32 + BF16 + F16,
+// plus the broader unary-math family (log/exp/sin/cos/tan/sinh/cosh
+// /neg/abs/sqrt) added in #1082 — same kind-tagged dispatch, same
+// dtype handling, same launch shape.
+//
 // In-place math in F32 (kiln's numerical-reference convention),
 // narrowed back to the storage dtype on store.
 //
@@ -28,12 +32,26 @@
 
 #define BLOCK_SIZE 256
 
-// Op kinds — match `UnaryKind` in activation.rs
+// Op kinds — match `UnaryKind` in activation.rs and the unary-math
+// op kinds in unary_arith.rs / trig.rs / hyperbolic.rs.
 #define KIND_SILU    0
 #define KIND_SIGMOID 1
 #define KIND_GELU    2
 #define KIND_TANH    3
 #define KIND_RELU    4
+// Unary math kinds (#1082):
+#define KIND_LOG     5   // ln(x)
+#define KIND_EXP     6   // e^x
+#define KIND_SIN     7
+#define KIND_COS     8
+#define KIND_TAN     9
+#define KIND_SINH   10
+#define KIND_COSH   11
+#define KIND_NEG    12
+#define KIND_ABS    13
+#define KIND_SQRT   14
+
+#define KIND_MAX    14
 
 // Dtype tags
 #define DTYPE_F32  0
@@ -63,6 +81,36 @@ __device__ __forceinline__ float apply_unary(int kind, float x) {
         }
         case KIND_RELU: {
             return fmaxf(0.0f, x);
+        }
+        case KIND_LOG: {
+            return logf(x);
+        }
+        case KIND_EXP: {
+            return expf(x);
+        }
+        case KIND_SIN: {
+            return sinf(x);
+        }
+        case KIND_COS: {
+            return cosf(x);
+        }
+        case KIND_TAN: {
+            return tanf(x);
+        }
+        case KIND_SINH: {
+            return sinhf(x);
+        }
+        case KIND_COSH: {
+            return coshf(x);
+        }
+        case KIND_NEG: {
+            return -x;
+        }
+        case KIND_ABS: {
+            return fabsf(x);
+        }
+        case KIND_SQRT: {
+            return sqrtf(x);
         }
         default:
             return 0.0f;
@@ -107,7 +155,7 @@ extern "C" int kiln_activation_unary_async(const void* x,
                                            int dtype,
                                            cudaStream_t stream) {
     if (n_elements < 0) return 1;
-    if (kind < 0 || kind > 4) return 2;
+    if (kind < 0 || kind > KIND_MAX) return 2;
     if (n_elements == 0) return 0;
 
     int64_t blocks_i64 = (n_elements + BLOCK_SIZE - 1) / BLOCK_SIZE;

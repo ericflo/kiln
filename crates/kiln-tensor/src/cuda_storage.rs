@@ -930,7 +930,8 @@ pub fn cuda_elementwise_binary(
 
 /// CUDA-side unary activation: `out[i] = activation(x[i])`.
 ///
-/// `kind` encodes the op (0=Silu, 1=Sigmoid, 2=Gelu, 3=Tanh, 4=Relu).
+/// `kind` encodes the op (0=Silu, 1=Sigmoid, 2=Gelu, 3=Tanh, 4=Relu;
+/// 5=Log, 6=Exp, 7=Sin, 8=Cos, 9=Tan, 10=Sinh, 11=Cosh, 12=Neg, 13=Abs, 14=Sqrt).
 /// Dtype inferred from `x.dtype()`; must be F32/BF16/F16. Input must
 /// be contiguous and on CUDA.
 #[cfg(feature = "cuda")]
