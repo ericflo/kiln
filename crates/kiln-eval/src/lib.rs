@@ -44,7 +44,8 @@ pub use production_trace::{
 };
 pub use result::{
     AggregateMetrics, EvalJobState, EvalOutcomeKind, EvalProgress, EvalResult, ExampleOutcome,
-    FlipDiff, LatencyStats, ReasoningLengthStats, ScorerBreakdown, SuiteResult, ToolBreakdown,
+    FlipDiff, LatencyStats, PassRateConfidenceInterval, ReasoningLengthStats, ScorerBreakdown,
+    SuiteResult, TagBreakdown, ToolBreakdown,
 };
 pub use scorers::{
     ArgsScoring, CodeStyle, NameMatch, NumericTolerance, Scorer, ScorerError, score_completion,

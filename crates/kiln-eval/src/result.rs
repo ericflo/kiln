@@ -132,6 +132,14 @@ pub struct ScorerBreakdown {
     pub pass_rate: f32,
 }
 
+/// Wilson-score confidence interval for a binomial pass rate.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct PassRateConfidenceInterval {
+    pub confidence_level: f32,
+    pub lower: f32,
+    pub upper: f32,
+}
+
 /// Aggregate metrics over a single suite run against a single adapter.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AggregateMetrics {
@@ -141,6 +149,11 @@ pub struct AggregateMetrics {
     pub num_invalid: u32,
     pub num_error: u32,
     pub accuracy: f32,
+    /// 95% Wilson interval around [`Self::accuracy`]. Production trace evals
+    /// are random samples; this makes sample uncertainty visible alongside
+    /// the point estimate.
+    #[serde(default)]
+    pub accuracy_confidence_interval: PassRateConfidenceInterval,
     pub mean_score: f32,
     /// Weighted mean over `EvalExample::weight`.
     pub weighted_mean_score: f32,
@@ -151,6 +164,10 @@ pub struct AggregateMetrics {
     pub elapsed_secs: f64,
     /// Pass rate sliced by example tag. Useful for "easy/medium/hard" splits.
     pub pass_rate_by_tag: BTreeMap<String, f32>,
+    /// Count-aware tag breakdown with confidence intervals. `pass_rate_by_tag`
+    /// is retained for backward compatibility and quick dashboards.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tag_breakdown: BTreeMap<String, TagBreakdown>,
     /// Per-scorer-kind breakdown when the suite mixes scorers.
     pub by_scorer: Vec<ScorerBreakdown>,
     /// Per-tool-name pass rate, surfaced only when the suite exercises
@@ -199,6 +216,18 @@ pub struct ToolBreakdown {
     pub num_examples: u32,
     pub num_pass: u32,
     pub pass_rate: f32,
+    #[serde(default)]
+    pub confidence_interval: PassRateConfidenceInterval,
+}
+
+/// Per-tag aggregate counts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TagBreakdown {
+    pub num_examples: u32,
+    pub num_pass: u32,
+    pub pass_rate: f32,
+    #[serde(default)]
+    pub confidence_interval: PassRateConfidenceInterval,
 }
 
 /// Compact summary of reasoning-block lengths across a suite run.
@@ -411,10 +440,25 @@ impl AggregateMetrics {
             0.0
         };
         let pass_rate_by_tag = tag_pass
+            .iter()
+            .map(|(tag, (n, p))| {
+                let rate = if *n > 0 { *p as f32 / *n as f32 } else { 0.0 };
+                (tag.clone(), rate)
+            })
+            .collect();
+        let tag_breakdown = tag_pass
             .into_iter()
             .map(|(tag, (n, p))| {
                 let rate = if n > 0 { p as f32 / n as f32 } else { 0.0 };
-                (tag, rate)
+                (
+                    tag,
+                    TagBreakdown {
+                        num_examples: n,
+                        num_pass: p,
+                        pass_rate: rate,
+                        confidence_interval: pass_rate_confidence_interval(p, n),
+                    },
+                )
             })
             .collect();
         let by_scorer = scorer_acc
@@ -437,6 +481,7 @@ impl AggregateMetrics {
                         num_examples: n,
                         num_pass: p,
                         pass_rate: rate,
+                        confidence_interval: pass_rate_confidence_interval(p, n),
                     },
                 )
             })
@@ -450,6 +495,7 @@ impl AggregateMetrics {
             num_invalid,
             num_error,
             accuracy,
+            accuracy_confidence_interval: pass_rate_confidence_interval(num_pass, num_examples),
             mean_score,
             weighted_mean_score,
             latency: LatencyStats::from_samples(&latencies),
@@ -457,6 +503,7 @@ impl AggregateMetrics {
             total_completion_tokens: completion_tokens,
             elapsed_secs,
             pass_rate_by_tag,
+            tag_breakdown,
             by_scorer,
             pass_rate_by_tool,
             reasoning_length,
@@ -487,6 +534,28 @@ fn compute_reasoning_stats(samples: &[u32]) -> ReasoningLengthStats {
         p50_chars: p(0.5),
         p90_chars: p(0.9),
         max_chars: *sorted.last().unwrap_or(&0),
+    }
+}
+
+fn pass_rate_confidence_interval(num_pass: u32, num_examples: u32) -> PassRateConfidenceInterval {
+    if num_examples == 0 {
+        return PassRateConfidenceInterval {
+            confidence_level: 0.95,
+            lower: 0.0,
+            upper: 0.0,
+        };
+    }
+    let z = 1.959_963_984_540_054_f64;
+    let n = num_examples as f64;
+    let phat = num_pass as f64 / n;
+    let z2 = z * z;
+    let denom = 1.0 + z2 / n;
+    let center = phat + z2 / (2.0 * n);
+    let margin = z * ((phat * (1.0 - phat) + z2 / (4.0 * n)) / n).sqrt();
+    PassRateConfidenceInterval {
+        confidence_level: 0.95,
+        lower: ((center - margin) / denom).clamp(0.0, 1.0) as f32,
+        upper: ((center + margin) / denom).clamp(0.0, 1.0) as f32,
     }
 }
 
@@ -716,6 +785,9 @@ mod tests {
         assert_eq!(metrics.num_fail, 1);
         assert_eq!(metrics.num_invalid, 1);
         assert!((metrics.accuracy - 1.0 / 3.0).abs() < 1e-6);
+        assert!(metrics.accuracy_confidence_interval.lower < metrics.accuracy);
+        assert!(metrics.accuracy_confidence_interval.upper > metrics.accuracy);
+        assert_eq!(metrics.accuracy_confidence_interval.confidence_level, 0.95);
         // weighted: 2*1 + 1*0 + 1*0 / 4 = 0.5
         assert!((metrics.weighted_mean_score - 0.5).abs() < 1e-6);
         assert_eq!(metrics.total_completion_tokens, 60);
@@ -734,5 +806,73 @@ mod tests {
         let m =
             AggregateMetrics::compute(&outcomes, &BTreeMap::new(), &tags, &BTreeMap::new(), 1.0);
         assert_eq!(m.pass_rate_by_tag.get("easy").copied(), Some(0.5));
+        let easy = m.tag_breakdown.get("easy").unwrap();
+        assert_eq!(easy.num_examples, 2);
+        assert_eq!(easy.num_pass, 1);
+        assert!((easy.pass_rate - 0.5).abs() < 1e-6);
+        assert!(easy.confidence_interval.lower < 0.5);
+        assert!(easy.confidence_interval.upper > 0.5);
+    }
+
+    #[test]
+    fn aggregate_tool_breakdown_has_confidence_interval() {
+        let outcomes = vec![
+            mk("a", 0, EvalOutcomeKind::Pass, 1.0, 1.0),
+            mk("b", 0, EvalOutcomeKind::Fail, 0.0, 1.0),
+        ];
+        let mut target_tools = BTreeMap::new();
+        target_tools.insert("a".to_string(), "Bash".to_string());
+        target_tools.insert("b".to_string(), "Bash".to_string());
+        let m = AggregateMetrics::compute_with_tools(
+            &outcomes,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &target_tools,
+            &BTreeMap::new(),
+            1.0,
+        );
+        let bash = m.pass_rate_by_tool.get("Bash").unwrap();
+        assert_eq!(bash.num_examples, 2);
+        assert_eq!(bash.num_pass, 1);
+        assert!((bash.pass_rate - 0.5).abs() < 1e-6);
+        assert!(bash.confidence_interval.lower < 0.5);
+        assert!(bash.confidence_interval.upper > 0.5);
+    }
+
+    #[test]
+    fn aggregate_serializes_confidence_interval_fields() {
+        let outcomes = vec![
+            mk("a", 0, EvalOutcomeKind::Pass, 1.0, 1.0),
+            mk("b", 0, EvalOutcomeKind::Fail, 0.0, 1.0),
+        ];
+        let m = AggregateMetrics::compute(
+            &outcomes,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            1.0,
+        );
+        let json = serde_json::to_value(&m).unwrap();
+        assert!(
+            (json["accuracy_confidence_interval"]["confidence_level"]
+                .as_f64()
+                .unwrap()
+                - 0.95)
+                .abs()
+                < 1e-6
+        );
+        assert!(
+            json["accuracy_confidence_interval"]["lower"]
+                .as_f64()
+                .unwrap()
+                < 0.5
+        );
+        assert!(
+            json["accuracy_confidence_interval"]["upper"]
+                .as_f64()
+                .unwrap()
+                > 0.5
+        );
     }
 }

@@ -725,8 +725,9 @@ fn print_human(result: &EvalResultPayload) {
         println!("Suite: {} | Adapter: {}", r.suite_name, adapter_label);
         println!("  job: {}  hash: {}", result.job_id, r.suite_hash);
         println!(
-            "  accuracy: {:>5.1}%  |  mean: {:.3}  |  weighted: {:.3}",
+            "  accuracy: {:>5.1}% {}  |  mean: {:.3}  |  weighted: {:.3}",
             r.metrics.accuracy * 100.0,
+            format_ci(&r.metrics.accuracy_confidence_interval),
             r.metrics.mean_score,
             r.metrics.weighted_mean_score
         );
@@ -760,7 +761,19 @@ fn print_human(result: &EvalResultPayload) {
                 );
             }
         }
-        if !r.metrics.pass_rate_by_tag.is_empty() {
+        if !r.metrics.tag_breakdown.is_empty() {
+            println!("  by tag:");
+            for (tag, br) in &r.metrics.tag_breakdown {
+                println!(
+                    "    {:<24}  {:>5.1}% {}  ({}/{})",
+                    tag,
+                    br.pass_rate * 100.0,
+                    format_ci(&br.confidence_interval),
+                    br.num_pass,
+                    br.num_examples
+                );
+            }
+        } else if !r.metrics.pass_rate_by_tag.is_empty() {
             println!("  by tag:");
             for (tag, rate) in &r.metrics.pass_rate_by_tag {
                 println!("    {:<24}  {:>5.1}%", tag, rate * 100.0);
@@ -770,9 +783,10 @@ fn print_human(result: &EvalResultPayload) {
             println!("  by tool:");
             for (tool, br) in &r.metrics.pass_rate_by_tool {
                 println!(
-                    "    {:<24}  {:>5.1}%  ({}/{})",
+                    "    {:<24}  {:>5.1}% {}  ({}/{})",
                     tool,
                     br.pass_rate * 100.0,
+                    format_ci(&br.confidence_interval),
                     br.num_pass,
                     br.num_examples
                 );
@@ -825,6 +839,13 @@ fn print_human(result: &EvalResultPayload) {
             );
         }
     }
+}
+
+fn format_ci(ci: &kiln_eval::result::PassRateConfidenceInterval) -> String {
+    if ci.confidence_level <= 0.0 {
+        return String::new();
+    }
+    format!("(95% CI {:.1}-{:.1}%)", ci.lower * 100.0, ci.upper * 100.0)
 }
 
 fn print_compare(result: &EvalResultPayload) {

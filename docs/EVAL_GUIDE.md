@@ -522,12 +522,16 @@ Two layouts are supported:
 
 - `num_examples`, `num_pass`, `num_fail`, `num_invalid`, `num_error`
 - `accuracy` — pass rate
+- `accuracy_confidence_interval` — 95% Wilson interval around `accuracy`;
+  production trace suites are random samples, so treat this as the sampling
+  uncertainty around the point estimate.
 - `mean_score`, `weighted_mean_score`
 - `latency` — `{p50_ms, p90_ms, p99_ms, mean_ms, max_ms}`
 - `total_prompt_tokens`, `total_completion_tokens`
 - `elapsed_secs`
 - `pass_rate_by_tag` — per-tag pass rate (uses the first completion when
   `n>1`)
+- `tag_breakdown` — per-tag pass counts and confidence intervals
 - `by_scorer` — per-scorer-kind breakdown when the suite mixes scorers
 
 Every example record (`outcomes[]`) carries:
@@ -699,9 +703,10 @@ The executor passes these into the chat template so the Qwen3.5
 broader catalogue than the rest.
 
 For agentic suites, the result includes `pass_rate_by_tool`: a map from
-tool name to `(num_examples, num_pass, pass_rate)`. So you can spot a
-model that nails `Read` but flubs `Edit` without writing per-tool tags
-yourself.
+tool name to `(num_examples, num_pass, pass_rate, confidence_interval)`. So
+you can spot a model that nails `Read` but flubs `Edit` without writing
+per-tool tags yourself, while still seeing how much evidence each tool slice
+has.
 
 ## Built-in: `qwen3.5-agentic-core`
 
