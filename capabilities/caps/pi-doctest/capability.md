@@ -380,6 +380,16 @@ directly; the next H33 follow-up should either confirm H33 with another seed or
 use a broader, reliability-preserving data signal rather than one narrow
 preference pair.
 
+H35 performed that H33 confirmation before spending more training time. It did
+not train a new adapter; it reran `pi-doctest-h33-hardneg-g2-noecho-r4a8` on a
+fresh `LIMIT=8 SEEDS=1` blind aggregate, paired against the same base8 summary.
+The result did not reproduce H33's larger-gate win: composite fell to 0.721875
+versus base8 0.8328125, outcome fell to 0.75, and zero rollouts rose to 2. It
+did use fewer tool calls than base (4.625 mean calls, tool-call efficiency
+0.84375), but that efficiency was bought by lost correctness. H33 should now be
+treated as an unstable candidate rather than a stable kept stage; do not chain
+further from it without a stronger multi-seed confirmation.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
