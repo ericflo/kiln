@@ -1904,6 +1904,7 @@ version = "0.2.19"
 dependencies = [
  "candle-core",
  "half",
+ "kiln-autograd",
  "kiln-tensor",
 ]
 
