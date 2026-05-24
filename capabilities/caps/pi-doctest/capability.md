@@ -332,6 +332,21 @@ wall-clock rose to 42.35s. The larger gate was skipped. The throughput shape is
 now workable, but this hard-negative data still does not improve the target
 behavior from base.
 
+H32 returned to natural successful traces instead of failure negatives. It took
+the short same-task pair behind H26 and rank-rescaled the tiny original reward
+spread `[0.987196, 0.985446]` into `[1.0, 0.0]`, preserving only passing
+train-only trajectories. The first two-pair version was rejected before
+training because the second pair included a 1243-token / 571-action-token
+completion, repeating H25's timeout shape. The one-pair version dry-ran at 579
+action tokens, 480 env tokens, max 814 sequence tokens, and max 299 action
+tokens per completion. Training completed in 264s observed wall-clock with peak
+VRAM about 15997 MiB; verification passed with delta proxy 0.238848. Blind
+`LIMIT=4` smoke was exactly flat on the score: composite 0.934375 versus base
+0.934375, outcome/tested/format all 1.0, tool-call efficiency 0.78125, mean
+tool calls 5.25, mean thinking chars 1979.25, and wall-clock 36.52s. The larger
+gate was skipped. Rank-amplified natural preferences are safer than hard
+failure negatives, but one tiny-preference group is not enough signal.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
