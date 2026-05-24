@@ -1062,3 +1062,28 @@ not chain from H59. The next viable adapter route likely needs either a much
 broader and more diverse behavior anchor with explicit regularization, or an
 external/generated teacher distribution that is not just copies of the base
 model's own successful traces.
+
+### H60: synthetic ideal SFT anchor
+
+H60 tested the synthesized-distribution lesson from `pi-faithful-completion`:
+instead of copying the base model's successful traces, train on deterministic
+rubric-perfect examples for simple doctest stubs. The four examples were
+hand-authored concise read -> edit -> doctest -> `DONE` trajectories for
+`double`, `is_even`, `first_char`, and `clamp`. They were shorter and more
+uniform than H59, tokenizing to 507, 515, 525, and 592 tokens.
+
+Training used native `cuda_sft_file`, rank 4 / alpha 4 / lr `1e-7`, 1 epoch,
+and `KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 86.078s observed,
+much faster than H59, with peak observed VRAM 15994 MiB. The receipt reported
+500 action tokens and 1639 context tokens. Adapter verify passed with 400
+nonzero LoRA tensors and a small LoRA update proxy, 0.012513.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it, though less catastrophically than
+H59. Paired base scored 0.900000 with no zero rollouts and mean wall-clock
+45.10s. H60 scored 0.814583 with no zero rollouts and mean wall-clock 44.68s.
+Lesson: synthesized ideal SFT at very low dose avoids the zero-rollout and
+latency regressions seen in H59, but it still reduces composite. A synthetic
+distribution alone is not enough. Future SFT-like work needs either explicit
+regularization against base behavior, a stronger teacher distribution with
+harder/diverse task semantics, or should be moved behind a confirmed positive
+adapter rather than trained directly on base.
