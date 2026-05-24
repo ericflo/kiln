@@ -217,6 +217,102 @@ impl DeviceOp2 for ScatterAddOp {
         Ok(Some(out))
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, values: &Tensor, indices: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd so future MSL
+        // kernel work can drop in without changing the call site:
+        //   - axis == 0 only (dim0 fast path)
+        //   - 1-D U32 indices (matches cuda_fwd; I64 / multi-D fall
+        //     through to CPU until kernels are extended)
+        //   - F32 / BF16 values (F16 needs an atomic-add fp16
+        //     path on Metal before it can route through this)
+        //   - contiguous inputs
+        if self.axis != 0 {
+            return Ok(None);
+        }
+        if indices.rank() != 1 {
+            return Ok(None);
+        }
+        if indices.dtype() != DType::U32 {
+            return Ok(None);
+        }
+        if values.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !matches!(values.dtype(), DType::F32 | DType::BF16) {
+            return Ok(None);
+        }
+        if !values.is_contiguous() || !indices.is_contiguous() {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): implement
+        // `crate::metal_scatter_add_dim0(out, indices, values)`
+        // analogous to `crate::cuda_scatter_add_dim0` above. Until
+        // that kernel lands, fall through to the CPU path
+        // (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. Custom MSL kernel: one thread per (i, inner_index)
+        //      pair; load `values[i, inner]`, atomic-add into
+        //      `out[ids[i], inner]`. Metal supports `atomic_float`
+        //      add on iOS17+/macOS14+ — for BF16, two-step
+        //      (cast-to-F32, atomic-add, cast back) is the portable
+        //      path until native BF16 atomics ship.
+        //   2. Output buffer must be zero-allocated before the
+        //      atomic-add pass (analog of `cuda_zeros` here); the
+        //      Metal device-allocator path lives in
+        //      `kiln-model::backend::metal`.
+        //   3. MPS Graph has no public scatter-add primitive that
+        //      matches our determinism contract — avoid that route.
+        Ok(None)
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, values: &Tensor, indices: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / metal_fwd:
+        //   - axis == 0 only
+        //   - 1-D U32 indices
+        //   - F32 / BF16 values (F16 needs atomic-add fp16 support
+        //     before it can route through this)
+        //   - contiguous inputs
+        if self.axis != 0 {
+            return Ok(None);
+        }
+        if indices.rank() != 1 {
+            return Ok(None);
+        }
+        if indices.dtype() != DType::U32 {
+            return Ok(None);
+        }
+        if values.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !matches!(values.dtype(), DType::F32 | DType::BF16) {
+            return Ok(None);
+        }
+        if !values.is_contiguous() || !indices.is_contiguous() {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): implement
+        // `crate::vulkan_scatter_add_dim0(out, indices, values)`
+        // analogous to `crate::cuda_scatter_add_dim0` above. Until
+        // that wrapper lands, fall through to the CPU path
+        // (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. SPIR-V compute shader: one invocation per (i,
+        //      inner_index) pair; `atomicAdd` into
+        //      `out[ids[i], inner]`. Requires the
+        //      `VK_KHR_shader_atomic_float` extension for F32
+        //      atomics; BF16 needs a cast-to-F32 / atomic-add /
+        //      cast-back wrapper (analog of the Metal note above).
+        //   2. Output buffer must be zero-allocated before the
+        //      atomic-add pass; `VkTensor::zeros` (or equivalent) in
+        //      `vk_tensor.rs` is the natural primitive.
+        //   3. Dtype matrix gap: `VkDType` exposes F32 / BF16 today;
+        //      F16 / I64-index paths need either widening `VkDType`
+        //      or cast wrappers at the dispatch boundary.
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         // scatter_add's bwd is index_select. Phase 6b wires this once
         // kiln-autograd's BackwardOp surface accepts the

@@ -143,6 +143,87 @@ impl DeviceOp2 for IndexSelectOp {
         }
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, input: &Tensor, indices: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd so future MSL
+        // kernel work can drop in without changing the call site:
+        //   - axis == 0 only (dim0 fast path; generic-axis lands later)
+        //   - non-packed input dtype
+        //   - contiguous input and indices
+        //   - U32 indices (matches cuda_fwd; I64 needs a cast kernel)
+        if self.axis != 0 {
+            return Ok(None);
+        }
+        if input.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !input.is_contiguous() || !indices.is_contiguous() {
+            return Ok(None);
+        }
+        if indices.dtype() != DType::U32 {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): implement
+        // `crate::metal_index_select_dim0(input, indices)` analogous
+        // to `crate::cuda_index_select_dim0` above. Until that kernel
+        // lands, fall through to the CPU path so the op still
+        // produces correct results on Mac (numerics-correct,
+        // performance-wrong).
+        // Candidate implementations:
+        //   1. Custom MSL kernel: grid over (n_indices, inner_block);
+        //      each thread copies one `block_bytes` slab from
+        //      input[ids[i], ...] to out[i, ...]. Mirrors the dim0
+        //      structure of the CUDA kernel.
+        //   2. MPS Graph: use `gather(_:indices:axis:)` for one-shot
+        //      dispatch; cheaper to wire but higher per-call overhead.
+        //   3. Reuse the gather kernel in `kiln-model::backend::metal`
+        //      if/when one is added there (the embedding lookup hot
+        //      path uses dim0 index_select).
+        Ok(None)
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, input: &Tensor, indices: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / metal_fwd:
+        //   - axis == 0 only
+        //   - non-packed input dtype
+        //   - contiguous input and indices
+        //   - U32 indices (matches cuda_fwd; I64 needs a cast kernel)
+        if self.axis != 0 {
+            return Ok(None);
+        }
+        if input.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !input.is_contiguous() || !indices.is_contiguous() {
+            return Ok(None);
+        }
+        if indices.dtype() != DType::U32 {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): implement
+        // `crate::vulkan_index_select_dim0(input, indices)` analogous
+        // to `crate::cuda_index_select_dim0` above. Until that
+        // wrapper lands, fall through to the CPU path
+        // (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. SPIR-V compute shader: grid over (n_indices,
+        //      inner_block); each invocation copies one
+        //      `block_bytes` slab from input[ids[i], ...] to
+        //      out[i, ...]. Mirrors the dim0 structure of the CUDA
+        //      kernel.
+        //   2. Reuse a gather kernel from
+        //      `kiln-vulkan-kernel::vk_ops` if/when one is added.
+        //      Requires moving `input` / `indices` to `VkTensor`
+        //      storage at the dispatch boundary; see
+        //      `VkTensor::from_*` constructors in `vk_tensor.rs`.
+        //   3. Dtype matrix gap: `VkDType` exposes F32 / BF16 today.
+        //      F16/I64 inputs need either widening `VkDType` or a
+        //      cast-to-supported wrapper at the dispatch boundary;
+        //      the cast kernels live in `vk_ops::cast`.
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
