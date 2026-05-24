@@ -56,6 +56,7 @@ fn main() {
     }
 
     build.file(csrc_dir.join("contiguous.cu"));
+    build.file(csrc_dir.join("index_select.cu"));
     build.compile("kiln_tensor_cuda_ops");
 
     println!(
