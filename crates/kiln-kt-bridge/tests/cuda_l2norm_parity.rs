@@ -1,0 +1,185 @@
+//! Parity test: kt CUDA L2-norm (`L2NormOp::cuda_fwd` /
+//! `cuda_l2norm_last_axis`) vs kt CPU reference (`ops::l2_norm`).
+//!
+//! Phase 4 substrate validation. Confirms the kernels in
+//! `csrc/reduce_last_axis.cu` (sum-of-squares + scale apply) produce
+//! per-row L2-normalized outputs matching the canonical CPU reference.
+
+
+
+use candle_core::backend::BackendDevice;
+use candle_core::{DType as CandleDType, Device as CandleDevice, Tensor as CandleTensor};
+
+use kiln_tensor::{cuda_l2norm_last_axis, ops, Tensor};
+
+fn try_cuda() -> Option<CandleDevice> {
+    CandleDevice::new_cuda(0).ok()
+}
+
+fn pattern(n: usize, seed: u64) -> Vec<f32> {
+    let mut out = Vec::with_capacity(n);
+    let mut s = seed.wrapping_mul(0x9E3779B97F4A7C15);
+    for _ in 0..n {
+        s = s.wrapping_add(0xDEADBEEF).wrapping_mul(0x9E3779B97F4A7C15);
+        // Range roughly [-1, 1) — same shape as the softmax parity test.
+        let f = ((s as u32 % 2048) as f32 - 1024.0) / 1024.0;
+        out.push(f);
+    }
+    out
+}
+
+fn cpu_reference_f32(data: &[f32], n_rows: usize, n_cols: usize, eps: f32) -> Vec<f32> {
+    // kt CPU L2-norm via ops::l2_norm. Build a CPU kt-Tensor first,
+    // then run the op.
+    let x = Tensor::from_slice(data, vec![n_rows, n_cols]).unwrap();
+    let y = ops::l2_norm(&x, eps).unwrap();
+    let cpu_storage = y
+        .storage()
+        .as_any()
+        .downcast_ref::<kiln_tensor::CpuStorage>()
+        .unwrap();
+    let bytes = cpu_storage.as_bytes();
+    let mut out = Vec::with_capacity(n_rows * n_cols);
+    for i in 0..(n_rows * n_cols) {
+        out.push(f32::from_le_bytes(
+            bytes[i * 4..i * 4 + 4].try_into().unwrap(),
+        ));
+    }
+    out
+}
+
+fn run_l2norm_parity(
+    n_rows: usize,
+    n_cols: usize,
+    dtype: CandleDType,
+    eps: f32,
+    tolerance: f32,
+) {
+    let Some(dev) = try_cuda() else {
+        eprintln!("CUDA not available; skipping");
+        return;
+    };
+    let n = n_rows * n_cols;
+    let data = pattern(n, 13);
+
+    let x_cd = CandleTensor::from_vec(data.clone(), (n_rows, n_cols), &dev)
+        .unwrap()
+        .to_dtype(dtype)
+        .unwrap();
+    let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_cd).unwrap();
+
+    let out_kt = cuda_l2norm_last_axis(&x_kt, eps).expect("l2norm");
+    let cuda_dev = match dev {
+        CandleDevice::Cuda(ref c) => c,
+        _ => unreachable!(),
+    };
+    cuda_dev.synchronize().unwrap();
+
+    // Reference: kt CPU L2-norm over the same F32 values.
+    let ref_vec = cpu_reference_f32(&data, n_rows, n_cols, eps);
+
+    let got_vec: Vec<f32> = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .unwrap()
+        .to_dtype(CandleDType::F32)
+        .unwrap()
+        .reshape((n,))
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+
+    assert_eq!(ref_vec.len(), got_vec.len());
+    let mut max_abs = 0.0f32;
+    for (a, b) in ref_vec.iter().zip(got_vec.iter()) {
+        let d = (a - b).abs();
+        if d > max_abs {
+            max_abs = d;
+        }
+    }
+    assert!(
+        max_abs < tolerance,
+        "rows={n_rows} cols={n_cols} dtype={dtype:?} eps={eps} max_abs={max_abs} > {tolerance}"
+    );
+
+    // Each row should be L2-unit-length up to eps (sum of squares ≈ 1
+    // when eps is small relative to the row's magnitude).
+    for row in 0..n_rows {
+        let row_sq: f32 = got_vec[row * n_cols..(row + 1) * n_cols]
+            .iter()
+            .map(|v| v * v)
+            .sum();
+        // With eps in the denominator, the actual row sq is
+        // sum/(sum+eps), so for non-degenerate rows it's ≈ 1.
+        assert!(
+            row_sq <= 1.0 + 1e-2 && row_sq > 0.0,
+            "row {row} sum_sq = {row_sq}, expected ∈ (0, ~1]"
+        );
+    }
+}
+
+#[test]
+fn cuda_l2norm_f32_4_rows_512_cols() {
+    run_l2norm_parity(4, 512, CandleDType::F32, 1e-6, 1e-5);
+}
+
+#[test]
+fn cuda_l2norm_bf16_8_rows_64_cols() {
+    // BF16 has ~3 decimal digits of precision; widen the tolerance.
+    run_l2norm_parity(8, 64, CandleDType::BF16, 1e-6, 2e-2);
+}
+
+#[test]
+fn cuda_l2norm_bf16_2_rows_2048_cols() {
+    // Larger row size — exercises the strided per-thread reduction
+    // when n_cols > MAX_THREADS.
+    run_l2norm_parity(2, 2048, CandleDType::BF16, 1e-6, 2e-2);
+}
+
+#[test]
+fn cuda_l2norm_dispatches_through_ops_l2_norm() {
+    let Some(dev) = try_cuda() else {
+        eprintln!("CUDA not available; skipping");
+        return;
+    };
+    let n_rows = 4;
+    let n_cols = 256;
+    let eps = 1e-6_f32;
+    let x_cd = CandleTensor::from_vec(
+        pattern(n_rows * n_cols, 23),
+        (n_rows, n_cols),
+        &dev,
+    )
+    .unwrap()
+    .to_dtype(CandleDType::BF16)
+    .unwrap();
+    let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_cd).unwrap();
+
+    // ops::l2_norm should pick the CUDA path automatically via
+    // L2NormOp::cuda_fwd.
+    let out_kt = ops::l2_norm(&x_kt, eps).expect("dispatch");
+
+    let cuda_dev = match dev {
+        CandleDevice::Cuda(ref c) => c,
+        _ => unreachable!(),
+    };
+    cuda_dev.synchronize().unwrap();
+
+    let got_vec: Vec<f32> = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .unwrap()
+        .to_dtype(CandleDType::F32)
+        .unwrap()
+        .reshape((n_rows * n_cols,))
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+
+    for row in 0..n_rows {
+        let row_sq: f32 = got_vec[row * n_cols..(row + 1) * n_cols]
+            .iter()
+            .map(|v| v * v)
+            .sum();
+        assert!(
+            row_sq > 0.0 && row_sq <= 1.0 + 1e-2,
+            "row {row} sum_sq = {row_sq}"
+        );
+    }
+}
