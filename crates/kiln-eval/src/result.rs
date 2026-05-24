@@ -62,6 +62,11 @@ pub struct ExampleOutcome {
     /// re-join against the suite).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Metadata inherited from the example. Production trace suites use this
+    /// for source_path/source_line/session/model provenance so raw eval
+    /// results remain auditable without joining against the source suite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
     /// Qwen3.5 `<think>…</think>` reasoning extracted from the raw completion,
     /// when present. Stored separately so dashboards can show "the model
     /// thought for 432 chars before answering" without re-parsing on every
@@ -366,7 +371,8 @@ impl AggregateMetrics {
             // outcome but the textual check is good enough for an
             // aggregate stat.
             if let Some(detail) = out.detail.as_deref() {
-                if detail.contains("formats=") && !detail.contains("formats=[xml")
+                if detail.contains("formats=")
+                    && !detail.contains("formats=[xml")
                     && !detail.contains("formats=[xml,")
                 {
                     num_non_xml_tool_calls += 1;
@@ -558,12 +564,8 @@ impl EvalResult {
             };
             match (prior, o.kind) {
                 (EvalOutcomeKind::Pass, EvalOutcomeKind::Pass) => diff.both_pass += 1,
-                (EvalOutcomeKind::Pass, _) => {
-                    diff.regressed.push(o.example_id.clone())
-                }
-                (_, EvalOutcomeKind::Pass) => {
-                    diff.improved.push(o.example_id.clone())
-                }
+                (EvalOutcomeKind::Pass, _) => diff.regressed.push(o.example_id.clone()),
+                (_, EvalOutcomeKind::Pass) => diff.improved.push(o.example_id.clone()),
                 _ => diff.both_fail += 1,
             }
         }
@@ -614,6 +616,7 @@ mod tests {
             completion_tokens: Some(20),
             latency_ms: Some(lat),
             tags: Vec::new(),
+            metadata: None,
             reasoning_text: None,
             unclosed_thinking: false,
         }
@@ -685,7 +688,10 @@ mod tests {
         let result = EvalResult {
             job_id: "j2".into(),
             state: EvalJobState::Completed,
-            runs: vec![mk_run("v0", vec![mk("a", 0, EvalOutcomeKind::Pass, 1.0, 1.0)])],
+            runs: vec![mk_run(
+                "v0",
+                vec![mk("a", 0, EvalOutcomeKind::Pass, 1.0, 1.0)],
+            )],
             progress: None,
             error: None,
         };
@@ -725,13 +731,8 @@ mod tests {
         let mut tags = BTreeMap::new();
         tags.insert("a".to_string(), vec!["easy".to_string()]);
         tags.insert("b".to_string(), vec!["easy".to_string()]);
-        let m = AggregateMetrics::compute(
-            &outcomes,
-            &BTreeMap::new(),
-            &tags,
-            &BTreeMap::new(),
-            1.0,
-        );
+        let m =
+            AggregateMetrics::compute(&outcomes, &BTreeMap::new(), &tags, &BTreeMap::new(), 1.0);
         assert_eq!(m.pass_rate_by_tag.get("easy").copied(), Some(0.5));
     }
 }

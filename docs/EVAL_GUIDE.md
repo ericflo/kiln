@@ -162,6 +162,12 @@ rows, target tools, prompt chars, target chars). This is the artifact that lets
 you later explain what production workload slice an adapter score actually
 measured.
 
+Each generated example also embeds the same provenance in `metadata`, and
+raw eval results echo that metadata on every outcome. When a production
+workload eval fails, the result JSON can be inspected directly to recover the
+source export path, source line, session/turn/model fields, and target tool
+set for that failed turn.
+
 The target is canonical semantic tool-call JSON, not the source model's wire
 format. At eval time, Kiln renders the saved `messages` and `tools` through
 the model backend's chat template, so Qwen3.5 sees its native `<tools>` prompt
