@@ -1100,7 +1100,10 @@ mod tests {
         assert_eq!(suite.examples[0].messages.len(), 2);
         assert_eq!(suite.examples[0].messages.last().unwrap().role, "user");
         assert_eq!(suite.examples[1].messages.len(), 6);
-        assert_eq!(suite.examples[1].messages.last().unwrap().content, "Go ahead.");
+        assert_eq!(
+            suite.examples[1].messages.last().unwrap().content,
+            "Go ahead."
+        );
         let first = extract_first_tool_call(suite.examples[0].target.as_deref().unwrap()).unwrap();
         let second = extract_first_tool_call(suite.examples[1].target.as_deref().unwrap()).unwrap();
         assert_eq!(first.name, "Read");
