@@ -21,7 +21,7 @@
 use candle_core::backend::BackendDevice;
 use candle_core::{DType as CandleDType, Device as CandleDevice, Tensor as CandleTensor};
 
-use kiln_tensor::{ops, Device, Tensor};
+use kiln_tensor::{cuda_contiguous, ops, Device, Tensor};
 
 fn try_cuda() -> Option<CandleDevice> {
     CandleDevice::new_cuda(0).ok()
@@ -38,12 +38,24 @@ fn pattern_f32(n: usize, seed: u64) -> Vec<f32> {
     out
 }
 
-/// Materialize a kt-Tensor (which may be a non-contiguous view) to a
-/// flat F32 vector via `.contiguous()` + candle copy.
+/// Materialize a kt-Tensor (which may be a non-contiguous view *or*
+/// a contiguous view over a Borrowed CudaStorage) into a flat F32
+/// vector.
+///
+/// Why not `kt.contiguous()`? `Tensor::contiguous` short-circuits and
+/// returns the input as-is when `is_contiguous()` is true. Chunks of
+/// a 1-D tensor (axis=0 splits) ARE contiguous views, so
+/// `.contiguous()` leaves their storage as `SliceOwner::Borrowed`,
+/// and `kt_tensor_to_candle_cuda_copy` panics because
+/// `CudaStorage::slice()` doesn't support borrowed storage.
+///
+/// Routing through `cuda_contiguous` directly forces a fresh Owned
+/// CUDA allocation and a kernel-side stride-aware copy, which is what
+/// the kt→candle adapter requires.
 fn materialize_to_f32(kt: &Tensor) -> Vec<f32> {
-    let contig = kt.contiguous().unwrap();
-    let n: usize = contig.shape().iter().product();
-    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&contig)
+    let owned = cuda_contiguous(kt).unwrap();
+    let n: usize = owned.shape().iter().product();
+    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&owned)
         .unwrap()
         .to_dtype(CandleDType::F32)
         .unwrap()
