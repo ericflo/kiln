@@ -196,6 +196,13 @@ the command argument is scored. That means a production target like
 uses an equivalent direct `python3 -c ...` call, while a different inner Python
 program still fails.
 
+Inline Python payloads are inspected recursively too. The scorer extracts
+`os.system`, `os.popen`, `subprocess.*`, and `Popen(...)` shell commands and
+scores those nested commands with the same shell scorer. It also compares
+executed file paths from `exec(open(...).read())`, `runpy.run_path(...)`, and
+`Path(...).read_text()` so equivalent wrappers around the same local script are
+not treated as source-format differences.
+
 ## The judgment flywheel (training a local judge LoRA, no frontier LLM)
 
 The eval system also captures *user preferences* into a separate kind of
