@@ -47,4 +47,36 @@ wall-clock is slightly worse than the base smoke even though tool calls and
 thinking chars improved. The next step should be a larger paired blind
 promotion check before treating H19 as a kept stage.
 
+## Promotion Check
+
+The larger paired blind check rejected H19.
+
+`LIMIT=8 SEEDS=1` base:
+
+- Composite: 0.8328125.
+- Outcome: 0.875.
+- Tested-before-done: 1.0.
+- Tool-call efficiency: 0.78125.
+- Mean tool calls: 5.25.
+- Mean thinking chars: 3486.0.
+- Mean wall-clock: 49.624973833560944s.
+- Zero rollouts: 1.
+
+`LIMIT=8 SEEDS=1` H19:
+
+- Composite: 0.6828125.
+- Delta: -0.15.
+- Outcome: 0.6875.
+- Tested-before-done: 0.9375.
+- Tool-call efficiency: 0.734375.
+- Mean tool calls: 7.0.
+- Mean thinking chars: 3587.0.
+- Mean wall-clock: 88.93232873082161s.
+- Zero rollouts: 2.
+
+The 4-rollout smoke lift was not stable. H19 should not be promoted. The
+main lesson is that ultrashort SFT can complete locally, but this particular
+workflow anchor overfit and made the adapter less reliable on the broader
+blind slice.
+
 No eval task contents or per-example eval transcripts were inspected.

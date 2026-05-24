@@ -173,6 +173,12 @@ tested-before-done 1.0, tool-call efficiency 0.8125, mean tool calls 5.0, and
 mean thinking chars 1717.0. This is a smoke-kept adapter only; the next step is
 a larger paired blind promotion check before treating it as a stage.
 
+The paired promotion check rejected H19. On `LIMIT=8 SEEDS=1`, base scored
+0.8328125 and H19 scored 0.6828125, delta -0.15. H19 produced more zero
+rollouts, worse outcome, worse tested-before-done, worse tool-call efficiency,
+more tool calls, more thinking chars, and slower wall-clock. The smoke lift was
+not stable; H19 is a data-shape/throughput lesson, not a promoted stage.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
