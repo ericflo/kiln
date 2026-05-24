@@ -765,3 +765,26 @@ reliability and latency. Next attempts should keep the edit-form token budget
 while changing the signal, preferably outcome-preserving pairs that differ only
 in efficient thinking/tool use after full verification, or a mixed anchor set
 that preserves broad task-solving behavior.
+
+### H46: realistic ECHO workflow
+
+H46 tested whether H45's failure came from its unnatural trajectory shape.
+It kept edit-form compression but restored assistant/tool alternation and ECHO:
+`edit` -> edit observation -> doctest -> doctest observation -> `DONE` was
+preferred over a no-test path and a redundant-retest path. The dataset used the
+first two H44 compact successes and dry-ran at 654 action tokens, 756 env
+tokens, 2214 context tokens, and reward stdev 0.414327.
+
+Training used rank 4 / alpha 4 / lr `1e-6`, ECHO lambda 0.05, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 698.235s observed, with
+peak observed VRAM 16007 MiB. ECHO env CE improved from 1.91345 to 1.35367.
+Adapter verify passed with 400 nonzero LoRA tensors and LoRA update proxy
+0.055388.
+
+Blind `LIMIT=4 SEEDS=1` smoke still rejected it, but the regression was much
+smaller than H45: paired base composite was 0.953125 with mean wall-clock
+26.24s; H46 scored 0.94375 with mean wall-clock 38.35s. Lesson: realistic
+observations plus ECHO substantially reduce the harm, but the no-test/retest
+contrast still fails to beat base and adds latency. Next attempts should keep
+H46's realistic trajectory structure while removing the `DONE`-without-test
+negative, using only verified outcome-preserving efficiency contrasts.
