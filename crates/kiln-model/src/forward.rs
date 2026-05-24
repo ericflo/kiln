@@ -190,6 +190,22 @@ fn cuda_use_kt_api_argmax() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: l2-normalize (last-axis) through the kt-API +
+/// adapters. Set `KILN_USE_KT_API_L2_NORMALIZE=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// [`l2_normalize`]'s F32 `x / sqrt(sum(x^2) + eps)` composite
+/// through `kiln_tensor::cuda_l2norm_last_axis`. Distinct from the
+/// existing `KILN_USE_KT_API_L2_QK_NORM` gate which targets the
+/// *fused* GDN q+k variant (`fused_l2_qk_norm`) — this one
+/// migrates the *non-fused* single-tensor primitive, which is also
+/// called outside the GDN qk path.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_l2_normalize() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_L2_NORMALIZE").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -6624,12 +6640,54 @@ fn lm_head_weighted_prep_argmax(
 
 /// L2 normalize the last dimension: x / sqrt(sum(x^2) + eps).
 /// Returns result in F32 regardless of input dtype.
+///
+/// Phase 7 (#1082): when `KILN_USE_KT_API_L2_NORMALIZE=1` (or
+/// `KILN_USE_KT_API_ALL=1`) is set AND the (F32-promoted) input is
+/// a contiguous CUDA tensor, route through
+/// `kiln_tensor::cuda_l2norm_last_axis` via the kt-bridge borrow
+/// adapter. Falls through to the portable candle composite when
+/// any precondition fails so behavior is identical with the gate
+/// off.
 fn l2_normalize(x: &Tensor) -> Result<Tensor> {
     let x_f32 = x.to_dtype(DType::F32)?;
+    #[cfg(feature = "cuda")]
+    if cuda_use_kt_api_l2_normalize()
+        && matches!(x_f32.device(), Device::Cuda(_))
+        && x_f32.is_contiguous()
+    {
+        if let Some(out) = try_kt_l2_normalize(&x_f32, 1e-6)? {
+            return Ok(out);
+        }
+    }
     let sq_sum = x_f32.sqr()?.sum_keepdim(candle_core::D::Minus1)?;
     let norm = (sq_sum + 1e-6)?.sqrt()?;
     let normalized = x_f32.broadcast_div(&norm)?;
     Ok(normalized)
+}
+
+/// Phase 7 (#1082) — kt-API l2-normalize migration helper. Routes
+/// a contiguous F32 CUDA candle tensor through
+/// `kiln_tensor::cuda_l2norm_last_axis`.
+///
+/// Returns `Ok(None)` on any incompatibility so the caller falls
+/// through to the candle composite. NVTX range
+/// `kiln/l2_normalize_kt` brackets the migrated call so nsys traces
+/// separate the path from the baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_l2_normalize(x_f32: &Tensor, eps: f32) -> Result<Option<Tensor>> {
+    kiln_nvtx::range!(c"kiln/l2_normalize_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x_f32) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out_kt = match kiln_tensor::cuda_l2norm_last_axis(&x_kt, eps) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_l2_normalize: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
 }
 
 fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result<(Tensor, Tensor)> {
