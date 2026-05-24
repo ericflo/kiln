@@ -9,7 +9,10 @@
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{
+    bail, dispatch1, BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result,
+    Storage, Tensor, TensorId,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrigKind {
@@ -43,19 +46,75 @@ impl TrigKind {
             TrigKind::Atan => x.atan(),
         }
     }
+
+    /// CUDA kernel kind tag. Only sin/cos/tan are wired to the shared
+    /// activation kernel today (#1082). The inverse trig ops (asin,
+    /// acos, atan) stay CPU-only until a follow-up.
+    #[cfg(feature = "cuda")]
+    fn cuda_kind_tag(self) -> Option<i32> {
+        match self {
+            TrigKind::Sin => Some(7),
+            TrigKind::Cos => Some(8),
+            TrigKind::Tan => Some(9),
+            TrigKind::Asin | TrigKind::Acos | TrigKind::Atan => None,
+        }
+    }
 }
 
-fn apply(kind: TrigKind, x: &Tensor) -> Result<Tensor> {
+/// `DeviceOp1` adapter for the trig family. CUDA path routes the
+/// forward sin/cos/tan through the shared `cuda_activation_unary`
+/// kernel; asin/acos/atan fall through to CPU (#1082).
+#[derive(Debug, Clone, Copy)]
+struct TrigOp {
+    kind: TrigKind,
+}
+
+impl DeviceOp1 for TrigOp {
+    fn name(&self) -> &'static str {
+        self.kind.name()
+    }
+
+    fn determinism(&self) -> Determinism {
+        Determinism::Constructive
+    }
+
+    fn cpu_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, self.kind.name())?;
+        let t = cpu_apply(self.kind, x)?;
+        Ok(Some(t))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        match self.kind.cuda_kind_tag() {
+            Some(tag) => Ok(Some(crate::cuda_activation_unary(x, tag)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
+        None
+    }
+}
+
+fn validate(x: &Tensor, name: &str) -> Result<()> {
     if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
-        bail!(
-            "{}: dtype must be F32/BF16/F16, got {}",
-            kind.name(),
-            x.dtype()
-        );
+        bail!("{name}: dtype must be F32/BF16/F16, got {}", x.dtype());
     }
     if !x.is_contiguous() {
-        bail!("{}: input must be contiguous", kind.name());
+        bail!("{name}: input must be contiguous");
     }
+    Ok(())
+}
+
+fn cpu_apply(kind: TrigKind, x: &Tensor) -> Result<Tensor> {
     let dtype = x.dtype();
     let cpu = x
         .storage()
@@ -91,22 +150,22 @@ fn apply(kind: TrigKind, x: &Tensor) -> Result<Tensor> {
 }
 
 pub fn sin(x: &Tensor) -> Result<Tensor> {
-    apply(TrigKind::Sin, x)
+    dispatch1(&TrigOp { kind: TrigKind::Sin }, x)
 }
 pub fn cos(x: &Tensor) -> Result<Tensor> {
-    apply(TrigKind::Cos, x)
+    dispatch1(&TrigOp { kind: TrigKind::Cos }, x)
 }
 pub fn tan(x: &Tensor) -> Result<Tensor> {
-    apply(TrigKind::Tan, x)
+    dispatch1(&TrigOp { kind: TrigKind::Tan }, x)
 }
 pub fn asin(x: &Tensor) -> Result<Tensor> {
-    apply(TrigKind::Asin, x)
+    dispatch1(&TrigOp { kind: TrigKind::Asin }, x)
 }
 pub fn acos(x: &Tensor) -> Result<Tensor> {
-    apply(TrigKind::Acos, x)
+    dispatch1(&TrigOp { kind: TrigKind::Acos }, x)
 }
 pub fn atan(x: &Tensor) -> Result<Tensor> {
-    apply(TrigKind::Atan, x)
+    dispatch1(&TrigOp { kind: TrigKind::Atan }, x)
 }
 
 #[cfg(test)]
@@ -197,7 +256,12 @@ mod tests {
                 .map(|&v| half::bf16::from_f32(v))
                 .collect();
             let x = Tensor::from_slice(&bf, vec![3]).unwrap();
-            let y = apply(kind, &x).unwrap();
+            let y = match kind {
+                TrigKind::Sin => sin(&x).unwrap(),
+                TrigKind::Cos => cos(&x).unwrap(),
+                TrigKind::Tan => tan(&x).unwrap(),
+                _ => unreachable!(),
+            };
             assert_eq!(y.dtype(), DType::BF16);
         }
     }
