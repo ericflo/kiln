@@ -367,6 +367,10 @@ def main():
         summary = {
             "mode": args.mode,
             "adapter": args.adapter or "",
+            "prompt_variant": os.environ.get("PI_DOCTEST_PROMPT_VARIANT", "").strip(),
+            "prompt_extra_instructions": os.environ.get(
+                "PI_DOCTEST_EXTRA_INSTRUCTIONS", ""
+            ).strip(),
             "n_tasks": len(tasks),
             "n_rollouts": len(records),
             "n_generations": args.num_generations,

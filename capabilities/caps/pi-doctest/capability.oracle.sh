@@ -117,6 +117,8 @@ out = {
     "rubric_version": "v1",
     "status": "kept-with-caveat",
     "adapter": summary.get("adapter", ""),
+    "prompt_variant": summary.get("prompt_variant", ""),
+    "prompt_extra_instructions": summary.get("prompt_extra_instructions", ""),
     "n_tasks": summary.get("n_tasks"),
     "n_rollouts": summary.get("n_rollouts"),
     "n_generations": summary.get("n_generations"),

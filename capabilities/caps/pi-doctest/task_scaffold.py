@@ -20,6 +20,29 @@ import sys
 from pathlib import Path
 
 
+PROMPT_VARIANTS = {
+    "lean-tools": (
+        "Variant instructions:\n"
+        "- Do not read README.md; all task information is in solution.py.\n"
+        "- Keep reasoning to one short sentence before each tool call; do not "
+        "restate the doctest examples.\n"
+        "- Prefer `edit` over `write`: replace only `raise NotImplementedError` "
+        "and any needed function-body lines.\n"
+        "- Use the shortest reliable loop: read solution.py, edit the body, run "
+        "the doctest command, then reply DONE after a pass.\n"
+        "- After a passing doctest, do not inspect, rerun, or explain anything."
+    ),
+    "edit-first": (
+        "Variant instructions:\n"
+        "- Prefer `edit` over `write` and preserve imports, signature, and "
+        "docstring exactly.\n"
+        "- Replace only the stubbed function body.\n"
+        "- Run the doctest command after editing, and reply DONE immediately "
+        "after it passes."
+    ),
+}
+
+
 def _normalize_doctest_examples(signature: str) -> str:
     """Convert assertion-style example lines into executable doctests."""
     out = []
@@ -53,7 +76,7 @@ def init_workdir(task: dict, dir: str) -> None:
 
 
 def pi_prompt(task: dict) -> str:
-    return (
+    prompt = (
         "In the file `solution.py` there is a stub Python function with a "
         "docstring containing doctest examples. Replace the function body "
         "so the doctests pass.\n\n"
@@ -70,6 +93,23 @@ def pi_prompt(task: dict) -> str:
         "Constraint: do not modify the function signature or the docstring. "
         "Only the function body should change."
     )
+    variant = os.environ.get("PI_DOCTEST_PROMPT_VARIANT", "").strip()
+    extra = os.environ.get("PI_DOCTEST_EXTRA_INSTRUCTIONS", "").strip()
+    additions = []
+    if variant:
+        try:
+            additions.append(PROMPT_VARIANTS[variant])
+        except KeyError as exc:
+            allowed = ", ".join(sorted(PROMPT_VARIANTS))
+            raise ValueError(
+                f"unknown PI_DOCTEST_PROMPT_VARIANT={variant!r}; "
+                f"allowed: {allowed}"
+            ) from exc
+    if extra:
+        additions.append(f"Additional instructions:\n{extra}")
+    if additions:
+        prompt = f"{prompt}\n\n" + "\n\n".join(additions)
+    return prompt
 
 
 if __name__ == "__main__":

@@ -190,6 +190,15 @@ stable here; future adapter attempts need a stronger gate before optimism, and
 should likely move away from SFT unless a qualitatively different signal is
 available.
 
+H21 tested whether prompt wording alone could recover the efficiency headroom
+before distillation. Three base-model prompt variants were evaluated on the
+same `LIMIT=8 SEEDS=1` blind aggregate size: `lean-tools`, `edit-first`, and
+a narrow stop-after-pass extra instruction. None beat the default prompt's
+0.8328125 composite. `lean-tools` reduced thinking chars but hurt outcome;
+`edit-first` removed zero rollouts but collapsed tool-call efficiency; the
+stop-after-pass extra instruction regressed both outcome and efficiency. Do
+not distill these prompts.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
