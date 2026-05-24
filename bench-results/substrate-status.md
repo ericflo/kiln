@@ -77,11 +77,26 @@ the input side. Output direction still copies because there's no
 "borrowed candle Tensor" type to wrap a kt allocation; that copy
 drops away once the call-site caller is also kt-API-typed.
 
-### Phase 3 — PagedKvCacheKt scaffold (PRs #1364, #1365, #1366)
+### Phase 1 — CUDA substrate ops (PRs #1374, #1376)
+
+`crates/kiln-tensor/csrc/` now hosts two new CUDA kernels with a
+matching `build.rs` that compiles them via nvcc when `--features cuda`
+is on. These removed the "CPU-only" hard error from kt-tensor's
+`Tensor::contiguous()` and added a typed gather entry point.
+
+| Kernel | Rust wrapper | Use |
+|---|---|---|
+| `contiguous.cu` | `cuda_contiguous(src)` | stride-aware copy → contiguous output; one thread per output element, byte-wise copy (dtype-agnostic, MAX_RANK=8) |
+| `index_select.cu` | `cuda_index_select_dim0(src, indices)` | axis=0 gather; one block per output row, threads cooperate on byte copy; U32 indices |
+
+`Tensor::contiguous()` now dispatches to `cuda_contiguous` whenever
+the source storage is on CUDA. Both wrappers accept Owned + Borrowed
+storage (Phase 7 v2 compatible).
+
+### Phase 3 — PagedKvCacheKt complete for non-FP8 (PRs #1364, #1365, #1366, #1373, #1375, #1377)
 
 `crates/kiln-model/src/paged_kv_cache_kt.rs` — kt-Tensor twin of
-`PagedKvCache`. Same field layout + FP8 quantization story; lives
-alongside the candle cache, call sites migrate one at a time.
+`PagedKvCache`. Now **feature-complete for non-FP8 production decode**:
 
 | Surface | Status |
 |---|---|
@@ -89,13 +104,17 @@ alongside the candle cache, call sites migrate one at a time.
 | Accessors (`block_size`, `num_blocks`, `num_layers`, `is_fp8`, `compute_dtype`, `pool_tensors`) | ✅ |
 | `write_token_major_native_graph_slot` (CUDA-graph contract) | ✅ |
 | `write_token_major_native_single` (host-slot single-token) | ✅ |
+| `write_contiguous_slot_run` (multi-token contiguous via dtod memcpy) | ✅ |
 | `contiguous_slot_run_starts` helper | ✅ |
-| `read` (needs CUDA-side `Tensor::contiguous()`) | pending |
-| Multi-token / batched writes | pending |
+| `read` (fast contiguous path via `cuda_contiguous`) | ✅ |
+| `read` (gather path via `cuda_index_select_dim0`) | ✅ |
 | FP8 quant/dequant (needs FP8 kt-API in kt-bridge) | pending |
+| Per-row write fallback (multi-token non-contiguous) | pending |
 
-The CUDA-side substrate ops (contiguous, narrow-with-copy) are the
-dominant unblock for the remaining methods.
+Coexists with the candle `PagedKvCache`; call sites in
+`kiln-model`/`kiln-server`/`kiln-scheduler` migrate one at a time.
+The candle cache stays the production path until the migration is
+gated through.
 
 ### Phase 2.5 / 2.7 — Parameter scaffolding (PRs #1367, #1368, #1369, #1370)
 
@@ -121,17 +140,24 @@ methods (forward-stale, epoch monotonic, snapshot-survives-swap).
   needs a hand-crafted migration; total ~3-4 hours of mechanical
   work. Non-blocking for production since gdn kt-API isn't yet
   called from kiln-model.
-- **CUDA-side substrate ops** (`Tensor::contiguous` for CUDA storage
-  + stride-aware narrow-with-copy): unblocks the remaining
-  `PagedKvCacheKt` methods (read, multi-token writes, anything that
-  needs `narrow().contiguous()` on device). New CUDA kernel work
-  per the `BackendRuntime::contiguous` hook described in
-  `kiln-tensor/src/tensor.rs:358`.
 - **Per-backend BLAS handle impls** (Phase 2 main event): lift the
   existing cublasLt probe into a `CublasLtMatmulHandle: BackendMatmul`
   impl + matching MPS/Vulkan handles behind their feature flags.
   Once landed, `Parameter::forward_dispatch(Plain { weight })` has
   a real backend to delegate to (currently a caller responsibility).
+- **PagedKvCache → PagedKvCacheKt call-site migration** (~60 sites
+  across `kiln-model`/`kiln-server`/`kiln-scheduler`): the kt cache
+  is now feature-complete for non-FP8 decode, so call sites can flip
+  one at a time behind a `KILN_USE_KT_PAGED_KV` env gate. Cleanest
+  first migration is `transformer_block_paged_kv` in
+  `kiln-model/src/forward.rs` since that's the single concentrated
+  consumer.
+- **FP8 dequant kt-API** (in `kt-bridge` or a new `kiln-fp8` crate):
+  closes the final pending portion of `PagedKvCacheKt` for FP8 caches.
+- **More CUDA substrate ops** (element-wise add, mul, softmax,
+  embedding lookup) — needed to land Phase 4 layer-glue (RMSNorm /
+  residual / embedding / final norm + LM head) on kt-Tensor end to
+  end.
 - **`CudaFlashAttentionTrainingBf16` reshape** so `flash_attn_fwd`
   can be migrated through the borrow path (the current CustomOp2
   shape blocks a clean drop-in).
