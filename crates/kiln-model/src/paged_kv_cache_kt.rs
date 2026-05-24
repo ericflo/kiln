@@ -178,6 +178,64 @@ impl PagedKvCacheKt {
     pub fn pool_tensors(&self, layer_idx: usize) -> Option<(&KtTensor, &KtTensor)> {
         self.layers.get(layer_idx).map(|(k, v)| (k, v))
     }
+
+    /// Slot-based decode-token writer — the CUDA-graph contract entry
+    /// point. Mirrors [`crate::paged_kv_cache::PagedKvCache::
+    /// write_token_major_native_graph_slot`] but takes kt-Tensors.
+    ///
+    /// Inputs:
+    /// - `k`, `v`: BF16 `[batch, 1, num_kv_heads, head_dim]`
+    /// - `slot`: U32 `[1]` device tensor (or `[batch]` for the batched
+    ///   variant — currently only `[1]` is exercised through this path)
+    ///
+    /// Returns `Ok(false)` when the cache is FP8-backed, when k/v
+    /// aren't BF16, or when `k.dim(1) != 1` — callers fall back to
+    /// [`Self::write`] (which doesn't exist yet; see the candle path
+    /// for the full quantization story).
+    ///
+    /// Routes through
+    /// [`kiln_flash_attn::paged_kv_write_token_major_bf16_slot_kt`],
+    /// which accepts Borrowed kt-Tensors (Phase 7 v2 — PR #1360).
+    pub fn write_token_major_native_graph_slot(
+        &self,
+        layer_idx: usize,
+        k: &KtTensor,
+        v: &KtTensor,
+        slot: &KtTensor,
+    ) -> Result<bool> {
+        if self.fp8 || k.dtype() != KtDType::BF16 || v.dtype() != KtDType::BF16 {
+            return Ok(false);
+        }
+        let k_shape = k.shape();
+        if k_shape.len() < 2 || k_shape[1] != 1 {
+            return Ok(false);
+        }
+        let (k_pool, v_pool) = &self.layers[layer_idx];
+        kiln_flash_attn::paged_kv_write_token_major_bf16_slot_kt(k_pool, v_pool, k, v, slot)
+            .map_err(|e| anyhow::anyhow!("kt paged_kv_write_token_major_bf16_slot: {e}"))?;
+        Ok(true)
+    }
+
+    /// Host-slot variant: writes a single decode token at a host-known
+    /// slot index. Mirrors the host-slot path of
+    /// [`crate::paged_kv_cache::PagedKvCache::write_token_major_native`]
+    /// (only the `new_len == 1` branch — multi-token writes need either
+    /// the batched API or the slot-run path, both follow-ups).
+    pub fn write_token_major_native_single(
+        &self,
+        layer_idx: usize,
+        slot: usize,
+        k: &KtTensor,
+        v: &KtTensor,
+    ) -> Result<bool> {
+        if self.fp8 || k.dtype() != KtDType::BF16 || v.dtype() != KtDType::BF16 {
+            return Ok(false);
+        }
+        let (k_pool, v_pool) = &self.layers[layer_idx];
+        kiln_flash_attn::paged_kv_write_token_major_bf16_kt(k_pool, v_pool, k, v, slot)
+            .map_err(|e| anyhow::anyhow!("kt paged_kv_write_token_major_bf16: {e}"))?;
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
