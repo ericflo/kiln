@@ -77,6 +77,41 @@ the input side. Output direction still copies because there's no
 "borrowed candle Tensor" type to wrap a kt allocation; that copy
 drops away once the call-site caller is also kt-API-typed.
 
+### Phase 3 — PagedKvCacheKt scaffold (PRs #1364, #1365, #1366)
+
+`crates/kiln-model/src/paged_kv_cache_kt.rs` — kt-Tensor twin of
+`PagedKvCache`. Same field layout + FP8 quantization story; lives
+alongside the candle cache, call sites migrate one at a time.
+
+| Surface | Status |
+|---|---|
+| `PagedKvCacheKt::new` / `new_with_fp8` | ✅ |
+| Accessors (`block_size`, `num_blocks`, `num_layers`, `is_fp8`, `compute_dtype`, `pool_tensors`) | ✅ |
+| `write_token_major_native_graph_slot` (CUDA-graph contract) | ✅ |
+| `write_token_major_native_single` (host-slot single-token) | ✅ |
+| `contiguous_slot_run_starts` helper | ✅ |
+| `read` (needs CUDA-side `Tensor::contiguous()`) | pending |
+| Multi-token / batched writes | pending |
+| FP8 quant/dequant (needs FP8 kt-API in kt-bridge) | pending |
+
+The CUDA-side substrate ops (contiguous, narrow-with-copy) are the
+dominant unblock for the remaining methods.
+
+### Phase 2.5 / 2.7 — Parameter scaffolding (PRs #1367, #1368, #1369, #1370)
+
+`crates/kiln-param/src/parameter.rs` — explicit type-system scaffolding
+for the Phase 2.5/2.7 design rules:
+
+| Item (issue line) | API | Status |
+|---|---|---|
+| Phase 2.5 "Forward dispatches on storage variant" (line 282) | `Parameter::forward_dispatch() -> ForwardDispatch<'_>` | ✅ (checked in issue body) |
+| Phase 2.5 "Storage-coherence invariant" (line 287) — bookkeeping half | `is_forward_stale` / `mark_master_dirty` / `mark_forward_clean` | ✅ scaffold; kernel + parity test pending |
+| Phase 2.7 "Parameter::version epoch counter" | `current_epoch` / `bump_epoch` (saturating) | ✅ |
+| Phase 2.7 "Eval-while-training via Parameter snapshot" | `Parameter::snapshot()` (O(1) clone, Arc-share) | ✅ primitive; integration with eval/mod.rs pending |
+
+15 new unit tests cover the state-machine transitions on the new
+methods (forward-stale, epoch monotonic, snapshot-survives-swap).
+
 ### What's next
 
 - **gdn-kernel kt-API migration** (~20 remaining entry points): the
@@ -86,13 +121,17 @@ drops away once the call-site caller is also kt-API-typed.
   needs a hand-crafted migration; total ~3-4 hours of mechanical
   work. Non-blocking for production since gdn kt-API isn't yet
   called from kiln-model.
-- **`PagedKvCache` port** (line 110/167/324 of #1082): 1505 LOC in
-  `paged_kv_cache.rs`. Scaffold the kt-Tensor twin first
-  (constructors + accessors), then writers, then the CUDA-graph
-  slot interface.
+- **CUDA-side substrate ops** (`Tensor::contiguous` for CUDA storage
+  + stride-aware narrow-with-copy): unblocks the remaining
+  `PagedKvCacheKt` methods (read, multi-token writes, anything that
+  needs `narrow().contiguous()` on device). New CUDA kernel work
+  per the `BackendRuntime::contiguous` hook described in
+  `kiln-tensor/src/tensor.rs:358`.
 - **Per-backend BLAS handle impls** (Phase 2 main event): lift the
   existing cublasLt probe into a `CublasLtMatmulHandle: BackendMatmul`
   impl + matching MPS/Vulkan handles behind their feature flags.
+  Once landed, `Parameter::forward_dispatch(Plain { weight })` has
+  a real backend to delegate to (currently a caller responsibility).
 - **`CudaFlashAttentionTrainingBf16` reshape** so `flash_attn_fwd`
   can be migrated through the borrow path (the current CustomOp2
   shape blocks a clean drop-in).
