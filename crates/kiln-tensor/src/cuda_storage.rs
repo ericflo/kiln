@@ -410,6 +410,16 @@ unsafe extern "C" {
         dtype_tag: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_masked_fill_u8_async(
+        x: *const core::ffi::c_void,
+        mask: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n_elements: i64,
+        fill_value: f32,
+        dtype: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// CUDA-side stride-aware contiguous() — produces a new kt-Tensor with
@@ -1535,4 +1545,132 @@ pub fn cuda_l2norm_last_axis(x: &crate::Tensor, eps: f32) -> Result<crate::Tenso
         crate::Layout::contiguous(shape.to_vec()),
         crate::TensorId::next(),
     )
+}
+
+/// CUDA masked-fill (Phase 4 substrate op).
+///
+/// `out[i] = (mask[i] != 0) ? fill_value : x[i]` over a contiguous
+/// `x` with shape `S` and dtype F32/BF16/F16, and a contiguous `mask`
+/// with shape `S` and dtype U8. `fill_value` is `f32` and cast to
+/// `x`'s dtype on store.
+///
+/// Routes through `kiln_masked_fill_u8_async` in
+/// `csrc/masked_fill.cu`. Mirrors the CPU `MaskedFillOp::cpu_fwd`
+/// (see `kiln-tensor/src/ops/mask.rs`).
+#[cfg(feature = "cuda")]
+pub fn cuda_masked_fill(
+    x: &crate::Tensor,
+    mask: &crate::Tensor,
+    fill_value: f32,
+) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+
+    if x.shape() != mask.shape() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_masked_fill: shape mismatch x={:?} mask={:?}",
+            x.shape(),
+            mask.shape()
+        )));
+    }
+    if mask.dtype() != crate::DType::U8 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_masked_fill: mask dtype must be U8, got {}",
+            mask.dtype()
+        )));
+    }
+    let dtype = x.dtype();
+    let dtype_tag: i32 = match dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_masked_fill: unsupported x dtype {other}"
+            )));
+        }
+    };
+    if !x.is_contiguous() || !mask.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_masked_fill: contiguous inputs required".to_string(),
+        ));
+    }
+
+    let n = x.element_count();
+    let x_bpe = dtype.size_in_bytes();
+
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_masked_fill: x must be CUDA".to_string()))?;
+    let mask_storage = mask
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_masked_fill: mask must be CUDA".to_string()))?;
+
+    let candle_device = x_storage.candle_device.clone();
+    let device_index = match x_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+    let out_storage = CudaStorage::zeros(candle_device.clone(), device_index, dtype, n)?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let x_base = match &x_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let mask_base = match &mask_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+    };
+
+    // mask dtype is U8 → bpe = 1.
+    let x_off = (x.layout().start_offset() * x_bpe) as u64;
+    let mask_off = mask.layout().start_offset() as u64;
+
+    let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
+    let mask_ptr = (mask_base + mask_off) as *const core::ffi::c_void;
+    let out_ptr = out_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_masked_fill_u8_async(
+            x_ptr,
+            mask_ptr,
+            out_ptr,
+            n as i64,
+            fill_value,
+            dtype_tag,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_masked_fill: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(x.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_masked_fill: wrap: {e}")))
 }
