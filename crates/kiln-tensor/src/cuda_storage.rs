@@ -473,6 +473,20 @@ unsafe extern "C" {
         inner_bytes: i64,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_rope_async(
+        x_in: *const core::ffi::c_void,
+        x_out: *mut core::ffi::c_void,
+        cos: *const core::ffi::c_void,
+        sin: *const core::ffi::c_void,
+        leading: i64,
+        seq: i64,
+        head_dim: i64,
+        pair_count: i64,
+        x_dtype: i32,
+        cs_dtype: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// CUDA-side stride-aware contiguous() — produces a new kt-Tensor with
@@ -2530,4 +2544,228 @@ pub fn cuda_concat(inputs: &[&crate::Tensor], axis: usize) -> Result<crate::Tens
 }
 
 
+/// CUDA-side rotary position embedding (RoPE) — applies a per-position
+/// 2-D rotation to the first `rotary_dim` of each row's `head_dim`,
+/// passing through the remaining `head_dim - rotary_dim` entries.
+///
+/// Mirrors [`crate::ops::rope::RopeOp::cpu_fwd`]:
+///   x:   [..., seq, head_dim], dtype F32/BF16/F16
+///   cos: [seq, rotary_dim/2], dtype F32/BF16/F16
+///   sin: [seq, rotary_dim/2], dtype F32/BF16/F16
+///
+/// `rotary_dim` is taken from `2 * cos.shape[-1]` (must equal
+/// `2 * sin.shape[-1]`); the rotated region is the leading
+/// `rotary_dim` of each row's `head_dim`.
+///
+/// All inputs must be contiguous, on the same CUDA device, with the
+/// shape constraints validated in `ops/rope.rs::validate`. Returns a
+/// fresh contiguous output tensor of the same shape + dtype as `x`.
+#[cfg(feature = "cuda")]
+pub fn cuda_rope(
+    x: &crate::Tensor,
+    cos: &crate::Tensor,
+    sin: &crate::Tensor,
+    rotary_dim: usize,
+) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use std::any::Any as _;
+
+    // Shape / dtype validation (mirrors ops/rope.rs::validate).
+    if x.rank() < 2 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope: x must have rank >= 2, got shape {:?}",
+            x.shape()
+        )));
+    }
+    if cos.rank() != 2 || sin.rank() != 2 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope: cos / sin must be rank-2, got cos={:?} sin={:?}",
+            cos.shape(),
+            sin.shape()
+        )));
+    }
+    if cos.shape() != sin.shape() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope: cos / sin shape mismatch {:?} vs {:?}",
+            cos.shape(),
+            sin.shape()
+        )));
+    }
+    if cos.dtype() != sin.dtype() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope: cos / sin dtype mismatch {} vs {}",
+            cos.dtype(),
+            sin.dtype()
+        )));
+    }
+    let head_dim = x.shape()[x.rank() - 1];
+    let seq = x.shape()[x.rank() - 2];
+    if cos.shape()[0] != seq {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope: cos.shape[0] ({}) != x seq ({seq})",
+            cos.shape()[0]
+        )));
+    }
+    if rotary_dim == 0 || !rotary_dim.is_multiple_of(2) {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope: rotary_dim must be positive and even, got {rotary_dim}"
+        )));
+    }
+    if rotary_dim > head_dim {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope: rotary_dim ({rotary_dim}) > head_dim ({head_dim})"
+        )));
+    }
+    if cos.shape()[1] * 2 != rotary_dim {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope: cos.shape[1] ({}) * 2 != rotary_dim ({rotary_dim})",
+            cos.shape()[1]
+        )));
+    }
+    if !x.is_contiguous() || !cos.is_contiguous() || !sin.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_rope: contiguous inputs required".to_string(),
+        ));
+    }
+    if !matches!(
+        x.dtype(),
+        crate::DType::F32 | crate::DType::BF16 | crate::DType::F16
+    ) {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope: x dtype must be F32/BF16/F16, got {}",
+            x.dtype()
+        )));
+    }
+    if !matches!(
+        cos.dtype(),
+        crate::DType::F32 | crate::DType::BF16 | crate::DType::F16
+    ) {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope: cos / sin dtype must be F32/BF16/F16, got {}",
+            cos.dtype()
+        )));
+    }
+
+    let x_dtype = x.dtype();
+    let cs_dtype = cos.dtype();
+    let x_dtype_tag: i32 = match x_dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        _ => unreachable!(),
+    };
+    let cs_dtype_tag: i32 = match cs_dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        _ => unreachable!(),
+    };
+
+    let pair_count = rotary_dim / 2;
+    let leading: usize = x.shape()[..x.rank() - 2]
+        .iter()
+        .product::<usize>()
+        .max(1);
+    let n = x.element_count();
+    let x_bpe = x_dtype.size_in_bytes();
+
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_rope: x must be CUDA".to_string()))?;
+    let cos_storage = cos
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_rope: cos must be CUDA".to_string()))?;
+    let sin_storage = sin
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_rope: sin must be CUDA".to_string()))?;
+
+    let candle_device = x_storage.candle_device.clone();
+    let device_index = match x_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+    let out_storage = CudaStorage::zeros(candle_device.clone(), device_index, x_dtype, n)?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let cs_bpe = cs_dtype.size_in_bytes();
+
+    let x_base = match &x_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let cos_base = match &cos_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let sin_base = match &sin_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+    };
+
+    let x_off = (x.layout().start_offset() * x_bpe) as u64;
+    let cos_off = (cos.layout().start_offset() * cs_bpe) as u64;
+    let sin_off = (sin.layout().start_offset() * cs_bpe) as u64;
+
+    let x_in_ptr = (x_base + x_off) as *const core::ffi::c_void;
+    let cos_ptr = (cos_base + cos_off) as *const core::ffi::c_void;
+    let sin_ptr = (sin_base + sin_off) as *const core::ffi::c_void;
+    let out_ptr = out_base as *mut core::ffi::c_void;
+
+    // The kernel writes the entire output: rotated values for the first
+    // rotary_dim of each row's head_dim, and a pass-through copy for the
+    // tail (head_dim - rotary_dim trailing entries). No prior memcpy needed.
+
+    let status = unsafe {
+        kiln_rope_async(
+            x_in_ptr,
+            out_ptr,
+            cos_ptr,
+            sin_ptr,
+            leading as i64,
+            seq as i64,
+            head_dim as i64,
+            pair_count as i64,
+            x_dtype_tag,
+            cs_dtype_tag,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_rope: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(x.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_rope: wrap: {e}")))
+}
 
