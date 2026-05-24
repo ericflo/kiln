@@ -1133,3 +1133,29 @@ hard smoke loss seen in H60, but it still loses score and adds latency. The
 simple SFT-distribution axis appears exhausted for now; the next experiment
 should move back to real reward variance or a genuinely stronger teacher-style
 signal rather than more tiny SFT mixtures.
+
+### H63: real early-failure GRPO
+
+H63 returned to real train-rollout reward variance after the small-SFT axis
+failed. It used the two H44 natural variance groups but removed the long repair
+tail from each near-miss. The preferred completion kept the direct successful
+read -> edit -> doctest -> `DONE` trajectory. The rejected completion kept the
+real wrong first edit, the real failed doctest observation, then stopped with
+`DONE`. This preserved semantic reward variance while cutting the long repair
+sequence that made H44 throughput-bound.
+
+Dry-run shape was 2 groups, 4 completions, rewards 1.0 vs 0.35, 552 action
+tokens, 916 env tokens, 1112 context tokens, and reward stdev 0.325. Training
+used rank 4 / alpha 4 / lr `5e-7`, no ECHO, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 391.914s observed with
+peak observed VRAM 16008 MiB. Adapter verify passed with 400 nonzero LoRA
+tensors and LoRA update proxy 0.028180.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.98125 with no
+zero rollouts and mean wall-clock 25.29s. H63 scored 0.75 with one zero
+rollout and mean wall-clock 49.23s. Lesson: trimming the repair tail makes
+real reward-variance GRPO locally trainable, which is an important systems
+result, but the particular "wrong edit -> failed doctest -> stop" negative
+still destabilizes the policy. Future real-variance work should keep the
+trainability trick, but avoid teaching failed-doctest terminal stops; use
+preferred repair continuations or softer contrasts instead.
