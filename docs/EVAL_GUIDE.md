@@ -189,6 +189,26 @@ inline JSON, and fenced tool-call blocks by default. Use
 `--require-qwen-xml` only when you intentionally want to grade native Qwen
 output formatting in addition to tool-call semantics.
 
+The scorer itself is not tied to a running Kiln server. For quick cross-model
+checks against hosted or local OpenAI-compatible APIs, build/run the standalone
+example from the `kiln-eval` crate:
+
+```bash
+cargo run -p kiln-eval --example trace_api_eval -- \
+  --suite production_tool_calls.json \
+  --api-base https://api.openai.com/v1 \
+  --model gpt-4.1-mini \
+  --model qwen/qwen3.5-4b \
+  --output production_tool_calls.api-result.json
+```
+
+The example sends the saved `messages` and effective `tools` catalogue through
+the target API's normal chat-completions surface, converts structured
+`message.tool_calls` responses back into canonical `tool_calls` JSON for
+scoring, and still accepts raw Qwen XML / fenced / inline JSON completions.
+This keeps the eval focused on tool-call semantics while letting each provider
+apply its own ideal chat/tool format.
+
 For shell-heavy traces, the tool-call scorer compares beneath common wrappers:
 `bash -lc`, `python -c`, and Python here-doc/stdin forms are normalized before
 the command argument is scored. That means a production target like
