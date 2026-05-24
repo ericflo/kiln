@@ -326,6 +326,139 @@ pub fn cuda_zeros(
 }
 
 // ----------------------------------------------------------------------
+// CUDA-side Tensor::contiguous (Phase 1 substrate op)
+// ----------------------------------------------------------------------
+//
+// The kernel itself lives in `csrc/contiguous.cu` and is compiled by
+// `build.rs` when `--features cuda` is on. See the kernel header
+// comment for the algorithm and launch shape.
+
+unsafe extern "C" {
+    fn kiln_contiguous_copy_async(
+        src: *const core::ffi::c_void,
+        dst: *mut core::ffi::c_void,
+        shape: *const i64,
+        strides_e: *const i64,
+        rank: i32,
+        bytes_per_elem: i32,
+        n_elements: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+}
+
+/// CUDA-side stride-aware contiguous() — produces a new kt-Tensor with
+/// the same logical shape + dtype as `src` but row-major contiguous
+/// strides and `start_offset = 0`.
+///
+/// Routes through the `kiln_contiguous_copy_async` kernel. Caller is
+/// the dispatch site in `Tensor::contiguous()`.
+///
+/// Errors:
+/// - Source must be CUDA storage (downcast to `CudaStorage`).
+/// - Packed dtypes are not supported (Marlin / Int4Packed / Fp4Packed
+///   have no element-wise interpretation).
+/// - Rank must be ≤ 8 (matches the kernel's `MAX_RANK`).
+#[cfg(feature = "cuda")]
+pub fn cuda_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use std::any::Any as _;
+
+    if src.dtype().is_packed() {
+        return Err(crate::Error::Msg(
+            "cuda_contiguous: packed dtype not supported".to_string(),
+        ));
+    }
+
+    let layout = src.layout();
+    let shape = src.shape();
+    let strides_elems = src.strides();
+    let rank = shape.len();
+    if rank > 8 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_contiguous: rank {rank} exceeds kernel MAX_RANK=8"
+        )));
+    }
+    let n_elements = src.element_count();
+    let bpe = src.dtype().size_in_bytes();
+
+    let src_storage = src
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_contiguous: source must be CUDA storage".to_string())
+        })?;
+
+    // Allocate the destination — contiguous, same dtype, same shape.
+    let candle_device = src_storage.candle_device.clone();
+    let device_index = match src_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!("CudaStorage::device is always Cuda"),
+    };
+    let dst_storage = CudaStorage::zeros(
+        candle_device.clone(),
+        device_index,
+        src.dtype(),
+        n_elements,
+    )?;
+
+    // Extract raw device pointers. Source base + start_offset; dst
+    // base.
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let src_base = match &src_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let dst_base = match &dst_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+    };
+
+    // Source pointer at the live region's start (start_offset applied).
+    let src_byte_off = (layout.start_offset() * bpe) as u64;
+    let src_ptr = (src_base + src_byte_off) as *const core::ffi::c_void;
+    let dst_ptr = dst_base as *mut core::ffi::c_void;
+
+    // Marshal shape + element strides to i64 vecs.
+    let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
+    let strides_i64: Vec<i64> = strides_elems.iter().map(|&s| s as i64).collect();
+
+    let status = unsafe {
+        kiln_contiguous_copy_async(
+            src_ptr,
+            dst_ptr,
+            shape_i64.as_ptr(),
+            strides_i64.as_ptr(),
+            rank as i32,
+            bpe as i32,
+            n_elements as i64,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_contiguous: kiln_contiguous_copy_async returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(dst_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(shape.to_vec()),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_contiguous: wrap: {e}")))
+}
+
+// ----------------------------------------------------------------------
 // Tests are GPU-only — gated by KILN_TENSOR_CUDA_TEST=1 so a host with
 // cudarc + candle's cuda feature compiled in but no actual GPU doesn't
 // spuriously fail.

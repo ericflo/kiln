@@ -6,6 +6,12 @@ publish = false
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# build.rs compiles the CUDA-side `contiguous` kernel (csrc/contiguous.cu)
+# when --features cuda is enabled. No-op outside the cuda feature.
+build = "build.rs"
+
+[build-dependencies]
+cc = "1"
 
 # kiln-tensor is internal-only — no semver commitment.
 # Other kiln-* crates may break against minor version bumps until candle

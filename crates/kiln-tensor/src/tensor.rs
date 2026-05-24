@@ -361,9 +361,13 @@ impl Tensor {
         }
         // Anti-pattern 2: this is the materializing branch — count it.
         profile::emit_contiguous_copy();
+        #[cfg(feature = "cuda")]
+        if matches!(self.device(), crate::Device::Cuda(_)) {
+            return crate::cuda_storage::cuda_contiguous(self);
+        }
         if !self.device().is_cpu() {
             return Err(Error::Msg(format!(
-                "Tensor::contiguous: only CPU contiguous is implemented in Phase 1.5; \
+                "Tensor::contiguous: only CPU + CUDA contiguous is implemented; \
                  device {} support lands with the per-backend storage impl",
                 self.device()
             )));
