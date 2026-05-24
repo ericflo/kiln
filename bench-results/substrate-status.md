@@ -22,30 +22,70 @@ the candle-typed twins when call sites in `kiln-model` migrate.
 | `kiln-marlin-gemm` | `marlin_w4a16_gemm_kt` | 1 of 1 (100%) |
 | `kiln-gdn-kernel` | substitution + recurrent + full_chunk + multiblock + chunk_prep + chunk_scan + 10 decode variants (all bf16/vf32/qf32 dtype combos × rmsnorm/non-rmsnorm) + gated_rms_norm + 3 fused-gates variants | 20 of 22 (91%) |
 
-### Phase 7 — first production call-site migration (2026-05-23 / 24)
+### Phase 7 — migration vehicle (v1 + v2) complete end-to-end (2026-05-23 / 24)
 
-The Phase 7 migration vehicle landed: `kiln-kt-bridge` now exposes a
-**candle↔kt-Tensor copying-adapter pair**:
+The Phase 7 migration vehicle landed in **two waves**:
 
-- `kt_tensor_from_candle_cuda_copy(&candle::Tensor) → KtTensor` (PR #1344)
-- `kt_tensor_to_candle_cuda_copy(&KtTensor) → candle::Tensor` (PR #1345)
+**v1 — candle↔kt copying-adapter pair** (PRs #1344, #1345):
+- `kt_tensor_from_candle_cuda_copy(&candle::Tensor) → KtTensor`
+- `kt_tensor_to_candle_cuda_copy(&KtTensor) → candle::Tensor`
+- Cost: one device-to-device memcpy per direction.
 
-Cost: one device-to-device memcpy per direction. The v2 zero-copy
-borrow variant is deferred behind either a cudarc API addition or a
-`BorrowedCudaStorage` variant in `kiln-tensor`; both are wider
-refactors that can drop in later without changing call-site code.
+**v2 — zero-copy borrow path** (PRs #1351, #1352, #1353, #1354, #1355):
+- `kiln_tensor::CudaStorage` gained a `SliceOwner::Borrowed` variant
+  (PR #1351) with an Arc `_keep_alive` holding the external owner's
+  storage Arc.
+- `kt_tensor_from_candle_cuda_borrow(&candle::Tensor) → KtTensor`
+  (PR #1352) wraps the candle CUDA buffer without copying; the
+  candle Tensor's storage Arc is held in the keep-alive slot.
+- kt-bridge adds owner-agnostic `cuda_input_device_ptr` and
+  `cuda_output_device_ptr` accessors that work for both Owned and
+  Borrowed storage (PR #1353).
+- 5 kt-API entry points migrated to accept Borrowed inputs:
+  `fused_sigmoid_mul_kt`, `fused_rmsnorm_kt`, `fused_rotary_qk_kt`,
+  `fused_mlp_silu_mul_kt`, `fused_l2_qk_norm_kt` (PRs #1353, #1354).
+- All 18 kiln-model pilot call sites flipped from v1 copy to v2
+  borrow (PR #1355). Inputs now pay **zero** dtod memcpys when the
+  env flag is set; outputs still go through the copying adapter
+  until the call-site callers are also kt-API-typed.
 
-First production call site to migrate through the pair: the
-attention output gate's fused sigmoid/mul (PR #1346) —
-`kiln-model/src/forward.rs:attention_output_gate_decode_if`. Default
-off; `KILN_USE_KT_API_SIGMOID_MUL=1` exercises the kt-API path
-end-to-end for A/B parity. NVTX range `kiln/attn/output_gate_cuda_fused_kt`
-distinguishes it from the production candle path in profiles.
+### Phase 7 — production call-site migrations (env-gated, default off)
 
-This is the template for broader Phase 7 call-site migration; each
-follow-on PR can flip more sites behind their own env gates and
-graduate to "candle path deleted" once parity holds across a
-representative bench sweep.
+Each of these adds a parallel kt-API path in `kiln-model/src/forward.rs`
+that runs alongside the candle path; one env var per family flips it.
+`KILN_USE_KT_API_ALL=1` enables every family at once for end-to-end
+parity sweeps. NVTX ranges suffixed `_kt` distinguish the migrated
+path from the candle path in nsys traces.
+
+| Env flag | Call sites | Op |
+|---|---|---|
+| `KILN_USE_KT_API_SIGMOID_MUL` | 1 | attn output gate `fused_sigmoid_mul_kt` |
+| `KILN_USE_KT_API_RMSNORM` | 1 | `rms_norm` → `fused_rmsnorm_kt` |
+| `KILN_USE_KT_API_ROTARY_QK` | 2 | rotary embedding → `fused_rotary_qk_kt` |
+| `KILN_USE_KT_API_MLP_SILU_MUL` | 2 | MLP gate\|\|up → `fused_mlp_silu_mul_kt` |
+| `KILN_USE_KT_API_L2_QK_NORM` | 1 | L2 QK norm → `fused_l2_qk_norm_kt` |
+
+All five families now run through the v2 zero-copy borrow path on
+the input side. Output direction still copies because there's no
+"borrowed candle Tensor" type to wrap a kt allocation; that copy
+drops away once the call-site caller is also kt-API-typed.
+
+### What's next
+
+- **More kt-API entry-point migrations** (~70 remaining of the 100+
+  kt-API surface): mechanical, ~10 line diff each, follows the
+  `cuda_input_device_ptr`/`cuda_output_device_ptr` template in PRs
+  #1353 / #1354.
+- **`PagedKvCache` port** (line 110/167/324 of #1082): 1505 LOC in
+  `paged_kv_cache.rs`. Scaffold the kt-Tensor twin first
+  (constructors + accessors), then writers, then the CUDA-graph
+  slot interface.
+- **Per-backend BLAS handle impls** (Phase 2 main event): lift the
+  existing cublasLt probe into a `CublasLtMatmulHandle: BackendMatmul`
+  impl + matching MPS/Vulkan handles behind their feature flags.
+- **`CudaFlashAttentionTrainingBf16` reshape** so `flash_attn_fwd`
+  can be migrated through the borrow path (the current CustomOp2
+  shape blocks a clean drop-in).
 
 **211 / 211 deliverables shipped** — substrate complete; per-backend
 matmul trait + Phase 7 migration plumbing in place; cross-op
