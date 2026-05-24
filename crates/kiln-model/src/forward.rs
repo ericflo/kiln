@@ -185,6 +185,39 @@ pub(crate) fn cuda_use_kt_api_matmul() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: route the `PagedKvCache` allocation in
+/// `forward.rs` through the `PagedKvCacheKt` (kt-API) twin defined
+/// in [`crate::paged_kv_cache_kt`]. Default off; set
+/// `KILN_USE_KT_PAGED_KV_CACHE=1` (or `KILN_USE_KT_API_ALL=1`) to
+/// flip the gate.
+///
+/// Wiring the gate without yet migrating any call site is an
+/// intentional incremental step (#1082, Phase 7). The
+/// [`crate::paged_kv_cache_kt::PagedKvCacheKt`] twin is feature
+/// complete for the non-FP8 decode path, but each `forward.rs`
+/// call site is tightly coupled to candle-typed writers/readers
+/// and to `&Device` constructors (vs. the kt twin's
+/// `Arc<CudaDevice>` + `device_index` signature). Landing this
+/// gate first lets follow-up PRs migrate one call site at a time
+/// — same playbook as the kt-API per-kernel migrations
+/// (`KILN_USE_KT_API_SIGMOID_MUL`, `KILN_USE_KT_API_RMSNORM`,
+/// `KILN_USE_KT_API_ROTARY_QK`, `KILN_USE_KT_API_MLP_SILU_MUL`,
+/// `KILN_USE_KT_API_L2_QK_NORM`, `KILN_USE_KT_API_FLASH_ATTN_FWD`,
+/// `KILN_USE_KT_API_GDN_FULL_CHUNK`, `KILN_USE_KT_API_MATMUL`).
+///
+/// Today this gate is unused. The first call-site migration will
+/// branch on it. Returning a bool through `OnceLock` matches the
+/// other Phase 7 gates so the cost is one atomic read per call
+/// (negligible vs. the cache allocation it gates).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+pub(crate) fn cuda_use_kt_paged_kv_cache() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 thread_local! {
     static VULKAN_SKIP_GDN_STATE_READBACK_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
