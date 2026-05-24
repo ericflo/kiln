@@ -109,32 +109,22 @@ pub fn flash_attn_fwd_kt(
         )));
     }
 
-    let (q_st, q_off_bytes) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-    let (k_st, k_off_bytes) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let (v_st, v_off_bytes) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
+    // Owner-agnostic input pointers (Phase 7 v2).
+    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+    let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
 
     // Output + softmax_lse allocated through the shared bridge.
     let out_t = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, seqlen_q, num_heads, head_dim])?;
     let lse_t = alloc_cuda_tensor(q_st, KtDType::F32, vec![b, num_heads, seqlen_q])?;
-    let out_cuda = kiln_kt_bridge::cuda_storage_of_output(&out_t);
-    let lse_cuda = kiln_kt_bridge::cuda_storage_of_output(&lse_t);
+    let out_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out_t);
+    let lse_ptr = kiln_kt_bridge::cuda_output_device_ptr(&lse_t);
 
     let stream = q_st.candle_device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
-    let q_slice = q_st.slice().slice(q_off_bytes..);
-    let k_slice = k_st.slice().slice(k_off_bytes..);
-    let v_slice = v_st.slice().slice(v_off_bytes..);
-    let out_slice = out_cuda.slice().slice(0..);
-    let lse_slice = lse_cuda.slice().slice(0..);
-
     let status = unsafe {
-        let (q_ptr, _g1) = q_slice.device_ptr(&stream);
-        let (k_ptr, _g2) = k_slice.device_ptr(&stream);
-        let (v_ptr, _g3) = v_slice.device_ptr(&stream);
-        let (out_ptr, _g4) = out_slice.device_ptr(&stream);
-        let (lse_ptr, _g5) = lse_slice.device_ptr(&stream);
-
         kiln_flash_attn_fwd(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -260,42 +250,22 @@ pub fn flash_attn_paged_decode_kt(
         )));
     }
 
-    let (q_st, q_off) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-    let (k_st, k_off) = cuda_storage_and_byte_offset(k_pool, KtDType::BF16, "k_pool")?;
-    let (v_st, v_off) = cuda_storage_and_byte_offset(v_pool, KtDType::BF16, "v_pool")?;
-    let (bt_st, bt_off) = cuda_storage_and_byte_offset(block_table, KtDType::U32, "block_table")?;
+    // Owner-agnostic input pointers (Phase 7 v2).
+    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
+    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
+    let bt_ptr = kiln_kt_bridge::cuda_input_device_ptr(block_table, KtDType::U32, "block_table")?;
+    let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
 
     let out_t = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, 1, num_heads, head_dim])?;
     let lse_t = alloc_cuda_tensor(q_st, KtDType::F32, vec![b, num_heads, 1])?;
-    let out_st = out_t.storage();
-    let out_cuda = out_st
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .expect("alloc returned CUDA");
-    let lse_st = lse_t.storage();
-    let lse_cuda = lse_st
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .expect("alloc returned CUDA");
+    let out_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out_t);
+    let lse_ptr = kiln_kt_bridge::cuda_output_device_ptr(&lse_t);
 
     let stream = q_st.candle_device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
-    let q_slice = q_st.slice().slice(q_off..);
-    let k_slice = k_st.slice().slice(k_off..);
-    let v_slice = v_st.slice().slice(v_off..);
-    let bt_slice = bt_st.slice().slice(bt_off..);
-    let out_slice = out_cuda.slice().slice(0..);
-    let lse_slice = lse_cuda.slice().slice(0..);
-
     let status = unsafe {
-        let (q_ptr, _g1) = q_slice.device_ptr(&stream);
-        let (k_ptr, _g2) = k_slice.device_ptr(&stream);
-        let (v_ptr, _g3) = v_slice.device_ptr(&stream);
-        let (bt_ptr, _g4) = bt_slice.device_ptr(&stream);
-        let (out_ptr, _g5) = out_slice.device_ptr(&stream);
-        let (lse_ptr, _g6) = lse_slice.device_ptr(&stream);
-
         kiln_flash_attn_fwd_paged_decode(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -391,44 +361,23 @@ pub fn flash_attn_paged_decode_dyn_seqlen_kt(
         )));
     }
 
-    let (q_st, q_off) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-    let (k_st, k_off) = cuda_storage_and_byte_offset(k_pool, KtDType::BF16, "k_pool")?;
-    let (v_st, v_off) = cuda_storage_and_byte_offset(v_pool, KtDType::BF16, "v_pool")?;
-    let (bt_st, bt_off) = cuda_storage_and_byte_offset(block_table, KtDType::U32, "block_table")?;
-    let (sk_st, sk_off) = cuda_storage_and_byte_offset(seqused_k, KtDType::U32, "seqused_k")?;
+    // Owner-agnostic input pointers (Phase 7 v2).
+    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
+    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
+    let bt_ptr = kiln_kt_bridge::cuda_input_device_ptr(block_table, KtDType::U32, "block_table")?;
+    let sk_ptr = kiln_kt_bridge::cuda_input_device_ptr(seqused_k, KtDType::U32, "seqused_k")?;
+    let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
 
     let out_t = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, 1, num_heads, head_dim])?;
     let lse_t = alloc_cuda_tensor(q_st, KtDType::F32, vec![b, num_heads, 1])?;
-    let out_cuda = out_t
-        .storage()
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .expect("alloc CUDA");
-    let lse_cuda = lse_t
-        .storage()
-        .as_any()
-        .downcast_ref::<CudaStorage>()
-        .expect("alloc CUDA");
+    let out_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out_t);
+    let lse_ptr = kiln_kt_bridge::cuda_output_device_ptr(&lse_t);
 
     let stream = q_st.candle_device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
-    let q_slice = q_st.slice().slice(q_off..);
-    let k_slice = k_st.slice().slice(k_off..);
-    let v_slice = v_st.slice().slice(v_off..);
-    let bt_slice = bt_st.slice().slice(bt_off..);
-    let sk_slice = sk_st.slice().slice(sk_off..);
-    let out_slice = out_cuda.slice().slice(0..);
-    let lse_slice = lse_cuda.slice().slice(0..);
 
     let status = unsafe {
-        let (q_ptr, _g1) = q_slice.device_ptr(&stream);
-        let (k_ptr, _g2) = k_slice.device_ptr(&stream);
-        let (v_ptr, _g3) = v_slice.device_ptr(&stream);
-        let (bt_ptr, _g4) = bt_slice.device_ptr(&stream);
-        let (sk_ptr, _g5) = sk_slice.device_ptr(&stream);
-        let (out_ptr, _g6) = out_slice.device_ptr(&stream);
-        let (lse_ptr, _g7) = lse_slice.device_ptr(&stream);
-
         kiln_flash_attn_fwd_paged_decode_dyn_seqlen(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -502,22 +451,17 @@ pub fn paged_kv_write_token_major_bf16_kt(
     let head_dim_i32 = i32::try_from(head_dim)
         .map_err(|_| FlashAttnError::Msg(format!("kt-flash-attn: head_dim {head_dim} exceeds i32")))?;
 
-    let (k_st, k_off) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let (v_st, v_off) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
-    let (kp_st, kp_off) = cuda_storage_and_byte_offset(k_pool, KtDType::BF16, "k_pool")?;
-    let (vp_st, vp_off) = cuda_storage_and_byte_offset(v_pool, KtDType::BF16, "v_pool")?;
+    // Owner-agnostic input pointers (Phase 7 v2). k_pool/v_pool are
+    // written in place; caller convention: pass Owned for the pools.
+    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+    let kp_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
+    let vp_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
+    let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
 
     let stream = k_st.candle_device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
-    let k_slice = k_st.slice().slice(k_off..);
-    let v_slice = v_st.slice().slice(v_off..);
-    let kp_slice = kp_st.slice().slice(kp_off..);
-    let vp_slice = vp_st.slice().slice(vp_off..);
     let status = unsafe {
-        let (k_ptr, _g1) = k_slice.device_ptr(&stream);
-        let (v_ptr, _g2) = v_slice.device_ptr(&stream);
-        let (kp_ptr, _g3) = kp_slice.device_ptr(&stream);
-        let (vp_ptr, _g4) = vp_slice.device_ptr(&stream);
         kiln_paged_kv_write_token_major_bf16(
             kp_ptr as *mut _,
             vp_ptr as *mut _,
@@ -573,25 +517,16 @@ pub fn paged_kv_write_token_major_bf16_slot_kt(
     let head_dim_i32 = i32::try_from(head_dim)
         .map_err(|_| FlashAttnError::Msg(format!("head_dim {head_dim} > i32")))?;
 
-    let (k_st, k_off) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let (v_st, v_off) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
-    let (kp_st, kp_off) = cuda_storage_and_byte_offset(k_pool, KtDType::BF16, "k_pool")?;
-    let (vp_st, vp_off) = cuda_storage_and_byte_offset(v_pool, KtDType::BF16, "v_pool")?;
-    let (sl_st, sl_off) = cuda_storage_and_byte_offset(slot, KtDType::U32, "slot")?;
+    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+    let kp_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
+    let vp_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
+    let sl_ptr = kiln_kt_bridge::cuda_input_device_ptr(slot, KtDType::U32, "slot")?;
+    let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
 
     let stream = k_st.candle_device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
-    let k_slice = k_st.slice().slice(k_off..);
-    let v_slice = v_st.slice().slice(v_off..);
-    let kp_slice = kp_st.slice().slice(kp_off..);
-    let vp_slice = vp_st.slice().slice(vp_off..);
-    let sl_slice = sl_st.slice().slice(sl_off..);
     let status = unsafe {
-        let (k_ptr, _g1) = k_slice.device_ptr(&stream);
-        let (v_ptr, _g2) = v_slice.device_ptr(&stream);
-        let (kp_ptr, _g3) = kp_slice.device_ptr(&stream);
-        let (vp_ptr, _g4) = vp_slice.device_ptr(&stream);
-        let (sl_ptr, _g5) = sl_slice.device_ptr(&stream);
         kiln_paged_kv_write_token_major_bf16_slot(
             kp_ptr as *mut _,
             vp_ptr as *mut _,
@@ -654,12 +589,14 @@ pub fn flash_attn_bwd_kt(
     let seqlen_q_rounded = round_up(seqlen_q, 128);
     let head_dim_rounded = round_up(head_dim, 32);
 
-    let (dout_st, dout_off) = cuda_storage_and_byte_offset(dout, KtDType::BF16, "dout")?;
-    let (q_st, q_off) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-    let (k_st, k_off) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let (v_st, v_off) = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
-    let (out_st, out_off) = cuda_storage_and_byte_offset(out, KtDType::BF16, "out")?;
-    let (lse_st, lse_off) = cuda_storage_and_byte_offset(softmax_lse, KtDType::F32, "softmax_lse")?;
+    // Owner-agnostic input pointers (Phase 7 v2).
+    let dout_ptr = kiln_kt_bridge::cuda_input_device_ptr(dout, KtDType::BF16, "dout")?;
+    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+    let out_ptr = kiln_kt_bridge::cuda_input_device_ptr(out, KtDType::BF16, "out")?;
+    let lse_ptr = kiln_kt_bridge::cuda_input_device_ptr(softmax_lse, KtDType::F32, "softmax_lse")?;
+    let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
 
     let dq = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, seqlen_q, num_heads, head_dim])?;
     let dk = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, seqlen_k, num_heads, head_dim])?;
@@ -671,41 +608,16 @@ pub fn flash_attn_bwd_kt(
         KtDType::F32,
         vec![b, seqlen_q_rounded, num_heads, head_dim_rounded],
     )?;
-
-    let dq_cuda = dq.storage().as_any().downcast_ref::<CudaStorage>().unwrap();
-    let dk_cuda = dk.storage().as_any().downcast_ref::<CudaStorage>().unwrap();
-    let dv_cuda = dv.storage().as_any().downcast_ref::<CudaStorage>().unwrap();
-    let sd_cuda = softmax_d.storage().as_any().downcast_ref::<CudaStorage>().unwrap();
-    let da_cuda = dq_accum.storage().as_any().downcast_ref::<CudaStorage>().unwrap();
+    let dq_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dq);
+    let dk_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dk);
+    let dv_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dv);
+    let sd_ptr = kiln_kt_bridge::cuda_output_device_ptr(&softmax_d);
+    let da_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dq_accum);
 
     let stream = q_st.candle_device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
-    let dout_slice = dout_st.slice().slice(dout_off..);
-    let q_slice = q_st.slice().slice(q_off..);
-    let k_slice = k_st.slice().slice(k_off..);
-    let v_slice = v_st.slice().slice(v_off..);
-    let out_slice = out_st.slice().slice(out_off..);
-    let lse_slice = lse_st.slice().slice(lse_off..);
-    let dq_slice = dq_cuda.slice().slice(0..);
-    let dk_slice = dk_cuda.slice().slice(0..);
-    let dv_slice = dv_cuda.slice().slice(0..);
-    let sd_slice = sd_cuda.slice().slice(0..);
-    let da_slice = da_cuda.slice().slice(0..);
-
     let status = unsafe {
-        let (dout_ptr, _g1) = dout_slice.device_ptr(&stream);
-        let (q_ptr, _g2) = q_slice.device_ptr(&stream);
-        let (k_ptr, _g3) = k_slice.device_ptr(&stream);
-        let (v_ptr, _g4) = v_slice.device_ptr(&stream);
-        let (out_ptr, _g5) = out_slice.device_ptr(&stream);
-        let (lse_ptr, _g6) = lse_slice.device_ptr(&stream);
-        let (dq_ptr, _g7) = dq_slice.device_ptr(&stream);
-        let (dk_ptr, _g8) = dk_slice.device_ptr(&stream);
-        let (dv_ptr, _g9) = dv_slice.device_ptr(&stream);
-        let (sd_ptr, _g10) = sd_slice.device_ptr(&stream);
-        let (da_ptr, _g11) = da_slice.device_ptr(&stream);
-
         kiln_flash_attn_bwd(
             dout_ptr as *const _,
             q_ptr as *const _,
