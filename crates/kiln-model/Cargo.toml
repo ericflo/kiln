@@ -24,6 +24,10 @@ kiln-gdn-kernel = { workspace = true, optional = true }
 kiln-marlin-gemm = { workspace = true, optional = true }
 kiln-rmsnorm-kernel = { workspace = true, optional = true }
 kiln-vulkan-kernel = { workspace = true, optional = true }
+# Phase 7 migration adapter: lets candle-typed call sites round-trip
+# through the kt-API for A/B parity testing. Pulled in under `cuda`
+# alongside the other kernel crates.
+kiln-kt-bridge = { workspace = true, optional = true }
 kiln-nvtx = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
@@ -35,7 +39,7 @@ objc2-metal = { version = "0.3", optional = true }
 
 
 [features]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-conv1d-kernel", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-marlin-gemm", "dep:kiln-rmsnorm-kernel", "dep:half"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-conv1d-kernel", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-marlin-gemm", "dep:kiln-rmsnorm-kernel", "dep:kiln-kt-bridge", "dep:half"]
 # Enable candle's Metal backend on Apple Silicon. Pulls in candle-metal-kernels
 # (JIT-compiled MSL shaders cached in the MetalDevice); no Xcode required.
 metal = ["candle-core/metal", "candle-nn/metal", "dep:candle-metal-kernels", "dep:objc2", "dep:objc2-metal"]
