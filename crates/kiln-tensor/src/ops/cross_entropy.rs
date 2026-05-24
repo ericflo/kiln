@@ -50,6 +50,15 @@ impl DeviceOp2 for CrossEntropyOp {
         Determinism::Constructive
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, logits: &Tensor, targets: &Tensor) -> Result<Option<Tensor>> {
+        // Defer to the canonical validation so shape/dtype errors are
+        // surfaced as Errs (instead of silently falling back to the
+        // CPU path, which would mask any CUDA-specific bug).
+        validate(logits, targets)?;
+        Ok(Some(crate::cuda_cross_entropy_loss(logits, targets)?))
+    }
+
     fn cpu_fwd(&self, logits: &Tensor, targets: &Tensor) -> Result<Option<Tensor>> {
         validate(logits, targets)?;
         let logits_cpu = downcast_cpu(logits, "logits")?;

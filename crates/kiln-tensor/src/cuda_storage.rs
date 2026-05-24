@@ -440,6 +440,19 @@ unsafe extern "C" {
         dtype_tag: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_cross_entropy_loss_async(
+        logits: *const core::ffi::c_void,
+        targets: *const core::ffi::c_void,
+        row_loss_f32: *mut core::ffi::c_void,
+        row_err_i32: *mut core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n_rows: i64,
+        n_cols: i64,
+        dtype_tag: i32,
+        targets_tag: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// CUDA-side stride-aware contiguous() — produces a new kt-Tensor with
@@ -1966,3 +1979,245 @@ pub fn cuda_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         crate::TensorId::next(),
     )
 }
+
+/// CUDA cross-entropy loss (Phase 4 substrate op).
+///
+/// Mirrors the CPU reference in
+/// `crates/kiln-tensor/src/ops/cross_entropy.rs`:
+///
+/// ```text
+/// for each batch b:
+///     m = max_v logits[b, v]
+///     log_sum_exp = m + log(sum_v exp(logits[b, v] - m))
+///     loss_b = log_sum_exp - logits[b, targets[b]]
+/// loss = mean_b loss_b
+/// ```
+///
+/// `logits` is `[batch, vocab]` (F32 / BF16 / F16), `targets` is
+/// `[batch]` (I64 or U32). Output is a rank-0 scalar at the logits
+/// dtype.
+///
+/// Implementation: dispatches `kiln_cross_entropy_loss_async` in
+/// `csrc/cross_entropy.cu`. The kernel does the row-wise log-sum-exp
+/// + target-logit subtraction into a per-row F32 scratch buffer,
+/// then a single-block finalize sums and divides by batch.
+///
+/// Target-index validation runs on-device: an out-of-range target
+/// (negative or `>= vocab`) sets a device-side error flag which we
+/// read back after sync and surface as `Result::Err`. An all-`-inf`
+/// row similarly errors out (loss undefined).
+#[cfg(feature = "cuda")]
+pub fn cuda_cross_entropy_loss(
+    logits: &crate::Tensor,
+    targets: &crate::Tensor,
+) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+
+    let dtype = logits.dtype();
+    let dtype_tag: i32 = match dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_cross_entropy_loss: logits dtype must be F32/BF16/F16, got {other}"
+            )));
+        }
+    };
+    let targets_tag: i32 = match targets.dtype() {
+        crate::DType::I64 => 0,
+        crate::DType::U32 => 1,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_cross_entropy_loss: targets dtype must be I64/U32, got {other}"
+            )));
+        }
+    };
+    if logits.rank() != 2 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_cross_entropy_loss: logits must be rank-2 [batch, vocab], got shape {:?}",
+            logits.shape()
+        )));
+    }
+    if targets.rank() != 1 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_cross_entropy_loss: targets must be rank-1 [batch], got shape {:?}",
+            targets.shape()
+        )));
+    }
+    if !logits.is_contiguous() || !targets.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_cross_entropy_loss: both inputs must be contiguous".to_string(),
+        ));
+    }
+    let shape = logits.shape();
+    let batch = shape[0];
+    let vocab = shape[1];
+    if batch == 0 {
+        return Err(crate::Error::Msg(
+            "cuda_cross_entropy_loss: batch dim is 0 — mean is undefined".to_string(),
+        ));
+    }
+    if targets.shape()[0] != batch {
+        return Err(crate::Error::Msg(format!(
+            "cuda_cross_entropy_loss: batch mismatch — logits has batch={batch}, targets has batch={}",
+            targets.shape()[0]
+        )));
+    }
+
+    let logits_storage = logits
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_cross_entropy_loss: logits must be CUDA storage".to_string())
+        })?;
+    let targets_storage = targets
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg(
+                "cuda_cross_entropy_loss: targets must be CUDA storage".to_string(),
+            )
+        })?;
+
+    let candle_device = logits_storage.candle_device.clone();
+    let device_index = match logits_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+
+    // Allocate per-row F32 scratch and a 4-byte error flag. Both
+    // start zeroed.
+    let row_loss_storage = CudaStorage::zeros(
+        candle_device.clone(),
+        device_index,
+        crate::DType::F32,
+        batch,
+    )?;
+    // For row_err we use a 1-element U32 buffer (4 bytes, zero-init).
+    let row_err_storage = CudaStorage::zeros(
+        candle_device.clone(),
+        device_index,
+        crate::DType::U32,
+        1,
+    )?;
+
+    // Scalar output buffer (1 element at the input dtype). Reusing
+    // `CudaStorage::zeros` to get a zero-initialized buffer; the
+    // kernel overwrites it.
+    let out_storage = CudaStorage::zeros(candle_device.clone(), device_index, dtype, 1)?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let logits_base = match &logits_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let targets_base = match &targets_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let row_loss_base = match &row_loss_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+    };
+    let row_err_base = match &row_err_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+    };
+
+    let logits_off = (logits.layout().start_offset() * dtype.size_in_bytes()) as u64;
+    let targets_off = (targets.layout().start_offset() * targets.dtype().size_in_bytes()) as u64;
+    let logits_ptr = (logits_base + logits_off) as *const core::ffi::c_void;
+    let targets_ptr = (targets_base + targets_off) as *const core::ffi::c_void;
+    let row_loss_ptr = row_loss_base as *mut core::ffi::c_void;
+    let row_err_ptr = row_err_base as *mut core::ffi::c_void;
+    let out_ptr = out_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_cross_entropy_loss_async(
+            logits_ptr,
+            targets_ptr,
+            row_loss_ptr,
+            row_err_ptr,
+            out_ptr,
+            batch as i64,
+            vocab as i64,
+            dtype_tag,
+            targets_tag,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_cross_entropy_loss: FFI returned status {status}"
+        )));
+    }
+
+    // Read back the row-error flag to surface validation failures.
+    // This forces a sync but is the only way to surface a Result-level
+    // error from on-device checks. We copy a single u32.
+    let row_err_slice = match &row_err_storage.slice {
+        SliceOwner::Owned(s) => s,
+        SliceOwner::Borrowed { .. } => unreachable!(),
+    };
+    let mut err_host = [0u8; 4];
+    stream
+        .memcpy_dtoh(row_err_slice, &mut err_host)
+        .map_err(|e| {
+            crate::Error::Msg(format!(
+                "cuda_cross_entropy_loss: row_err D2H failed: {e:?}"
+            ))
+        })?;
+    let err_code = u32::from_le_bytes(err_host);
+    match err_code {
+        0 => {}
+        1 => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_cross_entropy_loss: target out of range (vocab={vocab})"
+            )));
+        }
+        2 => {
+            return Err(crate::Error::Msg(
+                "cuda_cross_entropy_loss: row has no finite logits (all -inf?); loss is undefined"
+                    .to_string(),
+            ));
+        }
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_cross_entropy_loss: unknown row_err code {other}"
+            )));
+        }
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(Vec::<usize>::new()),
+        crate::TensorId::next(),
+    )
+}
+
+
