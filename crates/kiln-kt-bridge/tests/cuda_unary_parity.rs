@@ -273,6 +273,153 @@ fn cuda_activation_unary_log_direct_call() {
         assert!((g - want).abs() < 1e-5, "i={i}: got {g}, want {want}");
     }
 
-    // KIND_MAX+1 (=15) must still error.
-    assert!(cuda_activation_unary(&x_kt, 15).is_err());
+    // KIND_MAX after the follow-up extension is 21 — kind 15 (LOG2)
+    // is now valid. The new direct-call smoke below covers the
+    // current KIND_MAX+1 bound.
+}
+
+
+// ---- log_variants (new in #1082 follow-up: kinds 15..=17) ---------------
+
+#[test]
+fn cuda_log2_f32_parity() {
+    let data = positive_pattern(257, 30);
+    check_op("log2", ops::log2, &data, CandleDType::F32, 1e-5);
+}
+
+#[test]
+fn cuda_log2_bf16_parity() {
+    let data = positive_pattern(257, 31);
+    check_op("log2", ops::log2, &data, CandleDType::BF16, 1e-1);
+}
+
+#[test]
+fn cuda_log10_f32_parity() {
+    let data = positive_pattern(257, 32);
+    check_op("log10", ops::log10, &data, CandleDType::F32, 1e-5);
+}
+
+#[test]
+fn cuda_log10_bf16_parity() {
+    let data = positive_pattern(257, 33);
+    check_op("log10", ops::log10, &data, CandleDType::BF16, 1e-1);
+}
+
+#[test]
+fn cuda_log1p_f32_parity() {
+    // log1p domain: x > -1. Use positive_pattern to stay safe and
+    // exercise the numerical-stability advantage near 0.
+    let data: Vec<f32> = pattern(257, 34).into_iter().map(|x| x.abs() * 0.5).collect();
+    check_op("log1p", ops::log1p, &data, CandleDType::F32, 1e-5);
+}
+
+#[test]
+fn cuda_log1p_bf16_parity() {
+    let data: Vec<f32> = pattern(257, 35).into_iter().map(|x| x.abs() * 0.5).collect();
+    check_op("log1p", ops::log1p, &data, CandleDType::BF16, 1e-1);
+}
+
+// ---- trig inverse (new in #1082 follow-up: kinds 18..=20) --------------
+
+#[test]
+fn cuda_asin_f32_parity() {
+    // asin domain: [-1, 1]. Clamp to [-0.9, 0.9] to keep finite derivatives.
+    let data: Vec<f32> = pattern(257, 40).into_iter().map(|x| x * 0.3).collect();
+    check_op("asin", ops::asin, &data, CandleDType::F32, 1e-5);
+}
+
+#[test]
+fn cuda_asin_bf16_parity() {
+    let data: Vec<f32> = pattern(257, 41).into_iter().map(|x| x * 0.3).collect();
+    check_op("asin", ops::asin, &data, CandleDType::BF16, 1e-2);
+}
+
+#[test]
+fn cuda_acos_f32_parity() {
+    let data: Vec<f32> = pattern(257, 42).into_iter().map(|x| x * 0.3).collect();
+    check_op("acos", ops::acos, &data, CandleDType::F32, 1e-5);
+}
+
+#[test]
+fn cuda_acos_bf16_parity() {
+    let data: Vec<f32> = pattern(257, 43).into_iter().map(|x| x * 0.3).collect();
+    check_op("acos", ops::acos, &data, CandleDType::BF16, 1e-2);
+}
+
+#[test]
+fn cuda_atan_f32_parity() {
+    // atan: defined on all R, bounded output.
+    let data = pattern(257, 44);
+    check_op("atan", ops::atan, &data, CandleDType::F32, 1e-5);
+}
+
+#[test]
+fn cuda_atan_bf16_parity() {
+    let data = pattern(257, 45);
+    check_op("atan", ops::atan, &data, CandleDType::BF16, 1e-2);
+}
+
+// ---- atanh (new in #1082 follow-up: kind 21) ---------------------------
+
+#[test]
+fn cuda_atanh_f32_parity() {
+    // atanh domain: (-1, 1). Stay well clear of the asymptotes.
+    let data: Vec<f32> = pattern(257, 46).into_iter().map(|x| x * 0.2).collect();
+    check_op("atanh", ops::atanh, &data, CandleDType::F32, 1e-5);
+}
+
+#[test]
+fn cuda_atanh_bf16_parity() {
+    let data: Vec<f32> = pattern(257, 47).into_iter().map(|x| x * 0.2).collect();
+    check_op("atanh", ops::atanh, &data, CandleDType::BF16, 1e-2);
+}
+
+// ---- direct cuda_activation_unary FFI smoke for new kind range ---------
+
+#[test]
+fn cuda_activation_unary_log2_direct_call() {
+    // Confirm the FFI bounds-check accepts the new kinds 15..=21.
+    let Some(dev) = try_cuda() else {
+        eprintln!("CUDA not available; skipping");
+        return;
+    };
+    let data: Vec<f32> = (1..=64).map(|i| i as f32).collect();
+    let n = data.len();
+    let x_cd = CandleTensor::from_vec(data.clone(), (n,), &dev)
+        .unwrap()
+        .to_dtype(CandleDType::F32)
+        .unwrap();
+    let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_cd).unwrap();
+
+    // KIND_LOG2 = 15 (new); should succeed.
+    let out_kt = cuda_activation_unary(&x_kt, 15).expect("KIND_LOG2");
+    let cuda_dev = match dev {
+        CandleDevice::Cuda(ref c) => c,
+        _ => unreachable!(),
+    };
+    cuda_dev.synchronize().unwrap();
+
+    let got: Vec<f32> = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .unwrap()
+        .reshape((n,))
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    for (i, &g) in got.iter().enumerate() {
+        let want = (i as f32 + 1.0).log2();
+        assert!((g - want).abs() < 1e-5, "i={i}: got {g}, want {want}");
+    }
+
+    // KIND_ATANH = 21 (new max); should succeed for inputs in (-1, 1).
+    let safe: Vec<f32> = (0..64).map(|i| (i as f32 - 32.0) / 64.0 * 0.5).collect();
+    let safe_cd = CandleTensor::from_vec(safe.clone(), (safe.len(),), &dev)
+        .unwrap()
+        .to_dtype(CandleDType::F32)
+        .unwrap();
+    let safe_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&safe_cd).unwrap();
+    let _out_atanh = cuda_activation_unary(&safe_kt, 21).expect("KIND_ATANH");
+    cuda_dev.synchronize().unwrap();
+
+    // KIND_MAX+1 (=22) must still error.
+    assert!(cuda_activation_unary(&x_kt, 22).is_err());
 }

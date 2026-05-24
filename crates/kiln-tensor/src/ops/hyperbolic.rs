@@ -1,12 +1,19 @@
-//! `sinh`, `cosh` — hyperbolic primitives.
+//! `sinh`, `cosh`, `atanh` — hyperbolic primitives.
 //!
 //! `tanh` is in `activation.rs` because it's used as a nonlinearity.
-//! These two complete the hyperbolic family for general math use.
+//! These three complete the hyperbolic family for general math use:
 //!
 //! ```text
-//! sinh(x) = (e^x - e^-x) / 2
-//! cosh(x) = (e^x + e^-x) / 2
+//! sinh(x)  = (e^x - e^-x) / 2
+//! cosh(x)  = (e^x + e^-x) / 2
+//! atanh(x) = 0.5 * ln((1 + x) / (1 - x))   (defined for |x| < 1)
 //! ```
+//!
+//! # CUDA wiring (#1082)
+//!
+//! All three route through the shared `cuda_activation_unary`
+//! kernel — sinh/cosh as kinds 10/11 (#1082 base) and atanh as
+//! kind 21 (#1082 follow-up).
 
 use std::sync::Arc;
 
@@ -19,6 +26,7 @@ use crate::{
 enum HyperKind {
     Sinh,
     Cosh,
+    Atanh,
 }
 
 impl HyperKind {
@@ -26,6 +34,7 @@ impl HyperKind {
         match self {
             HyperKind::Sinh => "sinh",
             HyperKind::Cosh => "cosh",
+            HyperKind::Atanh => "atanh",
         }
     }
 
@@ -33,16 +42,18 @@ impl HyperKind {
         match self {
             HyperKind::Sinh => v.sinh(),
             HyperKind::Cosh => v.cosh(),
+            HyperKind::Atanh => v.atanh(),
         }
     }
 
-    /// CUDA kernel kind tag matching `KIND_SINH`/`KIND_COSH` in
-    /// `csrc/activation.cu` (#1082).
+    /// CUDA kernel kind tag matching `KIND_SINH`/`KIND_COSH`/
+    /// `KIND_ATANH` in `csrc/activation.cu` (#1082).
     #[cfg(feature = "cuda")]
     const fn cuda_kind_tag(self) -> i32 {
         match self {
             HyperKind::Sinh => 10,
             HyperKind::Cosh => 11,
+            HyperKind::Atanh => 21,
         }
     }
 }
@@ -137,6 +148,10 @@ pub fn cosh(x: &Tensor) -> Result<Tensor> {
     dispatch1(&HyperOp { kind: HyperKind::Cosh }, x)
 }
 
+pub fn atanh(x: &Tensor) -> Result<Tensor> {
+    dispatch1(&HyperOp { kind: HyperKind::Atanh }, x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +191,28 @@ mod tests {
         for i in 0..3 {
             let id = c[i] * c[i] - s[i] * s[i];
             assert!((id - 1.0).abs() < 1e-3, "i={i}: id={id}");
+        }
+    }
+
+    #[test]
+    fn atanh_known_values() {
+        // atanh(0)=0, atanh(0.5) ≈ 0.549306, atanh(-0.5) ≈ -0.549306
+        let x = Tensor::from_slice(&[0.0f32, 0.5, -0.5], vec![3]).unwrap();
+        let y = read_f32(&atanh(&x).unwrap());
+        assert!(y[0].abs() < 1e-6);
+        assert!((y[1] - 0.5493061).abs() < 1e-5);
+        assert!((y[2] + 0.5493061).abs() < 1e-5);
+    }
+
+    #[test]
+    fn atanh_inverse_of_tanh() {
+        // atanh(tanh(x)) ≈ x for |x| < ~5 (tanh saturates after that)
+        let xs = [-1.5f32, -0.5, 0.0, 0.5, 1.5];
+        for &xv in &xs {
+            let t = xv.tanh();
+            let x = Tensor::from_slice(&[t], vec![1]).unwrap();
+            let y = read_f32(&atanh(&x).unwrap());
+            assert!((y[0] - xv).abs() < 1e-4, "atanh(tanh({xv}))={}", y[0]);
         }
     }
 }
