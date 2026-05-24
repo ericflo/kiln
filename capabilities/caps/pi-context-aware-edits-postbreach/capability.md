@@ -135,6 +135,18 @@ and JavaScript camelCase/CommonJS style when available.
   `lr=3e-5`, `echo_lambda=0.05`). This isolates whether PB-H2 failed because
   the update was too weak, while avoiding PB-H3's strict-prompt outcome
   damage.
+  - Result: rejected. The stronger default-prompt recipe trained and verified
+    with gradient checkpointing, but blind eval was 0.2900 (`delta=-0.0096`).
+    It improved `format_compliance` substantially (0.5625 to 0.6875) and cut
+    efficiency cost (4.94 tool calls, 1449.8 thinking chars), but `outcome`
+    fell to 0.3750 and `convention_consistency` fell to 0.9125. Strong GRPO
+    on the PB-H2 rollout distribution over-optimizes terminal shape at the
+    expense of correct edits.
+- **PB-H5: default-prompt moderate Agentic GRPO/ECHO.** Reuse the clean PB-H2
+  default-prompt train rollout distribution with an intermediate update
+  (`rank=8`, `alpha=16`, `lr=1e-5`, `echo_lambda=0.03`). This tests whether
+  the useful H2 outcome movement and H4 format movement can be balanced without
+  the H4 outcome/convention collapse.
 
 ## Standard Workflow
 

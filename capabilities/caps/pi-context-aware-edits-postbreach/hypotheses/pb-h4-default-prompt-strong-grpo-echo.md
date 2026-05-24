@@ -32,4 +32,17 @@ Reject if any of:
 
 ## Result
 
-Pending.
+Rejected. Dry-run reused the clean PB-H2 default-prompt GRPO data and kept
+10/16 reward-varied groups (30 completions). Training completed with
+`rank=16`, `alpha=32`, `lr=3e-5`, `echo_lambda=0.05`, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=32`; peak VRAM was 19,478 MiB and the adapter
+smoke test passed. Verification passed with 400 nonzero LoRA tensors and a
+delta-proxy upper bound of 22.3440.
+
+Blind 3-seed eval regressed from the postbreach baseline 0.2996 to 0.2900
+(`delta=-0.0096`). The adapter did improve `format_compliance` from 0.5625 to
+0.6875 and reduced tool/thinking cost (4.94 tool calls, 1449.8 thinking chars,
+292.1 thinking chars/tool call), but `outcome` fell from 0.5000 to 0.3750 and
+`convention_consistency` fell from 0.9736 to 0.9125. This falsifies the
+"PB-H2 was merely underpowered" explanation: the strong update moved terminal
+shape but damaged the actual edit behavior.
