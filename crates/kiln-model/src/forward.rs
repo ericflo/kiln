@@ -370,6 +370,30 @@ fn cuda_use_kt_api_mul_scalar() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: `tensor + constant` (scalar-add) through the
+/// kt-API + adapters. Set `KILN_USE_KT_API_ADD_SCALAR=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// `tensor + scalar` candle calls used in the LoRA training
+/// backward sigmoid-derivative path (the `sigmoid_f32.neg() + 1.0`
+/// and `gate_tile.neg().exp() + 1.0` shapes) through
+/// `kiln_tensor::cuda_scalar_op` with `ScalarKind::AddScalar`
+/// (kind tag 0) via the kt-bridge borrow adapter. Pays one dtod
+/// memcpy on the output direction (the kt allocation is
+/// freshly-owned). Falls through to the candle `+ scalar`
+/// composite when any precondition fails so behavior is identical
+/// with the gate off.
+///
+/// Distinct from `KILN_USE_KT_API_MUL_SCALAR` which targets the
+/// `affine(c, 0.0)` (mul-only) shape — this one covers the
+/// add-only shape from candle's overloaded `Tensor + f64`
+/// (`Add<f64>` impl).
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_add_scalar() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ADD_SCALAR").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -2082,7 +2106,34 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
             let gate_tile = gate_2d.narrow(0, start, len)?;
             let grad_y_tile = grad_y_2d.narrow(0, start, len)?;
 
-            let sigmoid_gate = (gate_tile.neg()?.exp()? + 1.0)?.recip()?;
+            // Phase 7 (#1082): when `KILN_USE_KT_API_ADD_SCALAR=1`
+            // (or `KILN_USE_KT_API_ALL=1`) is set AND the
+            // exp() output is a contiguous CUDA tensor of a
+            // supported dtype, route the `+ 1.0` step of the
+            // sigmoid backward composite through
+            // `kiln_tensor::cuda_scalar_op` with kind 0
+            // (AddScalar). Falls through to the candle composite
+            // when any precondition fails.
+            let neg_exp = gate_tile.neg()?.exp()?;
+            let one_plus_neg_exp = {
+                #[cfg(feature = "cuda")]
+                {
+                    if let Some(out) = try_kt_add_scalar(&neg_exp, 1.0)
+                        .map_err(|e| candle_core::Error::Msg(format!(
+                            "CudaSigmoidMulTrainingBf16 backward: try_kt_add_scalar: {e}"
+                        )))?
+                    {
+                        out
+                    } else {
+                        (neg_exp + 1.0)?
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    (neg_exp + 1.0)?
+                }
+            };
+            let sigmoid_gate = one_plus_neg_exp.recip()?;
             let grad_x_tile = (grad_y_tile.clone() * sigmoid_gate.clone())?;
             let (grad_x_tile_storage, grad_x_tile_layout) = grad_x_tile.storage_and_layout();
             let Storage::Cuda(grad_x_tile_storage) = &*grad_x_tile_storage else {
@@ -2101,7 +2152,28 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
             )?;
 
             let sigmoid_f32 = sigmoid_gate.to_dtype(DType::F32)?;
-            let one_minus_sigmoid = (sigmoid_f32.neg()? + 1.0)?;
+            // Phase 7 (#1082): same kt-API add-scalar migration for
+            // the `(-sigmoid_f32) + 1.0` step of the sigmoid
+            // derivative composite.
+            let neg_sigmoid = sigmoid_f32.neg()?;
+            let one_minus_sigmoid = {
+                #[cfg(feature = "cuda")]
+                {
+                    if let Some(out) = try_kt_add_scalar(&neg_sigmoid, 1.0)
+                        .map_err(|e| candle_core::Error::Msg(format!(
+                            "CudaSigmoidMulTrainingBf16 backward: try_kt_add_scalar: {e}"
+                        )))?
+                    {
+                        out
+                    } else {
+                        (neg_sigmoid + 1.0)?
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    (neg_sigmoid + 1.0)?
+                }
+            };
             let gate_deriv = (sigmoid_f32 * one_minus_sigmoid)?;
             let grad_gate_tile =
                 (grad_y_tile.to_dtype(DType::F32)? * x_tile.to_dtype(DType::F32)?)?;
@@ -6296,6 +6368,50 @@ fn try_kt_mul_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
     Ok(Some(out))
 }
 
+/// Phase 7 (#1082) — kt-API add-scalar migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_scalar_op` with kind tag 0 (AddScalar) for
+/// the candle `Tensor + scalar` (`Add<f64>`) shape.
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0, or non-finite scalar) so the
+/// caller falls through to the candle composite. NVTX range
+/// `kiln/add_scalar_kt` brackets the migrated call so nsys traces
+/// separate the path from the baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_add_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_add_scalar() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+    if !c.is_finite() {
+        return Ok(None);
+    }
+    let c_f32 = c as f32;
+
+    kiln_nvtx::range!(c"kiln/add_scalar_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 0 = ScalarKind::AddScalar (matches
+    // crates/kiln-tensor/src/ops/scalar.rs).
+    let out_kt = match kiln_tensor::cuda_scalar_op(&x_kt, 0, c_f32) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_add_scalar: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
 #[cfg(feature = "cuda")]
 fn cuda_rotary_one_training_bf16_supported(
     x: &Tensor,
@@ -7669,7 +7785,30 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
     let abs_x = (relu_x.clone() + relu_neg_x)?;
     let neg_abs = abs_x.neg()?;
     // log(1 + exp(-|x|)) — always stable since exp(-|x|) ∈ (0, 1]
-    let log_term = (neg_abs.exp()? + 1.0)?.log()?;
+    //
+    // Phase 7 (#1082): when `KILN_USE_KT_API_ADD_SCALAR=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND the exp() output is a
+    // contiguous CUDA tensor of a supported dtype, route the
+    // `+ 1.0` step of the softplus composite through
+    // `kiln_tensor::cuda_scalar_op` with kind 0 (AddScalar).
+    // Falls through to the candle composite when any precondition
+    // fails.
+    let exp_neg_abs = neg_abs.exp()?;
+    let one_plus = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_add_scalar(&exp_neg_abs, 1.0)? {
+                out
+            } else {
+                (exp_neg_abs + 1.0)?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            (exp_neg_abs + 1.0)?
+        }
+    };
+    let log_term = one_plus.log()?;
     Ok((relu_x + log_term)?)
 }
 
