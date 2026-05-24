@@ -479,3 +479,97 @@ and migrating `crates/kiln-train`'s `HashMap<candle_core::TensorId,
 infra — every contract (autograd, parameter slot coherence,
 optimizer master-write, sampler chain) is already settled and
 parity-tested.
+
+## 2026-05-24 update — Phase 2 main event + Phase 4 layer-glue + Phase 7 v2 5-of-5
+
+The Phase 2 cublasLt `MatmulHandle` shipped this session — the
+"Phase 2 main event" the previous implementor flagged as the
+dominant remaining unblock. With it, `Parameter::forward_dispatch
+(Plain { weight })` finally has a real CUDA backend to delegate
+to, and a `KILN_USE_KT_API_MATMUL=1` env flag flips production
+forward.rs matmul sites to route through cublasLt instead of
+candle's `cublasGemmEx` default-tensor-op.
+
+### What landed
+
+| Commit | Delivery |
+|---|---|
+| `bf1fef2` | `kiln-blas::CublasLtMatmulHandle` — feature-gated cublasLt context + matmul executor (Phase 2 main event). FFI wrapper in `csrc/cublaslt_matmul.cu`, Send+Sync Rust handle with workspace pool + algo cache integration. 3 GPU parity tests + 15 CPU tests. |
+| `34d535f` | `kiln-tensor::cuda_matmul` glue. `MatmulOp::cuda_fwd` now routes through the handle (per-device `OnceLock` registry, shared algo cache). 5 GPU parity tests (BF16 + F32 shapes including a scaled-down MLP gate\|\|up). |
+| `f3f4c0b` | First production matmul migration in `forward.rs`. New `cuda_use_kt_api_matmul()` env gate + `try_kt_matmul()` helper. Branches inside `matmul_no_broadcast_copy`'s 2D fast path to route through `cuda_matmul` when the env var is set. NVTX range `kiln/matmul_kt`. |
+| `ba052cc` | Phase 4 CUDA softmax substrate kernel. New `csrc/softmax.cu` (three-pass row-max → exp → normalize with warp-shuffle reductions, F32 accumulation). `SoftmaxLastDimOp::cuda_fwd` wires through `kiln_softmax_last_axis_async`. 4 GPU parity tests (BF16 / F32, including strided reduction for n_cols > 1024). |
+| `a4a4286` | `EmbeddingOp::cuda_fwd` via the existing `cuda_index_select_dim0` substrate. Handles both 1-D and 2-D token_ids via flatten → gather → reshape. 2 GPU parity tests (BF16 + F32). |
+| `e3ab5d1` | `kiln-gdn-kernel` kt-API migrated to v2 Borrowed-compatible accessors. All 20 kt entries now use `cuda_input_device_ptr` / `cuda_output_device_ptr` instead of `.slice().slice(off..).device_ptr()`. Smart per-function migrator handled the irregular naming convention that broke PR #1361's regex pass. Smoke test validates Borrowed-input path. |
+| `ed7caef` | CI fix — moved cuda parity tests from `kiln-tensor/tests/` to `kiln-kt-bridge/tests/` so the default-features test build doesn't pull cudarc 0.19.4 transitively. |
+| `4c41125` | `cuda_matmul_with_bias` — cublasLt `CUBLASLT_EPILOGUE_BIAS` fused matmul. One kernel computes `C = A @ B + bias`. 3 GPU parity tests against candle's `matmul + broadcast_add`. |
+| `cb35677` | `KILN_USE_KT_API_MATMUL=1` now also fires inside `CudaBackend::linear_prefill_apply`. Combined with the existing fallback-path migration, this covers the universal 2D matmul pattern across the full CUDA path (training/autograd prefill + decode fallback). |
+
+### Phase 7 v2 borrow-compat — now uniform across all 5 kernel crates
+
+| Crate | Coverage (was → is) |
+|---|---|
+| `kiln-flash-attn` | 5/5 → 5/5 |
+| `kiln-conv1d-kernel` | 2/2 → 2/2 |
+| `kiln-marlin-gemm` | 1/1 → 1/1 |
+| `kiln-rmsnorm-kernel` | 25/25 → 25/25 |
+| `kiln-gdn-kernel` | **0/20 → 20/20** |
+
+Every kernel-crate kt entry now accepts both Owned and Borrowed
+`kt_tensor::CudaStorage` — Phase 7 zero-copy candle→kt input path
+works through every entry point.
+
+### kt-Tensor CUDA substrate completeness
+
+| Op | Substrate | kt-Tensor wrapper | DeviceOp `cuda_fwd` |
+|---|---|---|:-:|
+| `contiguous` | `csrc/contiguous.cu` | `cuda_contiguous` | ✓ |
+| `index_select_dim0` | `csrc/index_select.cu` | `cuda_index_select_dim0` | ✓ |
+| Elementwise binary (add/sub/mul/div) | `csrc/elementwise.cu` | `cuda_elementwise_binary` | ✓ |
+| Activation (silu/sigmoid/gelu/tanh/relu) | `csrc/activation.cu` | `cuda_activation_unary` | ✓ |
+| Cast (F32↔BF16↔F16) | `csrc/cast.cu` | `cuda_cast` | ✓ |
+| **Softmax last axis** | **`csrc/softmax.cu` (new)** | **`cuda_softmax_last_axis`** | **✓** |
+| **Matmul (cublasLt)** | **`kiln-blas/csrc/cublaslt_matmul.cu` (new)** | **`cuda_matmul`** | **✓** |
+| **Matmul + bias (fused)** | **same handle, Bias epilogue (new)** | **`cuda_matmul_with_bias`** | n/a (helper) |
+| **Embedding (via index_select)** | same kernel | — (uses `cuda_index_select_dim0`) | **✓** |
+
+### Production migration coverage
+
+`KILN_USE_KT_API_MATMUL=1` exercises **two** sites in forward.rs:
+
+1. `matmul_no_broadcast_copy`'s 2D fast path — the fallback when
+   `backend.linear_decode` / `linear_prefill_apply` returns None.
+   Covers CUDA decode + all CPU paths.
+2. `CudaBackend::linear_prefill_apply` — the production CUDA
+   training/autograd prefill matmul site. The dominant prefill
+   matmul call (24 GDN layers × 4 in_proj matmuls per layer per
+   step at training; the LM head broadcast at inference).
+
+Together: the universal 2D matmul pattern in the decoder is
+covered. Every projection (gate, up, down, QKV, O, LM head) is
+exercisable through the cublasLt path under `KILN_USE_KT_API_MATMUL=1`.
+
+### What's next (post-2026-05-24)
+
+The substrate-side work for Phase 2/3/4/7 is essentially complete.
+Remaining sub-phases for full candle removal:
+
+1. **`PagedKvCacheKt` call-site migration** (~60 sites in
+   `kiln-model`/`kiln-server`/`kiln-scheduler`). PagedKvCacheKt
+   itself is feature-complete for non-FP8 decode — only the call
+   sites haven't flipped. Cleanest first migration is
+   `transformer_block_paged_kv` in `kiln-model/src/forward.rs`.
+2. **FP8 quant/dequant kt-API** — closes the final pending portion
+   of `PagedKvCacheKt` for FP8 caches. Either in `kt-bridge` or a
+   new `kiln-fp8` crate.
+3. **`CudaFlashAttentionTrainingBf16` reshape** — unblocks
+   `flash_attn_fwd` migration through the borrow path.
+4. **`Tensor::to_device(Device::Cuda)`** — first-class CPU↔CUDA
+   buffer move. Current parity tests use `kt-bridge`'s
+   `kt_tensor_from_candle_cuda_borrow` as a workaround.
+5. **Forward-dispatch caller in `kiln-model`** — pick a call site
+   that holds a `kiln-param::Parameter` and route it through
+   `Parameter::forward_dispatch().match { Plain { weight } =>
+   kiln_tensor::cuda_matmul(input, weight), ... }`. This proves
+   the per-storage-variant dispatch end-to-end in production.
+
+All of those are mechanical follow-ups; the contracts are settled.
