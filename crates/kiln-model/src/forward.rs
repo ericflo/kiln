@@ -346,6 +346,30 @@ fn cuda_use_kt_api_cat_dim2() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: `Tensor::affine(c, 0.0)` (scalar-multiply only)
+/// through the kt-API + adapters. Set
+/// `KILN_USE_KT_API_MUL_SCALAR=1` (or `KILN_USE_KT_API_ALL=1`) to
+/// enable; default off. Routes the `.affine(c, 0.0)` candle calls
+/// in the CudaLoraLinearBf16 / CudaLoraAddBf16 backward LoRA
+/// gradient paths (per-tile grad_hidden scaling, grad_b scaling)
+/// through `kiln_tensor::cuda_scalar_op` with `ScalarKind::MulScalar`
+/// (kind tag 2) via the kt-bridge borrow adapter. Pays one dtod
+/// memcpy on the output direction (the kt allocation is
+/// freshly-owned). Falls through to the candle `affine` composite
+/// when any precondition fails so behavior is identical with the
+/// gate off.
+///
+/// Only the bias=0 case is routed; mixed mul+add affine stays on
+/// candle. The scalar kernel is just an elementwise multiply by a
+/// constant, so the migration is functionally identical to the
+/// candle path on supported dtypes (F32/BF16/F16).
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_mul_scalar() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MUL_SCALAR").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -1524,9 +1548,32 @@ impl CustomOp3 for CudaLoraLinearBf16 {
             let grad_y_tile_f32 = to_dtype_if_needed(&grad_y_tile, DType::F32)?;
 
             let grad_x_base = grad_y_tile_bf16.matmul(&weight_t_t)?;
-            let grad_hidden = grad_y_tile_f32
-                .matmul(&b_f32)?
-                .affine(self.scale as f64, 0.0)?;
+            // Phase 7 (#1082): when `KILN_USE_KT_API_MUL_SCALAR=1`
+            // (or `KILN_USE_KT_API_ALL=1`) is set AND the input is
+            // a contiguous CUDA tensor of a supported dtype, route
+            // the `affine(scale, 0.0)` (mul-only) through
+            // `kiln_tensor::cuda_scalar_op` with kind 2
+            // (MulScalar). Falls through to the candle composite
+            // when any precondition fails.
+            let grad_hidden_pre = grad_y_tile_f32.matmul(&b_f32)?;
+            let grad_hidden = {
+                #[cfg(feature = "cuda")]
+                {
+                    if let Some(out) = try_kt_mul_scalar(&grad_hidden_pre, self.scale as f64)
+                        .map_err(|e| candle_core::Error::Msg(format!(
+                            "CudaLoraLinearBf16 backward: try_kt_mul_scalar: {e}"
+                        )))?
+                    {
+                        out
+                    } else {
+                        grad_hidden_pre.affine(self.scale as f64, 0.0)?
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    grad_hidden_pre.affine(self.scale as f64, 0.0)?
+                }
+            };
             let grad_x_lora = grad_hidden.matmul(&a_f32)?.to_dtype(DType::BF16)?;
             let grad_x_tile = (grad_x_base + grad_x_lora)?;
             let (grad_x_tile_storage, grad_x_tile_layout) = grad_x_tile.storage_and_layout();
@@ -1547,10 +1594,27 @@ impl CustomOp3 for CudaLoraLinearBf16 {
                 .matmul(&a_t_bf16)?
                 .to_dtype(DType::F32)?
                 .contiguous()?;
-            let grad_b_tile = grad_y_tile_f32
-                .t()?
-                .matmul(&hidden)?
-                .affine(self.scale as f64, 0.0)?;
+            // Phase 7 (#1082): same kt-API mul-scalar migration for
+            // the grad_b_tile scaling.
+            let grad_b_tile_pre = grad_y_tile_f32.t()?.matmul(&hidden)?;
+            let grad_b_tile = {
+                #[cfg(feature = "cuda")]
+                {
+                    if let Some(out) = try_kt_mul_scalar(&grad_b_tile_pre, self.scale as f64)
+                        .map_err(|e| candle_core::Error::Msg(format!(
+                            "CudaLoraLinearBf16 backward: try_kt_mul_scalar: {e}"
+                        )))?
+                    {
+                        out
+                    } else {
+                        grad_b_tile_pre.affine(self.scale as f64, 0.0)?
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    grad_b_tile_pre.affine(self.scale as f64, 0.0)?
+                }
+            };
             grad_b_acc = Some(match grad_b_acc {
                 Some(acc) => (acc + grad_b_tile)?,
                 None => grad_b_tile,
@@ -1687,13 +1751,51 @@ impl CustomOp3 for CudaLoraAddBf16 {
             let grad_y_tile_f32 = to_dtype_if_needed(&grad_y_tile, DType::F32)?;
             let hidden_tile = hidden.narrow(0, start, len)?;
             let hidden_tile_f32 = to_dtype_if_needed(&hidden_tile, DType::F32)?;
-            let grad_hidden_tile = grad_y_tile_f32
-                .matmul(&b_f32)?
-                .affine(self.scale as f64, 0.0)?;
-            let grad_b_tile = grad_y_tile_f32
-                .t()?
-                .matmul(&hidden_tile_f32)?
-                .affine(self.scale as f64, 0.0)?;
+            // Phase 7 (#1082): when `KILN_USE_KT_API_MUL_SCALAR=1`
+            // (or `KILN_USE_KT_API_ALL=1`) is set AND the input is
+            // a contiguous CUDA tensor of a supported dtype, route
+            // the `affine(scale, 0.0)` (mul-only) through
+            // `kiln_tensor::cuda_scalar_op` with kind 2
+            // (MulScalar). Falls through to the candle composite
+            // when any precondition fails.
+            let grad_hidden_tile_pre = grad_y_tile_f32.matmul(&b_f32)?;
+            let grad_hidden_tile = {
+                #[cfg(feature = "cuda")]
+                {
+                    if let Some(out) = try_kt_mul_scalar(&grad_hidden_tile_pre, self.scale as f64)
+                        .map_err(|e| candle_core::Error::Msg(format!(
+                            "CudaLoraAddBf16 backward: try_kt_mul_scalar: {e}"
+                        )))?
+                    {
+                        out
+                    } else {
+                        grad_hidden_tile_pre.affine(self.scale as f64, 0.0)?
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    grad_hidden_tile_pre.affine(self.scale as f64, 0.0)?
+                }
+            };
+            let grad_b_tile_pre = grad_y_tile_f32.t()?.matmul(&hidden_tile_f32)?;
+            let grad_b_tile = {
+                #[cfg(feature = "cuda")]
+                {
+                    if let Some(out) = try_kt_mul_scalar(&grad_b_tile_pre, self.scale as f64)
+                        .map_err(|e| candle_core::Error::Msg(format!(
+                            "CudaLoraAddBf16 backward: try_kt_mul_scalar: {e}"
+                        )))?
+                    {
+                        out
+                    } else {
+                        grad_b_tile_pre.affine(self.scale as f64, 0.0)?
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    grad_b_tile_pre.affine(self.scale as f64, 0.0)?
+                }
+            };
             grad_hidden_tiles.push(grad_hidden_tile);
             grad_b_acc = Some(match grad_b_acc {
                 Some(acc) => (acc + grad_b_tile)?,
@@ -6146,6 +6248,51 @@ fn try_kt_cat_dim2(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_cat_dim2: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API mul-scalar migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_scalar_op` with kind tag 2 (MulScalar) for
+/// the special-case `affine(c, 0.0)` shape (multiply-only — no
+/// bias add).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0, or scalar fits outside f32 range)
+/// so the caller falls through to the candle composite. NVTX range
+/// `kiln/mul_scalar_kt` brackets the migrated call so nsys traces
+/// separate the path from the baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_mul_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_mul_scalar() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+    if !c.is_finite() {
+        return Ok(None);
+    }
+    let c_f32 = c as f32;
+
+    kiln_nvtx::range!(c"kiln/mul_scalar_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 2 = ScalarKind::MulScalar (matches
+    // crates/kiln-tensor/src/ops/scalar.rs).
+    let out_kt = match kiln_tensor::cuda_scalar_op(&x_kt, 2, c_f32) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_mul_scalar: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
