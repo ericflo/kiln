@@ -163,6 +163,28 @@ fn cuda_use_kt_api_gdn_full_chunk() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
+/// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
+/// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
+/// exercise the migration path for parity testing.
+///
+/// Distinct from the per-fused-kernel migrations (sigmoid_mul,
+/// rmsnorm, rotary_qk, mlp_silu_mul, l2_qk_norm) — this one routes
+/// the *plain matmul* in `matmul_no_broadcast_copy`'s 2D fast path
+/// through cublasLt. Lights up the universal 2D matmul site (LM
+/// head, QKV projections, MLP down) when the env var is set.
+///
+/// Pays one dtod memcpy on the output direction (the kt allocation
+/// is freshly-owned; there's no "borrowed candle Tensor" type to
+/// wrap a kt allocation yet). Inputs go zero-copy through the
+/// kt-bridge borrow adapter.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_matmul() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MATMUL").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 thread_local! {
     static VULKAN_SKIP_GDN_STATE_READBACK_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
@@ -3574,6 +3596,30 @@ fn matmul_no_broadcast_copy(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             let out_n = r_dims[1];
             let lead: usize = l_dims[..l_dims.len() - 1].iter().product();
             let lhs2d = lhs.reshape((lead, k))?;
+
+            // Phase 7 opt-in: route the 2D matmul through the kt
+            // cublasLt handle. Falls through to candle's matmul on
+            // any incompatibility (non-CUDA, non-{BF16,F16,F32},
+            // borrowed-storage edge case). The kt path produces a
+            // freshly-allocated kt CudaStorage; we copy the result
+            // back into a candle Tensor via the kt-bridge copy
+            // adapter so the rest of `forward.rs` is untouched.
+            #[cfg(feature = "cuda")]
+            if cuda_use_kt_api_matmul()
+                && matches!(lhs2d.device(), Device::Cuda(_))
+                && matches!(rhs.device(), Device::Cuda(_))
+                && matches!(lhs2d.dtype(), DType::BF16 | DType::F16 | DType::F32)
+                && lhs2d.dtype() == rhs.dtype()
+                && lhs2d.is_contiguous()
+                && rhs.is_contiguous()
+            {
+                if let Some(out2d) = try_kt_matmul(&lhs2d, rhs)? {
+                    let mut out_shape: Vec<usize> = l_dims[..l_dims.len() - 1].to_vec();
+                    out_shape.push(out_n);
+                    return Ok(out2d.reshape(out_shape)?);
+                }
+            }
+
             let out2d = lhs2d.matmul(rhs)?;
             let mut out_shape: Vec<usize> = l_dims[..l_dims.len() - 1].to_vec();
             out_shape.push(out_n);
@@ -3581,6 +3627,35 @@ fn matmul_no_broadcast_copy(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         }
     }
     Ok(lhs.broadcast_matmul(rhs)?)
+}
+
+/// Phase 7 — kt-API matmul migration helper. Routes a 2D candle
+/// matmul through `kiln_tensor::cuda_matmul` (which dispatches via
+/// the `kiln_blas::CublasLtMatmulHandle`).
+///
+/// Returns `Ok(None)` on any incompatibility so the caller falls
+/// through to candle's `Tensor::matmul`. NVTX range `kiln/matmul_kt`
+/// brackets the migrated call so nsys traces separate the path from
+/// the candle baseline.
+#[cfg(feature = "cuda")]
+fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>> {
+    kiln_nvtx::range!(c"kiln/matmul_kt");
+
+    let lhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(lhs) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let rhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(rhs) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out_kt = match kiln_tensor::cuda_matmul(&lhs_kt, &rhs_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_matmul: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
 }
 
 /// Vulkan-routed `[B, T, H] @ [H, D] -> [B, T, D]` matmul with autograd
