@@ -32,6 +32,32 @@ Reject or do not promote if the 3-seed blind eval shows any of:
   baseline value of 302.7;
 - receipt shows zero ECHO env-token steps or adapter verification fails.
 
+## Results
+
+Status: rejected.
+
+- Default 8-segment checkpointing OOMed on the full rank-16 arm, a
+  max-groups=4 rank-8 arm, and a max-groups=1 rank-4 arm during
+  checkpointed GRPO reverse backward.
+- A two-completion rank-4 micro arm trained and verified but regressed
+  blind eval composite from 0.4800 to 0.4528.
+- Explicit `KILN_GRAD_CHECKPOINT_SEGMENTS=32` fit the max-groups=4
+  rank-8 arm on the RTX 4090: 3 kept groups, 12 completions, 10,278
+  action tokens, 4,997 env tokens, 948s wall clock, observed peak VRAM
+  18,839 MiB.
+- The 32-segment arm regressed blind eval composite to 0.1625
+  (`delta=-0.3175`). It preserved `convention_consistency` at 0.9583
+  and `read_before_edit` at 1.0000, but `format_compliance` fell to
+  0.4861 and `outcome` to 0.4167. Thinking chars/tool improved
+  (302.7 to 284.4), but mean tool calls increased (5.00 to 5.42) and
+  nonzero rollouts collapsed (18 to 6).
+
+Conclusion: gradient checkpointing solves the local memory bottleneck for
+larger H1 slices, but the reward signal is too sparse/noisy for this
+agentic-GRPO recipe. Scaling H1 data worsens the exact target sub-scores,
+so the next iteration should switch methods rather than continue GRPO
+hyperparameter sweeps on the same rollout distribution.
+
 ## Rationale
 
 `pi-doctest` found `filter_var_min > 0.05` more robust than training on all

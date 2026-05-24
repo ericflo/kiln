@@ -132,6 +132,13 @@ A4: Skip the actual edit, claim the function already exists.
     0.4528. Thinking efficiency improved slightly (302.7 → 291.5
     chars/tool), but format, outcome, convention, and read-before-edit
     all dropped.
+  - Gradient-checkpointing follow-up: the earlier OOMs used the default
+    8 checkpoint segments. Explicit `KILN_GRAD_CHECKPOINT_SEGMENTS=32`
+    fit a max-groups=4 rank-8 arm on RTX 4090 (peak 18,839 MiB, 3 kept
+    groups, 12 completions), but blind eval collapsed to 0.1625
+    (`delta=-0.3175`). This rejects scaling the same sparse GRPO signal:
+    it preserved conventions but damaged `format_compliance` and
+    `outcome`.
 - **H2: mixed-language corpus** (Python + Rust + Go + JS) — does
   context-awareness generalize across language conventions, or is it
   language-specific?
