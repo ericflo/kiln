@@ -275,6 +275,22 @@ to 5.75, and mean thinking chars rose to 2102.75. The local throughput shape is
 good, but synthetic repair negatives appear to teach extra tool use; do not
 run the larger gate.
 
+H28 tested a real chain experiment using the reference-cap lesson that chaining
+only makes sense when the second corpus is broader and complementary. It
+continued from H26, which moved efficiency but hurt outcome, and trained on five
+train-only hard-negative groups: concise verified pass traces versus wrong
+no-test terminal guesses. The local shape was good: 10 completions, 936 action
+tokens, max 554 sequence tokens, explicit 24-segment checkpointing, 270s train
+time, and peak VRAM about 15981 MiB. `LIMIT=4` smoke looked excellent:
+composite 0.990625 versus base 0.934375, tool-call efficiency 0.96875, mean
+tool calls 3.5, and mean thinking chars 1066.0. The larger `LIMIT=8` paired
+gate rejected it hard: composite 0.659375 versus base 0.8328125, outcome
+0.6875, tool-call efficiency 0.703125, two zero rollouts, and slower wall
+clock. Chaining from a rejected efficiency adapter amplified fragility; future
+chains should start from an adapter that clears the larger gate, or test the
+broad hard-negative contrast fresh from base before stacking any efficiency
+prior. `LIMIT=4` is now only a throughput smoke, not a decision gate.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
