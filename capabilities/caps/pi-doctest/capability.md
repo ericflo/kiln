@@ -1035,3 +1035,30 @@ Next work should avoid another narrow suffix-only GRPO contrast and instead
 use a broader outcome-preserving success corpus, a method with less policy
 drift for terminal/action discipline, or a chain only after a confirmed
 general behavior anchor.
+
+### H59: concise full-success SFT anchor
+
+H59 tested the broader outcome-preserving success-corpus direction with SFT
+instead of GRPO. It reconstructed four complete train-only successful
+trajectories from the H54 suffix rows: read, concise `edit`, doctest, and
+concise `DONE`. Unlike H58, there were no negative premature-stop examples and
+no pairwise terminal contrast; the hypothesis was that a positive full-behavior
+anchor might preserve reliability while nudging the model toward the compact
+workflow.
+
+The dataset had 4 examples. They tokenized to 508, 676, 613, and 664 tokens.
+Training used native `cuda_sft_file`, rank 4 / alpha 4 / lr `5e-7`, 1 epoch,
+and `KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 537.075s observed,
+with peak observed VRAM 16003 MiB. The receipt reported 578 action tokens and
+1883 context tokens. Adapter verify passed with 400 nonzero LoRA tensors and
+LoRA update proxy 0.060093.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.971875 with no
+zero rollouts and mean wall-clock 30.27s. H59 scored 0.75 with one zero
+rollout and mean wall-clock 37.14s. Lesson: current-main SFT can now complete
+this compact full-success anchor locally, but even very low-dose positive
+successful-trajectory SFT still introduces reliability drift on this cap. Do
+not chain from H59. The next viable adapter route likely needs either a much
+broader and more diverse behavior anchor with explicit regularization, or an
+external/generated teacher distribution that is not just copies of the base
+model's own successful traces.
