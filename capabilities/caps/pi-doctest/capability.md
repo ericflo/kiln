@@ -158,6 +158,21 @@ Another local server-native GRPO attempt needs a much tighter action-token cap
 around 350 per completion, otherwise this cap should switch to a gentler
 non-GRPO data signal instead of burning time on tiny slow preference groups.
 
+H18 switched to SFT on successful train rollouts. The raw Pi transcripts were
+rendered into compact thinking-on workflows with real tool arguments and
+normalized `solution.py` paths. The signal was valid, but local SFT still
+stalled on examples with full code-writing turns: edit-style examples reached
+56% after 689s, and compact write-style examples with a 3100-char cap reached
+71% after 580s. Both were stopped without eval.
+
+H19 kept the same write-style SFT anchor but capped examples at 2900 chars.
+This trained successfully in 128004 ms with rank 4 / alpha 8 / lr 1e-5 /
+1 epoch on 6 examples. Smoke result, `LIMIT=4 SEEDS=1`: composite 0.94375,
+delta +0.0375 versus the normalized thinking-on base smoke, outcome 1.0,
+tested-before-done 1.0, tool-call efficiency 0.8125, mean tool calls 5.0, and
+mean thinking chars 1717.0. This is a smoke-kept adapter only; the next step is
+a larger paired blind promotion check before treating it as a stage.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
