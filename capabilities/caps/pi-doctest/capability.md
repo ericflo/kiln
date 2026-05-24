@@ -318,6 +318,20 @@ gradient checkpointing remains necessary, but fewer segments are the wrong
 direction for this trainer path. Keep 24 segments for policy-on GRPO and reduce
 data/token shape instead.
 
+H31 followed that evidence: keep 24 checkpoint segments, train fresh from base,
+and reduce the H29 hard-negative corpus to two groups with `--max-groups 2`.
+Dry-run shape was 4 completions, 389 action tokens, 526 env tokens, max 554
+sequence tokens, max 150 action tokens per completion, and reward stdev 0.5.
+Training completed in 77s observed wall-clock, peak VRAM about 15997 MiB, with
+the receipt reporting 70565 ms in backward and 73531 ms total. Verification
+passed with 400 nonzero LoRA tensors and delta proxy 0.248275. Blind `LIMIT=4`
+smoke rejected it: H31 scored 0.925 versus base 0.934375. Outcome,
+tested-before-done, and format stayed at 1.0, but tool-call efficiency fell to
+0.75, mean tool calls rose to 5.5, mean thinking chars rose to 2153.25, and
+wall-clock rose to 42.35s. The larger gate was skipped. The throughput shape is
+now workable, but this hard-negative data still does not improve the target
+behavior from base.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
