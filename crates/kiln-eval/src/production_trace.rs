@@ -147,10 +147,51 @@ pub struct ProductionTraceSuiteStats {
     pub effective_seed: u64,
     #[serde(default)]
     pub source_format_counts: BTreeMap<String, u64>,
+    /// Histogram of tools across all retained-before-sampling examples. This
+    /// is the workload distribution after parse/length/dedupe filters.
     #[serde(default)]
     pub target_tool_histogram: BTreeMap<String, u64>,
+    /// Histogram of source formats in the final kept reservoir sample.
+    #[serde(default)]
+    pub sampled_source_format_counts: BTreeMap<String, u64>,
+    /// Histogram of target tools in the final kept reservoir sample.
+    #[serde(default)]
+    pub sampled_tool_histogram: BTreeMap<String, u64>,
+    /// Per-example provenance for the final kept sample. This makes a suite
+    /// reproducible/auditable without embedding exporter-specific fields into
+    /// the suite schema.
+    #[serde(default)]
+    pub sampled_examples: Vec<ProductionTraceSampleRecord>,
     #[serde(default)]
     pub parse_error_examples: Vec<String>,
+}
+
+/// Provenance record for one sampled production trace example.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProductionTraceSampleRecord {
+    pub example_id: String,
+    pub source_line: usize,
+    pub source_format: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<String>,
+    #[serde(default)]
+    pub target_tools: Vec<String>,
+    pub prompt_chars: usize,
+    pub target_chars: usize,
+}
+
+#[derive(Debug)]
+struct SampledTraceExample {
+    example: EvalExample,
+    sample: ProductionTraceSampleRecord,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -200,7 +241,7 @@ pub fn synthesize_production_trace_suite<R: BufRead>(
         ..Default::default()
     };
     let mut rng = SmallRng::seed_from_u64(effective_seed);
-    let mut reservoir: Vec<EvalExample> = Vec::new();
+    let mut reservoir: Vec<SampledTraceExample> = Vec::new();
     let mut dedupe_keys: HashSet<String> = HashSet::new();
 
     for (idx, line_result) in reader.lines().enumerate() {
@@ -238,11 +279,13 @@ pub fn synthesize_production_trace_suite<R: BufRead>(
             stats.skipped_empty_prompt += 1;
             continue;
         }
-        if prompt_chars(&turn.prompt_messages) > config.sampling.max_prompt_chars {
+        let prompt_char_count = prompt_chars(&turn.prompt_messages);
+        let target_char_count = target.chars().count();
+        if prompt_char_count > config.sampling.max_prompt_chars {
             stats.skipped_prompt_too_long += 1;
             continue;
         }
-        if target.chars().count() > config.sampling.max_target_chars {
+        if target_char_count > config.sampling.max_target_chars {
             stats.skipped_target_too_long += 1;
             continue;
         }
@@ -261,7 +304,20 @@ pub fn synthesize_production_trace_suite<R: BufRead>(
             *stats.target_tool_histogram.entry(tool.clone()).or_default() += 1;
         }
 
-        let metadata = turn.metadata(&target_tools);
+        let metadata = turn.metadata(&target_tools, prompt_char_count, target_char_count);
+        let sample = ProductionTraceSampleRecord {
+            example_id: id.clone(),
+            source_line: turn.source_line,
+            source_format: turn.source_format.to_string(),
+            turn_id: turn.id.clone(),
+            session_id: turn.session_id.clone(),
+            timestamp: turn.timestamp.clone(),
+            production_model: turn.model.clone(),
+            split: turn.split.clone(),
+            target_tools: target_tools.clone(),
+            prompt_chars: prompt_char_count,
+            target_chars: target_char_count,
+        };
         let example = EvalExample {
             id: Some(id),
             messages: turn.prompt_messages,
@@ -280,14 +336,15 @@ pub fn synthesize_production_trace_suite<R: BufRead>(
         };
 
         stats.examples_generated += 1;
+        let sampled = SampledTraceExample { example, sample };
         match config.sampling.max_examples {
             Some(cap) if reservoir.len() >= cap => {
                 let r = (rng.next_u64() % stats.examples_generated) as usize;
                 if r < cap {
-                    reservoir[r] = example;
+                    reservoir[r] = sampled;
                 }
             }
-            _ => reservoir.push(example),
+            _ => reservoir.push(sampled),
         }
     }
 
@@ -296,7 +353,22 @@ pub fn synthesize_production_trace_suite<R: BufRead>(
         return Err(ProductionTraceError::NoExamples);
     }
 
-    let suite_tools = hoist_identical_tools(&mut reservoir);
+    stats.sampled_examples = reservoir.iter().map(|item| item.sample.clone()).collect();
+    for sample in &stats.sampled_examples {
+        *stats
+            .sampled_source_format_counts
+            .entry(sample.source_format.clone())
+            .or_default() += 1;
+        for tool in &sample.target_tools {
+            *stats
+                .sampled_tool_histogram
+                .entry(tool.clone())
+                .or_default() += 1;
+        }
+    }
+
+    let mut examples: Vec<EvalExample> = reservoir.into_iter().map(|item| item.example).collect();
+    let suite_tools = hoist_identical_tools(&mut examples);
     let suite = EvalSuite {
         name: config.suite_name.clone(),
         description: config.description.clone().or_else(|| {
@@ -313,7 +385,7 @@ pub fn synthesize_production_trace_suite<R: BufRead>(
         },
         generation: config.generation.clone(),
         system_prompt: None,
-        examples: reservoir,
+        examples,
         schema_version: 1,
         tools: suite_tools,
     };
@@ -709,7 +781,12 @@ impl TraceTurn {
         }
     }
 
-    fn metadata(&self, target_tools: &[String]) -> serde_json::Value {
+    fn metadata(
+        &self,
+        target_tools: &[String],
+        prompt_chars: usize,
+        target_chars: usize,
+    ) -> serde_json::Value {
         let mut obj = self.source_metadata.clone();
         obj.insert("source_line".into(), serde_json::json!(self.source_line));
         obj.insert(
@@ -717,6 +794,8 @@ impl TraceTurn {
             serde_json::json!(self.source_format),
         );
         obj.insert("target_tools".into(), serde_json::json!(target_tools));
+        obj.insert("prompt_chars".into(), serde_json::json!(prompt_chars));
+        obj.insert("target_chars".into(), serde_json::json!(target_chars));
         if let Some(id) = self.id.as_deref() {
             obj.insert("turn_id".into(), serde_json::json!(id));
         }
@@ -792,6 +871,17 @@ mod tests {
         let (suite, stats) = build(&input, Some(10));
         assert_eq!(stats.rows_seen, 1);
         assert_eq!(stats.eligible_tool_turns, 1);
+        assert_eq!(stats.sampled_examples.len(), 1);
+        assert_eq!(stats.sampled_examples[0].source_line, 1);
+        assert_eq!(stats.sampled_examples[0].turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(
+            stats.sampled_examples[0].session_id.as_deref(),
+            Some("sess-1")
+        );
+        assert_eq!(
+            stats.sampled_tool_histogram.get("Read"),
+            Some(&1)
+        );
         assert_eq!(suite.examples.len(), 1);
         assert_eq!(suite.examples[0].messages.len(), 2);
         assert!(suite.tools.as_ref().map_or(false, |t| t.len() == 1));
@@ -805,6 +895,12 @@ mod tests {
         assert_eq!(
             suite.examples[0].metadata.as_ref().unwrap()["session_id"],
             serde_json::json!("sess-1")
+        );
+        assert!(
+            suite.examples[0].metadata.as_ref().unwrap()["prompt_chars"]
+                .as_u64()
+                .unwrap()
+                > 0
         );
     }
 
@@ -922,6 +1018,47 @@ mod tests {
         let a_ids: Vec<_> = a.examples.iter().map(|e| e.id.clone()).collect();
         let b_ids: Vec<_> = b.examples.iter().map(|e| e.id.clone()).collect();
         assert_eq!(a_ids, b_ids);
+    }
+
+    #[test]
+    fn stats_sample_records_match_kept_reservoir() {
+        let mut rows = String::new();
+        for (i, tool) in ["Read", "Bash", "Edit", "Bash"].iter().enumerate() {
+            let args = if *tool == "Bash" {
+                serde_json::json!({"command": format!("echo {i}")})
+            } else {
+                serde_json::json!({"path": format!("/tmp/{i}")})
+            };
+            let line = serde_json::json!({
+                "id": format!("turn-{i}"),
+                "session_id": "sess-audit",
+                "prompt_messages": [{"role":"user", "content": format!("q{i}")}],
+                "chosen": {"role":"assistant", "tool_calls":[{
+                    "type":"function",
+                    "function":{"name": tool, "arguments": args.to_string()}
+                }]}
+            });
+            rows.push_str(&line.to_string());
+            rows.push('\n');
+        }
+        let (suite, stats) = build(&rows, Some(2));
+        let suite_ids: Vec<_> = suite
+            .examples
+            .iter()
+            .map(|e| e.id.as_deref().unwrap())
+            .collect();
+        let sampled_ids: Vec<_> = stats
+            .sampled_examples
+            .iter()
+            .map(|s| s.example_id.as_str())
+            .collect();
+        assert_eq!(suite_ids, sampled_ids);
+        assert_eq!(stats.sampled_examples.len(), 2);
+        assert_eq!(stats.sampled_tool_histogram.values().sum::<u64>(), 2);
+        assert_eq!(
+            stats.sampled_source_format_counts.get("prompt_chosen_jsonl"),
+            Some(&2)
+        );
     }
 
     #[test]

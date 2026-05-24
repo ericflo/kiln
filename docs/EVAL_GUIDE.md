@@ -121,6 +121,7 @@ export of recorded tool-calling turns into an eval suite:
 kiln-eval trace-suite \
   --input production-turns.jsonl \
   --output production-tool-calls.json \
+  --stats-output production-tool-calls.report.json \
   --suite-name production-tool-calls \
   --max-examples 1000 \
   --seed 42
@@ -139,6 +140,14 @@ Rows without a current-turn tool call are skipped. Eligible rows are
 reservoir-sampled, so large exports can stream through without loading the
 whole file. Dedupe is off by default because repeated production turns are
 workload-frequency signal.
+
+Use `--stats-output` for the audit sidecar you keep with eval results. It
+records the exact sampling config, effective seed, parse/skip counts, source
+format counts, retained-vs-sampled tool histograms, and one provenance record
+per sampled example (`example_id`, source line, source format, optional
+turn/session/model fields, target tools, prompt chars, target chars). This is
+the artifact that lets you later explain what production workload slice an
+adapter score actually measured.
 
 The target is canonical semantic tool-call JSON, not the source model's wire
 format. At eval time, Kiln renders the saved `messages` and `tools` through

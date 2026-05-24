@@ -137,6 +137,10 @@ struct TraceSuiteArgs {
     /// Output EvalSuite JSON file. Required unless --stdout is set.
     #[arg(long)]
     output: Option<PathBuf>,
+    /// Optional JSON sidecar with sampling config, skip counts, tool
+    /// histograms, and sampled example provenance.
+    #[arg(long)]
+    stats_output: Option<PathBuf>,
     /// Suite name to write into the EvalSuite.
     #[arg(long)]
     suite_name: String,
@@ -331,11 +335,21 @@ fn cmd_trace_suite(args: TraceSuiteArgs) -> Result<()> {
     if args.stdout {
         println!("{suite_json}");
     } else if let Some(output) = args.output.as_ref() {
-        if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
-        }
-        std::fs::write(output, suite_json).with_context(|| format!("write {}", output.display()))?;
+        write_string_file(output, &suite_json)?;
+    }
+
+    if let Some(stats_output) = args.stats_output.as_ref() {
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "kind": "production_trace_suite_report",
+            "input": args.input.display().to_string(),
+            "suite_output": args.output.as_ref().map(|p| p.display().to_string()),
+            "suite_name": &suite.name,
+            "config": &cfg,
+            "stats": &stats,
+        });
+        let report_json = serde_json::to_string_pretty(&report)?;
+        write_string_file(stats_output, &report_json)?;
     }
 
     eprintln!(
@@ -374,6 +388,14 @@ fn cmd_trace_suite(args: TraceSuiteArgs) -> Result<()> {
             eprintln!("  {err}");
         }
     }
+    Ok(())
+}
+
+fn write_string_file(path: &PathBuf, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    std::fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
