@@ -543,6 +543,16 @@ unsafe extern "C" {
         dtype: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_compare_async(
+        a: *const core::ffi::c_void,
+        b: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n_elements: i64,
+        kind: i32,
+        dtype: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// CUDA-side stride-aware contiguous() — produces a new kt-Tensor with
@@ -3493,4 +3503,129 @@ pub fn cuda_clamp_pow(
         crate::TensorId::next(),
     )
     .map_err(|e| crate::Error::Msg(format!("cuda_clamp_pow: wrap: {e}")))
+}
+
+/// CUDA-side element-wise comparison: `out[i] = (op(a[i], b[i])) ? 1 : 0`.
+///
+/// `kind` encodes the op (0=Eq, 1=Ne, 2=Lt, 3=Le, 4=Gt, 5=Ge). Dtype
+/// is inferred from `a.dtype()`; must be F32/BF16/F16. Both inputs
+/// must be contiguous and on the same CUDA device.
+///
+/// Returns a fresh contiguous U8 tensor of the same shape — useful
+/// as a mask for `masked_fill` / `where_select`. (#1082)
+#[cfg(feature = "cuda")]
+pub fn cuda_compare(
+    a: &crate::Tensor,
+    b: &crate::Tensor,
+    kind: i32,
+) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use std::any::Any as _;
+
+    if a.shape() != b.shape() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_compare: shape mismatch a={:?} b={:?}",
+            a.shape(),
+            b.shape()
+        )));
+    }
+    if a.dtype() != b.dtype() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_compare: dtype mismatch a={} b={}",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    let dtype = a.dtype();
+    let dtype_tag: i32 = match dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_compare: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_compare: contiguous inputs required".to_string(),
+        ));
+    }
+
+    let n = a.element_count();
+    let bpe = dtype.size_in_bytes();
+
+    let a_storage = a
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_compare: a must be CUDA".to_string()))?;
+    let b_storage = b
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_compare: b must be CUDA".to_string()))?;
+
+    let candle_device = a_storage.candle_device.clone();
+    let device_index = match a_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+    // Output is U8 (one byte per element).
+    let out_storage = CudaStorage::zeros(
+        candle_device.clone(),
+        device_index,
+        crate::DType::U8,
+        n,
+    )?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let a_base = match &a_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let b_base = match &b_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+    };
+
+    let a_off = (a.layout().start_offset() * bpe) as u64;
+    let b_off = (b.layout().start_offset() * bpe) as u64;
+
+    let a_ptr = (a_base + a_off) as *const core::ffi::c_void;
+    let b_ptr = (b_base + b_off) as *const core::ffi::c_void;
+    let out_ptr = out_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_compare_async(a_ptr, b_ptr, out_ptr, n as i64, kind, dtype_tag, raw_stream)
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_compare: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(a.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_compare: wrap: {e}")))
 }

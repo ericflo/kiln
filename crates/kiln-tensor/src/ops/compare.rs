@@ -5,6 +5,12 @@
 //! These compose naturally with [`where_select`] and `masked_fill`.
 //!
 //! Non-differentiable (boolean output).
+//!
+//! # Dispatch
+//!
+//! - CPU path: per-element F32-promoted comparison.
+//! - CUDA path: `cuda_compare` (kernel `csrc/compare.cu`) when both
+//!   inputs are CUDA-resident, contiguous, and F32/BF16/F16. (#1082)
 
 use std::sync::Arc;
 
@@ -29,6 +35,17 @@ impl CmpKind {
             CmpKind::Le => "le",
             CmpKind::Gt => "gt",
             CmpKind::Ge => "ge",
+        }
+    }
+    /// Integer tag matching `csrc/compare.cu` `KIND_*` macros.
+    pub const fn as_i32(self) -> i32 {
+        match self {
+            CmpKind::Eq => 0,
+            CmpKind::Ne => 1,
+            CmpKind::Lt => 2,
+            CmpKind::Le => 3,
+            CmpKind::Gt => 4,
+            CmpKind::Ge => 5,
         }
     }
     fn apply_f32(self, a: f32, b: f32) -> bool {
@@ -67,6 +84,22 @@ fn apply(kind: CmpKind, a: &Tensor, b: &Tensor) -> Result<Tensor> {
             a.dtype()
         );
     }
+
+    // CUDA fast path: both inputs on the same CUDA device, contiguous,
+    // F32/BF16/F16. Routes through the kernel in `csrc/compare.cu` and
+    // returns a U8 mask. (#1082)
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(a.device(), crate::Device::Cuda(_))
+            && matches!(b.device(), crate::Device::Cuda(_))
+            && a.device() == b.device()
+            && a.is_contiguous()
+            && b.is_contiguous()
+        {
+            return crate::cuda_compare(a, b, kind.as_i32());
+        }
+    }
+
     if !a.is_contiguous() || !b.is_contiguous() {
         bail!("{}: inputs must be contiguous", kind.name());
     }
