@@ -109,6 +109,61 @@ impl DeviceOp1 for UnaryArithOp {
         Ok(Some(crate::cuda_activation_unary(x, self.kind.cuda_kind_tag())?))
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd so future MSL
+        // kernel work can drop in without changing the call site.
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): once a Metal unary-arith kernel
+        // ships, dispatch via `self.kind.cuda_kind_tag()` (or a
+        // Metal-specific tag) and route through
+        // `crate::metal_activation_unary`. Until then, fall through
+        // to CPU (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. Custom MSL kernel: per-element pointwise; switch on
+        //      `kind_tag` selecting neg / abs / sqrt / rsqrt /
+        //      reciprocal / square. All map to MSL `simd_*` /
+        //      builtins directly.
+        //   2. MPS Graph: per-primitive (`negative(_:)`,
+        //      `absolute(_:)`, `squareRoot(_:)`, etc.) bound by
+        //      kind. Higher per-call overhead but trivial to wire.
+        Ok(None)
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / metal_fwd.
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): once a Vulkan unary-arith
+        // kernel ships, dispatch via `self.kind.cuda_kind_tag()` and
+        // route through `crate::vulkan_activation_unary`. Until
+        // then, fall through to CPU (numerics-correct,
+        // performance-wrong).
+        // Candidate implementations:
+        //   1. SPIR-V compute shader: per-element pointwise; switch
+        //      on `kind_tag` (push-constant or pipeline-specialized)
+        //      selecting neg / abs / sqrt / rsqrt / reciprocal /
+        //      square. All map to GLSL builtins directly.
+        //   2. Reuse `kiln-vulkan-kernel::vk_ops::elementwise`
+        //      primitives where the unary op already has a kernel.
+        //   3. Dtype matrix gap: `VkDType` exposes F32 / BF16 today;
+        //      F16 needs widening or a cast wrapper at the dispatch
+        //      boundary.
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }

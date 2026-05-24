@@ -157,6 +157,78 @@ impl DeviceOp1 for ActivationOp {
         Ok(Some(crate::cuda_activation_unary(x, kind_tag)?))
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd so future MSL
+        // kernel work can drop in without changing the call site:
+        //   - validate(x, kind) (rank-bounded, dtype check)
+        //   - F32 / BF16 / F16 only
+        //   - contiguous input
+        validate(x, self.kind)?;
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): implement
+        // `crate::metal_activation_unary(x, kind_tag)` analogous to
+        // `crate::cuda_activation_unary` above. Until that kernel
+        // lands, fall through to the CPU path so the op still
+        // produces correct results on Mac (numerics-correct,
+        // performance-wrong).
+        // Candidate implementations:
+        //   1. Custom MSL kernel: per-element pointwise; one switch
+        //      over `kind_tag` selecting silu / sigmoid / gelu /
+        //      tanh / relu — matches the CUDA kernel's structure
+        //      one-for-one.
+        //   2. MPS Graph: per-activation primitives
+        //      (`sigmoid(_:)`, `tanh(_:)`, `reLU(_:)`, etc.) bound
+        //      by `kind_tag`. Higher per-call overhead but trivial
+        //      to wire — silu/gelu still need a small compose
+        //      (`x * sigmoid(x)` / `0.5 * x * (1 + erf(x/sqrt(2)))`).
+        //   3. Reuse the activation kernel in
+        //      `kiln-model::backend::metal` if/when one is added
+        //      there (the production hot-path for MLP gate/up uses
+        //      silu).
+        Ok(None)
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / metal_fwd:
+        //   - validate(x, kind)
+        //   - F32 / BF16 / F16 only
+        //   - contiguous input
+        validate(x, self.kind)?;
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): implement
+        // `crate::vulkan_activation_unary(x, kind_tag)` analogous to
+        // `crate::cuda_activation_unary` above. Until that wrapper
+        // lands, fall through to the CPU path (numerics-correct,
+        // performance-wrong).
+        // Candidate implementations:
+        //   1. SPIR-V compute shader: per-element pointwise; one
+        //      switch over `kind_tag` selecting silu / sigmoid /
+        //      gelu / tanh / relu. The kind_tag can be pushed via
+        //      push-constants or specialized at pipeline-creation
+        //      time for ~5 cheap pipelines.
+        //   2. Reuse activation primitives from
+        //      `kiln-vulkan-kernel::vk_ops::activation` (the silu
+        //      mul kernel already exists for MLP). For the other
+        //      kinds, build out a per-kind kernel or compose from
+        //      `vk_ops::elementwise` primitives.
+        //   3. Dtype matrix gap: `VkDType` exposes F32 / BF16 today;
+        //      F16 needs either widening or a cast-to-F32 / cast-
+        //      back wrapper at the dispatch boundary.
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }

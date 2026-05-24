@@ -109,6 +109,66 @@ impl DeviceOp1 for LogExpOp {
         }
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd. Returning
+        // Ok(None) triggers CPU fallthrough in DeviceOp1 dispatch.
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): once a Metal log/exp kernel
+        // ships, dispatch via `self.kind.cuda_kind_tag()` (or a
+        // Metal-specific tag) and route through
+        // `crate::metal_activation_unary`. Until then, fall through
+        // to CPU (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. Custom MSL kernel: per-element pointwise; switch on
+        //      `kind_tag` selecting exp / log / log2 / log10 /
+        //      expm1 / log1p / exp2.
+        //   2. MPS Graph: per-primitive (`exponent(_:)`,
+        //      `logarithm(_:)`, etc.) bound by kind. Higher
+        //      per-call overhead but trivial to wire.
+        //   3. expm1 / log1p must NOT be rewritten as
+        //      `exp(x) - 1` / `log(1 + x)` on the GPU path — those
+        //      lose precision at small `|x|`. Use MSL's `expm1` /
+        //      `log1p` or an equivalent stable approximation.
+        Ok(None)
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / metal_fwd.
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): once a Vulkan log/exp kernel
+        // ships, dispatch via `self.kind.cuda_kind_tag()` and route
+        // through `crate::vulkan_activation_unary`. Until then,
+        // fall through to CPU (numerics-correct,
+        // performance-wrong).
+        // Candidate implementations:
+        //   1. SPIR-V compute shader: per-element pointwise; switch
+        //      on `kind_tag` (push-constant or pipeline-specialized)
+        //      selecting exp / log / log2 / log10 / expm1 / log1p /
+        //      exp2.
+        //   2. expm1 / log1p must NOT be lowered as `exp(x) - 1` /
+        //      `log(1 + x)` — those lose precision at small `|x|`.
+        //      Use the GLSL `expm1` / `log1p` builtins or an
+        //      equivalent stable approximation.
+        //   3. Dtype matrix gap: `VkDType` exposes F32 / BF16 today;
+        //      F16 / extended-precision paths need widening or a
+        //      cast wrapper at the dispatch boundary.
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }

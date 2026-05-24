@@ -90,6 +90,56 @@ impl DeviceOp1 for HyperOp {
         Ok(Some(crate::cuda_activation_unary(x, self.kind.cuda_kind_tag())?))
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd so future MSL
+        // kernel work can drop in without changing the call site.
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): once a Metal hyperbolic kernel
+        // ships, dispatch via `self.kind.cuda_kind_tag()` (or a
+        // Metal-specific tag) and route through
+        // `crate::metal_activation_unary`. Until then, fall through
+        // to CPU (numerics-correct, performance-wrong).
+        // Candidate implementations:
+        //   1. Custom MSL kernel: per-element pointwise; switch on
+        //      `kind_tag` selecting sinh / cosh / asinh / acosh /
+        //      atanh. (tanh is already in the activation kernel.)
+        //   2. MPS Graph: per-primitive (`sinh(_:)`, `cosh(_:)`, etc.)
+        //      bound by kind.
+        Ok(None)
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / metal_fwd.
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): once a Vulkan hyperbolic
+        // kernel ships, dispatch via `self.kind.cuda_kind_tag()` and
+        // route through `crate::vulkan_activation_unary`. Until
+        // then, fall through to CPU (numerics-correct,
+        // performance-wrong).
+        // Candidate implementations:
+        //   1. SPIR-V compute shader: per-element pointwise; switch
+        //      on `kind_tag` (push-constant or pipeline-specialized)
+        //      selecting sinh / cosh / asinh / acosh / atanh.
+        //   2. Dtype matrix gap: `VkDType` exposes F32 / BF16 today;
+        //      F16 / extended-precision paths need widening or a
+        //      cast wrapper at the dispatch boundary.
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
