@@ -683,3 +683,27 @@ base smoke 0.934375, outcome/tested/format all 1.0, tool-call efficiency
 72.69s, and three zero rollouts. Lesson: lowering dose does not rescue the
 terminal-only post-pass-stop corpus; the next data shape needs pre-pass
 workflow coverage, not another dose-only variant.
+
+### H43: balanced workflow low-dose no-ECHO
+
+H43 added pre-pass workflow coverage to the post-pass stop signal: one
+start-read contrast, two post-write-test-before-DONE contrasts, and two
+post-pass-DONE-before-rerun contrasts, all from train-only data. It used rank
+4, alpha 4, lr `1e-6`, no ECHO.
+
+The adapter `pi-doctest-h43-balanced-workflow-lowdose-noecho-r4a4-lr1e6`
+trained successfully in 287880 ms with 324 action tokens, 0 env tokens, 4500
+context tokens, and about 15970 MiB peak VRAM under
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. Adapter verify passed with LoRA update
+proxy 0.11519.
+
+Blind `LIMIT=4 SEEDS=1` smoke was positive but smaller than H41/H42: composite
+0.953125 versus base smoke 0.934375, outcome/tested/format all 1.0,
+tool-call efficiency 0.84375, mean tool calls 4.5, mean thinking chars 1821.5,
+and mean wall-clock 36.97s. Promotion rejected it: `LIMIT=8` composite
+0.6484375 versus base 0.8328125, outcome 0.6875, tested-before-done 0.8125,
+tool-call efficiency 0.8125, mean tool calls 4.875, mean thinking chars
+3284.125, mean wall-clock 80.66s, and two zero rollouts. Lesson: small
+tool-choice micro-contrast GRPO continues to create smoke false positives; the
+next route should stop adding isolated micro-contrast rows and instead preserve
+complete task-solving behavior.
