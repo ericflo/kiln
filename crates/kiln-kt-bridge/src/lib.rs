@@ -423,6 +423,136 @@ pub fn kt_tensor_to_candle_cuda_copy(
     Ok(dst)
 }
 
+/// Phase 7 candle→kt adapter — **zero-copy borrow variant** (v2).
+///
+/// Wraps a candle CUDA `Tensor` as a kt-Tensor without copying the
+/// device buffer. The returned kt-Tensor shares its CUDA memory with
+/// the candle source; a clone of the candle `Tensor` is held as the
+/// `_keep_alive` Arc inside the borrowed `CudaStorage` so the device
+/// allocation stays valid for as long as the kt-Tensor lives.
+///
+/// Counterpart to [`kt_tensor_from_candle_cuda_copy`]; same input
+/// contract (contiguous, CUDA, dtype maps via [`candle_dtype_to_kt`])
+/// but **zero memcpys**.
+///
+/// # Migration story
+///
+/// Existing kt-API call sites use `CudaStorage::slice()`, which
+/// panics on a `Borrowed` storage by design (see `cuda_storage.rs`).
+/// A borrowed kt-Tensor can therefore only be passed to kt-API
+/// functions that have been migrated to use the dtype/owner-aware
+/// raw-pointer accessor — that migration is the next step after this
+/// PR. Until then, the borrow adapter is useful for tests + the
+/// allocator-pool integration; the copying adapter remains the
+/// production-safe path for call sites that still reach `.slice()`.
+pub fn kt_tensor_from_candle_cuda_borrow(
+    t: &candle_core::Tensor,
+) -> Result<KtTensor, BridgeError> {
+    use candle_core::{
+        backend::{BackendDevice, BackendStorage},
+        cuda_backend::cudarc::driver::DevicePtr,
+        DType as C, DeviceLocation, Storage as CStorage,
+    };
+    use half::{bf16, f16};
+
+    if !t.is_contiguous() {
+        return Err(BridgeError::new(
+            "kt-bridge: kt_tensor_from_candle_cuda_borrow: tensor must be contiguous",
+        ));
+    }
+    let kt_dtype = candle_dtype_to_kt(t.dtype())?;
+    let shape: Vec<usize> = t.dims().to_vec();
+    let n_elems: usize = shape.iter().product();
+    let bytes_per_elem = kt_dtype.size_in_bytes();
+
+    let (storage_guard, layout) = t.storage_and_layout();
+    let cuda_st = match &*storage_guard {
+        CStorage::Cuda(c) => c,
+        _ => {
+            return Err(BridgeError::new(
+                "kt-bridge: kt_tensor_from_candle_cuda_borrow: tensor must be on CUDA",
+            ))
+        }
+    };
+
+    let candle_device_arc = std::sync::Arc::new(cuda_st.device().clone());
+    let device_index = match candle_device_arc.location() {
+        DeviceLocation::Cuda { gpu_id } => gpu_id,
+        other => {
+            return Err(BridgeError::new(format!(
+                "kt-bridge borrow: expected Cuda location, got {other:?}"
+            )));
+        }
+    };
+    let stream = candle_device_arc.cuda_stream();
+    let off = layout.start_offset();
+    let byte_off = off * bytes_per_elem;
+    let total_bytes = n_elems * bytes_per_elem;
+
+    // Extract the raw device pointer at the live region's start. Per
+    // dtype because as_cuda_slice<T>() is typed; we discard the
+    // SyncOnDrop guard since we're producing a Borrowed kt storage
+    // and don't have a stream/event to record against.
+    macro_rules! src_ptr {
+        ($T:ty, $name:literal) => {{
+            let slice = cuda_st.as_cuda_slice::<$T>().map_err(|e| {
+                BridgeError::new(format!(
+                    "kt-bridge borrow: as_cuda_slice {}: {e}",
+                    $name
+                ))
+            })?;
+            let view = slice.slice(off..);
+            let (ptr, _g) = unsafe { view.device_ptr(&stream) };
+            ptr
+        }};
+    }
+    let src_ptr = match t.dtype() {
+        C::F32 => src_ptr!(f32, "f32"),
+        C::BF16 => src_ptr!(bf16, "bf16"),
+        C::F16 => src_ptr!(f16, "f16"),
+        C::U32 => src_ptr!(u32, "u32"),
+        C::U8 => src_ptr!(u8, "u8"),
+        C::I64 => src_ptr!(i64, "i64"),
+        other => {
+            return Err(BridgeError::new(format!(
+                "kt-bridge borrow: unsupported candle dtype {other:?}"
+            )));
+        }
+    };
+
+    // The kt borrowed storage points at the active region (with
+    // start_offset already applied), so the kt layout sets
+    // start_offset=0. byte_len = the active region's bytes.
+    let _ = byte_off; // we baked the offset into src_ptr
+    drop(storage_guard);
+
+    // Keep-alive: clone the candle Tensor (cheap — Arc clone) and
+    // wrap in an Arc so the kt side has a Send+Sync handle. Holding
+    // the Tensor keeps its Arc<Tensor_> alive, which in turn keeps
+    // its Arc<RwLock<Storage>> alive, which keeps the CudaSlice<T>
+    // (and the underlying device allocation) alive.
+    let keep_alive: std::sync::Arc<dyn std::any::Any + Send + Sync> =
+        std::sync::Arc::new(t.clone());
+
+    let storage = CudaStorage::from_borrowed(
+        candle_device_arc,
+        device_index,
+        kt_dtype,
+        src_ptr,
+        total_bytes,
+        keep_alive,
+    )
+    .map_err(|e| BridgeError::new(format!("kt-bridge borrow: from_borrowed: {e}")))?;
+    let storage_arc: kiln_tensor::Storage = std::sync::Arc::new(storage);
+
+    KtTensor::from_parts(
+        storage_arc,
+        kiln_tensor::Layout::contiguous(shape),
+        kiln_tensor::TensorId::next(),
+    )
+    .map_err(|e| BridgeError::new(format!("kt-bridge borrow: wrap: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
