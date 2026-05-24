@@ -976,3 +976,31 @@ useful trainability pattern, but the H54 dose was too strong or too narrow to
 stabilize reliability. The next attempt should keep the step-local shape while
 reducing update strength, for example a lower learning rate or softer reward
 gap, rather than chaining on H54.
+
+### H57: low-dose step-local suffix subset
+
+H56/H57 tested the obvious repair after H55: keep the trainable one-action
+suffix-ranking data shape, but reduce update strength instead of chaining from
+H54. H56 reused all 12 H54 groups with lr `1e-7` and no ECHO. It timed out
+before adapter write under the 900s guard, last reporting `16228/34352`, so
+the full 12-group shape is not reliably trainable locally even at lower LR.
+
+H57 reduced the low-dose branch to the first two train-only anchors across the
+same three suffix positions: post-read edit, post-edit doctest, and post-pass
+DONE. The dry-run shape was 6 groups, 12 completions, 300 action tokens, 0 env
+tokens, 5610 context tokens, and reward stdev 0.125. Training used rank 4 /
+alpha 4 / lr `1e-7`, no ECHO, and `KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It
+completed barely inside the guardrail in 873.606s observed, with peak observed
+VRAM 15946 MiB and final loss -0.000536. Adapter verify passed with 400
+nonzero LoRA tensors and a much smaller LoRA update proxy, 0.017790.
+
+Blind `LIMIT=4 SEEDS=1` smoke was mildly positive but slower: paired base
+scored 0.934375 with mean wall-clock 29.89s and no zero rollouts, while H57
+scored 0.9625 with mean wall-clock 36.09s and no zero rollouts. The `LIMIT=8`
+promotion gate rejected it hard: paired base scored 0.87890625 with no zero
+rollouts and mean wall-clock 59.65s, while H57 scored 0.546875 with three
+zero rollouts and mean wall-clock 76.25s. Lesson: lowering the suffix-ranking
+update strength fixed the adapter delta proxy but not the reliability problem.
+The next direction should stop training on terse-vs-verbose thinking alone and
+mix suffix ranking with outcome-preserving behavior anchors or a direct
+anti-zero reliability signal.
