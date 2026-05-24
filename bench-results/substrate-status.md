@@ -20,7 +20,32 @@ the candle-typed twins when call sites in `kiln-model` migrate.
 | `kiln-conv1d-kernel` | `causal_conv1d_update_kt`, `causal_conv1d_prefill_kt` | 2 of 2 (100%) |
 | `kiln-rmsnorm-kernel` | full kt-API surface: 4 RMSNorm + 4 rotary + 2 L2-qk-norm + mega-fused attn-decode-prep + 2 MLP silu-mul + sigmoid-mul + 2 LoRA-decode + LoRA-add-inplace + 5 depthwise-conv1d + 2 SGD + 2 AdamW + silu-inplace-save-sigmoid + f32→bf16 cast | **25 of 25 (100%)** |
 | `kiln-marlin-gemm` | `marlin_w4a16_gemm_kt` | 1 of 1 (100%) |
-| `kiln-gdn-kernel` | substitution + recurrent + full_chunk + multiblock + 10 decode variants (all bf16/vf32/qf32 dtype combos × rmsnorm/non-rmsnorm) + gated_rms_norm + 3 fused-gates variants | 18 of 22 (82%) |
+| `kiln-gdn-kernel` | substitution + recurrent + full_chunk + multiblock + chunk_prep + chunk_scan + 10 decode variants (all bf16/vf32/qf32 dtype combos × rmsnorm/non-rmsnorm) + gated_rms_norm + 3 fused-gates variants | 20 of 22 (91%) |
+
+### Phase 7 — first production call-site migration (2026-05-23 / 24)
+
+The Phase 7 migration vehicle landed: `kiln-kt-bridge` now exposes a
+**candle↔kt-Tensor copying-adapter pair**:
+
+- `kt_tensor_from_candle_cuda_copy(&candle::Tensor) → KtTensor` (PR #1344)
+- `kt_tensor_to_candle_cuda_copy(&KtTensor) → candle::Tensor` (PR #1345)
+
+Cost: one device-to-device memcpy per direction. The v2 zero-copy
+borrow variant is deferred behind either a cudarc API addition or a
+`BorrowedCudaStorage` variant in `kiln-tensor`; both are wider
+refactors that can drop in later without changing call-site code.
+
+First production call site to migrate through the pair: the
+attention output gate's fused sigmoid/mul (PR #1346) —
+`kiln-model/src/forward.rs:attention_output_gate_decode_if`. Default
+off; `KILN_USE_KT_API_SIGMOID_MUL=1` exercises the kt-API path
+end-to-end for A/B parity. NVTX range `kiln/attn/output_gate_cuda_fused_kt`
+distinguishes it from the production candle path in profiles.
+
+This is the template for broader Phase 7 call-site migration; each
+follow-on PR can flip more sites behind their own env gates and
+graduate to "candle path deleted" once parity holds across a
+representative bench sweep.
 
 **211 / 211 deliverables shipped** — substrate complete; per-backend
 matmul trait + Phase 7 migration plumbing in place; cross-op
