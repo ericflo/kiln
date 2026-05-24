@@ -134,6 +134,43 @@ impl DeviceOp2 for MaskedFillOp {
         )?))
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, x: &Tensor, mask: &Tensor) -> Result<Option<Tensor>> {
+        // Validate shape / dtype / contiguous — same contract as cpu_fwd.
+        // Return Ok(None) for unsupported configurations so the
+        // dispatcher falls through to CPU; bail on hard errors that
+        // would also fail CPU dispatch.
+        if x.shape() != mask.shape() {
+            bail!(
+                "MaskedFillOp: shape mismatch {:?} vs mask {:?}",
+                x.shape(),
+                mask.shape()
+            );
+        }
+        if mask.dtype() != DType::U8 {
+            bail!(
+                "MaskedFillOp: mask dtype must be U8, got {}",
+                mask.dtype()
+            );
+        }
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() || !mask.is_contiguous() {
+            return Ok(None);
+        }
+        // Only CUDA-resident storage on both inputs hits the kernel
+        // path; otherwise fall through to CPU.
+        if !matches!(x.device(), crate::Device::Cuda(_))
+            || !matches!(mask.device(), crate::Device::Cuda(_))
+        {
+            return Ok(None);
+        }
+
+        let out = crate::cuda_masked_fill(x, mask, self.fill_value)?;
+        Ok(Some(out))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
