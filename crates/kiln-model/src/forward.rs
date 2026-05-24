@@ -176,6 +176,20 @@ fn cuda_use_kt_api_softmax() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: lm_head argmax (1-D flattened logits) through the
+/// kt-API + adapters. Set `KILN_USE_KT_API_ARGMAX=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// [`lm_head_argmax`]'s final `argmax(0)` through
+/// `kiln_tensor::cuda_argmax_last_axis` (which is the only axis on a
+/// 1-D tensor). Returns the scalar I64 token id back through the
+/// kt-bridge copy-back adapter.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_argmax() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ARGMAX").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -6421,7 +6435,49 @@ fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
         }
     }
     let logits = lm_head_forward(x, embed_tokens_t)?;
-    Ok(logits.flatten_all()?.argmax(0)?.to_scalar::<u32>()?)
+    let logits_1d = logits.flatten_all()?;
+    #[cfg(feature = "cuda")]
+    if cuda_use_kt_api_argmax()
+        && matches!(logits_1d.device(), Device::Cuda(_))
+        && matches!(logits_1d.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        && logits_1d.is_contiguous()
+    {
+        if let Some(token) = try_kt_argmax_1d(&logits_1d)? {
+            return Ok(token);
+        }
+    }
+    Ok(logits_1d.argmax(0)?.to_scalar::<u32>()?)
+}
+
+/// Phase 7 (#1082) — kt-API argmax migration helper. Routes a 1-D
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_argmax_last_axis` (which on rank-1 reduces
+/// to a single I64 scalar). The result is copied back through the
+/// kt-bridge to a candle scalar and then cast to `u32` to match the
+/// existing return type.
+///
+/// Returns `Ok(None)` on any incompatibility so the caller falls
+/// through to candle's `argmax`. NVTX range `kiln/argmax_kt` brackets
+/// the migrated call so nsys traces separate the path from the
+/// baseline.
+#[cfg(feature = "cuda")]
+fn try_kt_argmax_1d(x: &Tensor) -> Result<Option<u32>> {
+    kiln_nvtx::range!(c"kiln/argmax_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out_kt = match kiln_tensor::cuda_argmax_last_axis(&x_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_argmax_1d: candle copy-back failed: {e}"))?;
+    // kt_argmax returns I64; cuda_argmax_last_axis on a rank-1 input
+    // yields a rank-0 scalar tensor.
+    let token_i64 = out.to_scalar::<i64>()?;
+    Ok(Some(token_i64 as u32))
 }
 
 fn lm_head_argmax_backend_decode_if(
