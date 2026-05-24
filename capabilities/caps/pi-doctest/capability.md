@@ -419,6 +419,20 @@ and the timeout fired before any adapter artifact was saved. The idea is safer
 behaviorally than wrong/no-test negatives, but the next retry must keep every
 completion below roughly 850 sequence tokens and below 300 action tokens.
 
+H38 rebuilt H37 as a short-only version: one train-only successful trace from
+H17, compressed-thinking variant ranked above the original, with both
+completions under the local throughput envelope. Dry-run shape was 1 group, 2
+completions, 337 action tokens, 448 env tokens, max 763 sequence tokens, and
+max 261 action tokens per completion. Training completed in 102s observed
+wall-clock with peak VRAM about 15983 MiB, and verification passed with delta
+proxy 0.255293. Blind `LIMIT=4` smoke looked useful: composite 0.962500 versus
+base 0.934375, outcome/tested/format all 1.0, tool-call efficiency 0.875, and
+mean tool calls 4.25. But the `LIMIT=8` larger gate rejected it: composite
+0.731250 versus base 0.8328125, outcome 0.75, tested-before-done 0.9375, two
+zero rollouts, mean wall-clock 63.41s, and mean thinking chars 3362.1. The
+short compression shape is trainable, but one-task compression overfits smoke
+and does not yet stabilize thinking efficiency.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
