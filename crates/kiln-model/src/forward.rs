@@ -109,6 +109,27 @@ fn cuda_use_kt_api_rmsnorm() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_RMSNORM").is_ok())
 }
 
+/// Phase 7 opt-in: fused_rotary_qk through the kt-API + adapters.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_rotary_qk() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ROTARY_QK").is_ok())
+}
+
+/// Phase 7 opt-in: fused_mlp_silu_mul through the kt-API + adapters.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_mlp_silu_mul() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MLP_SILU_MUL").is_ok())
+}
+
+/// Phase 7 opt-in: fused_l2_qk_norm through the kt-API + adapters.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_l2_qk_norm() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_L2_QK_NORM").is_ok())
+}
+
 thread_local! {
     static VULKAN_SKIP_GDN_STATE_READBACK_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
@@ -5004,6 +5025,24 @@ pub fn rotary_embedding_from_tensor(
         if !cuda_fused_rotary_qk_disabled()
             && kiln_rmsnorm_kernel::supports_rotary_qk(q, k, &cos, &sin, head_dim, rotary_dim)
         {
+            if cuda_use_kt_api_rotary_qk() {
+                let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(q)
+                    .with_context(|| "kt-adapter: rotary_qk q → kt failed")?;
+                let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(k)
+                    .with_context(|| "kt-adapter: rotary_qk k → kt failed")?;
+                let cos_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&cos)
+                    .with_context(|| "kt-adapter: rotary_qk cos → kt failed")?;
+                let sin_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&sin)
+                    .with_context(|| "kt-adapter: rotary_qk sin → kt failed")?;
+                let (rq_kt, rk_kt) =
+                    kiln_rmsnorm_kernel::fused_rotary_qk_kt(&q_kt, &k_kt, &cos_kt, &sin_kt, rotary_dim)
+                        .map_err(|e| anyhow::anyhow!("kt fused_rotary_qk: {e}"))?;
+                let rq = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rq_kt)
+                    .with_context(|| "kt-adapter: rotary_qk rq → candle failed")?;
+                let rk = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rk_kt)
+                    .with_context(|| "kt-adapter: rotary_qk rk → candle failed")?;
+                return Ok((rq, rk));
+            }
             return kiln_rmsnorm_kernel::fused_rotary_qk(q, k, &cos, &sin, head_dim, rotary_dim)
                 .context("cuda fused rotary qk kernel failed");
         }
@@ -5037,6 +5076,24 @@ fn rotary_embedding_from_tables(
         if !cuda_fused_rotary_qk_disabled()
             && kiln_rmsnorm_kernel::supports_rotary_qk(q, k, cos, sin, head_dim, rotary_dim)
         {
+            if cuda_use_kt_api_rotary_qk() {
+                let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(q)
+                    .with_context(|| "kt-adapter: rotary_qk2 q → kt failed")?;
+                let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(k)
+                    .with_context(|| "kt-adapter: rotary_qk2 k → kt failed")?;
+                let cos_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(cos)
+                    .with_context(|| "kt-adapter: rotary_qk2 cos → kt failed")?;
+                let sin_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(sin)
+                    .with_context(|| "kt-adapter: rotary_qk2 sin → kt failed")?;
+                let (rq_kt, rk_kt) =
+                    kiln_rmsnorm_kernel::fused_rotary_qk_kt(&q_kt, &k_kt, &cos_kt, &sin_kt, rotary_dim)
+                        .map_err(|e| anyhow::anyhow!("kt fused_rotary_qk2: {e}"))?;
+                let rq = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rq_kt)
+                    .with_context(|| "kt-adapter: rotary_qk2 rq → candle failed")?;
+                let rk = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rk_kt)
+                    .with_context(|| "kt-adapter: rotary_qk2 rk → candle failed")?;
+                return Ok((rq, rk));
+            }
             return kiln_rmsnorm_kernel::fused_rotary_qk(q, k, cos, sin, head_dim, rotary_dim)
                 .context("cuda fused rotary qk kernel failed");
         }
@@ -5379,6 +5436,16 @@ pub fn swiglu_ffn_gated_hidden(
             && !up.track_op()
             && kiln_rmsnorm_kernel::supports_mlp_silu_mul(&gate, &up)
         {
+            if cuda_use_kt_api_mlp_silu_mul() {
+                let gate_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&gate)
+                    .with_context(|| "kt-adapter: mlp_silu_mul gate → kt failed")?;
+                let up_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&up)
+                    .with_context(|| "kt-adapter: mlp_silu_mul up → kt failed")?;
+                let out_kt = kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt(&gate_kt, &up_kt)
+                    .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul: {e}"))?;
+                return kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                    .with_context(|| "kt-adapter: mlp_silu_mul out → candle failed");
+            }
             return kiln_rmsnorm_kernel::fused_mlp_silu_mul(&gate, &up)
                 .context("cuda fused mlp silu*mul kernel failed");
         }
@@ -5871,8 +5938,21 @@ fn swiglu_ffn_impl_no_chunk(
                     && kiln_rmsnorm_kernel::supports_mlp_silu_mul(&gate, &up)
                 {
                     let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
-                    let hidden = kiln_rmsnorm_kernel::fused_mlp_silu_mul(&gate, &up)
-                        .context("cuda fused mlp silu*mul kernel failed")?;
+                    let hidden = if cuda_use_kt_api_mlp_silu_mul() {
+                        let gate_kt =
+                            kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&gate)
+                                .with_context(|| "kt-adapter: mlp_silu_mul2 gate → kt failed")?;
+                        let up_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&up)
+                            .with_context(|| "kt-adapter: mlp_silu_mul2 up → kt failed")?;
+                        let out_kt =
+                            kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt(&gate_kt, &up_kt)
+                                .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul2: {e}"))?;
+                        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                            .with_context(|| "kt-adapter: mlp_silu_mul2 out → candle failed")?
+                    } else {
+                        kiln_rmsnorm_kernel::fused_mlp_silu_mul(&gate, &up)
+                            .context("cuda fused mlp silu*mul kernel failed")?
+                    };
                     finish_mlp_stage_profile(
                         profile_device,
                         profile_context,
@@ -6286,6 +6366,20 @@ fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result
             && input_dtype == DType::BF16
             && kiln_rmsnorm_kernel::supports_l2_qk_norm(q, k)
         {
+            if cuda_use_kt_api_l2_qk_norm() {
+                let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(q)
+                    .with_context(|| "kt-adapter: l2_qk_norm q → kt failed")?;
+                let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(k)
+                    .with_context(|| "kt-adapter: l2_qk_norm k → kt failed")?;
+                let (q_out_kt, k_out_kt) =
+                    kiln_rmsnorm_kernel::fused_l2_qk_norm_kt(&q_kt, &k_kt, scale as f32, 1e-6)
+                        .map_err(|e| anyhow::anyhow!("kt fused_l2_qk_norm: {e}"))?;
+                let q_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&q_out_kt)
+                    .with_context(|| "kt-adapter: l2_qk_norm q_out → candle failed")?;
+                let k_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&k_out_kt)
+                    .with_context(|| "kt-adapter: l2_qk_norm k_out → candle failed")?;
+                return Ok((q_out, k_out));
+            }
             return kiln_rmsnorm_kernel::fused_l2_qk_norm(q, k, scale as f32, 1e-6)
                 .context("fused_l2_qk_norm kernel failed");
         }
