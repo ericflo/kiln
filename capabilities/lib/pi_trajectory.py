@@ -273,3 +273,73 @@ def build_scored_rollout(
     trajectory = parse_pi_session(session_path, include_context=include_context)
     text = flatten_action_text(trajectory) or "(empty)"
     return {"text": text, "reward": reward, "trajectory": trajectory}
+
+
+def from_rollouts_to_sft_messages(
+    rollouts_jsonl,
+    min_composite: float = 0.7,
+    require_format_compliance: bool = True,
+    require_exit_zero: bool = True,
+    sort_shortest_first: bool = True,
+    extra_filter=None,
+) -> list[dict]:
+    """Convert filtered pi rollouts into SftExample messages.
+
+    Reads rollouts.jsonl produced by a cap's rollout.py, filters by
+    composite/format/exit, parses each session transcript via
+    parse_pi_session(include_context=True), and emits a list of
+    {"messages": [{"role", "content"}, ...]} dicts suitable for kiln's
+    /v1/train/sft endpoint as SftExample.
+
+    Important: parse_pi_session renders assistant tool_calls in the
+    Qwen-XML format the model's chat template produces at inference,
+    so SFT trains on the same token shape the model emits at eval.
+    Tool args are read from b["input"] (not b["arguments"]) per the
+    pi 0.75.1+ session format.
+
+    Args:
+        rollouts_jsonl: Path to rollouts.jsonl (one rollout dict per line).
+        min_composite: Reject rollouts with sub_scores.composite below this.
+        require_format_compliance: Reject if sub_scores.format_compliance < 1.0.
+        require_exit_zero: Reject if rollout exit_code != 0.
+        sort_shortest_first: Sort output by total chars (helps fit in batch).
+        extra_filter: Optional callable(rollout)->bool for cap-specific filtering.
+
+    Returns:
+        List of {"messages": [...]} dicts ready to pass as SftRequest.examples.
+    """
+    rollouts: list[dict] = []
+    for line in Path(rollouts_jsonl).read_text().splitlines():
+        if not line.strip():
+            continue
+        rollouts.append(json.loads(line))
+
+    filtered: list[dict] = []
+    for r in rollouts:
+        if require_exit_zero and r.get("exit_code", 1) != 0:
+            continue
+        ss = r.get("sub_scores", {}) or {}
+        if ss.get("composite", 0) < min_composite:
+            continue
+        if require_format_compliance and ss.get("format_compliance", 0) < 1.0:
+            continue
+        if extra_filter and not extra_filter(r):
+            continue
+        tp = r.get("transcript_path")
+        if not tp or not Path(tp).exists():
+            continue
+        segments = parse_pi_session(Path(tp), include_context=True)
+        if not segments:
+            continue
+        messages = [
+            {"role": s["role"], "content": s["content"]}
+            for s in segments
+            if s.get("content")
+        ]
+        if len(messages) < 3 or messages[-1]["role"] != "assistant":
+            continue
+        filtered.append({"messages": messages})
+
+    if sort_shortest_first:
+        filtered.sort(key=lambda r: sum(len(m["content"]) for m in r["messages"]))
+    return filtered

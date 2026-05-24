@@ -1,0 +1,64 @@
+{
+  "round": 4,
+  "stage": "grpo-chain-progress",
+  "name": "Live GRPO chain-iter4 sweep progress + queue optimization",
+  "session": "2026-05-24",
+  "pod": "pod-bacd20aa3760a0b6f0e0e771",
+  "timestamp": "2026-05-24T03:25Z",
+  "v4_training_completed": {
+    "adapter": "pi-cc-r4-grpo-chain-iter4-r16a32-v4",
+    "training_duration_min": 29,
+    "groups_trained": 8,
+    "completions_seen": 32,
+    "loss_curve": [0.408, 0.398, 0.379, 0.350],
+    "echo_env_ce_curve": [2.154, 2.143, 1.997, 1.964],
+    "adapter_size_bytes": 61002400,
+    "adapter_loaded": true,
+    "verdict": "Training converged cleanly. Loss dropped 0.41 -> 0.35 (-14%). ECHO env CE dropped 2.15 -> 1.96. Awaiting eval to determine signal vs iter4 baseline."
+  },
+  "queue_optimization_2026_05_24_03_24Z": {
+    "rationale": "Eric mandate emphasizes DATA over hyperparams. Canceled Arms C+E (reward transforms that overlap with built-in advantage normalization) to make room for genuinely-new-data arms.",
+    "cancelled": {
+      "armC_recentered": "redundant with dr_grpo advantage normalization (kiln docs: 'DrGrpo drops std-normalization')",
+      "armE_highvar": "redundant with dynamic_sampling=true (kiln docs: 'groups with uniform reward dropped before training')"
+    },
+    "queued_new": {
+      "armF_iter2_data": {
+        "data": "iter2-grpo-train.jsonl (24 groups, 3x iter4 size, 96 completions)",
+        "reasoning": "Different prompt distribution + 3x more learning signal. Largest source change in the sweep."
+      },
+      "armG_iter4strong": {
+        "data": "iter4-grpo-train-strong.jsonl (2 groups, mean reward 0.764, median spread 0.279)",
+        "reasoning": "Smallest but highest-quality. R3's --filter-var-min 0.05 elite filter. Tests if a small batch of very-high-variance high-quality samples is more valuable than 8 mediocre groups."
+      }
+    },
+    "current_queue_order": [
+      "armB_pow2 (active, 412s elapsed)",
+      "armD_binarized (pos 1)",
+      "armF_iter2_data (pos 2)",
+      "armG_iter4strong (pos 3)"
+    ]
+  },
+  "data_inventory_2026_05_24": {
+    "downloaded_from_B2": [
+      "iter1-grpo-train.jsonl: 16 groups",
+      "iter2-grpo-train.jsonl: 24 groups (biggest)",
+      "iter4-grpo-train.jsonl: 8 groups (used by armB/D/v4)",
+      "iter4-grpo-train-strong.jsonl: 2 groups (high-quality filtered)",
+      "iter11-grpo-train.jsonl: 8 groups",
+      "merged-iter-1-4-11.jsonl: 32 groups (not yet queued; backup for follow-up)"
+    ]
+  },
+  "infra_findings_additional": {
+    "training_cancel_endpoint": "DELETE /v1/train/queue/{job_id} cancels queued (not active) jobs. Returns {job_id, status: cancelled}.",
+    "training_status_list": "GET /v1/train/queue returns {running, queued[], completed[]} with progress + loss telemetry."
+  },
+  "pod_lease_pressure": {
+    "lease_acquired_at": "2026-05-24T02:36Z",
+    "ttl_hours": 3,
+    "expires": "2026-05-24T05:36Z",
+    "remaining_at_snapshot": "~2h 11min",
+    "training_time_budget": "Arms B + D + F + G ≈ 1h 30min training, leaves ~40min for evaluation across all completed arms"
+  },
+  "next_step": "Wait for Arm B completion (~03:55), then sequential eval of v4 → B → D → F → G vs iter4 baseline"
+}

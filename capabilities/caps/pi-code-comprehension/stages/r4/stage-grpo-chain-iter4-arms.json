@@ -1,0 +1,69 @@
+{
+  "round": 4,
+  "stage": "grpo-chain-iter4-arms",
+  "name": "Five GRPO arms chained on top of iter4 with varied reward-shape transformations",
+  "session": "2026-05-24",
+  "pod": "pod-bacd20aa3760a0b6f0e0e771",
+  "parent_adapter": "pi-code-comprehension-iter4-h4-echo-0075",
+  "source_data": "iter4-grpo-train.jsonl (R3 backup: kiln/pi-code-comprehension/20260519/iter-4-train/iter4-rollouts-grpo-train)",
+  "source_data_stats": {
+    "groups": 8,
+    "completions_per_group": 4,
+    "total_completions": 32,
+    "reward_mean": 0.690,
+    "reward_stdev": 0.100,
+    "reward_range": [0.476, 0.900],
+    "per_group_spreads": [0.404, 0.114, 0.146, 0.000, 0.103, 0.067, 0.121, 0.154]
+  },
+  "rationale": "Eric mandate: 'focus on data, not hyperparams.' R4 SFT arms confirmed iter4 GRPO+ECHO ceiling at +0.045. Instead of new training data, transform the SAME iter4 train rollouts under different reward shapes to probe whether the existing data + smarter reward signal can push past +0.10. All arms share LR=1e-5, rank=16, alpha=32, kl_coeff=0.02, advantage_mode=dr_grpo to isolate the data transformation as the only varying factor.",
+  "arms": {
+    "v4_baseline": {
+      "name": "GRPO chain on iter4, raw composite rewards",
+      "data_transform": "none (raw composite rewards 0.476-0.900)",
+      "expected_role": "control — does GRPO chain on iter4 with proven recipe move past iter4?",
+      "training_status": "running at submission time"
+    },
+    "armB_pow2": {
+      "name": "Power-scaled rewards (r²)",
+      "data_transform": "reward ← reward²",
+      "rationale": "Sharpens the gradient between high-reward completions and mediocre ones. Best (0.9² = 0.81) gets more pull, worst (0.5² = 0.25) gets less.",
+      "expected_role": "test if higher reward contrast amplifies the learning signal"
+    },
+    "armC_recentered": {
+      "name": "Per-group recentered to [-1, +1]",
+      "data_transform": "reward ← (reward - midpoint) / half_range  (per-group)",
+      "rationale": "DAPO-style normalization: every group gets the same effective contrast regardless of absolute reward level. dynamic_sampling: false (keeps all groups including the zero-variance one — for diagnostics).",
+      "expected_role": "test if uniform per-group contrast helps when source rewards are clustered tight"
+    },
+    "armD_binarized": {
+      "name": "Binarized rewards (top-1 in group = +1, rest = 0)",
+      "data_transform": "reward ← 1.0 if argmax in group else 0.0",
+      "rationale": "Most aggressive: hard preference learning. The trainer pushes ONLY toward the single best completion in each group. Equivalent to KTO/best-of-N at the group level.",
+      "expected_role": "test if hard preference signal beats continuous reward"
+    },
+    "armE_highvar": {
+      "name": "High-variance groups subset",
+      "data_transform": "drop groups whose reward range < median (median=0.118), keep 4/8 groups",
+      "rationale": "GRPO learns nothing from low-variance groups (dynamic_sampling drops them at runtime anyway). Removing them reduces training-step waste, may produce cleaner learning curve.",
+      "expected_role": "test if focused training on high-variance groups yields cleaner signal"
+    }
+  },
+  "training_recipe_shared": {
+    "learning_rate": 1e-5,
+    "lora_rank": 16,
+    "lora_alpha": 32.0,
+    "kl_coeff": 0.02,
+    "advantage_mode": "dr_grpo",
+    "dynamic_sampling": true,
+    "echo_lambda": 0.05,
+    "base_adapter": "pi-code-comprehension-iter4-h4-echo-0075"
+  },
+  "infra_findings": {
+    "lineage_json_required": "kiln /v1/train/grpo with base_adapter requires <adapter_dir>/lineage.json with proper schema (base_model as object with id+config_digest, not string). Restored iter4 from B2 backup BEST_ADAPTER_iter4/adapter.tgz omits lineage.json — must synthesize.",
+    "training_runs_via_http": "/v1/train/grpo endpoint accepts dataset_path (server-local file) + config, queues training behind a worker that runs serially. Multiple arms can queue but execute one at a time.",
+    "advantage_mode_serde": "Use snake_case 'dr_grpo' (not 'DrGrpo') — kiln serde enum default. 'vanilla' also valid.",
+    "training_speed_a6000": "8-group GRPO with r16α32, ECHO enabled, takes ~30-35 min on A6000 with KV cache + training competing for VRAM (28.5GB training budget). Per-group: ~3-5 min."
+  },
+  "expected_completion": "v4 at 03:30, remaining arms by ~05:30 (within pod lease)",
+  "next_step": "5-seed eval each arm vs iter4 baseline, paired-lift analysis, identify winner if any clears +0.10/3σ bar"
+}

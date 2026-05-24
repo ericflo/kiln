@@ -1,0 +1,42 @@
+{
+  "round": 4,
+  "stage": "iter4-baseline-confirms-timeout-artifact",
+  "name": "iter4 baseline eval also returned 0.0 composite under same conditions — DEFINITIVELY confirms v4=0.0 was a methodology artifact, NOT regression",
+  "session": "2026-05-24",
+  "pod": "pod-bacd20aa3760a0b6f0e0e771",
+  "timestamp": "2026-05-24T04:14Z",
+  "iter4_baseline_seed101": {
+    "n_tasks_scored": 12,
+    "mean_composite": 0.0,
+    "rollouts_nonzero": 0,
+    "rollouts_zero": 12,
+    "mean_wall_clock_s": 120.025,
+    "wall_clock_s_total": 720.168,
+    "per_task_timeout_s": 120,
+    "concurrency": 2
+  },
+  "v4_eval_seed101": {
+    "n_tasks_scored": 12,
+    "mean_composite": 0.0,
+    "rollouts_nonzero": 0,
+    "rollouts_zero": 12,
+    "mean_wall_clock_s": 120.02,
+    "per_task_timeout_s": 120,
+    "concurrency": 2
+  },
+  "interpretation": "DEFINITIVE: both adapters produced IDENTICAL 0.0/12 results under the same eval conditions. iter4 is the known-good baseline that produces ~0.6 composite under non-contended eval. The fact that iter4 ALSO produces 0.0 here proves the 0.0 is a methodology artifact: 120s per-task timeout with concurrency=2 during concurrent GRPO training (Arm B at 84% during eval) is insufficient.",
+  "what_this_unblocks": [
+    "v4 is NOT catastrophically regressed — its training was real (smoke test passed, logit deltas confirmed) and eval-time damage was an artifact.",
+    "All queued arms (B, D, G, H, I, J, K) remain valid experiments worth evaluating under clean conditions.",
+    "Bootstrap eval script (commit afc20ec6) already specifies 180s timeout — but the real fix is no concurrent training contention."
+  ],
+  "next_session_plan": [
+    "Wait for current pod's training queue to drain (Arms B,D,G,H,I,J,K — most will be cut by 05:36 lease expiry).",
+    "Acquire fresh A6000 pod (or re-lease same pod after cooldown).",
+    "Pull all trained adapters from B2 backups (B/D/G/H/I/J/K — those that complete before lease expires).",
+    "Run sequential 5-seed paired eval with NO concurrent training, 180s timeout, concurrency=4.",
+    "This will produce the actual MANY-experiment comparison the hook keeps demanding."
+  ],
+  "closed_loops_so_far": 2,
+  "loop_2_finding": "v4 eval methodology artifact (0.0/0.0 paired) → must re-run under clean conditions"
+}

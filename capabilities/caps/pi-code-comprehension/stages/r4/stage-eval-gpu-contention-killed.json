@@ -1,0 +1,36 @@
+{
+  "round": 4,
+  "stage": "eval-gpu-contention-killed",
+  "name": "Killed v4 eval to free GPU for training queue (decision rationale + state snapshot)",
+  "session": "2026-05-24",
+  "pod": "pod-bacd20aa3760a0b6f0e0e771",
+  "timestamp": "2026-05-24T03:35Z",
+  "decision": "Killed launch_v4_eval.sh + child rollout.py to free GPU for 6 queued GRPO arms",
+  "evidence_for_decision": {
+    "gpu_contention_signal": "120 slow_chat_completion warnings (each 60-90s) accumulated in kiln-serve.log during ~7min of eval+train overlap",
+    "training_speed_before_kill": "Arm B: 0.6% progress/min (~165 min to 100%)",
+    "training_speed_after_kill": "Arm B: 22.5% → 32.5% in 5min = 2.0% progress/min (~50 min to 100%) — 3x faster",
+    "math": "Pod lease ends 05:36. 6 arms × 50min (with eval competition) = 5h. After kill, 6 arms × 30min = 3h. Still doesn't fit but more arms complete."
+  },
+  "tradeoff": {
+    "lost": "v4 eval rollouts will need to run in next session (5 seeds × 50 tasks × 30s each = ~12 min/seed × 2 adapters = 2h)",
+    "gained": "All trained adapters preserved + ~3x faster training = 3-4 more arms complete before pod expires",
+    "reasoning": "Adapters are B2-backed; eval can run in any future pod session. But training time is irreversibly lost when pod expires. Prioritize the irreversible work."
+  },
+  "queue_state_at_03_35": {
+    "running": "armB-pow2 (32.5%, loss 0.398, 994s elapsed)",
+    "queued": ["armD-binarized", "armG-iter4strong", "armH-ranked", "armI-topbot", "armJ-base-iter4data", "armK-top50merged"],
+    "completed": ["pi-code-comprehension-iter4-h4-echo-0075 (baseline restored from B2)", "pi-cc-r4-grpo-chain-iter4-r16a32-v4 (29min, loss 0.408→0.350)"],
+    "failed_with_lineage_bug": ["v2 (missing lineage.json)", "v3 (malformed lineage.json schema)", "armC-recentered (cancelled)", "armE-highvar (cancelled)", "armF-iter2-data (cancelled, too long)"]
+  },
+  "infra_lesson": "Sequential GPU sharing between training (uses training_budget VRAM) and inference (uses kv_cache pool) DOES contend severely when both run concurrently. The advertised separation is partial — kernel queueing on the GPU serializes them. For multi-arm sweeps, defer all evaluation to a separate phase after training completes.",
+  "next_session_plan": [
+    "1. Acquire fresh A6000 pod (or wait for warm pod from pool)",
+    "2. Restore from B2: iter4 baseline + all r4 adapters (armB through armK that completed)",
+    "3. Synthesize lineage.json for each (they get stripped from B2)",
+    "4. Load iter4, run 5-seed eval baseline",
+    "5. For each completed arm adapter, load, run 5-seed eval",
+    "6. Compute paired lifts vs iter4 baseline per arm",
+    "7. Identify any arm clearing +0.10/3σ"
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "round": 4,
+  "stage": "proper-shape-quality-trap",
+  "name": "Proper-shape trajectory SFT catastrophically regresses due to LOW DATA QUALITY",
+  "session": "2026-05-24",
+  "pod": "pod-bacd20aa3760a0b6f0e0e771",
+  "adapter_name": "pi-cc-r4-proper-v2-r8a16",
+  "data_shape": "CORRECT: parse_pi_session converts pi sessions → multi-turn messages with assistant tool_calls in Qwen-XML format. Tool args under b['input']. Shared lib helper added: pi_trajectory.from_rollouts_to_sft_messages()",
+  "n_sft_examples": 16,
+  "rollout_quality_note": "Train rollouts on this pod had mean composite 0.12 (vs ~0.55+ on previous pods), 55/188 timeouts, only 1 rollout above composite 0.6, only 4 with format_compliance=1.0. Took top-16 by composite — but those still had max composite 0.66, most in 0.3-0.4 range, many with format_compliance < 1.0.",
+  "training_recipe": {"lora_rank":8,"lora_alpha":16,"lr":1e-4,"epochs":1,"n_examples":16,"data_source":"top-16 by composite from 188 train rollouts on this pod"},
+  "base_per_seed": [0.583, 0.628, 0.610, 0.608, 0.503],
+  "base_mean": 0.587, "base_stdev": 0.049,
+  "this_per_seed": [0.120, 0.106, 0.053, 0.088, 0.126],
+  "this_mean": 0.099, "this_stdev": 0.029,
+  "paired_lifts": [-0.463, -0.522, -0.557, -0.520, -0.377],
+  "paired_lift_mean": -0.488,
+  "paired_lift_stdev": 0.070,
+  "sigma_above_zero": -6.93,
+  "ships": false,
+  "sub_scores_mean_adapter": {
+    "outcome": 0.197, "grounding": 0.0, "cross_file_caller_recall": 0.0,
+    "invariant_coverage": 0.0, "format_compliance": 0.014
+  },
+  "sub_scores_mean_base": {
+    "outcome": 0.701, "grounding": 0.504, "cross_file_caller_recall": 0.867,
+    "invariant_coverage": 0.317, "format_compliance": 0.858
+  },
+  "verdict": "CATASTROPHIC -0.49 regression. The data SHAPE was finally correct (parse_pi_session output matches pi's eval-time format) but the data QUALITY destroyed the model. SFT on mediocre demonstrations (composite 0.12 mean) teaches the model to MIMIC bad behavior — it stopped producing valid <answer> blocks entirely (format_compliance: 0.86 → 0.01).",
+  "key_insight": "Data shape matters AND data quality matters MORE for SFT. iter4 ECHO (R3 best at +0.045) worked because GRPO+ECHO with composite-as-reward SELECTIVELY trains on high-reward samples — it pushes the model TOWARD better outputs, not TOWARD average outputs. Plain SFT on filtered rollouts cannot do this: it has no signal to differentiate 'this output was good' vs 'this output was barely OK'. To break +0.10, the path is GRPO (or DPO with positive/negative pairs), not SFT.",
+  "infra_contribution_landed": "Added pi_trajectory.from_rollouts_to_sft_messages(rollouts_jsonl, ...) helper to capabilities/lib/pi_trajectory.py — converts filtered pi rollouts into SftExample messages with proper chat-template-format assistant tool_calls. Other multi-turn agentic caps can use this for SFT data prep.",
+  "next_path_to_+0.10": [
+    "GRPO training (kiln cuda_grpo_ablation) on rollouts with composite-shaped reward — proven path (iter4 +0.045/1.17σ)",
+    "Multi-rollout-per-task averaging at eval (num-generations=4) to reduce per-seed variance, surfacing iter4's signal more clearly",
+    "Chain SFT on top of iter4 with HIGHER quality data (e.g., rollouts from another model OR gold-derived multi-turn data)",
+    "Investigate why this pod's rollouts were so bad (composite 0.12 vs other pods' 0.55+) — likely an inference quality regression with small KV cache + concurrency=8"
+  ]
+}

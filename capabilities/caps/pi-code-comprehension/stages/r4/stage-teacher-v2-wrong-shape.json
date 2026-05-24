@@ -1,0 +1,29 @@
+{
+  "round": 4,
+  "stage": "teacher-v2-wrong-shape",
+  "name": "qwen3-coder teacher SFT 16 examples (WRONG single-shot shape) vs clean base",
+  "session": "2026-05-23",
+  "adapter_name": "pi-cc-r4-teacher-qwen3coder-v2-r8a16",
+  "data_shape": "WRONG: single-shot system+user+assistant(rationale+<answer>) — doesn't match pi's multi-turn tool-call format at eval",
+  "training_recipe": {"lora_rank":8,"lora_alpha":16,"lr":1e-4,"epochs":1,"n_examples":16,"http_endpoint":"/v1/train/sft"},
+  "base_per_seed": [0.623, 0.582, 0.591, 0.600, 0.601],
+  "base_mean": 0.599, "base_stdev": 0.015,
+  "this_per_seed": [0.586, 0.657, 0.596, 0.656, 0.560],
+  "this_mean": 0.611, "this_stdev": 0.044,
+  "paired_lifts": [-0.037, +0.075, +0.006, +0.056, -0.041],
+  "paired_lift_mean": 0.012,
+  "paired_lift_stdev": 0.053,
+  "sigma_above_zero": 0.23,
+  "ships": false,
+  "sub_scores_mean_adapter": {
+    "outcome": 0.733, "grounding": 0.492, "cross_file_caller_recall": 0.85,
+    "invariant_coverage": 0.333, "format_compliance": 0.9
+  },
+  "sub_scores_mean_base": {
+    "outcome": 0.724, "grounding": 0.470, "cross_file_caller_recall": 0.90,
+    "invariant_coverage": 0.306, "format_compliance": 0.90
+  },
+  "verdict": "Marginal +0.012/0.23σ lift — within noise. Confirms wrong data shape hypothesis: training on single-shot rationale+answer text DOESN'T lift the cap because pi's eval uses multi-turn structured tool calls. iter4 (R3 best arm, trained via GRPO+ECHO on actual rollout trajectories with matching shape) gets +0.045/1.17σ on this same clean base. The data-shape gap is the bottleneck — not the underlying teacher quality.",
+  "key_insight": "Kiln capabilities have a shared lib at capabilities/lib/pi_trajectory.py with parse_pi_session() that converts pi JSONL transcripts into the canonical kiln Trajectory schema (role/content/kind/tool_call_id). Pi tool args live under b['input'] (not b['arguments']) — verified by direct read of pi 0.75.1 sessions. SFT training data must match the chat-template-rendered shape the model produces at eval — i.e., assistant tool_call as the literal `<tool_call><function=NAME>\\n<parameter=K>\\nV\\n</parameter>...</function></tool_call>` text. Single-shot teacher data doesn't match this and produces noise-level lifts.",
+  "next_step": "Regenerate base rollouts on current pod (so transcript paths are valid), then SFT on parse_pi_session-converted messages — should produce a clearer lift than the wrong-shape teacher arm above."
+}
