@@ -788,3 +788,33 @@ observations plus ECHO substantially reduce the harm, but the no-test/retest
 contrast still fails to beat base and adds latency. Next attempts should keep
 H46's realistic trajectory structure while removing the `DONE`-without-test
 negative, using only verified outcome-preserving efficiency contrasts.
+
+### H47: verified-only realistic ECHO workflow
+
+H47 tested the direct follow-up from H46: remove the unverified no-test
+negative entirely and train only a verified outcome-preserving efficiency
+contrast. The preferred completion kept the realistic `edit` -> edit
+observation -> doctest -> doctest observation -> `DONE` trajectory; the weak
+completion also verified but spent an extra redundant doctest rerun before
+`DONE`. The dataset reused H46's two train-only groups with the no-test
+completion filtered out, preserving rewards 1.0 versus 0.65. Dry-run stats
+were 2 groups, 4 completions, 506 action tokens, 587 env tokens, 1646 context
+tokens, and reward stdev 0.175.
+
+Training used rank 4 / alpha 4 / lr `1e-6`, ECHO lambda 0.05, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in 275.301s observed, with
+peak observed VRAM 15966 MiB. ECHO env CE improved from 1.96740 to 1.44720.
+Adapter verify passed with 400 nonzero LoRA tensors and LoRA update proxy
+0.057425.
+
+Blind `LIMIT=4 SEEDS=1` smoke was slightly positive on composite but slower:
+paired base scored 0.740625 with mean wall-clock 29.47s; H47 scored 0.75 with
+mean wall-clock 37.65s. Because the gain was thin, H47 went to a blind
+`LIMIT=8` promotion check. Promotion rejected it: paired base scored 0.8375
+with mean wall-clock 51.60s and one zero rollout, while H47 scored 0.66875
+with mean wall-clock 76.70s and two zero rollouts. Lesson: removing the
+unverified negative avoided H46's immediate smoke regression, but verified-only
+ECHO still over-conditioned the model toward slower, less reliable broader
+behavior. The next attempt should keep verified-only data but reduce or remove
+ECHO, or switch to a non-adapter/prompt-side stop policy rather than another
+realistic ECHO workflow update.
