@@ -178,6 +178,8 @@ pub struct ProductionTraceSuiteStats {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProductionTraceSampleRecord {
     pub example_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
     pub source_line: usize,
     pub source_format: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -202,6 +204,24 @@ pub struct ProductionTraceSampleRecord {
 struct SampledTraceExample {
     example: EvalExample,
     sample: ProductionTraceSampleRecord,
+}
+
+/// One JSONL row plus optional physical-input provenance.
+#[derive(Debug, Clone)]
+pub struct ProductionTraceInputLine {
+    pub json: String,
+    pub source_path: Option<String>,
+    pub source_line: Option<usize>,
+}
+
+impl ProductionTraceInputLine {
+    pub fn new(json: impl Into<String>) -> Self {
+        Self {
+            json: json.into(),
+            source_path: None,
+            source_line: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -250,6 +270,30 @@ pub fn synthesize_production_trace_suite<R: BufRead>(
     reader: R,
     config: &ProductionTraceSuiteConfig,
 ) -> Result<(EvalSuite, ProductionTraceSuiteStats), ProductionTraceError> {
+    let mut next_line = 0usize;
+    let lines = reader.lines().map(move |line_result| {
+        next_line += 1;
+        line_result
+            .map(|json| ProductionTraceInputLine {
+                json,
+                source_path: None,
+                source_line: Some(next_line),
+            })
+            .map_err(|e| ProductionTraceError::Io(format!("{e}")))
+    });
+    synthesize_production_trace_suite_from_lines(lines, config)
+}
+
+/// Stream already-labelled JSONL rows and build a tool-call prediction suite.
+/// This is the path used by the CLI when sampling across multiple files while
+/// preserving physical source provenance.
+pub fn synthesize_production_trace_suite_from_lines<I>(
+    lines: I,
+    config: &ProductionTraceSuiteConfig,
+) -> Result<(EvalSuite, ProductionTraceSuiteStats), ProductionTraceError>
+where
+    I: IntoIterator<Item = Result<ProductionTraceInputLine, ProductionTraceError>>,
+{
     if config.suite_name.trim().is_empty() {
         return Err(ProductionTraceError::InvalidConfig(
             "suite_name must be non-empty".into(),
@@ -276,16 +320,21 @@ pub fn synthesize_production_trace_suite<R: BufRead>(
     let mut reservoir: Vec<SampledTraceExample> = Vec::new();
     let mut dedupe_keys: HashSet<String> = HashSet::new();
 
-    for (idx, line_result) in reader.lines().enumerate() {
-        let line_no = idx + 1;
+    for (idx, line_result) in lines.into_iter().enumerate() {
         stats.rows_seen += 1;
-        let line = line_result.map_err(|e| ProductionTraceError::Io(format!("{e}")))?;
-        let trimmed = line.trim();
+        let input = line_result?;
+        let line_no = input.source_line.unwrap_or(idx + 1);
+        let trimmed = input.json.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        let parsed_row = match parse_trace_row(trimmed, line_no, config.input_format) {
+        let parsed_row = match parse_trace_row(
+            trimmed,
+            line_no,
+            input.source_path.as_deref(),
+            config.input_format,
+        ) {
             Ok(row) => row,
             Err(err) => {
                 stats.skipped_parse_error += 1;
@@ -334,7 +383,14 @@ pub fn synthesize_production_trace_suite<R: BufRead>(
                 }
             }
 
-            let id = stable_example_id(line_no, turn.id.as_deref(), &turn.prompt_messages, &target);
+            let id = stable_example_id(
+                line_no,
+                turn.id.as_deref(),
+                turn.source_path.as_deref(),
+                turn.source_message_index,
+                &turn.prompt_messages,
+                &target,
+            );
             let mut tags = vec!["production_trace".to_string(), "kind:tool_call".to_string()];
             for tool in &target_tools {
                 tags.push(format!("tool:{tool}"));
@@ -344,6 +400,7 @@ pub fn synthesize_production_trace_suite<R: BufRead>(
             let metadata = turn.metadata(&target_tools, prompt_char_count, target_char_count);
             let sample = ProductionTraceSampleRecord {
                 example_id: id.clone(),
+                source_path: turn.source_path.clone(),
                 source_line: turn.source_line,
                 source_format: turn.source_format.to_string(),
                 turn_id: turn.id.clone(),
@@ -434,6 +491,7 @@ pub fn synthesize_production_trace_suite<R: BufRead>(
 fn parse_trace_row(
     line: &str,
     line_no: usize,
+    source_path: Option<&str>,
     requested: ProductionTraceFormat,
 ) -> Result<ParsedTraceRow, ProductionTraceError> {
     let value: serde_json::Value =
@@ -442,37 +500,48 @@ fn parse_trace_row(
             message: format!("invalid JSON: {e}"),
         })?;
     match requested {
-        ProductionTraceFormat::Auto => parse_auto(&value, line_no),
-        ProductionTraceFormat::PromptChosenJsonl => parse_prompt_chosen(&value, line_no),
-        ProductionTraceFormat::OpenAiJsonl => parse_openai_messages(&value, line_no),
-        ProductionTraceFormat::OpenAiTrajectoryJsonl => parse_openai_trajectory(&value, line_no),
-        ProductionTraceFormat::AnthropicJsonl => parse_anthropic_turn(&value, line_no),
+        ProductionTraceFormat::Auto => parse_auto(&value, line_no, source_path),
+        ProductionTraceFormat::PromptChosenJsonl => {
+            parse_prompt_chosen(&value, line_no, source_path)
+        }
+        ProductionTraceFormat::OpenAiJsonl => parse_openai_messages(&value, line_no, source_path),
+        ProductionTraceFormat::OpenAiTrajectoryJsonl => {
+            parse_openai_trajectory(&value, line_no, source_path)
+        }
+        ProductionTraceFormat::AnthropicJsonl => parse_anthropic_turn(&value, line_no, source_path),
     }
 }
 
 fn parse_auto(
     value: &serde_json::Value,
     line_no: usize,
+    source_path: Option<&str>,
 ) -> Result<ParsedTraceRow, ProductionTraceError> {
     if let Some(format) = explicit_row_format(value)? {
         match format {
             ProductionTraceFormat::Auto => {}
-            ProductionTraceFormat::PromptChosenJsonl => return parse_prompt_chosen(value, line_no),
-            ProductionTraceFormat::OpenAiJsonl => return parse_openai_messages(value, line_no),
-            ProductionTraceFormat::OpenAiTrajectoryJsonl => {
-                return parse_openai_trajectory(value, line_no);
+            ProductionTraceFormat::PromptChosenJsonl => {
+                return parse_prompt_chosen(value, line_no, source_path);
             }
-            ProductionTraceFormat::AnthropicJsonl => return parse_anthropic_turn(value, line_no),
+            ProductionTraceFormat::OpenAiJsonl => {
+                return parse_openai_messages(value, line_no, source_path);
+            }
+            ProductionTraceFormat::OpenAiTrajectoryJsonl => {
+                return parse_openai_trajectory(value, line_no, source_path);
+            }
+            ProductionTraceFormat::AnthropicJsonl => {
+                return parse_anthropic_turn(value, line_no, source_path);
+            }
         }
     }
     if value.get("prompt_messages").is_some() && value.get("chosen").is_some() {
-        return parse_prompt_chosen(value, line_no);
+        return parse_prompt_chosen(value, line_no, source_path);
     }
     if value.get("assistant_response").is_some() {
-        return parse_anthropic_turn(value, line_no);
+        return parse_anthropic_turn(value, line_no, source_path);
     }
     if value.get("messages").is_some() {
-        return parse_openai_messages(value, line_no);
+        return parse_openai_messages(value, line_no, source_path);
     }
     Err(ProductionTraceError::Parse {
         line: line_no,
@@ -512,6 +581,7 @@ fn explicit_row_format(
 fn parse_prompt_chosen(
     value: &serde_json::Value,
     line_no: usize,
+    source_path: Option<&str>,
 ) -> Result<ParsedTraceRow, ProductionTraceError> {
     let prompt_values = value
         .get("prompt_messages")
@@ -543,12 +613,14 @@ fn parse_prompt_chosen(
         chosen,
         tools,
         None,
+        source_path,
     )))
 }
 
 fn parse_openai_messages(
     value: &serde_json::Value,
     line_no: usize,
+    source_path: Option<&str>,
 ) -> Result<ParsedTraceRow, ProductionTraceError> {
     let messages = value
         .get("messages")
@@ -579,12 +651,14 @@ fn parse_openai_messages(
         chosen,
         tools,
         Some(chosen_idx),
+        source_path,
     )))
 }
 
 fn parse_openai_trajectory(
     value: &serde_json::Value,
     line_no: usize,
+    source_path: Option<&str>,
 ) -> Result<ParsedTraceRow, ProductionTraceError> {
     let messages = value
         .get("messages")
@@ -611,6 +685,7 @@ fn parse_openai_trajectory(
             chosen.clone(),
             tools.clone(),
             Some(chosen_idx),
+            source_path,
         ));
     }
     Ok(ParsedTraceRow::many("openai_trajectory_jsonl", turns))
@@ -631,6 +706,7 @@ struct RawAnthropicTurn {
 fn parse_anthropic_turn(
     value: &serde_json::Value,
     line_no: usize,
+    source_path: Option<&str>,
 ) -> Result<ParsedTraceRow, ProductionTraceError> {
     let raw: RawAnthropicTurn =
         serde_json::from_value(value.clone()).map_err(|e| ProductionTraceError::Parse {
@@ -667,6 +743,7 @@ fn parse_anthropic_turn(
         chosen,
         tools,
         Some(chosen_idx),
+        source_path,
     )))
 }
 
@@ -783,14 +860,43 @@ fn example_hash(messages: &[EvalChatMessage], target: &str) -> String {
 fn stable_example_id(
     line_no: usize,
     source_id: Option<&str>,
+    source_path: Option<&str>,
+    source_message_index: Option<usize>,
     messages: &[EvalChatMessage],
     target: &str,
 ) -> String {
-    let hash = example_hash(messages, target);
+    let mut hasher = Sha256::new();
+    if let Some(source_path) = source_path {
+        hasher.update(source_path.as_bytes());
+    }
+    hasher.update([0]);
+    if let Some(source_message_index) = source_message_index {
+        hasher.update(source_message_index.to_string().as_bytes());
+    }
+    hasher.update([0]);
+    let bytes = serde_json::to_vec(messages).unwrap_or_default();
+    hasher.update(bytes);
+    hasher.update([0]);
+    hasher.update(target.as_bytes());
+    let digest = hasher.finalize();
+    let hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     let suffix = &hash[..12.min(hash.len())];
+    let message_part = source_message_index
+        .map(|idx| format!("-m{idx}"))
+        .unwrap_or_default();
+    let path_part = source_path
+        .filter(|s| !s.trim().is_empty())
+        .map(|path| {
+            let mut h = Sha256::new();
+            h.update(path.as_bytes());
+            let digest = h.finalize();
+            let short: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+            format!("-src{short}")
+        })
+        .unwrap_or_default();
     match source_id.filter(|s| !s.trim().is_empty()) {
-        Some(id) => format!("trace-{line_no}-{id}-{suffix}"),
-        None => format!("trace-{line_no}-{suffix}"),
+        Some(id) => format!("trace{path_part}-{line_no}{message_part}-{id}-{suffix}"),
+        None => format!("trace{path_part}-{line_no}{message_part}-{suffix}"),
     }
 }
 
@@ -860,6 +966,7 @@ struct TraceTurn {
     model: Option<String>,
     split: Option<String>,
     source_line: usize,
+    source_path: Option<String>,
     source_format: &'static str,
     source_message_index: Option<usize>,
     prompt_messages: Vec<EvalChatMessage>,
@@ -877,6 +984,7 @@ impl TraceTurn {
         chosen: EvalChatMessage,
         tools: Vec<serde_json::Value>,
         source_message_index: Option<usize>,
+        input_source_path: Option<&str>,
     ) -> Self {
         let mut source_metadata = serde_json::Map::new();
         if let Some(meta) = value.get("metadata").and_then(|v| v.as_object()) {
@@ -887,6 +995,13 @@ impl TraceTurn {
         Self {
             id: string_field(value, "id"),
             session_id: string_field(value, "session_id"),
+            source_path: input_source_path.map(str::to_string).or_else(|| {
+                string_field(value, "source_path").or_else(|| {
+                    source_metadata
+                        .get("source_path")
+                        .and_then(value_to_string)
+                })
+            }),
             timestamp: string_field(value, "timestamp")
                 .or_else(|| source_metadata.get("timestamp").and_then(value_to_string)),
             model: string_field(value, "model"),
@@ -909,6 +1024,9 @@ impl TraceTurn {
     ) -> serde_json::Value {
         let mut obj = self.source_metadata.clone();
         obj.insert("source_line".into(), serde_json::json!(self.source_line));
+        if let Some(source_path) = self.source_path.as_deref() {
+            obj.insert("source_path".into(), serde_json::json!(source_path));
+        }
         obj.insert(
             "source_format".into(),
             serde_json::json!(self.source_format),
@@ -1251,6 +1369,58 @@ mod tests {
                 .sampled_source_format_counts
                 .get("prompt_chosen_jsonl"),
             Some(&2)
+        );
+    }
+
+    #[test]
+    fn labelled_input_lines_preserve_source_path_and_line() {
+        let read_row = serde_json::json!({
+            "id": "row-a",
+            "prompt_messages": [{"role":"user", "content":"read"}],
+            "chosen": {"role":"assistant", "tool_calls":[{
+                "type":"function",
+                "function":{"name":"Read", "arguments":"{\"path\":\"/tmp/a\"}"}
+            }]}
+        });
+        let bash_row = serde_json::json!({
+            "id": "row-b",
+            "prompt_messages": [{"role":"user", "content":"run"}],
+            "chosen": {"role":"assistant", "tool_calls":[{
+                "type":"function",
+                "function":{"name":"Bash", "arguments":"{\"command\":\"pwd\"}"}
+            }]}
+        });
+        let mut cfg = ProductionTraceSuiteConfig::new("multi-input");
+        cfg.sampling.seed = Some(5);
+        cfg.sampling.max_examples = None;
+        let lines = vec![
+            Ok(ProductionTraceInputLine {
+                json: read_row.to_string(),
+                source_path: Some("export-a.jsonl".to_string()),
+                source_line: Some(7),
+            }),
+            Ok(ProductionTraceInputLine {
+                json: bash_row.to_string(),
+                source_path: Some("export-b.jsonl".to_string()),
+                source_line: Some(3),
+            }),
+        ];
+        let (suite, stats) = synthesize_production_trace_suite_from_lines(lines, &cfg).unwrap();
+        assert_eq!(suite.examples.len(), 2);
+        assert_eq!(stats.sampled_examples[0].source_path.as_deref(), Some("export-a.jsonl"));
+        assert_eq!(stats.sampled_examples[0].source_line, 7);
+        assert_eq!(stats.sampled_examples[1].source_path.as_deref(), Some("export-b.jsonl"));
+        assert_eq!(stats.sampled_examples[1].source_line, 3);
+        assert!(
+            suite.examples[0]
+                .id
+                .as_deref()
+                .unwrap()
+                .contains("src")
+        );
+        assert_eq!(
+            suite.examples[0].metadata.as_ref().unwrap()["source_path"],
+            serde_json::json!("export-a.jsonl")
         );
     }
 

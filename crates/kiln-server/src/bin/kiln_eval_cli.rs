@@ -18,6 +18,7 @@
 //! `http://localhost:8420`). Output is human-readable by default; pass
 //! `--json` to emit the raw `EvalResult`.
 
+use std::io::BufRead;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -25,7 +26,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use kiln_eval::{
     EvalChatMessage, EvalCompareSpec, EvalExample, EvalGenerationParams, EvalSuite,
-    ProductionTraceFormat, ProductionTraceSuiteConfig, SuiteResult,
+    ProductionTraceError, ProductionTraceFormat, ProductionTraceInputLine,
+    ProductionTraceSuiteConfig, SuiteResult,
 };
 use serde::Deserialize;
 
@@ -130,10 +132,10 @@ struct ProbeArgs {
 
 #[derive(Parser, Debug)]
 struct TraceSuiteArgs {
-    /// Production trace JSONL. Supports prompt_chosen_jsonl, openai_jsonl,
-    /// openai_trajectory_jsonl, and anthropic_jsonl rows from any exporter.
-    #[arg(long)]
-    input: PathBuf,
+    /// Production trace JSONL file. Repeat --input to sample one suite across
+    /// multiple exports.
+    #[arg(long, required = true)]
+    input: Vec<PathBuf>,
     /// Output EvalSuite JSON file. Required unless --stdout is set.
     #[arg(long)]
     output: Option<PathBuf>,
@@ -307,9 +309,7 @@ fn cmd_trace_suite(args: TraceSuiteArgs) -> Result<()> {
     if !args.stdout && args.output.is_none() {
         bail!("--output is required unless --stdout is set");
     }
-    let file = std::fs::File::open(&args.input)
-        .with_context(|| format!("open {}", args.input.display()))?;
-    let reader = std::io::BufReader::new(file);
+    let input_paths = args.input.clone();
 
     let mut cfg = ProductionTraceSuiteConfig::new(args.suite_name);
     cfg.description = args.description;
@@ -335,11 +335,12 @@ fn cmd_trace_suite(args: TraceSuiteArgs) -> Result<()> {
         cfg.generation.temperature = temperature;
     }
 
-    let (suite, stats) =
-        kiln_eval::synthesize_production_trace_suite(reader, &cfg).with_context(|| {
+    let input_lines = TraceInputLines::new(input_paths.clone());
+    let (suite, stats) = kiln_eval::synthesize_production_trace_suite_from_lines(input_lines, &cfg)
+        .with_context(|| {
             format!(
                 "building production trace suite from {}",
-                args.input.display()
+                display_input_paths(&input_paths)
             )
         })?;
     let suite_json = serde_json::to_string_pretty(&suite)?;
@@ -353,7 +354,8 @@ fn cmd_trace_suite(args: TraceSuiteArgs) -> Result<()> {
         let report = serde_json::json!({
             "schema_version": 1,
             "kind": "production_trace_suite_report",
-            "input": args.input.display().to_string(),
+            "input": input_paths.first().map(|p| p.display().to_string()),
+            "inputs": input_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "suite_output": args.output.as_ref().map(|p| p.display().to_string()),
             "suite_name": &suite.name,
             "config": &cfg,
@@ -400,6 +402,102 @@ fn cmd_trace_suite(args: TraceSuiteArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+struct TraceInputLines {
+    paths: Vec<PathBuf>,
+    next_path: usize,
+    current_path: Option<PathBuf>,
+    current_reader: Option<std::io::BufReader<std::fs::File>>,
+    current_line: usize,
+}
+
+impl TraceInputLines {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths,
+            next_path: 0,
+            current_path: None,
+            current_reader: None,
+            current_line: 0,
+        }
+    }
+}
+
+impl Iterator for TraceInputLines {
+    type Item = std::result::Result<ProductionTraceInputLine, ProductionTraceError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(reader) = self.current_reader.as_mut() {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => {
+                        self.current_reader = None;
+                        self.current_path = None;
+                        self.current_line = 0;
+                        continue;
+                    }
+                    Ok(_) => {
+                        self.current_line += 1;
+                        return Some(Ok(ProductionTraceInputLine {
+                            json: line,
+                            source_path: self
+                                .current_path
+                                .as_ref()
+                                .map(|p| p.display().to_string()),
+                            source_line: Some(self.current_line),
+                        }));
+                    }
+                    Err(e) => {
+                        let path = self
+                            .current_path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<unknown>".to_string());
+                        return Some(Err(ProductionTraceError::Io(format!(
+                            "read {path}: {e}"
+                        ))));
+                    }
+                }
+            }
+
+            if self.next_path >= self.paths.len() {
+                return None;
+            }
+
+            let path = self.paths[self.next_path].clone();
+            self.next_path += 1;
+            match std::fs::File::open(&path) {
+                Ok(file) => {
+                    self.current_path = Some(path);
+                    self.current_reader = Some(std::io::BufReader::new(file));
+                    self.current_line = 0;
+                }
+                Err(e) => {
+                    return Some(Err(ProductionTraceError::Io(format!(
+                        "open {}: {e}",
+                        path.display()
+                    ))));
+                }
+            }
+        }
+    }
+}
+
+fn display_input_paths(paths: &[PathBuf]) -> String {
+    match paths {
+        [] => "<none>".to_string(),
+        [one] => one.display().to_string(),
+        many => format!(
+            "{} inputs ({})",
+            many.len(),
+            many.iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 fn write_string_file(path: &PathBuf, contents: &str) -> Result<()> {

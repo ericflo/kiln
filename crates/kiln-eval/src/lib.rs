@@ -37,8 +37,10 @@ pub use builtin::{
     SWE_BENCH_MINI, TERMINAL_BENCH_MINI, qwen3_agentic_core,
 };
 pub use production_trace::{
-    ProductionTraceFormat, ProductionTraceSampleRecord, ProductionTraceSampling,
-    ProductionTraceSuiteConfig, ProductionTraceSuiteStats, synthesize_production_trace_suite,
+    ProductionTraceError, ProductionTraceFormat, ProductionTraceInputLine,
+    ProductionTraceSampleRecord, ProductionTraceSampling, ProductionTraceSuiteConfig,
+    ProductionTraceSuiteStats, synthesize_production_trace_suite,
+    synthesize_production_trace_suite_from_lines,
 };
 pub use result::{
     AggregateMetrics, EvalJobState, EvalOutcomeKind, EvalProgress, EvalResult, ExampleOutcome,
