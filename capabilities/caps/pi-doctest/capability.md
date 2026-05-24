@@ -1316,3 +1316,30 @@ was not a simple over-dosed useful direction that scalar shrinkage can fix.
 Together, H68 and H69 close the obvious dose variants of H64: future repair-tail
 work should change the contrast or add broad reliability anchors instead of
 continuing scalar variants.
+
+### H70: H66 then real-success SFT
+
+H70 tested a small version of the `pi-faithful-completion` oscillation lesson.
+H66 was a train-only validated ideal SFT step that failed badly under the live
+thinking-enabled agent. H70 continued from H66 with a different distribution:
+four train-only concise real-success traces from H59, rather than mixing those
+examples into a fresh base-stage SFT.
+
+The corpus was
+`/tmp/pi-doctest-h59-concise-success-sft/sft.concise-success.g4.jsonl`.
+Rendered line lengths were 2148, 2386, 2626, and 2343 chars; the trainer
+tokenized them to 508, 676, 613, and 664 tokens. Training used `cuda_sft_file`
+with the generic trainer because native SFT base-adapter loading is not yet
+implemented. Hyperparameters were rank 4 / alpha 4 / lr `5e-8`, 1 epoch, seed
+`3235536621`, and `KILN_GRAD_CHECKPOINT_SEGMENTS=24`, starting from
+`pi-doctest-h66-direct-solver-sft-g8-r4a4lr5e8`. It completed in 105.118s
+observed with peak observed VRAM 15985 MiB. The receipt reported 578 action
+tokens and 1883 context tokens. Adapter verify passed with 400 nonzero LoRA
+tensors, 200 projection pairs, and LoRA update proxy 0.016049.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.953125 with no
+zero rollouts and mean wall-clock 24.98s. H70 scored 0.934375 with no zero
+rollouts and mean wall-clock 46.32s. Lesson: continuing H66 with real-success
+SFT softened H66's catastrophic reliability loss, but still lost to base and
+nearly doubled latency. The H66 ideal-SFT direction is not a useful first stage
+for pi-doctest mini-oscillation without a confirmed stabilizer.
