@@ -77,21 +77,26 @@ the input side. Output direction still copies because there's no
 "borrowed candle Tensor" type to wrap a kt allocation; that copy
 drops away once the call-site caller is also kt-API-typed.
 
-### Phase 1 — CUDA substrate ops (PRs #1374, #1376)
+### Phase 1 — CUDA substrate ops (PRs #1374, #1376, #1379, #1380, #1381)
 
-`crates/kiln-tensor/csrc/` now hosts two new CUDA kernels with a
+`crates/kiln-tensor/csrc/` now hosts **five** CUDA kernels with a
 matching `build.rs` that compiles them via nvcc when `--features cuda`
-is on. These removed the "CPU-only" hard error from kt-tensor's
-`Tensor::contiguous()` and added a typed gather entry point.
+is on. Each kernel removed a CPU-only error path from the kt-Tensor
+ops surface; together they cover the bulk of the Phase 4 layer-glue
+prerequisites.
 
-| Kernel | Rust wrapper | Use |
+| Kernel | Rust wrapper | kt-Tensor op routing |
 |---|---|---|
-| `contiguous.cu` | `cuda_contiguous(src)` | stride-aware copy → contiguous output; one thread per output element, byte-wise copy (dtype-agnostic, MAX_RANK=8) |
-| `index_select.cu` | `cuda_index_select_dim0(src, indices)` | axis=0 gather; one block per output row, threads cooperate on byte copy; U32 indices |
+| `contiguous.cu` | `cuda_contiguous(src)` | `Tensor::contiguous()` on CUDA |
+| `index_select.cu` | `cuda_index_select_dim0(src, indices)` | direct + `PagedKvCacheKt::read` gather |
+| `elementwise.cu` | `cuda_elementwise_binary(a, b, kind)` | `ElementwiseOp::cuda_fwd` for add/sub/mul/div on F32/BF16/F16 |
+| `activation.cu` | `cuda_activation_unary(x, kind)` | `ActivationOp::cuda_fwd` for silu/sigmoid/gelu/tanh/relu |
+| `cast.cu` | `cuda_cast(src, target)` | `CastOp::cuda_fwd` for F32↔BF16↔F16 (6 directions) |
 
-`Tensor::contiguous()` now dispatches to `cuda_contiguous` whenever
-the source storage is on CUDA. Both wrappers accept Owned + Borrowed
-storage (Phase 7 v2 compatible).
+All wrappers accept both `Owned` and `Borrowed` `CudaStorage`
+variants — Phase 7 v2 ready. All kernels use F32 staging for the
+arithmetic (matches kt's numerical-reference convention) and
+byte-wise / typed copies for the storage ops.
 
 ### Phase 3 — PagedKvCacheKt complete for non-FP8 (PRs #1364, #1365, #1366, #1373, #1375, #1377)
 
