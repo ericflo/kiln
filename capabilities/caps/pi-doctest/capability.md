@@ -660,3 +660,26 @@ calls 7.25, mean thinking chars 3783.25, mean wall-clock 75.04s, and one zero
 rollout. Lesson: post-pass stopping is a useful target, but the adapter update
 was too narrow; next attempts should combine terminal stop contrast with
 pre-pass workflow coverage or use a lower-impact method.
+
+### H42: low-dose post-pass stop no-ECHO
+
+H42 reused the H41 terminal post-pass-stop corpus but lowered the adapter dose
+to rank 4, alpha 4, lr `1e-6`, no ECHO. This tested whether H41's promotion
+failure came from too much update magnitude rather than from the terminal-only
+data shape.
+
+The adapter `pi-doctest-h42-postpass-stop-lowdose-noecho-r4a4-lr1e6` trained
+successfully in 273316 ms with 260 action tokens, 0 env tokens, 2970 context
+tokens, and about 15983 MiB peak VRAM under
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. Adapter verify passed with a much smaller
+LoRA update proxy, 0.15715 versus H41's 0.78701.
+
+Blind `LIMIT=4 SEEDS=1` smoke again looked positive: composite 0.971875 versus
+base smoke 0.934375, outcome/tested/format all 1.0, tool-call efficiency
+0.90625, mean tool calls 4.25, mean thinking chars 1670.75, and mean wall-clock
+34.38s. Promotion failed badly: `LIMIT=8` composite 0.5875 versus base
+0.8328125, outcome 0.625, tested-before-done 0.9375, tool-call efficiency
+0.8125, mean tool calls 5.125, mean thinking chars 2815.75, mean wall-clock
+72.69s, and three zero rollouts. Lesson: lowering dose does not rescue the
+terminal-only post-pass-stop corpus; the next data shape needs pre-pass
+workflow coverage, not another dose-only variant.
