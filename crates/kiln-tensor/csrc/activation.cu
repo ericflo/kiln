@@ -3,7 +3,9 @@
 // Covers silu / sigmoid / gelu / tanh / relu over F32 + BF16 + F16,
 // plus the broader unary-math family (log/exp/sin/cos/tan/sinh/cosh
 // /neg/abs/sqrt) added in #1082 — same kind-tagged dispatch, same
-// dtype handling, same launch shape.
+// dtype handling, same launch shape. Extended further in the same
+// PR series with log2/log10/log1p (kinds 15..=17), inverse trig
+// (asin/acos/atan, 18..=20), and atanh (21).
 //
 // In-place math in F32 (kiln's numerical-reference convention),
 // narrowed back to the storage dtype on store.
@@ -50,8 +52,17 @@
 #define KIND_NEG    12
 #define KIND_ABS    13
 #define KIND_SQRT   14
+// More unary-math kinds (#1082, follow-up commits):
+#define KIND_LOG2   15
+#define KIND_LOG10  16
+#define KIND_LOG1P  17
+#define KIND_ASIN   18
+#define KIND_ACOS   19
+#define KIND_ATAN   20
+// Inverse hyperbolic (#1082):
+#define KIND_ATANH  21
 
-#define KIND_MAX    14
+#define KIND_MAX    21
 
 // Dtype tags
 #define DTYPE_F32  0
@@ -111,6 +122,27 @@ __device__ __forceinline__ float apply_unary(int kind, float x) {
         }
         case KIND_SQRT: {
             return sqrtf(x);
+        }
+        case KIND_LOG2: {
+            return log2f(x);
+        }
+        case KIND_LOG10: {
+            return log10f(x);
+        }
+        case KIND_LOG1P: {
+            return log1pf(x);
+        }
+        case KIND_ASIN: {
+            return asinf(x);
+        }
+        case KIND_ACOS: {
+            return acosf(x);
+        }
+        case KIND_ATAN: {
+            return atanf(x);
+        }
+        case KIND_ATANH: {
+            return atanhf(x);
         }
         default:
             return 0.0f;
