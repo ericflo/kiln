@@ -248,6 +248,18 @@ started, before any adapter artifact was saved. Policy-on local GRPO needs
 substantially shorter trajectories, likely under 800 sequence tokens and under
 300 action tokens, before it can be a practical data experiment on this laptop.
 
+H26 enforced that shorter policy cap by mining the shortest same-task
+two-completion pair from the H17 train data. The selected completions were 814
+and 801 sequence tokens, with 280 and 299 action tokens. Baseline-mode
+GRPO+ECHO trained successfully in 308s and verified with a nonzero adapter
+delta. Cheap `LIMIT=4` smoke was positive, composite 0.953125 versus base
+0.934375, with tool-call efficiency 0.84375. The larger `LIMIT=8` paired gate
+rejected it: H26 scored 0.7796875 versus base 0.8328125. It improved
+tool-call efficiency to 0.828125 and reduced mean tool calls to 4.875, but
+outcome fell to 0.8125. This is the first completed policy-on local GRPO shape
+that moved the targeted efficiency axis, but the tiny saturated reward spread
+was not a safe action-side signal.
+
 ### Adversarial design (§0)
 
 **Q: What's the cheapest way to score 1.0 without doing the capability?**
