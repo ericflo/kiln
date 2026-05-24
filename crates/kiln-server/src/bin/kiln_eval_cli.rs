@@ -150,7 +150,8 @@ struct TraceSuiteArgs {
     #[arg(long)]
     description: Option<String>,
     /// Input format: auto | prompt_chosen_jsonl | openai_jsonl |
-    /// openai_trajectory_jsonl | anthropic_jsonl.
+    /// openai_trajectory_jsonl | anthropic_jsonl |
+    /// anthropic_trajectory_jsonl.
     #[arg(long, default_value = "auto", value_parser = parse_trace_format)]
     format: ProductionTraceFormat,
     /// Reservoir sample size. Omit to use the production-trace default.
@@ -197,8 +198,11 @@ fn parse_trace_format(s: &str) -> std::result::Result<ProductionTraceFormat, Str
         "anthropic_jsonl" | "anthropic-jsonl" | "jsonl" => {
             Ok(ProductionTraceFormat::AnthropicJsonl)
         }
+        "anthropic_trajectory_jsonl" | "anthropic-trajectory-jsonl" | "anthropic_trajectory" => {
+            Ok(ProductionTraceFormat::AnthropicTrajectoryJsonl)
+        }
         other => Err(format!(
-            "unknown trace format `{other}` (try auto | prompt_chosen_jsonl | openai_jsonl | openai_trajectory_jsonl | anthropic_jsonl)"
+            "unknown trace format `{other}` (try auto | prompt_chosen_jsonl | openai_jsonl | openai_trajectory_jsonl | anthropic_jsonl | anthropic_trajectory_jsonl)"
         )),
     }
 }

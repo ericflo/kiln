@@ -139,10 +139,16 @@ one JSON object per row in one of these shapes:
   every assistant message with a tool call becomes one sampled candidate, and
   its prompt is the exact message prefix before that assistant turn.
 - **`anthropic_jsonl`**: `{ "system_prompt": "...", "messages": [...], "assistant_response": [...], "tools": [...] }`
+- **`anthropic_trajectory_jsonl`**: `{ "system_prompt": "...", "messages": [full Anthropic-style trajectory], "tools": [...] }`;
+  every assistant message containing a `tool_use` block becomes one sampled
+  candidate after converting the exact Anthropic prefix to Kiln's chat format.
 
 Pass `--format openai_trajectory_jsonl` when every row is a full trajectory,
-or include `"format": "openai_trajectory_jsonl"` / `"trace_format": ...` on
-individual rows when mixing row shapes under `--format auto`.
+pass `--format anthropic_trajectory_jsonl` for Anthropic full trajectories, or
+include `"format": "openai_trajectory_jsonl"` / `"trace_format": ...` on
+individual rows when mixing row shapes under `--format auto`. Auto-detection
+also recognizes Anthropic `messages` arrays that contain `tool_use` or
+`tool_result` content blocks.
 
 Rows without a current-turn tool call are skipped. Eligible rows are
 reservoir-sampled, so large exports can stream through without loading the

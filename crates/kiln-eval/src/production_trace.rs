@@ -11,6 +11,8 @@
 //! - `openai-trajectory-jsonl`: `messages` contains a full OpenAI-style
 //!   trajectory; every assistant tool-call message becomes one eval turn.
 //! - `anthropic-jsonl`: Anthropic-style `messages` + `assistant_response` blocks.
+//! - `anthropic-trajectory-jsonl`: `messages` contains a full Anthropic-style
+//!   trajectory; every assistant `tool_use` message becomes one eval turn.
 //!
 //! Sampling is reservoir-based, so large exports can be streamed without
 //! holding every eligible turn in memory. Unlike generic SFT synthesis,
@@ -48,6 +50,10 @@ pub enum ProductionTraceFormat {
     OpenAiTrajectoryJsonl,
     /// Rows with Anthropic-style `messages` plus `assistant_response` blocks.
     AnthropicJsonl,
+    /// Rows with full Anthropic-style trajectories. Every assistant message
+    /// containing a `tool_use` block is materialized into a separate eval
+    /// example whose prompt is the exact converted prefix before that message.
+    AnthropicTrajectoryJsonl,
 }
 
 /// Sampling/filtering knobs for production trace suite construction.
@@ -509,6 +515,9 @@ fn parse_trace_row(
             parse_openai_trajectory(&value, line_no, source_path)
         }
         ProductionTraceFormat::AnthropicJsonl => parse_anthropic_turn(&value, line_no, source_path),
+        ProductionTraceFormat::AnthropicTrajectoryJsonl => {
+            parse_anthropic_trajectory(&value, line_no, source_path)
+        }
     }
 }
 
@@ -532,6 +541,9 @@ fn parse_auto(
             ProductionTraceFormat::AnthropicJsonl => {
                 return parse_anthropic_turn(value, line_no, source_path);
             }
+            ProductionTraceFormat::AnthropicTrajectoryJsonl => {
+                return parse_anthropic_trajectory(value, line_no, source_path);
+            }
         }
     }
     if value.get("prompt_messages").is_some() && value.get("chosen").is_some() {
@@ -541,6 +553,9 @@ fn parse_auto(
         return parse_anthropic_turn(value, line_no, source_path);
     }
     if value.get("messages").is_some() {
+        if looks_like_anthropic_messages(value.get("messages")) {
+            return parse_anthropic_trajectory(value, line_no, source_path);
+        }
         return parse_openai_messages(value, line_no, source_path);
     }
     Err(ProductionTraceError::Parse {
@@ -569,6 +584,9 @@ fn explicit_row_format(
             ProductionTraceFormat::OpenAiTrajectoryJsonl
         }
         "anthropic_jsonl" => ProductionTraceFormat::AnthropicJsonl,
+        "anthropic_trajectory_jsonl" | "anthropic_trajectory" => {
+            ProductionTraceFormat::AnthropicTrajectoryJsonl
+        }
         _ => {
             return Err(ProductionTraceError::InvalidConfig(format!(
                 "unknown explicit row format `{label}`"
@@ -745,6 +763,99 @@ fn parse_anthropic_turn(
         Some(chosen_idx),
         source_path,
     )))
+}
+
+fn parse_anthropic_trajectory(
+    value: &serde_json::Value,
+    line_no: usize,
+    source_path: Option<&str>,
+) -> Result<ParsedTraceRow, ProductionTraceError> {
+    let raw: RawAnthropicTurn =
+        serde_json::from_value(value.clone()).map_err(|e| ProductionTraceError::Parse {
+            line: line_no,
+            message: format!("invalid anthropic trajectory row: {e}"),
+        })?;
+    let tools = raw
+        .tools
+        .iter()
+        .map(normalize_tool_schema)
+        .collect::<Vec<_>>();
+    let mut turns = Vec::new();
+    for (chosen_idx, chosen) in raw.messages.iter().enumerate() {
+        if chosen.role != "assistant" || !anthropic_message_has_tool_use(chosen) {
+            continue;
+        }
+        let prefix_conv = anthropic_turn_to_sft_conversation(
+            &raw.messages[..chosen_idx],
+            &[],
+            raw.system_prompt.as_deref(),
+            Some(&tools),
+        );
+        let chosen_conv = anthropic_turn_to_sft_conversation(
+            &[],
+            anthropic_assistant_response_blocks(chosen)
+                .as_deref()
+                .unwrap_or(&[]),
+            None,
+            None,
+        );
+        let Some(chosen_msg) = chosen_conv.messages.last() else {
+            continue;
+        };
+        let prompt_messages = prefix_conv
+            .messages
+            .iter()
+            .map(sft_to_chat_message)
+            .collect();
+        turns.push(TraceTurn::from_export(
+            value,
+            line_no,
+            "anthropic_trajectory_jsonl",
+            prompt_messages,
+            sft_to_chat_message(chosen_msg),
+            tools.clone(),
+            Some(chosen_idx),
+            source_path,
+        ));
+    }
+    Ok(ParsedTraceRow::many("anthropic_trajectory_jsonl", turns))
+}
+
+fn looks_like_anthropic_messages(messages: Option<&serde_json::Value>) -> bool {
+    messages
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter().any(|msg| {
+                msg.get("content")
+                    .and_then(|content| content.as_array())
+                    .map(|blocks| {
+                        blocks.iter().any(|block| {
+                            matches!(
+                                block.get("type").and_then(|v| v.as_str()),
+                                Some("tool_use" | "tool_result")
+                            )
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn anthropic_message_has_tool_use(message: &AnthropicMessage) -> bool {
+    match &message.content {
+        crate::trajectory::AnthropicContent::Blocks(blocks) => blocks
+            .iter()
+            .any(|block| matches!(block, AnthropicBlock::ToolUse { .. })),
+        crate::trajectory::AnthropicContent::Text(_) => false,
+    }
+}
+
+fn anthropic_assistant_response_blocks(message: &AnthropicMessage) -> Option<Vec<AnthropicBlock>> {
+    match &message.content {
+        crate::trajectory::AnthropicContent::Blocks(blocks) => Some(blocks.clone()),
+        crate::trajectory::AnthropicContent::Text(_) => None,
+    }
 }
 
 fn value_to_chat_message(
@@ -1235,6 +1346,80 @@ mod tests {
             stats
                 .sampled_source_format_counts
                 .get("openai_trajectory_jsonl"),
+            Some(&2)
+        );
+    }
+
+    #[test]
+    fn anthropic_trajectory_jsonl_materializes_each_tool_use_turn() {
+        let line = serde_json::json!({
+            "format": "anthropic_trajectory_jsonl",
+            "id": "anthropic-trajectory-1",
+            "session_id": "sess-anthropic",
+            "system_prompt": "You are a coding agent.",
+            "messages": [
+                {"role":"user", "content":"Inspect Cargo.toml, then run tests."},
+                {"role":"assistant", "content":[{
+                    "type":"tool_use",
+                    "id":"toolu_read",
+                    "name":"Read",
+                    "input":{"file_path":"Cargo.toml"}
+                }]},
+                {"role":"user", "content":[{
+                    "type":"tool_result",
+                    "tool_use_id":"toolu_read",
+                    "content":"[workspace]"
+                }]},
+                {"role":"assistant", "content":"Need to run the test suite."},
+                {"role":"user", "content":"Go ahead."},
+                {"role":"assistant", "content":[{
+                    "type":"text",
+                    "text":"Running tests now."
+                }, {
+                    "type":"tool_use",
+                    "id":"toolu_bash",
+                    "name":"Bash",
+                    "input":{"command":"cargo test -p kiln-eval"}
+                }]}
+            ],
+            "tools": [
+                {"name":"Read","description":"Read a file","input_schema":{"type":"object"}},
+                {"name":"Bash","description":"Run a shell command","input_schema":{"type":"object"}}
+            ]
+        });
+        let mut cfg = ProductionTraceSuiteConfig::new("anthropic-full-trajectory");
+        cfg.sampling.seed = Some(10);
+        cfg.sampling.max_examples = None;
+        let (suite, stats) =
+            synthesize_production_trace_suite(std::io::Cursor::new(format!("{line}\n")), &cfg)
+                .unwrap();
+        assert_eq!(stats.rows_seen, 1);
+        assert_eq!(stats.rows_parsed, 1);
+        assert_eq!(stats.eligible_tool_turns, 2);
+        assert_eq!(suite.examples.len(), 2);
+        assert_eq!(suite.examples[0].messages.len(), 2);
+        assert_eq!(suite.examples[0].messages[0].role, "system");
+        assert_eq!(suite.examples[0].messages[1].role, "user");
+        assert_eq!(suite.examples[1].messages.len(), 6);
+        assert_eq!(suite.examples[1].messages[2].role, "assistant");
+        assert!(suite.examples[1].messages[2].tool_calls.is_some());
+        assert_eq!(suite.examples[1].messages[3].role, "tool");
+        let first = extract_first_tool_call(suite.examples[0].target.as_deref().unwrap()).unwrap();
+        let second = extract_first_tool_call(suite.examples[1].target.as_deref().unwrap()).unwrap();
+        assert_eq!(first.name, "Read");
+        assert_eq!(second.name, "Bash");
+        assert_eq!(
+            stats
+                .sampled_examples
+                .iter()
+                .map(|s| s.source_message_index)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(5)]
+        );
+        assert_eq!(
+            stats
+                .sampled_source_format_counts
+                .get("anthropic_trajectory_jsonl"),
             Some(&2)
         );
     }
