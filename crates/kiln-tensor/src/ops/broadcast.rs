@@ -17,89 +17,236 @@
 //!
 //! `Constructive`. Fixed iteration order; the only operation per
 //! element is a byte copy from the source slot.
+//!
+//! # Dispatch
+//!
+//! Wrapped as a [`DeviceOp1`] so CUDA tensors route through
+//! `cuda_index_select_dim0` on a flattened view of the input. The
+//! gather indices are a flat-output-index → flat-input-index map
+//! computed on the host once per call.
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{
+    bail, dispatch1, BackwardOp, CpuStorage, Determinism, DeviceOp1, Error, Layout, Result,
+    Storage, Tensor, TensorId,
+};
+
+/// Broadcast op — materializes broadcasting of size-1 axes.
+#[derive(Debug, Clone)]
+pub struct BroadcastOp {
+    target_shape: Vec<usize>,
+}
+
+impl BroadcastOp {
+    pub fn new(target_shape: &[usize]) -> Self {
+        BroadcastOp {
+            target_shape: target_shape.to_vec(),
+        }
+    }
+
+    pub fn target_shape(&self) -> &[usize] {
+        &self.target_shape
+    }
+
+    /// Compute the per-axis broadcast factor for `in_shape` →
+    /// `target_shape`, validating that each axis is either equal
+    /// or the input axis is size-1.
+    fn broadcast_factors(&self, in_shape: &[usize]) -> Result<Vec<usize>> {
+        if in_shape.len() != self.target_shape.len() {
+            bail!(
+                "broadcast_to: rank mismatch: input {:?} vs target {:?}",
+                in_shape,
+                self.target_shape
+            );
+        }
+        let mut bf = vec![1usize; in_shape.len()];
+        for (axis, (&in_d, &out_d)) in
+            in_shape.iter().zip(self.target_shape.iter()).enumerate()
+        {
+            if in_d == out_d {
+                bf[axis] = 1;
+            } else if in_d == 1 {
+                bf[axis] = out_d;
+            } else {
+                bail!(
+                    "broadcast_to: cannot broadcast axis {axis} from {in_d} to {out_d} (input shape {:?}, target {:?})",
+                    in_shape,
+                    self.target_shape
+                );
+            }
+        }
+        Ok(bf)
+    }
+
+    /// Compute the flat-output-index → flat-input-index gather map.
+    ///
+    /// Used by both `cpu_fwd` (for byte copies) and `cuda_fwd` (as
+    /// indices into a flattened CUDA buffer). Length = target_total.
+    fn gather_indices(&self, in_shape: &[usize]) -> Vec<u32> {
+        let rank = in_shape.len();
+        let target_total: usize = self.target_shape.iter().product();
+        let mut in_strides = vec![1usize; rank];
+        for k in (0..rank.saturating_sub(1)).rev() {
+            in_strides[k] = in_strides[k + 1] * in_shape[k + 1];
+        }
+        let mut out_strides = vec![1usize; rank];
+        for k in (0..rank.saturating_sub(1)).rev() {
+            out_strides[k] = out_strides[k + 1] * self.target_shape[k + 1];
+        }
+        let mut indices = Vec::with_capacity(target_total);
+        for flat_out in 0..target_total {
+            let mut rem = flat_out;
+            let mut in_offset = 0usize;
+            for k in 0..rank {
+                let idx_out = rem / out_strides[k];
+                rem %= out_strides[k];
+                let idx_in = if in_shape[k] == 1 { 0 } else { idx_out };
+                in_offset += idx_in * in_strides[k];
+            }
+            indices.push(in_offset as u32);
+        }
+        indices
+    }
+}
+
+impl DeviceOp1 for BroadcastOp {
+    fn name(&self) -> &'static str {
+        "broadcast_to"
+    }
+
+    fn determinism(&self) -> Determinism {
+        Determinism::Constructive
+    }
+
+    fn cpu_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        let in_shape = x.shape();
+        let _bf = self.broadcast_factors(in_shape)?;
+
+        if !x.is_contiguous() {
+            bail!("broadcast_to: input must be contiguous");
+        }
+        let dtype = x.dtype();
+        if dtype.is_packed() {
+            bail!("broadcast_to: packed dtype {dtype} not supported");
+        }
+        let per = dtype.size_in_bytes();
+        let in_cpu = x
+            .storage()
+            .as_any()
+            .downcast_ref::<CpuStorage>()
+            .ok_or_else(|| Error::from_str("broadcast_to: storage must be CpuStorage"))?;
+        let in_bytes = in_cpu.as_bytes();
+
+        let target_total: usize = self.target_shape.iter().product();
+        let mut out_bytes = vec![0u8; target_total * per];
+
+        // Walk every output index and copy the corresponding input element.
+        // For each output index (i0, i1, …, i_{R-1}) compute the source
+        // index (i0/bf0, i1/bf1, …) where bf_k = broadcast_factor[k].
+        // The strides for the input are derived from `in_shape`.
+        let rank = in_shape.len();
+        let mut in_strides = vec![1usize; rank];
+        for k in (0..rank.saturating_sub(1)).rev() {
+            in_strides[k] = in_strides[k + 1] * in_shape[k + 1];
+        }
+        let mut out_strides = vec![1usize; rank];
+        for k in (0..rank.saturating_sub(1)).rev() {
+            out_strides[k] = out_strides[k + 1] * self.target_shape[k + 1];
+        }
+        for flat_out in 0..target_total {
+            // Decompose flat_out into per-axis indices.
+            let mut rem = flat_out;
+            let mut in_offset = 0usize;
+            for k in 0..rank {
+                let idx_out = rem / out_strides[k];
+                rem %= out_strides[k];
+                let idx_in = if in_shape[k] == 1 { 0 } else { idx_out };
+                in_offset += idx_in * in_strides[k];
+            }
+            let src = in_offset * per;
+            let dst = flat_out * per;
+            out_bytes[dst..dst + per].copy_from_slice(&in_bytes[src..src + per]);
+        }
+        let cpu = CpuStorage::from_bytes(dtype, out_bytes)?;
+        let storage: Storage = Arc::new(cpu);
+        Ok(Some(Tensor::from_parts(
+            storage,
+            Layout::contiguous(self.target_shape.clone()),
+            TensorId::next(),
+        )?))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        let in_shape = x.shape();
+        let _bf = self.broadcast_factors(in_shape)?;
+        let dtype = x.dtype();
+        if dtype.is_packed() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+
+        // Fast path: shapes already match — no data movement.
+        if in_shape == self.target_shape.as_slice() {
+            return Ok(Some(x.reshape(x.shape().to_vec())?));
+        }
+
+        let target_total: usize = self.target_shape.iter().product();
+        if target_total == 0 {
+            // Empty output: build a zero-element tensor of the right shape.
+            // Use reshape via cuda_contiguous? Simpler — fall through to CPU.
+            return Ok(None);
+        }
+
+        let in_total: usize = in_shape.iter().product();
+
+        // Resolve the candle CudaDevice from `x`'s storage so indices
+        // land on the matching device.
+        let x_storage = x
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::CudaStorage>()
+            .ok_or_else(|| Error::from_str("broadcast_to::cuda_fwd: x must be CUDA storage"))?;
+        let candle_device = x_storage.candle_device().clone();
+        let device_index = match x.device() {
+            crate::Device::Cuda(i) => i,
+            _ => return Ok(None),
+        };
+
+        // Flatten the input to 1D so we can use cuda_index_select_dim0.
+        let x_flat = x.reshape(vec![in_total])?;
+
+        // Build the gather indices on CPU, then ship to CUDA.
+        let indices_host = self.gather_indices(in_shape);
+        let indices_cpu = Tensor::from_slice(&indices_host, vec![target_total])?;
+        let indices_cuda =
+            crate::host_to_cuda_copy(&indices_cpu, candle_device, device_index)?;
+
+        let gathered = crate::cuda_index_select_dim0(&x_flat, &indices_cuda)?;
+
+        // Reshape the 1D gathered output to the target shape.
+        Ok(Some(gathered.reshape(self.target_shape.clone())?))
+    }
+
+    fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
+        None
+    }
+}
 
 /// Broadcast `x` to `target_shape`. Each axis of `target_shape`
 /// must either equal the corresponding `x` axis or be a multiple
 /// of a size-1 input axis.
 pub fn broadcast_to(x: &Tensor, target_shape: &[usize]) -> Result<Tensor> {
-    let in_shape = x.shape();
-    if in_shape.len() != target_shape.len() {
-        bail!(
-            "broadcast_to: rank mismatch: input {:?} vs target {:?}",
-            in_shape,
-            target_shape
-        );
-    }
-    let mut broadcast_factor = vec![1usize; in_shape.len()];
-    for (axis, (&in_d, &out_d)) in in_shape.iter().zip(target_shape.iter()).enumerate() {
-        if in_d == out_d {
-            broadcast_factor[axis] = 1;
-        } else if in_d == 1 {
-            broadcast_factor[axis] = out_d;
-        } else {
-            bail!(
-                "broadcast_to: cannot broadcast axis {axis} from {in_d} to {out_d} (input shape {:?}, target {:?})",
-                in_shape,
-                target_shape
-            );
-        }
-    }
-    if !x.is_contiguous() {
-        bail!("broadcast_to: input must be contiguous");
-    }
-    let dtype = x.dtype();
-    if dtype.is_packed() {
-        bail!("broadcast_to: packed dtype {dtype} not supported");
-    }
-    let per = dtype.size_in_bytes();
-    let in_cpu = x
-        .storage()
-        .as_any()
-        .downcast_ref::<CpuStorage>()
-        .ok_or_else(|| Error::from_str("broadcast_to: storage must be CpuStorage"))?;
-    let in_bytes = in_cpu.as_bytes();
-
-    let target_total: usize = target_shape.iter().product();
-    let mut out_bytes = vec![0u8; target_total * per];
-    // Walk every output index and copy the corresponding input element.
-    // For each output index (i0, i1, …, i_{R-1}) compute the source
-    // index (i0/bf0, i1/bf1, …) where bf_k = broadcast_factor[k].
-    // The strides for the input are derived from `in_shape`.
-    let rank = in_shape.len();
-    let mut in_strides = vec![1usize; rank];
-    for k in (0..rank.saturating_sub(1)).rev() {
-        in_strides[k] = in_strides[k + 1] * in_shape[k + 1];
-    }
-    let mut out_strides = vec![1usize; rank];
-    for k in (0..rank.saturating_sub(1)).rev() {
-        out_strides[k] = out_strides[k + 1] * target_shape[k + 1];
-    }
-    for flat_out in 0..target_total {
-        // Decompose flat_out into per-axis indices.
-        let mut rem = flat_out;
-        let mut in_offset = 0usize;
-        for k in 0..rank {
-            let idx_out = rem / out_strides[k];
-            rem %= out_strides[k];
-            let idx_in = if in_shape[k] == 1 { 0 } else { idx_out };
-            in_offset += idx_in * in_strides[k];
-        }
-        let src = in_offset * per;
-        let dst = flat_out * per;
-        out_bytes[dst..dst + per].copy_from_slice(&in_bytes[src..src + per]);
-    }
-    let cpu = CpuStorage::from_bytes(dtype, out_bytes)?;
-    let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(target_shape.to_vec()), TensorId::next())
+    dispatch1(&BroadcastOp::new(target_shape), x)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DType;
 
     fn read_f32(t: &Tensor) -> Vec<f32> {
         let cpu = t.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
