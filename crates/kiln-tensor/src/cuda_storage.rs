@@ -400,6 +400,15 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_argmax_last_axis_async(
+        x: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n_rows: i64,
+        n_cols: i64,
+        dtype_tag: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_l2norm_apply_async(
         x: *const core::ffi::c_void,
         sum_sq_f32: *const core::ffi::c_void,
@@ -1673,4 +1682,103 @@ pub fn cuda_masked_fill(
         crate::TensorId::next(),
     )
     .map_err(|e| crate::Error::Msg(format!("cuda_masked_fill: wrap: {e}")))
+}
+
+
+/// CUDA argmax over the trailing axis (Phase 4 substrate op).
+///
+/// Operates on a contiguous `[..., D]` tensor; produces a fresh
+/// contiguous tensor of shape `[...]` (trailing axis dropped) with
+/// `I64` element type containing per-row argmax indices.
+///
+/// Routes through `kiln_argmax_last_axis_async` in
+/// `csrc/argmax_last_axis.cu`. F32/BF16/F16 inputs supported. Ties
+/// break to the lowest index — same convention as
+/// `candle_core::Tensor::argmax` and kt's CPU `argmax_last_dim`.
+#[cfg(feature = "cuda")]
+pub fn cuda_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+
+    let in_dtype = x.dtype();
+    let dtype_tag: i32 = match in_dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_argmax_last_axis: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !x.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_argmax_last_axis: input must be contiguous".to_string(),
+        ));
+    }
+    let rank = x.rank();
+    if rank == 0 {
+        return Err(crate::Error::Msg(
+            "cuda_argmax_last_axis: input must have rank >= 1".to_string(),
+        ));
+    }
+    let shape = x.shape();
+    let n_cols = shape[rank - 1] as i64;
+    let n_rows = (x.element_count() / shape[rank - 1]) as i64;
+
+    let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
+        || crate::Error::Msg("cuda_argmax_last_axis: input must be CUDA".to_string()),
+    )?;
+    let candle_device = x_storage.candle_device.clone();
+    let device_index = match x_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+
+    // Output: shape = leading axes, dtype = I64.
+    let out_shape: Vec<usize> = shape[..rank - 1].to_vec();
+    let out_elem_count: usize = out_shape.iter().product::<usize>().max(1);
+    let out_storage = CudaStorage::zeros(
+        candle_device.clone(),
+        device_index,
+        crate::DType::I64,
+        out_elem_count,
+    )?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let x_base = match &x_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+    };
+
+    let x_off = (x.layout().start_offset() * in_dtype.size_in_bytes()) as u64;
+    let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
+    let out_ptr = out_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_argmax_last_axis_async(x_ptr, out_ptr, n_rows, n_cols, dtype_tag, raw_stream)
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_argmax_last_axis: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(out_shape),
+        crate::TensorId::next(),
+    )
 }

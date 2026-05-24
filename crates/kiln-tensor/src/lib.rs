@@ -75,7 +75,7 @@ pub use tensor_id::TensorId;
 pub use cuda_allocator::CudaAllocator;
 #[cfg(feature = "cuda")]
 pub use cuda_storage::{
-    cuda_activation_unary, cuda_cast, cuda_contiguous, cuda_elementwise_binary,
+    cuda_activation_unary, cuda_argmax_last_axis, cuda_cast, cuda_contiguous, cuda_elementwise_binary,
     cuda_index_select_dim0, cuda_l2norm_last_axis, cuda_masked_fill, cuda_softmax_last_axis,
     cuda_sum_squared_last_axis, cuda_to_host_copy, cuda_zeros, host_to_cuda_copy, CudaStorage,
 };
