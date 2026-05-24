@@ -463,6 +463,16 @@ unsafe extern "C" {
         dtype_tag: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_concat_async(
+        dst: *mut core::ffi::c_void,
+        src_ptrs: *const *const core::ffi::c_void,
+        t_axis_lens: *const i64,
+        n_inputs: i32,
+        outer: i64,
+        inner_bytes: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// CUDA-side stride-aware contiguous() — produces a new kt-Tensor with
@@ -2348,6 +2358,175 @@ pub fn cuda_mean_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     }
     let inv = 1.0_f32 / (n_cols as f32);
     cuda_reduce_last_axis_impl(x, inv, "cuda_mean_last_axis")
+}
+
+/// CUDA-side `concat(inputs, axis)` — concatenate `inputs` along
+/// `axis` into a freshly-allocated contiguous output.
+///
+/// Mirrors the CPU reference in `crates/kiln-tensor/src/ops/concat.rs`
+/// byte-for-byte: per-outer-slab, each input's axis-slab is copied
+/// into the running output offset. The kernel
+/// `kiln_concat_async` performs all the copies in a single launch.
+///
+/// Requirements:
+/// - At least one input (and no more than 32).
+/// - All inputs must be CUDA-backed and contiguous.
+/// - All inputs must share dtype and the same shape except along `axis`.
+/// - `axis < rank`, all input ranks equal.
+/// - Packed dtypes are not supported.
+#[cfg(feature = "cuda")]
+pub fn cuda_concat(inputs: &[&crate::Tensor], axis: usize) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use std::any::Any as _;
+
+    if inputs.is_empty() {
+        return Err(crate::Error::Msg(
+            "cuda_concat: at least one input required".to_string(),
+        ));
+    }
+    if inputs.len() > 32 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_concat: too many inputs ({}); MAX_INPUTS=32",
+            inputs.len()
+        )));
+    }
+
+    let rank = inputs[0].rank();
+    if axis >= rank {
+        return Err(crate::Error::Msg(format!(
+            "cuda_concat: axis {axis} out of range for rank-{rank} inputs"
+        )));
+    }
+    let dtype = inputs[0].dtype();
+    if dtype.is_packed() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_concat: packed dtype {dtype} is not supported"
+        )));
+    }
+    let bpe = dtype.size_in_bytes();
+    if bpe == 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_concat: zero-size dtype {dtype}"
+        )));
+    }
+
+    for (i, t) in inputs.iter().enumerate() {
+        if t.rank() != rank {
+            return Err(crate::Error::Msg(format!(
+                "cuda_concat: input {i} rank {} != input 0 rank {rank}",
+                t.rank()
+            )));
+        }
+        if t.dtype() != dtype {
+            return Err(crate::Error::Msg(format!(
+                "cuda_concat: input {i} dtype {} != input 0 dtype {dtype}",
+                t.dtype()
+            )));
+        }
+        if !t.is_contiguous() {
+            return Err(crate::Error::Msg(format!(
+                "cuda_concat: input {i} must be contiguous"
+            )));
+        }
+        for (d, (&a, &b)) in t.shape().iter().zip(inputs[0].shape()).enumerate() {
+            if d != axis && a != b {
+                return Err(crate::Error::Msg(format!(
+                    "cuda_concat: input {i} shape {:?} differs from input 0 shape {:?} along axis {d}",
+                    t.shape(),
+                    inputs[0].shape()
+                )));
+            }
+        }
+    }
+
+    // Output shape: input 0's shape with axis dim replaced by sum.
+    let mut out_shape = inputs[0].shape().to_vec();
+    let axis_total: usize = inputs.iter().map(|t| t.shape()[axis]).sum();
+    out_shape[axis] = axis_total;
+
+    let outer: usize = out_shape[..axis].iter().product::<usize>().max(1);
+    let inner: usize = out_shape[axis + 1..].iter().product::<usize>().max(1);
+    let inner_bytes = (inner * bpe) as i64;
+
+    // Pull candle_device + device index from first input.
+    let first_storage = inputs[0]
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_concat: input 0 must be CUDA storage".to_string())
+        })?;
+    let candle_device = first_storage.candle_device.clone();
+    let device_index = match first_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!("CudaStorage::device is always Cuda"),
+    };
+
+    // Allocate destination — same device, same dtype, total elements.
+    let n_out_elements: usize = out_shape.iter().product();
+    let dst_storage =
+        CudaStorage::zeros(candle_device.clone(), device_index, dtype, n_out_elements)?;
+
+    // Collect per-input source pointers (base + start_offset bytes).
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let mut src_ptrs: Vec<*const core::ffi::c_void> = Vec::with_capacity(inputs.len());
+    let mut t_axis_lens: Vec<i64> = Vec::with_capacity(inputs.len());
+    // Hold guards so any borrowed device-pointer lifetime stays alive
+    // through the kernel launch.
+    for t in inputs {
+        let st = t
+            .storage()
+            .as_any()
+            .downcast_ref::<CudaStorage>()
+            .ok_or_else(|| {
+                crate::Error::Msg("cuda_concat: input must be CUDA storage".to_string())
+            })?;
+        let base = match &st.slice {
+            SliceOwner::Owned(s) => {
+                let (p, _g) = s.device_ptr(&stream);
+                p
+            }
+            SliceOwner::Borrowed { ptr, .. } => *ptr,
+        };
+        let off = (t.layout().start_offset() * bpe) as u64;
+        src_ptrs.push((base + off) as *const core::ffi::c_void);
+        t_axis_lens.push(t.shape()[axis] as i64);
+    }
+
+    let dst_base = match &dst_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+    };
+    let dst_ptr = dst_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_concat_async(
+            dst_ptr,
+            src_ptrs.as_ptr(),
+            t_axis_lens.as_ptr(),
+            inputs.len() as i32,
+            outer as i64,
+            inner_bytes,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_concat: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(dst_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(out_shape),
+        crate::TensorId::next(),
+    )
 }
 
 

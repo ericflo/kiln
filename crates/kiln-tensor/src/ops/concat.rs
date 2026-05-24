@@ -18,8 +18,12 @@
 //! Concat is naturally variable-arity, which doesn't fit the
 //! `DeviceOp{1,2,3}` trait surface. The op is exposed as a free
 //! function plus a [`ConcatOp`] handle carrying the `axis`. Per-
-//! backend impls plug in via the convenience function once we have
-//! a `DeviceOpN` trait — for now, only the CPU path lands.
+//! backend impls plug in via the convenience function:
+//! - CPU path: byte-wise per-outer-slab copy (in `concat()`).
+//! - CUDA path: dispatches through `cuda_concat` (in
+//!   `crates/kiln-tensor/src/cuda_storage.rs`) when all inputs are
+//!   CUDA-backed. The kernel performs the same per-(outer, axis,
+//!   inner) byte copy as the CPU reference, in a single launch.
 //!
 //! # Determinism
 //!
@@ -46,6 +50,37 @@ impl ConcatOp {
     }
     pub fn name(&self) -> &'static str {
         "concat"
+    }
+
+    /// Forward via the variable-arity dispatch in [`concat`]. Mirrors
+    /// the `cpu_fwd`/`cuda_fwd` surface of single-input ops for code
+    /// that wants to invoke through the `ConcatOp` handle. The
+    /// dispatch picks the CUDA fast path automatically when all inputs
+    /// are CUDA-backed.
+    pub fn fwd(&self, inputs: &[&Tensor]) -> Result<Tensor> {
+        concat(inputs, self.axis)
+    }
+
+    /// CUDA-only forward: routes directly through the CUDA substrate
+    /// kernel. Returns `Ok(None)` (rather than erroring) when any
+    /// input is not on CUDA — keeps the per-Op surface symmetric with
+    /// `DeviceOp{1,2,3}::cuda_fwd`.
+    #[cfg(feature = "cuda")]
+    pub fn cuda_fwd(&self, inputs: &[&Tensor]) -> Result<Option<Tensor>> {
+        if inputs.is_empty() {
+            return Ok(None);
+        }
+        if inputs.len() > 32 {
+            return Ok(None);
+        }
+        if !inputs
+            .iter()
+            .all(|t| matches!(t.device(), crate::Device::Cuda(_)))
+        {
+            return Ok(None);
+        }
+        let out = crate::cuda_concat(inputs, self.axis)?;
+        Ok(Some(out))
     }
 }
 
@@ -94,6 +129,21 @@ pub fn concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
                     inputs[0].shape()
                 );
             }
+        }
+    }
+
+    // CUDA fast path: if all inputs are CUDA-backed (and within the
+    // substrate's MAX_INPUTS=32), route through `cuda_concat` to
+    // avoid a CPU staging copy. Mirrors the per-Op `cuda_fwd` pattern
+    // for variable-arity ops like this one.
+    #[cfg(feature = "cuda")]
+    {
+        let all_cuda = inputs.len() <= 32
+            && inputs
+                .iter()
+                .all(|t| matches!(t.device(), crate::Device::Cuda(_)));
+        if all_cuda {
+            return crate::cuda_concat(inputs, axis);
         }
     }
 
