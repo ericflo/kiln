@@ -171,6 +171,61 @@ impl DeviceOp2 for MaskedFillOp {
         Ok(Some(out))
     }
 
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor, mask: &Tensor) -> Result<Option<Tensor>> {
+        // Same precondition gates as cuda_fwd. Hard-error on shape
+        // mismatch and mask-dtype since those would also fail CPU
+        // dispatch; soft-fall through on unsupported value dtypes /
+        // non-contiguous / non-Vulkan-resident storage so the
+        // dispatcher routes through CPU.
+        if x.shape() != mask.shape() {
+            bail!(
+                "MaskedFillOp: shape mismatch {:?} vs mask {:?}",
+                x.shape(),
+                mask.shape()
+            );
+        }
+        if mask.dtype() != DType::U8 {
+            bail!(
+                "MaskedFillOp: mask dtype must be U8, got {}",
+                mask.dtype()
+            );
+        }
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() || !mask.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(x.device(), crate::Device::Vulkan(_))
+            || !matches!(mask.device(), crate::Device::Vulkan(_))
+        {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): implement
+        // `crate::vulkan_masked_fill(x, mask, self.fill_value)`
+        // analogous to `crate::cuda_masked_fill` above. Until that
+        // wrapper lands, fall through to the CPU path (numerics-
+        // correct, performance-wrong).
+        // Candidate implementations:
+        //   1. New SPIR-V compute shader added to
+        //      `kiln-vulkan-kernel::vk_ops::mask`. The existing
+        //      `vk_causal_mask_inplace` already writes -inf into a
+        //      scores tensor based on a position predicate; the
+        //      `masked_fill` variant generalizes it to an arbitrary
+        //      U8 mask buffer and arbitrary `fill_value`. Pure
+        //      pointwise — one work-item per element, no reductions.
+        //   2. Reuse `vk_ops::elementwise`'s where-style ternary if
+        //      present; otherwise this is a thin new shader.
+        //   3. Dtype matrix: `VkDType` currently exposes only F32 and
+        //      Bf16. F16 needs a new variant added in
+        //      `kiln-vulkan-kernel::vk_tensor::VkDType` before any
+        //      F16-native shader can land. Mask dtype is fixed at U8
+        //      (matches cpu_fwd); the shader must read U8 via a
+        //      uint8 storage buffer (Vulkan `VK_KHR_8bit_storage`).
+        Ok(None)
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
