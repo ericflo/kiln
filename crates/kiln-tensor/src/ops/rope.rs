@@ -122,6 +122,30 @@ impl DeviceOp3 for RopeOp {
         Ok(Some(out))
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Option<Tensor>> {
+        // Validate up front so error semantics match cpu_fwd.
+        validate(x, cos, sin, self.rotary_dim)?;
+        // CUDA path requires contiguous inputs of supported dtypes.
+        // Anything off-path returns None so dispatch3 falls back to CPU.
+        if !x.is_contiguous() || !cos.is_contiguous() || !sin.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(
+            x.dtype(),
+            crate::DType::F32 | crate::DType::BF16 | crate::DType::F16
+        ) {
+            return Ok(None);
+        }
+        if !matches!(
+            cos.dtype(),
+            crate::DType::F32 | crate::DType::BF16 | crate::DType::F16
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(crate::cuda_rope(x, cos, sin, self.rotary_dim)?))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
