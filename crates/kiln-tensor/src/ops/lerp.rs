@@ -33,6 +33,17 @@ pub fn lerp(a: &Tensor, b: &Tensor, weight: f32) -> Result<Tensor> {
     if !a.is_contiguous() || !b.is_contiguous() {
         bail!("lerp: inputs must be contiguous");
     }
+    // CUDA fast path: when both inputs live on CUDA, route through
+    // `csrc/lerp.cu` (issue #1082). The CPU branch below still
+    // handles CpuStorage-backed tensors with identical numerics.
+    #[cfg(feature = "cuda")]
+    {
+        let a_on_cuda = a.storage().as_any().is::<crate::CudaStorage>();
+        let b_on_cuda = b.storage().as_any().is::<crate::CudaStorage>();
+        if a_on_cuda && b_on_cuda {
+            return crate::cuda_lerp(a, b, weight);
+        }
+    }
     let n = a.element_count();
     let a_cpu = a.storage();
     let a_cpu = a_cpu

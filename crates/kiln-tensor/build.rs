@@ -125,6 +125,7 @@ fn build_cuda() {
     build.file(csrc_dir.join("where_select.cu"));
     build.file(csrc_dir.join("diag.cu"));
     build.file(csrc_dir.join("binary_minmax.cu"));
+    build.file(csrc_dir.join("lerp.cu"));
     build.compile("kiln_tensor_cuda_ops");
 
     println!(
