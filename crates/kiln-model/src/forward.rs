@@ -236,13 +236,24 @@ fn cuda_use_kt_api_sigmoid_mul() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: route the fused RMSNorm inference forward through
-/// the kt-API + adapters. Set `KILN_USE_KT_API_RMSNORM=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off.
+/// Phase 7 default-on (#1082): route the fused RMSNorm inference
+/// forward through the kt-API + adapters. Default ON because both
+/// paths bottom out in the same `kiln_fused_rmsnorm` FFI symbol —
+/// only the Rust shell types and the kt-bridge dtod-copy at the
+/// output boundary differ. This is bit-exact by construction: the
+/// kernel reads the same input bytes and writes the same output
+/// bytes; the kt path then copies those bytes from a kt-owned
+/// allocation back into a candle tensor. The conv1d (`9b51148d`)
+/// + flash_attn (`e1b45a34`) flips established that the kt-bridge
+/// borrow + dtod-copy machinery is itself byte-stable. Set
+/// `KILN_DISABLE_KT_API_RMSNORM=1` to opt out (escape hatch).
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_rmsnorm() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_RMSNORM").is_ok());
+    // #1082: flipped default ON. Both candle and kt paths bottom out
+    // in the same FFI symbol (`kiln_fused_rmsnorm`); only the Rust
+    // shell types differ. Escape hatch: `KILN_DISABLE_KT_API_RMSNORM=1`.
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_RMSNORM").is_err());
     direct || cuda_use_kt_api_all()
 }
 
