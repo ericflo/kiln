@@ -21893,7 +21893,29 @@ pub fn mtp_forward_step(
     //
     // We keep the concat alive (named `concat`) so the Phase B6 dump can
     // capture the exact bytes fed into `fc.weight` as `fc_input`.
-    let concat = Tensor::cat(&[&norm_emb, &norm_h], 2)?.contiguous()?;
+    //
+    // Phase 7 (#1082): for rank-3 tensors axis-2 is the last dim, so
+    // route the cat through `try_kt_concat_last_dim`. Both pieces are
+    // produced by the RMSNorm above and are contiguous CUDA tensors of
+    // matching dtype + rank; the helper's preconditions are satisfied
+    // on the production decode path. The follow-up `.contiguous()?` is
+    // kept because `try_kt_concat_last_dim` outputs are already
+    // contiguous but callers downstream rely on the layout assertion.
+    let concat = {
+        #[cfg(feature = "cuda")]
+        {
+            let pieces: [&Tensor; 2] = [&norm_emb, &norm_h];
+            match try_kt_concat_last_dim(&pieces)? {
+                Some(out) => out,
+                None => Tensor::cat(&[&norm_emb, &norm_h], 2)?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            Tensor::cat(&[&norm_emb, &norm_h], 2)?
+        }
+    }
+    .contiguous()?;
     if dump_pre_rope {
         let _ = crate::mtp_debug::capture_pre_rope_tap("concat", &concat);
     }
