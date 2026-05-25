@@ -410,6 +410,28 @@ fn cuda_use_kt_api_neg() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise `Tensor::sqrt()` through the kt-API
+/// + adapters. Set `KILN_USE_KT_API_SQRT=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// `.sqrt()` candle calls in `forward.rs` (the L2-norm
+/// denominator `(sq_sum + eps).sqrt()`) through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 14 (Sqrt)
+/// via the kt-bridge borrow adapter. Pays one dtod memcpy on the
+/// output direction (the kt allocation is freshly-owned). Falls
+/// through to the candle composite when any precondition fails so
+/// behavior is identical with the gate off.
+///
+/// Distinct from the fused RMSNorm sites (`(variance + eps).sqrt()
+/// .recip()`) which are still candle composites; this gate only
+/// migrates the standalone `.sqrt()` shape that has no fused
+/// kernel alternative.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_sqrt() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SQRT").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -6510,6 +6532,45 @@ fn try_kt_neg(x: &Tensor) -> Result<Option<Tensor>> {
     Ok(Some(out))
 }
 
+/// Phase 7 (#1082) — kt-API sqrt migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 14 (Sqrt).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0) so the caller falls through to
+/// the candle `.sqrt()`. NVTX range `kiln/sqrt_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_sqrt(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_sqrt() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/sqrt_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 14 = Sqrt (matches csrc/activation.cu constants and
+    // crates/kiln-tensor/src/ops/unary_arith.rs::cuda_kind_tag).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 14) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_sqrt: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
 #[cfg(feature = "cuda")]
 fn cuda_rotary_one_training_bf16_supported(
     x: &Tensor,
@@ -7748,7 +7809,27 @@ fn l2_normalize(x: &Tensor) -> Result<Tensor> {
             x_f32.sqr()?.sum_keepdim(candle_core::D::Minus1)?
         }
     };
-    let norm = (sq_sum + 1e-6)?.sqrt()?;
+    // Phase 7 (#1082): when `KILN_USE_KT_API_SQRT=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND the addend is a
+    // contiguous CUDA tensor of a supported dtype, route the
+    // `.sqrt()` step through `kiln_tensor::cuda_activation_unary`
+    // with kind 14 (Sqrt). Falls through to the candle composite
+    // when any precondition fails.
+    let sq_sum_eps = (sq_sum + 1e-6)?;
+    let norm = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_sqrt(&sq_sum_eps)? {
+                out
+            } else {
+                sq_sum_eps.sqrt()?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            sq_sum_eps.sqrt()?
+        }
+    };
     let normalized = x_f32.broadcast_div(&norm)?;
     Ok(normalized)
 }
