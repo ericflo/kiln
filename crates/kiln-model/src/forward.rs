@@ -108,7 +108,19 @@ fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
             (exp_neg_x + 1.0).context("cuda_sigmoid add one")?
         }
     };
-    let result = one_plus.recip().context("cuda_sigmoid recip")?;
+    let result = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_recip(&one_plus).context("cuda_sigmoid try_kt_recip")? {
+                Some(out) => out,
+                None => one_plus.recip().context("cuda_sigmoid recip")?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            one_plus.recip().context("cuda_sigmoid recip")?
+        }
+    };
     Ok(result)
 }
 
@@ -819,7 +831,6 @@ fn cuda_use_kt_api_relu() -> bool {
 /// land in follow-up commits of the same #1082 series. Mirrors
 /// `cuda_use_kt_api_sqrt` / `cuda_use_kt_api_neg` cadence.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 fn cuda_use_kt_api_recip() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_RECIP").is_ok());
@@ -7717,12 +7728,11 @@ fn try_kt_relu(x: &Tensor) -> Result<Option<Tensor>> {
 /// and `1.0 / NaN = NaN`. See `csrc/activation.cu` `KIND_RECIP`
 /// case (added in commit 7a3e1e77 for the same #1082 series).
 ///
-/// `#[allow(dead_code)]` until the first call-site migration
-/// lands in a follow-up commit; mirrors the dead-code-allowed
-/// precedent of `try_kt_tanh` (9839a3a4), `try_kt_gelu`
-/// (445095b6), and `try_kt_relu` (445095b6).
+/// First call-site migration: the `cuda_sigmoid` composite's
+/// `(1 + e^-x).recip()` final step. Additional RMSNorm
+/// `(variance + eps).sqrt().recip()` sites land in follow-up
+/// commits of the same #1082 series.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 fn try_kt_recip(x: &Tensor) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_recip() {
         return Ok(None);
