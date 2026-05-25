@@ -17067,6 +17067,17 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // `bench-results/cuda-graph-bs2-secondary-audit.md` suspects 3+4).
     // `None` reproduces the legacy per-call allocation behavior.
     graph_outputs: Option<(&Tensor, &Tensor)>,
+    // CUDA-graph-stable RoPE cos/sin tables for the bs>1 captured
+    // forward. When `Some((cos, sin))` (shape `[batch, rotary_dim/2]`,
+    // typically `graph_inputs.rotary_cos`/`.rotary_sin`), the RoPE
+    // step consumes the caller-owned tables via
+    // `rotary_embedding_from_tables` instead of calling
+    // `rotary_embedding_from_tensor`, which builds fresh
+    // `cudaMalloc`-backed `freqs/cos/sin` tensors inside the captured
+    // region (#1082 suspect 2 — see
+    // `bench-results/cuda-graph-bs2-secondary-audit.md`). `None`
+    // reproduces the legacy positions-based per-call build.
+    rope_tables: Option<(&Tensor, &Tensor)>,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
     let profile_device = x.device();
@@ -17279,7 +17290,29 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     };
     let (q, k) = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
-        let out = if positions.elem_count() == 1 {
+        let out = if let Some((cos, sin)) = rope_tables {
+            // CUDA-graph capture path: the runner pre-allocates
+            // `[batch, rotary_dim/2]` cos/sin tables and re-fills them via
+            // `update_batched_rotary_buffers` before every replay, so the
+            // captured RoPE kernel reads from a stable device pointer.
+            // The table shape matches the per-row layout (one (cos, sin)
+            // row per start_position, even when positions are uniform),
+            // so we swap batch <-> seq_len so `apply_rope` /
+            // `fused_rotary_qk` broadcast `[batch, half]` against
+            // `[1, batch, num_heads, half]`. This bypasses the
+            // `rotary_embedding_from_tensor` inner allocation of
+            // freshly-allocated `freqs/cos/sin` tensors inside the
+            // captured region — the bug documented as suspect 2 in
+            // `bench-results/cuda-graph-bs2-secondary-audit.md` (#1082).
+            let q_swap = q.transpose(0, 1)?.contiguous()?;
+            let k_swap = k.transpose(0, 1)?.contiguous()?;
+            let (q_rot, k_rot) =
+                rotary_embedding_from_tables(&q_swap, &k_swap, cos, sin, head_dim, rotary_dim)?;
+            (
+                q_rot.transpose(0, 1)?.contiguous()?,
+                k_rot.transpose(0, 1)?.contiguous()?,
+            )
+        } else if positions.elem_count() == 1 {
             // Shared scalar position: reuse the existing seq_len-major rope
             // path. cos/sin shape [1, half_rotary] broadcasts cleanly across
             // [batch, 1, num_heads, half_rotary].
@@ -19351,6 +19384,10 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     // captured forward path. Forwarded as-is to
     // `gqa_attention_paged_decode_contiguous_batch` (#1082).
     graph_outputs: Option<(&Tensor, &Tensor)>,
+    // CUDA-graph-stable RoPE cos/sin tables for the bs>1 captured
+    // forward path. Forwarded as-is to
+    // `gqa_attention_paged_decode_contiguous_batch` (#1082 suspect 2).
+    rope_tables: Option<(&Tensor, &Tensor)>,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -19398,6 +19435,7 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         full_attn_profile_context,
         cached_meta,
         graph_outputs,
+        rope_tables,
     )?;
     let x = {
         kiln_nvtx::range!(c"kiln/residual_batch_decode");
@@ -19464,6 +19502,8 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
         None,
         None,
         None,
+        None,
+        None,
     )
 }
 
@@ -19510,6 +19550,20 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
     // (#1082 suspects 3+4).
     stable_attn_out_gpu: Option<&[Tensor]>,
     stable_softmax_lse_gpu: Option<&[Tensor]>,
+    // CUDA-graph-stable RoPE `[batch, rotary_dim/2]` cos/sin tables.
+    // When `Some`, the caller has pre-allocated runner-owned device
+    // tensors and refills them via
+    // `CudaGraphRunner::update_batched_rotary_buffers` before each
+    // graph replay. The captured RoPE step reads from those stable
+    // pointers via `rotary_embedding_from_tables`, instead of the
+    // legacy `rotary_embedding_from_tensor` path that allocates fresh
+    // `freqs/cos/sin` `cudaMalloc` tensors inside the captured region.
+    // Mirrors the bs=1 `PagedDecodeGraphInputs::{rotary_cos,
+    // rotary_sin}` plumbing into `gqa_attention_paged_with_rope_tables`
+    // (#1082 suspect 2 — see
+    // `bench-results/cuda-graph-bs2-secondary-audit.md`).
+    stable_rotary_cos_gpu: Option<&Tensor>,
+    stable_rotary_sin_gpu: Option<&Tensor>,
 ) -> Result<Tensor> {
     let batch = token_ids.len();
     anyhow::ensure!(batch > 0, "batched paged decode requires a non-empty batch");
@@ -19655,6 +19709,15 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                         }
                         _ => None,
                     };
+                // Pull the runner-owned stable rotary cos/sin tables
+                // through. Both must be provided together — they're a
+                // logical pair populated by the same
+                // `update_batched_rotary_buffers` step (#1082 suspect 2).
+                let layer_rope_tables: Option<(&Tensor, &Tensor)> =
+                    match (stable_rotary_cos_gpu, stable_rotary_sin_gpu) {
+                        (Some(cos), Some(sin)) => Some((cos, sin)),
+                        _ => None,
+                    };
                 hidden = transformer_block_paged_decode_contiguous_batch(
                     backend,
                     &hidden,
@@ -19671,6 +19734,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     profile_mlp_stages.then_some((i, max_start_pos)),
                     cached_paged_meta_ref,
                     layer_graph_outputs,
+                    layer_rope_tables,
                 )
                 .with_context(|| {
                     format!("batched transformer block {i} (full attention, paged)")
@@ -21242,19 +21306,25 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
     // `graph_inputs.seqused_k`) and now also writes/reads the
     // per-layer flash-attn paged-decode `attn_out` + `softmax_lse`
     // through caller-owned tensors (`graph_inputs.attn_out[layer]` +
-    // `graph_inputs.softmax_lse[layer]`). Both were previously
-    // re-allocated by `Tensor::from_slice` or `Tensor::zeros` inside
-    // the captured region and would `cudaFree` their storage at end
-    // of capture, leaving the graph with dangling pointers (the
-    // `ILLEGAL_ADDRESS` fault documented in
+    // `graph_inputs.softmax_lse[layer]`). The RoPE step now reads
+    // its cos/sin tables from `graph_inputs.rotary_cos` /
+    // `.rotary_sin` (refreshed via
+    // `CudaGraphRunner::update_batched_rotary_buffers` before each
+    // replay) instead of allocating fresh `freqs/cos/sin` tensors
+    // inside the captured region via `rotary_embedding_from_tensor`.
+    // All of these allocations would otherwise `cudaFree` their
+    // storage at end of capture, leaving the graph with dangling
+    // pointers (the `ILLEGAL_ADDRESS` fault documented in
     // `bench-results/cuda-graph-bs2-memcheck.md` and the matching
-    // entry for suspects 3+4 in
+    // entries for suspects 2, 3, and 4 in
     // `bench-results/cuda-graph-bs2-secondary-audit.md`, #1082).
     //
     // FUTURE WORK (also part of #1082): the per-step KV-slot writer
-    // and rotary cos/sin tables are still built inside the captured
-    // region today, and may surface capture-time allocations when the
-    // bs>1 decode shape exercises them. The bs=1 forward
+    // is still built inside the captured region today (suspect 1).
+    // That one needs a new batched-slot kernel in `kiln-flash-attn`
+    // (it's a baked-immediate correctness bug under graph replay
+    // across `start_pos` values, not a dangling-pointer fault) — see
+    // the audit doc for the full plan. The bs=1 forward
     // (`model_forward_paged_with_graph_inputs` →
     // `model_forward_paged_inner`) already threads its
     // `PagedDecodeGraphInputs` through to every per-layer call site
@@ -21281,6 +21351,13 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
         // 3+4 — see `bench-results/cuda-graph-bs2-secondary-audit.md`).
         Some(graph_inputs.attn_out),
         Some(graph_inputs.softmax_lse),
+        // Thread the runner-owned `[batch, rotary_dim/2]` cos/sin
+        // tables through so the captured RoPE step reads from stable
+        // device pointers via `rotary_embedding_from_tables` instead
+        // of allocating fresh `freqs/cos/sin` `cudaMalloc` tensors
+        // inside the captured region (#1082 suspect 2).
+        Some(graph_inputs.rotary_cos),
+        Some(graph_inputs.rotary_sin),
     )?;
     // Compute logits and slice them into the caller-owned stable
     // `output_logits` buffer (`[batch, 1, vocab]`). The captured graph
@@ -21559,6 +21636,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                     &block_table_refs,
                     full_attn_idx,
                     layer_lora,
+                    None,
                     None,
                     None,
                     None,
@@ -25018,6 +25096,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )?;
         device.synchronize()?;
         assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
@@ -25168,6 +25247,7 @@ mod tests {
             &mut batch_cache,
             &block_tables,
             0,
+            None,
             None,
             None,
             None,
