@@ -554,6 +554,29 @@ fn cuda_use_kt_api_sin() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise `Tensor::cos()` through the kt-API
+/// + adapters. Set `KILN_USE_KT_API_COS=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// `.cos()` candle calls in `forward.rs` (the RoPE
+/// `freqs.cos()` cache builder) through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 8 (Cos) via
+/// the kt-bridge borrow adapter. Pays one dtod memcpy on the
+/// output direction (the kt allocation is freshly-owned). Falls
+/// through to the candle composite when any precondition fails so
+/// behavior is identical with the gate off.
+///
+/// Distinct from the fused `cuda_rope` kernel (which fuses
+/// rotate+apply with prebuilt cos/sin caches) — this gate
+/// migrates the *cache-construction* `.cos()` step that runs once
+/// per RoPE precompute (rare hot-path traffic). Mirrors the SIN
+/// scaffold (commit 728b3917).
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_cos() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_COS").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -6237,6 +6260,12 @@ pub fn rotary_embedding(
     // Outer product: [seq_len, half_rotary]
     let freqs = pos.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
 
+    #[cfg(feature = "cuda")]
+    let cos = match try_kt_cos(&freqs)? {
+        Some(t) => t,
+        None => freqs.cos()?,
+    };
+    #[cfg(not(feature = "cuda"))]
     let cos = freqs.cos()?; // [seq_len, half_rotary]
     #[cfg(feature = "cuda")]
     let sin = match try_kt_sin(&freqs)? {
@@ -6272,6 +6301,12 @@ pub fn rotary_embedding_from_tensor(
 
     let freqs = pos.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
 
+    #[cfg(feature = "cuda")]
+    let cos = match try_kt_cos(&freqs)? {
+        Some(t) => t,
+        None => freqs.cos()?,
+    };
+    #[cfg(not(feature = "cuda"))]
     let cos = freqs.cos()?;
     #[cfg(feature = "cuda")]
     let sin = match try_kt_sin(&freqs)? {
@@ -6321,6 +6356,12 @@ fn rotary_tables_from_tensor(
 ) -> Result<(Tensor, Tensor)> {
     let pos = positions_tensor.unsqueeze(1)?;
     let freqs = pos.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
+    #[cfg(feature = "cuda")]
+    let cos = match try_kt_cos(&freqs)? {
+        Some(t) => t,
+        None => freqs.cos()?,
+    };
+    #[cfg(not(feature = "cuda"))]
     let cos = freqs.cos()?;
     #[cfg(feature = "cuda")]
     let sin = match try_kt_sin(&freqs)? {
@@ -7076,6 +7117,44 @@ fn try_kt_sin(x: &Tensor) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_sin: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API cos migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 8 (Cos).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0) so the caller falls through to
+/// the candle `.cos()`. NVTX range `kiln/cos_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite. Mirrors `try_kt_sin` (commit 728b3917).
+#[cfg(feature = "cuda")]
+fn try_kt_cos(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_cos() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/cos_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 8 = Cos (matches csrc/activation.cu KIND_COS).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 8) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_cos: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
