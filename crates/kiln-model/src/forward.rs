@@ -416,6 +416,89 @@ fn cuda_use_kt_api_lora_add() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 (#1082) opt-in: route equal-shape `Tensor::broadcast_mul`
+/// candle calls through `kiln_tensor::cuda_elementwise_binary` with
+/// kind tag 2 (Mul) via the kt-bridge borrow adapter. Set
+/// `KILN_USE_KT_API_BROADCAST_MUL=1` (or `KILN_USE_KT_API_ALL=1`) to
+/// enable; default off.
+///
+/// `broadcast_mul` in `crates/kiln-model/src/cuda_train.rs` is used
+/// pervasively in normalization, attention, MLP and cross-entropy
+/// composites. Many call sites multiply two equal-shape contiguous
+/// CUDA tensors (e.g. `rms_inv_sq * rms_inv`, `prev_sumexp *
+/// prev_scale`) where the kt fast path applies one-for-one with the
+/// candle composite; sites with true broadcasting (size-1 axis
+/// expansion) fall through automatically because the helper checks
+/// `a.shape() == b.shape()` up front. Mirrors the
+/// [`cuda_use_kt_api_lora_add`] gate pattern. NVTX range
+/// `kiln/broadcast_mul_kt` brackets the migrated call so nsys
+/// traces separate the path from the candle baseline.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_broadcast_mul() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_BROADCAST_MUL").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
+/// Phase 7 (#1082) opt-in: route equal-shape `Tensor::broadcast_add`
+/// candle calls through `kiln_tensor::cuda_elementwise_binary` with
+/// kind tag 0 (Add). Set `KILN_USE_KT_API_BROADCAST_ADD=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off.
+///
+/// Mirror of [`cuda_use_kt_api_broadcast_mul`] — equal-shape sites
+/// (e.g. `log_sumexp_only + running_max` in the linear cross-entropy
+/// log-sum-exp combine) hit the kt fast path; true broadcasting
+/// sites fall through.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_broadcast_add() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_BROADCAST_ADD").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
+/// Phase 7 (#1082) opt-in: route equal-shape `Tensor::broadcast_sub`
+/// candle calls through `kiln_tensor::cuda_elementwise_binary` with
+/// kind tag 1 (Sub). Set `KILN_USE_KT_API_BROADCAST_SUB=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off.
+///
+/// Mirror of [`cuda_use_kt_api_broadcast_mul`]. Wired up for
+/// completeness; production `broadcast_sub` call sites in
+/// `cuda_train.rs` are almost all `[..., V] - [..., 1]` true
+/// broadcasts (softmax shift, cross-entropy chunk shift), which the
+/// helper rejects at the shape-equality gate. Plumbed so future
+/// equal-shape sites land without further scaffolding, matching the
+/// dead-code-allowed precedent of [`cuda_use_kt_api_min_binary`]
+/// (PR #(... binary minmax)) and [`cuda_use_kt_api_lerp`].
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_broadcast_sub() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_BROADCAST_SUB").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
+/// Phase 7 (#1082) opt-in: route equal-shape `Tensor::broadcast_div`
+/// candle calls through `kiln_tensor::cuda_elementwise_binary` with
+/// kind tag 3 (Div). Set `KILN_USE_KT_API_BROADCAST_DIV=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off.
+///
+/// Mirror of [`cuda_use_kt_api_broadcast_mul`]. Targets the
+/// `cuda_div` forward + backward in `cuda_train.rs` where the
+/// general `lhs.broadcast_div(rhs)` reduces to elementwise div when
+/// the caller passes equal-shape operands; sites with true
+/// broadcasting (softmax normalize, etc.) fall through.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_broadcast_div() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_BROADCAST_DIV").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: last-dim `Tensor::cat` through the kt-API +
 /// adapters. Set `KILN_USE_KT_API_CONCAT_LAST_DIM=1` (or
 /// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
@@ -10915,6 +10998,203 @@ fn try_kt_lora_add(base: &Tensor, delta: &Tensor) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_lora_add: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API `broadcast_mul` migration helper.
+/// Routes equal-shape contiguous CUDA tensor pairs through
+/// `kiln_tensor::cuda_elementwise_binary` with kind tag 2 (Mul),
+/// matching `KIND_MUL` in `crates/kiln-tensor/csrc/elementwise.cu`.
+///
+/// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
+/// unsupported dtype, dtype/shape mismatch, non-contiguous, rank-0)
+/// so the caller falls through to the candle `broadcast_mul`
+/// composite. NVTX range `kiln/broadcast_mul_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// candle baseline.
+///
+/// Mirrors the structural contract of [`try_kt_lora_add`] (the
+/// other elementwise-binary migration helper): true broadcasting
+/// sites (size-1 axis expansion) fail the shape-equality gate and
+/// safely fall through. Used for the many `broadcast_mul` call
+/// sites in `crates/kiln-model/src/cuda_train.rs` (RMSNorm fwd/bwd,
+/// cuda_rope, cross-entropy chunk combine, softmax bwd, etc.).
+#[cfg(feature = "cuda")]
+pub(crate) fn try_kt_broadcast_mul(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_broadcast_mul() {
+        return Ok(None);
+    }
+    if !matches!(a.device(), Device::Cuda(_))
+        || !matches!(b.device(), Device::Cuda(_))
+        || !matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || a.dtype() != b.dtype()
+        || a.shape() != b.shape()
+        || !a.is_contiguous()
+        || !b.is_contiguous()
+        || a.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/broadcast_mul_kt");
+
+    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 2 = Mul (matches KIND_MUL in
+    // crates/kiln-tensor/csrc/elementwise.cu).
+    let out_kt = match kiln_tensor::cuda_elementwise_binary(&a_kt, &b_kt, 2) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_broadcast_mul: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API `broadcast_add` migration helper.
+/// Mirror of [`try_kt_broadcast_mul`] with kind tag 0 (Add).
+///
+/// Wired up for completeness; the most common equal-shape add call
+/// sites in `cuda_train.rs` are the linear cross-entropy log-sum-exp
+/// combine (`log_sumexp_only + running_max`) where both operands
+/// share the `[..., 1]` reduced shape. True broadcasting sites
+/// (e.g. `attn_scores + mask`) fall through at the shape-equality
+/// gate, matching the `Ok(None)` precondition of [`try_kt_lora_add`].
+#[cfg(feature = "cuda")]
+pub(crate) fn try_kt_broadcast_add(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_broadcast_add() {
+        return Ok(None);
+    }
+    if !matches!(a.device(), Device::Cuda(_))
+        || !matches!(b.device(), Device::Cuda(_))
+        || !matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || a.dtype() != b.dtype()
+        || a.shape() != b.shape()
+        || !a.is_contiguous()
+        || !b.is_contiguous()
+        || a.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/broadcast_add_kt");
+
+    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 0 = Add (matches KIND_ADD in
+    // crates/kiln-tensor/csrc/elementwise.cu).
+    let out_kt = match kiln_tensor::cuda_elementwise_binary(&a_kt, &b_kt, 0) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_broadcast_add: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API `broadcast_sub` migration helper.
+/// Mirror of [`try_kt_broadcast_mul`] with kind tag 1 (Sub).
+///
+/// Wired up for completeness; today there are no production
+/// equal-shape `broadcast_sub` call sites in `cuda_train.rs` (the
+/// softmax/softplus/cross-entropy shifts are all `[..., V] - [..., 1]`
+/// true broadcasts that fail the shape-equality gate). Plumbed so
+/// future equal-shape sites land without further scaffolding,
+/// matching the dead-code-allowed precedent of [`try_kt_min_binary`]
+/// and [`try_kt_lerp`].
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+pub(crate) fn try_kt_broadcast_sub(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_broadcast_sub() {
+        return Ok(None);
+    }
+    if !matches!(a.device(), Device::Cuda(_))
+        || !matches!(b.device(), Device::Cuda(_))
+        || !matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || a.dtype() != b.dtype()
+        || a.shape() != b.shape()
+        || !a.is_contiguous()
+        || !b.is_contiguous()
+        || a.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/broadcast_sub_kt");
+
+    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 1 = Sub (matches KIND_SUB in
+    // crates/kiln-tensor/csrc/elementwise.cu).
+    let out_kt = match kiln_tensor::cuda_elementwise_binary(&a_kt, &b_kt, 1) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_broadcast_sub: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API `broadcast_div` migration helper.
+/// Mirror of [`try_kt_broadcast_mul`] with kind tag 3 (Div).
+///
+/// Targets the `cuda_div` forward + backward sites in
+/// `cuda_train.rs` where the caller passes equal-shape operands;
+/// sites with true broadcasting (e.g. softmax `exp / sum_exp`) fall
+/// through at the shape-equality gate.
+#[cfg(feature = "cuda")]
+pub(crate) fn try_kt_broadcast_div(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_broadcast_div() {
+        return Ok(None);
+    }
+    if !matches!(a.device(), Device::Cuda(_))
+        || !matches!(b.device(), Device::Cuda(_))
+        || !matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || a.dtype() != b.dtype()
+        || a.shape() != b.shape()
+        || !a.is_contiguous()
+        || !b.is_contiguous()
+        || a.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/broadcast_div_kt");
+
+    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 3 = Div (matches KIND_DIV in
+    // crates/kiln-tensor/csrc/elementwise.cu).
+    let out_kt = match kiln_tensor::cuda_elementwise_binary(&a_kt, &b_kt, 3) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_broadcast_div: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
