@@ -9774,9 +9774,42 @@ fn rotary_one_backward(
 
     let dx1 = (g1.broadcast_mul(&cos)? + g2.broadcast_mul(&sin)?)?;
     let dx2 = (g2.broadcast_mul(&cos)? - g1.broadcast_mul(&sin)?)?;
+    // Phase 7 (#1082): route the RoPE backward last-dim concat through
+    // `try_kt_concat_last_dim`. The 2-piece and 3-piece concats both
+    // run once per RoPE backward call inside the training step; the
+    // helper falls through to the candle composite when its
+    // preconditions (CUDA-resident, supported dtype, contiguous,
+    // matching rank) are not satisfied, so behavior is bit-identical
+    // when the gate is off.
     let out = match grad_pass {
-        Some(pass) => Tensor::cat(&[&dx1, &dx2, &pass], candle_core::D::Minus1)?,
-        None => Tensor::cat(&[&dx1, &dx2], candle_core::D::Minus1)?,
+        Some(pass) => {
+            #[cfg(feature = "cuda")]
+            {
+                let pieces: [&Tensor; 3] = [&dx1, &dx2, &pass];
+                match try_kt_concat_last_dim(&pieces)? {
+                    Some(out) => out,
+                    None => Tensor::cat(&[&dx1, &dx2, &pass], candle_core::D::Minus1)?,
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                Tensor::cat(&[&dx1, &dx2, &pass], candle_core::D::Minus1)?
+            }
+        }
+        None => {
+            #[cfg(feature = "cuda")]
+            {
+                let pieces: [&Tensor; 2] = [&dx1, &dx2];
+                match try_kt_concat_last_dim(&pieces)? {
+                    Some(out) => out,
+                    None => Tensor::cat(&[&dx1, &dx2], candle_core::D::Minus1)?,
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                Tensor::cat(&[&dx1, &dx2], candle_core::D::Minus1)?
+            }
+        }
     };
     Ok(out.to_dtype(grad_dtype)?)
 }
