@@ -140,12 +140,35 @@ fn cuda_reciprocal_negative_values_f32_parity() {
     check_op("recip-neg", ops::reciprocal, &data, CandleDType::F32, 1e-5);
 }
 
-// ---- direct cuda_activation_unary FFI smoke for KIND_RECIP -------------
+// ---- sign (#1082: kind 23) ---------------------------------------------
+
+#[test]
+fn cuda_sign_f32_parity() {
+    // Mix of positive, negative, and a few zeros to exercise the
+    // three-way branch.
+    let mut data = pattern(257, 10);
+    // Salt in some exact zeros and very small values straddling zero.
+    data[0] = 0.0;
+    data[1] = -0.0;
+    data[2] = f32::MIN_POSITIVE;
+    data[3] = -f32::MIN_POSITIVE;
+    check_op("sign", ops::sign, &data, CandleDType::F32, 1e-6);
+}
+
+#[test]
+fn cuda_sign_bf16_parity() {
+    // BF16: -1.0 / 0.0 / 1.0 are all exactly representable so this
+    // is a bit-tight assertion modulo the F32→BF16 narrowing on the
+    // input side (which may flush the smallest subnormals to 0).
+    let data = pattern(513, 11);
+    check_op("sign", ops::sign, &data, CandleDType::BF16, 1e-3);
+}
+
+// ---- direct cuda_activation_unary FFI smoke for KIND_SIGN --------------
 
 #[test]
 fn cuda_activation_unary_recip_direct_call() {
-    // Confirm the FFI bounds-check accepts kind 22 (new KIND_MAX)
-    // and rejects 23 (one past the current max).
+    // Confirm the FFI bounds-check accepts the existing kind 22.
     let Some(dev) = try_cuda() else {
         eprintln!("CUDA not available; skipping");
         return;
@@ -158,7 +181,7 @@ fn cuda_activation_unary_recip_direct_call() {
         .unwrap();
     let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_cd).unwrap();
 
-    // KIND_RECIP = 22 (new max); should succeed for nonzero inputs.
+    // KIND_RECIP = 22; should succeed.
     let out_kt = cuda_activation_unary(&x_kt, 22).expect("KIND_RECIP");
     let cuda_dev = match dev {
         CandleDevice::Cuda(ref c) => c,
@@ -176,7 +199,56 @@ fn cuda_activation_unary_recip_direct_call() {
         let want = 1.0_f32 / (i as f32 + 1.0);
         assert!((g - want).abs() < 1e-5, "i={i}: got {g}, want {want}");
     }
+}
 
-    // KIND_MAX+1 (=23) must still error.
-    assert!(cuda_activation_unary(&x_kt, 23).is_err());
+#[test]
+fn cuda_activation_unary_sign_direct_call() {
+    // Confirm the FFI bounds-check accepts kind 23 (new KIND_MAX)
+    // and rejects 24 (one past the current max).
+    let Some(dev) = try_cuda() else {
+        eprintln!("CUDA not available; skipping");
+        return;
+    };
+    // Mix of positive, negative, and zero.
+    let data: Vec<f32> = (0..64)
+        .map(|i| (i as f32 - 32.0) * 0.25)
+        .collect();
+    let n = data.len();
+    let x_cd = CandleTensor::from_vec(data.clone(), (n,), &dev)
+        .unwrap()
+        .to_dtype(CandleDType::F32)
+        .unwrap();
+    let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_cd).unwrap();
+
+    // KIND_SIGN = 23 (new max); should succeed.
+    let out_kt = cuda_activation_unary(&x_kt, 23).expect("KIND_SIGN");
+    let cuda_dev = match dev {
+        CandleDevice::Cuda(ref c) => c,
+        _ => unreachable!(),
+    };
+    cuda_dev.synchronize().unwrap();
+
+    let got: Vec<f32> = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .unwrap()
+        .reshape((n,))
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    for (i, &g) in got.iter().enumerate() {
+        let v = data[i];
+        let want = if v > 0.0 {
+            1.0
+        } else if v < 0.0 {
+            -1.0
+        } else {
+            0.0
+        };
+        assert!(
+            (g - want).abs() < 1e-6,
+            "i={i}: v={v} got {g}, want {want}"
+        );
+    }
+
+    // KIND_MAX+1 (=24) must still error.
+    assert!(cuda_activation_unary(&x_kt, 24).is_err());
 }

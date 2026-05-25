@@ -5,7 +5,8 @@
 // /neg/abs/sqrt) added in #1082 — same kind-tagged dispatch, same
 // dtype handling, same launch shape. Extended further in the same
 // PR series with log2/log10/log1p (kinds 15..=17), inverse trig
-// (asin/acos/atan, 18..=20), atanh (21), and reciprocal (22).
+// (asin/acos/atan, 18..=20), atanh (21), reciprocal (22), and
+// sign (23).
 //
 // In-place math in F32 (kiln's numerical-reference convention),
 // narrowed back to the storage dtype on store.
@@ -64,8 +65,10 @@
 // Reciprocal — unblocks RMSNorm-style migrations like
 // `(variance + eps).sqrt().recip()` (#1082):
 #define KIND_RECIP  22
+// Sign-and-round family (#1082):
+#define KIND_SIGN   23
 
-#define KIND_MAX    22
+#define KIND_MAX    23
 
 // Dtype tags
 #define DTYPE_F32  0
@@ -151,6 +154,19 @@ __device__ __forceinline__ float apply_unary(int kind, float x) {
             // 1.0 / x — IEEE NaN/inf semantics match the CPU
             // reference (div-by-zero yields ±inf, 0/0 yields NaN).
             return 1.0f / x;
+        }
+        case KIND_SIGN: {
+            // Three-way sign matching the CPU reference:
+            //   x > 0 ->  1
+            //   x < 0 -> -1
+            //   x = 0 (or NaN) -> 0
+            // Note: CUDA `copysignf(1.0f, x)` would return +1 for
+            // +0 and -1 for -0, which disagrees with the CPU
+            // `if v > 0 ... else if v < 0 ... else 0` chain. Stay
+            // explicit to preserve bit-tight parity.
+            if (x > 0.0f) return 1.0f;
+            if (x < 0.0f) return -1.0f;
+            return 0.0f;
         }
         default:
             return 0.0f;

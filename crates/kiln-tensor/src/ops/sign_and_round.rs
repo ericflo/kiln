@@ -7,9 +7,9 @@
 //! # CUDA wiring (#1082)
 //!
 //! Routes through the shared `cuda_activation_unary` kernel.
-//! `recip` lands first (kind 22, this commit); the other five
-//! kinds (sign/floor/ceil/round/trunc) follow in subsequent
-//! commits of the #1082 series.
+//! `recip` landed first (kind 22), `sign` follows (kind 23); the
+//! remaining four kinds (floor/ceil/round/trunc) land in
+//! subsequent commits of the #1082 series.
 
 use std::sync::Arc;
 
@@ -61,14 +61,15 @@ impl SignRoundKind {
 
     /// CUDA kernel kind tag matching the `KIND_*` constants in
     /// `csrc/activation.cu`. `None` means the CUDA path is not yet
-    /// wired for this op (falls back to CPU). `recip` is the first
-    /// of this family to land (kind 22, #1082).
+    /// wired for this op (falls back to CPU). `recip` landed first
+    /// (kind 22); `sign` follows in this commit of the #1082 series.
     #[cfg(feature = "cuda")]
     const fn cuda_kind_tag(self) -> Option<i32> {
         match self {
             SignRoundKind::Reciprocal => Some(22),
-            // sign/floor/ceil/round/trunc CUDA wiring lands in
-            // follow-up commits of the #1082 series.
+            SignRoundKind::Sign => Some(23),
+            // floor/ceil/round/trunc CUDA wiring lands in follow-up
+            // commits of the #1082 series.
             _ => None,
         }
     }
