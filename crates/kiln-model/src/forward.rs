@@ -16717,6 +16717,12 @@ pub fn gqa_attention_paged(
         lora,
         #[cfg(feature = "cuda")]
         None,
+        // Phase 7 #1082: no kt twin plumbed through this wrapper yet
+        // — the cache-owning struct migration that allocates one via
+        // `try_kt_paged_kv_cache_new` is a follow-up commit. Default
+        // `None` keeps this path on the candle writer only.
+        #[cfg(feature = "cuda")]
+        None,
     )
 }
 
@@ -16740,6 +16746,15 @@ fn gqa_attention_paged_with_rope_tables(
     attn_output_gate: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
     #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    // Phase 7 #1082: kt twin of `paged_cache` used to mirror the
+    // CUDA-graph paged-KV write to the kt cache when the env gate
+    // `KILN_USE_KT_PAGED_KV_CACHE` is on. `None` means "gate off,
+    // non-CUDA device, or caller hasn't been migrated yet" — the
+    // candle writer below runs unchanged in that case. CUDA-gated
+    // since `PagedKvCacheKt` itself is CUDA-only.
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<
+        &crate::paged_kv_cache_kt::PagedKvCacheKt,
+    >,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
     let profile_device = x.device();
@@ -17181,12 +17196,37 @@ fn gqa_attention_paged_with_rope_tables(
             #[cfg(feature = "cuda")]
             {
                 if let Some(inputs) = graph_inputs {
-                    paged_cache.write_token_major_native_graph_slot(
+                    let done = paged_cache.write_token_major_native_graph_slot(
                         full_attn_layer_idx,
                         &k_cache_token_major,
                         &v_cache_token_major,
                         inputs.kv_slot,
-                    )?
+                    )?;
+                    // Phase 7 #1082: when the candle writer succeeded and a
+                    // kt twin cache is plumbed through (i.e. the
+                    // `KILN_USE_KT_PAGED_KV_CACHE` gate is on and the
+                    // owning struct allocated a kt cache via
+                    // `try_kt_paged_kv_cache_new`), mirror the same write
+                    // into the kt cache through
+                    // `try_kt_paged_kv_write_token_major_native_graph_slot`.
+                    // Both caches hold the same K/V/slot device storage
+                    // (the helper *borrows* k/v/slot rather than copying),
+                    // so any divergence between the two writers surfaces
+                    // immediately in downstream reads. When `kt_paged_cache`
+                    // is `None` (default), the helper short-circuits to
+                    // `Ok(false)` and this branch is zero overhead — the
+                    // candle write above is the only thing that ran.
+                    if done && kt_paged_cache.is_some() {
+                        let _kt_done =
+                            try_kt_paged_kv_write_token_major_native_graph_slot(
+                                kt_paged_cache,
+                                full_attn_layer_idx,
+                                &k_cache_token_major,
+                                &v_cache_token_major,
+                                inputs.kv_slot,
+                            )?;
+                    }
+                    done
                 } else {
                     false
                 }
@@ -18217,6 +18257,12 @@ pub fn transformer_block_paged(
         #[cfg(feature = "cuda")]
         None,
         None,
+        // Phase 7 #1082: no kt twin plumbed through this wrapper yet —
+        // the cache-owning struct migration that allocates one is a
+        // follow-up commit. Default `None` keeps this path on the
+        // candle writer only.
+        #[cfg(feature = "cuda")]
+        None,
     )
 }
 
@@ -18241,6 +18287,13 @@ fn transformer_block_paged_with_rope_tables(
     lora: Option<(&LoraLayerWeights, f32)>,
     #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
     profile_mlp_context: Option<(usize, usize)>,
+    // Phase 7 #1082: kt twin of `paged_cache`, plumbed through to the
+    // GQA paged-attention call below so the kt cache can mirror the
+    // CUDA-graph paged-KV write. `None` keeps the path on the candle
+    // writer only; same migration playbook as `graph_inputs`.
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<
+        &crate::paged_kv_cache_kt::PagedKvCacheKt,
+    >,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -18333,6 +18386,12 @@ fn transformer_block_paged_with_rope_tables(
         lora,
         #[cfg(feature = "cuda")]
         graph_inputs,
+        // Phase 7 #1082: forward the kt twin through to the GQA
+        // attention call. None on this path until the cache-owning
+        // model struct migration plumbs an `Option<&PagedKvCacheKt>`
+        // through every transformer-block invocation.
+        #[cfg(feature = "cuda")]
+        kt_paged_cache,
     )?;
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_attn_block", &attn_out);
@@ -21380,6 +21439,13 @@ fn model_forward_paged_inner(
                     #[cfg(feature = "cuda")]
                     graph_inputs,
                     profile_mlp_stages.then_some((i, start_pos)),
+                    // Phase 7 #1082: no kt twin plumbed through this
+                    // top-level paged decode caller yet — the
+                    // cache-owning model struct migration is a follow-up
+                    // commit. Default `None` keeps this on the candle
+                    // writer only.
+                    #[cfg(feature = "cuda")]
+                    None,
                 );
                 crate::mtp_debug::exit_b12_layer_scope();
                 hidden = block_result
