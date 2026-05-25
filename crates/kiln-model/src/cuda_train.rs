@@ -2242,14 +2242,43 @@ pub fn cuda_softplus(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
         .as_tensor()
         .maximum(&zeros)
         .context("cuda_softplus: max(x, 0)")?;
-    let neg_x = input.as_tensor().neg().context("cuda_softplus: neg")?;
+    // Phase 7 (#1082): route the per-element unary steps through
+    // their kt-API helpers. `cuda_softplus` computes the numerically
+    // stable `softplus(x) = max(x, 0) + log(exp(-|x|) + 1)` and
+    // chains `neg → maximum → add → neg → exp → add_scalar → log`.
+    // The three contiguous-F32 unary/scalar steps (`neg(x)`,
+    // `neg(abs_x)`, `exp(-abs_x)`, `+ 1.0`) are clean kt-route
+    // candidates; the rest of the chain (`maximum`, broadcast add,
+    // `log`) keeps the candle path because the kt helpers for those
+    // ops are not wired in yet. Each step independently falls
+    // through to its candle composite when its gate is off OR its
+    // precondition fails, so behavior is identical with the gates
+    // off.
+    let x = input.as_tensor();
+    let neg_x = match crate::forward::try_kt_neg(x).context("cuda_softplus: try_kt_neg")? {
+        Some(out) => out,
+        None => x.neg().context("cuda_softplus: neg")?,
+    };
     let relu_neg_x = neg_x.maximum(&zeros).context("cuda_softplus: max(-x, 0)")?;
     let abs_x = (&relu_x + &relu_neg_x).context("cuda_softplus: abs")?;
-    let neg_abs = abs_x.neg().context("cuda_softplus: -abs")?;
-    let log_term = (neg_abs.exp().context("cuda_softplus: exp(-abs)")? + 1.0)
-        .context("cuda_softplus: add one")?
-        .log()
-        .context("cuda_softplus: log")?;
+    let neg_abs = match crate::forward::try_kt_neg(&abs_x).context("cuda_softplus: try_kt_neg abs")?
+    {
+        Some(out) => out,
+        None => abs_x.neg().context("cuda_softplus: -abs")?,
+    };
+    let exp_neg_abs = match crate::forward::try_kt_exp(&neg_abs)
+        .context("cuda_softplus: try_kt_exp")?
+    {
+        Some(out) => out,
+        None => neg_abs.exp().context("cuda_softplus: exp(-abs)")?,
+    };
+    let one_plus = match crate::forward::try_kt_add_scalar(&exp_neg_abs, 1.0)
+        .context("cuda_softplus: try_kt_add_scalar")?
+    {
+        Some(out) => out,
+        None => (exp_neg_abs + 1.0).context("cuda_softplus: add one")?,
+    };
+    let log_term = one_plus.log().context("cuda_softplus: log")?;
     let out = (relu_x + log_term).context("cuda_softplus: stable output")?;
     let needs_grad =
         input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
