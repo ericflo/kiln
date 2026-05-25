@@ -1538,6 +1538,126 @@ mod tests {
         Ok(())
     }
 
+    /// Closes suspect 1 in #1082: the fused batched-slot writer must
+    /// land the same byte pattern in the K/V pool as the legacy per-row
+    /// `write_token_major_native_batch` path for every row, with no
+    /// silent off-by-row mistakes from the per-row 2D-grid kernel
+    /// dispatch. Requires CUDA. Skips on CPU-only builds.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_write_token_major_native_batch_graph_slot_matches_per_row() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!(
+                "CUDA unavailable, skipping test_write_token_major_native_batch_graph_slot_matches_per_row"
+            );
+            return Ok(());
+        };
+        let batch = 4usize;
+        let heads = 2usize;
+        let head_dim = 8usize;
+        // Distinct slots per row so an off-by-row bug shows up as a
+        // wrong-slot write rather than a silent stomp.
+        let slots: Vec<u32> = vec![1u32, 3, 5, 7];
+        let total_slots = 8usize;
+        let block_size = 1usize;
+        let cache = PagedKvCache::new(
+            1,
+            total_slots,
+            block_size,
+            heads,
+            head_dim,
+            DType::BF16,
+            &device,
+        )?;
+        // Build distinct K/V per row so any row-swap surfaces.
+        let elems = batch * heads * head_dim;
+        let k_data: Vec<f32> = (0..elems)
+            .map(|i| ((i as f32) - (elems as f32) / 2.0) * 0.015625)
+            .collect();
+        let k = Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let v = (k.to_dtype(DType::F32)? + 50.0)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let slots_t = Tensor::from_slice(slots.as_slice(), batch, &device)?.contiguous()?;
+
+        // Fused-slot writer.
+        let ok = cache.write_token_major_native_batch_graph_slot(0, &k, &v, &slots_t)?;
+        assert!(ok, "batched-graph-slot writer should accept bf16 [batch,1,kv_heads,head_dim]");
+        device.synchronize()?;
+
+        // Reference: per-row write of the same K/V into a fresh cache.
+        let ref_cache = PagedKvCache::new(
+            1,
+            total_slots,
+            block_size,
+            heads,
+            head_dim,
+            DType::BF16,
+            &device,
+        )?;
+        let mut bts: Vec<BlockTable> = (0..batch)
+            .map(|i| {
+                let mut bt = BlockTable::new();
+                bt.push(slots[i]);
+                bt
+            })
+            .collect();
+        let bt_refs: Vec<&BlockTable> = bts.iter_mut().map(|bt| &*bt).collect();
+        let start_positions = vec![0usize; batch];
+        assert!(ref_cache.write_token_major_native_batch(
+            0,
+            &bt_refs,
+            &start_positions,
+            &k,
+            &v,
+        )?);
+        device.synchronize()?;
+
+        // Byte-level equality of the full pool tensor across both caches.
+        let (k_pool_fused, v_pool_fused) = cache
+            .pool_tensors(0)
+            .expect("layer 0 pool tensors");
+        let (k_pool_ref, v_pool_ref) = ref_cache
+            .pool_tensors(0)
+            .expect("ref layer 0 pool tensors");
+        let kf = k_pool_fused
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let kr = k_pool_ref
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let vf = v_pool_fused
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let vr = v_pool_ref
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(kf.len(), kr.len());
+        for i in 0..kf.len() {
+            assert!(
+                (kf[i] - kr[i]).abs() < 1e-6,
+                "K pool mismatch at {i}: fused={} ref={}",
+                kf[i],
+                kr[i]
+            );
+        }
+        for i in 0..vf.len() {
+            assert!(
+                (vf[i] - vr[i]).abs() < 1e-6,
+                "V pool mismatch at {i}: fused={} ref={}",
+                vf[i],
+                vr[i]
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_fp8_paged_memory_savings() -> Result<()> {
         let device = Device::Cpu;
