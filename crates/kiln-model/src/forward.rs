@@ -2260,10 +2260,28 @@ fn cuda_lora_training_linear_disabled() -> bool {
 #[cfg(feature = "cuda")]
 fn to_dtype_if_needed(t: &Tensor, dtype: DType) -> candle_core::Result<Tensor> {
     if t.dtype() == dtype {
-        Ok(t.clone())
-    } else {
-        t.to_dtype(dtype)
+        return Ok(t.clone());
     }
+    // Phase 7 (#1082): route the conditional dtype cast through
+    // `try_kt_to_dtype` when `KILN_USE_KT_API_TO_DTYPE=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set. This single utility is
+    // called from ~16 sites in `forward.rs` (LoRA F32 backward,
+    // RMSNorm fwd/bwd, layernorm bwd, FA fwd/bwd recompute, the
+    // CudaLoraAddF32 ops); a single change at the utility
+    // function lights up the gate at every call site
+    // automatically. Falls through to candle's `.to_dtype()` when
+    // the preconditions fail (non-contiguous input, unsupported
+    // dtype pair, etc.).
+    #[cfg(feature = "cuda")]
+    {
+        match try_kt_to_dtype(t, dtype)
+            .map_err(|e| candle_core::Error::Msg(format!("try_kt_to_dtype: {e}")))?
+        {
+            Some(out) => return Ok(out),
+            None => {}
+        }
+    }
+    t.to_dtype(dtype)
 }
 
 #[cfg(feature = "cuda")]
