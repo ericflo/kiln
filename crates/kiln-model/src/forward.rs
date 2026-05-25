@@ -1130,6 +1130,55 @@ pub(crate) fn cuda_use_kt_api_matmul() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: route the on-device sampler argmax in
+/// [`crate::sampling::greedy_sample`] / [`crate::sampling::greedy_sample_rows`]
+/// through `kiln_tensor::cuda_argmax_last_axis`. Default off; set
+/// `KILN_USE_KT_API_SAMPLING_ARGMAX=1` (or `KILN_USE_KT_API_ALL=1`)
+/// to flip the gate.
+///
+/// Distinct from the existing `KILN_USE_KT_API_ARGMAX` gate:
+/// `KILN_USE_KT_API_ARGMAX` targets the *fused-LM-head* argmax fast
+/// path in [`lm_head_argmax`] / [`try_kt_lm_head_argmax`], where the
+/// matmul output is already in kt-storage and the argmax composes
+/// directly without a candle copy-back. The sampler argmax sits
+/// *after* `lm_head_forward` on the candle-typed logits tensor that
+/// callers hold (e.g. paged-prefill `[B*T, vocab]` rows or the
+/// flattened decode `[vocab]` slice), so it pays one kt-bridge
+/// borrow on the input direction and one kt-bridge copy-back on
+/// the output `[1]` / `[B]` I64 indices. Splitting the gate lets
+/// us A/B the sampler hook in isolation from the fused LM head
+/// hook (which already lands in `lm_head_argmax`).
+///
+/// Wiring the gate without yet migrating either call site
+/// (`greedy_sample` and `greedy_sample_rows`) is an intentional
+/// incremental step (#1082, Phase 7). The sampler module
+/// [`crate::sampling`] still imports `candle_core::Tensor` and the
+/// public function signatures take candle tensors, so each call
+/// site needs the borrow + reduce + copy-back composite written
+/// out by hand (kt has no `Tensor::argmax(dim)` method by design —
+/// it exposes `cuda_argmax_last_axis(&KtTensor) -> KtTensor`).
+/// Landing this gate first lets follow-up PRs migrate one sampler
+/// entry point at a time without churning the helper inventory —
+/// same playbook as the per-kernel kt-API migrations
+/// (`KILN_USE_KT_API_SIGMOID_MUL`, `KILN_USE_KT_API_RMSNORM`,
+/// `KILN_USE_KT_API_ROTARY_QK`, `KILN_USE_KT_API_MLP_SILU_MUL`,
+/// `KILN_USE_KT_API_L2_QK_NORM`, `KILN_USE_KT_API_FLASH_ATTN_FWD`,
+/// `KILN_USE_KT_API_GDN_FULL_CHUNK`, `KILN_USE_KT_API_MATMUL`,
+/// `KILN_USE_KT_PAGED_KV_CACHE`).
+///
+/// Today this gate is unused. The first call-site migration will
+/// branch on it. Returning a bool through `OnceLock` matches the
+/// other Phase 7 gates so the cost is one atomic read per call
+/// (negligible vs. the argmax it gates).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+pub(crate) fn cuda_use_kt_api_sampling_argmax() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SAMPLING_ARGMAX").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: route the `PagedKvCache` allocation in
 /// `forward.rs` through the `PagedKvCacheKt` (kt-API) twin defined
 /// in [`crate::paged_kv_cache_kt`]. Default off; set
