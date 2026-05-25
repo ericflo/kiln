@@ -260,7 +260,17 @@ and JavaScript camelCase/CommonJS style when available.
   no-ECHO recipe. This tests whether H10's useful outcome/format movement came
   from clean success/failure contrast while partial groups introduced the
   convention/read drift.
-  - Result: pending.
+  - Result: rejected. The clean-binary dataset met the variance gate
+    (`15` groups / `60` completions) and the CUDA 13.2 run trained, installed,
+    smoke-tested, and verified cleanly with gradient checkpointing (`final_loss=0.148495`,
+    observed peak training VRAM 22,555 MiB, elapsed 5,794.8s, verify L2 proxy
+    1.0291). Blind eval still regressed to 0.2892 (`delta=-0.0104`), below both
+    baseline and PB-H10: `outcome=0.4583`, `format_compliance=0.5417`,
+    `convention_consistency=0.9312`, and `read_before_edit=1.0000`. Filtering
+    out partial-credit groups did not recover H10's contract balance; it
+    removed useful signal and confirms that further rank/alpha/filter sweeps
+    around the same PB-H7 no-ECHO data are not promising. H10 remains the
+    current best caveated adapter.
 
 ## Standard Workflow
 

@@ -45,4 +45,24 @@ Reject if any of:
 
 ## Result
 
-Pending.
+Rejected. The clean-binary filtered set met the training-data gate
+(`15` reward-variant groups / `60` completions) and trained cleanly under CUDA
+13.2 on the RTX 4090 with gradient checkpointing (`rank=4`, `alpha=8`,
+`lr=5e-6`, no ECHO, final loss `0.148495`, observed peak VRAM `22,555 MiB`,
+elapsed `5,794.8s`). Adapter smoke test and `kiln adapters verify` both passed;
+verification found 400 nonzero tensors and a LoRA update L2 proxy of `1.0291`.
+
+Blind 3-seed eval regressed to `0.2892` composite (`delta=-0.0104`, stdev
+`0.4390`, 48 rollouts), below both the `0.2996` postbreach baseline and
+PB-H10's `0.3404` current-best score. Sub-scores were:
+`outcome=0.4583`, `format_compliance=0.5417`,
+`convention_consistency=0.9312`, `read_before_edit=1.0000`,
+`no_redundant_imports=1.0000`, and `no_style_drift=1.0000`. Efficiency was
+`5.90` tool calls/rollout, `1966.1` thinking chars, and `343.8` thinking
+chars/tool.
+
+This falsifies the idea that PB-H10's useful movement came from clean
+success/failure contrast alone. Dropping partial-credit groups removed useful
+training signal and regressed outcome, format, and convention. H10 remains the
+current best caveated adapter, and further filtering/rank/alpha sweeps around
+the PB-H7 no-ECHO data are not promising.
