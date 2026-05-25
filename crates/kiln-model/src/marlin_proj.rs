@@ -312,7 +312,7 @@ fn cuda_use_kt_api_marlin() -> bool {
 /// the I32→U32 mapping in `candle_dtype_to_kt` lets the packed
 /// weights flow through without a copy or a U32 reinterpret tensor.
 #[cfg(feature = "cuda")]
-fn matmul_bf16_2d_kt(x_bf16: &Tensor, w: &MarlinPackedProj) -> Result<Tensor> {
+pub(crate) fn matmul_bf16_2d_kt(x_bf16: &Tensor, w: &MarlinPackedProj) -> Result<Tensor> {
     kiln_nvtx::range!(c"kiln/marlin_w4a16_gemm_kt");
     let device = x_bf16.device();
     // Kernel is F16-only; cast bf16 -> fp16 at the boundary and back
