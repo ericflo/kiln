@@ -223,16 +223,25 @@ fn cuda_use_kt_api_all() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ALL").is_ok())
 }
 
-/// Phase 7 opt-in: route the attn-output sigmoid/mul fused kernel
-/// through the kt-API + kt-bridge copying adapters. Default off so
-/// production perf is unchanged; set
-/// `KILN_USE_KT_API_SIGMOID_MUL=1` (or `KILN_USE_KT_API_ALL=1`) to
-/// exercise the migration path for parity testing. Pays ~3 dtod
-/// memcpys per call.
+/// Phase 7 default-on (#1082): route the attn-output sigmoid/mul
+/// fused kernel through the kt-API + kt-bridge copying adapters.
+/// Default ON because both paths bottom out in the same
+/// `kiln_fused_sigmoid_mul` FFI symbol (same `kiln-rmsnorm-kernel`
+/// crate as the rmsnorm/rotary_qk flips); only the Rust shell types
+/// and the kt-bridge dtod-copy at the output boundary differ. This
+/// is bit-exact by construction — the rmsnorm flip (`078f3f71`)
+/// and rotary_qk flip (`8f383a9e`) both established that the
+/// kt-bridge borrow + dtod-copy machinery in this kernel crate is
+/// byte-stable. Set `KILN_DISABLE_KT_API_SIGMOID_MUL=1` to opt out.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_sigmoid_mul() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SIGMOID_MUL").is_ok());
+    // #1082: flipped default ON. Both candle and kt paths bottom out
+    // in the same FFI symbol (`kiln_fused_sigmoid_mul`); only the
+    // Rust shell types differ. Escape hatch:
+    // `KILN_DISABLE_KT_API_SIGMOID_MUL=1`.
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SIGMOID_MUL").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -276,19 +285,43 @@ fn cuda_use_kt_api_rotary_qk() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: fused_mlp_silu_mul through the kt-API + adapters.
+/// Phase 7 default-on (#1082): fused_mlp_silu_mul through the kt-API
+/// + adapters. Default ON because both paths bottom out in the same
+/// `kiln_fused_mlp_silu_mul` FFI symbol (`kiln-rmsnorm-kernel`
+/// crate); only the Rust shell types and the kt-bridge dtod-copy at
+/// the output boundary differ. Same bit-exact-by-construction
+/// argument as the rmsnorm (`078f3f71`), rotary_qk (`8f383a9e`), and
+/// sigmoid_mul flips. Set `KILN_DISABLE_KT_API_MLP_SILU_MUL=1` to
+/// opt out (escape hatch).
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_mlp_silu_mul() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MLP_SILU_MUL").is_ok());
+    // #1082: flipped default ON. Both candle and kt paths bottom out
+    // in the same FFI symbol (`kiln_fused_mlp_silu_mul`); only the
+    // Rust shell types differ. Escape hatch:
+    // `KILN_DISABLE_KT_API_MLP_SILU_MUL=1`.
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MLP_SILU_MUL").is_err());
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: fused_l2_qk_norm through the kt-API + adapters.
+/// Phase 7 default-on (#1082): fused_l2_qk_norm through the kt-API +
+/// adapters. Default ON because both paths bottom out in the same
+/// `kiln_fused_l2_qk_norm` FFI symbol (`kiln-rmsnorm-kernel` crate);
+/// only the Rust shell types and the kt-bridge dtod-copy at the
+/// output boundary differ. Same bit-exact-by-construction argument
+/// as the rmsnorm (`078f3f71`), rotary_qk (`8f383a9e`), sigmoid_mul,
+/// and mlp_silu_mul flips. Set `KILN_DISABLE_KT_API_L2_QK_NORM=1` to
+/// opt out (escape hatch).
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_l2_qk_norm() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_L2_QK_NORM").is_ok());
+    // #1082: flipped default ON. Both candle and kt paths bottom out
+    // in the same FFI symbol (`kiln_fused_l2_qk_norm`); only the
+    // Rust shell types differ. Escape hatch:
+    // `KILN_DISABLE_KT_API_L2_QK_NORM=1`.
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_L2_QK_NORM").is_err());
     direct || cuda_use_kt_api_all()
 }
 
