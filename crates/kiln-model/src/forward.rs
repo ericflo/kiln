@@ -837,6 +837,28 @@ fn cuda_use_kt_api_recip() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in (#1082): elementwise natural-log `Tensor::log()`
+/// through the kt-API + adapters. Set `KILN_USE_KT_API_LOG=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// `.log()` candle calls through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 5 (Log =
+/// `ln(x)`) via the kt-bridge borrow adapter. Pays one dtod
+/// memcpy on the output direction. Falls through to the candle
+/// composite when any precondition fails so behavior is identical
+/// with the gate off.
+///
+/// Production call site in `forward.rs` is the `softplus` helper:
+/// `softplus(x) = relu(x) + log(1 + exp(-|x|))`. softplus is the
+/// last step of the GDN `b` (forget gate) path — runs once per
+/// decode step. Mirrors `cuda_use_kt_api_exp` /
+/// `cuda_use_kt_api_sqrt` cadence.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_log() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LOG").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -7761,6 +7783,53 @@ fn try_kt_recip(x: &Tensor) -> Result<Option<Tensor>> {
     Ok(Some(out))
 }
 
+/// Phase 7 (#1082) — kt-API log migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 5 (Log =
+/// natural log, `ln(x)`).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0) so the caller falls through to
+/// the candle `.log()`. NVTX range `kiln/log_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite. Mirrors `try_kt_exp` (212d5b83) and the
+/// other Phase 7 elementwise helpers.
+///
+/// IEEE semantics match the candle CPU reference: `ln(0) = -inf`,
+/// `ln(<0) = NaN`. See `csrc/activation.cu` `KIND_LOG` case.
+///
+/// First call-site migration: the `softplus` helper's
+/// `(1 + exp(-|x|)).log()` step. softplus runs as the last step
+/// of the GDN `b` (forget gate) computation, once per decode step.
+#[cfg(feature = "cuda")]
+fn try_kt_log(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_log() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/log_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 5 = Log (matches csrc/activation.cu KIND_LOG = ln(x)).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 5) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_log: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
 #[cfg(feature = "cuda")]
 fn cuda_rotary_one_training_bf16_supported(
     x: &Tensor,
@@ -9230,7 +9299,25 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
             (exp_neg_abs + 1.0)?
         }
     };
-    let log_term = one_plus.log()?;
+    // Phase 7 (#1082): when `KILN_USE_KT_API_LOG=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND the input is a contiguous
+    // CUDA tensor of a supported dtype, route the `.log()` through
+    // `kiln_tensor::cuda_activation_unary` with kind 5 (Log = ln(x)).
+    // Falls through to the candle composite when any precondition
+    // fails so behavior is identical with the gate off.
+    let log_term = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_log(&one_plus)? {
+                Some(out) => out,
+                None => one_plus.log()?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            one_plus.log()?
+        }
+    };
     Ok((relu_x + log_term)?)
 }
 
