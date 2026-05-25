@@ -833,14 +833,12 @@ fn cuda_use_kt_api_lerp() -> bool {
 /// behavior is identical with the gate off.
 ///
 /// The gate + helper are wired up for completeness; today there
-/// are no production `.abs()` call sites in `forward.rs` (all
-/// `.abs()` sites are in `#[cfg(test)]` parity helpers, where
-/// the candle path is what's being verified). Future kernels that
-/// compute `|x|` directly (e.g. softplus refactored to use a
-/// single-kernel `abs` instead of `relu(x) + relu(-x)`) can route
-/// through this gate.
+/// Wired into the `softplus` helper's `abs_x = relu(x) + relu(-x)`
+/// site as of the same #1082 series — `try_kt_abs(x)` takes a
+/// single-kernel fast path when this gate is enabled, replacing
+/// three candle ops (neg, relu(-x), add) with one
+/// `cuda_activation_unary` dispatch.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 fn cuda_use_kt_api_abs() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ABS").is_ok());
@@ -8560,10 +8558,16 @@ fn try_kt_lerp(a: &Tensor, b: &Tensor, weight: f32) -> Result<Option<Tensor>> {
 /// helpers. The helper is wired up to match the established
 /// Phase 7 scaffold so future kernel refactors that compute `|x|`
 /// directly (instead of `relu(x) + relu(-x)`) can plug in
-/// trivially. Mirrors the dead-code-allowed precedent of
-/// `try_kt_paged_kv_cache_new` (638bc441).
+/// trivially.
+///
+/// First production call site (wired in the same #1082 series):
+/// the `softplus` helper's `abs_x = relu(x) + relu(-x)`
+/// computation now takes a fused single-kernel `try_kt_abs(x)`
+/// fast path when `KILN_USE_KT_API_ABS=1` (or
+/// `KILN_USE_KT_API_ALL=1`) is set. softplus runs as the last
+/// step of the GDN `b` (forget gate) computation, once per
+/// decode step.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 fn try_kt_abs(x: &Tensor) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_abs() {
         return Ok(None);
@@ -11400,42 +11404,52 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
         }
     };
     // |x| = relu(x) + relu(-x)
+    //
+    // Phase 7 (#1082): when `KILN_USE_KT_API_ABS=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND `x` is a contiguous
+    // CUDA tensor of {F32, BF16, F16}, route the `|x|` computation
+    // through a single `kiln_tensor::cuda_activation_unary` call
+    // with kind 13 (Abs) — one fused kernel replacing the
+    // `neg + relu(-x) + add(relu(x), relu(-x))` composite (three
+    // candle ops + two intermediate buffers). Falls through to the
+    // `relu(x) + relu(-x)` identity when any precondition fails so
+    // behavior is identical with the gate off. First production
+    // call site for `try_kt_abs`.
+    //
     // Phase 7 (#1082): when `KILN_USE_KT_API_NEG=1` (or
     // `KILN_USE_KT_API_ALL=1`) is set AND the input is a contiguous
     // CUDA tensor of a supported dtype, route the `.neg()` through
     // `kiln_tensor::cuda_activation_unary` with kind 12 (Neg).
     // Falls through to the candle composite when any precondition
     // fails.
-    let neg_x = {
+    let abs_x = {
         #[cfg(feature = "cuda")]
         {
-            if let Some(out) = try_kt_neg(x)? {
+            if let Some(out) = try_kt_abs(x)? {
                 out
             } else {
-                x.neg()?
+                let neg_x = if let Some(out) = try_kt_neg(x)? {
+                    out
+                } else {
+                    x.neg()?
+                };
+                // Phase 7 (#1082): same kt-API max_binary migration
+                // for the `relu(-x)` half of the
+                // `|x| = relu(x) + relu(-x)` identity.
+                let relu_neg_x = match try_kt_max_binary(&neg_x, &zeros)? {
+                    Some(out) => out,
+                    None => neg_x.maximum(&zeros)?,
+                };
+                (relu_x.clone() + relu_neg_x)?
             }
         }
         #[cfg(not(feature = "cuda"))]
         {
-            x.neg()?
+            let neg_x = x.neg()?;
+            let relu_neg_x = neg_x.maximum(&zeros)?;
+            (relu_x.clone() + relu_neg_x)?
         }
     };
-    // Phase 7 (#1082): same kt-API max_binary migration for the
-    // `relu(-x)` half of the `|x| = relu(x) + relu(-x)` identity.
-    let relu_neg_x = {
-        #[cfg(feature = "cuda")]
-        {
-            match try_kt_max_binary(&neg_x, &zeros)? {
-                Some(out) => out,
-                None => neg_x.maximum(&zeros)?,
-            }
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            neg_x.maximum(&zeros)?
-        }
-    };
-    let abs_x = (relu_x.clone() + relu_neg_x)?;
     // Phase 7 (#1082): same kt-API neg migration for `abs_x.neg()`.
     let neg_abs = {
         #[cfg(feature = "cuda")]
