@@ -13379,8 +13379,28 @@ pub fn gdn_recurrent_backward_no_grad(
             .reshape((1, 1, chunk, chunk))?
             .broadcast_as((batch, heads, chunk, chunk))?
             .to_dtype(DType::F32)?;
+        // Phase 7 (#1082): route the `beta_c.neg()` step through
+        // `try_kt_neg` when `KILN_USE_KT_API_NEG=1` (or
+        // `KILN_USE_KT_API_ALL=1`) is set. Mirrors the wirings
+        // already in this same backward function and in `softplus`
+        // / `cuda_sigmoid`. Falls through to the candle composite
+        // when any precondition fails so behavior is identical with
+        // the gate off.
+        let beta_c_neg = {
+            #[cfg(feature = "cuda")]
+            {
+                match try_kt_neg(&beta_c)? {
+                    Some(out) => out,
+                    None => beta_c.neg()?,
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                beta_c.neg()?
+            }
+        };
         let d_a_strict = dr_w_t
-            .broadcast_mul(&beta_c.neg()?.unsqueeze(3)?)?
+            .broadcast_mul(&beta_c_neg.unsqueeze(3)?)?
             .broadcast_mul(&strict_mask)?;
 
         let big_g = g_c.cumsum(candle_core::D::Minus1)?;
@@ -13406,7 +13426,29 @@ pub fn gdn_recurrent_backward_no_grad(
         };
         let p_col = p.unsqueeze(3)?;
         let d_v = d_v_prime.clone();
-        let d_ks_entry = d_v_prime.broadcast_mul(&p_col)?.neg()?.contiguous()?;
+        // Phase 7 (#1082): route the `.neg()` step of the
+        // `d_ks_entry` computation through `try_kt_neg` when
+        // `KILN_USE_KT_API_NEG=1` (or `KILN_USE_KT_API_ALL=1`) is
+        // set. The intermediate `d_v_prime.broadcast_mul(&p_col)`
+        // stays candle-side; only the elementwise `.neg()` migrates
+        // to a single `cuda_activation_unary` kind 12 (Neg)
+        // dispatch. Falls through to candle on any precondition
+        // failure.
+        let d_ks_entry_pre = d_v_prime.broadcast_mul(&p_col)?;
+        let d_ks_entry = {
+            #[cfg(feature = "cuda")]
+            {
+                let negated = match try_kt_neg(&d_ks_entry_pre)? {
+                    Some(out) => out,
+                    None => d_ks_entry_pre.neg()?,
+                };
+                negated.contiguous()?
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                d_ks_entry_pre.neg()?.contiguous()?
+            }
+        };
         let mut d_g_acc = (&ks_entry * &d_ks_entry)?.sum(candle_core::D::Minus1)?;
         let d_q_s = dq_s_scaled.broadcast_mul(&p_col)?.contiguous()?;
         d_g_acc = (&d_g_acc
