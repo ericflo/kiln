@@ -103,7 +103,8 @@ pub use phase_b::{
 
 pub mod kt_api;
 pub use kt_api::{
-    OpdLossError, opd_top_k_reverse_kl_kt, opd_top_k_reverse_kl_per_position_kt,
+    OpdLossError, PerPositionMetricsKt, compute_per_position_metrics_kt,
+    opd_top_k_reverse_kl_kt, opd_top_k_reverse_kl_per_position_kt,
 };
 
 /// Default chunk size when iterating along the active-token dimension. Used

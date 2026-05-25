@@ -257,6 +257,112 @@ pub fn opd_top_k_reverse_kl_per_position_kt(
     ))
 }
 
+/// kt-typed parallel of [`crate::PerPositionMetrics`].
+///
+/// Three parallel `[T_active]` arrays carrying the per-position
+/// distribution-alignment diagnostics (§3.8 of the OPD grand plan).
+/// Lengths are all equal to the number of active positions.
+///
+/// Mirrors the candle-typed [`crate::PerPositionMetrics`] struct so
+/// the Phase B kt-rewrite has a stable target type to populate.
+#[derive(Debug, Clone, Default)]
+pub struct PerPositionMetricsKt {
+    /// Per-position student entropy over the teacher's K support, in
+    /// nats. Higher = student less concentrated.
+    pub student_entropy: Vec<f32>,
+    /// Per-position teacher entropy over the same K support, in nats.
+    pub teacher_entropy: Vec<f32>,
+    /// Per-position reverse KL (same value the loss kernel emits).
+    pub reverse_kl: Vec<f32>,
+}
+
+impl PerPositionMetricsKt {
+    /// `[T_active]` of `|H(q) - H(p)|` per position.
+    pub fn entropy_gap_vec(&self) -> Vec<f32> {
+        self.student_entropy
+            .iter()
+            .zip(self.teacher_entropy.iter())
+            .map(|(p, q)| (q - p).abs())
+            .collect()
+    }
+
+    /// Mean over active positions of `|H(q) - H(p)|`. The scalar §3.8
+    /// diagnostic.
+    pub fn mean_entropy_gap(&self) -> f64 {
+        if self.student_entropy.is_empty() {
+            return 0.0;
+        }
+        let n = self.student_entropy.len() as f64;
+        self.student_entropy
+            .iter()
+            .zip(self.teacher_entropy.iter())
+            .map(|(p, q)| (q - p).abs() as f64)
+            .sum::<f64>()
+            / n
+    }
+
+    /// Mean per-position KL — matches what the trainer already tracks,
+    /// but recomputed here so the metrics call doesn't depend on a
+    /// separate loss pass.
+    pub fn mean_reverse_kl(&self) -> f64 {
+        if self.reverse_kl.is_empty() {
+            return 0.0;
+        }
+        let n = self.reverse_kl.len() as f64;
+        self.reverse_kl.iter().map(|&v| v as f64).sum::<f64>() / n
+    }
+}
+
+/// kt-typed entry point for per-position distribution-alignment
+/// metrics over the teacher's K support — **stub**.
+///
+/// Validates `hidden`, `head_t`, and the teacher top-K tensors
+/// against the production OPD contract (same checks as
+/// [`opd_top_k_reverse_kl_kt`]) and returns
+/// [`OpdLossError::NotYetImplemented`]. When the Phase B kt-rewrite
+/// lands, this function's body will be filled in (re-implementing
+/// the gather + matmul + entropy / KL reduction over
+/// `kiln_tensor::Tensor` ops + raw CUDA FFI) without breaking the
+/// signature.
+///
+/// # Shape contract (matches the candle-typed
+/// [`crate::compute_per_position_metrics`] entry point)
+///
+/// - `hidden`: `[1, T, H]` student hidden states.
+/// - `head_t`: `[H, V]` transposed LM head.
+/// - `teacher_topk_indices`: `[T_active * K]` row-major flat.
+/// - `teacher_topk_logprobs`: `[T_active * K]` row-major flat.
+/// - `label_mask`: `[T]` booleans selecting active positions.
+/// - `top_k`: K — the teacher's support size.
+///
+/// # Returns
+///
+/// Today: always returns [`OpdLossError::NotYetImplemented`] after
+/// passing shape validation. After the kt-rewrite: a populated
+/// [`PerPositionMetricsKt`] with the three diagnostic vectors.
+pub fn compute_per_position_metrics_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    top_k: usize,
+) -> Result<PerPositionMetricsKt, OpdLossError> {
+    let _ = validate_inputs_kt(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        top_k,
+    )?;
+    // All shape preconditions pass; the body is filled in by the
+    // Phase B kt-rewrite.
+    Err(OpdLossError::NotYetImplemented(
+        "compute_per_position_metrics_kt",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,4 +569,64 @@ mod tests {
         let s = format!("{err}");
         assert!(s.contains("hidden must be 3-D"), "got: {s}");
     }
+
+    #[test]
+    fn compute_per_position_metrics_kt_validates_hidden_rank() {
+        let h = KtTensor::from_vec(vec![0.0f32; 16], vec![4, 4]).expect("alloc h");
+        let w = dummy_head_t(4, 8);
+        let idx = vec![0u32; 4];
+        let lp = vec![0.0f32; 4];
+        let mask = vec![true; 4];
+        let err =
+            compute_per_position_metrics_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
+        let s = format!("{err}");
+        assert!(s.contains("hidden must be 3-D"), "got: {s}");
+    }
+
+    #[test]
+    fn compute_per_position_metrics_kt_stub_returns_not_yet_implemented_on_valid_shapes() {
+        let h = dummy_hidden(4, 8);
+        let w = dummy_head_t(8, 16);
+        let idx = vec![0u32; 4];
+        let lp = vec![0.0f32; 4];
+        let mask = vec![true; 4];
+        let err = compute_per_position_metrics_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
+        assert!(
+            matches!(err, OpdLossError::NotYetImplemented(_)),
+            "expected NotYetImplemented, got: {err}"
+        );
+    }
+
+    #[test]
+    fn per_position_metrics_kt_entropy_gap_vec_smoke() {
+        let m = PerPositionMetricsKt {
+            student_entropy: vec![1.0, 0.5, 2.0],
+            teacher_entropy: vec![1.5, 0.5, 1.0],
+            reverse_kl: vec![0.1, 0.0, 0.5],
+        };
+        let gap = m.entropy_gap_vec();
+        assert_eq!(gap, vec![0.5, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn per_position_metrics_kt_mean_helpers() {
+        let m = PerPositionMetricsKt {
+            student_entropy: vec![1.0, 0.5, 2.0],
+            teacher_entropy: vec![1.5, 0.5, 1.0],
+            reverse_kl: vec![0.1, 0.0, 0.5],
+        };
+        let mean_gap = m.mean_entropy_gap();
+        assert!((mean_gap - 0.5).abs() < 1e-6, "got: {mean_gap}");
+        let mean_kl = m.mean_reverse_kl();
+        assert!((mean_kl - 0.2).abs() < 1e-6, "got: {mean_kl}");
+    }
+
+    #[test]
+    fn per_position_metrics_kt_empty_means_are_zero() {
+        let m = PerPositionMetricsKt::default();
+        assert_eq!(m.mean_entropy_gap(), 0.0);
+        assert_eq!(m.mean_reverse_kl(), 0.0);
+        assert!(m.entropy_gap_vec().is_empty());
+    }
+
 }
