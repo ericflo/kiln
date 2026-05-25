@@ -13079,8 +13079,44 @@ fn gdn_chunk_prep_f32(
     let causal_bool = causal_lower_tri_bool(chunk, device)?
         .reshape((1, 1, chunk, chunk))?
         .broadcast_as((batch, heads, chunk, chunk))?;
-    let strict_decay = strict_bool.where_cond(&decay_delta, &zero_delta)?.exp()?;
-    let causal_decay = causal_bool.where_cond(&decay_delta, &zero_delta)?.exp()?;
+    // Phase 7 (#1082): route the two `where_cond(...).exp()` steps
+    // through `try_kt_exp` when `KILN_USE_KT_API_EXP=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set. The where_cond itself stays
+    // candle-side (candle's masked-select plumbing handles the
+    // selection), but the resulting tensor's exp goes through the
+    // kt-API dispatch instead of the candle `.exp()` composite.
+    // Mirrors the `big_g.exp()` and `g_last.exp()` wirings already
+    // in this function. Falls through to the candle path when any
+    // precondition fails so behavior is identical with the gate
+    // off.
+    let strict_decay = {
+        let masked = strict_bool.where_cond(&decay_delta, &zero_delta)?;
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_exp(&masked)? {
+                Some(out) => out,
+                None => masked.exp()?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            masked.exp()?
+        }
+    };
+    let causal_decay = {
+        let masked = causal_bool.where_cond(&decay_delta, &zero_delta)?;
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_exp(&masked)? {
+                Some(out) => out,
+                None => masked.exp()?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            masked.exp()?
+        }
+    };
     // Phase 7 (#1082): route `big_g.exp()` through
     // `try_kt_exp` when `KILN_USE_KT_API_EXP=1` (or
     // `KILN_USE_KT_API_ALL=1`) is set. Falls through to the
