@@ -1,10 +1,15 @@
-//! Phase B parity tests: vk_matmul forward + backward vs candle.
+//! Phase B parity tests: vk_matmul forward + backward vs an analytical
+//! reference (with a single candle Var-based oracle scoped to the
+//! LoRA composition backward in `vk_lora_style_composition_backward_parity`).
+//!
+//! Test factories are candle-free via the kt-native
+//! `VkTensor::from_f32_slice` / `from_f32_slice_as_bf16` /
+//! `parameter_from_f32_slice` constructors. (#1082)
 //!
 //! Also covers the LoRA-style composition `delta = (x @ A.T) @ B.T`
 //! since it's the Phase B canonical use case.
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
 use half::bf16;
 use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
@@ -24,32 +29,19 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 }
 
 fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    VkTensor::from_candle(&t, Arc::clone(dev))
+    VkTensor::from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn upload_bf16(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?.to_dtype(DType::BF16)?;
-    VkTensor::from_candle(&t, Arc::clone(dev))
+    VkTensor::from_f32_slice_as_bf16(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn upload_param_f32(
     dev: &Arc<VulkanDevice>,
     data: &[f32],
     shape: &[usize],
-) -> Result<(candle_core::Var, VkTensor)> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    let var = candle_core::Var::from_tensor(&t)?;
-    let vk = VkTensor::from_candle(&t, Arc::clone(dev))?;
-    let pid = var.id();
-    let param = VkTensor::parameter(
-        Arc::clone(vk.buffer()),
-        vk.shape().to_vec(),
-        vk.dtype(),
-        Arc::clone(vk.device()),
-        pid,
-    );
-    Ok((var, param))
+) -> Result<VkTensor> {
+    VkTensor::parameter_from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn max_abs_diff(got: &[f32], expected: &[f32]) -> f32 {
@@ -89,7 +81,7 @@ fn vk_matmul_bf16w_canonical_weight_forward_and_dx() -> Result<()> {
         .collect();
     let w_bf16: Vec<f32> = w_data.iter().map(|&v| bf16::from_f32(v).to_f32()).collect();
 
-    let (_x_var, x) = upload_param_f32(&dev, &x_data, &[batch, hidden])?;
+    let x = upload_param_f32(&dev, &x_data, &[batch, hidden])?;
     let w = upload_bf16(&dev, &w_data, &[out_dim, hidden])?;
     let out = vk_matmul_bf16w(&x, &w)?;
     assert_eq!(out.shape(), &[batch, out_dim]);
@@ -169,8 +161,8 @@ fn vk_matmul_backward_parity() -> Result<()> {
     let n = 3;
     let a_data: Vec<f32> = (0..(m * k)).map(|i| (i as f32) * 0.1 - 1.0).collect();
     let b_data: Vec<f32> = (0..(k * n)).map(|i| (i as f32) * 0.2 - 0.5).collect();
-    let (_a_var, a) = upload_param_f32(&dev, &a_data, &[m, k])?;
-    let (_b_var, b) = upload_param_f32(&dev, &b_data, &[k, n])?;
+    let a = upload_param_f32(&dev, &a_data, &[m, k])?;
+    let b = upload_param_f32(&dev, &b_data, &[k, n])?;
     let c = vk_matmul(&a, &b)?;
     let loss = vk_mean_all(&c)?;
     let grads = vk_backward(&loss)?;
@@ -228,9 +220,9 @@ fn vk_lora_style_composition_backward_parity() -> Result<()> {
         .map(|i| ((i as f32) * 0.029).cos() * 0.3)
         .collect();
 
-    let (_x_var, x) = upload_param_f32(&dev, &x_data, &[batch, in_features])?;
-    let (_a_var, a_mat) = upload_param_f32(&dev, &a_data, &[rank, in_features])?;
-    let (_b_var, b_mat) = upload_param_f32(&dev, &b_data, &[out_features, rank])?;
+    let x = upload_param_f32(&dev, &x_data, &[batch, in_features])?;
+    let a_mat = upload_param_f32(&dev, &a_data, &[rank, in_features])?;
+    let b_mat = upload_param_f32(&dev, &b_data, &[out_features, rank])?;
 
     // h = x @ A.T     (batch, rank)
     let a_t = vk_transpose_2d_no_grad(&a_mat)?;
@@ -294,8 +286,10 @@ fn vk_lora_style_composition_backward_parity() -> Result<()> {
     //   d loss / d A = h_for_a path: d loss / d A = (d loss / d h).T @ x ... etc.
     //
     // The candle-free reference here is intricate; use a fresh candle
-    // path for the reference instead.
-    use candle_core::{DType, Var};
+    // path for the reference instead. This is the one legitimate
+    // candle use left in this file — scoped to a single test as an
+    // analytical-grad oracle. (#1082)
+    use candle_core::{DType, Device, Tensor, Var};
     let dev_c = Device::Cpu;
     let xv = Var::from_tensor(&Tensor::from_vec(
         x_data.clone(),
