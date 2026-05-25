@@ -1980,6 +1980,7 @@ dependencies = [
  "candle-nn",
  "cc",
  "half",
+ "kiln-tensor",
  "tracing",
 ]
 
@@ -2098,6 +2099,7 @@ dependencies = [
  "kiln-flce-kernel",
  "kiln-model",
  "kiln-opd-loss-kernel",
+ "kiln-tensor",
  "kiln-vulkan-kernel",
  "rand 0.10.1",
  "reqwest",

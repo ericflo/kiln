@@ -1,6 +1,6 @@
 [package]
 name = "kiln-opd-loss-kernel"
-description = "Fused top-K reverse-KL loss for On-Policy Distillation (OPD) — gathers student logits at teacher's top-K support indices, renormalises both sides, computes per-token reverse KL + gradient w.r.t. student hidden states without materialising the full [T, V] logits tensor."
+description = "Fused top-K reverse-KL loss for On-Policy Distillation (OPD) — gathers student logits at teacher's top-K support indices, renormalises both sides, computes per-token reverse KL + gradient w.r.t. student hidden states without materialising the full [T, V] logits tensor. Phase 7 prep: kt-typed parallel surface (see `kt_api`)."
 version.workspace = true
 publish = false
 edition.workspace = true
@@ -13,6 +13,11 @@ cc = "1"
 
 [dependencies]
 candle-core = { workspace = true }
+# kt-typed parallel surface (see `kt_api`). Phase 7 prep — no CUDA
+# feature is needed here because the kt-typed trait+stubs live at the
+# Rust level only; the CUDA FFI in `phase_b.rs` still routes through
+# candle storage today.
+kiln-tensor = { workspace = true }
 anyhow = { workspace = true }
 half = "2"
 # `tracing` for the warn-on-fallback path in cuda_fwd. Cheap dep and
@@ -29,7 +34,7 @@ tracing = { workspace = true }
 # reference path; a raw-CUDA C-ABI kernel + `build.rs` lands in the next
 # milestone (see `docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md`
 # §9.2). The CPU reference path is the parity oracle.
-cuda = ["candle-core/cuda"]
+cuda = ["candle-core/cuda", "kiln-tensor/cuda"]
 
 [dev-dependencies]
 candle-nn = { workspace = true }

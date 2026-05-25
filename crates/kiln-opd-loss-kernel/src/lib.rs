@@ -101,6 +101,11 @@ pub use phase_b::{
     opd_top_k_reverse_kl_phase_b, opd_top_k_reverse_kl_phase_b_per_position,
 };
 
+pub mod kt_api;
+pub use kt_api::{
+    OpdLossError, opd_top_k_reverse_kl_kt, opd_top_k_reverse_kl_per_position_kt,
+};
+
 /// Default chunk size when iterating along the active-token dimension. Used
 /// by Phase B to bound the temporary `[chunk_T, K]` intermediate. For
 /// typical OPD configs (T_active ≤ 8192, K = 32) the whole batch fits in
