@@ -12,6 +12,7 @@ kiln-eval = { workspace = true }
 kiln-flce-kernel = { workspace = true }
 kiln-model = { workspace = true }
 kiln-opd-loss-kernel = { workspace = true }
+kiln-tensor = { workspace = true }
 candle-core = { workspace = true }
 candle-nn = { workspace = true }
 safetensors = { workspace = true }

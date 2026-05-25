@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 #[cfg(test)]
-use candle_core::{DType, Device, Tensor};
+use kiln_tensor as kt;
 use kiln_core::config::ModelConfig;
 use kiln_model::lora_loader::AdapterConfig;
 
@@ -311,12 +311,22 @@ mod tests {
             dir.join("adapter_config.json"),
             serde_json::to_string_pretty(&adapter_config)?,
         )?;
-        let device = Device::Cpu;
-        let mut tensors = std::collections::HashMap::new();
+        // Migrated off candle to kiln-tensor (#1082): tests build CPU
+        // zero-tensors and write them to safetensors. The downstream
+        // validate_base_adapter_compatibility reads the file back via
+        // `safetensors::SafeTensors::deserialize`, so the on-disk format
+        // is the contract — not the Rust tensor type.
+        let mut tensors_owned: std::collections::HashMap<String, kt::Tensor> =
+            std::collections::HashMap::new();
         for (name, shape) in shapes {
-            tensors.insert(name, Tensor::zeros(shape, DType::F32, &device)?);
+            tensors_owned.insert(name, kt::Tensor::zeros_cpu(shape, kt::DType::F32));
         }
-        candle_core::safetensors::save(&tensors, dir.join("adapter_model.safetensors"))?;
+        let tensors_borrow: std::collections::HashMap<&str, &kt::Tensor> = tensors_owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v))
+            .collect();
+        kt::safetensors::save_cpu(&tensors_borrow, dir.join("adapter_model.safetensors"))
+            .map_err(|e| anyhow::anyhow!("kt::safetensors::save_cpu: {e}"))?;
         Ok(())
     }
 
