@@ -12168,9 +12168,41 @@ fn gated_deltanet_gates_fallback(
             .broadcast_add(&dt_bias_f32)
             .context("gdn gates fallback broadcast_add dt_bias")?;
         let sp = softplus(&a_biased).context("gdn gates fallback softplus")?;
-        let a_log_exp = a_log_f32
-            .exp()
-            .context("gdn gates fallback a_log exp")?;
+        // Phase 7 (#1082): when `KILN_USE_KT_API_EXP=1` (or
+        // `KILN_USE_KT_API_ALL=1`) is set AND `a_log_f32` is a
+        // contiguous CUDA tensor of a supported dtype, route the
+        // `a_log_f32.exp()` step through
+        // `kiln_tensor::cuda_activation_unary` with kind 6 (Exp) via
+        // the kt-bridge borrow adapter. Falls through to candle's
+        // `.exp()` on any precondition failure.
+        //
+        // Same fallback path as the `.neg()` migration immediately
+        // below — the GDN gates fallback that runs when
+        // KILN_DISABLE_FUSED_GDN_GATES=1 forces the parity-baseline
+        // composite. Wiring the exp step in addition to the neg step
+        // means the full `-exp(A_log)` decay computation goes through
+        // the kt-API when both KILN_USE_KT_API_EXP and
+        // KILN_USE_KT_API_NEG are set.
+        let a_log_exp = {
+            #[cfg(feature = "cuda")]
+            {
+                if let Some(out) = try_kt_exp(&a_log_f32)
+                    .context("gdn gates fallback try_kt_exp")?
+                {
+                    out
+                } else {
+                    a_log_f32
+                        .exp()
+                        .context("gdn gates fallback a_log exp")?
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                a_log_f32
+                    .exp()
+                    .context("gdn gates fallback a_log exp")?
+            }
+        };
         // Phase 7 (#1082): when `KILN_USE_KT_API_NEG=1` (or
         // `KILN_USE_KT_API_ALL=1`) is set AND `a_log_exp` is a
         // contiguous CUDA tensor of a supported dtype, route
