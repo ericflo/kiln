@@ -1616,3 +1616,32 @@ experiment should stop treating H64 repair-continuation plus H77
 moderate-thinking as the main source of signal. Use a broader behavior anchor,
 a different real-reward source, or an OPD/teacher-style signal that adds new
 capability rather than reweighting known fragile adapters.
+
+### H80: H33/H77 concat balanced
+
+H80 tested whether a more faithful composition operator could preserve useful
+signal from old unstable adapters. H33 had one larger-gate reliability win
+before failing confirmation; H77 had the best evidence that moderate
+task-specific thinking is safer than terse imitation. H80 used concat merge to
+preserve those two updates in separate rank blocks instead of averaging their
+tensors or retraining a mixed corpus.
+
+The output adapter was `pi-doctest-h80-h33-h77-concat-balanced`. Sources were
+`pi-doctest-h33-hardneg-g2-noecho-r4a8` at weight 0.5 and
+`pi-doctest-h77-moderate-thinking-workflow-r4a4lr1e7` at weight 0.25. H77 used
+the smaller source weight because H33 has `alpha/r = 2` while H77 has
+`alpha/r = 1`; concat preserves source 0's scale in the merged rank-8 / alpha
+16 output. Adapter verify passed with 200 LoRA projection pairs, 400 nonzero
+tensors, LoRA update proxy 0.181218, and adapter hash
+`sha256:6f7a00979a7b1bb0411f32246b64944e9c9de6e238065c2373be5d669308909e`.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.925000 with no
+zero rollouts and mean wall-clock 44.33s. H80 also scored 0.925000 with no zero
+rollouts, but mean wall-clock rose to 49.07s. No wider gate was run because
+the adapter did not improve score or zero count.
+
+Lesson: preserving H33 and H77 as separate rank blocks still does not recover
+H33's one-off reliability gain or add useful thinking efficiency. The immediate
+adapter-composition branch around H33/H64/H77 is exhausted; the next useful
+experiment should build genuinely new data rather than keep recombining old
+fragile adapters.
