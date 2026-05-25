@@ -1212,48 +1212,51 @@ fn cuda_use_kt_api_min_with_scalar() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: elementwise `Tensor::sin()` through the kt-API
-/// + adapters. Set `KILN_USE_KT_API_SIN=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// `.sin()` candle calls in `forward.rs` (the RoPE
-/// `freqs.sin()` cache builder) through
-/// `kiln_tensor::cuda_activation_unary` with kind tag 7 (Sin) via
-/// the kt-bridge borrow adapter. Pays one dtod memcpy on the
-/// output direction (the kt allocation is freshly-owned). Falls
-/// through to the candle composite when any precondition fails so
-/// behavior is identical with the gate off.
+/// Phase 7 default-on (#1082): elementwise `Tensor::sin()` through
+/// the kt-API + adapters. Default ON because the kt path is a
+/// single-kernel `sinf(x)` dispatch via
+/// `kiln_tensor::cuda_activation_unary` kind 7 (Sin) — bit-exact to
+/// the candle `.sin()` op which uses the same CUDA `sinf`/`__hsin`
+/// intrinsic. Only the Rust shell types and the kt-bridge dtod-copy
+/// at the output boundary differ. Same argument as the exp/log flip
+/// (`53f9b282`). Escape hatch: `KILN_DISABLE_KT_API_SIN=1`.
 ///
+/// Production call site: the RoPE `freqs.sin()` cache builder.
 /// Distinct from the fused `cuda_rope` kernel (which fuses
-/// rotate+apply with prebuilt cos/sin caches) — this gate
-/// migrates the *cache-construction* `.sin()` step that runs once
-/// per RoPE precompute (rare hot-path traffic).
+/// rotate+apply with prebuilt cos/sin caches) — this gate migrates
+/// the *cache-construction* `.sin()` step that runs once per RoPE
+/// precompute (rare hot-path traffic).
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_sin() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SIN").is_ok());
+    // #1082: flipped default ON. Single-kernel `sinf` dispatch
+    // (`cuda_activation_unary` kind 7); bit-exact by construction.
+    // Escape hatch: `KILN_DISABLE_KT_API_SIN=1`.
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SIN").is_err());
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: elementwise `Tensor::cos()` through the kt-API
-/// + adapters. Set `KILN_USE_KT_API_COS=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// `.cos()` candle calls in `forward.rs` (the RoPE
-/// `freqs.cos()` cache builder) through
-/// `kiln_tensor::cuda_activation_unary` with kind tag 8 (Cos) via
-/// the kt-bridge borrow adapter. Pays one dtod memcpy on the
-/// output direction (the kt allocation is freshly-owned). Falls
-/// through to the candle composite when any precondition fails so
-/// behavior is identical with the gate off.
+/// Phase 7 default-on (#1082): elementwise `Tensor::cos()` through
+/// the kt-API + adapters. Default ON because the kt path is a
+/// single-kernel `cosf(x)` dispatch via
+/// `kiln_tensor::cuda_activation_unary` kind 8 (Cos) — bit-exact to
+/// the candle `.cos()` op which uses the same CUDA `cosf`/`__hcos`
+/// intrinsic. Only the Rust shell types and the kt-bridge dtod-copy
+/// at the output boundary differ. Same argument as the SIN flip
+/// directly above. Escape hatch: `KILN_DISABLE_KT_API_COS=1`.
 ///
+/// Production call site: the RoPE `freqs.cos()` cache builder.
 /// Distinct from the fused `cuda_rope` kernel (which fuses
-/// rotate+apply with prebuilt cos/sin caches) — this gate
-/// migrates the *cache-construction* `.cos()` step that runs once
-/// per RoPE precompute (rare hot-path traffic). Mirrors the SIN
-/// scaffold (commit 728b3917).
+/// rotate+apply with prebuilt cos/sin caches) — this gate migrates
+/// the *cache-construction* `.cos()` step that runs once per RoPE
+/// precompute (rare hot-path traffic).
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_cos() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_COS").is_ok());
+    // #1082: flipped default ON. Single-kernel `cosf` dispatch
+    // (`cuda_activation_unary` kind 8); bit-exact by construction.
+    // Escape hatch: `KILN_DISABLE_KT_API_COS=1`.
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_COS").is_err());
     direct || cuda_use_kt_api_all()
 }
 
