@@ -1820,6 +1820,230 @@ pub(crate) fn try_kt_paged_kv_write_token_major_native_graph_slot(
         )
 }
 
+/// Phase 7 opt-in: route a `PagedKvCache::block_size()` accessor read
+/// through the kt twin `PagedKvCacheKt::block_size()` (#1082).
+///
+/// When `kt_cache` is `Some` and the per-site gate
+/// `KILN_USE_KT_PAGED_KV_BLOCK_SIZE` (or `KILN_USE_KT_PAGED_KV_CACHE`,
+/// or `KILN_USE_KT_API_ALL`) is on, this returns the kt cache's
+/// `block_size()` and panics if it disagrees with the candle value
+/// passed in. When the gate is off OR `kt_cache` is `None`, the
+/// candle value is returned unchanged — zero overhead, zero
+/// behavior change on the default path.
+///
+/// This is the read-side counterpart to
+/// [`try_kt_paged_kv_write_token_major_native_graph_slot`]. Accessors
+/// are migrated first because they don't touch device storage —
+/// any divergence between the candle and kt caches surfaces
+/// immediately at construction time (`try_kt_paged_kv_cache_new`
+/// is wired through with the same shape args as the candle path),
+/// so a wired accessor that returns `kt.block_size()` is bit-for-bit
+/// identical to the candle `paged_cache.block_size()` whenever the
+/// gate is on.
+///
+/// NVTX-ranged so the migration is visible in nsys traces — when
+/// the kt path is exercised it shows up as a thin slice between
+/// the preceding paged-decode setup and the writer.
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn try_kt_paged_kv_block_size(
+    candle_block_size: usize,
+    kt_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
+) -> usize {
+    let kt = match kt_cache {
+        Some(c) => c,
+        None => return candle_block_size,
+    };
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let gate_on = *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_PAGED_KV_BLOCK_SIZE").is_ok()
+            || std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    });
+    if !gate_on {
+        return candle_block_size;
+    }
+    kiln_nvtx::range!(c"kiln/paged_kv_kt/block_size");
+    let kt_block_size = kt.block_size();
+    assert_eq!(
+        kt_block_size, candle_block_size,
+        "try_kt_paged_kv_block_size: kt.block_size()={kt_block_size} \
+         disagrees with candle paged_cache.block_size()={candle_block_size}"
+    );
+    kt_block_size
+}
+
+/// Phase 7 opt-in: route a `PagedKvCache::is_fp8()` accessor read
+/// through the kt twin `PagedKvCacheKt::is_fp8()` (#1082).
+///
+/// Sibling to [`try_kt_paged_kv_block_size`]. Returns the kt cache
+/// value (with parity assertion against the candle value) when
+/// `kt_cache` is `Some` AND the per-site gate
+/// `KILN_USE_KT_PAGED_KV_IS_FP8` (or the meta-gates
+/// `KILN_USE_KT_PAGED_KV_CACHE` / `KILN_USE_KT_API_ALL`) is on.
+/// Otherwise returns the candle value unchanged.
+///
+/// `is_fp8()` is a pure-read accessor backed by a private `bool`
+/// field on both cache types — the kt twin sets it in
+/// `PagedKvCacheKt::new_with_fp8` with the same arg the candle
+/// `PagedKvCache::new_with_fp8` does, so the assertion must pass
+/// by construction.
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn try_kt_paged_kv_is_fp8(
+    candle_is_fp8: bool,
+    kt_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
+) -> bool {
+    let kt = match kt_cache {
+        Some(c) => c,
+        None => return candle_is_fp8,
+    };
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let gate_on = *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_PAGED_KV_IS_FP8").is_ok()
+            || std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    });
+    if !gate_on {
+        return candle_is_fp8;
+    }
+    kiln_nvtx::range!(c"kiln/paged_kv_kt/is_fp8");
+    let kt_is_fp8 = kt.is_fp8();
+    assert_eq!(
+        kt_is_fp8, candle_is_fp8,
+        "try_kt_paged_kv_is_fp8: kt.is_fp8()={kt_is_fp8} \
+         disagrees with candle paged_cache.is_fp8()={candle_is_fp8}"
+    );
+    kt_is_fp8
+}
+
+/// Phase 7 opt-in: parity-check a `PagedKvCache::pool_tensors(layer_idx)`
+/// presence read against the kt twin (#1082).
+///
+/// Unlike [`try_kt_paged_kv_block_size`] / [`try_kt_paged_kv_is_fp8`], this
+/// helper does NOT return the kt tensors — they're a different type
+/// (`&KtTensor` vs `&Tensor`) and threading them through the existing
+/// flash-attn callers would be a much bigger change than an accessor
+/// migration. Instead, this just asserts that the kt cache has a layer
+/// for `layer_idx` iff the candle cache does, so that any kt allocator
+/// drift (e.g. a future change to how kt counts layers from
+/// `num_full_attn_layers`) surfaces immediately under the env gate.
+///
+/// The return is `()`. Callers continue to use the candle `pool_tensors`
+/// return for the actual K/V pool tensors.
+///
+/// Gate: `KILN_USE_KT_PAGED_KV_POOL_TENSORS` (or meta-gates
+/// `KILN_USE_KT_PAGED_KV_CACHE` / `KILN_USE_KT_API_ALL`). NOP on the
+/// default path.
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn try_kt_paged_kv_pool_tensors_present(
+    candle_present: bool,
+    layer_idx: usize,
+    kt_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
+) {
+    let kt = match kt_cache {
+        Some(c) => c,
+        None => return,
+    };
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let gate_on = *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_PAGED_KV_POOL_TENSORS").is_ok()
+            || std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    });
+    if !gate_on {
+        return;
+    }
+    kiln_nvtx::range!(c"kiln/paged_kv_kt/pool_tensors_present");
+    let kt_present = kt.pool_tensors(layer_idx).is_some();
+    assert_eq!(
+        kt_present, candle_present,
+        "try_kt_paged_kv_pool_tensors_present: layer_idx={layer_idx}, \
+         kt.pool_tensors(idx).is_some()={kt_present} \
+         disagrees with candle paged_cache.pool_tensors(idx).is_some()={candle_present}"
+    );
+}
+
+/// Phase 7 opt-in: route a `PagedKvCache::num_layers()` accessor read
+/// through the kt twin (#1082).
+///
+/// Sibling to [`try_kt_paged_kv_block_size`] / [`try_kt_paged_kv_is_fp8`].
+/// Gate: `KILN_USE_KT_PAGED_KV_NUM_LAYERS` (or meta-gates).
+///
+/// `num_layers()` is `Vec<(KtTensor,KtTensor)>::len()` on the kt side
+/// and the equivalent on candle — both are populated from
+/// `num_full_attn_layers` in their respective `new_with_fp8`
+/// constructors, so divergence requires the kt allocator to disagree
+/// with the candle one. Assertion is defense-in-depth.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+#[inline]
+pub(crate) fn try_kt_paged_kv_num_layers(
+    candle_num_layers: usize,
+    kt_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
+) -> usize {
+    let kt = match kt_cache {
+        Some(c) => c,
+        None => return candle_num_layers,
+    };
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let gate_on = *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_PAGED_KV_NUM_LAYERS").is_ok()
+            || std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    });
+    if !gate_on {
+        return candle_num_layers;
+    }
+    kiln_nvtx::range!(c"kiln/paged_kv_kt/num_layers");
+    let kt_num_layers = kt.num_layers();
+    assert_eq!(
+        kt_num_layers, candle_num_layers,
+        "try_kt_paged_kv_num_layers: kt.num_layers()={kt_num_layers} \
+         disagrees with candle paged_cache.num_layers()={candle_num_layers}"
+    );
+    kt_num_layers
+}
+
+/// Phase 7 opt-in: route a `PagedKvCache::num_blocks()` accessor read
+/// through the kt twin (#1082).
+///
+/// Sibling to [`try_kt_paged_kv_block_size`]. Gate:
+/// `KILN_USE_KT_PAGED_KV_NUM_BLOCKS` (or meta-gates).
+///
+/// `num_blocks` is a stored field on both cache types — set from the
+/// same constructor arg.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+#[inline]
+pub(crate) fn try_kt_paged_kv_num_blocks(
+    candle_num_blocks: usize,
+    kt_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
+) -> usize {
+    let kt = match kt_cache {
+        Some(c) => c,
+        None => return candle_num_blocks,
+    };
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let gate_on = *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_PAGED_KV_NUM_BLOCKS").is_ok()
+            || std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    });
+    if !gate_on {
+        return candle_num_blocks;
+    }
+    kiln_nvtx::range!(c"kiln/paged_kv_kt/num_blocks");
+    let kt_num_blocks = kt.num_blocks();
+    assert_eq!(
+        kt_num_blocks, candle_num_blocks,
+        "try_kt_paged_kv_num_blocks: kt.num_blocks()={kt_num_blocks} \
+         disagrees with candle paged_cache.num_blocks()={candle_num_blocks}"
+    );
+    kt_num_blocks
+}
+
 /// Phase 7 opt-in: route the Vulkan `linear_prefill_apply` 2D matmul
 /// path through a kt-API equivalent of `kiln_tensor::cuda_matmul`.
 /// Default off; set `KILN_USE_KT_API_MATMUL=1` (or
@@ -16477,9 +16701,23 @@ fn try_flash_attn_paged_decode(
     lora_scale: f32,
     #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
     profile_context: Option<(usize, usize)>,
+    // Phase 7 #1082: kt twin of `paged_cache` for parity-checked
+    // accessor reads. When `Some` AND the env gate is on,
+    // `paged_cache.block_size()` and `paged_cache.is_fp8()` are
+    // re-routed through `try_kt_paged_kv_*` helpers. CUDA-gated
+    // since `PagedKvCacheKt` is CUDA-only. `None` on the default
+    // path (caller not migrated yet or gate off) keeps every
+    // accessor on the candle path unchanged.
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<
+        &crate::paged_kv_cache_kt::PagedKvCacheKt,
+    >,
 ) -> Result<Option<Tensor>> {
     const K_BLOCK_N: usize = 128;
 
+    #[cfg(feature = "cuda")]
+    let block_size =
+        try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
+    #[cfg(not(feature = "cuda"))]
     let block_size = paged_cache.block_size();
     if block_size == 0 || K_BLOCK_N % block_size != 0 {
         return Ok(None);
@@ -16498,7 +16736,14 @@ fn try_flash_attn_paged_decode(
         return Ok(None);
     }
 
-    let (k_pool, v_pool) = match paged_cache.pool_tensors(full_attn_layer_idx) {
+    let candle_pools = paged_cache.pool_tensors(full_attn_layer_idx);
+    #[cfg(feature = "cuda")]
+    try_kt_paged_kv_pool_tensors_present(
+        candle_pools.is_some(),
+        full_attn_layer_idx,
+        kt_paged_cache,
+    );
+    let (k_pool, v_pool) = match candle_pools {
         Some(p) => p,
         None => return Ok(None),
     };
@@ -16513,7 +16758,11 @@ fn try_flash_attn_paged_decode(
     // time on the single-request decode path.
     let use_cuda_direct_paged_decode =
         backend.name() == "cuda" && !cuda_direct_paged_decode_disabled();
-    if !paged_cache.is_fp8() && !use_cuda_direct_paged_decode {
+    #[cfg(feature = "cuda")]
+    let is_fp8 = try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache);
+    #[cfg(not(feature = "cuda"))]
+    let is_fp8 = paged_cache.is_fp8();
+    if !is_fp8 && !use_cuda_direct_paged_decode {
         if let Some(start_slot) =
             contiguous_slot_run_start(block_table, block_size, 0, total_seq_len)
         {
@@ -17197,6 +17446,14 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // closing suspect 1 in `bench-results/cuda-graph-bs2-secondary-audit.md`
     // for #1082. `None` reproduces the legacy per-row writer.
     kv_slot: Option<&Tensor>,
+    // Phase 7 #1082: kt twin of `paged_cache` for parity-checked
+    // accessor reads. When `Some` AND the env gate is on, accessor
+    // calls (`is_fp8`, `num_layers`) are mirrored through
+    // `try_kt_paged_kv_*` helpers. `None` keeps every accessor on
+    // the candle path unchanged.
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<
+        &crate::paged_kv_cache_kt::PagedKvCacheKt,
+    >,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
     let profile_device = x.device();
@@ -17213,14 +17470,29 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         positions.elem_count() == 1 || positions.elem_count() == batch,
         "batched contiguous paged attention positions tensor must hold either a shared scalar or one entry per row"
     );
-    anyhow::ensure!(
-        !paged_cache.is_fp8(),
-        "batched contiguous paged attention does not support FP8 caches"
-    );
-    anyhow::ensure!(
-        full_attn_layer_idx < paged_cache.num_layers(),
-        "batched contiguous paged attention layer index out of range"
-    );
+    #[cfg(feature = "cuda")]
+    {
+        anyhow::ensure!(
+            !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache),
+            "batched contiguous paged attention does not support FP8 caches"
+        );
+        anyhow::ensure!(
+            full_attn_layer_idx
+                < try_kt_paged_kv_num_layers(paged_cache.num_layers(), kt_paged_cache),
+            "batched contiguous paged attention layer index out of range"
+        );
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        anyhow::ensure!(
+            !paged_cache.is_fp8(),
+            "batched contiguous paged attention does not support FP8 caches"
+        );
+        anyhow::ensure!(
+            full_attn_layer_idx < paged_cache.num_layers(),
+            "batched contiguous paged attention layer index out of range"
+        );
+    }
 
     // Phase 12-B-prime: drop the uniform-start_pos assertion stack. Per-row
     // K/V lengths are encoded via `seqused_k`, and per-row start positions
@@ -18332,7 +18604,7 @@ fn gqa_attention_paged_with_rope_tables(
     //     full cache history, defeating the kv_len = 1 contract).
     if seq_len == 1
         && !single_token_self_attn
-        && !paged_cache.is_fp8()
+        && !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache)
         && (num_heads / num_kv_heads) > 1
         && !fused_paged_decode_disabled()
         && backend.supports_flash_attn_paged_decode()
@@ -18363,6 +18635,8 @@ fn gqa_attention_paged_with_rope_tables(
                 #[cfg(feature = "cuda")]
                 graph_inputs,
                 profile_context,
+                #[cfg(feature = "cuda")]
+                kt_paged_cache,
             )?
         };
         if let Some(out) = out_opt {
@@ -18395,14 +18669,19 @@ fn gqa_attention_paged_with_rope_tables(
     } else {
         let prefix_only_prefill = seq_len > 1
             && start_pos > 0
-            && !paged_cache.is_fp8()
+            && !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache)
             && backend.supports_flash_attn_prefill_head_major()
             && !crate::mtp_debug::is_c7_sdpa_capture_armed();
         let prefix_append_fast = if prefix_only_prefill
             && start_pos >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
             && backend.supports_paged_kv_head_major_read_append_token_major()
         {
-            contiguous_slot_run_start(block_table, paged_cache.block_size(), 0, start_pos)
+            contiguous_slot_run_start(
+                block_table,
+                try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache),
+                0,
+                start_pos,
+            )
                 .and_then(|start_slot| {
                     paged_cache
                         .pool_tensors(full_attn_layer_idx)
@@ -18430,11 +18709,16 @@ fn gqa_attention_paged_with_rope_tables(
         };
         let fast_read = if seq_len > 1
             && fast_read_len >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
-            && !paged_cache.is_fp8()
+            && !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache)
             && backend.supports_paged_kv_head_major_read()
             && backend.supports_flash_attn_prefill_head_major()
         {
-            contiguous_slot_run_start(block_table, paged_cache.block_size(), 0, fast_read_len)
+            contiguous_slot_run_start(
+                block_table,
+                try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache),
+                0,
+                fast_read_len,
+            )
                 .and_then(|start_slot| {
                     paged_cache
                         .pool_tensors(full_attn_layer_idx)
@@ -19544,6 +19828,11 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     // Forwarded as-is to `gqa_attention_paged_decode_contiguous_batch`
     // (#1082 suspect 1).
     kv_slot: Option<&Tensor>,
+    // Phase 7 #1082: kt twin of `paged_cache` forwarded as-is to the
+    // GQA layer. `None` (default) keeps the candle accessor path.
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<
+        &crate::paged_kv_cache_kt::PagedKvCacheKt,
+    >,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -19593,6 +19882,8 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         graph_outputs,
         rope_tables,
         kv_slot,
+        #[cfg(feature = "cuda")]
+        kt_paged_cache,
     )?;
     let x = {
         kiln_nvtx::range!(c"kiln/residual_batch_decode");
@@ -19902,6 +20193,8 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     layer_graph_outputs,
                     layer_rope_tables,
                     stable_kv_slot_gpu,
+                    #[cfg(feature = "cuda")]
+                    None,
                 )
                 .with_context(|| {
                     format!("batched transformer block {i} (full attention, paged)")
@@ -21813,6 +22106,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                     None,
                     None,
                     None,
+                    #[cfg(feature = "cuda")]
                     None,
                 ) {
                     Ok(out) => hidden = out,
@@ -25270,6 +25564,7 @@ mod tests {
             None,
             None,
             None,
+        #[cfg(feature = "cuda")]
             None,
         )?;
         device.synchronize()?;
@@ -25427,6 +25722,7 @@ mod tests {
             None,
             None,
             None,
+            #[cfg(feature = "cuda")]
             None,
         )?;
         device.synchronize()?;
