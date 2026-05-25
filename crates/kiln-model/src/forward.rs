@@ -7309,6 +7309,29 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
             sq.mean_keepdim(candle_core::D::Minus1)?
         }
     };
+    // Phase 7 (#1082): when `KILN_USE_KT_API_ADD_SCALAR=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND `variance` is a
+    // contiguous CUDA tensor, route the `+ eps` step through
+    // `kiln_tensor::cuda_scalar_op` with kind 0 (AddScalar) — a
+    // single-kernel dispatch instead of the candle composite.
+    // Mirrors the l2_normalize and softplus add-scalar wirings.
+    // Falls through to the candle `+ f64` composite when any
+    // precondition fails so behavior is identical with the gate
+    // off.
+    let variance_plus_eps = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_add_scalar(&variance, eps)? {
+                out
+            } else {
+                (variance + eps)?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            (variance + eps)?
+        }
+    };
     // Phase 7 (#1082): when `KILN_USE_KT_API_RSQRT=1` (or
     // `KILN_USE_KT_API_ALL=1`) is set AND `variance + eps` is a
     // contiguous CUDA F32 tensor, route the
@@ -7318,7 +7341,6 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
     // intermediate sqrt buffer. Falls through to the candle
     // composite when any precondition fails so behavior is
     // identical with the gate off.
-    let variance_plus_eps = (variance + eps)?;
     let rms_inv = {
         #[cfg(feature = "cuda")]
         {
@@ -11619,6 +11641,26 @@ fn gated_rms_norm_fallback(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) ->
             sq.mean_keepdim(candle_core::D::Minus1)?
         }
     };
+    // Phase 7 (#1082): when `KILN_USE_KT_API_ADD_SCALAR=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND `variance` is a
+    // contiguous CUDA tensor, route the `+ eps` step through
+    // `kiln_tensor::cuda_scalar_op` with kind 0 (AddScalar).
+    // Mirrors the rms_norm_fallback wiring. Falls through to the
+    // candle `+ f64` composite when any precondition fails.
+    let variance_plus_eps = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_add_scalar(&variance, eps)? {
+                out
+            } else {
+                (variance + eps)?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            (variance + eps)?
+        }
+    };
     // Phase 7 (#1082): when `KILN_USE_KT_API_RSQRT=1` (or
     // `KILN_USE_KT_API_ALL=1`) is set, route the RMSNorm-tail
     // `(variance + eps).sqrt().recip()` composite through
@@ -11626,7 +11668,6 @@ fn gated_rms_norm_fallback(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) ->
     // single fused kernel that replaces the two candle calls + the
     // intermediate sqrt buffer. Falls through to the candle
     // composite when any precondition fails.
-    let variance_plus_eps = (variance + eps)?;
     let rms_inv = {
         #[cfg(feature = "cuda")]
         {
