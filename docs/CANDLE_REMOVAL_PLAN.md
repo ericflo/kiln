@@ -4,7 +4,7 @@ This document inventories every `candle_core` and `candle_nn` reference in
 the kiln workspace and the migration path to a candle-free build. It is
 the canonical artifact for tracking Phase 7 closeout against issue #1082.
 
-Last refreshed: 2026-05-25, against `main` post-commit `f569b7be`.
+Last refreshed: 2026-05-25, against `main` post-merge of `ce/1082-pagedkv-accessors-migrate` (`40666082`) + 9 Metal/Vulkan kernel wires (`ddee82e6`, `1471dafb`, `b5ec4874`, `a88d0842`, `93ad0360`, `bb2e6283`, `5d9dcef3`, `742cf7e4`, `c846f188`) + 10 cuda_train.rs kt-API wires (`ddd8379c` through `e99a1a42`).
 
 ## Workspace candle footprint
 
@@ -125,14 +125,23 @@ sed -i "/candle-core.*path.*vendor/d" Cargo.toml
 | Tier 4 close       | Full matrix |
 | Tier 5 delete      | Full matrix + a fresh `cargo tree -i candle-core` returning empty |
 
-## Status snapshot (2026-05-25)
+## Status snapshot (2026-05-25, refreshed)
 
-- Tier 0: ✅ already candle-free.
-- Tier 1: 🟡 in flight — kt_api surfaces shipped on all 5 kernel crates;
-  candle-typed surfaces still primary in production. Migrating callers
-  is the bulk of the remaining mechanical work.
-- Tier 2: 🟡 in flight — flce-kernel Phase B is the standout effort.
-- Tier 3: 🟡 in flight — 40+ env gates landed; default-off.
+- Tier 0: ✅ already candle-free (kiln-core, kiln-scheduler, kiln-nvtx).
+- Tier 1: 🟡 in flight — all 5 kernel crates have kt_api surfaces. Production
+  wiring in progress: kiln-rmsnorm-kernel has 7 `_kt` calls in forward.rs;
+  kiln-conv1d-kernel, kiln-marlin-gemm, kiln-flash-attn, kiln-gdn-kernel
+  have 0 production `_kt` callers yet (kt_api surfaces ready, callers
+  still on candle-typed entries).
+- Tier 2: 🟡 in flight — flce-kernel Phase B is the standout rewrite effort.
+  Metal + Vulkan backends now have real kernel wires landed for 9 ops
+  (rmsnorm, layernorm, l2norm, silu, sigmoid, softmax, elementwise binary
+  add/sub/mul/div, cast f32↔bf16, index_select_dim0).
+- Tier 3: 🟡 in flight — kiln-model has 40+ env-gated kt-API parallel paths
+  in forward.rs + cuda_train.rs. PagedKvCacheKt accessor migration now
+  has 5 parity helpers (`try_kt_paged_kv_{block_size, is_fp8,
+  pool_tensors_present, num_layers, num_blocks}`) + 9 production accessor
+  read sites migrated. All defaults remain off.
 - Tier 4: ⏳ blocked on Tier 1 + Tier 3.
 - Tier 5: ⏳ blocked on everything above.
 
