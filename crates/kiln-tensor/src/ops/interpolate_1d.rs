@@ -38,6 +38,23 @@ pub fn interpolate_1d(x: &Tensor, target_len: usize, align: AlignCorners) -> Res
     if !x.is_contiguous() {
         bail!("interpolate_1d: input must be contiguous");
     }
+
+    // CUDA fast path: D2H-copy the input and reuse the CPU
+    // resampling loop. The inner math is a 1-D linear blend of two
+    // neighbors and isn't where decode-time hot path lives, but the
+    // public API still must accept CUDA-resident inputs transparently
+    // because upstream feature-extraction outputs already live on the
+    // device that produced them. See `#1082`.
+    #[cfg(feature = "cuda")]
+    let _x_host;
+    #[cfg(feature = "cuda")]
+    let x = if matches!(x.device(), crate::Device::Cuda(_)) {
+        _x_host = crate::cuda_to_host_copy(x)?;
+        &_x_host
+    } else {
+        x
+    };
+
     let mut out_shape: Vec<usize> = x.shape().to_vec();
     let last = *out_shape.last().unwrap();
     if last == 0 {
