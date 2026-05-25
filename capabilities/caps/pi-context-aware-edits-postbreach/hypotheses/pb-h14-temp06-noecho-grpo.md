@@ -49,4 +49,40 @@ Reject if any of:
 Payload smoke passed before full rollout generation. With
 `KILN_PI_PAYLOAD_TRACE=1`, a one-task train smoke wrote 7 provider-request
 trace rows, each showing `temperature=0.6` and `top_p=0.95`. The smoke rollout
-is not used for training. Full rollout generation and training are pending.
+is not used for training.
+
+Full train-only rollout generation completed over 32 tasks x 4 generations.
+The pool had 128 completions with reward mean 0.3330, stdev 0.4561, and reward
+counts `0.0:82`, `0.48:3`, `0.5:3`, `0.96:8`, `1.0:32`. After
+`filter_var_min=0.05`, 17 reward-variant groups survived, above the 12-group
+gate. The GRPO train data hash was
+`sha256:a379c65229e79fe64ff326ccadf1b16b2517e14c426cc27af99ef079c8a5ef23`.
+
+The H10-style no-ECHO CUDA 13.2 training run completed on the local RTX 4090
+with gradient checkpointing (`KILN_GRAD_CHECKPOINT_SEGMENTS=32`): rank 4,
+alpha 8, `lr=5e-6`, seed 3141592653, 17 groups / 68 completions trained,
+59,314 action tokens, 21,243 environment tokens, and 14,758 context tokens.
+Final loss was 0.084138, observed peak training VRAM was 20,801 MiB, and wall
+time was about 4,814s. The installed adapter is
+`pi-context-aware-edits-postbreach-pb-h14-temp06-noecho-grpo-r4a8`.
+
+Offline adapter verification passed for the installed adapter: 400 tensors,
+200 matched LoRA projection pairs, rank 4, alpha 8, all tensors nonzero,
+adapter model hash
+`sha256:e81f847e3681c16115ad7edb55bcba48798a35896b6ab2918fb5dbd94afb3472`,
+and LoRA delta proxy L2 1.0844.
+
+Blind 3-seed CUDA eval scored **0.4125** composite over 16 tasks / 48 rollouts,
+with `delta=+0.1129` versus the postbreach baseline and above PB-H10's 0.3404.
+Sub-scores were `outcome=0.5000`, `format_compliance=0.6562`,
+`convention_consistency=0.9750`, `read_before_edit=1.0000`,
+`no_redundant_imports=1.0000`, and `no_style_drift=1.0000`. Efficiency stayed
+within gate: 6.02 tool calls, 1,917.0 thinking chars, and 311.5 thinking
+chars/tool call. The CUDA eval server was healthy during the run with W4A16
+Marlin packing 104/104 projections, CUDA graphs enabled, and no observed
+server errors or timeouts.
+
+Verdict: kept with caveat. H14 is the new current-best postbreach adapter by
+composite and clears the +0.05 improvement gate, but it does not satisfy the
+predeclared outcome floor (`0.5000 < 0.5208` versus PB-H10). Treat it as a
+better caveated adapter, not an unconditional promotion.

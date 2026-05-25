@@ -278,7 +278,18 @@ and JavaScript camelCase/CommonJS style when available.
   recipe. This follows the `pi-faithful-completion` lesson that lower rollout
   temperature can clean up advantage signal without changing the objective,
   while avoiding another sweep over the exhausted PB-H7 data.
-  - Result: pending.
+  - Result: kept with caveat. The provider-payload smoke confirmed
+    `temperature=0.6` and `top_p=0.95`, and the full train rollout produced
+    enough reward-variant groups (`17` groups / `68` completions after
+    filtering). The CUDA 13.2 no-ECHO GRPO run trained, installed, smoke-tested,
+    and verified cleanly with gradient checkpointing (`final_loss=0.084138`,
+    observed peak training VRAM 20,801 MiB, elapsed 4,814.3s, verify L2 proxy
+    1.0844). Blind eval improved to 0.4125 (`delta=+0.1129`), above both
+    baseline and PB-H10, with `format_compliance=0.6562`,
+    `convention_consistency=0.9750`, and `read_before_edit=1.0000`. It still
+    missed the predeclared outcome floor versus PB-H10 (`outcome=0.5000` vs.
+    `0.5208`), so H14 becomes the current best caveated adapter rather than an
+    unconditional promotion.
 
 ## Standard Workflow
 
