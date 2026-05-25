@@ -2070,6 +2070,7 @@ dependencies = [
  "bytemuck",
  "candle-core",
  "candle-metal-kernels",
+ "candle-nn",
  "cc",
  "half",
  "kiln-autograd",

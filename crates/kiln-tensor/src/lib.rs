@@ -98,7 +98,7 @@ pub use fp8::{
 #[cfg(feature = "metal")]
 pub use metal_allocator::MetalAllocator;
 #[cfg(feature = "metal")]
-pub use metal_storage::{metal_zeros, MetalStorage};
+pub use metal_storage::{metal_softmax_last_axis, metal_zeros, MetalStorage};
 #[cfg(feature = "vulkan")]
 pub use vulkan_allocator::VulkanAllocator;
 #[cfg(feature = "vulkan")]

@@ -179,6 +179,187 @@ pub fn metal_zeros(
     Ok(Arc::new(storage))
 }
 
+
+// ----------------------------------------------------------------------
+// metal_softmax_last_axis — Phase 4 Metal substrate op (#1082)
+// ----------------------------------------------------------------------
+
+/// Metal softmax over the trailing axis. Mirrors the role of
+/// [`crate::cuda_softmax_last_axis`] for the Metal backend.
+///
+/// Operates on a contiguous `[..., D]` Metal-backed tensor; produces a
+/// fresh contiguous tensor of the same shape and dtype with each
+/// `[..., :]` row normalized to a probability distribution.
+///
+/// # Implementation
+///
+/// Delegates to candle's `candle_nn::ops::softmax_last_dim`, which
+/// dispatches to candle's Metal kernels under the hood. We wrap the
+/// kt-Tensor's `Arc<metal::Buffer>` in a candle [`candle_core::MetalStorage`]
+/// (sharing the underlying MTLBuffer — zero-copy on Apple Silicon UMA),
+/// build a candle Tensor via the public [`candle_core::Tensor::from_storage`],
+/// run the softmax, then wrap the result's MTLBuffer back into a kt
+/// `MetalStorage`. On UMA, both the input and output Arcs point to the
+/// same underlying MTLBuffer (refcounted by Objective-C `retain`), so
+/// no host/device round-trip occurs.
+///
+/// # Requirements
+///
+/// - `x` must be backed by [`MetalStorage`]
+/// - `x.dtype()` must be `F32`, `BF16`, or `F16`
+/// - `x.rank() >= 1`
+/// - `x.is_contiguous()` must hold
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] if the storage isn't `MetalStorage`, the
+/// dtype is unsupported, the layout is non-contiguous, or the
+/// underlying candle call fails (e.g. shape/dtype mismatch the candle
+/// kernel cannot handle).
+///
+/// # Phase 7 (#1082) note
+///
+/// This is the canonical kt-API Metal softmax for Phase 4 (substrate
+/// ops); Phase 7 candle removal replaces the candle-typed inner call
+/// with a direct `candle_metal_kernels::call_last_softmax` or a vendored
+/// MSL kernel. The public signature (`metal_softmax_last_axis(&Tensor)
+/// -> Result<Tensor>`) does not change.
+pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
+    use candle_core::{op::BackpropOp, DType as CandleDType, MetalStorage as CandleMetalStorage, Storage as CandleStorage, Tensor as CandleTensor};
+
+    // ---- Validate kt-side preconditions ----
+    let dtype = x.dtype();
+    let candle_dtype = match dtype {
+        DType::F32 => CandleDType::F32,
+        DType::BF16 => CandleDType::BF16,
+        DType::F16 => CandleDType::F16,
+        other => {
+            return Err(Error::Msg(format!(
+                "metal_softmax_last_axis: unsupported dtype {other}"
+            )));
+        }
+    };
+    if x.rank() == 0 {
+        return Err(Error::Msg(
+            "metal_softmax_last_axis: input must have rank >= 1".to_string(),
+        ));
+    }
+    if !x.is_contiguous() {
+        return Err(Error::Msg(
+            "metal_softmax_last_axis: input must be contiguous".to_string(),
+        ));
+    }
+
+    let kt_metal = x
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_softmax_last_axis: input must be Metal-backed".to_string())
+        })?;
+
+    let candle_device_arc = kt_metal.candle_device().clone();
+    let device_index = match kt_metal.device() {
+        Device::Metal(i) => i,
+        _ => unreachable!("MetalStorage::device() returns Device::Metal"),
+    };
+
+    let shape: Vec<usize> = x.shape().to_vec();
+    let element_count: usize = x.element_count();
+
+    // ---- Wrap kt buffer in a candle MetalStorage (shares underlying MTLBuffer) ----
+    //
+    // `candle_core::MetalStorage::new(buffer, device, count, dtype)` takes:
+    //   - buffer: Arc<metal::Buffer>  (same type kt-tensor holds)
+    //   - device: MetalDevice         (cloned from the Arc — cheap, NSObject retain)
+    //   - count: usize                (element count)
+    //   - dtype: candle DType
+    //
+    // The resulting candle MetalStorage shares the MTLBuffer with kt-tensor's
+    // MetalStorage (Apple Silicon UMA: a single physical allocation, two Arc
+    // handles, one MTLBuffer retain-count).
+    let candle_in_storage = CandleMetalStorage::new(
+        Arc::clone(kt_metal.buffer()),
+        (*candle_device_arc).clone(),
+        element_count,
+        candle_dtype,
+    );
+    let candle_storage = CandleStorage::Metal(candle_in_storage);
+    let candle_in: CandleTensor = CandleTensor::from_storage(
+        candle_storage,
+        shape.as_slice(),
+        BackpropOp::none(),
+        /*is_variable=*/ false,
+    );
+
+    // ---- Dispatch through candle_nn ----
+    //
+    // `candle_nn::ops::softmax_last_dim` invokes candle's Metal softmax
+    // kernel (via the same path candle_nn::ops::softmax(_, -1) takes).
+    let candle_out: CandleTensor = candle_nn::ops::softmax_last_dim(&candle_in).map_err(|e| {
+        Error::Msg(format!(
+            "metal_softmax_last_axis: candle_nn::ops::softmax_last_dim failed: {e}"
+        ))
+    })?;
+
+    // candle's softmax may return a non-contiguous result depending on the
+    // kernel path; force contiguity so the resulting kt tensor's stride
+    // assumption holds.
+    let candle_out = candle_out.contiguous().map_err(|e| {
+        Error::Msg(format!(
+            "metal_softmax_last_axis: candle contiguous failed: {e}"
+        ))
+    })?;
+
+    // ---- Extract the output buffer back into kt-Tensor space ----
+    //
+    // candle's `Tensor::storage_and_layout` returns a `RwLockReadGuard`
+    // over a `candle_core::Storage`. Match on the Metal variant and
+    // extract the underlying MTLBuffer via `.buffer()`. We then wrap
+    // a clone in an `Arc<metal::Buffer>` — `metal::Buffer: Clone`
+    // performs an NSObject retain (refcount bump), so kt-Tensor's new
+    // Arc points to the same MTLBuffer the candle result owns.
+    let (out_storage_guard, _out_layout) = candle_out.storage_and_layout();
+    let candle_out_metal = match &*out_storage_guard {
+        CandleStorage::Metal(m) => m,
+        _ => {
+            return Err(Error::Msg(
+                "metal_softmax_last_axis: candle softmax returned non-Metal storage \
+                 (unexpected — candle_nn::ops::softmax_last_dim preserves device)"
+                    .to_string(),
+            ));
+        }
+    };
+
+    // `candle_out_metal.buffer()` returns `&metal::Buffer`. The `metal`
+    // crate's `Buffer` is a thin Objective-C handle (`ProtocolObject<MTLBuffer>`);
+    // its `Clone` impl is an NSObject `retain`, so cloning is cheap and
+    // refcounts the underlying MTLBuffer. Wrapping in `Arc::new(...)`
+    // gives kt-Tensor its own Arc<Buffer> sharing the MTLBuffer with
+    // the candle result. When the candle Tensor `candle_out` drops at
+    // the end of this function, the MTLBuffer survives (kt-side retain
+    // still holds it).
+    let out_buffer_clone = candle_out_metal.buffer().to_owned();
+    let out_buffer_arc: Arc<candle_metal_kernels::metal::Buffer> = Arc::new(out_buffer_clone);
+
+    let out_storage = MetalStorage::from_buffer(
+        candle_device_arc,
+        device_index,
+        dtype,
+        out_buffer_arc,
+    )?;
+    let out_storage_arc: crate::Storage = Arc::new(out_storage);
+
+    // Drop the candle read guard before we construct the kt tensor.
+    drop(out_storage_guard);
+
+    crate::Tensor::from_parts(
+        out_storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

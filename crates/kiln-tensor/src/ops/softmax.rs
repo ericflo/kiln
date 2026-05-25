@@ -147,7 +147,14 @@ impl DeviceOp1 for SoftmaxLastDimOp {
         //      the trailing dim, two-pass max → exp+sum → divide.
         //   3. Reuse the metal kernels in `kiln-model::backend::metal`
         //      (the existing softmax there is the production hot path).
-        Ok(None)
+        //
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::metal_softmax_last_axis` which wraps candle's
+        // `candle_nn::ops::softmax_last_dim` (zero-copy on UMA — shares
+        // the MTLBuffer between kt and candle storages). See
+        // `metal_storage.rs::metal_softmax_last_axis` for the
+        // integration pattern.
+        Ok(Some(crate::metal_softmax_last_axis(x)?))
     }
 
     #[cfg(feature = "vulkan")]
