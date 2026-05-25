@@ -4709,12 +4709,21 @@ impl CudaBackwardOp for ShiftedCrossEntropyBackward {
         let shifted = active_logits
             .broadcast_sub(&max_val)
             .context("cuda_shifted_cross_entropy_loss backward: shift")?;
-        let exp_shifted = shifted
-            .exp()
-            .context("cuda_shifted_cross_entropy_loss backward: exp")?;
-        let sum_exp = exp_shifted
-            .sum_keepdim(D::Minus1)
-            .context("cuda_shifted_cross_entropy_loss backward: sum")?;
+        // Phase 7 (#1082): wire exp + sum_keepdim through kt-API
+        let exp_shifted = match crate::forward::try_kt_exp(&shifted)
+            .context("cuda_shifted_cross_entropy_loss backward: try_kt_exp")?
+        {
+            Some(out) => out,
+            None => shifted.exp().context("cuda_shifted_cross_entropy_loss backward: exp")?,
+        };
+        let sum_exp = match crate::forward::try_kt_sum_last_dim_keepdim(&exp_shifted)
+            .context("cuda_shifted_cross_entropy_loss backward: try_kt_sum")?
+        {
+            Some(out) => out,
+            None => exp_shifted
+                .sum_keepdim(D::Minus1)
+                .context("cuda_shifted_cross_entropy_loss backward: sum")?,
+        };
         let mut grad_active = exp_shifted
             .broadcast_div(&sum_exp)
             .context("cuda_shifted_cross_entropy_loss backward: softmax")?;
@@ -4870,11 +4879,23 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                     let shifted = logits_chunk.broadcast_sub(&chunk_max).context(
                         "cuda_shifted_linear_cross_entropy_loss backward: initial shift",
                     )?;
-                    let chunk_sumexp = shifted
-                        .exp()
-                        .context("cuda_shifted_linear_cross_entropy_loss backward: initial exp")?
-                        .sum_keepdim(D::Minus1)
-                        .context("cuda_shifted_linear_cross_entropy_loss backward: initial sum")?;
+                    // Phase 7 (#1082): wire exp + sum_keepdim through kt-API
+                    let chunk_exp = match crate::forward::try_kt_exp(&shifted)
+                        .context("cuda_shifted_linear_cross_entropy_loss backward: try_kt_exp init")?
+                    {
+                        Some(out) => out,
+                        None => shifted
+                            .exp()
+                            .context("cuda_shifted_linear_cross_entropy_loss backward: initial exp")?,
+                    };
+                    let chunk_sumexp = match crate::forward::try_kt_sum_last_dim_keepdim(&chunk_exp)
+                        .context("cuda_shifted_linear_cross_entropy_loss backward: try_kt_sum init")?
+                    {
+                        Some(out) => out,
+                        None => chunk_exp
+                            .sum_keepdim(D::Minus1)
+                            .context("cuda_shifted_linear_cross_entropy_loss backward: initial sum")?,
+                    };
                     (chunk_max.detach(), chunk_sumexp.detach())
                 }
                 (Some(prev_max), Some(prev_sumexp)) => {
