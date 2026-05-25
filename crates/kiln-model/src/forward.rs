@@ -15868,6 +15868,131 @@ impl CachedPagedDecodeMeta {
             strict_start_slots,
         })
     }
+
+    /// Build the per-step paged-decode metadata using caller-owned stable
+    /// device buffers for `block_table_tensor` and `seqused_k_tensor` instead
+    /// of allocating fresh ones via `Tensor::from_slice`.
+    ///
+    /// This is the CUDA graph capture path's entry point: during capture the
+    /// regular [`Self::build`] would call `Tensor::from_slice` inside the
+    /// captured stream window, baking transient `cudaMalloc`-backed device
+    /// pointers into the captured kernel arguments. When the per-call
+    /// `CachedPagedDecodeMeta` local drops at end of capture, candle
+    /// `cudaFree`s the storage and the captured graph is left holding
+    /// dangling pointers — the first `cuGraphLaunch` then faults with
+    /// `CUDA_ERROR_ILLEGAL_ADDRESS` (see `bench-results/cuda-graph-bs2-memcheck.md`,
+    /// issue #1082).
+    ///
+    /// Callers must pre-populate the stable buffers with the same per-row
+    /// data the regular [`Self::build`] would write (the CUDA graph runner
+    /// re-fills them before every replay via `cudaMemcpyHtoDAsync`). The
+    /// tensors are taken by clone (cheap — they're storage handles, not
+    /// data copies) and stored on the returned `CachedPagedDecodeMeta` so
+    /// downstream call sites (e.g. `gqa_attention_paged_decode_contiguous_batch`)
+    /// can keep their existing `&meta.block_table_tensor` access pattern.
+    ///
+    /// Shape contract (the caller is responsible for upholding it):
+    ///   * `stable_block_table_gpu` must be `[batch, max_blocks_per_seq]` u32.
+    ///   * `stable_seqused_k_gpu` must be `[batch]` i32.
+    /// where `max_blocks_per_seq = ceil(max_seqlen_k / paged_cache.block_size()).max(1)`
+    /// and `max_seqlen_k = max(start_positions) + 1`.
+    pub fn build_with_stable_buffers(
+        paged_cache: &PagedKvCache,
+        block_tables: &[&BlockTable],
+        start_positions: &[usize],
+        stable_block_table_gpu: &Tensor,
+        stable_seqused_k_gpu: &Tensor,
+    ) -> Result<Self> {
+        let batch = start_positions.len();
+        anyhow::ensure!(
+            batch > 0,
+            "CachedPagedDecodeMeta requires a non-empty batch"
+        );
+        anyhow::ensure!(
+            block_tables.len() == batch,
+            "CachedPagedDecodeMeta metadata length mismatch ({} vs {batch})",
+            block_tables.len()
+        );
+
+        let max_start_pos = *start_positions
+            .iter()
+            .max()
+            .context("CachedPagedDecodeMeta requires non-empty start_positions")?;
+        let min_start_pos = *start_positions
+            .iter()
+            .min()
+            .context("CachedPagedDecodeMeta requires non-empty start_positions")?;
+        let uniform_start_pos = max_start_pos == min_start_pos;
+        let max_seqlen_k = max_start_pos + 1;
+
+        let page_block_size = paged_cache.block_size();
+        let max_blocks_per_seq =
+            ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
+
+        // Verify per-row block-table coverage matches the regular build path
+        // even though we don't materialize the device tensors here. This
+        // catches inconsistent block_tables / start_positions before they
+        // reach the captured kernel.
+        for (row_idx, bt) in block_tables.iter().enumerate() {
+            let row_seqlen = start_positions[row_idx] + 1;
+            let row_blocks = bt.blocks.as_slice();
+            anyhow::ensure!(
+                row_blocks.len() * page_block_size >= row_seqlen,
+                "CachedPagedDecodeMeta row {row_idx}: block_table covers {} tokens but row needs {}",
+                row_blocks.len() * page_block_size,
+                row_seqlen,
+            );
+        }
+
+        // Validate the stable buffer shapes match what the captured kernels
+        // expect. A shape mismatch here would silently corrupt the captured
+        // launch.
+        let block_table_dims = stable_block_table_gpu.dims();
+        anyhow::ensure!(
+            block_table_dims == [batch, max_blocks_per_seq],
+            "CachedPagedDecodeMeta stable block_table shape mismatch: got {:?}, expected [{batch}, {max_blocks_per_seq}]",
+            block_table_dims,
+        );
+        let seqused_k_dims = stable_seqused_k_gpu.dims();
+        anyhow::ensure!(
+            seqused_k_dims == [batch],
+            "CachedPagedDecodeMeta stable seqused_k shape mismatch: got {:?}, expected [{batch}]",
+            seqused_k_dims,
+        );
+
+        let strict_start_slots: Option<Vec<u32>> = if uniform_start_pos {
+            let live_window_starts = vec![0usize; batch];
+            match paged_cache.contiguous_slot_run_starts(
+                block_tables,
+                &live_window_starts,
+                max_seqlen_k,
+            ) {
+                Some(slots) => {
+                    let v: Result<Vec<u32>> = slots
+                        .iter()
+                        .map(|&slot| {
+                            u32::try_from(slot).context(
+                                "CachedPagedDecodeMeta: start slot exceeds u32 range",
+                            )
+                        })
+                        .collect();
+                    Some(v?)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        Ok(Self {
+            block_table_tensor: stable_block_table_gpu.clone(),
+            seqused_k_tensor: stable_seqused_k_gpu.clone(),
+            max_seqlen_k,
+            max_blocks_per_seq,
+            uniform_start_pos,
+            strict_start_slots,
+        })
+    }
 }
 
 /// Batched full-attention decode for rows whose live paged-KV windows can be
