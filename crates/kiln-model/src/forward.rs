@@ -18092,6 +18092,10 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         (None, Some(v)) => Some(v.as_slice()),
         (None, None) => None,
     };
+    #[cfg(feature = "cuda")]
+    let page_block_size =
+        try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
+    #[cfg(not(feature = "cuda"))]
     let page_block_size = paged_cache.block_size();
     let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
     let attn_output = {
