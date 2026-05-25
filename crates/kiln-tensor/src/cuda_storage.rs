@@ -439,6 +439,16 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_scan_last_axis_async(
+        x: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n_rows: i64,
+        n_cols: i64,
+        dtype_tag: i32,
+        kind: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_l2norm_apply_async(
         x: *const core::ffi::c_void,
         sum_sq_f32: *const core::ffi::c_void,
@@ -4710,4 +4720,129 @@ pub fn cuda_diag_build(v: &crate::Tensor) -> Result<crate::Tensor> {
         crate::TensorId::next(),
     )
     .map_err(|e| crate::Error::Msg(format!("cuda_diag_build: wrap: {e}")))
+}
+
+
+/// CUDA cumulative sum along the trailing axis (Phase 6 scan kernel,
+/// #1082).
+///
+/// Operates on a contiguous `[..., D]` tensor; produces a fresh
+/// contiguous tensor of the same shape and dtype with each row scanned
+/// (inclusive prefix sum) over the trailing axis.
+///
+/// Routes through `kiln_scan_last_axis_async(..., kind=0)` in
+/// `csrc/scan_axis.cu`. F32/BF16/F16 supported. F32 accumulation.
+#[cfg(feature = "cuda")]
+pub fn cuda_cumsum_axis(x: &crate::Tensor, axis: usize) -> Result<crate::Tensor> {
+    cuda_scan_axis_impl(x, axis, 0, "cuda_cumsum_axis")
+}
+
+/// CUDA cumulative product along the trailing axis (Phase 6 scan
+/// kernel, #1082).
+///
+/// Operates on a contiguous `[..., D]` tensor; produces a fresh
+/// contiguous tensor of the same shape and dtype with each row scanned
+/// (inclusive prefix product) over the trailing axis.
+///
+/// Routes through `kiln_scan_last_axis_async(..., kind=1)` in
+/// `csrc/scan_axis.cu`. F32/BF16/F16 supported. F32 accumulation.
+#[cfg(feature = "cuda")]
+pub fn cuda_cumprod_axis(x: &crate::Tensor, axis: usize) -> Result<crate::Tensor> {
+    cuda_scan_axis_impl(x, axis, 1, "cuda_cumprod_axis")
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_scan_axis_impl(
+    x: &crate::Tensor,
+    axis: usize,
+    kind: i32,
+    label: &str,
+) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+
+    let dtype = x.dtype();
+    let dtype_tag: i32 = match dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "{label}: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !x.is_contiguous() {
+        return Err(crate::Error::Msg(format!(
+            "{label}: input must be contiguous"
+        )));
+    }
+    let rank = x.rank();
+    if rank == 0 {
+        return Err(crate::Error::Msg(format!(
+            "{label}: input must have rank >= 1"
+        )));
+    }
+    if axis != rank - 1 {
+        return Err(crate::Error::Msg(format!(
+            "{label}: only last-axis scan supported (axis={axis}, rank={rank})"
+        )));
+    }
+    let shape = x.shape();
+    let n_cols = shape[rank - 1] as i64;
+    let n_rows = if shape[rank - 1] == 0 {
+        0
+    } else {
+        (x.element_count() / shape[rank - 1]) as i64
+    };
+
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg(format!("{label}: input must be CUDA")))?;
+    let candle_device = x_storage.candle_device.clone();
+    let device_index = match x_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+    let out_storage =
+        CudaStorage::zeros(candle_device.clone(), device_index, dtype, x.element_count())?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let x_base = match &x_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+    };
+
+    let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
+    let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
+    let out_ptr = out_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_scan_last_axis_async(x_ptr, out_ptr, n_rows, n_cols, dtype_tag, kind, raw_stream)
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "{label}: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(shape.to_vec()),
+        crate::TensorId::next(),
+    )
 }
