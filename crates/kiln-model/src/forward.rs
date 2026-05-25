@@ -11108,14 +11108,15 @@ fn lm_head_argmax_backend_decode_if(
 /// `kiln/sampling_argmax_rows_kt` brackets the migrated call so
 /// nsys traces separate the path from the baseline.
 ///
-/// Today the helper is unused — the migration of
-/// `greedy_sample_rows` lands in a follow-up commit so the
-/// kt-API call site lives next to its candle baseline for easy
-/// A/B benching. Pattern follows commit 46406b2e (lerp scaffold)
-/// and commit ad3eb4dc (fused LM head argmax).
+/// Wired into [`crate::sampling::greedy_sample_rows`]: when the
+/// gate is on AND the logits tensor is a contiguous CUDA tensor
+/// of a supported dtype, the kt-API path runs and the rest of the
+/// candle composite (`argmax(vocab_dim)` + `flatten_all` +
+/// `to_vec1::<u32>()`) is bypassed entirely. Pattern follows
+/// commit 46406b2e (lerp scaffold) and commit ad3eb4dc (fused LM
+/// head argmax).
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
-fn try_kt_sampling_argmax_rows(logits: &Tensor) -> Result<Option<Vec<u32>>> {
+pub(crate) fn try_kt_sampling_argmax_rows(logits: &Tensor) -> Result<Option<Vec<u32>>> {
     if !cuda_use_kt_api_sampling_argmax() {
         return Ok(None);
     }

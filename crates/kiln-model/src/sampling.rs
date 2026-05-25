@@ -64,6 +64,19 @@ pub fn greedy_sample(logits: &Tensor) -> Result<u32> {
 pub fn greedy_sample_rows(logits: &Tensor) -> Result<Vec<u32>> {
     let dims = logits.dims();
     anyhow::ensure!(!dims.is_empty(), "logits tensor must have at least one dim");
+    // Phase 7 (#1082): when `KILN_USE_KT_API_SAMPLING_ARGMAX=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND `logits` is a contiguous
+    // CUDA tensor of {F32, BF16, F16} with rank >= 1, route the
+    // per-row argmax through `kiln_tensor::cuda_argmax_last_axis`
+    // via the kt-bridge borrow adapter. This replaces the candle
+    // `argmax(vocab_dim) + flatten_all + to_vec1::<u32>()`
+    // composite with a single fused kernel + one I64->u32 host
+    // copy. Falls through to the candle composite when any
+    // precondition fails so behavior is identical with the gate off.
+    #[cfg(feature = "cuda")]
+    if let Some(ids) = crate::forward::try_kt_sampling_argmax_rows(logits)? {
+        return Ok(ids);
+    }
     let vocab_dim = dims.len() - 1;
     let ids = logits.argmax(vocab_dim)?.flatten_all()?;
     Ok(ids.to_vec1::<u32>()?)
