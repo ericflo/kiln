@@ -12,6 +12,24 @@ use std::sync::Arc;
 
 use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
 
+/// Materialize `t` on CPU. CUDA inputs are D2H-copied via
+/// `cuda_to_host_copy`; CPU inputs are cheap `Arc` bumps. The loss
+/// ops below are scalar reductions over (pred, target) batches and
+/// are not on any inner training hot path — most fit on a single
+/// memory bandwidth roundtrip and read back to one f32 — so reading
+/// to host today is the obvious correct shape, and fused
+/// `cuda_*_loss` kernels can land later without changing the public
+/// API. See `#1082`.
+fn to_cpu(t: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(t.device(), crate::Device::Cuda(_)) {
+            return crate::cuda_to_host_copy(t);
+        }
+    }
+    Ok(t.clone())
+}
+
 fn validate_pair(a: &Tensor, b: &Tensor, name: &str) -> Result<()> {
     if a.shape() != b.shape() {
         bail!("{name}: shape mismatch: {:?} vs {:?}", a.shape(), b.shape());
@@ -25,17 +43,30 @@ fn validate_pair(a: &Tensor, b: &Tensor, name: &str) -> Result<()> {
     if !a.is_contiguous() || !b.is_contiguous() {
         bail!("{name}: inputs must be contiguous");
     }
+    // Both inputs must be on the same device. load_pair_f32 below
+    // D2H-copies each side independently before reading bytes, so a
+    // mixed-device pair would silently produce garbage without this
+    // guard.
+    if a.device() != b.device() {
+        bail!(
+            "{name}: inputs on different devices: a={}, b={}",
+            a.device(),
+            b.device()
+        );
+    }
     Ok(())
 }
 
 fn load_pair_f32(a: &Tensor, b: &Tensor) -> Result<(Vec<f32>, Vec<f32>)> {
-    let a_bytes = a
+    let a_host = to_cpu(a)?;
+    let b_host = to_cpu(b)?;
+    let a_bytes = a_host
         .storage()
         .as_any()
         .downcast_ref::<CpuStorage>()
         .ok_or_else(|| Error::from_str("losses: storage must be CpuStorage"))?
         .as_bytes();
-    let b_bytes = b
+    let b_bytes = b_host
         .storage()
         .as_any()
         .downcast_ref::<CpuStorage>()
@@ -267,17 +298,26 @@ pub fn nll_loss(log_probs: &Tensor, targets: &Tensor) -> Result<Tensor> {
             log_probs.dtype()
         );
     }
+    if log_probs.device() != targets.device() {
+        bail!(
+            "nll_loss: inputs on different devices: log_probs={}, targets={}",
+            log_probs.device(),
+            targets.device()
+        );
+    }
     let dtype = log_probs.dtype();
     let batch = log_probs.shape()[0];
     let vocab = log_probs.shape()[1];
 
-    let lp_bytes = log_probs
+    let lp_host = to_cpu(log_probs)?;
+    let t_host = to_cpu(targets)?;
+    let lp_bytes = lp_host
         .storage()
         .as_any()
         .downcast_ref::<CpuStorage>()
         .ok_or_else(|| Error::from_str("nll_loss: log_probs storage must be CpuStorage"))?
         .as_bytes();
-    let t_bytes = targets
+    let t_bytes = t_host
         .storage()
         .as_any()
         .downcast_ref::<CpuStorage>()
@@ -498,4 +538,99 @@ mod tests {
         let l = scalar_f32(&margin_ranking(&a, &b, &y, 0.5).unwrap());
         assert!((l - 0.5).abs() < 1e-6);
     }
+
+    /// CUDA parity: build a (pred, target) pair on CUDA, lift the
+    /// same pair on CPU, and assert byte-equal scalar outputs across
+    /// mse_loss / l1_loss / huber_loss / bce_with_logits /
+    /// hinge_loss / nll_loss. All six go through the shared
+    /// `load_pair_f32` helper which now D2H-copies on entry, so a
+    /// regression in any one path would show up here.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_loss_parity_full_table() {
+        let cdev = match candle_core::Device::cuda_if_available(0) {
+            Ok(candle_core::Device::Cuda(c)) => c,
+            _ => return,
+        };
+        let cdev = std::sync::Arc::new(cdev);
+
+        let pred_cpu = Tensor::from_slice(&[1.0f32, -2.0, 3.0, -4.0], vec![4]).unwrap();
+        let tgt_cpu = Tensor::from_slice(&[0.5f32, -1.5, 2.5, -3.0], vec![4]).unwrap();
+        let pred_cuda = pred_cpu
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+        let tgt_cuda = tgt_cpu
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+
+        let pairs: &[(&str, f32, f32)] = &[
+            ("mse", scalar_f32(&mse_loss(&pred_cpu, &tgt_cpu).unwrap()),
+                    scalar_f32(&mse_loss(&pred_cuda, &tgt_cuda).unwrap())),
+            ("l1",  scalar_f32(&l1_loss(&pred_cpu, &tgt_cpu).unwrap()),
+                    scalar_f32(&l1_loss(&pred_cuda, &tgt_cuda).unwrap())),
+            ("huber",
+                scalar_f32(&huber_loss(&pred_cpu, &tgt_cpu, 1.0).unwrap()),
+                scalar_f32(&huber_loss(&pred_cuda, &tgt_cuda, 1.0).unwrap())),
+        ];
+        for (name, cpu, cuda) in pairs.iter() {
+            assert!(
+                (cpu - cuda).abs() < 1e-5,
+                "{name} parity: cpu={cpu}, cuda={cuda}"
+            );
+        }
+
+        // bce_with_logits — uses (-1, 1) target convention is OK here
+        // since the formula is dtype-stable on f32.
+        let logits_cpu = Tensor::from_slice(&[0.0f32, 0.0], vec![2]).unwrap();
+        let bce_target_cpu = Tensor::from_slice(&[0.0f32, 1.0], vec![2]).unwrap();
+        let logits_cuda = logits_cpu
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+        let bce_target_cuda = bce_target_cpu
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+        let bce_c = scalar_f32(&bce_with_logits(&logits_cpu, &bce_target_cpu).unwrap());
+        let bce_g = scalar_f32(&bce_with_logits(&logits_cuda, &bce_target_cuda).unwrap());
+        assert!((bce_c - bce_g).abs() < 1e-5, "bce parity: cpu={bce_c}, cuda={bce_g}");
+
+        // nll_loss has its own load path (not load_pair_f32) so test
+        // it specifically.
+        let lp_val = (1.0_f32 / 3.0).ln();
+        let lp_cpu = Tensor::from_slice(&[lp_val; 6], vec![2, 3]).unwrap();
+        let lp_cuda = lp_cpu
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+        let tg_cpu = Tensor::from_slice(&[0i64, 2], vec![2]).unwrap();
+        let tg_cuda = tg_cpu
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+        let nll_c = scalar_f32(&nll_loss(&lp_cpu, &tg_cpu).unwrap());
+        let nll_g = scalar_f32(&nll_loss(&lp_cuda, &tg_cuda).unwrap());
+        assert!((nll_c - nll_g).abs() < 1e-5, "nll parity: cpu={nll_c}, cuda={nll_g}");
+    }
+
+    /// Mixed-device pairs must error rather than silently downcasting
+    /// one input to CpuStorage and producing garbage.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_loss_mixed_devices_errors() {
+        let cdev = match candle_core::Device::cuda_if_available(0) {
+            Ok(candle_core::Device::Cuda(c)) => c,
+            _ => return,
+        };
+        let cdev = std::sync::Arc::new(cdev);
+
+        let a_cpu = Tensor::from_slice(&[1.0f32, 2.0], vec![2]).unwrap();
+        let b_cuda = Tensor::from_slice(&[1.0f32, 2.0], vec![2])
+            .unwrap()
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+
+        let e = mse_loss(&a_cpu, &b_cuda).unwrap_err();
+        assert!(
+            e.to_string().contains("different devices"),
+            "expected mixed-device error, got {e}"
+        );
+    }
 }
+
