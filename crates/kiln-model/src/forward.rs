@@ -11595,7 +11595,30 @@ fn gated_rms_norm_fallback(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) ->
     let w_f32 = weight.to_dtype(DType::F32)?;
 
     // RMS norm on last dimension
-    let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    //
+    // Phase 7 (#1082): when `KILN_USE_KT_API_MEAN_LAST_DIM=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND the squared F32 input
+    // is a contiguous CUDA tensor, route the `mean_keepdim(-1)`
+    // step through `kiln_tensor::cuda_mean_last_axis` plus a
+    // zero-cost `unsqueeze(-1)`. Mirrors the rms_norm_fallback
+    // wiring (line ~7298). Falls through to the candle
+    // `.mean_keepdim()` when any precondition fails so behavior
+    // is identical with the gate off.
+    let sq = x_f32.sqr()?;
+    let variance = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_mean_last_dim_keepdim(&sq)? {
+                out
+            } else {
+                sq.mean_keepdim(candle_core::D::Minus1)?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            sq.mean_keepdim(candle_core::D::Minus1)?
+        }
+    };
     // Phase 7 (#1082): when `KILN_USE_KT_API_RSQRT=1` (or
     // `KILN_USE_KT_API_ALL=1`) is set, route the RMSNorm-tail
     // `(variance + eps).sqrt().recip()` composite through
