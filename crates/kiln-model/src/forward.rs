@@ -19977,38 +19977,26 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
     graph_inputs: &mut BatchedPagedDecodeGraphInputs<'_>,
 ) -> Result<()> {
     // Run the bs>1 hidden path with the persistent linear-state slot
-    // and the graph-stable token-id / position device buffers. This is
-    // the same code path `decode_next_tokens_paged_contiguous_batch_greedy_with_ids`
-    // drives, just with the per-step host→device builds skipped — the
-    // captured graph reads from `graph_inputs.token_ids` / `.positions`
-    // device pointers that the runner re-fills before each replay.
+    // and the graph-stable token-id / position / block_table /
+    // seqused_k device buffers. The captured graph now reads the
+    // per-step paged-decode metadata from caller-owned device tensors
+    // (`graph_inputs.block_table` + `graph_inputs.seqused_k`) instead
+    // of from transient `Tensor::from_slice` allocations inside
+    // `CachedPagedDecodeMeta::build`, which would `cudaFree` their
+    // storage at end of capture and leave the graph with dangling
+    // pointers (the `ILLEGAL_ADDRESS` fault documented in
+    // `bench-results/cuda-graph-bs2-memcheck.md`, #1082).
     //
-    // KNOWN BUG (#1082, see `bench-results/cuda-graph-bs2-memcheck.md`):
-    // only `token_ids`, `positions`, and `linear_state` are threaded
-    // through to the inner forward today. The other stable buffers in
-    // `graph_inputs` (`block_table`, `seqused_k`, `kv_slot`,
-    // `rotary_cos`, `rotary_sin`, `attn_out`, `softmax_lse`,
-    // `output_logits` for non-LM-head paths) are NOT consumed by
-    // `model_forward_paged_decode_contiguous_batch_hidden_inner` —
-    // which then calls `CachedPagedDecodeMeta::build` and reallocates
-    // `block_table_tensor` + `seqused_k_tensor` via `Tensor::from_slice`
-    // on every entry. During CUDA graph capture those allocations go
-    // through candle's regular `cudaMalloc`, the captured kernels bake
-    // their device pointers as immediate args, and when the per-call
-    // `CachedPagedDecodeMeta` local drops at end of capture the
-    // storage is `cudaFree`'d — leaving the captured graph with
-    // dangling pointers. The first `cuGraphLaunch` faults with
-    // `CUDA_ERROR_ILLEGAL_ADDRESS` (compute-sanitizer pins it to a
-    // `ucopy_f32` kernel reading ~900 MiB past the nearest live
-    // allocation). This is why `KILN_CUDA_GRAPHS_BATCHED=1` is
-    // default-off. The fix is to extend the inner forward to accept
-    // stable `block_table` + `seqused_k` (and audit the rest of the
-    // intra-graph `Tensor::from_slice` / `Tensor::zeros` sites) so it
-    // can be steered to read from the graph-input buffers when the
-    // capture path calls it. The bs=1 forward
-    // (`model_forward_paged_with_graph_inputs` →
-    // `model_forward_paged_inner`) already follows that discipline —
-    // mirror it here.
+    // FUTURE WORK (also part of #1082): the per-step KV-slot writer,
+    // rotary cos/sin tables, paged-decode attn_out + softmax_lse
+    // scratch, and (for non-LM-head paths) output_logits are still
+    // built inside the captured region today, and may also surface
+    // capture-time allocations when the bs>1 decode shape exercises
+    // them. The bs=1 forward (`model_forward_paged_with_graph_inputs`
+    // → `model_forward_paged_inner`) already threads its
+    // `PagedDecodeGraphInputs` through to every per-layer call site
+    // — mirror that discipline here as additional fault shapes
+    // surface under `KILN_CUDA_GRAPHS_BATCHED=1` runs.
     let hidden = model_forward_paged_decode_contiguous_batch_hidden_inner(
         backend,
         input_tokens,
@@ -20021,14 +20009,8 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
         lora,
         Some(graph_inputs.positions),
         Some(graph_inputs.token_ids),
-        // stable_block_table_gpu / stable_seqused_k_gpu: not threaded
-        // through yet — the next commit wires `graph_inputs.block_table`
-        // + `graph_inputs.seqused_k` into these slots so the captured
-        // graph reads paged-decode meta from caller-owned device
-        // tensors instead of from transient `Tensor::from_slice`
-        // allocations (#1082).
-        None,
-        None,
+        Some(graph_inputs.block_table),
+        Some(graph_inputs.seqused_k),
     )?;
     // Compute logits and slice them into the caller-owned stable
     // `output_logits` buffer (`[batch, 1, vocab]`). The captured graph
