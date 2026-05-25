@@ -6,7 +6,7 @@
 // dtype handling, same launch shape. Extended further in the same
 // PR series with log2/log10/log1p (kinds 15..=17), inverse trig
 // (asin/acos/atan, 18..=20), atanh (21), reciprocal (22), sign
-// (23), floor (24), and ceil (25).
+// (23), floor (24), ceil (25), and round (26).
 //
 // In-place math in F32 (kiln's numerical-reference convention),
 // narrowed back to the storage dtype on store.
@@ -69,8 +69,9 @@
 #define KIND_SIGN   23
 #define KIND_FLOOR  24
 #define KIND_CEIL   25
+#define KIND_ROUND  26
 
-#define KIND_MAX    25
+#define KIND_MAX    26
 
 // Dtype tags
 #define DTYPE_F32  0
@@ -175,6 +176,11 @@ __device__ __forceinline__ float apply_unary(int kind, float x) {
         }
         case KIND_CEIL: {
             return ceilf(x);
+        }
+        case KIND_ROUND: {
+            // CUDA `roundf` rounds half away from zero (per the
+            // CUDA Math API docs), matching Rust's `f32::round`.
+            return roundf(x);
         }
         default:
             return 0.0f;

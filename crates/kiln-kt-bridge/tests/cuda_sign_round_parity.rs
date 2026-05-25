@@ -362,8 +362,7 @@ fn cuda_ceil_bf16_parity() {
 
 #[test]
 fn cuda_activation_unary_ceil_direct_call() {
-    // Confirm the FFI bounds-check accepts kind 25 (new KIND_MAX)
-    // and rejects 26 (one past the current max).
+    // Confirm the FFI bounds-check accepts kind 25.
     let Some(dev) = try_cuda() else {
         eprintln!("CUDA not available; skipping");
         return;
@@ -376,7 +375,7 @@ fn cuda_activation_unary_ceil_direct_call() {
         .unwrap();
     let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_cd).unwrap();
 
-    // KIND_CEIL = 25 (new max); should succeed.
+    // KIND_CEIL = 25; should succeed.
     let out_kt = cuda_activation_unary(&x_kt, 25).expect("KIND_CEIL");
     let cuda_dev = match dev {
         CandleDevice::Cuda(ref c) => c,
@@ -398,7 +397,71 @@ fn cuda_activation_unary_ceil_direct_call() {
             data[i]
         );
     }
+}
 
-    // KIND_MAX+1 (=26) must still error.
-    assert!(cuda_activation_unary(&x_kt, 26).is_err());
+// ---- round (#1082: kind 26) --------------------------------------------
+
+#[test]
+fn cuda_round_f32_parity() {
+    let data = pattern(257, 24);
+    check_op("round", ops::round, &data, CandleDType::F32, 1e-6);
+}
+
+#[test]
+fn cuda_round_bf16_parity() {
+    let data = pattern(257, 25);
+    check_op("round", ops::round, &data, CandleDType::BF16, 1e-2);
+}
+
+#[test]
+fn cuda_round_half_away_from_zero_parity() {
+    // CUDA `roundf` and Rust `f32::round` both round half away from
+    // zero. Hit the ±0.5, ±1.5, ±2.5 ties exactly to confirm.
+    let data: Vec<f32> = vec![
+        0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 3.5, -3.5, 0.0, -0.0,
+    ];
+    check_op("round-ties", ops::round, &data, CandleDType::F32, 1e-6);
+}
+
+#[test]
+fn cuda_activation_unary_round_direct_call() {
+    // Confirm the FFI bounds-check accepts kind 26 (new KIND_MAX)
+    // and rejects 27 (one past the current max).
+    let Some(dev) = try_cuda() else {
+        eprintln!("CUDA not available; skipping");
+        return;
+    };
+    let data: Vec<f32> = (0..64).map(|i| (i as f32 - 32.0) * 0.43).collect();
+    let n = data.len();
+    let x_cd = CandleTensor::from_vec(data.clone(), (n,), &dev)
+        .unwrap()
+        .to_dtype(CandleDType::F32)
+        .unwrap();
+    let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_cd).unwrap();
+
+    // KIND_ROUND = 26 (new max); should succeed.
+    let out_kt = cuda_activation_unary(&x_kt, 26).expect("KIND_ROUND");
+    let cuda_dev = match dev {
+        CandleDevice::Cuda(ref c) => c,
+        _ => unreachable!(),
+    };
+    cuda_dev.synchronize().unwrap();
+
+    let got: Vec<f32> = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .unwrap()
+        .reshape((n,))
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    for (i, &g) in got.iter().enumerate() {
+        let want = data[i].round();
+        assert!(
+            (g - want).abs() < 1e-6,
+            "i={i}: v={} got {g}, want {want}",
+            data[i]
+        );
+    }
+
+    // KIND_MAX+1 (=27) must still error.
+    assert!(cuda_activation_unary(&x_kt, 27).is_err());
 }
