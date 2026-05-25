@@ -1508,3 +1508,44 @@ concise-over-verbose full workflows still create the reliability and latency
 drift seen in prior small imitation-style attempts. Future work needs real
 reward variance or explicit base-distribution regularization, not more
 positive full-workflow imitation at this scale.
+
+### H77: moderate thinking workflow
+
+H77 adjusted the H76 lesson instead of simply lowering dose. H76 trained the
+model toward terse thinking over verbose thinking and failed blind smoke. H77
+tested a three-way compact workflow contrast that preferred moderate,
+task-specific thinking over both terse and verbose variants, while holding the
+correct read/edit/doctest/`DONE` tool sequence and solution code fixed.
+
+The dataset was
+`/tmp/pi-doctest-h77-moderate-thinking-workflow/grpo-train.moderate-thinking-workflow.g3x3.jsonl`.
+It used the same verified train-only tasks as H76: `task_0024`, `task_0026`,
+and `task_0057`. Each group had a moderate completion at reward 1.0, a terse
+completion at 0.82, and a verbose generic completion at 0.82. Dry-run passed
+with 3 groups, 9 completions, 1523 action tokens, 1083 env tokens, 2502
+context tokens, reward stdev 0.084853, and hash
+`sha256:071acc422adc062103e7dc393f22be03b27d3330aa6b7d7e7f2344c679f6933c`.
+
+Training used `cuda_grpo_ablation --mode phase1`, rank 4 / alpha 4 / lr
+`1e-7`, no ECHO, seed `3141592653`, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed locally in 465.773s observed,
+with peak observed VRAM 15,986 MiB. Adapter verify passed with 400 nonzero
+tensors, 200 LoRA projection pairs, and LoRA update proxy 0.009156.
+
+Blind `LIMIT=4 SEEDS=1` smoke was positive: paired base scored 0.925 with no
+zero rollouts and mean wall-clock 27.34s, while H77 scored 0.971875 with no
+zero rollouts and mean wall-clock 28.83s. The first `LIMIT=8` wider gate was
+also positive on composite: base 0.753906 with one zero and 54.04s mean
+wall-clock, H77 0.842188 with one zero and 67.70s mean wall-clock. Because
+prior pi-doctest adapters repeatedly produced one-off wider wins, H77 went to
+a second `LIMIT=8` confirmation. Confirmation rejected it: base scored
+0.707813 with two zeros and 64.44s mean wall-clock, while H77 scored 0.593750
+with three zeros and 70.99s mean wall-clock.
+
+Across the two wider gates, base averaged 0.730859 composite with three zero
+rollouts over sixteen, while H77 averaged 0.717969 with four zero rollouts
+over sixteen. Lesson: moderate thinking is a better target than
+terse-over-verbose imitation, but this small synthetic style-only workflow
+contrast still does not stabilize hard-tail reliability and it adds latency.
+Future work should pair any style target with real reward variance or explicit
+base-distribution regularization.
