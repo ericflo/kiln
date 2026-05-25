@@ -58,6 +58,22 @@ fn cuda_train_use_kt_api_adamw_step() -> bool {
     })
 }
 
+/// Phase 7 opt-in (#1082): when `KILN_USE_KT_API_LORA_ADD_INPLACE=1`
+/// (or `KILN_USE_KT_API_ALL=1`) is set, route the in-place LoRA add
+/// dispatched from `cuda_lora_linear_fused` through the kt-typed
+/// surface (`lora_add_inplace_f32_kt`) instead of the candle-typed
+/// `kiln_rmsnorm_kernel::lora_add_inplace_f32`. Default off. The
+/// kt path is bit-exact by construction (same `kiln_lora_add_inplace_f32`
+/// FFI symbol); only the Rust shell types change.
+fn cuda_train_use_kt_api_lora_add_inplace() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_API_LORA_ADD_INPLACE").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    })
+}
+
 /// Backward op interface for the future CUDA-native training graph.
 pub trait CudaBackwardOp: Send + Sync + std::fmt::Debug {
     fn op_name(&self) -> &'static str;
@@ -1400,8 +1416,27 @@ pub fn cuda_lora_linear_fused(
         .context("cuda_lora_linear_fused: hidden matmul")?
         .contiguous()
         .context("cuda_lora_linear_fused: contiguous hidden")?;
-    kiln_rmsnorm_kernel::lora_add_inplace_f32(&base_out, &hidden, b.as_tensor(), scale)
-        .context("cuda_lora_linear_fused: in-place LoRA add")?;
+    // Phase 7 opt-in (#1082): when `KILN_USE_KT_API_LORA_ADD_INPLACE=1`
+    // (or `KILN_USE_KT_API_ALL=1`) is set, route the in-place LoRA
+    // add through the kt-typed surface (`lora_add_inplace_f32_kt`).
+    // Bit-exact by construction — both candle and kt paths bottom
+    // out in the same `kiln_lora_add_inplace_f32` FFI symbol; the
+    // in-place mutation surfaces in `base_out` via the zero-copy
+    // `kt_tensor_from_candle_cuda_borrow` adapter.
+    if cuda_train_use_kt_api_lora_add_inplace() {
+        kiln_nvtx::range!(c"kiln/cuda_train/lora_add_inplace_kt");
+        let base_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&base_out)
+            .context("cuda_lora_linear_fused kt: borrow base_out -> kt")?;
+        let hidden_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&hidden)
+            .context("cuda_lora_linear_fused kt: borrow hidden -> kt")?;
+        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b.as_tensor())
+            .context("cuda_lora_linear_fused kt: borrow b -> kt")?;
+        kiln_rmsnorm_kernel::lora_add_inplace_f32_kt(&base_kt, &hidden_kt, &b_kt, scale)
+            .map_err(|e| anyhow::anyhow!("cuda_lora_linear_fused kt: lora_add_inplace_f32_kt: {e}"))?;
+    } else {
+        kiln_rmsnorm_kernel::lora_add_inplace_f32(&base_out, &hidden, b.as_tensor(), scale)
+            .context("cuda_lora_linear_fused: in-place LoRA add")?;
+    }
 
     let needs_grad = input.requires_grad()
         || input.grad_fn().is_some()
