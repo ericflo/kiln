@@ -22,6 +22,18 @@ pub fn cumprod(x: &Tensor, axis: usize) -> Result<Tensor> {
     if !x.is_contiguous() {
         bail!("cumprod: input must be contiguous");
     }
+
+    // CUDA fast path: route through the Phase 6 scan kernel
+    // (`cuda_cumprod_axis` → `csrc/scan_axis.cu` with kind=1).
+    // F32/BF16/F16 with F32 accumulation, matches the CPU
+    // reference. The kernel handles any axis position via the
+    // (outer, axis_dim, inner) decomposition the CPU loop below
+    // mirrors. See `#1082`.
+    #[cfg(feature = "cuda")]
+    if matches!(x.device(), crate::Device::Cuda(_)) {
+        return crate::cuda_cumprod_axis(x, axis);
+    }
+
     let dtype = x.dtype();
     let shape = x.shape().to_vec();
     let outer: usize = shape[..axis].iter().product::<usize>().max(1);
