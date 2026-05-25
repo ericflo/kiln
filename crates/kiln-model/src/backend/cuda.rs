@@ -646,6 +646,32 @@ impl BackendRuntime for CudaBackend {
         ) {
             return Ok(None);
         }
+        // Phase 7 opt-in (#1082): route through the kt-typed surface.
+        // gdn_chunk_scan_kt returns a 2-tuple. Behind KILN_USE_KT_API_GDN.
+        if self.cuda_use_kt_api_gdn {
+            kiln_nvtx::range!(c"kiln/gdn_chunk_scan_kt");
+            let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_strict)
+                .with_context(|| "kt-adapter: gdn_chunk_scan a_strict → kt failed")?;
+            let m_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b_mask)
+                .with_context(|| "kt-adapter: gdn_chunk_scan b_mask → kt failed")?;
+            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_prime)
+                .with_context(|| "kt-adapter: gdn_chunk_scan v_prime → kt failed")?;
+            let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s_scaled)
+                .with_context(|| "kt-adapter: gdn_chunk_scan q_s_scaled → kt failed")?;
+            let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
+                .with_context(|| "kt-adapter: gdn_chunk_scan beta → kt failed")?;
+            let dlc_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(decay_last_col)
+                .with_context(|| "kt-adapter: gdn_chunk_scan decay_last_col → kt failed")?;
+            let (o0, o1) = kiln_gdn_kernel::gdn_chunk_scan_kt(
+                &a_kt, &m_kt, &v_kt, &qs_kt, &beta_kt, &dlc_kt,
+            )
+            .map_err(|e| anyhow::anyhow!("kt gdn_chunk_scan: {e}"))?;
+            let c0 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o0)
+                .with_context(|| "kt-adapter: gdn_chunk_scan o0 → candle failed")?;
+            let c1 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o1)
+                .with_context(|| "kt-adapter: gdn_chunk_scan o1 → candle failed")?;
+            return Ok(Some((c0, c1)));
+        }
         let out = kiln_gdn_kernel::gdn_chunk_scan(
             a_strict,
             b_mask,
