@@ -13675,6 +13675,17 @@ pub fn gdn_recurrent_backward_no_grad(
         let _ = q_s_scaled;
     }
 
+    // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM2=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND every chunk is a
+    // contiguous CUDA tensor of a supported dtype, route the
+    // time-axis (axis=2) per-gradient concat through
+    // `kiln_tensor::cuda_concat(_, 2)`. Mirrors the
+    // gdn_chunkwise_recurrence cat_out wiring and the conv1d
+    // prefill/decode cat_dim2 wirings. Falls through to the
+    // candle composite when any precondition fails so behavior
+    // is identical with the gate off. The closure is invoked
+    // five times per backward (dq/dk/dv/dbeta/dg) so this
+    // covers five fast-path sites in one wire-up.
     let collect = |chunks: &[Option<Tensor>], name: &str| -> Result<Tensor> {
         let mut refs = Vec::with_capacity(chunks.len());
         for (idx, chunk) in chunks.iter().enumerate() {
@@ -13683,6 +13694,12 @@ pub fn gdn_recurrent_backward_no_grad(
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("missing {name} chunk {idx}"))?,
             );
+        }
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_cat_dim2(&refs)? {
+                return Ok(out);
+            }
         }
         Ok(Tensor::cat(&refs, 2)?)
     };
