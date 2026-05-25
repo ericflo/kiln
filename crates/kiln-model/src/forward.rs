@@ -1361,29 +1361,29 @@ fn cuda_use_kt_api_relu() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in (#1082): elementwise `Tensor::recip()` through the
-/// kt-API + adapters. Set `KILN_USE_KT_API_RECIP=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
-/// `.recip()` candle calls through
-/// `kiln_tensor::cuda_activation_unary` with kind tag 22 (Recip)
-/// via the kt-bridge borrow adapter. Pays one dtod memcpy on the
-/// output direction. Falls through to the candle composite when
-/// any precondition fails so behavior is identical with the gate
-/// off.
+/// Phase 7 default-on (#1082): elementwise `Tensor::recip()` through
+/// the kt-API + adapters. Default ON because the kt path bottoms out
+/// in `kiln_tensor::cuda_activation_unary` with kind tag 22 (Recip) —
+/// a single-kernel `1.0 / x` dispatch identical to the candle backend's
+/// `.recip()` op. Only the Rust shell types and the kt-bridge dtod-
+/// copy at the output boundary differ. This is bit-exact by
+/// construction — same argument as the exp / log flip (`53f9b282`).
+/// IEEE semantics match (1.0/0 = ±inf; 1.0/NaN = NaN). Escape hatch:
+/// `KILN_DISABLE_KT_API_RECIP=1`.
 ///
 /// Production call sites in `forward.rs` are the
 /// `(variance + eps).sqrt().recip()` RMSNorm tail (multiple
 /// sites — RMSNorm production path, MTP debug taps, and the
 /// universal RMSNorm helper) and the `cuda_sigmoid` composite's
-/// `(1 + e^-x).recip()` final step. The kt-API kernel exposed by
-/// the recently-landed kind 22 in `csrc/activation.cu` (commit
-/// 7a3e1e77) makes this scaffold non-dead — call-site migrations
-/// land in follow-up commits of the same #1082 series. Mirrors
-/// `cuda_use_kt_api_sqrt` / `cuda_use_kt_api_neg` cadence.
+/// `(1 + e^-x).recip()` final step. Mirrors `cuda_use_kt_api_sqrt` /
+/// `cuda_use_kt_api_neg` cadence.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_recip() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_RECIP").is_ok());
+    // #1082: flipped default ON. Single-kernel dispatch
+    // (`cuda_activation_unary` kind 22); bit-exact by construction.
+    // Escape hatch: `KILN_DISABLE_KT_API_RECIP=1`.
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_RECIP").is_err());
     direct || cuda_use_kt_api_all()
 }
 
