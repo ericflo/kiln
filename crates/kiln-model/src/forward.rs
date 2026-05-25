@@ -278,6 +278,18 @@ fn cuda_use_kt_api_flash_attn_fwd() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: flash_attn_bwd through the kt-API + adapters.
+/// Routes the FA-bwd recompute path in `CudaFlashAttentionTrainingBf16::bwd`
+/// through `kiln_flash_attn::flash_attn_bwd_kt` when
+/// `KILN_USE_KT_API_FLASH_ATTN_BWD=1` (or `KILN_USE_KT_API_ALL=1`) is set.
+/// Falls through to the candle-typed `flash_attn_bwd` when off.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_flash_attn_bwd() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_FLASH_ATTN_BWD").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: GDN full_chunk_forward (+ multiblock) through
 /// the kt-API + adapters.
 #[cfg(feature = "cuda")]
@@ -4694,6 +4706,55 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
                 None => grad_y.to_dtype(DType::BF16)?,
             }
         };
+        // Phase 7 opt-in (#1082): route through the kt-typed FA-bwd surface.
+        // Production training path for Qwen3.5-4B has dout/q/k/v/res in BF16
+        // and softmax_lse in F32 (the FA-fwd recompute produces both above).
+        // Behind KILN_USE_KT_API_FLASH_ATTN_BWD gate; falls through to
+        // candle when off or dtype guard fails.
+        if cuda_use_kt_api_flash_attn_bwd()
+            && dout.dtype() == DType::BF16
+            && q.dtype() == DType::BF16
+            && k.dtype() == DType::BF16
+            && v.dtype() == DType::BF16
+            && res.dtype() == DType::BF16
+            && softmax_lse.dtype() == DType::F32
+        {
+            kiln_nvtx::range!(c"kiln/flash_attn_bwd_kt");
+            let dout_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dout)
+                .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd dout: {e}")))?;
+            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
+                .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd q: {e}")))?;
+            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
+                .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd k: {e}")))?;
+            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+                .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd v: {e}")))?;
+            let res_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(res)
+                .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd res: {e}")))?;
+            let lse_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&softmax_lse)
+                .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd lse: {e}")))?;
+            let (dq_kt, dk_kt, dv_kt) = kiln_flash_attn::flash_attn_bwd_kt(
+                &dout_kt,
+                &q_kt,
+                &k_kt,
+                &v_kt,
+                &res_kt,
+                &lse_kt,
+                self.softmax_scale,
+                self.causal,
+            )
+            .map_err(|e| {
+                candle_core::Error::Msg(format!(
+                    "CudaFlashAttentionTrainingBf16 bwd kt: {e:?}"
+                ))
+            })?;
+            let dq = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&dq_kt)
+                .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd dq: {e}")))?;
+            let dk = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&dk_kt)
+                .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd dk: {e}")))?;
+            let dv = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&dv_kt)
+                .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd dv: {e}")))?;
+            return Ok((Some(dq), Some(dk), Some(dv)));
+        }
         let (dq, dk, dv) = kiln_flash_attn::flash_attn_bwd(
             &dout,
             q,
