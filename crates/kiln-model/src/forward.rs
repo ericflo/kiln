@@ -13647,12 +13647,39 @@ pub fn gdn_recurrent_backward_no_grad(
                 d_ks_entry_pre.neg()?.contiguous()?
             }
         };
-        let mut d_g_acc = (&ks_entry * &d_ks_entry)?.sum(candle_core::D::Minus1)?;
+        // Phase 7 (#1082): wire `try_kt_sum_axis` into the two
+        // `sum(D::Minus1)?` reductions that build `d_g_acc`:
+        // first the `(&ks_entry * &d_ks_entry)?.sum(D::Minus1)?`
+        // initializer, then the in-place
+        // `(&q_s * &dq_s_scaled).broadcast_mul(&p_col).sum(D::Minus1)?`
+        // accumulator. Both operands are 4D tensors so `D::Minus1`
+        // resolves to axis 3 at runtime; the helper falls through
+        // to the candle composite on any precondition failure so
+        // behavior is identical with the gate off.
+        let g_acc_prod = (&ks_entry * &d_ks_entry)?;
+        #[cfg(feature = "cuda")]
+        let mut d_g_acc = {
+            let axis = g_acc_prod.rank().saturating_sub(1);
+            match try_kt_sum_axis(&g_acc_prod, axis)? {
+                Some(out) => out,
+                None => g_acc_prod.sum(candle_core::D::Minus1)?,
+            }
+        };
+        #[cfg(not(feature = "cuda"))]
+        let mut d_g_acc = g_acc_prod.sum(candle_core::D::Minus1)?;
         let d_q_s = dq_s_scaled.broadcast_mul(&p_col)?.contiguous()?;
-        d_g_acc = (&d_g_acc
-            + &(&q_s * &dq_s_scaled)?
-                .broadcast_mul(&p_col)?
-                .sum(candle_core::D::Minus1)?)?;
+        let qss_prod = (&q_s * &dq_s_scaled)?.broadcast_mul(&p_col)?;
+        #[cfg(feature = "cuda")]
+        let qss_sum = {
+            let axis = qss_prod.rank().saturating_sub(1);
+            match try_kt_sum_axis(&qss_prod, axis)? {
+                Some(out) => out,
+                None => qss_prod.sum(candle_core::D::Minus1)?,
+            }
+        };
+        #[cfg(not(feature = "cuda"))]
+        let qss_sum = qss_prod.sum(candle_core::D::Minus1)?;
+        d_g_acc = (&d_g_acc + &qss_sum)?;
 
         let big_g_col = big_g.unsqueeze(3)?;
         let big_g_row = big_g.unsqueeze(2)?;
