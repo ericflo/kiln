@@ -1246,30 +1246,30 @@ fn cuda_use_kt_api_cos() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: elementwise `Tensor::exp()` through the kt-API
-/// + adapters. Set `KILN_USE_KT_API_EXP=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
-/// `.exp()` candle calls through
-/// `kiln_tensor::cuda_activation_unary` with kind tag 6 (Exp) via
-/// the kt-bridge borrow adapter. Pays one dtod memcpy on the
-/// output direction (the kt allocation is freshly-owned). Falls
-/// through to the candle composite when any precondition fails so
-/// behavior is identical with the gate off.
+/// Phase 7 default-on (#1082): elementwise `Tensor::exp()` through
+/// the kt-API + adapters. Default ON because both paths bottom out
+/// in the same single-kernel CUDA `expf`/`__hexp` elementwise
+/// dispatch — only the Rust shell types and the kt-bridge dtod-copy
+/// at the output boundary differ. This is bit-exact by construction:
+/// the single-kernel dispatch with no intermediate quantization
+/// produces the same per-element result as the candle `.exp()`
+/// kernel which uses the same CUDA intrinsic.
 ///
 /// Distinct from the fused softmax site (which routes through
 /// `try_kt_softmax_last_dim` at the kt-API level) — this gate
-/// migrates the *standalone* `.exp()` calls in `forward.rs` that
-/// are not part of a pre-fused composite, e.g. the
-/// CudaSigmoidMulTrainingBf16 backward (`neg_gate.exp()`) which
-/// already routes its `+ 1.0` epilogue through
-/// `try_kt_add_scalar`. The first call-site migration is wired
-/// up; additional standalone .exp() sites (softmax composite,
-/// GDN decay exponentials, softplus log-term builders) can be
-/// migrated incrementally without re-doing the gate.
+/// migrates the *standalone* `.exp()` calls in `forward.rs` /
+/// `cuda_train.rs` that are not part of a pre-fused composite
+/// (sigmoid forward, sigmoid backward, softmax backward shifted
+/// exponentials, softplus log-term builders). Set
+/// `KILN_DISABLE_KT_API_EXP=1` to opt out (escape hatch).
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_exp() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_EXP").is_ok());
+    // #1082: flipped default ON. Both candle and kt paths bottom out
+    // in the same single-kernel CUDA elementwise dispatch; only the
+    // Rust shell types differ. Escape hatch:
+    // `KILN_DISABLE_KT_API_EXP=1`.
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_EXP").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -1382,25 +1382,30 @@ fn cuda_use_kt_api_recip() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in (#1082): elementwise natural-log `Tensor::log()`
-/// through the kt-API + adapters. Set `KILN_USE_KT_API_LOG=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
-/// `.log()` candle calls through
-/// `kiln_tensor::cuda_activation_unary` with kind tag 5 (Log =
-/// `ln(x)`) via the kt-bridge borrow adapter. Pays one dtod
-/// memcpy on the output direction. Falls through to the candle
-/// composite when any precondition fails so behavior is identical
-/// with the gate off.
+/// Phase 7 default-on (#1082): elementwise natural-log
+/// `Tensor::log()` through the kt-API + adapters. Default ON because
+/// both paths bottom out in the same single-kernel CUDA `logf` /
+/// `__hlog` elementwise dispatch — only the Rust shell types and
+/// the kt-bridge dtod-copy at the output boundary differ. This is
+/// bit-exact by construction: the single-kernel dispatch with no
+/// intermediate quantization produces the same per-element result
+/// as the candle `.log()` kernel which uses the same CUDA
+/// intrinsic. Mirrors the EXP flip (same commit).
 ///
 /// Production call site in `forward.rs` is the `softplus` helper:
 /// `softplus(x) = relu(x) + log(1 + exp(-|x|))`. softplus is the
 /// last step of the GDN `b` (forget gate) path — runs once per
-/// decode step. Mirrors `cuda_use_kt_api_exp` /
-/// `cuda_use_kt_api_sqrt` cadence.
+/// decode step. Also used in `cuda_train.rs` for the
+/// shifted-linear-cross-entropy `log(sumexp)` term. Set
+/// `KILN_DISABLE_KT_API_LOG=1` to opt out (escape hatch).
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_log() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LOG").is_ok());
+    // #1082: flipped default ON. Both candle and kt paths bottom out
+    // in the same single-kernel CUDA elementwise dispatch; only the
+    // Rust shell types differ. Escape hatch:
+    // `KILN_DISABLE_KT_API_LOG=1`.
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_LOG").is_err());
     direct || cuda_use_kt_api_all()
 }
 
