@@ -13384,7 +13384,26 @@ pub fn gdn_recurrent_backward_no_grad(
             .broadcast_mul(&strict_mask)?;
 
         let big_g = g_c.cumsum(candle_core::D::Minus1)?;
-        let p = big_g.exp()?;
+        // Phase 7 (#1082): route the `big_g.exp()` step through
+        // `try_kt_exp` when `KILN_USE_KT_API_EXP=1` (or
+        // `KILN_USE_KT_API_ALL=1`) is set. Mirrors the prefill
+        // chunkwise `p = big_g.exp()` wirings (ca8de9eb, 288531c7,
+        // 38e4ea3d). Falls through to the candle `.exp()` composite
+        // when any precondition fails so behavior is identical with
+        // the gate off.
+        let p = {
+            #[cfg(feature = "cuda")]
+            {
+                match try_kt_exp(&big_g)? {
+                    Some(out) => out,
+                    None => big_g.exp()?,
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                big_g.exp()?
+            }
+        };
         let p_col = p.unsqueeze(3)?;
         let d_v = d_v_prime.clone();
         let d_ks_entry = d_v_prime.broadcast_mul(&p_col)?.neg()?.contiguous()?;
@@ -13405,14 +13424,47 @@ pub fn gdn_recurrent_backward_no_grad(
         let causal_bool = causal_lower_tri_bool(chunk, q.device())?
             .reshape((1, 1, chunk, chunk))?
             .broadcast_as((batch, heads, chunk, chunk))?;
-        let strict_decay = strict_bool
-            .where_cond(&decay_delta, &zero_delta)?
-            .exp()?
-            .broadcast_mul(&strict_bool.to_dtype(DType::F32)?)?;
-        let causal_decay = causal_bool
-            .where_cond(&decay_delta, &zero_delta)?
-            .exp()?
-            .broadcast_mul(&causal_bool.to_dtype(DType::F32)?)?;
+        // Phase 7 (#1082): route both `where_cond(...).exp()` steps
+        // through `try_kt_exp` under the same KILN_USE_KT_API_EXP
+        // gate. The where_cond stays candle-side; only the
+        // elementwise `.exp()` migrates. Mirrors the chunkwise
+        // forward `gdn_chunk_prep_f32` strict/causal_decay wirings
+        // (commit 38e4ea3d). Falls through to candle on any
+        // precondition failure.
+        let strict_decay = {
+            let masked = strict_bool.where_cond(&decay_delta, &zero_delta)?;
+            let exped = {
+                #[cfg(feature = "cuda")]
+                {
+                    match try_kt_exp(&masked)? {
+                        Some(out) => out,
+                        None => masked.exp()?,
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    masked.exp()?
+                }
+            };
+            exped.broadcast_mul(&strict_bool.to_dtype(DType::F32)?)?
+        };
+        let causal_decay = {
+            let masked = causal_bool.where_cond(&decay_delta, &zero_delta)?;
+            let exped = {
+                #[cfg(feature = "cuda")]
+                {
+                    match try_kt_exp(&masked)? {
+                        Some(out) => out,
+                        None => masked.exp()?,
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    masked.exp()?
+                }
+            };
+            exped.broadcast_mul(&causal_bool.to_dtype(DType::F32)?)?
+        };
         let d_kkt = d_a_strict.broadcast_mul(&strict_decay)?.contiguous()?;
         let d_qkt = d_b_mask.broadcast_mul(&causal_decay)?.contiguous()?;
         let term_a = d_a_strict
