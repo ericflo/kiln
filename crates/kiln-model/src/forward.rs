@@ -11276,9 +11276,34 @@ fn causal_conv1d_decode(
         }
     };
 
-    // Dot product per channel: sum over kernel dimension
+    // Dot product per channel: sum over kernel dimension.
+    //
+    // Phase 7 (#1082): when `KILN_USE_KT_API_SUM_AXIS=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set, the `sum(2)` reduction along
+    // the kernel dim is routed through `kiln_tensor::cuda_sum_axis`
+    // via the kt-bridge borrow adapter (NVTX range
+    // `kiln/sum_axis_kt`). Falls through to candle's `sum(2)` when
+    // any precondition fails. This is the GDN single-token conv
+    // path's per-channel dot-product, called once per layer per
+    // decode step — a less-trafficked but consistent migration site
+    // for the sum-axis kernel that mirrors the keepdim variant
+    // already used in `cuda_softmax_last_dim`'s fallback composite.
     let w_expanded = w_f32.unsqueeze(0)?; // [1, channels, kernel_size]
-    let output = window.broadcast_mul(&w_expanded)?.sum(2)?; // [batch, channels]
+    let pre_sum = window.broadcast_mul(&w_expanded)?;
+    let output = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_sum_axis(&pre_sum, 2)? {
+                out
+            } else {
+                pre_sum.sum(2)?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            pre_sum.sum(2)?
+        }
+    }; // [batch, channels]
     let output = output.unsqueeze(2)?; // [batch, channels, 1]
 
     // Update conv_state in place: drop oldest, append newest. CUDA graph
