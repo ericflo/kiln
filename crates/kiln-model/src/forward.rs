@@ -30932,6 +30932,148 @@ mod tests {
         Ok(())
     }
 
+    /// Parity check for the kt-API path of `backend.gdn_chunk_prep`
+    /// against the candle-typed path. Both bottom out in the same FFI
+    /// symbol (`kiln_gdn_chunk_prep`) so this asserts byte-for-byte
+    /// parity on all 6 BF16 output tensors:
+    ///   - a_strict       : [B, H, C, C]
+    ///   - b_mask         : [B, H, C, C]
+    ///   - v_prime        : [B, H, C, dv]
+    ///   - q_s_scaled     : [B, H, C, dv]
+    ///   - decay_last_col : [B, H, C]
+    ///   - p_last         : [B, H]
+    /// (#1082)
+    ///
+    /// This is the production prefill outer-recurrence path for
+    /// Qwen3.5-4B GDN. The kt wire landed in 68a3667e behind the
+    /// KILN_USE_KT_API_GDN gate; this test exercises the 6-tuple kt
+    /// adapter path which has 6 distinct kt→candle copies.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gdn_chunk_prep_kt_api_parity() -> Result<()> {
+        use crate::backend::BackendRuntime;
+        use crate::backend::cuda::CudaBackend;
+        use rand::rngs::StdRng;
+        use rand::{RngExt, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_gdn_chunk_prep_kt_api_parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // Qwen3.5-4B GDN prefill envelope (see gdn_chunk_prep at
+        // crates/kiln-gdn-kernel/src/lib.rs:2479):
+        //   g        : [B, H, C]      bf16
+        //   v        : [B, H, C, dv]  bf16
+        //   kkt/qkt  : [B, H, C, C]   bf16
+        //   ks_entry : [B, H, C, dv]  bf16
+        //   q_s      : [B, H, C, dv]  bf16
+        // Caller-side C <= 128 cap.
+        let batch = 1usize;
+        let heads = 32usize;
+        let chunk = 64usize;
+        let dv = 128usize;
+
+        let n_g = batch * heads * chunk;
+        let n_v = batch * heads * chunk * dv;
+        let n_kkt = batch * heads * chunk * chunk;
+        let n_qkt = batch * heads * chunk * chunk;
+        let n_ks = batch * heads * chunk * dv;
+        let n_qs = batch * heads * chunk * dv;
+
+        let mut rng = StdRng::seed_from_u64(0xC0_1DCEFF);
+        // Keep g small so cumsum-then-exp doesn't overflow inside the
+        // kernel. The candle-op chain uses F32 internally so range is
+        // forgiving, but small magnitudes exercise more interior bits.
+        let g_data: Vec<f32> = (0..n_g).map(|_| rng.random_range(-0.05f32..0.0)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let kkt_data: Vec<f32> = (0..n_kkt).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let qkt_data: Vec<f32> = (0..n_qkt).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let ks_data: Vec<f32> = (0..n_ks).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let qs_data: Vec<f32> = (0..n_qs).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+
+        let g = Tensor::from_slice(&g_data, (batch, heads, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let kkt = Tensor::from_slice(&kkt_data, (batch, heads, chunk, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+        let qkt = Tensor::from_slice(&qkt_data, (batch, heads, chunk, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+        let ks_entry =
+            Tensor::from_slice(&ks_data, (batch, heads, chunk, dv), &device)?
+                .to_dtype(DType::BF16)?;
+        let q_s = Tensor::from_slice(&qs_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+
+        // Candle-typed path.
+        let candle_be = CudaBackend::new_with_kt_api_gdn(device.clone(), false);
+        let outs_candle = match candle_be.gdn_chunk_prep(&g, &v, &kkt, &qkt, &ks_entry, &q_s)? {
+            Some(t) => t,
+            None => {
+                eprintln!("candle gdn_chunk_prep declined dispatch; skipping kt parity");
+                return Ok(());
+            }
+        };
+        let (a_strict_c, b_mask_c, v_prime_c, q_s_scaled_c, decay_last_col_c, p_last_c) =
+            outs_candle;
+
+        // kt-API path.
+        let kt_be = CudaBackend::new_with_kt_api_gdn(device.clone(), true);
+        let outs_kt = match kt_be.gdn_chunk_prep(&g, &v, &kkt, &qkt, &ks_entry, &q_s)? {
+            Some(t) => t,
+            None => {
+                eprintln!("kt gdn_chunk_prep declined dispatch; skipping kt parity");
+                return Ok(());
+            }
+        };
+        let (a_strict_k, b_mask_k, v_prime_k, q_s_scaled_k, decay_last_col_k, p_last_k) = outs_kt;
+
+        // Helper: assert byte-exact parity on a single output pair.
+        fn assert_byte_exact(
+            label: &str,
+            candle: &Tensor,
+            kt: &Tensor,
+        ) -> Result<()> {
+            assert_eq!(candle.dims(), kt.dims(), "{label}: dims mismatch");
+            let c: Vec<f32> = candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let k: Vec<f32> = kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            assert_eq!(c.len(), k.len(), "{label}: length mismatch");
+            let mut mismatches = 0usize;
+            for (i, (x, y)) in c.iter().zip(k.iter()).enumerate() {
+                if x.to_bits() != y.to_bits() {
+                    if mismatches < 4 {
+                        eprintln!(
+                            "{label} kt parity mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                            x.to_bits(),
+                            y.to_bits()
+                        );
+                    }
+                    mismatches += 1;
+                }
+            }
+            assert_eq!(
+                mismatches, 0,
+                "kt-API gdn_chunk_prep {label} diverges from candle at {mismatches} indices"
+            );
+            Ok(())
+        }
+
+        assert_byte_exact("a_strict", &a_strict_c, &a_strict_k)?;
+        assert_byte_exact("b_mask", &b_mask_c, &b_mask_k)?;
+        assert_byte_exact("v_prime", &v_prime_c, &v_prime_k)?;
+        assert_byte_exact("q_s_scaled", &q_s_scaled_c, &q_s_scaled_k)?;
+        assert_byte_exact("decay_last_col", &decay_last_col_c, &decay_last_col_k)?;
+        assert_byte_exact("p_last", &p_last_c, &p_last_k)?;
+
+        Ok(())
+    }
+
     /// Metal parity check for `backend.causal_conv1d_update` against the same
     /// portable `causal_conv1d_decode` + `cuda_silu` oracle used by CUDA.
     #[cfg(feature = "metal")]
