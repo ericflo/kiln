@@ -1,0 +1,141 @@
+# Candle Removal Plan (#1082)
+
+This document inventories every `candle_core` and `candle_nn` reference in
+the kiln workspace and the migration path to a candle-free build. It is
+the canonical artifact for tracking Phase 7 closeout against issue #1082.
+
+Last refreshed: 2026-05-25, against `main` post-commit `f569b7be`.
+
+## Workspace candle footprint
+
+```
+.rs files importing candle, by crate (descending):
+
+41  kiln-kt-bridge
+27  kiln-model
+20  kiln-vulkan-kernel
+ 9  kiln-train
+ 6  kiln-server
+ 6  kiln-gdn-kernel
+ 5  kiln-tensor
+ 4  kiln-rmsnorm-kernel
+ 4  kiln-opd-loss-kernel
+ 4  kiln-marlin-gemm
+ 3  kiln-flce-kernel
+ 3  kiln-flash-attn
+ 3  kiln-conv1d-kernel
+ 2  kiln-blas
+
+15  total crates with `candle*` in `[dependencies]` or `[dev-dependencies]`
+```
+
+## Removal sequencing
+
+Removal proceeds bottom-up: leaf crates first (they have the smallest blast
+radius), then the high-traffic kernel crates, then `kiln-model`, then the
+bridges, finally the vendor delete.
+
+### Tier 0 — already candle-free (kt-substrate primary)
+
+- `kiln-core`        — never depended on candle directly.
+- `kiln-scheduler`   — never depended on candle directly.
+- `kiln-nvtx`        — never depended on candle directly.
+
+### Tier 1 — leaf crates with minimal candle surface
+
+| Crate | candle deps | Migration path |
+|---|---|---|
+| `kiln-blas`             | `dep:candle-core` (optional, `cublaslt`/`probe` features) | Drop once the cublasLt probe binary is moved to a standalone debug crate or rewritten against `cudarc` directly. |
+| `kiln-conv1d-kernel`    | `candle-core` (cuda feature) | Drop the candle-typed surface once all callers use `kt_api::*_kt`. |
+| `kiln-marlin-gemm`      | `candle-core` (cuda feature) | Same as conv1d. |
+| `kiln-flash-attn`       | `candle-core` (cuda feature) | Same; 5/5 kt_api smoke tests already green. |
+| `kiln-rmsnorm-kernel`   | `candle-core` (cuda feature) | Same; 25/25 kt_api smoke tests already green. |
+| `kiln-gdn-kernel`       | `candle-core` (cuda feature) + `candle-nn` | Same; 20/20 kt_api smoke tests already green. |
+
+For each Tier-1 crate, removing candle means:
+
+1. Migrate every production caller in `kiln-model::forward` and
+   `kiln-train` from the candle-typed entry to the `kt_api::*_kt` entry
+   (zero-copy borrow path).
+2. Delete the candle-typed `lib.rs` surface.
+3. Delete the `candle-core` line from the crate `Cargo.toml`.
+4. Verify `cargo check --release -p kiln-<crate> --features cuda`.
+
+### Tier 2 — opd-loss + flce + mps + vulkan
+
+| Crate | Notes |
+|---|---|
+| `kiln-opd-loss-kernel`  | Smaller surface; mirror the rmsnorm path. |
+| `kiln-flce-kernel`      | **Largest single rewrite.** Phase A is pure-candle, Phase B is the raw-CUDA replacement. Driving Phase B to closeout is its own multi-PR effort (see crate-level `phase_b.rs`). |
+| `kiln-mps`              | Apple Silicon only; Metal storage substrate lives here. |
+| `kiln-vulkan-kernel`    | 20 .rs files importing candle. Most are integration shims that can be removed once `kiln-tensor`s Vulkan backend is fully wired (current scaffolds: ~30 `vulkan_fwd: Ok(None)` sites). |
+
+### Tier 3 — `kiln-model` (the forward pass)
+
+27 .rs files. The candle surface here is the most diffuse and the most
+performance-sensitive. Migration proceeds op-family by op-family, with
+each migration env-gated by a `KILN_USE_KT_API_*` flag so the gate can be
+flipped to default-on after a clean parity-test cycle.
+
+State today (post-#f569b7be):
+
+- 40+ env-gated kt-API parallel paths landed; each defaults off.
+- The `KILN_USE_KT_API_ALL=1` master switch flips all gates on at once.
+- `PagedKvCache` ↔ `PagedKvCacheKt` migration is partial — constructor +
+  writer wired, first end-to-end production site flipped via bench
+  (`d5bba062`), ~10 decode call sites remain on the candle path.
+
+Remaining work to drop the candle dep from `kiln-model`:
+
+1. Finish the PagedKvCacheKt call-site migration.
+2. Promote every `try_kt_*` helper from opt-in to default-on by removing
+   its env gate (after a parity cycle).
+3. Delete the candle fallback branches in the `if let Some(out) =
+   try_kt_*` patterns.
+
+### Tier 4 — `kiln-kt-bridge` (the bridge itself)
+
+By design, `kiln-kt-bridge` IS the candle↔kt boundary. Its `candle-core`
+dep is removed last: once every production path is on kt-typed tensors,
+the bridge collapses to a thin device-id translation layer (or is
+deleted entirely).
+
+### Tier 5 — vendor delete
+
+After every `crates/*/Cargo.toml` has no candle entry:
+
+```bash
+# Verify no transitive candle dep anywhere
+cargo tree --workspace -i candle-core   # should be empty
+
+# Delete the vendor tree
+rm -rf vendor/candle-core/
+
+# Remove the workspace patch
+sed -i "/candle-core.*path.*vendor/d" Cargo.toml
+```
+
+## Build matrix coverage required before each tier closes
+
+| Tier | Required CI green |
+|---|---|
+| Tier 1 crate close | `linux-default` + `linux-cuda` (the kernel crates own gate) |
+| Tier 2 crate close | Same + `macos-metal` for `kiln-mps`, `linux-vulkan` for `kiln-vulkan-kernel` |
+| Tier 3 close       | Full matrix + opd/sft regression nightlies green |
+| Tier 4 close       | Full matrix |
+| Tier 5 delete      | Full matrix + a fresh `cargo tree -i candle-core` returning empty |
+
+## Status snapshot (2026-05-25)
+
+- Tier 0: ✅ already candle-free.
+- Tier 1: 🟡 in flight — kt_api surfaces shipped on all 5 kernel crates;
+  candle-typed surfaces still primary in production. Migrating callers
+  is the bulk of the remaining mechanical work.
+- Tier 2: 🟡 in flight — flce-kernel Phase B is the standout effort.
+- Tier 3: 🟡 in flight — 40+ env gates landed; default-off.
+- Tier 4: ⏳ blocked on Tier 1 + Tier 3.
+- Tier 5: ⏳ blocked on everything above.
+
+This document is updated as tiers close — search-replace the 🟡/⏳ marks
+as each tier reaches the relevant `Required CI green` gate.
+
