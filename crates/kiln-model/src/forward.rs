@@ -987,6 +987,37 @@ fn cuda_use_kt_api_scalar_div_tensor() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise `max(x, c)` (tensor / scalar
+/// elementwise maximum) through the kt-API + adapters. Set
+/// `KILN_USE_KT_API_MAX_WITH_SCALAR=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// `x.maximum_scalar(c)`-style candle composites through
+/// `kiln_tensor::cuda_scalar_op` with kind tag 6
+/// (MaxWithScalar) via the kt-bridge borrow adapter. Pays one
+/// dtod memcpy on the output direction (the kt allocation is
+/// freshly-owned). Falls through to the candle composite when
+/// any precondition fails so behavior is identical with the
+/// gate off.
+///
+/// The gate + helper are wired up for completeness; today
+/// `max(x, 0)` is folded into `relu` which has its own gate
+/// ([`cuda_use_kt_api_relu`]), and other `max(x, c)` shapes
+/// are uncommon in `forward.rs`. Future kernels that need a
+/// non-zero lower bound (gradient clamping floor, safe-log
+/// guards before `log(x)`, leaky-ReLU lower bound) can route
+/// through this gate. Distinct from
+/// [`cuda_use_kt_api_max_binary`] which targets tensor-tensor
+/// maximum, and from [`cuda_use_kt_api_clamp`] which targets
+/// the fused `clamp(x, lo, hi)` two-sided shape.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_max_with_scalar() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED
+        .get_or_init(|| std::env::var("KILN_USE_KT_API_MAX_WITH_SCALAR").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: elementwise `Tensor::sin()` through the kt-API
 /// + adapters. Set `KILN_USE_KT_API_SIN=1` (or
 /// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
@@ -8784,6 +8815,63 @@ fn try_kt_scalar_div_tensor(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_scalar_div_tensor: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API max-with-scalar migration helper.
+/// Routes a contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_scalar_op` with kind tag 6
+/// (MaxWithScalar) for the `max(x, c)` (elementwise) shape.
+///
+/// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
+/// unsupported dtype, non-contiguous, rank-0, or non-finite
+/// scalar) so the caller falls through to the candle composite.
+/// NVTX range `kiln/max_with_scalar_kt` brackets the migrated
+/// call so nsys traces separate the path from the baseline
+/// composite.
+///
+/// Today this helper has no production call site — `max(x, 0)`
+/// goes through `relu` (see `try_kt_relu` /
+/// `cuda_use_kt_api_relu`), and other `max(x, c)` shapes are
+/// uncommon in `forward.rs`. The helper is wired up to match
+/// the established Phase 7 scaffold so future kernel refactors
+/// that need a non-zero lower bound (gradient clamping floor,
+/// safe-log guards before `log(x)`, leaky-ReLU lower bound)
+/// can plug in trivially. Mirrors the dead-code-allowed
+/// precedent of `try_kt_paged_kv_cache_new` (638bc441) and the
+/// pow scaffold (2b07eef7).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_max_with_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_max_with_scalar() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+    if !c.is_finite() {
+        return Ok(None);
+    }
+    let c_f32 = c as f32;
+
+    kiln_nvtx::range!(c"kiln/max_with_scalar_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 6 = ScalarKind::MaxWithScalar (matches
+    // crates/kiln-tensor/src/ops/scalar.rs).
+    let out_kt = match kiln_tensor::cuda_scalar_op(&x_kt, 6, c_f32) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_max_with_scalar: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
