@@ -1143,7 +1143,7 @@ impl BackendRuntime for CudaBackend {
             && dt_bias.dtype() == DType::BF16
             && state.dtype() == DType::BF16
             && z.dtype() == DType::BF16
-            && weight.dtype() == DType::BF16
+            && weight.dtype() == DType::F32
         {
             kiln_nvtx::range!(c"kiln/gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt");
             let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
