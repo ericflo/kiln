@@ -378,8 +378,31 @@ impl<'a> Drop for CommandBatch<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernels::upload_tensor_f32_buffer;
-    use candle_core::{Device, Tensor};
+
+    /// Local f32-vector → device-local Vulkan buffer helper for tests.
+    /// Replaces the previous candle-backed `upload_tensor_f32_buffer` call:
+    /// the test only needs CPU bytes uploaded to a device buffer, so going
+    /// through candle Tensor construction was pure overhead and a needless
+    /// candle dependency at the `cmd_batch.rs` layer. (#1082)
+    fn upload_f32_slice(dev: &VulkanDevice, data: &[f32]) -> VulkanBuffer {
+        let bytes: &[u8] = bytemuck::cast_slice(data);
+        let buf = VulkanBuffer::create_device_local(
+            dev.device(),
+            dev.device_local_mem_type(),
+            bytes.len() as u64,
+        )
+        .unwrap();
+        VulkanBuffer::upload_data(
+            dev.device(),
+            dev.host_visible_mem_type(),
+            dev.queue(),
+            dev.queue_family_index(),
+            &buf,
+            bytes,
+        )
+        .unwrap();
+        buf
+    }
 
     #[test]
     fn command_batch_chains_two_adds() {
@@ -390,12 +413,9 @@ mod tests {
         let a: Vec<f32> = (0..n).map(|i| (i as f32) * 0.01).collect();
         let b: Vec<f32> = (0..n).map(|i| (i as f32) * 0.02).collect();
         let c: Vec<f32> = (0..n).map(|i| (i as f32) * 0.03).collect();
-        let a_t = Tensor::from_vec(a.clone(), n, &Device::Cpu).unwrap();
-        let b_t = Tensor::from_vec(b.clone(), n, &Device::Cpu).unwrap();
-        let c_t = Tensor::from_vec(c.clone(), n, &Device::Cpu).unwrap();
-        let a_buf = upload_tensor_f32_buffer(&dev, &a_t).unwrap();
-        let b_buf = upload_tensor_f32_buffer(&dev, &b_t).unwrap();
-        let c_buf = upload_tensor_f32_buffer(&dev, &c_t).unwrap();
+        let a_buf = upload_f32_slice(&dev, &a);
+        let b_buf = upload_f32_slice(&dev, &b);
+        let c_buf = upload_f32_slice(&dev, &c);
         let tmp = VulkanBuffer::create_device_local(
             dev.device(),
             dev.device_local_mem_type(),
