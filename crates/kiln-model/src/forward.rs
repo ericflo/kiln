@@ -4026,7 +4026,21 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
         let dout = if grad_y.dtype() == DType::BF16 {
             grad_y.clone()
         } else {
-            grad_y.to_dtype(DType::BF16)?
+            // Phase 7 (#1082): route the grad_y → BF16 cast in the
+            // FlashAttn-bwd recompute through
+            // `kiln_tensor::cuda_cast` when
+            // `KILN_USE_KT_API_TO_DTYPE=1` (or
+            // `KILN_USE_KT_API_ALL=1`) is set. `grad_y` is typically
+            // F32 here (the backward accumulator dtype); the cast
+            // narrows to BF16 for FA-bwd's preferred dtype. Falls
+            // through to candle's `.to_dtype()` when the gate is off
+            // or the preconditions fail (e.g. non-contiguous grad_y).
+            match try_kt_to_dtype(grad_y, DType::BF16)
+                .map_err(|e| candle_core::Error::Msg(format!("try_kt_to_dtype: {e}")))?
+            {
+                Some(out) => out,
+                None => grad_y.to_dtype(DType::BF16)?,
+            }
         };
         let (dq, dk, dv) = kiln_flash_attn::flash_attn_bwd(
             &dout,
