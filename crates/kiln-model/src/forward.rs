@@ -790,49 +790,61 @@ fn cuda_use_kt_api_cat_dim1() -> bool {
 
 /// Phase 7 opt-in: `Tensor::affine(c, 0.0)` (scalar-multiply only)
 /// through the kt-API + adapters. Set
-/// `KILN_USE_KT_API_MUL_SCALAR=1` (or `KILN_USE_KT_API_ALL=1`) to
-/// enable; default off. Routes the `.affine(c, 0.0)` candle calls
-/// in the CudaLoraLinearBf16 / CudaLoraAddBf16 backward LoRA
-/// gradient paths (per-tile grad_hidden scaling, grad_b scaling)
-/// through `kiln_tensor::cuda_scalar_op` with `ScalarKind::MulScalar`
-/// (kind tag 2) via the kt-bridge borrow adapter. Pays one dtod
-/// memcpy on the output direction (the kt allocation is
-/// freshly-owned). Falls through to the candle `affine` composite
-/// when any precondition fails so behavior is identical with the
-/// gate off.
+/// Phase 7 default-on (#1082): `affine(c, 0.0)` / `tensor * scalar`
+/// through the kt-API + adapters. Default ON because the kt path is a
+/// single-kernel `out = c * x` dispatch via
+/// `kiln_tensor::cuda_scalar_op` with `ScalarKind::MulScalar` (kind 2)
+/// — bit-equivalent to the candle `.affine(c, 0.0)` op which also
+/// resolves to a single elementwise-mul kernel on supported dtypes
+/// (F32/BF16/F16). Both paths convert the f64 multiplier to f32 at
+/// the kernel boundary in the same way for non-f64 tensors. Only the
+/// Rust shell types and the kt-bridge dtod-copy at the output
+/// boundary differ. Same argument as the unary single-kernel flips.
+/// Escape hatch: `KILN_DISABLE_KT_API_MUL_SCALAR=1`.
 ///
-/// Only the bias=0 case is routed; mixed mul+add affine stays on
-/// candle. The scalar kernel is just an elementwise multiply by a
-/// constant, so the migration is functionally identical to the
-/// candle path on supported dtypes (F32/BF16/F16).
+/// Production call sites: the `.affine(c, 0.0)` candle calls in the
+/// CudaLoraLinearBf16 / CudaLoraAddBf16 backward LoRA gradient paths
+/// (per-tile grad_hidden scaling, grad_b scaling). Only the bias=0
+/// case is routed; mixed mul+add affine stays on candle.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_mul_scalar() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MUL_SCALAR").is_ok());
+    // #1082: flipped default ON. Single-kernel scalar-mul dispatch
+    // (`cuda_scalar_op` kind 2); bit-equivalent to candle
+    // `.affine(c, 0.0)`. Escape hatch:
+    // `KILN_DISABLE_KT_API_MUL_SCALAR=1`.
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MUL_SCALAR").is_err());
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: `tensor + constant` (scalar-add) through the
-/// kt-API + adapters. Set `KILN_USE_KT_API_ADD_SCALAR=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// `tensor + scalar` candle calls used in the LoRA training
-/// backward sigmoid-derivative path (the `sigmoid_f32.neg() + 1.0`
-/// and `gate_tile.neg().exp() + 1.0` shapes) through
-/// `kiln_tensor::cuda_scalar_op` with `ScalarKind::AddScalar`
-/// (kind tag 0) via the kt-bridge borrow adapter. Pays one dtod
-/// memcpy on the output direction (the kt allocation is
-/// freshly-owned). Falls through to the candle `+ scalar`
-/// composite when any precondition fails so behavior is identical
-/// with the gate off.
+/// Phase 7 default-on (#1082): `tensor + constant` (scalar-add)
+/// through the kt-API + adapters. Default ON because the kt path is a
+/// single-kernel `out = x + c` dispatch via
+/// `kiln_tensor::cuda_scalar_op` with `ScalarKind::AddScalar` (kind 0)
+/// — bit-equivalent to the candle overloaded `Tensor + f64` op which
+/// also resolves to a single elementwise-add kernel on supported
+/// dtypes. Both paths convert the f64 addend to f32 at the kernel
+/// boundary in the same way for non-f64 tensors. Only the Rust shell
+/// types and the kt-bridge dtod-copy at the output boundary differ.
+/// Same argument as the MUL_SCALAR flip. Escape hatch:
+/// `KILN_DISABLE_KT_API_ADD_SCALAR=1`.
+///
+/// Production call sites: the `tensor + scalar` candle calls in the
+/// LoRA training backward sigmoid-derivative path
+/// (`sigmoid_f32.neg() + 1.0`, `gate_tile.neg().exp() + 1.0`) and the
+/// RMSNorm tail variance epsilon `(variance + eps)` shape.
 ///
 /// Distinct from `KILN_USE_KT_API_MUL_SCALAR` which targets the
-/// `affine(c, 0.0)` (mul-only) shape — this one covers the
-/// add-only shape from candle's overloaded `Tensor + f64`
-/// (`Add<f64>` impl).
+/// `affine(c, 0.0)` (mul-only) shape — this one covers the add-only
+/// shape from candle's overloaded `Tensor + f64` (`Add<f64>` impl).
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_add_scalar() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ADD_SCALAR").is_ok());
+    // #1082: flipped default ON. Single-kernel scalar-add dispatch
+    // (`cuda_scalar_op` kind 0); bit-equivalent to candle
+    // `Tensor + f64`. Escape hatch:
+    // `KILN_DISABLE_KT_API_ADD_SCALAR=1`.
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_ADD_SCALAR").is_err());
     direct || cuda_use_kt_api_all()
 }
 
