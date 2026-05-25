@@ -1042,6 +1042,52 @@ impl BackendRuntime for CudaBackend {
             );
             return Ok(None);
         }
+        // Phase 7 opt-in (#1082): route through the kt-typed bf16 surface.
+        // Production decode path for Qwen3.5-4B uses bf16 for all 10 input
+        // tensors; the bf16_kt variant is the matching production hot
+        // path. Behind KILN_USE_KT_API_GDN gate.
+        if self.cuda_use_kt_api_gdn
+            && q.dtype() == DType::BF16
+            && k.dtype() == DType::BF16
+            && v.dtype() == DType::BF16
+            && a.dtype() == DType::BF16
+            && b.dtype() == DType::BF16
+            && a_log.dtype() == DType::BF16
+            && dt_bias.dtype() == DType::BF16
+            && state.dtype() == DType::BF16
+            && z.dtype() == DType::BF16
+            && weight.dtype() == DType::BF16
+        {
+            kiln_nvtx::range!(c"kiln/gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt");
+            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
+                .with_context(|| "kt-adapter: gdn_decode_rmsnorm q → kt failed")?;
+            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
+                .with_context(|| "kt-adapter: gdn_decode_rmsnorm k → kt failed")?;
+            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+                .with_context(|| "kt-adapter: gdn_decode_rmsnorm v → kt failed")?;
+            let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
+                .with_context(|| "kt-adapter: gdn_decode_rmsnorm a → kt failed")?;
+            let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
+                .with_context(|| "kt-adapter: gdn_decode_rmsnorm b → kt failed")?;
+            let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_log)
+                .with_context(|| "kt-adapter: gdn_decode_rmsnorm a_log → kt failed")?;
+            let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(dt_bias)
+                .with_context(|| "kt-adapter: gdn_decode_rmsnorm dt_bias → kt failed")?;
+            let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
+                .with_context(|| "kt-adapter: gdn_decode_rmsnorm state → kt failed")?;
+            let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(z)
+                .with_context(|| "kt-adapter: gdn_decode_rmsnorm z → kt failed")?;
+            let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
+                .with_context(|| "kt-adapter: gdn_decode_rmsnorm weight → kt failed")?;
+            let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
+                &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+                q_scale as f32, qk_eps as f32, rms_eps as f32,
+            )
+            .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent_rmsnorm: {e}"))?;
+            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                .with_context(|| "kt-adapter: gdn_decode_rmsnorm out → candle failed")?;
+            return Ok(Some(out));
+        }
         let out = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm(
             q,
             k,
