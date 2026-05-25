@@ -11,13 +11,13 @@
 #![cfg(test)]
 
 use anyhow::Result;
-use candle_core::{Device, Tensor, TensorId, Var};
 use kiln_vulkan_kernel::vk_ops::conv1d::{vk_causal_conv1d, vk_causal_conv1d_no_grad};
 use kiln_vulkan_kernel::vk_ops::gdn_gated_rms_norm::{
     vk_gdn_gated_rms_norm, vk_gdn_gated_rms_norm_no_grad,
 };
 use kiln_vulkan_kernel::vk_ops::gdn_gates::{vk_gdn_gates, vk_gdn_gates_no_grad};
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
+use kiln_vulkan_kernel::vk_tensor::TensorId;
 use kiln_vulkan_kernel::{VkTensor, VulkanBuffer, VulkanDevice};
 use std::sync::Arc;
 
@@ -29,8 +29,7 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 }
 
 fn upload(device: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    VkTensor::from_candle(&t, Arc::clone(device))
+    VkTensor::from_f32_slice(data, shape.to_vec(), Arc::clone(device))
 }
 
 fn upload_param(
@@ -38,17 +37,9 @@ fn upload_param(
     data: &[f32],
     shape: &[usize],
 ) -> Result<(TensorId, VkTensor)> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    let var = Var::from_tensor(&t)?;
-    let vk = VkTensor::from_candle(&t, Arc::clone(device))?;
-    let param = VkTensor::parameter(
-        Arc::clone(vk.buffer()),
-        vk.shape().to_vec(),
-        vk.dtype(),
-        Arc::clone(vk.device()),
-        var.id(),
-    );
-    Ok((var.id(), param))
+    let param = VkTensor::parameter_from_f32_slice(data, shape.to_vec(), Arc::clone(device))?;
+    let pid = param.param_id().expect("parameter has id");
+    Ok((pid, param))
 }
 
 fn upload_buffer(device: &Arc<VulkanDevice>, data: &[f32]) -> Result<Arc<VulkanBuffer>> {
