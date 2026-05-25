@@ -48,6 +48,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
 use std::sync::Arc;
 
+/// Materialize `t` on CPU. CUDA inputs are D2H-copied via
+/// `cuda_to_host_copy`; CPU inputs are cheap `Arc` bumps.
+/// `GumbelSampler` keeps its splitmix64 RNG state in a host-side
+/// Mutex and runs the elementwise `logit + Gumbel(0,1)` argmax in
+/// Rust, so the public API must accept CUDA-resident logits
+/// transparently — upstream `LogitProcessor` chain outputs (top-k,
+/// top-p, temperature, etc.) typically live on the device they
+/// were produced on.
+///
+/// Phase 4 substrate per `#1082`; a fused
+/// `cuda_gumbel_argmax_one_pass` kernel can replace this readback
+/// later without changing the public API.
+fn to_cpu(t: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(t.device(), crate::Device::Cuda(_)) {
+            return crate::cuda_to_host_copy(t);
+        }
+    }
+    Ok(t.clone())
+}
+
 /// Single-step Gumbel-max categorical sampler.
 ///
 /// Sample one token id per batch row. Returns an `[B]` `I64` tensor.
@@ -93,7 +115,8 @@ impl GumbelSampler {
         }
         let batch = logits.shape()[0];
         let vocab = logits.shape()[1];
-        let cpu = logits
+        let logits_host = to_cpu(logits)?;
+        let cpu = logits_host
             .storage()
             .as_any()
             .downcast_ref::<CpuStorage>()
@@ -338,4 +361,66 @@ mod tests {
         let out = s.sample(&logits).unwrap();
         assert_eq!(read_i64(&out), vec![0, 2]);
     }
+
+    /// CUDA parity: lifting the same logits onto CUDA produces
+    /// byte-equal sampled token ids when the sampler is seeded
+    /// identically. The Gumbel RNG runs on the host (same code path),
+    /// so this only confirms the D2H copy preserves logit bytes and
+    /// doesn't accidentally byte-swap or re-cast.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_gumbel_parity() {
+        let cdev = match candle_core::Device::cuda_if_available(0) {
+            Ok(candle_core::Device::Cuda(c)) => c,
+            _ => return,
+        };
+        let cdev = std::sync::Arc::new(cdev);
+
+        let logits_cpu = Tensor::from_slice(
+            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 1.5, 2.5, 3.5, 4.5, 5.5],
+            vec![2, 5],
+        )
+        .unwrap();
+        let logits_cuda = logits_cpu
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+
+        let s_cpu = GumbelSampler::with_seed(0xABCDEF);
+        let s_cuda = GumbelSampler::with_seed(0xABCDEF);
+        for _ in 0..30 {
+            let ids_cpu = read_i64(&s_cpu.sample(&logits_cpu).unwrap());
+            let ids_cuda = read_i64(&s_cuda.sample(&logits_cuda).unwrap());
+            assert_eq!(ids_cpu, ids_cuda, "gumbel cuda parity drift");
+        }
+    }
+
+    /// CUDA parity with masked logits: -inf must round-trip
+    /// faithfully through D2H copy. If the read-back path
+    /// accidentally clamped infinities, the masked tokens would
+    /// suddenly become selectable.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_gumbel_respects_neg_inf_mask() {
+        let cdev = match candle_core::Device::cuda_if_available(0) {
+            Ok(candle_core::Device::Cuda(c)) => c,
+            _ => return,
+        };
+        let cdev = std::sync::Arc::new(cdev);
+
+        let logits_cpu = Tensor::from_slice(
+            &[f32::NEG_INFINITY, f32::NEG_INFINITY, 0.0, f32::NEG_INFINITY],
+            vec![1, 4],
+        )
+        .unwrap();
+        let logits_cuda = logits_cpu
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+
+        for seed in 1..10 {
+            let s = GumbelSampler::with_seed(seed);
+            let ids = read_i64(&s.sample(&logits_cuda).unwrap());
+            assert_eq!(ids, vec![2], "cuda neg-inf mask drift at seed {seed}");
+        }
+    }
 }
+

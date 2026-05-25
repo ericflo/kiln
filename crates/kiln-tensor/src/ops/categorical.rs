@@ -10,6 +10,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
 
+/// Materialize `t` on CPU. CUDA inputs are D2H-copied via
+/// `cuda_to_host_copy`; CPU inputs are cheap `Arc` bumps.
+/// Multinomial is a per-row inverse-CDF sampler whose RNG
+/// (`splitmix64`) lives on the CPU and is shared across batch
+/// rows, so the sampling step is host-resident. The public API
+/// must accept CUDA-resident probability tensors transparently —
+/// upstream `softmax_last_dim` / sampler chain outputs already
+/// live on the device they were produced on. See `#1082`.
+fn to_cpu(t: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(t.device(), crate::Device::Cuda(_)) {
+            return crate::cuda_to_host_copy(t);
+        }
+    }
+    Ok(t.clone())
+}
+
 #[derive(Debug)]
 pub struct Multinomial {
     rng: Mutex<u64>,
@@ -50,7 +68,8 @@ impl Multinomial {
         }
         let batch = probs.shape()[0];
         let vocab = probs.shape()[1];
-        let cpu = probs
+        let probs_host = to_cpu(probs)?;
+        let cpu = probs_host
             .storage()
             .as_any()
             .downcast_ref::<CpuStorage>()
@@ -190,4 +209,39 @@ mod tests {
         let e = m.sample(&probs).unwrap_err();
         assert!(e.to_string().contains("all-zero"));
     }
+
+    /// CUDA parity: same RNG seed + same probability table produces
+    /// byte-equal token ids when the prob tensor lives on CUDA vs
+    /// CPU. The sampling step is CPU-resident (the splitmix64 RNG
+    /// state lives in `self.rng`); the to_cpu helper just makes the
+    /// probability bytes readable on host regardless of where they
+    /// were produced.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_multinomial_parity() {
+        let cdev = match candle_core::Device::cuda_if_available(0) {
+            Ok(candle_core::Device::Cuda(c)) => c,
+            _ => return,
+        };
+        let cdev = std::sync::Arc::new(cdev);
+
+        let probs_cpu = Tensor::from_slice(
+            &[0.5f32, 0.3, 0.2, 0.1, 0.6, 0.3],
+            vec![2, 3],
+        )
+        .unwrap();
+        let probs_cuda = probs_cpu
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+
+        // Same RNG seed → same draws on either device.
+        let m_cpu = Multinomial::with_seed(12345);
+        let m_cuda = Multinomial::with_seed(12345);
+        for _ in 0..50 {
+            let t_cpu = read_i64(&m_cpu.sample(&probs_cpu).unwrap());
+            let t_cuda = read_i64(&m_cuda.sample(&probs_cuda).unwrap());
+            assert_eq!(t_cpu, t_cuda, "multinomial cuda parity drift");
+        }
+    }
 }
+
