@@ -1231,6 +1231,35 @@ impl BackendRuntime for CudaBackend {
             );
             return Ok(None);
         }
+        // Phase 7 opt-in (#1082): route through the kt-typed bf16 surface.
+        // Production decode path for Qwen3.5-4B uses bf16 for a, b, a_log, dt_bias;
+        // the bf16_kt variant is the matching production hot path. Behind
+        // KILN_USE_KT_API_GDN gate. Falls through to candle for the
+        // mixed-precision variants (f32/f32, f32/bf16 a_log/dt_bias).
+        if self.cuda_use_kt_api_gdn
+            && a.dtype() == DType::BF16
+            && b.dtype() == DType::BF16
+            && a_log.dtype() == DType::BF16
+            && dt_bias.dtype() == DType::BF16
+        {
+            kiln_nvtx::range!(c"kiln/gdn_gates_bf16_kt");
+            let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
+                .with_context(|| "kt-adapter: gdn_gates a → kt failed")?;
+            let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
+                .with_context(|| "kt-adapter: gdn_gates b → kt failed")?;
+            let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_log)
+                .with_context(|| "kt-adapter: gdn_gates a_log → kt failed")?;
+            let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(dt_bias)
+                .with_context(|| "kt-adapter: gdn_gates dt_bias → kt failed")?;
+            let (beta_kt, g_kt) =
+                kiln_gdn_kernel::gdn_gates_bf16_kt(&a_kt, &b_kt, &alog_kt, &dtb_kt)
+                    .map_err(|e| anyhow::anyhow!("kt gdn_gates_bf16: {e}"))?;
+            let beta = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&beta_kt)
+                .with_context(|| "kt-adapter: gdn_gates beta → candle failed")?;
+            let g = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&g_kt)
+                .with_context(|| "kt-adapter: gdn_gates g → candle failed")?;
+            return Ok(Some((beta, g)));
+        }
         let (beta, g) =
             kiln_gdn_kernel::gdn_gates(a, b, a_log, dt_bias).context("gdn_gates kernel failed")?;
         Ok(Some((beta, g)))
