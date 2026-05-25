@@ -830,12 +830,23 @@ pub fn cuda_rmsnorm(
         .context("cuda_rmsnorm: square input")?
         .mean_keepdim(D::Minus1)
         .context("cuda_rmsnorm: row variance")?;
-    let rms_inv = (variance + eps as f64)
-        .context("cuda_rmsnorm: add eps")?
-        .sqrt()
-        .context("cuda_rmsnorm: sqrt variance")?
-        .recip()
-        .context("cuda_rmsnorm: reciprocal rms")?;
+    // Phase 7 (#1082): route the `(variance + eps).sqrt().recip()` chain
+    // through `try_kt_rsqrt` (fused single-kernel `cuda_activation_unary`
+    // kind tag 22 — sqrt + recip in one pass). Falls through to the candle
+    // two-step composite when KILN_USE_KT_API_RSQRT is off or any
+    // precondition fails so behavior is identical with the gate off.
+    let variance_plus_eps = (variance + eps as f64)
+        .context("cuda_rmsnorm: add eps")?;
+    let rms_inv = match crate::forward::try_kt_rsqrt(&variance_plus_eps)
+        .context("cuda_rmsnorm: try_kt_rsqrt")?
+    {
+        Some(out) => out,
+        None => variance_plus_eps
+            .sqrt()
+            .context("cuda_rmsnorm: sqrt variance")?
+            .recip()
+            .context("cuda_rmsnorm: reciprocal rms")?,
+    };
     let normed = input
         .as_tensor()
         .broadcast_mul(&rms_inv)
