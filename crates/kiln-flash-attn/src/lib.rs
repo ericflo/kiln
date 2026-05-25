@@ -101,6 +101,18 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_paged_kv_write_token_major_bf16_batch_slot(
+        k_pool: *mut core::ffi::c_void,
+        v_pool: *mut core::ffi::c_void,
+        k: *const core::ffi::c_void,
+        v: *const core::ffi::c_void,
+        slots: *const u32,
+        batch: i32,
+        num_kv_heads: i32,
+        head_dim: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_flash_attn_bwd(
         dout: *const core::ffi::c_void,
         q: *const core::ffi::c_void,
@@ -1198,6 +1210,140 @@ pub fn paged_kv_write_token_major_bf16_slot(
         if status != 0 {
             candle_core::bail!(
                 "kiln_paged_kv_write_token_major_bf16_slot failed with status {status}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Write one decode token per row into a paged K/V pool using a `[batch]` u32
+/// device-side slot tensor. One fused CUDA kernel launch handles every row —
+/// no per-row host loop, no transient device tensors, safe under CUDA graph
+/// capture across different per-replay slot values (`slots` is read from the
+/// runner-owned `kv_slot_buffer`, refreshed via `update_cuda_scalar` before
+/// each replay).
+///
+/// Shapes:
+/// * `k_pool`, `v_pool`: `[total_slots, num_kv_heads, head_dim]` bf16
+/// * `k`, `v`: `[batch, num_kv_heads, head_dim]` (or `[batch, 1, num_kv_heads,
+///   head_dim]` which reshapes contiguously) bf16
+/// * `slots`: `[batch]` u32 device tensor of destination slot indices
+///
+/// Closes suspect 1 in `bench-results/cuda-graph-bs2-secondary-audit.md` for
+/// `#1082`. Caller must hold the contiguity invariant for `k` / `v` / `slots`.
+pub fn paged_kv_write_token_major_bf16_batch_slot(
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    slots: &Tensor,
+) -> Result<()> {
+    let (_, num_kv_heads, head_dim) = k_pool.dims3()?;
+    if v_pool.dims3()? != k_pool.dims3()? {
+        candle_core::bail!("paged_kv_write_token_major_bf16_batch_slot k/v pool dims mismatch");
+    }
+    if k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+        || k_pool.dtype() != DType::BF16
+        || v_pool.dtype() != DType::BF16
+    {
+        candle_core::bail!("paged_kv_write_token_major_bf16_batch_slot requires bf16 tensors");
+    }
+    if slots.dtype() != DType::U32 || slots.dims().len() != 1 {
+        candle_core::bail!(
+            "paged_kv_write_token_major_bf16_batch_slot requires u32 slots shape [batch], got {:?} {:?}",
+            slots.dtype(),
+            slots.dims()
+        );
+    }
+    let batch = slots.dims()[0];
+    if batch == 0 {
+        candle_core::bail!(
+            "paged_kv_write_token_major_bf16_batch_slot requires a non-empty batch"
+        );
+    }
+    let expected_per_row = num_kv_heads * head_dim;
+    if k.elem_count() != batch * expected_per_row || v.elem_count() != batch * expected_per_row {
+        candle_core::bail!(
+            "paged_kv_write_token_major_bf16_batch_slot expects batch*({num_kv_heads}*{head_dim})={} elements per K/V, got k={} v={}",
+            batch * expected_per_row,
+            k.elem_count(),
+            v.elem_count()
+        );
+    }
+    let Ok(batch_i32) = i32::try_from(batch) else {
+        candle_core::bail!("paged_kv_write_token_major_bf16_batch_slot batch {batch} exceeds i32");
+    };
+    let Ok(num_kv_heads_i32) = i32::try_from(num_kv_heads) else {
+        candle_core::bail!(
+            "paged_kv_write_token_major_bf16_batch_slot num_kv_heads {num_kv_heads} exceeds i32"
+        );
+    };
+    let Ok(head_dim_i32) = i32::try_from(head_dim) else {
+        candle_core::bail!(
+            "paged_kv_write_token_major_bf16_batch_slot head_dim {head_dim} exceeds i32"
+        );
+    };
+
+    let k = k.contiguous()?;
+    let v = v.contiguous()?;
+    let slots = slots.contiguous()?;
+    let (k_storage, k_layout) = k.storage_and_layout();
+    let (v_storage, v_layout) = v.storage_and_layout();
+    let (kp_storage, kp_layout) = k_pool.storage_and_layout();
+    let (vp_storage, vp_layout) = v_pool.storage_and_layout();
+    let (slots_storage, slots_layout) = slots.storage_and_layout();
+
+    macro_rules! cuda {
+        ($s:expr, $name:expr) => {
+            match &*$s {
+                candle_core::Storage::Cuda(c) => c,
+                _ => candle_core::bail!(concat!($name, " must be a CUDA tensor")),
+            }
+        };
+    }
+    let k_cuda = cuda!(k_storage, "k");
+    let v_cuda = cuda!(v_storage, "v");
+    let kp_cuda = cuda!(kp_storage, "k_pool");
+    let vp_cuda = cuda!(vp_storage, "v_pool");
+    let slots_cuda = cuda!(slots_storage, "slots");
+    let stream = k_cuda.device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let k_slice = k_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(k_layout.start_offset()..);
+    let v_slice = v_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(v_layout.start_offset()..);
+    let kp_slice = kp_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(kp_layout.start_offset()..);
+    let vp_slice = vp_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(vp_layout.start_offset()..);
+    let slots_slice = slots_cuda
+        .as_cuda_slice::<u32>()?
+        .slice(slots_layout.start_offset()..);
+    unsafe {
+        let (k_ptr, _g1) = k_slice.device_ptr(&stream);
+        let (v_ptr, _g2) = v_slice.device_ptr(&stream);
+        let (kp_ptr, _g3) = kp_slice.device_ptr(&stream);
+        let (vp_ptr, _g4) = vp_slice.device_ptr(&stream);
+        let (slots_ptr, _g5) = slots_slice.device_ptr(&stream);
+        let status = kiln_paged_kv_write_token_major_bf16_batch_slot(
+            kp_ptr as *mut _,
+            vp_ptr as *mut _,
+            k_ptr as *const _,
+            v_ptr as *const _,
+            slots_ptr as *const u32,
+            batch_i32,
+            num_kv_heads_i32,
+            head_dim_i32,
+            raw_stream,
+        );
+        if status != 0 {
+            candle_core::bail!(
+                "kiln_paged_kv_write_token_major_bf16_batch_slot failed with status {status}"
             );
         }
     }

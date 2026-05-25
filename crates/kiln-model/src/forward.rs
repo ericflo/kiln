@@ -17182,6 +17182,21 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // `bench-results/cuda-graph-bs2-secondary-audit.md`). `None`
     // reproduces the legacy positions-based per-call build.
     rope_tables: Option<(&Tensor, &Tensor)>,
+    // CUDA-graph-stable `[batch]` u32 per-row KV-write slot tensor. When
+    // `Some` and `kv_fused_batched_enabled()` is true, the per-row KV slot
+    // writer dispatches the fused batched kernel
+    // (`PagedKvCache::write_token_major_native_batch_graph_slot`) instead
+    // of the per-row host loop that calls
+    // `paged_kv_write_token_major_bf16` with a baked-immediate slot.
+    // The baked-immediate form is a CUDA-graph replay-correctness bug:
+    // the captured kernel records the capture-time slot index as a
+    // launch immediate, so replays at a different decode position
+    // write into the wrong KV-cache slot. The fused-slot kernel reads
+    // its destination slots from this device tensor on every replay
+    // (refreshed via `update_cuda_scalar` outside the captured region),
+    // closing suspect 1 in `bench-results/cuda-graph-bs2-secondary-audit.md`
+    // for #1082. `None` reproduces the legacy per-row writer.
+    kv_slot: Option<&Tensor>,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
     let profile_device = x.device();
@@ -17450,13 +17465,46 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
 
     {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
-        if !paged_cache.write_token_major_native_batch(
-            full_attn_layer_idx,
-            block_tables,
-            start_positions,
-            &k,
-            &v,
-        )? {
+        let kv_write_done = {
+            #[cfg(feature = "cuda")]
+            {
+                // #1082 suspect 1: when the runner has wired the
+                // `[batch] u32` per-row slot device buffer through
+                // `BatchedPagedDecodeGraphInputs.kv_slot` and the
+                // `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED` gate is on, write
+                // via the fused batched-slot kernel so the captured
+                // graph re-reads fresh slots on every replay. Otherwise
+                // fall back to the legacy per-row writer that bakes
+                // host-immediate slots into kernel args.
+                if let Some(slot_tensor) = kv_slot {
+                    if kv_fused_batched_enabled() {
+                        paged_cache.write_token_major_native_batch_graph_slot(
+                            full_attn_layer_idx,
+                            &k,
+                            &v,
+                            slot_tensor,
+                        )?
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                false
+            }
+        };
+        if !kv_write_done
+            && !paged_cache.write_token_major_native_batch(
+                full_attn_layer_idx,
+                block_tables,
+                start_positions,
+                &k,
+                &v,
+            )?
+        {
             anyhow::bail!("batched contiguous paged attention KV write declined");
         }
         finish_full_attn_stage_profile(
@@ -19492,6 +19540,10 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     // forward path. Forwarded as-is to
     // `gqa_attention_paged_decode_contiguous_batch` (#1082 suspect 2).
     rope_tables: Option<(&Tensor, &Tensor)>,
+    // CUDA-graph-stable `[batch]` u32 per-row KV-write slot tensor.
+    // Forwarded as-is to `gqa_attention_paged_decode_contiguous_batch`
+    // (#1082 suspect 1).
+    kv_slot: Option<&Tensor>,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -19540,6 +19592,7 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         cached_meta,
         graph_outputs,
         rope_tables,
+        kv_slot,
     )?;
     let x = {
         kiln_nvtx::range!(c"kiln/residual_batch_decode");
@@ -19608,6 +19661,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -19668,6 +19722,14 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
     // `bench-results/cuda-graph-bs2-secondary-audit.md`).
     stable_rotary_cos_gpu: Option<&Tensor>,
     stable_rotary_sin_gpu: Option<&Tensor>,
+    // CUDA-graph-stable `[batch]` u32 per-row KV-write slot tensor.
+    // When `Some`, the bs>1 KV-write step on the captured path
+    // dispatches the fused batched-slot kernel
+    // (`PagedKvCache::write_token_major_native_batch_graph_slot`) so
+    // every replay re-reads its per-row destination slot from this
+    // runner-owned device tensor instead of baking host-immediate
+    // slots into the captured kernel args. Closes #1082 suspect 1.
+    stable_kv_slot_gpu: Option<&Tensor>,
 ) -> Result<Tensor> {
     let batch = token_ids.len();
     anyhow::ensure!(batch > 0, "batched paged decode requires a non-empty batch");
@@ -19839,6 +19901,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     cached_paged_meta_ref,
                     layer_graph_outputs,
                     layer_rope_tables,
+                    stable_kv_slot_gpu,
                 )
                 .with_context(|| {
                     format!("batched transformer block {i} (full attention, paged)")
@@ -21462,6 +21525,11 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
         // inside the captured region (#1082 suspect 2).
         Some(graph_inputs.rotary_cos),
         Some(graph_inputs.rotary_sin),
+        // Thread the runner-owned `[batch]` u32 KV-slot buffer
+        // through so the captured KV-write step dispatches the fused
+        // batched-slot kernel instead of baking host-immediate slots
+        // into per-row kernel args (#1082 suspect 1).
+        Some(graph_inputs.kv_slot),
     )?;
     // Compute logits and slice them into the caller-owned stable
     // `output_logits` buffer (`[batch, 1, vocab]`). The captured graph
@@ -21740,6 +21808,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                     &block_table_refs,
                     full_attn_idx,
                     layer_lora,
+                    None,
                     None,
                     None,
                     None,
@@ -25201,6 +25270,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )?;
         device.synchronize()?;
         assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
@@ -25351,6 +25421,7 @@ mod tests {
             &mut batch_cache,
             &block_tables,
             0,
+            None,
             None,
             None,
             None,
@@ -30490,4 +30561,21 @@ mod tests {
             std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
         }
     }
+}
+
+
+/// Read the `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED` env var.
+///
+/// When set to `1`/`true`/`yes`/`on`, the bs>1 paged-decode CUDA-graph
+/// path uses the fused batched-slot KV writer kernel
+/// (`PagedKvCache::write_token_major_native_batch_graph_slot`) so the
+/// per-row destination slots are read from a device tensor at replay
+/// time instead of being baked into the captured kernel args.
+/// Closes suspect 1 in `bench-results/cuda-graph-bs2-secondary-audit.md`
+/// for #1082. Defaults to off until validation closes.
+#[cfg(feature = "cuda")]
+fn kv_fused_batched_enabled() -> bool {
+    std::env::var("KILN_CUDA_GRAPHS_BATCHED_KV_FUSED")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
 }

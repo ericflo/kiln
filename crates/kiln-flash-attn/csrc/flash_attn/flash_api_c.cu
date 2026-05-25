@@ -523,6 +523,66 @@ extern "C" kiln_flash_status_t kiln_paged_kv_write_token_major_bf16(
     return err == cudaSuccess ? 0 : -2;
 }
 
+// Fused batched per-row slot writer. Writes `batch` rows from K/V `[batch, num_kv_heads, head_dim]`
+// into K/V pools `[total_slots, num_kv_heads, head_dim]` using a `[batch]` u32 device
+// tensor of per-row destination slot indices. Grid is 2D: blockIdx.y = batch row,
+// blockIdx.x = element within that row. One kernel launch handles all rows — no
+// per-row host loop, no transient device tensors, safe under CUDA graph capture
+// because the only inputs that vary across replays are the device-pointer-backed
+// `slots` table (refreshed via `update_cuda_scalar` outside the captured region).
+// See `bench-results/cuda-graph-bs2-secondary-audit.md` suspect 1 for #1082.
+__global__ void kiln_paged_kv_write_token_major_bf16_batch_slot_kernel(
+    __nv_bfloat16 *k_pool,
+    __nv_bfloat16 *v_pool,
+    const __nv_bfloat16 *k,
+    const __nv_bfloat16 *v,
+    const unsigned int *slots,
+    int batch,
+    int num_kv_heads,
+    int head_dim)
+{
+    int row = blockIdx.y;
+    if (row >= batch) return;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = num_kv_heads * head_dim;
+    if (idx >= total) return;
+    int slot = int(slots[row]);
+    int dst = slot * total + idx;
+    int src = row * total + idx;
+    k_pool[dst] = k[src];
+    v_pool[dst] = v[src];
+}
+
+extern "C" kiln_flash_status_t kiln_paged_kv_write_token_major_bf16_batch_slot(
+    void *k_pool,
+    void *v_pool,
+    const void *k,
+    const void *v,
+    const unsigned int *slots,
+    int batch,
+    int num_kv_heads,
+    int head_dim,
+    void *stream)
+{
+    if (batch <= 0 || num_kv_heads <= 0 || head_dim <= 0) return -1;
+    int total = num_kv_heads * head_dim;
+    int threads = 256;
+    int blocks_x = (total + threads - 1) / threads;
+    dim3 grid(blocks_x, batch, 1);
+    cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+    kiln_paged_kv_write_token_major_bf16_batch_slot_kernel<<<grid, threads, 0, cuda_stream>>>(
+        static_cast<__nv_bfloat16 *>(k_pool),
+        static_cast<__nv_bfloat16 *>(v_pool),
+        static_cast<const __nv_bfloat16 *>(k),
+        static_cast<const __nv_bfloat16 *>(v),
+        slots,
+        batch,
+        num_kv_heads,
+        head_dim);
+    cudaError_t err = cudaGetLastError();
+    return err == cudaSuccess ? 0 : -2;
+}
+
 extern "C" kiln_flash_status_t kiln_flash_attn_bwd(
     const void *dout,
     const void *q, const void *k, const void *v,
