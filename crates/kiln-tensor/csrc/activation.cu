@@ -6,7 +6,7 @@
 // dtype handling, same launch shape. Extended further in the same
 // PR series with log2/log10/log1p (kinds 15..=17), inverse trig
 // (asin/acos/atan, 18..=20), atanh (21), reciprocal (22), sign
-// (23), and floor (24).
+// (23), floor (24), and ceil (25).
 //
 // In-place math in F32 (kiln's numerical-reference convention),
 // narrowed back to the storage dtype on store.
@@ -68,8 +68,9 @@
 // Sign-and-round family (#1082):
 #define KIND_SIGN   23
 #define KIND_FLOOR  24
+#define KIND_CEIL   25
 
-#define KIND_MAX    24
+#define KIND_MAX    25
 
 // Dtype tags
 #define DTYPE_F32  0
@@ -171,6 +172,9 @@ __device__ __forceinline__ float apply_unary(int kind, float x) {
         }
         case KIND_FLOOR: {
             return floorf(x);
+        }
+        case KIND_CEIL: {
+            return ceilf(x);
         }
         default:
             return 0.0f;
