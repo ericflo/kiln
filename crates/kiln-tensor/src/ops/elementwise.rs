@@ -160,6 +160,54 @@ impl DeviceOp2 for ElementwiseOp {
         Ok(Some(crate::cuda_elementwise_binary(a, b, kind_tag)?))
     }
 
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as the CUDA path:
+        //   - validate(a, b, kind)
+        //   - F32 only on Vulkan today (the underlying
+        //     `vk_elementwise_binary_f32` shader is F32-only;
+        //     BF16/F16 fall through to CPU until a cast wrapper or
+        //     widened shader lands).
+        //   - contiguous inputs
+        //   - storage must be Vulkan-backed on both sides (otherwise
+        //     fall back to CPU gracefully rather than have the wrapper
+        //     raise).
+        //
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::vulkan_elementwise_binary` which wraps the production
+        // `vk_add_no_grad` (kind_tag=0), `vk_sub_no_grad` (=1),
+        // `vk_mul_no_grad` (=2), and `vk_div_no_grad` (=3) shaders.
+        // Current bridge D2H+H2D round-trips bytes through the host;
+        // see `vulkan_storage.rs::vulkan_elementwise_binary` rustdoc
+        // for the zero-copy follow-up plan.
+        validate(a, b, self.kind)?;
+        if !a.is_contiguous() || !b.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(a.dtype(), DType::F32) {
+            return Ok(None);
+        }
+        if a
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::VulkanStorage>()
+            .is_none()
+            || b.storage()
+                .as_any()
+                .downcast_ref::<crate::VulkanStorage>()
+                .is_none()
+        {
+            return Ok(None);
+        }
+        let kind_tag: i32 = match self.kind {
+            BinaryKind::Add => 0,
+            BinaryKind::Sub => 1,
+            BinaryKind::Mul => 2,
+            BinaryKind::Div => 3,
+        };
+        Ok(Some(crate::vulkan_elementwise_binary(a, b, kind_tag)?))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
