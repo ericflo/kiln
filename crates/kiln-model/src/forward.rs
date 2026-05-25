@@ -432,6 +432,31 @@ fn cuda_use_kt_api_sqrt() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise `Tensor::abs()` through the kt-API
+/// + adapters. Set `KILN_USE_KT_API_ABS=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// `.abs()` candle calls through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 13 (Abs)
+/// via the kt-bridge borrow adapter. Pays one dtod memcpy on the
+/// output direction (the kt allocation is freshly-owned). Falls
+/// through to the candle composite when any precondition fails so
+/// behavior is identical with the gate off.
+///
+/// The gate + helper are wired up for completeness; today there
+/// are no production `.abs()` call sites in `forward.rs` (all
+/// `.abs()` sites are in `#[cfg(test)]` parity helpers, where
+/// the candle path is what's being verified). Future kernels that
+/// compute `|x|` directly (e.g. softplus refactored to use a
+/// single-kernel `abs` instead of `relu(x) + relu(-x)`) can route
+/// through this gate.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_abs() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ABS").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -6568,6 +6593,54 @@ fn try_kt_sqrt(x: &Tensor) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_sqrt: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API abs migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 13 (Abs).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0) so the caller falls through to
+/// the candle `.abs()`. NVTX range `kiln/abs_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite.
+///
+/// Today this helper has no production call site — the only
+/// `.abs()` sites in `forward.rs` are in `#[cfg(test)]` parity
+/// helpers. The helper is wired up to match the established
+/// Phase 7 scaffold so future kernel refactors that compute `|x|`
+/// directly (instead of `relu(x) + relu(-x)`) can plug in
+/// trivially. Mirrors the dead-code-allowed precedent of
+/// `try_kt_paged_kv_cache_new` (638bc441).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_abs(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_abs() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/abs_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 13 = Abs (matches csrc/activation.cu constants and
+    // crates/kiln-tensor/src/ops/unary_arith.rs::cuda_kind_tag).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 13) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_abs: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
