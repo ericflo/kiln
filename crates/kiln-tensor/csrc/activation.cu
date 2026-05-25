@@ -5,8 +5,8 @@
 // /neg/abs/sqrt) added in #1082 — same kind-tagged dispatch, same
 // dtype handling, same launch shape. Extended further in the same
 // PR series with log2/log10/log1p (kinds 15..=17), inverse trig
-// (asin/acos/atan, 18..=20), atanh (21), reciprocal (22), and
-// sign (23).
+// (asin/acos/atan, 18..=20), atanh (21), reciprocal (22), sign
+// (23), and floor (24).
 //
 // In-place math in F32 (kiln's numerical-reference convention),
 // narrowed back to the storage dtype on store.
@@ -67,8 +67,9 @@
 #define KIND_RECIP  22
 // Sign-and-round family (#1082):
 #define KIND_SIGN   23
+#define KIND_FLOOR  24
 
-#define KIND_MAX    23
+#define KIND_MAX    24
 
 // Dtype tags
 #define DTYPE_F32  0
@@ -167,6 +168,9 @@ __device__ __forceinline__ float apply_unary(int kind, float x) {
             if (x > 0.0f) return 1.0f;
             if (x < 0.0f) return -1.0f;
             return 0.0f;
+        }
+        case KIND_FLOOR: {
+            return floorf(x);
         }
         default:
             return 0.0f;

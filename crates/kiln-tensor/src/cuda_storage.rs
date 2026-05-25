@@ -1020,7 +1020,7 @@ pub fn cuda_elementwise_binary(
 /// `kind` encodes the op (0=Silu, 1=Sigmoid, 2=Gelu, 3=Tanh, 4=Relu;
 /// 5=Log, 6=Exp, 7=Sin, 8=Cos, 9=Tan, 10=Sinh, 11=Cosh, 12=Neg, 13=Abs, 14=Sqrt;
 /// 15=Log2, 16=Log10, 17=Log1p, 18=Asin, 19=Acos, 20=Atan, 21=Atanh;
-/// 22=Recip, 23=Sign).
+/// 22=Recip, 23=Sign, 24=Floor).
 /// Dtype inferred from `x.dtype()`; must be F32/BF16/F16. Input must
 /// be contiguous and on CUDA.
 #[cfg(feature = "cuda")]

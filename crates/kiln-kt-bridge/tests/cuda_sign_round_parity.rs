@@ -63,9 +63,53 @@ where
     };
     let n = data.len();
 
-    let cpu_in = Tensor::from_slice(data, vec![n]).unwrap();
+    // Run the CPU reference at the target dtype so it sees the same
+    // narrowed inputs the CUDA path does. floor/ceil/round/trunc are
+    // integer-discontinuous: an F32 input like 1.99 has `floor = 1`,
+    // but the BF16-narrowed input rounds to 2.0 and `floor = 2`.
+    // Building the CPU tensor directly at BF16/F16 (instead of F32
+    // and letting the CUDA copy do the narrowing) keeps both sides
+    // honest. Smooth ops tolerate either form; this normalization
+    // just makes the comparison apples-to-apples for every kind.
+    let cpu_in = match dtype {
+        CandleDType::F32 => Tensor::from_slice(data, vec![n]).unwrap(),
+        CandleDType::BF16 => {
+            let bf: Vec<half::bf16> = data.iter().map(|&v| half::bf16::from_f32(v)).collect();
+            Tensor::from_slice(&bf, vec![n]).unwrap()
+        }
+        CandleDType::F16 => {
+            let h: Vec<half::f16> = data.iter().map(|&v| half::f16::from_f32(v)).collect();
+            Tensor::from_slice(&h, vec![n]).unwrap()
+        }
+        other => panic!("unsupported test dtype {other:?}"),
+    };
     let cpu_out = op(&cpu_in).expect("cpu op");
-    let cpu_vec = read_f32(&cpu_out);
+    let cpu_vec: Vec<f32> = match dtype {
+        CandleDType::F32 => read_f32(&cpu_out),
+        CandleDType::BF16 => {
+            let cpu = cpu_out
+                .storage()
+                .as_any()
+                .downcast_ref::<CpuStorage>()
+                .unwrap();
+            cpu.as_bytes()
+                .chunks(2)
+                .map(|c| half::bf16::from_le_bytes(c.try_into().unwrap()).to_f32())
+                .collect()
+        }
+        CandleDType::F16 => {
+            let cpu = cpu_out
+                .storage()
+                .as_any()
+                .downcast_ref::<CpuStorage>()
+                .unwrap();
+            cpu.as_bytes()
+                .chunks(2)
+                .map(|c| half::f16::from_le_bytes(c.try_into().unwrap()).to_f32())
+                .collect()
+        }
+        _ => unreachable!(),
+    };
 
     let x_cd = CandleTensor::from_vec(data.to_vec(), (n,), &dev)
         .unwrap()
@@ -203,8 +247,7 @@ fn cuda_activation_unary_recip_direct_call() {
 
 #[test]
 fn cuda_activation_unary_sign_direct_call() {
-    // Confirm the FFI bounds-check accepts kind 23 (new KIND_MAX)
-    // and rejects 24 (one past the current max).
+    // Confirm the FFI bounds-check accepts kind 23.
     let Some(dev) = try_cuda() else {
         eprintln!("CUDA not available; skipping");
         return;
@@ -220,7 +263,7 @@ fn cuda_activation_unary_sign_direct_call() {
         .unwrap();
     let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_cd).unwrap();
 
-    // KIND_SIGN = 23 (new max); should succeed.
+    // KIND_SIGN = 23; should succeed.
     let out_kt = cuda_activation_unary(&x_kt, 23).expect("KIND_SIGN");
     let cuda_dev = match dev {
         CandleDevice::Cuda(ref c) => c,
@@ -248,7 +291,61 @@ fn cuda_activation_unary_sign_direct_call() {
             "i={i}: v={v} got {g}, want {want}"
         );
     }
+}
 
-    // KIND_MAX+1 (=24) must still error.
-    assert!(cuda_activation_unary(&x_kt, 24).is_err());
+// ---- floor (#1082: kind 24) --------------------------------------------
+
+#[test]
+fn cuda_floor_f32_parity() {
+    let data = pattern(257, 20);
+    check_op("floor", ops::floor, &data, CandleDType::F32, 1e-6);
+}
+
+#[test]
+fn cuda_floor_bf16_parity() {
+    let data = pattern(257, 21);
+    check_op("floor", ops::floor, &data, CandleDType::BF16, 1e-2);
+}
+
+#[test]
+fn cuda_activation_unary_floor_direct_call() {
+    // Confirm the FFI bounds-check accepts kind 24 (new KIND_MAX)
+    // and rejects 25 (one past the current max).
+    let Some(dev) = try_cuda() else {
+        eprintln!("CUDA not available; skipping");
+        return;
+    };
+    let data: Vec<f32> = (0..64).map(|i| (i as f32 - 32.0) * 0.37).collect();
+    let n = data.len();
+    let x_cd = CandleTensor::from_vec(data.clone(), (n,), &dev)
+        .unwrap()
+        .to_dtype(CandleDType::F32)
+        .unwrap();
+    let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_cd).unwrap();
+
+    // KIND_FLOOR = 24 (new max); should succeed.
+    let out_kt = cuda_activation_unary(&x_kt, 24).expect("KIND_FLOOR");
+    let cuda_dev = match dev {
+        CandleDevice::Cuda(ref c) => c,
+        _ => unreachable!(),
+    };
+    cuda_dev.synchronize().unwrap();
+
+    let got: Vec<f32> = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .unwrap()
+        .reshape((n,))
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    for (i, &g) in got.iter().enumerate() {
+        let want = data[i].floor();
+        assert!(
+            (g - want).abs() < 1e-6,
+            "i={i}: v={} got {g}, want {want}",
+            data[i]
+        );
+    }
+
+    // KIND_MAX+1 (=25) must still error.
+    assert!(cuda_activation_unary(&x_kt, 25).is_err());
 }
