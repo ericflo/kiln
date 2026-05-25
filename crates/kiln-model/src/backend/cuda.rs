@@ -108,13 +108,21 @@ pub struct CudaBackend {
     /// kiln/gdn/conv region). When off, forward.rs falls back to the
     /// candle to_f32/cat/sum/narrow chain.
     fused_conv1d_enabled: bool,
-    /// Phase 7 opt-in (#1082): route the fused conv1d update + prefill
+    /// Phase 7 default-on (#1082): route the fused conv1d update + prefill
     /// kernels through the kt-typed surface (`causal_conv1d_update_kt` /
     /// `causal_conv1d_prefill_kt`) instead of the candle-typed shim.
-    /// Set `KILN_USE_KT_API_CONV1D=1` (or `KILN_USE_KT_API_ALL=1`) to
-    /// enable; default off. The candle `&mut Tensor` for `conv_state`
-    /// is wired through the zero-copy borrow adapter so the kernel's
-    /// in-place write surfaces in the caller's candle tensor.
+    /// Default ON because byte-exact parity is verified by
+    /// `test_causal_conv1d_update_kt_api_parity` (B=1, C=8192, K=4, 0
+    /// mismatches across 8192 output + 24576 conv_state elements) and
+    /// `test_causal_conv1d_prefill_kt_api_parity` (B=1, C=8192, T=8, K=4,
+    /// 0 mismatches across 65536 output + 24576 conv_state elements).
+    /// Both paths bottom out in the same FFI symbol
+    /// (`kiln_causal_conv1d_update_bf16_f32` /
+    /// `kiln_causal_conv1d_prefill_bf16_f32`) — only the Rust shell
+    /// types differ. The candle `&mut Tensor` for `conv_state` is wired
+    /// through the zero-copy borrow adapter so the kernel's in-place
+    /// write surfaces in the caller's candle tensor. Set
+    /// `KILN_DISABLE_KT_API_CONV1D=1` to opt out (escape hatch).
     cuda_use_kt_api_conv1d: bool,
     /// Phase 7 (#1082) opt-in: route `kiln_gdn_kernel::gdn_forward_substitution`
     /// through the kt-typed surface (`gdn_forward_substitution_kt`) instead
@@ -152,8 +160,11 @@ impl CudaBackend {
         let gdn_gated_rms_norm_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM").is_err();
         let fused_conv1d_enabled = std::env::var("KILN_DISABLE_FUSED_CONV1D").is_err();
-        let cuda_use_kt_api_conv1d = std::env::var("KILN_USE_KT_API_CONV1D").is_ok()
-            || std::env::var("KILN_USE_KT_API_ALL").is_ok();
+        // #1082: flipped default ON post byte-exact parity tests
+        // (`69a5f68c` update + `1cb0c107` prefill, 0 mismatches). Both
+        // candle and kt paths bottom out in the same FFI symbol, so this
+        // is bit-exact. Escape hatch: `KILN_DISABLE_KT_API_CONV1D=1`.
+        let cuda_use_kt_api_conv1d = std::env::var("KILN_DISABLE_KT_API_CONV1D").is_err();
         let cuda_use_kt_api_gdn = std::env::var("KILN_USE_KT_API_GDN").is_ok()
             || std::env::var("KILN_USE_KT_API_ALL").is_ok();
         let cuda_use_kt_api_flash_attn = std::env::var("KILN_USE_KT_API_FLASH_ATTN").is_ok()

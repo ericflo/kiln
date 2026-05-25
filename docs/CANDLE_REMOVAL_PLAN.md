@@ -135,7 +135,7 @@ sed -i "/candle-core.*path.*vendor/d" Cargo.toml
   `crates/kiln-model/src/backend/cuda.rs:1004` and `:1038`.
   Status by crate:
     - kiln-rmsnorm-kernel: 7 production `_kt` callers in forward.rs ✓
-    - kiln-conv1d-kernel: 2/2 kt_api functions wired in CudaBackend ✓ + byte-exact parity tests at B=1/C=8192 (`69a5f68c` update + `1cb0c107` prefill, 0 mismatches across 8192/65536 output elements and 24576 conv_state elements)
+    - kiln-conv1d-kernel: 2/2 kt_api functions wired in CudaBackend ✓ + byte-exact parity tests at B=1/C=8192 (`69a5f68c` update + `1cb0c107` prefill, 0 mismatches across 8192/65536 output elements and 24576 conv_state elements). **Default ON** — env gate flipped from `KILN_USE_KT_API_CONV1D` opt-in to `KILN_DISABLE_KT_API_CONV1D` opt-out as the first Tier 1 default flip.
     - kiln-marlin-gemm: 1/1 kt_api function wired in marlin_proj::matmul_bf16 ✓ (`8b415107` + `668b0847` bridge extension for I32→U32)
     - kiln-gdn-kernel: 5/10 kt_api functions wired in CudaBackend ✓ (`forward_substitution`/`14c17570`, `recurrent_forward`/`7a357a3d`, `chunk_prep`/`68a3667e`, `chunk_scan`/`1edc82dc`, `full_chunk_forward_multiblock`/`57b37c00`) — 5 remaining (decode_gates_recurrent variants + gated_rms_norm)
     - kiln-flash-attn: 4/5 production wires ✓ (`flash_attn_fwd_kt` at `f3b7e797`, `flash_attn_paged_decode_kt` at `c49c1995`, `flash_attn_paged_decode_dyn_seqlen_kt` at `7fe3011f`, no-graph-outputs `dyn_seqlen` variant at `276482d6`) + 2/5 functions used internally by `paged_kv_cache_kt.rs` (`paged_kv_write_token_major_bf16_slot_kt` + `_bf16_kt`); 1 entry point remaining (`flash_attn_bwd_kt` for the training path) + the `with_graph_outputs` kt-API extension
