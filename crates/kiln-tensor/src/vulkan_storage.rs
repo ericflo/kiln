@@ -656,6 +656,195 @@ pub fn vulkan_rmsnorm_last_axis(
 }
 
 // ----------------------------------------------------------------------
+// vulkan_l2norm_last_axis — Phase 4 Vulkan substrate op (#1082)
+// ----------------------------------------------------------------------
+
+/// Vulkan L2-norm over the trailing axis. Mirrors the role of
+/// [`crate::cuda_l2norm_last_axis`] for the Vulkan backend.
+///
+/// Operates on a contiguous `[..., D]` Vulkan-backed tensor and
+/// produces a fresh tensor of the same shape with each row L2-normalized:
+/// `y = x / sqrt(sum(x^2) + eps)`.
+///
+/// # Implementation
+///
+/// Delegates to `kiln_vulkan_kernel::vk_ops::l2norm::vk_l2_norm_lastdim_no_grad`,
+/// the production F32 L2-norm shader. Carries `scale = 1.0` (the
+/// shader API supports fused-scale for QK-norm call sites; pure L2
+/// norm uses 1.0).
+///
+/// # Limitations
+///
+/// The shader caps `hidden_dim <= 256` (see `check_l2norm_shape` in
+/// `vk_ops/l2norm.rs`). Inputs with a larger trailing dim return
+/// `Error::Msg` here and the op falls through to the CPU path before
+/// reaching this wrapper.
+///
+/// Bridges between kt's `VulkanStorage` and `VkTensor` via D2H+H2D
+/// round-trip, matching [`vulkan_softmax_last_axis`].
+///
+/// # Requirements
+///
+/// - `x` must be backed by [`VulkanStorage`]
+/// - `x.dtype() == F32`
+/// - `x.rank() >= 1`
+/// - `x.is_contiguous()`
+/// - `*x.shape().last().unwrap() <= 256` (shader limit)
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on any precondition failure or kernel error.
+#[allow(clippy::needless_range_loop)]
+pub fn vulkan_l2norm_last_axis(x: &crate::Tensor, eps: f32) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::l2norm::vk_l2_norm_lastdim_no_grad;
+    use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
+
+    let dtype = x.dtype();
+    if !matches!(dtype, DType::F32) {
+        return Err(Error::Msg(format!(
+            "vulkan_l2norm_last_axis: unsupported dtype {dtype} (kernel is F32-only)"
+        )));
+    }
+    if x.rank() == 0 {
+        return Err(Error::Msg(
+            "vulkan_l2norm_last_axis: input must have rank >= 1".to_string(),
+        ));
+    }
+    if !x.is_contiguous() {
+        return Err(Error::Msg(
+            "vulkan_l2norm_last_axis: input must be contiguous".to_string(),
+        ));
+    }
+    let hidden = *x.shape().last().unwrap();
+    if hidden == 0 || hidden > 256 {
+        return Err(Error::Msg(format!(
+            "vulkan_l2norm_last_axis: hidden dim {hidden} exceeds shader cap 256"
+        )));
+    }
+
+    let kt_vk = x
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| {
+            Error::Msg("vulkan_l2norm_last_axis: input must be Vulkan-backed".to_string())
+        })?;
+
+    let vulkan_device = Arc::clone(kt_vk.vulkan_device());
+    let device_index = match kt_vk.device() {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+    let shape: Vec<usize> = x.shape().to_vec();
+    let byte_len = kt_vk.byte_len();
+
+    // ---- D2H ----
+    let bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        kt_vk.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_l2norm_last_axis: D2H read_back failed: {e}"
+        ))
+    })?;
+
+    // ---- H2D into VkTensor ----
+    let vk_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_l2norm_last_axis: device-local alloc for VkTensor input failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &vk_buffer,
+        &bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_l2norm_last_axis: H2D upload of VkTensor input failed: {e}"
+        ))
+    })?;
+    let vk_in = VkTensor::from_buffer(
+        Arc::new(vk_buffer),
+        shape.clone(),
+        VkDType::F32,
+        Arc::clone(&vulkan_device),
+    );
+
+    // ---- Dispatch ----
+    let vk_out = vk_l2_norm_lastdim_no_grad(&vk_in, /*scale=*/ 1.0_f32, eps).map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_l2norm_last_axis: kernel dispatch failed: {e}"
+        ))
+    })?;
+
+    // ---- D2H result ----
+    let out_bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        vk_out.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_l2norm_last_axis: D2H read_back of kernel result failed: {e}"
+        ))
+    })?;
+
+    // ---- H2D into kt VulkanStorage ----
+    let out_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_l2norm_last_axis: device-local alloc for kt output failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &out_buffer,
+        &out_bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_l2norm_last_axis: H2D upload of kt output failed: {e}"
+        ))
+    })?;
+    let out_storage = VulkanStorage::from_buffer(
+        vulkan_device,
+        device_index,
+        dtype,
+        out_buffer,
+        byte_len as u64,
+    )?;
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
+// ----------------------------------------------------------------------
 // vulkan_argmax_last_axis — Phase 4 Vulkan substrate op (#1082)
 // ----------------------------------------------------------------------
 
