@@ -1,7 +1,7 @@
 //! Phase C.5 parity test: vk_sdpa_prefill forward + backward vs CPU reference.
+//! (candle-free; #1082)
 
 use anyhow::Result;
-use candle_core::{Device, Tensor, Var};
 use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::attention::{vk_flash_sdpa_prefill_flat, vk_sdpa_prefill};
@@ -22,27 +22,15 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 }
 
 fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    VkTensor::from_candle(&t, Arc::clone(dev))
+    VkTensor::from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn upload_param_f32(
     dev: &Arc<VulkanDevice>,
     data: &[f32],
     shape: &[usize],
-) -> Result<(Var, VkTensor)> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    let var = Var::from_tensor(&t)?;
-    let vk = VkTensor::from_candle(&t, Arc::clone(dev))?;
-    let pid = var.id();
-    let param = VkTensor::parameter(
-        Arc::clone(vk.buffer()),
-        vk.shape().to_vec(),
-        vk.dtype(),
-        Arc::clone(vk.device()),
-        pid,
-    );
-    Ok((var, param))
+) -> Result<VkTensor> {
+    VkTensor::parameter_from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn max_abs_diff(got: &[f32], expected: &[f32]) -> f32 {
@@ -244,9 +232,9 @@ fn vk_sdpa_backward_runs_through_three_params() -> Result<()> {
     let v_data: Vec<f32> = (0..(rows * heads_kv * head_dim))
         .map(|i| 0.1 + (i as f32) * 0.005)
         .collect();
-    let (_qv, q) = upload_param_f32(&dev, &q_data, &[rows, heads_q, head_dim])?;
-    let (_kv, k) = upload_param_f32(&dev, &k_data, &[rows, heads_kv, head_dim])?;
-    let (_vv, v) = upload_param_f32(&dev, &v_data, &[rows, heads_kv, head_dim])?;
+    let q = upload_param_f32(&dev, &q_data, &[rows, heads_q, head_dim])?;
+    let k = upload_param_f32(&dev, &k_data, &[rows, heads_kv, head_dim])?;
+    let v = upload_param_f32(&dev, &v_data, &[rows, heads_kv, head_dim])?;
     let out = vk_sdpa_prefill(&q, &k, &v, scale)?;
     // sanity loss: mean(silu(out)^2)
     let s = vk_silu(&out)?;
@@ -283,9 +271,9 @@ fn vk_flash_sdpa_flat_matches_cpu_forward_and_backward() -> Result<()> {
         .map(|i| ((i as f32) * 0.031).sin() * 0.15 + 0.05)
         .collect();
 
-    let (_qv_f, q_f) = upload_param_f32(&dev, &q_data, &[rows, heads_q * head_dim])?;
-    let (_kv_f, k_f) = upload_param_f32(&dev, &k_data, &[rows, heads_kv * head_dim])?;
-    let (_vv_f, v_f) = upload_param_f32(&dev, &v_data, &[rows, heads_kv * head_dim])?;
+    let q_f = upload_param_f32(&dev, &q_data, &[rows, heads_q * head_dim])?;
+    let k_f = upload_param_f32(&dev, &k_data, &[rows, heads_kv * head_dim])?;
+    let v_f = upload_param_f32(&dev, &v_data, &[rows, heads_kv * head_dim])?;
     let out_f = vk_flash_sdpa_prefill_flat(&q_f, &k_f, &v_f, heads_q, heads_kv, head_dim, scale)?;
 
     let expected_out = cpu_sdpa(
