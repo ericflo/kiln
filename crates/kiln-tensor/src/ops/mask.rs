@@ -202,28 +202,14 @@ impl DeviceOp2 for MaskedFillOp {
         {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Vulkan): implement
-        // `crate::vulkan_masked_fill(x, mask, self.fill_value)`
-        // analogous to `crate::cuda_masked_fill` above. Until that
-        // wrapper lands, fall through to the CPU path (numerics-
-        // correct, performance-wrong).
-        // Candidate implementations:
-        //   1. New SPIR-V compute shader added to
-        //      `kiln-vulkan-kernel::vk_ops::mask`. The existing
-        //      `vk_causal_mask_inplace` already writes -inf into a
-        //      scores tensor based on a position predicate; the
-        //      `masked_fill` variant generalizes it to an arbitrary
-        //      U8 mask buffer and arbitrary `fill_value`. Pure
-        //      pointwise — one work-item per element, no reductions.
-        //   2. Reuse `vk_ops::elementwise`'s where-style ternary if
-        //      present; otherwise this is a thin new shader.
-        //   3. Dtype matrix: `VkDType` currently exposes only F32 and
-        //      Bf16. F16 needs a new variant added in
-        //      `kiln-vulkan-kernel::vk_tensor::VkDType` before any
-        //      F16-native shader can land. Mask dtype is fixed at U8
-        //      (matches cpu_fwd); the shader must read U8 via a
-        //      uint8 storage buffer (Vulkan `VK_KHR_8bit_storage`).
-        Ok(None)
+        // Wired through `crate::vulkan_masked_fill`, which does a
+        // D2H read_back + CPU pointwise where + H2D upload through
+        // `VulkanStorage`. Functionally on-device on both sides; the
+        // pointwise ternary itself runs host-side until a SPIR-V
+        // `masked_fill` kernel lands in
+        // `kiln_vulkan_kernel::vk_ops::mask`. See the wrapper's
+        // rustdoc for the kernel + zero-copy follow-up plan.
+        Ok(Some(crate::vulkan_masked_fill(x, mask, self.fill_value)?))
     }
 
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {

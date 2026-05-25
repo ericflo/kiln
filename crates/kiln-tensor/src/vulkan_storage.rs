@@ -556,6 +556,224 @@ fn read_one_f32(dtype: DType, bytes: &[u8], i: usize) -> f32 {
     }
 }
 
+// ----------------------------------------------------------------------
+// vulkan_masked_fill — Phase 4 Vulkan substrate op (#1082)
+// ----------------------------------------------------------------------
+
+/// Vulkan masked-fill. Mirrors the role of [`crate::cuda_masked_fill`]
+/// for the Vulkan backend.
+///
+/// `out[i] = (mask[i] != 0) ? fill_value : x[i]` over a contiguous
+/// `x` with shape `S` and dtype F32 / BF16 / F16, and a contiguous
+/// `mask` with shape `S` and dtype U8. `fill_value` is `f32` and cast
+/// to `x`'s dtype on store.
+///
+/// # Implementation: D2H + CPU compute + H2D bridge
+///
+/// `kiln-vulkan-kernel::vk_ops::mask` currently exposes
+/// `vk_causal_mask_inplace` (additive `-1e30` for `k > q + offset`)
+/// and `vk_scale_inplace`, but no generic `masked_fill` with a U8
+/// buffer + arbitrary `fill_value`. Until that shader lands, this
+/// wrapper ships the same D2H-read + CPU-compute + H2D-upload bridge
+/// used by [`vulkan_softmax_last_axis`]'s pre-kernel staging path —
+/// the storage is GPU-resident on both sides of the call, but the
+/// pointwise where-style ternary runs on the host.
+///
+/// This is functionally identical to the `Ok(None)` fallback (the
+/// dispatcher would route to CPU) but keeps the storage round-trip
+/// visible at the dispatch site instead of silently dropping off the
+/// Vulkan path mid-graph. Once a real SPIR-V `masked_fill` shader
+/// lands in `kiln_vulkan_kernel::vk_ops::mask`, swap the host-side
+/// pointwise loop below for a `dispatch_simple(...)` call — the
+/// surrounding D2H/H2D scaffolding can stay or shrink to a zero-copy
+/// bridge per the softmax wrapper's rustdoc.
+///
+/// # Performance follow-up (#1082)
+///
+/// See [`vulkan_softmax_last_axis`] for the three zero-copy bridges
+/// proposed for the broader kt <-> kiln-vulkan-kernel seam. Applying
+/// any of them here removes the round-trip; replacing the inner CPU
+/// loop with a SPIR-V dispatch removes the host compute. The shader
+/// itself is the simplest in `vk_ops::` — pure pointwise, one
+/// work-item per element, no reductions, no shared memory.
+///
+/// # Requirements
+///
+/// - `x` and `mask` must be backed by [`VulkanStorage`]
+/// - `x.dtype()` must be `F32`, `BF16`, or `F16`
+/// - `mask.dtype()` must be `U8`
+/// - `x.shape() == mask.shape()`
+/// - both must be contiguous
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] if any input isn't `VulkanStorage`, dtypes
+/// are unsupported, shapes mismatch, layouts are non-contiguous, or
+/// the underlying buffer transfer fails.
+pub fn vulkan_masked_fill(
+    x: &crate::Tensor,
+    mask: &crate::Tensor,
+    fill_value: f32,
+) -> Result<crate::Tensor> {
+    // ---- Validate kt-side preconditions ----
+    let dtype = x.dtype();
+    if x.shape() != mask.shape() {
+        return Err(Error::Msg(format!(
+            "vulkan_masked_fill: shape mismatch x={:?} mask={:?}",
+            x.shape(),
+            mask.shape()
+        )));
+    }
+    if mask.dtype() != DType::U8 {
+        return Err(Error::Msg(format!(
+            "vulkan_masked_fill: mask dtype must be U8, got {}",
+            mask.dtype()
+        )));
+    }
+    if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+        return Err(Error::Msg(format!(
+            "vulkan_masked_fill: unsupported x dtype {dtype} (F32/BF16/F16 only)"
+        )));
+    }
+    if !x.is_contiguous() || !mask.is_contiguous() {
+        return Err(Error::Msg(
+            "vulkan_masked_fill: x and mask must be contiguous".to_string(),
+        ));
+    }
+
+    let kt_x = x
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| {
+            Error::Msg("vulkan_masked_fill: x must be Vulkan-backed".to_string())
+        })?;
+    let kt_mask = mask
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| {
+            Error::Msg("vulkan_masked_fill: mask must be Vulkan-backed".to_string())
+        })?;
+
+    let vulkan_device = Arc::clone(kt_x.vulkan_device());
+    let device_index = match kt_x.device() {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+
+    let shape: Vec<usize> = x.shape().to_vec();
+    let n = x.element_count();
+    let per = dtype.size_in_bytes();
+    let byte_len = kt_x.byte_len();
+
+    // ---- D2H: read kt x + mask buffers back to host bytes ----
+    let x_bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        kt_x.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_masked_fill: D2H read_back of x failed: {e}"
+        ))
+    })?;
+    let m_bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        kt_mask.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_masked_fill: D2H read_back of mask failed: {e}"
+        ))
+    })?;
+
+    // ---- Host-side pointwise: where(mask != 0, fill_value, x) ----
+    // Output dtype matches input dtype; fill_value casts on store.
+    let mut out_bytes = vec![0u8; n * per];
+    match dtype {
+        DType::F32 => {
+            for i in 0..n {
+                let v = if m_bytes[i] != 0 {
+                    fill_value
+                } else {
+                    f32::from_le_bytes(x_bytes[i * 4..i * 4 + 4].try_into().unwrap())
+                };
+                out_bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        DType::BF16 => {
+            for i in 0..n {
+                let v = if m_bytes[i] != 0 {
+                    fill_value
+                } else {
+                    half::bf16::from_le_bytes(x_bytes[i * 2..i * 2 + 2].try_into().unwrap())
+                        .to_f32()
+                };
+                out_bytes[i * 2..i * 2 + 2]
+                    .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
+            }
+        }
+        DType::F16 => {
+            for i in 0..n {
+                let v = if m_bytes[i] != 0 {
+                    fill_value
+                } else {
+                    half::f16::from_le_bytes(x_bytes[i * 2..i * 2 + 2].try_into().unwrap())
+                        .to_f32()
+                };
+                out_bytes[i * 2..i * 2 + 2]
+                    .copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
+            }
+        }
+        _ => unreachable!("vulkan_masked_fill: dtype gated above"),
+    }
+
+    // ---- H2D: upload result bytes into a fresh kt VulkanStorage ----
+    let out_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_masked_fill: device-local alloc for kt output failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &out_buffer,
+        &out_bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_masked_fill: H2D upload of kt output failed: {e}"
+        ))
+    })?;
+    let out_storage = VulkanStorage::from_buffer(
+        vulkan_device,
+        device_index,
+        dtype,
+        out_buffer,
+        byte_len as u64,
+    )?;
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
