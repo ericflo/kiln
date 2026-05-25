@@ -327,3 +327,115 @@ All four root-cause intra-graph alloc suspects from
 
 The unit-level closure is settled. The remaining step is a single
 end-to-end validation pass.
+
+## End-to-end sanitizer sweep — 2026-05-25 (in-progress, blocked)
+
+A6000 sanitizer sweep attempted on `main` at commit `86faaec`
+(`kiln-autograd: backward ops for FLCE forward ...`). **Findings:**
+
+### Pure-kernel sanitizer result: 0 errors
+
+Ran `compute-sanitizer --tool memcheck` on the kiln-model unit-test
+binary with `KILN_CUDA_GRAPHS=true KILN_CUDA_GRAPHS_BATCHED=1
+KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1`, targeting the bs>1 / paged-decode
+test surface:
+
+| Test | Result |
+|---|---|
+| `paged_kv_cache::tests::test_write_token_major_native_batch_then_read_roundtrip` | **pass, 0 sanitizer errors** |
+| `forward::tests::test_linear_attention_state_batch_row_assembly_and_scatter` | **pass, 0 sanitizer errors** |
+| `paged_kv_cache::tests::test_write_token_major_native_batch_graph_slot_matches_per_row` | **pass, 0 sanitizer errors** |
+| `forward::tests::test_flash_attn_paged_decode_dyn_seqlen_kt_api_parity` | **pass, 0 sanitizer errors** |
+| `forward::tests::test_model_forward_paged_decode_contiguous_batch_dyn_seqlen_cuda` (bs=2, non-uniform `start_positions`) | **fails on functional check unrelated to memory safety** (see below) |
+
+Final sanitizer summary line: `========= ERROR SUMMARY: 0 errors`.
+
+This re-confirms the PR #1384 "0 errors at kernel unit-test level"
+finding on `main` post-residual-audit, including the per-row kv-slot
+graph-slot writer and the batch row assembly/scatter paths added by
+the Phase 5 bs>1 fix series.
+
+### Validation gate blocked by two unrelated kt-API regressions
+
+**Blocker #1: kt-rotary cos/sin shape mismatch.**
+`test_model_forward_paged_decode_contiguous_batch_dyn_seqlen_cuda`
+fails before the cuda graph capture path is reached, with:
+
+```
+Error: batched transformer block 0 (full attention, paged)
+Caused by:
+    kt fused_rotary_qk: kt-rotary: cos [2, 128] != [2, 256]
+```
+
+This is a shape contract violation between `rotary_embedding_from_tensor`
+and the kt-typed `fused_rotary_qk` wire on the bs>1 paged-decode path.
+It is **not** a memory-safety issue — sanitizer is silent — and it is
+**not** introduced by the Phase 5 bs>1 work; it predates the
+`KILN_CUDA_GRAPHS_BATCHED=1` enable code path entirely.
+
+**Blocker #2: kt-bridge gdn_gates contiguous failure on the live
+driver.** `kiln-bench --paged` and `kiln serve` both fail at first
+forward pass with:
+
+```
+gdn decode gates fused backend
+kt-adapter: gdn_gates a → kt failed
+kt-bridge: kt_tensor_from_candle_cuda_borrow: tensor must be contiguous
+```
+
+This regression is fresh on `main` HEAD — the kt-typed gdn_gates wire
+landed in commit `64e0b5d8` and was flipped on by default in commit
+`efcba50b` (2026-05-25 19:22:04 UTC). With `KILN_DISABLE_KT_API_GDN=1`,
+the failure mode shifts to `kiln_gdn_gates_bf16 failed with status 500`
+(known issue #1066 sccache class), which persisted even after
+`cargo clean -p kiln-gdn-kernel` + `SCCACHE_RECACHE=1` rebuild with an
+invalidated source.
+
+`kiln-smoke-check` (the official sccache-corruption healer) also
+**fails on the same path**. The skill notes say: "No known
+sccache-corruption signature in output." Both blockers reproduce
+across fresh sccache namespaces and identical commits, so this is a
+real `main` HEAD bug, not a per-pod cache artifact.
+
+### Default-flip held back
+
+Per the task contract ("if sanitizer surfaces NEW errors not captured
+by the existing audit, document them clearly and DO NOT flip the
+default"), the `KILN_CUDA_GRAPHS_BATCHED=1` default flip is held back.
+
+Strictly, sanitizer surfaced **zero new errors** — the bs>1 path
+itself appears memory-safe. But the validation gate cannot be
+declared green until the production driver (`kiln-bench --paged`,
+`kiln serve` with concurrent requests) can actually reach the bs>1
+captured graph replay under sanitizer. Both blockers above prevent
+that, and both are upstream of the bs>1 capture path.
+
+### Recommended next steps
+
+1. **Fix blocker #1 (kt-rotary shape contract)** — audit the call to
+   `fused_rotary_qk` from `gqa_attention_paged_decode_contiguous_batch`
+   and ensure `cos` / `sin` are shaped `[batch, head_dim]` to match the
+   kernel's expectation. The error message `cos [2, 128] != [2, 256]`
+   suggests `head_dim=256` on the kernel side but `[2, 128]` from the
+   inv_freq broadcast — likely a missing `partial_rotary_factor`
+   adjustment or a halved `rotary_dim` somewhere.
+2. **Fix blocker #2 (kt-bridge contiguous on gdn_gates `a`)** — the
+   `a` tensor passed into `gdn_gates_bf16_kt` must be made contiguous
+   at the call site, or the kt-bridge must accept non-contiguous
+   inputs with an explicit copy. The candle fallback (set
+   `KILN_DISABLE_KT_API_GDN=1`) currently triggers a different sccache
+   class of failure that needs a separate diagnosis.
+3. **Re-run the end-to-end sanitizer sweep** once the two blockers
+   land. With those fixed, the same compute-sanitizer command on
+   `kiln serve` + 4 concurrent chat completions should run to
+   completion and produce `ERROR SUMMARY: 0 errors` against the full
+   captured-graph replay surface.
+4. **Then flip the default** by changing `batched_graph_enabled()` in
+   `crates/kiln-model/src/cuda_graph.rs` to default-on
+   (`KILN_DISABLE_CUDA_GRAPHS_BATCHED` opt-out) and update this doc's
+   "Headline" section.
+
+Pod artifacts (sanitizer log on the kiln-model test binary):
+saved to `/tmp/test-san.log` on pod `vrz9h2elkn71fa` (preserved as
+this commit's reference data).
+
