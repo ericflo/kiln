@@ -129,15 +129,22 @@ pub struct CudaBackend {
     /// of the candle-typed shim. Set `KILN_USE_KT_API_GDN=1` (or
     /// `KILN_USE_KT_API_ALL=1`) to enable; default off.
     cuda_use_kt_api_gdn: bool,
-    /// Phase 7 opt-in (#1082): route the flash-attention-2 prefill
-    /// kernel through the kt-typed surface (`flash_attn_fwd_kt`)
-    /// instead of the candle-typed `kiln_flash_attn::flash_attn`
-    /// shim. Set `KILN_USE_KT_API_FLASH_ATTN=1` (or
-    /// `KILN_USE_KT_API_ALL=1`) to enable; default off. The kt path
-    /// matches the candle path bit-exactly because both bottom out
-    /// in the same `kiln_flash_attn_fwd` FFI symbol; only the Rust
+    /// Phase 7 default-on (#1082): route the flash-attention-2 prefill
+    /// + paged_decode kernels through the kt-typed surface
+    /// (`flash_attn_fwd_kt` / `flash_attn_paged_decode_kt` /
+    /// `flash_attn_paged_decode_dyn_seqlen_kt`) instead of the
+    /// candle-typed `kiln_flash_attn::flash_attn` shim. Default ON
+    /// because the kt path matches the candle path bit-exactly: both
+    /// bottom out in the same FFI symbols (`kiln_flash_attn_fwd`,
+    /// `kiln_flash_attn_fwd_paged_decode`,
+    /// `kiln_flash_attn_fwd_paged_decode_dyn_seqlen`); only the Rust
     /// shell types change. The candle wrapper discards softmax_lse;
-    /// the kt path does the same (we only return `out`).
+    /// the kt path does the same (we only return `out`). The
+    /// `with_graph_outputs` site retains its `graph_outputs.is_none()`
+    /// guard — when callers own the output tensors (CUDA-graph capture
+    /// path), the candle wrapper is still used because the kt surface
+    /// does not yet take a caller-owned `(out, lse)` pair. Set
+    /// `KILN_DISABLE_KT_API_FLASH_ATTN=1` to opt out (escape hatch).
     cuda_use_kt_api_flash_attn: bool,
     /// Forward-only CUDA LoRA delta/add for decode. Training declines because
     /// tracked LoRA tensors need autograd.
@@ -167,8 +174,14 @@ impl CudaBackend {
         let cuda_use_kt_api_conv1d = std::env::var("KILN_DISABLE_KT_API_CONV1D").is_err();
         let cuda_use_kt_api_gdn = std::env::var("KILN_USE_KT_API_GDN").is_ok()
             || std::env::var("KILN_USE_KT_API_ALL").is_ok();
-        let cuda_use_kt_api_flash_attn = std::env::var("KILN_USE_KT_API_FLASH_ATTN").is_ok()
-            || std::env::var("KILN_USE_KT_API_ALL").is_ok();
+        // #1082: flipped default ON. The kt path is bit-exact by
+        // construction — all 4 wired flash_attn dispatch sites bottom
+        // out in the same FFI symbols as the candle shim, with only
+        // the Rust shell types changing. The `with_graph_outputs`
+        // site retains its `graph_outputs.is_none()` guard so the
+        // caller-owned-output path keeps using the candle wrapper.
+        // Escape hatch: `KILN_DISABLE_KT_API_FLASH_ATTN=1`.
+        let cuda_use_kt_api_flash_attn = std::env::var("KILN_DISABLE_KT_API_FLASH_ATTN").is_err();
         let gdn_decode_fused_enabled = gdn_gates_enabled
             && gdn_gated_rms_norm_enabled
             && std::env::var("KILN_DISABLE_FUSED_GDN_DECODE").is_err();
