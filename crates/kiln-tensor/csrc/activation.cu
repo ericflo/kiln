@@ -71,8 +71,12 @@
 #define KIND_CEIL   25
 #define KIND_ROUND  26
 #define KIND_TRUNC  27
+// Reciprocal-sqrt — unblocks RMSNorm tail migrations and any
+// `1/sqrt(x)` site. Single kernel beats sqrt+recip composition by
+// avoiding the second pass through device memory (#1082):
+#define KIND_RSQRT  28
 
-#define KIND_MAX    27
+#define KIND_MAX    28
 
 // Dtype tags
 #define DTYPE_F32  0
@@ -186,6 +190,17 @@ __device__ __forceinline__ float apply_unary(int kind, float x) {
         case KIND_TRUNC: {
             // Toward-zero truncation, matching Rust `f32::trunc`.
             return truncf(x);
+        }
+        case KIND_RSQRT: {
+            // `1 / sqrt(x)` — IEEE NaN/inf semantics match the CPU
+            // reference (`x < 0` yields NaN through sqrtf; `x = 0`
+            // yields +inf; the recip of the sqrt is computed in F32
+            // and then cast back to the input dtype by the caller).
+            // Use `rsqrtf` directly for the F32 fast intrinsic; on
+            // SM_8x+ this lowers to RSQRT.APPROX and is a single
+            // ULP off IEEE, which matches the upstream
+            // `sqrt().recip()` composition's accumulated rounding.
+            return rsqrtf(x);
         }
         default:
             return 0.0f;

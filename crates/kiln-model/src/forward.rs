@@ -604,6 +604,31 @@ fn cuda_use_kt_api_sqrt() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise reciprocal-sqrt
+/// (`1 / sqrt(x)`) through the kt-API + adapters. Set
+/// `KILN_USE_KT_API_RSQRT=1` (or `KILN_USE_KT_API_ALL=1`) to enable;
+/// default off. Routes candle composites that compute
+/// `x.sqrt()?.recip()?` (or any standalone `Tensor::rsqrt()` future
+/// API) through `kiln_tensor::cuda_activation_unary` with kind
+/// tag 28 (Rsqrt) via the kt-bridge borrow adapter. Single kernel
+/// beats sqrt+recip composition by avoiding the second pass through
+/// device memory and the intermediate allocation. Pays one dtod
+/// memcpy on the output direction (the kt allocation is freshly-
+/// owned). Falls through to the candle composite when any
+/// precondition fails so behavior is identical with the gate off.
+///
+/// Targets the RMSNorm tail `(variance + eps).sqrt().recip()` shape
+/// that appears 5+ times in `forward.rs` (RMSNorm, MTP debug taps,
+/// parity test paths). Mirrors the [`cuda_use_kt_api_sqrt`] /
+/// [`cuda_use_kt_api_recip`] cadence.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_rsqrt() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_RSQRT").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: elementwise `Tensor::abs()` through the kt-API
 /// + adapters. Set `KILN_USE_KT_API_ABS=1` (or
 /// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
@@ -7424,6 +7449,56 @@ fn try_kt_sqrt(x: &Tensor) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_sqrt: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API rsqrt migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 28 (Rsqrt).
+/// Computes `1 / sqrt(x)` in a single kernel pass, replacing the
+/// candle `sqrt().recip()` composite which makes two passes through
+/// device memory and allocates a transient sqrt-output buffer.
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0) so the caller falls through to
+/// the candle composite. NVTX range `kiln/rsqrt_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite.
+///
+/// Wired up for completeness; today there are no `Tensor::rsqrt()`
+/// API calls in `forward.rs` (candle 0.9 has no rsqrt method). The
+/// production RMSNorm-tail `(variance + eps).sqrt().recip()` sites
+/// (5+ of them) can be ported to call this helper directly in
+/// follow-up commits — each port replaces two candle calls + one
+/// allocation with a single fused kernel.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_rsqrt(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_rsqrt() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/rsqrt_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 28 = Rsqrt (matches KIND_RSQRT in
+    // csrc/activation.cu — added alongside this helper).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 28) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_rsqrt: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
