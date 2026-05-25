@@ -23,36 +23,40 @@
 //! kt-typed entry points below are the public surface they will plug
 //! into.
 //!
-//! Until then this module ships:
+//! This module ships:
 //!
 //! 1. [`OpdLossError`] — kt-typed error, independent of candle /
 //!    anyhow.
-//! 2. [`opd_top_k_reverse_kl_kt`] — kt-typed scalar-mean entry
-//!    point **stub** that validates shapes and returns
-//!    [`OpdLossError::NotYetImplemented`].
+//! 2. [`opd_top_k_reverse_kl_kt`] — kt-typed scalar-mean forward
+//!    entry point. Re-implements the gather + matmul + log-softmax
+//!    + reverse-KL reduction over [`kiln_tensor`] ops; mirrors the
+//!    Phase A candle reference (`crate::opd_top_k_reverse_kl_phase_a`).
 //! 3. [`opd_top_k_reverse_kl_per_position_kt`] — kt-typed per-
-//!    position entry point **stub**, same shape validation.
+//!    position forward entry point. Same forward kernel as the
+//!    scalar entry point but without the final `mean_all`.
+//! 4. [`compute_per_position_metrics_kt`] — kt-typed diagnostics
+//!    entry point. Reuses the same forward kernel and additionally
+//!    computes student / teacher entropy over the K-support.
 //!
-//! Documenting both names now lets downstream call sites (the
-//! kiln-train OPD trainer in particular) be ported in advance behind
-//! a feature flag — the bodies are filled in by the Phase B
-//! kt-rewrite sub-task. (#1082)
+//! Forward only — backward is still TBD via the same kiln-autograd
+//! hooks the FLCE kt-typed backward is waiting on; the candle
+//! [`crate::phase_b::OpdLossCustomOp`] continues to own production
+//! gradient flow until that lands. (#1082)
 //!
-//! # Design — why a stub
+//! # Numerical contract
 //!
-//! Filling in either body requires a candle-free re-implementation
-//! of the per-token gather + batched matmul + log-softmax reduction,
-//! plus a kt-typed parallel of the [`crate::phase_b::OpdLossCustomOp`]
-//! adapter (manual backward over kiln-autograd, which is still
-//! evolving — see PR #1078/#1079 for the SFT/GRPO step structure).
-//! That is the bulk of the Phase B rewrite (~1500 lines including
-//! the autograd adapter) and is intentionally out of scope here. By
-//! shipping the stub functions, the next sub-agent doing the
-//! kt-rewrite only needs to fill in the body — the public signature
-//! is already frozen, doc-commented, and unit-tested (shape
-//! validation only).
+//! Numerically equivalent to the candle Phase A reference up to
+//! floating-point associativity in the per-row matmul + log-softmax
+//! reductions. The kernel sequence (gather → matmul → renormalise →
+//! KL reduce) is identical and the reductions are bounded by K (the
+//! teacher's support size), so there's no chunked tail.
 
-use kiln_tensor::Tensor as KtTensor;
+use kiln_tensor::{
+    ops::{
+        exp, index_select, log_softmax_last_dim, matmul, mean_all, mul, neg, sub, sum_axis, to_f32,
+    },
+    Error as KtError, Tensor as KtTensor,
+};
 
 /// Error type for the kiln-tensor-typed OPD loss surface.
 ///
@@ -64,10 +68,16 @@ pub enum OpdLossError {
     /// Generic message error for shape / dtype validation failures
     /// in the kt-typed entry points.
     Msg(String),
+    /// Underlying `kiln_tensor` op error surfaced from the forward
+    /// gather + matmul + KL reduction.
+    Kt(KtError),
     /// The kt-typed entry point exists but its body has not yet been
-    /// implemented. Returned today by [`opd_top_k_reverse_kl_kt`] and
-    /// [`opd_top_k_reverse_kl_per_position_kt`]; will be removed once
-    /// the kt-typed Phase B forward/backward land.
+    /// implemented. Reserved for future backward / extra entry
+    /// points; the production forwards
+    /// [`opd_top_k_reverse_kl_kt`] /
+    /// [`opd_top_k_reverse_kl_per_position_kt`] /
+    /// [`compute_per_position_metrics_kt`] no longer return this
+    /// variant.
     NotYetImplemented(&'static str),
 }
 
@@ -75,6 +85,7 @@ impl std::fmt::Display for OpdLossError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OpdLossError::Msg(m) => f.write_str(m),
+            OpdLossError::Kt(e) => write!(f, "kt-opd-loss: {e}"),
             OpdLossError::NotYetImplemented(name) => write!(
                 f,
                 "kt-opd-loss: {name} is not yet implemented; use the candle-typed entry point",
@@ -88,6 +99,12 @@ impl std::error::Error for OpdLossError {}
 impl OpdLossError {
     pub fn msg(s: impl Into<String>) -> Self {
         OpdLossError::Msg(s.into())
+    }
+}
+
+impl From<KtError> for OpdLossError {
+    fn from(e: KtError) -> Self {
+        OpdLossError::Kt(e)
     }
 }
 
@@ -168,14 +185,120 @@ fn validate_inputs_kt(
     Ok((seq_len, hidden_size, vocab_size, active_count, top_k))
 }
 
-/// kt-typed entry point for OPD scalar-mean reverse-KL — **stub**.
+/// Build a rank-0 F32 scalar tensor holding 0.0. Used by the
+/// scalar-mean entry point when there are no active positions.
+fn zero_scalar() -> Result<KtTensor, OpdLossError> {
+    KtTensor::from_vec(vec![0.0f32], vec![]).map_err(OpdLossError::Kt)
+}
+
+/// Build an empty 1-D F32 tensor of shape `[0]`. Used by the
+/// per-position entry point when there are no active positions.
+fn empty_per_position() -> Result<KtTensor, OpdLossError> {
+    KtTensor::from_vec(Vec::<f32>::new(), vec![0]).map_err(OpdLossError::Kt)
+}
+
+/// Forward kernel shared by [`opd_top_k_reverse_kl_kt`],
+/// [`opd_top_k_reverse_kl_per_position_kt`], and
+/// [`compute_per_position_metrics_kt`].
 ///
-/// Validates `hidden`, `head_t`, and the teacher top-K tensors
-/// against the production OPD contract and returns
-/// [`OpdLossError::NotYetImplemented`]. When the Phase B kt-rewrite
-/// lands, this function's body will be filled in (re-implementing
-/// the gather + matmul + KL reduction over `kiln_tensor::Tensor`
-/// ops + raw CUDA FFI) without breaking the signature.
+/// Computes the per-position reverse KL over the teacher's K
+/// support, returning a 1-D `[T_active]` F32 tensor of KL values.
+/// Mirrors the candle reference `per_position_phase_a` one-for-one:
+///
+///   1. Squeeze hidden batch dim 0; index_select active rows from
+///      hidden → `[T_active, H]` F32.
+///   2. Gather K columns of `head_t` per active token:
+///      `head_t.index_select(1, teacher_topk_indices_flat)` →
+///      `[H, T_active * K]`. Reshape to `[H, T_active, K]`, permute
+///      to `[T_active, H, K]`, contiguous.
+///   3. Batched matmul `[T_active, 1, H] @ [T_active, H, K]` →
+///      `[T_active, 1, K]`, squeeze → `[T_active, K]` F32 student
+///      logits at the K support.
+///   4. `log_softmax_last_dim` on both student logits and the
+///      teacher-provided log-probabilities → `log_p_hat`, `log_q_hat`.
+///   5. `p_hat = exp(log_p_hat)`, `diff = log_p_hat - log_q_hat`,
+///      `KL[t] = sum_k p_hat[t, k] * diff[t, k]`. Returns the 1-D
+///      `[T_active]` KL vector.
+///
+/// Also returns `(log_p_hat, log_q_hat)` so the per-position metrics
+/// path can compute entropies without redoing the kernel.
+///
+/// Caller must short-circuit `active_count == 0`; this function
+/// expects at least one active row.
+fn per_position_forward_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    active_positions: &[u32],
+    top_k: usize,
+) -> Result<(KtTensor, KtTensor, KtTensor), OpdLossError> {
+    let active_count = active_positions.len();
+    debug_assert!(active_count > 0, "caller short-circuits empty");
+
+    // Step 1: gather active rows from hidden and cast to F32.
+    //
+    // hidden is `[1, T, H]`; squeeze batch dim → `[T, H]`. Then
+    // index_select(0, active_positions) → `[T_active, H]`.
+    let hidden_2d = hidden.squeeze(0)?;
+    let active_idx = KtTensor::from_vec(active_positions.to_vec(), vec![active_count])?;
+    let active_hidden = index_select(&hidden_2d, 0, &active_idx)?;
+    let active_hidden_f32 = to_f32(&active_hidden)?;
+    let head_t_f32 = to_f32(head_t)?;
+
+    // Step 2: gather K columns per active token from `head_t`.
+    //
+    // teacher_topk_indices is the row-major flat `[T_active * K]`
+    // index buffer. `head_t.index_select(1, flat)` yields
+    // `[H, T_active * K]`. Reshape to `[H, T_active, K]` and
+    // permute to `[T_active, H, K]`.
+    let hidden_size = head_t.shape()[0];
+    let flat_indices = KtTensor::from_vec(
+        teacher_topk_indices.to_vec(),
+        vec![active_count * top_k],
+    )?;
+    let gathered = index_select(&head_t_f32, 1, &flat_indices)?;
+    let reshaped = gathered.reshape(vec![hidden_size, active_count, top_k])?;
+    let head_gather = reshaped.permute(&[1, 0, 2])?.contiguous()?;
+
+    // Step 3: batched matmul. `active_hidden_f32` is `[T_active, H]`;
+    // unsqueeze(1) → `[T_active, 1, H]`. matmul against
+    // `[T_active, H, K]` → `[T_active, 1, K]`; squeeze(1) →
+    // `[T_active, K]`.
+    let lhs = active_hidden_f32.unsqueeze(1)?;
+    let s_logits = matmul(&lhs, &head_gather)?.squeeze(1)?;
+
+    // Step 4: renormalise both distributions over the K support.
+    //
+    // `log_softmax_last_dim` requires contiguous inputs. The matmul
+    // output is contiguous, and we build q_logprobs fresh.
+    let s_logits = s_logits.contiguous()?;
+    let q_logprobs = KtTensor::from_vec(
+        teacher_topk_logprobs.to_vec(),
+        vec![active_count, top_k],
+    )?;
+    let log_p_hat = log_softmax_last_dim(&s_logits)?;
+    let log_q_hat = log_softmax_last_dim(&q_logprobs)?;
+
+    // Step 5: per-position reverse KL.
+    //
+    //   p_hat        = exp(log_p_hat)                  [T_active, K]
+    //   diff         = log_p_hat - log_q_hat           [T_active, K]
+    //   per_token[t] = sum_k p_hat[t, k] * diff[t, k]  [T_active]
+    let p_hat = exp(&log_p_hat)?;
+    let diff = sub(&log_p_hat, &log_q_hat)?;
+    let prod = mul(&p_hat, &diff)?;
+    let per_token = sum_axis(&prod, 1)?;
+
+    Ok((per_token, log_p_hat, log_q_hat))
+}
+
+/// kt-typed entry point for OPD scalar-mean reverse-KL.
+///
+/// Re-implements the candle Phase A reference
+/// (`crate::opd_top_k_reverse_kl_phase_a`) over `kiln_tensor` ops.
+/// Numerically equivalent up to floating-point associativity in the
+/// matmul and the per-row log-softmax / KL reductions.
 ///
 /// # Shape contract (matches the candle-typed
 /// [`crate::opd_top_k_reverse_kl`] entry point)
@@ -197,9 +320,16 @@ fn validate_inputs_kt(
 ///
 /// # Returns
 ///
-/// Today: always returns [`OpdLossError::NotYetImplemented`] after
-/// passing shape validation. After the kt-rewrite: a scalar F32
-/// [`KtTensor`] holding the mean reverse KL over active positions.
+/// A scalar F32 [`KtTensor`] (rank-0 / shape `[]`) holding the mean
+/// reverse KL over active positions. Returns a scalar 0.0 tensor if
+/// no positions are active.
+///
+/// # Backward
+///
+/// Backward is not yet implemented in the kt-typed path — it still
+/// lives in [`crate::phase_b::OpdLossCustomOp`] and will be migrated
+/// once kt-tensor has the necessary autograd hooks. Until then this
+/// entry point is forward-only.
 pub fn opd_top_k_reverse_kl_kt(
     hidden: &KtTensor,
     head_t: &KtTensor,
@@ -208,7 +338,7 @@ pub fn opd_top_k_reverse_kl_kt(
     label_mask: &[bool],
     top_k: usize,
 ) -> Result<KtTensor, OpdLossError> {
-    let _ = validate_inputs_kt(
+    let (_, _, _, active_count, _) = validate_inputs_kt(
         hidden,
         head_t,
         teacher_topk_indices,
@@ -216,24 +346,44 @@ pub fn opd_top_k_reverse_kl_kt(
         label_mask,
         top_k,
     )?;
-    // All shape preconditions pass; the body is filled in by the
-    // Phase B kt-rewrite.
-    Err(OpdLossError::NotYetImplemented("opd_top_k_reverse_kl_kt"))
+    if active_count == 0 {
+        return zero_scalar();
+    }
+
+    let active_positions: Vec<u32> = label_mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+        .collect();
+
+    let (per_token, _log_p_hat, _log_q_hat) = per_position_forward_kt(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        &active_positions,
+        top_k,
+    )?;
+    let loss = mean_all(&per_token)?;
+    Ok(loss)
 }
 
-/// kt-typed entry point for OPD per-position reverse-KL — **stub**.
+/// kt-typed entry point for OPD per-position reverse-KL.
 ///
-/// Same contract as [`opd_top_k_reverse_kl_kt`] but emits the
-/// `[T_active]` f32 per-position KL vector instead of the scalar
-/// mean. Used by the GRPO importance-sampling advantage construction
-/// (`A_t = -KL_t`, §3.1 step 4 of the OPD grand plan).
+/// Same forward kernel as [`opd_top_k_reverse_kl_kt`] but without
+/// the final [`mean_all`] reduction. Used by the GRPO importance-
+/// sampling advantage construction (`A_t = -KL_t`, §3.1 step 4 of
+/// the OPD grand plan).
 ///
 /// # Returns
 ///
-/// Today: always returns [`OpdLossError::NotYetImplemented`] after
-/// passing shape validation. After the kt-rewrite: a 1-D F32
-/// [`KtTensor`] of shape `[T_active]` holding the per-position
-/// reverse KL.
+/// A 1-D F32 [`KtTensor`] of shape `[T_active]` holding the per-
+/// position reverse KL. Returns an empty `[0]` F32 tensor if no
+/// positions are active.
+///
+/// # Backward
+///
+/// See [`opd_top_k_reverse_kl_kt`] — forward-only today.
 pub fn opd_top_k_reverse_kl_per_position_kt(
     hidden: &KtTensor,
     head_t: &KtTensor,
@@ -242,7 +392,7 @@ pub fn opd_top_k_reverse_kl_per_position_kt(
     label_mask: &[bool],
     top_k: usize,
 ) -> Result<KtTensor, OpdLossError> {
-    let _ = validate_inputs_kt(
+    let (_, _, _, active_count, _) = validate_inputs_kt(
         hidden,
         head_t,
         teacher_topk_indices,
@@ -250,11 +400,25 @@ pub fn opd_top_k_reverse_kl_per_position_kt(
         label_mask,
         top_k,
     )?;
-    // All shape preconditions pass; the body is filled in by the
-    // Phase B kt-rewrite.
-    Err(OpdLossError::NotYetImplemented(
-        "opd_top_k_reverse_kl_per_position_kt",
-    ))
+    if active_count == 0 {
+        return empty_per_position();
+    }
+
+    let active_positions: Vec<u32> = label_mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+        .collect();
+
+    let (per_token, _log_p_hat, _log_q_hat) = per_position_forward_kt(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        &active_positions,
+        top_k,
+    )?;
+    Ok(per_token)
 }
 
 /// kt-typed parallel of [`crate::PerPositionMetrics`].
@@ -313,17 +477,41 @@ impl PerPositionMetricsKt {
     }
 }
 
+/// Read a 1-D F32 [`KtTensor`] into a `Vec<f32>`. Used to populate
+/// the [`PerPositionMetricsKt`] struct from the kt-typed forward
+/// kernel outputs.
+fn read_f32_vec(t: &KtTensor) -> Result<Vec<f32>, OpdLossError> {
+    use kiln_tensor::CpuStorage;
+    let cpu = t
+        .storage()
+        .as_any()
+        .downcast_ref::<CpuStorage>()
+        .ok_or_else(|| {
+            OpdLossError::msg(
+                "kt-opd-loss: metrics path requires CpuStorage on the kt-typed forward outputs",
+            )
+        })?;
+    Ok(cpu
+        .as_bytes()
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect())
+}
+
 /// kt-typed entry point for per-position distribution-alignment
-/// metrics over the teacher's K support — **stub**.
+/// metrics over the teacher's K support.
 ///
-/// Validates `hidden`, `head_t`, and the teacher top-K tensors
-/// against the production OPD contract (same checks as
-/// [`opd_top_k_reverse_kl_kt`]) and returns
-/// [`OpdLossError::NotYetImplemented`]. When the Phase B kt-rewrite
-/// lands, this function's body will be filled in (re-implementing
-/// the gather + matmul + entropy / KL reduction over
-/// `kiln_tensor::Tensor` ops + raw CUDA FFI) without breaking the
-/// signature.
+/// Reuses the same forward kernel as [`opd_top_k_reverse_kl_kt`] and
+/// additionally computes the per-position entropies of both the
+/// renormalised student and teacher distributions over the K
+/// support.
+///
+///   H(p_hat)[t] = -sum_k p_hat[t, k] * log_p_hat[t, k]
+///   H(q_hat)[t] = -sum_k q_hat[t, k] * log_q_hat[t, k]
+///
+/// where `p_hat`, `q_hat` are the student / teacher distributions
+/// renormalised over the K support (see the candle reference
+/// [`crate::compute_per_position_metrics`] for the definition).
 ///
 /// # Shape contract (matches the candle-typed
 /// [`crate::compute_per_position_metrics`] entry point)
@@ -337,9 +525,9 @@ impl PerPositionMetricsKt {
 ///
 /// # Returns
 ///
-/// Today: always returns [`OpdLossError::NotYetImplemented`] after
-/// passing shape validation. After the kt-rewrite: a populated
-/// [`PerPositionMetricsKt`] with the three diagnostic vectors.
+/// A populated [`PerPositionMetricsKt`] with three `[T_active]` f32
+/// vectors — student entropy, teacher entropy, reverse KL. Returns
+/// the default (empty) value if no positions are active.
 pub fn compute_per_position_metrics_kt(
     hidden: &KtTensor,
     head_t: &KtTensor,
@@ -348,7 +536,7 @@ pub fn compute_per_position_metrics_kt(
     label_mask: &[bool],
     top_k: usize,
 ) -> Result<PerPositionMetricsKt, OpdLossError> {
-    let _ = validate_inputs_kt(
+    let (_, _, _, active_count, _) = validate_inputs_kt(
         hidden,
         head_t,
         teacher_topk_indices,
@@ -356,11 +544,57 @@ pub fn compute_per_position_metrics_kt(
         label_mask,
         top_k,
     )?;
-    // All shape preconditions pass; the body is filled in by the
-    // Phase B kt-rewrite.
-    Err(OpdLossError::NotYetImplemented(
-        "compute_per_position_metrics_kt",
-    ))
+    if active_count == 0 {
+        return Ok(PerPositionMetricsKt::default());
+    }
+
+    let active_positions: Vec<u32> = label_mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+        .collect();
+
+    let (per_token, log_p_hat, log_q_hat) = per_position_forward_kt(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        &active_positions,
+        top_k,
+    )?;
+
+    // Entropies: H(p) = -sum_k p * log p, H(q) = -sum_k q * log q.
+    //
+    // Both log_p_hat / log_q_hat are `[T_active, K]` F32 outputs of
+    // log_softmax_last_dim above.
+    let p_hat = exp(&log_p_hat)?;
+    let q_hat = exp(&log_q_hat)?;
+    let p_log_p = mul(&p_hat, &log_p_hat)?;
+    let q_log_q = mul(&q_hat, &log_q_hat)?;
+    let student_entropy_t = sum_axis(&p_log_p, 1)?; // sum_k p log p — negate below
+    let teacher_entropy_t = sum_axis(&q_log_q, 1)?;
+    // H(p) = -sum_k p log p = neg(sum_k p log p).
+    let student_entropy = neg(&student_entropy_t)?;
+    let teacher_entropy = neg(&teacher_entropy_t)?;
+
+    let reverse_kl = per_token;
+
+    // Materialise to Vec<f32> for the metrics struct. The metrics
+    // path is a diagnostic / logging path, not part of the loss
+    // graph, so reading the tensors back to host is fine.
+    //
+    // Force contiguous before the host read; the upstream
+    // sum_axis / neg / sum_axis chain is already 1-D and contiguous
+    // on the CPU path, but call `.contiguous()` defensively in case
+    // a backend returns a strided view.
+    let student_entropy = student_entropy.contiguous()?;
+    let teacher_entropy = teacher_entropy.contiguous()?;
+    let reverse_kl = reverse_kl.contiguous()?;
+    Ok(PerPositionMetricsKt {
+        student_entropy: read_f32_vec(&student_entropy)?,
+        teacher_entropy: read_f32_vec(&teacher_entropy)?,
+        reverse_kl: read_f32_vec(&reverse_kl)?,
+    })
 }
 
 #[cfg(test)]
@@ -526,34 +760,164 @@ mod tests {
         );
     }
 
-    #[test]
-    fn opd_top_k_reverse_kl_kt_stub_returns_not_yet_implemented_on_valid_shapes() {
-        let h = dummy_hidden(4, 8);
-        let w = dummy_head_t(8, 16);
-        let idx = vec![0u32; 4];
-        let lp = vec![0.0f32; 4];
-        let mask = vec![true; 4];
-        let err =
-            opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
-        assert!(
-            matches!(err, OpdLossError::NotYetImplemented(_)),
-            "expected NotYetImplemented, got: {err}"
-        );
+    /// Read a 1-D or 0-D F32 [`KtTensor`] into a Vec for assertions.
+    fn read_f32(t: &KtTensor) -> Vec<f32> {
+        use kiln_tensor::CpuStorage;
+        let cpu = t
+            .storage()
+            .as_any()
+            .downcast_ref::<CpuStorage>()
+            .expect("CpuStorage");
+        cpu.as_bytes()
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect()
     }
 
     #[test]
-    fn opd_top_k_reverse_kl_per_position_kt_stub_returns_not_yet_implemented_on_valid_shapes() {
+    fn opd_top_k_reverse_kl_kt_returns_scalar_on_valid_shapes() {
+        // K=1 with matching teacher logprob = 0 (i.e. teacher places
+        // all mass on the single token). With zero hidden and zero
+        // head, the student also has log_p_hat = 0 and KL = 0.
         let h = dummy_hidden(4, 8);
         let w = dummy_head_t(8, 16);
         let idx = vec![0u32; 4];
         let lp = vec![0.0f32; 4];
         let mask = vec![true; 4];
-        let err = opd_top_k_reverse_kl_per_position_kt(&h, &w, &idx, &lp, &mask, 1)
-            .unwrap_err();
-        assert!(
-            matches!(err, OpdLossError::NotYetImplemented(_)),
-            "expected NotYetImplemented, got: {err}"
+        let out = opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 1).expect("forward");
+        assert_eq!(out.shape(), &[] as &[usize], "scalar output");
+        let v = read_f32(&out);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].abs() < 1e-6, "K=1 KL must be exactly 0, got {}", v[0]);
+    }
+
+    #[test]
+    fn opd_top_k_reverse_kl_per_position_kt_returns_vector_on_valid_shapes() {
+        // K=1 ⇒ both renormalised distributions are degenerate
+        // singletons ⇒ KL = 0 at every active position.
+        let h = dummy_hidden(4, 8);
+        let w = dummy_head_t(8, 16);
+        let idx = vec![0u32; 4];
+        let lp = vec![0.0f32; 4];
+        let mask = vec![true; 4];
+        let out = opd_top_k_reverse_kl_per_position_kt(&h, &w, &idx, &lp, &mask, 1)
+            .expect("forward");
+        assert_eq!(out.shape(), &[4]);
+        let v = read_f32(&out);
+        assert_eq!(v.len(), 4);
+        for (i, &x) in v.iter().enumerate() {
+            assert!(x.abs() < 1e-6, "per_token[{i}] should be 0, got {x}");
+        }
+    }
+
+    #[test]
+    fn opd_top_k_reverse_kl_kt_no_active_returns_zero_scalar() {
+        // All-masked-out positions: T_active = 0, no teacher data,
+        // result is a scalar 0.0.
+        let h = dummy_hidden(4, 8);
+        let w = dummy_head_t(8, 16);
+        let idx: Vec<u32> = vec![];
+        let lp: Vec<f32> = vec![];
+        let mask = vec![false; 4];
+        let out = opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 4).expect("forward");
+        assert_eq!(out.shape(), &[] as &[usize], "scalar output");
+        let v = read_f32(&out);
+        assert_eq!(v, vec![0.0]);
+    }
+
+    #[test]
+    fn opd_top_k_reverse_kl_per_position_kt_no_active_returns_empty_1d() {
+        let h = dummy_hidden(4, 8);
+        let w = dummy_head_t(8, 16);
+        let idx: Vec<u32> = vec![];
+        let lp: Vec<f32> = vec![];
+        let mask = vec![false; 4];
+        let out = opd_top_k_reverse_kl_per_position_kt(&h, &w, &idx, &lp, &mask, 4)
+            .expect("forward");
+        assert_eq!(out.shape(), &[0]);
+        assert!(read_f32(&out).is_empty());
+    }
+
+    #[test]
+    fn opd_top_k_reverse_kl_kt_uniform_teacher_uniform_student_kl_zero() {
+        // K = 4 with uniform teacher logprobs (-log 4) at every active
+        // position, zero hidden + zero head ⇒ student is also uniform
+        // over the K support ⇒ KL = 0.
+        let h = dummy_hidden(4, 8);
+        let w = dummy_head_t(8, 16);
+        let top_k = 4usize;
+        let active = 3usize;
+        // active positions at indices 0, 2, 3
+        let mask = vec![true, false, true, true];
+        // T_active * K distinct indices into [0, 16)
+        let mut idx: Vec<u32> = Vec::with_capacity(active * top_k);
+        for r in 0..active {
+            for k in 0..top_k {
+                idx.push((r * top_k + k) as u32);
+            }
+        }
+        let lp = vec![-(top_k as f32).ln(); active * top_k];
+        let out = opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, top_k).expect("forward");
+        let v = read_f32(&out);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].abs() < 1e-5, "uniform KL must be 0, got {}", v[0]);
+    }
+
+    #[test]
+    fn opd_top_k_reverse_kl_per_position_kt_parity_with_scalar_mean() {
+        // Build a small but non-trivial forward and confirm that
+        // mean(per_position) == scalar entry point output. This is
+        // the simplest parity check that exercises the full
+        // gather + matmul + log-softmax + KL path.
+        //
+        // Use random-ish (deterministic) hidden / head values to
+        // avoid the degenerate uniform case.
+        let t_seq = 5;
+        let h_dim = 4;
+        let v_dim = 8;
+        let k = 3;
+        let mask = vec![true, false, true, true, false];
+        let active = mask.iter().filter(|&&m| m).count();
+
+        let hidden_data: Vec<f32> = (0..t_seq * h_dim)
+            .map(|i| ((i as f32) * 0.13).sin())
+            .collect();
+        let hidden = KtTensor::from_vec(hidden_data, vec![1, t_seq, h_dim]).unwrap();
+
+        let head_data: Vec<f32> = (0..h_dim * v_dim)
+            .map(|i| ((i as f32) * 0.07).cos() * 0.5)
+            .collect();
+        let head = KtTensor::from_vec(head_data, vec![h_dim, v_dim]).unwrap();
+
+        let mut idx: Vec<u32> = Vec::with_capacity(active * k);
+        for r in 0..active {
+            for kk in 0..k {
+                idx.push(((r + kk) % v_dim) as u32);
+            }
+        }
+        let lp: Vec<f32> = (0..active * k)
+            .map(|i| -1.0 - ((i as f32) * 0.05).cos())
+            .collect();
+
+        let scalar = read_f32(
+            &opd_top_k_reverse_kl_kt(&hidden, &head, &idx, &lp, &mask, k).unwrap(),
         );
+        let per_pos = read_f32(
+            &opd_top_k_reverse_kl_per_position_kt(&hidden, &head, &idx, &lp, &mask, k)
+                .unwrap(),
+        );
+        assert_eq!(per_pos.len(), active);
+        let mean: f32 = per_pos.iter().sum::<f32>() / (active as f32);
+        assert!(
+            (scalar[0] - mean).abs() < 1e-5,
+            "scalar={} != mean(per_pos)={}",
+            scalar[0],
+            mean
+        );
+        // Sanity: KL is non-negative.
+        for (i, &kl) in per_pos.iter().enumerate() {
+            assert!(kl > -1e-6, "KL must be >= 0; per_pos[{i}] = {kl}");
+        }
     }
 
     #[test]
@@ -584,17 +948,72 @@ mod tests {
     }
 
     #[test]
-    fn compute_per_position_metrics_kt_stub_returns_not_yet_implemented_on_valid_shapes() {
+    fn compute_per_position_metrics_kt_returns_populated_struct_on_valid_shapes() {
+        // K = 1, uniform-degenerate case: entropies are exactly 0
+        // (single-token distribution) and reverse KL is 0.
         let h = dummy_hidden(4, 8);
         let w = dummy_head_t(8, 16);
         let idx = vec![0u32; 4];
         let lp = vec![0.0f32; 4];
         let mask = vec![true; 4];
-        let err = compute_per_position_metrics_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
-        assert!(
-            matches!(err, OpdLossError::NotYetImplemented(_)),
-            "expected NotYetImplemented, got: {err}"
-        );
+        let m = compute_per_position_metrics_kt(&h, &w, &idx, &lp, &mask, 1)
+            .expect("metrics");
+        assert_eq!(m.student_entropy.len(), 4);
+        assert_eq!(m.teacher_entropy.len(), 4);
+        assert_eq!(m.reverse_kl.len(), 4);
+        for v in m
+            .student_entropy
+            .iter()
+            .chain(m.teacher_entropy.iter())
+            .chain(m.reverse_kl.iter())
+        {
+            assert!(v.abs() < 1e-5, "got {v}");
+        }
+    }
+
+    #[test]
+    fn compute_per_position_metrics_kt_uniform_entropy_log_k() {
+        // K=4, zero hidden + zero head ⇒ student uniform over K ⇒
+        // H(p_hat) = ln(K). Teacher logprobs uniform too ⇒
+        // H(q_hat) = ln(K).
+        let h = dummy_hidden(4, 8);
+        let w = dummy_head_t(8, 16);
+        let top_k = 4usize;
+        let active = 3usize;
+        let mask = vec![true, false, true, true];
+        let mut idx: Vec<u32> = Vec::with_capacity(active * top_k);
+        for r in 0..active {
+            for k in 0..top_k {
+                idx.push((r * top_k + k) as u32);
+            }
+        }
+        let lp = vec![-(top_k as f32).ln(); active * top_k];
+        let m = compute_per_position_metrics_kt(&h, &w, &idx, &lp, &mask, top_k)
+            .expect("metrics");
+        let expect_h = (top_k as f32).ln();
+        for &s in &m.student_entropy {
+            assert!((s - expect_h).abs() < 1e-5, "student H = {s}, want {expect_h}");
+        }
+        for &t in &m.teacher_entropy {
+            assert!((t - expect_h).abs() < 1e-5, "teacher H = {t}, want {expect_h}");
+        }
+        for &kl in &m.reverse_kl {
+            assert!(kl.abs() < 1e-5, "KL = {kl}, want 0");
+        }
+    }
+
+    #[test]
+    fn compute_per_position_metrics_kt_no_active_returns_default() {
+        let h = dummy_hidden(4, 8);
+        let w = dummy_head_t(8, 16);
+        let idx: Vec<u32> = vec![];
+        let lp: Vec<f32> = vec![];
+        let mask = vec![false; 4];
+        let m = compute_per_position_metrics_kt(&h, &w, &idx, &lp, &mask, 4)
+            .expect("metrics");
+        assert!(m.student_entropy.is_empty());
+        assert!(m.teacher_entropy.is_empty());
+        assert!(m.reverse_kl.is_empty());
     }
 
     #[test]
