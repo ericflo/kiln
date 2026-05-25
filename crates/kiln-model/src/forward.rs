@@ -394,6 +394,22 @@ fn cuda_use_kt_api_add_scalar() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise `Tensor::neg()` through the kt-API
+/// + adapters. Set `KILN_USE_KT_API_NEG=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// `.neg()` candle calls in `forward.rs` (sigmoid backward
+/// composites, softplus) through `kiln_tensor::cuda_activation_unary`
+/// with kind tag 12 (Neg) via the kt-bridge borrow adapter. Pays
+/// one dtod memcpy on the output direction (the kt allocation is
+/// freshly-owned). Falls through to the candle composite when any
+/// precondition fails so behavior is identical with the gate off.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_neg() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_NEG").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -2114,7 +2130,31 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
             // `kiln_tensor::cuda_scalar_op` with kind 0
             // (AddScalar). Falls through to the candle composite
             // when any precondition fails.
-            let neg_exp = gate_tile.neg()?.exp()?;
+            // Phase 7 (#1082): same kt-API migration for the
+            // `gate_tile.neg()` step — when `KILN_USE_KT_API_NEG=1`
+            // (or `KILN_USE_KT_API_ALL=1`) is set, route through
+            // `kiln_tensor::cuda_activation_unary` with kind 12
+            // (Neg). Falls through to the candle composite when
+            // any precondition fails.
+            let neg_gate = {
+                #[cfg(feature = "cuda")]
+                {
+                    if let Some(out) = try_kt_neg(&gate_tile).map_err(|e| {
+                        candle_core::Error::Msg(format!(
+                            "CudaSigmoidMulTrainingBf16 backward: try_kt_neg: {e}"
+                        ))
+                    })? {
+                        out
+                    } else {
+                        gate_tile.neg()?
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    gate_tile.neg()?
+                }
+            };
+            let neg_exp = neg_gate.exp()?;
             let one_plus_neg_exp = {
                 #[cfg(feature = "cuda")]
                 {
@@ -2155,7 +2195,26 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
             // Phase 7 (#1082): same kt-API add-scalar migration for
             // the `(-sigmoid_f32) + 1.0` step of the sigmoid
             // derivative composite.
-            let neg_sigmoid = sigmoid_f32.neg()?;
+            // Phase 7 (#1082): same kt-API neg migration for the
+            // `sigmoid_f32.neg()` step.
+            let neg_sigmoid = {
+                #[cfg(feature = "cuda")]
+                {
+                    if let Some(out) = try_kt_neg(&sigmoid_f32).map_err(|e| {
+                        candle_core::Error::Msg(format!(
+                            "CudaSigmoidMulTrainingBf16 backward: try_kt_neg: {e}"
+                        ))
+                    })? {
+                        out
+                    } else {
+                        sigmoid_f32.neg()?
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    sigmoid_f32.neg()?
+                }
+            };
             let one_minus_sigmoid = {
                 #[cfg(feature = "cuda")]
                 {
@@ -6412,6 +6471,45 @@ fn try_kt_add_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
     Ok(Some(out))
 }
 
+/// Phase 7 (#1082) — kt-API neg migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 12 (Neg).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0) so the caller falls through to
+/// the candle `.neg()`. NVTX range `kiln/neg_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_neg(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_neg() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/neg_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 12 = Neg (matches csrc/activation.cu constants and
+    // crates/kiln-tensor/src/ops/unary_arith.rs::cuda_kind_tag).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 12) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_neg: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
 #[cfg(feature = "cuda")]
 fn cuda_rotary_one_training_bf16_supported(
     x: &Tensor,
@@ -7780,10 +7878,43 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
     let zeros = Tensor::zeros_like(x)?;
     let relu_x = x.maximum(&zeros)?;
     // |x| = relu(x) + relu(-x)
-    let neg_x = x.neg()?;
+    // Phase 7 (#1082): when `KILN_USE_KT_API_NEG=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND the input is a contiguous
+    // CUDA tensor of a supported dtype, route the `.neg()` through
+    // `kiln_tensor::cuda_activation_unary` with kind 12 (Neg).
+    // Falls through to the candle composite when any precondition
+    // fails.
+    let neg_x = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_neg(x)? {
+                out
+            } else {
+                x.neg()?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            x.neg()?
+        }
+    };
     let relu_neg_x = neg_x.maximum(&zeros)?;
     let abs_x = (relu_x.clone() + relu_neg_x)?;
-    let neg_abs = abs_x.neg()?;
+    // Phase 7 (#1082): same kt-API neg migration for `abs_x.neg()`.
+    let neg_abs = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_neg(&abs_x)? {
+                out
+            } else {
+                abs_x.neg()?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            abs_x.neg()?
+        }
+    };
     // log(1 + exp(-|x|)) — always stable since exp(-|x|) ∈ (0, 1]
     //
     // Phase 7 (#1082): when `KILN_USE_KT_API_ADD_SCALAR=1` (or
