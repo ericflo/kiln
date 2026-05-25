@@ -438,6 +438,14 @@ pub fn fused_linear_cross_entropy_phase_b_kt(
 /// The per-chunk kernel sequence is identical (matmul → max → shift →
 /// exp → div → diff → matmul); all reductions and accumulators run in
 /// F32.
+///
+/// # Device-agnostic
+///
+/// `grad_loss` is broadcast through `broadcast_to([num_active,
+/// chunk_len])` after a `reshape([1, 1])`, so the backward never
+/// pulls scalar values to host — when kt-tensor's elementwise ops
+/// are wired up to CUDA, the backward continues to work without
+/// changes.
 pub fn fused_linear_cross_entropy_phase_b_backward_kt(
     hidden: &KtTensor,
     head_t: &KtTensor,
@@ -586,7 +594,16 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
     // -----------------------------------------------------------------
     // Pass 2: accumulate dhidden_active by chunk.
     // -----------------------------------------------------------------
+    //
+    // Reshape grad_loss to a 1x1 tensor up front so we can broadcast it
+    // to `[num_active, chunk_len]` per-chunk via `broadcast_to`. The
+    // candle reference uses `broadcast_mul(&grad_loss_f32)` directly on
+    // a rank-0 scalar; kt-tensor's `broadcast_to` requires equal-rank
+    // inputs so we promote the scalar to rank-2 once before the loop.
     let grad_loss_f32 = to_f32(grad_loss).map_err(FlceError::Kt)?;
+    let grad_loss_2d = grad_loss_f32
+        .reshape(vec![1, 1])
+        .map_err(FlceError::Kt)?;
     let inv_n = 1.0f32 / (num_active as f32);
 
     // Broadcast running_max / running_sumexp to 2-D once (they don't
@@ -644,13 +661,13 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
         // scaled = diff * (1/N)
         let scaled = mul_scalar(&diff, inv_n).map_err(FlceError::Kt)?;
 
-        // grad_logits_chunk = scaled * grad_loss (broadcast scalar across [num_active, chunk_len]).
-        // grad_loss_f32 is rank-0; broadcast it manually to [num_active, chunk_len] via
-        // unsqueeze x2 + broadcast_to. unsqueeze on rank-0 is not the right pattern; use
-        // mul_scalar with the host scalar value extracted from grad_loss_f32.
-        let grad_loss_value = scalar_f32_from(&grad_loss_f32)?;
-        let grad_logits_chunk =
-            mul_scalar(&scaled, grad_loss_value).map_err(FlceError::Kt)?;
+        // grad_logits_chunk = scaled * grad_loss
+        //   Broadcast the [1, 1] grad_loss to [num_active, chunk_len]
+        //   and multiply elementwise. Equivalent to candle's
+        //   `scaled.broadcast_mul(&grad_loss_f32)` on a rank-0 scalar.
+        let grad_loss_b = broadcast_to(&grad_loss_2d, &[num_active, chunk_len])
+            .map_err(FlceError::Kt)?;
+        let grad_logits_chunk = mul(&scaled, &grad_loss_b).map_err(FlceError::Kt)?;
 
         // chunk_contrib = grad_logits_chunk @ head_chunk.T   shape [num_active, hidden_size]
         let head_chunk_t = head_chunk
@@ -693,25 +710,6 @@ fn zeros_like_hidden_in_dtype(
     dtype: KtDType,
 ) -> Result<KtTensor, FlceError> {
     Ok(KtTensor::zeros_cpu(hidden_dims.to_vec(), dtype))
-}
-
-/// Helper: read the scalar value out of a rank-0 F32 tensor as `f32`.
-/// Used to broadcast `grad_loss` across the per-chunk grad-logits
-/// tensor via `mul_scalar` (since `grad_loss` is a scalar).
-fn scalar_f32_from(t: &KtTensor) -> Result<f32, FlceError> {
-    let storage = t.storage();
-    let cpu = storage
-        .as_any()
-        .downcast_ref::<kiln_tensor::CpuStorage>()
-        .ok_or_else(|| FlceError::msg("kt-flce-bwd: grad_loss must be on CPU storage"))?;
-    let bytes = cpu.as_bytes();
-    if bytes.len() < 4 {
-        return Err(FlceError::msg(format!(
-            "kt-flce-bwd: grad_loss must be a scalar F32 (got {} bytes)",
-            bytes.len()
-        )));
-    }
-    Ok(f32::from_le_bytes(bytes[0..4].try_into().unwrap()))
 }
 
 /// Helper: build a rank-0 F32 scalar tensor holding 0.0.
