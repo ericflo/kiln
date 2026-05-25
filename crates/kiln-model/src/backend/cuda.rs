@@ -201,6 +201,16 @@ impl CudaBackend {
         be
     }
 
+    /// Test-only constructor (#1082) for parity tests of the kt-API
+    /// gdn wiring. Same race-avoidance rationale as
+    /// `new_with_kt_api_conv1d`.
+    #[cfg(test)]
+    pub(crate) fn new_with_kt_api_gdn(device: Device, kt_api: bool) -> Self {
+        let mut be = Self::new(device);
+        be.cuda_use_kt_api_gdn = kt_api;
+        be
+    }
+
     pub fn training_capabilities_static() -> TrainingCapabilities {
         TrainingCapabilities {
             projection_training: "backend-routed candle CUDA autograd with offset chunk hook",
