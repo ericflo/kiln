@@ -6,7 +6,6 @@
 #![cfg(test)]
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
 use kiln_vulkan_kernel::vk_ops::conv1d::vk_causal_conv1d_bwd_no_grad;
 use kiln_vulkan_kernel::vk_ops::gdn_gates::vk_gdn_gates_bwd_no_grad;
 use kiln_vulkan_kernel::vk_ops::reverse_cumsum::vk_reverse_cumsum_no_grad;
@@ -21,8 +20,7 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 }
 
 fn upload(device: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    VkTensor::from_candle(&t, Arc::clone(device))
+    VkTensor::from_f32_slice(data, shape.to_vec(), Arc::clone(device))
 }
 
 fn upload_buffer(device: &Arc<VulkanDevice>, data: &[f32]) -> Result<Arc<VulkanBuffer>> {

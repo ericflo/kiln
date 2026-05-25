@@ -247,6 +247,90 @@ impl VkTensor {
         Ok(Self::from_buffer(Arc::new(buffer), shape, dtype, device))
     }
 
+    /// Upload an f32 slice as a fresh F32 VkTensor leaf. Candle-free
+    /// constructor for tests/examples that only need bytes → GPU; mirrors
+    /// the F32 fast-path of [`Self::from_candle`] without the candle
+    /// dependency. (#1082)
+    pub fn from_f32_slice(
+        data: &[f32],
+        shape: Vec<usize>,
+        device: Arc<VulkanDevice>,
+    ) -> Result<Self> {
+        let nelem: usize = shape.iter().product();
+        anyhow::ensure!(
+            data.len() == nelem,
+            "VkTensor::from_f32_slice: {} elements for shape {:?} (expected {})",
+            data.len(),
+            shape,
+            nelem
+        );
+        let bytes: &[u8] = bytemuck::cast_slice(data);
+        let buffer = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            device_buffer_bytes(nelem, VkDType::F32) as u64,
+        )
+        .context("VkTensor::from_f32_slice: device-local buffer")?;
+        VulkanBuffer::upload_data(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            &buffer,
+            bytes,
+        )
+        .context("VkTensor::from_f32_slice: upload")?;
+        Ok(Self::from_buffer(
+            Arc::new(buffer),
+            shape,
+            VkDType::F32,
+            device,
+        ))
+    }
+
+    /// Upload an f32 source slice converted to BF16 as a fresh BF16
+    /// VkTensor leaf. Candle-free; mirrors the BF16 path of
+    /// [`Self::from_candle`] after a `to_dtype(BF16)` cast. (#1082)
+    pub fn from_f32_slice_as_bf16(
+        data: &[f32],
+        shape: Vec<usize>,
+        device: Arc<VulkanDevice>,
+    ) -> Result<Self> {
+        let nelem: usize = shape.iter().product();
+        anyhow::ensure!(
+            data.len() == nelem,
+            "VkTensor::from_f32_slice_as_bf16: {} elements for shape {:?} (expected {})",
+            data.len(),
+            shape,
+            nelem
+        );
+        let mut bytes: Vec<u8> = Vec::with_capacity(nelem * 2);
+        for &v in data {
+            bytes.extend_from_slice(&bf16::from_f32(v).to_bits().to_le_bytes());
+        }
+        let buffer = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            device_buffer_bytes(nelem, VkDType::Bf16) as u64,
+        )
+        .context("VkTensor::from_f32_slice_as_bf16: device-local buffer")?;
+        VulkanBuffer::upload_data(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            &buffer,
+            &bytes,
+        )
+        .context("VkTensor::from_f32_slice_as_bf16: upload")?;
+        Ok(Self::from_buffer(
+            Arc::new(buffer),
+            shape,
+            VkDType::Bf16,
+            device,
+        ))
+    }
+
     /// Upload a candle Tensor to GPU as a fresh VkTensor leaf.
     ///
     /// Only F32 and BF16 are accepted. The tensor is forced contiguous;
