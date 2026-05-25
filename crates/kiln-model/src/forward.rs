@@ -532,6 +532,28 @@ fn cuda_use_kt_api_pow() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise `Tensor::sin()` through the kt-API
+/// + adapters. Set `KILN_USE_KT_API_SIN=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// `.sin()` candle calls in `forward.rs` (the RoPE
+/// `freqs.sin()` cache builder) through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 7 (Sin) via
+/// the kt-bridge borrow adapter. Pays one dtod memcpy on the
+/// output direction (the kt allocation is freshly-owned). Falls
+/// through to the candle composite when any precondition fails so
+/// behavior is identical with the gate off.
+///
+/// Distinct from the fused `cuda_rope` kernel (which fuses
+/// rotate+apply with prebuilt cos/sin caches) — this gate
+/// migrates the *cache-construction* `.sin()` step that runs once
+/// per RoPE precompute (rare hot-path traffic).
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_sin() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SIN").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -6216,6 +6238,12 @@ pub fn rotary_embedding(
     let freqs = pos.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
 
     let cos = freqs.cos()?; // [seq_len, half_rotary]
+    #[cfg(feature = "cuda")]
+    let sin = match try_kt_sin(&freqs)? {
+        Some(t) => t,
+        None => freqs.sin()?,
+    };
+    #[cfg(not(feature = "cuda"))]
     let sin = freqs.sin()?; // [seq_len, half_rotary]
 
     let rotated_q = apply_rope(q, &cos, &sin, head_dim, rotary_dim)?;
@@ -6245,6 +6273,12 @@ pub fn rotary_embedding_from_tensor(
     let freqs = pos.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
 
     let cos = freqs.cos()?;
+    #[cfg(feature = "cuda")]
+    let sin = match try_kt_sin(&freqs)? {
+        Some(t) => t,
+        None => freqs.sin()?,
+    };
+    #[cfg(not(feature = "cuda"))]
     let sin = freqs.sin()?;
 
     #[cfg(feature = "cuda")]
@@ -6287,7 +6321,15 @@ fn rotary_tables_from_tensor(
 ) -> Result<(Tensor, Tensor)> {
     let pos = positions_tensor.unsqueeze(1)?;
     let freqs = pos.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
-    Ok((freqs.cos()?, freqs.sin()?))
+    let cos = freqs.cos()?;
+    #[cfg(feature = "cuda")]
+    let sin = match try_kt_sin(&freqs)? {
+        Some(t) => t,
+        None => freqs.sin()?,
+    };
+    #[cfg(not(feature = "cuda"))]
+    let sin = freqs.sin()?;
+    Ok((cos, sin))
 }
 
 fn rotary_embedding_from_tables(
@@ -6996,6 +7038,44 @@ fn try_kt_pow(x: &Tensor, p: f32) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_pow: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API sin migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 7 (Sin).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0) so the caller falls through to
+/// the candle `.sin()`. NVTX range `kiln/sin_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_sin(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_sin() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/sin_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 7 = Sin (matches csrc/activation.cu KIND_SIN).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 7) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_sin: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
