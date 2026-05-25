@@ -7,24 +7,34 @@ name: OPD bench gate
 # in bench-results/opd-a6000-baseline.json.
 #
 # The bench requires a CUDA GPU (A6000 minimum, per the baseline). GitHub-
-# hosted runners don't have a GPU, so this workflow currently runs on:
-#   1. `workflow_dispatch` — manual trigger from the kiln team's pods.
-#   2. A self-hosted runner labelled `cuda-a6000` once one is wired up
-#      (uncomment the `pull_request` trigger below at that point).
+# hosted runners don't have a GPU, so this workflow runs on:
+#   1. `pull_request` — only the `gate-self-test` job (no GPU) fires on
+#      PRs that touch `bench-results/**`, the gate scripts, or the OPD
+#      loss/training crates. This is the #1082 §9 "CPU-only smoke variant"
+#      that gives the gate PR-time enforcement on the regression-check
+#      schema without waiting for the self-hosted A6000 runner.
+#   2. `workflow_dispatch` — manual trigger for the full CUDA bench
+#      against the A6000 baseline (requires a self-hosted runner
+#      labelled `cuda-a6000`).
+#   3. `schedule` is intentionally NOT wired here — `perf-regression-nightly.yml`
+#      handles the nightly A6000 cron for the SFT/GRPO step-time gate;
+#      this workflow's CUDA leg is dispatch-only.
 #
-# Until the self-hosted runner is online, the bench-results/check_opd_regression.py
-# script is exercised by `scripts-self-test` below (running against a
-# synthetic stdout) so the gate's logic is mechanically verified on every
-# PR even without GPU access.
+# When the self-hosted runner comes online, broaden the `pull_request`
+# event to also fire the `cuda-bench` job below — today it's
+# conditionally skipped via the `if: github.event_name == 'workflow_dispatch'`
+# guard, so PRs only spin up the cheap `gate-self-test` job.
 
 on:
   workflow_dispatch:
-  # Uncomment once a self-hosted CUDA runner labelled `cuda-a6000` is online:
-  # pull_request:
-  #   paths:
-  #     - 'crates/kiln-opd-loss-kernel/**'
-  #     - 'crates/kiln-train/**'
-  #     - 'bench-results/**'
+  pull_request:
+    paths:
+      - 'crates/kiln-opd-loss-kernel/**'
+      - 'crates/kiln-train/**'
+      - 'bench-results/check_opd_regression.py'
+      - 'bench-results/opd-a6000-baseline.json'
+      - 'bench-results/opd-a100-baseline.json'
+      - '.github/workflows/opd-bench-gate.yml'
 
 env:
   CARGO_TERM_COLOR: always

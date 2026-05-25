@@ -23,6 +23,17 @@ on:
     # 06:00 UTC nightly — ~22:00 / 23:00 PT depending on DST, after most
     # PRs are merged. Move this earlier or later by editing the cron.
     - cron: '0 6 * * *'
+  # #1082 §9 "CPU-only smoke variant" — fires the GHA-hosted
+  # `gate-self-test` job on every PR that touches the gate script,
+  # baselines, or workflow YAML. The heavy `cuda-bench` job is gated by
+  # `if: github.event_name == 'schedule' || ... 'workflow_dispatch'` so
+  # it stays off the PR-time critical path until the self-hosted A6000
+  # runner comes online.
+  pull_request:
+    paths:
+      - 'bench-results/check_sft_train_regression.py'
+      - 'bench-results/regression/**'
+      - '.github/workflows/perf-regression-nightly.yml'
   workflow_dispatch:
     inputs:
       ref:
