@@ -17573,6 +17573,13 @@ impl CachedPagedDecodeMeta {
         start_positions: &[usize],
         stable_block_table_gpu: &Tensor,
         stable_seqused_k_gpu: &Tensor,
+        // Phase 7 #1082: kt twin of `paged_cache` for the parity-checked
+        // `paged_cache.block_size()` read inside this fn. `None` (default
+        // path) keeps the accessor on the candle path unchanged. CUDA-only
+        // since `PagedKvCacheKt` is `cfg(feature = "cuda")`.
+        #[cfg(feature = "cuda")] kt_paged_cache: Option<
+            &crate::paged_kv_cache_kt::PagedKvCacheKt,
+        >,
     ) -> Result<Self> {
         let batch = start_positions.len();
         anyhow::ensure!(
@@ -17596,6 +17603,10 @@ impl CachedPagedDecodeMeta {
         let uniform_start_pos = max_start_pos == min_start_pos;
         let max_seqlen_k = max_start_pos + 1;
 
+        #[cfg(feature = "cuda")]
+        let page_block_size =
+            try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
+        #[cfg(not(feature = "cuda"))]
         let page_block_size = paged_cache.block_size();
         let max_blocks_per_seq =
             ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
@@ -20444,6 +20455,12 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     start_positions,
                     bt,
                     sk,
+                    // Phase 7 #1082: kt twin threading deferred — caller does not
+                    // yet expose `kt_paged_cache` to the inner. `None` keeps the
+                    // `paged_cache.block_size()` read on the candle path (the
+                    // helper short-circuits when kt is `None`).
+                    #[cfg(feature = "cuda")]
+                    None,
                 )
                 .context(
                     "build cached paged decode metadata for batched step (stable buffers)",
