@@ -171,27 +171,31 @@ impl DeviceOp1 for ActivationOp {
         if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Metal): implement
-        // `crate::metal_activation_unary(x, kind_tag)` analogous to
-        // `crate::cuda_activation_unary` above. Until that kernel
-        // lands, fall through to the CPU path so the op still
-        // produces correct results on Mac (numerics-correct,
-        // performance-wrong).
-        // Candidate implementations:
-        //   1. Custom MSL kernel: per-element pointwise; one switch
-        //      over `kind_tag` selecting silu / sigmoid / gelu /
-        //      tanh / relu — matches the CUDA kernel's structure
-        //      one-for-one.
-        //   2. MPS Graph: per-activation primitives
-        //      (`sigmoid(_:)`, `tanh(_:)`, `reLU(_:)`, etc.) bound
-        //      by `kind_tag`. Higher per-call overhead but trivial
-        //      to wire — silu/gelu still need a small compose
-        //      (`x * sigmoid(x)` / `0.5 * x * (1 + erf(x/sqrt(2)))`).
-        //   3. Reuse the activation kernel in
-        //      `kiln-model::backend::metal` if/when one is added
-        //      there (the production hot-path for MLP gate/up uses
-        //      silu).
-        Ok(None)
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::metal_activation_unary` which wraps candle's
+        // production Metal `unary_*` kernels (the same path
+        // `candle::Tensor::{silu, gelu, tanh, relu}()` take). Apple
+        // Silicon UMA: no host bounce — kt MetalStorage::buffer is
+        // shared with the candle wrapper via Arc<metal::Buffer>.
+        //
+        // kind in {Silu, Gelu, Tanh, Relu}. Sigmoid still has no
+        // candle UnaryOp, so it falls through to CPU until a real
+        // Metal sigmoid kernel lands.
+        let kind_tag: i32 = match self.kind {
+            UnaryKind::Silu => 0,
+            UnaryKind::Sigmoid => return Ok(None),
+            UnaryKind::Gelu => 2,
+            UnaryKind::Tanh => 3,
+            UnaryKind::Relu => 4,
+        };
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::MetalStorage>()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(crate::metal_activation_unary(x, kind_tag)?))
     }
 
     #[cfg(feature = "vulkan")]

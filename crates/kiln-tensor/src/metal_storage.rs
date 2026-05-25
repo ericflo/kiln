@@ -1205,6 +1205,153 @@ pub fn metal_elementwise_binary(
     )
 }
 
+// ----------------------------------------------------------------------
+// metal_activation_unary — Phase 4 Metal substrate op (#1082)
+// ----------------------------------------------------------------------
+
+/// Metal unary activation. Mirrors the role of
+/// [`crate::cuda_activation_unary`] for the Metal backend.
+///
+/// Dispatches on `kind_tag` (matches the CUDA tags in
+/// `ActivationOp::cuda_fwd`):
+///   - `0` -> Silu via `candle::Tensor::silu(&x)`
+///   - `1` -> Sigmoid — not natively in candle's `UnaryOp`. This
+///     wrapper rejects kind=1 with an error; callers must fall through
+///     to CPU until a real Metal sigmoid kernel lands.
+///   - `2` -> Gelu via `candle::Tensor::gelu(&x)` (tanh approximation,
+///     matches the CPU/CUDA formula)
+///   - `3` -> Tanh via `candle::Tensor::tanh(&x)`
+///   - `4` -> Relu via `candle::Tensor::relu(&x)`
+///
+/// candle's pointwise unary ops go through the production Metal
+/// shaders (`unary_*` kernels in `vendor/candle-metal-kernels`). Covers
+/// F32 / BF16 / F16.
+///
+/// # Apple Silicon UMA zero-copy invariant
+///
+/// Same pattern as `metal_softmax_last_axis` and friends — wrap kt
+/// MetalStorage buffer in a candle MetalStorage (shared MTLBuffer),
+/// dispatch, then `retain`-clone the candle output buffer back into a
+/// fresh kt MetalStorage.
+///
+/// # Requirements
+///
+/// - `x` must be backed by [`MetalStorage`]
+/// - `x.dtype()` in {F32, BF16, F16}
+/// - `x.is_contiguous()`
+/// - `kind_tag` in {0, 2, 3, 4} (Sigmoid=1 is rejected pending kernel)
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on unsupported kind, dtype, non-contiguous
+/// layout, non-Metal storage, or candle kernel error.
+pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate::Tensor> {
+    use candle_core::{
+        op::BackpropOp, DType as CandleDType, MetalStorage as CandleMetalStorage,
+        Storage as CandleStorage, Tensor as CandleTensor,
+    };
+
+    if !matches!(kind_tag, 0 | 2 | 3 | 4) {
+        return Err(Error::Msg(format!(
+            "metal_activation_unary: kind_tag {kind_tag} not supported on Metal today \
+             (0=Silu, 2=Gelu, 3=Tanh, 4=Relu; Sigmoid=1 has no candle UnaryOp — \
+             falls through to CPU until a Metal sigmoid kernel lands)"
+        )));
+    }
+    let dtype = x.dtype();
+    let candle_dtype = match dtype {
+        DType::F32 => CandleDType::F32,
+        DType::BF16 => CandleDType::BF16,
+        DType::F16 => CandleDType::F16,
+        other => {
+            return Err(Error::Msg(format!(
+                "metal_activation_unary: unsupported dtype {other} (F32/BF16/F16 only)"
+            )));
+        }
+    };
+    if !x.is_contiguous() {
+        return Err(Error::Msg(
+            "metal_activation_unary: input must be contiguous".to_string(),
+        ));
+    }
+
+    let kt_metal = x
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_activation_unary: input must be Metal-backed".to_string())
+        })?;
+
+    let candle_device_arc = kt_metal.candle_device().clone();
+    let device_index = match kt_metal.device() {
+        Device::Metal(i) => i,
+        _ => unreachable!("MetalStorage::device() returns Device::Metal"),
+    };
+    let shape: Vec<usize> = x.shape().to_vec();
+    let element_count: usize = x.element_count();
+
+    // ---- Wrap kt buffer in candle MetalStorage ----
+    let candle_in_storage = CandleMetalStorage::new(
+        Arc::clone(kt_metal.buffer()),
+        (*candle_device_arc).clone(),
+        element_count,
+        candle_dtype,
+    );
+    let candle_in: CandleTensor = CandleTensor::from_storage(
+        CandleStorage::Metal(candle_in_storage),
+        shape.as_slice(),
+        BackpropOp::none(),
+        false,
+    );
+
+    // ---- Dispatch through candle's Metal unary kernel ----
+    let candle_out: CandleTensor = match kind_tag {
+        0 => candle_in.silu(),
+        2 => candle_in.gelu(),
+        3 => candle_in.tanh(),
+        4 => candle_in.relu(),
+        _ => unreachable!("gated above"),
+    }
+    .map_err(|e| {
+        Error::Msg(format!(
+            "metal_activation_unary: candle unary op (kind={kind_tag}) failed: {e}"
+        ))
+    })?;
+
+    let candle_out = candle_out.contiguous().map_err(|e| {
+        Error::Msg(format!(
+            "metal_activation_unary: candle contiguous failed: {e}"
+        ))
+    })?;
+
+    let (out_storage_guard, _out_layout) = candle_out.storage_and_layout();
+    let candle_out_metal = match &*out_storage_guard {
+        CandleStorage::Metal(m) => m,
+        _ => {
+            return Err(Error::Msg(
+                "metal_activation_unary: candle returned non-Metal storage \
+                 (unexpected — unary ops preserve device)"
+                    .to_string(),
+            ));
+        }
+    };
+    let out_buffer_arc: Arc<candle_metal_kernels::metal::Buffer> =
+        Arc::new(candle_out_metal.buffer().to_owned());
+
+    let out_storage =
+        MetalStorage::from_buffer(candle_device_arc, device_index, dtype, out_buffer_arc)?;
+    let out_storage_arc: crate::Storage = Arc::new(out_storage);
+
+    drop(out_storage_guard);
+
+    crate::Tensor::from_parts(
+        out_storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
