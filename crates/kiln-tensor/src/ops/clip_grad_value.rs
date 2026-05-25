@@ -18,6 +18,14 @@ fn clip_one(g: &Tensor, c: f32) -> Result<Tensor> {
     if !g.is_contiguous() {
         bail!("clip_grad_value: input must be contiguous");
     }
+
+    // CUDA fast path: route through cuda_clamp_pow with kind=0 (clamp)
+    // and symmetric bounds [-c, c].
+    #[cfg(feature = "cuda")]
+    if matches!(g.device(), crate::Device::Cuda(_)) {
+        return crate::cuda_clamp_pow(g, 0, -c, c);
+    }
+
     let n = g.element_count();
     let cpu = g
         .storage()
