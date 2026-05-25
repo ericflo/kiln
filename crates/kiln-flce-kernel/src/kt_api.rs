@@ -16,22 +16,27 @@
 //! integrations migrate), the kt-typed entry points + provider trait
 //! below are the public surface they will plug into.
 //!
-//! Until then this module ships only the parallel **trait** + **error
-//! type**. Callers that already have a `kiln_tensor::Tensor`-typed
-//! matmul implementation (the kiln-vulkan-kernel head-chunk path will,
-//! per #1082 line 614) can implement [`FlceMatmulProviderKt`] today;
-//! the candle-typed [`crate::FlceMatmulProvider`] stays in place for
-//! the existing call sites and continues to compile until the full
-//! Phase B rewrite lands.
+//! Until then this module ships:
 //!
-//! # Design — why no `KtTensor` entry point yet
+//! 1. [`FlceMatmulProviderKt`] — kt-typed parallel of the candle
+//!    [`crate::FlceMatmulProvider`] trait.
+//! 2. [`FlceError`] — kt-typed error, independent of candle / anyhow.
+//! 3. [`fused_linear_cross_entropy_phase_b_kt`] — kt-typed entry
+//!    point **stub** that validates shapes and returns
+//!    [`FlceError::NotYetImplemented`]. The signature is stable; the
+//!    body is filled in by the Phase B kt-rewrite. Documenting the
+//!    name now lets downstream call sites be ported in advance behind
+//!    a feature flag.
+//!
+//! # Design — why a stub entry point
 //!
 //! `fused_linear_cross_entropy_phase_b_kt` would need a candle-free
-//! re-implementation of the chunked log-sum-exp reduction. That is the
-//! bulk of the Phase B rewrite (~900 lines including the `CustomOp1`
-//! adapter) and is intentionally out of scope here; this PR ships the
-//! migration scaffolding so the rewrite can land incrementally without
-//! breaking the candle-typed path.
+//! re-implementation of the chunked log-sum-exp reduction. That is
+//! the bulk of the Phase B rewrite (~900 lines including the
+//! `CustomOp1` adapter) and is intentionally out of scope here. By
+//! shipping the stub function, the next sub-agent doing the kt-rewrite
+//! only needs to fill in the body — the public signature is already
+//! frozen, doc-commented, and unit-tested (shape validation only).
 
 use std::sync::Arc;
 
@@ -44,13 +49,24 @@ use kiln_tensor::Tensor as KtTensor;
 /// can delete candle without rewriting any kt-typed call site.
 #[derive(Debug)]
 pub enum FlceError {
+    /// Generic message error for shape / dtype validation failures
+    /// in the kt-typed entry points.
     Msg(String),
+    /// The kt-typed entry point exists but its body has not yet been
+    /// implemented. Returned today by
+    /// [`fused_linear_cross_entropy_phase_b_kt`]; will be removed once
+    /// the kt-typed Phase B forward/backward land.
+    NotYetImplemented(&'static str),
 }
 
 impl std::fmt::Display for FlceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FlceError::Msg(m) => f.write_str(m),
+            FlceError::NotYetImplemented(name) => write!(
+                f,
+                "kt-flce: {name} is not yet implemented; use the candle-typed entry point",
+            ),
         }
     }
 }
@@ -108,13 +124,87 @@ pub trait FlceMatmulProviderKt: Send + Sync + std::fmt::Debug {
 /// points (analogous to [`crate::FlceProvider`]).
 pub type FlceProviderKt = Arc<dyn FlceMatmulProviderKt>;
 
+/// kt-typed entry point for FLCE Phase B — **stub**.
+///
+/// Validates `hidden` and `head_t` shapes against the production
+/// FLCE contract and returns [`FlceError::NotYetImplemented`]. When
+/// the Phase B kt-rewrite lands, this function's body will be filled
+/// in (re-implementing the chunked log-sum-exp reduction over
+/// `kiln_tensor::Tensor` ops) without breaking the signature.
+///
+/// # Shape contract (matches the candle-typed entry point)
+///
+/// - `hidden`: `[1, seq_len, hidden_size]` post-final-RMSNorm
+///   hidden states.
+/// - `head_t`: `[hidden_size, vocab_size]` transposed lm_head weight
+///   (matches kiln's `embed_tokens_t` layout — i.e. `W.T` where `W`
+///   is the standard `[vocab_size, hidden_size]` lm_head).
+/// - `input_ids`: token ids; `input_ids[1..]` are next-token targets
+///   for `logits[..seq_len-1]`.
+/// - `label_mask`: `[seq_len]` booleans; only positions where
+///   `label_mask[i+1]` is true contribute to the loss.
+/// - `chunk_size`: chunk size along the vocab dim.
+///
+/// # Returns
+///
+/// Today: always returns [`FlceError::NotYetImplemented`] after
+/// passing shape validation. After the kt-rewrite: a scalar F32
+/// [`KtTensor`] holding the mean cross-entropy over active positions.
+pub fn fused_linear_cross_entropy_phase_b_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    chunk_size: usize,
+) -> Result<KtTensor, FlceError> {
+    let seq_len = input_ids.len();
+    if label_mask.len() != seq_len {
+        return Err(FlceError::msg(format!(
+            "kt-flce: label_mask length {} does not match input_ids length {}",
+            label_mask.len(),
+            seq_len,
+        )));
+    }
+    if chunk_size == 0 {
+        return Err(FlceError::msg("kt-flce: chunk_size must be > 0"));
+    }
+    let hidden_dims = hidden.shape();
+    if hidden_dims.len() != 3 {
+        return Err(FlceError::msg(format!(
+            "kt-flce: hidden must be 3-D [1, seq_len, hidden_size]; got {hidden_dims:?}",
+        )));
+    }
+    if hidden_dims[0] != 1 {
+        return Err(FlceError::msg(format!(
+            "kt-flce: hidden batch dim must be 1; got {hidden_dims:?}",
+        )));
+    }
+    let head_dims = head_t.shape();
+    if head_dims.len() != 2 {
+        return Err(FlceError::msg(format!(
+            "kt-flce: head_t must be 2-D [hidden_size, vocab_size]; got {head_dims:?}",
+        )));
+    }
+    if hidden_dims[2] != head_dims[0] {
+        return Err(FlceError::msg(format!(
+            "kt-flce: hidden hidden_size {} != head_t hidden_size {}",
+            hidden_dims[2], head_dims[0],
+        )));
+    }
+    // All shape preconditions pass; the body is filled in by the
+    // Phase B kt-rewrite.
+    Err(FlceError::NotYetImplemented(
+        "fused_linear_cross_entropy_phase_b_kt",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiln_tensor::{DType as KtDType, Tensor as KtTensorCtor};
 
     /// Smoke test: the kt-typed trait + error type compile and are
-    /// Send + Sync. No behavioral assertions — there is no kt-typed
-    /// entry point to exercise yet (see module docs).
+    /// Send + Sync.
     #[derive(Debug)]
     struct DeclineAllProvider;
 
@@ -148,5 +238,88 @@ mod tests {
         assert_eq!(format!("{e}"), "test message");
         // std::error::Error impl is reachable.
         let _: &dyn std::error::Error = &e;
+    }
+
+    #[test]
+    fn flce_error_not_yet_implemented_displays_name() {
+        let e = FlceError::NotYetImplemented("foo_kt");
+        let s = format!("{e}");
+        assert!(s.contains("foo_kt"), "got: {s}");
+        assert!(s.contains("not yet implemented"), "got: {s}");
+    }
+
+    fn dummy_hidden(seq_len: usize, hidden_size: usize) -> KtTensor {
+        let n = seq_len * hidden_size;
+        let data = vec![0.0f32; n];
+        KtTensorCtor::from_vec(data, vec![1, seq_len, hidden_size]).expect("alloc hidden")
+    }
+
+    fn dummy_head_t(hidden_size: usize, vocab_size: usize) -> KtTensor {
+        let n = hidden_size * vocab_size;
+        let data = vec![0.0f32; n];
+        KtTensorCtor::from_vec(data, vec![hidden_size, vocab_size]).expect("alloc head")
+    }
+
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_kt_validates_chunk_size_zero() {
+        let h = dummy_hidden(4, 8);
+        let w = dummy_head_t(8, 16);
+        let ids = vec![0u32; 4];
+        let mask = vec![true; 4];
+        let err = fused_linear_cross_entropy_phase_b_kt(&h, &w, &ids, &mask, 0).unwrap_err();
+        assert!(matches!(err, FlceError::Msg(_)));
+        let s = format!("{err}");
+        assert!(s.contains("chunk_size must be > 0"), "got: {s}");
+        // Avoid an unused-import warning on DType when no other test
+        // references it.
+        let _: KtDType = KtDType::F32;
+    }
+
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_kt_validates_mask_length() {
+        let h = dummy_hidden(4, 8);
+        let w = dummy_head_t(8, 16);
+        let ids = vec![0u32; 4];
+        let mask = vec![true; 3]; // wrong length
+        let err = fused_linear_cross_entropy_phase_b_kt(&h, &w, &ids, &mask, 4).unwrap_err();
+        let s = format!("{err}");
+        assert!(s.contains("label_mask length"), "got: {s}");
+    }
+
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_kt_validates_hidden_rank() {
+        // 2-D hidden — must be 3-D.
+        let h = KtTensor::from_vec(vec![0.0f32; 16], vec![4, 4]).expect("alloc h");
+        let w = dummy_head_t(4, 8);
+        let ids = vec![0u32; 4];
+        let mask = vec![true; 4];
+        let err = fused_linear_cross_entropy_phase_b_kt(&h, &w, &ids, &mask, 4).unwrap_err();
+        let s = format!("{err}");
+        assert!(s.contains("hidden must be 3-D"), "got: {s}");
+    }
+
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_kt_validates_hidden_vs_head_hidden_size() {
+        // hidden_size=8 but head_t hidden_size=4 — mismatch.
+        let h = dummy_hidden(4, 8);
+        let w = dummy_head_t(4, 16);
+        let ids = vec![0u32; 4];
+        let mask = vec![true; 4];
+        let err = fused_linear_cross_entropy_phase_b_kt(&h, &w, &ids, &mask, 4).unwrap_err();
+        let s = format!("{err}");
+        assert!(s.contains("hidden hidden_size"), "got: {s}");
+    }
+
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_kt_stub_returns_not_yet_implemented_on_valid_shapes() {
+        let h = dummy_hidden(4, 8);
+        let w = dummy_head_t(8, 16);
+        let ids = vec![0u32; 4];
+        let mask = vec![true; 4];
+        let err = fused_linear_cross_entropy_phase_b_kt(&h, &w, &ids, &mask, 4).unwrap_err();
+        assert!(
+            matches!(err, FlceError::NotYetImplemented(_)),
+            "expected NotYetImplemented, got: {err}"
+        );
     }
 }

@@ -48,7 +48,9 @@ pub use phase_b::{
 };
 
 pub mod kt_api;
-pub use kt_api::{FlceError, FlceMatmulProviderKt, FlceProviderKt};
+pub use kt_api::{
+    FlceError, FlceMatmulProviderKt, FlceProviderKt, fused_linear_cross_entropy_phase_b_kt,
+};
 
 /// Optional matmul override hook for the FLCE chunked head pass.
 ///
