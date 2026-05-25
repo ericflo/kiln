@@ -26,6 +26,38 @@ pub fn next_cuda_train_op_id() -> u64 {
     NEXT_CUDA_TRAIN_OP_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Phase 7 opt-in (#1082): when `KILN_USE_KT_API_SGD_STEP=1` (or
+/// `KILN_USE_KT_API_ALL=1`) is set, route the optimizer SGD step
+/// dispatched from `CudaTrainTensor::sgd_step_inplace` through the
+/// kt-typed surface (`sgd_step_{f32,bf16}_kt`) instead of the
+/// candle-typed `kiln_rmsnorm_kernel::sgd_step_inplace`. Default
+/// off. Cached behind `OnceLock` to match other Phase 7 opt-in
+/// helpers (see `forward.rs::cuda_use_kt_api_*`). Same env-flag
+/// name as `CudaBackend::dispatch_sgd_step` for consistency.
+fn cuda_train_use_kt_api_sgd_step() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_API_SGD_STEP").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    })
+}
+
+/// Phase 7 opt-in (#1082): when `KILN_USE_KT_API_ADAMW_STEP=1` (or
+/// `KILN_USE_KT_API_ALL=1`) is set, route the optimizer AdamW step
+/// dispatched from `CudaTrainTensor::adamw_step_inplace` through the
+/// kt-typed surface (`adamw_step_{f32,bf16}_kt`) instead of the
+/// candle-typed `kiln_rmsnorm_kernel::adamw_step_inplace`. Default
+/// off.
+fn cuda_train_use_kt_api_adamw_step() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_API_ADAMW_STEP").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    })
+}
+
 /// Backward op interface for the future CUDA-native training graph.
 pub trait CudaBackwardOp: Send + Sync + std::fmt::Debug {
     fn op_name(&self) -> &'static str;
@@ -152,6 +184,29 @@ impl CudaTrainTensor {
             self.tensor.dtype(),
             grad.tensor.dtype()
         );
+        // Phase 7 opt-in (#1082): when `KILN_USE_KT_API_SGD_STEP=1`
+        // (or `KILN_USE_KT_API_ALL=1`) is set, route the kernel
+        // dispatch through the kt-typed surface. Bit-exact by
+        // construction — both candle and kt paths bottom out in the
+        // same `kiln_sgd_step_{f32,bf16}` FFI symbols; the in-place
+        // mutation surfaces in `self.tensor` via the zero-copy
+        // `kt_tensor_from_candle_cuda_borrow` adapter. Same opt-in
+        // flag as `CudaBackend::dispatch_sgd_step` for consistency
+        // across the two call sites.
+        if cuda_train_use_kt_api_sgd_step() {
+            kiln_nvtx::range!(c"kiln/cuda_train/sgd_step_kt");
+            let param_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&self.tensor)
+                .context("cuda_train sgd_step kt: borrow param -> kt")?;
+            let grad_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&grad.tensor)
+                .context("cuda_train sgd_step kt: borrow grad -> kt")?;
+            return match self.tensor.dtype() {
+                DType::F32 => kiln_rmsnorm_kernel::sgd_step_f32_kt(&param_kt, &grad_kt, lr)
+                    .map_err(|e| anyhow::anyhow!("cuda_train sgd_step_f32_kt: {e}")),
+                DType::BF16 => kiln_rmsnorm_kernel::sgd_step_bf16_kt(&param_kt, &grad_kt, lr)
+                    .map_err(|e| anyhow::anyhow!("cuda_train sgd_step_bf16_kt: {e}")),
+                other => anyhow::bail!("cuda_train sgd_step kt: unsupported dtype {other:?}"),
+            };
+        }
         kiln_rmsnorm_kernel::sgd_step_inplace(&self.tensor, &grad.tensor, lr)
             .context("CUDA training tensor SGD step")
     }
@@ -186,6 +241,62 @@ impl CudaTrainTensor {
                 self.tensor.dtype(),
                 tensor.dtype()
             );
+        }
+        // Phase 7 opt-in (#1082): when `KILN_USE_KT_API_ADAMW_STEP=1`
+        // (or `KILN_USE_KT_API_ALL=1`) is set, route the kernel
+        // dispatch through the kt-typed surface. Bit-exact by
+        // construction — both candle and kt paths bottom out in the
+        // same `kiln_adamw_step_{f32,bf16}` FFI symbols. The candle
+        // path computes bias-correction internally from `step`; the
+        // kt path takes pre-computed `bias_correction{1,2}` and we
+        // replicate the same `(1 - beta^step).max(1e-20)` formula
+        // here. Same opt-in flag as `CudaBackend::dispatch_adamw_step`.
+        if cuda_train_use_kt_api_adamw_step() {
+            if step == 0 {
+                anyhow::bail!("cuda_train adamw_step kt: step must be >= 1");
+            }
+            kiln_nvtx::range!(c"kiln/cuda_train/adamw_step_kt");
+            let bias_correction1 = (1.0f32 - beta1.powi(step as i32)).max(1e-20);
+            let bias_correction2 = (1.0f32 - beta2.powi(step as i32)).max(1e-20);
+            let param_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&self.tensor)
+                .context("cuda_train adamw_step kt: borrow param -> kt")?;
+            let grad_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(grad.as_tensor())
+                .context("cuda_train adamw_step kt: borrow grad -> kt")?;
+            let m1_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(first_moment.as_tensor())
+                .context("cuda_train adamw_step kt: borrow first_moment -> kt")?;
+            let m2_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(second_moment.as_tensor())
+                .context("cuda_train adamw_step kt: borrow second_moment -> kt")?;
+            return match self.tensor.dtype() {
+                DType::F32 => kiln_rmsnorm_kernel::adamw_step_f32_kt(
+                    &param_kt,
+                    &grad_kt,
+                    &m1_kt,
+                    &m2_kt,
+                    lr,
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                    bias_correction1,
+                    bias_correction2,
+                )
+                .map_err(|e| anyhow::anyhow!("cuda_train adamw_step_f32_kt: {e}")),
+                DType::BF16 => kiln_rmsnorm_kernel::adamw_step_bf16_kt(
+                    &param_kt,
+                    &grad_kt,
+                    &m1_kt,
+                    &m2_kt,
+                    lr,
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                    bias_correction1,
+                    bias_correction2,
+                )
+                .map_err(|e| anyhow::anyhow!("cuda_train adamw_step_bf16_kt: {e}")),
+                other => anyhow::bail!("cuda_train adamw_step kt: unsupported dtype {other:?}"),
+            };
         }
         kiln_rmsnorm_kernel::adamw_step_inplace(
             &self.tensor,
