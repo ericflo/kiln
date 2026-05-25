@@ -1439,7 +1439,7 @@ pub fn gdn_full_chunk_forward_multiblock_kt(
 /// Fused gated RMS-norm. Inputs:
 /// - `x`:      BF16 `[rows, hidden]` — input activations
 /// - `z`:      BF16 `[rows, hidden]` — gate
-/// - `weight`: F32  `[hidden]` — learned per-channel scale
+/// - `weight`: BF16 `[hidden]` — learned per-channel scale
 ///
 /// Returns BF16 `[rows, hidden]`. Computes
 /// `out = (x / rms(x)) * weight * silu(z)` in one pass.
@@ -1473,8 +1473,8 @@ pub fn gdn_gated_rms_norm_bf16_kt(
     let (x_st, _) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
     let z_ptr = kiln_kt_bridge::cuda_input_device_ptr(z, KtDType::BF16, "z")?;
     let (z_st, _) = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::F32, "weight")?;
-    let (w_st, _) = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
+    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::BF16, "weight")?;
+    let (w_st, _) = cuda_storage_and_byte_offset(weight, KtDType::BF16, "weight")?;
 
     let out = alloc_cuda_tensor(x_st, KtDType::BF16, vec![rows, hidden])?;
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
