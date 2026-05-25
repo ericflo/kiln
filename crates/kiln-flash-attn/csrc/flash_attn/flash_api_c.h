@@ -126,6 +126,23 @@ kiln_flash_status_t kiln_paged_kv_write_token_major_bf16(
     void *stream
 );
 
+// Batched variant: write  token rows into 
+// pools using a  u32 device tensor of per-row destination slots. The K/V
+// inputs are  contiguous bf16. One fused kernel
+// launch handles every row — no per-row host loop, no transient device tensors,
+// safe under CUDA graph capture/replay across different slot indices.
+kiln_flash_status_t kiln_paged_kv_write_token_major_bf16_batch_slot(
+    void *k_pool,
+    void *v_pool,
+    const void *k,
+    const void *v,
+    const unsigned int *slots,
+    int batch,
+    int num_kv_heads,
+    int head_dim,
+    void *stream
+);
+
 // Flash Attention Backward Pass
 //
 // All pointer arguments must be CUDA device pointers.
