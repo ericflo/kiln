@@ -1820,6 +1820,59 @@ pub(crate) fn try_kt_paged_kv_write_token_major_native_graph_slot(
         )
 }
 
+/// Phase 7 opt-in: route a `PagedKvCache::block_size()` accessor read
+/// through the kt twin `PagedKvCacheKt::block_size()` (#1082).
+///
+/// When `kt_cache` is `Some` and the per-site gate
+/// `KILN_USE_KT_PAGED_KV_BLOCK_SIZE` (or `KILN_USE_KT_PAGED_KV_CACHE`,
+/// or `KILN_USE_KT_API_ALL`) is on, this returns the kt cache's
+/// `block_size()` and panics if it disagrees with the candle value
+/// passed in. When the gate is off OR `kt_cache` is `None`, the
+/// candle value is returned unchanged — zero overhead, zero
+/// behavior change on the default path.
+///
+/// This is the read-side counterpart to
+/// [`try_kt_paged_kv_write_token_major_native_graph_slot`]. Accessors
+/// are migrated first because they don't touch device storage —
+/// any divergence between the candle and kt caches surfaces
+/// immediately at construction time (`try_kt_paged_kv_cache_new`
+/// is wired through with the same shape args as the candle path),
+/// so a wired accessor that returns `kt.block_size()` is bit-for-bit
+/// identical to the candle `paged_cache.block_size()` whenever the
+/// gate is on.
+///
+/// NVTX-ranged so the migration is visible in nsys traces — when
+/// the kt path is exercised it shows up as a thin slice between
+/// the preceding paged-decode setup and the writer.
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn try_kt_paged_kv_block_size(
+    candle_block_size: usize,
+    kt_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
+) -> usize {
+    let kt = match kt_cache {
+        Some(c) => c,
+        None => return candle_block_size,
+    };
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let gate_on = *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_PAGED_KV_BLOCK_SIZE").is_ok()
+            || std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    });
+    if !gate_on {
+        return candle_block_size;
+    }
+    kiln_nvtx::range!(c"kiln/paged_kv_kt/block_size");
+    let kt_block_size = kt.block_size();
+    assert_eq!(
+        kt_block_size, candle_block_size,
+        "try_kt_paged_kv_block_size: kt.block_size()={kt_block_size} \
+         disagrees with candle paged_cache.block_size()={candle_block_size}"
+    );
+    kt_block_size
+}
+
 /// Phase 7 opt-in: route the Vulkan `linear_prefill_apply` 2D matmul
 /// path through a kt-API equivalent of `kiln_tensor::cuda_matmul`.
 /// Default off; set `KILN_USE_KT_API_MATMUL=1` (or
@@ -18354,7 +18407,12 @@ fn gqa_attention_paged_with_rope_tables(
             && start_pos >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
             && backend.supports_paged_kv_head_major_read_append_token_major()
         {
-            contiguous_slot_run_start(block_table, paged_cache.block_size(), 0, start_pos)
+            contiguous_slot_run_start(
+                block_table,
+                try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache),
+                0,
+                start_pos,
+            )
                 .and_then(|start_slot| {
                     paged_cache
                         .pool_tensors(full_attn_layer_idx)
@@ -18386,7 +18444,12 @@ fn gqa_attention_paged_with_rope_tables(
             && backend.supports_paged_kv_head_major_read()
             && backend.supports_flash_attn_prefill_head_major()
         {
-            contiguous_slot_run_start(block_table, paged_cache.block_size(), 0, fast_read_len)
+            contiguous_slot_run_start(
+                block_table,
+                try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache),
+                0,
+                fast_read_len,
+            )
                 .and_then(|start_slot| {
                     paged_cache
                         .pool_tensors(full_attn_layer_idx)
