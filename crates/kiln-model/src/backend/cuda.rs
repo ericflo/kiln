@@ -707,6 +707,40 @@ impl BackendRuntime for CudaBackend {
                 g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
             )
         {
+            // Phase 7 opt-in (#1082): route through the kt-typed surface.
+            // 9 input tensors, all borrowed via the kt-bridge zero-copy
+            // adapter. State mutation surfaces through the caller's
+            // `&mut Tensor` via the shared buffer (conv1d pattern).
+            if self.cuda_use_kt_api_gdn {
+                kiln_nvtx::range!(c"kiln/gdn_full_chunk_forward_multiblock_kt");
+                let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
+                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock g → kt")?;
+                let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock v → kt")?;
+                let kkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(kkt)
+                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock kkt → kt")?;
+                let qkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(qkt)
+                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock qkt → kt")?;
+                let ks_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(ks_entry)
+                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock ks_entry → kt")?;
+                let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s)
+                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock q_s → kt")?;
+                let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
+                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock beta → kt")?;
+                let kt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_t)
+                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock k_t → kt")?;
+                let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
+                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock state → kt")?;
+                let out_kt = kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_kt(
+                    &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
+                    dv_tile,
+                )
+                .map_err(|e| anyhow::anyhow!("kt gdn_full_chunk_forward_multiblock: {e}"))?;
+                let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock out → candle")?;
+                CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(out));
+            }
             let out = kiln_gdn_kernel::gdn_full_chunk_forward_multiblock(
                 g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
             )
