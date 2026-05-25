@@ -1539,13 +1539,37 @@ impl BackendRuntime for CudaBackend {
             && dt_bias.dtype() == DType::BF16
         {
             kiln_nvtx::range!(c"kiln/gdn_gates_bf16_kt");
-            let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
+            // kt_tensor_from_candle_cuda_borrow requires contiguous inputs (see
+            // kiln-kt-bridge::lib.rs: "tensor must be contiguous"). At the
+            // bs>1 / prefill GDN call site, `a` and `b` arrive as
+            // `ab.narrow(2, .., nv)` views on a fused A/B in-proj output,
+            // which are non-contiguous on the last dim. The non-kt
+            // `gdn_gates` path handles this by computing a collapsed
+            // row-stride and falling through to `.contiguous()` on declined
+            // stride; the kt wire is strict, so we make each operand
+            // contiguous here. This is a no-op when the upstream tensor is
+            // already contiguous (the seq_len==1 decode case). a_log and
+            // dt_bias are weight tensors and are already contiguous; the
+            // calls are kept for symmetry / future-proofing.
+            let a_c = a
+                .contiguous()
+                .with_context(|| "kt-adapter: gdn_gates a contiguous failed")?;
+            let b_c = b
+                .contiguous()
+                .with_context(|| "kt-adapter: gdn_gates b contiguous failed")?;
+            let alog_c = a_log
+                .contiguous()
+                .with_context(|| "kt-adapter: gdn_gates a_log contiguous failed")?;
+            let dtb_c = dt_bias
+                .contiguous()
+                .with_context(|| "kt-adapter: gdn_gates dt_bias contiguous failed")?;
+            let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_c)
                 .with_context(|| "kt-adapter: gdn_gates a → kt failed")?;
-            let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
+            let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_c)
                 .with_context(|| "kt-adapter: gdn_gates b → kt failed")?;
-            let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_log)
+            let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&alog_c)
                 .with_context(|| "kt-adapter: gdn_gates a_log → kt failed")?;
-            let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(dt_bias)
+            let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
                 .with_context(|| "kt-adapter: gdn_gates dt_bias → kt failed")?;
             let (beta_kt, g_kt) =
                 kiln_gdn_kernel::gdn_gates_bf16_kt(&a_kt, &b_kt, &alog_kt, &dtb_kt)
@@ -2248,6 +2272,114 @@ mod tests {
         )?;
 
         assert_eq!(routed.to_vec2::<f32>()?, expected.to_vec2::<f32>()?);
+        Ok(())
+    }
+
+    /// Regression for #1082: the kt-typed `gdn_gates` wire requires
+    /// contiguous inputs (kt_tensor_from_candle_cuda_borrow). At the
+    /// fused-AB in-proj path, `a` and `b` arrive as `ab.narrow(2, 0, nv)`
+    /// / `ab.narrow(2, nv, nv)` views, which are non-contiguous on the last
+    /// dim. The candle fallback `gdn_gates` accepted them via an internal
+    /// `.contiguous()` fallback; the kt wire used to fail with
+    /// "kt-bridge: kt_tensor_from_candle_cuda_borrow: tensor must be
+    /// contiguous".
+    ///
+    /// This test confirms the contiguous precondition violation is fixed:
+    /// the kt path no longer errors at the bridge borrow step for
+    /// narrowed views. The downstream `kiln_gdn_gates_bf16` FFI may
+    /// still surface the documented #1066-class status=500 corruption
+    /// failure (a separate, pre-existing issue, see the
+    /// `bench-results/cuda-graph-status.md` "blocker #2" section), so a
+    /// status=500 here is tolerated as not-a-regression for the scope
+    /// of #1082's contiguous fix. What MUST NOT appear is "tensor must
+    /// be contiguous".
+    #[test]
+    fn cuda_gdn_gates_kt_accepts_narrowed_ab_views() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping cuda_gdn_gates_kt_accepts_narrowed_ab_views: {err}"
+                );
+                return Ok(());
+            }
+        };
+        let mut backend = CudaBackend::new(device.clone());
+        backend.cuda_use_kt_api_gdn = true;
+        backend.gdn_gates_enabled = true;
+        let nv = 32usize;
+        let batch = 2usize;
+        let seq_len = 5usize;
+        let n = batch * seq_len * nv * 2;
+        let ab_data: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+        let ab = Tensor::from_slice(&ab_data, (batch, seq_len, nv * 2), &device)?
+            .to_dtype(DType::BF16)?;
+        // Non-contiguous narrowed views on the last dim — the exact
+        // shape the production fused-AB in-proj path produces.
+        let a = ab.narrow(2, 0, nv)?;
+        let b = ab.narrow(2, nv, nv)?;
+        assert!(!a.is_contiguous(), "narrowed `a` should be non-contiguous");
+        assert!(!b.is_contiguous(), "narrowed `b` should be non-contiguous");
+        let a_log = Tensor::from_slice(
+            &(0..nv).map(|i| (i as f32) * 0.04 - 0.5).collect::<Vec<_>>(),
+            (nv,),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let dt_bias = Tensor::from_slice(
+            &(0..nv).map(|i| (i as f32) * 0.03 + 0.1).collect::<Vec<_>>(),
+            (nv,),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+
+        // Pre-#1082 fix: this call failed at
+        // "kt-bridge: kt_tensor_from_candle_cuda_borrow: tensor must
+        // be contiguous". Post-fix, the call either succeeds OR hits
+        // the documented #1066-class FFI status=500 — both indicate
+        // the contiguous precondition is now satisfied at the bridge
+        // boundary.
+        match backend.gdn_gates(&a, &b, &a_log, &dt_bias) {
+            Ok(Some((beta_kt, g_kt))) => {
+                backend.cuda_use_kt_api_gdn = false;
+                let (beta_ref, g_ref) = backend
+                    .gdn_gates(&a.contiguous()?, &b.contiguous()?, &a_log, &dt_bias)?
+                    .expect("candle gdn_gates fallback should engage");
+                let beta_diff =
+                    (beta_kt.to_dtype(DType::F32)? - beta_ref.to_dtype(DType::F32)?)?
+                        .abs()?
+                        .flatten_all()?
+                        .max(0)?
+                        .to_scalar::<f32>()?;
+                let g_diff = (g_kt.to_dtype(DType::F32)? - g_ref.to_dtype(DType::F32)?)?
+                    .abs()?
+                    .flatten_all()?
+                    .max(0)?
+                    .to_scalar::<f32>()?;
+                assert_eq!(
+                    beta_diff, 0.0,
+                    "kt vs candle gdn_gates beta max_abs_diff={beta_diff:e}"
+                );
+                assert_eq!(
+                    g_diff, 0.0,
+                    "kt vs candle gdn_gates g max_abs_diff={g_diff:e}"
+                );
+            }
+            Ok(None) => {
+                panic!("kt-API gdn_gates declined dispatch unexpectedly");
+            }
+            Err(err) => {
+                let msg = format!("{err:?}");
+                assert!(
+                    !msg.contains("tensor must be contiguous"),
+                    "regression #1082 contiguous precondition still violated: {msg}"
+                );
+                eprintln!(
+                    "kt gdn_gates surfaced non-regression downstream error \
+                     (likely #1066-class FFI status=500): {msg}"
+                );
+            }
+        }
         Ok(())
     }
 }
