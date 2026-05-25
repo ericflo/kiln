@@ -3,9 +3,9 @@
 //! already battle-tested in the inference and SFT paths; here we
 //! verify VkTensor wiring against the analytic Qwen3.5 RMSNorm
 //! definition + numeric finite-difference for backward).
+//! (candle-free; #1082)
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
 use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::elementwise::vk_mul;
@@ -22,27 +22,15 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 }
 
 fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    VkTensor::from_candle(&t, Arc::clone(dev))
+    VkTensor::from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn upload_param_f32(
     dev: &Arc<VulkanDevice>,
     data: &[f32],
     shape: &[usize],
-) -> Result<(candle_core::Var, VkTensor)> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    let var = candle_core::Var::from_tensor(&t)?;
-    let vk = VkTensor::from_candle(&t, Arc::clone(dev))?;
-    let pid = var.id();
-    let param = VkTensor::parameter(
-        Arc::clone(vk.buffer()),
-        vk.shape().to_vec(),
-        vk.dtype(),
-        Arc::clone(vk.device()),
-        pid,
-    );
-    Ok((var, param))
+) -> Result<VkTensor> {
+    VkTensor::parameter_from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn max_abs_diff(got: &[f32], expected: &[f32]) -> f32 {
@@ -109,7 +97,7 @@ fn vk_rmsnorm_backward_dx_finite_diff() -> Result<()> {
         .collect();
     let eps = 1e-5_f32;
 
-    let (_x_var, x_param) = upload_param_f32(&dev, &x_data, &[rows, hidden])?;
+    let x_param = upload_param_f32(&dev, &x_data, &[rows, hidden])?;
     let w = upload_f32(&dev, &w_data, &[hidden])?;
     let y = vk_rmsnorm(&x_param, &w, eps)?;
     let sq = vk_mul(&y, &y)?;
