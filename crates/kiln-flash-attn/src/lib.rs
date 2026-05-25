@@ -17,8 +17,8 @@ use half::bf16;
 mod kt_api;
 pub use kt_api::{
     flash_attn_bwd_kt, flash_attn_fwd_kt, flash_attn_paged_decode_dyn_seqlen_kt,
-    flash_attn_paged_decode_kt, paged_kv_write_token_major_bf16_kt,
-    paged_kv_write_token_major_bf16_slot_kt, FlashAttnError,
+    flash_attn_paged_decode_kt, paged_kv_write_token_major_bf16_batch_slot_kt,
+    paged_kv_write_token_major_bf16_kt, paged_kv_write_token_major_bf16_slot_kt, FlashAttnError,
 };
 
 // FFI declarations matching flash_api_c.h

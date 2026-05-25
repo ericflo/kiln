@@ -26,7 +26,8 @@ use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 use crate::{
     kiln_flash_attn_bwd, kiln_flash_attn_fwd, kiln_flash_attn_fwd_paged_decode,
     kiln_flash_attn_fwd_paged_decode_dyn_seqlen, kiln_paged_kv_write_token_major_bf16,
-    kiln_paged_kv_write_token_major_bf16_slot, round_up,
+    kiln_paged_kv_write_token_major_bf16_batch_slot, kiln_paged_kv_write_token_major_bf16_slot,
+    round_up,
 };
 
 /// Error type for the kiln-tensor-typed flash-attn surface. Stays
@@ -541,6 +542,107 @@ pub fn paged_kv_write_token_major_bf16_slot_kt(
     if status != 0 {
         return Err(FlashAttnError::Msg(format!(
             "kt-flash-attn: kv_write_slot FFI returned {status}"
+        )));
+    }
+    Ok(())
+}
+
+// ============================================================================
+// paged_kv_write_token_major_bf16_batch_slot_kt
+// ============================================================================
+
+/// `paged_kv_write_token_major_bf16_batch_slot` (batched device-slot variant)
+/// over kiln-tensor.
+///
+/// Mirrors [`crate::paged_kv_write_token_major_bf16_batch_slot`] one-for-one:
+/// same FFI symbol (`kiln_paged_kv_write_token_major_bf16_batch_slot`), same
+/// shape contract. Bottoms out in the same kernel; only the Rust shell types
+/// differ.
+///
+/// Shapes:
+/// - `k_pool`, `v_pool`: `[total_slots, num_kv_heads, head_dim]` BF16
+/// - `k`, `v`: contiguous BF16 with `element_count == batch * num_kv_heads * head_dim`
+/// - `slots`: U32 `[batch]` device tensor (one slot index per row)
+///
+/// The candle version calls `.contiguous()` on k/v/slots internally. The
+/// kt path requires the caller to pass contiguous storage (validated by
+/// `cuda_input_device_ptr`), matching the convention of the other
+/// kt-paged_kv_write entry points.
+pub fn paged_kv_write_token_major_bf16_batch_slot_kt(
+    k_pool: &KtTensor,
+    v_pool: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    slots: &KtTensor,
+) -> Result<(), FlashAttnError> {
+    let kp_shape = k_pool.shape();
+    if kp_shape.len() != 3 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: kv_write_batch_slot k_pool must be rank-3, got {kp_shape:?}"
+        )));
+    }
+    let (_, num_kv_heads, head_dim) = (kp_shape[0], kp_shape[1], kp_shape[2]);
+    if v_pool.shape() != kp_shape {
+        return Err(FlashAttnError::Msg(
+            "kt-flash-attn: kv_write_batch_slot k/v pool mismatch".to_string(),
+        ));
+    }
+    if slots.dtype() != KtDType::U32 || slots.shape().len() != 1 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: kv_write_batch_slot slots must be U32 rank-1, got {:?} {:?}",
+            slots.dtype(),
+            slots.shape()
+        )));
+    }
+    let batch = slots.shape()[0];
+    if batch == 0 {
+        return Err(FlashAttnError::Msg(
+            "kt-flash-attn: kv_write_batch_slot requires non-empty batch".to_string(),
+        ));
+    }
+    let expected_per_row = num_kv_heads * head_dim;
+    let expected_total = batch * expected_per_row;
+    if k.element_count() != expected_total || v.element_count() != expected_total {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: kv_write_batch_slot expects batch*({num_kv_heads}*{head_dim})={expected_total} elements per K/V, got k={} v={}",
+            k.element_count(),
+            v.element_count()
+        )));
+    }
+    let batch_i32 = i32::try_from(batch)
+        .map_err(|_| FlashAttnError::Msg(format!("batch {batch} > i32")))?;
+    let num_kv_heads_i32 = i32::try_from(num_kv_heads)
+        .map_err(|_| FlashAttnError::Msg(format!("num_kv_heads {num_kv_heads} > i32")))?;
+    let head_dim_i32 = i32::try_from(head_dim)
+        .map_err(|_| FlashAttnError::Msg(format!("head_dim {head_dim} > i32")))?;
+
+    // Owner-agnostic input pointers (Phase 7 v2). k_pool/v_pool are
+    // written in place; caller convention: pass Owned for the pools.
+    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+    let kp_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
+    let vp_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
+    let sl_ptr = kiln_kt_bridge::cuda_input_device_ptr(slots, KtDType::U32, "slots")?;
+    let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+
+    let stream = k_st.candle_device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let status = unsafe {
+        kiln_paged_kv_write_token_major_bf16_batch_slot(
+            kp_ptr as *mut _,
+            vp_ptr as *mut _,
+            k_ptr as *const _,
+            v_ptr as *const _,
+            sl_ptr as *const u32,
+            batch_i32,
+            num_kv_heads_i32,
+            head_dim_i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: kv_write_batch_slot FFI returned {status}"
         )));
     }
     Ok(())
