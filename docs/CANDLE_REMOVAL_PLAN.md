@@ -136,7 +136,7 @@ sed -i "/candle-core.*path.*vendor/d" Cargo.toml
   Status by crate:
     - kiln-rmsnorm-kernel: 7 production `_kt` callers in forward.rs ✓
     - kiln-conv1d-kernel: 2/2 kt_api functions wired in CudaBackend ✓
-    - kiln-marlin-gemm: 0/1 — sub-agent in flight as of 2026-05-25
+    - kiln-marlin-gemm: 1/1 kt_api function wired in marlin_proj::matmul_bf16 ✓ (`8b415107` + `668b0847` bridge extension for I32→U32)
     - kiln-flash-attn: 0/5 — pending
     - kiln-gdn-kernel: 0/3 — pending
     - kiln-opd-loss-kernel: separate phase (full rewrite for Phase B)
