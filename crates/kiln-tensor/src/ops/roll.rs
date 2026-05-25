@@ -38,6 +38,39 @@ pub fn roll(x: &Tensor, shift: i64, axis: usize) -> Result<Tensor> {
         return x.reshape(shape);
     }
 
+    // CUDA D2H fast path (#1082): roll is a structured row-block copy
+    // (each axis-position writes one inner-block slab into a shifted
+    // destination index). There is no shared "cyclic shift" CUDA
+    // kernel today, so the public API simply needs to accept
+    // CUDA-resident inputs instead of bailing with 'storage must be
+    // CpuStorage'. Round-trip via cuda_to_host_copy -> CPU loop ->
+    // host_to_cuda_copy so the result stays on the same CUDA device
+    // as the input. A native kernel (cudaMemcpyAsync split into two
+    // chunks per slab) is feasible follow-up work.
+    #[cfg(feature = "cuda")]
+    if let crate::Device::Cuda(device_index) = x.device() {
+        let host = crate::cuda_to_host_copy(x)?;
+        let cpu_out = roll_cpu(&host, s, axis)?;
+        let cuda_storage = x
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::CudaStorage>()
+            .ok_or_else(|| {
+                crate::Error::from_str(
+                    "roll: input claims CUDA device but storage is not CudaStorage",
+                )
+            })?;
+        let candle_device = cuda_storage.candle_device().clone();
+        return crate::host_to_cuda_copy(&cpu_out, candle_device, device_index);
+    }
+
+    roll_cpu(x, s, axis)
+}
+
+fn roll_cpu(x: &Tensor, s: usize, axis: usize) -> Result<Tensor> {
+    let dtype = x.dtype();
+    let shape: Vec<usize> = x.shape().to_vec();
+    let axis_len = shape[axis];
     let per = dtype.size_in_bytes();
     let outer: usize = shape[..axis].iter().product::<usize>().max(1);
     let inner: usize = shape[axis + 1..].iter().product::<usize>().max(1);
