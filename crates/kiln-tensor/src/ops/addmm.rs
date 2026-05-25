@@ -38,6 +38,28 @@ pub fn addmm(c: &Tensor, a: &Tensor, b: &Tensor, alpha: f32, beta: f32) -> Resul
         );
     }
 
+    // CUDA fused fast path: when alpha == 1.0, beta == 1.0, c is rank-1 [N],
+    // and all inputs are CUDA F32/BF16/F16, route through cuda_matmul_with_bias
+    // (cublasLt Bias epilogue) — saves one kernel launch + one pass over the
+    // output vs the matmul + broadcast_add decomposition.
+    #[cfg(feature = "cuda")]
+    if (alpha - 1.0).abs() < f32::EPSILON
+        && (beta - 1.0).abs() < f32::EPSILON
+        && c.rank() == 1
+        && c.shape()[0] == n
+        && matches!(a.device(), crate::Device::Cuda(_))
+        && matches!(b.device(), crate::Device::Cuda(_))
+        && matches!(c.device(), crate::Device::Cuda(_))
+        && matches!(a.dtype(), crate::DType::F32 | crate::DType::BF16 | crate::DType::F16)
+        && a.dtype() == b.dtype()
+        && a.dtype() == c.dtype()
+        && a.is_contiguous()
+        && b.is_contiguous()
+        && c.is_contiguous()
+    {
+        return crate::cuda_matmul_with_bias(a, b, c);
+    }
+
     // Compute the product first.
     let ab = matmul(a, b)?;
     let ab_scaled = if (alpha - 1.0).abs() < f32::EPSILON {
