@@ -377,6 +377,185 @@ pub fn vulkan_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     )
 }
 
+// ----------------------------------------------------------------------
+// vulkan_argmax_last_axis — Phase 4 Vulkan substrate op (#1082)
+// ----------------------------------------------------------------------
+
+/// Vulkan argmax over the trailing axis. Mirrors the role of
+/// [`crate::cuda_argmax_last_axis`] for the Vulkan backend.
+///
+/// Operates on a contiguous `[..., D]` Vulkan-backed tensor of dtype
+/// F32 / BF16 / F16 and produces a fresh contiguous I64-typed
+/// Vulkan-backed tensor of shape `[...]` (trailing axis dropped).
+/// Tie-break is lowest-index-wins, matching the CPU and CUDA paths.
+///
+/// # Implementation: D2H + CPU compute + H2D bridge
+///
+/// `kiln-vulkan-kernel` does not currently expose a generic
+/// `argmax_last_dim` SPIR-V shader (the `linear_decode_argmax_*`
+/// family is the fused matmul-then-argmax greedy decoder, not a
+/// drop-in reduction kernel). Until that shader lands, this wrapper
+/// ships the same D2H-read + CPU-compute + H2D-upload bridge used by
+/// [`vulkan_softmax_last_axis`]'s pre-kernel staging path — the
+/// storage is GPU-resident on both sides of the call, but the
+/// reduction itself runs on the host.
+///
+/// This is functionally identical to the `Ok(None)` fallback (the
+/// dispatcher would route to CPU) but keeps the storage round-trip
+/// fully visible at the dispatch site instead of silently dropping
+/// off the Vulkan path mid-graph. Once a real SPIR-V argmax kernel
+/// lands in `kiln_vulkan_kernel::vk_ops::reduce` (or a new
+/// `vk_ops::argmax` module), swap the host-side scan below for a
+/// `dispatch_simple(...)` call — the surrounding D2H/H2D scaffolding
+/// can stay or shrink to a zero-copy bridge per the softmax wrapper's
+/// rustdoc.
+///
+/// # Performance follow-up (#1082)
+///
+/// See [`vulkan_softmax_last_axis`] for the three zero-copy bridges
+/// proposed for the broader kt <-> kiln-vulkan-kernel seam. Applying
+/// any of them here removes the round-trip; replacing the inner CPU
+/// scan with a SPIR-V dispatch removes the host compute.
+///
+/// # Requirements
+///
+/// - `x` must be backed by [`VulkanStorage`]
+/// - `x.dtype()` must be `F32`, `BF16`, or `F16`
+/// - `x.rank() >= 1`
+/// - `x.is_contiguous()` must hold
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] if the storage isn't `VulkanStorage`, the
+/// dtype is unsupported, the layout is non-contiguous, the rank is 0,
+/// or the underlying buffer transfer fails.
+pub fn vulkan_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
+    // ---- Validate kt-side preconditions ----
+    let dtype = x.dtype();
+    if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+        return Err(Error::Msg(format!(
+            "vulkan_argmax_last_axis: unsupported dtype {dtype} (F32/BF16/F16 only)"
+        )));
+    }
+    if x.rank() == 0 {
+        return Err(Error::Msg(
+            "vulkan_argmax_last_axis: input must have rank >= 1".to_string(),
+        ));
+    }
+    if !x.is_contiguous() {
+        return Err(Error::Msg(
+            "vulkan_argmax_last_axis: input must be contiguous".to_string(),
+        ));
+    }
+
+    let kt_vk = x
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| {
+            Error::Msg("vulkan_argmax_last_axis: input must be Vulkan-backed".to_string())
+        })?;
+
+    let vulkan_device = Arc::clone(kt_vk.vulkan_device());
+    let device_index = match kt_vk.device() {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+
+    let shape: Vec<usize> = x.shape().to_vec();
+    let hidden = *shape.last().unwrap();
+    let n_rows: usize = shape[..shape.len() - 1].iter().product::<usize>().max(1);
+
+    // ---- D2H: read kt buffer back to host bytes ----
+    let in_bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        kt_vk.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_argmax_last_axis: D2H read_back of input failed: {e}"
+        ))
+    })?;
+
+    // ---- Host-side argmax over each row (lowest-index tie-break) ----
+    let mut out_indices: Vec<i64> = Vec::with_capacity(n_rows);
+    for r in 0..n_rows {
+        let mut best_idx = 0usize;
+        let mut best_val = f32::NEG_INFINITY;
+        for i in 0..hidden {
+            let v = read_one_f32(dtype, &in_bytes, r * hidden + i);
+            if v > best_val {
+                best_val = v;
+                best_idx = i;
+            }
+            // Tie: keep best_idx (lowest-index-wins).
+        }
+        out_indices.push(best_idx as i64);
+    }
+    let out_bytes: Vec<u8> = out_indices
+        .iter()
+        .flat_map(|&v| v.to_le_bytes())
+        .collect();
+    let out_byte_len = out_bytes.len();
+
+    // ---- H2D: upload I64 result bytes into a fresh kt VulkanStorage ----
+    let out_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        out_byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_argmax_last_axis: device-local alloc for kt output failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &out_buffer,
+        &out_bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_argmax_last_axis: H2D upload of kt output failed: {e}"
+        ))
+    })?;
+    let out_storage = VulkanStorage::from_buffer(
+        vulkan_device,
+        device_index,
+        DType::I64,
+        out_buffer,
+        out_byte_len as u64,
+    )?;
+
+    // Output shape drops the trailing axis. Rank-1 input -> rank-0 output.
+    let out_shape: Vec<usize> = shape[..shape.len() - 1].to_vec();
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(out_shape),
+        crate::TensorId::next(),
+    )
+}
+
+fn read_one_f32(dtype: DType, bytes: &[u8], i: usize) -> f32 {
+    match dtype {
+        DType::F32 => f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()),
+        DType::BF16 => {
+            half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+        }
+        DType::F16 => {
+            half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32()
+        }
+        _ => unreachable!("vulkan_argmax_last_axis: read_one_f32 called with non-float dtype"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
