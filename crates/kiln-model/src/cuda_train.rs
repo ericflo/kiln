@@ -4971,9 +4971,14 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
             let shifted = logits_chunk
                 .broadcast_sub(&running_max)
                 .context("cuda_shifted_linear_cross_entropy_loss backward: grad shift")?;
-            let exp_chunk = shifted
-                .exp()
-                .context("cuda_shifted_linear_cross_entropy_loss backward: grad exp")?;
+            let exp_chunk = match crate::forward::try_kt_exp(&shifted)
+                .context("cuda_shifted_linear_cross_entropy_loss backward: try_kt_exp grad")?
+            {
+                Some(out) => out,
+                None => shifted
+                    .exp()
+                    .context("cuda_shifted_linear_cross_entropy_loss backward: grad exp")?,
+            };
             let softmax_chunk = exp_chunk
                 .broadcast_div(&running_sumexp)
                 .context("cuda_shifted_linear_cross_entropy_loss backward: grad softmax")?;
