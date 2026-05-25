@@ -31085,6 +31085,262 @@ mod tests {
         Ok(())
     }
 
+    /// Parity check for the kt-API path of `backend.gdn_chunk_scan`
+    /// against the candle-typed path. Both bottom out in the same FFI
+    /// symbol (`kiln_gdn_chunk_scan`) so this asserts byte-for-byte
+    /// parity on both outputs:
+    ///   - out_chunk  : [B, H, C, dv]  bf16
+    ///   - w_weighted : [B, H, C, dv]  bf16
+    /// (#1082)
+    ///
+    /// This is the production prefill path for Qwen3.5-4B GDN chunkwise
+    /// scan. The kt wire landed in 1edc82dc behind the
+    /// KILN_USE_KT_API_GDN gate; the kt adapter has 6 distinct
+    /// kt-bridge borrows + 2 kt→candle copies — middle complexity
+    /// between gdn_forward_substitution (3 in / 1 out) and gdn_chunk_prep
+    /// (6 in / 6 out).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gdn_chunk_scan_kt_api_parity() -> Result<()> {
+        use crate::backend::BackendRuntime;
+        use crate::backend::cuda::CudaBackend;
+        use rand::rngs::StdRng;
+        use rand::{RngExt, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("CUDA not available, skipping test_gdn_chunk_scan_kt_api_parity");
+                return Ok(());
+            }
+        };
+
+        // Qwen3.5-4B GDN prefill envelope. Caller-side C <= 64 cap
+        // (see gdn_chunk_scan_supports at
+        // crates/kiln-gdn-kernel/src/lib.rs:2693), dv <= 128:
+        //   a_strict      : [B, H, C, C]   bf16
+        //   b_mask        : [B, H, C, C]   bf16
+        //   v_prime       : [B, H, C, dv]  bf16
+        //   q_s_scaled    : [B, H, C, dv]  bf16
+        //   beta          : [B, H, C]      bf16
+        //   decay_last_col: [B, H, C]      bf16
+        let batch = 1usize;
+        let heads = 32usize;
+        let chunk = 64usize;
+        let dv = 128usize;
+
+        let n_a = batch * heads * chunk * chunk;
+        let n_b = batch * heads * chunk * chunk;
+        let n_v = batch * heads * chunk * dv;
+        let n_qs = batch * heads * chunk * dv;
+        let n_beta = batch * heads * chunk;
+        let n_dlc = batch * heads * chunk;
+
+        let mut rng = StdRng::seed_from_u64(0xC0_1DD15C);
+        // Modest magnitudes so bf16 rounding stays in interior bits
+        // and the chunk scan doesn't saturate. The candle/kt paths
+        // share an FFI symbol so this only exercises Rust-shell
+        // correctness, but extreme inputs would still be wasted bits.
+        let a_data: Vec<f32> = (0..n_a).map(|_| rng.random_range(-0.2f32..0.2)).collect();
+        let b_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(-0.2f32..0.2)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let qs_data: Vec<f32> = (0..n_qs).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let beta_data: Vec<f32> = (0..n_beta).map(|_| rng.random_range(-0.3f32..0.3)).collect();
+        let dlc_data: Vec<f32> = (0..n_dlc).map(|_| rng.random_range(-0.3f32..0.3)).collect();
+
+        let a_strict = Tensor::from_slice(&a_data, (batch, heads, chunk, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+        let b_mask = Tensor::from_slice(&b_data, (batch, heads, chunk, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+        let v_prime = Tensor::from_slice(&v_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let q_s_scaled = Tensor::from_slice(&qs_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (batch, heads, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+        let decay_last_col = Tensor::from_slice(&dlc_data, (batch, heads, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+
+        // Candle-typed path.
+        let candle_be = CudaBackend::new_with_kt_api_gdn(device.clone(), false);
+        let outs_candle = match candle_be.gdn_chunk_scan(
+            &a_strict,
+            &b_mask,
+            &v_prime,
+            &q_s_scaled,
+            &beta,
+            &decay_last_col,
+        )? {
+            Some(t) => t,
+            None => {
+                eprintln!("candle gdn_chunk_scan declined dispatch; skipping kt parity");
+                return Ok(());
+            }
+        };
+        let (out_chunk_c, w_weighted_c) = outs_candle;
+
+        // kt-API path.
+        let kt_be = CudaBackend::new_with_kt_api_gdn(device.clone(), true);
+        let outs_kt = match kt_be.gdn_chunk_scan(
+            &a_strict,
+            &b_mask,
+            &v_prime,
+            &q_s_scaled,
+            &beta,
+            &decay_last_col,
+        )? {
+            Some(t) => t,
+            None => {
+                eprintln!("kt gdn_chunk_scan declined dispatch; skipping kt parity");
+                return Ok(());
+            }
+        };
+        let (out_chunk_k, w_weighted_k) = outs_kt;
+
+        // Helper: assert byte-exact parity on a single output pair.
+        fn assert_byte_exact(label: &str, candle: &Tensor, kt: &Tensor) -> Result<()> {
+            assert_eq!(candle.dims(), kt.dims(), "{label}: dims mismatch");
+            let c: Vec<f32> = candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let k: Vec<f32> = kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            assert_eq!(c.len(), k.len(), "{label}: length mismatch");
+            let mut mismatches = 0usize;
+            for (i, (x, y)) in c.iter().zip(k.iter()).enumerate() {
+                if x.to_bits() != y.to_bits() {
+                    if mismatches < 4 {
+                        eprintln!(
+                            "{label} kt parity mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                            x.to_bits(),
+                            y.to_bits()
+                        );
+                    }
+                    mismatches += 1;
+                }
+            }
+            assert_eq!(
+                mismatches, 0,
+                "kt-API gdn_chunk_scan {label} diverges from candle at {mismatches} indices"
+            );
+            Ok(())
+        }
+
+        assert_byte_exact("out_chunk", &out_chunk_c, &out_chunk_k)?;
+        assert_byte_exact("w_weighted", &w_weighted_c, &w_weighted_k)?;
+
+        Ok(())
+    }
+
+    /// Parity check for the kt-API path of `backend.gdn_gated_rms_norm`
+    /// against the candle-typed path. Both bottom out in the same FFI
+    /// symbol (`kiln_gdn_gated_rms_norm`) so this asserts byte-for-byte
+    /// parity on the single bf16 output. (#1082)
+    ///
+    /// This is the production decode-fast-path normalization for
+    /// Qwen3.5-4B GDN; the kt wire landed in d4a9ec33 behind the
+    /// KILN_USE_KT_API_GDN gate. The kt adapter does a reshape to
+    /// `[rows, hidden]` before dispatch and a reshape back after, so
+    /// this test exercises the reshape adapter as well as the
+    /// kt-bridge borrow/copy adapter.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gdn_gated_rms_norm_kt_api_parity() -> Result<()> {
+        use crate::backend::BackendRuntime;
+        use crate::backend::cuda::CudaBackend;
+        use rand::rngs::StdRng;
+        use rand::{RngExt, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("CUDA not available, skipping test_gdn_gated_rms_norm_kt_api_parity");
+                return Ok(());
+            }
+        };
+
+        // gdn_gated_rms_norm_supports requires hidden=128 and matching
+        // x/z shapes (see crates/kiln-gdn-kernel/src/lib.rs:2279).
+        // Use a 4D layout that exercises the reshape path inside the
+        // kt adapter: `[batch, seq, heads, hidden]` collapses to
+        // `[rows=batch*seq*heads, hidden]`. That's the production
+        // shape for decode (B, 1, H, dv) and prefill (B, T, H, dv).
+        let batch = 1usize;
+        let seq = 4usize;
+        let heads = 32usize;
+        let hidden = 128usize;
+        let rows = batch * seq * heads;
+        let n_xz = rows * hidden;
+
+        let mut rng = StdRng::seed_from_u64(0xC0_1DD15D);
+        // Avoid zero-mean exact inputs because the rms-norm rsqrt
+        // would amplify rounding differences if the denominator were
+        // tiny — bias the inputs into a comfortable magnitude band.
+        let x_data: Vec<f32> = (0..n_xz).map(|_| rng.random_range(-1.0f32..1.0)).collect();
+        let z_data: Vec<f32> = (0..n_xz).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let w_data: Vec<f32> = (0..hidden).map(|_| rng.random_range(0.5f32..1.5)).collect();
+
+        let x = Tensor::from_slice(&x_data, (batch, seq, heads, hidden), &device)?
+            .to_dtype(DType::BF16)?;
+        let z = Tensor::from_slice(&z_data, (batch, seq, heads, hidden), &device)?
+            .to_dtype(DType::BF16)?;
+        let weight =
+            Tensor::from_slice(&w_data, (hidden,), &device)?.to_dtype(DType::BF16)?;
+
+        let eps = 1e-6_f64;
+
+        // Candle-typed path.
+        let candle_be = CudaBackend::new_with_kt_api_gdn(device.clone(), false);
+        let out_candle = match candle_be.gdn_gated_rms_norm(&x, &z, &weight, eps)? {
+            Some(t) => t,
+            None => {
+                eprintln!("candle gdn_gated_rms_norm declined dispatch; skipping kt parity");
+                return Ok(());
+            }
+        };
+
+        // kt-API path.
+        let kt_be = CudaBackend::new_with_kt_api_gdn(device.clone(), true);
+        let out_kt = match kt_be.gdn_gated_rms_norm(&x, &z, &weight, eps)? {
+            Some(t) => t,
+            None => {
+                eprintln!("kt gdn_gated_rms_norm declined dispatch; skipping kt parity");
+                return Ok(());
+            }
+        };
+
+        // Shape must round-trip the original layout through both
+        // paths — `[batch, seq, heads, hidden]` in, same out.
+        assert_eq!(out_candle.dims(), out_kt.dims(), "out dims mismatch");
+        assert_eq!(
+            out_candle.dims(),
+            &[batch, seq, heads, hidden],
+            "out dims should match input x"
+        );
+
+        // Output parity: byte-for-byte (same FFI symbol on both
+        // paths; the kt adapter reshape is metadata-only).
+        let c: Vec<f32> = out_candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let k: Vec<f32> = out_kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(c.len(), k.len(), "out length mismatch");
+        let mut mismatches = 0usize;
+        for (i, (x, y)) in c.iter().zip(k.iter()).enumerate() {
+            if x.to_bits() != y.to_bits() {
+                if mismatches < 4 {
+                    eprintln!(
+                        "kt parity output mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                        x.to_bits(),
+                        y.to_bits()
+                    );
+                }
+                mismatches += 1;
+            }
+        }
+        assert_eq!(
+            mismatches, 0,
+            "kt-API gdn_gated_rms_norm output diverges from candle at {mismatches} indices"
+        );
+
+        Ok(())
+    }
+
     /// Metal parity check for `backend.causal_conv1d_update` against the same
     /// portable `causal_conv1d_decode` + `cuda_silu` oracle used by CUDA.
     #[cfg(feature = "metal")]

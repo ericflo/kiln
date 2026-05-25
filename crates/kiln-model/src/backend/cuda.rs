@@ -235,6 +235,16 @@ impl CudaBackend {
         be
     }
 
+    /// Test-only constructor (#1082) for parity tests of the kt-API
+    /// flash-attn wiring (paged-decode + paged-decode-dyn-seqlen).
+    /// Same race-avoidance rationale as `new_with_kt_api_conv1d`.
+    #[cfg(test)]
+    pub(crate) fn new_with_kt_api_flash_attn(device: Device, kt_api: bool) -> Self {
+        let mut be = Self::new(device);
+        be.cuda_use_kt_api_flash_attn = kt_api;
+        be
+    }
+
     pub fn training_capabilities_static() -> TrainingCapabilities {
         TrainingCapabilities {
             projection_training: "backend-routed candle CUDA autograd with offset chunk hook",
