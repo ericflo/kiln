@@ -13555,7 +13555,23 @@ pub fn gdn_recurrent_backward_no_grad(
         let a_w = a_strict.matmul(&w)?;
         let pre_beta = (&v_prime - &a_w)?;
         let d_v_prime = dr.broadcast_mul(&beta_c.unsqueeze(3)?)?.contiguous()?;
-        let d_beta = (&pre_beta * &dr)?.sum(candle_core::D::Minus1)?;
+        // Phase 7 (#1082): wire `try_kt_sum_axis` into the
+        // `(&pre_beta * &dr)?.sum(D::Minus1)?` reduction for
+        // `d_beta`. The operand is a 4D tensor [B, H, C, dim] so
+        // `D::Minus1` resolves to axis 3 at runtime; the helper
+        // falls through to the candle composite on any precondition
+        // failure so behavior is identical with the gate off.
+        let prod_pb = (&pre_beta * &dr)?;
+        #[cfg(feature = "cuda")]
+        let d_beta = {
+            let axis = prod_pb.rank().saturating_sub(1);
+            match try_kt_sum_axis(&prod_pb, axis)? {
+                Some(out) => out,
+                None => prod_pb.sum(candle_core::D::Minus1)?,
+            }
+        };
+        #[cfg(not(feature = "cuda"))]
+        let d_beta = prod_pb.sum(candle_core::D::Minus1)?;
         let dr_w_t = dr.matmul(&w.transpose(2, 3)?.contiguous()?)?;
         let strict_mask = strict_lower_tri_bool(chunk, q.device())?
             .reshape((1, 1, chunk, chunk))?
