@@ -1645,3 +1645,42 @@ H33's one-off reliability gain or add useful thinking efficiency. The immediate
 adapter-composition branch around H33/H64/H77 is exhausted; the next useful
 experiment should build genuinely new data rather than keep recombining old
 fragile adapters.
+
+### H81: post-pass halt
+
+H81 returned to new train-only behavior data after H80 closed the immediate
+adapter-composition branch. It targeted only the final post-pass decision:
+after read/edit/doctest and a successful doctest observation, prefer emitting
+`DONE` immediately over running one redundant second doctest before `DONE`.
+This tested whether efficiency could be improved at the suffix policy level
+without changing solution generation or the read/edit/test workflow.
+
+The train dataset was
+`/tmp/pi-doctest-h81-postpass-halt/grpo-train.postpass-halt.g8.jsonl`, built
+from eight train-only tasks: `task_0024`, `task_0026`, `task_0028`,
+`task_0029`, `task_0032`, `task_0034`, `task_0037`, and `task_0038`. It
+contained 8 groups and 16 completions, with preferred immediate-DONE rewards
+of 1.0 and redundant-retest rewards of 0.55. Dry-run stats were 926 action
+tokens, 802 env tokens, 7156 context tokens, reward stdev 0.225, and dataset
+hash `sha256:ab3459edecf5e3589bfc7f635507922b1370471e78d2b1bb08c3f954068ff810`.
+
+Training produced `pi-doctest-h81-postpass-halt-r4a4lr1e7` using
+`cuda_grpo_ablation --mode phase1`, rank 4 / alpha 4 / lr `1e-7`, no ECHO,
+seed `3141592653`, and `KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in
+970.108s observed, with peak observed VRAM 16,013 MiB. The receipt reported
+965.569s wall-clock, 229.032s reference forward, 170.546s policy forward, and
+563.616s backward. Adapter verify passed with 400 nonzero tensors, 200 LoRA
+projection pairs, LoRA update proxy 0.021651, and adapter hash
+`sha256:aa949b81ae7423cdcd4ee3db8843eb4312130412190dfba6b72d480f5888bd98`.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.953125 with
+no zero rollouts and mean wall-clock 33.36s. H81 also scored 0.953125 with no
+zero rollouts, but mean wall-clock rose to 40.60s. No wider gate was run
+because the adapter did not improve score or reliability and worsened the
+efficiency metric it targeted.
+
+Lesson: final-action suffix training alone does not make thinking efficient.
+The model may be spending the extra time before the post-pass state, or the
+adapter update may add latency without changing the actual stop decision. This
+also reinforces that gradient checkpointing is useful for fitting local GRPO
+training in VRAM, but it does not reduce inference-time thinking tokens.
