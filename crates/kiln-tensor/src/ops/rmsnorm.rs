@@ -155,23 +155,30 @@ impl DeviceOp2 for RmsNormOp {
         if *x.shape().last().unwrap() != weight.shape()[0] {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Metal): implement
-        // `crate::metal_rmsnorm_last_axis(x, weight, self.eps)`
-        // analogous to `crate::cuda_rmsnorm_last_axis` above. Until
-        // that kernel lands, fall through to the CPU path so the op
-        // still produces correct results on Mac (numerics-correct,
-        // performance-wrong).
-        // Candidate implementations:
-        //   1. Custom MSL kernel: per-row threadgroup reduction over
-        //      the trailing dim, two-pass — first pass sums x^2 to
-        //      compute inv_rms in F32, second pass scales by
-        //      inv_rms * weight and casts back to dtype.
-        //   2. MPS Graph: compose `mean(x*x) -> rsqrt -> x * inv_rms *
-        //      w` for one-shot dispatch. Heavier per-call overhead
-        //      than a custom kernel but easier to wire.
-        //   3. Reuse the rmsnorm kernel in `kiln-model::backend::metal`
-        //      (the existing rmsnorm there is the production hot path).
-        Ok(None)
+        // Only dispatch when both inputs are Metal-backed; otherwise
+        // gracefully fall back to CPU rather than have the wrapper raise.
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::MetalStorage>()
+            .is_none()
+            || weight
+                .storage()
+                .as_any()
+                .downcast_ref::<crate::MetalStorage>()
+                .is_none()
+        {
+            return Ok(None);
+        }
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::metal_rmsnorm_last_axis` which wraps candle's
+        // `candle_nn::ops::rms_norm` (zero-copy on UMA — shares the
+        // MTLBuffer between kt and candle storages). See
+        // `metal_storage.rs::metal_rmsnorm_last_axis` for the
+        // integration pattern. Phase 7 (#1082) follow-up replaces the
+        // candle inner call with a direct
+        // `candle_metal_kernels::call_rms_norm` or a vendored MSL
+        // kernel.
+        Ok(Some(crate::metal_rmsnorm_last_axis(x, weight, self.eps)?))
     }
 
     #[cfg(feature = "vulkan")]

@@ -360,6 +360,382 @@ pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     )
 }
 
+// ----------------------------------------------------------------------
+// metal_rmsnorm_last_axis — Phase 4 Metal substrate op (#1082)
+// ----------------------------------------------------------------------
+
+/// Metal RMSNorm over the trailing axis. Mirrors the role of
+/// [`crate::cuda_rmsnorm_last_axis`] for the Metal backend.
+///
+/// Operates on contiguous `[..., D]` and `[D]` Metal-backed tensors and
+/// produces a fresh contiguous tensor with each `[..., :]` row
+/// normalized by its row-RMS and scaled per-element by `weight`:
+/// `y = w * x / sqrt(mean(x^2) + eps)`.
+///
+/// # Implementation
+///
+/// Delegates to candle's `candle_nn::ops::rms_norm`, which dispatches
+/// through candle's Metal RMSNorm kernel under the hood (the same path
+/// candle's `RmsNorm` layer takes). We wrap both kt-Tensors'
+/// `Arc<metal::Buffer>` handles in candle [`candle_core::MetalStorage`]
+/// values (sharing the underlying MTLBuffers — zero-copy on UMA),
+/// build candle Tensors via [`candle_core::Tensor::from_storage`], run
+/// `rms_norm`, then wrap the result's MTLBuffer back into a kt
+/// `MetalStorage`. Both input and output Arcs point at the same
+/// MTLBuffers (refcounted by Objective-C `retain`); no host/device
+/// round-trip on Apple Silicon.
+///
+/// # Requirements
+///
+/// - `x` and `weight` must both be backed by [`MetalStorage`]
+/// - `x.dtype()` must be `F32`, `BF16`, or `F16` (and equal to
+///   `weight.dtype()`)
+/// - `x.rank() >= 1`, `weight.rank() == 1`
+/// - `weight.shape()[0] == *x.shape().last().unwrap()`
+/// - both inputs contiguous
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on any precondition failure or candle error.
+///
+/// # Phase 7 (#1082) note
+///
+/// Phase 7 candle removal replaces the candle inner call with a
+/// `candle_metal_kernels::call_rms_norm` (or vendored MSL kernel).
+/// Public signature stays the same.
+pub fn metal_rmsnorm_last_axis(
+    x: &crate::Tensor,
+    weight: &crate::Tensor,
+    eps: f32,
+) -> Result<crate::Tensor> {
+    use candle_core::{
+        op::BackpropOp, DType as CandleDType, MetalStorage as CandleMetalStorage,
+        Storage as CandleStorage, Tensor as CandleTensor,
+    };
+
+    let dtype = x.dtype();
+    let candle_dtype = match dtype {
+        DType::F32 => CandleDType::F32,
+        DType::BF16 => CandleDType::BF16,
+        DType::F16 => CandleDType::F16,
+        other => {
+            return Err(Error::Msg(format!(
+                "metal_rmsnorm_last_axis: unsupported dtype {other}"
+            )));
+        }
+    };
+    if weight.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "metal_rmsnorm_last_axis: weight dtype {} != x dtype {dtype}",
+            weight.dtype()
+        )));
+    }
+    if x.rank() == 0 || weight.rank() != 1 {
+        return Err(Error::Msg(format!(
+            "metal_rmsnorm_last_axis: rank constraints failed (x.rank={}, weight.rank={})",
+            x.rank(),
+            weight.rank()
+        )));
+    }
+    if !x.is_contiguous() || !weight.is_contiguous() {
+        return Err(Error::Msg(
+            "metal_rmsnorm_last_axis: inputs must be contiguous".to_string(),
+        ));
+    }
+    let hidden = *x.shape().last().unwrap();
+    if weight.shape().first().copied() != Some(hidden) {
+        return Err(Error::Msg(format!(
+            "metal_rmsnorm_last_axis: weight.shape()[0] {:?} != x last-dim {hidden}",
+            weight.shape()
+        )));
+    }
+
+    let kt_metal_x = x
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_rmsnorm_last_axis: x must be Metal-backed".to_string())
+        })?;
+    let kt_metal_w = weight
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_rmsnorm_last_axis: weight must be Metal-backed".to_string())
+        })?;
+
+    let candle_device_arc = kt_metal_x.candle_device().clone();
+    let device_index = match kt_metal_x.device() {
+        Device::Metal(i) => i,
+        _ => unreachable!("MetalStorage::device() returns Device::Metal"),
+    };
+
+    let shape: Vec<usize> = x.shape().to_vec();
+    let element_count_x: usize = x.element_count();
+    let element_count_w: usize = weight.element_count();
+
+    let candle_x_storage = CandleMetalStorage::new(
+        Arc::clone(kt_metal_x.buffer()),
+        (*candle_device_arc).clone(),
+        element_count_x,
+        candle_dtype,
+    );
+    let candle_x: CandleTensor = CandleTensor::from_storage(
+        CandleStorage::Metal(candle_x_storage),
+        shape.as_slice(),
+        BackpropOp::none(),
+        false,
+    );
+
+    let candle_w_storage = CandleMetalStorage::new(
+        Arc::clone(kt_metal_w.buffer()),
+        (*candle_device_arc).clone(),
+        element_count_w,
+        candle_dtype,
+    );
+    let candle_w: CandleTensor = CandleTensor::from_storage(
+        CandleStorage::Metal(candle_w_storage),
+        &[hidden],
+        BackpropOp::none(),
+        false,
+    );
+
+    let candle_out: CandleTensor =
+        candle_nn::ops::rms_norm(&candle_x, &candle_w, eps).map_err(|e| {
+            Error::Msg(format!(
+                "metal_rmsnorm_last_axis: candle_nn::ops::rms_norm failed: {e}"
+            ))
+        })?;
+
+    let candle_out = candle_out.contiguous().map_err(|e| {
+        Error::Msg(format!(
+            "metal_rmsnorm_last_axis: candle contiguous failed: {e}"
+        ))
+    })?;
+
+    let (out_storage_guard, _out_layout) = candle_out.storage_and_layout();
+    let candle_out_metal = match &*out_storage_guard {
+        CandleStorage::Metal(m) => m,
+        _ => {
+            return Err(Error::Msg(
+                "metal_rmsnorm_last_axis: candle rms_norm returned non-Metal storage \
+                 (unexpected — candle_nn::ops::rms_norm preserves device)"
+                    .to_string(),
+            ));
+        }
+    };
+    let out_buffer_arc: Arc<candle_metal_kernels::metal::Buffer> =
+        Arc::new(candle_out_metal.buffer().to_owned());
+
+    let out_storage =
+        MetalStorage::from_buffer(candle_device_arc, device_index, dtype, out_buffer_arc)?;
+    let out_storage_arc: crate::Storage = Arc::new(out_storage);
+
+    drop(out_storage_guard);
+
+    crate::Tensor::from_parts(
+        out_storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
+// ----------------------------------------------------------------------
+// metal_layernorm_last_axis — Phase 4 Metal substrate op (#1082)
+// ----------------------------------------------------------------------
+
+/// Metal LayerNorm over the trailing axis. Mirrors the role of
+/// [`crate::cuda_layernorm_last_axis`] for the Metal backend.
+///
+/// Operates on contiguous `[..., D]`, `[D]`, `[D]` Metal-backed
+/// tensors and produces a fresh contiguous tensor:
+/// `y = ((x - mean) / sqrt(var + eps)) * weight + bias`.
+///
+/// # Implementation
+///
+/// Delegates to `candle_nn::ops::layer_norm`, which dispatches through
+/// candle's Metal LayerNorm kernel. Bridges all three kt MetalStorages
+/// -> candle MetalStorages via `Arc<metal::Buffer>` clone (NSObject
+/// retain), runs `layer_norm`, then wraps the result MTLBuffer back
+/// into a kt `MetalStorage`. Zero-copy on Apple Silicon UMA — same
+/// pattern as `metal_softmax_last_axis` and `metal_rmsnorm_last_axis`.
+///
+/// # Requirements
+///
+/// - `x`, `weight`, `bias` must all be Metal-backed
+/// - all three share dtype in {F32, BF16, F16}
+/// - `x.rank() >= 1`, `weight.rank() == 1`, `bias.rank() == 1`
+/// - `weight.shape()[0] == bias.shape()[0] == *x.shape().last().unwrap()`
+/// - all three contiguous
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on any precondition failure or candle error.
+pub fn metal_layernorm_last_axis(
+    x: &crate::Tensor,
+    weight: &crate::Tensor,
+    bias: &crate::Tensor,
+    eps: f32,
+) -> Result<crate::Tensor> {
+    use candle_core::{
+        op::BackpropOp, DType as CandleDType, MetalStorage as CandleMetalStorage,
+        Storage as CandleStorage, Tensor as CandleTensor,
+    };
+
+    let dtype = x.dtype();
+    let candle_dtype = match dtype {
+        DType::F32 => CandleDType::F32,
+        DType::BF16 => CandleDType::BF16,
+        DType::F16 => CandleDType::F16,
+        other => {
+            return Err(Error::Msg(format!(
+                "metal_layernorm_last_axis: unsupported dtype {other}"
+            )));
+        }
+    };
+    if weight.dtype() != dtype || bias.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "metal_layernorm_last_axis: weight dtype {} / bias dtype {} != x dtype {dtype}",
+            weight.dtype(),
+            bias.dtype()
+        )));
+    }
+    if x.rank() == 0 || weight.rank() != 1 || bias.rank() != 1 {
+        return Err(Error::Msg(format!(
+            "metal_layernorm_last_axis: rank constraints failed (x={}, w={}, b={})",
+            x.rank(),
+            weight.rank(),
+            bias.rank()
+        )));
+    }
+    if !x.is_contiguous() || !weight.is_contiguous() || !bias.is_contiguous() {
+        return Err(Error::Msg(
+            "metal_layernorm_last_axis: inputs must be contiguous".to_string(),
+        ));
+    }
+    let hidden = *x.shape().last().unwrap();
+    if weight.shape().first().copied() != Some(hidden)
+        || bias.shape().first().copied() != Some(hidden)
+    {
+        return Err(Error::Msg(format!(
+            "metal_layernorm_last_axis: weight/bias shapes ({:?}, {:?}) != x last-dim {hidden}",
+            weight.shape(),
+            bias.shape()
+        )));
+    }
+
+    let kt_metal_x = x
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_layernorm_last_axis: x must be Metal-backed".to_string())
+        })?;
+    let kt_metal_w = weight
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_layernorm_last_axis: weight must be Metal-backed".to_string())
+        })?;
+    let kt_metal_b = bias
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_layernorm_last_axis: bias must be Metal-backed".to_string())
+        })?;
+
+    let candle_device_arc = kt_metal_x.candle_device().clone();
+    let device_index = match kt_metal_x.device() {
+        Device::Metal(i) => i,
+        _ => unreachable!("MetalStorage::device() returns Device::Metal"),
+    };
+
+    let shape: Vec<usize> = x.shape().to_vec();
+    let element_count_x = x.element_count();
+    let element_count_w = weight.element_count();
+    let element_count_b = bias.element_count();
+
+    let candle_x_storage = CandleMetalStorage::new(
+        Arc::clone(kt_metal_x.buffer()),
+        (*candle_device_arc).clone(),
+        element_count_x,
+        candle_dtype,
+    );
+    let candle_x: CandleTensor = CandleTensor::from_storage(
+        CandleStorage::Metal(candle_x_storage),
+        shape.as_slice(),
+        BackpropOp::none(),
+        false,
+    );
+
+    let candle_w_storage = CandleMetalStorage::new(
+        Arc::clone(kt_metal_w.buffer()),
+        (*candle_device_arc).clone(),
+        element_count_w,
+        candle_dtype,
+    );
+    let candle_w: CandleTensor = CandleTensor::from_storage(
+        CandleStorage::Metal(candle_w_storage),
+        &[hidden],
+        BackpropOp::none(),
+        false,
+    );
+
+    let candle_b_storage = CandleMetalStorage::new(
+        Arc::clone(kt_metal_b.buffer()),
+        (*candle_device_arc).clone(),
+        element_count_b,
+        candle_dtype,
+    );
+    let candle_b: CandleTensor = CandleTensor::from_storage(
+        CandleStorage::Metal(candle_b_storage),
+        &[hidden],
+        BackpropOp::none(),
+        false,
+    );
+
+    let candle_out: CandleTensor =
+        candle_nn::ops::layer_norm(&candle_x, &candle_w, &candle_b, eps).map_err(|e| {
+            Error::Msg(format!(
+                "metal_layernorm_last_axis: candle_nn::ops::layer_norm failed: {e}"
+            ))
+        })?;
+
+    let candle_out = candle_out.contiguous().map_err(|e| {
+        Error::Msg(format!(
+            "metal_layernorm_last_axis: candle contiguous failed: {e}"
+        ))
+    })?;
+
+    let (out_storage_guard, _out_layout) = candle_out.storage_and_layout();
+    let candle_out_metal = match &*out_storage_guard {
+        CandleStorage::Metal(m) => m,
+        _ => {
+            return Err(Error::Msg(
+                "metal_layernorm_last_axis: candle layer_norm returned non-Metal storage"
+                    .to_string(),
+            ));
+        }
+    };
+    let out_buffer_arc: Arc<candle_metal_kernels::metal::Buffer> =
+        Arc::new(candle_out_metal.buffer().to_owned());
+
+    let out_storage =
+        MetalStorage::from_buffer(candle_device_arc, device_index, dtype, out_buffer_arc)?;
+    let out_storage_arc: crate::Storage = Arc::new(out_storage);
+
+    drop(out_storage_guard);
+
+    crate::Tensor::from_parts(
+        out_storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

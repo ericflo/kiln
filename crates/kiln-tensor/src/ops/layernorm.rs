@@ -100,24 +100,36 @@ impl crate::DeviceOp3 for LayerNormOp {
         if weight.shape()[0] != d || bias.shape()[0] != d {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Metal): implement
-        // `crate::metal_layernorm_last_axis(x, weight, bias, self.eps)`
-        // analogous to `crate::cuda_layernorm_last_axis` above. Until
-        // that kernel lands, fall through to the CPU path so the op
-        // still produces correct results on Mac (numerics-correct,
-        // performance-wrong).
-        // Candidate implementations:
-        //   1. Custom MSL kernel: per-row threadgroup reduction over
-        //      the trailing dim, two-pass — first pass computes
-        //      mean(x) and var(x) in F32 (Welford or sum-of-squares),
-        //      second pass scales by `(x - mean) * inv_std * weight +
-        //      bias` and casts back to dtype.
-        //   2. MPS Graph: compose `mean(x) -> var(x) -> normalize ->
-        //      scale -> bias` for one-shot dispatch. Higher per-call
-        //      overhead than a custom kernel but easier to wire.
-        //   3. Reuse a Metal layernorm kernel from
-        //      `kiln-model::backend::metal` if/when one is added there.
-        Ok(None)
+        // Only dispatch when all three inputs are Metal-backed.
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::MetalStorage>()
+            .is_none()
+            || weight
+                .storage()
+                .as_any()
+                .downcast_ref::<crate::MetalStorage>()
+                .is_none()
+            || bias
+                .storage()
+                .as_any()
+                .downcast_ref::<crate::MetalStorage>()
+                .is_none()
+        {
+            return Ok(None);
+        }
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::metal_layernorm_last_axis` which wraps candle's
+        // `candle_nn::ops::layer_norm` (zero-copy on UMA — shares the
+        // MTLBuffers between kt and candle storages). See
+        // `metal_storage.rs::metal_layernorm_last_axis` for the
+        // integration pattern. Phase 7 (#1082) follow-up replaces the
+        // candle inner call with a direct
+        // `candle_metal_kernels::call_layer_norm` or a vendored MSL
+        // kernel.
+        Ok(Some(crate::metal_layernorm_last_axis(
+            x, weight, bias, self.eps,
+        )?))
     }
 
     #[cfg(feature = "vulkan")]
