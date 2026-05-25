@@ -746,6 +746,59 @@ fn cuda_use_kt_api_tanh() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in (#1082): elementwise `Tensor::gelu()` through the
+/// kt-API + adapters. Set `KILN_USE_KT_API_GELU=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// standalone `.gelu()` candle calls through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 2 (GELU) via
+/// the kt-bridge borrow adapter. Pays one dtod memcpy on the
+/// output direction. Falls through to the candle composite when
+/// any precondition fails so behavior is identical with the gate
+/// off.
+///
+/// Distinct from the fused GELU-tanh site (which already routes
+/// through `cuda_activation_unary` kind 2) — this gate migrates
+/// *standalone* `.gelu()` shapes. The gate + helper are wired up
+/// for completeness; today there are no production `.gelu()` call
+/// sites in `forward.rs` (Qwen3.5-4B uses SiLU for MLP gates, not
+/// GELU). Future kernel refactors or new model architectures that
+/// need GELU (e.g. GPT-2 / BERT-style MLPs, alternative activation
+/// experiments) can plug in trivially. Mirrors the
+/// dead-code-allowed precedent of `try_kt_tanh` (9839a3a4) and
+/// other scaffold gates (abs/clamp/pow).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_gelu() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_GELU").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
+/// Phase 7 opt-in (#1082): elementwise `Tensor::relu()` through the
+/// kt-API + adapters. Set `KILN_USE_KT_API_RELU=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// standalone `.relu()` candle calls through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 4 (ReLU) via
+/// the kt-bridge borrow adapter. Pays one dtod memcpy on the
+/// output direction. Falls through to the candle composite when
+/// any precondition fails so behavior is identical with the gate
+/// off.
+///
+/// Distinct from any fused activation kernel (none use ReLU
+/// today). The gate + helper are wired up for completeness; today
+/// there are no production `.relu()` call sites in `forward.rs`
+/// (Qwen3.5-4B uses SiLU for MLP gates, not ReLU). Future kernel
+/// refactors or alternative model architectures can plug in
+/// trivially. Mirrors the dead-code-allowed precedent of
+/// `try_kt_tanh` (9839a3a4) and the GELU scaffold above.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_relu() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_RELU").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -7527,6 +7580,98 @@ fn try_kt_tanh(x: &Tensor) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_tanh: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API GELU migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 2 (GELU).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0) so the caller falls through to
+/// the candle `.gelu()`. NVTX range `kiln/gelu_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite.
+///
+/// Today this helper has no production call site — Qwen3.5-4B
+/// uses SiLU for MLP gates, not GELU. The helper is wired up to
+/// match the established Phase 7 scaffold so future kernel
+/// refactors or alternative model architectures (GPT-2/BERT-style
+/// MLPs) can plug in trivially. Mirrors the dead-code-allowed
+/// precedent of `try_kt_tanh` (9839a3a4).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_gelu(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_gelu() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/gelu_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 2 = GELU (matches csrc/activation.cu KIND_GELU).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 2) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_gelu: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API ReLU migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 4 (ReLU).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0) so the caller falls through to
+/// the candle `.relu()`. NVTX range `kiln/relu_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite.
+///
+/// Today this helper has no production call site — Qwen3.5-4B
+/// uses SiLU for MLP gates, not ReLU. The helper is wired up to
+/// match the established Phase 7 scaffold so future kernel
+/// refactors or alternative model architectures can plug in
+/// trivially. Mirrors the dead-code-allowed precedent of
+/// `try_kt_tanh` (9839a3a4) and the GELU helper above.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_relu(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_relu() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/relu_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 4 = ReLU (matches csrc/activation.cu KIND_RELU).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 4) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_relu: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
