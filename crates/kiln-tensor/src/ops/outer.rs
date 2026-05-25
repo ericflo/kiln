@@ -29,6 +29,24 @@ pub fn outer(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     if !a.is_contiguous() || !b.is_contiguous() {
         bail!("outer: inputs must be contiguous");
     }
+
+    // CUDA fast path (#1082): `outer(a, b)` is `[M, 1] @ [1, N]`. Reshape
+    // both rank-1 inputs into 2-D row/column vectors and route through
+    // `cuda_matmul`, which already handles all three supported dtypes via
+    // cublasLt. This avoids a D2H round-trip on the common LoRA rank-1
+    // path and reduces to a single GEMM kernel launch.
+    #[cfg(feature = "cuda")]
+    if matches!(a.device(), crate::Device::Cuda(_))
+        && matches!(b.device(), crate::Device::Cuda(_))
+        && a.device() == b.device()
+    {
+        let m = a.element_count();
+        let n = b.element_count();
+        let a_col = a.reshape(vec![m, 1])?;
+        let b_row = b.reshape(vec![1, n])?;
+        return crate::cuda_matmul(&a_col, &b_row);
+    }
+
     let dtype = a.dtype();
     let per = dtype.size_in_bytes();
     let m = a.element_count();
