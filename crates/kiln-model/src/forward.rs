@@ -9761,6 +9761,25 @@ fn mlp_proj_forward_decode_if(
         let base = crate::marlin_proj::matmul_bf16(x, packed)
             .context("mlp_proj_forward: marlin matmul")?;
         if let Some(proj) = lora {
+            #[cfg(feature = "cuda")]
+            {
+                if let Some(delta) = try_kt_lora_delta(x, proj, lora_scale)
+                    .context("mlp_proj_forward: kt lora delta")?
+                {
+                    let delta = if delta.dtype() == base.dtype() {
+                        delta
+                    } else {
+                        delta.to_dtype(base.dtype())
+                            .context("mlp_proj_forward: kt lora delta cast")?
+                    };
+                    if let Some(out) = try_kt_lora_add(&base, &delta)
+                        .context("mlp_proj_forward: kt lora add")?
+                    {
+                        return Ok(out);
+                    }
+                    return Ok((base + delta).context("mlp_proj_forward: add lora delta")?);
+                }
+            }
             let delta =
                 compute_lora_delta(x, proj, lora_scale).context("mlp_proj_forward: lora delta")?;
             return Ok((base + delta).context("mlp_proj_forward: add lora delta")?);
@@ -13925,6 +13944,25 @@ fn q_proj_forward_decode_if(
         let base =
             crate::marlin_proj::matmul_bf16(x, packed).context("q_proj_forward: marlin matmul")?;
         if let Some(proj) = lora {
+            #[cfg(feature = "cuda")]
+            {
+                if let Some(delta) = try_kt_lora_delta(x, proj, lora_scale)
+                    .context("q_proj_forward: kt lora delta")?
+                {
+                    let delta = if delta.dtype() == base.dtype() {
+                        delta
+                    } else {
+                        delta.to_dtype(base.dtype())
+                            .context("q_proj_forward: kt lora delta cast")?
+                    };
+                    if let Some(out) = try_kt_lora_add(&base, &delta)
+                        .context("q_proj_forward: kt lora add")?
+                    {
+                        return Ok(out);
+                    }
+                    return Ok((base + delta).context("q_proj_forward: add lora delta")?);
+                }
+            }
             let delta =
                 compute_lora_delta(x, proj, lora_scale).context("q_proj_forward: lora delta")?;
             return Ok((base + delta).context("q_proj_forward: add lora delta")?);
