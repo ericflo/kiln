@@ -492,6 +492,33 @@ fn cuda_use_kt_api_sum_last_dim() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: `Tensor::sum(axis)` (non-keepdim, arbitrary axis)
+/// through the kt-API + adapters. Set `KILN_USE_KT_API_SUM_AXIS=1`
+/// (or `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// `tensor.sum(axis)` candle calls in the GDN single-token conv
+/// path (`output = window.broadcast_mul(&w_expanded)?.sum(2)?`,
+/// computing the per-channel dot-product over the kernel dim) and
+/// other less-trafficked specdec / MTP-debug audit paths through
+/// `kiln_tensor::cuda_sum_axis` via the kt-bridge borrow adapter.
+/// Pays one dtod memcpy on the output direction (the kt allocation
+/// is freshly-owned). Falls through to the candle composite when
+/// any precondition fails so behavior is identical with the gate
+/// off.
+///
+/// Distinct from [`cuda_use_kt_api_sum_last_dim`]: that gate
+/// targets the *trailing-axis with keepdim* shape used by the
+/// softmax-fallback composite, where the helper re-applies
+/// `unsqueeze(-1)` to restore the keepdim shape. This gate
+/// targets the *arbitrary-axis without keepdim* shape, mirroring
+/// candle's `Tensor::sum(axis)` semantics directly.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_sum_axis() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SUM_AXIS").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: `max_keepdim(-1)` through the kt-API + adapters.
 /// Set `KILN_USE_KT_API_MAX_LAST_DIM=1` (or `KILN_USE_KT_API_ALL=1`)
 /// to enable; default off. Routes the `x.max_keepdim(D::Minus1)`
@@ -3777,6 +3804,53 @@ fn try_kt_sum_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
     let out = reduced
         .unsqueeze(candle_core::D::Minus1)
         .map_err(|e| anyhow::anyhow!("try_kt_sum_last_dim_keepdim: unsqueeze failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API `sum(axis)` (non-keepdim, arbitrary
+/// axis) migration helper. Routes a contiguous CUDA candle tensor
+/// through `kiln_tensor::cuda_sum_axis` (which reduces an arbitrary
+/// axis with the axis dim removed, matching candle's
+/// `Tensor::sum(axis)` semantics directly — no `unsqueeze(-1)`
+/// fixup required).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0, or axis out of range) so the
+/// caller falls through to the candle composite. NVTX range
+/// `kiln/sum_axis_kt` brackets the migrated call so nsys traces
+/// separate the path from the baseline composite.
+///
+/// Distinct from [`try_kt_sum_last_dim_keepdim`] (the trailing-axis
+/// + keepdim variant). The kt kernel under both helpers is the
+/// same `reduce_arbitrary_axis` (commit `7ca6cabd`) — this helper
+/// just exposes its native non-keepdim shape directly to candle
+/// `Tensor::sum(axis)` call sites.
+#[cfg(feature = "cuda")]
+fn try_kt_sum_axis(x: &Tensor, axis: usize) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_sum_axis() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+        || axis >= x.rank()
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/sum_axis_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out_kt = match kiln_tensor::cuda_sum_axis(&x_kt, axis) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_sum_axis: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
