@@ -3618,7 +3618,32 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
                     (neg_exp + 1.0)?
                 }
             };
-            let sigmoid_gate = one_plus_neg_exp.recip()?;
+            // Phase 7 (#1082): same kt-API migration for the
+            // `one_plus_neg_exp.recip()` step — when `KILN_USE_KT_API_RECIP=1`
+            // (or `KILN_USE_KT_API_ALL=1`) is set, route through
+            // `kiln_tensor::cuda_activation_unary` with kind 22
+            // (Recip). Falls through to the candle composite when
+            // any precondition fails. Mirrors the `cuda_sigmoid`
+            // wiring (line ~114) which already routes this step
+            // through `try_kt_recip`.
+            let sigmoid_gate = {
+                #[cfg(feature = "cuda")]
+                {
+                    if let Some(out) = try_kt_recip(&one_plus_neg_exp)
+                        .map_err(|e| candle_core::Error::Msg(format!(
+                            "CudaSigmoidMulTrainingBf16 backward: try_kt_recip: {e}"
+                        )))?
+                    {
+                        out
+                    } else {
+                        one_plus_neg_exp.recip()?
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    one_plus_neg_exp.recip()?
+                }
+            };
             let grad_x_tile = (grad_y_tile.clone() * sigmoid_gate.clone())?;
             let (grad_x_tile_storage, grad_x_tile_layout) = grad_x_tile.storage_and_layout();
             let Storage::Cuda(grad_x_tile_storage) = &*grad_x_tile_storage else {
