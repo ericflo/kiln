@@ -378,6 +378,284 @@ pub fn vulkan_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
 }
 
 // ----------------------------------------------------------------------
+// vulkan_rmsnorm_last_axis — Phase 4 Vulkan substrate op (#1082)
+// ----------------------------------------------------------------------
+
+/// Vulkan RMSNorm over the trailing axis. Mirrors the role of
+/// [`crate::cuda_rmsnorm_last_axis`] for the Vulkan backend.
+///
+/// Operates on a contiguous `[..., D]` Vulkan-backed tensor and a
+/// contiguous `[D]` Vulkan-backed `weight` tensor; produces a fresh
+/// contiguous tensor of the same shape and dtype with each `[..., :]`
+/// row normalized by its row-RMS and scaled per-element by `weight`.
+///
+/// # Implementation
+///
+/// Delegates to `kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm_no_grad`,
+/// the production F32 RMSNorm kernel (matches the QwenRmsNorm shader at
+/// `csrc/shaders/qwen_rmsnorm_forward.comp`). The kernel is F32-only;
+/// BF16/F16 inputs return an `Error::Msg` here and the op falls through
+/// to the CPU path before reaching this wrapper.
+///
+/// Note: the Qwen shader computes `(1 + w_shader) * x / sqrt(mean(x^2)
+/// + eps)`. The standard form (and the kt CPU reference path in
+/// `RmsNormOp::cpu_fwd`) is `w * x / sqrt(mean(x^2) + eps)`. To match
+/// the standard form, this wrapper pre-subtracts 1.0 from each weight
+/// element when staging it for the kernel.
+///
+/// The current path bridges between kt's `VulkanStorage` (which owns
+/// `VulkanBuffer` directly) and the kernel's `VkTensor` (which holds
+/// `Arc<VulkanBuffer>`) via D2H read-back + H2D re-upload at each
+/// boundary, matching [`vulkan_softmax_last_axis`]. Zero-copy follow-up
+/// is the same set of three bridges documented there.
+///
+/// # Requirements
+///
+/// - `x` and `weight` must both be backed by [`VulkanStorage`]
+/// - `x.dtype() == weight.dtype() == F32`
+/// - `x.rank() >= 1`, `weight.rank() == 1`
+/// - `weight.shape()[0] == *x.shape().last().unwrap()`
+/// - both inputs contiguous
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on any precondition failure, storage downcast
+/// failure, or kernel dispatch error.
+#[allow(clippy::needless_range_loop)]
+pub fn vulkan_rmsnorm_last_axis(
+    x: &crate::Tensor,
+    weight: &crate::Tensor,
+    eps: f32,
+) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm_no_grad;
+    use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
+
+    // ---- Validate kt-side preconditions ----
+    let dtype = x.dtype();
+    if !matches!(dtype, DType::F32) {
+        return Err(Error::Msg(format!(
+            "vulkan_rmsnorm_last_axis: unsupported dtype {dtype} (kernel is F32-only; \
+             BF16/F16 needs a cast wrapper or widened VkDType)"
+        )));
+    }
+    if weight.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "vulkan_rmsnorm_last_axis: weight dtype {} != x dtype {dtype}",
+            weight.dtype()
+        )));
+    }
+    if x.rank() == 0 || weight.rank() != 1 {
+        return Err(Error::Msg(format!(
+            "vulkan_rmsnorm_last_axis: rank constraints failed (x.rank={}, weight.rank={})",
+            x.rank(),
+            weight.rank()
+        )));
+    }
+    if !x.is_contiguous() || !weight.is_contiguous() {
+        return Err(Error::Msg(
+            "vulkan_rmsnorm_last_axis: inputs must be contiguous".to_string(),
+        ));
+    }
+    let hidden = *x.shape().last().unwrap();
+    if weight.shape().first().copied() != Some(hidden) {
+        return Err(Error::Msg(format!(
+            "vulkan_rmsnorm_last_axis: weight.shape()[0] {:?} != x last-dim {hidden}",
+            weight.shape()
+        )));
+    }
+
+    let kt_vk_x = x
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| {
+            Error::Msg("vulkan_rmsnorm_last_axis: x must be Vulkan-backed".to_string())
+        })?;
+    let kt_vk_w = weight
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| {
+            Error::Msg("vulkan_rmsnorm_last_axis: weight must be Vulkan-backed".to_string())
+        })?;
+
+    let vulkan_device = Arc::clone(kt_vk_x.vulkan_device());
+    let device_index = match kt_vk_x.device() {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+
+    let shape: Vec<usize> = x.shape().to_vec();
+    let x_byte_len = kt_vk_x.byte_len();
+    let w_byte_len = kt_vk_w.byte_len();
+
+    // ---- D2H x ----
+    let x_bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        kt_vk_x.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_rmsnorm_last_axis: D2H read_back of x failed: {e}"
+        ))
+    })?;
+
+    // ---- D2H weight, then transform `w -> w - 1.0` so the QwenRMSNorm
+    // shader's `(1 + w_shader) * ...` semantics matches kt's standard
+    // `w * ...` reference (see CPU `RmsNormOp::cpu_fwd`).
+    let w_bytes_orig = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        kt_vk_w.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_rmsnorm_last_axis: D2H read_back of weight failed: {e}"
+        ))
+    })?;
+    let w_bytes_adj: Vec<u8> = {
+        // F32-only path (gated above): subtract 1.0 from each element.
+        let n = w_bytes_orig.len() / 4;
+        let mut out = Vec::with_capacity(w_bytes_orig.len());
+        for i in 0..n {
+            let chunk = &w_bytes_orig[i * 4..(i + 1) * 4];
+            let v = f32::from_le_bytes(chunk.try_into().unwrap());
+            let adj = v - 1.0_f32;
+            out.extend_from_slice(&adj.to_le_bytes());
+        }
+        out
+    };
+
+    // ---- H2D into VkTensors ----
+    let vk_dtype = VkDType::F32;
+
+    let vk_x_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        x_byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_rmsnorm_last_axis: device-local alloc for VkTensor x failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &vk_x_buffer,
+        &x_bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_rmsnorm_last_axis: H2D upload of VkTensor x failed: {e}"
+        ))
+    })?;
+    let vk_x = VkTensor::from_buffer(
+        Arc::new(vk_x_buffer),
+        shape.clone(),
+        vk_dtype,
+        Arc::clone(&vulkan_device),
+    );
+
+    let vk_w_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        w_byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_rmsnorm_last_axis: device-local alloc for VkTensor weight failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &vk_w_buffer,
+        &w_bytes_adj,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_rmsnorm_last_axis: H2D upload of VkTensor weight failed: {e}"
+        ))
+    })?;
+    let vk_w = VkTensor::from_buffer(
+        Arc::new(vk_w_buffer),
+        vec![hidden],
+        vk_dtype,
+        Arc::clone(&vulkan_device),
+    );
+
+    // ---- Dispatch the production Vulkan RMSNorm kernel ----
+    let vk_out = vk_rmsnorm_no_grad(&vk_x, &vk_w, eps).map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_rmsnorm_last_axis: kernel dispatch failed: {e}"
+        ))
+    })?;
+
+    // ---- D2H kernel result ----
+    let out_bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        vk_out.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_rmsnorm_last_axis: D2H read_back of kernel result failed: {e}"
+        ))
+    })?;
+
+    // ---- H2D into kt VulkanStorage ----
+    let out_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        x_byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_rmsnorm_last_axis: device-local alloc for kt output failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &out_buffer,
+        &out_bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_rmsnorm_last_axis: H2D upload of kt output failed: {e}"
+        ))
+    })?;
+    let out_storage = VulkanStorage::from_buffer(
+        vulkan_device,
+        device_index,
+        dtype,
+        out_buffer,
+        x_byte_len as u64,
+    )?;
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
+// ----------------------------------------------------------------------
 // vulkan_argmax_last_axis — Phase 4 Vulkan substrate op (#1082)
 // ----------------------------------------------------------------------
 

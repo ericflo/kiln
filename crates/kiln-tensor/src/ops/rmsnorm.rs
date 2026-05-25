@@ -177,18 +177,25 @@ impl DeviceOp2 for RmsNormOp {
     #[cfg(feature = "vulkan")]
     fn vulkan_fwd(&self, x: &Tensor, weight: &Tensor) -> Result<Option<Tensor>> {
         // Gate on the same preconditions as cuda_fwd / metal_fwd:
-        //   - F32 / BF16 / F16 only
+        //   - F32 only on Vulkan today (the underlying
+        //     `kiln_vulkan_kernel::vk_ops::rmsnorm` kernel is F32-only;
+        //     BF16/F16 fall through to CPU until either VkDType is
+        //     widened or a cast wrapper lands in `vk_ops::cast`).
         //   - rank(x) >= 1, rank(weight) == 1
         //   - x and weight share dtype
         //   - contiguous inputs
         //   - last-dim length of x == weight.shape()[0]
+        //   - storage must be Vulkan-backed (otherwise fall through
+        //     to CPU; the helper would otherwise raise an error)
         //
-        // Note: an existing `VulkanRmsNormOp` lives in
-        // `kiln-vulkan-kernel`. The natural drop-in routes through
-        // that kernel for the F32 case; BF16/F16 inputs need either
-        // `VkDType` widening (F16 isn't currently exposed) or a
-        // cast-to-F32 / cast-back wrapper at the dispatch boundary.
-        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::vulkan_rmsnorm_last_axis` which wraps the production
+        // `vk_rmsnorm_no_grad` shader (`qwen_rmsnorm_forward.comp`).
+        // The current bridge round-trips bytes through the host between
+        // kt's `VulkanStorage` and the kernel's `VkTensor` — see
+        // `vulkan_storage.rs::vulkan_rmsnorm_last_axis` rustdoc for the
+        // zero-copy follow-up plan (mirrors the softmax wire).
+        if !matches!(x.dtype(), DType::F32) {
             return Ok(None);
         }
         if x.rank() == 0 || weight.rank() != 1 {
@@ -203,24 +210,23 @@ impl DeviceOp2 for RmsNormOp {
         if *x.shape().last().unwrap() != weight.shape()[0] {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Vulkan): implement
-        // `crate::vulkan_rmsnorm_last_axis(x, weight, self.eps)`
-        // analogous to `crate::cuda_rmsnorm_last_axis` above. Until
-        // that wrapper lands, fall through to the CPU path
-        // (numerics-correct, performance-wrong).
-        // Candidate implementations:
-        //   1. Reuse `kiln_vulkan_kernel::VulkanRmsNormOp` — the
-        //      production rmsnorm kernel. Requires moving `x` /
-        //      `weight` to `VkTensor` storage at the dispatch
-        //      boundary; see `Tensor::to_device` (phase 1) +
-        //      `VkTensor::from_*` constructors in `vk_tensor.rs`.
-        //   2. For BF16/F16 inputs, cast to F32, run kernel #1, cast
-        //      back. The cast kernels live in `vk_ops::cast`.
-        //   3. Add a BF16/F16-specific SPIR-V rmsnorm shader that
-        //      promotes to F32 inside the threadgroup and casts on
-        //      store — pattern matches the `__nv_bfloat16` path in
-        //      `cuda_rmsnorm_last_axis`.
-        Ok(None)
+        // Only dispatch the kernel when both inputs are actually
+        // Vulkan-resident. If a kt tensor is on CPU under the
+        // `vulkan` feature, the downcast in `vulkan_rmsnorm_last_axis`
+        // would raise; gracefully fall back instead.
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::VulkanStorage>()
+            .is_none()
+            || weight
+                .storage()
+                .as_any()
+                .downcast_ref::<crate::VulkanStorage>()
+                .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(crate::vulkan_rmsnorm_last_axis(x, weight, self.eps)?))
     }
 
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
