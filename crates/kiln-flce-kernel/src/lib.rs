@@ -47,6 +47,9 @@ pub use phase_b::{
     fused_linear_cross_entropy_phase_b, fused_linear_cross_entropy_phase_b_with_provider,
 };
 
+pub mod kt_api;
+pub use kt_api::{FlceError, FlceMatmulProviderKt, FlceProviderKt};
+
 /// Optional matmul override hook for the FLCE chunked head pass.
 ///
 /// The default Phase B forward materializes the head as F32 (`head_t.to_dtype(F32)`,
