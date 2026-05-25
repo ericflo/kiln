@@ -609,6 +609,25 @@ unsafe extern "C" {
 /// Routes through the `kiln_contiguous_copy_async` kernel. Caller is
 /// the dispatch site in `Tensor::contiguous()`.
 ///
+/// # Materializes transposed / permuted views (#1082)
+///
+/// `Tensor::transpose(d0, d1)` and `Tensor::permute(&axes)` are
+/// zero-copy layout ops — they only permute `Layout::shape` and
+/// `Layout::strides` (see `Layout::{transpose,permute}` in
+/// `kiln-tensor::layout`). The transposed/permuted view shares
+/// storage with its parent.
+///
+/// Calling `.contiguous()` on such a view dispatches here, and
+/// `kiln_contiguous_copy_async` materializes the permuted layout
+/// because it is fully stride-aware: per output element it
+/// unflattens the linear index against the output shape and
+/// accumulates the source byte offset via the input's element
+/// strides plus `layout.start_offset()`. As a result, there is
+/// **no dedicated `cuda_transpose` / `cuda_permute` kernel**, and
+/// no `TransposeOp` / `PermuteOp` exists in `kiln-tensor::ops`.
+/// Parity is locked in by
+/// `crates/kiln-kt-bridge/tests/cuda_transpose_parity.rs`.
+///
 /// Errors:
 /// - Source must be CUDA storage (downcast to `CudaStorage`).
 /// - Packed dtypes are not supported (Marlin / Int4Packed / Fp4Packed
