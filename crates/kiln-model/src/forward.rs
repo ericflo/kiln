@@ -799,6 +799,33 @@ fn cuda_use_kt_api_relu() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in (#1082): elementwise `Tensor::recip()` through the
+/// kt-API + adapters. Set `KILN_USE_KT_API_RECIP=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// `.recip()` candle calls through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 22 (Recip)
+/// via the kt-bridge borrow adapter. Pays one dtod memcpy on the
+/// output direction. Falls through to the candle composite when
+/// any precondition fails so behavior is identical with the gate
+/// off.
+///
+/// Production call sites in `forward.rs` are the
+/// `(variance + eps).sqrt().recip()` RMSNorm tail (multiple
+/// sites — RMSNorm production path, MTP debug taps, and the
+/// universal RMSNorm helper) and the `cuda_sigmoid` composite's
+/// `(1 + e^-x).recip()` final step. The kt-API kernel exposed by
+/// the recently-landed kind 22 in `csrc/activation.cu` (commit
+/// 7a3e1e77) makes this scaffold non-dead — call-site migrations
+/// land in follow-up commits of the same #1082 series. Mirrors
+/// `cuda_use_kt_api_sqrt` / `cuda_use_kt_api_neg` cadence.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_recip() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_RECIP").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -7672,6 +7699,55 @@ fn try_kt_relu(x: &Tensor) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_relu: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API recip migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 22 (Recip).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0) so the caller falls through to
+/// the candle `.recip()`. NVTX range `kiln/recip_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite. Mirrors `try_kt_sqrt` / `try_kt_neg` /
+/// `try_kt_abs`.
+///
+/// IEEE semantics match the candle CPU reference: `1.0 / 0 = ±inf`
+/// and `1.0 / NaN = NaN`. See `csrc/activation.cu` `KIND_RECIP`
+/// case (added in commit 7a3e1e77 for the same #1082 series).
+///
+/// `#[allow(dead_code)]` until the first call-site migration
+/// lands in a follow-up commit; mirrors the dead-code-allowed
+/// precedent of `try_kt_tanh` (9839a3a4), `try_kt_gelu`
+/// (445095b6), and `try_kt_relu` (445095b6).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_recip(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_recip() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/recip_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 22 = Recip (matches csrc/activation.cu KIND_RECIP).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 22) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_recip: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
