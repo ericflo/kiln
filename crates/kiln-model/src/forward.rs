@@ -2393,8 +2393,40 @@ fn cuda_lora_add_training_f32(
         return Ok(None);
     }
 
-    let a_f32 = proj.a.to_dtype(DType::F32)?.contiguous()?;
-    let b_f32 = proj.b.to_dtype(DType::F32)?.contiguous()?;
+    // Phase 7 (#1082): route the BF16/F16→F32 promotion of the
+    // LoRA A/B factors through `kiln_tensor::cuda_cast` when
+    // `KILN_USE_KT_API_TO_DTYPE=1` (or `KILN_USE_KT_API_ALL=1`)
+    // is set. `cuda_cast` already produces a contiguous output,
+    // so the explicit `.contiguous()` is redundant on the kt path
+    // — but we keep it on the candle fall-through (candle's
+    // `to_dtype` doesn't *always* produce contiguous storage,
+    // notably for already-F32 inputs which alias).
+    let a_f32 = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_to_dtype(&proj.a, DType::F32)? {
+                Some(out) => out,
+                None => proj.a.to_dtype(DType::F32)?.contiguous()?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            proj.a.to_dtype(DType::F32)?.contiguous()?
+        }
+    };
+    let b_f32 = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_to_dtype(&proj.b, DType::F32)? {
+                Some(out) => out,
+                None => proj.b.to_dtype(DType::F32)?.contiguous()?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            proj.b.to_dtype(DType::F32)?.contiguous()?
+        }
+    };
     let a_t = a_f32.t()?.contiguous()?;
     let hidden = x_2d
         .matmul(&a_t)
