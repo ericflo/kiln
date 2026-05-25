@@ -482,6 +482,31 @@ fn cuda_use_kt_api_abs() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise `Tensor::clamp(lo, hi)` through the
+/// kt-API + adapters. Set `KILN_USE_KT_API_CLAMP=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// `.clamp(lo, hi)` candle calls through
+/// `kiln_tensor::cuda_clamp_pow` with kind tag 0 (Clamp) via the
+/// kt-bridge borrow adapter. Pays one dtod memcpy on the output
+/// direction (the kt allocation is freshly-owned). Falls through
+/// to the candle composite when any precondition fails so
+/// behavior is identical with the gate off.
+///
+/// The gate + helper are wired up for completeness; today there
+/// are no production `.clamp()` call sites in `forward.rs`.
+/// Future kernels that need value clipping (gradient clamping,
+/// safe-ReLU-style activations, range guards before division) can
+/// route through this gate. Mirrors the dead-code-allowed
+/// precedent of `try_kt_paged_kv_cache_new` (638bc441) and the
+/// abs scaffold (81d2d727).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_clamp() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_CLAMP").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -6724,6 +6749,57 @@ fn try_kt_abs(x: &Tensor) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_abs: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API clamp migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_clamp_pow` with kind tag 0 (Clamp).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0, non-finite bounds, lo > hi) so
+/// the caller falls through to the candle `.clamp(lo, hi)`. NVTX
+/// range `kiln/clamp_kt` brackets the migrated call so nsys traces
+/// separate the path from the baseline composite.
+///
+/// Today this helper has no production call site — the `forward.rs`
+/// path doesn't currently use `.clamp()`. The helper is wired up
+/// to match the established Phase 7 scaffold so future kernel
+/// refactors that need value clipping (gradient clamping,
+/// safe-ReLU-style activations, range guards before division)
+/// can plug in trivially. Mirrors the dead-code-allowed precedent
+/// of `try_kt_paged_kv_cache_new` (638bc441) and the abs scaffold
+/// (81d2d727).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_clamp(x: &Tensor, lo: f32, hi: f32) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_clamp() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+    if !lo.is_finite() || !hi.is_finite() || lo > hi {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/clamp_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 0 = Clamp (matches csrc/clamp_pow.cu KIND_CLAMP).
+    let out_kt = match kiln_tensor::cuda_clamp_pow(&x_kt, 0, lo, hi) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_clamp: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
