@@ -346,6 +346,29 @@ fn cuda_use_kt_api_embedding() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 (#1082) opt-in: LM head matmul (final projection from
+/// `[B*T, hidden]` to `[B*T, vocab]`) through the kt-API + adapters.
+/// Set `KILN_USE_KT_API_LM_HEAD=1` (or `KILN_USE_KT_API_ALL=1`) to
+/// enable; default off. Routes the [`lm_head_forward`] matmul
+/// (`x @ embed_tokens_t`) through `kiln_tensor::cuda_matmul`
+/// (cublasLt) directly, ahead of the existing
+/// `broadcast_matmul_cpu_compatible` dispatch. The LM head matmul is
+/// the single highest-impact production matmul site in `forward.rs`:
+/// `KILN_USE_KT_API_MATMUL=1` already catches matmul via the
+/// `linear_prefill_apply` fallback path, but the LM head goes through
+/// its own `lm_head_forward` / `lm_head_forward_backend_decode_if`
+/// dispatch and was therefore previously routed through the candle
+/// matmul path. Mirrors the [`cuda_use_kt_api_embedding`] gate
+/// (lm_head's mirror op on the input side). NVTX range
+/// `kiln/lm_head_kt` brackets the migrated call so nsys traces
+/// separate the path from the candle baseline.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_lm_head() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LM_HEAD").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: last-dim `Tensor::cat` through the kt-API +
 /// adapters. Set `KILN_USE_KT_API_CONCAT_LAST_DIM=1` (or
 /// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
@@ -9043,7 +9066,81 @@ fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Tensor> {
                 .context("metal batch lm_head GEMV failed");
         }
     }
+    #[cfg(feature = "cuda")]
+    if let Some(out) = try_kt_lm_head(x, embed_tokens_t)? {
+        return Ok(out);
+    }
     broadcast_matmul_cpu_compatible(x, embed_tokens_t)
+}
+
+/// Phase 7 (#1082) — kt-API LM head migration helper. Routes the
+/// `[B*T, hidden] @ [hidden, vocab] -> [B*T, vocab]` final projection
+/// through `kiln_tensor::cuda_matmul` (cublasLt) directly. The LM
+/// head is the single highest-impact production matmul site: the
+/// `embed_tokens_t` weight has shape `[hidden=2560, vocab=151_936]`,
+/// and at prefill `x` has `[B*T, hidden]` with sequence lengths in
+/// the hundreds or thousands.
+///
+/// Flattens any leading dims to a 2D `[lead, K]` view before
+/// dispatching to keep the kt path on the `M-N-K` cublasLt entry
+/// shape; reshapes the result back to match the input rank.
+///
+/// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
+/// non-{BF16,F16,F32}, dtype mismatch, non-contiguous,
+/// non-rank-2 weight, K-dim mismatch) so the caller falls through to
+/// [`broadcast_matmul_cpu_compatible`]. NVTX range `kiln/lm_head_kt`
+/// brackets the migrated call so nsys traces separate the path from
+/// the candle baseline.
+#[cfg(feature = "cuda")]
+fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_lm_head() {
+        return Ok(None);
+    }
+    let l_dims = x.dims();
+    let r_dims = embed_tokens_t.dims();
+    if r_dims.len() != 2 || l_dims.len() < 2 {
+        return Ok(None);
+    }
+    let k = l_dims[l_dims.len() - 1];
+    if r_dims[0] != k {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(embed_tokens_t.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::BF16 | DType::F16 | DType::F32)
+        || x.dtype() != embed_tokens_t.dtype()
+        || !x.is_contiguous()
+        || !embed_tokens_t.is_contiguous()
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/lm_head_kt");
+
+    let out_n = r_dims[1];
+    let lead: usize = l_dims[..l_dims.len() - 1].iter().product();
+    let x2d = match x.reshape((lead, k)) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    let lhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x2d) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let rhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(embed_tokens_t) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out_kt = match kiln_tensor::cuda_matmul(&lhs_kt, &rhs_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out2d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_lm_head: candle copy-back failed: {e}"))?;
+    let mut out_shape: Vec<usize> = l_dims[..l_dims.len() - 1].to_vec();
+    out_shape.push(out_n);
+    Ok(Some(out2d.reshape(out_shape)?))
 }
 
 fn lm_head_forward_backend_decode_if(
