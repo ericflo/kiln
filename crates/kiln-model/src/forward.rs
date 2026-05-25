@@ -30797,6 +30797,130 @@ mod tests {
         Ok(())
     }
 
+    /// Parity check for the kt-API path of
+    /// `backend.gdn_forward_substitution` against the candle-typed path.
+    /// Both bottom out in the same FFI symbol
+    /// (`kiln_gdn_forward_substitution`) so this asserts byte-for-byte
+    /// parity on the BF16 output `W = (I + A_strict)^{-1} (beta * V_prime)`.
+    /// (#1082)
+    ///
+    /// This is the production prefill path for Qwen3.5-4B GDN chunkwise
+    /// forward-substitution. The kt wire landed in 14c17570 behind the
+    /// `KILN_USE_KT_API_GDN` gate.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gdn_forward_substitution_kt_api_parity() -> Result<()> {
+        use crate::backend::BackendRuntime;
+        use crate::backend::cuda::CudaBackend;
+        use rand::rngs::StdRng;
+        use rand::{RngExt, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_gdn_forward_substitution_kt_api_parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // Qwen3.5-4B GDN prefill envelope (see gdn_forward_substitution at
+        // crates/kiln-gdn-kernel/src/lib.rs:406):
+        //   a_strict: [B, H, C, C]  bf16 (strictly lower-triangular)
+        //   v_prime:  [B, H, C, dv] bf16
+        //   beta:     [B, H, C]     bf16
+        //   out W:    [B, H, C, dv] bf16
+        // Caller-side C <= 128 cap.
+        let batch = 1usize;
+        let heads = 32usize;
+        let chunk = 64usize; // typical GDN chunk size
+        let dv = 128usize;
+
+        let n_a = batch * heads * chunk * chunk;
+        let n_v = batch * heads * chunk * dv;
+        let n_beta = batch * heads * chunk;
+
+        let mut rng = StdRng::seed_from_u64(0xC0_1DBABE);
+        // Keep magnitudes small so the (I + A_strict) inversion is
+        // numerically stable — even though we're comparing two paths
+        // that share the same FFI symbol, small-magnitude inputs
+        // exercise more interior bits of the kernel.
+        let mut a_data: Vec<f32> = (0..n_a)
+            .map(|_| rng.random_range(-0.05f32..0.05))
+            .collect();
+        // Enforce strict lower triangular structure (the kernel asserts
+        // this and may divide/multiply on the diagonal).
+        for b in 0..batch {
+            for h in 0..heads {
+                for i in 0..chunk {
+                    for j in i..chunk {
+                        let idx = ((b * heads + h) * chunk + i) * chunk + j;
+                        a_data[idx] = 0.0;
+                    }
+                }
+            }
+        }
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let beta_data: Vec<f32> = (0..n_beta)
+            .map(|_| rng.random_range(-0.5f32..0.5))
+            .collect();
+
+        let a_strict =
+            Tensor::from_slice(&a_data, (batch, heads, chunk, chunk), &device)?
+                .to_dtype(DType::BF16)?;
+        let v_prime = Tensor::from_slice(&v_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (batch, heads, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+
+        // Candle-typed path.
+        let candle_be = CudaBackend::new_with_kt_api_gdn(device.clone(), false);
+        let out_candle = match candle_be.gdn_forward_substitution(&a_strict, &v_prime, &beta)? {
+            Some(t) => t,
+            None => {
+                eprintln!("candle gdn_forward_substitution declined dispatch; skipping kt parity");
+                return Ok(());
+            }
+        };
+
+        // kt-API path.
+        let kt_be = CudaBackend::new_with_kt_api_gdn(device.clone(), true);
+        let out_kt = match kt_be.gdn_forward_substitution(&a_strict, &v_prime, &beta)? {
+            Some(t) => t,
+            None => {
+                eprintln!("kt gdn_forward_substitution declined dispatch; skipping kt parity");
+                return Ok(());
+            }
+        };
+
+        // Output parity: byte-for-byte (same FFI symbol).
+        let out_candle_data: Vec<f32> =
+            out_candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let out_kt_data: Vec<f32> =
+            out_kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(out_candle_data.len(), out_kt_data.len());
+        let mut mismatches = 0usize;
+        for (i, (x, y)) in out_candle_data.iter().zip(out_kt_data.iter()).enumerate() {
+            if x.to_bits() != y.to_bits() {
+                if mismatches < 4 {
+                    eprintln!(
+                        "kt parity output mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                        x.to_bits(),
+                        y.to_bits()
+                    );
+                }
+                mismatches += 1;
+            }
+        }
+        assert_eq!(
+            mismatches, 0,
+            "kt-API gdn_forward_substitution output diverges from candle path at {mismatches} indices"
+        );
+
+        Ok(())
+    }
+
     /// Metal parity check for `backend.causal_conv1d_update` against the same
     /// portable `causal_conv1d_decode` + `cuda_silu` oracle used by CUDA.
     #[cfg(feature = "metal")]
