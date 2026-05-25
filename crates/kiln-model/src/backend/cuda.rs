@@ -305,6 +305,18 @@ impl BackendRuntime for CudaBackend {
         true
     }
 
+    /// CUDA has no impl for the strict `flash_attn_paged_decode_contiguous_batch`
+    /// kernel (the bs>1 head-major uniform-`start_pos` path), so the trait
+    /// default `Ok(None)` always declines. Returning `false` here lets the
+    /// `try_strict` probe in `gqa_attention_paged_decode_contiguous_batch`
+    /// skip the `start_slots = Tensor::from_slice(...)` allocation that
+    /// would otherwise emit a captured `cudaMemcpyHtoDAsync` to a recycled
+    /// VA under CUDA graph capture (suspect 6 in
+    /// `bench-results/cuda-graph-bs2-secondary-audit.md`, #1082).
+    fn supports_strict_paged_decode_contiguous_batch(&self) -> bool {
+        false
+    }
+
     fn supports_gdn_forward_substitution(&self) -> bool {
         self.gdn_enabled
     }

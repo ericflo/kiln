@@ -225,6 +225,29 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    /// Whether the backend implements the strict (uniform-`start_pos`)
+    /// `flash_attn_paged_decode_contiguous_batch` kernel.
+    ///
+    /// Callers can use this to short-circuit before allocating the
+    /// `start_slots` device tensor (the `Tensor::from_slice` build in
+    /// `gqa_attention_paged_decode_contiguous_batch::try_strict`) on
+    /// backends that will decline the trait call anyway. Important
+    /// under CUDA graph capture: the `Tensor::from_slice` would emit a
+    /// captured `cudaMemcpyHtoDAsync` that targets storage which is
+    /// freed at end of capture, leaving a recycled-VA write hazard on
+    /// every replay even though no kernel reads from it (suspect 6 in
+    /// `bench-results/cuda-graph-bs2-secondary-audit.md`, #1082).
+    ///
+    /// Default `true` preserves the historical
+    /// "try-strict-then-fall-through-on-`None`" behavior so backends
+    /// that already opt-in via `flash_attn_paged_decode_contiguous_batch`
+    /// keep working unchanged. CUDA overrides to `false` because the
+    /// strict kernel has no CUDA impl today and the captured HtoD
+    /// scratch is a clean-up wart.
+    fn supports_strict_paged_decode_contiguous_batch(&self) -> bool {
+        true
+    }
+
     /// Varlen variant of [`Self::flash_attn_paged_decode_contiguous_batch`] for
     /// a group of decode rows with divergent K/V lengths under continuous
     /// batching. Uses block-table addressing so K/V need not be contiguous in

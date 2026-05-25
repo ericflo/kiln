@@ -17329,7 +17329,23 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH").is_ok();
         let force_dyn_seqlen = !kill_dyn_seqlen
             && std::env::var("KILN_FORCE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH").is_ok();
-        let prefer_strict = !force_dyn_seqlen && uniform_start_pos && strict_start_slots.is_some();
+        // Short-circuit the strict probe on backends that have no
+        // strict_paged_decode_contiguous_batch kernel impl. The probe
+        // would `Tensor::from_slice` build a `[batch] u32 start_slots`
+        // tensor before calling the backend, and on CUDA the backend
+        // declines via the trait default — but under CUDA graph
+        // capture, the `Tensor::from_slice`'s `cudaMemcpyHtoDAsync`
+        // is captured by the stream and on replay writes to a
+        // recycled VA (suspect 6 in
+        // `bench-results/cuda-graph-bs2-secondary-audit.md`, #1082).
+        // The strict kernel exists on Metal so the predicate defaults
+        // `true` and Metal paths keep their preferred-strict
+        // dispatch.
+        let backend_supports_strict = backend.supports_strict_paged_decode_contiguous_batch();
+        let prefer_strict = !force_dyn_seqlen
+            && uniform_start_pos
+            && strict_start_slots.is_some()
+            && backend_supports_strict;
 
         let try_strict = |out_acc: &mut Option<Tensor>| -> Result<()> {
             // Strict contiguous-batch path: pre-12-B-prime code path that
@@ -17402,10 +17418,18 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             }
         } else {
             try_dyn_seqlen(&mut out)?;
-            if out.is_none() && uniform_start_pos && strict_start_slots.is_some() {
+            if out.is_none()
+                && uniform_start_pos
+                && strict_start_slots.is_some()
+                && backend_supports_strict
+            {
                 // dyn_seqlen backend declined; the strict path can still
                 // serve uniform batches. Divergent batches have no fallback
-                // and will surface as the final context error below.
+                // and will surface as the final context error below. CUDA
+                // skips this fallback because its strict trait method has
+                // no impl (declines via the default `Ok(None)`) and the
+                // intermediate `Tensor::from_slice` would emit a captured
+                // HtoD to a recycled VA (#1082 suspect 6).
                 try_strict(&mut out)?;
             }
         }
