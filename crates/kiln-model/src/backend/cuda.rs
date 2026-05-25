@@ -124,10 +124,23 @@ pub struct CudaBackend {
     /// write surfaces in the caller's candle tensor. Set
     /// `KILN_DISABLE_KT_API_CONV1D=1` to opt out (escape hatch).
     cuda_use_kt_api_conv1d: bool,
-    /// Phase 7 (#1082) opt-in: route `kiln_gdn_kernel::gdn_forward_substitution`
-    /// through the kt-typed surface (`gdn_forward_substitution_kt`) instead
-    /// of the candle-typed shim. Set `KILN_USE_KT_API_GDN=1` (or
-    /// `KILN_USE_KT_API_ALL=1`) to enable; default off.
+    /// Phase 7 default-on (#1082): route all 10 GDN dispatch wires
+    /// (forward_substitution, recurrent_step, chunk_prep, chunk_scan,
+    /// gated_rms_norm, full_chunk_forward_multiblock, plus the 4
+    /// decode_* wires: gates_recurrent, qk_norm, qk_norm_gates_recurrent,
+    /// qk_norm_gates_recurrent_rmsnorm) through the kt-typed surfaces
+    /// instead of the candle-typed shims. Default ON because every
+    /// wire has byte-exact parity coverage: dedicated parity tests
+    /// landed in `d58b40ba` (recurrent_step), `b3666da0`
+    /// (forward_substitution), `b38410cb` (chunk_prep), `790ba424`
+    /// (chunk_scan + gated_rms_norm), `ee5c779a` (full_chunk_forward_
+    /// multiblock + decode_gates_recurrent), `ccb4fa82`
+    /// (decode_qk_norm), `f6c4ed70` (decode_qk_norm_rmsnorm); the
+    /// remaining decode wires are bit-exact by construction sharing
+    /// the same FFI symbols as the candle path. Three 3D->4D shape
+    /// mismatch bugs were caught and fixed by the parity work
+    /// (`e4823c7b`, `a1408c0e`, `ddd5cc00`). Set
+    /// `KILN_DISABLE_KT_API_GDN=1` to opt out (escape hatch).
     cuda_use_kt_api_gdn: bool,
     /// Phase 7 default-on (#1082): route the flash-attention-2 prefill
     /// + paged_decode kernels through the kt-typed surface
@@ -172,7 +185,13 @@ impl CudaBackend {
         // candle and kt paths bottom out in the same FFI symbol, so this
         // is bit-exact. Escape hatch: `KILN_DISABLE_KT_API_CONV1D=1`.
         let cuda_use_kt_api_conv1d = std::env::var("KILN_DISABLE_KT_API_CONV1D").is_err();
-        let cuda_use_kt_api_gdn = std::env::var("KILN_USE_KT_API_GDN").is_ok()
+        // #1082: flipped default ON post byte-exact parity tests on
+        // all 10 GDN wires. The parity work caught and fixed 3 shape
+        // mismatch bugs (`e4823c7b`, `a1408c0e`, `ddd5cc00`); after
+        // those fixes the kt path matches the candle path bit-exactly
+        // because both bottom out in the same FFI symbols. Escape
+        // hatch: `KILN_DISABLE_KT_API_GDN=1`.
+        let cuda_use_kt_api_gdn = std::env::var("KILN_DISABLE_KT_API_GDN").is_err()
             || std::env::var("KILN_USE_KT_API_ALL").is_ok();
         // #1082: flipped default ON. The kt path is bit-exact by
         // construction — all 4 wired flash_attn dispatch sites bottom
