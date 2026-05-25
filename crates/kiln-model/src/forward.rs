@@ -18327,6 +18327,8 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
         lora,
         None,
         None,
+        None,
+        None,
     )
 }
 
@@ -18336,6 +18338,18 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
 /// function skips the per-step host→device builds for those tensors
 /// and reads from the caller-owned device pointers instead — exactly
 /// the invariant CUDA graph capture/replay needs.
+///
+/// When `stable_block_table_gpu` / `stable_seqused_k_gpu` are also
+/// `Some`, the function uses [`CachedPagedDecodeMeta::build_with_stable_buffers`]
+/// in place of [`CachedPagedDecodeMeta::build`], so the captured
+/// graph reads the per-step paged-decode metadata from the caller-
+/// owned device tensors instead of from transient `Tensor::from_slice`
+/// allocations that would be `cudaFree`'d when the per-call meta
+/// drops at end of capture. This pins the `ILLEGAL_ADDRESS` fault
+/// documented in `bench-results/cuda-graph-bs2-memcheck.md` (#1082).
+/// All four stable parameters are independent: callers may pass any
+/// subset that matches the buffers their captured-region setup
+/// pre-allocates and re-fills.
 #[allow(clippy::too_many_arguments)]
 fn model_forward_paged_decode_contiguous_batch_hidden_inner(
     backend: &dyn BackendRuntime,
@@ -18349,6 +18363,8 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
     lora: Option<&LoraWeights>,
     stable_positions_gpu: Option<&Tensor>,
     stable_token_ids_gpu: Option<&Tensor>,
+    stable_block_table_gpu: Option<&Tensor>,
+    stable_seqused_k_gpu: Option<&Tensor>,
 ) -> Result<Tensor> {
     let batch = token_ids.len();
     anyhow::ensure!(batch > 0, "batched paged decode requires a non-empty batch");
@@ -18431,10 +18447,34 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
         .iter()
         .any(|layer| matches!(layer.attention, GpuAttentionWeights::Full(_)));
     let cached_paged_meta: Option<CachedPagedDecodeMeta> = if has_full_attention_layer {
-        Some(
-            CachedPagedDecodeMeta::build(device, paged_cache, block_tables, start_positions)
-                .context("build cached paged decode metadata for batched step")?,
-        )
+        // CUDA graph capture path: when the caller supplies stable
+        // `block_table` + `seqused_k` device buffers, build the meta
+        // around those instead of allocating fresh per-step tensors
+        // via `Tensor::from_slice`. The transient-allocation path bakes
+        // dangling pointers into the captured graph (#1082, see
+        // `bench-results/cuda-graph-bs2-memcheck.md`). Both stable
+        // tensors must be supplied together — they're a single
+        // logical "meta" input pair. If only one is provided, fall
+        // back to the regular build path to keep the code obviously
+        // correct rather than mixing stable and transient storage.
+        match (stable_block_table_gpu, stable_seqused_k_gpu) {
+            (Some(bt), Some(sk)) => Some(
+                CachedPagedDecodeMeta::build_with_stable_buffers(
+                    paged_cache,
+                    block_tables,
+                    start_positions,
+                    bt,
+                    sk,
+                )
+                .context(
+                    "build cached paged decode metadata for batched step (stable buffers)",
+                )?,
+            ),
+            _ => Some(
+                CachedPagedDecodeMeta::build(device, paged_cache, block_tables, start_positions)
+                    .context("build cached paged decode metadata for batched step")?,
+            ),
+        }
     } else {
         None
     };
@@ -19981,6 +20021,14 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
         lora,
         Some(graph_inputs.positions),
         Some(graph_inputs.token_ids),
+        // stable_block_table_gpu / stable_seqused_k_gpu: not threaded
+        // through yet — the next commit wires `graph_inputs.block_table`
+        // + `graph_inputs.seqused_k` into these slots so the captured
+        // graph reads paged-decode meta from caller-owned device
+        // tensors instead of from transient `Tensor::from_slice`
+        // allocations (#1082).
+        None,
+        None,
     )?;
     // Compute logits and slice them into the caller-owned stable
     // `output_logits` buffer (`[batch, 1, vocab]`). The captured graph
