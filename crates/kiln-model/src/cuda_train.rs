@@ -3917,18 +3917,44 @@ impl CudaBackwardOp for RmsNormBackward {
         let rms_inv_sq = rms_inv
             .sqr()
             .context("cuda_rmsnorm backward: inv rms square")?;
-        let rms_inv_cubed = rms_inv_sq
-            .broadcast_mul(&rms_inv)
-            .context("cuda_rmsnorm backward: inv rms cubed")?;
+        // Phase 7 (#1082): route the equal-shape `rms_inv_sq *
+        // rms_inv` product through the kt-API helper. Both operands
+        // share the `[..., 1]` reduced shape (rms_inv_sq is
+        // `rms_inv.sqr()`), so the shape-equality precondition
+        // engages and the kt path dispatches one
+        // `cuda_elementwise_binary(KIND_MUL)` launch. Falls through
+        // to the candle composite when KILN_USE_KT_API_BROADCAST_MUL
+        // is off or any precondition fails so behavior is identical
+        // with the gate off.
+        let rms_inv_cubed = match crate::forward::try_kt_broadcast_mul(&rms_inv_sq, &rms_inv)
+            .context("cuda_rmsnorm backward: try_kt_broadcast_mul rms_inv_cubed")?
+        {
+            Some(out) => out,
+            None => rms_inv_sq
+                .broadcast_mul(&rms_inv)
+                .context("cuda_rmsnorm backward: inv rms cubed")?,
+        };
         let correction_scale = rms_inv_cubed
             .affine(1.0f64 / hidden as f64, 0.0)
             .context("cuda_rmsnorm backward: correction scale")?;
+        // Phase 7 (#1082): route the equal-shape `dot *
+        // correction_scale` inner product through the kt-API helper.
+        // `dot` is `[..., 1]` (sum_keepdim over the last dim of u *
+        // input) and `correction_scale` is `rms_inv_cubed.affine(...)`
+        // which preserves `[..., 1]`. The outer `input *
+        // dot_correction` is a true broadcast (`[..., H] * [..., 1]`)
+        // and stays on the candle path.
+        let dot_correction = match crate::forward::try_kt_broadcast_mul(&dot, &correction_scale)
+            .context("cuda_rmsnorm backward: try_kt_broadcast_mul dot_correction")?
+        {
+            Some(out) => out,
+            None => dot
+                .broadcast_mul(&correction_scale)
+                .context("cuda_rmsnorm backward: dot correction")?,
+        };
         let correction = input
             .as_tensor()
-            .broadcast_mul(
-                &dot.broadcast_mul(&correction_scale)
-                    .context("cuda_rmsnorm backward: dot correction")?,
-            )
+            .broadcast_mul(&dot_correction)
             .context("cuda_rmsnorm backward: correction")?;
         let grad_input = (u
             .broadcast_mul(&rms_inv)
