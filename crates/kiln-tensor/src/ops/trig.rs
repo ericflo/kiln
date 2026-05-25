@@ -51,7 +51,12 @@ impl TrigKind {
     /// shared `cuda_activation_unary` kernel — sin/cos/tan as kinds
     /// 7/8/9 (#1082 base set) and asin/acos/atan as kinds 18/19/20
     /// (#1082 follow-up).
-    #[cfg(feature = "cuda")]
+    ///
+    /// Metal path reuses the same tags via `metal_activation_unary`
+    /// (candle covers only sin=7 and cos=8 today; the other four —
+    /// tan, asin, acos, atan — have no candle `UnaryOp` and fall
+    /// through to CPU until matching Metal kernels land).
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     fn cuda_kind_tag(self) -> Option<i32> {
         match self {
             TrigKind::Sin => Some(7),
@@ -105,13 +110,17 @@ impl DeviceOp1 for TrigOp {
 
     #[cfg(feature = "metal")]
     fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
-        // Gate on the same preconditions as cuda_fwd so future MSL
-        // kernel work can drop in without changing the call site:
-        //   - validate (dtype + contiguous)
-        //   - F32 / BF16 / F16 only
-        //   - contiguous input
-        //   - kind has a Metal-equivalent kernel tag (mirroring
-        //     cuda_kind_tag); kinds without one fall through to CPU
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::metal_activation_unary` which wraps candle's
+        // production Metal `unary_*` kernels (the same path
+        // `candle::Tensor::{sin, cos}()` take). Apple Silicon UMA:
+        // no host bounce — kt MetalStorage::buffer is shared with
+        // the candle wrapper via Arc<metal::Buffer>.
+        //
+        // Only `Sin` (kind=7) and `Cos` (kind=8) have candle
+        // `UnaryOp` variants today. `Tan` (9), `Asin` (18),
+        // `Acos` (19), `Atan` (20) still fall through to CPU until
+        // matching Metal kernels land.
         validate(x, self.kind.name())?;
         if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
             return Ok(None);
@@ -119,22 +128,21 @@ impl DeviceOp1 for TrigOp {
         if !x.is_contiguous() {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Metal): once a Metal trig kernel ships,
-        // dispatch on `self.kind.cuda_kind_tag()` (or a Metal-specific
-        // tag) and route through `crate::metal_activation_unary`.
-        // Until then, fall through to the CPU path so the op still
-        // produces correct results on Mac (numerics-correct,
-        // performance-wrong).
-        // Candidate implementations:
-        //   1. Custom MSL kernel: per-element pointwise; switch on
-        //      `kind_tag` selecting sin / cos / tan / asin / acos /
-        //      atan / atan2.
-        //   2. MPS Graph: per-primitive (`sin(_:)`, `cos(_:)`, etc.)
-        //      bound by kind. Higher per-call overhead but trivial
-        //      to wire.
-        //   3. Native Metal `simd_*` fast-math intrinsics for
-        //      reduced-precision paths where eps tolerance allows.
-        Ok(None)
+        let tag = match self.kind {
+            TrigKind::Sin | TrigKind::Cos => self.kind.cuda_kind_tag(),
+            _ => None,
+        };
+        let Some(tag) = tag else {
+            return Ok(None);
+        };
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::MetalStorage>()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(crate::metal_activation_unary(x, tag)?))
     }
 
     #[cfg(feature = "vulkan")]

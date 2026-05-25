@@ -1256,7 +1256,10 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
         Storage as CandleStorage, Tensor as CandleTensor,
     };
 
-    if !matches!(kind_tag, 0 | 2 | 3 | 4 | 5 | 6 | 12 | 13 | 14 | 22 | 23 | 24 | 25 | 26) {
+    if !matches!(
+        kind_tag,
+        0 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 12 | 13 | 14 | 22 | 23 | 24 | 25 | 26
+    ) {
         return Err(Error::Msg(format!(
             "metal_activation_unary: kind_tag {kind_tag} not supported on Metal today \
              (0=Silu, 2=Gelu, 3=Tanh, 4=Relu, 5=Ln, 6=Exp, 12=Neg, 13=Abs, 14=Sqrt; \
@@ -1322,6 +1325,8 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
         12 => candle_in.neg(),
         13 => candle_in.abs(),
         14 => candle_in.sqrt(),
+        7 => candle_in.sin(),
+        8 => candle_in.cos(),
         22 => candle_in.recip(),
         23 => candle_in.sign(),
         24 => candle_in.floor(),
