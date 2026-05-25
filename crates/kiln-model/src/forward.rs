@@ -369,6 +369,53 @@ fn cuda_use_kt_api_lm_head() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 (#1082) opt-in: LoRA delta composite
+/// (`(x @ A^T) @ B^T * scale`) through the kt-API + adapters.
+/// Set `KILN_USE_KT_API_LORA_DELTA=1` (or `KILN_USE_KT_API_ALL=1`)
+/// to enable; default off. Routes the
+/// [`crate::lora_loader::compute_lora_delta`] three-step composite
+/// (`hidden = x @ A^T`, `delta_pre = hidden @ B^T`,
+/// `delta = delta_pre * scale`) through `kiln_tensor::cuda_matmul`
+/// + `kiln_tensor::cuda_matmul` + `kiln_tensor::cuda_scalar_op`
+/// (kind 2 = MulScalar) directly, ahead of the candle composite.
+///
+/// LoRA delta is a hot inference + training path: every layer
+/// with a LoRA-targeted projection (q/k/v/o + gate/up/down) runs
+/// this composite per forward pass. The scale factor folds into a
+/// single fused kt scalar op instead of candle's `tensor * f64`
+/// broadcast path. Mirrors the [`cuda_use_kt_api_lm_head`] gate
+/// (LM head matmul migration). NVTX range `kiln/lora_delta_kt`
+/// brackets the migrated call so nsys traces separate the path
+/// from the candle baseline.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_lora_delta() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LORA_DELTA").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
+/// Phase 7 (#1082) opt-in: LoRA base + delta accumulator
+/// (`base + delta`) through the kt-API + adapters. Set
+/// `KILN_USE_KT_API_LORA_ADD=1` (or `KILN_USE_KT_API_ALL=1`) to
+/// enable; default off. Routes the final `(base + delta)?` step
+/// in [`add_lora_delta_to_base`] (and analogous call sites that
+/// add a LoRA delta on top of a base linear) through
+/// `kiln_tensor::cuda_elementwise_binary` with kind tag 0 (Add)
+/// directly, ahead of the candle `Add<Tensor>` composite.
+///
+/// LoRA-augmented projections run this final accumulator every
+/// forward call on every layer that has a LoRA target. Mirrors
+/// the [`cuda_use_kt_api_max_binary`] gate (other production
+/// binary op migration). NVTX range `kiln/lora_add_kt` brackets
+/// the migrated call so nsys traces separate the path from the
+/// candle baseline.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_lora_add() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LORA_ADD").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: last-dim `Tensor::cat` through the kt-API +
 /// adapters. Set `KILN_USE_KT_API_CONCAT_LAST_DIM=1` (or
 /// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
@@ -2142,6 +2189,17 @@ fn add_lora_delta_to_base(
                 &base, x, &proj.a, &proj.b, lora_scale,
             )
             .context("metal LoRA decode delta/add failed");
+        }
+    }
+    #[cfg(feature = "cuda")]
+    {
+        if let Some(delta) = try_kt_lora_delta(x, proj, lora_scale)? {
+            let delta = if delta.dtype() == base.dtype() {
+                delta
+            } else {
+                delta.to_dtype(base.dtype())?
+            };
+            return Ok((base + delta)?);
         }
     }
     let delta = compute_lora_delta(x, proj, lora_scale)?;
@@ -9733,6 +9791,145 @@ fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Tensor> {
         return Ok(out);
     }
     broadcast_matmul_cpu_compatible(x, embed_tokens_t)
+}
+
+/// Phase 7 (#1082) — kt-API LoRA delta migration helper. Routes
+/// the `(x @ A^T) @ B^T * scale` three-step composite from
+/// [`crate::lora_loader::compute_lora_delta`] through
+/// `kiln_tensor::cuda_matmul` + `kiln_tensor::cuda_matmul` +
+/// `kiln_tensor::cuda_scalar_op` (kind 2 = MulScalar) directly,
+/// ahead of the candle composite.
+///
+/// Flattens any leading dims to a 2D `[lead, in_features]` view
+/// before dispatching to keep the cublasLt entry shape canonical;
+/// reshapes the result back to match `x`'s rank. Casts A/B to
+/// `x.dtype()` first (matching the [`compute_lora_delta`] policy:
+/// cuBLAS BF16-input + FP32-accumulate on tensor cores).
+///
+/// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
+/// unsupported dtype, dtype/rank mismatch, non-contiguous,
+/// non-finite scale, K-dim mismatch) so the caller falls through
+/// to the candle composite. NVTX range `kiln/lora_delta_kt`
+/// brackets the migrated call so nsys traces separate the path
+/// from the candle baseline.
+#[cfg(feature = "cuda")]
+fn try_kt_lora_delta(
+    x: &Tensor,
+    proj: &LoraProjectionWeights,
+    scale: f32,
+) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_lora_delta() {
+        return Ok(None);
+    }
+    let x_dims = x.dims();
+    if x_dims.len() < 2 {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(proj.a.device(), Device::Cuda(_))
+        || !matches!(proj.b.device(), Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+        return Ok(None);
+    }
+    if !(scale as f64).is_finite() {
+        return Ok(None);
+    }
+    let Ok((rank, in_features)) = proj.a.dims2() else {
+        return Ok(None);
+    };
+    let Ok((out_features, b_rank)) = proj.b.dims2() else {
+        return Ok(None);
+    };
+    if b_rank != rank || x_dims[x_dims.len() - 1] != in_features {
+        return Ok(None);
+    }
+    let a = match proj.a.to_dtype(x.dtype()) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let b = match proj.b.to_dtype(x.dtype()) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let a_t = match a.t().and_then(|t| t.contiguous()) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let b_t = match b.t().and_then(|t| t.contiguous()) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    if !a_t.is_contiguous() || !b_t.is_contiguous() {
+        return Ok(None);
+    }
+
+    let lead: usize = x_dims[..x_dims.len() - 1].iter().product();
+    let x2d = match x.reshape((lead, in_features)).and_then(|t| t.contiguous()) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    if !x2d.is_contiguous() {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/lora_delta_kt");
+
+    // Step 1: hidden = x @ A^T -> shape [lead, rank]
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x2d) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let a_t_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_t) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let hidden_kt = match kiln_tensor::cuda_matmul(&x_kt, &a_t_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let hidden = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&hidden_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_lora_delta: candle copy-back hidden: {e}"))?;
+    if !hidden.is_contiguous() {
+        return Ok(None);
+    }
+
+    // Step 2: delta_pre = hidden @ B^T -> shape [lead, out_features]
+    let hidden_kt2 = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&hidden) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let b_t_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_t) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let delta_pre_kt = match kiln_tensor::cuda_matmul(&hidden_kt2, &b_t_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let delta_pre = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&delta_pre_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_lora_delta: candle copy-back delta_pre: {e}"))?;
+    if !delta_pre.is_contiguous() {
+        return Ok(None);
+    }
+
+    // Step 3: delta = delta_pre * scale (kind tag 2 = MulScalar)
+    let delta_pre_kt2 = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&delta_pre) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let delta_kt = match kiln_tensor::cuda_scalar_op(&delta_pre_kt2, 2, scale) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let delta2d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&delta_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_lora_delta: candle copy-back delta: {e}"))?;
+
+    let mut out_shape: Vec<usize> = x_dims[..x_dims.len() - 1].to_vec();
+    out_shape.push(out_features);
+    Ok(Some(delta2d.reshape(out_shape)?))
 }
 
 /// Phase 7 (#1082) — kt-API LM head migration helper. Routes the
