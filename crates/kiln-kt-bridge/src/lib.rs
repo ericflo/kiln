@@ -190,6 +190,16 @@ pub fn candle_dtype_to_kt(d: candle_core::DType) -> Result<KtDType, BridgeError>
         C::BF16 => KtDType::BF16,
         C::F16 => KtDType::F16,
         C::U32 => KtDType::U32,
+        // candle's `I32` and kt's `U32` are both 4-byte integers with
+        // identical CUDA storage layout. kt-tensor today doesn't have a
+        // dedicated I32 variant, but several kt-API entry points need to
+        // accept candle tensors that are nominally `i32` for layout
+        // reasons (e.g. Marlin's packed b_packed: the kernel treats the
+        // bits as opaque packed 4-bit weights, never as signed ints).
+        // Map I32 -> U32 so the borrow adapter can produce a kt-Tensor
+        // pointing at the same device bytes. Callers that need actual
+        // signed-i32 semantics must add a real KtDType::I32 first.
+        C::I32 => KtDType::U32,
         C::U8 => KtDType::U8,
         C::I64 => KtDType::I64,
         other => {
@@ -310,6 +320,9 @@ pub fn kt_tensor_from_candle_cuda_copy(
         C::BF16 => dispatch_copy!(bf16, "bf16"),
         C::F16 => dispatch_copy!(f16, "f16"),
         C::U32 => dispatch_copy!(u32, "u32"),
+        // I32 reinterpreted as U32 (same 4-byte layout); see
+        // `candle_dtype_to_kt`.
+        C::I32 => dispatch_copy!(i32, "i32"),
         C::U8 => dispatch_copy!(u8, "u8"),
         C::I64 => dispatch_copy!(i64, "i64"),
         other => {
@@ -555,6 +568,9 @@ pub fn kt_tensor_from_candle_cuda_borrow(
         C::BF16 => src_ptr!(bf16, "bf16"),
         C::F16 => src_ptr!(f16, "f16"),
         C::U32 => src_ptr!(u32, "u32"),
+        // I32 reinterpreted as U32 — same 4-byte layout, see
+        // `candle_dtype_to_kt` for the Marlin packed-i32 rationale.
+        C::I32 => src_ptr!(i32, "i32"),
         C::U8 => src_ptr!(u8, "u8"),
         C::I64 => src_ptr!(i64, "i64"),
         other => {
@@ -634,6 +650,9 @@ mod tests {
         assert_eq!(candle_dtype_to_kt(candle_core::DType::BF16).unwrap(), KtDType::BF16);
         assert_eq!(candle_dtype_to_kt(candle_core::DType::F16).unwrap(), KtDType::F16);
         assert_eq!(candle_dtype_to_kt(candle_core::DType::U32).unwrap(), KtDType::U32);
+        // I32 maps to U32 (4-byte storage reinterpret) for Marlin's
+        // packed-i32 b_packed and any other opaque-bytes use case.
+        assert_eq!(candle_dtype_to_kt(candle_core::DType::I32).unwrap(), KtDType::U32);
         assert_eq!(candle_dtype_to_kt(candle_core::DType::U8).unwrap(), KtDType::U8);
         assert_eq!(candle_dtype_to_kt(candle_core::DType::I64).unwrap(), KtDType::I64);
     }
