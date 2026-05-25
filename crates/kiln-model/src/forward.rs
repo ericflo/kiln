@@ -2486,8 +2486,40 @@ fn cuda_lora_add_training_bf16(
         return Ok(None);
     }
 
-    let a_bf16 = proj.a.to_dtype(DType::BF16)?.contiguous()?;
-    let b_bf16 = proj.b.to_dtype(DType::BF16)?.contiguous()?;
+    // Phase 7 (#1082): route the BF16 LoRA factor cast through the
+    // `KILN_USE_KT_API_TO_DTYPE` gate (commit 10036405). Mirrors
+    // the F32 LoRA-factor migration at the F32 LoRA-add training
+    // site (commit 7a093087). When the source LoRA factor is
+    // already BF16 the helper returns `Ok(None)` (target == source
+    // short-circuit) so we fall through to candle's `.to_dtype()`
+    // (a zero-copy view); the explicit `.contiguous()?` then
+    // pays for compactness if the view is non-contiguous.
+    let a_bf16 = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_to_dtype(&proj.a, DType::BF16)? {
+                Some(out) => out,
+                None => proj.a.to_dtype(DType::BF16)?.contiguous()?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            proj.a.to_dtype(DType::BF16)?.contiguous()?
+        }
+    };
+    let b_bf16 = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_to_dtype(&proj.b, DType::BF16)? {
+                Some(out) => out,
+                None => proj.b.to_dtype(DType::BF16)?.contiguous()?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            proj.b.to_dtype(DType::BF16)?.contiguous()?
+        }
+    };
     let a_t = a_bf16.t()?.contiguous()?;
     let hidden = x_2d
         .matmul(&a_t)
