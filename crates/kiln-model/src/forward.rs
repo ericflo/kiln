@@ -9985,6 +9985,69 @@ fn lm_head_argmax_backend_decode_if(
     lm_head_argmax(x, embed_tokens_t)
 }
 
+/// Phase 7 (#1082) — kt-API sampler argmax migration helper for
+/// the multi-row case used by
+/// [`crate::sampling::greedy_sample_rows`]. Routes a 2-D or
+/// higher contiguous CUDA candle logits tensor through
+/// `kiln_tensor::cuda_argmax_last_axis`, which reduces the last
+/// axis and yields an I64 tensor with one fewer rank. The result
+/// is copied back through the kt-bridge to a candle tensor,
+/// flattened, and cast to a `Vec<u32>` to match the existing
+/// `greedy_sample_rows` return type.
+///
+/// Distinct from [`try_kt_argmax_1d`]: that helper targets the
+/// post-`flatten_all` rank-1 case inside the fused LM head fast
+/// path ([`lm_head_argmax`]) and returns a scalar `u32`. The
+/// sampler path operates on per-row argmax over the vocab axis
+/// (`[..., vocab_size]` -> `[...]`) so it needs the rank-preserving
+/// reduction, not the rank-1 scalar collapse.
+///
+/// Gated on [`cuda_use_kt_api_sampling_argmax`]. Returns
+/// `Ok(None)` when the gate is off or the input is incompatible
+/// (non-CUDA, unsupported dtype, non-contiguous, rank-0) so the
+/// caller falls through to candle's `argmax(vocab_dim)` +
+/// `flatten_all` + `to_vec1::<u32>()`. NVTX range
+/// `kiln/sampling_argmax_rows_kt` brackets the migrated call so
+/// nsys traces separate the path from the baseline.
+///
+/// Today the helper is unused — the migration of
+/// `greedy_sample_rows` lands in a follow-up commit so the
+/// kt-API call site lives next to its candle baseline for easy
+/// A/B benching. Pattern follows commit 46406b2e (lerp scaffold)
+/// and commit ad3eb4dc (fused LM head argmax).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_sampling_argmax_rows(logits: &Tensor) -> Result<Option<Vec<u32>>> {
+    if !cuda_use_kt_api_sampling_argmax() {
+        return Ok(None);
+    }
+    if !matches!(logits.device(), Device::Cuda(_))
+        || !matches!(logits.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !logits.is_contiguous()
+        || logits.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/sampling_argmax_rows_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(logits) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out_kt = match kiln_tensor::cuda_argmax_last_axis(&x_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_sampling_argmax_rows: candle copy-back failed: {e}"))?;
+    // cuda_argmax_last_axis on a rank-N input yields a rank-(N-1) I64
+    // tensor; flatten and cast each element to u32 to match the
+    // existing greedy_sample_rows return type.
+    let ids_i64: Vec<i64> = out.flatten_all()?.to_vec1::<i64>()?;
+    Ok(Some(ids_i64.into_iter().map(|v| v as u32).collect()))
+}
+
 /// Token-history aggregation for the fused on-device sampling path.
 /// Returns `(unique_indices, counts)` sorted by ascending token id so
 /// the on-device scatter is deterministic across runs.
