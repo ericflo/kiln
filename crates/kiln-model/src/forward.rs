@@ -17816,6 +17816,10 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             // [batch, max_blocks_per_seq] block_table tensor that indexes the
             // paged KV pool. `flash_attn_paged_decode_dyn_seqlen` masks padding
             // beyond each row's seqused_k.
+            #[cfg(feature = "cuda")]
+            let page_block_size =
+                try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
+            #[cfg(not(feature = "cuda"))]
             let page_block_size = paged_cache.block_size();
             let max_blocks_per_seq =
                 ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
