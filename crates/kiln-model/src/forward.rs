@@ -10285,7 +10285,27 @@ fn gated_rms_norm_fallback(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) ->
 
     // RMS norm on last dimension
     let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
-    let rms_inv = (variance + eps)?.sqrt()?.recip()?;
+    // Phase 7 (#1082): when `KILN_USE_KT_API_RSQRT=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set, route the RMSNorm-tail
+    // `(variance + eps).sqrt().recip()` composite through
+    // `kiln_tensor::cuda_activation_unary` kind 28 (Rsqrt) — a
+    // single fused kernel that replaces the two candle calls + the
+    // intermediate sqrt buffer. Falls through to the candle
+    // composite when any precondition fails.
+    let variance_plus_eps = (variance + eps)?;
+    let rms_inv = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_rsqrt(&variance_plus_eps)? {
+                Some(out) => out,
+                None => variance_plus_eps.sqrt()?.recip()?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            variance_plus_eps.sqrt()?.recip()?
+        }
+    };
     let normed = x_f32.broadcast_mul(&rms_inv)?;
     let normed = normed.broadcast_mul(&w_f32)?;
 
