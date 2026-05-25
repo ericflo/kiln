@@ -3,11 +3,14 @@
 //!
 //! The chunkwise math is mathematically equivalent to the per-token
 //! recurrence, so the GPU output must match within F32 tolerance.
+//!
+//! Test factories are candle-free via the kt-native
+//! `VkTensor::from_f32_slice` / `parameter_from_f32_slice`
+//! constructors. (#1082)
 
 #![cfg(test)]
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
 use kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad;
 use kiln_vulkan_kernel::{VkTensor, VulkanDevice};
 use std::sync::Arc;
@@ -20,8 +23,7 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 }
 
 fn upload(device: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    VkTensor::from_candle(&t, Arc::clone(device))
+    VkTensor::from_f32_slice(data, shape.to_vec(), Arc::clone(device))
 }
 
 /// Per-token reference, mirroring `gdn_single_token_recurrence` in
@@ -320,24 +322,13 @@ fn vk_gdn_chunkwise_autograd_smoke() -> Result<()> {
     let chunk_size = 8;
 
     // Build VkTensors that participate in autograd: synthesize them as
-    // outputs of a no-op upload (we don't need them as parameters here;
-    // we just want the autograd tape to terminate at the GDN bwd op
-    // and verify gradients shape out correctly).
-    use candle_core::{Device, Tensor, Var};
+    // parameter leaves via the kt-native helper (which mints a fresh
+    // TensorId internally), no candle round-trip required.
     let mk_param = |seed: u64, n: usize, shape: Vec<usize>| -> Result<VkTensor> {
         let data: Vec<f32> = (0..n)
             .map(|i| (((i + seed as usize) as f32) * 0.05).sin())
             .collect();
-        let t = Tensor::from_vec(data, shape.clone(), &Device::Cpu)?;
-        let var = Var::from_tensor(&t)?;
-        let vk = VkTensor::from_candle(&t, Arc::clone(&dev))?;
-        Ok(VkTensor::parameter(
-            Arc::clone(vk.buffer()),
-            shape,
-            vk.dtype(),
-            Arc::clone(vk.device()),
-            var.id(),
-        ))
+        VkTensor::parameter_from_f32_slice(&data, shape, Arc::clone(&dev))
     };
 
     let q = mk_param(1, batch * nv * seq_len * dk, vec![batch, nv, seq_len, dk])?;
