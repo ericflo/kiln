@@ -1235,6 +1235,20 @@ impl BackendRuntime for CudaBackend {
                 .with_context(|| "kt-adapter: gdn_decode_gates z → kt failed")?;
             let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
                 .with_context(|| "kt-adapter: gdn_decode_gates weight → kt failed")?;
+            // Phase 7 follow-up (#1082): invariant check that the kt-typed
+            // predicate agrees with the candle predicate that already
+            // gated entry into this block. The shapes seen here are the
+            // *squeezed* 3D q/k/v with the seq_len=1 axis removed,
+            // matching kt_api's expected envelope. A debug_assert keeps
+            // release perf untouched; tests + dev builds catch drift
+            // between the two predicate chains.
+            debug_assert!(
+                kiln_gdn_kernel::gdn_decode_gates_recurrent_supports_kt(
+                    &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+                ),
+                "kt-typed gdn_decode_gates_recurrent_supports_kt declined for inputs that \
+                 passed candle-typed gdn_decode_gates_recurrent_supports — predicate drift"
+            );
             let out_kt = kiln_gdn_kernel::gdn_decode_gates_recurrent_bf16_kt(
                 &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
                 eps as f32,
@@ -1337,6 +1351,18 @@ impl BackendRuntime for CudaBackend {
                 .with_context(|| "kt-adapter: gdn_decode_qk_norm dt_bias → kt failed")?;
             let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
                 .with_context(|| "kt-adapter: gdn_decode_qk_norm state → kt failed")?;
+            // Phase 7 follow-up (#1082): kt-typed predicate invariant check.
+            // See sibling debug_assert! in `gdn_decode_gates_recurrent` for
+            // rationale. The kt predicate mirrors the candle envelope
+            // one-for-one; a drift here means kt_api.rs and lib.rs got
+            // out of sync.
+            debug_assert!(
+                kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_supports_kt(
+                    &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt,
+                ),
+                "kt-typed gdn_decode_qk_norm_gates_recurrent_supports_kt declined for inputs \
+                 that passed candle-typed predicate — predicate drift"
+            );
             let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_bf16_kt(
                 &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt,
                 q_scale as f32, qk_eps as f32,
@@ -1455,6 +1481,17 @@ impl BackendRuntime for CudaBackend {
                 .with_context(|| "kt-adapter: gdn_decode_rmsnorm z → kt failed")?;
             let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
                 .with_context(|| "kt-adapter: gdn_decode_rmsnorm weight → kt failed")?;
+            // Phase 7 follow-up (#1082): kt-typed predicate invariant check.
+            // The rmsnorm-fused variant composes the base qk_norm predicate
+            // with extra z (BF16) + weight (F32) shape gates; both halves
+            // must agree with the candle predicate.
+            debug_assert!(
+                kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt(
+                    &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+                ),
+                "kt-typed gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt declined for \
+                 inputs that passed candle-typed predicate — predicate drift"
+            );
             let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
                 &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
                 q_scale as f32, qk_eps as f32, rms_eps as f32,
@@ -1571,6 +1608,15 @@ impl BackendRuntime for CudaBackend {
                 .with_context(|| "kt-adapter: gdn_gates a_log → kt failed")?;
             let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
                 .with_context(|| "kt-adapter: gdn_gates dt_bias → kt failed")?;
+            // Phase 7 follow-up (#1082): kt-typed predicate invariant check.
+            // gdn_gates_decline_reason / gdn_gates_supports already gated
+            // entry above; the kt-typed mirror must agree on the same
+            // envelope (nv <= 256, matching shapes, bf16 a/b, etc).
+            debug_assert!(
+                kiln_gdn_kernel::gdn_gates_supports_kt(&a_kt, &b_kt, &alog_kt, &dtb_kt),
+                "kt-typed gdn_gates_supports_kt declined for inputs that passed candle-typed \
+                 gdn_gates_supports — predicate drift"
+            );
             let (beta_kt, g_kt) =
                 kiln_gdn_kernel::gdn_gates_bf16_kt(&a_kt, &b_kt, &alog_kt, &dtb_kt)
                     .map_err(|e| anyhow::anyhow!("kt gdn_gates_bf16: {e}"))?;
@@ -1790,6 +1836,16 @@ impl BackendRuntime for CudaBackend {
                 .with_context(|| "kt-adapter: gdn_gated_rms_norm z → kt failed")?;
             let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
                 .with_context(|| "kt-adapter: gdn_gated_rms_norm weight → kt failed")?;
+            // Phase 7 follow-up (#1082): kt-typed predicate invariant check.
+            // x/z are reshaped to [rows, hidden] at this point — the kt
+            // predicate accepts any rank as long as the last dim is 128
+            // and weight shape matches. gdn_gated_rms_norm_supports
+            // already gated entry above; this catches kt-vs-candle drift.
+            debug_assert!(
+                kiln_gdn_kernel::gdn_gated_rms_norm_supports_kt(&x_kt, &z_kt, &w_kt),
+                "kt-typed gdn_gated_rms_norm_supports_kt declined for inputs that passed \
+                 candle-typed gdn_gated_rms_norm_supports — predicate drift"
+            );
             let out_kt =
                 kiln_gdn_kernel::gdn_gated_rms_norm_bf16_kt(&x_kt, &z_kt, &w_kt, eps as f32)
                     .map_err(|e| anyhow::anyhow!("kt gdn_gated_rms_norm_bf16: {e}"))?;
