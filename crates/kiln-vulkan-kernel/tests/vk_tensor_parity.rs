@@ -1,12 +1,16 @@
 //! Parity tests for vk-native training Phase A: VkTensor + autograd
 //! tape + element-wise + reductions.
 //!
-//! Each test computes the same operation via candle on CPU and via
-//! the vk-native path on GPU, then asserts max-abs-diff under
-//! tolerance. Tests skip cleanly if no Vulkan device is available.
+//! Each test computes the same operation via an analytical CPU reference
+//! and via the vk-native path on GPU, then asserts max-abs-diff under
+//! tolerance. Test factories are candle-free via the kt-native
+//! `VkTensor::from_f32_slice` / `from_f32_slice_as_bf16` /
+//! `parameter_from_f32_slice` constructors. (#1082)
+//!
+//! Tests skip cleanly if no Vulkan device is available.
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+use half::bf16;
 use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::cast::{
@@ -26,32 +30,19 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 }
 
 fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    VkTensor::from_candle(&t, Arc::clone(dev))
+    VkTensor::from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn upload_bf16(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?.to_dtype(DType::BF16)?;
-    VkTensor::from_candle(&t, Arc::clone(dev))
+    VkTensor::from_f32_slice_as_bf16(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn upload_param_f32(
     dev: &Arc<VulkanDevice>,
     data: &[f32],
     shape: &[usize],
-) -> Result<(candle_core::Var, VkTensor)> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    let var = candle_core::Var::from_tensor(&t)?;
-    let vk = VkTensor::from_candle(&t, Arc::clone(dev))?;
-    let pid = var.id();
-    let param = VkTensor::parameter(
-        Arc::clone(vk.buffer()),
-        vk.shape().to_vec(),
-        vk.dtype(),
-        Arc::clone(vk.device()),
-        pid,
-    );
-    Ok((var, param))
+) -> Result<VkTensor> {
+    VkTensor::parameter_from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn max_abs_diff(got: &[f32], expected: &[f32]) -> f32 {
@@ -148,9 +139,9 @@ fn vk_chain_backward_parity() -> Result<()> {
     let b_data: Vec<f32> = vec![2.0, 3.0, -1.0, 0.5];
     let n = x_data.len() as f32;
 
-    let (_x_var, x) = upload_param_f32(&dev, &x_data, &[4])?;
-    let (_a_var, a) = upload_param_f32(&dev, &a_data, &[4])?;
-    let (_b_var, b) = upload_param_f32(&dev, &b_data, &[4])?;
+    let x = upload_param_f32(&dev, &x_data, &[4])?;
+    let a = upload_param_f32(&dev, &a_data, &[4])?;
+    let b = upload_param_f32(&dev, &b_data, &[4])?;
 
     let x_plus_a = vk_add(&x, &a)?;
     let inner = vk_mul(&x_plus_a, &b)?;
@@ -220,7 +211,7 @@ fn vk_reused_parameter_grad_accumulates() -> Result<()> {
     let Some(dev) = vk_dev() else { return Ok(()) };
     let x_data: Vec<f32> = vec![1.0, 2.0, -1.5, 3.5];
     let n = x_data.len() as f32;
-    let (_x_var, x) = upload_param_f32(&dev, &x_data, &[4])?;
+    let x = upload_param_f32(&dev, &x_data, &[4])?;
 
     // mul(x, x) — same VkTensor on both sides; the MulBackward will
     // return two grads keyed to the same op_id, exercising accumulation.
@@ -242,7 +233,7 @@ fn vk_reused_parameter_grad_accumulates() -> Result<()> {
 #[test]
 fn vk_detach_drops_grad_link() -> Result<()> {
     let Some(dev) = vk_dev() else { return Ok(()) };
-    let (_x_var, x) = upload_param_f32(&dev, &[1.0, 2.0], &[2])?;
+    let x = upload_param_f32(&dev, &[1.0, 2.0], &[2])?;
     let y = vk_add(&x, &x)?; // requires_grad
     assert!(y.requires_grad());
     let detached = y.detach();
@@ -299,7 +290,7 @@ fn vk_cast_autograd_passthrough() -> Result<()> {
     let Some(dev) = vk_dev() else { return Ok(()) };
     let x_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
     let n = x_data.len() as f32;
-    let (_x_var, x) = upload_param_f32(&dev, &x_data, &[4])?;
+    let x = upload_param_f32(&dev, &x_data, &[4])?;
     // y = cast(x, bf16); cast(y, f32); loss = mean(y * y)
     // After cast f32->bf16->f32 with values exactly representable in bf16,
     // gradient should be 2*x/n.
@@ -364,11 +355,10 @@ fn vk_transpose_2d_bf16_forward_parity() -> Result<()> {
     let data: Vec<f32> = (0..(rows * cols))
         .map(|i| ((i as f32) * 0.17).sin() * 0.25)
         .collect();
-    let rounded = Tensor::from_vec(data.clone(), &[rows, cols], &Device::Cpu)?
-        .to_dtype(DType::BF16)?
-        .to_dtype(DType::F32)?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
+    let rounded: Vec<f32> = data
+        .iter()
+        .map(|&v| bf16::from_f32(v).to_f32())
+        .collect();
     let t = upload_bf16(&dev, &data, &[rows, cols])?;
     let tt = vk_transpose_2d_no_grad(&t)?;
     assert_eq!(tt.dtype(), VkDType::Bf16);
@@ -392,7 +382,7 @@ fn vk_transpose_2d_autograd() -> Result<()> {
     let Some(dev) = vk_dev() else { return Ok(()) };
     let x_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
     let n = x_data.len() as f32;
-    let (_x_var, x) = upload_param_f32(&dev, &x_data, &[2, 3])?;
+    let x = upload_param_f32(&dev, &x_data, &[2, 3])?;
     // y = x.T; loss = mean(y * y) = mean(x * x) (same elements)
     let yt = vk_transpose_2d(&x)?;
     let sq = vk_mul(&yt, &yt)?;
@@ -414,7 +404,7 @@ fn vk_reshape_autograd_passthrough() -> Result<()> {
     let Some(dev) = vk_dev() else { return Ok(()) };
     let x_data: Vec<f32> = (0..12).map(|i| (i as f32) * 0.5).collect();
     let n = x_data.len() as f32;
-    let (_x_var, x) = upload_param_f32(&dev, &x_data, &[3, 4])?;
+    let x = upload_param_f32(&dev, &x_data, &[3, 4])?;
     // y = x.reshape([12]); loss = mean(y * y)
     let r = vk_reshape(&x, &[12])?;
     let sq = vk_mul(&r, &r)?;
