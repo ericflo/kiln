@@ -544,6 +544,33 @@ impl BackendRuntime for CudaBackend {
         if q.dtype() != DType::BF16 {
             return Ok(None);
         }
+        // Phase 7 opt-in (#1082): route through the kt-typed surface.
+        // The borrow adapter shares the underlying CUDA buffer with
+        // the candle tensor, so the kernel's in-place mutation of
+        // `state` surfaces through the caller's `&mut Tensor` (same
+        // pattern as conv1d_update at 695587df).
+        if self.cuda_use_kt_api_gdn {
+            kiln_nvtx::range!(c"kiln/gdn_recurrent_forward_kt");
+            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
+                .with_context(|| "kt-adapter: gdn_recurrent_step q → kt failed")?;
+            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
+                .with_context(|| "kt-adapter: gdn_recurrent_step k → kt failed")?;
+            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+                .with_context(|| "kt-adapter: gdn_recurrent_step v → kt failed")?;
+            let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
+                .with_context(|| "kt-adapter: gdn_recurrent_step beta → kt failed")?;
+            let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
+                .with_context(|| "kt-adapter: gdn_recurrent_step g → kt failed")?;
+            let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
+                .with_context(|| "kt-adapter: gdn_recurrent_step state → kt failed")?;
+            let out_kt = kiln_gdn_kernel::gdn_recurrent_forward_kt(
+                &q_kt, &k_kt, &v_kt, &beta_kt, &g_kt, &state_kt,
+            )
+            .map_err(|e| anyhow::anyhow!("kt gdn_recurrent_forward: {e}"))?;
+            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                .with_context(|| "kt-adapter: gdn_recurrent_step out → candle failed")?;
+            return Ok(Some(out));
+        }
         let out = kiln_gdn_kernel::gdn_recurrent_forward(q, k, v, beta, g, state)?;
         Ok(Some(out))
     }
