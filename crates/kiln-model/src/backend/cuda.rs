@@ -1056,41 +1056,48 @@ impl BackendRuntime for CudaBackend {
         k_t: &Tensor,
         state: &mut Tensor,
     ) -> Result<Option<Tensor>> {
-        if !kiln_gdn_kernel::gdn_full_chunk_forward_supports(
-            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
-        ) {
-            return Ok(None);
-        }
         let dv_tile = kiln_gdn_kernel::GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE;
-        if self.gdn_full_chunk_forward_multiblock_enabled
-            && kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_supports(
-                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
-            )
-        {
-            // Phase 7 opt-in (#1082): route through the kt-typed surface.
-            // 9 input tensors, all borrowed via the kt-bridge zero-copy
-            // adapter. State mutation surfaces through the caller's
-            // `&mut Tensor` via the shared buffer (conv1d pattern).
-            if self.cuda_use_kt_api_gdn {
+        // Phase 7 opt-in (#1082): when kt-API GDN is on (default ON,
+        // escape hatch `KILN_DISABLE_KT_API_GDN=1`), do the kt-borrow
+        // first and then call the kt-typed `_supports_kt` predicates
+        // (7da2615a) for both the single and multiblock paths. Bit-exact
+        // by construction — the kt-typed predicates mirror the candle
+        // predicates' check chains one-for-one and both bottom out in
+        // the same `kiln_gdn_full_chunk_forward[_multiblock]` FFI
+        // symbols on the success path. State mutation surfaces through
+        // the caller's `&mut Tensor` via the shared buffer (conv1d
+        // pattern).
+        if self.cuda_use_kt_api_gdn {
+            let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
+                .with_context(|| "kt-adapter: gdn_full_chunk_forward g → kt")?;
+            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+                .with_context(|| "kt-adapter: gdn_full_chunk_forward v → kt")?;
+            let kkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(kkt)
+                .with_context(|| "kt-adapter: gdn_full_chunk_forward kkt → kt")?;
+            let qkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(qkt)
+                .with_context(|| "kt-adapter: gdn_full_chunk_forward qkt → kt")?;
+            let ks_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(ks_entry)
+                .with_context(|| "kt-adapter: gdn_full_chunk_forward ks_entry → kt")?;
+            let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s)
+                .with_context(|| "kt-adapter: gdn_full_chunk_forward q_s → kt")?;
+            let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
+                .with_context(|| "kt-adapter: gdn_full_chunk_forward beta → kt")?;
+            let kt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_t)
+                .with_context(|| "kt-adapter: gdn_full_chunk_forward k_t → kt")?;
+            let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
+                .with_context(|| "kt-adapter: gdn_full_chunk_forward state → kt")?;
+            if !kiln_gdn_kernel::gdn_full_chunk_forward_supports_kt(
+                &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
+            ) {
+                return Ok(None);
+            }
+            if self.gdn_full_chunk_forward_multiblock_enabled
+                && kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_supports_kt(
+                    &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
+                    dv_tile,
+                )
+            {
                 kiln_nvtx::range!(c"kiln/gdn_full_chunk_forward_multiblock_kt");
-                let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
-                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock g → kt")?;
-                let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock v → kt")?;
-                let kkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(kkt)
-                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock kkt → kt")?;
-                let qkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(qkt)
-                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock qkt → kt")?;
-                let ks_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(ks_entry)
-                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock ks_entry → kt")?;
-                let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s)
-                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock q_s → kt")?;
-                let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
-                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock beta → kt")?;
-                let kt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_t)
-                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock k_t → kt")?;
-                let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
-                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock state → kt")?;
                 let out_kt = kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_kt(
                     &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
                     dv_tile,
@@ -1101,6 +1108,33 @@ impl BackendRuntime for CudaBackend {
                 CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.fetch_add(1, Ordering::Relaxed);
                 return Ok(Some(out));
             }
+            // Single-block kt path. The candle path falls back to
+            // `gdn_full_chunk_forward` (not `_multiblock`) when the
+            // multiblock predicate declines; mirror that here. We've
+            // borrowed all tensors as kt and confirmed kt-typed
+            // `_supports_kt` passes, but there is no kt-typed
+            // single-block kernel wire yet — fall back to the candle
+            // dispatch using the original candle `&Tensor` refs we
+            // still hold (the kt borrows are zero-copy adapters over
+            // the same underlying device storage, so the candle
+            // refs remain valid).
+            let out = kiln_gdn_kernel::gdn_full_chunk_forward(
+                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
+            )
+            .context("gdn_full_chunk_forward kernel failed")?;
+            CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+            return Ok(Some(out));
+        }
+        if !kiln_gdn_kernel::gdn_full_chunk_forward_supports(
+            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
+        ) {
+            return Ok(None);
+        }
+        if self.gdn_full_chunk_forward_multiblock_enabled
+            && kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_supports(
+                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
+            )
+        {
             let out = kiln_gdn_kernel::gdn_full_chunk_forward_multiblock(
                 g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
             )
