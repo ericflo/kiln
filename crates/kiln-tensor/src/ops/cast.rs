@@ -130,6 +130,51 @@ impl DeviceOp1 for CastOp {
         Ok(Some(crate::cuda_cast(x, to)?))
     }
 
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::vulkan_cast` which wraps the production
+        // `vk_cast_f32_to_bf16_no_grad` and `vk_cast_bf16_to_f32_no_grad`
+        // SPIR-V shaders.
+        //
+        // Gate on:
+        //   - F32 <-> BF16 dtype pair (only shaders available today;
+        //     F16 round-trips and integer casts fall through to CPU)
+        //   - contiguous input
+        //   - storage must be Vulkan-backed (otherwise fall back to
+        //     CPU gracefully rather than have the wrapper raise)
+        //   - same-dtype is a no-op handled by cpu_fwd's fast path
+        //
+        // Current bridge D2H+H2D round-trips bytes through the host;
+        // see `vulkan_storage.rs::vulkan_cast` rustdoc for the
+        // zero-copy follow-up plan.
+        let from = x.dtype();
+        let to = self.target;
+        if from == to {
+            // Same-dtype: let cpu_fwd handle the storage-Arc clone
+            // fast path so dispatch falls through cleanly.
+            return Ok(None);
+        }
+        let vulkan_supported = matches!(
+            (from, to),
+            (DType::F32, DType::BF16) | (DType::BF16, DType::F32)
+        );
+        if !vulkan_supported {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::VulkanStorage>()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(crate::vulkan_cast(x, to)?))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
