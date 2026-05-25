@@ -1873,6 +1873,50 @@ pub(crate) fn try_kt_paged_kv_block_size(
     kt_block_size
 }
 
+/// Phase 7 opt-in: route a `PagedKvCache::is_fp8()` accessor read
+/// through the kt twin `PagedKvCacheKt::is_fp8()` (#1082).
+///
+/// Sibling to [`try_kt_paged_kv_block_size`]. Returns the kt cache
+/// value (with parity assertion against the candle value) when
+/// `kt_cache` is `Some` AND the per-site gate
+/// `KILN_USE_KT_PAGED_KV_IS_FP8` (or the meta-gates
+/// `KILN_USE_KT_PAGED_KV_CACHE` / `KILN_USE_KT_API_ALL`) is on.
+/// Otherwise returns the candle value unchanged.
+///
+/// `is_fp8()` is a pure-read accessor backed by a private `bool`
+/// field on both cache types — the kt twin sets it in
+/// `PagedKvCacheKt::new_with_fp8` with the same arg the candle
+/// `PagedKvCache::new_with_fp8` does, so the assertion must pass
+/// by construction.
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn try_kt_paged_kv_is_fp8(
+    candle_is_fp8: bool,
+    kt_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
+) -> bool {
+    let kt = match kt_cache {
+        Some(c) => c,
+        None => return candle_is_fp8,
+    };
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let gate_on = *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_PAGED_KV_IS_FP8").is_ok()
+            || std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    });
+    if !gate_on {
+        return candle_is_fp8;
+    }
+    kiln_nvtx::range!(c"kiln/paged_kv_kt/is_fp8");
+    let kt_is_fp8 = kt.is_fp8();
+    assert_eq!(
+        kt_is_fp8, candle_is_fp8,
+        "try_kt_paged_kv_is_fp8: kt.is_fp8()={kt_is_fp8} \
+         disagrees with candle paged_cache.is_fp8()={candle_is_fp8}"
+    );
+    kt_is_fp8
+}
+
 /// Phase 7 opt-in: route the Vulkan `linear_prefill_apply` 2D matmul
 /// path through a kt-API equivalent of `kiln_tensor::cuda_matmul`.
 /// Default off; set `KILN_USE_KT_API_MATMUL=1` (or
@@ -18337,7 +18381,7 @@ fn gqa_attention_paged_with_rope_tables(
     //     full cache history, defeating the kv_len = 1 contract).
     if seq_len == 1
         && !single_token_self_attn
-        && !paged_cache.is_fp8()
+        && !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache)
         && (num_heads / num_kv_heads) > 1
         && !fused_paged_decode_disabled()
         && backend.supports_flash_attn_paged_decode()
@@ -18400,7 +18444,7 @@ fn gqa_attention_paged_with_rope_tables(
     } else {
         let prefix_only_prefill = seq_len > 1
             && start_pos > 0
-            && !paged_cache.is_fp8()
+            && !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache)
             && backend.supports_flash_attn_prefill_head_major()
             && !crate::mtp_debug::is_c7_sdpa_capture_armed();
         let prefix_append_fast = if prefix_only_prefill
@@ -18440,7 +18484,7 @@ fn gqa_attention_paged_with_rope_tables(
         };
         let fast_read = if seq_len > 1
             && fast_read_len >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
-            && !paged_cache.is_fp8()
+            && !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache)
             && backend.supports_paged_kv_head_major_read()
             && backend.supports_flash_attn_prefill_head_major()
         {
