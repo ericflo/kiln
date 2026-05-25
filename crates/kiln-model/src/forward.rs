@@ -10065,7 +10065,21 @@ fn swiglu_ffn_impl_chunked(
         start += len;
     }
     let output_refs: Vec<&Tensor> = outputs.iter().collect();
-    Tensor::cat(&output_refs, 1).context("chunked CUDA training MLP cat")
+    // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM1=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND all chunk outputs are
+    // contiguous CUDA tensors of a supported dtype, route the
+    // seq-axis concat through `kiln_tensor::cuda_concat(_, 1)`.
+    // This is the chunked CUDA training MLP path: when
+    // `seq_len > chunk_tokens` (default 1024), the MLP runs on
+    // per-tile slices and concats outputs back along the seq axis.
+    // Falls through to the candle composite when any precondition
+    // fails so behavior is identical with the gate off.
+    let out = if let Some(out) = try_kt_cat_dim1(&output_refs)? {
+        out
+    } else {
+        Tensor::cat(&output_refs, 1).context("chunked CUDA training MLP cat")?
+    };
+    Ok(out)
 }
 
 /// Legacy two-matmul split of x against gate_proj_t and up_proj_t with the
