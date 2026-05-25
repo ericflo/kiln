@@ -16,10 +16,13 @@ canonical "what's already done" reference.
 - The **bs=1 production CUDA graph capture/replay path is live**
   under `KILN_CUDA_GRAPHS=true` (on by default).
 - The **bs>1 batched capture/replay path is in-tree** under
-  `KILN_CUDA_GRAPHS_BATCHED=1` (off by default) but **last left in a
-  known-broken state** — a `CUDA_ERROR_ILLEGAL_ADDRESS` fault was
-  traced via `compute-sanitizer` and never fully diagnosed. Closing
-  that loop is the highest-priority remaining Phase 5 task.
+  `KILN_CUDA_GRAPHS_BATCHED=1` (off by default). **All four root-cause
+  intra-graph alloc suspects from `cuda-graph-bs2-secondary-audit.md`
+  are now closed** (see "Phase 5 bs>1 progress" below).
+- One end-to-end `compute-sanitizer` sweep on the full Qwen3.5-4B chat-
+  completion driver with `KILN_CUDA_GRAPHS_BATCHED=1
+  KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1` is the remaining validation gate
+  before flipping `KILN_CUDA_GRAPHS_BATCHED=1` to default-on.
 - The **substrate crates** (`kiln-graph`, `kiln-graph-cuda`,
   `kiln-graph-metal`, `kiln-graph-vulkan`) ship the backend-agnostic
   types but the per-backend impls are scaffolds.
@@ -297,3 +300,30 @@ mode is the unblock" is **stale** and predates these landings.
   landing; the **wiring** in `decode_step_paged_batched` /
   `try_capture_batched` is in-tree but **gated off** pending the
   fault root-cause described in section "0." above.
+
+## Phase 5 bs>1 progress (2026-05-25)
+
+All four root-cause intra-graph alloc suspects from
+`cuda-graph-bs2-secondary-audit.md` are now closed:
+
+| Suspect | Site | Closure commit(s) |
+|---|---|---|
+| 0 | `CachedPagedDecodeMeta::build` allocs (`block_table_tensor`, `seqused_k_tensor`) | `9b173f84` + `ab798167` + `393beadc` (stable-buffers refactor + thread through wrapper) |
+| 0b | `build_with_stable_buffers` extended to thread `Option<&PagedKvCacheKt>` | `d0f7049d` (round 2) |
+| 1 | per-row KV slot writer with capture-time baked-immediate slot | PR #1384 — new `kiln_paged_kv_write_token_major_bf16_batch_slot` CUDA kernel + Rust wrapper + `PagedKvCache::write_token_major_native_batch_graph_slot` + env gate `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1`. 0 compute-sanitizer errors on the kernel unit test. |
+| 2 | RoPE cos/sin tables allocated inside captured region | `b571b57d` (RoPE stable tables threaded as `Option<(&Tensor, &Tensor)>` through the bs>1 wrapper) |
+| 3+4 | `attn_out` / `softmax_lse` scratch allocated inside captured region | `a7af559b` (pin via `graph_outputs: Option<(&Tensor, &Tensor)>` param + thread through `gqa_attention_paged_decode_contiguous_batch`) |
+
+### What remains for `KILN_CUDA_GRAPHS_BATCHED=1` default-on
+
+1. **End-to-end compute-sanitizer sweep** with `KILN_CUDA_GRAPHS_BATCHED=1
+   KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1` on the full Qwen3.5-4B driver
+   (model load + multi-row chat-completion). Single confirmation run that
+   no `Invalid __global__ read/write` errors remain in the captured
+   graph replay path under realistic batch shapes.
+2. After the sanitizer is green, flip the `KILN_CUDA_GRAPHS_BATCHED=1`
+   default in code and rerun the production benchmarks for the new
+   baseline.
+
+The unit-level closure is settled. The remaining step is a single
+end-to-end validation pass.
