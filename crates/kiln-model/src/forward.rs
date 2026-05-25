@@ -1018,6 +1018,37 @@ fn cuda_use_kt_api_max_with_scalar() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise `min(x, c)` (tensor / scalar
+/// elementwise minimum) through the kt-API + adapters. Set
+/// `KILN_USE_KT_API_MIN_WITH_SCALAR=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// `x.minimum_scalar(c)`-style candle composites through
+/// `kiln_tensor::cuda_scalar_op` with kind tag 7
+/// (MinWithScalar) via the kt-bridge borrow adapter. Pays one
+/// dtod memcpy on the output direction (the kt allocation is
+/// freshly-owned). Falls through to the candle composite when
+/// any precondition fails so behavior is identical with the
+/// gate off.
+///
+/// The gate + helper are wired up for completeness alongside
+/// [`cuda_use_kt_api_max_with_scalar`] so the upper-bound side
+/// of `clamp(x, lo, hi)` (which today goes through the fused
+/// [`cuda_use_kt_api_clamp`]) can be expressed standalone when
+/// future kernels need it — e.g. saturating activations,
+/// softplus stabilization caps, or quantization-aware-training
+/// clip-by-value-from-above. Distinct from
+/// [`cuda_use_kt_api_min_binary`] which targets tensor-tensor
+/// minimum, and from [`cuda_use_kt_api_clamp`] which targets
+/// the fused two-sided shape.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_min_with_scalar() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED
+        .get_or_init(|| std::env::var("KILN_USE_KT_API_MIN_WITH_SCALAR").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: elementwise `Tensor::sin()` through the kt-API
 /// + adapters. Set `KILN_USE_KT_API_SIN=1` (or
 /// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
@@ -8872,6 +8903,63 @@ fn try_kt_max_with_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_max_with_scalar: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API min-with-scalar migration helper.
+/// Routes a contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_scalar_op` with kind tag 7
+/// (MinWithScalar) for the `min(x, c)` (elementwise) shape.
+///
+/// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
+/// unsupported dtype, non-contiguous, rank-0, or non-finite
+/// scalar) so the caller falls through to the candle composite.
+/// NVTX range `kiln/min_with_scalar_kt` brackets the migrated
+/// call so nsys traces separate the path from the baseline
+/// composite.
+///
+/// Today this helper has no production call site — the upper
+/// bound of `clamp(x, lo, hi)` is folded into the fused
+/// [`cuda_use_kt_api_clamp`] kernel, and other `min(x, c)`
+/// shapes are uncommon in `forward.rs`. The helper is wired
+/// up to match the established Phase 7 scaffold so future
+/// kernels that need a saturating cap (softplus stabilization,
+/// QAT clip-by-value-from-above) can plug in trivially.
+/// Mirrors the dead-code-allowed precedent of
+/// `try_kt_max_with_scalar` (84b40cd8) and the pow scaffold
+/// (2b07eef7).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_min_with_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_min_with_scalar() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+    if !c.is_finite() {
+        return Ok(None);
+    }
+    let c_f32 = c as f32;
+
+    kiln_nvtx::range!(c"kiln/min_with_scalar_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 7 = ScalarKind::MinWithScalar (matches
+    // crates/kiln-tensor/src/ops/scalar.rs).
+    let out_kt = match kiln_tensor::cuda_scalar_op(&x_kt, 7, c_f32) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_min_with_scalar: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
