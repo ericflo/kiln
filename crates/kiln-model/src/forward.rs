@@ -859,6 +859,32 @@ fn cuda_use_kt_api_log() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in (#1082): elementwise base-2 log `Tensor::log2()`
+/// through the kt-API + adapters. Set `KILN_USE_KT_API_LOG2=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// `.log2()` candle calls through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 15 (Log2 =
+/// `log2(x)`) via the kt-bridge borrow adapter. Pays one dtod
+/// memcpy on the output direction. Falls through to the candle
+/// composite when any precondition fails so behavior is identical
+/// with the gate off.
+///
+/// Today this gate is unused — there are no production `.log2()`
+/// call sites in `forward.rs`. The gate + helper are wired up to
+/// match the established Phase 7 scaffold so future kernel
+/// refactors (entropy / log-likelihood / sampling temperature
+/// math) can plug in trivially. Mirrors the dead-code-allowed
+/// precedent of `try_kt_tanh` (9839a3a4), `try_kt_gelu` /
+/// `try_kt_relu` (445095b6). `csrc/activation.cu` `KIND_LOG2`
+/// already exists (kind 15, doc comment in `cuda_storage.rs`).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_log2() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LOG2").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -7827,6 +7853,58 @@ fn try_kt_log(x: &Tensor) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_log: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API log2 migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 15 (Log2 =
+/// `log2(x)`).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0) so the caller falls through to
+/// the candle `.log2()`. NVTX range `kiln/log2_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite. Mirrors `try_kt_log` and the other Phase 7
+/// elementwise helpers.
+///
+/// IEEE semantics match the candle CPU reference: `log2(0) = -inf`,
+/// `log2(<0) = NaN`. See `csrc/activation.cu` `KIND_LOG2` case.
+///
+/// `#[allow(dead_code)]` because there are no production `.log2()`
+/// call sites in `forward.rs` today; the helper is wired up to
+/// match the established Phase 7 scaffold so future kernel
+/// refactors (entropy / log-likelihood / sampling temperature
+/// math) can plug in trivially. Mirrors the dead-code-allowed
+/// precedent of `try_kt_tanh` (9839a3a4), `try_kt_gelu` /
+/// `try_kt_relu` (445095b6).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_log2(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_log2() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/log2_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 15 = Log2 (matches csrc/activation.cu KIND_LOG2).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 15) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_log2: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
