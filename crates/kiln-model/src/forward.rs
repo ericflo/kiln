@@ -1155,6 +1155,31 @@ fn cuda_use_kt_api_log1p() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: route the elementwise dtype cast
+/// (`Tensor::to_dtype`) for the {F32, BF16, F16} triangle through
+/// the kt-API + adapters. Set `KILN_USE_KT_API_TO_DTYPE=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// `.to_dtype(target)` candle calls through
+/// `kiln_tensor::cuda_cast` (a contiguous fused cast kernel) via
+/// the kt-bridge borrow adapter. Pays one dtod memcpy on the
+/// output direction (the kt allocation is freshly-owned). Falls
+/// through to the candle composite when any precondition fails so
+/// behavior is identical with the gate off.
+///
+/// Distinct from the per-kernel epilogue fusions (e.g.
+/// `KILN_USE_KT_API_LM_HEAD` which folds the cast into the matmul
+/// epilogue) — this gate migrates *standalone* `.to_dtype()`
+/// calls in `forward.rs` that are not part of a pre-fused kernel,
+/// e.g. the LoRA delta dtype hops and the BF16↔F32 ping-pong in
+/// the rare-path backward composites. Inputs must be contiguous
+/// to match `cuda_cast`'s preconditions.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_to_dtype() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_TO_DTYPE").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -6882,7 +6907,26 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
 /// oracle for the fused CUDA kernel. Matches HF semantics exactly:
 /// `out = (1 + w) * x * rsqrt(mean(x^2) + eps)` with F32 reduction and epilogue.
 pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
-    let x_f32 = x.to_dtype(DType::F32)?;
+    // Phase 7 (#1082): when `KILN_USE_KT_API_TO_DTYPE=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND `x` is a contiguous CUDA
+    // tensor in the {F32, BF16, F16} triangle, route the BF16→F32
+    // promotion at the RMSNorm fallback entry through
+    // `kiln_tensor::cuda_cast`. Falls through to candle's
+    // `.to_dtype()` when any precondition fails so behavior is
+    // identical with the gate off.
+    let x_f32 = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_to_dtype(x, DType::F32)? {
+                Some(out) => out,
+                None => x.to_dtype(DType::F32)?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            x.to_dtype(DType::F32)?
+        }
+    };
     // Phase 7 (#1082): when `KILN_USE_KT_API_MEAN_LAST_DIM=1` (or
     // `KILN_USE_KT_API_ALL=1`) is set AND the squared F32 input is
     // a contiguous CUDA tensor, route the `mean_keepdim(-1)` step
@@ -8817,6 +8861,65 @@ fn try_kt_log1p(x: &Tensor) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_log1p: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API dtype-cast migration helper. Routes a
+/// contiguous CUDA candle tensor through `kiln_tensor::cuda_cast`
+/// for the {F32 ↔ BF16 ↔ F16} triangle.
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0, target == source) so the caller
+/// falls through to candle's `.to_dtype(target)`. NVTX range
+/// `kiln/to_dtype_kt` brackets the migrated call so nsys traces
+/// separate the path from the baseline composite. Mirrors the
+/// other Phase 7 elementwise helpers.
+///
+/// `to_dtype(same)` is a no-op in candle but `cuda_cast` short-
+/// circuits to a `.contiguous()`, so we treat `target == src.dtype()`
+/// as an early `Ok(None)` and let the caller decide.
+#[cfg(feature = "cuda")]
+fn try_kt_to_dtype(x: &Tensor, target: DType) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_to_dtype() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+    // Restrict to the {F32, BF16, F16} cast triangle that `cuda_cast`
+    // supports; everything else falls through to candle.
+    if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !matches!(target, DType::F32 | DType::BF16 | DType::F16)
+    {
+        return Ok(None);
+    }
+    if x.dtype() == target {
+        // Same-dtype `.to_dtype` is a no-op in candle (zero-copy view);
+        // skip the kt-API path so we don't pay an unnecessary dtod copy.
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/to_dtype_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let kt_target = match target {
+        DType::F32 => kiln_tensor::DType::F32,
+        DType::BF16 => kiln_tensor::DType::BF16,
+        DType::F16 => kiln_tensor::DType::F16,
+        _ => return Ok(None),
+    };
+    let out_kt = match kiln_tensor::cuda_cast(&x_kt, kt_target) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_to_dtype: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
