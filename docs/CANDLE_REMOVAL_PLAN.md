@@ -137,7 +137,7 @@ sed -i "/candle-core.*path.*vendor/d" Cargo.toml
     - kiln-rmsnorm-kernel: 7 production `_kt` callers in forward.rs ✓
     - kiln-conv1d-kernel: 2/2 kt_api functions wired in CudaBackend ✓ + byte-exact parity tests at B=1/C=8192 (`69a5f68c` update + `1cb0c107` prefill, 0 mismatches across 8192/65536 output elements and 24576 conv_state elements)
     - kiln-marlin-gemm: 1/1 kt_api function wired in marlin_proj::matmul_bf16 ✓ (`8b415107` + `668b0847` bridge extension for I32→U32)
-    - kiln-gdn-kernel: 1/10 kt_api functions wired (`gdn_forward_substitution_kt` in CudaBackend, `14c17570`) — 9 remaining
+    - kiln-gdn-kernel: 5/10 kt_api functions wired in CudaBackend ✓ (`forward_substitution`/`14c17570`, `recurrent_forward`/`7a357a3d`, `chunk_prep`/`68a3667e`, `chunk_scan`/`1edc82dc`, `full_chunk_forward_multiblock`/`57b37c00`) — 5 remaining (decode_gates_recurrent variants + gated_rms_norm)
     - kiln-flash-attn: 0/5 production wires — but 2/5 functions already used internally by `paged_kv_cache_kt.rs` (`paged_kv_write_token_major_bf16_slot_kt` + `_bf16_kt`); sub-agent in flight on the direct CudaBackend wire
     - kiln-opd-loss-kernel: separate phase (full rewrite for Phase B)
 - Tier 2: 🟡 in flight — flce-kernel Phase B is the standout rewrite effort.
