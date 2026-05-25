@@ -18,7 +18,7 @@ pub fn select_device_with_options(cuda_graphs: bool) -> Result<Device> {
     let _ = cuda_graphs;
 
     #[cfg(feature = "cuda")]
-    if candle_core::utils::cuda_is_available() {
+    if kiln_tensor::cuda_is_available() {
         if cuda_graphs {
             tracing::info!("CUDA available — using GPU device 0 with graph-capturable stream");
             let device = Device::new_cuda_with_stream(0)?;
@@ -48,7 +48,7 @@ pub fn select_device_with_options(cuda_graphs: bool) -> Result<Device> {
     }
 
     #[cfg(feature = "metal")]
-    if candle_core::utils::metal_is_available() {
+    if kiln_tensor::metal_is_available() {
         tracing::info!("Metal available — using Apple Silicon GPU");
         return Ok(Device::new_metal(0)?);
     }
