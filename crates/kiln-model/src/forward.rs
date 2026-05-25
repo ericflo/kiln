@@ -577,6 +577,33 @@ fn cuda_use_kt_api_cos() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise `Tensor::exp()` through the kt-API
+/// + adapters. Set `KILN_USE_KT_API_EXP=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// `.exp()` candle calls through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 6 (Exp) via
+/// the kt-bridge borrow adapter. Pays one dtod memcpy on the
+/// output direction (the kt allocation is freshly-owned). Falls
+/// through to the candle composite when any precondition fails so
+/// behavior is identical with the gate off.
+///
+/// Distinct from the fused softmax site (which routes through
+/// `try_kt_softmax_last_dim` at the kt-API level) — this gate
+/// migrates the *standalone* `.exp()` calls in `forward.rs` that
+/// are not part of a pre-fused composite, e.g. the
+/// CudaSigmoidMulTrainingBf16 backward (`neg_gate.exp()`) which
+/// already routes its `+ 1.0` epilogue through
+/// `try_kt_add_scalar`. The first call-site migration is wired
+/// up; additional standalone .exp() sites (softmax composite,
+/// GDN decay exponentials, softplus log-term builders) can be
+/// migrated incrementally without re-doing the gate.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_exp() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_EXP").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -2435,7 +2462,30 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
                     gate_tile.neg()?
                 }
             };
-            let neg_exp = neg_gate.exp()?;
+            // Phase 7 (#1082): same kt-API migration for the
+            // `neg_gate.exp()` step — when `KILN_USE_KT_API_EXP=1`
+            // (or `KILN_USE_KT_API_ALL=1`) is set, route through
+            // `kiln_tensor::cuda_activation_unary` with kind 6
+            // (Exp). Falls through to the candle composite when
+            // any precondition fails.
+            let neg_exp = {
+                #[cfg(feature = "cuda")]
+                {
+                    if let Some(out) = try_kt_exp(&neg_gate)
+                        .map_err(|e| candle_core::Error::Msg(format!(
+                            "CudaSigmoidMulTrainingBf16 backward: try_kt_exp: {e}"
+                        )))?
+                    {
+                        out
+                    } else {
+                        neg_gate.exp()?
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    neg_gate.exp()?
+                }
+            };
             let one_plus_neg_exp = {
                 #[cfg(feature = "cuda")]
                 {
@@ -2685,7 +2735,27 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
     }
     let max_val = x.max_keepdim(candle_core::D::Minus1)?;
     let shifted = x.broadcast_sub(&max_val)?;
-    let exp_shifted = shifted.exp()?;
+    // Phase 7 (#1082): when `KILN_USE_KT_API_EXP=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND `shifted` is a
+    // contiguous CUDA tensor of {F32, BF16, F16}, route the
+    // `.exp()` step of the softmax composite through
+    // `kiln_tensor::cuda_activation_unary` with kind 6 (Exp).
+    // Falls through to the candle composite when any
+    // precondition fails so behavior is identical with the
+    // gate off.
+    let exp_shifted = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_exp(&shifted)? {
+                Some(out) => out,
+                None => shifted.exp()?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            shifted.exp()?
+        }
+    };
     // Phase 7 (#1082): when `KILN_USE_KT_API_SUM_LAST_DIM=1` (or
     // `KILN_USE_KT_API_ALL=1`) is set AND `exp_shifted` is a
     // contiguous CUDA tensor of {F32, BF16, F16}, route the
@@ -7155,6 +7225,46 @@ fn try_kt_cos(x: &Tensor) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_cos: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API exp migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 6 (Exp).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0) so the caller falls through to
+/// the candle `.exp()`. NVTX range `kiln/exp_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite. Mirrors `try_kt_sin` / `try_kt_cos`
+/// (commits 728b3917 / 6c22330f).
+#[cfg(feature = "cuda")]
+fn try_kt_exp(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_exp() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/exp_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 6 = Exp (matches csrc/activation.cu KIND_EXP and
+    // crates/kiln-tensor/src/ops/unary_arith.rs::cuda_kind_tag).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 6) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_exp: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
