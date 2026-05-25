@@ -64,11 +64,15 @@ pub use backwards::cumsum::CumsumBackward;
 pub use backwards::dropout::DropoutBackward;
 pub use backwards::elementwise::{AddBackward, DivBackward, MulBackward, SubBackward};
 pub use backwards::embedding::EmbeddingBackward;
+pub use backwards::gather::GatherBackward;
 pub use backwards::index_ops::{CastBackward, IndexSelectBackward, ScatterAddBackward};
 pub use backwards::l2norm::L2NormBackward;
 pub use backwards::layernorm::LayerNormBackward;
 pub use backwards::mask::MaskedFillBackward;
 pub use backwards::matmul::MatmulBackward;
+pub use backwards::max_axis::MaxAxisBackward;
+pub use backwards::maximum::MaximumBackward;
+pub use backwards::narrow::NarrowBackward;
 pub use backwards::reduce::{ReduceBackward, ReduceKind, ReduceScope};
 pub use backwards::repeat::RepeatBackward;
 pub use backwards::rmsnorm::RmsNormBackward;
@@ -79,6 +83,7 @@ pub use backwards::trig::{
     AcosBackward, AsinBackward, AtanBackward, CosBackward, SinBackward, TanBackward,
 };
 pub use backwards::unary_arith::{AbsBackward, ExpBackward, LnBackward, NegBackward, SqrtBackward};
+pub use backwards::unsqueeze::UnsqueezeBackward;
 pub use backwards::where_select::WhereSelectBackward;
 pub use grad_store::GradStore;
 pub use tape::{Tape, TapeNode};
