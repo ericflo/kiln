@@ -1,0 +1,46 @@
+// Trivial f32 element-wise identity / copy kernel.
+//
+// Proof-of-concept Vulkan compute shader living inside `kiln-tensor`
+// (rather than in `kiln-vulkan-kernel`). The point of this kernel is
+// to validate the `crates/kiln-tensor/shaders/` build-time
+// SPIR-V compile path end-to-end:
+//
+//   1. `crates/kiln-tensor/build.rs` discovers this file under
+//      `shaders/` and invokes `glslc` (or `glslangValidator`) to
+//      compile it to SPIR-V at build time.
+//   2. The generated SPIR-V bytes are embedded into the crate via
+//      `include_bytes!` in the auto-generated `kt_spirv.rs`.
+//   3. `src/vk_shaders.rs` re-exports the embedded module so other
+//      kiln-tensor source can `use crate::vk_shaders::SPIR_V_KT_IDENTITY_F32`
+//      and pass it straight to `ShaderPipeline::new` /
+//      kiln-vulkan-kernel's pipeline cache.
+//
+// Once future kiln-tensor ops (concat / chunk / split / etc) need
+// their own GLSL → SPIR-V pipeline, they drop new `.comp` files into
+// `crates/kiln-tensor/shaders/` and register them in `build.rs`'s
+// `SHADERS` table. No further plumbing required.
+//
+// Semantics: `out[i] = in[i]` for `i in [0, n_elements)`.
+//
+// Push constants: total_elements (u32)
+// Bindings:
+//   binding 0  in   (readonly  buffer of f32)
+//   binding 1  out  (writeonly buffer of f32)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint total_elements;
+};
+
+layout(binding = 0) readonly buffer InBuf { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= total_elements) return;
+    data_out[idx] = data_in[idx];
+}

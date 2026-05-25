@@ -52,6 +52,8 @@ mod metal_storage;
 mod vulkan_allocator;
 #[cfg(feature = "vulkan")]
 mod vulkan_storage;
+#[cfg(feature = "vulkan")]
+pub mod vk_shaders;
 
 pub use activation_registry::{
     selective_recompute_recommendation, Activation, ActivationId, ActivationKind, ActivationRef,
