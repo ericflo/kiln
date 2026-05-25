@@ -32,6 +32,14 @@ pub enum DeviceBuffer {
     /// kt-API kernel crates pull device pointers from.
     #[cfg(feature = "cuda")]
     Cuda(Arc<kiln_tensor::CudaStorage>),
+    /// Metal-native storage. Available with `--features metal`. Wraps
+    /// `kiln-tensor`'s `MetalStorage`, which owns an Apple
+    /// `metal::Buffer` (`MTLStorageModeShared` on M-series for UMA
+    /// zero-copy). Apple Silicon UMA invariant: CPU+GPU share physical
+    /// memory, so the safetensors loader and optimizer don't pay a
+    /// copy round-trip on Mac.
+    #[cfg(feature = "metal")]
+    Metal(Arc<kiln_tensor::MetalStorage>),
     /// CPU-side fallback buffer. Carries an `Arc<[u8]>` so the same
     /// type-erased flow works when no GPU backend is selected.
     Cpu(Arc<[u8]>),
@@ -48,6 +56,11 @@ impl DeviceBuffer {
                 use kiln_tensor::StorageBackend;
                 st.byte_len() as u64
             }
+            #[cfg(feature = "metal")]
+            Self::Metal(st) => {
+                use kiln_tensor::StorageBackend;
+                st.byte_len() as u64
+            }
             Self::Cpu(bytes) => bytes.len() as u64,
         }
     }
@@ -59,6 +72,8 @@ impl DeviceBuffer {
             Self::Vulkan(_) => "vulkan",
             #[cfg(feature = "cuda")]
             Self::Cuda(_) => "cuda",
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => "metal",
             Self::Cpu(_) => "cpu",
         }
     }
@@ -87,6 +102,17 @@ impl DeviceBuffer {
         }
     }
 
+    /// Borrow the inner Metal storage, if this variant is Metal.
+    ///
+    /// Returns `None` for any other variant.
+    #[cfg(feature = "metal")]
+    pub fn as_metal(&self) -> Option<&Arc<kiln_tensor::MetalStorage>> {
+        match self {
+            Self::Metal(st) => Some(st),
+            _ => None,
+        }
+    }
+
     /// Borrow the CPU bytes, if this variant is Cpu.
     pub fn as_cpu(&self) -> Option<&Arc<[u8]>> {
         match self {
@@ -95,6 +121,8 @@ impl DeviceBuffer {
             Self::Vulkan(_) => None,
             #[cfg(feature = "cuda")]
             Self::Cuda(_) => None,
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => None,
         }
     }
 
@@ -108,6 +136,12 @@ impl DeviceBuffer {
     #[cfg(feature = "cuda")]
     pub fn from_cuda(st: Arc<kiln_tensor::CudaStorage>) -> Self {
         Self::Cuda(st)
+    }
+
+    /// Construct a Metal-backed device buffer from an existing Arc.
+    #[cfg(feature = "metal")]
+    pub fn from_metal(st: Arc<kiln_tensor::MetalStorage>) -> Self {
+        Self::Metal(st)
     }
 
     /// Construct a CPU-backed device buffer.

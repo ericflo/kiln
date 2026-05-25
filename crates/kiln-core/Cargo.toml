@@ -35,3 +35,8 @@ vulkan = ["dep:kiln-vulkan-kernel"]
 # StorageBackend trait provides byte_len/device/dtype without any
 # additional candle leakage at the kiln-core API surface.
 cuda = ["dep:kiln-tensor", "kiln-tensor/cuda"]
+# Phase 1 line 233 of #1082 — DeviceBuffer's `Metal` variant.
+# Pulls kiln-tensor with its `metal` feature so the MetalStorage
+# type is in scope. The variant carries `Arc<kiln_tensor::MetalStorage>`;
+# the StorageBackend trait provides byte_len/device/dtype.
+metal = ["dep:kiln-tensor", "kiln-tensor/metal"]
