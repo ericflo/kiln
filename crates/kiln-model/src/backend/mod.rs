@@ -248,6 +248,54 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    /// CUDA-graph-aware variant of
+    /// [`Self::flash_attn_paged_decode_contiguous_batch_dyn_seqlen`] that
+    /// accepts caller-owned `(out, softmax_lse)` device tensors so the
+    /// captured graph reads/writes its paged-decode scratch from stable
+    /// runner-owned storage instead of from transient `Tensor::zeros`
+    /// allocations inside the kernel wrapper.
+    ///
+    /// `graph_outputs = Some((out, softmax_lse))` skips the per-call
+    /// `Tensor::zeros` inside the captured region; the runner pre-allocates
+    /// these tensors and re-uses them across replays (see
+    /// `BatchedPagedDecodeGraphInputs::{attn_out, softmax_lse}`).
+    /// `graph_outputs = None` matches the non-graph behavior of
+    /// [`Self::flash_attn_paged_decode_contiguous_batch_dyn_seqlen`] and is
+    /// the default for backends that don't support stable graph buffers.
+    ///
+    /// The default impl routes through
+    /// [`Self::flash_attn_paged_decode_contiguous_batch_dyn_seqlen`] (i.e.
+    /// ignores `graph_outputs`), so non-CUDA backends don't need to override.
+    /// CUDA overrides this and threads `graph_outputs` into
+    /// `kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen`. Part of #1082
+    /// — see `bench-results/cuda-graph-bs2-secondary-audit.md` suspects 3+4.
+    #[allow(clippy::too_many_arguments)]
+    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
+        &self,
+        q: &Tensor,
+        k_pool: &Tensor,
+        v_pool: &Tensor,
+        block_table: &Tensor,
+        seqused_k: &Tensor,
+        _graph_outputs: Option<(&Tensor, &Tensor)>,
+        max_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<Tensor>> {
+        self.flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )
+    }
+
     fn supports_paged_kv_head_major_read(&self) -> bool {
         false
     }

@@ -17011,6 +17011,14 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     lora: Option<(&LoraLayerWeights, f32)>,
     profile_context: Option<(usize, usize)>,
     cached_meta: Option<&CachedPagedDecodeMeta>,
+    // CUDA-graph-stable paged-decode scratch tensors for the dyn_seqlen
+    // backend path. When `Some((attn_out, softmax_lse))`, the captured
+    // kernel writes/reads through caller-owned buffers re-used across
+    // graph replays instead of allocating fresh `Tensor::zeros` inside
+    // the captured region (#1082, see
+    // `bench-results/cuda-graph-bs2-secondary-audit.md` suspects 3+4).
+    // `None` reproduces the legacy per-call allocation behavior.
+    graph_outputs: Option<(&Tensor, &Tensor)>,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
     let profile_device = x.device();
@@ -17357,17 +17365,26 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         };
 
         let try_dyn_seqlen = |out_acc: &mut Option<Tensor>| -> Result<()> {
-            *out_acc = backend.flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
-                &q,
-                k_pool,
-                v_pool,
-                block_table_tensor,
-                seqused_k_tensor,
-                max_seqlen_k,
-                page_block_size,
-                softmax_scale,
-                true,
-            )?;
+            // When the caller threaded in graph-stable `(attn_out,
+            // softmax_lse)` scratch tensors, use the variant that
+            // consumes them so the captured kernel writes to a
+            // runner-owned destination across replays (#1082 suspects
+            // 3+4). Otherwise the kernel wrapper allocates fresh
+            // `Tensor::zeros` inside the captured region, which the
+            // captured graph then dangles when the tensors drop.
+            *out_acc = backend
+                .flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
+                    &q,
+                    k_pool,
+                    v_pool,
+                    block_table_tensor,
+                    seqused_k_tensor,
+                    graph_outputs,
+                    max_seqlen_k,
+                    page_block_size,
+                    softmax_scale,
+                    true,
+                )?;
             Ok(())
         };
 
@@ -19258,6 +19275,10 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     full_attn_profile_context: Option<(usize, usize)>,
     mlp_profile_context: Option<(usize, usize)>,
     cached_meta: Option<&CachedPagedDecodeMeta>,
+    // CUDA-graph-stable `(attn_out, softmax_lse)` scratch for the bs>1
+    // captured forward path. Forwarded as-is to
+    // `gqa_attention_paged_decode_contiguous_batch` (#1082).
+    graph_outputs: Option<(&Tensor, &Tensor)>,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -19304,6 +19325,7 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         lora,
         full_attn_profile_context,
         cached_meta,
+        graph_outputs,
     )?;
     let x = {
         kiln_nvtx::range!(c"kiln/residual_batch_decode");
@@ -19368,6 +19390,8 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
         None,
         None,
         None,
+        None,
+        None,
     )
 }
 
@@ -19404,6 +19428,16 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
     stable_token_ids_gpu: Option<&Tensor>,
     stable_block_table_gpu: Option<&Tensor>,
     stable_seqused_k_gpu: Option<&Tensor>,
+    // CUDA-graph-stable per-full-attn-layer `(attn_out, softmax_lse)`
+    // scratch tensors. When `Some`, the caller has pre-allocated one
+    // pair per full-attn layer and threads them through the captured
+    // forward so the bs>1 paged-decode kernel writes/reads from
+    // stable buffers instead of allocating fresh `Tensor::zeros`
+    // inside the captured region. Mirrors the bs=1
+    // `PagedDecodeGraphInputs::{attn_out, softmax_lse}` plumbing
+    // (#1082 suspects 3+4).
+    stable_attn_out_gpu: Option<&[Tensor]>,
+    stable_softmax_lse_gpu: Option<&[Tensor]>,
 ) -> Result<Tensor> {
     let batch = token_ids.len();
     anyhow::ensure!(batch > 0, "batched paged decode requires a non-empty batch");
@@ -19527,6 +19561,28 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
 
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
+                // Pick out the per-layer graph-stable paged-decode scratch
+                // tensors when the caller threaded them in. The captured
+                // CUDA graph re-uses these across replays so the kernel
+                // doesn't dangle pointers when its transient `Tensor::zeros`
+                // scratch drops at end of capture (#1082 suspects 3+4).
+                let layer_graph_outputs: Option<(&Tensor, &Tensor)> =
+                    match (stable_attn_out_gpu, stable_softmax_lse_gpu) {
+                        (Some(attn_outs), Some(lses)) => {
+                            let attn_out = attn_outs.get(full_attn_idx).with_context(|| {
+                                format!(
+                                    "stable attn_out missing for full-attn layer {full_attn_idx}"
+                                )
+                            })?;
+                            let lse = lses.get(full_attn_idx).with_context(|| {
+                                format!(
+                                    "stable softmax_lse missing for full-attn layer {full_attn_idx}"
+                                )
+                            })?;
+                            Some((attn_out, lse))
+                        }
+                        _ => None,
+                    };
                 hidden = transformer_block_paged_decode_contiguous_batch(
                     backend,
                     &hidden,
@@ -19542,6 +19598,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     profile_full_attn_stages.then_some((full_attn_idx, max_start_pos)),
                     profile_mlp_stages.then_some((i, max_start_pos)),
                     cached_paged_meta_ref,
+                    layer_graph_outputs,
                 )
                 .with_context(|| {
                     format!("batched transformer block {i} (full attention, paged)")
@@ -21107,22 +21164,27 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
 ) -> Result<()> {
     // Run the bs>1 hidden path with the persistent linear-state slot
     // and the graph-stable token-id / position / block_table /
-    // seqused_k device buffers. The captured graph now reads the
-    // per-step paged-decode metadata from caller-owned device tensors
-    // (`graph_inputs.block_table` + `graph_inputs.seqused_k`) instead
-    // of from transient `Tensor::from_slice` allocations inside
-    // `CachedPagedDecodeMeta::build`, which would `cudaFree` their
-    // storage at end of capture and leave the graph with dangling
-    // pointers (the `ILLEGAL_ADDRESS` fault documented in
-    // `bench-results/cuda-graph-bs2-memcheck.md`, #1082).
+    // seqused_k / per-layer paged-decode scratch device buffers. The
+    // captured graph reads the per-step paged-decode metadata from
+    // caller-owned device tensors (`graph_inputs.block_table` +
+    // `graph_inputs.seqused_k`) and now also writes/reads the
+    // per-layer flash-attn paged-decode `attn_out` + `softmax_lse`
+    // through caller-owned tensors (`graph_inputs.attn_out[layer]` +
+    // `graph_inputs.softmax_lse[layer]`). Both were previously
+    // re-allocated by `Tensor::from_slice` or `Tensor::zeros` inside
+    // the captured region and would `cudaFree` their storage at end
+    // of capture, leaving the graph with dangling pointers (the
+    // `ILLEGAL_ADDRESS` fault documented in
+    // `bench-results/cuda-graph-bs2-memcheck.md` and the matching
+    // entry for suspects 3+4 in
+    // `bench-results/cuda-graph-bs2-secondary-audit.md`, #1082).
     //
-    // FUTURE WORK (also part of #1082): the per-step KV-slot writer,
-    // rotary cos/sin tables, paged-decode attn_out + softmax_lse
-    // scratch, and (for non-LM-head paths) output_logits are still
-    // built inside the captured region today, and may also surface
-    // capture-time allocations when the bs>1 decode shape exercises
-    // them. The bs=1 forward (`model_forward_paged_with_graph_inputs`
-    // → `model_forward_paged_inner`) already threads its
+    // FUTURE WORK (also part of #1082): the per-step KV-slot writer
+    // and rotary cos/sin tables are still built inside the captured
+    // region today, and may surface capture-time allocations when the
+    // bs>1 decode shape exercises them. The bs=1 forward
+    // (`model_forward_paged_with_graph_inputs` →
+    // `model_forward_paged_inner`) already threads its
     // `PagedDecodeGraphInputs` through to every per-layer call site
     // — mirror that discipline here as additional fault shapes
     // surface under `KILN_CUDA_GRAPHS_BATCHED=1` runs.
@@ -21140,6 +21202,13 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
         Some(graph_inputs.token_ids),
         Some(graph_inputs.block_table),
         Some(graph_inputs.seqused_k),
+        // Thread the per-full-attn-layer stable paged-decode scratch
+        // through so the captured kernel writes/reads runner-owned
+        // `attn_out` / `softmax_lse` instead of building fresh
+        // `Tensor::zeros` inside the captured region (#1082 suspects
+        // 3+4 — see `bench-results/cuda-graph-bs2-secondary-audit.md`).
+        Some(graph_inputs.attn_out),
+        Some(graph_inputs.softmax_lse),
     )?;
     // Compute logits and slice them into the caller-owned stable
     // `output_logits` buffer (`[batch, 1, vocab]`). The captured graph
@@ -21418,6 +21487,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                     &block_table_refs,
                     full_attn_idx,
                     layer_lora,
+                    None,
                     None,
                     None,
                     None,
@@ -24853,6 +24923,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )?;
         device.synchronize()?;
         assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
@@ -25003,6 +25074,7 @@ mod tests {
             &mut batch_cache,
             &block_tables,
             0,
+            None,
             None,
             None,
             None,
