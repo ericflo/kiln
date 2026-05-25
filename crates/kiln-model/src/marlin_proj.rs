@@ -276,25 +276,30 @@ pub fn pack_from_bf16_batch(inputs: &[(Tensor, i32)]) -> Result<Vec<Option<Marli
     Ok((0..inputs.len()).map(|_| None).collect())
 }
 
-/// Phase 7 opt-in (#1082): when `KILN_USE_KT_API_MARLIN=1` (or
-/// `KILN_USE_KT_API_ALL=1`) is set, route [`matmul_bf16`] through the
-/// kt-typed surface (`marlin_w4a16_gemm_kt`) instead of the
+/// Phase 7 default-on (#1082): [`matmul_bf16`] routes through the
+/// kt-typed surface (`marlin_w4a16_gemm_kt`) by default instead of the
 /// candle-typed `marlin_w4a16_gemm` shim. Cached at module load.
 ///
-/// This is the first production migration of `kiln-marlin-gemm` — the
-/// crate has had a `kt_api` module landed since the initial Phase 7
-/// prep, but no production call site was wired until now. The kt-API
-/// path matches the candle path bit-exactly because both bottom out
-/// in the same `kiln_marlin_w4a16_gemm` FFI symbol; only the Rust
-/// shell types change.
+/// Default ON because byte-exact parity is verified by
+/// `test_marlin_w4a16_gemm_kt_api_parity` (`bf80b175`, m=1, k=2560,
+/// n=2560, groupsize=128 Qwen3.5-4B QKV envelope, 0 byte mismatches
+/// across all 2560 output elements). Both candle and kt paths bottom
+/// out in the same `kiln_marlin_w4a16_gemm` FFI symbol; only the Rust
+/// shell types and the location of the BF16↔F16 cast differ. The
+/// candle shim does the cast inside `marlin_w4a16_gemm`; the kt shim
+/// does the cast at the caller side in `matmul_bf16_2d_kt` before the
+/// kt borrow. Both produce the same bytes.
+///
+/// Set `KILN_DISABLE_KT_API_MARLIN=1` to opt out (escape hatch).
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_marlin() -> bool {
     use std::sync::OnceLock;
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_KT_API_MARLIN").is_ok()
-            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
-    })
+    // #1082: flipped default ON post byte-exact parity test
+    // (`bf80b175`, 0 byte mismatches). Both candle and kt paths bottom
+    // out in the same FFI symbol, so this is bit-exact by construction.
+    // Escape hatch: `KILN_DISABLE_KT_API_MARLIN=1`.
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MARLIN").is_err())
 }
 
 /// kt-API 2D matmul: takes a contiguous BF16 `[m, k]` activation and
@@ -355,9 +360,10 @@ pub(crate) fn matmul_bf16_2d_kt(x_bf16: &Tensor, w: &MarlinPackedProj) -> Result
 /// input rank with last dim `n`. Matches the shape contract of the existing
 /// `linear_with_lora_t` BF16 matmul it is replacing.
 ///
-/// Phase 7 opt-in (#1082): set `KILN_USE_KT_API_MARLIN=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to route through the kt-typed surface
-/// (`marlin_w4a16_gemm_kt`). Default off — bit-exactly equivalent.
+/// Phase 7 default-on (#1082): routes through the kt-typed surface
+/// (`marlin_w4a16_gemm_kt`) by default. Bit-exact by construction +
+/// verified by `test_marlin_w4a16_gemm_kt_api_parity` (`bf80b175`).
+/// Set `KILN_DISABLE_KT_API_MARLIN=1` to opt out.
 #[cfg(feature = "cuda")]
 pub fn matmul_bf16(x: &Tensor, w: &MarlinPackedProj) -> Result<Tensor> {
     let use_kt = cuda_use_kt_api_marlin();
