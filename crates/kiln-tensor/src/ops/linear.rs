@@ -4,6 +4,8 @@
 
 use crate::ops::{add, broadcast_to, matmul};
 use crate::{bail, Result, Tensor};
+#[cfg(feature = "cuda")]
+use crate::DType;
 
 /// `y = x @ w + b` (b is optional).
 ///
@@ -29,6 +31,45 @@ pub fn linear(x: &Tensor, w: &Tensor, b: Option<&Tensor>) -> Result<Tensor> {
     let mut out_shape = x.shape().to_vec();
     *out_shape.last_mut().unwrap() = out_dim;
     let leading: usize = x.shape()[..x.rank() - 1].iter().product::<usize>().max(1);
+
+    // CUDA fast path (#1082): when x and w (and bias if present) all live
+    // on the same CUDA device with matching dtypes and contiguous layouts,
+    // route through `cuda_matmul_with_bias` (single cublasLt call with
+    // CUBLASLT_EPILOGUE_BIAS) for the bias-present case, saving one
+    // kernel launch + one full pass over the output vs the separate
+    // matmul + broadcast + add decomposition. Bias-absent case routes
+    // through `cuda_matmul` directly.
+    #[cfg(feature = "cuda")]
+    if matches!(x.device(), crate::Device::Cuda(_))
+        && matches!(w.device(), crate::Device::Cuda(_))
+        && x.device() == w.device()
+        && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        && x.dtype() == w.dtype()
+        && x.is_contiguous()
+        && w.is_contiguous()
+    {
+        let x_2d = x.reshape(vec![leading, in_dim])?;
+        if let Some(bias) = b {
+            if bias.rank() != 1 || bias.shape()[0] != out_dim {
+                bail!(
+                    "linear: bias must be rank-1 [{out_dim}], got {:?}",
+                    bias.shape()
+                );
+            }
+            if matches!(bias.device(), crate::Device::Cuda(_))
+                && bias.device() == x.device()
+                && bias.dtype() == x.dtype()
+                && bias.is_contiguous()
+            {
+                let y_2d = crate::cuda_matmul_with_bias(&x_2d, w, bias)?;
+                return y_2d.reshape(out_shape);
+            }
+        } else {
+            let y_2d = crate::cuda_matmul(&x_2d, w)?;
+            return y_2d.reshape(out_shape);
+        }
+    }
+
     let x_2d = x.reshape(vec![leading, in_dim])?;
     let y_2d = matmul(&x_2d, w)?;
 
