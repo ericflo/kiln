@@ -1917,6 +1917,54 @@ pub(crate) fn try_kt_paged_kv_is_fp8(
     kt_is_fp8
 }
 
+/// Phase 7 opt-in: parity-check a `PagedKvCache::pool_tensors(layer_idx)`
+/// presence read against the kt twin (#1082).
+///
+/// Unlike [`try_kt_paged_kv_block_size`] / [`try_kt_paged_kv_is_fp8`], this
+/// helper does NOT return the kt tensors — they're a different type
+/// (`&KtTensor` vs `&Tensor`) and threading them through the existing
+/// flash-attn callers would be a much bigger change than an accessor
+/// migration. Instead, this just asserts that the kt cache has a layer
+/// for `layer_idx` iff the candle cache does, so that any kt allocator
+/// drift (e.g. a future change to how kt counts layers from
+/// `num_full_attn_layers`) surfaces immediately under the env gate.
+///
+/// The return is `()`. Callers continue to use the candle `pool_tensors`
+/// return for the actual K/V pool tensors.
+///
+/// Gate: `KILN_USE_KT_PAGED_KV_POOL_TENSORS` (or meta-gates
+/// `KILN_USE_KT_PAGED_KV_CACHE` / `KILN_USE_KT_API_ALL`). NOP on the
+/// default path.
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn try_kt_paged_kv_pool_tensors_present(
+    candle_present: bool,
+    layer_idx: usize,
+    kt_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
+) {
+    let kt = match kt_cache {
+        Some(c) => c,
+        None => return,
+    };
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let gate_on = *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_PAGED_KV_POOL_TENSORS").is_ok()
+            || std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    });
+    if !gate_on {
+        return;
+    }
+    kiln_nvtx::range!(c"kiln/paged_kv_kt/pool_tensors_present");
+    let kt_present = kt.pool_tensors(layer_idx).is_some();
+    assert_eq!(
+        kt_present, candle_present,
+        "try_kt_paged_kv_pool_tensors_present: layer_idx={layer_idx}, \
+         kt.pool_tensors(idx).is_some()={kt_present} \
+         disagrees with candle paged_cache.pool_tensors(idx).is_some()={candle_present}"
+    );
+}
+
 /// Phase 7 opt-in: route the Vulkan `linear_prefill_apply` 2D matmul
 /// path through a kt-API equivalent of `kiln_tensor::cuda_matmul`.
 /// Default off; set `KILN_USE_KT_API_MATMUL=1` (or
@@ -16609,7 +16657,14 @@ fn try_flash_attn_paged_decode(
         return Ok(None);
     }
 
-    let (k_pool, v_pool) = match paged_cache.pool_tensors(full_attn_layer_idx) {
+    let candle_pools = paged_cache.pool_tensors(full_attn_layer_idx);
+    #[cfg(feature = "cuda")]
+    try_kt_paged_kv_pool_tensors_present(
+        candle_pools.is_some(),
+        full_attn_layer_idx,
+        kt_paged_cache,
+    );
+    let (k_pool, v_pool) = match candle_pools {
         Some(p) => p,
         None => return Ok(None),
     };
