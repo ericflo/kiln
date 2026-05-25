@@ -723,6 +723,32 @@ fn cuda_use_kt_api_min_binary() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise linear interpolation
+/// (`out = a + w * (b - a)`) through the kt-API + adapters. Set
+/// `KILN_USE_KT_API_LERP=1` (or `KILN_USE_KT_API_ALL=1`) to enable;
+/// default off. Routes any `Tensor::lerp(a, b, w)`-shaped composite
+/// (or open-coded `a + (b - a) * w` / `affine` chains) through
+/// `kiln_tensor::cuda_lerp` via the kt-bridge borrow adapter. Pays
+/// one dtod memcpy on the output direction (the kt allocation is
+/// freshly-owned). Falls through to the candle composite when any
+/// precondition fails so behavior is identical with the gate off.
+///
+/// Wired up for completeness; today there are no `Tensor::lerp(...)`
+/// API calls in `forward.rs` (candle 0.9 has no lerp method). The
+/// kt kernel (commit `2abeb76a`) fuses the sub + mul + add into a
+/// single pass over device memory, replacing 3 candle calls + 2
+/// intermediate allocations. Future migrations of EMA-style
+/// composites (`new = old + alpha * (target - old)`) and any
+/// `Tensor::lerp` API consumers can plug in via [`try_kt_lerp`]
+/// without further plumbing.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_lerp() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LERP").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: elementwise `Tensor::abs()` through the kt-API
 /// + adapters. Set `KILN_USE_KT_API_ABS=1` (or
 /// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
@@ -7799,6 +7825,59 @@ fn try_kt_min_binary(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_min_binary: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API linear-interpolation migration helper.
+/// Routes a pair of same-shape, same-dtype contiguous CUDA candle
+/// tensors `(a, b)` and a scalar weight `w` through
+/// `kiln_tensor::cuda_lerp` to compute `a + w * (b - a)`. The fused
+/// kernel replaces a 3-call candle composite (sub + mul + add) and
+/// avoids 2 intermediate allocations.
+///
+/// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
+/// unsupported dtype, non-contiguous, dtype mismatch, shape
+/// mismatch, rank-0) so the caller falls through to the candle
+/// composite. NVTX range `kiln/lerp_kt` brackets the migrated call
+/// so nsys traces separate the path from the baseline composite.
+///
+/// Wired up for completeness; today there are no production
+/// `Tensor::lerp(...)` API call sites in `forward.rs`. Future
+/// EMA-style composites can plug in here without further plumbing.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_lerp(a: &Tensor, b: &Tensor, weight: f32) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_lerp() {
+        return Ok(None);
+    }
+    if !matches!(a.device(), Device::Cuda(_))
+        || !matches!(b.device(), Device::Cuda(_))
+        || !matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || a.dtype() != b.dtype()
+        || a.shape() != b.shape()
+        || !a.is_contiguous()
+        || !b.is_contiguous()
+        || a.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/lerp_kt");
+
+    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out_kt = match kiln_tensor::cuda_lerp(&a_kt, &b_kt, weight) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_lerp: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
