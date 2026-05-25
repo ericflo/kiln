@@ -16,7 +16,7 @@
 //! Qwen3.5-4B student (H=2560, V=32K subset), K=32, T ∈ {256, 1024, 4096}.
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor};
+use half::bf16;
 use kiln_vulkan_kernel::vk_ops::opd::{
     dispatch_opd_topk_kl_bwd_resident, dispatch_opd_topk_kl_fwd_resident,
 };
@@ -62,15 +62,68 @@ fn deterministic_topk(t: usize, v: usize, k: usize) -> (Vec<u32>, Vec<f32>) {
     (idx, lpq)
 }
 
+/// Upload an f32 buffer as a VkTensor leaf. Bypasses candle entirely:
+/// just bytes → device-local buffer → `VkTensor::from_buffer`. (#1082)
 fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    VkTensor::from_candle(&t, Arc::clone(dev))
+    let bytes: &[u8] = bytemuck::cast_slice(data);
+    let buf = VulkanBuffer::create_device_local(
+        dev.device(),
+        dev.device_local_mem_type(),
+        bytes.len().max(4) as u64,
+    )
+    .context("upload_f32: device-local buffer")?;
+    VulkanBuffer::upload_data(
+        dev.device(),
+        dev.host_visible_mem_type(),
+        dev.queue(),
+        dev.queue_family_index(),
+        &buf,
+        bytes,
+    )
+    .context("upload_f32: upload")?;
+    Ok(VkTensor::from_buffer(
+        Arc::new(buf),
+        shape.to_vec(),
+        VkDType::F32,
+        Arc::clone(dev),
+    ))
 }
 
+/// Upload f32 source data converted to BF16 as a VkTensor leaf. Replaces
+/// the candle `to_dtype(BF16)` step with a direct host-side
+/// `bf16::from_f32` pass. (#1082)
 fn upload_bf16w(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?
-        .to_dtype(DType::BF16)?;
-    VkTensor::from_candle(&t, Arc::clone(dev))
+    let mut bytes: Vec<u8> = Vec::with_capacity(data.len() * 2);
+    for &v in data {
+        bytes.extend_from_slice(&bf16::from_f32(v).to_bits().to_le_bytes());
+    }
+    // BF16 kernels view storage as u32 words; round odd element counts up
+    // so the final word is addressable.
+    let mut needed = bytes.len().max(2);
+    if needed % 4 != 0 {
+        needed = ((needed + 3) / 4) * 4;
+    }
+    let buf = VulkanBuffer::create_device_local(
+        dev.device(),
+        dev.device_local_mem_type(),
+        needed as u64,
+    )
+    .context("upload_bf16w: device-local buffer")?;
+    VulkanBuffer::upload_data(
+        dev.device(),
+        dev.host_visible_mem_type(),
+        dev.queue(),
+        dev.queue_family_index(),
+        &buf,
+        &bytes,
+    )
+    .context("upload_bf16w: upload")?;
+    Ok(VkTensor::from_buffer(
+        Arc::new(buf),
+        shape.to_vec(),
+        VkDType::Bf16,
+        Arc::clone(dev),
+    ))
 }
 
 fn upload_u32_buf(dev: &Arc<VulkanDevice>, data: &[u32]) -> Result<Arc<VulkanBuffer>> {
