@@ -9172,6 +9172,15 @@ fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
                 .context("metal lm_head argmax kernel failed");
         }
     }
+    // Fused matmul + argmax path: when both kt LM head and argmax
+    // gates are on (or KILN_USE_KT_API_ALL=1), chain
+    // `cuda_matmul` -> `cuda_argmax_last_axis` directly in
+    // kt-storage, skipping the intermediate candle copy-back the
+    // unfused composition would pay between the two stages.
+    #[cfg(feature = "cuda")]
+    if let Some(token) = try_kt_lm_head_argmax(x, embed_tokens_t)? {
+        return Ok(token);
+    }
     let logits = lm_head_forward(x, embed_tokens_t)?;
     let logits_1d = logits.flatten_all()?;
     #[cfg(feature = "cuda")]
@@ -9185,6 +9194,89 @@ fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
         }
     }
     Ok(logits_1d.argmax(0)?.to_scalar::<u32>()?)
+}
+
+/// Phase 7 (#1082) — fused kt-API LM head + argmax migration helper.
+/// Routes the `[1, 1, hidden] @ [hidden, vocab] -> argmax` pipeline
+/// through `kiln_tensor::cuda_matmul` followed directly by
+/// `kiln_tensor::cuda_argmax_last_axis` in kt-storage, skipping the
+/// intermediate candle copy-back that the unfused
+/// `try_kt_lm_head` -> `try_kt_argmax_1d` composition would pay.
+///
+/// Only fires when the LM head input flattens to exactly one row
+/// (`lead == 1`) — the canonical single-token decode case in
+/// [`lm_head_argmax`]. For multi-row inputs (e.g. prefill), the
+/// caller continues to chain the unfused `lm_head_forward` +
+/// `argmax(0)` after `flatten_all`, which is correct but not
+/// applicable to argmax-over-flattened-1D semantics on those shapes.
+///
+/// Requires both `KILN_USE_KT_API_LM_HEAD` and `KILN_USE_KT_API_ARGMAX`
+/// (or `KILN_USE_KT_API_ALL=1`) to be set; falls through cleanly when
+/// either is off. NVTX range `kiln/lm_head_argmax_kt` brackets the
+/// migrated call.
+#[cfg(feature = "cuda")]
+fn try_kt_lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<u32>> {
+    if !cuda_use_kt_api_lm_head() || !cuda_use_kt_api_argmax() {
+        return Ok(None);
+    }
+    let l_dims = x.dims();
+    let r_dims = embed_tokens_t.dims();
+    if r_dims.len() != 2 || l_dims.len() < 2 {
+        return Ok(None);
+    }
+    let k = l_dims[l_dims.len() - 1];
+    if r_dims[0] != k {
+        return Ok(None);
+    }
+    let lead: usize = l_dims[..l_dims.len() - 1].iter().product();
+    // Fused path only handles the single-row case so the matmul
+    // output's last-axis argmax matches the flattened-1D argmax
+    // semantics of the candle baseline. Multi-row inputs would
+    // need argmax over the full flattened logits, not per-row.
+    if lead != 1 {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(embed_tokens_t.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::BF16 | DType::F16 | DType::F32)
+        || x.dtype() != embed_tokens_t.dtype()
+        || !x.is_contiguous()
+        || !embed_tokens_t.is_contiguous()
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/lm_head_argmax_kt");
+
+    let x2d = match x.reshape((lead, k)) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    let lhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x2d) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let rhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(embed_tokens_t) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let logits_kt = match kiln_tensor::cuda_matmul(&lhs_kt, &rhs_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // `cuda_argmax_last_axis` reduces the last axis. On the
+    // `[1, vocab]` matmul output it yields a rank-1 `[1]` I64
+    // tensor; copy back to a candle scalar via the kt-bridge and
+    // unwrap to u32 to match the existing return type.
+    let argmax_kt = match kiln_tensor::cuda_argmax_last_axis(&logits_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let argmax = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&argmax_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_lm_head_argmax: candle copy-back failed: {e}"))?;
+    let token_i64 = argmax.flatten_all()?.to_scalar::<i64>()?;
+    Ok(Some(token_i64 as u32))
 }
 
 /// Phase 7 (#1082) — kt-API argmax migration helper. Routes a 1-D
