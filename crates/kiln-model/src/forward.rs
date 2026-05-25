@@ -30356,6 +30356,182 @@ mod tests {
         Ok(())
     }
 
+    /// Parity check for the kt-API path of
+    /// `backend.gdn_decode_qk_norm_gates_recurrent` against the
+    /// candle-typed path. Both bottom out in the same FFI symbol
+    /// (`kiln_gdn_decode_qk_norm_gates_recurrent_bf16`) so this asserts
+    /// byte-for-byte parity on the BF16 output and the BF16 `state`
+    /// mutation. (#1082)
+    ///
+    /// This is the production hot path for Qwen3.5-4B GDN decode
+    /// without the rmsnorm output gating. Caught a latent 3D-vs-4D
+    /// shape bug in the kt wire — the candle method forwards 4D
+    /// `[B, 1, heads, dim]` but the kt_api expects 3D `[B, heads, dim]`.
+    /// The wire now squeezes the seq_len=1 axis before the kt borrow
+    /// (same fix as the rmsnorm wire — see commit 171020c6).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gdn_decode_qk_norm_gates_recurrent_kt_api_parity() -> Result<()> {
+        use crate::backend::BackendRuntime;
+        use crate::backend::cuda::CudaBackend;
+        use rand::rngs::StdRng;
+        use rand::{RngExt, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_gdn_decode_qk_norm_gates_recurrent_kt_api_parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // Qwen3.5-4B GDN decode envelope at batch=1 (the kernel hard-pins
+        // dk == dv == 128 and requires value_heads % q_heads == 0):
+        //   q, k:    [B, 1, q_heads,     dk] bf16
+        //   v:       [B, 1, value_heads, dv] bf16
+        //   a, b:    [B, 1, value_heads]    bf16
+        //   a_log:   [value_heads]           bf16
+        //   dt_bias: [value_heads]           bf16
+        //   state:   [B, value_heads, dk, dv] bf16 (mutated in place)
+        // The kt and candle paths share the same FFI symbol; the test
+        // is correctness-of-Rust-shell only.
+        let batch = 1usize;
+        let q_heads = 16usize;
+        let value_heads = 32usize;
+        let dk = 128usize;
+        let dv = 128usize;
+
+        let n_q = batch * 1 * q_heads * dk;
+        let n_v = batch * 1 * value_heads * dv;
+        let n_ab = batch * 1 * value_heads;
+        let n_alog = value_heads;
+        let n_dtb = value_heads;
+        let n_state = batch * value_heads * dk * dv;
+
+        let mut rng = StdRng::seed_from_u64(0xC0_1DFACE);
+        let q_data: Vec<f32> = (0..n_q).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let k_data: Vec<f32> = (0..n_q).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let a_data: Vec<f32> = (0..n_ab).map(|_| rng.random_range(-0.1f32..0.1)).collect();
+        let b_data: Vec<f32> = (0..n_ab).map(|_| rng.random_range(-0.1f32..0.1)).collect();
+        let alog_data: Vec<f32> = (0..n_alog)
+            .map(|_| rng.random_range(-2.0f32..0.0))
+            .collect();
+        let dtb_data: Vec<f32> = (0..n_dtb).map(|_| rng.random_range(-0.1f32..0.1)).collect();
+        let s_data: Vec<f32> = (0..n_state).map(|_| rng.random_range(-0.3f32..0.3)).collect();
+
+        let q_f32 = Tensor::from_slice(&q_data, (batch, 1, q_heads, dk), &device)?;
+        let k_f32 = Tensor::from_slice(&k_data, (batch, 1, q_heads, dk), &device)?;
+        let v_f32 = Tensor::from_slice(&v_data, (batch, 1, value_heads, dv), &device)?;
+        let a_f32 = Tensor::from_slice(&a_data, (batch, 1, value_heads), &device)?;
+        let b_f32 = Tensor::from_slice(&b_data, (batch, 1, value_heads), &device)?;
+        let alog = Tensor::from_slice(&alog_data, (value_heads,), &device)?
+            .to_dtype(DType::BF16)?;
+        let dtb = Tensor::from_slice(&dtb_data, (value_heads,), &device)?
+            .to_dtype(DType::BF16)?;
+        // Independent state buffers; `clone()` is unsafe (Arc-shared
+        // CUDA storage), see the rmsnorm parity test for context.
+        let state_candle_init =
+            Tensor::from_slice(&s_data, (batch, value_heads, dk, dv), &device)?
+                .to_dtype(DType::BF16)?;
+        let state_kt_init =
+            Tensor::from_slice(&s_data, (batch, value_heads, dk, dv), &device)?
+                .to_dtype(DType::BF16)?;
+
+        let q = q_f32.to_dtype(DType::BF16)?;
+        let k = k_f32.to_dtype(DType::BF16)?;
+        let v = v_f32.to_dtype(DType::BF16)?;
+        let a = a_f32.to_dtype(DType::BF16)?;
+        let b = b_f32.to_dtype(DType::BF16)?;
+
+        let q_scale = (dk as f64).sqrt().recip();
+        let qk_eps = 1e-6f64;
+
+        // Candle-typed path.
+        let candle_be = CudaBackend::new_with_kt_api_gdn(device.clone(), false);
+        let mut state_candle = state_candle_init;
+        let out_candle = match candle_be.gdn_decode_qk_norm_gates_recurrent(
+            &q, &k, &v, &a, &b, &alog, &dtb, &mut state_candle,
+            q_scale, qk_eps,
+        )? {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "candle gdn_decode_qk_norm declined dispatch; skipping kt parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // kt-API path.
+        let kt_be = CudaBackend::new_with_kt_api_gdn(device.clone(), true);
+        let mut state_kt = state_kt_init;
+        let out_kt = match kt_be.gdn_decode_qk_norm_gates_recurrent(
+            &q, &k, &v, &a, &b, &alog, &dtb, &mut state_kt,
+            q_scale, qk_eps,
+        )? {
+            Some(t) => t,
+            None => {
+                eprintln!("kt gdn_decode_qk_norm declined dispatch; skipping kt parity");
+                return Ok(());
+            }
+        };
+
+        // Output parity: byte-for-byte (same FFI symbol).
+        let out_candle_data: Vec<f32> =
+            out_candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let out_kt_data: Vec<f32> =
+            out_kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(out_candle_data.len(), out_kt_data.len());
+        let mut mismatches = 0usize;
+        for (i, (a, b)) in out_candle_data.iter().zip(out_kt_data.iter()).enumerate() {
+            if a.to_bits() != b.to_bits() {
+                if mismatches < 4 {
+                    eprintln!(
+                        "kt parity output mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                        a.to_bits(),
+                        b.to_bits()
+                    );
+                }
+                mismatches += 1;
+            }
+        }
+        assert_eq!(
+            mismatches, 0,
+            "kt-API gdn_decode_qk_norm output diverges from candle path at {mismatches} indices"
+        );
+
+        // state parity: byte-for-byte (in-place mutation through both
+        // candle and kt borrow adapters writes to the same CUDA buffer
+        // semantics).
+        let s_candle_data: Vec<f32> =
+            state_candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let s_kt_data: Vec<f32> =
+            state_kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(s_candle_data.len(), s_kt_data.len());
+        let mut sm = 0usize;
+        for (i, (a, b)) in s_candle_data.iter().zip(s_kt_data.iter()).enumerate() {
+            if a.to_bits() != b.to_bits() {
+                if sm < 4 {
+                    eprintln!(
+                        "kt parity state mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                        a.to_bits(),
+                        b.to_bits()
+                    );
+                }
+                sm += 1;
+            }
+        }
+        assert_eq!(
+            sm, 0,
+            "kt-API gdn_decode_qk_norm state diverges from candle path at {sm} indices"
+        );
+
+        Ok(())
+    }
+
     /// Parity check for the kt-API path of `marlin_w4a16_gemm` against
     /// the candle-typed path. Both bottom out in the same FFI symbol
     /// (`kiln_marlin_w4a16_gemm`); only the Rust shell types and the
