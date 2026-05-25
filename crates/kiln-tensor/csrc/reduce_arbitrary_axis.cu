@@ -280,3 +280,164 @@ extern "C" int kiln_bool_reduce_arbitrary_axis_async(
     cudaError_t err = cudaGetLastError();
     return err == cudaSuccess ? 0 : -1;
 }
+
+// ----------------------------------------------------------------------
+// minmax reduction over an arbitrary axis (issue #1082).
+//
+// `kind == 0` -> MIN, `kind == 1` -> MAX. F32 accumulation throughout
+// (same numerical-reference convention as the sum/mean path); cast
+// back to T on the final store.
+//
+// The reduction tree is fixed (warp-shuffle + cross-warp via shared
+// memory), so bit-identical determinism is preserved for any given
+// (shape, axis, dtype) tuple. Identities are +INF for MIN and -INF
+// for MAX so empty thread tiles produce no contamination.
+
+namespace {
+
+template <typename T, int Kind>
+__global__ void reduce_arbitrary_axis_minmax_kernel(
+    const T* __restrict__ x,
+    T* __restrict__ out,
+    int64_t outer,
+    int64_t axis_dim,
+    int64_t inner) {
+    int64_t inner_idx = blockIdx.x;
+    int64_t outer_idx = blockIdx.y;
+    if (inner_idx >= inner || outer_idx >= outer) return;
+
+    int tid = threadIdx.x;
+    int blk = blockDim.x;
+
+    int64_t base = outer_idx * axis_dim * inner + inner_idx;
+
+    // Identities: +INF for MIN, -INF for MAX.
+    float local;
+    if constexpr (Kind == 0) {
+        local = INFINITY;
+    } else {
+        local = -INFINITY;
+    }
+    for (int64_t r = tid; r < axis_dim; r += blk) {
+        float v = to_f32<T>(x[base + r * inner]);
+        if constexpr (Kind == 0) {
+            // fminf propagates non-NaN over NaN — matches Rust's
+            // `f32::min` which returns the non-NaN operand when one
+            // side is NaN. CPU reference walks `cur.min(v)`.
+            local = fminf(local, v);
+        } else {
+            local = fmaxf(local, v);
+        }
+    }
+
+    __shared__ float shared_v[32];
+    for (int offset = 16; offset > 0; offset /= 2) {
+        float other = __shfl_xor_sync(0xFFFFFFFF, local, offset);
+        if constexpr (Kind == 0) {
+            local = fminf(local, other);
+        } else {
+            local = fmaxf(local, other);
+        }
+    }
+    int warp_id = tid / 32;
+    int lane = tid & 31;
+    if (lane == 0) shared_v[warp_id] = local;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float v;
+        if (lane < (blk + 31) / 32) {
+            v = shared_v[lane];
+        } else {
+            v = (Kind == 0) ? INFINITY : -INFINITY;
+        }
+        for (int offset = 16; offset > 0; offset /= 2) {
+            float other = __shfl_xor_sync(0xFFFFFFFF, v, offset);
+            if constexpr (Kind == 0) {
+                v = fminf(v, other);
+            } else {
+                v = fmaxf(v, other);
+            }
+        }
+        if (lane == 0) {
+            out[outer_idx * inner + inner_idx] = cast_from_f32<T>(v);
+        }
+    }
+}
+
+}  // anonymous namespace
+
+extern "C" int kiln_minmax_arbitrary_axis_async(
+    const void* x,
+    void* out,
+    int64_t outer,
+    int64_t axis_dim,
+    int64_t inner,
+    int32_t kind,        // 0=MIN, 1=MAX
+    int32_t dtype_tag,   // 0=F32, 1=BF16, 2=F16
+    void* stream_raw) {
+    if (outer == 0 || axis_dim == 0 || inner == 0) return 0;
+    cudaStream_t stream = static_cast<cudaStream_t>(stream_raw);
+
+    int threads = MAX_THREADS;
+    while ((int64_t)threads > axis_dim && threads > 32) {
+        threads /= 2;
+    }
+    if (threads < 32) threads = 32;
+
+    dim3 grid((unsigned int)inner, (unsigned int)outer);
+    dim3 block(threads);
+
+    if (kind == 0) {
+        switch (dtype_tag) {
+            case 0:
+                reduce_arbitrary_axis_minmax_kernel<float, 0><<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const float*>(x),
+                    reinterpret_cast<float*>(out),
+                    outer, axis_dim, inner);
+                break;
+            case 1:
+                reduce_arbitrary_axis_minmax_kernel<__nv_bfloat16, 0><<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(x),
+                    reinterpret_cast<__nv_bfloat16*>(out),
+                    outer, axis_dim, inner);
+                break;
+            case 2:
+                reduce_arbitrary_axis_minmax_kernel<__half, 0><<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const __half*>(x),
+                    reinterpret_cast<__half*>(out),
+                    outer, axis_dim, inner);
+                break;
+            default:
+                return -2;
+        }
+    } else if (kind == 1) {
+        switch (dtype_tag) {
+            case 0:
+                reduce_arbitrary_axis_minmax_kernel<float, 1><<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const float*>(x),
+                    reinterpret_cast<float*>(out),
+                    outer, axis_dim, inner);
+                break;
+            case 1:
+                reduce_arbitrary_axis_minmax_kernel<__nv_bfloat16, 1><<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(x),
+                    reinterpret_cast<__nv_bfloat16*>(out),
+                    outer, axis_dim, inner);
+                break;
+            case 2:
+                reduce_arbitrary_axis_minmax_kernel<__half, 1><<<grid, block, 0, stream>>>(
+                    reinterpret_cast<const __half*>(x),
+                    reinterpret_cast<__half*>(out),
+                    outer, axis_dim, inner);
+                break;
+            default:
+                return -2;
+        }
+    } else {
+        return -3;
+    }
+
+    cudaError_t err = cudaGetLastError();
+    return err == cudaSuccess ? 0 : -1;
+}

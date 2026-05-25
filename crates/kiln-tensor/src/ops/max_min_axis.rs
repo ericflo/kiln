@@ -48,6 +48,20 @@ fn apply(kind: MinMaxKind, x: &Tensor, axis: usize) -> Result<Tensor> {
     if !x.is_contiguous() {
         bail!("{}: input must be contiguous", kind.name());
     }
+    // CUDA fast path: if the storage is on CUDA, route through the
+    // dedicated minmax reduction kernel in
+    // `csrc/reduce_arbitrary_axis.cu` (issue #1082). The CPU branch
+    // below still handles `CpuStorage`-backed tensors with identical
+    // numerics.
+    #[cfg(feature = "cuda")]
+    {
+        if x.storage().as_any().is::<crate::CudaStorage>() {
+            return match kind {
+                MinMaxKind::Min => crate::cuda_min_axis(x, axis),
+                MinMaxKind::Max => crate::cuda_max_axis(x, axis),
+            };
+        }
+    }
     let dtype = x.dtype();
     let shape = x.shape().to_vec();
     let outer: usize = shape[..axis].iter().product::<usize>().max(1);

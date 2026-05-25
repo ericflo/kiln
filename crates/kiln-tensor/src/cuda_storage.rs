@@ -520,6 +520,17 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_minmax_arbitrary_axis_async(
+        x: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        outer: i64,
+        axis_dim: i64,
+        inner: i64,
+        kind: i32,
+        dtype_tag: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_bool_reduce_arbitrary_axis_async(
         mask: *const core::ffi::c_void,
         out: *mut core::ffi::c_void,
@@ -2993,6 +3004,148 @@ pub fn cuda_mean_axis(x: &crate::Tensor, axis: usize) -> Result<crate::Tensor> {
     }
     let inv = 1.0_f32 / (axis_dim as f32);
     cuda_reduce_arbitrary_axis_impl(x, axis, inv, "cuda_mean_axis")
+}
+
+/// Shared implementation behind [`cuda_min_axis`] / [`cuda_max_axis`].
+///
+/// Reduces `x` over a single axis by min or max. Routes through
+/// `kiln_minmax_arbitrary_axis_async` in `csrc/reduce_arbitrary_axis.cu`,
+/// which uses a fixed warp-shuffle + cross-warp tree (constructive
+/// determinism — matches the CPU reference `ops::max_axis` /
+/// `ops::min_axis` which walks the axis in a fixed iteration order).
+///
+/// F32 accumulation throughout; cast back to T on the final store.
+/// `kind == 0` is MIN, `kind == 1` is MAX.
+///
+/// Issue #1082.
+#[cfg(feature = "cuda")]
+fn cuda_minmax_arbitrary_axis_impl(
+    x: &crate::Tensor,
+    axis: usize,
+    kind: i32,
+    label: &str,
+) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+
+    let dtype = x.dtype();
+    let dtype_tag: i32 = match dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "{label}: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !x.is_contiguous() {
+        return Err(crate::Error::Msg(format!(
+            "{label}: input must be contiguous"
+        )));
+    }
+    let rank = x.rank();
+    if rank == 0 {
+        return Err(crate::Error::Msg(format!(
+            "{label}: input must have rank >= 1"
+        )));
+    }
+    if axis >= rank {
+        return Err(crate::Error::Msg(format!(
+            "{label}: axis {axis} out of bounds (rank {rank})"
+        )));
+    }
+    let shape = x.shape();
+    let axis_dim = shape[axis] as i64;
+    if axis_dim == 0 {
+        return Err(crate::Error::Msg(format!(
+            "{label}: axis dim is 0; {label} is undefined"
+        )));
+    }
+    let outer: i64 = shape[..axis].iter().product::<usize>() as i64;
+    let inner: i64 = shape[axis + 1..].iter().product::<usize>() as i64;
+    let outer = outer.max(1);
+    let inner = inner.max(1);
+
+    let x_storage =
+        x.storage()
+            .as_any()
+            .downcast_ref::<CudaStorage>()
+            .ok_or_else(|| {
+                crate::Error::Msg(format!("{label}: input must be CUDA"))
+            })?;
+    let candle_device = x_storage.candle_device.clone();
+    let device_index = match x_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+    let mut out_shape: Vec<usize> = shape.to_vec();
+    out_shape.remove(axis);
+    let out_elem_count: usize = (outer as usize) * (inner as usize);
+    let out_storage =
+        CudaStorage::zeros(candle_device.clone(), device_index, dtype, out_elem_count)?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let x_base = match &x_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+    };
+
+    let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
+    let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
+    let out_ptr = out_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_minmax_arbitrary_axis_async(
+            x_ptr,
+            out_ptr,
+            outer,
+            axis_dim,
+            inner,
+            kind,
+            dtype_tag,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "{label}: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(out_shape),
+        crate::TensorId::next(),
+    )
+}
+
+/// `out = min(x, axis=A)` on CUDA — produces a tensor of shape
+/// `x.shape` with axis `A` removed, at the same dtype as `x`.
+/// Issue #1082.
+#[cfg(feature = "cuda")]
+pub fn cuda_min_axis(x: &crate::Tensor, axis: usize) -> Result<crate::Tensor> {
+    cuda_minmax_arbitrary_axis_impl(x, axis, 0, "cuda_min_axis")
+}
+
+/// `out = max(x, axis=A)` on CUDA — produces a tensor of shape
+/// `x.shape` with axis `A` removed, at the same dtype as `x`.
+/// Issue #1082.
+#[cfg(feature = "cuda")]
+pub fn cuda_max_axis(x: &crate::Tensor, axis: usize) -> Result<crate::Tensor> {
+    cuda_minmax_arbitrary_axis_impl(x, axis, 1, "cuda_max_axis")
 }
 
 /// `out = all(mask, axis=A)` on CUDA — U8 mask in, U8 result of shape
