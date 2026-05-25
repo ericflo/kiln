@@ -45,11 +45,13 @@
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
 
+pub mod anomaly;
 mod backward_op;
 pub mod backwards;
 mod grad_store;
 mod tape;
 
+pub use anomaly::{anomaly_detection_enabled, anomaly_panic, ENV_DETECT_ANOMALY};
 pub use backward_op::{BackwardOp, BoxedBackwardOp};
 pub use backwards::activation::{
     GeluBackward, ReluBackward, SigmoidBackward, SiluBackward, SoftmaxLastDimBackward, TanhBackward,
