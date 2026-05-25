@@ -46,7 +46,29 @@ use kiln_core::block::BlockTable;
 /// try_kt_add_scalar. Each helper falls through to the candle
 /// composite on any precondition failure so behavior is identical
 /// with all gates off.
+///
+/// Phase 7 whole-composite migration (#1082): when
+/// `KILN_USE_KT_API_SIGMOID_COMPOSITE=1` (or
+/// `KILN_USE_KT_API_ALL=1`) is set, the entire four-step
+/// `neg -> exp -> add_scalar(1) -> recip` composite is replaced
+/// with a single `kiln_tensor::cuda_activation_unary(kind=1)` call
+/// via the kt-bridge borrow adapter. Mirrors the
+/// `KILN_USE_KT_API_RMSNORM` precedent: one env gate, one kernel
+/// dispatch, instead of fan-out across primitive kt-API gates. Falls
+/// through to the per-step composite path (or the candle path with
+/// all gates off) on any precondition failure.
 fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if cuda_use_kt_api_sigmoid_composite()
+        && matches!(x.device(), Device::Cuda(_))
+        && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        && x.is_contiguous()
+        && x.rank() > 0
+    {
+        if let Some(out) = try_kt_sigmoid_composite(x).context("cuda_sigmoid try_kt_sigmoid_composite")? {
+            return Ok(out);
+        }
+    }
     let neg_x = {
         #[cfg(feature = "cuda")]
         {
@@ -88,6 +110,52 @@ fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
     };
     let result = one_plus.recip().context("cuda_sigmoid recip")?;
     Ok(result)
+}
+
+/// Phase 7 opt-in (#1082): whole `cuda_sigmoid` composite through
+/// the kt-API + adapters. Set `KILN_USE_KT_API_SIGMOID_COMPOSITE=1`
+/// (or `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// entire four-step neg -> exp -> add_scalar(1) -> recip composite
+/// through one `kiln_tensor::cuda_activation_unary` call with kind
+/// tag 1 (Sigmoid) via the kt-bridge borrow adapter. Pays one dtod
+/// memcpy on the output direction (same overhead pattern as
+/// try_kt_softmax_last_dim). Mirrors the
+/// `KILN_USE_KT_API_RMSNORM` precedent of replacing a multi-step
+/// composite with a single kt-API kernel dispatch.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_sigmoid_composite() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED
+        .get_or_init(|| std::env::var("KILN_USE_KT_API_SIGMOID_COMPOSITE").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
+/// Phase 7 (#1082) — kt-API sigmoid whole-composite migration
+/// helper. Routes a contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 1 (Sigmoid),
+/// replacing the four-step neg/exp/add/recip composite with a
+/// single kernel dispatch.
+///
+/// Returns `Ok(None)` on any incompatibility so the caller falls
+/// through to the per-step composite. NVTX range
+/// `kiln/sigmoid_composite_kt` brackets the migrated call so nsys
+/// traces separate the path from the baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_sigmoid_composite(x: &Tensor) -> Result<Option<Tensor>> {
+    kiln_nvtx::range!(c"kiln/sigmoid_composite_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 1 = Sigmoid (matches csrc/activation.cu KIND_SIGMOID).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 1) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_sigmoid_composite: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
 }
 
 fn fused_paged_decode_disabled() -> bool {
