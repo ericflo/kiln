@@ -2359,7 +2359,13 @@ pub fn cuda_softplus(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
         Some(out) => out,
         None => (exp_neg_abs + 1.0).context("cuda_softplus: add one")?,
     };
-    let log_term = one_plus.log().context("cuda_softplus: log")?;
+    // Phase 7 (#1082): route the final `log()` through try_kt_log.
+    let log_term = match crate::forward::try_kt_log(&one_plus)
+        .context("cuda_softplus: try_kt_log")?
+    {
+        Some(out) => out,
+        None => one_plus.log().context("cuda_softplus: log")?,
+    };
     let out = (relu_x + log_term).context("cuda_softplus: stable output")?;
     let needs_grad =
         input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
