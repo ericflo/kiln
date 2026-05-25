@@ -25878,6 +25878,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         #[cfg(feature = "cuda")]
             None,
         )?;
@@ -26030,6 +26031,7 @@ mod tests {
             &mut batch_cache,
             &block_tables,
             0,
+            None,
             None,
             None,
             None,
