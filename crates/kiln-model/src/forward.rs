@@ -903,16 +903,21 @@ fn cuda_use_kt_api_rsqrt() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: elementwise binary `Tensor::maximum(other)`
-/// through the kt-API + adapters. Set `KILN_USE_KT_API_MAX_BINARY=1`
-/// (or `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// `x.maximum(&zeros)` candle calls (the `relu(x) = max(x, 0)`
-/// halves of `softplus`'s `|x| = relu(x) + relu(-x)` identity)
-/// through `kiln_tensor::cuda_binary_minmax` with kind tag 1 (Max)
-/// via the kt-bridge borrow adapter. Pays one dtod memcpy on the
-/// output direction (the kt allocation is freshly-owned). Falls
-/// through to the candle composite when any precondition fails so
-/// behavior is identical with the gate off.
+/// Phase 7 default-on (#1082): elementwise binary
+/// `Tensor::maximum(other)` through the kt-API + adapters. Default ON
+/// because the kt path is a single-kernel `fmaxf(a, b)` dispatch via
+/// `kiln_tensor::cuda_binary_minmax` kind 1 (Max) — bit-exact to the
+/// candle `.maximum(other)` op which uses the same `fmaxf` CUDA
+/// intrinsic. NaN propagation matches `f32::max` semantics (non-NaN
+/// operand wins). Only the Rust shell types and the kt-bridge
+/// dtod-copy at the output boundary differ. Same argument as the
+/// neg/sqrt/recip/abs single-kernel flips. Escape hatch:
+/// `KILN_DISABLE_KT_API_MAX_BINARY=1`.
+///
+/// Production call site: the `x.maximum(&zeros)` candle calls (the
+/// `relu(x) = max(x, 0)` halves of `softplus`'s `|x| = relu(x) +
+/// relu(-x)` identity). softplus runs once per decode step as the
+/// last step of the GDN `b` (forget gate) path.
 ///
 /// Distinct from [`cuda_use_kt_api_max_last_dim`] (the
 /// `max_keepdim(-1)` axis reduction): this gate targets the
@@ -920,8 +925,11 @@ fn cuda_use_kt_api_rsqrt() -> bool {
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_max_binary() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
+    // #1082: flipped default ON. Single-kernel `fmaxf` dispatch
+    // (`cuda_binary_minmax` kind 1); bit-exact by construction.
+    // Escape hatch: `KILN_DISABLE_KT_API_MAX_BINARY=1`.
     let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MAX_BINARY").is_ok());
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MAX_BINARY").is_err());
     direct || cuda_use_kt_api_all()
 }
 
