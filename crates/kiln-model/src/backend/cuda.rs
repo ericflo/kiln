@@ -451,6 +451,37 @@ impl BackendRuntime for CudaBackend {
         if any_tracks_op(&[q, k_pool, v_pool, block_table]) || q.dtype() != DType::BF16 {
             return Ok(None);
         }
+        // Phase 7 opt-in (#1082): route through the kt-typed surface.
+        // The kt path bottoms out in the same
+        // `kiln_flash_attn_fwd_paged_decode` FFI symbol as the candle
+        // shim, so it's bit-exactly equivalent; only the Rust shell
+        // types change. The candle wrapper discards softmax_lse; the
+        // kt path does the same here.
+        if self.cuda_use_kt_api_flash_attn {
+            kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_kt");
+            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
+                .context("flash_attn_paged_decode kt: borrow q -> kt")?;
+            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
+                .context("flash_attn_paged_decode kt: borrow k_pool -> kt")?;
+            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
+                .context("flash_attn_paged_decode kt: borrow v_pool -> kt")?;
+            let bt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(block_table)
+                .context("flash_attn_paged_decode kt: borrow block_table -> kt")?;
+            let out_kt = kiln_flash_attn::flash_attn_paged_decode_kt(
+                &q_kt,
+                &k_kt,
+                &v_kt,
+                &bt_kt,
+                total_seqlen_k,
+                page_block_size,
+                softmax_scale,
+                causal,
+            )
+            .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode kt: {e}"))?;
+            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                .context("flash_attn_paged_decode kt: copy kt out -> candle")?;
+            return Ok(Some(out));
+        }
         let out = kiln_flash_attn::flash_attn_paged_decode(
             q,
             k_pool,
