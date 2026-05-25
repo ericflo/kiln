@@ -669,7 +669,6 @@ fn cuda_use_kt_api_sqrt() -> bool {
 /// parity test paths). Mirrors the [`cuda_use_kt_api_sqrt`] /
 /// [`cuda_use_kt_api_recip`] cadence.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 fn cuda_use_kt_api_rsqrt() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_RSQRT").is_ok());
@@ -6651,7 +6650,29 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
             sq.mean_keepdim(candle_core::D::Minus1)?
         }
     };
-    let rms_inv = (variance + eps)?.sqrt()?.recip()?;
+    // Phase 7 (#1082): when `KILN_USE_KT_API_RSQRT=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND `variance + eps` is a
+    // contiguous CUDA F32 tensor, route the
+    // `.sqrt()?.recip()?` composite (the RMSNorm tail) through
+    // `kiln_tensor::cuda_activation_unary` kind 28 (Rsqrt) — a
+    // single fused kernel that replaces the two candle calls + the
+    // intermediate sqrt buffer. Falls through to the candle
+    // composite when any precondition fails so behavior is
+    // identical with the gate off.
+    let variance_plus_eps = (variance + eps)?;
+    let rms_inv = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_rsqrt(&variance_plus_eps)? {
+                Some(out) => out,
+                None => variance_plus_eps.sqrt()?.recip()?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            variance_plus_eps.sqrt()?.recip()?
+        }
+    };
     let normed = x_f32.broadcast_mul(&rms_inv)?;
     // Qwen3.5 RMSNorm stores weights centered around 0 and applies as (1 + w) * x_normed.
     // Keep everything in F32 for precision (matches HF: `output * (1.0 + self.weight.float())`),
@@ -7699,7 +7720,6 @@ fn try_kt_sqrt(x: &Tensor) -> Result<Option<Tensor>> {
 /// follow-up commits — each port replaces two candle calls + one
 /// allocation with a single fused kernel.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 fn try_kt_rsqrt(x: &Tensor) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_rsqrt() {
         return Ok(None);
