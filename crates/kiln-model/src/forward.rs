@@ -11673,17 +11673,43 @@ fn gdn_chunkwise_recurrence(
                     let causal_bool = causal_lower_tri_bool(c, device)?
                         .reshape((1, 1, c, c))?
                         .broadcast_as((batch, heads, c, c))?;
-                    let strict_decay = strict_bool
-                        .where_cond(&decay_delta, &zero_delta)?
-                        .exp()?
-                        .to_dtype(dtype)?;
-                    let causal_decay = causal_bool
-                        .where_cond(&decay_delta, &zero_delta)?
-                        .exp()?
-                        .to_dtype(dtype)?;
+                    // Phase 7 (#1082): three clusters of
+                    // `.exp()?.to_dtype(dtype)?` in the chunkwise GDN
+                    // decay-matrix prep all migrate through the
+                    // `KILN_USE_KT_API_EXP` + `KILN_USE_KT_API_TO_DTYPE`
+                    // gate pair (or the meta `_ALL` flag). Each leg
+                    // (EXP, then TO_DTYPE) falls through to the candle
+                    // op when its precondition fails, so behavior is
+                    // identical with the gates off. These ops run
+                    // per chunkwise prep on every GDN layer; the
+                    // bench coverage adds the chunkwise path to the
+                    // single-token site already wired (a7864c97).
+                    let exp_to_dtype = |t: &Tensor| -> Result<Tensor> {
+                        #[cfg(feature = "cuda")]
+                        {
+                            let exped = match try_kt_exp(t)? {
+                                Some(out) => out,
+                                None => t.exp()?,
+                            };
+                            match try_kt_to_dtype(&exped, dtype)? {
+                                Some(out) => Ok(out),
+                                None => Ok(exped.to_dtype(dtype)?),
+                            }
+                        }
+                        #[cfg(not(feature = "cuda"))]
+                        {
+                            Ok(t.exp()?.to_dtype(dtype)?)
+                        }
+                    };
+                    let strict_decay = exp_to_dtype(
+                        &strict_bool.where_cond(&decay_delta, &zero_delta)?,
+                    )?;
+                    let causal_decay = exp_to_dtype(
+                        &causal_bool.where_cond(&decay_delta, &zero_delta)?,
+                    )?;
 
                     // p[t] = exp(G[t]).
-                    let p = big_g.exp()?.to_dtype(dtype)?; // [B, nv, C]
+                    let p = exp_to_dtype(&big_g)?; // [B, nv, C]
                     let p_col = p.unsqueeze(3)?; // [B, nv, C, 1]
 
                     let strict_mask = strict_bool.to_dtype(dtype)?;
