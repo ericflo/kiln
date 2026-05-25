@@ -331,6 +331,60 @@ impl VkTensor {
         ))
     }
 
+    /// Mint a fresh `TensorId` for use as a parameter id, without
+    /// requiring callers to import candle. Today this still goes through
+    /// `candle_core::Tensor` (the only way to obtain a unique TensorId
+    /// from outside candle), but the candle dependency is contained in
+    /// this single function — when issue #1082 lands the kt-native
+    /// parameter-id type, only this body needs to swap. (#1082)
+    pub fn fresh_param_id() -> TensorId {
+        // A 1-element f32 CPU tensor is the cheapest legal Tensor to
+        // construct; we never store it, only read its id. The Tensor is
+        // dropped immediately after this call returns.
+        Tensor::zeros(&[1], DType::F32, &Device::Cpu)
+            .expect("VkTensor::fresh_param_id: candle Tensor::zeros(&[1], F32, Cpu) failed")
+            .id()
+    }
+
+    /// Build a parameter leaf directly from an f32 slice. Candle-free
+    /// replacement for the `Tensor::from_vec → VkTensor::from_candle →
+    /// VkTensor::parameter` pattern used in tests/examples that only
+    /// need a parameter for autograd. Mints a fresh `TensorId` via
+    /// [`Self::fresh_param_id`]. (#1082)
+    pub fn parameter_from_f32_slice(
+        data: &[f32],
+        shape: Vec<usize>,
+        device: Arc<VulkanDevice>,
+    ) -> Result<Self> {
+        let leaf = Self::from_f32_slice(data, shape, device)?;
+        Ok(Self::parameter(
+            Arc::clone(leaf.buffer()),
+            leaf.shape().to_vec(),
+            leaf.dtype(),
+            Arc::clone(leaf.device()),
+            Self::fresh_param_id(),
+        ))
+    }
+
+    /// Build a BF16 parameter leaf directly from an f32 slice (host-side
+    /// `bf16::from_f32` cast). Candle-free replacement for the
+    /// `Tensor::from_vec().to_dtype(BF16) → VkTensor::from_candle →
+    /// VkTensor::parameter` pattern. (#1082)
+    pub fn parameter_from_f32_slice_as_bf16(
+        data: &[f32],
+        shape: Vec<usize>,
+        device: Arc<VulkanDevice>,
+    ) -> Result<Self> {
+        let leaf = Self::from_f32_slice_as_bf16(data, shape, device)?;
+        Ok(Self::parameter(
+            Arc::clone(leaf.buffer()),
+            leaf.shape().to_vec(),
+            leaf.dtype(),
+            Arc::clone(leaf.device()),
+            Self::fresh_param_id(),
+        ))
+    }
+
     /// Upload a candle Tensor to GPU as a fresh VkTensor leaf.
     ///
     /// Only F32 and BF16 are accepted. The tensor is forced contiguous;

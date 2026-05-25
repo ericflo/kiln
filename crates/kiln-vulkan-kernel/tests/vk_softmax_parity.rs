@@ -1,7 +1,7 @@
-//! Phase C.1: vk_softmax forward + backward parity vs candle.
+//! Phase C.1: vk_softmax forward + backward parity vs an analytical
+//! CPU reference. (candle-free; #1082)
 
 use anyhow::Result;
-use candle_core::{Device, Tensor, Var};
 use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::elementwise::vk_mul;
@@ -60,27 +60,15 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 }
 
 fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    VkTensor::from_candle(&t, Arc::clone(dev))
+    VkTensor::from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn upload_param_f32(
     dev: &Arc<VulkanDevice>,
     data: &[f32],
     shape: &[usize],
-) -> Result<(Var, VkTensor)> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    let var = Var::from_tensor(&t)?;
-    let vk = VkTensor::from_candle(&t, Arc::clone(dev))?;
-    let pid = var.id();
-    let param = VkTensor::parameter(
-        Arc::clone(vk.buffer()),
-        vk.shape().to_vec(),
-        vk.dtype(),
-        Arc::clone(vk.device()),
-        pid,
-    );
-    Ok((var, param))
+) -> Result<VkTensor> {
+    VkTensor::parameter_from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn max_abs_diff(got: &[f32], expected: &[f32]) -> f32 {
@@ -119,7 +107,7 @@ fn vk_softmax_backward_parity() -> Result<()> {
         .collect();
 
     // VK path
-    let (_xv_var, x) = upload_param_f32(&dev, &data, &[rows, cols])?;
+    let x = upload_param_f32(&dev, &data, &[rows, cols])?;
     let y = vk_softmax_lastdim(&x)?;
     let sq = vk_mul(&y, &y)?;
     let loss = vk_mean_all(&sq)?;
