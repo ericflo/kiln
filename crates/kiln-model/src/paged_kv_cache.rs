@@ -248,6 +248,58 @@ impl PagedKvCache {
         Ok(true)
     }
 
+    /// Batched graph-slot variant of [`Self::write_token_major_native_graph_slot`].
+    ///
+    /// Writes one decode token per row into the paged K/V pool of `layer_idx`
+    /// using a `[batch]` u32 device tensor of per-row destination slot indices.
+    /// One fused CUDA kernel launch handles every row — safe under CUDA graph
+    /// capture because the only per-replay-varying input is `slots`, which the
+    /// runner refreshes via `update_cuda_scalar` outside the captured region.
+    ///
+    /// Shapes:
+    /// * `k`, `v`: `[batch, 1, num_kv_heads, head_dim]` bf16
+    /// * `slots`: `[batch]` u32 device tensor
+    ///
+    /// Returns `false` when preconditions aren't met (FP8 pool, non-bf16 K/V,
+    /// seq_len != 1, non-CUDA placement) so callers fall back to the slower
+    /// per-row path. Closes suspect 1 in
+    /// `bench-results/cuda-graph-bs2-secondary-audit.md` for `#1082`.
+    #[cfg(feature = "cuda")]
+    pub fn write_token_major_native_batch_graph_slot(
+        &self,
+        layer_idx: usize,
+        k: &Tensor,
+        v: &Tensor,
+        slots: &Tensor,
+    ) -> Result<bool> {
+        if self.fp8 || k.dtype() != DType::BF16 || v.dtype() != DType::BF16 {
+            return Ok(false);
+        }
+        // Expect [batch, 1, num_kv_heads, head_dim].
+        let (batch, seq_len, _heads, _head_dim) = k.dims4()?;
+        if seq_len != 1 {
+            return Ok(false);
+        }
+        if v.dims() != k.dims() {
+            return Ok(false);
+        }
+        if slots.dtype() != DType::U32 || slots.dims() != [batch] {
+            return Ok(false);
+        }
+        let (k_pool, v_pool) = &self.layers[layer_idx];
+        // The fused kernel writes contiguous [batch, num_kv_heads, head_dim].
+        // K/V come in as [batch, 1, kv_heads, head_dim]; collapse the seq_len=1
+        // dim before dispatching. `paged_kv_write_token_major_bf16_batch_slot`
+        // will `.contiguous()?` internally but we squeeze first so the
+        // element_count == batch * kv_heads * head_dim check is exact.
+        let k = k.squeeze(1)?;
+        let v = v.squeeze(1)?;
+        kiln_flash_attn::paged_kv_write_token_major_bf16_batch_slot(
+            k_pool, v_pool, &k, &v, slots,
+        )?;
+        Ok(true)
+    }
+
     pub fn write_token_major_native(
         &self,
         layer_idx: usize,
