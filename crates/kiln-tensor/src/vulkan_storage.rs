@@ -845,6 +845,194 @@ pub fn vulkan_l2norm_last_axis(x: &crate::Tensor, eps: f32) -> Result<crate::Ten
 }
 
 // ----------------------------------------------------------------------
+// vulkan_activation_unary — Phase 4 Vulkan substrate op (#1082)
+// ----------------------------------------------------------------------
+
+/// Vulkan unary activation. Mirrors the role of
+/// [`crate::cuda_activation_unary`] for the Vulkan backend.
+///
+/// Dispatches on `kind_tag` (matches the CUDA tags in
+/// `ActivationOp::cuda_fwd`):
+///   - `0` -> SiLU  (`x * sigmoid(x)`)
+///   - `1` -> Sigmoid (`1 / (1 + exp(-x))`)
+///
+/// Other kinds (Gelu=2, Tanh=3, Relu=4) currently return
+/// `Error::Msg`; the op's `vulkan_fwd` gates on the supported tags and
+/// falls through to CPU for the rest. F32-only on Vulkan today; the
+/// underlying `vk_silu_no_grad` / `vk_sigmoid_no_grad` shaders are
+/// F32-only.
+///
+/// # Implementation
+///
+/// Bridges between kt's `VulkanStorage` and the kernel's `VkTensor`
+/// via D2H read-back + H2D re-upload at each boundary, matching the
+/// softmax / rmsnorm / l2norm wires. Zero-copy follow-up is the same
+/// set of three bridges documented on `vulkan_softmax_last_axis`.
+///
+/// # Requirements
+///
+/// - `x` must be backed by [`VulkanStorage`]
+/// - `x.dtype() == F32`
+/// - `x.is_contiguous()`
+/// - `kind_tag` in {0, 1}
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on unsupported kind, dtype, non-contiguous
+/// layout, non-Vulkan storage, or kernel error.
+#[allow(clippy::needless_range_loop)]
+pub fn vulkan_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::sigmoid::vk_sigmoid_no_grad;
+    use kiln_vulkan_kernel::vk_ops::silu::vk_silu_no_grad;
+    use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
+
+    if !matches!(kind_tag, 0 | 1) {
+        return Err(Error::Msg(format!(
+            "vulkan_activation_unary: kind_tag {kind_tag} not supported on Vulkan today \
+             (only 0=Silu, 1=Sigmoid have shaders; Gelu/Tanh/Relu need new kernels)"
+        )));
+    }
+    let dtype = x.dtype();
+    if !matches!(dtype, DType::F32) {
+        return Err(Error::Msg(format!(
+            "vulkan_activation_unary: unsupported dtype {dtype} (F32-only today; \
+             BF16/F16 need cast wrappers or widened VkDType)"
+        )));
+    }
+    if !x.is_contiguous() {
+        return Err(Error::Msg(
+            "vulkan_activation_unary: input must be contiguous".to_string(),
+        ));
+    }
+
+    let kt_vk = x
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| {
+            Error::Msg("vulkan_activation_unary: input must be Vulkan-backed".to_string())
+        })?;
+
+    let vulkan_device = Arc::clone(kt_vk.vulkan_device());
+    let device_index = match kt_vk.device() {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+    let shape: Vec<usize> = x.shape().to_vec();
+    let byte_len = kt_vk.byte_len();
+
+    // ---- D2H ----
+    let bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        kt_vk.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_activation_unary: D2H read_back failed: {e}"
+        ))
+    })?;
+
+    // ---- H2D into VkTensor ----
+    let vk_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_activation_unary: device-local alloc for VkTensor input failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &vk_buffer,
+        &bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_activation_unary: H2D upload of VkTensor input failed: {e}"
+        ))
+    })?;
+    let vk_in = VkTensor::from_buffer(
+        Arc::new(vk_buffer),
+        shape.clone(),
+        VkDType::F32,
+        Arc::clone(&vulkan_device),
+    );
+
+    // ---- Dispatch ----
+    let vk_out = match kind_tag {
+        0 => vk_silu_no_grad(&vk_in),
+        1 => vk_sigmoid_no_grad(&vk_in),
+        _ => unreachable!("gated above"),
+    }
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_activation_unary: kernel dispatch (kind={kind_tag}) failed: {e}"
+        ))
+    })?;
+
+    // ---- D2H result ----
+    let out_bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        vk_out.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_activation_unary: D2H read_back of kernel result failed: {e}"
+        ))
+    })?;
+
+    // ---- H2D into kt VulkanStorage ----
+    let out_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_activation_unary: device-local alloc for kt output failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &out_buffer,
+        &out_bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_activation_unary: H2D upload of kt output failed: {e}"
+        ))
+    })?;
+    let out_storage = VulkanStorage::from_buffer(
+        vulkan_device,
+        device_index,
+        dtype,
+        out_buffer,
+        byte_len as u64,
+    )?;
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
+// ----------------------------------------------------------------------
 // vulkan_argmax_last_axis — Phase 4 Vulkan substrate op (#1082)
 // ----------------------------------------------------------------------
 

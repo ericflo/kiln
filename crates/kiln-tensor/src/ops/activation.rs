@@ -198,35 +198,44 @@ impl DeviceOp1 for ActivationOp {
     fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
         // Gate on the same preconditions as cuda_fwd / metal_fwd:
         //   - validate(x, kind)
-        //   - F32 / BF16 / F16 only
+        //   - F32 only on Vulkan today (the underlying
+        //     `vk_silu_no_grad` / `vk_sigmoid_no_grad` shaders are
+        //     F32-only; BF16/F16 fall through to CPU until a cast
+        //     wrapper or BF16/F16 shader lands).
         //   - contiguous input
+        //   - kind in {Silu, Sigmoid} — Gelu/Tanh/Relu still fall
+        //     through to CPU until matching shaders land.
+        //   - storage must be Vulkan-backed (otherwise fall back to
+        //     CPU gracefully rather than have the wrapper raise).
+        //
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::vulkan_activation_unary` which wraps the production
+        // `vk_silu_no_grad` (kind_tag=0) and `vk_sigmoid_no_grad`
+        // (kind_tag=1) shaders. Current bridge D2H+H2D round-trips
+        // bytes through the host; see
+        // `vulkan_storage.rs::vulkan_activation_unary` rustdoc for the
+        // zero-copy follow-up plan.
         validate(x, self.kind)?;
         if !x.is_contiguous() {
             return Ok(None);
         }
-        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+        if !matches!(x.dtype(), DType::F32) {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Vulkan): implement
-        // `crate::vulkan_activation_unary(x, kind_tag)` analogous to
-        // `crate::cuda_activation_unary` above. Until that wrapper
-        // lands, fall through to the CPU path (numerics-correct,
-        // performance-wrong).
-        // Candidate implementations:
-        //   1. SPIR-V compute shader: per-element pointwise; one
-        //      switch over `kind_tag` selecting silu / sigmoid /
-        //      gelu / tanh / relu. The kind_tag can be pushed via
-        //      push-constants or specialized at pipeline-creation
-        //      time for ~5 cheap pipelines.
-        //   2. Reuse activation primitives from
-        //      `kiln-vulkan-kernel::vk_ops::activation` (the silu
-        //      mul kernel already exists for MLP). For the other
-        //      kinds, build out a per-kind kernel or compose from
-        //      `vk_ops::elementwise` primitives.
-        //   3. Dtype matrix gap: `VkDType` exposes F32 / BF16 today;
-        //      F16 needs either widening or a cast-to-F32 / cast-
-        //      back wrapper at the dispatch boundary.
-        Ok(None)
+        let kind_tag: i32 = match self.kind {
+            UnaryKind::Silu => 0,
+            UnaryKind::Sigmoid => 1,
+            // No Vulkan shader yet for the remaining kinds.
+            _ => return Ok(None),
+        };
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::VulkanStorage>()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(crate::vulkan_activation_unary(x, kind_tag)?))
     }
 
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
