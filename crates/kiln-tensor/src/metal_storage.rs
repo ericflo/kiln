@@ -737,6 +737,173 @@ pub fn metal_layernorm_last_axis(
 }
 
 // ----------------------------------------------------------------------
+// metal_index_select_dim0 — Phase 4 Metal substrate op (#1082)
+// ----------------------------------------------------------------------
+
+/// Metal index_select along axis 0. Mirrors the role of
+/// [`crate::cuda_index_select_dim0`] for the Metal backend.
+///
+/// Dispatches through candle's production Metal `index_select` kernel
+/// (`candle_metal_kernels::call_index_select`, the same path
+/// `candle_core::Tensor::index_select(...)` takes).
+///
+/// Given:
+///   - `input: [vocab_size, hidden]` or `[axis_dim, ...]` (rank >= 1)
+///   - `indices: [N]` or higher-rank, dtype U32
+///
+/// Produces a contiguous `[indices.shape, ...input.shape[1..]]` tensor
+/// with the same dtype as `input`.
+///
+/// # Apple Silicon UMA zero-copy invariant
+///
+/// Same wrap-share-retain pattern as the other metal_* helpers — one
+/// physical allocation per side.
+///
+/// # Requirements
+///
+/// - `input` must be backed by [`MetalStorage`]
+/// - `indices` must be backed by [`MetalStorage`]
+/// - `input` and `indices` both contiguous
+/// - `indices.dtype() == U32` (matches CUDA's `cuda_index_select_dim0`)
+/// - `input.dtype()` in {F32, BF16, F16} (candle's Metal index_select
+///   supports these; integer/packed dtypes return Err here and the
+///   op's metal_fwd falls through to CPU.)
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on unsupported dtype, non-contiguous layout,
+/// non-Metal storage, or candle kernel error.
+pub fn metal_index_select_dim0(
+    input: &crate::Tensor,
+    indices: &crate::Tensor,
+) -> Result<crate::Tensor> {
+    use candle_core::{
+        op::BackpropOp, DType as CandleDType, MetalStorage as CandleMetalStorage,
+        Storage as CandleStorage, Tensor as CandleTensor,
+    };
+
+    let dtype = input.dtype();
+    let candle_input_dtype = match dtype {
+        DType::F32 => CandleDType::F32,
+        DType::BF16 => CandleDType::BF16,
+        DType::F16 => CandleDType::F16,
+        other => {
+            return Err(Error::Msg(format!(
+                "metal_index_select_dim0: unsupported input dtype {other} \
+                 (float triple only)"
+            )));
+        }
+    };
+    if indices.dtype() != DType::U32 {
+        return Err(Error::Msg(format!(
+            "metal_index_select_dim0: indices dtype must be U32 (got {})",
+            indices.dtype()
+        )));
+    }
+    if !input.is_contiguous() || !indices.is_contiguous() {
+        return Err(Error::Msg(
+            "metal_index_select_dim0: inputs must be contiguous".to_string(),
+        ));
+    }
+    if input.rank() == 0 {
+        return Err(Error::Msg(
+            "metal_index_select_dim0: input must have rank >= 1".to_string(),
+        ));
+    }
+
+    let kt_metal_in = input
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_index_select_dim0: input must be Metal-backed".to_string())
+        })?;
+    let kt_metal_ids = indices
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_index_select_dim0: indices must be Metal-backed".to_string())
+        })?;
+
+    let candle_device_arc = kt_metal_in.candle_device().clone();
+    let device_index = match kt_metal_in.device() {
+        Device::Metal(i) => i,
+        _ => unreachable!("MetalStorage::device() returns Device::Metal"),
+    };
+    let in_shape: Vec<usize> = input.shape().to_vec();
+    let in_element_count: usize = input.element_count();
+    let ids_shape: Vec<usize> = indices.shape().to_vec();
+    let ids_element_count: usize = indices.element_count();
+
+    // ---- Wrap kt buffers in candle MetalStorages ----
+    let candle_in_storage = CandleMetalStorage::new(
+        Arc::clone(kt_metal_in.buffer()),
+        (*candle_device_arc).clone(),
+        in_element_count,
+        candle_input_dtype,
+    );
+    let candle_in: CandleTensor = CandleTensor::from_storage(
+        CandleStorage::Metal(candle_in_storage),
+        in_shape.as_slice(),
+        BackpropOp::none(),
+        false,
+    );
+    let candle_ids_storage = CandleMetalStorage::new(
+        Arc::clone(kt_metal_ids.buffer()),
+        (*candle_device_arc).clone(),
+        ids_element_count,
+        CandleDType::U32,
+    );
+    // candle's index_select accepts multi-dim indices; flatten internally.
+    let candle_ids: CandleTensor = CandleTensor::from_storage(
+        CandleStorage::Metal(candle_ids_storage),
+        ids_shape.as_slice(),
+        BackpropOp::none(),
+        false,
+    );
+
+    // ---- Dispatch ----
+    let candle_out: CandleTensor = candle_in.index_select(&candle_ids, 0).map_err(|e| {
+        Error::Msg(format!(
+            "metal_index_select_dim0: candle index_select failed: {e}"
+        ))
+    })?;
+
+    let candle_out = candle_out.contiguous().map_err(|e| {
+        Error::Msg(format!(
+            "metal_index_select_dim0: candle contiguous failed: {e}"
+        ))
+    })?;
+
+    let out_shape: Vec<usize> = candle_out.shape().dims().to_vec();
+    let (out_storage_guard, _out_layout) = candle_out.storage_and_layout();
+    let candle_out_metal = match &*out_storage_guard {
+        CandleStorage::Metal(m) => m,
+        _ => {
+            return Err(Error::Msg(
+                "metal_index_select_dim0: candle index_select returned non-Metal storage"
+                    .to_string(),
+            ));
+        }
+    };
+    let out_buffer_arc: Arc<candle_metal_kernels::metal::Buffer> =
+        Arc::new(candle_out_metal.buffer().to_owned());
+
+    let out_storage =
+        MetalStorage::from_buffer(candle_device_arc, device_index, dtype, out_buffer_arc)?;
+    let out_storage_arc: crate::Storage = Arc::new(out_storage);
+
+    drop(out_storage_guard);
+
+    crate::Tensor::from_parts(
+        out_storage_arc,
+        crate::Layout::contiguous(out_shape),
+        crate::TensorId::next(),
+    )
+}
+
+// ----------------------------------------------------------------------
 // metal_cast — Phase 4 Metal substrate op (#1082)
 // ----------------------------------------------------------------------
 

@@ -151,6 +151,16 @@ impl DeviceOp2 for IndexSelectOp {
         //   - non-packed input dtype
         //   - contiguous input and indices
         //   - U32 indices (matches cuda_fwd; I64 needs a cast kernel)
+        //   - F32/BF16/F16 input dtype (candle Metal index_select
+        //     supports these)
+        //   - storage must be Metal-backed on both sides
+        //
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::metal_index_select_dim0` which wraps candle's
+        // production Metal `call_index_select` kernel (the same path
+        // `candle::Tensor::index_select(ids, 0)` takes). Apple Silicon
+        // UMA: no host bounce — kt's MetalStorage::buffer is shared
+        // with the candle wrapper via Arc<metal::Buffer>.
         if self.axis != 0 {
             return Ok(None);
         }
@@ -163,23 +173,23 @@ impl DeviceOp2 for IndexSelectOp {
         if indices.dtype() != DType::U32 {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Metal): implement
-        // `crate::metal_index_select_dim0(input, indices)` analogous
-        // to `crate::cuda_index_select_dim0` above. Until that kernel
-        // lands, fall through to the CPU path so the op still
-        // produces correct results on Mac (numerics-correct,
-        // performance-wrong).
-        // Candidate implementations:
-        //   1. Custom MSL kernel: grid over (n_indices, inner_block);
-        //      each thread copies one `block_bytes` slab from
-        //      input[ids[i], ...] to out[i, ...]. Mirrors the dim0
-        //      structure of the CUDA kernel.
-        //   2. MPS Graph: use `gather(_:indices:axis:)` for one-shot
-        //      dispatch; cheaper to wire but higher per-call overhead.
-        //   3. Reuse the gather kernel in `kiln-model::backend::metal`
-        //      if/when one is added there (the embedding lookup hot
-        //      path uses dim0 index_select).
-        Ok(None)
+        if !matches!(input.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if input
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::MetalStorage>()
+            .is_none()
+            || indices
+                .storage()
+                .as_any()
+                .downcast_ref::<crate::MetalStorage>()
+                .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(crate::metal_index_select_dim0(input, indices)?))
     }
 
     #[cfg(feature = "vulkan")]
