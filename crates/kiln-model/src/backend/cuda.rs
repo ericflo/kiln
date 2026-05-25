@@ -986,18 +986,13 @@ impl BackendRuntime for CudaBackend {
         beta: &Tensor,
         decay_last_col: &Tensor,
     ) -> Result<Option<(Tensor, Tensor)>> {
-        if !kiln_gdn_kernel::gdn_chunk_scan_supports(
-            a_strict,
-            b_mask,
-            v_prime,
-            q_s_scaled,
-            beta,
-            decay_last_col,
-        ) {
-            return Ok(None);
-        }
-        // Phase 7 opt-in (#1082): route through the kt-typed surface.
-        // gdn_chunk_scan_kt returns a 2-tuple. Behind KILN_USE_KT_API_GDN.
+        // Phase 7 opt-in (#1082): when kt-API GDN is on (default ON,
+        // escape hatch `KILN_DISABLE_KT_API_GDN=1`), do the kt-borrow
+        // first and then call the kt-typed `_supports_kt` predicate
+        // (7da2615a). Bit-exact by construction — the kt-typed predicate
+        // mirrors the candle predicate's check chain one-for-one and
+        // both bottom out in the same `kiln_gdn_chunk_scan` FFI symbol
+        // on the success path. gdn_chunk_scan_kt returns a 2-tuple.
         if self.cuda_use_kt_api_gdn {
             kiln_nvtx::range!(c"kiln/gdn_chunk_scan_kt");
             let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_strict)
@@ -1012,6 +1007,11 @@ impl BackendRuntime for CudaBackend {
                 .with_context(|| "kt-adapter: gdn_chunk_scan beta → kt failed")?;
             let dlc_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(decay_last_col)
                 .with_context(|| "kt-adapter: gdn_chunk_scan decay_last_col → kt failed")?;
+            if !kiln_gdn_kernel::gdn_chunk_scan_supports_kt(
+                &a_kt, &m_kt, &v_kt, &qs_kt, &beta_kt, &dlc_kt,
+            ) {
+                return Ok(None);
+            }
             let (o0, o1) = kiln_gdn_kernel::gdn_chunk_scan_kt(
                 &a_kt, &m_kt, &v_kt, &qs_kt, &beta_kt, &dlc_kt,
             )
@@ -1021,6 +1021,16 @@ impl BackendRuntime for CudaBackend {
             let c1 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o1)
                 .with_context(|| "kt-adapter: gdn_chunk_scan o1 → candle failed")?;
             return Ok(Some((c0, c1)));
+        }
+        if !kiln_gdn_kernel::gdn_chunk_scan_supports(
+            a_strict,
+            b_mask,
+            v_prime,
+            q_s_scaled,
+            beta,
+            decay_last_col,
+        ) {
+            return Ok(None);
         }
         let out = kiln_gdn_kernel::gdn_chunk_scan(
             a_strict,
