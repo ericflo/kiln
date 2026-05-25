@@ -13,10 +13,16 @@
 
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
-use candle_core::{CpuStorage, DType, Device, Storage, Tensor, TensorId};
+use candle_core::{CpuStorage, DType, Device, Storage, Tensor};
 use half::bf16;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Re-export so callers outside `vk_tensor.rs` (e.g. `vk_autograd.rs`)
+/// can refer to the parameter-id type without an explicit candle import.
+/// Today this is `candle_core::TensorId`; once issue #1082 lands the
+/// kt-native parameter-id type, only this `pub use` needs to swap. (#1082)
+pub use candle_core::TensorId;
 
 /// Element type of a `VkTensor`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -16,9 +16,8 @@
 
 use crate::vk_ops::elementwise::vk_add_no_grad;
 use crate::vk_ops::reduce::vk_ones_like;
-use crate::vk_tensor::{VkTensor, VkTensorInner};
+use crate::vk_tensor::{TensorId, VkTensor, VkTensorInner};
 use anyhow::{Context, Result};
-use candle_core::TensorId;
 use std::collections::{HashMap, HashSet};
 
 /// Per-parameter gradient store keyed by `TensorId`. Matches the
