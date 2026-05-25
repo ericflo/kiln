@@ -108,22 +108,13 @@ pub struct CudaBackend {
     /// kiln/gdn/conv region). When off, forward.rs falls back to the
     /// candle to_f32/cat/sum/narrow chain.
     fused_conv1d_enabled: bool,
-    /// Phase 7 default-on (#1082): route the fused conv1d update + prefill
-    /// kernels through the kt-typed surface (`causal_conv1d_update_kt` /
-    /// `causal_conv1d_prefill_kt`) instead of the candle-typed shim.
-    /// Default ON because byte-exact parity is verified by
-    /// `test_causal_conv1d_update_kt_api_parity` (B=1, C=8192, K=4, 0
-    /// mismatches across 8192 output + 24576 conv_state elements) and
-    /// `test_causal_conv1d_prefill_kt_api_parity` (B=1, C=8192, T=8, K=4,
-    /// 0 mismatches across 65536 output + 24576 conv_state elements).
-    /// Both paths bottom out in the same FFI symbol
-    /// (`kiln_causal_conv1d_update_bf16_f32` /
-    /// `kiln_causal_conv1d_prefill_bf16_f32`) — only the Rust shell
-    /// types differ. The candle `&mut Tensor` for `conv_state` is wired
-    /// through the zero-copy borrow adapter so the kernel's in-place
-    /// write surfaces in the caller's candle tensor. Set
-    /// `KILN_DISABLE_KT_API_CONV1D=1` to opt out (escape hatch).
-    cuda_use_kt_api_conv1d: bool,
+    // Phase 7 (#1082): the cuda_use_kt_api_conv1d gate was removed once
+    // the kt-typed surface (causal_conv1d_{update,prefill}_kt +
+    // supports{,_prefill}_kt) became the only path. The escape hatch
+    // for the conv kernel as a whole is still `fused_conv1d_enabled`
+    // (KILN_DISABLE_FUSED_CONV1D), which falls back to forward.rs's
+    // candle to_f32/cat/sum/narrow chain — the kt-typed path is bit-
+    // exact with the previous kt-API code (same FFI symbol).
     /// Phase 7 default-on (#1082): route all 10 GDN dispatch wires
     /// (forward_substitution, recurrent_step, chunk_prep, chunk_scan,
     /// gated_rms_norm, full_chunk_forward_multiblock, plus the 4
@@ -206,11 +197,11 @@ impl CudaBackend {
         let gdn_gated_rms_norm_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM").is_err();
         let fused_conv1d_enabled = std::env::var("KILN_DISABLE_FUSED_CONV1D").is_err();
-        // #1082: flipped default ON post byte-exact parity tests
-        // (`69a5f68c` update + `1cb0c107` prefill, 0 mismatches). Both
-        // candle and kt paths bottom out in the same FFI symbol, so this
-        // is bit-exact. Escape hatch: `KILN_DISABLE_KT_API_CONV1D=1`.
-        let cuda_use_kt_api_conv1d = std::env::var("KILN_DISABLE_KT_API_CONV1D").is_err();
+        // #1082: the dedicated KILN_DISABLE_KT_API_CONV1D gate was
+        // removed once the kt-typed conv1d surface became the only
+        // path in `causal_conv1d_{update,prefill}`. The whole-kernel
+        // kill switch `KILN_DISABLE_FUSED_CONV1D=1` still falls back
+        // to forward.rs's candle to_f32/cat/sum/narrow chain.
         // #1082: flipped default ON post byte-exact parity tests on
         // all 10 GDN wires. The parity work caught and fixed 3 shape
         // mismatch bugs (`e4823c7b`, `a1408c0e`, `ddd5cc00`); after
@@ -264,7 +255,6 @@ impl CudaBackend {
             gdn_decode_qk_norm_recurrent_enabled,
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled,
             fused_conv1d_enabled,
-            cuda_use_kt_api_conv1d,
             cuda_use_kt_api_gdn,
             cuda_use_kt_api_flash_attn,
             cuda_use_kt_api_sgd_step,
@@ -275,21 +265,9 @@ impl CudaBackend {
     }
 
     /// Test-only constructor (#1082) for parity tests of the kt-API
-    /// conv1d wiring. Builds a CudaBackend with the default env-driven
-    /// kill switches, then overrides `cuda_use_kt_api_conv1d` to the
-    /// requested value. Avoids mutating process-global env state from
+    /// gdn wiring. Avoids mutating process-global env state from
     /// the test, which would race with other parallel tests in the
     /// same binary.
-    #[cfg(test)]
-    pub(crate) fn new_with_kt_api_conv1d(device: Device, kt_api: bool) -> Self {
-        let mut be = Self::new(device);
-        be.cuda_use_kt_api_conv1d = kt_api;
-        be
-    }
-
-    /// Test-only constructor (#1082) for parity tests of the kt-API
-    /// gdn wiring. Same race-avoidance rationale as
-    /// `new_with_kt_api_conv1d`.
     #[cfg(test)]
     pub(crate) fn new_with_kt_api_gdn(device: Device, kt_api: bool) -> Self {
         let mut be = Self::new(device);
@@ -299,7 +277,7 @@ impl CudaBackend {
 
     /// Test-only constructor (#1082) for parity tests of the kt-API
     /// flash-attn wiring (paged-decode + paged-decode-dyn-seqlen).
-    /// Same race-avoidance rationale as `new_with_kt_api_conv1d`.
+    /// Same race-avoidance rationale as `new_with_kt_api_gdn`.
     #[cfg(test)]
     pub(crate) fn new_with_kt_api_flash_attn(device: Device, kt_api: bool) -> Self {
         let mut be = Self::new(device);
@@ -1879,30 +1857,28 @@ impl BackendRuntime for CudaBackend {
         if !self.fused_conv1d_enabled {
             return Ok(None);
         }
-        if !kiln_conv1d_kernel::supports(x, weight, conv_state, kernel_size) {
-            return Ok(None);
-        }
-        // Phase 7 opt-in (#1082): route through the kt-typed surface.
+        // Phase 7 (#1082): kt-typed surface is now the only path.
         // The borrow adapter shares the underlying CUDA buffer with
         // the candle tensor, so the kernel's in-place mutation of
         // `conv_state` surfaces through the caller's `&mut Tensor`
         // automatically (anti-pattern 16 — owner-agnostic raw ptr).
-        if self.cuda_use_kt_api_conv1d {
-            let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x)
-                .with_context(|| "kt-adapter: conv1d_update x → kt failed")?;
-            let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
-                .with_context(|| "kt-adapter: conv1d_update weight → kt failed")?;
-            let s_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(conv_state)
-                .with_context(|| "kt-adapter: conv1d_update conv_state → kt failed")?;
-            let out_kt =
-                kiln_conv1d_kernel::causal_conv1d_update_kt(&x_kt, &w_kt, &s_kt, kernel_size)
-                    .map_err(|e| anyhow::anyhow!("kt causal_conv1d_update: {e}"))?;
-            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .with_context(|| "kt-adapter: conv1d_update out → candle failed")?;
-            return Ok(Some(out));
+        // Predicate also runs on the kt-borrowed view so no
+        // candle-typed `kiln_conv1d_kernel::supports*` call survives
+        // in production code — see docs/CANDLE_REMOVAL_PLAN.md
+        // §"kiln-conv1d-kernel".
+        let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x)
+            .with_context(|| "kt-adapter: conv1d_update x → kt failed")?;
+        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
+            .with_context(|| "kt-adapter: conv1d_update weight → kt failed")?;
+        let s_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(conv_state)
+            .with_context(|| "kt-adapter: conv1d_update conv_state → kt failed")?;
+        if !kiln_conv1d_kernel::supports_kt(&x_kt, &w_kt, &s_kt, kernel_size) {
+            return Ok(None);
         }
-        let out = kiln_conv1d_kernel::causal_conv1d_update(x, weight, conv_state, kernel_size)
-            .context("causal_conv1d_update kernel failed")?;
+        let out_kt = kiln_conv1d_kernel::causal_conv1d_update_kt(&x_kt, &w_kt, &s_kt, kernel_size)
+            .map_err(|e| anyhow::anyhow!("kt causal_conv1d_update: {e}"))?;
+        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .with_context(|| "kt-adapter: conv1d_update out → candle failed")?;
         Ok(Some(out))
     }
 
@@ -1916,27 +1892,21 @@ impl BackendRuntime for CudaBackend {
         if !self.fused_conv1d_enabled {
             return Ok(None);
         }
-        if !kiln_conv1d_kernel::supports_prefill(x, weight, conv_state, kernel_size) {
+        // Phase 7 (#1082): kt-typed surface is now the only path.
+        // See update path above for the borrow/in-place semantics.
+        let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x)
+            .with_context(|| "kt-adapter: conv1d_prefill x → kt failed")?;
+        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
+            .with_context(|| "kt-adapter: conv1d_prefill weight → kt failed")?;
+        let s_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(conv_state)
+            .with_context(|| "kt-adapter: conv1d_prefill conv_state → kt failed")?;
+        if !kiln_conv1d_kernel::supports_prefill_kt(&x_kt, &w_kt, &s_kt, kernel_size) {
             return Ok(None);
         }
-        // Phase 7 opt-in (#1082): kt-typed surface. See update path
-        // above for the borrow/in-place semantics.
-        if self.cuda_use_kt_api_conv1d {
-            let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x)
-                .with_context(|| "kt-adapter: conv1d_prefill x → kt failed")?;
-            let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
-                .with_context(|| "kt-adapter: conv1d_prefill weight → kt failed")?;
-            let s_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(conv_state)
-                .with_context(|| "kt-adapter: conv1d_prefill conv_state → kt failed")?;
-            let out_kt =
-                kiln_conv1d_kernel::causal_conv1d_prefill_kt(&x_kt, &w_kt, &s_kt, kernel_size)
-                    .map_err(|e| anyhow::anyhow!("kt causal_conv1d_prefill: {e}"))?;
-            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .with_context(|| "kt-adapter: conv1d_prefill out → candle failed")?;
-            return Ok(Some(out));
-        }
-        let out = kiln_conv1d_kernel::causal_conv1d_prefill(x, weight, conv_state, kernel_size)
-            .context("causal_conv1d_prefill kernel failed")?;
+        let out_kt = kiln_conv1d_kernel::causal_conv1d_prefill_kt(&x_kt, &w_kt, &s_kt, kernel_size)
+            .map_err(|e| anyhow::anyhow!("kt causal_conv1d_prefill: {e}"))?;
+        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .with_context(|| "kt-adapter: conv1d_prefill out → candle failed")?;
         Ok(Some(out))
     }
 }
@@ -1956,7 +1926,6 @@ mod tests {
             gdn_decode_qk_norm_recurrent_enabled: false,
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled: false,
             fused_conv1d_enabled: false,
-            cuda_use_kt_api_conv1d: false,
             cuda_use_kt_api_gdn: false,
             cuda_use_kt_api_flash_attn: false,
             cuda_use_kt_api_sgd_step: false,
