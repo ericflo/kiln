@@ -2112,9 +2112,15 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
                         .exp()
                         .context("cuda_shifted_linear_cross_entropy_loss: initial exp")?,
                 };
-                let chunk_sumexp = chunk_exp
-                    .sum_keepdim(D::Minus1)
-                    .context("cuda_shifted_linear_cross_entropy_loss: initial sum")?;
+                // Phase 7 (#1082): route sum_keepdim(-1) through kt-API
+                let chunk_sumexp = match crate::forward::try_kt_sum_last_dim_keepdim(&chunk_exp)
+                    .context("cuda_shifted_linear_cross_entropy_loss: try_kt_sum init")?
+                {
+                    Some(out) => out,
+                    None => chunk_exp
+                        .sum_keepdim(D::Minus1)
+                        .context("cuda_shifted_linear_cross_entropy_loss: initial sum")?,
+                };
                 (chunk_max.detach(), chunk_sumexp.detach())
             }
             (Some(prev_max), Some(prev_sumexp)) => {
@@ -2151,9 +2157,15 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
                         .exp()
                         .context("cuda_shifted_linear_cross_entropy_loss: chunk exp")?,
                 };
-                let chunk_sumexp = chunk_exp
-                    .sum_keepdim(D::Minus1)
-                    .context("cuda_shifted_linear_cross_entropy_loss: chunk sum")?;
+                // Phase 7 (#1082): route sum_keepdim(-1) through kt-API
+                let chunk_sumexp = match crate::forward::try_kt_sum_last_dim_keepdim(&chunk_exp)
+                    .context("cuda_shifted_linear_cross_entropy_loss: try_kt_sum chunk")?
+                {
+                    Some(out) => out,
+                    None => chunk_exp
+                        .sum_keepdim(D::Minus1)
+                        .context("cuda_shifted_linear_cross_entropy_loss: chunk sum")?,
+                };
                 let new_sumexp = (scaled_prev + chunk_sumexp)
                     .context("cuda_shifted_linear_cross_entropy_loss: update sum")?;
                 (new_max.detach(), new_sumexp.detach())
