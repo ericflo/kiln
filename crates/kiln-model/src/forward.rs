@@ -604,6 +604,36 @@ fn cuda_use_kt_api_exp() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise `Tensor::tanh()` through the kt-API
+/// + adapters. Set `KILN_USE_KT_API_TANH=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// `.tanh()` candle calls through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 3 (Tanh) via
+/// the kt-bridge borrow adapter. Pays one dtod memcpy on the
+/// output direction (the kt allocation is freshly-owned). Falls
+/// through to the candle composite when any precondition fails so
+/// behavior is identical with the gate off.
+///
+/// Distinct from the fused GELU-tanh site (which routes through
+/// `cuda_activation_unary` kind 2 GELU) — this gate migrates
+/// *standalone* `.tanh()` shapes. The gate + helper are wired up
+/// for completeness; today there are no production `.tanh()` call
+/// sites in `forward.rs` (the only sites are inside `#[cfg(test)]`
+/// parity helpers, where the candle path is what's being
+/// verified). Future kernel refactors that need `tanh(x)`
+/// (sigmoid alternative, gradient clamping, soft-min/max
+/// approximations) can plug in trivially. Mirrors the
+/// dead-code-allowed precedent of `try_kt_paged_kv_cache_new`
+/// (638bc441), the abs scaffold (81d2d727), the clamp scaffold
+/// (e9ed87f4), and the pow scaffold (2b07eef7).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_tanh() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_TANH").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -7265,6 +7295,55 @@ fn try_kt_exp(x: &Tensor) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_exp: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API tanh migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 3 (Tanh).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0) so the caller falls through to
+/// the candle `.tanh()`. NVTX range `kiln/tanh_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite.
+///
+/// Today this helper has no production call site — the only
+/// `.tanh()` sites in `forward.rs` are in `#[cfg(test)]` parity
+/// helpers (where the candle path is what's being verified). The
+/// helper is wired up to match the established Phase 7 scaffold
+/// so future kernel refactors that compute `tanh(x)` directly
+/// can plug in trivially. Mirrors the dead-code-allowed precedent
+/// of `try_kt_paged_kv_cache_new` (638bc441), `try_kt_abs`
+/// (81d2d727), `try_kt_clamp` (e9ed87f4), and `try_kt_pow`
+/// (2b07eef7).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_tanh(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_tanh() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/tanh_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 3 = Tanh (matches csrc/activation.cu KIND_TANH).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 3) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_tanh: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
