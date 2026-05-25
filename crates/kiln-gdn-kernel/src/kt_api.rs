@@ -2213,6 +2213,259 @@ pub fn gdn_full_chunk_forward_multiblock_supports_kt(
     dv >= dv_tile && dv % dv_tile == 0
 }
 
+/// kt-typed mirror of [`crate::gdn_decode_gates_recurrent_supports`].
+///
+/// Same dtype + device + shape envelope as the candle predicate
+/// (`q/k/a/b/a_log/dt_bias/state` BF16; `v` BF16 or F32; `weight` F32;
+/// 4D `[B, 1, q_heads, dk=128]` for q/k; `[B, 1, value_heads, dv=128]`
+/// for v/z; 3D `[B, 1, value_heads]` for a/b; `[value_heads]` for
+/// a_log/dt_bias; `[dv]` for weight; 4D `[B, value_heads, dk, dv]` for
+/// state; state must be contiguous; `value_heads >= q_heads` and
+/// `value_heads % q_heads == 0`).
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_decode_gates_recurrent_supports_kt(
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    a: &KtTensor,
+    b: &KtTensor,
+    a_log: &KtTensor,
+    dt_bias: &KtTensor,
+    state: &KtTensor,
+    z: &KtTensor,
+    weight: &KtTensor,
+) -> bool {
+    if !is_cuda(q) {
+        return false;
+    }
+    if q.dtype() != KtDType::BF16
+        || k.dtype() != KtDType::BF16
+        || !matches!(v.dtype(), KtDType::BF16 | KtDType::F32)
+        || a.dtype() != KtDType::BF16
+        || b.dtype() != KtDType::BF16
+        || a_log.dtype() != KtDType::BF16
+        || dt_bias.dtype() != KtDType::BF16
+        || state.dtype() != KtDType::BF16
+    {
+        return false;
+    }
+    let qs = q.shape();
+    if qs.len() != 4 {
+        return false;
+    }
+    let (batch, seq_len, q_heads, dk) = (qs[0], qs[1], qs[2], qs[3]);
+    let ks = k.shape();
+    if ks.len() != 4 || (ks[0], ks[1], ks[2], ks[3]) != (batch, seq_len, q_heads, dk) {
+        return false;
+    }
+    let vs = v.shape();
+    if vs.len() != 4 || (vs[0], vs[1]) != (batch, seq_len) {
+        return false;
+    }
+    let (value_heads, dv) = (vs[2], vs[3]);
+    let as_ = a.shape();
+    if as_.len() != 3 || (as_[0], as_[1], as_[2]) != (batch, seq_len, value_heads) {
+        return false;
+    }
+    let bs = b.shape();
+    if bs.len() != 3 || (bs[0], bs[1], bs[2]) != (batch, seq_len, value_heads) {
+        return false;
+    }
+    if z.shape() != [batch, seq_len, value_heads, dv] {
+        return false;
+    }
+    if a_log.shape() != [value_heads] || dt_bias.shape() != [value_heads] {
+        return false;
+    }
+    if weight.shape() != [dv] {
+        return false;
+    }
+    let ss = state.shape();
+    if ss.len() != 4 || (ss[0], ss[1], ss[2], ss[3]) != (batch, value_heads, dk, dv) {
+        return false;
+    }
+    batch >= 1
+        && seq_len == 1
+        && q_heads > 0
+        && value_heads >= q_heads
+        && value_heads % q_heads == 0
+        && dk == 128
+        && dv == 128
+        && state.is_contiguous()
+}
+
+/// kt-typed mirror of [`crate::gdn_decode_qk_norm_gates_recurrent_supports`].
+///
+/// Same dtype + device + shape envelope as the candle predicate. Unlike
+/// [`gdn_decode_gates_recurrent_supports_kt`], q and k may be either
+/// BF16 or F32 (matching the four production variants: bf16/bf16,
+/// qf32/vbf16, qf32/vf32, vf32/bf16).
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_decode_qk_norm_gates_recurrent_supports_kt(
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    a: &KtTensor,
+    b: &KtTensor,
+    a_log: &KtTensor,
+    dt_bias: &KtTensor,
+    state: &KtTensor,
+) -> bool {
+    if !is_cuda(q) {
+        return false;
+    }
+    if !matches!(q.dtype(), KtDType::BF16 | KtDType::F32)
+        || k.dtype() != q.dtype()
+        || !matches!(v.dtype(), KtDType::BF16 | KtDType::F32)
+        || a.dtype() != KtDType::BF16
+        || b.dtype() != KtDType::BF16
+        || a_log.dtype() != KtDType::BF16
+        || dt_bias.dtype() != KtDType::BF16
+        || state.dtype() != KtDType::BF16
+    {
+        return false;
+    }
+    let qs = q.shape();
+    if qs.len() != 4 {
+        return false;
+    }
+    let (batch, seq_len, q_heads, dk) = (qs[0], qs[1], qs[2], qs[3]);
+    let ks = k.shape();
+    if ks.len() != 4 || (ks[0], ks[1], ks[2], ks[3]) != (batch, seq_len, q_heads, dk) {
+        return false;
+    }
+    let vs = v.shape();
+    if vs.len() != 4 || (vs[0], vs[1]) != (batch, seq_len) {
+        return false;
+    }
+    let (value_heads, dv) = (vs[2], vs[3]);
+    let as_ = a.shape();
+    if as_.len() != 3 || (as_[0], as_[1], as_[2]) != (batch, seq_len, value_heads) {
+        return false;
+    }
+    let bs = b.shape();
+    if bs.len() != 3 || (bs[0], bs[1], bs[2]) != (batch, seq_len, value_heads) {
+        return false;
+    }
+    if a_log.shape() != [value_heads] || dt_bias.shape() != [value_heads] {
+        return false;
+    }
+    let ss = state.shape();
+    if ss.len() != 4 || (ss[0], ss[1], ss[2], ss[3]) != (batch, value_heads, dk, dv) {
+        return false;
+    }
+    batch >= 1
+        && seq_len == 1
+        && q_heads > 0
+        && value_heads >= q_heads
+        && value_heads % q_heads == 0
+        && dk == 128
+        && dv == 128
+        && state.is_contiguous()
+}
+
+/// kt-typed mirror of
+/// [`crate::gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports`].
+///
+/// Composes [`gdn_decode_qk_norm_gates_recurrent_supports_kt`] with the
+/// extra `z` (BF16, shape `[B, 1, value_heads, dv]`) and `weight` (F32,
+/// shape `[dv]`) checks needed by the rmsnorm-fused variant.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt(
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    a: &KtTensor,
+    b: &KtTensor,
+    a_log: &KtTensor,
+    dt_bias: &KtTensor,
+    state: &KtTensor,
+    z: &KtTensor,
+    weight: &KtTensor,
+) -> bool {
+    if !gdn_decode_qk_norm_gates_recurrent_supports_kt(q, k, v, a, b, a_log, dt_bias, state) {
+        return false;
+    }
+    if z.dtype() != KtDType::BF16 || weight.dtype() != KtDType::F32 {
+        return false;
+    }
+    let qs = q.shape();
+    let (batch, seq_len) = (qs[0], qs[1]);
+    let vs = v.shape();
+    let (value_heads, dv) = (vs[2], vs[3]);
+    z.shape() == [batch, seq_len, value_heads, dv] && weight.shape() == [dv]
+}
+
+/// kt-typed mirror of [`crate::gdn_gates_supports`].
+///
+/// Same dtype + device + shape envelope as
+/// [`crate::gdn_gates_decline_reason`]:
+///   - all on CUDA
+///   - `a, b` BF16
+///   - `(a_log, dt_bias)` ∈ {(BF16, BF16), (F32, F32), (F32, BF16)}
+///   - `a.shape == b.shape`, last dim `nv ∈ 1..=256`
+///   - `a_log.shape == dt_bias.shape == [nv]`
+pub fn gdn_gates_supports_kt(
+    a: &KtTensor,
+    b: &KtTensor,
+    a_log: &KtTensor,
+    dt_bias: &KtTensor,
+) -> bool {
+    if !is_cuda(a) || !is_cuda(b) || !is_cuda(a_log) || !is_cuda(dt_bias) {
+        return false;
+    }
+    if a.dtype() != KtDType::BF16 || b.dtype() != KtDType::BF16 {
+        return false;
+    }
+    if !matches!(
+        (a_log.dtype(), dt_bias.dtype()),
+        (KtDType::BF16, KtDType::BF16)
+            | (KtDType::F32, KtDType::F32)
+            | (KtDType::F32, KtDType::BF16)
+    ) {
+        return false;
+    }
+    if a.shape() != b.shape() {
+        return false;
+    }
+    let last = match a.shape().last() {
+        Some(n) => *n,
+        None => return false,
+    };
+    if last == 0 || last > 256 {
+        return false;
+    }
+    if a_log.shape() != [last] || dt_bias.shape() != [last] {
+        return false;
+    }
+    true
+}
+
+/// kt-typed mirror of [`crate::gdn_gated_rms_norm_supports`].
+///
+/// Same dtype + device + shape envelope as the candle predicate:
+///   - CUDA + BF16 for x, z, weight
+///   - `x.shape == z.shape`
+///   - last dim `hidden == 128`
+///   - `weight.shape == [hidden]`
+pub fn gdn_gated_rms_norm_supports_kt(x: &KtTensor, z: &KtTensor, weight: &KtTensor) -> bool {
+    if !is_cuda(x) {
+        return false;
+    }
+    if x.dtype() != KtDType::BF16 || z.dtype() != KtDType::BF16 || weight.dtype() != KtDType::BF16
+    {
+        return false;
+    }
+    if x.shape() != z.shape() {
+        return false;
+    }
+    let hidden = match x.shape().last() {
+        Some(n) => *n,
+        None => return false,
+    };
+    hidden == 128 && weight.shape() == [hidden]
+}
+
 #[cfg(test)]
 mod predicate_tests {
     use super::*;
@@ -2253,5 +2506,70 @@ mod predicate_tests {
             &st,
             crate::GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE,
         ));
+    }
+
+    #[test]
+    fn decode_predicates_decline_on_cpu() {
+        // CPU tensors should always decline (CUDA-only kernels). This
+        // exercises the new decode + gates + gated_rms_norm predicates
+        // in the host-only compile path (#1082 phase 7 follow-up).
+        let batch = 1usize;
+        let seq_len = 1usize;
+        let q_heads = 16usize;
+        let value_heads = 16usize;
+        let dk = 128usize;
+        let dv = 128usize;
+        let q = KtTensor::zeros_cpu(vec![batch, seq_len, q_heads, dk], KtDType::BF16);
+        let k = KtTensor::zeros_cpu(vec![batch, seq_len, q_heads, dk], KtDType::BF16);
+        let v = KtTensor::zeros_cpu(vec![batch, seq_len, value_heads, dv], KtDType::BF16);
+        let a = KtTensor::zeros_cpu(vec![batch, seq_len, value_heads], KtDType::BF16);
+        let b = KtTensor::zeros_cpu(vec![batch, seq_len, value_heads], KtDType::BF16);
+        let a_log = KtTensor::zeros_cpu(vec![value_heads], KtDType::BF16);
+        let dt_bias = KtTensor::zeros_cpu(vec![value_heads], KtDType::BF16);
+        let state = KtTensor::zeros_cpu(vec![batch, value_heads, dk, dv], KtDType::BF16);
+        let z = KtTensor::zeros_cpu(vec![batch, seq_len, value_heads, dv], KtDType::BF16);
+        let weight_f32 = KtTensor::zeros_cpu(vec![dv], KtDType::F32);
+        let weight_bf16 = KtTensor::zeros_cpu(vec![dv], KtDType::BF16);
+
+        assert!(!gdn_decode_gates_recurrent_supports_kt(
+            &q,
+            &k,
+            &v,
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            &state,
+            &z,
+            &weight_f32,
+        ));
+        assert!(!gdn_decode_qk_norm_gates_recurrent_supports_kt(
+            &q, &k, &v, &a, &b, &a_log, &dt_bias, &state,
+        ));
+        assert!(!gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt(
+            &q,
+            &k,
+            &v,
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            &state,
+            &z,
+            &weight_f32,
+        ));
+
+        // gdn_gates: a,b matching [.., nv], a_log/dt_bias [nv].
+        let nv = 32usize;
+        let g_a = KtTensor::zeros_cpu(vec![1, 1, nv], KtDType::BF16);
+        let g_b = KtTensor::zeros_cpu(vec![1, 1, nv], KtDType::BF16);
+        let g_al = KtTensor::zeros_cpu(vec![nv], KtDType::BF16);
+        let g_dt = KtTensor::zeros_cpu(vec![nv], KtDType::BF16);
+        assert!(!gdn_gates_supports_kt(&g_a, &g_b, &g_al, &g_dt));
+
+        // gdn_gated_rms_norm: x/z BF16 [.., 128], weight BF16 [128].
+        let r_x = KtTensor::zeros_cpu(vec![1, 1, value_heads, dv], KtDType::BF16);
+        let r_z = KtTensor::zeros_cpu(vec![1, 1, value_heads, dv], KtDType::BF16);
+        assert!(!gdn_gated_rms_norm_supports_kt(&r_x, &r_z, &weight_bf16));
     }
 }
