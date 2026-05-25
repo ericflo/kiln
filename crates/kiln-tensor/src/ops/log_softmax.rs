@@ -12,6 +12,19 @@ pub fn log_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
     if x.rank() == 0 {
         bail!("log_softmax_last_dim: input must have rank ≥ 1");
     }
+
+    // CUDA fast path: compose cuda_softmax_last_axis + activation_unary(log).
+    // The log kind tag is 5 per csrc/activation.cu.
+    #[cfg(feature = "cuda")]
+    if matches!(x.device(), crate::Device::Cuda(_))
+        && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        && x.is_contiguous()
+    {
+        let softmax = crate::cuda_softmax_last_axis(x)?;
+        let logged = crate::cuda_activation_unary(&softmax, 5)?;
+        return Ok(logged);
+    }
+
     if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
         bail!(
             "log_softmax_last_dim: dtype must be F32/BF16/F16, got {}",
