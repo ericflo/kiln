@@ -836,19 +836,23 @@ fn cuda_use_kt_api_add_scalar() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: elementwise `Tensor::neg()` through the kt-API
-/// + adapters. Set `KILN_USE_KT_API_NEG=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// `.neg()` candle calls in `forward.rs` (sigmoid backward
-/// composites, softplus) through `kiln_tensor::cuda_activation_unary`
-/// with kind tag 12 (Neg) via the kt-bridge borrow adapter. Pays
-/// one dtod memcpy on the output direction (the kt allocation is
-/// freshly-owned). Falls through to the candle composite when any
-/// precondition fails so behavior is identical with the gate off.
+/// Phase 7 default-on (#1082): elementwise `Tensor::neg()` through
+/// the kt-API + adapters. Default ON because the kt path bottoms out
+/// in `kiln_tensor::cuda_activation_unary` with kind tag 12 (Neg) —
+/// a single-kernel dispatch identical to the candle backend's `.neg()`
+/// composite (both eventually call the same `csrc/activation.cu`
+/// Neg kernel). Only the Rust shell types (KtTensor vs candle Tensor)
+/// and the kt-bridge dtod-copy at the output boundary differ. This is
+/// bit-exact by construction — same argument as the rmsnorm flip
+/// (`078f3f71`) and rotary_qk flip (`8f383a9e`). Escape hatch:
+/// `KILN_DISABLE_KT_API_NEG=1`.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_neg() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_NEG").is_ok());
+    // #1082: flipped default ON. Single-kernel dispatch
+    // (`cuda_activation_unary` kind 12); bit-exact by construction.
+    // Escape hatch: `KILN_DISABLE_KT_API_NEG=1`.
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_NEG").is_err());
     direct || cuda_use_kt_api_all()
 }
 
