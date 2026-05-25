@@ -451,7 +451,6 @@ fn cuda_use_kt_api_broadcast_mul() -> bool {
 /// log-sum-exp combine) hit the kt fast path; true broadcasting
 /// sites fall through.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 fn cuda_use_kt_api_broadcast_add() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =

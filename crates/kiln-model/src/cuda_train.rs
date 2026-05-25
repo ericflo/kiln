@@ -2235,9 +2235,27 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
             .log()
             .context("cuda_shifted_linear_cross_entropy_loss: log sumexp")?,
     };
-    let log_sum_exp = log_sumexp_only
-        .broadcast_add(&running_max)
-        .context("cuda_shifted_linear_cross_entropy_loss: add max")?
+    // Phase 7 (#1082): route the equal-shape `log_sumexp_only +
+    // running_max` log-sum-exp combine through the kt-API helper.
+    // `log_sumexp_only` is `running_sumexp.log()` (preserves
+    // `[..., 1]`) and `running_max` is a prior max_keepdim(-1) result
+    // also shaped `[..., 1]`, so the shape-equality precondition
+    // engages and the kt path dispatches one
+    // cuda_elementwise_binary(KIND_ADD) launch. Falls through to the
+    // candle composite when KILN_USE_KT_API_BROADCAST_ADD is off
+    // (default) so behavior is identical with the gate off.
+    let log_sum_exp_keepdim = match crate::forward::try_kt_broadcast_add(
+        &log_sumexp_only,
+        &running_max,
+    )
+    .context("cuda_shifted_linear_cross_entropy_loss: try_kt_broadcast_add log_sum_exp")?
+    {
+        Some(out) => out,
+        None => log_sumexp_only
+            .broadcast_add(&running_max)
+            .context("cuda_shifted_linear_cross_entropy_loss: add max")?,
+    };
+    let log_sum_exp = log_sum_exp_keepdim
         .squeeze(1)
         .context("cuda_shifted_linear_cross_entropy_loss: squeeze lse")?;
     let per_token =
