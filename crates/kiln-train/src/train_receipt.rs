@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Tensor};
+use candle_core::{DType, Device, Tensor};
 use kiln_core::config::ModelConfig;
 use kiln_core::config_hashes::ConfigHashes;
 use kiln_core::tokenizer::KilnTokenizer;
@@ -1354,25 +1354,15 @@ pub fn lora_delta_norm_summary_from_adapter(
     if !adapter_model.exists() {
         return Ok(Vec::new());
     }
-    // Migrated off candle (#1082): walk the safetensors file directly via
-    // the `safetensors` crate and compute per-tensor L2 norms from raw
-    // bytes. LoRA adapter tensors are written as F32 by both the CUDA
-    // (`save_cuda_lora_adapter`) and candle-autograd save paths, so a
-    // bytes-level f32 reduction is exact (no dtype coercion needed). For
-    // any non-F32 tensor we surface a clear error rather than silently
-    // mis-reading the bytes — that's the cue to extend this helper if a
-    // future save path lands BF16 LoRA on disk.
-    let st_data = std::fs::read(&adapter_model)
-        .with_context(|| format!("read adapter tensors {}", adapter_model.display()))?;
-    let tensors = safetensors::SafeTensors::deserialize(&st_data)
-        .with_context(|| format!("deserialize adapter tensors {}", adapter_model.display()))?;
+    let tensors = candle_core::safetensors::load(&adapter_model, &Device::Cpu)
+        .with_context(|| format!("load adapter tensors {}", adapter_model.display()))?;
 
     let mut pairs: BTreeMap<(usize, String), ProjectionPair> = BTreeMap::new();
-    for (key, view) in tensors.tensors() {
+    for (key, tensor) in tensors {
         let Some(parsed) = parse_peft_lora_key(&key) else {
             continue;
         };
-        let norm = safetensors_view_l2_norm(&view)
+        let norm = tensor_l2_norm(&tensor)
             .with_context(|| format!("compute l2 norm for adapter tensor {key}"))?;
         let pair = pairs.entry((parsed.layer, parsed.module)).or_default();
         match parsed.kind {
@@ -1553,40 +1543,6 @@ pub(crate) fn tensor_l2_norm(tensor: &Tensor) -> Result<f64> {
         .sum_all()?
         .to_scalar::<f32>()?;
     Ok((sum_sq as f64).sqrt())
-}
-
-/// Compute the L2 norm of a safetensors-backed F32 tensor directly from
-/// its byte view, without round-tripping through a candle (or kt) Tensor.
-///
-/// Migrated from `tensor_l2_norm(candle::Tensor)` for the safetensors
-/// loaded path (#1082). LoRA adapter tensors are written as F32 by every
-/// current save path; we error out on any other dtype rather than
-/// silently mis-reading.
-pub(crate) fn safetensors_view_l2_norm(
-    view: &safetensors::tensor::TensorView<'_>,
-) -> Result<f64> {
-    use safetensors::tensor::Dtype;
-    match view.dtype() {
-        Dtype::F32 => {
-            let bytes = view.data();
-            if !bytes.len().is_multiple_of(4) {
-                anyhow::bail!(
-                    "safetensors_view_l2_norm: F32 byte length {} not a multiple of 4",
-                    bytes.len()
-                );
-            }
-            let mut sum_sq = 0.0_f64;
-            for chunk in bytes.chunks_exact(4) {
-                let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64;
-                sum_sq += v * v;
-            }
-            Ok(sum_sq.sqrt())
-        }
-        other => anyhow::bail!(
-            "safetensors_view_l2_norm: unsupported dtype {other:?}; expected F32 \
-             (current LoRA save paths only emit F32 — extend this helper if that changes)"
-        ),
-    }
 }
 
 #[derive(Debug, Default, Clone)]
