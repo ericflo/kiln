@@ -4386,10 +4386,14 @@ impl CudaBackwardOp for ExpBackward {
             "cuda_exp backward expected one input, got {}",
             self.inputs.len()
         );
-        let exp = self.inputs[0]
-            .as_tensor()
-            .exp()
-            .context("cuda_exp backward: exp input")?;
+        // Phase 7 (#1082): exp'(x) = exp(x). Route through the kt-API
+        // helper with a candle fallback. The helper accepts
+        // contiguous F32/BF16/F16 on CUDA and falls through otherwise.
+        let x = self.inputs[0].as_tensor();
+        let exp = match crate::forward::try_kt_exp(x).context("cuda_exp backward: try_kt_exp")? {
+            Some(out) => out,
+            None => x.exp().context("cuda_exp backward: exp input")?,
+        };
         let grad = (grad_out.as_tensor() * &exp).context("cuda_exp backward: input grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
@@ -4415,16 +4419,37 @@ impl CudaBackwardOp for SoftplusBackward {
             "cuda_softplus backward expected one input, got {}",
             self.inputs.len()
         );
-        let exp_neg = self.inputs[0]
-            .as_tensor()
-            .neg()
-            .context("cuda_softplus backward: negate input")?
-            .exp()
-            .context("cuda_softplus backward: exp -input")?;
-        let sigmoid = (exp_neg + 1.0)
-            .context("cuda_softplus backward: add one")?
-            .recip()
-            .context("cuda_softplus backward: reciprocal")?;
+        // Phase 7 (#1082): softplus'(x) = sigmoid(x) = 1 / (1 + exp(-x)).
+        // The chain `neg → exp → + 1.0 → recip` is the same composite
+        // wired in `cuda_sigmoid` / `cuda_silu` / `cuda_train::cuda_silu`
+        // — route each step through its kt-API helper with a candle
+        // fallback. The dtype check happens implicitly in the helpers:
+        // they accept contiguous F32/BF16/F16, fall through otherwise.
+        let x = self.inputs[0].as_tensor();
+        let neg_x = match crate::forward::try_kt_neg(x)
+            .context("cuda_softplus backward: try_kt_neg")?
+        {
+            Some(out) => out,
+            None => x.neg().context("cuda_softplus backward: negate input")?,
+        };
+        let exp_neg = match crate::forward::try_kt_exp(&neg_x)
+            .context("cuda_softplus backward: try_kt_exp")?
+        {
+            Some(out) => out,
+            None => neg_x.exp().context("cuda_softplus backward: exp -input")?,
+        };
+        let one_plus = match crate::forward::try_kt_add_scalar(&exp_neg, 1.0)
+            .context("cuda_softplus backward: try_kt_add_scalar")?
+        {
+            Some(out) => out,
+            None => (exp_neg + 1.0).context("cuda_softplus backward: add one")?,
+        };
+        let sigmoid = match crate::forward::try_kt_recip(&one_plus)
+            .context("cuda_softplus backward: try_kt_recip")?
+        {
+            Some(out) => out,
+            None => one_plus.recip().context("cuda_softplus backward: reciprocal")?,
+        };
         let grad =
             (grad_out.as_tensor() * &sigmoid).context("cuda_softplus backward: input grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
