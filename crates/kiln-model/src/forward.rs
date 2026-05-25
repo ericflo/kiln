@@ -12420,12 +12420,18 @@ fn gdn_chunkwise_recurrence(
                     let q_s_scaled = q_s.broadcast_mul(&p_col)?;
 
                     let g_last = big_g.narrow(2, c - 1, 1)?; // [B, nv, 1]
-                    let decay_last_col_u = g_last
-                        .broadcast_sub(&big_g)?
-                        .exp()?
-                        .to_dtype(dtype)?
-                        .unsqueeze(3)?; // [B, nv, C, 1]
-                    let p_last_u = g_last.exp()?.to_dtype(dtype)?.unsqueeze(3)?; // [B,nv,1,1]
+                    // Phase 7 (#1082): wire try_kt_exp + try_kt_to_dtype into
+                    // the two remaining `.exp()` sites of the GDN chunkwise
+                    // prep — `decay_last_col_u` and `p_last_u`. Mirrors the
+                    // strict_decay / causal_decay / p `exp_to_dtype` closure
+                    // above so all five chunk-prep exp calls now take the
+                    // single-kernel kt-API fast path when
+                    // KILN_USE_KT_API_EXP=1 (or KILN_USE_KT_API_ALL=1) is set.
+                    let decay_last_col_u = {
+                        let g_diff = g_last.broadcast_sub(&big_g)?;
+                        exp_to_dtype(&g_diff)?.unsqueeze(3)?
+                    }; // [B, nv, C, 1]
+                    let p_last_u = exp_to_dtype(&g_last)?.unsqueeze(3)?; // [B,nv,1,1]
 
                     (
                         a_strict,
