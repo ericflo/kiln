@@ -1586,3 +1586,33 @@ still produced the same false-positive shape as H77: smoke uplift followed by
 confirmed reliability and latency loss. Real reward variance helps early, but
 this narrow repair-continuation representation is too expensive and unstable
 without a stronger base-distribution regularizer or broader success anchor.
+
+### H79: H64/H77 TIES D20
+
+H79 tested whether H78's failure came from training-time interference rather
+than from the two source directions themselves. It used the server's TIES
+adapter merge to combine H64's real repair-continuation adapter with H77's
+moderate-thinking adapter, equal weights, density 0.2. This is the
+pi-faithful-completion composition lesson applied cheaply: combine
+complementary weak pulls, but trim conflicts instead of continuing to train
+the same mixed corpus.
+
+The output adapter was `pi-doctest-h79-h64-h77-ties-d20`. Sources were
+`pi-doctest-h64-repair-continuation-g2-r4a4lr5e7` and
+`pi-doctest-h77-moderate-thinking-workflow-r4a4lr1e7`, each at weight 0.5.
+The `/v1/adapters/merge` request used `mode="ties"` and `density=0.2`, and
+wrote 400 tensors. Adapter verify passed with rank 4 / alpha 4, 200 LoRA
+projection pairs, 400 nonzero tensors, LoRA update proxy 0.011565, and adapter
+hash `sha256:d220302d3f7605f2b8d6a66488f14af68340a7db9c0eb7d469e3816742b3db89`.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.943750 with no
+zero rollouts and mean wall-clock 27.20s. H79 scored 0.925000 with no zero
+rollouts and mean wall-clock 43.78s. No wider gate was run because H79 neither
+beat score nor zero count, and it was slower.
+
+Lesson: TIES trimming avoided an immediate zero-rollout failure, but the
+H64/H77 directions still do not combine into a useful adapter. The next
+experiment should stop treating H64 repair-continuation plus H77
+moderate-thinking as the main source of signal. Use a broader behavior anchor,
+a different real-reward source, or an OPD/teacher-style signal that adds new
+capability rather than reweighting known fragile adapters.
