@@ -10,7 +10,7 @@
 //! `cargo test --workspace` keeps working on CUDA-only / CPU-only hosts.
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+use half::bf16;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::opd::{
     vk_opd_top_k_metrics, vk_opd_top_k_reverse_kl_loss, vk_opd_top_k_reverse_kl_per_position,
@@ -27,37 +27,26 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
     VulkanDevice::new().ok().map(Arc::new)
 }
 
+// Test factories are candle-free via the kt-native
+// `VkTensor::from_f32_slice` / `from_f32_slice_as_bf16` /
+// `parameter_from_f32_slice` constructors. (#1082)
 fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    VkTensor::from_candle(&t, Arc::clone(dev))
+    VkTensor::from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn upload_bf16w(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?.to_dtype(DType::BF16)?;
-    VkTensor::from_candle(&t, Arc::clone(dev))
+    VkTensor::from_f32_slice_as_bf16(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn upload_param_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    use candle_core::Var;
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    let var = Var::from_tensor(&t)?;
-    let vk = VkTensor::from_candle(&t, Arc::clone(dev))?;
-    let pid = var.id();
-    Ok(VkTensor::parameter(
-        Arc::clone(vk.buffer()),
-        vk.shape().to_vec(),
-        vk.dtype(),
-        Arc::clone(vk.device()),
-        pid,
-    ))
+    VkTensor::parameter_from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn bf16_round_trip(data: &[f32]) -> Result<Vec<f32>> {
-    Ok(Tensor::from_vec(data.to_vec(), data.len(), &Device::Cpu)?
-        .to_dtype(DType::BF16)?
-        .to_dtype(DType::F32)?
-        .flatten_all()?
-        .to_vec1::<f32>()?)
+    Ok(data
+        .iter()
+        .map(|&v| bf16::from_f32(v).to_f32())
+        .collect())
 }
 
 /// CPU f64 oracle. For each active position computes
