@@ -1,7 +1,16 @@
 //! FLCE forward + backward parity vs naive CPU cross-entropy.
+//!
+//! Test factories are candle-free via the kt-native
+//! `VkTensor::from_f32_slice` / `from_f32_slice_as_bf16` /
+//! `parameter_from_f32_slice` constructors.
+//!
+//! The remaining candle reference is scoped to a single oracle
+//! (`candle_selected_log_probs_and_grpo`) where candle is used
+//! deliberately as the analytical-gradient reference for the GRPO
+//! backward. (#1082)
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor, Var};
+use half::bf16;
 use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::flce::{
@@ -48,39 +57,20 @@ fn upload_param_f32(
     dev: &Arc<VulkanDevice>,
     data: &[f32],
     shape: &[usize],
-) -> Result<(Var, VkTensor)> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    let var = Var::from_tensor(&t)?;
-    let vk = VkTensor::from_candle(&t, Arc::clone(dev))?;
-    let pid = var.id();
-    let param = VkTensor::parameter(
-        Arc::clone(vk.buffer()),
-        vk.shape().to_vec(),
-        vk.dtype(),
-        Arc::clone(vk.device()),
-        pid,
-    );
-    Ok((var, param))
+) -> Result<VkTensor> {
+    VkTensor::parameter_from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
-    VkTensor::from_candle(&t, Arc::clone(dev))
+    VkTensor::from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn upload_bf16(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?.to_dtype(DType::BF16)?;
-    VkTensor::from_candle(&t, Arc::clone(dev))
+    VkTensor::from_f32_slice_as_bf16(data, shape.to_vec(), Arc::clone(dev))
 }
 
-fn bf16_rounded(data: &[f32], shape: &[usize]) -> Result<Vec<f32>> {
-    Ok(
-        Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?
-            .to_dtype(DType::BF16)?
-            .to_dtype(DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?,
-    )
+fn bf16_rounded(data: &[f32], _shape: &[usize]) -> Result<Vec<f32>> {
+    Ok(data.iter().map(|&v| bf16::from_f32(v).to_f32()).collect())
 }
 
 /// CPU cross-entropy reference: loss = mean_i (-log(softmax(logit_i)[label_i]))
@@ -208,7 +198,9 @@ fn candle_selected_log_probs_and_grpo(
     hidden_dim: usize,
     vocab: usize,
 ) -> Result<(Vec<f32>, f32, Vec<f32>)> {
-    use candle_core::{D, DType};
+    // Scoped candle reference: this oracle is deliberately implemented
+    // via candle's autograd for analytical-gradient parity. (#1082)
+    use candle_core::{D, DType, Device, Tensor, Var};
 
     let dev = Device::Cpu;
     let hidden_var = Var::from_tensor(&Tensor::from_vec(
@@ -266,7 +258,7 @@ fn vk_flce_forward_backward_parity_small() -> Result<()> {
         .collect();
     let labels: Vec<u32> = vec![3, 11, 0, 16];
 
-    let (_hv, hidden) = upload_param_f32(&dev, &h_data, &[num_active, hidden_dim])?;
+    let hidden = upload_param_f32(&dev, &h_data, &[num_active, hidden_dim])?;
     let weight = upload_f32(&dev, &w_data, &[vocab, hidden_dim])?;
     let loss = vk_flce_loss(&hidden, &weight, &labels, chunk)?;
 
@@ -312,7 +304,7 @@ fn vk_selected_logprob_and_grpo_parity_small() -> Result<()> {
     let clip_epsilon = 0.2_f32;
     let kl_coeff = 0.05_f32;
 
-    let (_hv, hidden) = upload_param_f32(&dev, &h_data, &[num_active, hidden_dim])?;
+    let hidden = upload_param_f32(&dev, &h_data, &[num_active, hidden_dim])?;
     let weight = upload_f32(&dev, &w_data, &[vocab, hidden_dim])?;
     let ref_vk = upload_f32(&dev, &ref_log_probs, &[num_active])?;
 
@@ -424,7 +416,7 @@ fn vk_selected_logprob_and_grpo_parity_bf16_lm_head() -> Result<()> {
     let clip_epsilon = 0.2_f32;
     let kl_coeff = 0.05_f32;
 
-    let (_hv, hidden) = upload_param_f32(&dev, &h_data, &[num_active, hidden_dim])?;
+    let hidden = upload_param_f32(&dev, &h_data, &[num_active, hidden_dim])?;
     let weight = upload_bf16(&dev, &w_f32, &[vocab, hidden_dim])?;
     let ref_vk = upload_f32(&dev, &ref_log_probs, &[num_active])?;
 
