@@ -974,3 +974,52 @@ through `kiln_tensor::profile::emit_contiguous_copy()`, which
 Phase 9's bench-gate enforces non-regression on every kiln-tensor
 op's parity test + the per-tier baselines under
 `bench-results/pre-migration-baseline/` (Phase 0.10).
+
+### Phase 7 kt_api production wiring snapshot (2026-05-25)
+
+The Tier-1 leaf crates (see `docs/CANDLE_REMOVAL_PLAN.md`) now expose
+kt-typed entrypoints at every production call site. Concretely:
+
+- **5/5 Tier-1 kernel crates have kt_api production wires** —
+  `kiln-rmsnorm-kernel`, `kiln-conv1d-kernel`, `kiln-marlin-gemm`,
+  `kiln-flash-attn`, and `kiln-gdn-kernel`. The candle-typed surface on
+  each crate stays in place for back-compat but is no longer called
+  from `kiln-model::forward` or `kiln-train::cuda_train`. gdn closed at
+  10/10 wires (PR-equivalent commit `d4a9ec33`); flash-attn at 5/5;
+  rmsnorm at 25/25 smoke tests green; marlin + conv1d ditto.
+- **kt-API helpers wired at ~95 production call sites** across
+  `crates/kiln-model/src/forward.rs` (decode + prefill kernels,
+  paged-decode, gdn chunk/recurrent/qk-norm/gates/gated-rms-norm,
+  flash-attn paged decode variants) and `crates/kiln-train/src/cuda_train.rs`
+  (training-side rmsnorm, flash-attn fwd/bwd, marlin matmul, gdn
+  forward-substitution/gates). Each wire is a borrow-zero-copy path
+  through `kiln_kt_bridge`; no extra alloc on the hot path.
+- **DeviceBuffer Metal variant landed.** `kiln_tensor::DeviceBuffer`
+  now has a `Metal(MetalStorage)` arm alongside `Cpu` / `Cuda` /
+  `Vulkan`, giving every kt-typed op a uniform handle on Apple
+  Silicon. Paired with the `MetalAllocator` (see "kt-tensor allocator
+  impls" in `bench-results/cuda-graph-status.md`), the Metal backend
+  reaches the same lifecycle contract as CPU + CUDA + Vulkan.
+- **Phase 5 bs>1 CUDA graph capture audit suspects all closed.** All
+  four root-cause intra-graph alloc suspects from
+  `bench-results/cuda-graph-bs2-secondary-audit.md` are resolved. The
+  batched capture/replay path lives in-tree under
+  `KILN_CUDA_GRAPHS_BATCHED=1` (default off); one end-to-end
+  `compute-sanitizer` sweep on the Qwen3.5-4B chat-completion driver
+  remains as the validation gate before defaulting on. See
+  `bench-results/cuda-graph-status.md` for the canonical
+  what's-done-vs-what's-left inventory.
+- **9 Vulkan ops + 15 Metal kind tags wired through real kernels.**
+  The Vulkan backend has 9 ops on real `kiln-vulkan-kernel` compute
+  pipelines (the rest are `Ok(None)` fall-through to CPU reference);
+  the Metal backend has 15 op-kind tags wired through real MPS / MSL
+  kernels via `kiln-mps`. Together with the kt_api wires above,
+  `KILN_USE_KT_API_ALL=1` is end-to-end runnable on CUDA today and
+  partially runnable on Metal + Vulkan.
+
+The remaining `kiln-model` candle dependency is the diffuse 27-file
+forward.rs surface (PagedKvCacheKt finalization, `try_kt_*` gate
+demotion, fallback-branch deletion) and the Tier-2 crates
+(`kiln-opd-loss-kernel`, `kiln-flce-kernel` Phase B closeout,
+`kiln-vulkan-kernel` shim cleanup). See `docs/CANDLE_REMOVAL_PLAN.md`
+for the full sequence to vendor delete.
