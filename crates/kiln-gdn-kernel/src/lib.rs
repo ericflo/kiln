@@ -69,8 +69,9 @@ use std::cell::RefCell;
 /// kiln-tensor-typed surface alongside candle-typed. Same FFI.
 mod kt_api;
 pub use kt_api::{
-    gdn_chunk_prep_kt, gdn_chunk_scan_kt, gdn_decode_gates_recurrent_bf16_kt,
-    gdn_decode_gates_recurrent_vf32_bf16_kt, gdn_decode_qk_norm_gates_recurrent_bf16_kt,
+    gdn_chunk_prep_kt, gdn_chunk_prep_supports_kt, gdn_chunk_scan_kt, gdn_chunk_scan_supports_kt,
+    gdn_decode_gates_recurrent_bf16_kt, gdn_decode_gates_recurrent_vf32_bf16_kt,
+    gdn_decode_qk_norm_gates_recurrent_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt,
@@ -78,9 +79,10 @@ pub use kt_api::{
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt, gdn_forward_substitution_kt,
-    gdn_full_chunk_forward_kt, gdn_full_chunk_forward_multiblock_kt, gdn_gated_rms_norm_bf16_kt,
-    gdn_gates_bf16_f32_bf16_params_kt, gdn_gates_bf16_f32_params_kt, gdn_gates_bf16_kt,
-    gdn_recurrent_forward_kt, GdnError,
+    gdn_full_chunk_forward_kt, gdn_full_chunk_forward_multiblock_kt,
+    gdn_full_chunk_forward_multiblock_supports_kt, gdn_full_chunk_forward_supports_kt,
+    gdn_gated_rms_norm_bf16_kt, gdn_gates_bf16_f32_bf16_params_kt, gdn_gates_bf16_f32_params_kt,
+    gdn_gates_bf16_kt, gdn_recurrent_forward_kt, GdnError,
 };
 
 unsafe extern "C" {

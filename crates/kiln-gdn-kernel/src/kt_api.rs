@@ -12,7 +12,7 @@
 
 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 use kiln_kt_bridge::BridgeError;
-use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
+use kiln_tensor::{CudaStorage, DType as KtDType, Device as KtDevice, Tensor as KtTensor};
 
 use crate::{
     kiln_gdn_decode_gates_recurrent_bf16, kiln_gdn_decode_gates_recurrent_vf32_bf16,
@@ -1973,4 +1973,285 @@ pub fn gdn_chunk_scan_kt(
         )));
     }
     Ok((out_chunk, w_weighted))
+}
+
+// ============================================================================
+// kt-typed envelope predicates
+// ============================================================================
+//
+// These mirror the candle-typed `gdn_*_supports` predicates in `lib.rs`
+// one-for-one: same dtype + device + shape envelope checks. Inputs are
+// kt-tensors instead of candle-tensors so callers can dispatch on a
+// pre-borrowed kt-Tensor without round-tripping back through candle.
+// All four are pure — no CUDA dispatch, no FFI — and therefore safe to
+// call from any thread / under graph capture.
+
+fn shape_dim_at(t: &KtTensor, axis: usize) -> Option<usize> {
+    let s = t.shape();
+    if axis < s.len() {
+        Some(s[axis])
+    } else {
+        None
+    }
+}
+
+fn is_cuda(t: &KtTensor) -> bool {
+    matches!(t.device(), KtDevice::Cuda(_))
+}
+
+/// kt-typed mirror of [`crate::gdn_chunk_prep_supports`].
+pub fn gdn_chunk_prep_supports_kt(
+    g: &KtTensor,
+    v: &KtTensor,
+    kkt: &KtTensor,
+    qkt: &KtTensor,
+    ks_entry: &KtTensor,
+    q_s: &KtTensor,
+) -> bool {
+    if !is_cuda(g) {
+        return false;
+    }
+    if g.dtype() != KtDType::BF16
+        || v.dtype() != KtDType::BF16
+        || kkt.dtype() != KtDType::BF16
+        || qkt.dtype() != KtDType::BF16
+        || ks_entry.dtype() != KtDType::BF16
+        || q_s.dtype() != KtDType::BF16
+    {
+        return false;
+    }
+    let g_dims = g.shape();
+    let c = match g_dims.last() {
+        Some(n) => *n,
+        None => return false,
+    };
+    if c == 0 || c > 128 {
+        return false;
+    }
+    let vd = v.shape();
+    if vd.len() < 2 {
+        return false;
+    }
+    let dv = vd[vd.len() - 1];
+    if dv == 0 || dv > 1024 {
+        return false;
+    }
+    if vd[vd.len() - 2] != c {
+        return false;
+    }
+    let kdims = kkt.shape();
+    let qdims = qkt.shape();
+    if kdims.len() < 2 || qdims.len() < 2 {
+        return false;
+    }
+    if kdims[kdims.len() - 1] != c
+        || kdims[kdims.len() - 2] != c
+        || qdims[qdims.len() - 1] != c
+        || qdims[qdims.len() - 2] != c
+    {
+        return false;
+    }
+    if ks_entry.shape().last().copied() != Some(dv) || q_s.shape().last().copied() != Some(dv) {
+        return false;
+    }
+    true
+}
+
+/// kt-typed mirror of [`crate::gdn_chunk_scan_supports`].
+pub fn gdn_chunk_scan_supports_kt(
+    a_strict: &KtTensor,
+    b_mask: &KtTensor,
+    v_prime: &KtTensor,
+    q_s_scaled: &KtTensor,
+    beta: &KtTensor,
+    decay_last_col: &KtTensor,
+) -> bool {
+    if !is_cuda(a_strict) {
+        return false;
+    }
+    if a_strict.dtype() != KtDType::BF16
+        || b_mask.dtype() != KtDType::BF16
+        || v_prime.dtype() != KtDType::BF16
+        || q_s_scaled.dtype() != KtDType::BF16
+        || beta.dtype() != KtDType::BF16
+        || decay_last_col.dtype() != KtDType::BF16
+    {
+        return false;
+    }
+    let a = a_strict.shape();
+    if a.len() != 4 {
+        return false;
+    }
+    let (b, h, c, c2) = (a[0], a[1], a[2], a[3]);
+    if c != c2 || c == 0 || c > 64 {
+        return false;
+    }
+    let bm = b_mask.shape();
+    if bm.len() != 4 || (bm[0], bm[1], bm[2], bm[3]) != (b, h, c, c) {
+        return false;
+    }
+    let vp = v_prime.shape();
+    if vp.len() != 4 {
+        return false;
+    }
+    let dv = vp[3];
+    if (vp[0], vp[1], vp[2]) != (b, h, c) || dv == 0 || dv > 128 {
+        return false;
+    }
+    let qs = q_s_scaled.shape();
+    if qs.len() != 4 || (qs[0], qs[1], qs[2], qs[3]) != (b, h, c, dv) {
+        return false;
+    }
+    let be = beta.shape();
+    if be.len() != 3 || (be[0], be[1], be[2]) != (b, h, c) {
+        return false;
+    }
+    let dl = decay_last_col.shape();
+    dl.len() == 3 && (dl[0], dl[1], dl[2]) == (b, h, c)
+}
+
+/// kt-typed mirror of [`crate::gdn_full_chunk_forward_supports`].
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_full_chunk_forward_supports_kt(
+    g: &KtTensor,
+    v: &KtTensor,
+    kkt: &KtTensor,
+    qkt: &KtTensor,
+    ks_entry: &KtTensor,
+    q_s: &KtTensor,
+    beta: &KtTensor,
+    k_t: &KtTensor,
+    state: &KtTensor,
+) -> bool {
+    if !is_cuda(g) {
+        return false;
+    }
+    if g.dtype() != KtDType::BF16
+        || v.dtype() != KtDType::BF16
+        || kkt.dtype() != KtDType::BF16
+        || qkt.dtype() != KtDType::BF16
+        || ks_entry.dtype() != KtDType::BF16
+        || q_s.dtype() != KtDType::BF16
+        || beta.dtype() != KtDType::BF16
+        || k_t.dtype() != KtDType::BF16
+        || state.dtype() != KtDType::BF16
+    {
+        return false;
+    }
+    let gs = g.shape();
+    if gs.len() != 3 {
+        return false;
+    }
+    let (b, h, c) = (gs[0], gs[1], gs[2]);
+    if c != 64 {
+        return false;
+    }
+    let vs = v.shape();
+    if vs.len() != 4 {
+        return false;
+    }
+    let dv = vs[3];
+    if (vs[0], vs[1], vs[2]) != (b, h, c) || dv == 0 || dv > 128 {
+        return false;
+    }
+    let ks = kkt.shape();
+    if ks.len() != 4 || (ks[0], ks[1], ks[2], ks[3]) != (b, h, c, c) {
+        return false;
+    }
+    let qs = qkt.shape();
+    if qs.len() != 4 || (qs[0], qs[1], qs[2], qs[3]) != (b, h, c, c) {
+        return false;
+    }
+    let kes = ks_entry.shape();
+    if kes.len() != 4 || (kes[0], kes[1], kes[2], kes[3]) != (b, h, c, dv) {
+        return false;
+    }
+    let qse = q_s.shape();
+    if qse.len() != 4 || (qse[0], qse[1], qse[2], qse[3]) != (b, h, c, dv) {
+        return false;
+    }
+    let be = beta.shape();
+    if be.len() != 3 || (be[0], be[1], be[2]) != (b, h, c) {
+        return false;
+    }
+    let kt = k_t.shape();
+    if kt.len() != 4 {
+        return false;
+    }
+    let dk = kt[2];
+    if (kt[0], kt[1], kt[3]) != (b, h, c) || dk == 0 || dk > 128 {
+        return false;
+    }
+    let st = state.shape();
+    st.len() == 4 && (st[0], st[1], st[2], st[3]) == (b, h, dk, dv)
+}
+
+/// kt-typed mirror of [`crate::gdn_full_chunk_forward_multiblock_supports`].
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_full_chunk_forward_multiblock_supports_kt(
+    g: &KtTensor,
+    v: &KtTensor,
+    kkt: &KtTensor,
+    qkt: &KtTensor,
+    ks_entry: &KtTensor,
+    q_s: &KtTensor,
+    beta: &KtTensor,
+    k_t: &KtTensor,
+    state: &KtTensor,
+    dv_tile: usize,
+) -> bool {
+    if dv_tile != crate::GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE {
+        return false;
+    }
+    if !gdn_full_chunk_forward_supports_kt(g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state) {
+        return false;
+    }
+    let dv = match shape_dim_at(v, 3) {
+        Some(d) => d,
+        None => return false,
+    };
+    dv >= dv_tile && dv % dv_tile == 0
+}
+
+#[cfg(test)]
+mod predicate_tests {
+    use super::*;
+
+    // These tests confirm the predicates compile + return `false` for the
+    // trivial CPU-tensor case (no GPU required). Byte-exact parity vs the
+    // candle predicates is implicit: both functions implement the same
+    // pure shape/dtype/device check chain on the same inputs.
+
+    #[test]
+    fn predicates_decline_on_cpu() {
+        // Build CPU kt-tensors and confirm `_supports_kt` declines because
+        // of the CUDA-device check (all predicates start with `is_cuda`).
+        let g = KtTensor::zeros_cpu(vec![1, 32, 64], KtDType::BF16);
+        let v = KtTensor::zeros_cpu(vec![1, 32, 64, 128], KtDType::BF16);
+        let kkt = KtTensor::zeros_cpu(vec![1, 32, 64, 64], KtDType::BF16);
+        let qkt = KtTensor::zeros_cpu(vec![1, 32, 64, 64], KtDType::BF16);
+        let ks = KtTensor::zeros_cpu(vec![1, 32, 64, 128], KtDType::BF16);
+        let qs = KtTensor::zeros_cpu(vec![1, 32, 64, 128], KtDType::BF16);
+        let beta = KtTensor::zeros_cpu(vec![1, 32, 64], KtDType::BF16);
+        let kt = KtTensor::zeros_cpu(vec![1, 32, 128, 64], KtDType::BF16);
+        let st = KtTensor::zeros_cpu(vec![1, 32, 128, 128], KtDType::BF16);
+
+        assert!(!gdn_chunk_prep_supports_kt(&g, &v, &kkt, &qkt, &ks, &qs));
+        assert!(!gdn_chunk_scan_supports_kt(&kkt, &qkt, &v, &qs, &beta, &g));
+        assert!(!gdn_full_chunk_forward_supports_kt(
+            &g, &v, &kkt, &qkt, &ks, &qs, &beta, &kt, &st
+        ));
+        assert!(!gdn_full_chunk_forward_multiblock_supports_kt(
+            &g,
+            &v,
+            &kkt,
+            &qkt,
+            &ks,
+            &qs,
+            &beta,
+            &kt,
+            &st,
+            crate::GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE,
+        ));
+    }
 }
