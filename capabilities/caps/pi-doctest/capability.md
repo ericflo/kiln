@@ -1684,3 +1684,52 @@ The model may be spending the extra time before the post-pass state, or the
 adapter update may add latency without changing the actual stop decision. This
 also reinforces that gradient checkpointing is useful for fitting local GRPO
 training in VRAM, but it does not reduce inference-time thinking tokens.
+
+### H82: broad post-read edit choice
+
+H82 tested whether moving the training signal earlier in the workflow could
+avoid the suffix-only failures. After a read action and the train-only
+`solution.py` stub observation, each group ranked a correct semantic body edit
+above a plausible wrong body edit. This is a broader version of H71/H72's local
+edit-choice idea: 9 train tasks instead of 2, and every rejected edit was
+verified to fail the train doctests.
+
+A small no-adapter prompt diagnostic was run first. Extra instructions to
+"think enough" before the first edit but keep later decisions compact were
+faster than base, 18.65s vs 21.70s mean wall-clock, but dropped composite from
+0.971875 to 0.75 and introduced one zero rollout. The prompt was therefore not
+distilled.
+
+The train dataset was
+`/tmp/pi-doctest-h82-broad-postread-edit-choice/grpo-train.broad-postread-edit-choice.g9.jsonl`,
+built from `task_0024`, `task_0025`, `task_0026`, `task_0028`, `task_0029`,
+`task_0032`, `task_0034`, `task_0037`, and `task_0038`. It contained 9 groups
+and 18 completions with rewards 1.0 vs 0.15, reward stdev 0.425, 486 action
+tokens, 0 env tokens, 7386 context tokens, and dataset hash
+`sha256:577b846a8d5f02d69ce958a77b8c74748d347f91e53228a9149a7428b8e84a60`.
+
+Training produced `pi-doctest-h82-broad-postread-edit-choice-r4a4lr1e7` using
+`cuda_grpo_ablation --mode phase1`, rank 4 / alpha 4 / lr `1e-7`, no ECHO,
+seed `3141592653`, and `KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed in
+425.397s observed, with peak observed VRAM 15,973 MiB. The receipt reported
+421.236s wall-clock, 54.508s reference forward, 29.842s policy forward, and
+334.470s backward. Adapter verify passed with 400 nonzero tensors, 200 LoRA
+projection pairs, LoRA update proxy 0.022547, and adapter hash
+`sha256:657867e57e324423efbec8d594e5ac284a6b6ee90050414c13cda8a36514919e`.
+
+Blind `LIMIT=4 SEEDS=1` smoke was positive on score but slower: paired base
+scored 0.900000 with no zero rollouts and 43.16s mean wall-clock, while H82
+scored 0.934375 with no zero rollouts and 49.25s mean wall-clock. The first
+`LIMIT=8` confirmation looked strong: base scored 0.601562 with 3 zeros and
+63.77s, while H82 scored 0.818750 with 1 zero and 62.02s. The second
+`LIMIT=8` confirmation rejected it: base scored 0.828125 with 1 zero and
+51.31s, while H82 scored 0.556250 with 3 zeros and 76.83s. Aggregated across
+the two wider gates, base averaged 0.714844 and H82 averaged 0.687500; both
+had 4 total zero rollouts, and H82 was slower, 69.43s vs 57.54s.
+
+Lesson: broad post-read semantic edit-choice data is more promising than
+terminal suffix micro-contrasts because it can convert a weak hard-tail sample,
+but it is still unstable as a standalone update. The next version should not
+just add more hand-authored wrong edits. It needs a stabilizer: an oscillating
+chain with successful-workflow data, a teacher-quality edit-choice source, or a
+broader real-rollout distribution that provides base-behavior regularization.
