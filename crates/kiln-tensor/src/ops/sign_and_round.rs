@@ -64,7 +64,11 @@ impl SignRoundKind {
     /// CUDA paths: recip (22), sign (23), floor (24), ceil (25),
     /// round (26), trunc (27) — the last (#1082) landed with this
     /// commit.
-    #[cfg(feature = "cuda")]
+    ///
+    /// Metal path reuses the same tags via `metal_activation_unary`
+    /// (candle covers 22..=26; trunc=27 falls through to CPU since
+    /// candle has no `UnaryOp::Trunc`).
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     const fn cuda_kind_tag(self) -> i32 {
         match self {
             SignRoundKind::Reciprocal => 22,
@@ -111,6 +115,16 @@ impl DeviceOp1 for SignRoundOp {
 
     #[cfg(feature = "metal")]
     fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::metal_activation_unary` which wraps candle's
+        // production Metal `unary_*` kernels (the same path
+        // `candle::Tensor::{recip, sign, floor, ceil, round}()` take).
+        // Apple Silicon UMA: no host bounce — kt MetalStorage::buffer
+        // is shared with the candle wrapper via Arc<metal::Buffer>.
+        //
+        // `Trunc` (kind=27) has no candle `UnaryOp::Trunc` so it
+        // still falls through to CPU; the other five — Reciprocal,
+        // Sign, Floor, Ceil, Round — all run on-device.
         validate(x, self.kind.name())?;
         if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
             return Ok(None);
@@ -118,11 +132,20 @@ impl DeviceOp1 for SignRoundOp {
         if !x.is_contiguous() {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Metal): once a Metal sign/round kernel
-        // ships, dispatch via the kind tag and route through
-        // `crate::metal_activation_unary`. Until then, fall through
-        // to CPU.
-        Ok(None)
+        if matches!(self.kind, SignRoundKind::Trunc) {
+            return Ok(None);
+        }
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::MetalStorage>()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(crate::metal_activation_unary(
+            x,
+            self.kind.cuda_kind_tag(),
+        )?))
     }
 
     #[cfg(feature = "vulkan")]
