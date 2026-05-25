@@ -1239,6 +1239,85 @@ pub(crate) fn cuda_use_kt_api_sampling_penalties() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: route the on-device softmax inside the
+/// sampler (last-dim, F32 input) through
+/// `kiln_tensor::cuda_softmax_last_axis`. Default off; set
+/// `KILN_USE_KT_API_SAMPLING_SOFTMAX=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to flip the gate.
+///
+/// Distinct from the existing `KILN_USE_KT_API_SOFTMAX` gate:
+/// `KILN_USE_KT_API_SOFTMAX` targets the forward-pass attention
+/// softmax (called from `cuda_softmax_last_dim` inside the
+/// flash-attn fallback path), where the input is a 4-D
+/// `[B, H, T, T]` attention-score tensor that's already in
+/// kt-storage upstream. The sampler softmax sits at the end of
+/// `sample_with_params` / `sample_with_full_params`, after
+/// temperature scaling and (possibly) top-k truncation, on a
+/// rank-1 `[K]` or `[vocab]` candle tensor. Today the sampler
+/// computes the softmax host-side after a `to_vec1::<f32>()`
+/// transfer; the kt-API path would keep the tensor on device
+/// through softmax and only transfer the post-softmax `[K]`
+/// probability vector (typically K=20-50 for Qwen3.5's default
+/// top_k), trading one full-vocab DtoH for K host floats and
+/// one device softmax kernel.
+///
+/// Wiring the gate without yet migrating either call site
+/// (`sample_with_params` and `sample_with_full_params`) is an
+/// intentional incremental step (#1082, Phase 7). The candle
+/// softmax-then-host pattern is interleaved with host-side
+/// rank-based filtering (top-p, min-p, categorical) that can't
+/// stay in kt-storage; restructuring the sampler to keep the
+/// device softmax in the loop requires a careful audit of the
+/// filter ordering and is best done one call site at a time.
+///
+/// Today this gate is unused. The first call-site migration will
+/// branch on it. Returning a bool through `OnceLock` matches the
+/// other Phase 7 gates so the cost is one atomic read per call
+/// (negligible vs. the softmax it gates).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+pub(crate) fn cuda_use_kt_api_sampling_softmax() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SAMPLING_SOFTMAX").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
+/// Phase 7 opt-in: meta-flag that enables the entire kt-API sampler
+/// family (`KILN_USE_KT_API_SAMPLING_ARGMAX`,
+/// `KILN_USE_KT_API_SAMPLING_PENALTIES`,
+/// `KILN_USE_KT_API_SAMPLING_SOFTMAX`) at once. Set
+/// `KILN_USE_KT_API_SAMPLING_ALL=1` (or `KILN_USE_KT_API_ALL=1`)
+/// to flip every sampler-related kt-API gate to true in one go.
+///
+/// This is the sampler-family analog of the cross-cutting
+/// `KILN_USE_KT_API_ALL` meta-flag: useful for benching the full
+/// sampler kt-API path end-to-end without having to set three
+/// individual env vars. Each per-gate function still consults
+/// `cuda_use_kt_api_all()` as the highest-priority short-circuit,
+/// so `KILN_USE_KT_API_ALL=1` continues to enable everything
+/// (including the sampler family); this flag is the narrower
+/// "everything sampler, nothing else" knob.
+///
+/// Wiring the gate without yet migrating the per-family gates to
+/// consult it is an intentional incremental step (#1082, Phase 7).
+/// The per-family gates can be updated to short-circuit on
+/// `cuda_use_kt_api_sampling_all()` in a follow-up commit once
+/// the first sampler call site lands, mirroring how
+/// `KILN_USE_KT_API_ALL` was wired up.
+///
+/// Today this gate is unused. Returning a bool through `OnceLock`
+/// matches the other Phase 7 gates so the cost is one atomic read
+/// per call.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+pub(crate) fn cuda_use_kt_api_sampling_all() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SAMPLING_ALL").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: route the `PagedKvCache` allocation in
 /// `forward.rs` through the `PagedKvCacheKt` (kt-API) twin defined
 /// in [`crate::paged_kv_cache_kt`]. Default off; set
