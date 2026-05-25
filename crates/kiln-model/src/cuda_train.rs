@@ -2075,9 +2075,21 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
                 let shifted = logits_chunk
                     .broadcast_sub(&chunk_max)
                     .context("cuda_shifted_linear_cross_entropy_loss: initial shift")?;
-                let chunk_sumexp = shifted
-                    .exp()
-                    .context("cuda_shifted_linear_cross_entropy_loss: initial exp")?
+                // Phase 7 (#1082): route the per-chunk `exp` through
+                // the kt-API helper. `shifted` is a broadcast_sub of
+                // two F32 contiguous tensors → contiguous F32 result
+                // on CUDA, matching the kt route's gate. Falls through
+                // to the candle `exp()` path when the gate is off or
+                // the precondition fails.
+                let chunk_exp = match crate::forward::try_kt_exp(&shifted)
+                    .context("cuda_shifted_linear_cross_entropy_loss: try_kt_exp initial")?
+                {
+                    Some(out) => out,
+                    None => shifted
+                        .exp()
+                        .context("cuda_shifted_linear_cross_entropy_loss: initial exp")?,
+                };
+                let chunk_sumexp = chunk_exp
                     .sum_keepdim(D::Minus1)
                     .context("cuda_shifted_linear_cross_entropy_loss: initial sum")?;
                 (chunk_max.detach(), chunk_sumexp.detach())
@@ -2086,19 +2098,37 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
                 let new_max = prev_max
                     .maximum(&chunk_max)
                     .context("cuda_shifted_linear_cross_entropy_loss: running max")?;
-                let prev_scale = (prev_max - &new_max)
-                    .context("cuda_shifted_linear_cross_entropy_loss: previous scale logits")?
-                    .exp()
-                    .context("cuda_shifted_linear_cross_entropy_loss: previous scale")?;
+                // Phase 7 (#1082): route the `prev_scale` exp through
+                // the kt-API helper. `(prev_max - new_max)` is two F32
+                // contiguous tensors → contiguous F32 result on CUDA.
+                let prev_diff = (prev_max - &new_max)
+                    .context("cuda_shifted_linear_cross_entropy_loss: previous scale logits")?;
+                let prev_scale = match crate::forward::try_kt_exp(&prev_diff)
+                    .context("cuda_shifted_linear_cross_entropy_loss: try_kt_exp prev_scale")?
+                {
+                    Some(out) => out,
+                    None => prev_diff
+                        .exp()
+                        .context("cuda_shifted_linear_cross_entropy_loss: previous scale")?,
+                };
                 let scaled_prev = prev_sumexp
                     .broadcast_mul(&prev_scale)
                     .context("cuda_shifted_linear_cross_entropy_loss: scale previous sum")?;
                 let shifted = logits_chunk
                     .broadcast_sub(&new_max)
                     .context("cuda_shifted_linear_cross_entropy_loss: chunk shift")?;
-                let chunk_sumexp = shifted
-                    .exp()
-                    .context("cuda_shifted_linear_cross_entropy_loss: chunk exp")?
+                // Phase 7 (#1082): route the chunk `exp` through the
+                // kt-API helper. Same shape contract as the initial
+                // chunk branch above.
+                let chunk_exp = match crate::forward::try_kt_exp(&shifted)
+                    .context("cuda_shifted_linear_cross_entropy_loss: try_kt_exp chunk")?
+                {
+                    Some(out) => out,
+                    None => shifted
+                        .exp()
+                        .context("cuda_shifted_linear_cross_entropy_loss: chunk exp")?,
+                };
+                let chunk_sumexp = chunk_exp
                     .sum_keepdim(D::Minus1)
                     .context("cuda_shifted_linear_cross_entropy_loss: chunk sum")?;
                 let new_sumexp = (scaled_prev + chunk_sumexp)
