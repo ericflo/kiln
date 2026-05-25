@@ -12591,7 +12591,32 @@ fn gdn_chunkwise_recurrence(
     }
 
     let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
-    let out = Tensor::cat(&out_chunks, 2)?;
+    // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM2=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND every chunk-output is
+    // a contiguous CUDA tensor of a supported dtype, route the
+    // time-axis (axis=2) per-chunk concat through
+    // `kiln_tensor::cuda_concat(_, 2)`. Mirrors the conv1d
+    // prefill/decode cat_dim2 wirings. Falls through to the
+    // candle composite when any precondition fails so behavior
+    // is identical with the gate off. This is the
+    // gdn_chunkwise_recurrence final assembly step that joins
+    // per-chunk outputs into the seq_len-shaped attention
+    // output, called once per GDN layer per prefill request.
+    let out = {
+        let chunk_refs: Vec<&Tensor> = out_chunks.iter().collect();
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_cat_dim2(&chunk_refs)? {
+                out
+            } else {
+                Tensor::cat(&chunk_refs, 2)?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            Tensor::cat(&chunk_refs, 2)?
+        }
+    };
     finish_gdn_recurrent_inner_profile(
         device,
         "cat_out",
