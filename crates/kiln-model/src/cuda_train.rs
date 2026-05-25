@@ -2169,9 +2169,19 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
     let correct_refs: Vec<&Tensor> = correct.iter().collect();
     let correct_logits = Tensor::cat(&correct_refs, 0)
         .context("cuda_shifted_linear_cross_entropy_loss: cat correct logits")?;
-    let log_sum_exp = running_sumexp
-        .log()
-        .context("cuda_shifted_linear_cross_entropy_loss: log sumexp")?
+    // Phase 7 (#1082): route `running_sumexp.log()` through `try_kt_log`
+    // (single-kernel `cuda_activation_unary` with kind tag 6). Falls
+    // through to candle `.log()` when the kt-API gate is off or any
+    // precondition fails so behavior is identical with the gate off.
+    let log_sumexp_only = match crate::forward::try_kt_log(&running_sumexp)
+        .context("cuda_shifted_linear_cross_entropy_loss: try_kt_log")?
+    {
+        Some(out) => out,
+        None => running_sumexp
+            .log()
+            .context("cuda_shifted_linear_cross_entropy_loss: log sumexp")?,
+    };
+    let log_sum_exp = log_sumexp_only
         .broadcast_add(&running_max)
         .context("cuda_shifted_linear_cross_entropy_loss: add max")?
         .squeeze(1)
