@@ -29987,6 +29987,136 @@ mod tests {
         Ok(())
     }
 
+    /// Parity check for the kt-API path of `causal_conv1d_prefill` against
+    /// the candle-typed path at the native MTP draft shape (B=1, C=8192,
+    /// T=8, K=4). Both bottom out in the same FFI symbol, so this asserts
+    /// byte-for-byte output parity and byte-for-byte conv_state parity.
+    /// (#1082)
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_causal_conv1d_prefill_kt_api_parity() -> Result<()> {
+        use crate::backend::BackendRuntime;
+        use crate::backend::cuda::CudaBackend;
+        use rand::rngs::StdRng;
+        use rand::{RngExt, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_causal_conv1d_prefill_kt_api_parity"
+                );
+                return Ok(());
+            }
+        };
+
+        let batch = 1usize;
+        let channels = 8192usize; // Qwen3.5-4B linear_qkv_dim
+        let seq_len = 8usize; // native MTP draft length
+        let kernel_size = 4usize;
+
+        let mut rng = StdRng::seed_from_u64(0xC0_1DD00D);
+        let n_x = batch * channels * seq_len;
+        let n_w = channels * kernel_size;
+        let n_s = batch * channels * (kernel_size - 1);
+
+        let x_data: Vec<f32> = (0..n_x)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let w_data: Vec<f32> = (0..n_w)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.3f32..0.3f32))
+            .collect();
+
+        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
+            .to_dtype(DType::BF16)?;
+        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?
+            .to_dtype(DType::BF16)?;
+        // Independent conv_state buffers; see update parity test for why
+        // `clone()` is unsafe here (Arc-shared CUDA storage).
+        let s_candle_init =
+            Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?;
+        let s_kt_init =
+            Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?;
+
+        let candle_be = CudaBackend::new_with_kt_api_conv1d(device.clone(), false);
+        if !candle_be.supports_causal_conv1d_prefill() {
+            eprintln!(
+                "CudaBackend declined causal_conv1d_prefill (KILN_DISABLE_FUSED_CONV1D?); skipping"
+            );
+            return Ok(());
+        }
+        let mut s_candle = s_candle_init;
+        let out_candle =
+            match candle_be.causal_conv1d_prefill(&x, &w, &mut s_candle, kernel_size)? {
+                Some(t) => t,
+                None => {
+                    eprintln!("candle prefill declined dispatch; skipping kt parity");
+                    return Ok(());
+                }
+            };
+
+        let kt_be = CudaBackend::new_with_kt_api_conv1d(device.clone(), true);
+        let mut s_kt = s_kt_init;
+        let out_kt = match kt_be.causal_conv1d_prefill(&x, &w, &mut s_kt, kernel_size)? {
+            Some(t) => t,
+            None => {
+                eprintln!("kt prefill declined dispatch; skipping kt parity");
+                return Ok(());
+            }
+        };
+
+        let out_candle_data: Vec<f32> =
+            out_candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let out_kt_data: Vec<f32> =
+            out_kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(out_candle_data.len(), out_kt_data.len());
+        let mut mismatches = 0usize;
+        for (i, (a, b)) in out_candle_data.iter().zip(out_kt_data.iter()).enumerate() {
+            if a.to_bits() != b.to_bits() {
+                if mismatches < 4 {
+                    eprintln!(
+                        "kt prefill parity output mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                        a.to_bits(),
+                        b.to_bits()
+                    );
+                }
+                mismatches += 1;
+            }
+        }
+        assert_eq!(
+            mismatches, 0,
+            "kt-API causal_conv1d_prefill output diverges from candle path at {mismatches} indices"
+        );
+
+        let s_candle_data: Vec<f32> =
+            s_candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let s_kt_data: Vec<f32> = s_kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(s_candle_data.len(), s_kt_data.len());
+        let mut sm = 0usize;
+        for (i, (a, b)) in s_candle_data.iter().zip(s_kt_data.iter()).enumerate() {
+            if a.to_bits() != b.to_bits() {
+                if sm < 4 {
+                    eprintln!(
+                        "kt prefill parity state mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                        a.to_bits(),
+                        b.to_bits()
+                    );
+                }
+                sm += 1;
+            }
+        }
+        assert_eq!(
+            sm, 0,
+            "kt-API causal_conv1d_prefill conv_state diverges from candle path at {sm} indices"
+        );
+
+        Ok(())
+    }
+
+
 
     /// Metal parity check for `backend.causal_conv1d_update` against the same
     /// portable `causal_conv1d_decode` + `cuda_silu` oracle used by CUDA.
