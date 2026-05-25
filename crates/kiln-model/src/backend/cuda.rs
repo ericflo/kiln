@@ -1443,6 +1443,43 @@ impl BackendRuntime for CudaBackend {
         if !kiln_gdn_kernel::gdn_gated_rms_norm_supports(x, z, weight) {
             return Ok(None);
         }
+        // Phase 7 opt-in (#1082): route through the kt-typed bf16 surface.
+        // gdn_gated_rms_norm_supports already guarantees x/z/weight are BF16
+        // on CUDA with hidden=128; the bf16_kt variant matches the production
+        // hot path. Behind KILN_USE_KT_API_GDN gate.
+        if self.cuda_use_kt_api_gdn
+            && x.dtype() == DType::BF16
+            && z.dtype() == DType::BF16
+            && weight.dtype() == DType::BF16
+        {
+            kiln_nvtx::range!(c"kiln/gdn_gated_rms_norm_bf16_kt");
+            // The kt variant expects rank-2 [rows, hidden]; flatten higher-rank
+            // x/z by folding all leading dims into rows. weight stays [hidden].
+            let x_dims = x.dims();
+            let hidden = *x_dims.last().expect("x has at least one dim (checked by supports)");
+            let rows: usize = x_dims.iter().take(x_dims.len() - 1).product();
+            let x_flat = x
+                .reshape((rows, hidden))
+                .context("kt-adapter: gdn_gated_rms_norm reshape x → [rows, hidden] failed")?;
+            let z_flat = z
+                .reshape((rows, hidden))
+                .context("kt-adapter: gdn_gated_rms_norm reshape z → [rows, hidden] failed")?;
+            let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_flat)
+                .with_context(|| "kt-adapter: gdn_gated_rms_norm x → kt failed")?;
+            let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&z_flat)
+                .with_context(|| "kt-adapter: gdn_gated_rms_norm z → kt failed")?;
+            let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
+                .with_context(|| "kt-adapter: gdn_gated_rms_norm weight → kt failed")?;
+            let out_kt =
+                kiln_gdn_kernel::gdn_gated_rms_norm_bf16_kt(&x_kt, &z_kt, &w_kt, eps as f32)
+                    .map_err(|e| anyhow::anyhow!("kt gdn_gated_rms_norm_bf16: {e}"))?;
+            let out_flat = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                .with_context(|| "kt-adapter: gdn_gated_rms_norm out → candle failed")?;
+            let out = out_flat
+                .reshape(x_dims)
+                .context("kt-adapter: gdn_gated_rms_norm reshape out → original failed")?;
+            return Ok(Some(out));
+        }
         let out = kiln_gdn_kernel::gdn_gated_rms_norm(x, z, weight, eps as f32)
             .context("gdn_gated_rms_norm kernel failed")?;
         Ok(Some(out))
