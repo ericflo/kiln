@@ -3868,12 +3868,22 @@ impl CudaBackwardOp for RmsNormBackward {
             .context("cuda_rmsnorm backward: square input")?
             .mean_keepdim(D::Minus1)
             .context("cuda_rmsnorm backward: row variance")?;
-        let rms_inv = (variance + self.eps as f64)
-            .context("cuda_rmsnorm backward: add eps")?
-            .sqrt()
-            .context("cuda_rmsnorm backward: sqrt variance")?
-            .recip()
-            .context("cuda_rmsnorm backward: reciprocal rms")?;
+        // Phase 7 (#1082): fuse the `.sqrt().recip()` chain via
+        // `try_kt_rsqrt` (single-kernel `cuda_activation_unary` kind tag 22).
+        // Mirrors the forward `cuda_rmsnorm` rsqrt wiring. Falls through to
+        // the candle composite when KILN_USE_KT_API_RSQRT is off.
+        let variance_plus_eps = (variance + self.eps as f64)
+            .context("cuda_rmsnorm backward: add eps")?;
+        let rms_inv = match crate::forward::try_kt_rsqrt(&variance_plus_eps)
+            .context("cuda_rmsnorm backward: try_kt_rsqrt")?
+        {
+            Some(out) => out,
+            None => variance_plus_eps
+                .sqrt()
+                .context("cuda_rmsnorm backward: sqrt variance")?
+                .recip()
+                .context("cuda_rmsnorm backward: reciprocal rms")?,
+        };
         let rms_inv_sq = rms_inv
             .sqr()
             .context("cuda_rmsnorm backward: inv rms square")?;
