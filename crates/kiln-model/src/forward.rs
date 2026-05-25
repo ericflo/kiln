@@ -4273,7 +4273,7 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
 /// `kiln/sum_last_dim_kt` brackets the migrated call so nsys
 /// traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
-fn try_kt_sum_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
+pub(crate) fn try_kt_sum_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_sum_last_dim() {
         return Ok(None);
     }
@@ -4362,7 +4362,7 @@ fn try_kt_sum_axis(x: &Tensor, axis: usize) -> Result<Option<Tensor>> {
 /// `kiln/max_last_dim_kt` brackets the migrated call so nsys
 /// traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
-fn try_kt_max_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
+pub(crate) fn try_kt_max_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_max_last_dim() {
         return Ok(None);
     }
@@ -8708,7 +8708,7 @@ fn try_kt_sqrt(x: &Tensor) -> Result<Option<Tensor>> {
 /// follow-up commits — each port replaces two candle calls + one
 /// allocation with a single fused kernel.
 #[cfg(feature = "cuda")]
-fn try_kt_rsqrt(x: &Tensor) -> Result<Option<Tensor>> {
+pub(crate) fn try_kt_rsqrt(x: &Tensor) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_rsqrt() {
         return Ok(None);
     }
@@ -9660,7 +9660,7 @@ pub(crate) fn try_kt_recip(x: &Tensor) -> Result<Option<Tensor>> {
 /// `(1 + exp(-|x|)).log()` step. softplus runs as the last step
 /// of the GDN `b` (forget gate) computation, once per decode step.
 #[cfg(feature = "cuda")]
-fn try_kt_log(x: &Tensor) -> Result<Option<Tensor>> {
+pub(crate) fn try_kt_log(x: &Tensor) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_log() {
         return Ok(None);
     }
