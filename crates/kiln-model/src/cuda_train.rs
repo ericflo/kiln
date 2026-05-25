@@ -726,10 +726,23 @@ pub fn cuda_div(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrai
         lhs.dtype(),
         rhs.dtype()
     );
-    let out = lhs
-        .as_tensor()
-        .broadcast_div(rhs.as_tensor())
-        .context("cuda_div: candle CUDA div")?;
+    // Phase 7 (#1082): route the equal-shape elementwise div through
+    // the kt-API helper. `cuda_div` requires lhs.shape() ==
+    // rhs.shape() at entry (asserted above), so the helper's
+    // shape-equality precondition is guaranteed to engage and the kt
+    // path dispatches one cuda_elementwise_binary(KIND_DIV) launch.
+    // Falls through to the candle composite when
+    // KILN_USE_KT_API_BROADCAST_DIV is off (default) so behavior is
+    // identical with the gate off.
+    let out = match crate::forward::try_kt_broadcast_div(lhs.as_tensor(), rhs.as_tensor())
+        .context("cuda_div: try_kt_broadcast_div")?
+    {
+        Some(out) => out,
+        None => lhs
+            .as_tensor()
+            .broadcast_div(rhs.as_tensor())
+            .context("cuda_div: candle CUDA div")?,
+    };
     let needs_grad = lhs.requires_grad()
         || lhs.grad_fn().is_some()
         || lhs.param_id().is_some()
