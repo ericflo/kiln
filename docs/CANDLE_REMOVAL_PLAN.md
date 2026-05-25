@@ -135,7 +135,7 @@ sed -i "/candle-core.*path.*vendor/d" Cargo.toml
   `crates/kiln-model/src/backend/cuda.rs:1004` and `:1038`.
   Status by crate:
     - kiln-rmsnorm-kernel: 7 production `_kt` callers in forward.rs ✓
-    - kiln-conv1d-kernel: 2/2 kt_api functions wired in CudaBackend ✓
+    - kiln-conv1d-kernel: 2/2 kt_api functions wired in CudaBackend ✓ + byte-exact parity tests at B=1/C=8192 (`69a5f68c` update + `1cb0c107` prefill, 0 mismatches across 8192/65536 output elements and 24576 conv_state elements)
     - kiln-marlin-gemm: 1/1 kt_api function wired in marlin_proj::matmul_bf16 ✓ (`8b415107` + `668b0847` bridge extension for I32→U32)
     - kiln-flash-attn: 0/5 — pending
     - kiln-gdn-kernel: 0/3 — pending
