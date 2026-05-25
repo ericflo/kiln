@@ -1474,3 +1474,37 @@ action tokens and total steps but did not change the practical runtime class.
 The next experiment should stop slicing long thinking-on transcripts and
 instead collect or synthesize short successful rollouts whose whole
 prompt+prefix is compact.
+
+### H76: compact success workflow
+
+H76 tested that next direction directly. Instead of slicing old thinking-on
+transcripts, it built compact train-only successful workflows from task stubs.
+Each group used the same correct read/edit/doctest/`DONE` workflow on both
+completions. The preferred completion used terse thinking; the weaker
+completion used verbose thinking. This avoided failed code, wrong edits, and
+premature terminal negatives.
+
+The first build attempted six train tasks, but two train task shapes were
+excluded during local verifier construction: `task_0060` expected `None` in a
+doctest, which produces no display-hook output, and `task_0063` had a median
+doctest inconsistent with the usual sorted median. The final data used
+`task_0024`, `task_0026`, and `task_0057`:
+`/tmp/pi-doctest-h76-compact-success-grpo/grpo-train.compact-success-workflow.g3.jsonl`.
+Dry-run passed with 3 groups, 6 completions, 953 action tokens, 722 env tokens,
+1668 context tokens, reward stdev 0.075000, and hash
+`sha256:13b4ceb792b586b721c4530ca83e8834f2fad235a5cae0ebb4577b71baa518dc`.
+
+Training used `cuda_grpo_ablation --mode phase1`, rank 4 / alpha 4 / lr
+`2e-7`, no ECHO, seed `3141592653`, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed locally in 107.683s observed
+with peak observed VRAM 15,941 MiB. Adapter verify passed with 400 nonzero
+tensors, 200 LoRA projection pairs, and LoRA update proxy 0.018225.
+
+Blind `LIMIT=4 SEEDS=1` smoke rejected it. Paired base scored 0.934375 with
+no zero rollouts and mean wall-clock 29.40s. H76 scored 0.703125 with one zero
+rollout and mean wall-clock 60.36s. Lesson: compact-from-start full workflow
+data fixes the H74/H75 throughput problem, but success-only
+concise-over-verbose full workflows still create the reliability and latency
+drift seen in prior small imitation-style attempts. Future work needs real
+reward variance or explicit base-distribution regularization, not more
+positive full-workflow imitation at this scale.
