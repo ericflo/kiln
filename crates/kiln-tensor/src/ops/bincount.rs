@@ -17,6 +17,24 @@ pub fn bincount(x: &Tensor, min_length: usize) -> Result<Tensor> {
     if !x.is_contiguous() {
         bail!("bincount: input must be contiguous");
     }
+
+    // CUDA fast path: D2H-copy the input integer tensor and reuse the
+    // CPU histogram. bincount's output is a small dense histogram
+    // indexed by max(x), and the inner loop is data-dependent
+    // scatter-add — a CPU loop is fine. The public API must accept
+    // CUDA-resident inputs transparently because upstream `argmax` /
+    // sampler outputs already live on the device that produced them.
+    // See `#1082`.
+    #[cfg(feature = "cuda")]
+    let _x_host;
+    #[cfg(feature = "cuda")]
+    let x = if matches!(x.device(), crate::Device::Cuda(_)) {
+        _x_host = crate::cuda_to_host_copy(x)?;
+        &_x_host
+    } else {
+        x
+    };
+
     let n = x.element_count();
     let cpu = x
         .storage()
