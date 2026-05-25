@@ -121,6 +121,16 @@ pub struct CudaBackend {
     /// of the candle-typed shim. Set `KILN_USE_KT_API_GDN=1` (or
     /// `KILN_USE_KT_API_ALL=1`) to enable; default off.
     cuda_use_kt_api_gdn: bool,
+    /// Phase 7 opt-in (#1082): route the flash-attention-2 prefill
+    /// kernel through the kt-typed surface (`flash_attn_fwd_kt`)
+    /// instead of the candle-typed `kiln_flash_attn::flash_attn`
+    /// shim. Set `KILN_USE_KT_API_FLASH_ATTN=1` (or
+    /// `KILN_USE_KT_API_ALL=1`) to enable; default off. The kt path
+    /// matches the candle path bit-exactly because both bottom out
+    /// in the same `kiln_flash_attn_fwd` FFI symbol; only the Rust
+    /// shell types change. The candle wrapper discards softmax_lse;
+    /// the kt path does the same (we only return `out`).
+    cuda_use_kt_api_flash_attn: bool,
     /// Forward-only CUDA LoRA delta/add for decode. Training declines because
     /// tracked LoRA tensors need autograd.
     lora_decode_add_enabled: bool,
@@ -146,6 +156,8 @@ impl CudaBackend {
             || std::env::var("KILN_USE_KT_API_ALL").is_ok();
         let cuda_use_kt_api_gdn = std::env::var("KILN_USE_KT_API_GDN").is_ok()
             || std::env::var("KILN_USE_KT_API_ALL").is_ok();
+        let cuda_use_kt_api_flash_attn = std::env::var("KILN_USE_KT_API_FLASH_ATTN").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok();
         let gdn_decode_fused_enabled = gdn_gates_enabled
             && gdn_gated_rms_norm_enabled
             && std::env::var("KILN_DISABLE_FUSED_GDN_DECODE").is_err();
@@ -170,6 +182,7 @@ impl CudaBackend {
             fused_conv1d_enabled,
             cuda_use_kt_api_conv1d,
             cuda_use_kt_api_gdn,
+            cuda_use_kt_api_flash_attn,
             lora_decode_add_enabled,
             gdn_full_chunk_forward_multiblock_enabled,
         }
@@ -394,6 +407,30 @@ impl BackendRuntime for CudaBackend {
         }
         if q.dtype() != DType::BF16 {
             return Ok(None);
+        }
+        // Phase 7 opt-in (#1082): route through the kt-typed surface.
+        // The kt path bottoms out in the same `kiln_flash_attn_fwd` FFI
+        // symbol as the candle shim, so it's bit-exactly equivalent;
+        // only the Rust shell types change. The candle wrapper
+        // discards softmax_lse, so the kt path does the same here.
+        if self.cuda_use_kt_api_flash_attn {
+            kiln_nvtx::range!(c"kiln/flash_attn_kt");
+            // Match candle shim's contiguous-input contract.
+            let q_c = q.contiguous().context("flash_attn kt: q contiguous")?;
+            let k_c = k.contiguous().context("flash_attn kt: k contiguous")?;
+            let v_c = v.contiguous().context("flash_attn kt: v contiguous")?;
+            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_c)
+                .context("flash_attn kt: borrow q -> kt")?;
+            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_c)
+                .context("flash_attn kt: borrow k -> kt")?;
+            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_c)
+                .context("flash_attn kt: borrow v -> kt")?;
+            let (out_kt, _lse_kt) =
+                kiln_flash_attn::flash_attn_fwd_kt(&q_kt, &k_kt, &v_kt, softmax_scale, causal)
+                    .map_err(|e| anyhow::anyhow!("flash_attn kt: flash_attn_fwd_kt: {e}"))?;
+            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                .context("flash_attn kt: copy kt out -> candle")?;
+            return Ok(Some(out));
         }
         let out = kiln_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
             .context("flash_attn kernel failed")?;
@@ -1227,6 +1264,7 @@ mod tests {
             fused_conv1d_enabled: false,
             cuda_use_kt_api_conv1d: false,
             cuda_use_kt_api_gdn: false,
+            cuda_use_kt_api_flash_attn: false,
             lora_decode_add_enabled: false,
             gdn_full_chunk_forward_multiblock_enabled: false,
         }
