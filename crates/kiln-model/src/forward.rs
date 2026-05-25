@@ -12168,11 +12168,42 @@ fn gated_deltanet_gates_fallback(
             .broadcast_add(&dt_bias_f32)
             .context("gdn gates fallback broadcast_add dt_bias")?;
         let sp = softplus(&a_biased).context("gdn gates fallback softplus")?;
-        let neg_decay = a_log_f32
+        let a_log_exp = a_log_f32
             .exp()
-            .context("gdn gates fallback a_log exp")?
-            .neg()
-            .context("gdn gates fallback a_log neg")?; // -exp(A_log)
+            .context("gdn gates fallback a_log exp")?;
+        // Phase 7 (#1082): when `KILN_USE_KT_API_NEG=1` (or
+        // `KILN_USE_KT_API_ALL=1`) is set AND `a_log_exp` is a
+        // contiguous CUDA tensor of a supported dtype, route
+        // `a_log_exp.neg()` through `kiln_tensor::cuda_activation_unary`
+        // with kind 12 (Neg) via the kt-bridge borrow adapter. Falls
+        // through to candle's `.neg()` on any precondition failure.
+        //
+        // This is the GDN gates fallback path — only reached when
+        // KILN_DISABLE_FUSED_GDN_GATES=1 disables the fused kernel for
+        // parity testing. Wiring here exercises the kt-API on a less-
+        // trafficked code path that mirrors the fused kernel's
+        // -exp(A_log) decay computation in candle composites, so kt-API
+        // parity coverage extends to the parity baseline itself.
+        let neg_decay = {
+            #[cfg(feature = "cuda")]
+            {
+                if let Some(out) = try_kt_neg(&a_log_exp)
+                    .context("gdn gates fallback try_kt_neg")?
+                {
+                    out
+                } else {
+                    a_log_exp
+                        .neg()
+                        .context("gdn gates fallback a_log neg")?
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                a_log_exp
+                    .neg()
+                    .context("gdn gates fallback a_log neg")?
+            }
+        }; // -exp(A_log)
         sp.broadcast_mul(&neg_decay)
             .context("gdn gates fallback broadcast_mul neg_decay")?
     }
