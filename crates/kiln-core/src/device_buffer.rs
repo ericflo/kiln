@@ -171,6 +171,14 @@ mod tests {
         assert!(buf.as_vulkan().is_none());
     }
 
+    #[cfg(feature = "metal")]
+    #[test]
+    fn cpu_variant_does_not_resolve_as_metal() {
+        let bytes: Arc<[u8]> = Arc::from(vec![0u8; 4].into_boxed_slice());
+        let buf = DeviceBuffer::from_cpu_bytes(bytes);
+        assert!(buf.as_metal().is_none());
+    }
+
     #[test]
     fn dropping_buffer_releases_arc() {
         let bytes: Arc<[u8]> = Arc::from(vec![0u8; 8].into_boxed_slice());
