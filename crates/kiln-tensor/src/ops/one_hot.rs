@@ -44,6 +44,25 @@ pub fn one_hot(indices: &Tensor, depth: usize, dtype: DType) -> Result<Tensor> {
     if !indices.is_contiguous() {
         bail!("one_hot: indices must be contiguous");
     }
+
+    // CUDA fast path: D2H-copy the integer indices tensor and
+    // reuse the CPU one-hot loop. The output is a small dense
+    // tensor with all-zero rows except one set bit per index, and
+    // the inner write is data-dependent scatter — a CPU loop is
+    // fine. The public API must accept CUDA-resident indices
+    // transparently because upstream `argmax` / sampler outputs
+    // already live on the device that produced them. See
+    // `#1082`.
+    #[cfg(feature = "cuda")]
+    let _indices_host;
+    #[cfg(feature = "cuda")]
+    let indices = if matches!(indices.device(), crate::Device::Cuda(_)) {
+        _indices_host = crate::cuda_to_host_copy(indices)?;
+        &_indices_host
+    } else {
+        indices
+    };
+
     let n = indices.element_count();
     let in_cpu = indices
         .storage()
