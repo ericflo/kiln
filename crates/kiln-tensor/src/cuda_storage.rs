@@ -289,6 +289,14 @@ impl CudaStorage {
     pub fn candle_device(&self) -> &Arc<CudaDevice> {
         &self.candle_device
     }
+
+    /// Crate-internal accessor for the slice owner. Used by sibling
+    /// FFI modules (`fp8.rs`, etc.) that need to extract a device
+    /// pointer without going through `device_ptr_raw` (which discards
+    /// the stream guard).
+    pub(crate) fn slice_owner(&self) -> &SliceOwner {
+        &self.slice
+    }
 }
 
 impl StorageBackend for CudaStorage {
