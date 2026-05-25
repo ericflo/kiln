@@ -9,7 +9,7 @@
 
 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 use kiln_kt_bridge::BridgeError;
-use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
+use kiln_tensor::{CudaStorage, DType as KtDType, Device as KtDevice, Tensor as KtTensor};
 
 use crate::{kiln_causal_conv1d_prefill_bf16_f32, kiln_causal_conv1d_update_bf16_f32};
 
@@ -252,4 +252,103 @@ pub fn causal_conv1d_prefill_kt(
         )));
     }
     Ok(out)
+}
+
+/// kt-typed twin of [`crate::supports`].
+///
+/// Returns `true` only for the exact bf16/f32/K=4 envelope the
+/// vendored kernel was specialised for. Mirrors the candle-typed
+/// [`crate::supports_update`] but takes `&KtTensor` so callers on
+/// the kt-substrate don't need to round-trip through candle for the
+/// pre-dispatch envelope check.
+///
+/// Phase 7 (#1082) — once every caller is on this kt-typed
+/// predicate, the candle-typed `supports*` can be deleted alongside
+/// the candle dep itself.
+pub fn supports_kt(
+    x: &KtTensor,
+    weight: &KtTensor,
+    conv_state: &KtTensor,
+    kernel_size: usize,
+) -> bool {
+    supports_update_kt(x, weight, conv_state, kernel_size)
+}
+
+/// kt-typed twin of [`crate::supports_update`].
+pub fn supports_update_kt(
+    x: &KtTensor,
+    weight: &KtTensor,
+    conv_state: &KtTensor,
+    kernel_size: usize,
+) -> bool {
+    if kernel_size != 4 {
+        return false;
+    }
+    if !matches!(x.device(), KtDevice::Cuda(_)) {
+        return false;
+    }
+    if x.dtype() != KtDType::BF16 || weight.dtype() != KtDType::BF16 {
+        return false;
+    }
+    if conv_state.dtype() != KtDType::F32 {
+        return false;
+    }
+    // x: [B, C, 1]
+    let x_shape = x.shape();
+    if x_shape.len() != 3 || x_shape[2] != 1 {
+        return false;
+    }
+    let (batch, channels) = (x_shape[0], x_shape[1]);
+    // conv_state: [B, C, K-1]
+    let cs_shape = conv_state.shape();
+    if cs_shape.len() != 3
+        || (cs_shape[0], cs_shape[1], cs_shape[2]) != (batch, channels, kernel_size - 1)
+    {
+        return false;
+    }
+    weight_supports_kt(weight, channels, kernel_size)
+}
+
+/// kt-typed twin of [`crate::supports_prefill`].
+pub fn supports_prefill_kt(
+    x: &KtTensor,
+    weight: &KtTensor,
+    conv_state: &KtTensor,
+    kernel_size: usize,
+) -> bool {
+    if kernel_size != 4 {
+        return false;
+    }
+    if !matches!(x.device(), KtDevice::Cuda(_)) {
+        return false;
+    }
+    if x.dtype() != KtDType::BF16 || weight.dtype() != KtDType::BF16 {
+        return false;
+    }
+    if conv_state.dtype() != KtDType::F32 {
+        return false;
+    }
+    // x: [B, C, T], T > 1
+    let x_shape = x.shape();
+    if x_shape.len() != 3 || x_shape[2] <= 1 {
+        return false;
+    }
+    let (batch, channels) = (x_shape[0], x_shape[1]);
+    // conv_state: [B, C, K-1]
+    let cs_shape = conv_state.shape();
+    if cs_shape.len() != 3
+        || (cs_shape[0], cs_shape[1], cs_shape[2]) != (batch, channels, kernel_size - 1)
+    {
+        return false;
+    }
+    weight_supports_kt(weight, channels, kernel_size)
+}
+
+fn weight_supports_kt(weight: &KtTensor, channels: usize, kernel_size: usize) -> bool {
+    let s = weight.shape();
+    match s.len() {
+        3 => s[0] == channels && s[1] == 1 && s[2] == kernel_size,
+        2 => s[0] == channels && s[1] == kernel_size,
+        _ => false,
+    }
 }
