@@ -445,6 +445,53 @@ fn cuda_use_kt_api_sum_last_dim() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: `max_keepdim(-1)` through the kt-API + adapters.
+/// Set `KILN_USE_KT_API_MAX_LAST_DIM=1` (or `KILN_USE_KT_API_ALL=1`)
+/// to enable; default off. Routes the `x.max_keepdim(D::Minus1)`
+/// reduction (the softmax-stabilization max step in the candle
+/// composite fallback for [`cuda_softmax_last_dim`]) through
+/// `kiln_tensor::cuda_max_axis` plus a zero-cost `unsqueeze(-1)` to
+/// restore the trailing-dim shape. Falls through to the candle
+/// composite when any precondition fails so behavior is identical
+/// with the gate off.
+///
+/// Mirrors [`cuda_use_kt_api_mean_last_dim`] and
+/// [`cuda_use_kt_api_sum_last_dim`]. The kt kernel
+/// (`reduce_arbitrary_axis`, commit `7ca6cabd`) supports any axis
+/// including non-trailing, but this gate only targets the trailing
+/// axis since that's the only `max_keepdim` shape forward.rs uses.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_max_last_dim() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MAX_LAST_DIM").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
+/// Phase 7 opt-in: `min_keepdim(-1)` through the kt-API + adapters.
+/// Set `KILN_USE_KT_API_MIN_LAST_DIM=1` (or `KILN_USE_KT_API_ALL=1`)
+/// to enable; default off. Routes any
+/// `x.min_keepdim(D::Minus1)` reduction through
+/// `kiln_tensor::cuda_min_axis` plus a zero-cost `unsqueeze(-1)` to
+/// restore the trailing-dim shape. Falls through to the candle
+/// composite when any precondition fails so behavior is identical
+/// with the gate off.
+///
+/// Mirror of [`cuda_use_kt_api_max_last_dim`]. Today there are no
+/// production `min_keepdim(-1)` call sites in `forward.rs`; the
+/// gate + helper are scaffolded for symmetry with the `max_last_dim`
+/// path (the kt kernel is the same `reduce_arbitrary_axis` shared
+/// dispatch, just with `axis_op=0`) so future migrations land
+/// without further plumbing.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_min_last_dim() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MIN_LAST_DIM").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: `Tensor::cat` along axis 0 through the kt-API +
 /// adapters. Set `KILN_USE_KT_API_CAT_DIM0=1` (or
 /// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
@@ -3189,7 +3236,27 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
             return Ok(out);
         }
     }
-    let max_val = x.max_keepdim(candle_core::D::Minus1)?;
+    // Phase 7 (#1082): when `KILN_USE_KT_API_MAX_LAST_DIM=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND `x` is a contiguous CUDA
+    // tensor of {F32, BF16, F16}, route the
+    // `max_keepdim(D::Minus1)` reduction (the softmax-stabilization
+    // max step) through `kiln_tensor::cuda_max_axis` plus a
+    // zero-cost `unsqueeze(-1)`. Falls through to the candle
+    // composite when any precondition fails so behavior is
+    // identical with the gate off.
+    let max_val = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_max_last_dim_keepdim(x)? {
+                Some(out) => out,
+                None => x.max_keepdim(candle_core::D::Minus1)?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            x.max_keepdim(candle_core::D::Minus1)?
+        }
+    };
     let shifted = x.broadcast_sub(&max_val)?;
     // Phase 7 (#1082): when `KILN_USE_KT_API_EXP=1` (or
     // `KILN_USE_KT_API_ALL=1`) is set AND `shifted` is a
@@ -3276,6 +3343,93 @@ fn try_kt_sum_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
     let out = reduced
         .unsqueeze(candle_core::D::Minus1)
         .map_err(|e| anyhow::anyhow!("try_kt_sum_last_dim_keepdim: unsqueeze failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API `max_keepdim(-1)` migration helper.
+/// Routes a contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_max_axis` (which reduces an arbitrary axis
+/// with the axis dim removed) and re-applies `unsqueeze(-1)` so the
+/// output shape matches `max_keepdim`.
+///
+/// Returns `Ok(None)` on any incompatibility so the caller falls
+/// through to the candle composite. NVTX range
+/// `kiln/max_last_dim_kt` brackets the migrated call so nsys
+/// traces separate the path from the baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_max_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_max_last_dim() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/max_last_dim_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let last_axis = x.rank() - 1;
+    let out_kt = match kiln_tensor::cuda_max_axis(&x_kt, last_axis) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let reduced = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).map_err(|e| {
+        anyhow::anyhow!("try_kt_max_last_dim_keepdim: candle copy-back failed: {e}")
+    })?;
+    let out = reduced
+        .unsqueeze(candle_core::D::Minus1)
+        .map_err(|e| anyhow::anyhow!("try_kt_max_last_dim_keepdim: unsqueeze failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API `min_keepdim(-1)` migration helper.
+/// Mirrors [`try_kt_max_last_dim_keepdim`] but with
+/// `kiln_tensor::cuda_min_axis`. Wired up for completeness; today
+/// there are no `min_keepdim(-1)` production call sites in
+/// `forward.rs`.
+///
+/// Returns `Ok(None)` on any incompatibility so the caller falls
+/// through to the candle composite. NVTX range
+/// `kiln/min_last_dim_kt` brackets the migrated call so nsys
+/// traces separate the path from the baseline composite.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_min_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_min_last_dim() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/min_last_dim_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let last_axis = x.rank() - 1;
+    let out_kt = match kiln_tensor::cuda_min_axis(&x_kt, last_axis) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let reduced = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).map_err(|e| {
+        anyhow::anyhow!("try_kt_min_last_dim_keepdim: candle copy-back failed: {e}")
+    })?;
+    let out = reduced
+        .unsqueeze(candle_core::D::Minus1)
+        .map_err(|e| anyhow::anyhow!("try_kt_min_last_dim_keepdim: unsqueeze failed: {e}"))?;
     Ok(Some(out))
 }
 
