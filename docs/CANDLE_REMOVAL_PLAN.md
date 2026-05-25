@@ -128,11 +128,18 @@ sed -i "/candle-core.*path.*vendor/d" Cargo.toml
 ## Status snapshot (2026-05-25, refreshed)
 
 - Tier 0: ✅ already candle-free (kiln-core, kiln-scheduler, kiln-nvtx).
-- Tier 1: 🟡 in flight — all 5 kernel crates have kt_api surfaces. Production
-  wiring in progress: kiln-rmsnorm-kernel has 7 `_kt` calls in forward.rs;
-  kiln-conv1d-kernel, kiln-marlin-gemm, kiln-flash-attn, kiln-gdn-kernel
-  have 0 production `_kt` callers yet (kt_api surfaces ready, callers
-  still on candle-typed entries).
+- Tier 1: 🟡 in flight — all 5 kernel crates have kt_api surfaces.
+  **Production wiring breakthrough** (#695587df): first kt_api production wire
+  for a non-rmsnorm kernel crate. kiln-conv1d-kernel's `causal_conv1d_update_kt`
+  + `causal_conv1d_prefill_kt` are now both wired in `CudaBackend` at
+  `crates/kiln-model/src/backend/cuda.rs:1004` and `:1038`.
+  Status by crate:
+    - kiln-rmsnorm-kernel: 7 production `_kt` callers in forward.rs ✓
+    - kiln-conv1d-kernel: 2/2 kt_api functions wired in CudaBackend ✓
+    - kiln-marlin-gemm: 0/1 — sub-agent in flight as of 2026-05-25
+    - kiln-flash-attn: 0/5 — pending
+    - kiln-gdn-kernel: 0/3 — pending
+    - kiln-opd-loss-kernel: separate phase (full rewrite for Phase B)
 - Tier 2: 🟡 in flight — flce-kernel Phase B is the standout rewrite effort.
   Metal + Vulkan backends now have real kernel wires landed for 9 ops
   (rmsnorm, layernorm, l2norm, silu, sigmoid, softmax, elementwise binary
