@@ -30652,6 +30652,151 @@ mod tests {
 
 
 
+    /// Parity check for the kt-API path of
+    /// `backend.gdn_recurrent_step` against the candle-typed path.
+    /// Both bottom out in the same FFI symbol
+    /// (`kiln_gdn_recurrent_forward`) so this asserts byte-for-byte
+    /// parity on the BF16 output and the BF16 `state` mutation. (#1082)
+    ///
+    /// This is the production hot path for Qwen3.5-4B GDN decode at
+    /// shapes the qk-norm/rmsnorm wrappers fall through to. The wire
+    /// landed in 7a357a3d.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gdn_recurrent_step_kt_api_parity() -> Result<()> {
+        use crate::backend::BackendRuntime;
+        use crate::backend::cuda::CudaBackend;
+        use rand::rngs::StdRng;
+        use rand::{RngExt, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_gdn_recurrent_step_kt_api_parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // Qwen3.5-4B GDN decode envelope at batch=1 with seq_len=1
+        // collapsed away (the trait signature expects 3D, see
+        // `gdn_recurrent_forward` at crates/kiln-gdn-kernel/src/lib.rs:537):
+        //   q, k:    [B, H, dk]      bf16
+        //   v:       [B, H, dv]      bf16
+        //   beta, g: [B, H]          bf16
+        //   state:   [B, H, dk, dv]  bf16 (mutated in place)
+        // The kt and candle paths share the same FFI symbol; the test
+        // is correctness-of-Rust-shell only.
+        let batch = 1usize;
+        let heads = 32usize;
+        let dk = 128usize;
+        let dv = 128usize;
+
+        let n_qk = batch * heads * dk;
+        let n_v = batch * heads * dv;
+        let n_bg = batch * heads;
+        let n_state = batch * heads * dk * dv;
+
+        let mut rng = StdRng::seed_from_u64(0xC0_1DD0DE);
+        let q_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let k_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let beta_data: Vec<f32> = (0..n_bg).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let g_data: Vec<f32> = (0..n_bg).map(|_| rng.random_range(-2.0f32..0.0)).collect();
+        let s_data: Vec<f32> = (0..n_state).map(|_| rng.random_range(-0.3f32..0.3)).collect();
+
+        let q = Tensor::from_slice(&q_data, (batch, heads, dk), &device)?.to_dtype(DType::BF16)?;
+        let k = Tensor::from_slice(&k_data, (batch, heads, dk), &device)?.to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (batch, heads, dv), &device)?.to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (batch, heads), &device)?.to_dtype(DType::BF16)?;
+        let g = Tensor::from_slice(&g_data, (batch, heads), &device)?.to_dtype(DType::BF16)?;
+        // Allocate two INDEPENDENT state buffers from the same seed data;
+        // candle `Tensor::clone()` shares storage (it's effectively
+        // `Arc<Tensor_>::clone`) and would race the same underlying CUDA
+        // buffer once the kernel mutates it. See conv1d parity test at
+        // commit 69a5f68c for the original incident.
+        let mut state_candle =
+            Tensor::from_slice(&s_data, (batch, heads, dk, dv), &device)?.to_dtype(DType::BF16)?;
+        let mut state_kt =
+            Tensor::from_slice(&s_data, (batch, heads, dk, dv), &device)?.to_dtype(DType::BF16)?;
+
+        // Candle-typed path.
+        let candle_be = CudaBackend::new_with_kt_api_gdn(device.clone(), false);
+        let out_candle = match candle_be.gdn_recurrent_step(
+            &q, &k, &v, &beta, &g, &mut state_candle,
+        )? {
+            Some(t) => t,
+            None => {
+                eprintln!("candle gdn_recurrent_step declined dispatch; skipping kt parity");
+                return Ok(());
+            }
+        };
+
+        // kt-API path.
+        let kt_be = CudaBackend::new_with_kt_api_gdn(device.clone(), true);
+        let out_kt = match kt_be.gdn_recurrent_step(
+            &q, &k, &v, &beta, &g, &mut state_kt,
+        )? {
+            Some(t) => t,
+            None => {
+                eprintln!("kt gdn_recurrent_step declined dispatch; skipping kt parity");
+                return Ok(());
+            }
+        };
+
+        // Output parity: byte-for-byte (same FFI symbol).
+        let out_candle_data: Vec<f32> =
+            out_candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let out_kt_data: Vec<f32> =
+            out_kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(out_candle_data.len(), out_kt_data.len());
+        let mut mismatches = 0usize;
+        for (i, (a, b)) in out_candle_data.iter().zip(out_kt_data.iter()).enumerate() {
+            if a.to_bits() != b.to_bits() {
+                if mismatches < 4 {
+                    eprintln!(
+                        "kt parity output mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                        a.to_bits(),
+                        b.to_bits()
+                    );
+                }
+                mismatches += 1;
+            }
+        }
+        assert_eq!(
+            mismatches, 0,
+            "kt-API gdn_recurrent_step output diverges from candle path at {mismatches} indices"
+        );
+
+        // state parity: byte-for-byte (in-place mutation through both
+        // candle and kt borrow adapters writes to the same CUDA buffer).
+        let s_candle_data: Vec<f32> =
+            state_candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let s_kt_data: Vec<f32> =
+            state_kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(s_candle_data.len(), s_kt_data.len());
+        let mut sm = 0usize;
+        for (i, (a, b)) in s_candle_data.iter().zip(s_kt_data.iter()).enumerate() {
+            if a.to_bits() != b.to_bits() {
+                if sm < 4 {
+                    eprintln!(
+                        "kt parity state mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                        a.to_bits(),
+                        b.to_bits()
+                    );
+                }
+                sm += 1;
+            }
+        }
+        assert_eq!(
+            sm, 0,
+            "kt-API gdn_recurrent_step state diverges from candle path at {sm} indices"
+        );
+
+        Ok(())
+    }
+
     /// Metal parity check for `backend.causal_conv1d_update` against the same
     /// portable `causal_conv1d_decode` + `cuda_silu` oracle used by CUDA.
     #[cfg(feature = "metal")]
