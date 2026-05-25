@@ -11234,13 +11234,34 @@ fn l2_normalize(x: &Tensor) -> Result<Tensor> {
             x_f32.sqr()?.sum_keepdim(candle_core::D::Minus1)?
         }
     };
+    // Phase 7 (#1082): when `KILN_USE_KT_API_ADD_SCALAR=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND `sq_sum` is a contiguous
+    // CUDA tensor of {F32, BF16, F16}, route the `+ 1e-6` epsilon
+    // step through `kiln_tensor::cuda_scalar_op` with kind 0
+    // (AddScalar). Falls through to the candle composite when any
+    // precondition fails so behavior is identical with the gate
+    // off. Mirrors the softplus + sigmoid wirings of try_kt_add_scalar.
+    //
     // Phase 7 (#1082): when `KILN_USE_KT_API_SQRT=1` (or
     // `KILN_USE_KT_API_ALL=1`) is set AND the addend is a
     // contiguous CUDA tensor of a supported dtype, route the
     // `.sqrt()` step through `kiln_tensor::cuda_activation_unary`
     // with kind 14 (Sqrt). Falls through to the candle composite
     // when any precondition fails.
-    let sq_sum_eps = (sq_sum + 1e-6)?;
+    let sq_sum_eps = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = try_kt_add_scalar(&sq_sum, 1e-6)? {
+                out
+            } else {
+                (sq_sum + 1e-6)?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            (sq_sum + 1e-6)?
+        }
+    };
     let norm = {
         #[cfg(feature = "cuda")]
         {
