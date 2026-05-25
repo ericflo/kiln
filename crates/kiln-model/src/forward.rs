@@ -7990,7 +7990,7 @@ fn apply_rope(
 /// NVTX range `kiln/concat_last_dim_kt` brackets the migrated call
 /// so nsys traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
-fn try_kt_concat_last_dim(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
+pub(crate) fn try_kt_concat_last_dim(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_concat_last_dim() {
         return Ok(None);
     }

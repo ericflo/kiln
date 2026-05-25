@@ -942,9 +942,37 @@ fn cuda_rope_apply(
         )
     };
 
+    // Phase 7 (#1082): when `KILN_USE_KT_API_CONCAT_LAST_DIM=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND all pieces are contiguous
+    // CUDA tensors of a supported dtype, route the last-dim concat
+    // through `kiln_tensor::cuda_concat(_, last_axis)`. Mirrors the
+    // existing wirings at `forward.rs` for the RoPE backward and
+    // MTP fc concat sites. `r1`/`r2` are freshly-allocated from
+    // elementwise broadcast_mul/add, so they are contiguous. The
+    // `pass` slice comes from `narrow(..)` and may not be
+    // contiguous; in that case the helper returns `None` and the
+    // candle composite still runs.
     match x_pass {
-        Some(pass) => Tensor::cat(&[&r1, &r2, &pass], D::Minus1).context("cuda_rope: cat output"),
-        None => Tensor::cat(&[&r1, &r2], D::Minus1).context("cuda_rope: cat output"),
+        Some(pass) => {
+            let pieces: [&Tensor; 3] = [&r1, &r2, &pass];
+            if let Some(out) = crate::forward::try_kt_concat_last_dim(&pieces)
+                .context("cuda_rope: try_kt_concat_last_dim")?
+            {
+                Ok(out)
+            } else {
+                Tensor::cat(&pieces, D::Minus1).context("cuda_rope: cat output")
+            }
+        }
+        None => {
+            let pieces: [&Tensor; 2] = [&r1, &r2];
+            if let Some(out) = crate::forward::try_kt_concat_last_dim(&pieces)
+                .context("cuda_rope: try_kt_concat_last_dim")?
+            {
+                Ok(out)
+            } else {
+                Tensor::cat(&pieces, D::Minus1).context("cuda_rope: cat output")
+            }
+        }
     }
 }
 
