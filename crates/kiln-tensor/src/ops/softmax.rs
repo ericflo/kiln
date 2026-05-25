@@ -159,20 +159,24 @@ impl DeviceOp1 for SoftmaxLastDimOp {
 
     #[cfg(feature = "vulkan")]
     fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
-        // Gate on the same preconditions as the CUDA path so future
-        // SPIR-V kernel work can drop in without changing the call site:
-        //   - F32 / BF16 / F16 only (matches cpu_fwd's accepted dtypes)
+        // Gate on the same preconditions as the CUDA path:
+        //   - F32 only on Vulkan (kernel is F32-only; BF16/F16 fall
+        //     through to CPU)
         //   - rank ≥ 1
         //   - contiguous input (row-major over the trailing axis)
+        //   - storage must be Vulkan-backed (otherwise CPU path runs)
         //
-        // Note: the existing `kiln-vulkan-kernel::vk_ops::softmax`
-        // implementation (`vk_softmax_lastdim_no_grad`) is F32-only —
-        // `VkDType` currently models only F32 and BF16, with BF16 not
-        // wired through the existing softmax kernel. BF16/F16 inputs
-        // will require either widening `VkDType` (add F16, route BF16
-        // through the softmax kernel) or a cast-to-F32 / cast-back
-        // wrapper at the dispatch boundary.
-        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+        // Routes through `crate::vulkan_softmax_last_axis`, which calls
+        // the production `kiln_vulkan_kernel::vk_ops::softmax::
+        // vk_softmax_lastdim_no_grad` shader. The current bridge
+        // round-trips bytes through the host between kt's
+        // `VulkanStorage` and the kernel's `VkTensor` — see the docs on
+        // `vulkan_softmax_last_axis` for the zero-copy follow-up plan.
+        //
+        // BF16/F16 still need either `VkDType` widening or a cast
+        // wrapper; for now they return Ok(None) and the dispatcher
+        // falls back to the CPU path.
+        if !matches!(x.dtype(), DType::F32) {
             return Ok(None);
         }
         if x.rank() == 0 {
@@ -181,31 +185,19 @@ impl DeviceOp1 for SoftmaxLastDimOp {
         if !x.is_contiguous() {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Vulkan): implement
-        // `crate::vulkan_softmax_last_axis(x)` analogous to
-        // `crate::cuda_softmax_last_axis` above. Until that wrapper
-        // lands, fall through to the CPU path so the op still produces
-        // correct results on Vulkan-only systems (numerics-correct,
-        // performance-wrong).
-        // Candidate implementations:
-        //   1. Reuse `kiln_vulkan_kernel::vk_ops::softmax::
-        //      vk_softmax_lastdim_no_grad` — the production softmax
-        //      kernel (two-pass max → exp+sum → divide, F32-only).
-        //      Requires moving `x` to `VkTensor` storage at the
-        //      dispatch boundary; see `Tensor::to_device` (phase 1) +
-        //      `VkTensor::from_*` constructors in `vk_tensor.rs`.
-        //   2. For BF16/F16 inputs, either:
-        //      a. Cast to F32, run kernel #1, cast back. The cast
-        //         kernels live in `vk_ops::cast`.
-        //      b. Add a BF16/F16-specific SPIR-V softmax shader that
-        //         promotes to F32 inside the threadgroup and casts on
-        //         store — pattern matches the CUDA `__nv_bfloat16`
-        //         path in `cuda_softmax_last_axis`.
-        //   3. Dtype matrix gap: `VkDType` currently exposes only F32
-        //      and Bf16; F16 needs a new variant added in
-        //      `kiln-vulkan-kernel::vk_tensor::VkDType` before any
-        //      F16-native shader can land.
-        Ok(None)
+        // Only dispatch the kernel when storage is actually Vulkan; if
+        // the tensor is on CPU under the `vulkan` feature, fall through
+        // to the CPU path. The downcast in `vulkan_softmax_last_axis`
+        // would otherwise raise an error rather than gracefully fall
+        // back.
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::VulkanStorage>()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(crate::vulkan_softmax_last_axis(x)?))
     }
 
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {

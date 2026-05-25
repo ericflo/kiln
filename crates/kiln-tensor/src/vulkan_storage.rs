@@ -164,6 +164,219 @@ pub fn vulkan_zeros(
     Ok(Arc::new(storage))
 }
 
+// ----------------------------------------------------------------------
+// vulkan_softmax_last_axis — Phase 4 Vulkan substrate op (#1082)
+// ----------------------------------------------------------------------
+
+/// Vulkan softmax over the trailing axis. Mirrors the role of
+/// [`crate::cuda_softmax_last_axis`] for the Vulkan backend.
+///
+/// Operates on a contiguous `[..., D]` Vulkan-backed tensor; produces a
+/// fresh contiguous tensor of the same shape and dtype with each
+/// `[..., :]` row normalized to a probability distribution.
+///
+/// # Implementation
+///
+/// Delegates to `kiln_vulkan_kernel::vk_ops::softmax::vk_softmax_lastdim_no_grad`,
+/// the production F32 softmax kernel (two-pass max → exp+sum → divide).
+///
+/// The current path bridges between kt's `VulkanStorage` (which owns
+/// `VulkanBuffer` directly) and the kernel's `VkTensor` (which holds
+/// `Arc<VulkanBuffer>`) via D2H read-back + H2D re-upload at each
+/// boundary. The data round-trips through the host even though both
+/// sides are GPU-resident — this is functionally correct (kernel runs
+/// on-device) but adds a per-call host bounce.
+///
+/// # Performance follow-up (#1082)
+///
+/// The cleanest fix is to land a zero-copy bridge, e.g. one of:
+///   1. Add `VkTensor::from_kt_storage(&VulkanStorage) -> VkTensor` that
+///      shares the underlying `vk::Buffer` handle without copying. Needs
+///      an upstream `VkTensor` constructor that accepts a borrowed
+///      `VulkanBuffer` (or an `Arc<VulkanBuffer>` cloned from one we own
+///      cooperatively).
+///   2. Add a kt-side `from_arc_buffer` constructor to `VulkanStorage`
+///      so the kernel result's `Arc<VulkanBuffer>` can be wrapped
+///      directly. The Arc count survives the kernel call and ownership
+///      transfers cleanly back to kt.
+///   3. Expose `kiln_vulkan_kernel::vk_ops::softmax::dispatch_softmax_fwd`
+///      (currently `pub(crate)`) so kt can dispatch the shader against
+///      kt-side `vk::Buffer` handles directly, no `VkTensor` involved.
+///
+/// All three avoid the H2D+D2H round-trip in this wrapper.
+///
+/// # Requirements
+///
+/// - `x` must be backed by [`VulkanStorage`]
+/// - `x.dtype()` must be `F32` (kernel is F32-only; BF16/F16 needs cast
+///   or a widened `VkDType` per the softmax-op TODOs)
+/// - `x.rank() >= 1`
+/// - `x.is_contiguous()` must hold
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] if the storage isn't `VulkanStorage`, the
+/// dtype is unsupported, the layout is non-contiguous, or the
+/// underlying kernel call fails.
+#[allow(clippy::needless_range_loop)]
+pub fn vulkan_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::softmax::vk_softmax_lastdim_no_grad;
+    use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
+
+    // ---- Validate kt-side preconditions ----
+    let dtype = x.dtype();
+    if !matches!(dtype, DType::F32) {
+        return Err(Error::Msg(format!(
+            "vulkan_softmax_last_axis: unsupported dtype {dtype} (kernel is F32-only; \
+             BF16/F16 needs a cast wrapper or widened VkDType — see TODO)"
+        )));
+    }
+    if x.rank() == 0 {
+        return Err(Error::Msg(
+            "vulkan_softmax_last_axis: input must have rank >= 1".to_string(),
+        ));
+    }
+    if !x.is_contiguous() {
+        return Err(Error::Msg(
+            "vulkan_softmax_last_axis: input must be contiguous".to_string(),
+        ));
+    }
+
+    let kt_vk = x
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| {
+            Error::Msg("vulkan_softmax_last_axis: input must be Vulkan-backed".to_string())
+        })?;
+
+    let vulkan_device = Arc::clone(kt_vk.vulkan_device());
+    let device_index = match kt_vk.device() {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+
+    let shape: Vec<usize> = x.shape().to_vec();
+    let element_count: usize = x.element_count();
+    let byte_len = kt_vk.byte_len();
+
+    // ---- D2H: read kt buffer back to host bytes ----
+    let bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        kt_vk.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_softmax_last_axis: D2H read_back of input failed: {e}"
+        ))
+    })?;
+
+    // ---- H2D: upload bytes into a fresh VkTensor leaf ----
+    let vk_dtype = match dtype {
+        DType::F32 => VkDType::F32,
+        // Unreachable: gated above. Kept exhaustive for clarity.
+        other => {
+            return Err(Error::Msg(format!(
+                "vulkan_softmax_last_axis: dtype {other} cannot be mapped to VkDType"
+            )));
+        }
+    };
+    let vk_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_softmax_last_axis: device-local alloc for VkTensor input failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &vk_buffer,
+        &bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_softmax_last_axis: H2D upload of VkTensor input failed: {e}"
+        ))
+    })?;
+    let vk_in = VkTensor::from_buffer(
+        Arc::new(vk_buffer),
+        shape.clone(),
+        vk_dtype,
+        Arc::clone(&vulkan_device),
+    );
+
+    // ---- Dispatch the production Vulkan softmax kernel ----
+    let vk_out = vk_softmax_lastdim_no_grad(&vk_in).map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_softmax_last_axis: kernel dispatch failed: {e}"
+        ))
+    })?;
+
+    // ---- D2H: read kernel result back to host bytes ----
+    let out_bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        vk_out.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_softmax_last_axis: D2H read_back of kernel result failed: {e}"
+        ))
+    })?;
+
+    // ---- H2D: upload result bytes into a fresh kt VulkanStorage ----
+    let out_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_softmax_last_axis: device-local alloc for kt output failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &out_buffer,
+        &out_bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_softmax_last_axis: H2D upload of kt output failed: {e}"
+        ))
+    })?;
+    let out_storage = VulkanStorage::from_buffer(
+        vulkan_device,
+        device_index,
+        dtype,
+        out_buffer,
+        byte_len as u64,
+    )?;
+
+    let _ = element_count; // shape is the source of truth; element_count kept for symmetry with cuda path
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
