@@ -37,6 +37,22 @@ pub fn dot(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     if !a.is_contiguous() || !b.is_contiguous() {
         bail!("dot: inputs must be contiguous");
     }
+
+    // CUDA fast path (#1082): compose `cuda_elementwise_binary` (KIND_MUL)
+    // + `cuda_sum_last_axis` for the standard `sum(a * b)` form. Both
+    // tensors must live on the same CUDA device with matching dtypes.
+    // Returns rank-0 scalar same as the CPU branch.
+    #[cfg(feature = "cuda")]
+    if matches!(a.device(), crate::Device::Cuda(_))
+        && matches!(b.device(), crate::Device::Cuda(_))
+        && a.device() == b.device()
+    {
+        // KIND_MUL = 2 per csrc/elementwise.cu.
+        let prod = crate::cuda_elementwise_binary(a, b, 2)?;
+        let scalar = crate::cuda_sum_last_axis(&prod)?;
+        return Ok(scalar);
+    }
+
     let dtype = a.dtype();
     let n = a.element_count();
     let a_bytes = a
