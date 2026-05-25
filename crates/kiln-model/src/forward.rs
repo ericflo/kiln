@@ -21308,6 +21308,41 @@ mod tests {
             DType::BF16,
             &device,
         )?;
+        // Phase 7 #1082: parallel-allocate a kt twin via the constructor
+        // stub `try_kt_paged_kv_cache_new` (commit 638bc441). When the
+        // env gate `KILN_USE_KT_PAGED_KV_CACHE` is off (the default),
+        // this returns `None` and is zero overhead — the test still
+        // runs against `batch_cache` only and asserts the same parity
+        // bound. When the gate is on, the kt cache is allocated
+        // alongside the candle cache and its shape accessors are
+        // checked here so the constructor stub is exercised at a real
+        // call site instead of only behind `#[allow(dead_code)]`.
+        // The kt writer/reader story is still ahead — see the writer
+        // stub `try_kt_paged_kv_write_token_major_native_graph_slot`
+        // for the matching helper. Until that gets threaded through
+        // `model_forward_paged_decode_contiguous_batch`, the kt cache
+        // built here is *only* used for shape parity, not for the
+        // K/V writes the test makes against `batch_cache`.
+        let batch_cache_kt = try_kt_paged_kv_cache_new(
+            1,
+            2,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            DType::BF16,
+            &device,
+        )?;
+        if let Some(ref kt) = batch_cache_kt {
+            // Constructor-stub shape parity: the kt cache must have the
+            // same per-layer block count and block size as the candle
+            // cache it shadows. Catches any future regression in the
+            // constructor stub or in `PagedKvCacheKt::new` that would
+            // silently allocate a differently-shaped pool.
+            assert_eq!(kt.num_layers(), 1);
+            assert_eq!(kt.num_blocks(), 2);
+            assert_eq!(kt.block_size(), block_size);
+            assert!(!kt.is_fp8(), "BF16 path must not flip the FP8 flag");
+        }
         assert!(batch_cache.write_token_major_native(
             0,
             &bt0,
