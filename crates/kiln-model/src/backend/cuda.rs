@@ -167,6 +167,19 @@ impl CudaBackend {
         }
     }
 
+    /// Test-only constructor (#1082) for parity tests of the kt-API
+    /// conv1d wiring. Builds a CudaBackend with the default env-driven
+    /// kill switches, then overrides `cuda_use_kt_api_conv1d` to the
+    /// requested value. Avoids mutating process-global env state from
+    /// the test, which would race with other parallel tests in the
+    /// same binary.
+    #[cfg(test)]
+    pub(crate) fn new_with_kt_api_conv1d(device: Device, kt_api: bool) -> Self {
+        let mut be = Self::new(device);
+        be.cuda_use_kt_api_conv1d = kt_api;
+        be
+    }
+
     pub fn training_capabilities_static() -> TrainingCapabilities {
         TrainingCapabilities {
             projection_training: "backend-routed candle CUDA autograd with offset chunk hook",
