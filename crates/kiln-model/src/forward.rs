@@ -38,10 +38,54 @@ use kiln_core::block::BlockTable;
 ///
 /// `candle_nn::ops::sigmoid` lacks a CUDA kernel, so we implement it using
 /// basic tensor operations that all have CUDA support.
+///
+/// Phase 7 (#1082): when `KILN_USE_KT_API_NEG=1`,
+/// `KILN_USE_KT_API_EXP=1`, and/or `KILN_USE_KT_API_ADD_SCALAR=1`
+/// (or `KILN_USE_KT_API_ALL=1`) are set, route the corresponding
+/// step through the kt-API via try_kt_neg / try_kt_exp /
+/// try_kt_add_scalar. Each helper falls through to the candle
+/// composite on any precondition failure so behavior is identical
+/// with all gates off.
 fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
-    let neg_x = x.neg().context("cuda_sigmoid x.neg")?;
-    let exp_neg_x = neg_x.exp().context("cuda_sigmoid exp")?;
-    let one_plus = (exp_neg_x + 1.0).context("cuda_sigmoid add one")?;
+    let neg_x = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_neg(x).context("cuda_sigmoid try_kt_neg")? {
+                Some(out) => out,
+                None => x.neg().context("cuda_sigmoid x.neg")?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            x.neg().context("cuda_sigmoid x.neg")?
+        }
+    };
+    let exp_neg_x = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_exp(&neg_x).context("cuda_sigmoid try_kt_exp")? {
+                Some(out) => out,
+                None => neg_x.exp().context("cuda_sigmoid exp")?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            neg_x.exp().context("cuda_sigmoid exp")?
+        }
+    };
+    let one_plus = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_add_scalar(&exp_neg_x, 1.0).context("cuda_sigmoid try_kt_add_scalar")? {
+                Some(out) => out,
+                None => (exp_neg_x + 1.0).context("cuda_sigmoid add one")?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            (exp_neg_x + 1.0).context("cuda_sigmoid add one")?
+        }
+    };
     let result = one_plus.recip().context("cuda_sigmoid recip")?;
     Ok(result)
 }
