@@ -947,8 +947,13 @@ fn cuda_use_kt_api_div_scalar() -> bool {
 /// residuals) can route through this gate. Mirrors the
 /// dead-code-allowed precedent of `try_kt_paged_kv_cache_new`
 /// (638bc441) and the clamp/pow scaffolds (e9ed87f4 / 2b07eef7).
+///
+/// Wired into the `CudaSigmoidMulTrainingBf16` backward path's
+/// `1 - sigmoid` step as of the same #1082 series — replaces the
+/// two-step `neg + add_scalar(1)` composite with a single
+/// `cuda_scalar_op` kind 4 (ScalarMinusTensor) dispatch when the
+/// gate is enabled.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 fn cuda_use_kt_api_scalar_minus_tensor() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED
@@ -3660,44 +3665,56 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
             )?;
 
             let sigmoid_f32 = sigmoid_gate.to_dtype(DType::F32)?;
+            // Phase 7 (#1082): fast path through
+            // `try_kt_scalar_minus_tensor(sigmoid_f32, 1.0)` — when
+            // `KILN_USE_KT_API_SCALAR_MINUS_TENSOR=1` (or
+            // `KILN_USE_KT_API_ALL=1`) is set, replace the two-step
+            // `neg + add_scalar(1)` composite (= `(-s) + 1 = 1 - s`)
+            // with a single `kiln_tensor::cuda_scalar_op` kind 4
+            // (ScalarMinusTensor) dispatch. Falls through to the
+            // existing per-step neg / add_scalar wirings when any
+            // precondition fails so behavior is identical with the
+            // gate off. First production call site for
+            // `try_kt_scalar_minus_tensor`.
+            //
             // Phase 7 (#1082): same kt-API add-scalar migration for
             // the `(-sigmoid_f32) + 1.0` step of the sigmoid
             // derivative composite.
             // Phase 7 (#1082): same kt-API neg migration for the
             // `sigmoid_f32.neg()` step.
-            let neg_sigmoid = {
-                #[cfg(feature = "cuda")]
-                {
-                    if let Some(out) = try_kt_neg(&sigmoid_f32).map_err(|e| {
-                        candle_core::Error::Msg(format!(
-                            "CudaSigmoidMulTrainingBf16 backward: try_kt_neg: {e}"
-                        ))
-                    })? {
-                        out
-                    } else {
-                        sigmoid_f32.neg()?
-                    }
-                }
-                #[cfg(not(feature = "cuda"))]
-                {
-                    sigmoid_f32.neg()?
-                }
-            };
             let one_minus_sigmoid = {
                 #[cfg(feature = "cuda")]
                 {
-                    if let Some(out) = try_kt_add_scalar(&neg_sigmoid, 1.0)
-                        .map_err(|e| candle_core::Error::Msg(format!(
-                            "CudaSigmoidMulTrainingBf16 backward: try_kt_add_scalar: {e}"
-                        )))?
-                    {
+                    if let Some(out) = try_kt_scalar_minus_tensor(&sigmoid_f32, 1.0).map_err(
+                        |e| candle_core::Error::Msg(format!(
+                            "CudaSigmoidMulTrainingBf16 backward: try_kt_scalar_minus_tensor: {e}"
+                        )),
+                    )? {
                         out
                     } else {
-                        (neg_sigmoid + 1.0)?
+                        let neg_sigmoid = if let Some(out) = try_kt_neg(&sigmoid_f32).map_err(|e| {
+                            candle_core::Error::Msg(format!(
+                                "CudaSigmoidMulTrainingBf16 backward: try_kt_neg: {e}"
+                            ))
+                        })? {
+                            out
+                        } else {
+                            sigmoid_f32.neg()?
+                        };
+                        if let Some(out) = try_kt_add_scalar(&neg_sigmoid, 1.0)
+                            .map_err(|e| candle_core::Error::Msg(format!(
+                                "CudaSigmoidMulTrainingBf16 backward: try_kt_add_scalar: {e}"
+                            )))?
+                        {
+                            out
+                        } else {
+                            (neg_sigmoid + 1.0)?
+                        }
                     }
                 }
                 #[cfg(not(feature = "cuda"))]
                 {
+                    let neg_sigmoid = sigmoid_f32.neg()?;
                     (neg_sigmoid + 1.0)?
                 }
             };
@@ -8780,16 +8797,14 @@ fn try_kt_div_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
 /// the migrated call so nsys traces separate the path from the
 /// baseline composite.
 ///
-/// Today this helper has no production call site — `forward.rs`
-/// doesn't currently have a standalone `c - x` pattern (most uses
-/// fold into `affine(-1, c)`). The helper is wired up to match
-/// the established Phase 7 scaffold so future kernel refactors
-/// that need a single-kernel "scalar minus tensor" path can plug
-/// in trivially. Mirrors the dead-code-allowed precedent of
-/// `try_kt_paged_kv_cache_new` (638bc441) and the pow scaffold
-/// (2b07eef7).
+/// First production call site (wired in the same #1082 series):
+/// the `CudaSigmoidMulTrainingBf16` backward path's
+/// `1 - sigmoid` step (the sigmoid derivative composite). The
+/// fast path replaces the two-step `neg + add_scalar(1)` composite
+/// (which is itself the candle expression of `(-s) + 1 = 1 - s`)
+/// with a single `cuda_scalar_op` kind 4 (ScalarMinusTensor)
+/// dispatch when the gate is enabled.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 fn try_kt_scalar_minus_tensor(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_scalar_minus_tensor() {
         return Ok(None);
