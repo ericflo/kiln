@@ -1213,15 +1213,20 @@ pub fn metal_elementwise_binary(
 /// [`crate::cuda_activation_unary`] for the Metal backend.
 ///
 /// Dispatches on `kind_tag` (matches the CUDA tags in
-/// `ActivationOp::cuda_fwd`):
-///   - `0` -> Silu via `candle::Tensor::silu(&x)`
-///   - `1` -> Sigmoid — not natively in candle's `UnaryOp`. This
-///     wrapper rejects kind=1 with an error; callers must fall through
-///     to CPU until a real Metal sigmoid kernel lands.
-///   - `2` -> Gelu via `candle::Tensor::gelu(&x)` (tanh approximation,
+/// `ActivationOp::cuda_fwd` and `UnaryArithKind::cuda_kind_tag`):
+///   - `0`  -> Silu via `candle::Tensor::silu(&x)` (activation)
+///   - `1`  -> Sigmoid — not natively in candle's `UnaryOp`. This
+///     wrapper rejects kind=1; callers must fall through to CPU until
+///     a real Metal sigmoid kernel lands.
+///   - `2`  -> Gelu via `candle::Tensor::gelu(&x)` (tanh approximation,
 ///     matches the CPU/CUDA formula)
-///   - `3` -> Tanh via `candle::Tensor::tanh(&x)`
-///   - `4` -> Relu via `candle::Tensor::relu(&x)`
+///   - `3`  -> Tanh via `candle::Tensor::tanh(&x)`
+///   - `4`  -> Relu via `candle::Tensor::relu(&x)`
+///   - `5`  -> Ln via `candle::Tensor::log(&x)` (unary arith)
+///   - `6`  -> Exp via `candle::Tensor::exp(&x)` (unary arith)
+///   - `12` -> Neg via `candle::Tensor::neg(&x)` (unary arith)
+///   - `13` -> Abs via `candle::Tensor::abs(&x)` (unary arith)
+///   - `14` -> Sqrt via `candle::Tensor::sqrt(&x)` (unary arith)
 ///
 /// candle's pointwise unary ops go through the production Metal
 /// shaders (`unary_*` kernels in `vendor/candle-metal-kernels`). Covers
@@ -1251,11 +1256,12 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
         Storage as CandleStorage, Tensor as CandleTensor,
     };
 
-    if !matches!(kind_tag, 0 | 2 | 3 | 4) {
+    if !matches!(kind_tag, 0 | 2 | 3 | 4 | 5 | 6 | 12 | 13 | 14) {
         return Err(Error::Msg(format!(
             "metal_activation_unary: kind_tag {kind_tag} not supported on Metal today \
-             (0=Silu, 2=Gelu, 3=Tanh, 4=Relu; Sigmoid=1 has no candle UnaryOp — \
-             falls through to CPU until a Metal sigmoid kernel lands)"
+             (0=Silu, 2=Gelu, 3=Tanh, 4=Relu, 5=Ln, 6=Exp, 12=Neg, 13=Abs, 14=Sqrt; \
+             Sigmoid=1 has no candle UnaryOp — falls through to CPU until a Metal \
+             sigmoid kernel lands)"
         )));
     }
     let dtype = x.dtype();
@@ -1311,6 +1317,11 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
         2 => candle_in.gelu(),
         3 => candle_in.tanh(),
         4 => candle_in.relu(),
+        5 => candle_in.log(),
+        6 => candle_in.exp(),
+        12 => candle_in.neg(),
+        13 => candle_in.abs(),
+        14 => candle_in.sqrt(),
         _ => unreachable!("gated above"),
     }
     .map_err(|e| {

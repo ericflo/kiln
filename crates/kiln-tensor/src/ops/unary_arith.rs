@@ -61,7 +61,8 @@ impl UnaryArithKind {
 
     /// Kind tag matching the `KIND_*` constants in `csrc/activation.cu`.
     /// CUDA path routes through `cuda_activation_unary` per #1082.
-    #[cfg(feature = "cuda")]
+    /// Metal path reuses the same tags via `metal_activation_unary`.
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     const fn cuda_kind_tag(self) -> i32 {
         match self {
             // 0..=4 reserved for activation.rs (silu/sigmoid/gelu/tanh/relu).
@@ -111,8 +112,18 @@ impl DeviceOp1 for UnaryArithOp {
 
     #[cfg(feature = "metal")]
     fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
-        // Gate on the same preconditions as cuda_fwd so future MSL
-        // kernel work can drop in without changing the call site.
+        // Gate on the same preconditions as cuda_fwd plus a Metal
+        // storage check (graceful fall-through if not Metal-backed).
+        //
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::metal_activation_unary` which wraps candle's
+        // production Metal `unary_*` kernels (the same path
+        // `candle::Tensor::{neg, abs, sqrt, exp, log}()` take). Apple
+        // Silicon UMA: no host bounce — kt MetalStorage::buffer is
+        // shared with the candle wrapper via Arc<metal::Buffer>.
+        //
+        // Kind tag map (matches `UnaryArithKind::cuda_kind_tag`):
+        //   5 = Ln, 6 = Exp, 12 = Neg, 13 = Abs, 14 = Sqrt.
         validate(x, self.kind.name())?;
         if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
             return Ok(None);
@@ -120,20 +131,17 @@ impl DeviceOp1 for UnaryArithOp {
         if !x.is_contiguous() {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Metal): once a Metal unary-arith kernel
-        // ships, dispatch via `self.kind.cuda_kind_tag()` (or a
-        // Metal-specific tag) and route through
-        // `crate::metal_activation_unary`. Until then, fall through
-        // to CPU (numerics-correct, performance-wrong).
-        // Candidate implementations:
-        //   1. Custom MSL kernel: per-element pointwise; switch on
-        //      `kind_tag` selecting neg / abs / sqrt / rsqrt /
-        //      reciprocal / square. All map to MSL `simd_*` /
-        //      builtins directly.
-        //   2. MPS Graph: per-primitive (`negative(_:)`,
-        //      `absolute(_:)`, `squareRoot(_:)`, etc.) bound by
-        //      kind. Higher per-call overhead but trivial to wire.
-        Ok(None)
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::MetalStorage>()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(crate::metal_activation_unary(
+            x,
+            self.kind.cuda_kind_tag(),
+        )?))
     }
 
     #[cfg(feature = "vulkan")]
