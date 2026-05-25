@@ -2199,6 +2199,9 @@ fn add_lora_delta_to_base(
             } else {
                 delta.to_dtype(base.dtype())?
             };
+            if let Some(out) = try_kt_lora_add(&base, &delta)? {
+                return Ok(out);
+            }
             return Ok((base + delta)?);
         }
     }
@@ -2208,6 +2211,12 @@ fn add_lora_delta_to_base(
     } else {
         delta.to_dtype(base.dtype())?
     };
+    #[cfg(feature = "cuda")]
+    {
+        if let Some(out) = try_kt_lora_add(&base, &delta)? {
+            return Ok(out);
+        }
+    }
     Ok((base + delta)?)
 }
 
@@ -9791,6 +9800,56 @@ fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Tensor> {
         return Ok(out);
     }
     broadcast_matmul_cpu_compatible(x, embed_tokens_t)
+}
+
+/// Phase 7 (#1082) — kt-API LoRA add migration helper. Routes
+/// the `base + delta` final accumulator from
+/// [`add_lora_delta_to_base`] (and analogous Marlin LoRA call
+/// sites) through `kiln_tensor::cuda_elementwise_binary` with
+/// kind tag 0 (Add) directly, ahead of the candle composite.
+///
+/// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
+/// unsupported dtype, dtype/shape mismatch, non-contiguous,
+/// rank-0) so the caller falls through to the candle
+/// `Add<Tensor>` composite. NVTX range `kiln/lora_add_kt`
+/// brackets the migrated call so nsys traces separate the path
+/// from the candle baseline.
+#[cfg(feature = "cuda")]
+fn try_kt_lora_add(base: &Tensor, delta: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_lora_add() {
+        return Ok(None);
+    }
+    if !matches!(base.device(), Device::Cuda(_))
+        || !matches!(delta.device(), Device::Cuda(_))
+        || !matches!(base.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || base.dtype() != delta.dtype()
+        || base.shape() != delta.shape()
+        || !base.is_contiguous()
+        || !delta.is_contiguous()
+        || base.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/lora_add_kt");
+
+    let base_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(base) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let delta_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(delta) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 0 = Add (matches BinaryKind::Add in
+    // crates/kiln-tensor/src/ops/elementwise.rs).
+    let out_kt = match kiln_tensor::cuda_elementwise_binary(&base_kt, &delta_kt, 0) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_lora_add: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
 }
 
 /// Phase 7 (#1082) — kt-API LoRA delta migration helper. Routes
