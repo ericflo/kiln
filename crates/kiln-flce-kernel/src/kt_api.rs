@@ -26,19 +26,22 @@
 //!    over [`kiln_tensor`] ops; mirrors the Phase A candle reference
 //!    (see [`crate::fused_linear_cross_entropy`]) up to floating-
 //!    point associativity in the chunked reduction.
-//!
-//! Backward (`backward_dhidden_kt`) is still TBD — autograd lives in
-//! a separate crate and will plug into the existing dC chunk recipe
-//! once kt-tensor has the necessary backward hooks.
+//! 4. [`fused_linear_cross_entropy_phase_b_backward_kt`] — kt-typed
+//!    manual backward producing `dhidden` from `grad_loss`. Mirrors
+//!    the candle reference's `phase_b::backward_dhidden` step-by-step
+//!    using the kt-typed parallels of every op in the candle code
+//!    path. Together with the forward this closes the loop on running
+//!    FLCE Phase B end-to-end over kt-tensor without dragging a
+//!    `candle_core::CustomOp1` boundary into the autograd graph.
 
 use std::sync::Arc;
 
 use kiln_tensor::{
     ops::{
-        broadcast_to, exp, gather, index_select, ln, matmul, max_axis, mean_all, mul, scatter_add,
-        sub, sum_axis, to_f32,
+        broadcast_to, exp, gather, index_select, ln, matmul, max_axis, mean_all, mul, mul_scalar,
+        scatter_add, sub, sum_axis, to_f32,
     },
-    Error as KtError, Tensor as KtTensor,
+    DType as KtDType, Error as KtError, Tensor as KtTensor,
 };
 
 /// Error type for the kiln-tensor-typed FLCE surface.
@@ -398,6 +401,319 @@ pub fn fused_linear_cross_entropy_phase_b_kt(
     Ok(loss)
 }
 
+/// kt-typed FLCE Phase B backward — compute `dhidden` from `grad_loss`.
+///
+/// Manual two-pass backward mirroring the candle reference
+/// (`crate::phase_b::backward_dhidden`):
+///
+/// 1. **Pass 1**: recompute `running_max` and `running_sumexp` chunk-by-chunk
+///    (identical to forward, minus the `correct_logit` gather).
+/// 2. **Pass 2**: for each chunk, recompute `softmax = exp(logits - running_max)
+///    / running_sumexp`, build the one-hot label mask for that chunk, and
+///    accumulate `dhidden_active += (softmax - one_hot) @ head_chunk.T *
+///    grad_loss / N`. Finally scatter `dhidden_active` back into the
+///    `[seq_len, hidden_size]` zero buffer, unsqueeze batch dim, cast to
+///    the original `hidden` dtype.
+///
+/// # Shape contract
+///
+/// - `hidden`: same shape as forward input `[1, seq_len, hidden_size]`.
+/// - `head_t`: `[hidden_size, vocab_size]`.
+/// - `input_ids`: length `seq_len`.
+/// - `label_mask`: length `seq_len`.
+/// - `chunk_size`: same as forward (rerun the chunk loop).
+/// - `grad_loss`: scalar (rank-0) F32 tensor; the seed gradient
+///   `d_loss / d_loss` (typically 1.0).
+///
+/// # Returns
+///
+/// `dhidden` as a tensor with shape `[1, seq_len, hidden_size]` and the
+/// **original** `hidden.dtype()`. Rows outside `active_positions` and
+/// the `seq_len-1` row are zero.
+///
+/// # Numerical equivalence
+///
+/// Returns the same gradient as candle's `phase_b::backward_dhidden` up
+/// to floating-point associativity in the chunked sum-exp accumulation.
+/// The per-chunk kernel sequence is identical (matmul → max → shift →
+/// exp → div → diff → matmul); all reductions and accumulators run in
+/// F32.
+pub fn fused_linear_cross_entropy_phase_b_backward_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    chunk_size: usize,
+    grad_loss: &KtTensor,
+) -> Result<KtTensor, FlceError> {
+    let seq_len = input_ids.len();
+    if label_mask.len() != seq_len {
+        return Err(FlceError::msg(format!(
+            "kt-flce-bwd: label_mask length {} does not match input_ids length {}",
+            label_mask.len(),
+            seq_len,
+        )));
+    }
+    if chunk_size == 0 {
+        return Err(FlceError::msg("kt-flce-bwd: chunk_size must be > 0"));
+    }
+    let hidden_dims = hidden.shape().to_vec();
+    if hidden_dims.len() != 3 {
+        return Err(FlceError::msg(format!(
+            "kt-flce-bwd: hidden must be 3-D [1, seq_len, hidden_size]; got {hidden_dims:?}",
+        )));
+    }
+    if hidden_dims[0] != 1 {
+        return Err(FlceError::msg(format!(
+            "kt-flce-bwd: hidden batch dim must be 1; got {hidden_dims:?}",
+        )));
+    }
+    let head_dims = head_t.shape().to_vec();
+    if head_dims.len() != 2 {
+        return Err(FlceError::msg(format!(
+            "kt-flce-bwd: head_t must be 2-D [hidden_size, vocab_size]; got {head_dims:?}",
+        )));
+    }
+    if hidden_dims[2] != head_dims[0] {
+        return Err(FlceError::msg(format!(
+            "kt-flce-bwd: hidden hidden_size {} != head_t hidden_size {}",
+            hidden_dims[2], head_dims[0],
+        )));
+    }
+
+    let hidden_size = hidden_dims[2];
+    let vocab_size = head_dims[1];
+    let original_dtype = hidden.dtype();
+
+    // seq_len < 2: no targets, gradient is zero everywhere.
+    if seq_len < 2 {
+        return zeros_like_hidden_in_dtype(&hidden_dims, original_dtype);
+    }
+
+    // Active row indices in the shifted positions, mirroring forward.
+    let shift_mask = &label_mask[1..]; // length seq_len - 1
+    let shift_labels: Vec<u32> = input_ids[1..].to_vec();
+    let active_positions: Vec<u32> = shift_mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+        .collect();
+
+    if active_positions.is_empty() {
+        return zeros_like_hidden_in_dtype(&hidden_dims, original_dtype);
+    }
+
+    let num_active = active_positions.len();
+    let active_labels: Vec<u32> = active_positions
+        .iter()
+        .map(|&i| shift_labels[i as usize])
+        .collect();
+
+    // Build active_hidden F32 the same way as forward.
+    let hidden_2d = hidden.squeeze(0).map_err(FlceError::Kt)?;
+    let shift_hidden = hidden_2d
+        .narrow(0, 0, seq_len - 1)
+        .map_err(FlceError::Kt)?
+        .contiguous()
+        .map_err(FlceError::Kt)?;
+    let active_idx = KtTensor::from_vec(active_positions.clone(), vec![num_active])
+        .map_err(FlceError::Kt)?;
+    let active_hidden = index_select(&shift_hidden, 0, &active_idx).map_err(FlceError::Kt)?;
+    let active_hidden_f32 = to_f32(&active_hidden).map_err(FlceError::Kt)?;
+    let head_t_f32 = to_f32(head_t).map_err(FlceError::Kt)?;
+
+    // -----------------------------------------------------------------
+    // Pass 1: recompute running_max + running_sumexp.
+    // -----------------------------------------------------------------
+    let mut running_max: Option<KtTensor> = None; // 1-D [num_active] F32
+    let mut running_sumexp: Option<KtTensor> = None; // 1-D [num_active] F32
+    let mut chunk_start = 0usize;
+    while chunk_start < vocab_size {
+        let chunk_len = chunk_size.min(vocab_size - chunk_start);
+        let head_chunk = head_t_f32
+            .narrow(1, chunk_start, chunk_len)
+            .map_err(FlceError::Kt)?
+            .contiguous()
+            .map_err(FlceError::Kt)?;
+        let logits_chunk = matmul(&active_hidden_f32, &head_chunk).map_err(FlceError::Kt)?;
+        let chunk_max_1d = max_axis(&logits_chunk, 1).map_err(FlceError::Kt)?;
+
+        let (new_max_1d, new_sumexp_1d) = match (running_max.as_ref(), running_sumexp.as_ref()) {
+            (None, None) => {
+                let chunk_max_2d = chunk_max_1d
+                    .unsqueeze(1)
+                    .map_err(FlceError::Kt)?
+                    .contiguous()
+                    .map_err(FlceError::Kt)?;
+                let chunk_max_b = broadcast_to(&chunk_max_2d, &[num_active, chunk_len])
+                    .map_err(FlceError::Kt)?;
+                let shifted = sub(&logits_chunk, &chunk_max_b).map_err(FlceError::Kt)?;
+                let exped = exp(&shifted).map_err(FlceError::Kt)?;
+                let chunk_sumexp_1d = sum_axis(&exped, 1).map_err(FlceError::Kt)?;
+                (chunk_max_1d, chunk_sumexp_1d)
+            }
+            (Some(prev_max), Some(prev_sumexp)) => {
+                let new_max_1d = elementwise_max(prev_max, &chunk_max_1d)?;
+                let prev_scale_1d = exp(&sub(prev_max, &new_max_1d).map_err(FlceError::Kt)?)
+                    .map_err(FlceError::Kt)?;
+                let scaled_prev_1d = mul(prev_sumexp, &prev_scale_1d).map_err(FlceError::Kt)?;
+                let new_max_2d = new_max_1d
+                    .unsqueeze(1)
+                    .map_err(FlceError::Kt)?
+                    .contiguous()
+                    .map_err(FlceError::Kt)?;
+                let new_max_b = broadcast_to(&new_max_2d, &[num_active, chunk_len])
+                    .map_err(FlceError::Kt)?;
+                let shifted = sub(&logits_chunk, &new_max_b).map_err(FlceError::Kt)?;
+                let exped = exp(&shifted).map_err(FlceError::Kt)?;
+                let chunk_sumexp_1d = sum_axis(&exped, 1).map_err(FlceError::Kt)?;
+                let new_sumexp_1d =
+                    kiln_tensor::ops::add(&scaled_prev_1d, &chunk_sumexp_1d).map_err(FlceError::Kt)?;
+                (new_max_1d, new_sumexp_1d)
+            }
+            _ => unreachable!("running_max and running_sumexp are set together"),
+        };
+        running_max = Some(new_max_1d);
+        running_sumexp = Some(new_sumexp_1d);
+        chunk_start += chunk_len;
+    }
+
+    let running_max_1d = running_max
+        .ok_or_else(|| FlceError::msg("kt-flce-bwd: vocab_size was 0"))?;
+    let running_sumexp_1d = running_sumexp
+        .ok_or_else(|| FlceError::msg("kt-flce-bwd: vocab_size was 0"))?;
+
+    // -----------------------------------------------------------------
+    // Pass 2: accumulate dhidden_active by chunk.
+    // -----------------------------------------------------------------
+    let grad_loss_f32 = to_f32(grad_loss).map_err(FlceError::Kt)?;
+    let inv_n = 1.0f32 / (num_active as f32);
+
+    // Broadcast running_max / running_sumexp to 2-D once (they don't
+    // depend on chunk; we'll re-broadcast to chunk_len inside the loop).
+    let running_max_2d = running_max_1d
+        .unsqueeze(1)
+        .map_err(FlceError::Kt)?
+        .contiguous()
+        .map_err(FlceError::Kt)?;
+    let running_sumexp_2d = running_sumexp_1d
+        .unsqueeze(1)
+        .map_err(FlceError::Kt)?
+        .contiguous()
+        .map_err(FlceError::Kt)?;
+
+    let mut dhidden_active =
+        KtTensor::zeros_cpu(vec![num_active, hidden_size], KtDType::F32);
+    let mut chunk_start = 0usize;
+    while chunk_start < vocab_size {
+        let chunk_len = chunk_size.min(vocab_size - chunk_start);
+        let chunk_end = chunk_start + chunk_len;
+
+        let head_chunk = head_t_f32
+            .narrow(1, chunk_start, chunk_len)
+            .map_err(FlceError::Kt)?
+            .contiguous()
+            .map_err(FlceError::Kt)?;
+        let logits_chunk = matmul(&active_hidden_f32, &head_chunk).map_err(FlceError::Kt)?;
+
+        // softmax_chunk = exp(logits_chunk - running_max) / running_sumexp
+        let max_b = broadcast_to(&running_max_2d, &[num_active, chunk_len])
+            .map_err(FlceError::Kt)?;
+        let shifted = sub(&logits_chunk, &max_b).map_err(FlceError::Kt)?;
+        let exp_chunk = exp(&shifted).map_err(FlceError::Kt)?;
+        let sumexp_b = broadcast_to(&running_sumexp_2d, &[num_active, chunk_len])
+            .map_err(FlceError::Kt)?;
+        let softmax_chunk =
+            kiln_tensor::ops::div(&exp_chunk, &sumexp_b).map_err(FlceError::Kt)?;
+
+        // Build one_hot mask: 1.0 wherever label == col, else 0.
+        let mut one_hot_data: Vec<f32> = vec![0.0; num_active * chunk_len];
+        for (row_idx, &label) in active_labels.iter().enumerate() {
+            let label = label as usize;
+            if label >= chunk_start && label < chunk_end {
+                let col = label - chunk_start;
+                one_hot_data[row_idx * chunk_len + col] = 1.0;
+            }
+        }
+        let one_hot = KtTensor::from_vec(one_hot_data, vec![num_active, chunk_len])
+            .map_err(FlceError::Kt)?;
+
+        // diff = softmax - one_hot
+        let diff = sub(&softmax_chunk, &one_hot).map_err(FlceError::Kt)?;
+
+        // scaled = diff * (1/N)
+        let scaled = mul_scalar(&diff, inv_n).map_err(FlceError::Kt)?;
+
+        // grad_logits_chunk = scaled * grad_loss (broadcast scalar across [num_active, chunk_len]).
+        // grad_loss_f32 is rank-0; broadcast it manually to [num_active, chunk_len] via
+        // unsqueeze x2 + broadcast_to. unsqueeze on rank-0 is not the right pattern; use
+        // mul_scalar with the host scalar value extracted from grad_loss_f32.
+        let grad_loss_value = scalar_f32_from(&grad_loss_f32)?;
+        let grad_logits_chunk =
+            mul_scalar(&scaled, grad_loss_value).map_err(FlceError::Kt)?;
+
+        // chunk_contrib = grad_logits_chunk @ head_chunk.T   shape [num_active, hidden_size]
+        let head_chunk_t = head_chunk
+            .t()
+            .map_err(FlceError::Kt)?
+            .contiguous()
+            .map_err(FlceError::Kt)?;
+        let chunk_contrib =
+            matmul(&grad_logits_chunk, &head_chunk_t).map_err(FlceError::Kt)?;
+
+        dhidden_active =
+            kiln_tensor::ops::add(&dhidden_active, &chunk_contrib).map_err(FlceError::Kt)?;
+
+        chunk_start = chunk_end;
+    }
+
+    // Scatter dhidden_active back into a [seq_len, hidden_size] zero
+    // buffer. active_indices live in [0..seq_len-1]; row seq_len-1
+    // never contributed (we used hidden[..seq_len-1]) so its gradient
+    // stays zero.
+    let grad_hidden_2d =
+        scatter_add(&dhidden_active, 0, &active_idx, seq_len).map_err(FlceError::Kt)?;
+
+    // Restore the batch dim.
+    let grad_hidden_3d = grad_hidden_2d.unsqueeze(0).map_err(FlceError::Kt)?;
+
+    // Cast back to the original `hidden` dtype.
+    let out = if original_dtype == KtDType::F32 {
+        grad_hidden_3d
+    } else {
+        kiln_tensor::ops::cast(&grad_hidden_3d, original_dtype).map_err(FlceError::Kt)?
+    };
+    Ok(out)
+}
+
+/// Helper: build a zero `[1, seq_len, hidden_size]` tensor in the given
+/// dtype. Used by the empty-mask / short-seq early-returns.
+fn zeros_like_hidden_in_dtype(
+    hidden_dims: &[usize],
+    dtype: KtDType,
+) -> Result<KtTensor, FlceError> {
+    Ok(KtTensor::zeros_cpu(hidden_dims.to_vec(), dtype))
+}
+
+/// Helper: read the scalar value out of a rank-0 F32 tensor as `f32`.
+/// Used to broadcast `grad_loss` across the per-chunk grad-logits
+/// tensor via `mul_scalar` (since `grad_loss` is a scalar).
+fn scalar_f32_from(t: &KtTensor) -> Result<f32, FlceError> {
+    let storage = t.storage();
+    let cpu = storage
+        .as_any()
+        .downcast_ref::<kiln_tensor::CpuStorage>()
+        .ok_or_else(|| FlceError::msg("kt-flce-bwd: grad_loss must be on CPU storage"))?;
+    let bytes = cpu.as_bytes();
+    if bytes.len() < 4 {
+        return Err(FlceError::msg(format!(
+            "kt-flce-bwd: grad_loss must be a scalar F32 (got {} bytes)",
+            bytes.len()
+        )));
+    }
+    Ok(f32::from_le_bytes(bytes[0..4].try_into().unwrap()))
+}
+
 /// Helper: build a rank-0 F32 scalar tensor holding 0.0.
 fn zero_scalar() -> Result<KtTensor, FlceError> {
     KtTensor::from_vec(vec![0.0f32], vec![]).map_err(FlceError::Kt)
@@ -594,5 +910,378 @@ mod tests {
             .expect("scalar cpu");
         let bytes = cpu.as_bytes();
         f32::from_le_bytes(bytes[0..4].try_into().unwrap())
+    }
+
+    fn read_f32_vec(t: &KtTensor) -> Vec<f32> {
+        let storage = t.storage();
+        let cpu = storage
+            .as_any()
+            .downcast_ref::<kiln_tensor::CpuStorage>()
+            .expect("cpu storage");
+        let bytes = cpu.as_bytes();
+        bytes
+            .chunks(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect()
+    }
+
+    /// Backward smoke: short-seq early-return produces zero grad.
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_backward_kt_short_seq_returns_zero() {
+        let hidden = dummy_hidden(1, 4);
+        let head = dummy_head_t(4, 8);
+        let ids = vec![0u32];
+        let mask = vec![true];
+        let grad_loss = KtTensor::from_vec(vec![1.0f32], vec![]).unwrap();
+        let g =
+            fused_linear_cross_entropy_phase_b_backward_kt(&hidden, &head, &ids, &mask, 4, &grad_loss)
+                .expect("backward");
+        assert_eq!(g.shape(), &[1, 1, 4]);
+        assert!(read_f32_vec(&g).iter().all(|&v| v == 0.0));
+    }
+
+    /// Backward smoke: empty mask produces zero grad with hidden shape.
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_backward_kt_no_active_returns_zero() {
+        let hidden = dummy_hidden(4, 8);
+        let head = dummy_head_t(8, 16);
+        let ids = vec![0u32, 1, 2, 3];
+        // Mask shifted positions all false.
+        let mask = vec![true, false, false, false];
+        let grad_loss = KtTensor::from_vec(vec![1.0f32], vec![]).unwrap();
+        let g =
+            fused_linear_cross_entropy_phase_b_backward_kt(&hidden, &head, &ids, &mask, 4, &grad_loss)
+                .expect("backward");
+        assert_eq!(g.shape(), &[1, 4, 8]);
+        assert!(read_f32_vec(&g).iter().all(|&v| v == 0.0));
+    }
+
+    /// Uniform-input backward: with zero hidden + zero head, softmax is
+    /// 1/V for every position, so for an active row with label = c:
+    ///
+    ///   d_loss / d_logits[i, j] = (1/N) * (1/V - 1{j==c})
+    ///
+    /// then d_loss / d_active_hidden[i, :] = sum_j (...) * head_t[:, j]
+    /// which is zero because head_t is all zero. So the resulting
+    /// dhidden should be all zero, just confirming end-to-end runs
+    /// without panicking and the chunk-loop math is wired.
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_backward_kt_zero_inputs_zero_grad() {
+        let h = 8;
+        let v = 16;
+        let seq = 4;
+        let hidden = dummy_hidden(seq, h);
+        let head = dummy_head_t(h, v);
+        let ids = vec![0u32, 1, 2, 3];
+        let mask = vec![true; seq];
+        let grad_loss = KtTensor::from_vec(vec![1.0f32], vec![]).unwrap();
+        let g = fused_linear_cross_entropy_phase_b_backward_kt(
+            &hidden,
+            &head,
+            &ids,
+            &mask,
+            4,
+            &grad_loss,
+        )
+        .expect("backward");
+        assert_eq!(g.shape(), &[1, seq, h]);
+        // head_t == 0 ⇒ chunk_contrib == 0 ⇒ dhidden_active == 0.
+        for v in read_f32_vec(&g) {
+            assert!(v.abs() < 1e-6, "expected zero grad, got {v}");
+        }
+    }
+
+    /// Shape-validation: chunk_size = 0 errors.
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_backward_kt_validates_chunk_size_zero() {
+        let h = dummy_hidden(4, 8);
+        let w = dummy_head_t(8, 16);
+        let ids = vec![0u32; 4];
+        let mask = vec![true; 4];
+        let grad_loss = KtTensor::from_vec(vec![1.0f32], vec![]).unwrap();
+        let err =
+            fused_linear_cross_entropy_phase_b_backward_kt(&h, &w, &ids, &mask, 0, &grad_loss)
+                .unwrap_err();
+        assert!(matches!(err, FlceError::Msg(_)));
+        let s = format!("{err}");
+        assert!(s.contains("chunk_size must be > 0"), "got: {s}");
+    }
+
+    /// Shape-validation: mask length mismatch errors.
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_backward_kt_validates_mask_length() {
+        let h = dummy_hidden(4, 8);
+        let w = dummy_head_t(8, 16);
+        let ids = vec![0u32; 4];
+        let mask = vec![true; 3];
+        let grad_loss = KtTensor::from_vec(vec![1.0f32], vec![]).unwrap();
+        let err =
+            fused_linear_cross_entropy_phase_b_backward_kt(&h, &w, &ids, &mask, 4, &grad_loss)
+                .unwrap_err();
+        let s = format!("{err}");
+        assert!(s.contains("label_mask length"), "got: {s}");
+    }
+
+    /// Hidden rank validation in backward.
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_backward_kt_validates_hidden_rank() {
+        let h = KtTensor::from_vec(vec![0.0f32; 16], vec![4, 4]).expect("alloc h");
+        let w = dummy_head_t(4, 8);
+        let ids = vec![0u32; 4];
+        let mask = vec![true; 4];
+        let grad_loss = KtTensor::from_vec(vec![1.0f32], vec![]).unwrap();
+        let err =
+            fused_linear_cross_entropy_phase_b_backward_kt(&h, &w, &ids, &mask, 4, &grad_loss)
+                .unwrap_err();
+        let s = format!("{err}");
+        assert!(s.contains("hidden must be 3-D"), "got: {s}");
+    }
+
+    /// Backward parity: cross-check the kt-typed backward against the
+    /// candle Phase B's `bwd()` for the same inputs. This is the
+    /// load-bearing correctness test for the kt-typed backward.
+    ///
+    /// The candle path is invoked via the *Phase A* naive softmax CE
+    /// loss + candle's autograd `backward()` — the same gradient
+    /// oracle the candle Phase B parity test uses
+    /// (see `phase_b.rs::tests::cpu_phase_b_backward_parity_f32`).
+    #[test]
+    fn cpu_kt_backward_parity_against_naive_softmax_ce() {
+        // Construct a deterministic test case.
+        let seq_len = 16;
+        let hidden_size = 8;
+        let vocab_size = 64;
+        let chunk_size = 16;
+
+        let total_h = seq_len * hidden_size;
+        let hidden_vec: Vec<f32> = (0..total_h)
+            .map(|i| (i as f32 * 0.013).sin() * 0.5)
+            .collect();
+        let total_head = hidden_size * vocab_size;
+        let head_vec: Vec<f32> = (0..total_head)
+            .map(|i| ((i as f32 + 7.0) * 0.007).cos() * 0.25)
+            .collect();
+        let ids: Vec<u32> = (0..seq_len as u32)
+            .map(|i| (i * 31 + 5) % vocab_size as u32)
+            .collect();
+        let mask: Vec<bool> = (0..seq_len).map(|i| i > 0 && i % 2 == 1).collect();
+
+        // Naive softmax CE backward via candle autograd.
+        use candle_core::{DType as CDType, Device as CDevice, Tensor as CTensor, Var, D as CD};
+        let cdev = CDevice::Cpu;
+        let hidden_c = CTensor::from_vec(hidden_vec.clone(), (1, seq_len, hidden_size), &cdev)
+            .unwrap();
+        let head_c = CTensor::from_vec(head_vec.clone(), (hidden_size, vocab_size), &cdev).unwrap();
+
+        let hidden_var = Var::from_tensor(&hidden_c).unwrap();
+        // naive softmax CE — same logic as phase_b::tests::naive_softmax_ce.
+        let active_positions: Vec<u32> = mask[1..]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+            .collect();
+        let active_labels: Vec<u32> = active_positions
+            .iter()
+            .map(|&i| ids[1 + i as usize])
+            .collect();
+
+        let hidden_2d = hidden_var.as_tensor().squeeze(0).unwrap();
+        let shift_hidden = hidden_2d.narrow(0, 0, seq_len - 1).unwrap();
+        let active_idx = CTensor::new(active_positions.as_slice(), &cdev).unwrap();
+        let active_hidden = shift_hidden.index_select(&active_idx, 0).unwrap();
+        let logits = active_hidden
+            .to_dtype(CDType::F32)
+            .unwrap()
+            .matmul(&head_c.to_dtype(CDType::F32).unwrap())
+            .unwrap();
+        let log_sum_exp = logits.log_sum_exp(CD::Minus1).unwrap();
+        let labels_t = CTensor::new(active_labels.as_slice(), &cdev).unwrap();
+        let labels_2d = labels_t.unsqueeze(1).unwrap();
+        let correct = logits.gather(&labels_2d, 1).unwrap().squeeze(1).unwrap();
+        let per_token = (log_sum_exp - correct).unwrap();
+        let loss = per_token.mean_all().unwrap();
+        let grads = loss.backward().unwrap();
+        let grad_hidden_naive = grads.get(hidden_var.as_tensor()).unwrap().clone();
+
+        // kt-typed backward.
+        let hidden_kt = KtTensor::from_vec(hidden_vec.clone(), vec![1, seq_len, hidden_size])
+            .expect("alloc hidden kt");
+        let head_kt =
+            KtTensor::from_vec(head_vec.clone(), vec![hidden_size, vocab_size]).expect("alloc head kt");
+        let grad_loss_kt = KtTensor::from_vec(vec![1.0f32], vec![]).expect("alloc grad scalar");
+        let grad_kt = fused_linear_cross_entropy_phase_b_backward_kt(
+            &hidden_kt,
+            &head_kt,
+            &ids,
+            &mask,
+            chunk_size,
+            &grad_loss_kt,
+        )
+        .expect("kt backward");
+
+        // Compare element-wise.
+        let kt_vec = read_f32_vec(&grad_kt);
+        // Naive grad as flat vec.
+        let naive_flat: Vec<f32> = grad_hidden_naive
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_eq!(kt_vec.len(), naive_flat.len());
+        let mut max_abs = 0.0f32;
+        let mut max_naive_mag = 0.0f32;
+        for (k, n) in kt_vec.iter().zip(naive_flat.iter()) {
+            max_abs = max_abs.max((k - n).abs());
+            max_naive_mag = max_naive_mag.max(n.abs());
+        }
+        let rel = if max_naive_mag > 1e-6 {
+            max_abs / max_naive_mag
+        } else {
+            max_abs
+        };
+        assert!(
+            max_abs < 1e-4 || rel < 1e-4,
+            "kt-bwd vs naive bwd: max_abs={max_abs:.2e} max_naive={max_naive_mag:.6} rel={rel:.2e}",
+        );
+    }
+
+    /// Cross-check kt-typed backward against candle Phase B's `bwd()`
+    /// directly — the production backward path. Same inputs as the
+    /// naive-CE parity test; this confirms kt and candle Phase B
+    /// produce identical (up to FP associativity) gradients.
+    #[test]
+    fn cpu_kt_backward_parity_against_candle_phase_b() {
+        let seq_len = 16;
+        let hidden_size = 8;
+        let vocab_size = 64;
+        let chunk_size = 16;
+
+        let total_h = seq_len * hidden_size;
+        let hidden_vec: Vec<f32> = (0..total_h)
+            .map(|i| (i as f32 * 0.013).sin() * 0.5)
+            .collect();
+        let total_head = hidden_size * vocab_size;
+        let head_vec: Vec<f32> = (0..total_head)
+            .map(|i| ((i as f32 + 7.0) * 0.007).cos() * 0.25)
+            .collect();
+        let ids: Vec<u32> = (0..seq_len as u32)
+            .map(|i| (i * 31 + 5) % vocab_size as u32)
+            .collect();
+        let mask: Vec<bool> = (0..seq_len).map(|i| i > 0 && i % 2 == 1).collect();
+
+        // Candle Phase B backward via `loss.backward()`.
+        use candle_core::{Device as CDevice, Tensor as CTensor, Var};
+        let cdev = CDevice::Cpu;
+        let hidden_c = CTensor::from_vec(hidden_vec.clone(), (1, seq_len, hidden_size), &cdev)
+            .unwrap();
+        let head_c = CTensor::from_vec(head_vec.clone(), (hidden_size, vocab_size), &cdev).unwrap();
+        let hidden_var = Var::from_tensor(&hidden_c).unwrap();
+        let loss_pb = crate::fused_linear_cross_entropy_phase_b(
+            hidden_var.as_tensor(),
+            &head_c,
+            &ids,
+            &mask,
+            &cdev,
+            chunk_size,
+        )
+        .unwrap();
+        let grads = loss_pb.backward().unwrap();
+        let grad_pb = grads.get(hidden_var.as_tensor()).unwrap().clone();
+
+        // kt-typed backward.
+        let hidden_kt = KtTensor::from_vec(hidden_vec.clone(), vec![1, seq_len, hidden_size])
+            .expect("alloc hidden kt");
+        let head_kt =
+            KtTensor::from_vec(head_vec.clone(), vec![hidden_size, vocab_size]).expect("alloc head kt");
+        let grad_loss_kt = KtTensor::from_vec(vec![1.0f32], vec![]).expect("alloc grad scalar");
+        let grad_kt = fused_linear_cross_entropy_phase_b_backward_kt(
+            &hidden_kt,
+            &head_kt,
+            &ids,
+            &mask,
+            chunk_size,
+            &grad_loss_kt,
+        )
+        .expect("kt backward");
+
+        let kt_vec = read_f32_vec(&grad_kt);
+        let pb_flat: Vec<f32> = grad_pb.flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(kt_vec.len(), pb_flat.len());
+        let mut max_abs = 0.0f32;
+        let mut max_pb_mag = 0.0f32;
+        for (k, p) in kt_vec.iter().zip(pb_flat.iter()) {
+            max_abs = max_abs.max((k - p).abs());
+            max_pb_mag = max_pb_mag.max(p.abs());
+        }
+        let rel = if max_pb_mag > 1e-6 {
+            max_abs / max_pb_mag
+        } else {
+            max_abs
+        };
+        assert!(
+            max_abs < 1e-4 || rel < 1e-4,
+            "kt-bwd vs candle Phase B bwd: max_abs={max_abs:.2e} max_pb={max_pb_mag:.6} rel={rel:.2e}",
+        );
+    }
+
+    /// Backward chunk-size parity: single vs multi chunks produce
+    /// numerically equivalent gradients (up to FP associativity).
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_backward_kt_chunk_parity() {
+        let seq_len = 8;
+        let hidden_size = 4;
+        let vocab_size = 16;
+
+        let total_h = seq_len * hidden_size;
+        let hidden_vec: Vec<f32> = (0..total_h)
+            .map(|i| (i as f32 * 0.011).sin() * 0.3)
+            .collect();
+        let total_head = hidden_size * vocab_size;
+        let head_vec: Vec<f32> = (0..total_head)
+            .map(|i| ((i as f32 + 3.0) * 0.005).cos() * 0.2)
+            .collect();
+        let ids: Vec<u32> = (0..seq_len as u32)
+            .map(|i| (i * 17 + 2) % vocab_size as u32)
+            .collect();
+        let mask: Vec<bool> = (0..seq_len).map(|i| i > 0).collect();
+
+        let hidden_kt = KtTensor::from_vec(hidden_vec.clone(), vec![1, seq_len, hidden_size]).unwrap();
+        let head_kt =
+            KtTensor::from_vec(head_vec.clone(), vec![hidden_size, vocab_size]).unwrap();
+        let grad_loss_kt = KtTensor::from_vec(vec![1.0f32], vec![]).unwrap();
+
+        let g_single = fused_linear_cross_entropy_phase_b_backward_kt(
+            &hidden_kt,
+            &head_kt,
+            &ids,
+            &mask,
+            vocab_size,
+            &grad_loss_kt,
+        )
+        .unwrap();
+        let g_multi = fused_linear_cross_entropy_phase_b_backward_kt(
+            &hidden_kt,
+            &head_kt,
+            &ids,
+            &mask,
+            4,
+            &grad_loss_kt,
+        )
+        .unwrap();
+
+        let s = read_f32_vec(&g_single);
+        let m = read_f32_vec(&g_multi);
+        assert_eq!(s.len(), m.len());
+        let mut max_abs = 0.0f32;
+        let mut max_mag = 0.0f32;
+        for (a, b) in s.iter().zip(m.iter()) {
+            max_abs = max_abs.max((a - b).abs());
+            max_mag = max_mag.max(a.abs());
+        }
+        let rel = if max_mag > 1e-6 { max_abs / max_mag } else { max_abs };
+        assert!(
+            max_abs < 1e-4 || rel < 1e-4,
+            "chunk parity bwd: max_abs={max_abs:.2e} max_mag={max_mag:.6} rel={rel:.2e}"
+        );
     }
 }
