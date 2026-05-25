@@ -34,6 +34,38 @@ pub fn repeat_interleave(x: &Tensor, axis: usize, n: usize) -> Result<Tensor> {
     if !x.is_contiguous() {
         bail!("repeat_interleave: input must be contiguous");
     }
+
+    // CUDA D2H fast path (#1082): repeat_interleave is a structured
+    // host-byte copy that's a CPU loop over inner-block slices. There
+    // is no shared "interleaved copy" CUDA kernel today; the public
+    // API just needs to accept CUDA-resident inputs without bailing.
+    // Round-trip via cuda_to_host_copy -> CPU loop -> host_to_cuda_copy
+    // so the result lives on the same CUDA device as the input.
+    // GQA head expansion (the canonical caller) builds new K/V row
+    // banks once at attention assembly time, so the D2H/H2D is not
+    // on the per-token hot path. A native kernel is reasonable
+    // future work but out of scope for the substrate unblock.
+    #[cfg(feature = "cuda")]
+    if let crate::Device::Cuda(device_index) = x.device() {
+        let host = crate::cuda_to_host_copy(x)?;
+        let cpu_out = repeat_interleave_cpu(&host, axis, n)?;
+        let cuda_storage = x
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::CudaStorage>()
+            .ok_or_else(|| {
+                Error::from_str(
+                    "repeat_interleave: input claims CUDA device but storage is not CudaStorage",
+                )
+            })?;
+        let candle_device = cuda_storage.candle_device().clone();
+        return crate::host_to_cuda_copy(&cpu_out, candle_device, device_index);
+    }
+
+    repeat_interleave_cpu(x, axis, n)
+}
+
+fn repeat_interleave_cpu(x: &Tensor, axis: usize, n: usize) -> Result<Tensor> {
     let dtype = x.dtype();
     let per = dtype.size_in_bytes();
     let shape = x.shape();
