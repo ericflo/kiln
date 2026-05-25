@@ -19817,6 +19817,33 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
     // drives, just with the per-step host→device builds skipped — the
     // captured graph reads from `graph_inputs.token_ids` / `.positions`
     // device pointers that the runner re-fills before each replay.
+    //
+    // KNOWN BUG (#1082, see `bench-results/cuda-graph-bs2-memcheck.md`):
+    // only `token_ids`, `positions`, and `linear_state` are threaded
+    // through to the inner forward today. The other stable buffers in
+    // `graph_inputs` (`block_table`, `seqused_k`, `kv_slot`,
+    // `rotary_cos`, `rotary_sin`, `attn_out`, `softmax_lse`,
+    // `output_logits` for non-LM-head paths) are NOT consumed by
+    // `model_forward_paged_decode_contiguous_batch_hidden_inner` —
+    // which then calls `CachedPagedDecodeMeta::build` and reallocates
+    // `block_table_tensor` + `seqused_k_tensor` via `Tensor::from_slice`
+    // on every entry. During CUDA graph capture those allocations go
+    // through candle's regular `cudaMalloc`, the captured kernels bake
+    // their device pointers as immediate args, and when the per-call
+    // `CachedPagedDecodeMeta` local drops at end of capture the
+    // storage is `cudaFree`'d — leaving the captured graph with
+    // dangling pointers. The first `cuGraphLaunch` faults with
+    // `CUDA_ERROR_ILLEGAL_ADDRESS` (compute-sanitizer pins it to a
+    // `ucopy_f32` kernel reading ~900 MiB past the nearest live
+    // allocation). This is why `KILN_CUDA_GRAPHS_BATCHED=1` is
+    // default-off. The fix is to extend the inner forward to accept
+    // stable `block_table` + `seqused_k` (and audit the rest of the
+    // intra-graph `Tensor::from_slice` / `Tensor::zeros` sites) so it
+    // can be steered to read from the graph-input buffers when the
+    // capture path calls it. The bs=1 forward
+    // (`model_forward_paged_with_graph_inputs` →
+    // `model_forward_paged_inner`) already follows that discipline —
+    // mirror it here.
     let hidden = model_forward_paged_decode_contiguous_batch_hidden_inner(
         backend,
         input_tokens,
