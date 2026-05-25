@@ -31713,6 +31713,307 @@ mod tests {
         Ok(())
     }
 
+    /// Parity check for the kt-API path of `backend.flash_attn_paged_decode`
+    /// against the candle-typed path. Both bottom out in the same FFI
+    /// symbol (`kiln_flash_attn_fwd_paged_decode`) so this asserts
+    /// byte-for-byte parity on the BF16 output. (#1082)
+    ///
+    /// This is the paged GQA decode hot path. The kt wire landed in
+    /// c49c1995 and is now default-ON behind `KILN_DISABLE_KT_API_FLASH_ATTN`
+    /// (flipped in e1b45a34). The kt adapter has 4 distinct kt-bridge
+    /// borrows + 1 kt→candle output copy. The candle wrapper discards
+    /// `softmax_lse`; the kt path does the same (we only return `out`).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_flash_attn_paged_decode_kt_api_parity() -> Result<()> {
+        use crate::backend::BackendRuntime;
+        use crate::backend::cuda::CudaBackend;
+        use rand::rngs::StdRng;
+        use rand::{RngExt, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_flash_attn_paged_decode_kt_api_parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // Qwen3.5-4B-style paged GQA decode envelope (see
+        // flash_attn_paged_decode at
+        // crates/kiln-flash-attn/src/lib.rs:267). head_dim must be 128
+        // or 256; num_heads % num_heads_k must be 0; page_block_size
+        // must divide 128 (kBlockN). Use B=1, num_heads=32,
+        // num_heads_k=4 (GQA 8:1), head_dim=128, page_block_size=64,
+        // total_seqlen_k=128 (= 2 pages).
+        let batch = 1usize;
+        let num_heads = 32usize;
+        let num_heads_k = 4usize;
+        let head_dim = 128usize;
+        let page_block_size = 64usize;
+        let total_seqlen_k = 128usize; // 2 pages
+        let num_pages_total = 4usize; // give 2 extra unused pages
+        let max_blocks_per_seq = 2usize;
+        // Pool layout per `flash_attn_paged_decode`: k_pool / v_pool
+        // shape `[total_slots, num_heads_k, head_dim]` where
+        // `total_slots = num_pages_total * page_block_size`.
+        let total_slots = num_pages_total * page_block_size;
+
+        let n_q = batch * 1 * num_heads * head_dim;
+        let n_kv = total_slots * num_heads_k * head_dim;
+
+        let mut rng = StdRng::seed_from_u64(0xC0_1DD160);
+        let q_data: Vec<f32> = (0..n_q).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let k_data: Vec<f32> = (0..n_kv).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let v_data: Vec<f32> = (0..n_kv).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+
+        let q = Tensor::from_slice(&q_data, (batch, 1, num_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let k_pool = Tensor::from_slice(&k_data, (total_slots, num_heads_k, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let v_pool = Tensor::from_slice(&v_data, (total_slots, num_heads_k, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        // Map sequence-0 to physical pages [0, 1] (the first
+        // total_seqlen_k=128 tokens). U32 dtype as required by
+        // flash_attn_paged_decode_supports.
+        let block_table_data: Vec<u32> = vec![0, 1];
+        let block_table = Tensor::from_slice(
+            &block_table_data,
+            (batch, max_blocks_per_seq),
+            &device,
+        )?;
+
+        let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
+        let causal = false; // Decode is non-causal for queries against history.
+
+        // Candle-typed path.
+        let candle_be = CudaBackend::new_with_kt_api_flash_attn(device.clone(), false);
+        let out_candle = match candle_be.flash_attn_paged_decode(
+            &q,
+            &k_pool,
+            &v_pool,
+            &block_table,
+            total_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )? {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "candle flash_attn_paged_decode declined dispatch; skipping kt parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // kt-API path.
+        let kt_be = CudaBackend::new_with_kt_api_flash_attn(device.clone(), true);
+        let out_kt = match kt_be.flash_attn_paged_decode(
+            &q,
+            &k_pool,
+            &v_pool,
+            &block_table,
+            total_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )? {
+            Some(t) => t,
+            None => {
+                eprintln!("kt flash_attn_paged_decode declined dispatch; skipping kt parity");
+                return Ok(());
+            }
+        };
+
+        // Output parity: byte-for-byte (same FFI symbol).
+        assert_eq!(
+            out_candle.dims(),
+            out_kt.dims(),
+            "out: dims mismatch (candle {:?}, kt {:?})",
+            out_candle.dims(),
+            out_kt.dims()
+        );
+        let c: Vec<f32> = out_candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let k: Vec<f32> = out_kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(c.len(), k.len(), "out: length mismatch");
+        let mut mismatches = 0usize;
+        for (i, (x, y)) in c.iter().zip(k.iter()).enumerate() {
+            if x.to_bits() != y.to_bits() {
+                if mismatches < 4 {
+                    eprintln!(
+                        "kt parity output mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                        x.to_bits(),
+                        y.to_bits()
+                    );
+                }
+                mismatches += 1;
+            }
+        }
+        assert_eq!(
+            mismatches, 0,
+            "kt-API flash_attn_paged_decode output diverges from candle at {mismatches} indices"
+        );
+
+        Ok(())
+    }
+
+    /// Parity check for the kt-API path of
+    /// `backend.flash_attn_paged_decode_contiguous_batch_dyn_seqlen`
+    /// against the candle-typed path. Both bottom out in the same FFI
+    /// symbol (`kiln_flash_attn_fwd_paged_decode_dyn_seqlen`) so this
+    /// asserts byte-for-byte parity on the BF16 output. (#1082)
+    ///
+    /// This is the dynamic-seqlen paged decode path used when each
+    /// batch entry has a different `seqlen_k`. The kt wire landed in
+    /// 7fe3011f and is now default-ON behind
+    /// `KILN_DISABLE_KT_API_FLASH_ATTN` (flipped in e1b45a34). The kt
+    /// adapter has 5 distinct kt-bridge borrows + 1 kt→candle output
+    /// copy (one more borrow than `flash_attn_paged_decode` to carry
+    /// the `seqused_k` per-batch lengths tensor).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_flash_attn_paged_decode_dyn_seqlen_kt_api_parity() -> Result<()> {
+        use crate::backend::BackendRuntime;
+        use crate::backend::cuda::CudaBackend;
+        use rand::rngs::StdRng;
+        use rand::{RngExt, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_flash_attn_paged_decode_dyn_seqlen_kt_api_parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // Same envelope as flash_attn_paged_decode but with a
+        // per-batch `seqused_k: [B]` u32 tensor instead of a uniform
+        // `total_seqlen_k`. Use B=2 to actually exercise the dyn
+        // dimension (seqlen_k differs between the two sequences).
+        let batch = 2usize;
+        let num_heads = 32usize;
+        let num_heads_k = 4usize;
+        let head_dim = 128usize;
+        let page_block_size = 64usize;
+        let max_seqlen_k = 192usize; // 3 pages
+        let num_pages_total = 8usize;
+        let max_blocks_per_seq = 3usize;
+        let total_slots = num_pages_total * page_block_size;
+
+        let n_q = batch * 1 * num_heads * head_dim;
+        let n_kv = total_slots * num_heads_k * head_dim;
+
+        let mut rng = StdRng::seed_from_u64(0xC0_1DD161);
+        let q_data: Vec<f32> = (0..n_q).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let k_data: Vec<f32> = (0..n_kv).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let v_data: Vec<f32> = (0..n_kv).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+
+        let q = Tensor::from_slice(&q_data, (batch, 1, num_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let k_pool = Tensor::from_slice(&k_data, (total_slots, num_heads_k, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let v_pool = Tensor::from_slice(&v_data, (total_slots, num_heads_k, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        // Seq 0 -> pages [0, 1, 2] (192 tokens, full max).
+        // Seq 1 -> pages [3, 4, 5] (128 tokens, 2 full pages).
+        let block_table_data: Vec<u32> = vec![0, 1, 2, 3, 4, 5];
+        let block_table = Tensor::from_slice(
+            &block_table_data,
+            (batch, max_blocks_per_seq),
+            &device,
+        )?;
+        // Per-batch actual seqlen_k: seq 0 uses 192, seq 1 uses 128.
+        // The kernel requires i32 dtype for seqused_k (per
+        // crates/kiln-flash-attn/src/lib.rs `flash_attn_paged_decode_dyn_seqlen`
+        // dtype check), distinct from the u32 block_table.
+        let seqused_k_data: Vec<i32> = vec![192, 128];
+        let seqused_k = Tensor::from_slice(&seqused_k_data, (batch,), &device)?;
+
+        let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
+        let causal = false;
+
+        // Candle-typed path.
+        let candle_be = CudaBackend::new_with_kt_api_flash_attn(device.clone(), false);
+        let out_candle = match candle_be
+            .flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+                &q,
+                &k_pool,
+                &v_pool,
+                &block_table,
+                &seqused_k,
+                max_seqlen_k,
+                page_block_size,
+                softmax_scale,
+                causal,
+            )? {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "candle flash_attn_paged_decode_dyn_seqlen declined dispatch; skipping kt parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // kt-API path.
+        let kt_be = CudaBackend::new_with_kt_api_flash_attn(device.clone(), true);
+        let out_kt = match kt_be.flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+            &q,
+            &k_pool,
+            &v_pool,
+            &block_table,
+            &seqused_k,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )? {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "kt flash_attn_paged_decode_dyn_seqlen declined dispatch; skipping kt parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // Output parity: byte-for-byte (same FFI symbol).
+        assert_eq!(
+            out_candle.dims(),
+            out_kt.dims(),
+            "out: dims mismatch (candle {:?}, kt {:?})",
+            out_candle.dims(),
+            out_kt.dims()
+        );
+        let c: Vec<f32> = out_candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let k: Vec<f32> = out_kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(c.len(), k.len(), "out: length mismatch");
+        let mut mismatches = 0usize;
+        for (i, (x, y)) in c.iter().zip(k.iter()).enumerate() {
+            if x.to_bits() != y.to_bits() {
+                if mismatches < 4 {
+                    eprintln!(
+                        "kt parity output mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                        x.to_bits(),
+                        y.to_bits()
+                    );
+                }
+                mismatches += 1;
+            }
+        }
+        assert_eq!(
+            mismatches, 0,
+            "kt-API flash_attn_paged_decode_dyn_seqlen output diverges from candle at {mismatches} indices"
+        );
+
+        Ok(())
+    }
+
     /// Metal parity check for `backend.causal_conv1d_update` against the same
     /// portable `causal_conv1d_decode` + `cuda_silu` oracle used by CUDA.
     #[cfg(feature = "metal")]
