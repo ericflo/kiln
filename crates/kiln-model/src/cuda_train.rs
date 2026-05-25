@@ -2254,11 +2254,36 @@ pub fn cuda_silu(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
         "cuda_silu: expected F32 input, got {:?}",
         input.dtype()
     );
-    let neg = input.as_tensor().neg().context("cuda_silu: neg")?;
-    let exp_neg = neg.exp().context("cuda_silu: exp")?;
-    let one_plus = (exp_neg + 1.0).context("cuda_silu: add one")?;
-    let sigmoid = one_plus.recip().context("cuda_silu: reciprocal")?;
-    let out = (input.as_tensor() * &sigmoid).context("cuda_silu: x * sigmoid")?;
+    // Phase 7 (#1082): route the four-step sigmoid composite
+    // (`neg` -> `exp` -> `+ 1.0` -> `recip`) through the kt-API
+    // helpers. Same pattern as `cuda_sigmoid` directly above;
+    // the trailing `x * sigmoid` keeps the candle broadcast_mul
+    // because there's no scalar version of that. Each step
+    // independently falls through to the candle composite when
+    // its gate is off OR its precondition fails, so behavior is
+    // identical with the gates off.
+    let x = input.as_tensor();
+    let neg = match crate::forward::try_kt_neg(x).context("cuda_silu: try_kt_neg")? {
+        Some(out) => out,
+        None => x.neg().context("cuda_silu: neg")?,
+    };
+    let exp_neg = match crate::forward::try_kt_exp(&neg).context("cuda_silu: try_kt_exp")? {
+        Some(out) => out,
+        None => neg.exp().context("cuda_silu: exp")?,
+    };
+    let one_plus = match crate::forward::try_kt_add_scalar(&exp_neg, 1.0)
+        .context("cuda_silu: try_kt_add_scalar")?
+    {
+        Some(out) => out,
+        None => (exp_neg + 1.0).context("cuda_silu: add one")?,
+    };
+    let sigmoid = match crate::forward::try_kt_recip(&one_plus)
+        .context("cuda_silu: try_kt_recip")?
+    {
+        Some(out) => out,
+        None => one_plus.recip().context("cuda_silu: reciprocal")?,
+    };
+    let out = (x * &sigmoid).context("cuda_silu: x * sigmoid")?;
     let needs_grad =
         input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
     let sigmoid_for_backward = CudaTrainTensor::new(sigmoid)?;
