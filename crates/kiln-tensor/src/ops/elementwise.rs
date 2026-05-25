@@ -160,6 +160,45 @@ impl DeviceOp2 for ElementwiseOp {
         Ok(Some(crate::cuda_elementwise_binary(a, b, kind_tag)?))
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::metal_elementwise_binary` which wraps candle's
+        // production Metal binary kernels.
+        //
+        // Gate on:
+        //   - validate(a, b, kind)
+        //   - F32/BF16/F16
+        //   - contiguous inputs
+        //   - storage must be Metal-backed on both sides
+        validate(a, b, self.kind)?;
+        if !a.is_contiguous() || !b.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if a
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::MetalStorage>()
+            .is_none()
+            || b.storage()
+                .as_any()
+                .downcast_ref::<crate::MetalStorage>()
+                .is_none()
+        {
+            return Ok(None);
+        }
+        let kind_tag: i32 = match self.kind {
+            BinaryKind::Add => 0,
+            BinaryKind::Sub => 1,
+            BinaryKind::Mul => 2,
+            BinaryKind::Div => 3,
+        };
+        Ok(Some(crate::metal_elementwise_binary(a, b, kind_tag)?))
+    }
+
     #[cfg(feature = "vulkan")]
     fn vulkan_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
         // Gate on the same preconditions as the CUDA path:
