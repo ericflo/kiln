@@ -7,9 +7,9 @@
 //! # CUDA wiring (#1082)
 //!
 //! Routes through the shared `cuda_activation_unary` kernel.
-//! `recip` landed first (kind 22), `sign` (23), `floor` (24),
-//! `ceil` (25), `round` (26); the remaining kind (trunc) lands
-//! in a subsequent commit of the #1082 series.
+//! All six kinds now route through CUDA via the shared kernel:
+//! `recip` (22), `sign` (23), `floor` (24), `ceil` (25),
+//! `round` (26), `trunc` (27) — all landed in the #1082 series.
 
 use std::sync::Arc;
 
@@ -60,21 +60,19 @@ impl SignRoundKind {
     }
 
     /// CUDA kernel kind tag matching the `KIND_*` constants in
-    /// `csrc/activation.cu`. `None` means the CUDA path is not yet
-    /// wired for this op (falls back to CPU). `recip` (22),
-    /// `sign` (23), `floor` (24), `ceil` (25) landed earlier;
-    /// `round` (26) follows in this commit of the #1082 series.
+    /// `csrc/activation.cu`. All six kinds in this family now have
+    /// CUDA paths: recip (22), sign (23), floor (24), ceil (25),
+    /// round (26), trunc (27) — the last (#1082) landed with this
+    /// commit.
     #[cfg(feature = "cuda")]
-    const fn cuda_kind_tag(self) -> Option<i32> {
+    const fn cuda_kind_tag(self) -> i32 {
         match self {
-            SignRoundKind::Reciprocal => Some(22),
-            SignRoundKind::Sign => Some(23),
-            SignRoundKind::Floor => Some(24),
-            SignRoundKind::Ceil => Some(25),
-            SignRoundKind::Round => Some(26),
-            // trunc CUDA wiring lands in a follow-up commit of
-            // the #1082 series.
-            _ => None,
+            SignRoundKind::Reciprocal => 22,
+            SignRoundKind::Sign => 23,
+            SignRoundKind::Floor => 24,
+            SignRoundKind::Ceil => 25,
+            SignRoundKind::Round => 26,
+            SignRoundKind::Trunc => 27,
         }
     }
 }
@@ -108,10 +106,7 @@ impl DeviceOp1 for SignRoundOp {
         if !x.is_contiguous() {
             return Ok(None);
         }
-        match self.kind.cuda_kind_tag() {
-            Some(tag) => Ok(Some(crate::cuda_activation_unary(x, tag)?)),
-            None => Ok(None),
-        }
+        Ok(Some(crate::cuda_activation_unary(x, self.kind.cuda_kind_tag())?))
     }
 
     #[cfg(feature = "metal")]
