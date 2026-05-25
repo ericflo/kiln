@@ -130,6 +130,47 @@ impl DeviceOp1 for CastOp {
         Ok(Some(crate::cuda_cast(x, to)?))
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::metal_cast` which wraps candle's production Metal
+        // `to_dtype` kernel.
+        //
+        // Gate on:
+        //   - float triple (F32/BF16/F16) — integer round-trips stay on CPU
+        //   - contiguous input
+        //   - storage must be Metal-backed
+        //   - same-dtype is a no-op handled by cpu_fwd's fast path
+        let from = x.dtype();
+        let to = self.target;
+        if from == to {
+            return Ok(None);
+        }
+        let metal_supported = matches!(
+            (from, to),
+            (DType::F32, DType::BF16)
+                | (DType::F32, DType::F16)
+                | (DType::BF16, DType::F32)
+                | (DType::BF16, DType::F16)
+                | (DType::F16, DType::F32)
+                | (DType::F16, DType::BF16)
+        );
+        if !metal_supported {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::MetalStorage>()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(crate::metal_cast(x, to)?))
+    }
+
     #[cfg(feature = "vulkan")]
     fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
         // Phase 4 substrate-op landing: dispatch through
