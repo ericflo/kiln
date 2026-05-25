@@ -1033,6 +1033,270 @@ pub fn vulkan_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate
 }
 
 // ----------------------------------------------------------------------
+// vulkan_elementwise_binary — Phase 4 Vulkan substrate op (#1082)
+// ----------------------------------------------------------------------
+
+/// Vulkan element-wise binary op (add/sub/mul/div). Mirrors the role of
+/// [`crate::cuda_elementwise_binary`] for the Vulkan backend.
+///
+/// Dispatches on `kind_tag` (matches the CUDA tags in
+/// `ElementwiseOp::cuda_fwd`):
+///   - `0` -> Add  (`a + b`)
+///   - `1` -> Sub  (`a - b`)
+///   - `2` -> Mul  (`a * b`)
+///   - `3` -> Div  (`a / b`)
+///
+/// F32-only on Vulkan today; the underlying
+/// `vk_elementwise_binary_f32` shader (and its `_offset` tiled variant)
+/// supports F32 only. BF16/F16 fall through to CPU until matching
+/// shaders land.
+///
+/// # Implementation
+///
+/// Bridges between kt's `VulkanStorage` and the kernel's `VkTensor`
+/// via D2H read-back + H2D re-upload at each boundary, matching the
+/// softmax / rmsnorm / l2norm wires. Zero-copy follow-up is the same
+/// set of three bridges documented on `vulkan_softmax_last_axis`.
+///
+/// # Requirements
+///
+/// - `a` and `b` must both be backed by [`VulkanStorage`]
+/// - `a.dtype() == b.dtype() == F32`
+/// - `a.shape() == b.shape()` (no broadcasting yet)
+/// - both contiguous
+/// - `kind_tag` in {0, 1, 2, 3}
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on unsupported kind, dtype, non-contiguous
+/// layout, non-Vulkan storage, shape mismatch, or kernel error.
+#[allow(clippy::needless_range_loop)]
+pub fn vulkan_elementwise_binary(
+    a: &crate::Tensor,
+    b: &crate::Tensor,
+    kind_tag: i32,
+) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::elementwise::{
+        vk_add_no_grad, vk_div_no_grad, vk_mul_no_grad, vk_sub_no_grad,
+    };
+    use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
+
+    if !matches!(kind_tag, 0 | 1 | 2 | 3) {
+        return Err(Error::Msg(format!(
+            "vulkan_elementwise_binary: kind_tag {kind_tag} not supported \
+             (only 0=Add, 1=Sub, 2=Mul, 3=Div have shaders)"
+        )));
+    }
+    let dtype = a.dtype();
+    if !matches!(dtype, DType::F32) {
+        return Err(Error::Msg(format!(
+            "vulkan_elementwise_binary: unsupported dtype {dtype} (F32-only today; \
+             BF16/F16 need cast wrappers or widened shaders)"
+        )));
+    }
+    if b.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "vulkan_elementwise_binary: dtype mismatch a={dtype} b={}",
+            b.dtype()
+        )));
+    }
+    if a.shape() != b.shape() {
+        return Err(Error::Msg(format!(
+            "vulkan_elementwise_binary: shape mismatch a={:?} b={:?}",
+            a.shape(),
+            b.shape()
+        )));
+    }
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(Error::Msg(
+            "vulkan_elementwise_binary: inputs must be contiguous".to_string(),
+        ));
+    }
+
+    let kt_vk_a = a
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| {
+            Error::Msg("vulkan_elementwise_binary: a must be Vulkan-backed".to_string())
+        })?;
+    let kt_vk_b = b
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| {
+            Error::Msg("vulkan_elementwise_binary: b must be Vulkan-backed".to_string())
+        })?;
+
+    let vulkan_device = Arc::clone(kt_vk_a.vulkan_device());
+    let device_index = match kt_vk_a.device() {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+    let shape: Vec<usize> = a.shape().to_vec();
+    let a_byte_len = kt_vk_a.byte_len();
+    let b_byte_len = kt_vk_b.byte_len();
+
+    // ---- D2H a ----
+    let a_bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        kt_vk_a.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_elementwise_binary: D2H read_back of a failed: {e}"
+        ))
+    })?;
+
+    // ---- D2H b ----
+    let b_bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        kt_vk_b.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_elementwise_binary: D2H read_back of b failed: {e}"
+        ))
+    })?;
+
+    // ---- H2D into VkTensors ----
+    let vk_dtype = VkDType::F32;
+
+    let vk_a_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        a_byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_elementwise_binary: device-local alloc for VkTensor a failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &vk_a_buffer,
+        &a_bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_elementwise_binary: H2D upload of VkTensor a failed: {e}"
+        ))
+    })?;
+    let vk_a = VkTensor::from_buffer(
+        Arc::new(vk_a_buffer),
+        shape.clone(),
+        vk_dtype,
+        Arc::clone(&vulkan_device),
+    );
+
+    let vk_b_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        b_byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_elementwise_binary: device-local alloc for VkTensor b failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &vk_b_buffer,
+        &b_bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_elementwise_binary: H2D upload of VkTensor b failed: {e}"
+        ))
+    })?;
+    let vk_b = VkTensor::from_buffer(
+        Arc::new(vk_b_buffer),
+        shape.clone(),
+        vk_dtype,
+        Arc::clone(&vulkan_device),
+    );
+
+    // ---- Dispatch ----
+    let vk_out = match kind_tag {
+        0 => vk_add_no_grad(&vk_a, &vk_b),
+        1 => vk_sub_no_grad(&vk_a, &vk_b),
+        2 => vk_mul_no_grad(&vk_a, &vk_b),
+        3 => vk_div_no_grad(&vk_a, &vk_b),
+        _ => unreachable!("gated above"),
+    }
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_elementwise_binary: kernel dispatch (kind={kind_tag}) failed: {e}"
+        ))
+    })?;
+
+    // ---- D2H result ----
+    let out_bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        vk_out.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_elementwise_binary: D2H read_back of kernel result failed: {e}"
+        ))
+    })?;
+
+    // ---- H2D into kt VulkanStorage ----
+    let out_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        a_byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_elementwise_binary: device-local alloc for kt output failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &out_buffer,
+        &out_bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_elementwise_binary: H2D upload of kt output failed: {e}"
+        ))
+    })?;
+    let out_storage = VulkanStorage::from_buffer(
+        vulkan_device,
+        device_index,
+        dtype,
+        out_buffer,
+        a_byte_len as u64,
+    )?;
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
+// ----------------------------------------------------------------------
 // vulkan_argmax_last_axis — Phase 4 Vulkan substrate op (#1082)
 // ----------------------------------------------------------------------
 
