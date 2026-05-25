@@ -1147,9 +1147,80 @@ fn should_use_fused_rmsnorm() -> bool {
 }
 
 /// CUDA-compatible SiLU (Swish): `x * sigmoid(x)`.
+///
+/// Phase 7 whole-composite migration (#1082): when
+/// `KILN_USE_KT_API_SILU_COMPOSITE=1` (or `KILN_USE_KT_API_ALL=1`)
+/// is set, the entire `sigmoid(x) * x` composite is replaced with a
+/// single `kiln_tensor::cuda_activation_unary(kind=0)` call (SiLU)
+/// via the kt-bridge borrow adapter. Mirrors the
+/// `KILN_USE_KT_API_RMSNORM` precedent: one env gate, one kernel
+/// dispatch, replacing a multi-step composite. Falls through to the
+/// existing `cuda_sigmoid` + multiply path on any precondition
+/// failure so behavior is identical with the gate off.
 fn cuda_silu(x: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if cuda_use_kt_api_silu_composite()
+        && matches!(x.device(), Device::Cuda(_))
+        && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        && x.is_contiguous()
+        && x.rank() > 0
+    {
+        if let Some(out) = try_kt_silu_composite(x).context("cuda_silu try_kt_silu_composite")? {
+            return Ok(out);
+        }
+    }
     let sig = cuda_sigmoid(x)?;
     Ok((x * sig)?)
+}
+
+/// Phase 7 opt-in (#1082): whole `cuda_silu` composite through the
+/// kt-API + adapters. Set `KILN_USE_KT_API_SILU_COMPOSITE=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// entire `sigmoid(x) * x` two-step composite through a single
+/// `kiln_tensor::cuda_activation_unary` call with kind tag 0 (SiLU)
+/// via the kt-bridge borrow adapter. Pays one dtod memcpy on the
+/// output direction.
+///
+/// Distinct from the fused-MLP `mlp_silu_mul` site (which fuses
+/// SiLU(gate) * up via a custom kernel) — this gate migrates
+/// *standalone* `cuda_silu` shapes. There are 12+ cuda_silu call
+/// sites in forward.rs (GDN gates, MLP silu mul fallback paths,
+/// training paths), all of which light up under this gate when
+/// the composite call site does not have a fused upstream.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_silu_composite() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SILU_COMPOSITE").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
+/// Phase 7 (#1082) — kt-API SiLU whole-composite migration helper.
+/// Routes a contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 0 (SiLU),
+/// replacing the two-step `sigmoid(x) * x` composite with a single
+/// kernel dispatch.
+///
+/// Returns `Ok(None)` on any incompatibility so the caller falls
+/// through to the `cuda_sigmoid` + multiply composite. NVTX range
+/// `kiln/silu_composite_kt` brackets the migrated call so nsys
+/// traces separate the path from the baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_silu_composite(x: &Tensor) -> Result<Option<Tensor>> {
+    kiln_nvtx::range!(c"kiln/silu_composite_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 0 = SiLU (matches csrc/activation.cu KIND_SILU).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 0) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_silu_composite: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
 }
 
 fn any_tensor_tracks_op(tensors: &[&Tensor]) -> bool {
