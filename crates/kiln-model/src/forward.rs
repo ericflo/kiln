@@ -1608,26 +1608,26 @@ pub(crate) fn try_kt_paged_kv_cache_new(
 /// `PagedKvCacheKt::write_token_major_native_graph_slot` short-
 /// circuits on `self.fp8`.
 ///
-/// # Why no call site uses this yet
+/// # Where this is now wired
 ///
-/// The single production call site at the
+/// As of commit `7dd0009c`, the production call site at the
 /// `paged_cache.write_token_major_native_graph_slot` invocation in
-/// `gqa_attention_paged_decode` reads `paged_cache: &mut PagedKvCache`
-/// from a function argument. Threading an `Option<&PagedKvCacheKt>`
-/// parallel argument all the way down requires either (a) changing
-/// the signature of that function and every transitive caller, or
-/// (b) plumbing the kt cache through a thread-local. Both options
-/// are out of scope for this helper-only PR. Landing the writer
-/// stub first means the follow-up plumbing PR is a much smaller
-/// diff — it only has to thread the kt cache through the call chain,
-/// not re-derive the per-call-site candle→kt borrow plumbing.
+/// `gqa_attention_paged_with_rope_tables` now takes an
+/// `Option<&PagedKvCacheKt>` parameter and passes it through to this
+/// helper. The parameter is threaded down from
+/// `gqa_attention_paged_with_rope_tables`'s callers
+/// (`gqa_attention_paged`, `transformer_block_paged_with_rope_tables`,
+/// `model_forward_paged_inner`), all of which default to `None` today.
+/// A follow-up commit will teach a cache-owning model struct to
+/// allocate an `Option<PagedKvCacheKt>` via `try_kt_paged_kv_cache_new`
+/// and pass `Some(&kt_cache)` down through that newly-threaded
+/// parameter, at which point this helper starts mirroring real
+/// production writes whenever the `KILN_USE_KT_PAGED_KV_CACHE` gate
+/// is on.
 ///
-/// Carries `#[allow(dead_code)]` like the constructor stub and the
-/// gate function until a follow-up wires the first call site. Same
-/// migration playbook as the per-kernel kt-API gates already landed
-/// in `forward.rs`.
+/// No longer `#[allow(dead_code)]` — `gqa_attention_paged_with_rope_tables`
+/// is the live caller.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 pub(crate) fn try_kt_paged_kv_write_token_major_native_graph_slot(
     kt_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
     layer_idx: usize,
