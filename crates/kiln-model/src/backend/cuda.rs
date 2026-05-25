@@ -116,6 +116,11 @@ pub struct CudaBackend {
     /// is wired through the zero-copy borrow adapter so the kernel's
     /// in-place write surfaces in the caller's candle tensor.
     cuda_use_kt_api_conv1d: bool,
+    /// Phase 7 (#1082) opt-in: route `kiln_gdn_kernel::gdn_forward_substitution`
+    /// through the kt-typed surface (`gdn_forward_substitution_kt`) instead
+    /// of the candle-typed shim. Set `KILN_USE_KT_API_GDN=1` (or
+    /// `KILN_USE_KT_API_ALL=1`) to enable; default off.
+    cuda_use_kt_api_gdn: bool,
     /// Forward-only CUDA LoRA delta/add for decode. Training declines because
     /// tracked LoRA tensors need autograd.
     lora_decode_add_enabled: bool,
@@ -138,6 +143,8 @@ impl CudaBackend {
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM").is_err();
         let fused_conv1d_enabled = std::env::var("KILN_DISABLE_FUSED_CONV1D").is_err();
         let cuda_use_kt_api_conv1d = std::env::var("KILN_USE_KT_API_CONV1D").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok();
+        let cuda_use_kt_api_gdn = std::env::var("KILN_USE_KT_API_GDN").is_ok()
             || std::env::var("KILN_USE_KT_API_ALL").is_ok();
         let gdn_decode_fused_enabled = gdn_gates_enabled
             && gdn_gated_rms_norm_enabled
@@ -162,6 +169,7 @@ impl CudaBackend {
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled,
             fused_conv1d_enabled,
             cuda_use_kt_api_conv1d,
+            cuda_use_kt_api_gdn,
             lora_decode_add_enabled,
             gdn_full_chunk_forward_multiblock_enabled,
         }
@@ -499,6 +507,26 @@ impl BackendRuntime for CudaBackend {
     ) -> Result<Option<Tensor>> {
         if a_strict.dtype() != DType::BF16 {
             return Ok(None);
+        }
+        // Phase 7 opt-in (#1082): route through the kt-typed surface.
+        // Mirrors the conv1d pattern landed in `695587df`; the borrow
+        // adapter shares the underlying CUDA buffer with the candle
+        // tensor, so this is zero-copy on inputs. The output is copied
+        // back via `kt_tensor_to_candle_cuda_copy` (one dtod memcpy on
+        // the F32 forward-substitution result, mirrors marlin pattern).
+        kiln_nvtx::range!(c"kiln/gdn_forward_substitution_kt");
+        if self.cuda_use_kt_api_gdn {
+            let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_strict)
+                .with_context(|| "kt-adapter: gdn_forward_substitution a_strict → kt failed")?;
+            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_prime)
+                .with_context(|| "kt-adapter: gdn_forward_substitution v_prime → kt failed")?;
+            let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
+                .with_context(|| "kt-adapter: gdn_forward_substitution beta → kt failed")?;
+            let out_kt = kiln_gdn_kernel::gdn_forward_substitution_kt(&a_kt, &v_kt, &b_kt)
+                .map_err(|e| anyhow::anyhow!("kt gdn_forward_substitution: {e}"))?;
+            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                .with_context(|| "kt-adapter: gdn_forward_substitution out → candle failed")?;
+            return Ok(Some(out));
         }
         let out = kiln_gdn_kernel::gdn_forward_substitution(a_strict, v_prime, beta)?;
         Ok(Some(out))
@@ -1076,6 +1104,7 @@ mod tests {
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled: false,
             fused_conv1d_enabled: false,
             cuda_use_kt_api_conv1d: false,
+            cuda_use_kt_api_gdn: false,
             lora_decode_add_enabled: false,
             gdn_full_chunk_forward_multiblock_enabled: false,
         }
