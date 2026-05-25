@@ -257,11 +257,22 @@ fn cuda_use_kt_api_rmsnorm() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: fused_rotary_qk through the kt-API + adapters.
+/// Phase 7 default-on (#1082): fused_rotary_qk through the kt-API +
+/// adapters. Default ON because both paths bottom out in the same
+/// `kiln_fused_rotary_qk` FFI symbol — only the Rust shell types
+/// (KtTensor vs candle Tensor) and the kt-bridge dtod-copy at the
+/// q_out / k_out boundary differ. The kernel reads the same input
+/// bytes and writes the same output bytes; the kt path then copies
+/// those bytes from kt-owned allocations back into candle tensors.
+/// Same bit-exact-by-construction argument as the rmsnorm flip
+/// directly above. Set `KILN_DISABLE_KT_API_ROTARY_QK=1` to opt out.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_rotary_qk() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ROTARY_QK").is_ok());
+    // #1082: flipped default ON. Both paths bottom out in
+    // `kiln_fused_rotary_qk` FFI; only Rust shell types differ.
+    // Escape hatch: `KILN_DISABLE_KT_API_ROTARY_QK=1`.
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_ROTARY_QK").is_err());
     direct || cuda_use_kt_api_all()
 }
 
