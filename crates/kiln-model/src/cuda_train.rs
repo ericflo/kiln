@@ -1823,12 +1823,19 @@ pub fn cuda_softmax_last_dim(input: &CudaTrainTensor) -> Result<CudaTrainTensor>
         !input.dims().is_empty(),
         "cuda_softmax_last_dim: expected non-empty shape"
     );
-    let max_val = input
-        .as_tensor()
-        .max_keepdim(D::Minus1)
-        .context("cuda_softmax_last_dim: max_keepdim")?;
-    let shifted = input
-        .as_tensor()
+    // Phase 7 (#1082): route .max_keepdim(-1) through try_kt_max_last_dim_keepdim
+    // (single-kernel kt-side reduction). Falls through to candle when
+    // KILN_USE_KT_API_MAX_KEEPDIM is off or preconditions fail.
+    let x_ref = input.as_tensor();
+    let max_val = match crate::forward::try_kt_max_last_dim_keepdim(x_ref)
+        .context("cuda_softmax_last_dim: try_kt_max_last_dim_keepdim")?
+    {
+        Some(out) => out,
+        None => x_ref
+            .max_keepdim(D::Minus1)
+            .context("cuda_softmax_last_dim: max_keepdim")?,
+    };
+    let shifted = x_ref
         .broadcast_sub(&max_val)
         .context("cuda_softmax_last_dim: shift")?;
     // Phase 7 (#1082): route the per-row `exp` step through the
@@ -1845,9 +1852,14 @@ pub fn cuda_softmax_last_dim(input: &CudaTrainTensor) -> Result<CudaTrainTensor>
         Some(out) => out,
         None => shifted.exp().context("cuda_softmax_last_dim: exp")?,
     };
-    let sum_exp = exp_shifted
-        .sum_keepdim(D::Minus1)
-        .context("cuda_softmax_last_dim: sum_keepdim")?;
+    let sum_exp = match crate::forward::try_kt_sum_last_dim_keepdim(&exp_shifted)
+        .context("cuda_softmax_last_dim: try_kt_sum_last_dim_keepdim")?
+    {
+        Some(out) => out,
+        None => exp_shifted
+            .sum_keepdim(D::Minus1)
+            .context("cuda_softmax_last_dim: sum_keepdim")?,
+    };
     let out = exp_shifted
         .broadcast_div(&sum_exp)
         .context("cuda_softmax_last_dim: normalize")?;
