@@ -13119,7 +13119,30 @@ fn gdn_chunk_prep_f32(
         .contiguous()?;
     let q_s_scaled = q_s_f32.broadcast_mul(&p_col)?;
     let g_last = big_g.narrow(2, chunk - 1, 1)?;
-    let decay_last_col = g_last.broadcast_sub(&big_g)?.exp()?;
+    // Phase 7 (#1082): route the `g_last.broadcast_sub(&big_g).exp()`
+    // step through `try_kt_exp` when `KILN_USE_KT_API_EXP=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set. Mirrors the same gate that
+    // already wraps `big_g.exp()` and `g_last.exp()` in this same
+    // function. The `broadcast_sub` itself stays candle-side
+    // (candle's broadcast plumbing handles the shape), but the
+    // resulting tensor goes through the kt-API exp dispatch
+    // instead of the candle `.exp()` composite. Falls through to
+    // the candle path when any precondition fails so behavior is
+    // identical with the gate off.
+    let decay_last_col = {
+        let g_diff = g_last.broadcast_sub(&big_g)?;
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_exp(&g_diff)? {
+                Some(out) => out,
+                None => g_diff.exp()?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            g_diff.exp()?
+        }
+    };
     // Phase 7 (#1082): same kt-API migration for `g_last.exp()`.
     let p_last_unsqueezed = {
         #[cfg(feature = "cuda")]
