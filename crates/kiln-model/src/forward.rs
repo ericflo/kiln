@@ -690,6 +690,120 @@ pub(crate) fn try_kt_paged_kv_cache_new(
     Ok(Some(cache))
 }
 
+/// Writer stub for the Phase 7 `PagedKvCacheKt` migration (#1082).
+///
+/// Companion helper to [`try_kt_paged_kv_cache_new`]. Where the
+/// constructor stub gave the next call-site migration a single,
+/// well-tested allocation surface for the kt cache, this helper does
+/// the same for the production *writer* path on `forward.rs`. It
+/// wraps [`crate::paged_kv_cache_kt::PagedKvCacheKt::write_token_major_native_graph_slot`]
+/// so a call site can hold both caches in parallel and dispatch the
+/// write to *both* without re-deriving the candle→kt tensor bridge in
+/// every call site.
+///
+/// Returns `Ok(false)` when `kt_cache` is `None` (gate off / non-CUDA
+/// device) so callers can fall through to the candle path unchanged.
+/// Returns `Ok(true)` only when the kt write was actually issued.
+///
+/// # Why a stub before the first call-site migration
+///
+/// The single production-path call to
+/// `paged_cache.write_token_major_native_graph_slot(...)` in this
+/// file (the CUDA-graph fast path inside
+/// `gqa_attention_paged_decode`) borrows candle-typed `&Tensor`
+/// inputs (`k`, `v`, `slot`). The kt twin signature takes
+/// `&KtTensor` inputs (see `paged_kv_cache_kt.rs:222`). Wiring the
+/// gate first (commit `eab7f795`) was step 1; landing the
+/// constructor stub (commit `638bc441`) was step 2; this helper is
+/// step 3 and gives the next call-site migration a single,
+/// well-tested writer surface to call alongside the candle writer.
+///
+/// # What it does
+///
+/// 1. Returns `false` immediately when `kt_cache` is `None`. This is
+///    the "gate off OR non-CUDA device" case — the constructor stub
+///    returns `None` in both, and this helper preserves the same
+///    zero-overhead fall-through contract.
+/// 2. Borrows `k`, `v`, `slot` as [`kiln_tensor::Tensor`] views via
+///    [`kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow`] — the
+///    same idiom every other kt-bridge entry point uses. Borrowing
+///    (not copying) means the kt and candle caches read from the
+///    same source K/V/slot device storage, so any divergence between
+///    the two writers is a property of the *writer* path, not of
+///    the inputs.
+/// 3. Delegates to
+///    [`PagedKvCacheKt::write_token_major_native_graph_slot`] which
+///    returns `Ok(false)` for shape/dtype-incompatible inputs (FP8,
+///    non-BF16, K not in token-major-single layout) — preserving
+///    the candle writer's same-named contract.
+///
+/// FP8 is intentionally not yet plumbed through this stub. Call
+/// sites exercising FP8 should keep using
+/// [`PagedKvCache::write_token_major_native_graph_slot`] on the
+/// candle side until the kt FP8 writer lands; this helper will
+/// return `Ok(false)` in that case because
+/// `PagedKvCacheKt::write_token_major_native_graph_slot` short-
+/// circuits on `self.fp8`.
+///
+/// # Why no call site uses this yet
+///
+/// The single production call site at the
+/// `paged_cache.write_token_major_native_graph_slot` invocation in
+/// `gqa_attention_paged_decode` reads `paged_cache: &mut PagedKvCache`
+/// from a function argument. Threading an `Option<&PagedKvCacheKt>`
+/// parallel argument all the way down requires either (a) changing
+/// the signature of that function and every transitive caller, or
+/// (b) plumbing the kt cache through a thread-local. Both options
+/// are out of scope for this helper-only PR. Landing the writer
+/// stub first means the follow-up plumbing PR is a much smaller
+/// diff — it only has to thread the kt cache through the call chain,
+/// not re-derive the per-call-site candle→kt borrow plumbing.
+///
+/// Carries `#[allow(dead_code)]` like the constructor stub and the
+/// gate function until a follow-up wires the first call site. Same
+/// migration playbook as the per-kernel kt-API gates already landed
+/// in `forward.rs`.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+pub(crate) fn try_kt_paged_kv_write_token_major_native_graph_slot(
+    kt_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
+    layer_idx: usize,
+    k: &Tensor,
+    v: &Tensor,
+    slot: &Tensor,
+) -> Result<bool> {
+    let cache = match kt_cache {
+        Some(c) => c,
+        None => return Ok(false),
+    };
+
+    let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k).map_err(|e| {
+        anyhow::anyhow!(
+            "try_kt_paged_kv_write_token_major_native_graph_slot: \
+             borrow k as KtTensor failed: {e}"
+        )
+    })?;
+    let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v).map_err(|e| {
+        anyhow::anyhow!(
+            "try_kt_paged_kv_write_token_major_native_graph_slot: \
+             borrow v as KtTensor failed: {e}"
+        )
+    })?;
+    let slot_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(slot).map_err(|e| {
+        anyhow::anyhow!(
+            "try_kt_paged_kv_write_token_major_native_graph_slot: \
+             borrow slot as KtTensor failed: {e}"
+        )
+    })?;
+
+    cache
+        .write_token_major_native_graph_slot(layer_idx, &k_kt, &v_kt, &slot_kt)
+        .context(
+            "try_kt_paged_kv_write_token_major_native_graph_slot: \
+             kt write_token_major_native_graph_slot failed",
+        )
+}
+
 /// Phase 7 opt-in: route the Vulkan `linear_prefill_apply` 2D matmul
 /// path through a kt-API equivalent of `kiln_tensor::cuda_matmul`.
 /// Default off; set `KILN_USE_KT_API_MATMUL=1` (or
