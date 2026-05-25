@@ -676,6 +676,53 @@ fn cuda_use_kt_api_rsqrt() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise binary `Tensor::maximum(other)`
+/// through the kt-API + adapters. Set `KILN_USE_KT_API_MAX_BINARY=1`
+/// (or `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// `x.maximum(&zeros)` candle calls (the `relu(x) = max(x, 0)`
+/// halves of `softplus`'s `|x| = relu(x) + relu(-x)` identity)
+/// through `kiln_tensor::cuda_binary_minmax` with kind tag 1 (Max)
+/// via the kt-bridge borrow adapter. Pays one dtod memcpy on the
+/// output direction (the kt allocation is freshly-owned). Falls
+/// through to the candle composite when any precondition fails so
+/// behavior is identical with the gate off.
+///
+/// Distinct from [`cuda_use_kt_api_max_last_dim`] (the
+/// `max_keepdim(-1)` axis reduction): this gate targets the
+/// *pointwise* binary `max(a, b)` shape.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_max_binary() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MAX_BINARY").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
+/// Phase 7 opt-in: elementwise binary `Tensor::minimum(other)`
+/// through the kt-API + adapters. Set `KILN_USE_KT_API_MIN_BINARY=1`
+/// (or `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes any
+/// `x.minimum(&other)` candle calls through
+/// `kiln_tensor::cuda_binary_minmax` with kind tag 0 (Min) via the
+/// kt-bridge borrow adapter. Falls through to the candle composite
+/// when any precondition fails so behavior is identical with the
+/// gate off.
+///
+/// Mirror of [`cuda_use_kt_api_max_binary`]. Wired up for
+/// completeness; today there are no production
+/// `.minimum(other)` call sites in `forward.rs` (the asymmetry
+/// matches softplus's `relu(x) + relu(-x)` shape which only
+/// requires `maximum`). The kt kernel is the same shared
+/// `binary_minmax` dispatch with `kind=0` so future migrations
+/// land without further plumbing.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_min_binary() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MIN_BINARY").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: elementwise `Tensor::abs()` through the kt-API
 /// + adapters. Set `KILN_USE_KT_API_ABS=1` (or
 /// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
@@ -7656,6 +7703,105 @@ fn try_kt_rsqrt(x: &Tensor) -> Result<Option<Tensor>> {
     Ok(Some(out))
 }
 
+/// Phase 7 (#1082) — kt-API binary `maximum(a, b)` migration helper.
+/// Routes a pair of same-shape, same-dtype contiguous CUDA candle
+/// tensors through `kiln_tensor::cuda_binary_minmax` with kind
+/// tag 1 (Max). NaN propagation matches `f32::max` semantics —
+/// the non-NaN operand wins when one side is NaN, which matches
+/// the candle `Tensor::maximum` contract.
+///
+/// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
+/// unsupported dtype, non-contiguous, dtype mismatch, shape
+/// mismatch, rank-0) so the caller falls through to the candle
+/// `.maximum(other)`. NVTX range `kiln/max_binary_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_max_binary(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_max_binary() {
+        return Ok(None);
+    }
+    if !matches!(a.device(), Device::Cuda(_))
+        || !matches!(b.device(), Device::Cuda(_))
+        || !matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || a.dtype() != b.dtype()
+        || a.shape() != b.shape()
+        || !a.is_contiguous()
+        || !b.is_contiguous()
+        || a.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/max_binary_kt");
+
+    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 1 = Max (matches KIND_MAXIMUM in
+    // csrc/binary_minmax.cu).
+    let out_kt = match kiln_tensor::cuda_binary_minmax(&a_kt, &b_kt, 1) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_max_binary: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API binary `minimum(a, b)` migration helper.
+/// Mirrors [`try_kt_max_binary`] but with kind tag 0 (Min). Wired
+/// up for completeness; today there are no production
+/// `.minimum(other)` call sites in `forward.rs`.
+///
+/// Returns `Ok(None)` on any incompatibility so the caller falls
+/// through to the candle `.minimum(other)`. NVTX range
+/// `kiln/min_binary_kt` brackets the migrated call so nsys traces
+/// separate the path from the baseline composite.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_min_binary(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_min_binary() {
+        return Ok(None);
+    }
+    if !matches!(a.device(), Device::Cuda(_))
+        || !matches!(b.device(), Device::Cuda(_))
+        || !matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || a.dtype() != b.dtype()
+        || a.shape() != b.shape()
+        || !a.is_contiguous()
+        || !b.is_contiguous()
+        || a.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/min_binary_kt");
+
+    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 0 = Min (matches KIND_MINIMUM in
+    // csrc/binary_minmax.cu).
+    let out_kt = match kiln_tensor::cuda_binary_minmax(&a_kt, &b_kt, 0) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_min_binary: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
 /// Phase 7 (#1082) — kt-API abs migration helper. Routes a
 /// contiguous CUDA candle tensor through
 /// `kiln_tensor::cuda_activation_unary` with kind tag 13 (Abs).
@@ -9872,7 +10018,27 @@ fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result
 /// This matches PyTorch's F.softplus output (which clamps to linear for x > 20).
 fn softplus(x: &Tensor) -> Result<Tensor> {
     let zeros = Tensor::zeros_like(x)?;
-    let relu_x = x.maximum(&zeros)?;
+    // Phase 7 (#1082): when `KILN_USE_KT_API_MAX_BINARY=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND `x` + `zeros` are
+    // contiguous CUDA tensors of {F32, BF16, F16}, route the
+    // pointwise `max(x, 0)` (relu) through
+    // `kiln_tensor::cuda_binary_minmax` with kind 1 (Max). Falls
+    // through to the candle `.maximum(&zeros)` when any
+    // precondition fails so behavior is identical with the gate
+    // off.
+    let relu_x = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_max_binary(x, &zeros)? {
+                Some(out) => out,
+                None => x.maximum(&zeros)?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            x.maximum(&zeros)?
+        }
+    };
     // |x| = relu(x) + relu(-x)
     // Phase 7 (#1082): when `KILN_USE_KT_API_NEG=1` (or
     // `KILN_USE_KT_API_ALL=1`) is set AND the input is a contiguous
@@ -9894,7 +10060,21 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
             x.neg()?
         }
     };
-    let relu_neg_x = neg_x.maximum(&zeros)?;
+    // Phase 7 (#1082): same kt-API max_binary migration for the
+    // `relu(-x)` half of the `|x| = relu(x) + relu(-x)` identity.
+    let relu_neg_x = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_max_binary(&neg_x, &zeros)? {
+                Some(out) => out,
+                None => neg_x.maximum(&zeros)?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            neg_x.maximum(&zeros)?
+        }
+    };
     let abs_x = (relu_x.clone() + relu_neg_x)?;
     // Phase 7 (#1082): same kt-API neg migration for `abs_x.neg()`.
     let neg_abs = {
