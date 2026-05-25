@@ -1965,6 +1965,85 @@ pub(crate) fn try_kt_paged_kv_pool_tensors_present(
     );
 }
 
+/// Phase 7 opt-in: route a `PagedKvCache::num_layers()` accessor read
+/// through the kt twin (#1082).
+///
+/// Sibling to [`try_kt_paged_kv_block_size`] / [`try_kt_paged_kv_is_fp8`].
+/// Gate: `KILN_USE_KT_PAGED_KV_NUM_LAYERS` (or meta-gates).
+///
+/// `num_layers()` is `Vec<(KtTensor,KtTensor)>::len()` on the kt side
+/// and the equivalent on candle — both are populated from
+/// `num_full_attn_layers` in their respective `new_with_fp8`
+/// constructors, so divergence requires the kt allocator to disagree
+/// with the candle one. Assertion is defense-in-depth.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+#[inline]
+pub(crate) fn try_kt_paged_kv_num_layers(
+    candle_num_layers: usize,
+    kt_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
+) -> usize {
+    let kt = match kt_cache {
+        Some(c) => c,
+        None => return candle_num_layers,
+    };
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let gate_on = *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_PAGED_KV_NUM_LAYERS").is_ok()
+            || std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    });
+    if !gate_on {
+        return candle_num_layers;
+    }
+    kiln_nvtx::range!(c"kiln/paged_kv_kt/num_layers");
+    let kt_num_layers = kt.num_layers();
+    assert_eq!(
+        kt_num_layers, candle_num_layers,
+        "try_kt_paged_kv_num_layers: kt.num_layers()={kt_num_layers} \
+         disagrees with candle paged_cache.num_layers()={candle_num_layers}"
+    );
+    kt_num_layers
+}
+
+/// Phase 7 opt-in: route a `PagedKvCache::num_blocks()` accessor read
+/// through the kt twin (#1082).
+///
+/// Sibling to [`try_kt_paged_kv_block_size`]. Gate:
+/// `KILN_USE_KT_PAGED_KV_NUM_BLOCKS` (or meta-gates).
+///
+/// `num_blocks` is a stored field on both cache types — set from the
+/// same constructor arg.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+#[inline]
+pub(crate) fn try_kt_paged_kv_num_blocks(
+    candle_num_blocks: usize,
+    kt_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
+) -> usize {
+    let kt = match kt_cache {
+        Some(c) => c,
+        None => return candle_num_blocks,
+    };
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let gate_on = *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_PAGED_KV_NUM_BLOCKS").is_ok()
+            || std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    });
+    if !gate_on {
+        return candle_num_blocks;
+    }
+    kiln_nvtx::range!(c"kiln/paged_kv_kt/num_blocks");
+    let kt_num_blocks = kt.num_blocks();
+    assert_eq!(
+        kt_num_blocks, candle_num_blocks,
+        "try_kt_paged_kv_num_blocks: kt.num_blocks()={kt_num_blocks} \
+         disagrees with candle paged_cache.num_blocks()={candle_num_blocks}"
+    );
+    kt_num_blocks
+}
+
 /// Phase 7 opt-in: route the Vulkan `linear_prefill_apply` 2D matmul
 /// path through a kt-API equivalent of `kiln_tensor::cuda_matmul`.
 /// Default off; set `KILN_USE_KT_API_MATMUL=1` (or
@@ -17352,6 +17431,14 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // `bench-results/cuda-graph-bs2-secondary-audit.md`). `None`
     // reproduces the legacy positions-based per-call build.
     rope_tables: Option<(&Tensor, &Tensor)>,
+    // Phase 7 #1082: kt twin of `paged_cache` for parity-checked
+    // accessor reads. When `Some` AND the env gate is on, accessor
+    // calls (`is_fp8`, `num_layers`) are mirrored through
+    // `try_kt_paged_kv_*` helpers. `None` keeps every accessor on
+    // the candle path unchanged.
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<
+        &crate::paged_kv_cache_kt::PagedKvCacheKt,
+    >,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
     let profile_device = x.device();
@@ -17368,14 +17455,29 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         positions.elem_count() == 1 || positions.elem_count() == batch,
         "batched contiguous paged attention positions tensor must hold either a shared scalar or one entry per row"
     );
-    anyhow::ensure!(
-        !paged_cache.is_fp8(),
-        "batched contiguous paged attention does not support FP8 caches"
-    );
-    anyhow::ensure!(
-        full_attn_layer_idx < paged_cache.num_layers(),
-        "batched contiguous paged attention layer index out of range"
-    );
+    #[cfg(feature = "cuda")]
+    {
+        anyhow::ensure!(
+            !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache),
+            "batched contiguous paged attention does not support FP8 caches"
+        );
+        anyhow::ensure!(
+            full_attn_layer_idx
+                < try_kt_paged_kv_num_layers(paged_cache.num_layers(), kt_paged_cache),
+            "batched contiguous paged attention layer index out of range"
+        );
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        anyhow::ensure!(
+            !paged_cache.is_fp8(),
+            "batched contiguous paged attention does not support FP8 caches"
+        );
+        anyhow::ensure!(
+            full_attn_layer_idx < paged_cache.num_layers(),
+            "batched contiguous paged attention layer index out of range"
+        );
+    }
 
     // Phase 12-B-prime: drop the uniform-start_pos assertion stack. Per-row
     // K/V lengths are encoded via `seqused_k`, and per-row start positions
@@ -19674,6 +19776,11 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     // forward path. Forwarded as-is to
     // `gqa_attention_paged_decode_contiguous_batch` (#1082 suspect 2).
     rope_tables: Option<(&Tensor, &Tensor)>,
+    // Phase 7 #1082: kt twin of `paged_cache` forwarded as-is to the
+    // GQA layer. `None` (default) keeps the candle accessor path.
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<
+        &crate::paged_kv_cache_kt::PagedKvCacheKt,
+    >,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -19722,6 +19829,8 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         cached_meta,
         graph_outputs,
         rope_tables,
+        #[cfg(feature = "cuda")]
+        kt_paged_cache,
     )?;
     let x = {
         kiln_nvtx::range!(c"kiln/residual_batch_decode");
@@ -20021,6 +20130,8 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     cached_paged_meta_ref,
                     layer_graph_outputs,
                     layer_rope_tables,
+                    #[cfg(feature = "cuda")]
+                    None,
                 )
                 .with_context(|| {
                     format!("batched transformer block {i} (full attention, paged)")
@@ -21926,6 +22037,8 @@ pub fn model_forward_paged_batched_decode_hidden(
                     None,
                     None,
                     None,
+                    None,
+                    #[cfg(feature = "cuda")]
                     None,
                 ) {
                     Ok(out) => hidden = out,
@@ -25383,6 +25496,8 @@ mod tests {
             None,
             None,
             None,
+        #[cfg(feature = "cuda")]
+            None,
         )?;
         device.synchronize()?;
         assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
@@ -25538,6 +25653,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            #[cfg(feature = "cuda")]
             None,
         )?;
         device.synchronize()?;
