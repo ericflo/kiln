@@ -1820,7 +1820,20 @@ pub fn cuda_softmax_last_dim(input: &CudaTrainTensor) -> Result<CudaTrainTensor>
         .as_tensor()
         .broadcast_sub(&max_val)
         .context("cuda_softmax_last_dim: shift")?;
-    let exp_shifted = shifted.exp().context("cuda_softmax_last_dim: exp")?;
+    // Phase 7 (#1082): route the per-row `exp` step through the
+    // kt-API helper. When `KILN_USE_KT_API_EXP=1` and the kt route's
+    // contiguous-F32 preconditions hold, this dispatches one
+    // `cuda_activation_unary(KIND_EXP)` launch on `shifted`
+    // (broadcast_sub of two F32 tensors produces an F32 contiguous
+    // result on CUDA, matching the kt route's gate); otherwise
+    // falls through to the candle `exp()` path. Behavior is
+    // bit-identical when the gate is off.
+    let exp_shifted = match crate::forward::try_kt_exp(&shifted)
+        .context("cuda_softmax_last_dim: try_kt_exp")?
+    {
+        Some(out) => out,
+        None => shifted.exp().context("cuda_softmax_last_dim: exp")?,
+    };
     let sum_exp = exp_shifted
         .sum_keepdim(D::Minus1)
         .context("cuda_softmax_last_dim: sum_keepdim")?;
