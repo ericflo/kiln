@@ -1033,6 +1033,289 @@ pub fn vulkan_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate
 }
 
 // ----------------------------------------------------------------------
+// vulkan_index_select_dim0 — Phase 4 Vulkan substrate op (#1082)
+// ----------------------------------------------------------------------
+
+/// Vulkan index_select along axis 0. Mirrors the role of
+/// [`crate::cuda_index_select_dim0`] for the Vulkan backend.
+///
+/// Dispatches through the production
+/// `kiln_vulkan_kernel::vk_ops::embedding::vk_embedding_lookup_f32`
+/// shader — the dim0 gather kernel currently exposed for embedding
+/// lookup. The shader handles arbitrary `[axis_dim, inner]` 2-D
+/// input (collapsing higher-rank input's inner dims), F32 input only.
+///
+/// Given:
+///   - `input: [axis_dim, ...]` (rank >= 1), F32
+///   - `indices: rank >= 1`, U32 (or kt's VulkanStorage with U32 bytes)
+///
+/// Produces a contiguous tensor with shape
+/// `[indices.shape, ...input.shape[1..]]` and dtype F32. Multi-dim
+/// indices are handled by flattening the index buffer before dispatch
+/// and reshaping the kernel's `[num_tokens, hidden]` output back.
+///
+/// # Implementation
+///
+/// Bridges between kt's `VulkanStorage` and the kernel's `VkTensor`
+/// via D2H read-back + H2D re-upload at each boundary. The indices
+/// buffer is re-uploaded as a `VkDType::F32`-placeholder VkTensor
+/// whose underlying bytes are the raw U32 token IDs (matches the
+/// `upload_u32_ids` helper convention in `vk_ops::embedding`). The
+/// shader interprets the buffer as `u32[]` regardless of placeholder
+/// dtype.
+///
+/// # Requirements
+///
+/// - `input` and `indices` must both be backed by [`VulkanStorage`]
+/// - `input.dtype() == F32`
+/// - `indices.dtype() == U32`
+/// - `input.rank() >= 1`, `indices.rank() >= 1`
+/// - both contiguous
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on unsupported dtype, non-contiguous layout,
+/// non-Vulkan storage, or kernel error.
+#[allow(clippy::needless_range_loop)]
+pub fn vulkan_index_select_dim0(
+    input: &crate::Tensor,
+    indices: &crate::Tensor,
+) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::embedding::vk_embedding_lookup_f32;
+    use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
+
+    // ---- Validate kt-side preconditions ----
+    let dtype = input.dtype();
+    if !matches!(dtype, DType::F32) {
+        return Err(Error::Msg(format!(
+            "vulkan_index_select_dim0: unsupported input dtype {dtype} \
+             (only F32 has a Vulkan shader today; BF16 has `vk_embedding_lookup_bf16` \
+              but emits F32 output — needs a separate wrapper path)"
+        )));
+    }
+    if indices.dtype() != DType::U32 {
+        return Err(Error::Msg(format!(
+            "vulkan_index_select_dim0: indices dtype must be U32 (got {})",
+            indices.dtype()
+        )));
+    }
+    if input.rank() == 0 || indices.rank() == 0 {
+        return Err(Error::Msg(format!(
+            "vulkan_index_select_dim0: rank constraints failed \
+             (input.rank={}, indices.rank={})",
+            input.rank(),
+            indices.rank()
+        )));
+    }
+    if !input.is_contiguous() || !indices.is_contiguous() {
+        return Err(Error::Msg(
+            "vulkan_index_select_dim0: inputs must be contiguous".to_string(),
+        ));
+    }
+
+    let kt_vk_in = input
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| {
+            Error::Msg("vulkan_index_select_dim0: input must be Vulkan-backed".to_string())
+        })?;
+    let kt_vk_ids = indices
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| {
+            Error::Msg("vulkan_index_select_dim0: indices must be Vulkan-backed".to_string())
+        })?;
+
+    let vulkan_device = Arc::clone(kt_vk_in.vulkan_device());
+    let device_index = match kt_vk_in.device() {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+
+    let in_shape: Vec<usize> = input.shape().to_vec();
+    let vocab_size = in_shape[0];
+    let hidden: usize = in_shape[1..].iter().product();
+    let in_byte_len = kt_vk_in.byte_len();
+    let ids_byte_len = kt_vk_ids.byte_len();
+    let n_indices = indices.element_count();
+
+    // ---- D2H input weights ----
+    let in_bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        kt_vk_in.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_index_select_dim0: D2H read_back of input failed: {e}"
+        ))
+    })?;
+
+    // ---- D2H ids ----
+    let ids_bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        kt_vk_ids.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_index_select_dim0: D2H read_back of ids failed: {e}"
+        ))
+    })?;
+
+    // ---- H2D input as F32 VkTensor with shape [vocab, hidden] (flatten inner) ----
+    let weight_shape = vec![vocab_size, hidden];
+    let vk_in_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        in_byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_index_select_dim0: device-local alloc for VkTensor input failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &vk_in_buffer,
+        &in_bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_index_select_dim0: H2D upload of VkTensor input failed: {e}"
+        ))
+    })?;
+    let vk_in = VkTensor::from_buffer(
+        Arc::new(vk_in_buffer),
+        weight_shape,
+        VkDType::F32,
+        Arc::clone(&vulkan_device),
+    );
+
+    // ---- H2D ids as F32-placeholder VkTensor (buffer holds raw u32 bytes)
+    // The vk_embedding_lookup_f32 kernel reads the ids buffer as u32[]
+    // regardless of placeholder dtype — same convention as `upload_u32_ids`.
+    let vk_ids_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        ids_byte_len.max(4) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_index_select_dim0: device-local alloc for VkTensor ids failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &vk_ids_buffer,
+        &ids_bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_index_select_dim0: H2D upload of VkTensor ids failed: {e}"
+        ))
+    })?;
+    let vk_ids = VkTensor::from_buffer(
+        Arc::new(vk_ids_buffer),
+        vec![n_indices],
+        VkDType::F32, // placeholder; buffer holds u32 bytes per upload_u32_ids convention
+        Arc::clone(&vulkan_device),
+    );
+
+    // ---- Dispatch ----
+    let vk_out = vk_embedding_lookup_f32(&vk_in, &vk_ids, vocab_size, hidden).map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_index_select_dim0: vk_embedding_lookup_f32 dispatch failed: {e}"
+        ))
+    })?;
+
+    // ---- D2H result ----
+    let out_bytes = kiln_vulkan_kernel::buffer::VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        vk_out.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_index_select_dim0: D2H read_back of kernel result failed: {e}"
+        ))
+    })?;
+
+    // ---- Compute final kt output shape ----
+    // Final shape = indices.shape ++ input.shape[1..]
+    let mut out_shape: Vec<usize> = indices.shape().to_vec();
+    out_shape.extend_from_slice(&in_shape[1..]);
+    let out_byte_len = n_indices * hidden * 4; // F32 only
+
+    // Truncate any trailing padding (in case the kernel's output buffer
+    // is over-allocated; mirrors the safety guard in vulkan_cast).
+    let trimmed_bytes = if out_bytes.len() > out_byte_len {
+        out_bytes[..out_byte_len].to_vec()
+    } else if out_bytes.len() < out_byte_len {
+        return Err(Error::Msg(format!(
+            "vulkan_index_select_dim0: kernel produced {} bytes, expected {}",
+            out_bytes.len(),
+            out_byte_len
+        )));
+    } else {
+        out_bytes
+    };
+
+    // ---- H2D into kt VulkanStorage ----
+    let out_buffer = kiln_vulkan_kernel::buffer::VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        out_byte_len.max(1) as u64,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_index_select_dim0: device-local alloc for kt output failed: {e}"
+        ))
+    })?;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        &out_buffer,
+        &trimmed_bytes,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_index_select_dim0: H2D upload of kt output failed: {e}"
+        ))
+    })?;
+    let out_storage = VulkanStorage::from_buffer(
+        vulkan_device,
+        device_index,
+        dtype,
+        out_buffer,
+        out_byte_len as u64,
+    )?;
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(out_shape),
+        crate::TensorId::next(),
+    )
+}
+
+// ----------------------------------------------------------------------
 // vulkan_cast — Phase 4 Vulkan substrate op (#1082)
 // ----------------------------------------------------------------------
 

@@ -199,6 +199,18 @@ impl DeviceOp2 for IndexSelectOp {
         //   - non-packed input dtype
         //   - contiguous input and indices
         //   - U32 indices (matches cuda_fwd; I64 needs a cast kernel)
+        //   - F32 input dtype (the `vk_embedding_lookup_f32` shader is
+        //     F32-only today; BF16 has `vk_embedding_lookup_bf16` but
+        //     emits F32 output, which doesn't match our same-dtype
+        //     index_select contract — wire that separately when needed)
+        //   - storage must be Vulkan-backed on both sides
+        //
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::vulkan_index_select_dim0` which wraps the production
+        // `vk_embedding_lookup_f32` shader. Current bridge D2H+H2D
+        // round-trips bytes through the host; see
+        // `vulkan_storage.rs::vulkan_index_select_dim0` rustdoc for
+        // the zero-copy follow-up plan.
         if self.axis != 0 {
             return Ok(None);
         }
@@ -211,27 +223,23 @@ impl DeviceOp2 for IndexSelectOp {
         if indices.dtype() != DType::U32 {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Vulkan): implement
-        // `crate::vulkan_index_select_dim0(input, indices)` analogous
-        // to `crate::cuda_index_select_dim0` above. Until that
-        // wrapper lands, fall through to the CPU path
-        // (numerics-correct, performance-wrong).
-        // Candidate implementations:
-        //   1. SPIR-V compute shader: grid over (n_indices,
-        //      inner_block); each invocation copies one
-        //      `block_bytes` slab from input[ids[i], ...] to
-        //      out[i, ...]. Mirrors the dim0 structure of the CUDA
-        //      kernel.
-        //   2. Reuse a gather kernel from
-        //      `kiln-vulkan-kernel::vk_ops` if/when one is added.
-        //      Requires moving `input` / `indices` to `VkTensor`
-        //      storage at the dispatch boundary; see
-        //      `VkTensor::from_*` constructors in `vk_tensor.rs`.
-        //   3. Dtype matrix gap: `VkDType` exposes F32 / BF16 today.
-        //      F16/I64 inputs need either widening `VkDType` or a
-        //      cast-to-supported wrapper at the dispatch boundary;
-        //      the cast kernels live in `vk_ops::cast`.
-        Ok(None)
+        if !matches!(input.dtype(), DType::F32) {
+            return Ok(None);
+        }
+        if input
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::VulkanStorage>()
+            .is_none()
+            || indices
+                .storage()
+                .as_any()
+                .downcast_ref::<crate::VulkanStorage>()
+                .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(crate::vulkan_index_select_dim0(input, indices)?))
     }
 
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
