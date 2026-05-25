@@ -45,6 +45,39 @@ pub fn clip_grad_norm(grads: &[&Tensor], max_norm: f32) -> Result<(f32, Vec<Tens
         }
     }
 
+    // CUDA fast path: D2H-copy each grad and reuse the CPU
+    // L2-norm + rescale loop. Gradient-clipping is a once-per-step
+    // operation that runs after the backward sweep; the per-tensor
+    // copy cost is dominated by the optimizer step that follows.
+    // The public API must accept CUDA-resident grads transparently
+    // because grad tensors live on the device that produced them.
+    // See `#1082`.
+    #[cfg(feature = "cuda")]
+    let _grads_host: Vec<Tensor>;
+    #[cfg(feature = "cuda")]
+    let grads_storage: Vec<&Tensor> = {
+        let any_cuda = grads
+            .iter()
+            .any(|g| matches!(g.device(), crate::Device::Cuda(_)));
+        if any_cuda {
+            _grads_host = grads
+                .iter()
+                .map(|g| {
+                    if matches!(g.device(), crate::Device::Cuda(_)) {
+                        crate::cuda_to_host_copy(g)
+                    } else {
+                        Ok((*g).clone())
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+            _grads_host.iter().collect::<Vec<&Tensor>>()
+        } else {
+            grads.to_vec()
+        }
+    };
+    #[cfg(feature = "cuda")]
+    let grads: &[&Tensor] = &grads_storage;
+
     // 1. Compute joint L2 norm.
     let mut sq_sum = 0.0_f32;
     for g in grads {
