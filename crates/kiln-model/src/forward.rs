@@ -16574,9 +16574,23 @@ fn try_flash_attn_paged_decode(
     lora_scale: f32,
     #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
     profile_context: Option<(usize, usize)>,
+    // Phase 7 #1082: kt twin of `paged_cache` for parity-checked
+    // accessor reads. When `Some` AND the env gate is on,
+    // `paged_cache.block_size()` and `paged_cache.is_fp8()` are
+    // re-routed through `try_kt_paged_kv_*` helpers. CUDA-gated
+    // since `PagedKvCacheKt` is CUDA-only. `None` on the default
+    // path (caller not migrated yet or gate off) keeps every
+    // accessor on the candle path unchanged.
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<
+        &crate::paged_kv_cache_kt::PagedKvCacheKt,
+    >,
 ) -> Result<Option<Tensor>> {
     const K_BLOCK_N: usize = 128;
 
+    #[cfg(feature = "cuda")]
+    let block_size =
+        try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
+    #[cfg(not(feature = "cuda"))]
     let block_size = paged_cache.block_size();
     if block_size == 0 || K_BLOCK_N % block_size != 0 {
         return Ok(None);
@@ -16610,7 +16624,11 @@ fn try_flash_attn_paged_decode(
     // time on the single-request decode path.
     let use_cuda_direct_paged_decode =
         backend.name() == "cuda" && !cuda_direct_paged_decode_disabled();
-    if !paged_cache.is_fp8() && !use_cuda_direct_paged_decode {
+    #[cfg(feature = "cuda")]
+    let is_fp8 = try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache);
+    #[cfg(not(feature = "cuda"))]
+    let is_fp8 = paged_cache.is_fp8();
+    if !is_fp8 && !use_cuda_direct_paged_decode {
         if let Some(start_slot) =
             contiguous_slot_run_start(block_table, block_size, 0, total_seq_len)
         {
@@ -18412,6 +18430,8 @@ fn gqa_attention_paged_with_rope_tables(
                 #[cfg(feature = "cuda")]
                 graph_inputs,
                 profile_context,
+                #[cfg(feature = "cuda")]
+                kt_paged_cache,
             )?
         };
         if let Some(out) = out_opt {
