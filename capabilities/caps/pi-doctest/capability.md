@@ -1444,3 +1444,33 @@ long-prefix representation is not locally practical. Action-token count alone
 is an insufficient throughput proxy; context tokens dominate this backward
 path. Future suffix work should compress/canonicalize the prior successful
 context or collect fresh short successful rollouts before training.
+
+### H75: compressed success suffix
+
+H75 directly followed H74's throughput failure. It kept the same train-only
+natural success-only suffix signal but canonicalized prior assistant prefix
+messages before training. Nine prefix assistant messages were rewritten into
+short read/edit/doctest forms while the preferred and rejected completion
+actions were left unchanged. Prefix chars fell from 6414 to 4266.
+
+The dataset was
+`/tmp/pi-doctest-h75-compressed-success-suffix/grpo-train.compressed-natural-success-suffix.g2x2-soft.jsonl`:
+4 groups, 8 completions, reward stdev 0.100000, action tokens 184, env tokens
+0, context tokens 6400, and hash
+`sha256:f9ce8c82dc9f3750fd5e2449cc5a16188fc75ad766899b67e09f4ce7592d3e93`.
+Dry-run passed.
+
+Training used the same recipe as H74: `cuda_grpo_ablation --mode phase1`, rank
+4 / alpha 4 / lr `2e-7`, no ECHO, seed `3141592653`, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It memory-fit and produced two progress
+lines: `9648/24214` at loss `-0.000853`, VRAM 15,986 MiB, then `13272/24214`
+at loss `-0.001178`, VRAM 15,968 MiB. After roughly 23 minutes observed it had
+passed only about 55% of the progress counter, projecting worse than H74
+overall, so it was manually terminated before adapter write and no blind eval
+was run.
+
+Verdict: rejected as throughput-aborted. Prefix canonicalization reduced
+action tokens and total steps but did not change the practical runtime class.
+The next experiment should stop slicing long thinking-on transcripts and
+instead collect or synthesize short successful rollouts whose whole
+prompt+prefix is compact.
