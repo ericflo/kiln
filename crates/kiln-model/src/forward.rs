@@ -31341,6 +31341,423 @@ mod tests {
         Ok(())
     }
 
+    /// Parity check for the kt-API path of `backend.gdn_full_chunk_forward`
+    /// against the candle-typed path on the multi-block dv-tiled variant
+    /// (the only path exercised at production Qwen3.5-4B prefill shapes —
+    /// dv=128 and the multi-block enabled bit defaults ON). Both paths
+    /// bottom out in the same FFI symbol
+    /// (`kiln_gdn_full_chunk_forward_multiblock`), so this asserts
+    /// byte-for-byte parity on both:
+    ///   - returned out tensor : [B, H, C, dv]    bf16
+    ///   - in-place state      : [B, H, dk, dv]   bf16 (mutated)
+    /// (#1082)
+    ///
+    /// This is the production prefill outer-recurrence path for
+    /// Qwen3.5-4B GDN. The kt wire landed in 57b37c00 behind the
+    /// KILN_USE_KT_API_GDN gate. The kt adapter has 9 distinct
+    /// kt-bridge borrows + 1 kt→candle output copy — the largest
+    /// borrow fan-out in the GDN kt surface — so worth exercising
+    /// independently from the lower-arity wires already covered.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gdn_full_chunk_forward_multiblock_kt_api_parity() -> Result<()> {
+        use crate::backend::BackendRuntime;
+        use crate::backend::cuda::CudaBackend;
+        use rand::rngs::StdRng;
+        use rand::{RngExt, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_gdn_full_chunk_forward_multiblock_kt_api_parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // Qwen3.5-4B GDN prefill envelope (see
+        // gdn_full_chunk_forward_supports at
+        // crates/kiln-gdn-kernel/src/lib.rs:2871):
+        //   g           : [B, H, C]       bf16   (C must be 64)
+        //   v           : [B, H, C, dv]   bf16   (dv <= 128)
+        //   kkt, qkt    : [B, H, C, C]    bf16
+        //   ks_entry    : [B, H, C, dv]   bf16
+        //   q_s         : [B, H, C, dv]   bf16
+        //   beta        : [B, H, C]       bf16
+        //   k_t         : [B, H, dk, C]   bf16
+        //   state       : [B, H, dk, dv]  bf16
+        // The multiblock supports check additionally requires
+        // `dv % GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE == 0`; the
+        // tile constant is 32 (see
+        // crates/kiln-gdn-kernel/src/lib.rs:3131), so dv=128 hits
+        // the multi-block path.
+        let batch = 1usize;
+        let heads = 32usize;
+        let chunk = 64usize;
+        let dk = 128usize;
+        let dv = 128usize;
+
+        let n_g = batch * heads * chunk;
+        let n_v = batch * heads * chunk * dv;
+        let n_kkt = batch * heads * chunk * chunk;
+        let n_qkt = batch * heads * chunk * chunk;
+        let n_ks = batch * heads * chunk * dv;
+        let n_qs = batch * heads * chunk * dv;
+        let n_beta = batch * heads * chunk;
+        let n_kt = batch * heads * dk * chunk;
+        let n_state = batch * heads * dk * dv;
+
+        let mut rng = StdRng::seed_from_u64(0xC0_1DD15E);
+        // Keep g small so cumsum-then-exp doesn't overflow; modest
+        // magnitudes for the rest so bf16 rounding stays in interior
+        // bits.
+        let g_data: Vec<f32> = (0..n_g).map(|_| rng.random_range(-0.05f32..0.0)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let kkt_data: Vec<f32> = (0..n_kkt).map(|_| rng.random_range(-0.3f32..0.3)).collect();
+        let qkt_data: Vec<f32> = (0..n_qkt).map(|_| rng.random_range(-0.3f32..0.3)).collect();
+        let ks_data: Vec<f32> = (0..n_ks).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let qs_data: Vec<f32> = (0..n_qs).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let beta_data: Vec<f32> = (0..n_beta).map(|_| rng.random_range(-0.3f32..0.3)).collect();
+        let kt_data: Vec<f32> = (0..n_kt).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let s_data: Vec<f32> = (0..n_state).map(|_| rng.random_range(-0.3f32..0.3)).collect();
+
+        let g = Tensor::from_slice(&g_data, (batch, heads, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let kkt = Tensor::from_slice(&kkt_data, (batch, heads, chunk, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+        let qkt = Tensor::from_slice(&qkt_data, (batch, heads, chunk, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+        let ks_entry =
+            Tensor::from_slice(&ks_data, (batch, heads, chunk, dv), &device)?
+                .to_dtype(DType::BF16)?;
+        let q_s = Tensor::from_slice(&qs_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (batch, heads, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+        let k_t = Tensor::from_slice(&kt_data, (batch, heads, dk, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+        // Two INDEPENDENT state buffers from the same seed data
+        // (candle Tensor::clone shares storage; would race).
+        let mut state_candle =
+            Tensor::from_slice(&s_data, (batch, heads, dk, dv), &device)?.to_dtype(DType::BF16)?;
+        let mut state_kt =
+            Tensor::from_slice(&s_data, (batch, heads, dk, dv), &device)?.to_dtype(DType::BF16)?;
+
+        // Candle-typed path.
+        let candle_be = CudaBackend::new_with_kt_api_gdn(device.clone(), false);
+        let out_candle = match candle_be.gdn_full_chunk_forward(
+            &g,
+            &v,
+            &kkt,
+            &qkt,
+            &ks_entry,
+            &q_s,
+            &beta,
+            &k_t,
+            &mut state_candle,
+        )? {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "candle gdn_full_chunk_forward declined dispatch; skipping kt parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // kt-API path.
+        let kt_be = CudaBackend::new_with_kt_api_gdn(device.clone(), true);
+        let out_kt = match kt_be.gdn_full_chunk_forward(
+            &g,
+            &v,
+            &kkt,
+            &qkt,
+            &ks_entry,
+            &q_s,
+            &beta,
+            &k_t,
+            &mut state_kt,
+        )? {
+            Some(t) => t,
+            None => {
+                eprintln!("kt gdn_full_chunk_forward declined dispatch; skipping kt parity");
+                return Ok(());
+            }
+        };
+
+        // Output parity: byte-for-byte (same FFI symbol).
+        fn assert_byte_exact(label: &str, candle: &Tensor, kt: &Tensor) -> Result<()> {
+            assert_eq!(candle.dims(), kt.dims(), "{label}: dims mismatch");
+            let c: Vec<f32> = candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let k: Vec<f32> = kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            assert_eq!(c.len(), k.len(), "{label}: length mismatch");
+            let mut mismatches = 0usize;
+            for (i, (x, y)) in c.iter().zip(k.iter()).enumerate() {
+                if x.to_bits() != y.to_bits() {
+                    if mismatches < 4 {
+                        eprintln!(
+                            "{label} kt parity mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                            x.to_bits(),
+                            y.to_bits()
+                        );
+                    }
+                    mismatches += 1;
+                }
+            }
+            assert_eq!(
+                mismatches, 0,
+                "kt-API gdn_full_chunk_forward_multiblock {label} diverges from candle at {mismatches} indices"
+            );
+            Ok(())
+        }
+
+        assert_byte_exact("out", &out_candle, &out_kt)?;
+        assert_byte_exact("state", &state_candle, &state_kt)?;
+
+        Ok(())
+    }
+
+    /// Parity check for the kt-API bf16 path of
+    /// `backend.gdn_decode_gates_recurrent` against the candle-typed
+    /// path. Both bottom out in the same FFI symbol
+    /// (`kiln_gdn_decode_gates_recurrent_bf16`) so this asserts
+    /// byte-for-byte parity on the returned `out` tensor AND on the
+    /// in-place mutation of `state`. (#1082)
+    ///
+    /// This is the production decode hot path for Qwen3.5-4B GDN
+    /// where the qk-norm wrapper falls through (split-decode path
+    /// when the fused decode kernel declines). The kt wire landed in
+    /// 2e315606 with a follow-up shape-fix in e4823c7b. The 4D→3D
+    /// squeeze fix matters: without it, the kt path errors at the
+    /// first shape check and the gate is effectively dead — this
+    /// parity test exercises the squeeze + 10-tensor kt-bridge borrow
+    /// surface.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gdn_decode_gates_recurrent_kt_api_parity() -> Result<()> {
+        use crate::backend::BackendRuntime;
+        use crate::backend::cuda::CudaBackend;
+        use rand::rngs::StdRng;
+        use rand::{RngExt, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_gdn_decode_gates_recurrent_kt_api_parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // Qwen3.5-4B GDN decode envelope at batch=1 (see
+        // gdn_decode_gates_recurrent_supports at
+        // crates/kiln-gdn-kernel/src/lib.rs:715):
+        //   q, k        : [B, 1, Hq, dk]     bf16   (dk == 128)
+        //   v           : [B, 1, Hv, dv]     bf16   (dv == 128)
+        //   a, b        : [B, 1, Hv]         bf16
+        //   a_log       : [Hv]               bf16
+        //   dt_bias     : [Hv]               bf16
+        //   state       : [B, Hv, dk, dv]    bf16   (mutated)
+        //   z           : [B, 1, Hv, dv]     bf16
+        //   weight      : [dv]               f32    (rmsnorm weight)
+        // Hv must be a multiple of Hq (GQA). Use Hq=Hv=32 to keep the
+        // test simple.
+        let batch = 1usize;
+        let seq = 1usize;
+        let q_heads = 32usize;
+        let v_heads = 32usize;
+        let dk = 128usize;
+        let dv = 128usize;
+
+        let n_qk = batch * seq * q_heads * dk;
+        let n_v = batch * seq * v_heads * dv;
+        let n_ab = batch * seq * v_heads;
+        let n_alog = v_heads;
+        let n_dtb = v_heads;
+        let n_state = batch * v_heads * dk * dv;
+        let n_z = batch * seq * v_heads * dv;
+        let n_w = dv;
+
+        let mut rng = StdRng::seed_from_u64(0xC0_1DD15F);
+        let q_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let k_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let a_data: Vec<f32> = (0..n_ab).map(|_| rng.random_range(-0.3f32..0.3)).collect();
+        let b_data: Vec<f32> = (0..n_ab).map(|_| rng.random_range(-0.3f32..0.3)).collect();
+        // a_log negative range so exp(a_log) stays in (0, 1) — matches
+        // production behavior of a logits-style gate.
+        let alog_data: Vec<f32> = (0..n_alog).map(|_| rng.random_range(-2.0f32..0.0)).collect();
+        let dtb_data: Vec<f32> = (0..n_dtb).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        let s_data: Vec<f32> = (0..n_state).map(|_| rng.random_range(-0.3f32..0.3)).collect();
+        let z_data: Vec<f32> = (0..n_z).map(|_| rng.random_range(-0.5f32..0.5)).collect();
+        // Weight ~ 1.0 — rmsnorm scaler.
+        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(0.5f32..1.5)).collect();
+
+        let q = Tensor::from_slice(&q_data, (batch, seq, q_heads, dk), &device)?
+            .to_dtype(DType::BF16)?;
+        let k = Tensor::from_slice(&k_data, (batch, seq, q_heads, dk), &device)?
+            .to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (batch, seq, v_heads, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let a =
+            Tensor::from_slice(&a_data, (batch, seq, v_heads), &device)?.to_dtype(DType::BF16)?;
+        let b =
+            Tensor::from_slice(&b_data, (batch, seq, v_heads), &device)?.to_dtype(DType::BF16)?;
+        let a_log =
+            Tensor::from_slice(&alog_data, (v_heads,), &device)?.to_dtype(DType::BF16)?;
+        let dt_bias =
+            Tensor::from_slice(&dtb_data, (v_heads,), &device)?.to_dtype(DType::BF16)?;
+        let z = Tensor::from_slice(&z_data, (batch, seq, v_heads, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        // weight stays F32 — production layout for rmsnorm scaler.
+        let weight = Tensor::from_slice(&w_data, (dv,), &device)?;
+        // Two INDEPENDENT state buffers (no candle clone).
+        let mut state_candle =
+            Tensor::from_slice(&s_data, (batch, v_heads, dk, dv), &device)?
+                .to_dtype(DType::BF16)?;
+        let mut state_kt = Tensor::from_slice(&s_data, (batch, v_heads, dk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+
+        let eps = 1e-6_f64;
+
+        // Candle-typed path.
+        let candle_be = CudaBackend::new_with_kt_api_gdn(device.clone(), false);
+        let out_candle = match candle_be.gdn_decode_gates_recurrent(
+            &q,
+            &k,
+            &v,
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            &mut state_candle,
+            &z,
+            &weight,
+            eps,
+        )? {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "candle gdn_decode_gates_recurrent declined dispatch; skipping kt parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // kt-API path.
+        let kt_be = CudaBackend::new_with_kt_api_gdn(device.clone(), true);
+        let out_kt = match kt_be.gdn_decode_gates_recurrent(
+            &q,
+            &k,
+            &v,
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            &mut state_kt,
+            &z,
+            &weight,
+            eps,
+        )? {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "kt gdn_decode_gates_recurrent declined dispatch; skipping kt parity"
+                );
+                return Ok(());
+            }
+        };
+
+        // Output + state parity. The candle path returns 4D
+        // `[B, 1, Hv, dv]` (`Tensor::zeros((batch, 1, value_heads, dv), ...)`
+        // at crates/kiln-gdn-kernel/src/lib.rs:870) while the kt path
+        // returns 3D `[B, Hv, dv]` (the kt_api allocates 3D output at
+        // crates/kiln-gdn-kernel/src/kt_api.rs:568). This shape
+        // divergence is a separate API-contract bug discovered while
+        // writing this test; flag it explicitly so the parity check
+        // exercises the data parity rather than masking the shape
+        // bug. The DATA — the actual fp values produced by the same
+        // FFI symbol — must still match byte-for-byte.
+        fn assert_flat_byte_exact(label: &str, candle: &Tensor, kt: &Tensor) -> Result<()> {
+            let c: Vec<f32> = candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let k: Vec<f32> = kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            assert_eq!(
+                c.len(),
+                k.len(),
+                "{label}: length mismatch (candle {:?} len {}, kt {:?} len {})",
+                candle.dims(),
+                c.len(),
+                kt.dims(),
+                k.len()
+            );
+            let mut mismatches = 0usize;
+            for (i, (x, y)) in c.iter().zip(k.iter()).enumerate() {
+                if x.to_bits() != y.to_bits() {
+                    if mismatches < 4 {
+                        eprintln!(
+                            "{label} kt parity mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                            x.to_bits(),
+                            y.to_bits()
+                        );
+                    }
+                    mismatches += 1;
+                }
+            }
+            assert_eq!(
+                mismatches, 0,
+                "kt-API gdn_decode_gates_recurrent {label} diverges from candle at {mismatches} indices"
+            );
+            Ok(())
+        }
+
+        // Document the shape divergence — candle 4D vs kt 3D — so the
+        // bug is visible. Both encode the same `B * Hv * dv` bf16
+        // values; the candle layout adds an extra seq_len=1 axis at
+        // position 1. The state parity is byte-exact on the same 4D
+        // layout (both paths borrow the same caller-owned buffer).
+        eprintln!(
+            "kt-API gdn_decode_gates_recurrent output shape: candle={:?} kt={:?}; \
+             comparing flattened data (kt-wire should reshape 3D->4D before returning, \
+             #1082 follow-up)",
+            out_candle.dims(),
+            out_kt.dims()
+        );
+        assert_flat_byte_exact("out", &out_candle, &out_kt)?;
+
+        fn assert_byte_exact(label: &str, candle: &Tensor, kt: &Tensor) -> Result<()> {
+            assert_eq!(candle.dims(), kt.dims(), "{label}: dims mismatch");
+            let c: Vec<f32> = candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let k: Vec<f32> = kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            assert_eq!(c.len(), k.len(), "{label}: length mismatch");
+            let mut mismatches = 0usize;
+            for (i, (x, y)) in c.iter().zip(k.iter()).enumerate() {
+                if x.to_bits() != y.to_bits() {
+                    if mismatches < 4 {
+                        eprintln!(
+                            "{label} kt parity mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
+                            x.to_bits(),
+                            y.to_bits()
+                        );
+                    }
+                    mismatches += 1;
+                }
+            }
+            assert_eq!(
+                mismatches, 0,
+                "kt-API gdn_decode_gates_recurrent {label} diverges from candle at {mismatches} indices"
+            );
+            Ok(())
+        }
+
+        assert_byte_exact("state", &state_candle, &state_kt)?;
+
+        Ok(())
+    }
+
     /// Metal parity check for `backend.causal_conv1d_update` against the same
     /// portable `causal_conv1d_decode` + `cuda_silu` oracle used by CUDA.
     #[cfg(feature = "metal")]
