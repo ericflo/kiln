@@ -958,6 +958,35 @@ fn cuda_use_kt_api_scalar_minus_tensor() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise `c / x` (scalar divided by tensor)
+/// through the kt-API + adapters. Set
+/// `KILN_USE_KT_API_SCALAR_DIV_TENSOR=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// `c / x` candle composite through `kiln_tensor::cuda_scalar_op`
+/// with kind tag 5 (ScalarDivTensor) via the kt-bridge borrow
+/// adapter. Pays one dtod memcpy on the output direction (the
+/// kt allocation is freshly-owned). Falls through to the candle
+/// composite when any precondition fails so behavior is
+/// identical with the gate off.
+///
+/// The gate + helper are wired up for completeness; today there
+/// are no production `c / x` call sites in `forward.rs` (most
+/// reciprocal-style patterns use `Tensor::recip()` which has its
+/// own gate, [`cuda_use_kt_api_recip`]). Future kernels that
+/// need a fused scalar-numerator reciprocal (e.g.
+/// `inv = scale / (x + eps)` style guards) can route through
+/// this gate without the extra add-scalar step. Distinct from
+/// [`cuda_use_kt_api_div_scalar`] which targets `x / c`
+/// (tensor / scalar) shape.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_scalar_div_tensor() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED
+        .get_or_init(|| std::env::var("KILN_USE_KT_API_SCALAR_DIV_TENSOR").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: elementwise `Tensor::sin()` through the kt-API
 /// + adapters. Set `KILN_USE_KT_API_SIN=1` (or
 /// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
@@ -8700,6 +8729,61 @@ fn try_kt_scalar_minus_tensor(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_scalar_minus_tensor: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API scalar-div-tensor migration helper.
+/// Routes a contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_scalar_op` with kind tag 5
+/// (ScalarDivTensor) for the `c / x` shape.
+///
+/// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
+/// unsupported dtype, non-contiguous, rank-0, or non-finite
+/// scalar) so the caller falls through to the candle composite
+/// (typically `c * x.recip()`). NVTX range
+/// `kiln/scalar_div_tensor_kt` brackets the migrated call so
+/// nsys traces separate the path from the baseline composite.
+///
+/// Today this helper has no production call site — `forward.rs`
+/// uses `Tensor::recip()` (see `try_kt_recip` / `cuda_use_kt_api_recip`)
+/// for reciprocal-style patterns, with subsequent scalar
+/// multiplication when needed. This helper offers a single-kernel
+/// alternative when the `c / x` shape is end-to-end fused.
+/// Mirrors the dead-code-allowed precedent of
+/// `try_kt_paged_kv_cache_new` (638bc441) and the pow scaffold
+/// (2b07eef7).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_scalar_div_tensor(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_scalar_div_tensor() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+    if !c.is_finite() {
+        return Ok(None);
+    }
+    let c_f32 = c as f32;
+
+    kiln_nvtx::range!(c"kiln/scalar_div_tensor_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 5 = ScalarKind::ScalarDivTensor (matches
+    // crates/kiln-tensor/src/ops/scalar.rs).
+    let out_kt = match kiln_tensor::cuda_scalar_op(&x_kt, 5, c_f32) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_scalar_div_tensor: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
