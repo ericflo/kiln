@@ -111,8 +111,134 @@ impl DeviceOp2 for EmbeddingOp {
         Ok(Some(tensor))
     }
 
-    // metal_fwd / vulkan_fwd inherit the default Ok(None) ->
-    // dispatcher falls through to cpu_fwd. Phase 2+ overrides each.
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, weights: &Tensor, token_ids: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd so the Metal
+        // path mirrors the CUDA / IndexSelectOp(axis=0) wiring:
+        //   - validate_inputs
+        //   - non-packed weights dtype
+        //   - contiguous weights + token_ids
+        //   - F32 / BF16 / F16 weights (candle Metal index_select set)
+        //   - U32 token_ids (matches cuda_fwd; I64 still needs a cast
+        //     kernel or fallback)
+        //   - storage must be Metal-backed on both sides
+        //
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::metal_index_select_dim0` which wraps candle's
+        // production Metal `call_index_select` kernel (same path as
+        // `IndexSelectOp::metal_fwd` for axis=0). Apple Silicon UMA:
+        // no host bounce — kt MetalStorage::buffer is shared with the
+        // candle wrapper via Arc<metal::Buffer>.
+        validate_inputs(weights, token_ids)?;
+        if weights.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !weights.is_contiguous() || !token_ids.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(weights.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if token_ids.dtype() != DType::U32 {
+            // I64 token_ids fall through to CPU until the substrate
+            // cast kernel grows an I64 -> U32 path.
+            return Ok(None);
+        }
+        if weights
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::MetalStorage>()
+            .is_none()
+            || token_ids
+                .storage()
+                .as_any()
+                .downcast_ref::<crate::MetalStorage>()
+                .is_none()
+        {
+            return Ok(None);
+        }
+
+        // Flatten multi-dim token_ids -> gather -> reshape.
+        let n_indices = token_ids.element_count();
+        let hidden = weights.shape()[1];
+        let ids_flat = if token_ids.rank() == 1 {
+            token_ids.clone()
+        } else {
+            token_ids.reshape(vec![n_indices])?
+        };
+        let gathered = crate::metal_index_select_dim0(weights, &ids_flat)?;
+        if token_ids.rank() == 1 {
+            Ok(Some(gathered))
+        } else {
+            let mut out_shape = token_ids.shape().to_vec();
+            out_shape.push(hidden);
+            Ok(Some(gathered.reshape(out_shape)?))
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, weights: &Tensor, token_ids: &Tensor) -> Result<Option<Tensor>> {
+        // Gate on the same preconditions as cuda_fwd / metal_fwd:
+        //   - validate_inputs
+        //   - non-packed weights dtype
+        //   - contiguous weights + token_ids
+        //   - F32 weights only (vk_embedding_lookup_f32 shader is
+        //     F32-only today; BF16 has vk_embedding_lookup_bf16 but
+        //     emits F32 output which doesn't match our same-dtype
+        //     contract — wire separately when needed)
+        //   - U32 token_ids (matches cuda_fwd; I64 needs a cast)
+        //   - storage must be Vulkan-backed on both sides
+        //
+        // Phase 4 substrate-op landing: dispatch through
+        // `crate::vulkan_index_select_dim0` which wraps the production
+        // `vk_embedding_lookup_f32` shader (same path as
+        // `IndexSelectOp::vulkan_fwd` for axis=0). Bridge currently
+        // D2H+H2D round-trips bytes via host; see
+        // `vulkan_storage.rs::vulkan_index_select_dim0` rustdoc for
+        // the zero-copy follow-up plan.
+        validate_inputs(weights, token_ids)?;
+        if weights.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !weights.is_contiguous() || !token_ids.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(weights.dtype(), DType::F32) {
+            return Ok(None);
+        }
+        if token_ids.dtype() != DType::U32 {
+            return Ok(None);
+        }
+        if weights
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::VulkanStorage>()
+            .is_none()
+            || token_ids
+                .storage()
+                .as_any()
+                .downcast_ref::<crate::VulkanStorage>()
+                .is_none()
+        {
+            return Ok(None);
+        }
+
+        let n_indices = token_ids.element_count();
+        let hidden = weights.shape()[1];
+        let ids_flat = if token_ids.rank() == 1 {
+            token_ids.clone()
+        } else {
+            token_ids.reshape(vec![n_indices])?
+        };
+        let gathered = crate::vulkan_index_select_dim0(weights, &ids_flat)?;
+        if token_ids.rank() == 1 {
+            Ok(Some(gathered))
+        } else {
+            let mut out_shape = token_ids.shape().to_vec();
+            out_shape.push(hidden);
+            Ok(Some(gathered.reshape(out_shape)?))
+        }
+    }
 
     #[cfg(feature = "cuda")]
     fn cuda_fwd(&self, weights: &Tensor, token_ids: &Tensor) -> Result<Option<Tensor>> {
