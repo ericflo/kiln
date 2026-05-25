@@ -976,26 +976,32 @@ fn cuda_use_kt_api_lerp() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: elementwise `Tensor::abs()` through the kt-API
-/// + adapters. Set `KILN_USE_KT_API_ABS=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// `.abs()` candle calls through
-/// `kiln_tensor::cuda_activation_unary` with kind tag 13 (Abs)
-/// via the kt-bridge borrow adapter. Pays one dtod memcpy on the
-/// output direction (the kt allocation is freshly-owned). Falls
-/// through to the candle composite when any precondition fails so
-/// behavior is identical with the gate off.
+/// Phase 7 default-on (#1082): elementwise `Tensor::abs()` through
+/// the kt-API + adapters. Default ON because the kt path is a
+/// single-kernel `fabsf(x)` dispatch via
+/// `kiln_tensor::cuda_activation_unary` kind 13 (Abs) — IEEE-equivalent
+/// to the candle `relu(x) + relu(-x)` composite it replaces (both
+/// produce the same byte-stable `|x|` result on finite inputs and
+/// match IEEE sign-extraction semantics on +/-0.0, NaN, and ±inf).
+/// In fact the direct `fabsf` formulation produces fewer roundings
+/// and avoids the intermediate `relu(-x)` allocation, so the kt path
+/// is at least as faithful as the candle composite. Escape hatch:
+/// `KILN_DISABLE_KT_API_ABS=1`.
 ///
-/// The gate + helper are wired up for completeness; today there
-/// Wired into the `softplus` helper's `abs_x = relu(x) + relu(-x)`
-/// site as of the same #1082 series — `try_kt_abs(x)` takes a
-/// single-kernel fast path when this gate is enabled, replacing
-/// three candle ops (neg, relu(-x), add) with one
+/// Production call site: the `softplus` helper's
+/// `abs_x = relu(x) + relu(-x)` step (softplus runs as the last
+/// step of the GDN `b` (forget gate) path — once per decode step).
+/// `try_kt_abs(x)` takes the single-kernel fast path; the candle
+/// composite (neg + relu(-x) + add = 3 kernels) becomes one
 /// `cuda_activation_unary` dispatch.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_abs() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ABS").is_ok());
+    // #1082: flipped default ON. Single-kernel `fabsf` dispatch
+    // (`cuda_activation_unary` kind 13); IEEE-equivalent to the
+    // candle `relu(x)+relu(-x)` composite on all finite inputs.
+    // Escape hatch: `KILN_DISABLE_KT_API_ABS=1`.
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_ABS").is_err());
     direct || cuda_use_kt_api_all()
 }
 
