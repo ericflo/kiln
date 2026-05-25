@@ -1733,3 +1733,35 @@ but it is still unstable as a standalone update. The next version should not
 just add more hand-authored wrong edits. It needs a stabilizer: an oscillating
 chain with successful-workflow data, a teacher-quality edit-choice source, or a
 broader real-rollout distribution that provides base-behavior regularization.
+
+### H83: H82/H77 TIES d20 w40/60
+
+H83 tested the cheapest stabilizer suggested by H82: combine the broad
+semantic edit-choice direction with a successful-workflow regularizer without
+running another trainer pass. It TIES-merged
+`pi-doctest-h82-broad-postread-edit-choice-r4a4lr1e7` at weight 0.4 with
+`pi-doctest-h77-moderate-thinking-workflow-r4a4lr1e7` at weight 0.6, using
+density 0.2. The output adapter was
+`pi-doctest-h83-h82-h77-ties-d20-w4060`.
+
+The merge wrote 400 tensors. Adapter verify passed with rank 4 / alpha 4, 200
+LoRA projection pairs, 400 nonzero tensors, LoRA update proxy 0.008886, and
+adapter hash
+`sha256:e2ee3a6f8e4ab9fc56a5c4e9b48cbf596c08191aa99dc437376966a04c0661ae`.
+No training pass was run, so gradient checkpointing was not relevant to H83;
+it remains useful for fitting GRPO training in VRAM but does not reduce
+inference-time thinking cost.
+
+Blind `LIMIT=4 SEEDS=1` smoke looked positive on score but expensive: paired
+base scored 0.925000 with no zero rollouts and 37.84s mean wall-clock, while
+H83 scored 0.962500 with no zero rollouts and 55.54s mean wall-clock. The
+wider `LIMIT=8 SEEDS=1` confirmation rejected it: base scored 0.934375 with
+no zero rollouts and 43.40s mean wall-clock, while H83 scored 0.662500 with 2
+zero rollouts and 75.78s mean wall-clock.
+
+Lesson: TIES over H82 and H77 trims update norm but does not stabilize the
+underlying behavior. H83 repeats the recent smoke-win/confirmation-fail
+pattern and adds a large thinking-latency tax. A useful stabilizer likely has
+to be learned jointly with the semantic edit signal, come from a higher-quality
+teacher edit-choice distribution, or use broader successful real rollouts
+rather than post-hoc mixing of rejected adapters.
