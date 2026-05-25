@@ -23,6 +23,45 @@ pub fn full_like(t: &Tensor, value: f32) -> Result<Tensor> {
             t.dtype()
         );
     }
+
+    // CUDA fast path: build on host, copy to the same CUDA device.
+    // For value == 0.0 this could be served by `cuda_zeros` directly,
+    // but host_to_cuda_copy handles arbitrary values uniformly and is
+    // dominated by the H2D transfer anyway.
+    #[cfg(feature = "cuda")]
+    if let crate::Device::Cuda(device_index) = t.device() {
+        let dtype = t.dtype();
+        let n = t.element_count();
+        let per = dtype.size_in_bytes();
+        let mut bytes = vec![0u8; n * per];
+        let one_bytes = match dtype {
+            DType::F32 => value.to_le_bytes().to_vec(),
+            DType::BF16 => half::bf16::from_f32(value).to_le_bytes().to_vec(),
+            DType::F16 => half::f16::from_f32(value).to_le_bytes().to_vec(),
+            _ => unreachable!(),
+        };
+        if value != 0.0 {
+            for i in 0..n {
+                bytes[i * per..(i + 1) * per].copy_from_slice(&one_bytes);
+            }
+        }
+        let cpu = CpuStorage::from_bytes(dtype, bytes)?;
+        let storage: Storage = Arc::new(cpu);
+        let cpu_t = Tensor::from_parts(
+            storage,
+            Layout::contiguous(t.shape().to_vec()),
+            TensorId::next(),
+        )?;
+        // Lift to CUDA on the same device as the source.
+        let cuda_storage = t
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::CudaStorage>()
+            .ok_or_else(|| Error::from_str("full_like: input claims CUDA device but storage is not CudaStorage"))?;
+        let candle_device = cuda_storage.candle_device().clone();
+        return crate::host_to_cuda_copy(&cpu_t, candle_device, device_index);
+    }
+
     let dtype = t.dtype();
     let n = t.element_count();
     let per = dtype.size_in_bytes();
