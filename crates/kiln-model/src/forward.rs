@@ -11267,7 +11267,38 @@ fn gdn_single_token_recurrence(
 ) -> Result<Tensor> {
     let dtype = q.dtype();
 
-    let p = g.to_dtype(DType::F32)?.exp()?.to_dtype(dtype)?;
+    // Phase 7 (#1082): cluster migration. The
+    // `g.to_dtype(F32).exp().to_dtype(dtype)` gate-decay
+    // composite runs every GDN decode token on every layer of
+    // the 24 GDN layers. Each gated leg (TO_DTYPE in, EXP,
+    // TO_DTYPE out) can run on the kt-API independently when
+    // its respective gate is set, so the whole 3-op cluster
+    // migrates as a unit under `KILN_USE_KT_API_ALL=1` and
+    // individual op-level gates under `KILN_USE_KT_API_EXP` /
+    // `KILN_USE_KT_API_TO_DTYPE`. Falls through cleanly when
+    // any single op's preconditions fail (the candle `?`
+    // operator preserves identical numerics).
+    let p = {
+        #[cfg(feature = "cuda")]
+        {
+            let g_f32 = match try_kt_to_dtype(g, DType::F32)? {
+                Some(out) => out,
+                None => g.to_dtype(DType::F32)?,
+            };
+            let g_exp = match try_kt_exp(&g_f32)? {
+                Some(out) => out,
+                None => g_f32.exp()?,
+            };
+            match try_kt_to_dtype(&g_exp, dtype)? {
+                Some(out) => out,
+                None => g_exp.to_dtype(dtype)?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            g.to_dtype(DType::F32)?.exp()?.to_dtype(dtype)?
+        }
+    };
     let p_u = p.unsqueeze(3)?; // [B, nv, 1, 1]
 
     let k_t = k.transpose(2, 3)?.contiguous()?; // [B, nv, dk, 1]
