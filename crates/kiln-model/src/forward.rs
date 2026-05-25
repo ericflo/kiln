@@ -507,6 +507,31 @@ fn cuda_use_kt_api_clamp() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: elementwise `Tensor::powf(p)` through the
+/// kt-API + adapters. Set `KILN_USE_KT_API_POW=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// `.powf(p)` candle calls through
+/// `kiln_tensor::cuda_clamp_pow` with kind tag 1 (Pow) via the
+/// kt-bridge borrow adapter. Pays one dtod memcpy on the output
+/// direction (the kt allocation is freshly-owned). Falls through
+/// to the candle composite when any precondition fails so
+/// behavior is identical with the gate off.
+///
+/// The gate + helper are wired up for completeness; today there
+/// are no production `.powf()` call sites in `forward.rs`.
+/// Future kernels that need elementwise power (L_p losses, RMSE,
+/// regularizers, Newton-Schulz iteration support) can route
+/// through this gate. Mirrors the dead-code-allowed precedent
+/// of `try_kt_paged_kv_cache_new` (638bc441), the abs scaffold
+/// (81d2d727), and the clamp scaffold (e9ed87f4).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_pow() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_POW").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -6800,6 +6825,63 @@ fn try_kt_clamp(x: &Tensor, lo: f32, hi: f32) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_clamp: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API pow migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_clamp_pow` with kind tag 1 (Pow).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0, non-finite exponent) so the
+/// caller falls through to the candle `.powf(p)`. NVTX range
+/// `kiln/pow_kt` brackets the migrated call so nsys traces
+/// separate the path from the baseline composite.
+///
+/// Today this helper has no production call site — the
+/// `forward.rs` path doesn't currently use `.powf()`. The helper
+/// is wired up to match the established Phase 7 scaffold so
+/// future kernel refactors that need elementwise power (L_p
+/// losses, RMSE, regularizers, Newton-Schulz iteration support)
+/// can plug in trivially. Mirrors the dead-code-allowed precedent
+/// of `try_kt_paged_kv_cache_new` (638bc441), the abs scaffold
+/// (81d2d727), and the clamp scaffold (e9ed87f4).
+///
+/// Note: `cuda_clamp_pow` ignores the `b` argument when `kind` is
+/// 1 (Pow), so this helper passes `0.0` for clarity (matching the
+/// kt-tensor `pow(x, p)` wrapper in
+/// `crates/kiln-tensor/src/ops/clamp_pow.rs`).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_pow(x: &Tensor, p: f32) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_pow() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+    if !p.is_finite() {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/pow_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 1 = Pow (matches csrc/clamp_pow.cu KIND_POW). The
+    // `b` argument is ignored by the Pow path, so pass 0.0.
+    let out_kt = match kiln_tensor::cuda_clamp_pow(&x_kt, 1, p, 0.0) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_pow: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
