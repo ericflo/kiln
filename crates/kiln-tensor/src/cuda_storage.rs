@@ -355,6 +355,16 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_binary_minmax_async(
+        a: *const core::ffi::c_void,
+        b: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n_elements: i64,
+        kind: i32,
+        dtype: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_elementwise_binary_async(
         a: *const core::ffi::c_void,
         b: *const core::ffi::c_void,
@@ -1024,6 +1034,134 @@ pub fn cuda_elementwise_binary(
         crate::TensorId::next(),
     )
     .map_err(|e| crate::Error::Msg(format!("cuda_elementwise_binary: wrap: {e}")))
+}
+
+/// CUDA-side elementwise binary minimum / maximum (#1082).
+///
+/// `kind` encodes the op: 0 = minimum, 1 = maximum. Both tensors must
+/// share shape + dtype (F32 / BF16 / F16) and be contiguous and on
+/// CUDA. NaN propagates via `fminf` / `fmaxf` semantics — the non-NaN
+/// operand wins when one side is NaN. Matches the CPU reference in
+/// `ops::binary_minmax::minimum` / `maximum`.
+#[cfg(feature = "cuda")]
+pub fn cuda_binary_minmax(
+    a: &crate::Tensor,
+    b: &crate::Tensor,
+    kind: i32,
+) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+
+    if a.shape() != b.shape() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_binary_minmax: shape mismatch a={:?} b={:?}",
+            a.shape(),
+            b.shape()
+        )));
+    }
+    if a.dtype() != b.dtype() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_binary_minmax: dtype mismatch a={} b={}",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    let dtype = a.dtype();
+    let dtype_tag: i32 = match dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_binary_minmax: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_binary_minmax: contiguous inputs required".to_string(),
+        ));
+    }
+    if kind != 0 && kind != 1 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_binary_minmax: kind must be 0 (min) or 1 (max), got {kind}"
+        )));
+    }
+
+    let a_storage = a
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_binary_minmax: a must be CUDA".to_string()))?;
+    let b_storage = b
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_binary_minmax: b must be CUDA".to_string()))?;
+
+    let candle_device = a_storage.candle_device.clone();
+    let device_index = match a_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+    let n = a.element_count();
+    let out_storage = CudaStorage::zeros(candle_device.clone(), device_index, dtype, n)?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let a_base = match &a_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let b_base = match &b_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let out_base = match &out_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+    };
+
+    let per = dtype.size_in_bytes();
+    let a_off = (a.layout().start_offset() * per) as u64;
+    let b_off = (b.layout().start_offset() * per) as u64;
+    let a_ptr = (a_base + a_off) as *const core::ffi::c_void;
+    let b_ptr = (b_base + b_off) as *const core::ffi::c_void;
+    let out_ptr = out_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_binary_minmax_async(
+            a_ptr,
+            b_ptr,
+            out_ptr,
+            n as i64,
+            kind,
+            dtype_tag,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_binary_minmax: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(a.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_binary_minmax: wrap: {e}")))
 }
 
 /// CUDA-side unary activation: `out[i] = activation(x[i])`.

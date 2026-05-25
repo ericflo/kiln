@@ -25,6 +25,19 @@ fn apply(f: impl Fn(f32, f32) -> f32, a: &Tensor, b: &Tensor, name: &str) -> Res
     if !a.is_contiguous() || !b.is_contiguous() {
         bail!("{name}: inputs must be contiguous");
     }
+    // CUDA fast path: when both inputs live on CUDA, route through
+    // `csrc/binary_minmax.cu` (issue #1082). The CPU branch below
+    // still handles CpuStorage-backed tensors with identical numerics.
+    #[cfg(feature = "cuda")]
+    {
+        let a_on_cuda = a.storage().as_any().is::<crate::CudaStorage>();
+        let b_on_cuda = b.storage().as_any().is::<crate::CudaStorage>();
+        if a_on_cuda && b_on_cuda {
+            let kind: i32 = if name == "minimum" { 0 } else { 1 };
+            return crate::cuda_binary_minmax(a, b, kind);
+        }
+    }
+
     let dtype = a.dtype();
     let per = dtype.size_in_bytes();
     let n = a.element_count();
