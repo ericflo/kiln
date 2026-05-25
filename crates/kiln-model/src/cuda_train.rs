@@ -2140,9 +2140,28 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
                         .exp()
                         .context("cuda_shifted_linear_cross_entropy_loss: previous scale")?,
                 };
-                let scaled_prev = prev_sumexp
-                    .broadcast_mul(&prev_scale)
-                    .context("cuda_shifted_linear_cross_entropy_loss: scale previous sum")?;
+                // Phase 7 (#1082): route the equal-shape
+                // `prev_sumexp * prev_scale` rescale through the
+                // kt-API helper. `prev_sumexp` is a prior
+                // sum_keepdim(-1) result (shape `[..., 1]`), and
+                // `prev_scale` is `exp(prev_max - new_max)` where
+                // both maxima are max_keepdim(-1) shape `[..., 1]`,
+                // so the shape-equality precondition engages and the
+                // kt path dispatches one
+                // cuda_elementwise_binary(KIND_MUL) launch. Falls
+                // through to the candle composite when
+                // KILN_USE_KT_API_BROADCAST_MUL is off.
+                let scaled_prev = match crate::forward::try_kt_broadcast_mul(
+                    &prev_sumexp,
+                    &prev_scale,
+                )
+                .context("cuda_shifted_linear_cross_entropy_loss: try_kt_broadcast_mul scale prev")?
+                {
+                    Some(out) => out,
+                    None => prev_sumexp
+                        .broadcast_mul(&prev_scale)
+                        .context("cuda_shifted_linear_cross_entropy_loss: scale previous sum")?,
+                };
                 let shifted = logits_chunk
                     .broadcast_sub(&new_max)
                     .context("cuda_shifted_linear_cross_entropy_loss: chunk shift")?;
@@ -4938,9 +4957,26 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                             .exp()
                             .context("cuda_shifted_linear_cross_entropy_loss backward: previous scale")?,
                     };
-                    let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale).context(
-                        "cuda_shifted_linear_cross_entropy_loss backward: scale previous sum",
-                    )?;
+                    // Phase 7 (#1082): mirror the forward
+                    // try_kt_broadcast_mul wiring for the
+                    // `prev_sumexp * prev_scale` rescale. Both
+                    // operands share the `[..., 1]` reduced shape
+                    // (sum_keepdim / max_keepdim outputs) so the kt
+                    // fast path engages. Falls through to the candle
+                    // composite when KILN_USE_KT_API_BROADCAST_MUL is
+                    // off.
+                    let scaled_prev = match crate::forward::try_kt_broadcast_mul(
+                        &prev_sumexp,
+                        &prev_scale,
+                    )
+                    .context(
+                        "cuda_shifted_linear_cross_entropy_loss backward: try_kt_broadcast_mul scale prev",
+                    )? {
+                        Some(out) => out,
+                        None => prev_sumexp.broadcast_mul(&prev_scale).context(
+                            "cuda_shifted_linear_cross_entropy_loss backward: scale previous sum",
+                        )?,
+                    };
                     let shifted = logits_chunk
                         .broadcast_sub(&new_max)
                         .context("cuda_shifted_linear_cross_entropy_loss backward: chunk shift")?;
