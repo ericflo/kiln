@@ -44,6 +44,8 @@ mod cuda_allocator;
 mod cuda_storage;
 #[cfg(feature = "cuda")]
 mod cuda_matmul;
+#[cfg(feature = "cuda")]
+mod fp8;
 #[cfg(feature = "metal")]
 mod metal_allocator;
 #[cfg(feature = "metal")]
@@ -88,6 +90,11 @@ pub use cuda_storage::{
 };
 #[cfg(feature = "cuda")]
 pub use cuda_matmul::{cuda_matmul, cuda_matmul_with_bias, snapshot_algo_cache};
+#[cfg(feature = "cuda")]
+pub use fp8::{
+    cuda_fp8_dequantize, cuda_fp8_dequantize_direct, cuda_fp8_quantize,
+    cuda_fp8_quantize_direct, cuda_fp8_quantize_with_scale, E4M3_MAX,
+};
 #[cfg(feature = "metal")]
 pub use metal_allocator::MetalAllocator;
 #[cfg(feature = "metal")]
