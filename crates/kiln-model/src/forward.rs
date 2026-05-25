@@ -346,6 +346,31 @@ fn cuda_use_kt_api_cat_dim2() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in: `Tensor::cat` along axis 1 through the kt-API +
+/// adapters. Set `KILN_USE_KT_API_CAT_DIM1=1` (or
+/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
+/// `Tensor::cat(&refs, 1)` call sites in `forward.rs` (streaming
+/// GDN tile outputs along the T axis, chunked CUDA training MLP
+/// concat, chunked full-attention pre-o cat) through
+/// `kiln_tensor::cuda_concat(_, 1)` via the kt-bridge borrow
+/// adapter. Inputs go zero-copy through the borrow adapter; the
+/// output uses the standard freshly-owned kt allocation + dtod
+/// copy-back to candle. Falls through to the candle `Tensor::cat`
+/// composite when any precondition fails so behavior is identical
+/// with the gate off.
+///
+/// Distinct from `KILN_USE_KT_API_CAT_DIM0` (per-tile grad cats
+/// along the leading row axis) and `KILN_USE_KT_API_CAT_DIM2`
+/// (`[batch, channels, time]` conv1d layout). This gate covers
+/// `[batch, time, ...]` concat patterns where the sequence/time
+/// axis is the middle dimension.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_cat_dim1() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_CAT_DIM1").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: `Tensor::affine(c, 0.0)` (scalar-multiply only)
 /// through the kt-API + adapters. Set
 /// `KILN_USE_KT_API_MUL_SCALAR=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -6371,6 +6396,64 @@ fn try_kt_cat_dim0(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
     Ok(Some(out))
 }
 
+/// Phase 7 (#1082) — kt-API axis-1 concat migration helper. Routes
+/// contiguous CUDA candle tensors of a supported dtype through
+/// `kiln_tensor::cuda_concat(_, 1)`.
+///
+/// Returns `Ok(None)` on any incompatibility (empty input, mixed
+/// devices/dtypes, non-CUDA, non-contiguous, unsupported dtype,
+/// rank < 2) so the caller falls through to the candle composite.
+/// NVTX range `kiln/cat_dim1_kt` brackets the migrated call so
+/// nsys traces separate the path from the baseline composite.
+#[cfg(feature = "cuda")]
+fn try_kt_cat_dim1(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_cat_dim1() {
+        return Ok(None);
+    }
+    if pieces.is_empty() {
+        return Ok(None);
+    }
+    let first = pieces[0];
+    let rank = first.rank();
+    if rank < 2 {
+        return Ok(None);
+    }
+    let dtype = first.dtype();
+    if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+        return Ok(None);
+    }
+    if !matches!(first.device(), Device::Cuda(_)) {
+        return Ok(None);
+    }
+    for t in pieces.iter() {
+        if !matches!(t.device(), Device::Cuda(_))
+            || t.dtype() != dtype
+            || !t.is_contiguous()
+            || t.rank() != rank
+        {
+            return Ok(None);
+        }
+    }
+
+    kiln_nvtx::range!(c"kiln/cat_dim1_kt");
+
+    let mut kt_owned = Vec::with_capacity(pieces.len());
+    for t in pieces.iter() {
+        match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t) {
+            Ok(k) => kt_owned.push(k),
+            Err(_) => return Ok(None),
+        }
+    }
+    let kt_refs: Vec<&kiln_tensor::Tensor> = kt_owned.iter().collect();
+    let out_kt = match kiln_tensor::cuda_concat(&kt_refs, 1) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_cat_dim1: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
 /// Phase 7 (#1082) — kt-API axis-2 concat migration helper. Routes
 /// contiguous CUDA candle tensors of a supported dtype through
 /// `kiln_tensor::cuda_concat(_, 2)`.
@@ -9856,6 +9939,21 @@ pub fn gated_deltanet_forward_streaming(
     }
 
     let tile_refs: Vec<&Tensor> = tile_outs.iter().collect();
+    // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM1=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND all tile outputs are
+    // contiguous CUDA tensors of a supported dtype, route the
+    // `Tensor::cat(&tile_refs, 1)` step through
+    // `kiln_tensor::cuda_concat(_, 1)` via the kt-bridge borrow
+    // adapter. Falls through to the candle composite when any
+    // precondition fails.
+    #[cfg(feature = "cuda")]
+    {
+        if let Some(out) = try_kt_cat_dim1(&tile_refs)
+            .context("streaming GDN try_kt_cat_dim1")?
+        {
+            return Ok(out);
+        }
+    }
     Tensor::cat(&tile_refs, 1).context("streaming GDN cat tile outputs along T axis")
 }
 
