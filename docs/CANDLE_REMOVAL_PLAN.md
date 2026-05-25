@@ -167,28 +167,41 @@ kt-typed surface and do not require the candle dep on the kernel crate).
 Run against `main` post-`fc5b6b7f`. Counts produced via:
 `grep -rn 'kiln_<crate>::' crates/ --include='*.rs' | grep -v '_kt\|kt_api'`.
 
-### kiln-conv1d-kernel — **BLOCKED** (4 candle-typed callers in kiln-model)
+### kiln-conv1d-kernel — **0 production callers** (substrate-blocked on dep drop)
 
-Candle-typed entry points still reachable in production:
-- `kiln_conv1d_kernel::supports` — `crates/kiln-model/src/backend/cuda.rs:1627`
-- `kiln_conv1d_kernel::causal_conv1d_update` — `crates/kiln-model/src/backend/cuda.rs:1649`
-- `kiln_conv1d_kernel::supports_prefill` — `crates/kiln-model/src/backend/cuda.rs:1664`
-- `kiln_conv1d_kernel::causal_conv1d_prefill` — `crates/kiln-model/src/backend/cuda.rs:1683`
+After `453ed5d3` (kt-typed `supports{,_update,_prefill}_kt` predicates
+landed) and `2ebcfb08` (`CudaBackend::causal_conv1d_{update,prefill}`
+migrated to use the kt-typed surface as the only path; the dedicated
+`cuda_use_kt_api_conv1d` flag + `KILN_DISABLE_KT_API_CONV1D` env gate
+removed; intra-process A/B parity tests in forward.rs deleted),
+production no longer touches the candle-typed
+`kiln_conv1d_kernel::supports*` / `causal_conv1d_*` surface anywhere.
 
-The kt-API default-on flip means the candle path is unreachable when
-`KILN_DISABLE_KT_API_CONV1D` is unset (production default). However, the
-candle path remains as the **escape-hatch fallback** when the env gate is
-set, and `supports`/`supports_prefix` are still called pre-dispatch as
-shape predicates. Both fallback and predicate callers must be migrated
-(or `supports*` exposed as kt-typed predicates) before candle can be
-dropped from the crate.
+Remaining candle-typed callers are all `#[cfg(test)]` inside the crate
+itself (`crates/kiln-conv1d-kernel/src/lib.rs:587/646/712/725`).
+These are parity scaffolds that build a candle reference and compare
+to the fused kernel.
 
-Follow-up steps (not done in this PR):
-1. Add `kt_api::supports_kt` / `supports_prefill_kt` (or a kt-typed
-   replacement predicate that takes `&kiln_tensor::Tensor`).
-2. Migrate the four call sites to the kt-typed surface.
-3. Delete the candle public functions from `lib.rs` (keep FFI + kt_api).
-4. Drop `candle-core = { workspace = true, features = ["cuda"] }`.
+The crate can drop `candle-core` from `[dependencies]` once the
+following structural blockers clear (none of these are specific to
+`kiln-conv1d-kernel` — they affect every CUDA-side kt_api):
+
+1. **`kt_api.rs` itself still uses `candle_core::cuda_backend::cudarc`
+   for `DevicePtr` + `candle_device().cuda_stream()` to plumb the CUDA
+   stream into the FFI.** This is the `kiln_tensor::CudaStorage` →
+   candle round-trip that every kernel crate's kt_api shares. Needs
+   a candle-free `kiln_tensor::CudaStorage::cuda_stream() -> *mut
+   c_void` accessor before `candle-core` can leave the runtime deps.
+2. **In-lib parity tests use `candle_core::Tensor::from_vec` + the
+   candle-typed reference implementation.** Migrating to kt requires
+   either a candle-free `kiln_tensor::Tensor::host_to_cuda_copy` (the
+   existing one takes `Arc<CudaDevice>` from candle), or moving the
+   reference computation to a candle-free CPU implementation.
+
+When #1 lands across the substrate, this crate's `Cargo.toml` drop is
+a one-line PR. Until then the `pub fn supports*` / `pub fn causal_conv1d_*`
+candle-typed surface stays as test-internal scaffolding only — no
+production caller remains.
 
 ### kiln-marlin-gemm — **BLOCKED** (5 candle-typed callers in kiln-model + 1 test)
 
