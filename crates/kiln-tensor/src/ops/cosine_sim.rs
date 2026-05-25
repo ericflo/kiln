@@ -14,6 +14,23 @@ use std::sync::Arc;
 
 use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
 
+/// Materialize `t` on CPU. CUDA inputs are D2H-copied via
+/// `cuda_to_host_copy`; CPU inputs are cheap `Arc` bumps. Cosine
+/// similarity is a per-row reduction commonly used in eval /
+/// contrastive-eval / k-NN scoring loops where the inputs already
+/// live on the device that produced them (encoder outputs on
+/// CUDA, etc.), so the public function must accept either device
+/// transparently. See `#1082`.
+fn to_cpu(t: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(t.device(), crate::Device::Cuda(_)) {
+            return crate::cuda_to_host_copy(t);
+        }
+    }
+    Ok(t.clone())
+}
+
 pub fn cosine_similarity(a: &Tensor, b: &Tensor, eps: f32) -> Result<Tensor> {
     if a.shape() != b.shape() {
         bail!(
@@ -37,6 +54,17 @@ pub fn cosine_similarity(a: &Tensor, b: &Tensor, eps: f32) -> Result<Tensor> {
     if !a.is_contiguous() || !b.is_contiguous() {
         bail!("cosine_similarity: inputs must be contiguous");
     }
+    // Both inputs must be on the same device — matches DeviceOp2's
+    // mismatched-device contract.
+    if a.device() != b.device() {
+        bail!(
+            "cosine_similarity: inputs on different devices: a={}, b={}",
+            a.device(),
+            b.device()
+        );
+    }
+    let a = to_cpu(a)?;
+    let b = to_cpu(b)?;
     let dtype = a.dtype();
     let shape = a.shape().to_vec();
     let last = *shape.last().unwrap();
@@ -170,5 +198,65 @@ mod tests {
         let b = Tensor::from_slice(&[1.0f32], vec![1]).unwrap();
         let e = cosine_similarity(&a, &b, 1e-8).unwrap_err();
         assert!(e.to_string().contains("shape"));
+    }
+
+    /// CUDA parity: cosine similarity on CUDA-resident tensors
+    /// matches the CPU result (within the BF16/F16 cast tolerance
+    /// implicit in the read-back path). Validates that lifting CPU
+    /// inputs onto CUDA via `to_device` and running the op keeps
+    /// working after the to_cpu insertion.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_cosine_sim_parity() {
+        let cdev = match candle_core::Device::cuda_if_available(0) {
+            Ok(candle_core::Device::Cuda(c)) => c,
+            _ => return,
+        };
+        let cdev = std::sync::Arc::new(cdev);
+
+        // Two rows: parallel + anti-parallel.
+        let a_cpu = Tensor::from_slice(&[1.0f32, 2.0, 1.0, 2.0], vec![2, 2]).unwrap();
+        let b_cpu = Tensor::from_slice(&[2.0f32, 4.0, -1.0, -2.0], vec![2, 2]).unwrap();
+        let a_cuda = a_cpu
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+        let b_cuda = b_cpu
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+
+        let cpu_out = cosine_similarity(&a_cpu, &b_cpu, 1e-8).unwrap();
+        let cuda_out = cosine_similarity(&a_cuda, &b_cuda, 1e-8).unwrap();
+        let c = read_f32(&cpu_out);
+        let g = read_f32(&cuda_out);
+        assert_eq!(c.len(), g.len());
+        for (i, (ci, gi)) in c.iter().zip(g.iter()).enumerate() {
+            assert!((ci - gi).abs() < 1e-5, "row {i}: cpu={ci}, cuda={gi}");
+        }
+    }
+
+    /// Mismatched-device inputs should error explicitly rather than
+    /// silently downcasting to CpuStorage and producing garbage. This
+    /// matches the DeviceOp2 contract at dispatch2(); cosine_similarity
+    /// is a free function so it enforces the same rule itself.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_cosine_sim_mixed_devices_errors() {
+        let cdev = match candle_core::Device::cuda_if_available(0) {
+            Ok(candle_core::Device::Cuda(c)) => c,
+            _ => return,
+        };
+        let cdev = std::sync::Arc::new(cdev);
+
+        let a_cpu = Tensor::from_slice(&[1.0f32, 2.0], vec![1, 2]).unwrap();
+        let b_cuda = Tensor::from_slice(&[1.0f32, 2.0], vec![1, 2])
+            .unwrap()
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+
+        let e = cosine_similarity(&a_cpu, &b_cuda, 1e-8).unwrap_err();
+        assert!(
+            e.to_string().contains("different devices"),
+            "expected mixed-device error, got {e}"
+        );
     }
 }
