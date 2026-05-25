@@ -18884,7 +18884,12 @@ fn gqa_attention_paged_with_rope_tables(
     //     full cache history, defeating the kv_len = 1 contract).
     if seq_len == 1
         && !single_token_self_attn
-        && !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache)
+        && {
+            #[cfg(feature = "cuda")]
+            { !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache) }
+            #[cfg(not(feature = "cuda"))]
+            { !paged_cache.is_fp8() }
+        }
         && (num_heads / num_kv_heads) > 1
         && !fused_paged_decode_disabled()
         && backend.supports_flash_attn_paged_decode()
@@ -18949,7 +18954,12 @@ fn gqa_attention_paged_with_rope_tables(
     } else {
         let prefix_only_prefill = seq_len > 1
             && start_pos > 0
-            && !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache)
+            && {
+            #[cfg(feature = "cuda")]
+            { !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache) }
+            #[cfg(not(feature = "cuda"))]
+            { !paged_cache.is_fp8() }
+        }
             && backend.supports_flash_attn_prefill_head_major()
             && !crate::mtp_debug::is_c7_sdpa_capture_armed();
         let prefix_append_fast = if prefix_only_prefill
@@ -18958,7 +18968,12 @@ fn gqa_attention_paged_with_rope_tables(
         {
             contiguous_slot_run_start(
                 block_table,
-                try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache),
+                {
+                    #[cfg(feature = "cuda")]
+                    { try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache) }
+                    #[cfg(not(feature = "cuda"))]
+                    { paged_cache.block_size() }
+                },
                 0,
                 start_pos,
             )
@@ -18989,13 +19004,23 @@ fn gqa_attention_paged_with_rope_tables(
         };
         let fast_read = if seq_len > 1
             && fast_read_len >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
-            && !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache)
+            && {
+            #[cfg(feature = "cuda")]
+            { !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache) }
+            #[cfg(not(feature = "cuda"))]
+            { !paged_cache.is_fp8() }
+        }
             && backend.supports_paged_kv_head_major_read()
             && backend.supports_flash_attn_prefill_head_major()
         {
             contiguous_slot_run_start(
                 block_table,
-                try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache),
+                {
+                    #[cfg(feature = "cuda")]
+                    { try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache) }
+                    #[cfg(not(feature = "cuda"))]
+                    { paged_cache.block_size() }
+                },
                 0,
                 fast_read_len,
             )
@@ -22381,6 +22406,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                     &block_table_refs,
                     full_attn_idx,
                     layer_lora,
+                    None,
                     None,
                     None,
                     None,
