@@ -46,7 +46,9 @@ use candle_core::{Device, Tensor};
 use half::bf16;
 use kiln_vulkan_kernel::buffer::VulkanBuffer;
 use kiln_vulkan_kernel::device::VulkanDevice;
-use kiln_vulkan_kernel::kernels::{dispatch_mlp_gate_up_decode_cached, upload_tensor_bf16_packed_buffer};
+use kiln_vulkan_kernel::kernels::{
+    dispatch_mlp_gate_up_decode_cached, upload_bf16_packed_buffer_from_slice,
+};
 
 const HIDDEN: usize = 2560;
 const INTERMEDIATE: usize = 9216;
@@ -55,22 +57,23 @@ const DEFAULT_ITERS: usize = 32;
 const WARMUP_ITERS: usize = 8;
 const BATCH_SWEEP: &[usize] = &[1, 4, 16, 64, 256, 1024];
 
-fn make_bf16_weight(rows: usize, cols: usize, seed: u64) -> Result<Tensor> {
+fn make_bf16_weight(seed: u64, rows: usize, cols: usize) -> Vec<bf16> {
     // Same deterministic-pattern fill as `decode_microbench.rs` so the two
-    // are comparable.
+    // are comparable. Candle-free: host-side Vec<bf16> ready for upload
+    // via the new bf16-slice uploader. (#1082)
     let n = rows * cols;
-    let data: Vec<bf16> = (0..n)
+    (0..n)
         .map(|i| {
             let v = (seed.wrapping_mul(i as u64 + 1) ^ 0x9E3779B97F4A7C15) & 0xFFFF;
             let f = ((v as f32) - 32768.0) / 327680.0;
             bf16::from_f32(f)
         })
-        .collect();
-    Tensor::from_vec(data, (rows, cols), &Device::Cpu).map_err(Into::into)
+        .collect()
 }
 
 fn make_x(batch: usize) -> Result<Tensor> {
-    // Decode dispatch shape: [batch, 1, hidden], FP32.
+    // Decode dispatch shape: [batch, 1, hidden], FP32. Still candle:
+    // `dispatch_mlp_gate_up_decode_cached` itself takes &Tensor today.
     let n = batch * HIDDEN;
     let data: Vec<f32> = (0..n)
         .map(|i| ((i % 31) as f32 - 15.0) * 0.01)
@@ -164,10 +167,11 @@ fn main() -> Result<()> {
     let gpu_name = gpu_name_via_vulkaninfo();
 
     // Build BF16 weights once, upload to device-local buffers (warm).
-    let w_gate = make_bf16_weight(HIDDEN, INTERMEDIATE, 0xDEADBEEF)?;
-    let w_up = make_bf16_weight(HIDDEN, INTERMEDIATE, 0xC0FFEE)?;
-    let gate_buf = upload_tensor_bf16_packed_buffer(&vk_device, &w_gate)?;
-    let up_buf = upload_tensor_bf16_packed_buffer(&vk_device, &w_up)?;
+    // Candle-free upload via the new bf16-slice entry point. (#1082)
+    let w_gate = make_bf16_weight(0xDEADBEEF, HIDDEN, INTERMEDIATE);
+    let w_up = make_bf16_weight(0xC0FFEE, HIDDEN, INTERMEDIATE);
+    let gate_buf = upload_bf16_packed_buffer_from_slice(&vk_device, &w_gate)?;
+    let up_buf = upload_bf16_packed_buffer_from_slice(&vk_device, &w_up)?;
 
     println!("# Phase 0.9 Vulkan MLP gate||up probe");
     println!("# GPU: {}", gpu_name);

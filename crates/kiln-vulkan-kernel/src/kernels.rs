@@ -1017,15 +1017,86 @@ pub fn buffer_to_tensor(
     }
 }
 
-/// Upload a Candle tensor as contiguous f32 values into a device-local Vulkan buffer.
-///
-/// This is used by model-level caches for immutable weights so repeated decode
-/// steps do not re-upload multi-megabyte projection matrices.
-pub fn upload_tensor_f32_buffer(vk_device: &VulkanDevice, tensor: &Tensor) -> Result<VulkanBuffer> {
+/// Upload raw bytes as immutable weights into a device-local Vulkan
+/// buffer using a transient command pool. Candle-free core shared by
+/// [`upload_tensor_f32_buffer`] and [`upload_tensor_bf16_packed_buffer`]
+/// and reusable from `#1082` migration call sites that already have
+/// host bytes in hand. (#1082)
+fn upload_bytes_to_device_buffer(
+    vk_device: &VulkanDevice,
+    bytes: &[u8],
+    create_ctx: &'static str,
+    upload_ctx: &'static str,
+) -> Result<VulkanBuffer> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
+
+    let buffer = VulkanBuffer::create_device_local(device, device_local_mt, bytes.len() as u64)
+        .context(create_ctx)?;
+    {
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::upload_data_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &buffer,
+            bytes,
+        )
+        .context(upload_ctx)?;
+    }
+    Ok(buffer)
+}
+
+/// Upload an f32 slice as a contiguous immutable weight buffer.
+/// Candle-free counterpart to [`upload_tensor_f32_buffer`]: callers
+/// with host-side f32 data can skip the candle Tensor staging step
+/// entirely. (#1082)
+pub fn upload_f32_buffer_from_slice(
+    vk_device: &VulkanDevice,
+    data: &[f32],
+) -> Result<VulkanBuffer> {
+    upload_bytes_to_device_buffer(
+        vk_device,
+        bytemuck::cast_slice(data),
+        "failed to create cached tensor buffer",
+        "failed to upload cached tensor buffer",
+    )
+}
+
+/// Upload a bf16 slice as packed immutable weights into a Vulkan
+/// buffer. Two bf16 lanes are packed per u32 word (`(hi << 16) | lo`)
+/// to match the `*_bf16w.comp` shader variants. Candle-free
+/// counterpart to [`upload_tensor_bf16_packed_buffer`]. (#1082)
+pub fn upload_bf16_packed_buffer_from_slice(
+    vk_device: &VulkanDevice,
+    data: &[bf16],
+) -> Result<VulkanBuffer> {
+    let mut packed = Vec::with_capacity(data.len().div_ceil(2));
+    for pair in data.chunks(2) {
+        let lo = pair[0].to_bits() as u32;
+        let hi = pair.get(1).map(|v| v.to_bits() as u32).unwrap_or(0);
+        packed.push(lo | (hi << 16));
+    }
+    upload_bytes_to_device_buffer(
+        vk_device,
+        bytemuck::cast_slice(&packed),
+        "failed to create cached packed bf16 tensor buffer",
+        "failed to upload cached packed bf16 tensor buffer",
+    )
+}
+
+/// Upload a Candle tensor as contiguous f32 values into a device-local Vulkan buffer.
+///
+/// This is used by model-level caches for immutable weights so repeated decode
+/// steps do not re-upload multi-megabyte projection matrices.
+///
+/// Candle-shim wrapper around [`upload_f32_buffer_from_slice`] —
+/// extracts the tensor's f32 bytes once, then delegates to the
+/// candle-free core. (#1082)
+pub fn upload_tensor_f32_buffer(vk_device: &VulkanDevice, tensor: &Tensor) -> Result<VulkanBuffer> {
     let tensor_f32;
     let tensor = if tensor.dtype() == DType::F32 {
         tensor
@@ -1036,53 +1107,33 @@ pub fn upload_tensor_f32_buffer(vk_device: &VulkanDevice, tensor: &Tensor) -> Re
         &tensor_f32
     };
     let data = extract_tensor_bytes(tensor)?.0;
-
-    let buffer = VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64)
-        .context("failed to create cached tensor buffer")?;
-    {
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &buffer,
-            &data,
-        )
-        .context("failed to upload cached tensor buffer")?;
-    }
-    Ok(buffer)
+    upload_bytes_to_device_buffer(
+        vk_device,
+        &data,
+        "failed to create cached tensor buffer",
+        "failed to upload cached tensor buffer",
+    )
 }
 
 /// Upload a BF16 Candle tensor as packed immutable weights into a Vulkan buffer.
 ///
 /// The resulting buffer stores two BF16 values per u32, matching the
 /// `*_bf16w.comp` shader variants.
+///
+/// Candle-shim wrapper around [`upload_bf16_packed_buffer_from_slice`].
+/// Extracts packed bf16 bytes from the tensor once, then delegates to
+/// the candle-free core. (#1082)
 pub fn upload_tensor_bf16_packed_buffer(
     vk_device: &VulkanDevice,
     tensor: &Tensor,
 ) -> Result<VulkanBuffer> {
-    let device = vk_device.device();
-    let queue = vk_device.queue();
-    let device_local_mt = vk_device.device_local_mem_type();
-    let host_visible_mt = vk_device.host_visible_mem_type();
     let data = extract_tensor_packed_bf16_bytes(tensor)?.0;
-
-    let buffer = VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64)
-        .context("failed to create cached packed bf16 tensor buffer")?;
-    {
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &buffer,
-            &data,
-        )
-        .context("failed to upload cached packed bf16 tensor buffer")?;
-    }
-    Ok(buffer)
+    upload_bytes_to_device_buffer(
+        vk_device,
+        &data,
+        "failed to create cached packed bf16 tensor buffer",
+        "failed to upload cached packed bf16 tensor buffer",
+    )
 }
 
 /// Dispatch the fused single-token GDN input projection kernel with cached weights.
