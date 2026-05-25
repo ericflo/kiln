@@ -1046,8 +1046,17 @@ impl BackendRuntime for CudaBackend {
                 eps as f32,
             )
             .map_err(|e| anyhow::anyhow!("kt gdn_decode_gates_recurrent: {e}"))?;
-            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
                 .with_context(|| "kt-adapter: gdn_decode_gates out → candle failed")?;
+            // kt_api allocates a 3D `[B, value_heads, dv]` output (see
+            // crates/kiln-gdn-kernel/src/kt_api.rs:568) but the
+            // BackendRuntime trait + production caller expect 4D
+            // `[B, 1, value_heads, dv]` (see attn_out shape contract at
+            // forward.rs:15595). Unsqueeze the seq_len axis back at
+            // position 1; metadata-only reshape, no copy. (#1082)
+            let out = out_3d
+                .unsqueeze(1)
+                .with_context(|| "kt-adapter: gdn_decode_gates out 3D->4D unsqueeze failed")?;
             return Ok(Some(out));
         }
         let out = kiln_gdn_kernel::gdn_decode_gates_recurrent(
@@ -1139,8 +1148,15 @@ impl BackendRuntime for CudaBackend {
                 q_scale as f32, qk_eps as f32,
             )
             .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent: {e}"))?;
-            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
                 .with_context(|| "kt-adapter: gdn_decode_qk_norm out → candle failed")?;
+            // Same 3D->4D unsqueeze fix as gdn_decode_gates_recurrent
+            // above. The kt_api allocates 3D `[B, value_heads, dv]`
+            // (see crates/kiln-gdn-kernel/src/kt_api.rs) but the trait
+            // contract is 4D `[B, 1, value_heads, dv]`. (#1082)
+            let out = out_3d
+                .unsqueeze(1)
+                .with_context(|| "kt-adapter: gdn_decode_qk_norm out 3D->4D unsqueeze failed")?;
             return Ok(Some(out));
         }
         let out = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent(
@@ -1250,8 +1266,15 @@ impl BackendRuntime for CudaBackend {
                 q_scale as f32, qk_eps as f32, rms_eps as f32,
             )
             .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent_rmsnorm: {e}"))?;
-            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
                 .with_context(|| "kt-adapter: gdn_decode_rmsnorm out → candle failed")?;
+            // Same 3D->4D unsqueeze fix as the gdn_decode_gates_recurrent
+            // and gdn_decode_qk_norm_gates_recurrent wires above. The
+            // kt_api allocates 3D `[B, value_heads, dv]` but the trait
+            // contract is 4D `[B, 1, value_heads, dv]`. (#1082)
+            let out = out_3d
+                .unsqueeze(1)
+                .with_context(|| "kt-adapter: gdn_decode_rmsnorm out 3D->4D unsqueeze failed")?;
             return Ok(Some(out));
         }
         let out = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm(

@@ -31672,64 +31672,18 @@ mod tests {
             }
         };
 
-        // Output + state parity. The candle path returns 4D
-        // `[B, 1, Hv, dv]` (`Tensor::zeros((batch, 1, value_heads, dv), ...)`
-        // at crates/kiln-gdn-kernel/src/lib.rs:870) while the kt path
-        // returns 3D `[B, Hv, dv]` (the kt_api allocates 3D output at
-        // crates/kiln-gdn-kernel/src/kt_api.rs:568). This shape
-        // divergence is a separate API-contract bug discovered while
-        // writing this test; flag it explicitly so the parity check
-        // exercises the data parity rather than masking the shape
-        // bug. The DATA — the actual fp values produced by the same
-        // FFI symbol — must still match byte-for-byte.
-        fn assert_flat_byte_exact(label: &str, candle: &Tensor, kt: &Tensor) -> Result<()> {
-            let c: Vec<f32> = candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-            let k: Vec<f32> = kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-            assert_eq!(
-                c.len(),
-                k.len(),
-                "{label}: length mismatch (candle {:?} len {}, kt {:?} len {})",
-                candle.dims(),
-                c.len(),
-                kt.dims(),
-                k.len()
-            );
-            let mut mismatches = 0usize;
-            for (i, (x, y)) in c.iter().zip(k.iter()).enumerate() {
-                if x.to_bits() != y.to_bits() {
-                    if mismatches < 4 {
-                        eprintln!(
-                            "{label} kt parity mismatch at {i}: candle=0x{:08x} kt=0x{:08x}",
-                            x.to_bits(),
-                            y.to_bits()
-                        );
-                    }
-                    mismatches += 1;
-                }
-            }
-            assert_eq!(
-                mismatches, 0,
-                "kt-API gdn_decode_gates_recurrent {label} diverges from candle at {mismatches} indices"
-            );
-            Ok(())
-        }
-
-        // Document the shape divergence — candle 4D vs kt 3D — so the
-        // bug is visible. Both encode the same `B * Hv * dv` bf16
-        // values; the candle layout adds an extra seq_len=1 axis at
-        // position 1. The state parity is byte-exact on the same 4D
-        // layout (both paths borrow the same caller-owned buffer).
-        eprintln!(
-            "kt-API gdn_decode_gates_recurrent output shape: candle={:?} kt={:?}; \
-             comparing flattened data (kt-wire should reshape 3D->4D before returning, \
-             #1082 follow-up)",
-            out_candle.dims(),
-            out_kt.dims()
-        );
-        assert_flat_byte_exact("out", &out_candle, &out_kt)?;
-
+        // Output + state parity (both are bf16, same FFI symbol).
+        // After the 3D->4D unsqueeze fix in the kt wire (see
+        // crates/kiln-model/src/backend/cuda.rs gdn_decode_gates_recurrent
+        // kt path) both paths return 4D `[B, 1, value_heads, dv]`.
         fn assert_byte_exact(label: &str, candle: &Tensor, kt: &Tensor) -> Result<()> {
-            assert_eq!(candle.dims(), kt.dims(), "{label}: dims mismatch");
+            assert_eq!(
+                candle.dims(),
+                kt.dims(),
+                "{label}: dims mismatch (candle {:?}, kt {:?})",
+                candle.dims(),
+                kt.dims()
+            );
             let c: Vec<f32> = candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
             let k: Vec<f32> = kt.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
             assert_eq!(c.len(), k.len(), "{label}: length mismatch");
@@ -31753,6 +31707,7 @@ mod tests {
             Ok(())
         }
 
+        assert_byte_exact("out", &out_candle, &out_kt)?;
         assert_byte_exact("state", &state_candle, &state_kt)?;
 
         Ok(())
