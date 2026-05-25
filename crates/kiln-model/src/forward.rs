@@ -8774,6 +8774,14 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
     };
     // log(1 + exp(-|x|)) — always stable since exp(-|x|) ∈ (0, 1]
     //
+    // Phase 7 (#1082): when `KILN_USE_KT_API_EXP=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set AND `neg_abs` is a
+    // contiguous CUDA tensor of {F32, BF16, F16}, route the
+    // `.exp()` step of the softplus composite through
+    // `kiln_tensor::cuda_activation_unary` with kind 6 (Exp).
+    // Falls through to the candle composite when any precondition
+    // fails.
+    //
     // Phase 7 (#1082): when `KILN_USE_KT_API_ADD_SCALAR=1` (or
     // `KILN_USE_KT_API_ALL=1`) is set AND the exp() output is a
     // contiguous CUDA tensor of a supported dtype, route the
@@ -8781,7 +8789,19 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
     // `kiln_tensor::cuda_scalar_op` with kind 0 (AddScalar).
     // Falls through to the candle composite when any precondition
     // fails.
-    let exp_neg_abs = neg_abs.exp()?;
+    let exp_neg_abs = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_exp(&neg_abs)? {
+                Some(out) => out,
+                None => neg_abs.exp()?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            neg_abs.exp()?
+        }
+    };
     let one_plus = {
         #[cfg(feature = "cuda")]
         {
@@ -10143,7 +10163,24 @@ fn gdn_chunk_prep_f32(
         .broadcast_as((batch, heads, chunk, chunk))?;
     let strict_decay = strict_bool.where_cond(&decay_delta, &zero_delta)?.exp()?;
     let causal_decay = causal_bool.where_cond(&decay_delta, &zero_delta)?.exp()?;
-    let p = big_g.exp()?;
+    // Phase 7 (#1082): route `big_g.exp()` through
+    // `try_kt_exp` when `KILN_USE_KT_API_EXP=1` (or
+    // `KILN_USE_KT_API_ALL=1`) is set. Falls through to the
+    // candle composite when any precondition fails so behavior is
+    // identical with the gate off.
+    let p = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_exp(&big_g)? {
+                Some(out) => out,
+                None => big_g.exp()?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            big_g.exp()?
+        }
+    };
     let p_col = p.unsqueeze(3)?;
     let strict_mask = strict_bool.to_dtype(DType::F32)?;
     let causal_mask = causal_bool.to_dtype(DType::F32)?;
@@ -10165,7 +10202,21 @@ fn gdn_chunk_prep_f32(
     let q_s_scaled = q_s_f32.broadcast_mul(&p_col)?;
     let g_last = big_g.narrow(2, chunk - 1, 1)?;
     let decay_last_col = g_last.broadcast_sub(&big_g)?.exp()?;
-    let p_last = g_last.exp()?.squeeze(2)?;
+    // Phase 7 (#1082): same kt-API migration for `g_last.exp()`.
+    let p_last_unsqueezed = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_exp(&g_last)? {
+                Some(out) => out,
+                None => g_last.exp()?,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            g_last.exp()?
+        }
+    };
+    let p_last = p_last_unsqueezed.squeeze(2)?;
     Ok((
         a_strict,
         b_mask,
