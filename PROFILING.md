@@ -189,6 +189,75 @@ parity-tolerance row fails the Phase 9 audit.
 
 ---
 
+## kt_api production-driveable state for the candle-removal migration (#1082, 2026-05-25)
+
+This section snapshots the Phase 7 (developer experience) kt_api
+migration as visible from a profiling / hot-path perspective. The
+short version: **kt-typed paths are now production-driveable on CUDA
+end-to-end, and the kt_api migration is essentially complete at the
+kernel-crate level (Tier 1 of `docs/CANDLE_REMOVAL_PLAN.md`).**
+
+### What's production-driveable today
+
+Every Tier-1 leaf crate exposes a `kt_api::*_kt` entry that takes
+`kiln_tensor::Tensor` directly (no candle round-trip) and is wired at
+every production call site in `kiln-model::forward` +
+`kiln-train::cuda_train`:
+
+| Crate | kt_api wires shipped | Smoke-test status |
+|---|---|---|
+| `kiln-rmsnorm-kernel`  | every forward + bwd path | 25/25 green |
+| `kiln-conv1d-kernel`   | full causal_conv1d_update + prefill | green |
+| `kiln-marlin-gemm`     | every W4A16 q_proj + MLP call site | green |
+| `kiln-flash-attn`      | prefill + paged-decode (incl. dyn-seqlen + graph variants) + training bwd | 5/5 green |
+| `kiln-gdn-kernel`      | recurrent, full-chunk, chunk_prep, chunk_scan, decode gates + qk-norm + gated-rms-norm | 10/10 green |
+
+That's **~95 production call sites** carrying kt-typed tensors on the
+decode hot path. The candle-typed surface on each crate is no longer
+called from `forward.rs` or `cuda_train.rs`; it survives only as
+back-compat scaffolding pending the crate-level `Cargo.toml` candle
+dependency drop (Tier-1 closeout in `docs/CANDLE_REMOVAL_PLAN.md`).
+
+### Profiling implications
+
+- **No new dispatch overhead.** Each kt_api wire is a borrow-zero-copy
+  path through `kiln_kt_bridge` — the candle↔kt boundary is a thin
+  device-id translation layer, not a copy. Decode-tier NVTX hotspot
+  shapes are unchanged from the post-#647 SFT-step profile baseline
+  (see "Phase 10 §3 post-#647 SFT-step re-profile" section below).
+- **Allocator behavior is uniform across backends.** `DeviceBuffer`
+  now has a `Metal(MetalStorage)` arm alongside `Cpu` / `Cuda` /
+  `Vulkan`. With the `MetalAllocator` shipped, all four backends
+  expose the same `Owned` / `Pool` / `Frozen` lifecycle that Phase 5
+  graph capture depends on — see `bench-results/cuda-graph-status.md`
+  for the full inventory.
+- **Phase 5 bs>1 batched CUDA graph path remains the next perf-side
+  unlock.** All four root-cause intra-graph alloc suspects from
+  `bench-results/cuda-graph-bs2-secondary-audit.md` are closed; the
+  batched capture/replay code is in-tree under
+  `KILN_CUDA_GRAPHS_BATCHED=1` (default off). One end-to-end
+  `compute-sanitizer` sweep on the Qwen3.5-4B chat-completion driver
+  is the remaining validation gate before defaulting on.
+- **9 Vulkan ops + 15 Metal kind tags** are wired through real
+  compute pipelines / MPS kernels (the rest still fall through to the
+  CPU reference). On CUDA, `KILN_USE_KT_API_ALL=1` is end-to-end
+  runnable today; the same flag is partially runnable on Metal +
+  Vulkan, with the gap tracked per-op in
+  `bench-results/parity-tolerance.csv`.
+
+### What remains before vendor delete
+
+The remaining `kiln-model` candle dependency is the diffuse forward.rs
+surface — finishing the `PagedKvCacheKt` call-site migration,
+demoting every `try_kt_*` env gate to default-on after a parity cycle,
+and deleting the candle fallback branches. Tier-2 crates
+(`kiln-opd-loss-kernel`, `kiln-flce-kernel` Phase B closeout,
+`kiln-vulkan-kernel` shim cleanup) follow. The `kiln-kt-bridge` candle
+dep is removed last, at which point `vendor/candle-core/` is deleted
+(Tier 5). The full sequence lives in `docs/CANDLE_REMOVAL_PLAN.md`.
+
+---
+
 ## Phase 10 §3 post-#647 SFT-step re-profile + next-kernel candidate audit (2026-04-29)
 
 **Verdict: `no_kernel_pivot`.** Three back-to-back nsys 2024.5.1
