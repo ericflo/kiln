@@ -13498,7 +13498,33 @@ pub fn gdn_recurrent_backward_no_grad(
         if let Some(d_s_exit) = d_s_carry.as_ref() {
             let p_last_u = p_last.unsqueeze(2)?.unsqueeze(3)?;
             ds_state_extra = Some(d_s_exit.broadcast_mul(&p_last_u)?);
-            d_p_last_acc = (s_in * d_s_exit)?.sum(3)?.sum(2)?;
+            // Phase 7 (#1082): wire `try_kt_sum_axis` into the
+            // `(s_in * d_s_exit)?.sum(3)?.sum(2)?` reduction chain
+            // for `d_p_last_acc`. Both sums collapse a tensor axis
+            // (axis 3 then axis 2), and `try_kt_sum_axis` is the
+            // axis-removing kt-API analogue of candle's
+            // `Tensor::sum(axis)`. Falls through to the candle
+            // composite when any precondition fails so behavior is
+            // identical with the gate off.
+            let prod = (s_in * d_s_exit)?;
+            #[cfg(feature = "cuda")]
+            let after_sum3 = match try_kt_sum_axis(&prod, 3)? {
+                Some(out) => out,
+                None => prod.sum(3)?,
+            };
+            #[cfg(not(feature = "cuda"))]
+            let after_sum3 = prod.sum(3)?;
+            #[cfg(feature = "cuda")]
+            {
+                d_p_last_acc = match try_kt_sum_axis(&after_sum3, 2)? {
+                    Some(out) => out,
+                    None => after_sum3.sum(2)?,
+                };
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                d_p_last_acc = after_sum3.sum(2)?;
+            }
             let tmp_dw = k_c.matmul(d_s_exit)?;
             d_w_acc = (&d_w_acc + &tmp_dw.broadcast_mul(&decay_last_col.unsqueeze(3)?)?)?;
             let tmp_dk = w.matmul(&d_s_exit.transpose(2, 3)?.contiguous()?)?;
