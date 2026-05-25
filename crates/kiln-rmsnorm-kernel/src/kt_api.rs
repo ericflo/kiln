@@ -207,8 +207,11 @@ pub fn fused_rmsnorm_backward_kt(
 /// In-place rotary application to Q and K projections. Inputs:
 /// - `q`: BF16 `[batch, seq_len, q_heads, head_dim]`
 /// - `k`: BF16 `[batch, seq_len, k_heads, head_dim]`
-/// - `cos`, `sin`: F32 `[seq_len, rotary_dim]` precomputed tables
-/// - `rotary_dim`: applied head dim slice; must be ≤ head_dim.
+/// - `cos`, `sin`: F32 `[seq_len, rotary_dim / 2]` precomputed tables
+///   (the half-dim layout the FFI kernel reads as
+///   `cos[t * (rotary_dim/2) + d]`; matches `kiln_rmsnorm_kernel::fused_rotary_qk`
+///   and the candle-typed `supports_rotary_qk` predicate).
+/// - `rotary_dim`: applied head dim slice; must be ≤ head_dim and even.
 ///
 /// Returns `(q_out, k_out)` BF16 tensors of the same shapes as the
 /// inputs.
@@ -241,15 +244,21 @@ pub fn fused_rotary_qk_kt(
             "kt-rotary: rotary_dim {rotary_dim} > head_dim {head_dim}"
         )));
     }
-    if cos.shape() != [seq_len, rotary_dim] {
+    if rotary_dim % 2 != 0 {
         return Err(RmsNormError::Msg(format!(
-            "kt-rotary: cos {:?} != [{seq_len}, {rotary_dim}]",
+            "kt-rotary: rotary_dim {rotary_dim} must be even"
+        )));
+    }
+    let half = rotary_dim / 2;
+    if cos.shape() != [seq_len, half] {
+        return Err(RmsNormError::Msg(format!(
+            "kt-rotary: cos {:?} != [{seq_len}, {half}]",
             cos.shape()
         )));
     }
-    if sin.shape() != [seq_len, rotary_dim] {
+    if sin.shape() != [seq_len, half] {
         return Err(RmsNormError::Msg(format!(
-            "kt-rotary: sin {:?} != [{seq_len}, {rotary_dim}]",
+            "kt-rotary: sin {:?} != [{seq_len}, {half}]",
             sin.shape()
         )));
     }
@@ -731,9 +740,15 @@ pub fn fused_rotary_one_kt(
             "kt-rotary-one: rotary_dim {rotary_dim} > head_dim {head_dim}"
         )));
     }
-    if cos.shape() != [seq_len, rotary_dim] || sin.shape() != [seq_len, rotary_dim] {
+    if rotary_dim % 2 != 0 {
         return Err(RmsNormError::Msg(format!(
-            "kt-rotary-one: cos/sin must be [{seq_len}, {rotary_dim}]"
+            "kt-rotary-one: rotary_dim {rotary_dim} must be even"
+        )));
+    }
+    let half = rotary_dim / 2;
+    if cos.shape() != [seq_len, half] || sin.shape() != [seq_len, half] {
+        return Err(RmsNormError::Msg(format!(
+            "kt-rotary-one: cos/sin must be [{seq_len}, {half}]"
         )));
     }
 
@@ -1349,9 +1364,15 @@ pub fn fused_rotary_one_bwd_kt(
             "kt-rotary-one-bwd: rotary_dim {rotary_dim} > head_dim {head_dim}"
         )));
     }
-    if cos.shape() != [seq_len, rotary_dim] || sin.shape() != [seq_len, rotary_dim] {
+    if rotary_dim % 2 != 0 {
         return Err(RmsNormError::Msg(format!(
-            "kt-rotary-one-bwd: cos/sin must be [{seq_len}, {rotary_dim}]"
+            "kt-rotary-one-bwd: rotary_dim {rotary_dim} must be even"
+        )));
+    }
+    let half = rotary_dim / 2;
+    if cos.shape() != [seq_len, half] || sin.shape() != [seq_len, half] {
+        return Err(RmsNormError::Msg(format!(
+            "kt-rotary-one-bwd: cos/sin must be [{seq_len}, {half}]"
         )));
     }
 
@@ -1544,5 +1565,92 @@ pub fn silu_inplace_save_sigmoid_f32_kt(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod kt_rotary_qk_regression {
+    //! Regression test for #1082: the kt-typed `fused_rotary_qk_kt`
+    //! validator used to require cos/sin shaped `[seq_len, rotary_dim]`,
+    //! but the underlying FFI kernel reads `cos[t * (rotary_dim/2) + d]`
+    //! — i.e. the half-dim layout — and the candle-typed
+    //! `supports_rotary_qk` predicate expects `[seq_len, rotary_dim/2]`.
+    //! The mismatch surfaced in production as `kt fused_rotary_qk:
+    //! kt-rotary: cos [S, R/2] != [S, R]` on the bs>1 dyn_seqlen paged
+    //! decode test. This test confirms the validator now accepts the
+    //! half-dim shape and produces results that match the candle
+    //! `fused_rotary_qk` reference.
+    use super::*;
+    use crate::fused_rotary_qk;
+    use candle_core::{DType, Device, Tensor};
+
+    #[test]
+    fn fused_rotary_qk_kt_accepts_half_rotary_cos_sin() -> Result<(), Box<dyn std::error::Error>> {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping fused_rotary_qk_kt_accepts_half_rotary_cos_sin: {err}"
+                );
+                return Ok(());
+            }
+        };
+
+        let batch = 2usize;
+        let seq_len = 2usize;
+        let q_heads = 4usize;
+        let k_heads = 2usize;
+        let head_dim = 256usize;
+        let rotary_dim = 256usize;
+        let half = rotary_dim / 2;
+
+        let q_data: Vec<f32> = (0..batch * seq_len * q_heads * head_dim)
+            .map(|i| ((i as f32 * 0.013).sin() * 0.5))
+            .collect();
+        let k_data: Vec<f32> = (0..batch * seq_len * k_heads * head_dim)
+            .map(|i| ((i as f32 * 0.019).cos() * 0.4))
+            .collect();
+        let cos_data: Vec<f32> = (0..seq_len * half)
+            .map(|i| (i as f32 * 0.007).cos())
+            .collect();
+        let sin_data: Vec<f32> = (0..seq_len * half)
+            .map(|i| (i as f32 * 0.007).sin())
+            .collect();
+
+        let q = Tensor::from_vec(q_data, (batch, seq_len, q_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let k = Tensor::from_vec(k_data, (batch, seq_len, k_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let cos = Tensor::from_vec(cos_data, (seq_len, half), &device)?;
+        let sin = Tensor::from_vec(sin_data, (seq_len, half), &device)?;
+
+        // Candle reference path.
+        let (q_ref, k_ref) = fused_rotary_qk(&q, &k, &cos, &sin, head_dim, rotary_dim)?;
+
+        // kt path. Pre-fix this used to reject with "kt-rotary: cos
+        // [seq, half] != [seq, rotary_dim]".
+        let q_kt_in = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q)?;
+        let k_kt_in = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k)?;
+        let cos_kt_in = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&cos)?;
+        let sin_kt_in = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&sin)?;
+        let (q_kt_out, k_kt_out) =
+            fused_rotary_qk_kt(&q_kt_in, &k_kt_in, &cos_kt_in, &sin_kt_in, rotary_dim)?;
+        let q_kt_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&q_kt_out)?;
+        let k_kt_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&k_kt_out)?;
+
+        // The two paths bottom out in the same FFI symbol; bit-exact is expected.
+        let q_diff = (&q_ref.to_dtype(DType::F32)? - &q_kt_candle.to_dtype(DType::F32)?)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        let k_diff = (&k_ref.to_dtype(DType::F32)? - &k_kt_candle.to_dtype(DType::F32)?)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        assert_eq!(q_diff, 0.0, "kt vs candle fused_rotary_qk q max_abs_diff={q_diff:e}");
+        assert_eq!(k_diff, 0.0, "kt vs candle fused_rotary_qk k max_abs_diff={k_diff:e}");
+        Ok(())
+    }
 }
 
