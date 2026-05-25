@@ -8270,7 +8270,7 @@ fn try_kt_mul_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
 /// `kiln/add_scalar_kt` brackets the migrated call so nsys traces
 /// separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
-fn try_kt_add_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
+pub(crate) fn try_kt_add_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_add_scalar() {
         return Ok(None);
     }
@@ -8313,7 +8313,7 @@ fn try_kt_add_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
 /// migrated call so nsys traces separate the path from the
 /// baseline composite.
 #[cfg(feature = "cuda")]
-fn try_kt_neg(x: &Tensor) -> Result<Option<Tensor>> {
+pub(crate) fn try_kt_neg(x: &Tensor) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_neg() {
         return Ok(None);
     }
@@ -9116,7 +9116,7 @@ fn try_kt_cos(x: &Tensor) -> Result<Option<Tensor>> {
 /// baseline composite. Mirrors `try_kt_sin` / `try_kt_cos`
 /// (commits 728b3917 / 6c22330f).
 #[cfg(feature = "cuda")]
-fn try_kt_exp(x: &Tensor) -> Result<Option<Tensor>> {
+pub(crate) fn try_kt_exp(x: &Tensor) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_exp() {
         return Ok(None);
     }
@@ -9306,7 +9306,7 @@ fn try_kt_relu(x: &Tensor) -> Result<Option<Tensor>> {
 /// `(variance + eps).sqrt().recip()` sites land in follow-up
 /// commits of the same #1082 series.
 #[cfg(feature = "cuda")]
-fn try_kt_recip(x: &Tensor) -> Result<Option<Tensor>> {
+pub(crate) fn try_kt_recip(x: &Tensor) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_recip() {
         return Ok(None);
     }
