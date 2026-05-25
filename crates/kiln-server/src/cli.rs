@@ -899,7 +899,7 @@ pub fn print_banner(host: &str, port: u16, model_path: Option<&str>, config_path
         let _ = writeln!(stderr, "  {} {}", style("Model:").dim(), style(mp).white());
     }
 
-    let cuda_status = if candle_core::utils::cuda_is_available() {
+    let cuda_status = if kiln_tensor::cuda_is_available() {
         style("available ✓").green()
     } else {
         style("not available").yellow()

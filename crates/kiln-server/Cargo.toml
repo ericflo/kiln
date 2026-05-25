@@ -27,6 +27,7 @@ kiln-core = { workspace = true }
 kiln-eval = { workspace = true }
 kiln-model = { workspace = true }
 kiln-scheduler = { workspace = true }
+kiln-tensor = { workspace = true }
 kiln-train = { workspace = true }
 candle-core = { workspace = true }
 axum = { workspace = true }
@@ -62,8 +63,8 @@ sha2 = { workspace = true }
 regex = "1"
 
 [features]
-cuda = ["kiln-model/cuda", "kiln-train/cuda"]
-metal = ["kiln-model/metal"]
+cuda = ["kiln-model/cuda", "kiln-tensor/cuda", "kiln-train/cuda"]
+metal = ["kiln-model/metal", "kiln-tensor/metal"]
 vulkan = ["kiln-model/vulkan", "kiln-train/vulkan"]
 # Forward kiln-model's NVTX feature so kiln-bench / kiln binaries emit ranges
 # under nsys for per-call-site attribution. No effect without --features cuda.

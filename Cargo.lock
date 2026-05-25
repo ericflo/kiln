@@ -2042,6 +2042,7 @@ dependencies = [
  "kiln-eval",
  "kiln-model",
  "kiln-scheduler",
+ "kiln-tensor",
  "kiln-train",
  "rand 0.10.1",
  "regex",
