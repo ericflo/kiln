@@ -25,6 +25,28 @@ fn cuda_paged_kv_write_token_major_disabled() -> bool {
         .get_or_init(|| std::env::var_os("KILN_DISABLE_CUDA_PAGED_KV_WRITE_TOKEN_MAJOR").is_some())
 }
 
+/// Phase 7 opt-in (#1082): route `paged_kv_write_token_major_bf16{,_slot,_batch_slot}`
+/// through the kt-API + adapters. Bottoms out in the same FFI symbols
+/// (`kiln_paged_kv_write_token_major_bf16{,_slot,_batch_slot}`) as the candle
+/// shims, so bit-exactly equivalent by construction; only the Rust shell
+/// types change. Enable with `KILN_USE_KT_API_PAGED_KV_WRITE=1` or
+/// `KILN_USE_KT_API_ALL=1`. Default off until parity testing and CI
+/// soak land.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_paged_kv_write() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_PAGED_KV_WRITE").is_ok());
+    direct || cuda_use_kt_api_all_local()
+}
+
+/// Mirror of [`crate::forward::cuda_use_kt_api_all`] visible here. Avoids a
+/// public cross-module dependency just to read the master switch.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_all_local() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ALL").is_ok())
+}
+
 /// Paged KV cache that stores K/V in block-organized pool tensors.
 ///
 /// Instead of pre-allocating `[max_seq_len]` per sequence (as [`KvCache`] does),
@@ -244,6 +266,29 @@ impl PagedKvCache {
             return Ok(false);
         }
         let (k_pool, v_pool) = &self.layers[layer_idx];
+        // Phase 7 opt-in (#1082): route through the kt-typed surface.
+        // Bottoms out in the same `kiln_paged_kv_write_token_major_bf16_slot`
+        // FFI symbol as the candle shim, so bit-exactly equivalent; only
+        // the Rust shell types change. Falls through to the candle path
+        // when the gate is off.
+        if cuda_use_kt_api_paged_kv_write() {
+            kiln_nvtx::range!(c"kiln/paged_kv_write_token_major_bf16_slot_kt");
+            let kp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
+                .context("paged_kv_write kt_slot: borrow k_pool -> kt")?;
+            let vp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
+                .context("paged_kv_write kt_slot: borrow v_pool -> kt")?;
+            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
+                .context("paged_kv_write kt_slot: borrow k -> kt")?;
+            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+                .context("paged_kv_write kt_slot: borrow v -> kt")?;
+            let slot_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(slot)
+                .context("paged_kv_write kt_slot: borrow slot -> kt")?;
+            kiln_flash_attn::paged_kv_write_token_major_bf16_slot_kt(
+                &kp_kt, &vp_kt, &k_kt, &v_kt, &slot_kt,
+            )
+            .map_err(|e| anyhow::anyhow!("paged_kv_write kt_slot: {e}"))?;
+            return Ok(true);
+        }
         kiln_flash_attn::paged_kv_write_token_major_bf16_slot(k_pool, v_pool, k, v, slot)?;
         Ok(true)
     }
@@ -294,6 +339,37 @@ impl PagedKvCache {
         // element_count == batch * kv_heads * head_dim check is exact.
         let k = k.squeeze(1)?;
         let v = v.squeeze(1)?;
+        // Phase 7 opt-in (#1082): route through the kt-typed surface.
+        // Bottoms out in the same `kiln_paged_kv_write_token_major_bf16_batch_slot`
+        // FFI symbol as the candle shim, so bit-exactly equivalent; only
+        // the Rust shell types change. Falls through to the candle path
+        // when the gate is off. We require both contiguous K/V and a
+        // contiguous slots tensor for the borrow adapter (the candle path
+        // calls `.contiguous()?` internally; we do the same here so the
+        // gate flip preserves observed behavior under non-contiguous inputs).
+        if cuda_use_kt_api_paged_kv_write() {
+            kiln_nvtx::range!(c"kiln/paged_kv_write_token_major_bf16_batch_slot_kt");
+            let k_c = k.contiguous().context("paged_kv_write kt_batch_slot: k contiguous")?;
+            let v_c = v.contiguous().context("paged_kv_write kt_batch_slot: v contiguous")?;
+            let slots_c = slots
+                .contiguous()
+                .context("paged_kv_write kt_batch_slot: slots contiguous")?;
+            let kp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
+                .context("paged_kv_write kt_batch_slot: borrow k_pool -> kt")?;
+            let vp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
+                .context("paged_kv_write kt_batch_slot: borrow v_pool -> kt")?;
+            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_c)
+                .context("paged_kv_write kt_batch_slot: borrow k -> kt")?;
+            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_c)
+                .context("paged_kv_write kt_batch_slot: borrow v -> kt")?;
+            let slots_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&slots_c)
+                .context("paged_kv_write kt_batch_slot: borrow slots -> kt")?;
+            kiln_flash_attn::paged_kv_write_token_major_bf16_batch_slot_kt(
+                &kp_kt, &vp_kt, &k_kt, &v_kt, &slots_kt,
+            )
+            .map_err(|e| anyhow::anyhow!("paged_kv_write kt_batch_slot: {e}"))?;
+            return Ok(true);
+        }
         kiln_flash_attn::paged_kv_write_token_major_bf16_batch_slot(
             k_pool, v_pool, &k, &v, slots,
         )?;
@@ -333,6 +409,29 @@ impl PagedKvCache {
                     && matches!(k.device(), Device::Cuda(_))
                     && matches!(v.device(), Device::Cuda(_))
                 {
+                    // Phase 7 opt-in (#1082): route through the kt-typed
+                    // surface when `KILN_USE_KT_API_PAGED_KV_WRITE=1` (or
+                    // `KILN_USE_KT_API_ALL=1`) is set. Bottoms out in the
+                    // same `kiln_paged_kv_write_token_major_bf16` FFI
+                    // symbol as the candle shim, so bit-exactly equivalent;
+                    // only the Rust shell types change. Falls through to
+                    // the candle path when the gate is off.
+                    if cuda_use_kt_api_paged_kv_write() {
+                        kiln_nvtx::range!(c"kiln/paged_kv_write_token_major_bf16_kt");
+                        let kp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
+                            .context("paged_kv_write kt_host: borrow k_pool -> kt")?;
+                        let vp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
+                            .context("paged_kv_write kt_host: borrow v_pool -> kt")?;
+                        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
+                            .context("paged_kv_write kt_host: borrow k -> kt")?;
+                        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+                            .context("paged_kv_write kt_host: borrow v -> kt")?;
+                        kiln_flash_attn::paged_kv_write_token_major_bf16_kt(
+                            &kp_kt, &vp_kt, &k_kt, &v_kt, slot,
+                        )
+                        .map_err(|e| anyhow::anyhow!("paged_kv_write kt_host: {e}"))?;
+                        return Ok(true);
+                    }
                     kiln_flash_attn::paged_kv_write_token_major_bf16(k_pool, v_pool, k, v, slot)?;
                     return Ok(true);
                 }
