@@ -13739,6 +13739,22 @@ pub fn gdn_recurrent_backward_no_grad(
             .broadcast_mul(&kkt)?;
         let term_b = d_b_mask.broadcast_mul(&causal_decay)?.broadcast_mul(&qkt)?;
         let term = (&term_a + &term_b)?;
+        // Phase 7 (#1082): wire `try_kt_sum_axis` into the
+        // `term.sum(D::Minus1)?` row-sum reduction. The operand is
+        // a 4D tensor [B, H, C, C] so `D::Minus1` resolves to axis
+        // 3 at runtime; the helper falls through to the candle
+        // composite on any precondition failure so behavior is
+        // identical with the gate off. Complements the col-sum
+        // (axis 2) which is already wired below.
+        #[cfg(feature = "cuda")]
+        let row_sum = {
+            let axis = term.rank().saturating_sub(1);
+            match try_kt_sum_axis(&term, axis)? {
+                Some(out) => out,
+                None => term.sum(candle_core::D::Minus1)?,
+            }
+        };
+        #[cfg(not(feature = "cuda"))]
         let row_sum = term.sum(candle_core::D::Minus1)?;
         // Phase 7 (#1082): route the col-sum reduction (axis 2,
         // the strict-mask row dim) through
