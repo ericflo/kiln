@@ -910,6 +910,37 @@ fn cuda_use_kt_api_log10() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
+/// Phase 7 opt-in (#1082): elementwise `log1p` (= `ln(1 + x)`,
+/// numerically stable for small `x`) through the kt-API + adapters.
+/// Set `KILN_USE_KT_API_LOG1P=1` (or `KILN_USE_KT_API_ALL=1`) to
+/// enable; default off. Routes `.log1p()` candle calls through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 17 (Log1p)
+/// via the kt-bridge borrow adapter. Pays one dtod memcpy on the
+/// output direction. Falls through to the candle composite when
+/// any precondition fails so behavior is identical with the gate
+/// off.
+///
+/// Today this gate is unused — there are no production `.log1p()`
+/// call sites in `forward.rs`. The `softplus` helper computes
+/// `log(1 + exp(-|x|))` as a manual two-step `(1 + exp).log()` so
+/// that the `1 +` step can be fused with the kt-API
+/// `add_scalar` migration; using log1p directly would collapse the
+/// two steps but lose the per-step gate granularity. The gate +
+/// helper here are wired up to match the established Phase 7
+/// scaffold so future kernel refactors (smoothed cross-entropy,
+/// confidence-calibration math) that have a natural log1p shape
+/// can plug in trivially. Mirrors the dead-code-allowed precedent
+/// of `try_kt_tanh` (9839a3a4), `try_kt_log2` / `try_kt_log10`
+/// (above). KIND_LOG1P already exists at kind 17 in
+/// `csrc/activation.cu`.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn cuda_use_kt_api_log1p() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LOG1P").is_ok());
+    direct || cuda_use_kt_api_all()
+}
+
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
 /// `kiln_tensor::cuda_matmul` (cublasLt) handle. Default off; set
 /// `KILN_USE_KT_API_MATMUL=1` (or `KILN_USE_KT_API_ALL=1`) to
@@ -7981,6 +8012,59 @@ fn try_kt_log10(x: &Tensor) -> Result<Option<Tensor>> {
     };
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_log10: candle copy-back failed: {e}"))?;
+    Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — kt-API log1p migration helper. Routes a
+/// contiguous CUDA candle tensor through
+/// `kiln_tensor::cuda_activation_unary` with kind tag 17 (Log1p =
+/// `ln(1 + x)`, numerically stable for small `x`).
+///
+/// Returns `Ok(None)` on any incompatibility (non-CUDA, unsupported
+/// dtype, non-contiguous, rank-0) so the caller falls through to
+/// the candle `.log1p()`. NVTX range `kiln/log1p_kt` brackets the
+/// migrated call so nsys traces separate the path from the
+/// baseline composite. Mirrors `try_kt_log`, `try_kt_log2`, and
+/// `try_kt_log10` (above).
+///
+/// IEEE semantics match the candle CPU reference: `log1p(-1) = -inf`,
+/// `log1p(<-1) = NaN`. See `csrc/activation.cu` `KIND_LOG1P` case
+/// (kind 17).
+///
+/// `#[allow(dead_code)]` because there are no production `.log1p()`
+/// call sites in `forward.rs` today; the helper is wired up to
+/// match the established Phase 7 scaffold so future kernel
+/// refactors (smoothed cross-entropy, confidence-calibration math)
+/// with a natural log1p shape can plug in trivially. Mirrors the
+/// dead-code-allowed precedent of `try_kt_tanh` (9839a3a4),
+/// `try_kt_log2` / `try_kt_log10` (above).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn try_kt_log1p(x: &Tensor) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_log1p() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() == 0
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/log1p_kt");
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kind tag 17 = Log1p (matches csrc/activation.cu KIND_LOG1P).
+    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 17) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("try_kt_log1p: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
