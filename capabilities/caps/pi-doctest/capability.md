@@ -1549,3 +1549,40 @@ terse-over-verbose imitation, but this small synthetic style-only workflow
 contrast still does not stabilize hard-tail reliability and it adds latency.
 Future work should pair any style target with real reward variance or explicit
 base-distribution regularization.
+
+### H78: real repair moderate anchor
+
+H78 tested that next idea directly. H77 showed that moderate task-specific
+thinking is safer than terse imitation, but failed confirmation as a small
+synthetic style-only contrast. H78 mixed two real repair-continuation groups
+from H64 with one mild H77 moderate-thinking anchor, making real reward
+variance the main signal while preserving a small amount of successful
+task-specific thinking pressure.
+
+The dataset was
+`/tmp/pi-doctest-h78-real-repair-moderate-anchor/grpo-train.real-repair-plus-moderate-anchor.g3.jsonl`.
+It contained 3 groups and 7 completions: two real repair-continuation groups
+with rewards 1.0 vs 0.75, plus one mild moderate-thinking anchor group with
+rewards 0.94, 0.90, and 0.90. Dry-run passed with 1399 action tokens, 1193 env
+tokens, 2002 context tokens, reward stdev 0.097164, and hash
+`sha256:0793dd228c0e48ccfcb8c507dfc134929c13521a41b78815179fda28a56f9a86`.
+
+Training used `cuda_grpo_ablation --mode phase1`, rank 4 / alpha 4 / lr
+`1e-7`, no ECHO, seed `3141592653`, and
+`KILN_GRAD_CHECKPOINT_SEGMENTS=24`. It completed locally in 1661.690s
+observed, with peak observed VRAM 16,001 MiB. The receipt reported 1657.644s
+wall-clock, 3 groups trained, 7 completions, 1399 action tokens, 1193 env
+tokens, and 2002 context tokens. Adapter verify passed with 400 nonzero
+tensors, 200 LoRA projection pairs, and LoRA update proxy 0.008076.
+
+Blind `LIMIT=4 SEEDS=1` smoke was positive: paired base scored 0.75 with one
+zero rollout and mean wall-clock 20.75s, while H78 scored 0.866667 with no
+zero rollouts and mean wall-clock 44.89s. The `LIMIT=8` confirmation rejected
+it: base scored 0.809375 with one zero and 45.31s mean wall-clock, while H78
+scored 0.726562 with two zeros and 63.30s mean wall-clock.
+
+Lesson: adding a real repair-continuation signal and a mild thinking anchor
+still produced the same false-positive shape as H77: smoke uplift followed by
+confirmed reliability and latency loss. Real reward variance helps early, but
+this narrow repair-continuation representation is too expensive and unstable
+without a stronger base-distribution regularizer or broader success anchor.
