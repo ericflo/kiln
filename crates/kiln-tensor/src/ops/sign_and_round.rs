@@ -3,18 +3,160 @@
 //! Elementwise primitives. All non-differentiable in the
 //! mathematical sense (piecewise constant or sparse-derivative),
 //! so no BackwardOp.
+//!
+//! # CUDA wiring (#1082)
+//!
+//! Routes through the shared `cuda_activation_unary` kernel.
+//! `recip` lands first (kind 22, this commit); the other five
+//! kinds (sign/floor/ceil/round/trunc) follow in subsequent
+//! commits of the #1082 series.
 
 use std::sync::Arc;
 
-use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
+use crate::{
+    bail, dispatch1, BackwardOp, CpuStorage, DType, Determinism, DeviceOp1, Error, Layout, Result,
+    Storage, Tensor, TensorId,
+};
 
-fn apply(f: impl Fn(f32) -> f32, x: &Tensor, name: &str) -> Result<Tensor> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignRoundKind {
+    Sign,
+    Floor,
+    Ceil,
+    Round,
+    Trunc,
+    Reciprocal,
+}
+
+impl SignRoundKind {
+    const fn name(self) -> &'static str {
+        match self {
+            SignRoundKind::Sign => "sign",
+            SignRoundKind::Floor => "floor",
+            SignRoundKind::Ceil => "ceil",
+            SignRoundKind::Round => "round",
+            SignRoundKind::Trunc => "trunc",
+            SignRoundKind::Reciprocal => "reciprocal",
+        }
+    }
+
+    fn apply_f32(self, v: f32) -> f32 {
+        match self {
+            SignRoundKind::Sign => {
+                if v > 0.0 {
+                    1.0
+                } else if v < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                }
+            }
+            SignRoundKind::Floor => v.floor(),
+            SignRoundKind::Ceil => v.ceil(),
+            SignRoundKind::Round => v.round(),
+            SignRoundKind::Trunc => v.trunc(),
+            SignRoundKind::Reciprocal => 1.0 / v,
+        }
+    }
+
+    /// CUDA kernel kind tag matching the `KIND_*` constants in
+    /// `csrc/activation.cu`. `None` means the CUDA path is not yet
+    /// wired for this op (falls back to CPU). `recip` is the first
+    /// of this family to land (kind 22, #1082).
+    #[cfg(feature = "cuda")]
+    const fn cuda_kind_tag(self) -> Option<i32> {
+        match self {
+            SignRoundKind::Reciprocal => Some(22),
+            // sign/floor/ceil/round/trunc CUDA wiring lands in
+            // follow-up commits of the #1082 series.
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SignRoundOp {
+    kind: SignRoundKind,
+}
+
+impl DeviceOp1 for SignRoundOp {
+    fn name(&self) -> &'static str {
+        self.kind.name()
+    }
+
+    fn determinism(&self) -> Determinism {
+        Determinism::Constructive
+    }
+
+    fn cpu_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, self.kind.name())?;
+        let t = cpu_apply(self.kind, x)?;
+        Ok(Some(t))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        match self.kind.cuda_kind_tag() {
+            Some(tag) => Ok(Some(crate::cuda_activation_unary(x, tag)?)),
+            None => Ok(None),
+        }
+    }
+
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Metal): once a Metal sign/round kernel
+        // ships, dispatch via the kind tag and route through
+        // `crate::metal_activation_unary`. Until then, fall through
+        // to CPU.
+        Ok(None)
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        // TODO(#1082, phase 4 Vulkan): once a Vulkan sign/round
+        // kernel ships, dispatch via the kind tag and route through
+        // `crate::vulkan_activation_unary`. Until then, fall
+        // through to CPU.
+        Ok(None)
+    }
+
+    fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
+        None
+    }
+}
+
+fn validate(x: &Tensor, name: &str) -> Result<()> {
     if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
         bail!("{name}: dtype must be F32/BF16/F16, got {}", x.dtype());
     }
     if !x.is_contiguous() {
         bail!("{name}: input must be contiguous");
     }
+    Ok(())
+}
+
+fn cpu_apply(kind: SignRoundKind, x: &Tensor) -> Result<Tensor> {
     let dtype = x.dtype();
     let cpu = x
         .storage()
@@ -34,7 +176,7 @@ fn apply(f: impl Fn(f32) -> f32, x: &Tensor, name: &str) -> Result<Tensor> {
                 .to_f32(),
             _ => unreachable!(),
         };
-        let y = f(v);
+        let y = kind.apply_f32(v);
         match dtype {
             DType::F32 => out[i * 4..i * 4 + 4].copy_from_slice(&y.to_le_bytes()),
             DType::BF16 => out[i * 2..i * 2 + 2]
@@ -50,39 +192,27 @@ fn apply(f: impl Fn(f32) -> f32, x: &Tensor, name: &str) -> Result<Tensor> {
 }
 
 pub fn sign(x: &Tensor) -> Result<Tensor> {
-    apply(
-        |v| {
-            if v > 0.0 {
-                1.0
-            } else if v < 0.0 {
-                -1.0
-            } else {
-                0.0
-            }
-        },
-        x,
-        "sign",
-    )
+    dispatch1(&SignRoundOp { kind: SignRoundKind::Sign }, x)
 }
 
 pub fn floor(x: &Tensor) -> Result<Tensor> {
-    apply(|v| v.floor(), x, "floor")
+    dispatch1(&SignRoundOp { kind: SignRoundKind::Floor }, x)
 }
 
 pub fn ceil(x: &Tensor) -> Result<Tensor> {
-    apply(|v| v.ceil(), x, "ceil")
+    dispatch1(&SignRoundOp { kind: SignRoundKind::Ceil }, x)
 }
 
 pub fn round(x: &Tensor) -> Result<Tensor> {
-    apply(|v| v.round(), x, "round")
+    dispatch1(&SignRoundOp { kind: SignRoundKind::Round }, x)
 }
 
 pub fn trunc(x: &Tensor) -> Result<Tensor> {
-    apply(|v| v.trunc(), x, "trunc")
+    dispatch1(&SignRoundOp { kind: SignRoundKind::Trunc }, x)
 }
 
 pub fn reciprocal(x: &Tensor) -> Result<Tensor> {
-    apply(|v| 1.0 / v, x, "reciprocal")
+    dispatch1(&SignRoundOp { kind: SignRoundKind::Reciprocal }, x)
 }
 
 #[cfg(test)]

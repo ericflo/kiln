@@ -5,7 +5,7 @@
 // /neg/abs/sqrt) added in #1082 — same kind-tagged dispatch, same
 // dtype handling, same launch shape. Extended further in the same
 // PR series with log2/log10/log1p (kinds 15..=17), inverse trig
-// (asin/acos/atan, 18..=20), and atanh (21).
+// (asin/acos/atan, 18..=20), atanh (21), and reciprocal (22).
 //
 // In-place math in F32 (kiln's numerical-reference convention),
 // narrowed back to the storage dtype on store.
@@ -61,8 +61,11 @@
 #define KIND_ATAN   20
 // Inverse hyperbolic (#1082):
 #define KIND_ATANH  21
+// Reciprocal — unblocks RMSNorm-style migrations like
+// `(variance + eps).sqrt().recip()` (#1082):
+#define KIND_RECIP  22
 
-#define KIND_MAX    21
+#define KIND_MAX    22
 
 // Dtype tags
 #define DTYPE_F32  0
@@ -143,6 +146,11 @@ __device__ __forceinline__ float apply_unary(int kind, float x) {
         }
         case KIND_ATANH: {
             return atanhf(x);
+        }
+        case KIND_RECIP: {
+            // 1.0 / x — IEEE NaN/inf semantics match the CPU
+            // reference (div-by-zero yields ±inf, 0/0 yields NaN).
+            return 1.0f / x;
         }
         default:
             return 0.0f;
