@@ -2246,10 +2246,16 @@ pub fn cuda_exp(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
         "cuda_exp: expected F32 input, got {:?}",
         input.dtype()
     );
-    let out = input
-        .as_tensor()
-        .exp()
-        .context("cuda_exp: candle CUDA exp")?;
+    // Phase 7 (#1082): route through `try_kt_exp` (single-kernel
+    // `cuda_activation_unary` with kind tag 5) when the kt-API gate
+    // is on AND the tensor is contiguous CUDA F32. Falls through to
+    // the candle composite when any precondition fails so behavior
+    // is identical with the gate off.
+    let x = input.as_tensor();
+    let out = match crate::forward::try_kt_exp(x).context("cuda_exp: try_kt_exp")? {
+        Some(out) => out,
+        None => x.exp().context("cuda_exp: candle CUDA exp")?,
+    };
     let needs_grad =
         input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
     let grad_fn = needs_grad.then(|| {
