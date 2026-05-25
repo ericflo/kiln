@@ -587,6 +587,41 @@ impl BackendRuntime for CudaBackend {
         if !kiln_gdn_kernel::gdn_chunk_prep_supports(g, v, kkt, qkt, ks_entry, q_s) {
             return Ok(None);
         }
+        // Phase 7 opt-in (#1082): route through the kt-typed surface.
+        // gdn_chunk_prep_kt returns a 6-tuple; each kt tensor is copied
+        // back to candle via the bridge. Mirrors gdn_forward_substitution
+        // pattern (14c17570).
+        if self.cuda_use_kt_api_gdn {
+            kiln_nvtx::range!(c"kiln/gdn_chunk_prep_kt");
+            let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
+                .with_context(|| "kt-adapter: gdn_chunk_prep g → kt failed")?;
+            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+                .with_context(|| "kt-adapter: gdn_chunk_prep v → kt failed")?;
+            let kkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(kkt)
+                .with_context(|| "kt-adapter: gdn_chunk_prep kkt → kt failed")?;
+            let qkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(qkt)
+                .with_context(|| "kt-adapter: gdn_chunk_prep qkt → kt failed")?;
+            let ks_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(ks_entry)
+                .with_context(|| "kt-adapter: gdn_chunk_prep ks_entry → kt failed")?;
+            let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s)
+                .with_context(|| "kt-adapter: gdn_chunk_prep q_s → kt failed")?;
+            let (o0, o1, o2, o3, o4, o5) =
+                kiln_gdn_kernel::gdn_chunk_prep_kt(&g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt)
+                    .map_err(|e| anyhow::anyhow!("kt gdn_chunk_prep: {e}"))?;
+            let c0 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o0)
+                .with_context(|| "kt-adapter: gdn_chunk_prep o0 → candle failed")?;
+            let c1 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o1)
+                .with_context(|| "kt-adapter: gdn_chunk_prep o1 → candle failed")?;
+            let c2 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o2)
+                .with_context(|| "kt-adapter: gdn_chunk_prep o2 → candle failed")?;
+            let c3 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o3)
+                .with_context(|| "kt-adapter: gdn_chunk_prep o3 → candle failed")?;
+            let c4 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o4)
+                .with_context(|| "kt-adapter: gdn_chunk_prep o4 → candle failed")?;
+            let c5 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o5)
+                .with_context(|| "kt-adapter: gdn_chunk_prep o5 → candle failed")?;
+            return Ok(Some((c0, c1, c2, c3, c4, c5)));
+        }
         let out = kiln_gdn_kernel::gdn_chunk_prep(g, v, kkt, qkt, ks_entry, q_s)
             .context("gdn_chunk_prep kernel failed")?;
         Ok(Some(out))
