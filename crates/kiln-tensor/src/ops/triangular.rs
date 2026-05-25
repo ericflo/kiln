@@ -65,6 +65,40 @@ fn apply_triangle(t: &Tensor, keep_upper: bool, name: &str) -> Result<Tensor> {
     if !t.is_contiguous() {
         bail!("{name}: input must be contiguous");
     }
+
+    // CUDA D2H fast path (#1082): triu/tril is a structured masking
+    // pattern over a square matrix. The work is dominated by the
+    // host-side byte copy of the kept entries, which is straightforward
+    // to express with a CPU loop. Round-trip via `cuda_to_host_copy`
+    // -> CPU loop -> `host_to_cuda_copy` so the public API accepts
+    // CUDA-resident inputs transparently and returns a tensor on the
+    // same CUDA device for downstream consumers. A native CUDA kernel
+    // is feasible (one block per row, simple branch on `j vs i`) but
+    // out of scope for the current substrate sweep — D2H is the
+    // unblock for callers that currently hit "storage must be
+    // CpuStorage" on CUDA-resident inputs.
+    #[cfg(feature = "cuda")]
+    if let crate::Device::Cuda(device_index) = t.device() {
+        let host = crate::cuda_to_host_copy(t)?;
+        let cpu_out = apply_triangle_cpu(&host, keep_upper, name)?;
+        let cuda_storage = t
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::CudaStorage>()
+            .ok_or_else(|| {
+                Error::from_str(
+                    "triangular: input claims CUDA device but storage is not CudaStorage",
+                )
+            })?;
+        let candle_device = cuda_storage.candle_device().clone();
+        return crate::host_to_cuda_copy(&cpu_out, candle_device, device_index);
+    }
+
+    apply_triangle_cpu(t, keep_upper, name)
+}
+
+fn apply_triangle_cpu(t: &Tensor, keep_upper: bool, name: &str) -> Result<Tensor> {
+    let n = t.shape()[0];
     let dtype = t.dtype();
     let per = dtype.size_in_bytes();
     let bytes = t
