@@ -19340,6 +19340,10 @@ pub fn model_forward_paged(
         positions_gpu,
         #[cfg(feature = "cuda")]
         None,
+        // Phase 7 #1082: no kt twin from this caller — forward
+        // `None` so the candle writer remains authoritative.
+        #[cfg(feature = "cuda")]
+        None,
         LmHeadMode::Full,
     )?;
     // `LmHeadMode::Full` always returns Some.
@@ -19381,6 +19385,10 @@ pub fn model_forward_paged_normed_hidden(
         lora,
         None,
         None,
+        #[cfg(feature = "cuda")]
+        None,
+        // Phase 7 #1082: no kt twin from this caller — forward
+        // `None` so the candle writer remains authoritative.
         #[cfg(feature = "cuda")]
         None,
         LmHeadMode::HiddenOnly,
@@ -19459,6 +19467,10 @@ pub fn model_forward_paged_last_token(
         lora,
         None,
         positions_gpu,
+        #[cfg(feature = "cuda")]
+        None,
+        // Phase 7 #1082: no kt twin from this caller — forward
+        // `None` so the candle writer remains authoritative.
         #[cfg(feature = "cuda")]
         None,
         LmHeadMode::LastRowOnly,
@@ -20134,6 +20146,10 @@ pub fn model_forward_paged_last_token_greedy(
         positions_gpu,
         #[cfg(feature = "cuda")]
         None,
+        // Phase 7 #1082: no kt twin from this caller — forward
+        // `None` so the candle writer remains authoritative.
+        #[cfg(feature = "cuda")]
+        None,
         LmHeadMode::LastRowArgmaxOnly,
     )?;
     token.context("LmHeadMode::LastRowArgmaxOnly always produces a token")
@@ -20199,6 +20215,10 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
         Some(positions_gpu),
         #[cfg(feature = "cuda")]
         graph_inputs,
+        // Phase 7 #1082: no kt twin from this caller — forward
+        // `None` so the candle writer remains authoritative.
+        #[cfg(feature = "cuda")]
+        None,
         LmHeadMode::Full,
     )?;
     Ok(logits.expect("LmHeadMode::Full always produces logits"))
@@ -20387,6 +20407,10 @@ pub fn model_forward_paged_batched_decode_hidden(
             lora,
             None,
             None,
+            #[cfg(feature = "cuda")]
+            None,
+            // Phase 7 #1082: no kt twin from this caller — forward
+            // `None` so the candle writer remains authoritative.
             #[cfg(feature = "cuda")]
             None,
             LmHeadMode::HiddenOnly,
@@ -20679,6 +20703,10 @@ pub fn model_forward_paged_with_last_hidden(
         positions_gpu,
         #[cfg(feature = "cuda")]
         None,
+        // Phase 7 #1082: no kt twin from this caller — forward
+        // `None` so the candle writer remains authoritative.
+        #[cfg(feature = "cuda")]
+        None,
         LmHeadMode::FullWithLastHidden,
     )?;
     Ok((
@@ -20725,6 +20753,10 @@ pub fn model_forward_paged_last_token_with_last_hidden(
         lora,
         None,
         positions_gpu,
+        #[cfg(feature = "cuda")]
+        None,
+        // Phase 7 #1082: no kt twin from this caller — forward
+        // `None` so the candle writer remains authoritative.
         #[cfg(feature = "cuda")]
         None,
         LmHeadMode::LastRowWithLastHidden,
@@ -21318,6 +21350,15 @@ fn model_forward_paged_inner(
     token_ids_gpu: Option<&Tensor>,
     positions_gpu: Option<&Tensor>,
     #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    // Phase 7 #1082: kt twin of `paged_cache` plumbed through to the
+    // per-layer `transformer_block_paged_with_rope_tables` so the kt
+    // cache can mirror the CUDA-graph paged-KV write performed inside
+    // `gqa_attention_paged_with_rope_tables`. `None` keeps the candle
+    // writer authoritative — same gating playbook as `graph_inputs`.
+    // CUDA-gated since `PagedKvCacheKt` itself is CUDA-only.
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<
+        &crate::paged_kv_cache_kt::PagedKvCacheKt,
+    >,
     lm_head_mode: LmHeadMode,
 ) -> Result<(Option<Tensor>, Option<Tensor>, Option<u32>)> {
     let seq_len = token_ids.len();
@@ -21439,13 +21480,14 @@ fn model_forward_paged_inner(
                     #[cfg(feature = "cuda")]
                     graph_inputs,
                     profile_mlp_stages.then_some((i, start_pos)),
-                    // Phase 7 #1082: no kt twin plumbed through this
-                    // top-level paged decode caller yet — the
-                    // cache-owning model struct migration is a follow-up
-                    // commit. Default `None` keeps this on the candle
-                    // writer only.
+                    // Phase 7 #1082: forward the inner-fn kt twin
+                    // parameter down to the per-layer block call so the
+                    // kt cache mirrors the candle CUDA-graph paged-KV
+                    // write. `None` when the gate is off or the caller
+                    // hasn't migrated; the candle writer is still
+                    // authoritative either way.
                     #[cfg(feature = "cuda")]
-                    None,
+                    kt_paged_cache,
                 );
                 crate::mtp_debug::exit_b12_layer_scope();
                 hidden = block_result
@@ -21933,6 +21975,10 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
             None,
             #[cfg(feature = "cuda")]
             None,
+            // Phase 7 #1082: no kt twin from this caller — forward
+            // `None` so the candle writer remains authoritative.
+            #[cfg(feature = "cuda")]
+            None,
             mode,
         )
         .with_context(|| {
@@ -22017,6 +22063,10 @@ pub fn model_forward_paged_streaming_with(
             lora,
             None,
             None,
+            #[cfg(feature = "cuda")]
+            None,
+            // Phase 7 #1082: no kt twin from this caller — forward
+            // `None` so the candle writer remains authoritative.
             #[cfg(feature = "cuda")]
             None,
             mode,
