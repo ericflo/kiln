@@ -49,6 +49,17 @@ impl GluKind {
     }
 }
 
+/// CUDA activation kind tag matching `csrc/activation.cu`.
+#[cfg(feature = "cuda")]
+fn cuda_activation_kind(kind: GluKind) -> i32 {
+    match kind {
+        GluKind::Glu => 1,    // KIND_SIGMOID
+        GluKind::SwiGLU => 0, // KIND_SILU
+        GluKind::GeGLU => 2,  // KIND_GELU
+        GluKind::ReGLU => 4,  // KIND_RELU
+    }
+}
+
 fn apply(kind: GluKind, x: &Tensor) -> Result<Tensor> {
     if x.rank() == 0 {
         bail!("{}: input must have rank ≥ 1", kind.name());
@@ -71,6 +82,38 @@ fn apply(kind: GluKind, x: &Tensor) -> Result<Tensor> {
             kind.name()
         );
     }
+
+    // CUDA fast path (#1082): split the trailing axis in half, then
+    // compose `cuda_contiguous` + `cuda_activation_unary` (per-kind
+    // tag) + `cuda_elementwise_binary` (KIND_MUL=2). Each piece is
+    // already a tuned kernel; the composition skips the host
+    // download + byte-wise per-element loop in the CPU branch.
+    //
+    // KIND_GLU=1 (sigmoid), KIND_SWIGLU=0 (silu), KIND_GEGLU=2
+    // (gelu), KIND_REGLU=4 (relu) — see `csrc/activation.cu`.
+    #[cfg(feature = "cuda")]
+    if matches!(x.device(), crate::Device::Cuda(_)) {
+        let axis = x.rank() - 1;
+        let parts = crate::ops::chunk(x, 2, axis)?;
+        if parts.len() != 2 {
+            bail!(
+                "{}: chunk produced {} parts (expected 2)",
+                kind.name(),
+                parts.len()
+            );
+        }
+        // `chunk` returns narrow views (non-contiguous along the
+        // split axis when axis is innermost). The elementwise +
+        // activation helpers require contiguous storage.
+        let a = crate::cuda_contiguous(&parts[0])?;
+        let b = crate::cuda_contiguous(&parts[1])?;
+        let act_kind = cuda_activation_kind(kind);
+        let activated = crate::cuda_activation_unary(&b, act_kind)?;
+        // KIND_MUL = 2 per csrc/elementwise.cu.
+        let out = crate::cuda_elementwise_binary(&a, &activated, 2)?;
+        return Ok(out);
+    }
+
     let half = last / 2;
     let outer: usize = shape[..shape.len() - 1].iter().product::<usize>().max(1);
     let dtype = x.dtype();
