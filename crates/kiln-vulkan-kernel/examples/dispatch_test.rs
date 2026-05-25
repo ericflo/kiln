@@ -1,7 +1,9 @@
 //! Dispatch test: compile a shader, upload data, dispatch, read back.
+//!
+//! Candle-free via the bytes-based [`kiln_vulkan_kernel::kernels::dispatch_kernel_bytes`]
+//! entry point. (#1082)
 
 use anyhow::Result;
-use candle_core::{DType, Tensor};
 
 fn main() -> Result<()> {
     // 1. Create Vulkan device
@@ -18,13 +20,12 @@ fn main() -> Result<()> {
     let spirv = kiln_vulkan_kernel::pipeline::ShaderPipeline::compile_shader(shader_path)?;
     println!("Compiled SPIR-V: {} bytes", spirv.len());
 
-    // 3. Create test tensors
-    let device = candle_core::Device::Cpu;
-    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], 4, &device)?;
-    let b = Tensor::from_vec(vec![10.0f32, 20.0, 30.0, 40.0], 4, &device)?;
+    // 3. Create test inputs (f32 host buffers, no candle).
+    let a: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+    let b: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0];
 
-    println!("a = {:?}", a.to_vec1::<f32>()?);
-    println!("b = {:?}", b.to_vec1::<f32>()?);
+    println!("a = {:?}", a);
+    println!("b = {:?}", b);
 
     // 4. Dispatch add kernel
     // add.comp push constants: total_elements (u32)
@@ -32,22 +33,25 @@ fn main() -> Result<()> {
     let workgroup_count = (1u32, 1u32, 1u32);
     let output_shape = vec![4usize];
 
+    let a_bytes: &[u8] = bytemuck::cast_slice(&a);
+    let b_bytes: &[u8] = bytemuck::cast_slice(&b);
+
     println!("Dispatching add kernel...");
-    let out = kiln_vulkan_kernel::kernels::dispatch_kernel(
+    let out_bytes = kiln_vulkan_kernel::kernels::dispatch_kernel_bytes(
         &vk_device,
         &spirv,
         &push_constants,
         workgroup_count,
-        &[&a, &b],
+        &[a_bytes, b_bytes],
         &output_shape,
-        DType::F32,
+        std::mem::size_of::<f32>(),
     )?;
 
-    let result: Vec<f32> = out.to_vec1()?;
+    let result: &[f32] = bytemuck::cast_slice(&out_bytes);
     println!("result = {:?}", result);
 
     // Verify: [11.0, 22.0, 33.0, 44.0]
-    let expected = vec![11.0f32, 22.0, 33.0, 44.0];
+    let expected = [11.0f32, 22.0, 33.0, 44.0];
     for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
         if (got - exp).abs() < 1e-4 {
             println!("  element {}: {} == {} OK", i, got, exp);

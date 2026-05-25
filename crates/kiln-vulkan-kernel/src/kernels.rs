@@ -381,6 +381,12 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
 /// Dispatch a Vulkan compute kernel.
 ///
 /// Manages the full lifecycle: create buffers, upload inputs, dispatch, read back output.
+///
+/// Candle-shim convenience wrapper around [`dispatch_kernel_bytes`]. The
+/// bytes-based core is the canonical entry point for #1082 callers that
+/// want to dispatch a SPIR-V kernel without dragging candle into scope;
+/// this wrapper keeps the historical `&[&Tensor]` signature alive for
+/// kernels.rs's internal candle-bridge code paths. (#1082)
 pub fn dispatch_kernel(
     vk_device: &VulkanDevice,
     spirv: &[u8],
@@ -390,6 +396,52 @@ pub fn dispatch_kernel(
     output_shape: &[usize],
     output_dtype: DType,
 ) -> Result<Tensor> {
+    // --- Extract input data (flatten to f32) ---
+    let mut input_data: Vec<Vec<u8>> = Vec::with_capacity(input_tensors.len());
+    for tensor in input_tensors {
+        let (data, _) = extract_tensor_bytes(tensor)?;
+        input_data.push(data);
+    }
+    let input_refs: Vec<&[u8]> = input_data.iter().map(|v| v.as_slice()).collect();
+
+    let elem_size = match output_dtype {
+        DType::F32 => 4usize,
+        DType::BF16 | DType::F16 => 2,
+        DType::F64 => 8,
+        _ => 4,
+    };
+    let output_data = dispatch_kernel_bytes(
+        vk_device,
+        spirv,
+        push_constants,
+        workgroup_count,
+        &input_refs,
+        output_shape,
+        elem_size,
+    )?;
+
+    // --- Create output tensor ---
+    create_tensor_from_data(&output_data, output_shape, output_dtype)
+        .context("failed to create output tensor")
+}
+
+/// Candle-free Vulkan compute dispatch — takes raw input byte slices and
+/// returns the output buffer as raw bytes. Same lifecycle (create
+/// buffers, upload, dispatch, read back) as [`dispatch_kernel`] but no
+/// candle types in the signature, so examples and downstream crates can
+/// dispatch a kernel without a candle dependency. (#1082)
+///
+/// `output_elem_size` is the per-element byte size of the output buffer
+/// (4 for f32, 2 for bf16/f16, 8 for f64).
+pub fn dispatch_kernel_bytes(
+    vk_device: &VulkanDevice,
+    spirv: &[u8],
+    push_constants: &[u32],
+    workgroup_count: (u32, u32, u32),
+    inputs: &[&[u8]],
+    output_shape: &[usize],
+    output_elem_size: usize,
+) -> Result<Vec<u8>> {
     // Per-axis dispatch grid limit. Use the actual device limit
     // (typically ≈ 2^31 - 1 on AMD/Strix Halo) rather than the
     // Vulkan spec minimum (65535), so we don't bail on legitimate
@@ -401,7 +453,7 @@ pub fn dispatch_kernel(
         workgroup_count.0 <= limit_x
             && workgroup_count.1 <= limit_y
             && workgroup_count.2 <= limit_z,
-        "dispatch_kernel: workgroup_count {:?} exceeds device per-axis \
+        "dispatch_kernel_bytes: workgroup_count {:?} exceeds device per-axis \
          limits ({}, {}, {})",
         workgroup_count,
         limit_x,
@@ -413,28 +465,16 @@ pub fn dispatch_kernel(
     let queue_family_index = vk_device.queue_family_index();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
-    // --- Extract input data (flatten to f32) ---
-    let mut input_data: Vec<Vec<u8>> = Vec::with_capacity(input_tensors.len());
-    for tensor in input_tensors {
-        let (data, _) = extract_tensor_bytes(tensor)?;
-        input_data.push(data);
-    }
 
     // --- Create output buffer ---
     let elem_count: usize = output_shape.iter().product();
-    let elem_size = match output_dtype {
-        DType::F32 => 4,
-        DType::BF16 | DType::F16 => 2,
-        DType::F64 => 8,
-        _ => 4,
-    };
-    let output_size = (elem_count * elem_size) as u64;
+    let output_size = (elem_count * output_elem_size) as u64;
     let output_buffer = VulkanBuffer::create_device_local(device, device_local_mt, output_size)
         .context("failed to create output buffer")?;
 
     // --- Create input buffers + upload ---
-    let mut input_buffers: Vec<VulkanBuffer> = Vec::with_capacity(input_data.len());
-    for data in &input_data {
+    let mut input_buffers: Vec<VulkanBuffer> = Vec::with_capacity(inputs.len());
+    for data in inputs {
         let buf = VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64)
             .context("failed to create input buffer")?;
         VulkanBuffer::upload_data(
@@ -453,7 +493,7 @@ pub fn dispatch_kernel(
     let total_bindings = input_buffers.len() + 1;
     tracing::trace!(
         total_bindings,
-        inputs = input_tensors.len(),
+        inputs = inputs.len(),
         "Vulkan dispatch start"
     );
     let mut all_handles: Vec<vk::Buffer> = Vec::with_capacity(total_bindings);
@@ -694,9 +734,7 @@ pub fn dispatch_kernel(
     }
     tracing::trace!("Vulkan dispatch complete");
 
-    // --- Create output tensor ---
-    create_tensor_from_data(&output_data, output_shape, output_dtype)
-        .context("failed to create output tensor")
+    Ok(output_data)
 }
 
 /// CommandPoolCreateInfo via ash 0.38 default+chained builder.
