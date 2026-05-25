@@ -1442,8 +1442,7 @@ pub(crate) fn cuda_use_kt_api_sampling_all() -> bool {
 /// other Phase 7 gates so the cost is one atomic read per call
 /// (negligible vs. the cache allocation it gates).
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
-pub(crate) fn cuda_use_kt_paged_kv_cache() -> bool {
+pub fn cuda_use_kt_paged_kv_cache() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok());
@@ -1506,8 +1505,7 @@ pub(crate) fn cuda_use_kt_paged_kv_cache() -> bool {
 /// smaller diff — it only has to touch the writer/reader story, not
 /// re-derive the device-arc / dtype plumbing per call site.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
-pub(crate) fn try_kt_paged_kv_cache_new(
+pub fn try_kt_paged_kv_cache_new(
     num_full_attn_layers: usize,
     num_blocks: usize,
     block_size: usize,
@@ -19347,6 +19345,76 @@ pub fn model_forward_paged(
         LmHeadMode::Full,
     )?;
     // `LmHeadMode::Full` always returns Some.
+    Ok(logits.expect("LmHeadMode::Full always produces logits"))
+}
+
+/// Paged-KV forward pass with an optional [`PagedKvCacheKt`] twin threaded
+/// through to the per-layer GQA-attention writer.
+///
+/// Same contract as [`model_forward_paged`] but lets the caller pass a kt
+/// cache that will be written-mirrored alongside the candle [`PagedKvCache`].
+/// When `kt_paged_cache` is `None` (or built features are non-CUDA), behavior
+/// is bit-identical to [`model_forward_paged`] — the candle writer is the only
+/// thing that runs. When `Some(&kt)` is passed AND
+/// `KILN_USE_KT_PAGED_KV_CACHE` is on, every paged-KV write inside
+/// [`gqa_attention_paged_with_rope_tables`] mirrors into the kt cache via
+/// `try_kt_paged_kv_write_token_major_native_graph_slot`.
+///
+/// # Why this exists
+///
+/// Phase 7 #1082 staging step: the writer plumbing (commits `7dd0009c`,
+/// `d67b6096`) and the inner-fn parameter (the commit before this one) are
+/// landed, but no caller passes `Some(&kt)`. This sibling function is the
+/// first public entry point that does — bench/latency code (`kiln-server`)
+/// can opt into the mirrored write path by allocating a kt twin alongside
+/// its `PagedKvCache` and routing through this fn instead of
+/// [`model_forward_paged`]. Every other production caller keeps using
+/// [`model_forward_paged`] unchanged, so the kt path stays opt-in.
+///
+/// # Vulkan fast-path skipped
+///
+/// Unlike [`model_forward_paged`], this fn does *not* dispatch to the
+/// Vulkan native single-submit resident-decode path: the kt twin is
+/// CUDA-only (see `PagedKvCacheKt`), so passing it on a Vulkan device is
+/// already meaningless. Callers that want the Vulkan fast path should
+/// keep using [`model_forward_paged`].
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_with_kt(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    positions_gpu: Option<&Tensor>,
+    // Phase 7 #1082: kt twin of `paged_cache`. `None` => behavior matches
+    // `model_forward_paged` exactly; `Some(&kt)` => every paged-KV write
+    // inside the full-attention layers mirrors into the kt cache.
+    #[cfg(feature = "cuda")] kt_paged_cache: Option<
+        &crate::paged_kv_cache_kt::PagedKvCacheKt,
+    >,
+) -> Result<Tensor> {
+    let (logits, _hidden, _token) = model_forward_paged_inner(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        None,
+        positions_gpu,
+        #[cfg(feature = "cuda")]
+        None,
+        #[cfg(feature = "cuda")]
+        kt_paged_cache,
+        LmHeadMode::Full,
+    )?;
     Ok(logits.expect("LmHeadMode::Full always produces logits"))
 }
 

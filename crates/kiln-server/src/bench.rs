@@ -23,10 +23,14 @@ use kiln_core::vram::{detect_used_vram_bytes, detect_vram};
 use kiln_model::ModelRunner;
 use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
-    GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
+    GpuWeights, LinearAttentionState, model_forward,
     model_forward_paged_last_token, model_forward_paged_last_token_greedy,
     model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
     model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
+    // Phase 7 #1082: kt twin entry point + allocator stub for the first
+    // end-to-end PagedKvCacheKt production wiring (latency bench decode
+    // loop). Both are CUDA-only and only kick in when the env gate
+    // `KILN_USE_KT_PAGED_KV_CACHE` is on; behavior is identical otherwise.
     streaming_prefill_enabled_for,
 };
 use kiln_model::kv_cache::KvCache;
@@ -878,6 +882,42 @@ fn bench_latency_paged(
         dtype,
         device,
     )?;
+
+    // Phase 7 #1082: first end-to-end PagedKvCacheKt production wiring.
+    // When `KILN_USE_KT_PAGED_KV_CACHE` (or `KILN_USE_KT_API_ALL`) is on
+    // AND we're on a CUDA device, allocate a kt twin alongside the
+    // candle `paged_cache` and pass it to `model_forward_paged_with_kt`
+    // below so every paged-KV write inside the GQA attention writer
+    // mirrors into the kt cache. When the gate is off (the default) or
+    // the device isn't CUDA, `try_kt_paged_kv_cache_new` returns `Ok(None)`
+    // and the decode loop is bit-identical to the previous behavior.
+    //
+    // The candle `paged_cache` remains authoritative for reads; the kt
+    // mirror only exercises the writer surface — that's enough to
+    // validate constructor + writer end-to-end on a real production
+    // workload (the latency bench).
+    #[cfg(feature = "cuda")]
+    let paged_cache_kt = kiln_model::forward::try_kt_paged_kv_cache_new(
+        config.num_full_attention_layers,
+        num_blocks,
+        PAGED_BLOCK_SIZE,
+        config.num_kv_heads,
+        config.head_dim,
+        dtype,
+        device,
+    )?;
+    #[cfg(feature = "cuda")]
+    if let Some(ref kt) = paged_cache_kt {
+        eprintln!(
+            "  Phase 7 #1082: PagedKvCacheKt twin allocated (layers={}, blocks={}, \
+             block_size={}, fp8={}); decode loop will mirror writes",
+            kt.num_layers(),
+            kt.num_blocks(),
+            kt.block_size(),
+            kt.is_fp8(),
+        );
+    }
+
     let backend = runtime_backend_for_bench(device, weights)?;
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
         config,
@@ -994,19 +1034,46 @@ fn bench_latency_paged(
             )
             .context("paged greedy decode forward pass failed")?
         } else {
-            let logits = model_forward_paged(
-                &*backend,
-                &[next_token],
-                weights,
-                config,
-                &paged_cache,
-                &block_table,
-                current_pos,
-                Some(&mut linear_state),
-                None,
-                None,
-            )
-            .context("paged decode forward pass failed")?;
+            // Phase 7 #1082: route through the kt-aware entry point.
+            // `paged_cache_kt.as_ref()` is `None` when the env gate is
+            // off, making this a no-op vs. `model_forward_paged`. When
+            // the gate is on, every paged-KV write inside this fn
+            // mirrors into the kt cache.
+            let logits = {
+                #[cfg(feature = "cuda")]
+                {
+                    kiln_model::forward::model_forward_paged_with_kt(
+                        &*backend,
+                        &[next_token],
+                        weights,
+                        config,
+                        &paged_cache,
+                        &block_table,
+                        current_pos,
+                        Some(&mut linear_state),
+                        None,
+                        None,
+                        paged_cache_kt.as_ref(),
+                    )
+                    .context("paged decode forward pass failed")?
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    kiln_model::forward::model_forward_paged(
+                        &*backend,
+                        &[next_token],
+                        weights,
+                        config,
+                        &paged_cache,
+                        &block_table,
+                        current_pos,
+                        Some(&mut linear_state),
+                        None,
+                        None,
+                    )
+                    .context("paged decode forward pass failed")?
+                }
+            };
             greedy_sample(&logits)?
         };
         current_pos += 1;
