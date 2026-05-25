@@ -62,6 +62,7 @@ fn main() {
     build.file(csrc_dir.join("cast.cu"));
     build.file(csrc_dir.join("softmax.cu"));
     build.file(csrc_dir.join("reduce_last_axis.cu"));
+    build.file(csrc_dir.join("reduce_arbitrary_axis.cu"));
     build.file(csrc_dir.join("argmax_last_axis.cu"));
     build.file(csrc_dir.join("masked_fill.cu"));
     build.file(csrc_dir.join("scatter_add.cu"));

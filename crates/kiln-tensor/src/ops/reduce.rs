@@ -144,20 +144,23 @@ impl DeviceOp1 for ReduceOp {
         if rank == 0 {
             return Ok(None);
         }
-        // Only Axis(rank-1) is supported on CUDA. All / non-last-axis
-        // fall back to CPU.
-        let last = rank - 1;
-        match self.scope {
-            ReductionScope::Axis(axis) if axis == last => {}
-            _ => return Ok(None),
+        // CUDA backend supports sum/mean over any single axis
+        // (issue #1082 extended this from last-axis-only). `All`
+        // still falls through to CPU.
+        let axis = match self.scope {
+            ReductionScope::Axis(a) => a,
+            ReductionScope::All => return Ok(None),
+        };
+        if axis >= rank {
+            return Ok(None);
         }
-        let n_cols = x.shape()[last];
-        if n_cols == 0 {
+        let axis_dim = x.shape()[axis];
+        if axis_dim == 0 {
             return Ok(None);
         }
         let out = match self.kind {
-            ReductionKind::Sum => crate::cuda_sum_last_axis(x)?,
-            ReductionKind::Mean => crate::cuda_mean_last_axis(x)?,
+            ReductionKind::Sum => crate::cuda_sum_axis(x, axis)?,
+            ReductionKind::Mean => crate::cuda_mean_axis(x, axis)?,
         };
         Ok(Some(out))
     }
