@@ -195,6 +195,7 @@ def _run_pi_one(
     pi_bin = cfg.get("pi_bin", "/usr/bin/pi")
     pi_model_id = cfg.get("pi_model_id", "Qwen3.5-4B")
     append_system_prompt = cfg.get("pi_append_system_prompt")
+    config_dir = Path(cfg.get("_config_dir", "."))
     rollout_cfg = cfg.get("rollout", {})
     max_wall = int(rollout_cfg.get("max_wall_clock_s", 120))
 
@@ -212,6 +213,11 @@ def _run_pi_one(
     ]
     if append_system_prompt:
         cmd.extend(["--append-system-prompt", str(append_system_prompt)])
+    for extension in cfg.get("pi_extensions") or []:
+        ext_path = Path(extension)
+        if not ext_path.is_absolute():
+            ext_path = config_dir / ext_path
+        cmd.extend(["--extension", str(ext_path)])
     t0 = time.time()
     try:
         subprocess.run(
@@ -279,7 +285,9 @@ def main():
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    cfg = json.loads(Path(args.config).read_text())
+    config_path = Path(args.config).resolve()
+    cfg = json.loads(config_path.read_text())
+    cfg["_config_dir"] = str(config_path.parent)
     if args.max_wall_clock_s is not None:
         cfg.setdefault("rollout", {})["max_wall_clock_s"] = args.max_wall_clock_s
     sandbox_root = Path(cfg.get("sandbox_root", f"/tmp/{cfg['slug']}-rollouts"))

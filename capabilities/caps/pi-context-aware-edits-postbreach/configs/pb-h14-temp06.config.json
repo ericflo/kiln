@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "slug": "pi-context-aware-edits-postbreach-pb-h14-temp06",
+  "paradigm": "agentic-grpo",
+  "base_model_path": "/workspace/Qwen3.5-4B",
+  "kiln_url": "http://localhost:8420",
+  "adapter_dir": "/workspace/adapters",
+  "pi_bin": "pi",
+  "pi_model_id": "qwen-3.5-4b-kiln-pi1024",
+  "pi_append_system_prompt": "When the edit is complete, always send a final plain-text response. Keep it to one sentence and name the modified file plus the style convention(s) preserved.",
+  "pi_extensions": [
+    "../extensions/provider-payload-temp06.ts"
+  ],
+  "sandbox_root": "/tmp/pi-context-aware-edits-postbreach-pb-h14-temp06-rollouts",
+  "rollout": {
+    "num_generations_train": 4,
+    "num_generations_eval": 1,
+    "max_wall_clock_s": 120,
+    "max_turns": 8,
+    "max_tokens_per_turn": 1024,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "parallel": 1
+  },
+  "eval": {
+    "seeds": 3,
+    "max_tasks": null,
+    "thinking_mode": "server-default"
+  }
+}

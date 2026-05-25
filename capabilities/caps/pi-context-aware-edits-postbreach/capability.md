@@ -271,6 +271,14 @@ and JavaScript camelCase/CommonJS style when available.
     removed useful signal and confirms that further rank/alpha/filter sweeps
     around the same PB-H7 no-ECHO data are not promising. H10 remains the
     current best caveated adapter.
+- **PB-H14: temperature-0.6 no-ECHO Agentic GRPO.** Generate a fresh train-only
+  rollout pool with the default final-only prompt and 1024 Pi output cap, but
+  force the provider payload to `temperature=0.6` and `top_p=0.95` through a Pi
+  extension before rerunning H10's `rank=4`, `alpha=8`, `lr=5e-6`, no-ECHO
+  recipe. This follows the `pi-faithful-completion` lesson that lower rollout
+  temperature can clean up advantage signal without changing the objective,
+  while avoiding another sweep over the exhausted PB-H7 data.
+  - Result: pending.
 
 ## Standard Workflow
 
