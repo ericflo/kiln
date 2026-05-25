@@ -37,8 +37,8 @@ use candle_core::cuda_backend::CudaDevice;
 
 use kiln_core::block::BlockTable;
 use kiln_tensor::{
-    cuda_zeros, CudaStorage, DType as KtDType, Layout, StorageBackend,
-    Tensor as KtTensor, TensorId,
+    cuda_fp8_dequantize_direct, cuda_fp8_quantize_direct, cuda_zeros, CudaStorage,
+    DType as KtDType, Layout, StorageBackend, Tensor as KtTensor, TensorId,
 };
 
 /// Paged KV cache backed by `kiln_tensor::Tensor`. Twin of
@@ -270,12 +270,6 @@ impl PagedKvCacheKt {
         k: &KtTensor,
         v: &KtTensor,
     ) -> Result<()> {
-        if self.fp8 {
-            anyhow::bail!(
-                "kt PagedKvCacheKt::write_contiguous_slot_run: FP8 cache write \
-                 path not yet wired"
-            );
-        }
         if k.dtype() != KtDType::BF16 || v.dtype() != KtDType::BF16 {
             anyhow::bail!(
                 "kt PagedKvCacheKt::write_contiguous_slot_run requires BF16 inputs"
@@ -306,6 +300,65 @@ impl PagedKvCacheKt {
             k.is_contiguous() && v.is_contiguous(),
             "kt PagedKvCacheKt::write_contiguous_slot_run requires contiguous k/v"
         );
+
+        if self.fp8 {
+            // FP8 path: quantize the BF16 source into a fresh U8
+            // buffer using the kt-API FP8 kernel, then memcpy_dtod
+            // the quantized buffer into the destination slot range.
+            // Scale = 1.0 ("direct" mode) — matches the candle
+            // PagedKvCache FP8 write path; per-slot scaling is not
+            // practical for the KV cache.
+            let k_q = cuda_fp8_quantize_direct(k)
+                .map_err(|e| anyhow::anyhow!("kt pkv fp8: quantize k: {e}"))?;
+            let v_q = cuda_fp8_quantize_direct(v)
+                .map_err(|e| anyhow::anyhow!("kt pkv fp8: quantize v: {e}"))?;
+            // U8 storage: 1 byte per element.
+            let total_bytes = expected_elems;
+            let dst_byte_off = start_slot * row_elems;
+            let k_src_cuda = k_q
+                .storage()
+                .as_any()
+                .downcast_ref::<CudaStorage>()
+                .ok_or_else(|| anyhow::anyhow!("kt PagedKvCacheKt fp8: k_q must be CUDA"))?;
+            let v_src_cuda = v_q
+                .storage()
+                .as_any()
+                .downcast_ref::<CudaStorage>()
+                .ok_or_else(|| anyhow::anyhow!("kt PagedKvCacheKt fp8: v_q must be CUDA"))?;
+            let k_dst_cuda = k_pool
+                .storage()
+                .as_any()
+                .downcast_ref::<CudaStorage>()
+                .ok_or_else(|| anyhow::anyhow!("kt PagedKvCacheKt: k_pool must be CUDA storage"))?;
+            let v_dst_cuda = v_pool
+                .storage()
+                .as_any()
+                .downcast_ref::<CudaStorage>()
+                .ok_or_else(|| anyhow::anyhow!("kt PagedKvCacheKt: v_pool must be CUDA storage"))?;
+            let (k_src_base, _) = k_src_cuda.device_ptr_raw();
+            let (v_src_base, _) = v_src_cuda.device_ptr_raw();
+            let (k_dst_base, _) = k_dst_cuda.device_ptr_raw();
+            let (v_dst_base, _) = v_dst_cuda.device_ptr_raw();
+            let stream = k_dst_cuda.candle_device().cuda_stream();
+            let raw_stream = stream.cu_stream();
+            unsafe {
+                cudarc_result::memcpy_dtod_async(
+                    k_dst_base + dst_byte_off as u64,
+                    k_src_base,
+                    total_bytes,
+                    raw_stream,
+                )
+                .map_err(|e| anyhow::anyhow!("kt pkv fp8: memcpy_dtod k_pool: {e:?}"))?;
+                cudarc_result::memcpy_dtod_async(
+                    v_dst_base + dst_byte_off as u64,
+                    v_src_base,
+                    total_bytes,
+                    raw_stream,
+                )
+                .map_err(|e| anyhow::anyhow!("kt pkv fp8: memcpy_dtod v_pool: {e:?}"))?;
+            }
+            return Ok(());
+        }
 
         let bpe = KtDType::BF16.size_in_bytes();
         let total_bytes = expected_elems * bpe;
@@ -387,12 +440,6 @@ impl PagedKvCacheKt {
         block_table: &BlockTable,
         seq_len: usize,
     ) -> Result<(KtTensor, KtTensor)> {
-        if self.fp8 {
-            anyhow::bail!(
-                "kt PagedKvCacheKt::read: FP8 cache read path not yet wired \
-                 (needs FP8 dequant kt-API)"
-            );
-        }
         let (k_pool, v_pool) = &self.layers[layer_idx];
 
         let (k_slice, v_slice) = if let Some(start_slot) =
@@ -446,6 +493,27 @@ impl PagedKvCacheKt {
             let v = kiln_tensor::cuda_index_select_dim0(v_pool, &kt_indices)
                 .map_err(|e| anyhow::anyhow!("kt pkv read: index_select v_pool: {e}"))?;
             (k, v)
+        };
+
+        // FP8 path: the slice is U8 (E4M3FN bit pattern). Dequantize
+        // back to the compute dtype before downstream attention. Narrow
+        // can produce a view with non-zero start_offset, so we
+        // materialize through `.contiguous()` first; the dequant kernel
+        // is contiguous-only.
+        let (k_slice, v_slice) = if self.fp8 {
+            let k_c = k_slice
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: contiguous k: {e}"))?;
+            let v_c = v_slice
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: contiguous v: {e}"))?;
+            let k_deq = cuda_fp8_dequantize_direct(&k_c, self.compute_dtype)
+                .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: dequantize k: {e}"))?;
+            let v_deq = cuda_fp8_dequantize_direct(&v_c, self.compute_dtype)
+                .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: dequantize v: {e}"))?;
+            (k_deq, v_deq)
+        } else {
+            (k_slice, v_slice)
         };
 
         // [seq_len, num_kv_heads, head_dim] -> [num_kv_heads, seq_len, head_dim]
