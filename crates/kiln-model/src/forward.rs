@@ -13529,7 +13529,26 @@ pub fn gdn_recurrent_backward_no_grad(
             d_w_acc = (&d_w_acc + &tmp_dw.broadcast_mul(&decay_last_col.unsqueeze(3)?)?)?;
             let tmp_dk = w.matmul(&d_s_exit.transpose(2, 3)?.contiguous()?)?;
             dk_state_extra = Some(tmp_dk.broadcast_mul(&decay_last_col.unsqueeze(3)?)?);
-            d_decay_last_col_acc = (&k_c * &tmp_dk)?.sum(candle_core::D::Minus1)?;
+            // Phase 7 (#1082): wire `try_kt_sum_axis` into the
+            // `(&k_c * &tmp_dk)?.sum(D::Minus1)?` reduction for
+            // `d_decay_last_col_acc`. The operand is a 4D tensor
+            // [B, H, C, dim] so `D::Minus1` resolves to axis 3 at
+            // runtime; the helper falls through to the candle
+            // composite on any precondition failure so behavior is
+            // identical with the gate off.
+            let prod_kc = (&k_c * &tmp_dk)?;
+            #[cfg(feature = "cuda")]
+            {
+                let axis = prod_kc.rank().saturating_sub(1);
+                d_decay_last_col_acc = match try_kt_sum_axis(&prod_kc, axis)? {
+                    Some(out) => out,
+                    None => prod_kc.sum(candle_core::D::Minus1)?,
+                };
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                d_decay_last_col_acc = prod_kc.sum(candle_core::D::Minus1)?;
+            }
         }
 
         let dr = solve_tri_transpose_f32(&a_strict, &beta_c, &d_w_acc)?.contiguous()?;
