@@ -12581,7 +12581,26 @@ fn solve_tri_transpose_f32(a_strict: &Tensor, beta: &Tensor, dw: &Tensor) -> Res
             let a_col = a_strict.narrow(2, t + 1, future_len)?.narrow(3, t, 1)?;
             let beta_future = beta.narrow(2, t + 1, future_len)?.unsqueeze(3)?;
             let weights = a_col.broadcast_mul(&beta_future)?;
-            let acc = dr_future.broadcast_mul(&weights)?.sum(2)?.unsqueeze(2)?;
+            // Phase 7 (#1082): route the chunkwise-backward sum-over-time
+            // reduction through kiln_tensor::cuda_sum_axis when
+            // KILN_USE_KT_API_SUM_AXIS=1 (or KILN_USE_KT_API_ALL=1).
+            // Falls through to candle on any precondition failure.
+            let acc_pre = dr_future.broadcast_mul(&weights)?;
+            let acc_sum = {
+                #[cfg(feature = "cuda")]
+                {
+                    if let Some(out) = try_kt_sum_axis(&acc_pre, 2)? {
+                        out
+                    } else {
+                        acc_pre.sum(2)?
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    acc_pre.sum(2)?
+                }
+            };
+            let acc = acc_sum.unsqueeze(2)?;
             (dw_t - acc)?
         };
         rows_rev.push(dr_t);
@@ -12762,7 +12781,29 @@ pub fn gdn_recurrent_backward_no_grad(
         let term_b = d_b_mask.broadcast_mul(&causal_decay)?.broadcast_mul(&qkt)?;
         let term = (&term_a + &term_b)?;
         let row_sum = term.sum(candle_core::D::Minus1)?;
-        let col_sum = term.sum(2)?;
+        // Phase 7 (#1082): route the col-sum reduction (axis 2,
+        // the strict-mask row dim) through
+        // kiln_tensor::cuda_sum_axis when KILN_USE_KT_API_SUM_AXIS=1
+        // (or KILN_USE_KT_API_ALL=1). Falls through to candle on
+        // any precondition failure. The complementary `row_sum`
+        // (last-dim non-keepdim) stays on candle since
+        // KILN_USE_KT_API_SUM_AXIS targets `sum(axis)` shapes and
+        // candle's `.sum(D::Minus1)` here already feeds the
+        // existing fused-decode fast paths upstream.
+        let col_sum = {
+            #[cfg(feature = "cuda")]
+            {
+                if let Some(out) = try_kt_sum_axis(&term, 2)? {
+                    out
+                } else {
+                    term.sum(2)?
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                term.sum(2)?
+            }
+        };
         d_g_acc = (&d_g_acc + &row_sum)?;
         d_g_acc = (&d_g_acc - &col_sum)?;
 
