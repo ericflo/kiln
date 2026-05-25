@@ -1,0 +1,3169 @@
+{
+  "job_id": "trace-api-0f2dc6f4-952d-458d-9854-c3231b595167",
+  "state": "completed",
+  "runs": [
+    {
+      "suite_name": "production-tool-call-analysis-v12-random-stratified-1000-cap262144-shard-04",
+      "adapter": "Qwen3.5-4B",
+      "metrics": {
+        "num_examples": 75,
+        "num_pass": 23,
+        "num_fail": 48,
+        "num_invalid": 4,
+        "num_error": 0,
+        "accuracy": 0.30666667,
+        "accuracy_confidence_interval": {
+          "confidence_level": 0.95,
+          "lower": 0.21386868,
+          "upper": 0.41830456
+        },
+        "mean_score": 0.61907697,
+        "weighted_mean_score": 0.61907697,
+        "latency": {
+          "p50_ms": 54149.230885000004,
+          "p90_ms": 113945.296024,
+          "p99_ms": 351034.299706,
+          "mean_ms": 67551.41074086668,
+          "max_ms": 458793.042448
+        },
+        "total_prompt_tokens": 5228369,
+        "total_completion_tokens": 10803,
+        "elapsed_secs": 5066.371932029,
+        "pass_rate_by_tag": {
+          "kind:tool_call": 0.30666667,
+          "production_model:claude-haiku-4-5-20251001": 0.125,
+          "production_model:claude-opus-4-6": 0.36842105,
+          "production_model:claude-opus-4-7": 0.25,
+          "production_model:claude-sonnet-4-6": 1.0,
+          "production_trace": 0.30666667,
+          "source_format:prompt_chosen_jsonl": 0.30666667,
+          "split:test": 0.16666667,
+          "split:train": 0.35185185,
+          "split:val": 0.22222222,
+          "tool:Bash": 0.18181819,
+          "tool:Edit": 1.0,
+          "tool:Grep": 0.0,
+          "tool:Read": 0.3809524,
+          "tool:TodoWrite": 0.33333334,
+          "tool:WebFetch": 0.0,
+          "tool:Write": 0.0
+        },
+        "tag_breakdown": {
+          "kind:tool_call": {
+            "num_examples": 75,
+            "num_pass": 23,
+            "pass_rate": 0.30666667,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.21386868,
+              "upper": 0.41830456
+            }
+          },
+          "production_model:claude-haiku-4-5-20251001": {
+            "num_examples": 8,
+            "num_pass": 1,
+            "pass_rate": 0.125,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.022417491,
+              "upper": 0.47088817
+            }
+          },
+          "production_model:claude-opus-4-6": {
+            "num_examples": 38,
+            "num_pass": 14,
+            "pass_rate": 0.36842105,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.2338422,
+              "upper": 0.5271604
+            }
+          },
+          "production_model:claude-opus-4-7": {
+            "num_examples": 28,
+            "num_pass": 7,
+            "pass_rate": 0.25,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.12676495,
+              "upper": 0.4335567
+            }
+          },
+          "production_model:claude-sonnet-4-6": {
+            "num_examples": 1,
+            "num_pass": 1,
+            "pass_rate": 1.0,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.20654932,
+              "upper": 1.0
+            }
+          },
+          "production_trace": {
+            "num_examples": 75,
+            "num_pass": 23,
+            "pass_rate": 0.30666667,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.21386868,
+              "upper": 0.41830456
+            }
+          },
+          "source_format:prompt_chosen_jsonl": {
+            "num_examples": 75,
+            "num_pass": 23,
+            "pass_rate": 0.30666667,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.21386868,
+              "upper": 0.41830456
+            }
+          },
+          "split:test": {
+            "num_examples": 12,
+            "num_pass": 2,
+            "pass_rate": 0.16666667,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.04696514,
+              "upper": 0.44803086
+            }
+          },
+          "split:train": {
+            "num_examples": 54,
+            "num_pass": 19,
+            "pass_rate": 0.35185185,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.23823011,
+              "upper": 0.48515168
+            }
+          },
+          "split:val": {
+            "num_examples": 9,
+            "num_pass": 2,
+            "pass_rate": 0.22222222,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.063225105,
+              "upper": 0.547411
+            }
+          },
+          "tool:Bash": {
+            "num_examples": 66,
+            "num_pass": 12,
+            "pass_rate": 0.18181819,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.107186064,
+              "upper": 0.29145193
+            }
+          },
+          "tool:Edit": {
+            "num_examples": 2,
+            "num_pass": 2,
+            "pass_rate": 1.0,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.34238023,
+              "upper": 1.0
+            }
+          },
+          "tool:Grep": {
+            "num_examples": 2,
+            "num_pass": 0,
+            "pass_rate": 0.0,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.0,
+              "upper": 0.6576198
+            }
+          },
+          "tool:Read": {
+            "num_examples": 21,
+            "num_pass": 8,
+            "pass_rate": 0.3809524,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.20751011,
+              "upper": 0.59121346
+            }
+          },
+          "tool:TodoWrite": {
+            "num_examples": 3,
+            "num_pass": 1,
+            "pass_rate": 0.33333334,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.061491944,
+              "upper": 0.7923404
+            }
+          },
+          "tool:WebFetch": {
+            "num_examples": 1,
+            "num_pass": 0,
+            "pass_rate": 0.0,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.0,
+              "upper": 0.7934507
+            }
+          },
+          "tool:Write": {
+            "num_examples": 1,
+            "num_pass": 0,
+            "pass_rate": 0.0,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.0,
+              "upper": 0.7934507
+            }
+          }
+        },
+        "by_scorer": [
+          {
+            "scorer_kind": "tool_call",
+            "num_examples": 75,
+            "mean_score": 0.61907697,
+            "pass_rate": 0.30666667
+          }
+        ],
+        "pass_rate_by_tool": {
+          "Bash": {
+            "num_examples": 53,
+            "num_pass": 12,
+            "pass_rate": 0.2264151,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.13454631,
+              "upper": 0.3552627
+            }
+          },
+          "Edit": {
+            "num_examples": 2,
+            "num_pass": 2,
+            "pass_rate": 1.0,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.34238023,
+              "upper": 1.0
+            }
+          },
+          "Grep": {
+            "num_examples": 1,
+            "num_pass": 0,
+            "pass_rate": 0.0,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.0,
+              "upper": 0.7934507
+            }
+          },
+          "Read": {
+            "num_examples": 14,
+            "num_pass": 8,
+            "pass_rate": 0.5714286,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.32590646,
+              "upper": 0.786192
+            }
+          },
+          "TodoWrite": {
+            "num_examples": 3,
+            "num_pass": 1,
+            "pass_rate": 0.33333334,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.061491944,
+              "upper": 0.7923404
+            }
+          },
+          "WebFetch": {
+            "num_examples": 1,
+            "num_pass": 0,
+            "pass_rate": 0.0,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.0,
+              "upper": 0.7934507
+            }
+          },
+          "Write": {
+            "num_examples": 1,
+            "num_pass": 0,
+            "pass_rate": 0.0,
+            "confidence_interval": {
+              "confidence_level": 0.95,
+              "lower": 0.0,
+              "upper": 0.7934507
+            }
+          }
+        },
+        "reasoning_length": {
+          "num_with_thinking": 0,
+          "mean_chars": 0.0,
+          "p50_chars": 0,
+          "p90_chars": 0,
+          "max_chars": 0
+        },
+        "num_unclosed_thinking": 0,
+        "num_non_xml_tool_calls": 71,
+        "confusion_by_tool": {
+          "Bash": {
+            "<none>": 3,
+            "Bash": 47,
+            "Read": 2,
+            "TodoWrite": 1
+          },
+          "Edit": {
+            "Edit": 2
+          },
+          "Grep": {
+            "Read": 1
+          },
+          "Read": {
+            "<none>": 1,
+            "Edit": 1,
+            "Read": 12
+          },
+          "TodoWrite": {
+            "Monitor": 1,
+            "TodoWrite": 1,
+            "Write": 1
+          },
+          "WebFetch": {
+            "WebFetch": 1
+          },
+          "Write": {
+            "Bash": 1
+          }
+        },
+        "num_schema_missing_required": 2,
+        "num_schema_extra_unknown": 0
+      },
+      "outcomes": [
+        {
+          "example_id": "trace-srca1f164c6-293-910266b0fdc3695967f079c9-0d3c7c42902d",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"date\\\"}\",\"name\":\"Bash\"},\"id\":\"call_a624a0a51f454378ac06bcc8a5a349d2\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 1.0,
+          "detail": "name=1.00  | struct=1.00  | content=1.00  || formats=[openai]",
+          "prompt_tokens": 120620,
+          "completion_tokens": 25,
+          "latency_ms": 65440.57413,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 101665,
+            "num_input_messages": 245,
+            "output_tokens": 52,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 326284,
+            "session_id": "22a249e6-16ac-455a-b4dc-ea4421b7fe9d",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 293,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 63,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-10T04:43:52.005833735Z",
+            "turn_id": "910266b0fdc3695967f079c9"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-294-908e8305180d3ee9ab90e7d6-2e55cb43af10",
+          "completion_index": 0,
+          "completion_text": "Task created: 1843 | Phase 10a (Dockerfile.sandbox, PR #156) is merged and deployed as v0.7.27. No open PRs, no pending/running tasks. Phase 10 goal is \"Rich sandbox image...\"\n\nChecked: completed task result confirms PR #156 merged; verified no pending/running tasks via ce tasks-list; inspected project description for Phase 10 scope.\n\nNext check in 10 minutes\n",
+          "kind": "invalid",
+          "score": 0.0,
+          "detail": "no tool_call found in completion",
+          "prompt_tokens": 58228,
+          "completion_tokens": 107,
+          "latency_ms": 42780.875985,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash",
+            "tool:Bash",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 63782,
+            "num_input_messages": 1,
+            "output_tokens": 322,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 214681,
+            "session_id": "80cf48d5-99b9-4f92-b5b4-7ad8108352a8",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 294,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 518,
+            "target_tools": [
+              "Bash",
+              "Bash",
+              "Bash"
+            ],
+            "timestamp": "2026-04-14T09:11:31.334426948Z",
+            "turn_id": "908e8305180d3ee9ab90e7d6"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-295-e4b48b7b68e829b4619e7ee5-c8cb4503ef5b",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ce feedback-create --source agent --comment \\\\\\\"Task: Tightened planner validation to prevent narration before decision line. Pattern: validate output ordering early, not just at finalization.\\\\\\\"\\\",\\\"description\\\":\\\"Create feedback entry\\\"}\",\"name\":\"Bash\"},\"id\":\"call_30b97560df5f49efbfb856e4a74260a5\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.40375003,
+          "detail": "[0] name=1.00  | struct=1.00  | content=0.36 command: 0.67 ; description: 0.05 || [1] missing predicted call (expected `Bash`) || formats=[openai]",
+          "prompt_tokens": 10484,
+          "completion_tokens": 73,
+          "latency_ms": 6511.415300999999,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 16859,
+            "num_input_messages": 3,
+            "output_tokens": 282,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 32864,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 295,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 948,
+            "target_tools": [
+              "Bash",
+              "Bash"
+            ],
+            "timestamp": "2026-03-27T14:01:55.313063149Z",
+            "turn_id": "e4b48b7b68e829b4619e7ee5"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-297-49ed9197e1a6fcae4fbaf4a5-f65aad7cef6e",
+          "completion_index": 0,
+          "completion_text": "**3. Fix dashboard_page() nav — add Docs link:**\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/workspace/sessions/8cf91fda4d378de13a93e53a/modelrelay/crates/modelrelay-web/src/templates.rs\\\",\\\"new_string\\\":\\\"      <a href=\\\\\\\"/\\\\\\\" class=\\\\\\\"logo\\\\\\\">Model<span>Relay</span></a>\\\\n      <div class=\\\\\\\"nav-links\\\\\\\">\\\\n        <a href=\\\\\\\"/dashboard\\\\\\\" class=\\\\\\\"active\\\\\\\">Dashboard</a>\\\\n        <a href=\\\\\\\"/setup\\\\\\\">Setup</a>\\\\n        <a href=\\\\\\\"/integrate\\\\\\\">Integrate</a>\\\\n        <a href=\\\\\\\"https://ericflo.github.io/modelrelay/\\\\\\\" target=\\\\\\\"_blank\\\\\\\" rel=\\\\\\\"noopener\\\\\\\">Docs</a>\\\\n      </div>\\\\n    </div>\\\\n  </nav>\\\",\\\"old_string\\\":\\\"      <a href=\\\\\\\"/\\\\\\\" class=\\\\\\\"logo\\\\\\\">Model<span>Relay</span></a>\\\\n      <div class=\\\\\\\"nav-links\\\\\\\">\\\\n        <a href=\\\\\\\"/dashboard\\\\\\\" class=\\\\\\\"active\\\\\\\">Dashboard</a>\\\\n        <a href=\\\\\\\"/setup\\\\\\\">Setup</a>\\\\n        <a href=\\\\\\\"/integrate\\\\\\\">Integrate</a>\\\\n      </div>\\\\n    </div>\\\\n  </nav>\\\",\\\"replace_all\\\":false}\",\"name\":\"Edit\"},\"id\":\"call_0491dc41df674d56a12d34e5bd819bc9\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.9173864,
+          "detail": "name=1.00  | struct=1.00  | content=0.72 new_string: 0.05 ; old_string: 0.85 || formats=[openai]",
+          "prompt_tokens": 77268,
+          "completion_tokens": 306,
+          "latency_ms": 113945.296024,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Edit"
+          ],
+          "metadata": {
+            "input_tokens": 78222,
+            "num_input_messages": 51,
+            "output_tokens": 291,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 266405,
+            "session_id": "93a99aee-1d0e-4c70-8ae1-f7520ef37ec1",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 297,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 628,
+            "target_tools": [
+              "Edit"
+            ],
+            "timestamp": "2026-04-10T05:52:23.151533024Z",
+            "turn_id": "49ed9197e1a6fcae4fbaf4a5"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-299-019f4ae53fbe4ae0a3de1a8d-84d0a30c8b1d",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"git push origin mtp/fc-halves-norm-swap-bisect 2>&1\\\",\\\"description\\\":\\\"Push branch\\\"}\",\"name\":\"Bash\"},\"id\":\"call_bb4c5d5f599544d1ad33f4e34ebb3044\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7792858,
+          "detail": "name=1.00  | struct=1.00  | content=0.26 command: 0.10 ; description: 0.43 || formats=[openai]",
+          "prompt_tokens": 93189,
+          "completion_tokens": 58,
+          "latency_ms": 58833.643729999996,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:val",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 89817,
+            "num_input_messages": 22,
+            "output_tokens": 150,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 293802,
+            "session_id": "c2396c75-57b1-4656-976e-0ad01eb1d0e2",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 299,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "val",
+            "target_chars": 208,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-21T03:27:12.069601262Z",
+            "turn_id": "019f4ae53fbe4ae0a3de1a8d"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-300-95297fcd8cb65b7e13339c60-4dcc949e3a0f",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/workspace/sessions/97917f35c2c5b4beff4dabdd/repo/internal/orchestrator/orchestrator.go\\\"}\",\"name\":\"Read\"},\"id\":\"call_cf2b0fadb83f4a199c0d1f2bc5872d20\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.0,
+          "detail": "name=0.00 expected `Grep`, got `Read` | struct=0.00 missing=[-n,output_mode,path,pattern] extra=[file_path] | content=0.00 -n: missing ; output_mode: missing ; path: missing ; pattern: missing || formats=[openai]",
+          "prompt_tokens": 55014,
+          "completion_tokens": 60,
+          "latency_ms": 31670.485095,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Grep"
+          ],
+          "metadata": {
+            "input_tokens": 61651,
+            "num_input_messages": 5,
+            "output_tokens": 164,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 206247,
+            "session_id": "b9b34127-fab4-4191-935f-e29944d876a9",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 300,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 242,
+            "target_tools": [
+              "Grep"
+            ],
+            "timestamp": "2026-04-08T15:11:14.730959351Z",
+            "turn_id": "95297fcd8cb65b7e13339c60"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-301-541d8cb5254ef2d89aa143ad-b5045ebdd58a",
+          "completion_index": 0,
+          "completion_text": "Task created: c5f0589f15a981... | Phase 1: kiln-served re-baseline + mechanical-code verifier extensions + audit\nPhase 1 Part A re-bases the 30-problem stratified subset against kiln-served Qwen3.5-4B (port 8420) to verify the transformers-fallback baseline was honest; Part B extends verify.py with Python-only AST checks for Write/Edit.new_string and bash command-shape; Part C audits precision/recall on 100 hand-labeled turns. Source-mod task includes the exact repo workflow, test command, and result format.\n\nNext check in 30 minutes\n",
+          "kind": "invalid",
+          "score": 0.0,
+          "detail": "no tool_call found in completion",
+          "prompt_tokens": 76647,
+          "completion_tokens": 149,
+          "latency_ms": 71002.22530800001,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:test",
+            "tool:Bash",
+            "tool:Bash",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 80806,
+            "num_input_messages": 1,
+            "output_tokens": 905,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 276887,
+            "session_id": "87d8bf6a-32e8-4f17-a734-aa1f522d192b",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 301,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "test",
+            "target_chars": 432,
+            "target_tools": [
+              "Bash",
+              "Bash",
+              "Bash"
+            ],
+            "timestamp": "2026-04-29T03:46:52.295916988Z",
+            "turn_id": "541d8cb5254ef2d89aa143ad"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-302-ed1298775d84c77010dcbb5a-6abd275c1e53",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"grep -n \\\\\\\"PUBLIC_KEY\\\\\\\\|ssh\\\\\\\\|SSH\\\\\\\\|ensureRepo\\\\\\\" internal/runpod/pool/pool.go 2>&1 | head -20\\\",\\\"description\\\":\\\"Check SSH in pool.go\\\"}\",\"name\":\"Bash\"},\"id\":\"call_9c86ff7f4dde40d49813d2a73009c0b5\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7289286,
+          "detail": "name=1.00  | struct=1.00  | content=0.10 command: 0.14 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 86467,
+          "completion_tokens": 74,
+          "latency_ms": 58395.654013,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:val",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 93805,
+            "num_input_messages": 101,
+            "output_tokens": 135,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 297612,
+            "session_id": "fd217ed2-7a9b-4b5c-a12f-05344a45f730",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 302,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "val",
+            "target_chars": 164,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-19T22:59:35.283429488Z",
+            "turn_id": "ed1298775d84c77010dcbb5a"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-303-39f88fcb03e46cb28aea289f-823d15ee3244",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"cd /tmp/kiln-inspect && find . -type f -name \\\\\\\"*.rs\\\\\\\" -o -name \\\\\\\"Cargo.toml\\\\\\\" | wc -l\\\"}\",\"name\":\"Bash\"},\"id\":\"call_fae6bf305a98433d83ee514c6d7dc7b0\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.73,
+          "detail": "name=1.00  | struct=1.00  | content=0.10 command: 0.10 || formats=[openai]",
+          "prompt_tokens": 11714,
+          "completion_tokens": 56,
+          "latency_ms": 6480.131827,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-haiku-4-5-20251001",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 23284,
+            "num_input_messages": 5,
+            "output_tokens": 112,
+            "production_model": "claude-haiku-4-5-20251001",
+            "prompt_chars": 7901,
+            "session_id": "14259f6c-c037-45d9-9eea-1a91f616caf3",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 303,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 136,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-13T07:14:18.47900975Z",
+            "turn_id": "39f88fcb03e46cb28aea289f"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-304-7e144486df190b929d2a8283-cc708367271a",
+          "completion_index": 0,
+          "completion_text": "I'll implement the Notes Phase 3.3 changes to surface summaries and suggested links in the UI. Let me start by reading the current server code and understanding the existing structure.\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/workspace/sessions/b5fbf698c08804e51337498c/data/apps/notes/server.py\\\"}\",\"name\":\"Read\"},\"id\":\"call_baf15bb03d7c446c81aa1e899c8bca0c\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.83928573,
+          "detail": "name=1.00  | struct=1.00  | content=0.46 file_path: 0.46 || formats=[openai]",
+          "prompt_tokens": 40938,
+          "completion_tokens": 93,
+          "latency_ms": 27061.455231,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Read"
+          ],
+          "metadata": {
+            "input_tokens": 48132,
+            "num_input_messages": 2,
+            "output_tokens": 97,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 154402,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 304,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 87,
+            "target_tools": [
+              "Read"
+            ],
+            "timestamp": "2026-03-23T04:52:33.180861537Z",
+            "turn_id": "7e144486df190b929d2a8283"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-305-149f646f2f1f638c57147462-fec5edfd2550",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"gh pr list --repo ericflo/kiln --limit 15 --search \\\\\\\"desktop\\\\\\\"\\\",\\\"description\\\":\\\"List recent desktop PRs\\\"}\",\"name\":\"Bash\"},\"id\":\"call_4b5bbebc2607456cb600463e7b3e41c9\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.40759617,
+          "detail": "[0] name=1.00  | struct=1.00  | content=0.38 command: 0.38 ; description: 0.38 || [1] missing predicted call (expected `Bash`) || formats=[openai]",
+          "prompt_tokens": 74674,
+          "completion_tokens": 61,
+          "latency_ms": 46028.51352,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:val",
+            "tool:Bash",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 76488,
+            "num_input_messages": 3,
+            "output_tokens": 440,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 258786,
+            "session_id": "bc2e7fea-9654-4076-9d46-4fce836c09d7",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 305,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "val",
+            "target_chars": 619,
+            "target_tools": [
+              "Bash",
+              "Bash"
+            ],
+            "timestamp": "2026-04-21T08:13:01.928733536Z",
+            "turn_id": "149f646f2f1f638c57147462"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-306-ecc230602b90f62ec7e8704c-3fa3892e11d8",
+          "completion_index": 0,
+          "completion_text": "Now let me add a test for the kiln metrics function at the end of store_test.go:\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"tail -20 internal/store/store_test.go\\\",\\\"description\\\":\\\"Check end of test file\\\"}\",\"name\":\"Bash\"},\"id\":\"call_19fa9dead58d40be918da58e4c9e12d1\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.0,
+          "detail": "name=0.00 expected `Write`, got `Bash` | struct=0.00 missing=[content,file_path] extra=[command,description] | content=0.00 content: missing ; file_path: missing || formats=[openai]",
+          "prompt_tokens": 102973,
+          "completion_tokens": 70,
+          "latency_ms": 70672.15158599999,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:val",
+            "tool:Write"
+          ],
+          "metadata": {
+            "input_tokens": 107063,
+            "num_input_messages": 141,
+            "output_tokens": 4514,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 352122,
+            "session_id": "f11d6117-b44c-4f1d-a292-3e369628fecf",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 306,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "val",
+            "target_chars": 9104,
+            "target_tools": [
+              "Write"
+            ],
+            "timestamp": "2026-04-19T22:10:15.713481617Z",
+            "turn_id": "ecc230602b90f62ec7e8704c"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-307-a9bdd45e84bac8a8c95c8769-ef412d689c79",
+          "completion_index": 0,
+          "completion_text": "Task completed cleanly: identified and queued a fix for archived app repos polluting health checks. The pattern here is \"verify remaining scope exists before creating tasks\" — I checked health, PRs, and code paths before committing to the task.\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ce feedback-create --source agent --comment \\\\\\\"Task completed: identified archived app repo discovery bug causing 9 bogus drift entries in health. Created focused source task with narrow scope and stop-if-already-fixed precondition. Preflight verified recent PRs (#358, #359) and health degradation still exists.\\\\\\\"\\\"}\",\"name\":\"Bash\"},\"id\":\"call_ae189ef6fa854e46b17d3525627178dc\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.65000004,
+          "detail": "name=1.00  | struct=0.50 missing=[description] extra=[] | content=0.33 command: 0.67 ; description: missing || formats=[openai]",
+          "prompt_tokens": 38146,
+          "completion_tokens": 137,
+          "latency_ms": 30785.824541,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 45619,
+            "num_input_messages": 1,
+            "output_tokens": 312,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 146443,
+            "session_id": "0487f87a-9026-4870-b230-a43d05c07c29",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 307,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 563,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-03-28T14:02:52.366191316Z",
+            "turn_id": "a9bdd45e84bac8a8c95c8769"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-308-a3b14eee5f95e80566bee4f1-d8cd863400c7",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/workspace/sessions/ee1006922f1f307c53842f86/README.md\\\",\\\"new_string\\\":\\\"> **Status:** v0.7.39 released. Brain/hands decoupling (sandbox isolation, credential filtering, `--require-sandbox` mode), MCP tool routing through sandboxes, multi-sandbox support with `sandbox_id` routing, rich sandbox image with runtimes and CLI tools, git and file resource provisioning, session cancel propagation, SQLite reliability fixes, Kubernetes sandbox backend, dual UI (chat + admin), multi-file agent skills, per-agent LLM providers, GHCR publishing, and golangci-lint CI. Full Anthropic API spec alignment.\\\",\\\"old_string\\\":\\\"> **Status:** v0.7.37 released. Brain/hands decoupling (sandbox isolation, credential filtering, `--require-sandbox` mode), MCP tool routing through sandboxes, multi-sandbox support with `sandbox_id` routing, rich sandbox image with runtimes and CLI tools, git and file resource provisioning, session cancel propagation, SQLite reliability fixes, Kubernetes sandbox backend, dual UI (chat + admin), multi-file agent skills, per-agent LLM providers, and GHCR publishing. Full Anthropic API spec alignment. CI green with race detector.\\\",\\\"replace_all\\\":false}\",\"name\":\"Edit\"},\"id\":\"call_a2b09e30ec7c4345a7b263e0748c68ae\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.20000002,
+          "detail": "name=0.00 expected `Read`, got `Edit` | struct=0.33 missing=[limit,offset] extra=[new_string,old_string,replace_all] | content=0.33 limit: missing ; offset: missing || formats=[openai]",
+          "prompt_tokens": 61512,
+          "completion_tokens": 323,
+          "latency_ms": 91406.55121,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Read"
+          ],
+          "metadata": {
+            "input_tokens": 66778,
+            "num_input_messages": 17,
+            "output_tokens": 108,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 223949,
+            "session_id": "52212fd7-6396-4ff0-a5dd-49b89b1d118f",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 308,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 138,
+            "target_tools": [
+              "Read"
+            ],
+            "timestamp": "2026-04-14T15:03:23.368248499Z",
+            "turn_id": "a3b14eee5f95e80566bee4f1"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-309-0b6be044bdd65225d780633d-e22ba3cc8b74",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"/home/clouderic/.local/bin/uv run --with pytest pytest tests/ -v --timeout=60 2>&1\\\",\\\"description\\\":\\\"Run tests with pytest\\\",\\\"timeout\\\":300000}\",\"name\":\"Bash\"},\"id\":\"call_62860aeb9cde4f249946c854d9cb5db6\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.87500006,
+          "detail": "name=1.00  | struct=1.00  | content=0.58 command: 0.70 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 32469,
+          "completion_tokens": 84,
+          "latency_ms": 20263.445119,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 38452,
+            "num_input_messages": 44,
+            "output_tokens": 127,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 113268,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 309,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 238,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-03-15T05:15:33.463617805Z",
+            "turn_id": "0b6be044bdd65225d780633d"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-311-064380a67ca18b51eea2cdcb-03a5c1591b12",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"python3 /data/.clouderic-internal/repos/apps/trajectory-trainer/scripts/runpod_api.py ssh 63etbzsldj8114 \\\\\\\"cat /start.sh 2>&1 | grep -A 50 'Rust\\\\\\\\|cargo\\\\\\\\|go\\\\\\\\|toolchain'\\\\\\\" 2>&1 | tail -60\\\",\\\"description\\\":\\\"Find Rust toolchain setup\\\"}\",\"name\":\"Bash\"},\"id\":\"call_9ce522a4d16a4a40a583966a6957842f\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.84250003,
+          "detail": "name=1.00  | struct=1.00  | content=0.47 command: 0.50 ; description: 0.45 || formats=[openai]",
+          "prompt_tokens": 95359,
+          "completion_tokens": 114,
+          "latency_ms": 79269.98954200001,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 97231,
+            "num_input_messages": 73,
+            "output_tokens": 271,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 320160,
+            "session_id": "4238b2b7-fdc9-439c-a7f9-69694122900d",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 311,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 214,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-17T05:08:05.420277363Z",
+            "turn_id": "064380a67ca18b51eea2cdcb"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-312-375e98a83e8026c88700e848-0a512b026596",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"head -1 /workspace/sessions/faf3308e581ff713b22199c5/data/accepted.jsonl | python3 -m json.tool 2>&1 | head -20\\\",\\\"description\\\":\\\"Inspect schema of accepted.jsonl\\\"}\",\"name\":\"Bash\"},\"id\":\"call_bb3df8ef95a2406c8df85f63da81702d\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7225,
+          "detail": "name=1.00  | struct=1.00  | content=0.08 command: 0.10 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 88584,
+          "completion_tokens": 91,
+          "latency_ms": 65570.627149,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:test",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 98149,
+            "num_input_messages": 45,
+            "output_tokens": 155,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 319239,
+            "session_id": "fa78ee94-4c9d-4672-a97c-29972982cd43",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 312,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "test",
+            "target_chars": 225,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-30T19:20:24.819113275Z",
+            "turn_id": "375e98a83e8026c88700e848"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-313-186b1f496f48e45a2a964c06-73809ae47273",
+          "completion_index": 0,
+          "completion_text": "The binary timestamp is still 01:49 — the pod didn't actually restart. The deploy succeeded but the pod is still running the old image. Let me check the deploy request status.\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ce deploy-requests-list 2>&1 | python3 -c \\\\\\\"\\\\nimport sys,json\\\\nd=json.load(sys.stdin)\\\\nfor dr in d if isinstance(d,list) else d.get('deploy_requests',d.get('items',[])):\\\\n    if 'deploy' in dr.get('reason','').lower() or 'deploy' in dr.get('id',''):\\\\n        print(dr.get('id',''), '|', dr.get('status',''), '|', dr.get('reason','')[:60])\\\\n\\\\\\\"\\\",\\\"description\\\":\\\"Check deploy request status\\\"}\",\"name\":\"Bash\"},\"id\":\"call_28af2bb0e7db4d3c9d1e27376203975c\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7736957,
+          "detail": "name=1.00  | struct=1.00  | content=0.25 command: 0.10 ; description: 0.39 || formats=[openai]",
+          "prompt_tokens": 102461,
+          "completion_tokens": 187,
+          "latency_ms": 112681.387922,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 104886,
+            "num_input_messages": 197,
+            "output_tokens": 122,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 348507,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 313,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 123,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-03-27T07:15:45.746045654Z",
+            "turn_id": "186b1f496f48e45a2a964c06"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-314-d7ced729e0e8033896549845-98998e19449d",
+          "completion_index": 0,
+          "completion_text": "Now let me read all the required files. Let me start with the kiln training lib.rs:\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/tmp/kiln-inspect/crates/kiln-train/src/lib.rs\\\"}\",\"name\":\"Read\"},\"id\":\"call_8a61b24051ef4f3182a5baf7374f76f1\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.16666667,
+          "detail": "[0] name=1.00  | struct=1.00  | content=1.00  || [1] missing predicted call (expected `Read`) || [2] missing predicted call (expected `Read`) || [3] missing predicted call (expected `Read`) || [4] missing predicted call (expected `Read`) || [5] missing predicted call (expected `Read`) || formats=[openai]",
+          "prompt_tokens": 14359,
+          "completion_tokens": 61,
+          "latency_ms": 7974.13452,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-haiku-4-5-20251001",
+            "split:train",
+            "tool:Read",
+            "tool:Read",
+            "tool:Read",
+            "tool:Read",
+            "tool:Read",
+            "tool:Read"
+          ],
+          "metadata": {
+            "input_tokens": 23599,
+            "num_input_messages": 19,
+            "output_tokens": 370,
+            "production_model": "claude-haiku-4-5-20251001",
+            "prompt_chars": 13459,
+            "session_id": "53c7e1a2-4cf6-4baf-b77a-cf338f961cb6",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 314,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 598,
+            "target_tools": [
+              "Read",
+              "Read",
+              "Read",
+              "Read",
+              "Read",
+              "Read"
+            ],
+            "timestamp": "2026-04-14T14:25:21.072913653Z",
+            "turn_id": "d7ced729e0e8033896549845"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-315-79ef41516713f426919da998-c691895919e5",
+          "completion_index": 0,
+          "completion_text": "I'll explore the OMA codebase to understand the structure you've requested. Let me start by checking for the repository location and then systematically examine the key files.\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ls -la /data/repo-cache/ 2>/dev/null || echo \\\\\\\"Not found\\\\\\\"\\\",\\\"dangerouslyDisableSandbox\\\":true}\",\"name\":\"Bash\"},\"id\":\"call_4ddc86058bc44836a36dc379c157337f\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.73,
+          "detail": "name=1.00  | struct=1.00 missing=[] extra=[dangerouslyDisableSandbox] | content=0.10 command: 0.10 || formats=[openai]",
+          "prompt_tokens": 10823,
+          "completion_tokens": 94,
+          "latency_ms": 7644.789449,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-haiku-4-5-20251001",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 22441,
+            "num_input_messages": 1,
+            "output_tokens": 120,
+            "production_model": "claude-haiku-4-5-20251001",
+            "prompt_chars": 4892,
+            "session_id": "d8118abe-95f8-4e3f-853b-ae43a21afcde",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 315,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 152,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-11T21:28:24.415438087Z",
+            "turn_id": "79ef41516713f426919da998"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-316-37b83531473d1371be503669-5f92c91469dd",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/tmp/story-desktop.png\\\"}\",\"name\":\"Read\"},\"id\":\"call_67cdc8e1fbaf4fa3ad33cb6b8dd285ad\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.5,
+          "detail": "[0] name=1.00  | struct=1.00  | content=1.00  || [1] missing predicted call (expected `Read`) || formats=[openai]",
+          "prompt_tokens": 53431,
+          "completion_tokens": 28,
+          "latency_ms": 24978.206079,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Read",
+            "tool:Read"
+          ],
+          "metadata": {
+            "input_tokens": 196832,
+            "num_input_messages": 37,
+            "output_tokens": 105,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 197406,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 316,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 157,
+            "target_tools": [
+              "Read",
+              "Read"
+            ],
+            "timestamp": "2026-03-25T20:30:00.801222538Z",
+            "turn_id": "37b83531473d1371be503669"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-317-374ad9991f7a41dad79b0b61-64541a0df3e9",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"tail -n 100 /tmp/bench_all.log 2>/dev/null | grep -c \\\\\\\"END_META\\\\\\\" || echo \\\\\\\"0\\\\\\\"\\\",\\\"description\\\":\\\"Check how many bench runs completed\\\"}\",\"name\":\"Monitor\"},\"id\":\"call_d4b4d14eb2084772b70e079e2719e116\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.0,
+          "detail": "name=0.00 expected `TodoWrite`, got `Monitor` | struct=0.00 missing=[todos] extra=[command,description] | content=0.00 todos: missing || formats=[openai]",
+          "prompt_tokens": 65739,
+          "completion_tokens": 72,
+          "latency_ms": 42029.928673,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:val",
+            "tool:TodoWrite"
+          ],
+          "metadata": {
+            "input_tokens": 73228,
+            "num_input_messages": 6,
+            "output_tokens": 299,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 229055,
+            "session_id": "77de8d28-a05d-43a7-8bdb-5a7689a86e32",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 317,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "val",
+            "target_chars": 518,
+            "target_tools": [
+              "TodoWrite"
+            ],
+            "timestamp": "2026-04-20T08:10:25.63942925Z",
+            "turn_id": "374ad9991f7a41dad79b0b61"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-318-c19318be6998131373ede844-2149b6840c67",
+          "completion_index": 0,
+          "completion_text": "Excellent! Reduced from 325 to 222 notes. Now let me check the notes pruning agent status and summarize the improvements.\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"# Check if the notes pruning agent is still running\\\\nls -la /tmp/claude-1000/-workspace-sessions-improvement-loop/ca2e55a7-1532-4cb7-b272-aafe005538d8/tasks/a4497a15c093c3deb.output 2>/dev/null && echo \\\\\\\"Agent output exists\\\\\\\" || echo \\\\\\\"Agent output missing\\\\\\\"\\\",\\\"description\\\":\\\"Check agent status\\\"}\",\"name\":\"Bash\"},\"id\":\"call_6e08cb1d4a354fdd9ae449da952bcd53\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7225,
+          "detail": "name=1.00  | struct=1.00  | content=0.08 command: 0.10 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 78211,
+          "completion_tokens": 167,
+          "latency_ms": 77617.947871,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 90654,
+            "num_input_messages": 124,
+            "output_tokens": 314,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 271936,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 318,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 901,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-03-22T15:58:34.140053714Z",
+            "turn_id": "c19318be6998131373ede844"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-319-8956e82639b8425c2af1bb01-44146941adbe",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"cat /tmp/gitoxide-fs-check/README.md 2>&1 | grep -A 30 \\\\\\\"## Benchmarks\\\\\\\"\\\",\\\"description\\\":\\\"Check benchmarks section\\\"}\",\"name\":\"Bash\"},\"id\":\"call_bb3a2a8326c1430c981a86c68e1d4889\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.36125,
+          "detail": "[0] name=1.00  | struct=1.00  | content=0.08 command: 0.10 ; description: 0.05 || [1] missing predicted call (expected `Bash`) || formats=[openai]",
+          "prompt_tokens": 53488,
+          "completion_tokens": 65,
+          "latency_ms": 31351.638522,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 59393,
+            "num_input_messages": 11,
+            "output_tokens": 629,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 195727,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 319,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 530,
+            "target_tools": [
+              "Bash",
+              "Bash"
+            ],
+            "timestamp": "2026-03-26T10:08:54.39208716Z",
+            "turn_id": "8956e82639b8425c2af1bb01"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-320-03163742631e9d8b782633f9-042c6511aaa1",
+          "completion_index": 0,
+          "completion_text": "Build succeeded. Now let me commit and create the PR:\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"git add -A && git status\\\",\\\"description\\\":\\\"Stage all changes\\\"}\",\"name\":\"Bash\"},\"id\":\"call_f3636aae347b48bda542f985a1b65416\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7225,
+          "detail": "name=1.00  | struct=1.00  | content=0.08 command: 0.10 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 72814,
+          "completion_tokens": 58,
+          "latency_ms": 43782.086405,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 77216,
+            "num_input_messages": 108,
+            "output_tokens": 158,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 240800,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 320,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 302,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-03-16T02:41:37.71074269Z",
+            "turn_id": "03163742631e9d8b782633f9"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-321-4b124a5ea4aa0e98a68e9871-392f063a3e9e",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"cd /data/repo-cache/ericflo/kiln.git && git show 597a08f --name-only 2>&1 | head -20\\\",\\\"description\\\":\\\"Check files in PR #642\\\"}\",\"name\":\"Bash\"},\"id\":\"call_cb79cfb8320c4cfe81181d163f3fea64\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.47631583,
+          "detail": "[0] name=1.00  | struct=1.00  | content=0.84 description: 0.68 || [1] missing predicted call (expected `Bash`) || formats=[openai]",
+          "prompt_tokens": 84217,
+          "completion_tokens": 79,
+          "latency_ms": 58321.132045,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:test",
+            "tool:Bash",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 90294,
+            "num_input_messages": 15,
+            "output_tokens": 265,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 294995,
+            "session_id": "5fdfdd3f-d2c5-417c-b1a6-21a79eeddf98",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 321,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "test",
+            "target_chars": 381,
+            "target_tools": [
+              "Bash",
+              "Bash"
+            ],
+            "timestamp": "2026-04-29T15:55:30.058643382Z",
+            "turn_id": "4b124a5ea4aa0e98a68e9871"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-323-6dd68d8a0f279b4db513dcb9-3c72f39b377b",
+          "completion_index": 0,
+          "completion_text": "Now I understand the architecture better. The harness config is passed to OMA, but I need to understand what actually happens when Claude Code runs. Let me check if there's any code that intercepts tool_use events and routes them to execute().\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"grep -r \\\\\\\"tool_use\\\\\\\\|tool_result\\\\\\\" /tmp/clouderic/internal/orchestrator --include=\\\\\\\"*.go\\\\\\\" -n\\\"}\",\"name\":\"Bash\"},\"id\":\"call_407e08ac1fe945efa302c3cb2c0e6194\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7333334,
+          "detail": "name=1.00  | struct=1.00  | content=0.11 command: 0.11 || formats=[openai]",
+          "prompt_tokens": 68480,
+          "completion_tokens": 104,
+          "latency_ms": 51814.138753,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-haiku-4-5-20251001",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 67478,
+            "num_input_messages": 117,
+            "output_tokens": 123,
+            "production_model": "claude-haiku-4-5-20251001",
+            "prompt_chars": 169255,
+            "session_id": "9a7f8e17-c877-43b2-aa28-c2774b6c1949",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 323,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 162,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-14T18:35:15.007414366Z",
+            "turn_id": "6dd68d8a0f279b4db513dcb9"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-325-ef2c4f542270af4b98200304-1f86b4100fbc",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/workspace/sessions/577f6451bed542e2789fdb70/kiln/crates/kiln-model/src/mtp_debug.rs\\\",\\\"limit\\\":100,\\\"offset\\\":530}\",\"name\":\"Read\"},\"id\":\"call_aa17674bc835475890382114ca61de0f\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.8000001,
+          "detail": "name=1.00  | struct=1.00  | content=0.33 limit: 0.00 ; offset: 0.00 || formats=[openai]",
+          "prompt_tokens": 95938,
+          "completion_tokens": 90,
+          "latency_ms": 71727.75881,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:val",
+            "tool:Read"
+          ],
+          "metadata": {
+            "input_tokens": 110183,
+            "num_input_messages": 41,
+            "output_tokens": 155,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 331423,
+            "session_id": "97733b2d-a29f-4aef-a622-30db7955b943",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 325,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "val",
+            "target_chars": 170,
+            "target_tools": [
+              "Read"
+            ],
+            "timestamp": "2026-04-21T11:12:31.726229464Z",
+            "turn_id": "ef2c4f542270af4b98200304"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-326-bddba63a8eb7137a01ddfcbb-686f18ad0700",
+          "completion_index": 0,
+          "completion_text": "Now let me check the remaining stubs and wire them up. Let me check the distill_merge and distill_pump functions:\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/data/projects/markdown-conversions/kiln/crates/kiln-server/src/training_queue.rs\\\",\\\"limit\\\":100,\\\"offset\\\":795}\",\"name\":\"Read\"},\"id\":\"call_0ce5ba0364154eef935bdadf11bcea01\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.0,
+          "detail": "name=0.00 expected `Bash`, got `Read` | struct=0.00 missing=[command,description,timeout] extra=[file_path,limit,offset] | content=0.00 command: missing ; description: missing ; timeout: missing || formats=[openai]",
+          "prompt_tokens": 138314,
+          "completion_tokens": 100,
+          "latency_ms": 115859.358358,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 146420,
+            "num_input_messages": 257,
+            "output_tokens": 306,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 455818,
+            "session_id": "f49d4c14-d1ba-448b-a9f9-03ecae534f59",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 326,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 246,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-05-16T04:26:36.702552622Z",
+            "turn_id": "bddba63a8eb7137a01ddfcbb"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-327-ca681e6bb0dca4f2d6c77524-c0ab8c6be5a8",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"todos\\\":[{\\\"activeForm\\\":\\\"Inspecting FLCE source for the contig bug site\\\",\\\"content\\\":\\\"Inspect FLCE source to find narrow(1, ...) site and verify bug exists\\\",\\\"status\\\":\\\"completed\\\"},{\\\"activeForm\\\":\\\"Applying .contiguous() fix\\\",\\\"content\\\":\\\"Add .contiguous() fix in lib.rs\\\",\\\"status\\\":\\\"in_progress\\\"},{\\\"activeForm\\\":\\\"Adding CPU regression test\\\",\\\"content\\\":\\\"Add CPU regression test for strided chunk slice\\\",\\\"status\\\":\\\"pending\\\"},{\\\"activeForm\\\":\\\"Running flce unit tests locally\\\",\\\"content\\\":\\\"Run cargo test -p kiln-flce-kernel locally\\\",\\\"status\\\":\\\"pending\\\"},{\\\"activeForm\\\":\\\"Running A6000 validation bench\\\",\\\"content\\\":\\\"Acquire RunPod A6000 and run T=2048 validation bench\\\",\\\"status\\\":\\\"pending\\\"},{\\\"activeForm\\\":\\\"Updating audit doc\\\",\\\"content\\\":\\\"Update audit doc with post-fix re-run section\\\",\\\"status\\\":\\\"pending\\\"},{\\\"activeForm\\\":\\\"Saving raw bench log\\\",\\\"content\\\":\\\"Save raw bench log to docs/\\\",\\\"status\\\":\\\"pending\\\"},{\\\"activeForm\\\":\\\"Opening PR with auto-merge\\\",\\\"content\\\":\\\"Commit, push, open PR with auto-merge\\\",\\\"status\\\":\\\"pending\\\"}]}\",\"name\":\"TodoWrite\"},\"id\":\"call_533cdb0513854befbe88fb4b76e2dc26\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.0,
+          "detail": "name=0.00 expected `Bash`, got `TodoWrite` | struct=0.00 missing=[command,description] extra=[todos] | content=0.00 command: missing ; description: missing || formats=[openai]",
+          "prompt_tokens": 88350,
+          "completion_tokens": 257,
+          "latency_ms": 117050.252716,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:test",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 92980,
+            "num_input_messages": 29,
+            "output_tokens": 216,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 307246,
+            "session_id": "a229f5ea-52fd-4bcc-a785-922f9f82b310",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 327,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "test",
+            "target_chars": 214,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-29T07:41:06.947581441Z",
+            "turn_id": "ca681e6bb0dca4f2d6c77524"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-328-71915e62183466e89a5d142d-b3accf27f491",
+          "completion_index": 0,
+          "completion_text": "**Found it!** The B2 URL returns 401 Unauthorized. The bucket is private, so those B2 URLs don't work from the browser.\n\nThe issue is clear now:\n1. When uploading, the file is saved locally AND uploaded to B2 asynchronously\n2. The API returns the B2 URL (which is private and requires auth)\n3. On page reload, the frontend tries to load the B2 URL but it fails with 401\n4. The local file path (`/api/uploads/...`) should work, but the B2 URL takes precedence\n\nThe fix: **Don't use B2 URLs for images that can be served locally**. Only use B2 for task artifacts that need permanent storage. For chat uploads, keep using the local `/api/uploads/` endpoint.\n\nLet me verify the local file still exists and test the local endpoint:\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"# Test local endpoint\\\\ncurl -sI \\\\\\\"http://localhost:${SERVER_PORT:-8080}/api/uploads/ae726e5e90ebd31d84748928/10d1216e4d98dfe413fe3c43-Screenshot_20260328_112824_Chrome.jpg\\\\\\\" | head -5\\\"}\",\"name\":\"Bash\"},\"id\":\"call_b24d3831416e4149aff62ec4dd475cd9\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.73,
+          "detail": "name=1.00  | struct=1.00  | content=0.10 command: 0.10 || formats=[openai]",
+          "prompt_tokens": 58232,
+          "completion_tokens": 304,
+          "latency_ms": 81882.400511,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 66996,
+            "num_input_messages": 41,
+            "output_tokens": 265,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 207314,
+            "session_id": "da8dbb35-c78b-4161-bac1-2bc30eed013f",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 328,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 230,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-03-28T23:50:40.050007982Z",
+            "turn_id": "71915e62183466e89a5d142d"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-330-5e64bcbb7541277a310dd7b3-ce85675bc570",
+          "completion_index": 0,
+          "completion_text": "Now I need to replace the `simpleMarkdown` function with the improved version. Let me read the current function:\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/data/apps/browser/server.js\\\",\\\"limit\\\":150,\\\"offset\\\":1270}\",\"name\":\"Read\"},\"id\":\"call_864cc9d9ecc94af3b15c0c3249fd0d95\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.8000001,
+          "detail": "name=1.00  | struct=1.00  | content=0.33 limit: 0.00 ; offset: 0.00 || formats=[openai]",
+          "prompt_tokens": 44693,
+          "completion_tokens": 82,
+          "latency_ms": 28091.823832,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-sonnet-4-6",
+            "split:train",
+            "tool:Read"
+          ],
+          "metadata": {
+            "input_tokens": 48887,
+            "num_input_messages": 15,
+            "output_tokens": 118,
+            "production_model": "claude-sonnet-4-6",
+            "prompt_chars": 153691,
+            "session_id": "92381980-a89b-4851-bf0c-3485bfddaa1e",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 330,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 113,
+            "target_tools": [
+              "Read"
+            ],
+            "timestamp": "2026-03-28T11:11:00.227676079Z",
+            "turn_id": "5e64bcbb7541277a310dd7b3"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-331-8a4645c17884e827eb219669-319ee35ae1ec",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/workspace/sessions/ccf505264786cf7acbb217eb/kiln/crates/kiln-server/src/training_queue.rs\\\",\\\"limit\\\":100,\\\"offset\\\":400}\",\"name\":\"Read\"},\"id\":\"call_d357e981b4b54d2fb293952073044004\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.94375,
+          "detail": "name=1.00  | struct=1.00 missing=[] extra=[limit,offset] | content=0.81 file_path: 0.81 || formats=[openai]",
+          "prompt_tokens": 85201,
+          "completion_tokens": 88,
+          "latency_ms": 61671.150953000004,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:test",
+            "tool:Read"
+          ],
+          "metadata": {
+            "input_tokens": 89612,
+            "num_input_messages": 16,
+            "output_tokens": 1356,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 297698,
+            "session_id": "c096bc31-aa4e-40c4-8a2a-053287229409",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 331,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "test",
+            "target_chars": 142,
+            "target_tools": [
+              "Read"
+            ],
+            "timestamp": "2026-05-09T23:49:11.633787312Z",
+            "turn_id": "8a4645c17884e827eb219669"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-332-62717890709cebb70d3e5427-e21b93d1fe7a",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"gh api repos/ericflo/kiln/releases/assets 2>&1 | python3 -c \\\\\\\"\\\\nimport sys, json\\\\ndata = json.load(sys.stdin)\\\\nfor a in data:\\\\n    print(f'{a[\\\\\\\\\\\\\\\"name\\\\\\\\\\\\\\\"]}: {a[\\\\\\\\\\\\\\\"id\\\\\\\\\\\\\\\"]} -> {a[\\\\\\\\\\\\\\\"browser_download_url\\\\\\\\\\\\\\\"]}')\\\\n\\\\\\\"\\\",\\\"description\\\":\\\"List all assets with ids\\\"}\",\"name\":\"Bash\"},\"id\":\"call_b396f912d4504c458f0387f4514811d0\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7825,
+          "detail": "name=1.00  | struct=1.00  | content=0.28 command: 0.50 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 72118,
+          "completion_tokens": 110,
+          "latency_ms": 55911.460105000006,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 77423,
+            "num_input_messages": 65,
+            "output_tokens": 192,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 254016,
+            "session_id": "47df8460-0c17-447d-b397-4b4c8353918c",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 332,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 305,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-17T09:00:18.005119503Z",
+            "turn_id": "62717890709cebb70d3e5427"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-333-12a04ce2405ecdb5daf117d1-835dc6d4170f",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/data/apps/gallery/server.py\\\",\\\"limit\\\":200,\\\"offset\\\":100}\",\"name\":\"Read\"},\"id\":\"call_6401adb135ab4f50a9d0a7bdb48c9e05\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.9000001,
+          "detail": "name=1.00  | struct=1.00  | content=0.67 limit: 0.00 || formats=[openai]",
+          "prompt_tokens": 45391,
+          "completion_tokens": 57,
+          "latency_ms": 24497.048644,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Read"
+          ],
+          "metadata": {
+            "input_tokens": 51600,
+            "num_input_messages": 6,
+            "output_tokens": 96,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 166241,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 333,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 114,
+            "target_tools": [
+              "Read"
+            ],
+            "timestamp": "2026-03-23T06:52:34.067473622Z",
+            "turn_id": "12a04ce2405ecdb5daf117d1"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-334-78d03504aceda4a9b2b11346-2da99783bd87",
+          "completion_index": 0,
+          "completion_text": "Now let me find the task completion block around lines 610-670:\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/tmp/ce-work/internal/orchestrator/orchestrator.go\\\",\\\"limit\\\":100,\\\"offset\\\":600}\",\"name\":\"Read\"},\"id\":\"call_5625f0c279244a72aa5c1467a2d6174f\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.30000004,
+          "detail": "[0] name=1.00  | struct=1.00  | content=0.67 limit: 0.00 || [1] missing predicted call (expected `Read`) || [2] missing predicted call (expected `Grep`) || formats=[openai]",
+          "prompt_tokens": 16415,
+          "completion_tokens": 86,
+          "latency_ms": 10653.683544,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-haiku-4-5-20251001",
+            "split:train",
+            "tool:Read",
+            "tool:Read",
+            "tool:Grep"
+          ],
+          "metadata": {
+            "input_tokens": 27232,
+            "num_input_messages": 11,
+            "output_tokens": 325,
+            "production_model": "claude-haiku-4-5-20251001",
+            "prompt_chars": 20993,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 334,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 415,
+            "target_tools": [
+              "Read",
+              "Read",
+              "Grep"
+            ],
+            "timestamp": "2026-03-27T03:40:44.095073791Z",
+            "turn_id": "78d03504aceda4a9b2b11346"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-336-6af610fa22bee91f9735639c-eb16374454c4",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ls /data/apps/gallery/ 2>&1\\\",\\\"description\\\":\\\"Check gallery app structure\\\"}\",\"name\":\"Bash\"},\"id\":\"call_cba0316ecc7f4f74b88ab36bddf29ab9\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7225,
+          "detail": "name=1.00  | struct=1.00  | content=0.08 command: 0.10 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 61369,
+          "completion_tokens": 49,
+          "latency_ms": 33598.323069000005,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 63833,
+            "num_input_messages": 37,
+            "output_tokens": 129,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 210854,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 336,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 247,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-03-25T10:13:24.346940333Z",
+            "turn_id": "6af610fa22bee91f9735639c"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-337-f7a4008caf2e6d8bb75d1a20-98af4bf7c72f",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"# Check failed tasks more closely\\\\nce tasks-list --status failed 2>&1 | python3 -c \\\\\\\"\\\\nimport json, sys\\\\ndata = json.load(sys.stdin)\\\\ntasks = data.get('tasks', [])\\\\nprint(f'Failed tasks: {len(tasks)}')\\\\nfor t in tasks:\\\\n    print(f'  [{t[\\\\\\\\\\\\\\\"id\\\\\\\\\\\\\\\"][:20]}] {t.get(\\\\\\\\\\\\\\\"title\\\\\\\\\\\\\\\",\\\\\\\\\\\\\\\"\\\\\\\\\\\\\\\")[:60]} cost=\\\\\\\\${t.get(\\\\\\\\\\\\\\\"cost_usd\\\\\\\\\\\\\\\",0):.2f}')\\\\n\\\\\\\" 2>&1\\\",\\\"description\\\":\\\"Review failed tasks\\\",\\\"timeout\\\":10000}\",\"name\":\"Bash\"},\"id\":\"call_b4457028fa02403dac99b21ccf6f8c81\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.35750002,
+          "detail": "[0] name=1.00  | struct=1.00  | content=0.05 command: 0.10 ; description: 0.05 ; timeout: 0.00 || [1] missing predicted call (expected `Bash`) || formats=[openai]",
+          "prompt_tokens": 67413,
+          "completion_tokens": 168,
+          "latency_ms": 65258.70402699999,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 74265,
+            "num_input_messages": 48,
+            "output_tokens": 768,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 232235,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 337,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 1769,
+            "target_tools": [
+              "Bash",
+              "Bash"
+            ],
+            "timestamp": "2026-03-23T16:02:37.728307074Z",
+            "turn_id": "f7a4008caf2e6d8bb75d1a20"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-338-93eff45b7f445673eb54abd6-7e983e2b73ee",
+          "completion_index": 0,
+          "completion_text": "The healthcheck app shows \"Warning\" status. Let me check why:\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"curl -s http://localhost:9116/apps/healthcheck/ 2>&1 | grep -i 'warning\\\\\\\\|alert' | head -10\\\",\\\"description\\\":\\\"Find warning trigger in healthcheck\\\"}\",\"name\":\"Bash\"},\"id\":\"call_fa5de0be27d047d594c31be63ade6440\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7225,
+          "detail": "name=1.00  | struct=1.00  | content=0.08 command: 0.10 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 62403,
+          "completion_tokens": 92,
+          "latency_ms": 43743.320891,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 64524,
+            "num_input_messages": 56,
+            "output_tokens": 203,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 211883,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 338,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 336,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-03-23T15:58:04.689317687Z",
+            "turn_id": "93eff45b7f445673eb54abd6"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-339-51ae1960e86d736b9831b095-c5394fee3472",
+          "completion_index": 0,
+          "completion_text": "<tool_call>\n<function=Bash>\n<parameter=command>\ncat > /workspace/sessions/fd1db526ea76f9cd31fe326c/work/kiln/scripts/c15_h_main_drift_audit.py << 'PYEOF'\n#!/usr/bin/env python3\n\"\"\"\nC15: h_main drift audit across decode steps.\nCompares kiln's h_main (at pos=0) against independent HF reference.\n\"\"\"\nimport os, sys, json, subprocess, torch, safetensors.torch as st\nfrom transformers import AutoModelForCausalLM\n\n# Paths\nKILN_DIR = os.environ.get(\"KILN_DIR\", \"/workspace/sessions/fd1db526ea76f9cd31fe326c/work/kiln\")\nKILN_SCRIPTS = os.path.join(KILN_DIR, \"scripts\")\nHF_MODEL = \"Qwen/Qwen3.5-4B\"\nKILN_DRAFT_MODEL = \"Qwen/Qwen2.5-Coder-32B-Instruct\"\n\ndef load_kiln_dump(path):\n    \"\"\"Load kiln dump, return h_main, base_pos, prompt_tokens.\"\"\"\n    d = st.load(path)\n    h_main = d.get(\"h_main\")\n    base_pos = d.get(\"meta__base_pos\")\n    prompt_tokens = d.get(\"prompt_tokens\")\n    return h_main, base_pos, prompt_tokens\n\ndef build_chained_sequence(step0_prompt, step1_pt, step2_pt, step3_pt, step4_pt, step5_pt, step6_pt, step7_pt):\n    \"\"\"Build T = prompt(512) ++ [step1_pt[0], step2_pt[0], ...]\"\"\"\n    T = step0_prompt\n    T.append(step1_pt[0])\n    T.append(step2_pt[0])\n    T.append(step3_pt[0])\n    T.append(step4_pt[0])\n    T.append(step5_pt[0])\n    T.append(step6_pt[0])\n    T.append(step7_pt[0])\n    return T\n\ndef hf_forward_with_hidden(model, input_ids, output_hidden_states=True):\n    \"\"\"Run HF forward, return hidden states.\"\"\"\n    if output_hidden_states:\n        out = model(input_ids, output_hidden_states=True)\n    else:\n        out = model(input_ids)\n    return out\n\ndef cos_sim(a, b):\n    \"\"\"Cosine similarity between two vectors.\"\"\"\n    a = a.flatten()\n    b = b.flatten()\n    return torch.dot(a, b) / (torch.norm(a) * torch.norm(b))\n\ndef max_delta(a, b):\n    \"\"\"Max absolute difference between two vectors.\"\"\"\n    return torch.abs(a - b).max().item()\n\ndef rel_err(a, b):\n    \"\"\"Relative error.\"\"\"\n    return torch.abs(a - b) / torch.abs(b)\n\ndef main():\n    # Load all pos=0 kiln dumps\n    dumps = {}\n    for s in range(8):\n        path = os.path.join(KILN_DIR, \"c15_out\", \"captures\", \"mtp_pos-0\", f\"step-{s}.safetensors\")\n        if not os.path.exists(path):\n            print(f\"MISSING: {path}\", file=sys.stderr)\n            sys.exit(1)\n        h_main, base_pos, prompt_tokens = load_kiln_dump(path)\n        dumps[s] = {\n            \"h_main\": h_main.squeeze().cpu().numpy(),\n            \"base_pos\": int(base_pos.item()),\n            \"prompt_tokens\": prompt_tokens.cpu().numpy().tolist() if prompt_tokens is not None else None\n        }\n        print(f\"Loaded step={s}: base_pos={dumps[s]['base_pos']}, prompt_tokens_len={len(dumps[s]['prompt_tokens'])}\")\n\n    # Validate\n    if len(dumps[0][\"prompt_tokens\"]) != 512:\n        print(f\"ERROR: step-0 prompt_tokens length is {len(dumps[0]['prompt_tokens'])}, expected 512\", file=sys.stderr)\n        sys.exit(1)\n    for s in range(1, 8):\n        if len(dumps[s][\"prompt_tokens\"]) != 1:\n            print(f\"ERROR: step-{s} prompt_tokens length is {len(dumps[s]['prompt_tokens'])}, expected 1\", file=sys.stderr)\n            sys.exit(1)\n\n    # Build chained token sequence\n    T = dumps[0][\"prompt_tokens\"]\n    T.append(dumps[1][\"prompt_tokens\"][0])\n    T.append(dumps[2][\"prompt_tokens\"][0])\n",
+          "kind": "invalid",
+          "score": 0.0,
+          "detail": "no tool_call found in completion",
+          "prompt_tokens": 66022,
+          "completion_tokens": 1024,
+          "latency_ms": 258363.311985,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:val",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 72435,
+            "num_input_messages": 11,
+            "output_tokens": 1551,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 232456,
+            "session_id": "52b3e56a-d7a2-421d-a6ad-beb40fea5cb6",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 339,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "val",
+            "target_chars": 245,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-21T23:53:43.505585055Z",
+            "turn_id": "51ae1960e86d736b9831b095"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-340-c6fe7fe8e28c8bdda5109b61-6d8f90d5ceee",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"cargo nextest run -p kiln-server 2>&1 | head -100\\\",\\\"description\\\":\\\"Run kiln-server tests (CPU-only)\\\"}\",\"name\":\"Bash\"},\"id\":\"call_552b636b84684bc9a1aa06a5bb1ed8d4\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7225,
+          "detail": "name=1.00  | struct=1.00  | content=0.08 command: 0.10 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 84153,
+          "completion_tokens": 63,
+          "latency_ms": 53134.665994999996,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:test",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 88046,
+            "num_input_messages": 19,
+            "output_tokens": 169,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 301937,
+            "session_id": "cd3192fd-88bb-4b23-aa29-86361a5c6f11",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 340,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "test",
+            "target_chars": 269,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-30T15:28:32.793869497Z",
+            "turn_id": "c6fe7fe8e28c8bdda5109b61"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-341-cf21d65b098a7586d94cab85-8f462feeaee5",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ce artifacts-url --task-id 84a08bbf8424286e024ae341 --name heartbeat-sample.txt 2>&1\\\",\\\"description\\\":\\\"Get B2 URL for heartbeat sample\\\"}\",\"name\":\"Bash\"},\"id\":\"call_3de24551c04242e79e0449f98e175be8\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.9347827,
+          "detail": "name=1.00  | struct=1.00  | content=0.78 description: 0.57 || formats=[openai]",
+          "prompt_tokens": 98585,
+          "completion_tokens": 80,
+          "latency_ms": 69986.46083699999,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:val",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 101845,
+            "num_input_messages": 79,
+            "output_tokens": 140,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 330346,
+            "session_id": "0a9712bb-5063-437c-97c5-676d668e81ad",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 341,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "val",
+            "target_chars": 185,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-20T19:56:07.819296265Z",
+            "turn_id": "cf21d65b098a7586d94cab85"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-342-07f903087b00691a9209b43d-8cce93f4be57",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/workspace/sessions/53fedbcdd20a84862adb2054/internal/api/server_test.go\\\",\\\"limit\\\":100,\\\"offset\\\":2658}\",\"name\":\"Read\"},\"id\":\"call_79a07a95dbea49c2a186b16937619ce1\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.9000001,
+          "detail": "name=1.00  | struct=1.00  | content=0.67 limit: 0.00 || formats=[openai]",
+          "prompt_tokens": 116153,
+          "completion_tokens": 80,
+          "latency_ms": 85119.90366499999,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Read"
+          ],
+          "metadata": {
+            "input_tokens": 110994,
+            "num_input_messages": 77,
+            "output_tokens": 115,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 377994,
+            "session_id": "cadb6844-8d06-4883-927b-12618735cacf",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 342,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 158,
+            "target_tools": [
+              "Read"
+            ],
+            "timestamp": "2026-04-09T03:15:38.84067379Z",
+            "turn_id": "07f903087b00691a9209b43d"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-343-d6e0b3c58907481a53f68079-6123606e4b8a",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ce tasks-list --project-id b135d32c4adf5e8965a42347 --status completed --limit 10 2>&1 | head -100\\\",\\\"description\\\":\\\"List completed tasks for project\\\"}\",\"name\":\"Bash\"},\"id\":\"call_b7c1ff888eab4a9bbd075c1ed3d6d2cd\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.72,
+          "detail": "name=1.00  | struct=1.00  | content=0.07 command: 0.08 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 67190,
+          "completion_tokens": 86,
+          "latency_ms": 45955.961129,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:val",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 71967,
+            "num_input_messages": 3,
+            "output_tokens": 557,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 238929,
+            "session_id": "41e50aa5-09ed-4aa4-852e-33ec26038523",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 343,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "val",
+            "target_chars": 189,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-20T03:20:01.938095408Z",
+            "turn_id": "d6e0b3c58907481a53f68079"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-349-6f008edc9db71be4fdb7e25b-4713480da8bd",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ce tasks-get --id 504cc726b91f9b798c38a773 2>/dev/null\\\"}\",\"name\":\"Bash\"},\"id\":\"call_947802cf72394e57b54aae3f93fdd85d\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 1.0,
+          "detail": "name=1.00  | struct=1.00  | content=1.00  || formats=[openai]",
+          "prompt_tokens": 54113,
+          "completion_tokens": 58,
+          "latency_ms": 30579.980701,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 59424,
+            "num_input_messages": 7,
+            "output_tokens": 200,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 196937,
+            "session_id": "7de29846-af57-460e-804a-95e32ff3c2df",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 349,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 399,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-13T09:22:13.70391806Z",
+            "turn_id": "6f008edc9db71be4fdb7e25b"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-350-29c5b41162a6c9985b5ec105-cfe1e77552da",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/data/apps/notes/server.py\\\",\\\"limit\\\":20,\\\"offset\\\":804}\",\"name\":\"Read\"},\"id\":\"call_f3be59eb4ee0465ba2c098bebad964df\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.9000001,
+          "detail": "name=1.00  | struct=1.00  | content=0.67 offset: 0.00 || formats=[openai]",
+          "prompt_tokens": 81381,
+          "completion_tokens": 57,
+          "latency_ms": 49337.781608,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Read"
+          ],
+          "metadata": {
+            "input_tokens": 125357,
+            "num_input_messages": 86,
+            "output_tokens": 96,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 272187,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 350,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 111,
+            "target_tools": [
+              "Read"
+            ],
+            "timestamp": "2026-03-23T21:53:59.71373943Z",
+            "turn_id": "29c5b41162a6c9985b5ec105"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-351-3b439dcc443eb708b8442dca-4470281b7565",
+          "completion_index": 0,
+          "completion_text": "PR created. Now I need to verify the test command works. Let me try a simpler approach.\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"cd desktop && cargo check 2>&1 | head -30\\\",\\\"description\\\":\\\"Verify cargo check works locally\\\"}\",\"name\":\"Bash\"},\"id\":\"call_82dc7dcbb00442a08b61e5eaa93d18f6\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7225,
+          "detail": "name=1.00  | struct=1.00  | content=0.08 command: 0.10 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 75862,
+          "completion_tokens": 75,
+          "latency_ms": 50276.738942,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 84109,
+            "num_input_messages": 45,
+            "output_tokens": 189,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 271746,
+            "session_id": "e9c174bf-b2a0-4009-853f-4e497d6f06ce",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 351,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 225,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-17T17:48:56.112481485Z",
+            "turn_id": "3b439dcc443eb708b8442dca"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-352-8990f63d739124f2414152d8-77cd29a63355",
+          "completion_index": 0,
+          "completion_text": "I see! Line 706-708: after `gated_rms_norm`, it reshapes to `[B, T, v_dim]`. So `gated_rms_norm` must be doing the reshape internally. Let me look at `gated_rms_norm` again:\n\n```rust\nfn gated_rms_norm(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {\n    let x_f32 = x.to_dtype(DType::F32)?;\n    let z_f32 = z.to_dtype(DType::F32)?;\n    let w_f32 = weight.to_dtype(DType::F32)?;\n\n    // RMS norm on last dimension\n    let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;\n    let rms_inv = (variance + eps)?.sqrt()?.recip()?;\n    let normed = x_f32.broadcast_mul(&rms_inv)?;\n    let normed = normed.broadcast_mul(&w_f32)?;  // <-- This is where it fails\n```\n\nThe `mean_keepdim` keeps the last dimension, so variance is `[B, T, nv, 1]`. Then `rms_inv` is also `[B, T, nv, 1]`. The broadcast_mul with `x_f32: [B, T, nv, dv]` works because `[B, T, nv, 1]` broadcasts to `[B, T, nv, dv]`.\n\nThen `w_f32: [nv*dv]` is broadcast_mul'd with `normed: [B, T, nv, dv]`. This should fail unless... wait, maybe the actual model has `nv=1`? No, that's not right.\n\nLet me check if maybe the norm weight is actually `[dv]` not `[v_dim]`. Let me look at the actual Qwen3.5 config:\n\nActually, I think I see the issue. The `gated_rms_norm` function is doing RMSNorm on the last dimension, but the weight should be `[dv]` (per value head), not `[v_dim]` (per value head group). The comment in the weights struct says `[num_heads * head_dim]` but that's wrong for the GDN norm!\n\nLet me check if there's a reshape happening before `gated_rms_norm` that I missed. Actually, looking at the code flow:\n1. `attn_out` is `[B, T, nv, dv]`\n2. `gated_rms_norm` is called\n3. Inside `gated_rms_norm`, RMS norm is computed on last dim → `[B, T, nv, dv]`\n4. Then `normed.broadcast_mul(&w_f32)` where `w_f32: [nv*dv]`\n\nThis should fail! Unless... maybe the actual model has a different structure. Let me check if maybe the norm weight is actually `[dv]` and the comment is wrong. Or maybe there's a reshape I'm missing.\n\nActually, I think the issue is that the real model's GDN norm weight IS `[dv]` not `[v_dim]`. The comment in the weights struct is wrong. Let me verify by checking what shape the actual Qwen3.5 model has:\n\nActually, let me just fix my test to use the correct shape. The GDN norm weight should be `[dv]` = `[value_head_dim]`, not `[v_dim]` = `[num_value_heads * value_head_dim]`. Let me update the test:\n\n<tool_call>\n<function=Edit>\n<parameter=file_path>\n/workspace/sessions/68063310208374dfc93b911e/repo/crates/kiln-train/src/trainer.rs\n</parameter>\n<parameter=new_string>\n            let mlp = GpuFfnWeights {\n                gate_proj: Tensor::randn(0.0f32, 0.02, (inter, h), device)?,\n                up_proj: Tensor::randn(0.0f32, 0.02, (inter, h), device)?,\n                down_proj: Tensor::randn(0.0f32, 0.02, (h, inter), device)?,\n            };\n\n            let attention = if config.is_full_attention_layer(layer_idx) {\n                let nh = config.num_attention_heads;\n                let nkv = config.num_kv_heads;\n                let hd = config.head_dim;\n                GpuAttentionWeights::Full(GpuFullAttentionWeights {\n                    q_proj: Tensor::rand\n",
+          "kind": "invalid",
+          "score": 0.0,
+          "detail": "no tool_call found in completion",
+          "prompt_tokens": 113783,
+          "completion_tokens": 1024,
+          "latency_ms": 458793.042448,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Read"
+          ],
+          "metadata": {
+            "input_tokens": 115367,
+            "num_input_messages": 147,
+            "output_tokens": 396,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 395764,
+            "session_id": "fd9e7dbb-7c49-410b-be55-7cef9ff78b49",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 352,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 167,
+            "target_tools": [
+              "Read"
+            ],
+            "timestamp": "2026-04-13T23:12:38.117609738Z",
+            "turn_id": "8990f63d739124f2414152d8"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-353-f162678860047b2e2b3b93c8-29d51b57d6cf",
+          "completion_index": 0,
+          "completion_text": "Looking at this run, here's my brief reflection:\n\n**What went well:** The tool_call hook approach produced a measurable improvement (39.6 → 44.2), confirming that structured output formatting guidance before tool invocations helps the model produce more useful tool calls.\n\n**What could improve:** The stagnation from iteration 3 onward suggests the model found a local optimum but couldn't escape it. The radical mutation at temp=1.0 failed to break through — this indicates the search space has a narrow valley or the guidance format needs more variety.\n\n**Pattern noticed:** The improvement plateaued after iteration 2, suggesting diminishing returns from this approach. Future iterations should explore different guidance formats (JSON schema, XML wrappers, natural language prompts) rather than just mutating the current format.\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ce feedback-create --source agent --comment \\\\\\\"AutoResearch run with tool_call hook guidance (seed 6738) achieved 44.2, improving from 39.6 but plateaued at iteration 3. Radical mutation at temp=1.0 failed to escape local optimum. Pattern: structured output formatting helps but needs format variety to avoid stagnation. Global best remains 53.2.\\\\\\\"\\\"}\",\"name\":\"Bash\"},\"id\":\"call_e418d1962c174ee9a5ceca828685447e\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.55,
+          "detail": "name=1.00  | struct=0.50 missing=[description] extra=[] | content=0.00 command: 0.00 ; description: missing || formats=[openai]",
+          "prompt_tokens": 50845,
+          "completion_tokens": 272,
+          "latency_ms": 63705.27451,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 56895,
+            "num_input_messages": 1,
+            "output_tokens": 730,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 188204,
+            "session_id": "12cc64ae-4eae-450a-9a36-80b94ae268aa",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 353,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 847,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-07T08:19:31.432720467Z",
+            "turn_id": "f162678860047b2e2b3b93c8"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-354-f5f978c2c7f1eac66c61de56-08849aed01dc",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ls -la /tmp/*.png 2>&1\\\",\\\"description\\\":\\\"List screenshot files\\\"}\",\"name\":\"Bash\"},\"id\":\"call_7c391ba1e6c04501851eaed752aacaf6\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.75750005,
+          "detail": "name=1.00  | struct=1.00  | content=0.19 command: 0.33 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 46887,
+          "completion_tokens": 49,
+          "latency_ms": 24505.223225,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 91554,
+            "num_input_messages": 16,
+            "output_tokens": 102,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 170057,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 354,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 167,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-03-23T17:41:55.659438962Z",
+            "turn_id": "f5f978c2c7f1eac66c61de56"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-355-2440da45c4a65b610008082c-ab4a67b6bb8b",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ls -la /data/apps/trajectory-trainer/\\\"}\",\"name\":\"Bash\"},\"id\":\"call_d4e16a95c9434ed6971a47fb0f1ec95e\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.9000001,
+          "detail": "name=1.00  | struct=1.00  | content=0.67 command: 0.67 || formats=[openai]",
+          "prompt_tokens": 11079,
+          "completion_tokens": 35,
+          "latency_ms": 5110.812275,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-haiku-4-5-20251001",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 22748,
+            "num_input_messages": 3,
+            "output_tokens": 80,
+            "production_model": "claude-haiku-4-5-20251001",
+            "prompt_chars": 5925,
+            "session_id": "cb1bc2fd-c4ee-44ac-ae5e-a442679f41a9",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 355,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 101,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-07T00:16:21.479175479Z",
+            "turn_id": "2440da45c4a65b610008082c"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-356-2f5c540325b6bc125801d6ff-1d9eb941acaf",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/workspace/sessions/53fb64bfd20022f2c5dc1873/repo/docs/site/quickstart.html\\\",\\\"new_string\\\":\\\"          <p style=\\\\\\\"color: var(--fg-dim);\\\\\\\">Use <a href=\\\\\\\"#sft-corrections\\\\\\\">SFT</a>, <a href=\\\\\\\"grpo.html\\\\\\\">GRPO</a>, and adapter workflows only after the server is healthy and you have sent one chat request.</p>\\\",\\\"old_string\\\":\\\"          <p style=\\\\\\\"color: var(--fg-dim);\\\\\\\">Use SFT, <a href=\\\\\\\"grpo.html\\\\\\\">GRPO</a>, and adapter workflows only after the server is healthy and you have sent one chat request.</p>\\\",\\\"replace_all\\\":false}\",\"name\":\"Edit\"},\"id\":\"call_11e212d0ec94489089839d8d249ba891\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 1.0,
+          "detail": "name=1.00  | struct=1.00 missing=[] extra=[replace_all] | content=1.00  || formats=[openai]",
+          "prompt_tokens": 79303,
+          "completion_tokens": 203,
+          "latency_ms": 88412.57539,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:train",
+            "tool:Edit"
+          ],
+          "metadata": {
+            "input_tokens": 83042,
+            "num_input_messages": 13,
+            "output_tokens": 300,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 282768,
+            "session_id": "96ef97cf-ae85-4d61-aa8b-6bbae0f1ebc3",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 356,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 561,
+            "target_tools": [
+              "Edit"
+            ],
+            "timestamp": "2026-05-07T03:15:48.719914182Z",
+            "turn_id": "2f5c540325b6bc125801d6ff"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-357-aa1a245afcb397dc872c7640-96c344ac1dd1",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"export OPENSSL_DIR=/usr && cargo test -p kiln-server --no-default-features --lib logging 2>&1 | tail -20\\\",\\\"description\\\":\\\"Try with OPENSSL_DIR\\\",\\\"timeout\\\":300000}\",\"name\":\"Bash\"},\"id\":\"call_a785cc262bec4075a459c7c5412eaa80\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7225,
+          "detail": "name=1.00  | struct=1.00 missing=[] extra=[timeout] | content=0.08 command: 0.10 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 91081,
+          "completion_tokens": 88,
+          "latency_ms": 66981.163462,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:test",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 95838,
+            "num_input_messages": 67,
+            "output_tokens": 134,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 320611,
+            "session_id": "87e43aa7-c399-4a1b-8e45-520ca46f1018",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 357,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "test",
+            "target_chars": 190,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-25T11:37:22.50882669Z",
+            "turn_id": "aa1a245afcb397dc872c7640"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-358-c78931b70a2fbe62f4e1aa68-9e595984e6eb",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/workspace/sessions/fcae43da93a678c6e01c13d2/repo/crates/kiln-model/src/lora_loader.rs\\\",\\\"limit\\\":8,\\\"offset\\\":465}\",\"name\":\"Read\"},\"id\":\"call_62e10b8a7f7547929346014ea84b8e34\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 1.0,
+          "detail": "name=1.00  | struct=1.00  | content=1.00  || formats=[openai]",
+          "prompt_tokens": 78999,
+          "completion_tokens": 87,
+          "latency_ms": 56805.290693,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:test",
+            "tool:Read"
+          ],
+          "metadata": {
+            "input_tokens": 82918,
+            "num_input_messages": 27,
+            "output_tokens": 155,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 280655,
+            "session_id": "7b33af28-843c-4d64-b863-7c29d1987554",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 358,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "test",
+            "target_chars": 170,
+            "target_tools": [
+              "Read"
+            ],
+            "timestamp": "2026-04-29T02:23:04.01857638Z",
+            "turn_id": "c78931b70a2fbe62f4e1aa68"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-359-a645a665f626c0cbcb1702d9-73aa47ca2608",
+          "completion_index": 0,
+          "completion_text": "Now run the browser automation to take screenshots:\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"npx puppeteer@latest eval 'const p=require(\\\\\\\"puppeteer\\\\\\\");(async()=>{const b=await p.launch({executablePath:\\\\\\\"/usr/bin/chromium-browser\\\\\\\",headless:true,args:[\\\\\\\"--no-sandbox\\\\\\\"]});const pg=await b.newPage();await pg.setViewport({width:390,height:844,isMobile:true});await pg.goto(\\\\\\\"http://127.0.0.1:8080/apps/webui-next\\\\\\\",{waitUntil:\\\\\\\"networkidle2\\\\\\\",timeout:15000});await new Promise(r=>setTimeout(r,1000));await pg.screenshot({path:\\\\\\\"chat-home-mobile.png\\\\\\\"});await pg.goto(\\\\\\\"http://127.0.0.1:8080/apps/webui-next/chats\\\\\\\",{waitUntil:\\\\\\\"networkidle2\\\\\\\"});await new Promise(r=>setTimeout(r,800));await pg.screenshot({path:\\\\\\\"chat-list-mobile.png\\\\\\\"});const row=await pg.$(\\\\\\\".inbox-row\\\\\\\");if(row){await row.click();await new Promise(r=>setTimeout(r,1000));await pg.screenshot({path:\\\\\\\"chat-detail-mobile.png\\\\\\\"});}await b.close();})()' 2>&1\\\",\\\"description\\\":\\\"Take mobile screenshots of chat flow\\\",\\\"timeout\\\":60000}\",\"name\":\"Bash\"},\"id\":\"call_bd5f0e6e8484408c8bf6e0c0d279af32\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.71500003,
+          "detail": "name=1.00  | struct=1.00  | content=0.05 command: 0.10 ; description: 0.05 ; timeout: 0.00 || formats=[openai]",
+          "prompt_tokens": 125779,
+          "completion_tokens": 320,
+          "latency_ms": 200251.9444,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 120901,
+            "num_input_messages": 65,
+            "output_tokens": 143,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 414657,
+            "session_id": "b4737ab9-3388-44d7-9057-a53bfddd6dc4",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 359,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 220,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-07T14:59:42.478403948Z",
+            "turn_id": "a645a665f626c0cbcb1702d9"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-362-c0f1262d8d84f832245f2246-24bbb1a36691",
+          "completion_index": 0,
+          "completion_text": "Now let me check the web layer to understand how tasks are created and exposed:\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"find /workspace/sessions/3b845436e6d2b2243becd658/internal/web -name \\\\\\\"*.go\\\\\\\" -type f\\\"}\",\"name\":\"Bash\"},\"id\":\"call_c45a13a2b7204c108e57c5700cbdbe62\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.73,
+          "detail": "name=1.00  | struct=1.00  | content=0.10 command: 0.10 || formats=[openai]",
+          "prompt_tokens": 60118,
+          "completion_tokens": 79,
+          "latency_ms": 39263.085332,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-haiku-4-5-20251001",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 70129,
+            "num_input_messages": 61,
+            "output_tokens": 106,
+            "production_model": "claude-haiku-4-5-20251001",
+            "prompt_chars": 164415,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 362,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 163,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-03-21T17:06:47.132573074Z",
+            "turn_id": "c0f1262d8d84f832245f2246"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-363-6e4bcd8f98b0ae1738db0488-bb127b5d0bf1",
+          "completion_index": 0,
+          "completion_text": "All 29 tests pass. Now let me run `cargo clippy` and `cargo fmt`:\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"CARGO_HOME=$HOME/.cargo cargo clippy -- -D warnings 2>&1\\\",\\\"description\\\":\\\"Run clippy with warnings as errors\\\",\\\"timeout\\\":180000}\",\"name\":\"Bash\"},\"id\":\"call_8176d1925c084cd2abf1118124ad4da3\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.77750003,
+          "detail": "name=1.00  | struct=1.00  | content=0.26 command: 0.12 ; description: 0.65 ; timeout: 0.00 || formats=[openai]",
+          "prompt_tokens": 85411,
+          "completion_tokens": 100,
+          "latency_ms": 65724.41744399999,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 85771,
+            "num_input_messages": 51,
+            "output_tokens": 132,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 290616,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 363,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 190,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-03-26T09:09:10.382192228Z",
+            "turn_id": "6e4bcd8f98b0ae1738db0488"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-364-3ce6f8e86e83a77bedca12e2-b336574d512b",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"prompt\\\":\\\"Look at the documentary video section. Is there a video player? What's the title and description? Is there a \\\\\\\"Watch the Film\\\\\\\" button? What does the page say about the video? Are there any issues with the video section?\\\",\\\"url\\\":\\\"https://folkreel.com/d/XjBe41T_6f4OHWC7-SEsrQ\\\"}\",\"name\":\"WebFetch\"},\"id\":\"call_90f67dacfe9c4bd5a3e8a96c827dcb94\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7760715,
+          "detail": "name=1.00  | struct=1.00  | content=0.25 prompt: 0.05 ; url: 0.46 || formats=[openai]",
+          "prompt_tokens": 48229,
+          "completion_tokens": 107,
+          "latency_ms": 34687.829025,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:WebFetch"
+          ],
+          "metadata": {
+            "input_tokens": 54226,
+            "num_input_messages": 50,
+            "output_tokens": 174,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 169900,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 364,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 241,
+            "target_tools": [
+              "WebFetch"
+            ],
+            "timestamp": "2026-03-15T02:08:57.55402112Z",
+            "turn_id": "3ce6f8e86e83a77bedca12e2"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-365-5d85501463aad15dec984e7b-7f1a160d835f",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ls -la /data/apps/music/ 2>&1\\\",\\\"description\\\":\\\"List running app directory\\\"}\",\"name\":\"Bash\"},\"id\":\"call_8ae8aa5043a244e4abb905e747c250d2\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.28583336,
+          "detail": "[0] name=1.00  | struct=1.00  | content=0.52 description: 0.05 || [1] missing predicted call (expected `Bash`) || [2] missing predicted call (expected `Bash`) || formats=[openai]",
+          "prompt_tokens": 15762,
+          "completion_tokens": 51,
+          "latency_ms": 8200.592434,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash",
+            "tool:Bash",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 21357,
+            "num_input_messages": 5,
+            "output_tokens": 253,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 51474,
+            "session_id": "928bd65f-5c03-448a-988e-2b895fae770f",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 365,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 437,
+            "target_tools": [
+              "Bash",
+              "Bash",
+              "Bash"
+            ],
+            "timestamp": "2026-03-28T08:53:18.039076501Z",
+            "turn_id": "5d85501463aad15dec984e7b"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-366-d59bfbc4e63f24145b960e1d-e1cde710edfb",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"python3 /tmp/runpod_api.py wait i4rrmiseoukau3 2>&1\\\",\\\"description\\\":\\\"Wait for SSH\\\",\\\"timeout\\\":300000}\",\"name\":\"Bash\"},\"id\":\"call_c62427cff1b44b3a9fdd5a7a8f56ae32\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.95714295,
+          "detail": "name=1.00  | struct=1.00  | content=0.86 description: 0.57 || formats=[openai]",
+          "prompt_tokens": 101034,
+          "completion_tokens": 75,
+          "latency_ms": 70990.726274,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 108334,
+            "num_input_messages": 181,
+            "output_tokens": 147,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 347722,
+            "session_id": "7fb303cb-f74c-4f09-9bcc-d8a9caff4da6",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 366,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 162,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-16T16:42:35.021486787Z",
+            "turn_id": "d59bfbc4e63f24145b960e1d"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-368-53c043701e34ef54c35f8599-4ad973ed83c3",
+          "completion_index": 0,
+          "completion_text": "All 18 files staged plus PROFILING.md. Commit and push.\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"git commit -m \\\\\\\"chore: move MTP phase-B profiling logs to assets/profiling/\\\\n\\\\nCold-reader polish — README points to assets/logo.png, but assets/ root\\\\nalso contained 18 leftover MTP phase-B trace/aggregate files (~1 MB) from\\\\nthe speculative-decoding null-result audit. Move them under\\\\nassets/profiling/ so the assets/ root stays focused on launch-visible\\\\nartifacts. PROFILING.md references updated; assets/logo.png unchanged.\\\\\\\"\\\",\\\"description\\\":\\\"Commit the file move\\\"}\",\"name\":\"Bash\"},\"id\":\"call_c8e9362098304fe4b40d23e8761ac816\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.7825,
+          "detail": "name=1.00  | struct=1.00  | content=0.28 command: 0.50 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 83245,
+          "completion_tokens": 155,
+          "latency_ms": 79467.002411,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:test",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 85303,
+            "num_input_messages": 35,
+            "output_tokens": 335,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 291847,
+            "session_id": "cb546777-c8b6-48a9-b4b2-f3fee90c74e6",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 368,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "test",
+            "target_chars": 636,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-05-01T17:43:13.840763235Z",
+            "turn_id": "53c043701e34ef54c35f8599"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-369-3946f3522cf7faca0679d8bd-32d0aec3e743",
+          "completion_index": 0,
+          "completion_text": "Let me check the actual content of the music.db file in /data/repos:\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"cat /data/repos/apps/music/music.db\\\"}\",\"name\":\"Bash\"},\"id\":\"call_aaf9c8ce990840b8ad3ff123968bc821\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.73,
+          "detail": "name=1.00  | struct=1.00  | content=0.10 command: 0.10 || formats=[openai]",
+          "prompt_tokens": 32547,
+          "completion_tokens": 49,
+          "latency_ms": 16637.011104999998,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-haiku-4-5-20251001",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 41461,
+            "num_input_messages": 21,
+            "output_tokens": 205,
+            "production_model": "claude-haiku-4-5-20251001",
+            "prompt_chars": 73572,
+            "session_id": "928bd65f-5c03-448a-988e-2b895fae770f",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 369,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 525,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-03-28T08:52:38.090859619Z",
+            "turn_id": "3946f3522cf7faca0679d8bd"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-370-16d8921990a325236ec2ff08-251a28195a7c",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ce projects-create --title \\\\\\\"Voice Eric\\\\\\\" --description \\\\\\\"Bidirectional voice interface app for Cloud Eric with three-loop architecture: tight voice model loop, orchestrator bridge loop, and Cloud Eric backend loop. Mobile-first design for walking around SF. Cartesia and Google Gemini Live API candidates for inner voice loop.\\\\\\\" --goals \\\\\\\"build-voice-eric-app,implement-three-loop-architecture,design-mobile-ui\\\\\\\"\\\",\\\"timeout\\\":10000}\",\"name\":\"Bash\"},\"id\":\"call_7a7381f6c0ae4a18aaffa0d3bef501f9\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.9333334,
+          "detail": "name=1.00  | struct=1.00  | content=0.78 command: 0.56 || formats=[openai]",
+          "prompt_tokens": 43094,
+          "completion_tokens": 122,
+          "latency_ms": 32589.654638,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 51805,
+            "num_input_messages": 5,
+            "output_tokens": 338,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 165625,
+            "session_id": "bf76eb23-47ae-4b51-b66b-6ed4e19a8fcf",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 370,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 1183,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-03-28T21:30:56.510013441Z",
+            "turn_id": "16d8921990a325236ec2ff08"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-371-f6da5b3bd185bf42b5e3ef09-5f7c6ab179a2",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"tail -3 /tmp/claude-1000/-workspace-sessions-7562e7a202257eb15f6d00f7/49eb297b-07b7-4d4f-a23e-1d247142d244/tasks/bkxohv5ju.output 2>&1 | head -3\\\",\\\"description\\\":\\\"Check wait task\\\"}\",\"name\":\"Bash\"},\"id\":\"call_00d47895c7244e7d95309ac07fc3aaac\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.9250001,
+          "detail": "name=1.00  | struct=1.00  | content=0.75 command: 0.50 || formats=[openai]",
+          "prompt_tokens": 96934,
+          "completion_tokens": 131,
+          "latency_ms": 86311.130314,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 102333,
+            "num_input_messages": 134,
+            "output_tokens": 179,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 308252,
+            "session_id": "49eb297b-07b7-4d4f-a23e-1d247142d244",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 371,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 235,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-16T23:06:16.222641235Z",
+            "turn_id": "f6da5b3bd185bf42b5e3ef09"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-372-c4c4c9950392fbbe64f0bea7-ea6472278447",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"python3 /data/.clouderic-internal/repos/apps/trajectory-trainer/scripts/runpod_api.py ssh nxqgqcb995tba7 \\\\\\\"cat /etc/apt/sources.list.d/ubuntu.sources 2>&1 | head -30\\\\\\\" 2>&1 | tail -20\\\",\\\"description\\\":\\\"Check ubuntu sources format\\\"}\",\"name\":\"Bash\"},\"id\":\"call_8bf2df3fcd3142209eac44c4e1d42f25\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.95000005,
+          "detail": "name=1.00  | struct=1.00  | content=0.83 command: 0.67 || formats=[openai]",
+          "prompt_tokens": 68457,
+          "completion_tokens": 102,
+          "latency_ms": 51063.632169000004,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 74552,
+            "num_input_messages": 53,
+            "output_tokens": 184,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 241797,
+            "session_id": "f6c84b3e-1237-4122-b3cb-6d65526b94c9",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 372,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 263,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-16T14:49:52.76120569Z",
+            "turn_id": "c4c4c9950392fbbe64f0bea7"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-373-2453b8aef154a63d21931aa6-6b118e267aa8",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"todos\\\":[{\\\"activeForm\\\":\\\"Writing server.js backend\\\",\\\"content\\\":\\\"Write server.js backend with Cartesia TTS/STT integration and CE orchestrator\\\",\\\"status\\\":\\\"completed\\\"},{\\\"activeForm\\\":\\\"Writing frontend UI\\\",\\\"content\\\":\\\"Write mobile-first frontend UI with visualization and voice controls\\\",\\\"status\\\":\\\"completed\\\"},{\\\"activeForm\\\":\\\"Installing deps and testing startup\\\",\\\"content\\\":\\\"Install dependencies and test app startup\\\",\\\"status\\\":\\\"in_progress\\\"},{\\\"activeForm\\\":\\\"Validating end-to-end functionality\\\",\\\"content\\\":\\\"Validate end-to-end: TTS, STT, CE API integration\\\",\\\"status\\\":\\\"pending\\\"},{\\\"activeForm\\\":\\\"Taking screenshot and saving artifact\\\",\\\"content\\\":\\\"Take screenshot with Puppeteer and save artifact\\\",\\\"status\\\":\\\"pending\\\"}]}\",\"name\":\"TodoWrite\"},\"id\":\"call_8f041e118dc146e78290cbbdfa60f15f\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 1.0,
+          "detail": "name=1.00  | struct=1.00  | content=1.00  || formats=[openai]",
+          "prompt_tokens": 58317,
+          "completion_tokens": 162,
+          "latency_ms": 54149.230885000004,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:TodoWrite"
+          ],
+          "metadata": {
+            "input_tokens": 84368,
+            "num_input_messages": 19,
+            "output_tokens": 234,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 218688,
+            "session_id": "378ea3c4-37c4-45c7-be13-42017e248f92",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 373,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 753,
+            "target_tools": [
+              "TodoWrite"
+            ],
+            "timestamp": "2026-03-28T21:39:42.362140807Z",
+            "turn_id": "2453b8aef154a63d21931aa6"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-375-9ae95f435bbfc51a649be088-500da9fb7d24",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"content\\\":\\\"# Claude Code Harness for OMA\\\\n\\\\nAn OMA harness adapter that uses [Claude Code](https://docs.anthropic.com/en/guides/claude-code) (`claude -p`) as the agent runtime. This is a thin harness that pipes session context to Claude Code and streams events back.\\\\n\\\\n## How It Works\\\\n\\\\nClaude Code in pipe/prompt mode (`claude -p`) is designed for embedding — it reads context from stdin, handles tool use natively, and outputs to stdout. This harness:\\\\n\\\\n1. Reads the user's task from OMA's session event log\\\\n2. Pipes the task and session context to `claude -p`\\\\n3. Streams Claude Code's output back as OMA events\\\\n4. Handles tool execution (via OMA's execute API)\\\\n\\\\n```\\\\nOMA Session                    Claude Code Harness                    Claude Code\\\\n───────────                    ─────────────                    ──────────────\\\\n1. User posts event     ──▶   2. Reads event log\\\\n                              3. Extracts task\\\\n                              4. Pipes to claude -p    ──▶  5. Claude handles tools\\\\n                                                          ◀──  6. Streams output\\\\n                              7. Translates events\\\\n                              8. Posts OMA events     ──▶   (stored in event log)\\\\n```\\\\n\\\\nClaude Code manages its own LLM calls and tool execution. The harness captures the output and translates it to OMA events.\\\\n\\\\n## Prerequisites\\\\n\\\\n- **Python 3.10+**\\\\n- **Claude Code**: `npm install -g @anthropic/claude-code`\\\\n- An Anthropic API key (`ANTHROPIC_API_KEY`)\\\\n\\\\n## Usage\\\\n\\\\n```bash\\\\n# Start an OMA server\\\\n./oma serve\\\\n\\\\n# Create agent, environment, session, and post a user event\\\\n\\\\n# Run the Claude Code harness\\\\nexport ANTHROPIC_API_KEY=\\\\\\\"your-key\\\\\\\"\\\\npython3 harnesses/claude-code/harness.py \\\\\\\\\\\\n  --session-id session_abc123 \\\\\\\\\\\\n  --server http://localhost:8080 \\\\\\\\\\\\n  --claude-bin /path/to/claude\\\\n\\\\n# Or use the global npm install\\\\npython3 harnesses/claude-code/harness.py \\\\\\\\\\\\n  --session-id session_abc123 \\\\\\\\\\\\n  --server http://localhost:8080\\\\n```\\\\n\\\\n## Options\\\\n\\\\n| Flag | Default | Description |\\\\n|------|---------|-------------|\\\\n| `--session-id` | (required) | OMA session ID to run |\\\\n| `--server` | `http://localhost:8080` | OMA server URL |\\\\n| `--claude-bin` | `claude` | Path to Claude Code binary |\\\\n| `--model` | (auto) | Model (defaults to Claude's configured model) |\\\\n| `--workdir` | `.` | Working directory for Claude Code |\\\\n| `--system-prompt` | (auto) | System prompt (defaults to agent's system prompt) |\\\\n\\\\n## Event Mapping\\\\n\\\\n| Claude Code Output | OMA Event |\\\\n|--------------------|-----------|\\\\n| Assistant text output | `assistant` event with text content |\\\\n| Tool use (tool_call) | `tool_use` block in assistant event |\\\\n| Tool result (tool_result) | `tool_result` event |\\\\n| Error | `assistant` event with error text |\\\\n\\\\n## Architecture Notes\\\\n\\\\n- Claude Code runs as a subprocess with stdin/stdout piping\\\\n- The harness uses `--mode json` or similar to get structured output\\\\n- Tool execution happens inside Claude Code (not routed through OMA's execute API)\\\\n- Tool results are captured and posted as OMA events for observability\\\\n- If Claude Code crashes, the session event log preserves all progress\\\\n- The harness can be extended to support streaming output for real-time UI updates\\\\n\\\\n## Example Tool Execution\\\\n\\\\nWhen Claude Code invokes a tool like `write_file`:\\\\n\\\\n1. The harness extracts the tool call from Claude's output\\\\n2. Posts a `tool_use` block in the assistant event\\\\n3. Executes the tool via OMA's `/v1/sessions/{id}/execute` API\\\\n4. Captures the result and posts a `tool_result` event\\\\n5. Continues the loop until `stop_reason` is `end_turn`\\\\n\\\",\\\"file_path\\\":\\\"/workspace/sessions/20b877990a5501a94b23f8ed/oma/harnesses/claude-code/README.md\\\"}\",\"name\":\"Write\"},\"id\":\"call_aba66c5ff7b44306bd193484643a898b\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.0,
+          "detail": "name=0.00 expected `TodoWrite`, got `Write` | struct=0.00 missing=[todos] extra=[content,file_path] | content=0.00 todos: missing || formats=[openai]",
+          "prompt_tokens": 89715,
+          "completion_tokens": 994,
+          "latency_ms": 351034.299706,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:TodoWrite"
+          ],
+          "metadata": {
+            "input_tokens": 95333,
+            "num_input_messages": 45,
+            "output_tokens": 282,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 322795,
+            "session_id": "7f448b19-2787-44d1-8419-82372d842410",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 375,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 903,
+            "target_tools": [
+              "TodoWrite"
+            ],
+            "timestamp": "2026-04-09T01:16:17.8570756Z",
+            "turn_id": "9ae95f435bbfc51a649be088"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-377-75c742c02cd9e5e6708beebf-bb8e072c9180",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"GITHUB_TOKEN=$(ce secret-get --name GITHUB_TOKEN) gh api repos/ericflo/kiln/contents/desktop/src-tauri/Cargo.toml --jq '.content' | base64 -d | head -100\\\",\\\"description\\\":\\\"Read desktop Cargo.toml\\\"}\",\"name\":\"Bash\"},\"id\":\"call_6c102f37bb064454b5693547bd37c29e\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.79666674,
+          "detail": "name=1.00  | struct=1.00  | content=0.32 command: 0.44 ; description: 0.20 || formats=[openai]",
+          "prompt_tokens": 69644,
+          "completion_tokens": 90,
+          "latency_ms": 49428.21095,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 73349,
+            "num_input_messages": 19,
+            "output_tokens": 193,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 242174,
+            "session_id": "3bb73fef-f6dc-4483-bcd7-8648c41512e0",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 377,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 289,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-17T06:46:44.937425555Z",
+            "turn_id": "75c742c02cd9e5e6708beebf"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-378-ae4231d3d6e8c4e7594d6649-1eeac68bec69",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"go test ./... -count=1 2>&1 | tail -15\\\",\\\"description\\\":\\\"Run tests\\\"}\",\"name\":\"Bash\"},\"id\":\"call_64ae6b21ac704d7bbef02f1eebf01880\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.25261906,
+          "detail": "[0] name=1.00  | struct=1.00  | content=0.19 command: 0.10 ; description: 0.29 || [1] missing predicted call (expected `Bash`) || [2] missing predicted call (expected `Bash`) || formats=[openai]",
+          "prompt_tokens": 59748,
+          "completion_tokens": 54,
+          "latency_ms": 33591.841088,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash",
+            "tool:Bash",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 65797,
+            "num_input_messages": 25,
+            "output_tokens": 205,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 220436,
+            "session_id": "c22924cd-6def-42fa-8c08-7a26bab40044",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 378,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 327,
+            "target_tools": [
+              "Bash",
+              "Bash",
+              "Bash"
+            ],
+            "timestamp": "2026-04-10T07:21:21.629839306Z",
+            "turn_id": "ae4231d3d6e8c4e7594d6649"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-379-97849f9864785f1f76e9a5d0-f30ed1d1643c",
+          "completion_index": 0,
+          "completion_text": "Now let me implement Phase B. I'll create a new function `fused_linear_cross_entropy_phase_b` that uses a `CustomOp1` with manual backward recomputation.\n{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/workspace/sessions/a9e90913558d77f7d3481247/repo/kiln/crates/kiln-flce-kernel/src/lib.rs\\\"}\",\"name\":\"Read\"},\"id\":\"call_ea379612f2564ef7a543e5a372dbaa03\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.57058823,
+          "detail": "name=1.00  | struct=0.33 missing=[limit,offset] extra=[] | content=0.24 file_path: 0.71 ; limit: missing ; offset: missing || formats=[openai]",
+          "prompt_tokens": 120329,
+          "completion_tokens": 105,
+          "latency_ms": 99522.364533,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:test",
+            "tool:Read"
+          ],
+          "metadata": {
+            "input_tokens": 137162,
+            "num_input_messages": 87,
+            "output_tokens": 646,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 400742,
+            "session_id": "5046c602-cb29-4540-b045-d3af441c4936",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 379,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "test",
+            "target_chars": 187,
+            "target_tools": [
+              "Read"
+            ],
+            "timestamp": "2026-04-29T18:32:49.00428481Z",
+            "turn_id": "97849f9864785f1f76e9a5d0"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-380-6768897875b7d57e4b76ea7b-2a72ea8e8bab",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"GITHUB_TOKEN=$(ce secret-get --name GITHUB_TOKEN)\\\",\\\"description\\\":\\\"Get GitHub token\\\"}\",\"name\":\"Bash\"},\"id\":\"call_31805518400b449d8a51b5c36af25aa1\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.70500004,
+          "detail": "name=1.00  | struct=0.67 missing=[timeout] extra=[] | content=0.35 description: 0.05 ; timeout: missing || formats=[openai]",
+          "prompt_tokens": 42818,
+          "completion_tokens": 51,
+          "latency_ms": 22555.270787,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 49929,
+            "num_input_messages": 3,
+            "output_tokens": 206,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 161029,
+            "session_id": "unknown",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 380,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 462,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-03-26T10:10:45.325408131Z",
+            "turn_id": "6768897875b7d57e4b76ea7b"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-381-3cc7a68c6522ae71036fb194-ef189570b146",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/workspace/sessions/eeb5056368f9b8f139264de7/repo/crates/kiln-server/src/api/completions.rs\\\",\\\"limit\\\":100,\\\"offset\\\":1690}\",\"name\":\"Read\"},\"id\":\"call_f254df08dcc541ab9c090b505e8730d0\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.0,
+          "detail": "name=0.00 expected `Bash`, got `Read` | struct=0.00 missing=[command,description] extra=[file_path,limit,offset] | content=0.00 command: missing ; description: missing || formats=[openai]",
+          "prompt_tokens": 93344,
+          "completion_tokens": 93,
+          "latency_ms": 70339.932406,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:test",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 100948,
+            "num_input_messages": 49,
+            "output_tokens": 574,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 335111,
+            "session_id": "8d66f7c3-8132-42dd-a033-fa1fe2382c5f",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 381,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "test",
+            "target_chars": 211,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-30T21:42:25.825354366Z",
+            "turn_id": "3cc7a68c6522ae71036fb194"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-383-a1bf2f7fc6dfcc53e1864e13-66099dae19b7",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"\\\\\\\\\\\\n\\\\\\\\\\\\necho \\\\\\\"=== vLLM qwen3_5_mtp.py exists? ===\\\\\\\" && \\\\\\\\\\\\ngh api repos/vllm-project/vllm/contents/vllm/model_executor/models/qwen3_5_mtp.py --jq '.name' 2>&1 && \\\\\\\\\\\\necho \\\\\\\"=== vLLM qwen3_next_mtp.py exists? ===\\\\\\\" && \\\\\\\\\\\\ngh api repos/vllm-project/vllm/contents/vllm/model_executor/models/qwen3_next_mtp.py --jq '.name' 2>&1 && \\\\\\\\\\\\necho \\\\\\\"=== vLLM spec_decode/eagle.py ===\\\\\\\" && \\\\\\\\\\\\ngh api repos/vllm-project/vllm/contents/vllm/v1/spec_decode/eagle.py --jq '.name' 2>&1\\\",\\\"description\\\":\\\"Check vLLM MTP files exist\\\"}\",\"name\":\"Bash\"},\"id\":\"call_0041fbc68cb54b1ba04f51147cafa0bb\",\"type\":\"function\"}]}",
+          "kind": "fail",
+          "score": 0.70750004,
+          "detail": "name=1.00  | struct=1.00  | content=0.03 command: 0.00 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 109592,
+          "completion_tokens": 210,
+          "latency_ms": 129808.69582400001,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-7",
+            "split:test",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 110384,
+            "num_input_messages": 37,
+            "output_tokens": 510,
+            "production_model": "claude-opus-4-7",
+            "prompt_chars": 369786,
+            "session_id": "e3adfd69-6113-4c5b-a0cb-b82282d8991d",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 383,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "test",
+            "target_chars": 743,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-25T01:20:50.127730961Z",
+            "turn_id": "a1bf2f7fc6dfcc53e1864e13"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-385-9e4d4e69c92559e008b65fbb-dae0ade167e1",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ls -la /tmp/now-*.png 2>/dev/null\\\",\\\"description\\\":\\\"Check new screenshots\\\"}\",\"name\":\"Bash\"},\"id\":\"call_556ccbaae42c4bd8bf4b2232b501c430\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.8575001,
+          "detail": "name=1.00  | struct=1.00  | content=0.52 description: 0.05 || formats=[openai]",
+          "prompt_tokens": 62383,
+          "completion_tokens": 53,
+          "latency_ms": 35362.098021,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 67950,
+            "num_input_messages": 17,
+            "output_tokens": 86,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 228030,
+            "session_id": "3812c672-d90c-41fc-b6c7-1abbc6d4f59b",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 385,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 132,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-07T08:07:48.170433392Z",
+            "turn_id": "9e4d4e69c92559e008b65fbb"
+          }
+        },
+        {
+          "example_id": "trace-srca1f164c6-386-7ff6dbb8d6c37cd88af7b08c-c50e929364d7",
+          "completion_index": 0,
+          "completion_text": "{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"python3 /workspace/sessions/9359cefb976b07c9fc85ad0e/runpod_api.py ssh scaqatd1dc3h6k \\\\\\\"sed -i 's/CMAKE_CUDA_ARCHITECTURES=86/CMAKE_CUDA_ARCHITECTURES=89/' /tmp/llama-setup.sh && grep CMAKE_CUDA /tmp/llama-setup.sh\\\\\\\" 2>&1 | tail -5\\\",\\\"description\\\":\\\"Update llama setup for sm_89\\\"}\",\"name\":\"Bash\"},\"id\":\"call_beeda1b371204891a4e950ff69975afe\",\"type\":\"function\"}]}",
+          "kind": "pass",
+          "score": 0.80750006,
+          "detail": "name=1.00  | struct=1.00  | content=0.36 command: 0.67 ; description: 0.05 || formats=[openai]",
+          "prompt_tokens": 82287,
+          "completion_tokens": 140,
+          "latency_ms": 74049.113944,
+          "tags": [
+            "production_trace",
+            "kind:tool_call",
+            "source_format:prompt_chosen_jsonl",
+            "production_model:claude-opus-4-6",
+            "split:train",
+            "tool:Bash"
+          ],
+          "metadata": {
+            "input_tokens": 92652,
+            "num_input_messages": 114,
+            "output_tokens": 263,
+            "production_model": "claude-opus-4-6",
+            "prompt_chars": 283452,
+            "session_id": "850a56e7-fe00-4593-9563-1af4fea923ef",
+            "source_format": "prompt_chosen_jsonl",
+            "source_line": 386,
+            "source_path": "/workspace/pr1383-qwen35-base-eval-1000/analysis_v12_random_stratified_1000_cap262144.prompt_chosen.jsonl",
+            "split": "train",
+            "target_chars": 276,
+            "target_tools": [
+              "Bash"
+            ],
+            "timestamp": "2026-04-16T04:33:51.589271021Z",
+            "turn_id": "7ff6dbb8d6c37cd88af7b08c"
+          }
+        }
+      ],
+      "started_at": "2026-05-25T09:47:46.888562950+00:00",
+      "finished_at": "2026-05-25T11:12:13.260685971+00:00",
+      "suite_hash": "sha256:3737e330b2801d56f00390d1a484e00d9d29d03982fcdd2d50ad8c3666ba240f"
+    }
+  ]
+}
