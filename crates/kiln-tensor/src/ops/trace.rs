@@ -18,6 +18,18 @@ pub fn trace(t: &Tensor) -> Result<Tensor> {
     if !t.is_contiguous() {
         bail!("trace: input must be contiguous");
     }
+
+    // CUDA fast path (#1082): `trace = sum(diagonal(x))`. Compose
+    // `cuda_diagonal_extract` (rank-2 `[n,n]` -> rank-1 `[n]`) with
+    // `cuda_sum_last_axis` (rank-1 -> rank-0 scalar). Both helpers
+    // handle all three supported dtypes natively and keep the result
+    // on the same CUDA device.
+    #[cfg(feature = "cuda")]
+    if matches!(t.device(), crate::Device::Cuda(_)) {
+        let diag = crate::cuda_diagonal_extract(t)?;
+        return crate::cuda_sum_last_axis(&diag);
+    }
+
     let dtype = t.dtype();
     let bytes = t
         .storage()
