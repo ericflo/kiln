@@ -571,17 +571,11 @@ pub fn sample_with_params(
 /// `top_p = 1`, and `top_k = 0`.
 fn sample_full_distribution_unsorted(scaled: &Tensor, seed: Option<u64>) -> Result<u32> {
     #[cfg(feature = "cuda")]
-    if crate::forward::cuda_use_kt_api_sampling_softmax() {
-        if let Some(weights) = try_kt_full_distribution_probs(scaled)? {
-            if weights.is_empty() {
-                anyhow::bail!("empty logits distribution");
-            }
-            return sample_from_distribution_weights(
-                &weights,
-                seed,
-                (weights.len() - 1) as u32,
-            );
+    if let Some(weights) = try_kt_full_distribution_probs(scaled)? {
+        if weights.is_empty() {
+            anyhow::bail!("empty logits distribution");
         }
+        return sample_from_distribution_weights(&weights, seed, (weights.len() - 1) as u32);
     }
 
     let values: Vec<f32> = scaled.to_vec1()?;
@@ -1277,6 +1271,31 @@ mod tests {
         let expected_token =
             sample_from_distribution_weights(&expected, Some(123), fallback_idx)?;
         assert_eq!(got_token, expected_token);
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_cuda_full_distribution_sampler_default_matches_cpu() -> Result<()> {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!(
+                "CUDA unavailable, skipping test_cuda_full_distribution_sampler_default_matches_cpu"
+            );
+            return Ok(());
+        };
+        let cpu = Device::Cpu;
+        let values = [0.0_f32, 2.0, -1.0, 6.0, 1.0, -3.0];
+        let cuda_logits = Tensor::new(&values, &cuda)?;
+        let cpu_logits = Tensor::new(&values, &cpu)?;
+
+        for seed in 0..32 {
+            let got = sample_full_distribution_unsorted(&cuda_logits, Some(seed))?;
+            let expected = sample_full_distribution_unsorted(&cpu_logits, Some(seed))?;
+            assert_eq!(
+                got, expected,
+                "full-distribution token mismatch at seed {seed}: got {got}, expected {expected}"
+            );
+        }
         Ok(())
     }
 
