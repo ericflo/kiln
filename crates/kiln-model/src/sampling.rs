@@ -50,6 +50,14 @@ fn last_position_logits(logits: &Tensor) -> Result<Tensor> {
 /// Returns the token ID (index of the maximum logit).
 pub fn greedy_sample(logits: &Tensor) -> Result<u32> {
     let flat = last_position_logits(logits)?;
+    // Phase 7 (#1082): contiguous CUDA logits of {F32, BF16, F16}
+    // take the kt 1-D argmax path by default after last-position
+    // flattening. Falls through to candle's argmax when any
+    // compatibility precondition fails.
+    #[cfg(feature = "cuda")]
+    if let Some(idx) = crate::forward::try_kt_argmax_1d(&flat)? {
+        return Ok(idx);
+    }
     // Argmax stays on device; only the scalar u32 token ID is transferred to host.
     let idx = flat.argmax(0)?.to_scalar::<u32>()?;
     Ok(idx)
@@ -678,6 +686,33 @@ mod tests {
         .reshape((1, 2, 3))?;
         let token = greedy_sample(&logits)?;
         assert_eq!(token, 0); // index of 7.0 in last row
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_cuda_greedy_sample_kt_default_matches_expected() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!(
+                "CUDA unavailable, skipping test_cuda_greedy_sample_kt_default_matches_expected"
+            );
+            return Ok(());
+        };
+
+        let values = [
+            9.0_f32, 1.0, 2.0, 3.0, // ignored non-last position
+            0.0, 4.0, 8.0, 7.0, // max index 2
+        ];
+        let logits = Tensor::new(&values, &device)?.reshape((2, 4))?;
+        let flat = last_position_logits(&logits)?;
+
+        assert_eq!(crate::forward::try_kt_argmax_1d(&flat)?, Some(2));
+        assert_eq!(greedy_sample(&logits)?, 2);
+
+        let bf16_logits = logits.to_dtype(DType::BF16)?;
+        let bf16_flat = last_position_logits(&bf16_logits)?;
+        assert_eq!(crate::forward::try_kt_argmax_1d(&bf16_flat)?, Some(2));
+        assert_eq!(greedy_sample(&bf16_logits)?, 2);
         Ok(())
     }
 

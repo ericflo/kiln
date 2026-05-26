@@ -11514,7 +11514,15 @@ fn try_kt_lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<u
 /// the migrated call so nsys traces separate the path from the
 /// baseline.
 #[cfg(feature = "cuda")]
-fn try_kt_argmax_1d(x: &Tensor) -> Result<Option<u32>> {
+pub(crate) fn try_kt_argmax_1d(x: &Tensor) -> Result<Option<u32>> {
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        || !x.is_contiguous()
+        || x.rank() != 1
+    {
+        return Ok(None);
+    }
+
     kiln_nvtx::range!(c"kiln/argmax_kt");
 
     let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
