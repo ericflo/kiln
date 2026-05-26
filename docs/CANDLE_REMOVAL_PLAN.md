@@ -18,9 +18,9 @@ landing (`3c90d064` + `fdeace4b` + `28514162` + `aa969ceb`).
   archived in `a215efd2`). Captured bs>1 shape-capture is fixed
   (`68aa19c8` + `c78c4f90`), but replay still hits
   `CUDA_ERROR_ILLEGAL_ADDRESS`; see `bench-results/cuda-graph-status.md`.
-- 🎉 **Tier 1 closed** for `kiln-conv1d-kernel` (`577f8b0c`) and
-  `kiln-marlin-gemm` (`4a862711`) — `candle-core` dropped from
-  both `[dependencies]` blocks.
+- 🎉 **Tier 1 closed** for `kiln-conv1d-kernel` (`577f8b0c`),
+  `kiln-marlin-gemm` (`4a862711`), and now `kiln-flash-attn` —
+  `candle-core` dropped from all three `[dependencies]` blocks.
 - 🎉 **KILN_DETECT_ANOMALY** Phase 9 trap wired end-to-end:
   scaffold (`72c2c16f`) + `Tensor::all_finite()` substrate
   primitive (`3c90d064`) + `Tape::backward` integration
@@ -570,34 +570,37 @@ Updated follow-up steps:
 5. Drop `candle-core` from Cargo.toml (substrate-blocked on the
    same kt-bridge cleanup as conv1d/marlin).
 
-### kiln-flash-attn — **BLOCKED** (candle-typed library surface remains)
+### kiln-flash-attn — ✅ **CANDLE-FREE** (Tier-1 complete)
 
-Candle-typed entry points still exist in `crates/kiln-flash-attn/src/lib.rs`
-as parity/reference surfaces, but the kiln-model production CUDA call sites now
-route through kt wrappers:
-
-Recently closed in the source tree:
-- `crates/kiln-model/src/backend/cuda.rs` routes FlashAttention forward,
+All public entry points operate on `kiln_tensor::Tensor`. The
+candle-typed parallel surface (`flash_attn_fwd`, `flash_attn_bwd`,
+`flash_attn_paged_decode*`, `paged_kv_write_*`) was deleted from
+`crates/kiln-flash-attn/src/lib.rs` after every `kiln-model`
+production caller migrated to the `*_kt` wrappers:
+- `crates/kiln-model/src/backend/cuda.rs` — FlashAttention forward,
   paged decode, dyn-seqlen paged decode, and graph-output dyn-seqlen
-  paged decode through kt wrappers.
-- `crates/kiln-model/src/cuda_train.rs` routes SFT/GRPO prefill
-  FlashAttention forward and backward through kt wrappers.
-- `crates/kiln-model/src/forward.rs` routes `CudaFlashAttentionTrainingBf16`
-  forward, backward recompute, and backward through kt wrappers; backward
-  collapses expanded GQA dk/dv back to heads_kv before returning gradients.
-- `crates/kiln-model/src/paged_kv_cache.rs` routes the 3 CUDA BF16
-  paged-KV writer fast paths through kt wrappers unconditionally:
-  `paged_kv_write_token_major_bf16_slot_kt`,
+  paged decode all route through kt wrappers.
+- `crates/kiln-model/src/cuda_train.rs` — SFT/GRPO prefill
+  FlashAttention forward and backward route through kt wrappers.
+- `crates/kiln-model/src/forward.rs` — `CudaFlashAttentionTrainingBf16`
+  forward, backward recompute, and backward route through kt wrappers;
+  backward collapses expanded GQA dk/dv back to heads_kv before
+  returning gradients.
+- `crates/kiln-model/src/paged_kv_cache.rs` — the 3 CUDA BF16 paged-KV
+  writer fast paths route through `paged_kv_write_token_major_bf16_slot_kt`,
   `paged_kv_write_token_major_bf16_batch_slot_kt`, and
-  `paged_kv_write_token_major_bf16_kt`. The
-  `KILN_DISABLE_CUDA_PAGED_KV_WRITE_TOKEN_MAJOR` kernel kill switch remains;
-  non-CUDA, Metal, FP8, and multi-token fallback behavior is unchanged.
+  `paged_kv_write_token_major_bf16_kt` unconditionally.
 
-Follow-up steps (not done in this PR):
+The in-lib parity tests (`kt_flash_attn_regression`) and the candle
+parity comparison in `tests/kt_v2_smoke.rs` were dropped alongside the
+candle shell; the remaining kt smoke tests construct CUDA inputs
+candle-free via `kiln_tensor::Tensor::cuda_from_slice`. `Cargo.toml`
+no longer depends on `candle-core` (matches the `kiln-conv1d-kernel` /
+`kiln-marlin-gemm` Tier-1 precedent).
+
+Remaining `kiln-flash-attn` follow-up (out of scope for this PR):
 1. Complete the PagedKvCacheKt migration so `paged_kv_cache.rs` can be
-   removed.
-2. Delete candle surface from `lib.rs` once no parity/reference callers need
-   the `candle_core::Tensor` wrappers.
+   removed entirely.
 
 ## Audit summary
 
@@ -607,7 +610,7 @@ Follow-up steps (not done in this PR):
 | `kiln-marlin-gemm`    | 0   | **No** | substrate (same as conv1d) |
 | `kiln-rmsnorm-kernel` | 53  | **No** | kt_api surface partial; needs op-family expansion |
 | `kiln-gdn-kernel`     | 9   | **No** | 1 single-block fall-through + 6 forward.rs prefill + 2 cuda_graph |
-| `kiln-flash-attn`     | ~10 | **No** | `paged_kv_write_*` + PagedKvCacheKt migration |
+| `kiln-flash-attn`     | 0   | ✅ **Yes (done)** | Tier-1 complete; candle dep dropped from `Cargo.toml`. |
 
 **Production-caller status:** As of `0841c266`,
 `kiln-conv1d-kernel` and `kiln-marlin-gemm` have **zero**
