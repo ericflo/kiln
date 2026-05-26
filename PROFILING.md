@@ -256,6 +256,30 @@ and deleting the candle fallback branches. Tier-2 crates
 dep is removed last, at which point `vendor/candle-core/` is deleted
 (Tier 5). The full sequence lives in `docs/CANDLE_REMOVAL_PLAN.md`.
 
+### Substrate-side passthroughs (2026-05-26)
+
+A small but high-leverage substrate addition landed: every kernel-
+crate `kt_api.rs` used to import
+`candle_core::cuda_backend::cudarc::driver::DevicePtr` just to call
+`storage.candle_device().cuda_stream().cu_stream()` for FFI
+dispatch — that same one-line pattern repeated 55 times across 5
+crates. `CudaStorage::cuda_stream_raw() -> *mut core::ffi::c_void`
+(`crates/kiln-tensor/src/cuda_storage.rs`, commit `d561dbf8`)
+collapses it to `let raw_stream = x_st.cuda_stream_raw();` and
+lets every `kt_api.rs` drop its last candle import (commit
+`338b1b88`). The accessor is a pure passthrough — the underlying
+provenance can change without breaking callers, so it's
+forward-compatible with Phase 1's "kiln-tensor owns the cuBLAS(Lt)
+handle" item that replaces the candle context entirely.
+
+After this batch, **production candle-typed callers in kiln-model
+are zero for `kiln-conv1d-kernel` and `kiln-marlin-gemm`** —
+`matmul_bf16` (`marlin_proj.rs`) and `causal_conv1d_{update,prefill}`
+(`backend/cuda.rs`) route through kt-only paths now. The other 3
+Tier-1 crates' Cargo.toml drops follow the same template once the
+substrate `Arc<CudaDevice>` passthrough is extended and the in-lib
+`#[cfg(test)]` parity scaffolds migrate off candle.
+
 ---
 
 ## Phase 10 §3 post-#647 SFT-step re-profile + next-kernel candidate audit (2026-04-29)
