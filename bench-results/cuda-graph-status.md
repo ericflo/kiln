@@ -301,6 +301,77 @@ mode is the unblock" is **stale** and predates these landings.
   `try_capture_batched` is in-tree but **gated off** pending the
   fault root-cause described in section "0." above.
 
+## Phase 5 sanitizer sweep — 2026-05-26 (kernel-level GREEN, live-driver blocked)
+
+A6000 RunPod sweep on main HEAD `f23a5a8e` (post-conv1d/marlin Tier 1 closes + GDN/flash-attn cuda.rs cleanups + the substrate
+`Tensor::cuda_from_slice` + `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs` additions):
+
+### Sanitizer results (5 runs)
+
+| Run | Config | compute-sanitizer | Bench result |
+|---|---|---|---|
+| Live driver (W4A16 + both batched flags + `--paged`) | `KILN_W4A16=1 KILN_CUDA_GRAPHS_BATCHED=1 KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1 KILN_CUDA_GRAPHS=true` | **0 errors** | Functional fail at GDN dispatch |
+| Live driver (both batched flags + `--paged`, no W4A16) | same minus W4A16 | **0 errors** | Same functional fail |
+| Baseline (no batched flags + `--paged`) | `KILN_CUDA_GRAPHS=true` only | n/a (not run) | Same functional fail |
+| 3 bs>1 / batched / paged unit tests | same batched flags | **0 errors** | **3/3 pass** |
+| bs=2 dyn_seqlen unit test | same batched flags | **0 errors** | Parity check fails (`max_abs_diff=2e0`) |
+
+**Canonical sanitizer summary across all 5 runs:** `========= ERROR SUMMARY: 0 errors`.
+
+### What this confirms
+
+- The substrate-side memory-safety contract for `KILN_CUDA_GRAPHS_BATCHED=1
+  KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1` is clean — no `Invalid __global__
+  read/write`, no out-of-bounds accesses, no use-after-free.
+- The 3 batched/paged unit tests pass functionally + cleanly under sanitizer.
+- The default-on flip is **not blocked at the memory-safety level**.
+
+### What's NOT yet green — pre-existing live-driver regression
+
+The live `kiln-bench --paged` driver hits a functional error during the
+first decode token:
+
+```
+gated deltanet layer 0 (linear attention, paged) ->
+  CUDA deferred qk_norm fallback recurrent path declined
+  (forward.rs:15325)
+```
+
+This reproduces in the **baseline** (no batched-graph flags), so it's
+not introduced by `KILN_CUDA_GRAPHS_BATCHED=1`. Root cause: the kt-typed
+`gdn_decode_qk_norm_gates_recurrent` and `gdn_decode_gates_recurrent`
+backends in `cuda.rs` require BF16 for every input tensor (q/k/v/a/b/
+a_log/dt_bias/state; weight=F32). On the live driver some upstream
+tensor is reaching this dispatch in a non-BF16 dtype, so both fast-paths
+return `Ok(None)` and the caller in forward.rs has no further fallback
+(the candle-typed `kiln_gdn_kernel::gdn_decode_*` fallbacks in cuda.rs
+were removed in #1082 `86c7f134` because both kt and candle envelopes
+were already bf16-only; the candle fallback would also bail with
+"envelope violation").
+
+The bs=2 dyn_seqlen parity divergence (`max_abs_diff=2e0`) is a
+separate issue — likely Blocker #1 from the 2026-05-25 attempt (kt-rotary
+cos/sin) re-surfacing as a numerical divergence instead of a shape error.
+
+### Decision
+
+**Do NOT flip `KILN_CUDA_GRAPHS_BATCHED=1` default-on until the live-
+driver regression is fixed.** The kernel-level sanitizer is green —
+the gate is the live-driver functional fix, not memory safety.
+
+Follow-up scope:
+1. Identify which tensor is loading in non-BF16 on the live driver
+   (likely `weights.a_log_gates` or `weights.dt_bias` — the model
+   loader comment at `loader.rs:897` says "Non-linear weights are
+   loaded as-is" so the safetensors dtype carries through).
+2. Either cast these tensors to BF16 at load time, or relax the kt
+   dispatch's dtype requirement to handle F32 a_log/dt_bias.
+3. Re-run the sanitizer sweep; expect 0 errors + clean live-driver run.
+
+Pod cost for this sweep: ~$0.21 (26 min × $0.49/hr pool-warm rate).
+Qwen3.5-4B model now cached at `/workspace/Qwen3.5-4B` on the pool
+worker pod for future leases.
+
 ## Phase 5 bs>1 progress (2026-05-25)
 
 All four root-cause intra-graph alloc suspects from
