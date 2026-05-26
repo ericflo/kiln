@@ -10,7 +10,7 @@
 //! PRs.
 
 use kiln_kt_bridge::BridgeError;
-use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
+use kiln_tensor::{CudaStorage, DType as KtDType, Device as KtDevice, Tensor as KtTensor};
 
 use crate::{
     kiln_adamw_step_bf16, kiln_adamw_step_f32, kiln_attn_decode_qkv_split_qk_norm_rope_bf16,
@@ -1539,6 +1539,112 @@ pub fn silu_inplace_save_sigmoid_f32_kt(
         )));
     }
     Ok(())
+}
+
+// ============================================================================
+// kt-typed `supports_*` predicates (#1082 Tier 1).
+//
+// Mirror the candle-typed `crate::supports_*` predicates from `lib.rs`,
+// but inspect `KtTensor` operands directly. Lets forward.rs gate on
+// kernel applicability without first bridging to candle (the bridge is
+// cheap but does an Arc clone — these predicates allow a pure-kt fast
+// path).
+//
+// Same semantics as the candle twins: returns `true` iff the underlying
+// kernel can run on the given operands. Returns `false` (not an Err) for
+// any rejection — callers fall through to the candle/composite path.
+// ============================================================================
+
+fn kt_is_cuda(t: &KtTensor) -> bool {
+    matches!(t.device(), KtDevice::Cuda(_))
+}
+
+/// kt twin of [`crate::supports_mlp_silu_mul`].
+pub fn supports_mlp_silu_mul_kt(gate: &KtTensor, up: &KtTensor) -> bool {
+    kt_is_cuda(gate)
+        && kt_is_cuda(up)
+        && gate.dtype() == KtDType::BF16
+        && up.dtype() == KtDType::BF16
+        && gate.is_contiguous()
+        && up.is_contiguous()
+        && gate.shape() == up.shape()
+        && gate.element_count() <= i64::MAX as usize
+}
+
+/// kt twin of [`crate::supports_mlp_silu_mul_packed`].
+pub fn supports_mlp_silu_mul_packed_kt(gate_up_packed: &KtTensor, cols: usize) -> bool {
+    let dims = gate_up_packed.shape();
+    kt_is_cuda(gate_up_packed)
+        && gate_up_packed.dtype() == KtDType::BF16
+        && gate_up_packed.is_contiguous()
+        && !dims.is_empty()
+        && dims[dims.len() - 1] == cols * 2
+        && cols > 0
+        && gate_up_packed.element_count() <= i64::MAX as usize
+}
+
+/// kt twin of [`crate::supports_sigmoid_mul`].
+pub fn supports_sigmoid_mul_kt(x: &KtTensor, gate: &KtTensor) -> bool {
+    kt_is_cuda(x)
+        && kt_is_cuda(gate)
+        && x.dtype() == KtDType::BF16
+        && gate.dtype() == KtDType::BF16
+        && x.is_contiguous()
+        && gate.is_contiguous()
+        && x.shape() == gate.shape()
+        && x.element_count() <= i64::MAX as usize
+}
+
+/// kt twin of [`crate::supports_rotary_qk`].
+///
+/// Same shape + dtype rules as the candle predicate: q/k are
+/// `[B, S, heads, head_dim]` BF16 on CUDA, contiguous, cos/sin are
+/// `[S, rotary_dim/2]` F32 on CUDA, contiguous. `rotary_dim` must be
+/// even and ≤ head_dim.
+pub fn supports_rotary_qk_kt(
+    q: &KtTensor,
+    k: &KtTensor,
+    cos: &KtTensor,
+    sin: &KtTensor,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> bool {
+    if !kt_is_cuda(q)
+        || !kt_is_cuda(k)
+        || !kt_is_cuda(cos)
+        || !kt_is_cuda(sin)
+        || q.dtype() != KtDType::BF16
+        || k.dtype() != KtDType::BF16
+        || cos.dtype() != KtDType::F32
+        || sin.dtype() != KtDType::F32
+        || !q.is_contiguous()
+        || !k.is_contiguous()
+        || !cos.is_contiguous()
+        || !sin.is_contiguous()
+        || q.rank() != 4
+        || k.rank() != 4
+        || rotary_dim == 0
+        || rotary_dim > head_dim
+        || rotary_dim % 2 != 0
+    {
+        return false;
+    }
+    let qd = q.shape();
+    let kd = k.shape();
+    let batch = qd[0];
+    let seq_len = qd[1];
+    qd[3] == head_dim
+        && kd[0] == batch
+        && kd[1] == seq_len
+        && kd[3] == head_dim
+        && cos.shape() == [seq_len, rotary_dim / 2]
+        && sin.shape() == [seq_len, rotary_dim / 2]
+        && batch <= i32::MAX as usize
+        && seq_len <= i32::MAX as usize
+        && qd[2] <= i32::MAX as usize
+        && kd[2] <= i32::MAX as usize
+        && head_dim <= i32::MAX as usize
+        && rotary_dim <= i32::MAX as usize
 }
 
 #[cfg(test)]
