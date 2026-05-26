@@ -33,6 +33,58 @@ The earlier `compute-sanitizer memcheck` "validation" at HEAD
 did NOT exercise the actual batched capture path the production
 caller hits — a planning miss the post-mortem must not repeat.
 
+## Phase 5 deep-dive — Investigation status (2026-05-26 evening)
+
+The shape-mismatch assert at `forward.rs:17679` is now fixed
+(commit `68aa19c8` + refinement `c78c4f90`). Verified via fresh
+bench: zero "batched CUDA graph capture failed" log lines (was
+hundreds before). **Capture itself now succeeds for bs=2.**
+
+The NEXT layer failure: every bs≥2 captured-graph replay hits
+`CUDA_ERROR_ILLEGAL_ADDRESS` at the post-launch
+`greedy_sample_rows(&captured.output_logits)` call
+(`cuda_graph.rs:711`). The eager-batched fallback also fails on
+the same error because the CUDA context has been poisoned by
+the failed replay.
+
+**Working hypothesis** (not yet verified end-to-end): the lm-head
+matmul + slice_set sequence inside the captured region recreates
+an intermediate `logits` buffer on every replay. With
+`CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH` set (the
+intended graph mode, line 1614), that intermediate is freed at
+the end of each launch and re-allocated on the next replay —
+but the captured cudaMemcpyAsync (recorded inside `slice_set`,
+which bottoms out at `vendor/candle-core/src/tensor_cat.rs:291`
+`src.storage().copy2d(...)`) has the *original* source pointer
+baked in. On replay, the source pointer is dangling → ILLEGAL.
+
+The bs=1 captured-graph path uses the SAME slice_set pattern
+(`cuda_graph.rs:1430-1432`) and works in production. The
+difference between bs=1 (works) and bs=2 (fails) is not yet
+known — possibly allocator determinism at smaller sizes happens
+to re-use the same address; possibly the bs=1 path's `linear_decode`
+returns a view onto persistent weights rather than a fresh
+allocation. Worth grepping `linear_decode` impls before assuming.
+
+**Fix direction** (substantial change, not landed): pre-allocate
+the lm-head output buffer OUTSIDE the capture window, thread it
+through `model_forward_paged_*_with_graph_inputs` via
+`graph_inputs.lm_head_buffer`, and have the lm-head matmul write
+into it directly (requires a `matmul_into(dst)` variant — candle
+doesn't have one; need either a kt-typed wrapper that takes a
+caller-owned output, or a CustomOp shim that copies the matmul
+result via a kernel that the captured graph re-runs deterministically).
+
+Companion idea worth exploring: drop `AUTO_FREE_ON_LAUNCH` for
+batched graphs (memory grows by one intermediate's worth per
+graph_size bucket — small for fixed workload, and the buffers
+stay valid across replays).
+
+Until a fix lands, Phase 5 captured-graph remains opt-in
+(`KILN_CUDA_GRAPHS_BATCHED=0` is the production default after
+`909e2e61`). Production decode runs the eager-batched path,
+which is healthy (498 tok/s @ bs=64 on A6000).
+
 **Status of the various paths (HEAD `2d9d4fc4` + revert):**
 
 - The **bs=1 production CUDA graph capture/replay path is live**
