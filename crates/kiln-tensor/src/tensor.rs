@@ -121,6 +121,55 @@ impl Tensor {
         Self::from_slice(&values, shape)
     }
 
+    /// Build a CUDA tensor directly from a host slice + shape on
+    /// the primary CUDA device — **candle-free constructor**.
+    ///
+    /// Internally:
+    /// 1. Builds the CPU tensor via [`Self::from_slice`].
+    /// 2. Resolves the primary CUDA device for `device_index` via
+    ///    [`crate::primary_cuda_device`].
+    /// 3. Uploads via [`crate::host_to_cuda_copy`].
+    ///
+    /// Callers never need to import `candle_core::Device` —
+    /// this is the substrate-side helper (#1082) that lets
+    /// kernel-crate `tests/*.rs` and `#[cfg(test)]` parity scaffolds
+    /// allocate CUDA inputs candle-free, which is a prerequisite for
+    /// dropping `candle-core` from the kernel crates' `Cargo.toml`.
+    ///
+    /// On non-CUDA builds this method is absent; tests that need it
+    /// can use `#[cfg(feature = "cuda")]` to gate.
+    #[cfg(feature = "cuda")]
+    pub fn cuda_from_slice<E: Element>(
+        values: &[E],
+        shape: impl Into<Vec<usize>>,
+        device_index: usize,
+    ) -> Result<Self> {
+        let cpu = Self::from_slice(values, shape)?;
+        let cdev = crate::primary_cuda_device(device_index)?;
+        crate::host_to_cuda_copy(&cpu, cdev, device_index)
+    }
+
+    /// Build a zero-initialized CUDA tensor on the primary CUDA
+    /// device for `device_index` — **candle-free constructor**.
+    ///
+    /// Companion to [`Self::cuda_from_slice`]. Useful for test
+    /// scaffolds that need a CUDA destination buffer of a known shape
+    /// without having to mention `candle_core` types.
+    #[cfg(feature = "cuda")]
+    pub fn cuda_zeros_on(
+        shape: impl Into<Vec<usize>>,
+        dtype: DType,
+        device_index: usize,
+    ) -> Result<Self> {
+        let shape_vec: Vec<usize> = shape.into();
+        let cdev = crate::primary_cuda_device(device_index)?;
+        let n_elements = shape_vec.iter().product::<usize>();
+        let storage =
+            crate::cuda_zeros(cdev, device_index, dtype, n_elements)?;
+        let layout = Layout::contiguous(shape_vec);
+        Self::from_parts(storage, layout, TensorId::new())
+    }
+
     /// Construct a [`Tensor`] from raw parts. Used by per-backend
     /// storage impls (Phase 1.6+ CUDA, 1.7 Metal, 1.8 Vulkan) and by
     /// view ops in this module.

@@ -324,6 +324,36 @@ impl CudaStorage {
     }
 }
 
+/// Construct the primary `Arc<CudaDevice>` for the given device index
+/// — **candle-free passthrough** for callers that need a kt-typed
+/// constructor but don't want to import `candle_core::Device` to
+/// resolve it.
+///
+/// Internally calls `candle_core::Device::new_cuda(device_index)` and
+/// unwraps to `Arc<CudaDevice>`. Returns `Err` if the requested CUDA
+/// device isn't available.
+///
+/// This is the substrate-side fix (#1082) that lets kernel-crate
+/// `#[cfg(test)]` parity scaffolds and `tests/*.rs` integration tests
+/// allocate CUDA storage without importing `candle_core`. Combined
+/// with [`Tensor::cuda_from_slice`] / [`cuda_zeros_on`], a kernel
+/// crate's test code can construct CUDA tensors candle-free.
+///
+/// Phase 1 of #1082 replaces the underlying provenance: this signature
+/// becomes `Arc<cudarc::driver::CudaContext>` and callers don't need
+/// to change.
+#[cfg(feature = "cuda")]
+pub fn primary_cuda_device(device_index: usize) -> Result<Arc<CudaDevice>> {
+    match candle_core::Device::new_cuda(device_index)
+        .map_err(|e| Error::Msg(format!("primary_cuda_device({device_index}): {e}")))?
+    {
+        candle_core::Device::Cuda(d) => Ok(Arc::new(d)),
+        _ => Err(Error::Msg(format!(
+            "primary_cuda_device({device_index}): expected Cuda device"
+        ))),
+    }
+}
+
 impl StorageBackend for CudaStorage {
     fn device(&self) -> Device {
         self.device
