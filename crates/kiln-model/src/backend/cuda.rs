@@ -1056,9 +1056,54 @@ impl BackendRuntime for CudaBackend {
                 state_shape = ?state.shape(), state_dtype = ?state.dtype(), state_contiguous = state.is_contiguous(),
                 z_shape = ?z.shape(), z_dtype = ?z.dtype(),
                 weight_shape = ?weight.shape(), weight_dtype = ?weight.dtype(),
-                "CUDA gdn_decode_gates_recurrent declined (non-bf16 envelope); using split decode path"
+                "CUDA gdn_decode_gates_recurrent declined (non-bf16 envelope); will retry with cast"
             );
-            return Ok(None);
+            // Phase 5 fix (#1082): same dtype-tolerance pattern as
+            // `gdn_decode_qk_norm_gates_recurrent` above. Cast small
+            // 1-D weight tensors (a_log, dt_bias) to BF16 if they
+            // arrived as F32 from the safetensors loader; the
+            // group-norm weight stays F32 (kernel contract).
+            let a_log_bf16 = if a_log.dtype() == DType::BF16 {
+                None
+            } else {
+                Some(a_log.to_dtype(DType::BF16)
+                    .with_context(|| "gdn_decode_gates: cast a_log -> bf16")?)
+            };
+            let dt_bias_bf16 = if dt_bias.dtype() == DType::BF16 {
+                None
+            } else {
+                Some(dt_bias.to_dtype(DType::BF16)
+                    .with_context(|| "gdn_decode_gates: cast dt_bias -> bf16")?)
+            };
+            let weight_f32 = if weight.dtype() == DType::F32 {
+                None
+            } else {
+                Some(weight.to_dtype(DType::F32)
+                    .with_context(|| "gdn_decode_gates: cast weight -> f32")?)
+            };
+            let still_non_envelope = q.dtype() != DType::BF16
+                || k.dtype() != DType::BF16
+                || v.dtype() != DType::BF16
+                || a.dtype() != DType::BF16
+                || b.dtype() != DType::BF16
+                || state.dtype() != DType::BF16
+                || z.dtype() != DType::BF16;
+            if still_non_envelope {
+                return Ok(None);
+            }
+            return self.gdn_decode_gates_recurrent(
+                q,
+                k,
+                v,
+                a,
+                b,
+                a_log_bf16.as_ref().unwrap_or(a_log),
+                dt_bias_bf16.as_ref().unwrap_or(dt_bias),
+                state,
+                z,
+                weight_f32.as_ref().unwrap_or(weight),
+                eps,
+            );
         }
         kiln_nvtx::range!(c"kiln/gdn_decode_gates_recurrent_bf16_kt");
         // kt_api expects 3D [B, heads, dim] but the candle method
@@ -1161,9 +1206,52 @@ impl BackendRuntime for CudaBackend {
                 a_log_shape = ?a_log.shape(), a_log_dtype = ?a_log.dtype(),
                 dt_bias_shape = ?dt_bias.shape(), dt_bias_dtype = ?dt_bias.dtype(),
                 state_shape = ?state.shape(), state_dtype = ?state.dtype(), state_contiguous = state.is_contiguous(),
-                "CUDA gdn_decode_qk_norm_gates_recurrent declined (non-bf16 envelope); using split qk_norm path"
+                "CUDA gdn_decode_qk_norm_gates_recurrent declined (non-bf16 envelope); will retry with cast"
             );
-            return Ok(None);
+            // Phase 5 fix (#1082): Qwen3.5-4B safetensors store
+            // `A_log` and `dt_bias` in F32 by default (loader keeps
+            // these "non-linear weights" as-is at loader.rs:897). The
+            // kt path requires every input in BF16, so cast the small
+            // 1-D weight tensors here and recurse. The cast is cheap
+            // (num_heads elements) and one-shot per call — the cost
+            // is dominated by the kernel launch.
+            let a_log_bf16 = if a_log.dtype() == DType::BF16 {
+                None
+            } else {
+                Some(a_log.to_dtype(DType::BF16)
+                    .with_context(|| "gdn_decode_qk_norm: cast a_log -> bf16")?)
+            };
+            let dt_bias_bf16 = if dt_bias.dtype() == DType::BF16 {
+                None
+            } else {
+                Some(dt_bias.to_dtype(DType::BF16)
+                    .with_context(|| "gdn_decode_qk_norm: cast dt_bias -> bf16")?)
+            };
+            let still_non_bf16 = q.dtype() != DType::BF16
+                || k.dtype() != DType::BF16
+                || v.dtype() != DType::BF16
+                || a.dtype() != DType::BF16
+                || b.dtype() != DType::BF16
+                || state.dtype() != DType::BF16;
+            if still_non_bf16 {
+                // Heavier tensors (q/k/v/a/b/state) shouldn't be
+                // non-bf16 on the production hot path; if they are,
+                // decline rather than silently casting (a cast on
+                // those is too expensive to hide).
+                return Ok(None);
+            }
+            return self.gdn_decode_qk_norm_gates_recurrent(
+                q,
+                k,
+                v,
+                a,
+                b,
+                a_log_bf16.as_ref().unwrap_or(a_log),
+                dt_bias_bf16.as_ref().unwrap_or(dt_bias),
+                state,
+                q_scale,
+                qk_eps,
+            );
         }
         kiln_nvtx::range!(c"kiln/gdn_decode_qk_norm_gates_recurrent_bf16_kt");
         // kt_api expects 3D [B, heads, dim] but the candle method
@@ -1267,9 +1355,57 @@ impl BackendRuntime for CudaBackend {
                 state_shape = ?state.shape(), state_dtype = ?state.dtype(), state_contiguous = state.is_contiguous(),
                 z_shape = ?z.shape(), z_dtype = ?z.dtype(),
                 weight_shape = ?weight.shape(), weight_dtype = ?weight.dtype(),
-                "CUDA gdn_decode_qk_norm_gates_recurrent_rmsnorm declined (non-bf16 envelope); using split gated_norm path"
+                "CUDA gdn_decode_qk_norm_gates_recurrent_rmsnorm declined (non-bf16 envelope); will retry with cast"
             );
-            return Ok(None);
+            // Phase 5 fix (#1082): cast small 1-D weight tensors
+            // (a_log, dt_bias) to BF16 + group-norm weight to F32
+            // if needed. Same template as the sibling functions
+            // above. Heavier tensors (q/k/v/a/b/state/z) shouldn't
+            // be non-bf16 on the production hot path; if they are,
+            // decline.
+            let a_log_bf16 = if a_log.dtype() == DType::BF16 {
+                None
+            } else {
+                Some(a_log.to_dtype(DType::BF16)
+                    .with_context(|| "gdn_decode_rmsnorm: cast a_log -> bf16")?)
+            };
+            let dt_bias_bf16 = if dt_bias.dtype() == DType::BF16 {
+                None
+            } else {
+                Some(dt_bias.to_dtype(DType::BF16)
+                    .with_context(|| "gdn_decode_rmsnorm: cast dt_bias -> bf16")?)
+            };
+            let weight_f32 = if weight.dtype() == DType::F32 {
+                None
+            } else {
+                Some(weight.to_dtype(DType::F32)
+                    .with_context(|| "gdn_decode_rmsnorm: cast weight -> f32")?)
+            };
+            let still_non_envelope = q.dtype() != DType::BF16
+                || k.dtype() != DType::BF16
+                || v.dtype() != DType::BF16
+                || a.dtype() != DType::BF16
+                || b.dtype() != DType::BF16
+                || state.dtype() != DType::BF16
+                || z.dtype() != DType::BF16;
+            if still_non_envelope {
+                return Ok(None);
+            }
+            return self.gdn_decode_qk_norm_gates_recurrent_rmsnorm(
+                q,
+                k,
+                v,
+                a,
+                b,
+                a_log_bf16.as_ref().unwrap_or(a_log),
+                dt_bias_bf16.as_ref().unwrap_or(dt_bias),
+                state,
+                z,
+                weight_f32.as_ref().unwrap_or(weight),
+                q_scale,
+                qk_eps,
+                rms_eps,
+            );
         }
         kiln_nvtx::range!(c"kiln/gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt");
         // kt_api expects 3D [B, heads, dim] but the candle method
