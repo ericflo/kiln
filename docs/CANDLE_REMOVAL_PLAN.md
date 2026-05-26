@@ -221,12 +221,20 @@ autograd tape:
   `anomaly_detection_enabled()` once at top, then after each
   `op.apply()` scans returned grads. On first non-finite,
   `anomaly_panic` with the producing op's tape position.
-- CUDA bridge (`28514162`): `Tensor::all_finite()` now uses a
+- CUDA bridge (`28514162`): `Tensor::all_finite()` initially used a
   `cuda_to_host_copy` D2H bridge for CUDA-resident tensors so
-  the trap works end-to-end for GPU training paths today,
+  the trap worked end-to-end for GPU training paths,
   paying an O(numel) D2H copy per scanned tensor. Covered by
   6 new CPU unit tests in `kiln-tensor::tensor::tests` (NaN,
   +Inf, -Inf, integer vacuous-true, post-transpose stride walk).
+- CUDA kernel (`is_finite_reduce.cu` + `cuda_is_finite`): replaces
+  the D2H bridge with a per-backend atomicOr reduction on the
+  device. Kernel walks `n_elements` and sets a single 4-byte u32
+  flag; `Tensor::all_finite()` reads back only those 4 bytes per
+  call instead of the full tensor. Supported dtypes: F32, BF16,
+  F16, F8E4M3, F8E5M2. Non-contiguous inputs are contiguified via
+  `cuda_contiguous` first (matching the kt-CUDA reduction
+  convention). Net D2H per scanned tensor: O(numel) → 4 bytes.
 - Tape regression (`aa969ceb`): `Tape::backward` now has a direct
   unit test with a fake backward op returning NaN, asserting the
   panic includes the anomaly prefix, tape position, op name, and
@@ -234,13 +242,13 @@ autograd tape:
   propagate when the env flag is disabled.
 
 Cost: O(numel) per backward step on CPU when enabled, ~5% per
-the issue body. CUDA paths pay an additional O(numel) D2H copy
-per scanned tensor. Off-by-default in production; CI training-
-parity tests opt in via `KILN_DETECT_ANOMALY=1`.
+the issue body. CUDA paths now pay only 4 bytes of D2H per scanned
+tensor (down from O(numel) under the bridge). Off-by-default in
+production; CI training-parity tests opt in via `KILN_DETECT_ANOMALY=1`.
 
-Remaining: per-backend `is_finite_storage` reduction kernels
-(CUDA/Metal/Vulkan) to replace the D2H bridge once the kernel
-substrate lands, then enable the trap in the SFT parity CI.
+Remaining: per-backend `is_finite_storage` reduction kernels for
+Metal and Vulkan (CUDA done). Then enable the trap in the SFT
+parity CI.
 
 ## Build matrix coverage required before each tier closes
 
