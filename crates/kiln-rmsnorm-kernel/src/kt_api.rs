@@ -1647,6 +1647,94 @@ pub fn supports_rotary_qk_kt(
         && rotary_dim <= i32::MAX as usize
 }
 
+/// kt twin of [`crate::supports_attn_decode_qkv_prep`].
+///
+/// Inspects the same shape/dtype/contig/device invariants as the candle
+/// predicate. Used by the decode-time fused QKV prep path.
+#[allow(clippy::too_many_arguments)]
+pub fn supports_attn_decode_qkv_prep_kt(
+    q_raw: &KtTensor,
+    k_raw: &KtTensor,
+    q_weight: &KtTensor,
+    k_weight: &KtTensor,
+    cos: &KtTensor,
+    sin: &KtTensor,
+    q_heads: usize,
+    k_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    has_gate: bool,
+) -> bool {
+    if !kt_is_cuda(q_raw)
+        || !kt_is_cuda(k_raw)
+        || !kt_is_cuda(q_weight)
+        || !kt_is_cuda(k_weight)
+        || !kt_is_cuda(cos)
+        || !kt_is_cuda(sin)
+        || q_raw.dtype() != KtDType::BF16
+        || k_raw.dtype() != KtDType::BF16
+        || q_weight.dtype() != KtDType::BF16
+        || k_weight.dtype() != KtDType::BF16
+        || cos.dtype() != KtDType::F32
+        || sin.dtype() != KtDType::F32
+        || !q_raw.is_contiguous()
+        || !k_raw.is_contiguous()
+        || !q_weight.is_contiguous()
+        || !k_weight.is_contiguous()
+        || !cos.is_contiguous()
+        || !sin.is_contiguous()
+        || q_raw.rank() != 3
+        || k_raw.rank() != 3
+        || q_heads == 0
+        || k_heads == 0
+        || head_dim == 0
+        || head_dim > 8192
+        || rotary_dim == 0
+        || rotary_dim > head_dim
+        || rotary_dim % 2 != 0
+    {
+        return false;
+    }
+
+    let qd = q_raw.shape();
+    let kd = k_raw.shape();
+    let batch = qd[0];
+    let Some(q_base) = q_heads.checked_mul(head_dim) else {
+        return false;
+    };
+    let Some(q_inner) = (if has_gate {
+        q_base.checked_mul(2)
+    } else {
+        Some(q_base)
+    }) else {
+        return false;
+    };
+    let Some(k_inner) = k_heads.checked_mul(head_dim) else {
+        return false;
+    };
+    let Some(total_heads) = q_heads.checked_add(k_heads) else {
+        return false;
+    };
+    let Some(total_rows) = batch.checked_mul(total_heads) else {
+        return false;
+    };
+    qd[1] == 1
+        && kd[0] == batch
+        && kd[1] == 1
+        && qd[2] == q_inner
+        && kd[2] == k_inner
+        && q_weight.shape() == [head_dim]
+        && k_weight.shape() == [head_dim]
+        && cos.shape() == [1, rotary_dim / 2]
+        && sin.shape() == [1, rotary_dim / 2]
+        && batch <= i32::MAX as usize
+        && total_rows <= i32::MAX as usize
+        && q_heads <= i32::MAX as usize
+        && k_heads <= i32::MAX as usize
+        && head_dim <= i32::MAX as usize
+        && rotary_dim <= i32::MAX as usize
+}
+
 #[cfg(test)]
 mod kt_rotary_qk_regression {
     //! Regression test for #1082: the kt-typed `fused_rotary_qk_kt`
