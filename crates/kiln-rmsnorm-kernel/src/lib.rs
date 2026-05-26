@@ -765,16 +765,21 @@ pub fn fused_rmsnorm_backward(
     Ok((grad_x, grad_w))
 }
 
-/// kt-bridge backward path — bit-exact alternative to
-/// [`fused_rmsnorm_backward`] that routes the math through
-/// [`kt_api::fused_rmsnorm_backward_kt`] and round-trips the gradients
-/// back to candle via [`kiln_kt_bridge::kt_tensor_to_candle_cuda_copy`].
+/// kt-bridge backward path — mathematically-equivalent alternative
+/// to [`fused_rmsnorm_backward`] that routes the math through
+/// [`kt_api::fused_rmsnorm_backward_kt`] and round-trips the
+/// gradients back to candle via
+/// [`kiln_kt_bridge::kt_tensor_to_candle_cuda_copy`].
 ///
-/// Same FFI symbol (`kiln_fused_rmsnorm_bwd`) → bit-exact by
-/// construction. The point of this path is not a perf delta — it's
-/// the first production migration of a candle `CustomOp::bwd` body to
-/// the kt bridge, proving the pattern that unblocks Tier-1 closures
-/// of `kiln-rmsnorm-kernel` / `kiln-opd-loss-kernel` / `kiln-flce-kernel`
+/// Same FFI symbol (`kiln_fused_rmsnorm_bwd`) → `grad_x` is
+/// bit-exact (no cross-row reduction); `grad_w` may differ by up to
+/// one BF16 ULP because the kernel's `atomicAdd` cross-row reduction
+/// is order-non-deterministic across separate launches (same caveat
+/// `parity_backward_multi_row_cuda` relies on with `tol=2e-2`). The
+/// point of this path is not a perf delta — it's the first
+/// production migration of a candle `CustomOp::bwd` body to the kt
+/// bridge, proving the pattern that unblocks Tier-1 closures of
+/// `kiln-rmsnorm-kernel` / `kiln-opd-loss-kernel` / `kiln-flce-kernel`
 /// (see `docs/CANDLE_REMOVAL_PLAN.md` §"kt-autograd readiness").
 ///
 /// Costs: 3 candle→kt borrows (zero-copy) + 2 kt→candle dtod memcpys
@@ -1093,8 +1098,10 @@ impl candle_core::CustomOp2 for RmsNormCustomOp {
             // FIRST production CustomOp::bwd migration to the kt
             // bridge (proves the pattern documented at
             // `docs/CANDLE_REMOVAL_PLAN.md` §"kt-autograd readiness").
-            // Same FFI symbol as the candle path → bit-exact by
-            // construction; the kill switch + fallback below preserve
+            // Same FFI symbol as the candle path → mathematically
+            // equivalent (grad_x bit-exact; grad_w within atomicAdd
+            // cross-launch ULP — see `fused_rmsnorm_backward_via_kt_bridge`
+            // docstring). The kill switch + fallback below preserve
             // the candle path as the parity-test escape hatch.
             if !rmsnorm_bwd_kt_bridge_disabled() {
                 match fused_rmsnorm_backward_via_kt_bridge(x, weight, &grad_out_c, self.eps) {
@@ -5267,17 +5274,25 @@ mod tests {
             let gx_diff = max_abs_diff(&gx_candle, &gx_bridge);
             let gw_diff = max_abs_diff(&gw_candle, &gw_bridge);
 
-            // Same FFI symbol → expect bit-exact bf16. Tolerance is
-            // one bf16 ULP (≈ 7.8e-3 at magnitudes ~1.0, tighter at
-            // smaller values); 1e-3 here is conservative for our
-            // input ranges (x in [-0.4, 0.4], grad_out in [-0.3, 0.3]).
+            // Same FFI symbol but TWO separate kernel launches → the
+            // `atomicAdd(&grad_w_partial_f32[j], ...)` in
+            // `csrc/fused_rmsnorm_bwd.cu:123` reduces rows in non-
+            // deterministic order, so the F32 sum can differ across
+            // calls. After the BF16 cast, 1-ULP divergence is
+            // possible (bf16 quantum scales with magnitude). The
+            // existing `parity_backward_multi_row_cuda` test uses
+            // `tol=2e-2` for grad_w against the candle reference for
+            // the same reason; we allow 5e-2 here as the worst-case
+            // observed on prefill[512, 2560] was 3.125e-2. grad_x is
+            // fully deterministic per-row (no cross-row reduction),
+            // so it tolerates a tighter bound.
             assert!(
                 gx_diff < 1e-3,
                 "kt-bridge grad_x parity failed on {label}: max_abs_diff={gx_diff} (tol=1e-3)"
             );
             assert!(
-                gw_diff < 1e-3,
-                "kt-bridge grad_w parity failed on {label}: max_abs_diff={gw_diff} (tol=1e-3)"
+                gw_diff < 5e-2,
+                "kt-bridge grad_w parity failed on {label}: max_abs_diff={gw_diff} (tol=5e-2 — atomicAdd cross-launch non-determinism budget)"
             );
         }
     }
