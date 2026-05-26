@@ -2127,3 +2127,174 @@ mod kt_lora_decode_regression {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod kt_optimizer_step_regression {
+    //! Regression tests for #1082: optimizer in-place CUDA steps now route
+    //! through kt shells at the model/training call sites. These tests keep
+    //! the old candle shell as the reference while both still exist.
+    use super::*;
+    use crate::{adamw_step_inplace, sgd_step_inplace};
+    use candle_core::{DType, Device, Tensor};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn cuda_or_skip(name: &str) -> Result<Option<Device>, candle_core::Error> {
+        match Device::new_cuda(0) {
+            Ok(device) => Ok(Some(device)),
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping {name}: {err}");
+                Ok(None)
+            }
+        }
+    }
+
+    fn tensor_from_f32(data: &[f32], dtype: DType, device: &Device) -> candle_core::Result<Tensor> {
+        Tensor::from_vec(data.to_vec(), (data.len(),), device)?.to_dtype(dtype)
+    }
+
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> candle_core::Result<f32> {
+        let a_f32 = a.to_dtype(DType::F32)?;
+        let b_f32 = b.to_dtype(DType::F32)?;
+        (&a_f32 - &b_f32)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()
+    }
+
+    #[test]
+    fn optimizer_sgd_step_kt_matches_candle_f32_and_bf16() -> TestResult {
+        let Some(device) = cuda_or_skip("optimizer_sgd_step_kt_matches_candle_f32_and_bf16")?
+        else {
+            return Ok(());
+        };
+
+        let param_data = [1.0f32, -2.0, 0.5, 3.0, -0.75, 0.25, 4.0, -1.5];
+        let grad_data = [0.25f32, -0.5, 0.125, 1.25, -0.75, 0.5, -0.25, 0.375];
+        let lr = 0.03125f32;
+
+        for dtype in [DType::F32, DType::BF16] {
+            let candle_param = tensor_from_f32(&param_data, dtype, &device)?;
+            let candle_grad = tensor_from_f32(&grad_data, dtype, &device)?;
+            let kt_param = tensor_from_f32(&param_data, dtype, &device)?;
+            let kt_grad = tensor_from_f32(&grad_data, dtype, &device)?;
+
+            sgd_step_inplace(&candle_param, &candle_grad, lr)?;
+
+            let kt_param_borrow = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&kt_param)?;
+            let kt_grad_borrow = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&kt_grad)?;
+            assert!(supports_optimizer_step_kt(&[&kt_param_borrow, &kt_grad_borrow]));
+            match dtype {
+                DType::F32 => sgd_step_f32_kt(&kt_param_borrow, &kt_grad_borrow, lr)?,
+                DType::BF16 => sgd_step_bf16_kt(&kt_param_borrow, &kt_grad_borrow, lr)?,
+                _ => unreachable!(),
+            }
+
+            let diff = max_abs_diff(&candle_param, &kt_param)?;
+            assert!(
+                diff <= 1e-6,
+                "dtype={dtype:?} kt vs candle SGD max_abs_diff={diff:e}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn optimizer_adamw_step_kt_matches_candle_f32_and_bf16() -> TestResult {
+        let Some(device) = cuda_or_skip("optimizer_adamw_step_kt_matches_candle_f32_and_bf16")?
+        else {
+            return Ok(());
+        };
+
+        let param_data = [1.0f32, -2.0, 0.5, 3.0, -0.75, 0.25, 4.0, -1.5];
+        let grad_data = [0.25f32, -0.5, 0.125, 1.25, -0.75, 0.5, -0.25, 0.375];
+        let m_data = [0.01f32, -0.02, 0.03, -0.04, 0.05, -0.06, 0.07, -0.08];
+        let v_data = [0.1f32, 0.2, 0.05, 0.4, 0.3, 0.12, 0.22, 0.18];
+        let lr = 0.01f32;
+        let beta1 = 0.9f32;
+        let beta2 = 0.999f32;
+        let eps = 1e-8f32;
+        let weight_decay = 0.05f32;
+        let step = 3u32;
+        let bias_correction1 = (1.0f32 - beta1.powi(step as i32)).max(1e-20);
+        let bias_correction2 = (1.0f32 - beta2.powi(step as i32)).max(1e-20);
+
+        for dtype in [DType::F32, DType::BF16] {
+            let candle_param = tensor_from_f32(&param_data, dtype, &device)?;
+            let candle_grad = tensor_from_f32(&grad_data, dtype, &device)?;
+            let candle_m = tensor_from_f32(&m_data, dtype, &device)?;
+            let candle_v = tensor_from_f32(&v_data, dtype, &device)?;
+            let kt_param = tensor_from_f32(&param_data, dtype, &device)?;
+            let kt_grad = tensor_from_f32(&grad_data, dtype, &device)?;
+            let kt_m = tensor_from_f32(&m_data, dtype, &device)?;
+            let kt_v = tensor_from_f32(&v_data, dtype, &device)?;
+
+            adamw_step_inplace(
+                &candle_param,
+                &candle_grad,
+                &candle_m,
+                &candle_v,
+                lr,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                step,
+            )?;
+
+            let kt_param_borrow = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&kt_param)?;
+            let kt_grad_borrow = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&kt_grad)?;
+            let kt_m_borrow = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&kt_m)?;
+            let kt_v_borrow = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&kt_v)?;
+            assert!(supports_optimizer_step_kt(&[
+                &kt_param_borrow,
+                &kt_grad_borrow,
+                &kt_m_borrow,
+                &kt_v_borrow,
+            ]));
+            match dtype {
+                DType::F32 => adamw_step_f32_kt(
+                    &kt_param_borrow,
+                    &kt_grad_borrow,
+                    &kt_m_borrow,
+                    &kt_v_borrow,
+                    lr,
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                    bias_correction1,
+                    bias_correction2,
+                )?,
+                DType::BF16 => adamw_step_bf16_kt(
+                    &kt_param_borrow,
+                    &kt_grad_borrow,
+                    &kt_m_borrow,
+                    &kt_v_borrow,
+                    lr,
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                    bias_correction1,
+                    bias_correction2,
+                )?,
+                _ => unreachable!(),
+            }
+
+            for (name, candle, kt) in [
+                ("param", &candle_param, &kt_param),
+                ("first_moment", &candle_m, &kt_m),
+                ("second_moment", &candle_v, &kt_v),
+            ] {
+                let diff = max_abs_diff(candle, kt)?;
+                assert!(
+                    diff <= 1e-6,
+                    "dtype={dtype:?} {name} kt vs candle AdamW max_abs_diff={diff:e}"
+                );
+            }
+        }
+        Ok(())
+    }
+}

@@ -80,6 +80,21 @@ fn with_cuda_resident_ids<R>(f: impl FnOnce(&mut HashSet<candle_core::TensorId>)
     f(&mut guard)
 }
 
+fn cuda_optimizer_tensors_supported_for_kt(tensors: &[&Tensor]) -> bool {
+    let Some(first) = tensors.first() else {
+        return false;
+    };
+    matches!(first.device(), Device::Cuda(_))
+        && matches!(first.dtype(), DType::F32 | DType::BF16)
+        && first.is_contiguous()
+        && tensors.iter().all(|tensor| {
+            matches!(tensor.device(), Device::Cuda(_))
+                && tensor.dtype() == first.dtype()
+                && tensor.shape().elem_count() == first.shape().elem_count()
+                && tensor.is_contiguous()
+        })
+}
+
 #[derive(Debug)]
 pub struct CudaBackend {
     device: Device,
@@ -139,32 +154,6 @@ pub struct CudaBackend {
     // into kt and writes through them via the new with_graph_outputs
     // entry; `None` calls the existing internally-allocating
     // `flash_attn_paged_decode_dyn_seqlen_kt`.
-    /// Phase 7 opt-in (#1082): route the SGD optimizer step through
-    /// the kt-typed surface (`sgd_step_{f32,bf16}_kt`) instead of the
-    /// candle-typed `kiln_rmsnorm_kernel::sgd_step_inplace` shim.
-    /// Default OFF — flips on once per-call parity coverage lands.
-    /// The kt path is bit-exact by construction: both paths bottom
-    /// out in the same FFI symbols (`kiln_sgd_step_f32`,
-    /// `kiln_sgd_step_bf16`); only the Rust shell types change. The
-    /// in-place mutation surfaces in the caller's candle tensor via
-    /// the zero-copy `kt_tensor_from_candle_cuda_borrow` adapter.
-    /// Set `KILN_USE_KT_API_SGD_STEP=1` (or `KILN_USE_KT_API_ALL=1`)
-    /// to enable.
-    cuda_use_kt_api_sgd_step: bool,
-    /// Phase 7 opt-in (#1082): route the AdamW optimizer step through
-    /// the kt-typed surface (`adamw_step_{f32,bf16}_kt`) instead of
-    /// the candle-typed `kiln_rmsnorm_kernel::adamw_step_inplace`
-    /// shim. Default OFF — flips on once per-call parity coverage
-    /// lands. Same bit-exact-by-construction rationale as
-    /// `cuda_use_kt_api_sgd_step` (both bottom out in the same
-    /// `kiln_adamw_step_{f32,bf16}` FFI symbols). The candle shim
-    /// computes bias-correction terms internally from `step: u32`;
-    /// the kt path takes pre-computed bias_correction1 /
-    /// bias_correction2 instead, so we replicate the same
-    /// `(1 - beta^step).max(1e-20)` formula at the caller. Set
-    /// `KILN_USE_KT_API_ADAMW_STEP=1` (or `KILN_USE_KT_API_ALL=1`)
-    /// to enable.
-    cuda_use_kt_api_adamw_step: bool,
     /// Forward-only CUDA LoRA delta/add for decode. Training declines because
     /// tracked LoRA tensors need autograd.
     lora_decode_add_enabled: bool,
@@ -206,21 +195,6 @@ impl CudaBackend {
         // KILN_DISABLE_KT_API_FLASH_ATTN gate removed alongside the
         // 3 sites where the kt-typed path is the only path. The
         // 4th site checks `graph_outputs.is_none()` directly.
-        // #1082: opt-in (default off). The kt path is bit-exact by
-        // construction — both candle and kt paths bottom out in
-        // the same `kiln_sgd_step_{f32,bf16}` FFI symbols; only the
-        // Rust shell types change. Flips on once per-call parity
-        // coverage lands. Opt-in: `KILN_USE_KT_API_SGD_STEP=1` (or
-        // `KILN_USE_KT_API_ALL=1`).
-        let cuda_use_kt_api_sgd_step = std::env::var("KILN_USE_KT_API_SGD_STEP").is_ok()
-            || std::env::var("KILN_USE_KT_API_ALL").is_ok();
-        // #1082: opt-in (default off). Same bit-exact-by-construction
-        // rationale as `cuda_use_kt_api_sgd_step` (both candle and
-        // kt paths bottom out in the same `kiln_adamw_step_{f32,bf16}`
-        // FFI symbols). Opt-in: `KILN_USE_KT_API_ADAMW_STEP=1` (or
-        // `KILN_USE_KT_API_ALL=1`).
-        let cuda_use_kt_api_adamw_step = std::env::var("KILN_USE_KT_API_ADAMW_STEP").is_ok()
-            || std::env::var("KILN_USE_KT_API_ALL").is_ok();
         let gdn_decode_fused_enabled = gdn_gates_enabled
             && gdn_gated_rms_norm_enabled
             && std::env::var("KILN_DISABLE_FUSED_GDN_DECODE").is_err();
@@ -243,8 +217,6 @@ impl CudaBackend {
             gdn_decode_qk_norm_recurrent_enabled,
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled,
             fused_conv1d_enabled,
-            cuda_use_kt_api_sgd_step,
-            cuda_use_kt_api_adamw_step,
             lora_decode_add_enabled,
             gdn_full_chunk_forward_multiblock_enabled,
         }
@@ -309,30 +281,25 @@ impl BackendRuntime for CudaBackend {
         if !self.has_resident_activation(param) || !self.has_resident_activation(grad) {
             return Ok(false);
         }
-        if !kiln_rmsnorm_kernel::supports_optimizer_step(&[param, grad]) {
+        if !cuda_optimizer_tensors_supported_for_kt(&[param, grad]) {
             return Ok(false);
         }
-        // Phase 7 opt-in (#1082): route through the kt-typed surface.
-        // Bit-exact by construction — both candle and kt paths bottom
-        // out in the same `kiln_sgd_step_{f32,bf16}` FFI symbols; the
-        // in-place mutation surfaces in the caller's candle tensor
-        // because the kt borrow adapter is zero-copy.
-        if self.cuda_use_kt_api_sgd_step {
-            kiln_nvtx::range!(c"kiln/sgd_step_kt");
-            let param_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(param)
-                .context("sgd_step kt: borrow param -> kt")?;
-            let grad_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(grad)
-                .context("sgd_step kt: borrow grad -> kt")?;
-            match param.dtype() {
-                DType::F32 => kiln_rmsnorm_kernel::sgd_step_f32_kt(&param_kt, &grad_kt, lr)
-                    .map_err(|e| anyhow::anyhow!("sgd_step kt: sgd_step_f32_kt: {e}"))?,
-                DType::BF16 => kiln_rmsnorm_kernel::sgd_step_bf16_kt(&param_kt, &grad_kt, lr)
-                    .map_err(|e| anyhow::anyhow!("sgd_step kt: sgd_step_bf16_kt: {e}"))?,
-                other => anyhow::bail!("sgd_step kt: unsupported dtype {other:?}"),
-            }
-        } else {
-            kiln_rmsnorm_kernel::sgd_step_inplace(param, grad, lr)
-                .context("cuda dispatch_sgd_step kernel failed")?;
+        let param_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(param)
+            .context("sgd_step kt: borrow param -> kt")?;
+        let grad_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(grad)
+            .context("sgd_step kt: borrow grad -> kt")?;
+        if !kiln_rmsnorm_kernel::supports_optimizer_step_kt(&[&param_kt, &grad_kt]) {
+            return Ok(false);
+        }
+        // Phase 7 (#1082): kt-only. Bit-exact: the previous candle
+        // shim and this kt shell bottom out in the same FFI symbol.
+        kiln_nvtx::range!(c"kiln/sgd_step_kt");
+        match param.dtype() {
+            DType::F32 => kiln_rmsnorm_kernel::sgd_step_f32_kt(&param_kt, &grad_kt, lr)
+                .map_err(|e| anyhow::anyhow!("sgd_step kt: sgd_step_f32_kt: {e}"))?,
+            DType::BF16 => kiln_rmsnorm_kernel::sgd_step_bf16_kt(&param_kt, &grad_kt, lr)
+                .map_err(|e| anyhow::anyhow!("sgd_step kt: sgd_step_bf16_kt: {e}"))?,
+            other => anyhow::bail!("sgd_step kt: unsupported dtype {other:?}"),
         }
         CUDA_SGD_DISPATCH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
         static FIRST_CUDA_SGD_LOGGED: OnceLock<()> = OnceLock::new();
@@ -369,84 +336,60 @@ impl BackendRuntime for CudaBackend {
         {
             return Ok(false);
         }
-        if !kiln_rmsnorm_kernel::supports_optimizer_step(&[
-            param,
-            grad,
-            first_moment,
-            second_moment,
+        if !cuda_optimizer_tensors_supported_for_kt(&[param, grad, first_moment, second_moment]) {
+            return Ok(false);
+        }
+        let param_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(param)
+            .context("adamw_step kt: borrow param -> kt")?;
+        let grad_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(grad)
+            .context("adamw_step kt: borrow grad -> kt")?;
+        let m1_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(first_moment)
+            .context("adamw_step kt: borrow first_moment -> kt")?;
+        let m2_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(second_moment)
+            .context("adamw_step kt: borrow second_moment -> kt")?;
+        if !kiln_rmsnorm_kernel::supports_optimizer_step_kt(&[
+            &param_kt, &grad_kt, &m1_kt, &m2_kt,
         ]) {
             return Ok(false);
         }
-        // Phase 7 opt-in (#1082): route through the kt-typed surface.
-        // Bit-exact by construction — both candle and kt paths bottom
-        // out in the same `kiln_adamw_step_{f32,bf16}` FFI symbols;
-        // the in-place mutation surfaces in the caller's candle
-        // tensors because the kt borrow adapter is zero-copy. The
-        // candle path computes the bias-correction terms internally
-        // from `step: u32`; the kt path takes pre-computed
-        // `bias_correction1` / `bias_correction2` instead, so we
-        // replicate the same `(1 - beta^step).max(1e-20)` formula
-        // (matches `kiln_rmsnorm_kernel::adamw_step_inplace`).
-        if self.cuda_use_kt_api_adamw_step {
-            if step == 0 {
-                anyhow::bail!("adamw_step kt: step must be >= 1");
-            }
-            kiln_nvtx::range!(c"kiln/adamw_step_kt");
-            let bias_correction1 = (1.0f32 - beta1.powi(step as i32)).max(1e-20);
-            let bias_correction2 = (1.0f32 - beta2.powi(step as i32)).max(1e-20);
-            let param_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(param)
-                .context("adamw_step kt: borrow param -> kt")?;
-            let grad_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(grad)
-                .context("adamw_step kt: borrow grad -> kt")?;
-            let m1_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(first_moment)
-                .context("adamw_step kt: borrow first_moment -> kt")?;
-            let m2_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(second_moment)
-                .context("adamw_step kt: borrow second_moment -> kt")?;
-            match param.dtype() {
-                DType::F32 => kiln_rmsnorm_kernel::adamw_step_f32_kt(
-                    &param_kt,
-                    &grad_kt,
-                    &m1_kt,
-                    &m2_kt,
-                    lr,
-                    beta1,
-                    beta2,
-                    eps,
-                    weight_decay,
-                    bias_correction1,
-                    bias_correction2,
-                )
-                .map_err(|e| anyhow::anyhow!("adamw_step kt: adamw_step_f32_kt: {e}"))?,
-                DType::BF16 => kiln_rmsnorm_kernel::adamw_step_bf16_kt(
-                    &param_kt,
-                    &grad_kt,
-                    &m1_kt,
-                    &m2_kt,
-                    lr,
-                    beta1,
-                    beta2,
-                    eps,
-                    weight_decay,
-                    bias_correction1,
-                    bias_correction2,
-                )
-                .map_err(|e| anyhow::anyhow!("adamw_step kt: adamw_step_bf16_kt: {e}"))?,
-                other => anyhow::bail!("adamw_step kt: unsupported dtype {other:?}"),
-            }
-        } else {
-            kiln_rmsnorm_kernel::adamw_step_inplace(
-                param,
-                grad,
-                first_moment,
-                second_moment,
+        if step == 0 {
+            anyhow::bail!("adamw_step kt: step must be >= 1");
+        }
+        // Phase 7 (#1082): kt-only. The candle shim computed these
+        // from `step`; the kt shell takes explicit bias corrections.
+        kiln_nvtx::range!(c"kiln/adamw_step_kt");
+        let bias_correction1 = (1.0f32 - beta1.powi(step as i32)).max(1e-20);
+        let bias_correction2 = (1.0f32 - beta2.powi(step as i32)).max(1e-20);
+        match param.dtype() {
+            DType::F32 => kiln_rmsnorm_kernel::adamw_step_f32_kt(
+                &param_kt,
+                &grad_kt,
+                &m1_kt,
+                &m2_kt,
                 lr,
                 beta1,
                 beta2,
                 eps,
                 weight_decay,
-                step,
+                bias_correction1,
+                bias_correction2,
             )
-            .context("cuda dispatch_adamw_step kernel failed")?;
+            .map_err(|e| anyhow::anyhow!("adamw_step kt: adamw_step_f32_kt: {e}"))?,
+            DType::BF16 => kiln_rmsnorm_kernel::adamw_step_bf16_kt(
+                &param_kt,
+                &grad_kt,
+                &m1_kt,
+                &m2_kt,
+                lr,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                bias_correction1,
+                bias_correction2,
+            )
+            .map_err(|e| anyhow::anyhow!("adamw_step kt: adamw_step_bf16_kt: {e}"))?,
+            other => anyhow::bail!("adamw_step kt: unsupported dtype {other:?}"),
         }
         CUDA_ADAMW_DISPATCH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
         static FIRST_CUDA_ADAMW_LOGGED: OnceLock<()> = OnceLock::new();
@@ -2016,8 +1959,6 @@ mod tests {
             gdn_decode_qk_norm_recurrent_enabled: false,
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled: false,
             fused_conv1d_enabled: false,
-            cuda_use_kt_api_sgd_step: false,
-            cuda_use_kt_api_adamw_step: false,
             lora_decode_add_enabled: false,
             gdn_full_chunk_forward_multiblock_enabled: false,
         }

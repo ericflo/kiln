@@ -94,8 +94,8 @@ pub use kt_api::{
     lora_decode_hidden_kt, sgd_step_bf16_kt, sgd_step_f32_kt,
     silu_inplace_save_sigmoid_f32_kt, supports_attn_decode_qkv_prep_kt,
     supports_l2_qk_norm_gqa_kt, supports_l2_qk_norm_kt, supports_lora_decode_add_kt,
-    supports_mlp_silu_mul_kt, supports_mlp_silu_mul_packed_kt, supports_rmsnorm_kt,
-    supports_rotary_qk_kt, supports_sigmoid_mul_kt, RmsNormError,
+    supports_mlp_silu_mul_kt, supports_mlp_silu_mul_packed_kt, supports_optimizer_step_kt,
+    supports_rmsnorm_kt, supports_rotary_qk_kt, supports_sigmoid_mul_kt, RmsNormError,
 };
 
 unsafe extern "C" {
