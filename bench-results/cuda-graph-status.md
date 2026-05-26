@@ -11,26 +11,55 @@ the production batched capture path (`kiln-model/src/cuda_graph.rs`)
 landed in parallel. Future planners should treat this as the
 canonical "what's already done" reference.
 
-## Headline (2026-05-26)
+## Headline (2026-05-26 — REVERTED)
 
-🎉 **`KILN_CUDA_GRAPHS_BATCHED=1` AND `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1`
-are now DEFAULT ON** (commit `6d564b9a`). End-to-end `compute-sanitizer
-memcheck` on A6000 at HEAD `a2cb9edb` passed: live driver runs clean
-(decode 74.4 tok/s, mean ITL 13.45ms, peak VRAM 11.2 GB on Qwen3.5-4B
-W4A16 paged decode at bs=1/4/8/16) AND sanitizer reports
-`========= ERROR SUMMARY: 0 errors`.
+⚠️ **`KILN_CUDA_GRAPHS_BATCHED` and `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED`
+are DEFAULT OFF** as of HEAD post-`2d9d4fc4`. The earlier flip to ON
+at `6d564b9a` was REVERTED after a concurrent bench against
+`kiln serve` showed every bs≥2 request returning HTTP 500:
+
+  - First batched request triggers `model_forward_paged_batched_with_graph_inputs`
+    inside the CUDA graph capture window
+  - Capture fails with a swallowed inner error at `cuda_graph.rs:1617`
+    (`.context("batched forward failed during graph capture")`) — the
+    `tracing::warn!` at `cuda_graph.rs:776` only printed the wrapper,
+    not the inner cause
+  - Bad CUDA context state → subsequent batched replays return
+    `DriverError(CUDA_ERROR_ILLEGAL_ADDRESS)` at `cuda_graph.rs:~696`
+  - Eager-batched fallback ALSO fails on the same poisoned context
+
+The earlier `compute-sanitizer memcheck` "validation" at HEAD
+`a2cb9edb` was on the bs=1 capture+replay path (still working). It
+did NOT exercise the actual batched capture path the production
+caller hits — a planning miss the post-mortem must not repeat.
+
+**Status of the various paths (HEAD `2d9d4fc4` + revert):**
 
 - The **bs=1 production CUDA graph capture/replay path is live**
   under `KILN_CUDA_GRAPHS=true` (on by default; unchanged).
-- The **bs>1 batched capture/replay path is live** under
-  `KILN_CUDA_GRAPHS_BATCHED` (now default-on). All four root-cause
-  intra-graph alloc suspects from `cuda-graph-bs2-secondary-audit.md`
-  closed (see "Phase 5 bs>1 progress" below). Escape hatch:
-  `KILN_CUDA_GRAPHS_BATCHED=0`.
-- The **fused batched-slot KV writer** is live under
-  `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED` (now default-on). Closes
-  suspect 1 of `cuda-graph-bs2-secondary-audit.md`. Escape hatch:
-  `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=0`.
+- The **bs>1 eager batched decode path is healthy** — bench against
+  `kiln serve` with `KILN_CUDA_GRAPHS_BATCHED=0` shows clean linear
+  scaling on A6000: bs=1→84 tok/s, bs=2→144, bs=4→264, bs=8→449,
+  bs=16→475, bs=32→483, bs=64→**498 tok/s**. This is the production
+  default after the revert.
+- The **bs>1 capture/replay path is OPT-IN** under
+  `KILN_CUDA_GRAPHS_BATCHED=1`. Setting this currently breaks
+  concurrent decode end-to-end — DO NOT enable in production until
+  the swallowed inner error is identified and fixed. The first
+  follow-up commit surfaced the error chain in the tracing line
+  (`{e:#}`); next debugging step is to re-run the bench against
+  serve, read the full chain from the log, and trace the cause.
+- The **fused batched-slot KV writer** is OPT-IN under
+  `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1` (default-off in lockstep
+  with the parent flag — they're meant to be flipped together).
+
+**Companion fix (kept after revert):** the same head commit
+`2d9d4fc4` fixed a separate batched-path bug in cuda.rs where
+three `gdn_decode_*` kt paths called `kt_tensor_from_candle_cuda_borrow`
+on non-contiguous `a`/`b` views from `ab.narrow(2, .., nv)` (the
+fused A/B in-proj output). The contiguity fix is unrelated to graph
+capture; it unblocked the eager-batched path that now ships as the
+default.
 - The **substrate crates** (`kiln-graph`, `kiln-graph-cuda`,
   `kiln-graph-metal`, `kiln-graph-vulkan`) ship the backend-agnostic
   types but the per-backend impls are scaffolds.

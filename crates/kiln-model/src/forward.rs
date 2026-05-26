@@ -31273,15 +31273,22 @@ mod tests {
 /// Closes suspect 1 in `bench-results/cuda-graph-bs2-secondary-audit.md`
 /// for #1082.
 ///
-/// **Default flipped ON (2026-05-26)** alongside the sibling
-/// `KILN_CUDA_GRAPHS_BATCHED` flip — same end-to-end
-/// `compute-sanitizer memcheck` validation run on A6000 at HEAD
-/// `a2cb9edb`. Both flags active under the validated configuration.
-/// Set `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=0` (or `false`, `no`,
-/// `off`) to opt out.
+/// **Default REVERTED to OFF (2026-05-26)** alongside the sibling
+/// `KILN_CUDA_GRAPHS_BATCHED` flip. Concurrent bench against
+/// `kiln serve` showed batched graph capture failing silently with
+/// a swallowed inner error → bad CUDA context → all bs≥2 requests
+/// 500ed. The sanitizer validation under HEAD `a2cb9edb` covered
+/// the bs=1 capture path, not the actual batched capture path the
+/// production server hits. See the matching note on
+/// `batched_graph_enabled()` in `cuda_graph.rs` for the full
+/// post-mortem.
+///
+/// Set `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1` to opt in once the
+/// underlying batched-capture bug is fixed and re-validated against
+/// `bench-concurrent-batch.py`.
 #[cfg(feature = "cuda")]
 fn kv_fused_batched_enabled() -> bool {
     std::env::var("KILN_CUDA_GRAPHS_BATCHED_KV_FUSED")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(true)
+        .unwrap_or(false)
 }

@@ -163,23 +163,45 @@ impl CudaGraphKey {
 /// hold for batched graphs to engage; either being off sends the
 /// bs>1 caller down the eager batched path.
 ///
-/// **Default flipped ON (2026-05-26)** post end-to-end
-/// `compute-sanitizer memcheck` validation on A6000 at HEAD
-/// `a2cb9edb`. Live driver runs clean (decode 74.4 tok/s, mean
-/// ITL 13.45ms, peak VRAM 11.2 GB on Qwen3.5-4B paged decode at
+/// **Default REVERTED to OFF (2026-05-26)** — the earlier flip to ON
+/// at `6d564b9a` was based on `kiln-bench` sequential-decode runs
+/// that never exercised the actual batched concurrent decode path.
+/// Concurrent bench against `kiln serve` showed every bs≥2 request
+/// returning HTTP 500 with a swallowed inner error at
+/// `cuda_graph.rs:1595` (`"batched forward failed during graph
+/// capture"`) → bad CUDA context → `CUDA_ERROR_ILLEGAL_ADDRESS` on
+/// the subsequent replay → eager-batched fallback also fails on the
+/// same poisoned context. The eager-batched path (with this flag
+/// `0`) is healthy: bs=64 → 498 tok/s on A6000 at HEAD `2d9d4fc4`
+/// after the GDN-decode contiguity fix in the same commit.
+///
+/// The earlier validation trail in `bench-results/cuda-graph-status.md`
+/// ("Phase 5 sanitizer sweep") covered the bs=1 capture + bs=1 replay
+/// path; the production caller hits batched capture which has a
+/// separate uninvestigated bug (suspect 1 in the comment at
+/// `cuda_graph.rs:1595`: per-step KV-slot writer baked-immediate
+/// correctness under graph replay across `start_pos` values).
+///
+/// Set `KILN_CUDA_GRAPHS_BATCHED=1` to opt in once the underlying
+/// capture bug is fixed and re-validated end-to-end against
+/// `bench-concurrent-batch.py`.
+///
+/// _Historical_: Phase 5 sanitizer sweep on A6000 at HEAD `a2cb9edb`:
+/// decode 74.4 tok/s, mean ITL 13.45ms, peak VRAM 11.2 GB on
+/// Qwen3.5-4B paged decode at
 /// batches 1/4/8/16) AND sanitizer reports `========= ERROR
 /// SUMMARY: 0 errors` under the full live-driver path with
 /// `KILN_CUDA_GRAPHS_BATCHED=1 KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1`.
 /// See `bench-results/cuda-graph-status.md` "Phase 5 sanitizer
 /// sweep" section for the validation trail.
 ///
-/// Set `KILN_CUDA_GRAPHS_BATCHED=0` (or `false`, `no`, `off`) to
-/// opt out (escape hatch — reverts to the eager batched path).
+/// Set `KILN_CUDA_GRAPHS_BATCHED=1` (or `true`, `yes`, `on`) to opt
+/// in once the batched-capture bug is fixed.
 #[cfg(feature = "cuda")]
 fn batched_graph_enabled() -> bool {
     std::env::var("KILN_CUDA_GRAPHS_BATCHED")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// Cache key for the (planned, not-yet-wired) batched (`bs > 1`) decode
@@ -751,10 +773,16 @@ impl CudaGraphRunner {
                 Ok(Some(tokens))
             }
             Err(e) => {
+                // `{:#}` prints the full anyhow error chain (e.g.
+                // "batched forward failed during graph capture:
+                // <inner cause>"). Without the `#` formatter the
+                // inner error is silently dropped — that hid the
+                // actual root cause from the 2026-05-26 Phase 5
+                // batched-decode regression investigation.
                 tracing::warn!(
                     batch_size,
                     max_seqlen_k = key.max_seqlen_k,
-                    error = %e,
+                    error = format!("{e:#}"),
                     "batched CUDA graph capture failed, falling back to eager"
                 );
                 Ok(None)
