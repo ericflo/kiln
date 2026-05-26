@@ -130,15 +130,15 @@ pub struct CudaBackend {
     // `kiln_gdn_kernel::gdn_full_chunk_forward` fall-through inside
     // the multiblock dispatcher, because no kt single-block kernel
     // wire exists yet.
-    // Phase 7 (#1082): the cuda_use_kt_api_flash_attn gate was
-    // removed once the kt-typed surface became the only path on
-    // the 3 sites that don't take caller-owned graph outputs
-    // (`flash_attn`, `flash_attn_paged_decode`,
-    // `flash_attn_paged_decode_contiguous_batch_dyn_seqlen`). The
-    // 4th site (`_with_graph_outputs`) still routes the
-    // `graph_outputs == Some(...)` case through the candle wrapper
-    // because the kt-typed entry doesn't accept caller-owned (out,
-    // lse) pairs yet; the `graph_outputs == None` case is kt.
+    // Phase 7 (#1082): all 4 flash-attn dispatch sites in this
+    // backend are now kt-only after `aab07fa7` landed the
+    // `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs`
+    // sibling. The `cuda_use_kt_api_flash_attn` gate is gone. The
+    // `_with_graph_outputs` site dispatches both branches through
+    // kt: `Some((out, lse))` borrows the caller's candle tensors
+    // into kt and writes through them via the new with_graph_outputs
+    // entry; `None` calls the existing internally-allocating
+    // `flash_attn_paged_decode_dyn_seqlen_kt`.
     /// Phase 7 opt-in (#1082): route the SGD optimizer step through
     /// the kt-typed surface (`sgd_step_{f32,bf16}_kt`) instead of the
     /// candle-typed `kiln_rmsnorm_kernel::sgd_step_inplace` shim.

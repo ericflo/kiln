@@ -17452,18 +17452,49 @@ fn try_flash_attn_paged_decode(
                         "missing CUDA graph paged decode LSE buffer for full-attention layer {full_attn_layer_idx}"
                     )
                 })?;
-                kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen(
-                    &q_fa,
-                    k_pool,
-                    v_pool,
-                    bt_tensor,
-                    inputs.seqused_k,
-                    Some((attn_out, softmax_lse)),
+                // Phase 7 (#1082): route through the new kt-typed
+                // `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_
+                // outputs` entry (`aab07fa7`). Bit-exact: bottoms out
+                // in the same FFI symbol as the candle wrapper. The
+                // kt entry writes through the caller-owned `(attn_out,
+                // softmax_lse)` pinned by the captured-graph runner,
+                // preserving the dangling-pointer-fix contract from
+                // `bench-results/cuda-graph-bs2-secondary-audit.md`
+                // suspects 3+4.
+                kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs");
+                let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_fa)
+                    .context("forward kt: borrow q_fa")?;
+                let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
+                    .context("forward kt: borrow k_pool")?;
+                let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
+                    .context("forward kt: borrow v_pool")?;
+                let bt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(bt_tensor)
+                    .context("forward kt: borrow bt_tensor")?;
+                let sk_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(inputs.seqused_k)
+                    .context("forward kt: borrow seqused_k")?;
+                let out_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(attn_out)
+                    .context("forward kt: borrow attn_out (caller-owned graph output)")?;
+                let lse_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(softmax_lse)
+                    .context("forward kt: borrow softmax_lse (caller-owned graph output)")?;
+                kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
+                    &q_kt,
+                    &k_kt,
+                    &v_kt,
+                    &bt_kt,
+                    &sk_kt,
+                    &out_kt,
+                    &lse_kt,
                     inputs.max_seqlen_k,
                     block_size,
                     softmax_scale,
                     true,
-                )?
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "forward kt: flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs: {e}"
+                    )
+                })?;
+                attn_out.clone()
             } else {
                 match backend.flash_attn_paged_decode(
                     &q_fa,
