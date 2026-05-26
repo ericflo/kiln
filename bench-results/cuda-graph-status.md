@@ -80,6 +80,33 @@ batched graphs (memory grows by one intermediate's worth per
 graph_size bucket — small for fixed workload, and the buffers
 stay valid across replays).
 
+### Why bs=1 works (probable explanation)
+
+Candle's `Tensor::matmul` likely uses an internal pool allocator
+(not `cudaMallocAsync`), so the lm-head output buffer is NOT
+captured as a `cudaMemAllocNode`. AUTO_FREE_ON_LAUNCH has
+nothing to free in the graph — the pool's address bookkeeping is
+host-side, outside the capture window. On bs=1 with small
+`[1, 1, vocab]` output and no inter-step memory pressure, the
+pool deterministically returns the same address each call, so
+the captured slice_set source pointer stays valid by luck. At
+bs=2 the output doubles in size, churning the pool — the next
+allocation may land at a different address, leaving the captured
+slice_set pointing at a now-stale or freed address.
+
+This is the same root-cause shape as the GDN fix at
+`cuda_graph.rs:1592-1601` ("the GDN decode kernel would
+Tensor::zeros(...) its outputs INSIDE the capture window"). The
+fix used there — pre-allocate the output buffer outside capture,
+hand it to the kernel via thread-local — needs to be applied to
+the lm-head output too. Either via a thread-local mechanism
+mirroring `with_decode_gates_recurrent_outputs`, or by adding a
+`matmul_into(dst)` variant in kt-typed matmul + plumbing it
+through the lm-head wrapper.
+
+The thread-local approach is the smaller diff and matches the
+existing GDN pattern exactly; recommended as the first attempt.
+
 Until a fix lands, Phase 5 captured-graph remains opt-in
 (`KILN_CUDA_GRAPHS_BATCHED=0` is the production default after
 `909e2e61`). Production decode runs the eager-batched path,
