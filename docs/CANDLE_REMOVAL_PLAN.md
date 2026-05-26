@@ -255,8 +255,11 @@ trap in the SFT parity CI.
       supports_kt 4D vs kernel 3D shape contract split fix
       (`a2cb9edb`). Remaining: 6 forward.rs prefill-chunk-loop
       sites (tests), 2 cuda_graph.rs sites (`with_decode_gates_
-      recurrent_outputs` needs a kt sibling that accepts caller-
-      owned outputs). `kt_api.rs` already candle-import-free.
+      recurrent_outputs` — see "Scope clarification" below: the
+      helper is effectively no-op-in-production today, so a naive
+      kt sibling closes the type wire but ships no behavior change;
+      the real fix is deeper). `kt_api.rs` already
+      candle-import-free.
     - **kiln-flash-attn: 🟡 cuda.rs fully kt-only** — all 4 sites
       migrated, including `_with_graph_outputs` via the new
       `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs`
@@ -440,18 +443,80 @@ Remaining candle-typed callers across kiln-model:
   outside the backend dispatcher path.
 - `crates/kiln-model/src/cuda_graph.rs` (2 sites):
   `with_decode_gates_recurrent_outputs` — graph-output wrapper that
-  takes caller-owned outputs (`(out, lse)` pair) for CUDA-graph
+  takes caller-owned outputs (`Vec<Tensor>`) for CUDA-graph
   capture; no kt-typed sibling exists yet.
 
-Follow-up steps:
+#### Scope clarification: `with_decode_gates_recurrent_outputs`
+
+Audited 2026-05-26 (worktree `agent-a3fe6452f68908706`). The two
+cuda_graph.rs callers (lines `~1385` and `~1574`) wrap the captured
+forward in `kiln_gdn_kernel::with_decode_gates_recurrent_outputs`,
+which sets up the `DECODE_GATES_RECURRENT_OUTPUTS` thread-local so
+the candle-typed `gdn_decode_gates_recurrent[_qk_norm[_rmsnorm]]`
+kernels can pick pre-allocated outputs via
+`next_decode_gates_recurrent_output` instead of `Tensor::zeros`-
+ing inside the capture window.
+
+That thread-local has **no production reader anymore**. The
+production decode dispatcher in `backend/cuda.rs:1011`,
+`:1197`, `:1378` already routes through the kt-typed kernels
+(`gdn_decode_gates_recurrent_bf16_kt` and friends in
+`kiln-gdn-kernel/src/kt_api.rs`). Each kt kernel allocates its
+own output via `kiln_kt_bridge::alloc_cuda_tensor` and the result
+is copied back to candle via `kt_tensor_to_candle_cuda_copy`. The
+candle-typed `gdn_decode_*` functions in `lib.rs` (the only
+readers of `DECODE_GATES_RECURRENT_OUTPUTS`) are now exercised
+only from in-lib parity tests at `lib.rs:3517`, `:3672`, `:3788`.
+
+Consequence: the cuda_graph.rs `with_decode_gates_recurrent_
+outputs(...)` calls are effectively **no-ops in production**
+today. The "AUTO_FREE_ON_LAUNCH would free intra-capture
+allocations" comment at `cuda_graph.rs:1565-1573` describes a
+defense that no longer applies — the kt path's `alloc_cuda_
+tensor` + dtod-copy both happen inside the capture window
+anyway. Either the captured graphs survive those freed
+allocations by some other mechanism (e.g., the AUTO_FREE
+semantics only apply to specific allocator pools that kt's
+`cuda_zeros` and candle's `Tensor::zeros` don't use), or there
+is a latent graph-replay-stability issue at `bs>=16` waiting to
+be tripped. Either way, that question is orthogonal to the
+candle-removal task.
+
+A cosmetic kt sibling (`with_decode_gates_recurrent_outputs_kt`
+taking `Vec<KtTensor>`) is implementable but has no caller path
+that would benefit:
+- The struct fields in `CapturedDecodeGraph` and
+  `CapturedBatchedDecodeGraph` (`_gdn_decode_outputs: Vec<Tensor>`)
+  store candle tensors for graph-stable lifetime ownership.
+- The kt-typed decode kernels in `kt_api.rs` do not consult any
+  thread-local — they allocate fresh outputs per call.
+- Wiring a kt-typed `DECODE_GATES_RECURRENT_OUTPUTS_KT` would
+  require rewriting all 8 kt-typed decode kernels to consult it,
+  plus changing the `CapturedDecodeGraph` field types and the
+  `Self::new_gdn_decode_outputs` allocator. Out of scope for a
+  single follow-up PR.
+
+Updated follow-up steps:
 1. Land a kt-typed single-block `gdn_full_chunk_forward_kt` to
-  eliminate the cuda.rs fall-through.
-2. Add kt-typed sibling for `with_decode_gates_recurrent_outputs`
-  with caller-owned outputs; migrate cuda_graph.rs sites.
+   eliminate the cuda.rs fall-through.
+2. **`with_decode_gates_recurrent_outputs` cleanup (one of):**
+   a. **Delete the helper and both call sites** once it is
+      confirmed that the kt path's graph-replay-stability does
+      not regress at `bs>=16` (the helper sets up state nobody
+      reads in production — removing it is a pure scaffolding
+      cleanup). Requires the graph-stability audit above.
+   b. **Wire the kt kernels to a kt-typed thread-local** if the
+      audit finds we actually need graph-stable pre-allocated
+      outputs. Adds `with_decode_gates_recurrent_outputs_kt` +
+      `next_decode_gates_recurrent_output_kt`, updates all 8
+      kt-typed decode kernels in `kt_api.rs`, changes
+      `CapturedDecodeGraph._gdn_decode_outputs` to `Vec<KtTensor>`,
+      and changes `Self::new_gdn_decode_outputs` to allocate kt
+      tensors via `kiln_kt_bridge::alloc_cuda_tensor`.
 3. Migrate the forward.rs prefill-chunk-loop sites once #1 lands.
 4. Delete candle surface from `lib.rs`.
 5. Drop `candle-core` from Cargo.toml (substrate-blocked on the
-  same kt-bridge cleanup as conv1d/marlin).
+   same kt-bridge cleanup as conv1d/marlin).
 
 ### kiln-flash-attn — **BLOCKED** (15 candle-typed callers in kiln-model)
 
