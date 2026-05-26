@@ -570,32 +570,69 @@ pub fn sample_with_params(
 /// This is the fast path for the API/UI defaults: `temperature > 0`,
 /// `top_p = 1`, and `top_k = 0`.
 fn sample_full_distribution_unsorted(scaled: &Tensor, seed: Option<u64>) -> Result<u32> {
+    #[cfg(feature = "cuda")]
+    if crate::forward::cuda_use_kt_api_sampling_softmax() {
+        if let Some(weights) = try_kt_full_distribution_probs(scaled)? {
+            if weights.is_empty() {
+                anyhow::bail!("empty logits distribution");
+            }
+            return sample_from_distribution_weights(
+                &weights,
+                seed,
+                (weights.len() - 1) as u32,
+            );
+        }
+    }
+
     let values: Vec<f32> = scaled.to_vec1()?;
     if values.is_empty() {
         anyhow::bail!("empty logits distribution");
     }
 
+    let fallback_idx = (values.len() - 1) as u32;
+    let Some(weights) = softmax_weights_from_logits(&values) else {
+        return Ok(fallback_idx);
+    };
+
+    sample_from_distribution_weights(&weights, seed, fallback_idx)
+}
+
+fn softmax_weights_from_logits(values: &[f32]) -> Option<Vec<f32>> {
     let max_logit = values
         .iter()
         .copied()
         .filter(|v| v.is_finite())
         .fold(f32::NEG_INFINITY, |acc, v| acc.max(v));
     if !max_logit.is_finite() {
-        return Ok((values.len() - 1) as u32);
+        return None;
     }
-    let mut sum = 0.0_f32;
-    let mut probs = Vec::with_capacity(values.len());
-    for &logit in &values {
-        let p = if logit.is_finite() {
+
+    let mut weights = Vec::with_capacity(values.len());
+    for &logit in values {
+        weights.push(if logit.is_finite() {
             (logit - max_logit).exp()
         } else {
             0.0
-        };
-        sum += p;
-        probs.push(p);
+        });
     }
+    Some(weights)
+}
+
+fn sample_from_distribution_weights(
+    weights: &[f32],
+    seed: Option<u64>,
+    fallback_idx: u32,
+) -> Result<u32> {
+    if weights.is_empty() {
+        anyhow::bail!("empty logits distribution");
+    }
+    let sum: f32 = weights
+        .iter()
+        .copied()
+        .filter(|w| w.is_finite() && *w > 0.0)
+        .sum();
     if !sum.is_finite() || sum <= 0.0 {
-        return Ok((values.len() - 1) as u32);
+        return Ok(fallback_idx);
     }
 
     let mut rng: StdRng = match seed {
@@ -604,14 +641,42 @@ fn sample_full_distribution_unsorted(scaled: &Tensor, seed: Option<u64>) -> Resu
     };
     let threshold = rng.random::<f32>() * sum;
     let mut cumsum = 0.0_f32;
-    for (idx, p) in probs.into_iter().enumerate() {
-        cumsum += p;
+    for (idx, &weight) in weights.iter().enumerate() {
+        if !weight.is_finite() || weight <= 0.0 {
+            continue;
+        }
+        cumsum += weight;
         if threshold < cumsum {
             return Ok(idx as u32);
         }
     }
 
-    Ok((values.len() - 1) as u32)
+    Ok(fallback_idx)
+}
+
+#[cfg(feature = "cuda")]
+fn try_kt_full_distribution_probs(scaled: &Tensor) -> Result<Option<Vec<f32>>> {
+    if !matches!(scaled.device(), Device::Cuda(_))
+        || scaled.dtype() != DType::F32
+        || !scaled.is_contiguous()
+        || scaled.rank() != 1
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/sampling_softmax_kt");
+
+    let scaled_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(scaled) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let probs_kt = match kiln_tensor::cuda_softmax_last_axis(&scaled_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let probs = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&probs_kt)
+        .map_err(|e| anyhow::anyhow!("kt sampling softmax copy-back failed: {e}"))?;
+    Ok(Some(probs.to_vec1::<f32>()?))
 }
 
 /// Sort `scaled` descending on-device, transfer only the top-k `(index, value)`
@@ -1174,6 +1239,37 @@ mod tests {
                 "direct kt penalty logit mismatch at {idx}: got {gd}, expected {e}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_cuda_sampling_softmax_kt_helper_matches_host_weights() -> Result<()> {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!(
+                "CUDA unavailable, skipping test_cuda_sampling_softmax_kt_helper_matches_host_weights"
+            );
+            return Ok(());
+        };
+        let values = [0.0_f32, 2.0, -1.0, 6.0, 1.0, -3.0];
+        let logits = Tensor::new(&values, &cuda)?;
+
+        let got = try_kt_full_distribution_probs(&logits)?
+            .context("expected CUDA kt sampler softmax path to run")?;
+        let expected = softmax_weights_from_logits(&values).context("host softmax weights")?;
+        assert_eq!(got.len(), expected.len());
+        for (idx, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (g - e).abs() <= 1e-5,
+                "sampling softmax mismatch at {idx}: got {g}, expected {e}"
+            );
+        }
+
+        let fallback_idx = (values.len() - 1) as u32;
+        let got_token = sample_from_distribution_weights(&got, Some(123), fallback_idx)?;
+        let expected_token =
+            sample_from_distribution_weights(&expected, Some(123), fallback_idx)?;
+        assert_eq!(got_token, expected_token);
         Ok(())
     }
 

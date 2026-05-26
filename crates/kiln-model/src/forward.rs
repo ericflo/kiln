@@ -1430,27 +1430,18 @@ pub(crate) fn cuda_use_kt_api_matmul() -> bool {
 /// kt-storage upstream. The sampler softmax sits at the end of
 /// `sample_with_params` / `sample_with_full_params`, after
 /// temperature scaling and (possibly) top-k truncation, on a
-/// rank-1 `[K]` or `[vocab]` candle tensor. Today the sampler
-/// computes the softmax host-side after a `to_vec1::<f32>()`
-/// transfer; the kt-API path would keep the tensor on device
-/// through softmax and only transfer the post-softmax `[K]`
-/// probability vector (typically K=20-50 for Qwen3.5's default
-/// top_k), trading one full-vocab DtoH for K host floats and
-/// one device softmax kernel.
+/// rank-1 `[K]` or `[vocab]` candle tensor. The first migrated
+/// call site is the full-distribution seeded path in
+/// `sampling::sample_full_distribution_unsorted`: it keeps the
+/// CUDA logits on device through kt softmax, then transfers the
+/// post-softmax probability vector for the existing host-side
+/// categorical draw. Top-k/top-p/min-p paths still use their
+/// existing host-side filtering because their rank-based filtering
+/// interleaves with the softmax domain.
 ///
-/// Wiring the gate without yet migrating either call site
-/// (`sample_with_params` and `sample_with_full_params`) is an
-/// intentional incremental step (#1082, Phase 7). The candle
-/// softmax-then-host pattern is interleaved with host-side
-/// rank-based filtering (top-p, min-p, categorical) that can't
-/// stay in kt-storage; restructuring the sampler to keep the
-/// device softmax in the loop requires a careful audit of the
-/// filter ordering and is best done one call site at a time.
-///
-/// Today this gate is unused. The first call-site migration will
-/// branch on it. Returning a bool through `OnceLock` matches the
-/// other Phase 7 gates so the cost is one atomic read per call
-/// (negligible vs. the softmax it gates).
+/// Returning a bool through `OnceLock` matches the other Phase 7
+/// gates so the cost is one atomic read per call (negligible vs.
+/// the softmax it gates).
 #[cfg(feature = "cuda")]
 #[allow(dead_code)]
 pub(crate) fn cuda_use_kt_api_sampling_softmax() -> bool {
