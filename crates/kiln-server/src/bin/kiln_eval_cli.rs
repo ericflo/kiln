@@ -526,7 +526,9 @@ fn build_panel_suite(
             example.metadata.as_ref(),
             &["prompt_chars", "prompt_char_count", "input_chars"],
         )
-        .unwrap_or_else(|| example_prompt_chars(example, source.tools.as_deref(), suite_tools_chars));
+        .unwrap_or_else(|| {
+            example_prompt_chars(example, source.tools.as_deref(), suite_tools_chars)
+        });
         let prompt_tokens = metadata_usize(
             example.metadata.as_ref(),
             &[
@@ -626,14 +628,15 @@ fn build_panel_suite(
         let example_id = example.resolved_id();
         *selected_counts.entry(stratum.key.clone()).or_default() += 1;
         *selected_weight_sums.entry(stratum.key.clone()).or_default() += *panel_weight as f64;
-        *selected_prompt_chars.entry(stratum.key.clone()).or_default() +=
-            metadata_usize(
-                example.metadata.as_ref(),
-                &["prompt_chars", "prompt_char_count", "input_chars"],
-            )
-            .unwrap_or_else(|| {
-                example_prompt_chars(&example, source.tools.as_deref(), suite_tools_chars)
-            });
+        *selected_prompt_chars
+            .entry(stratum.key.clone())
+            .or_default() += metadata_usize(
+            example.metadata.as_ref(),
+            &["prompt_chars", "prompt_char_count", "input_chars"],
+        )
+        .unwrap_or_else(|| {
+            example_prompt_chars(&example, source.tools.as_deref(), suite_tools_chars)
+        });
         if let Some(tokens) = metadata_usize(
             example.metadata.as_ref(),
             &[
@@ -643,7 +646,9 @@ fn build_panel_suite(
                 "input_token_count",
             ],
         ) {
-            *selected_prompt_tokens.entry(stratum.key.clone()).or_default() += tokens;
+            *selected_prompt_tokens
+                .entry(stratum.key.clone())
+                .or_default() += tokens;
         }
         selected_ids_by_stratum
             .entry(stratum.key.clone())
@@ -794,12 +799,7 @@ fn distribute_panel_remainder(
         remainders.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    strata[b.0]
-                        .indices
-                        .len()
-                        .cmp(&strata[a.0].indices.len())
-                })
+                .then_with(|| strata[b.0].indices.len().cmp(&strata[a.0].indices.len()))
                 .then_with(|| strata[a.0].key.cmp(&strata[b.0].key))
         });
         let mut advanced = false;

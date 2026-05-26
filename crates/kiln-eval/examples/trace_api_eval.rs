@@ -196,21 +196,24 @@ async fn run_model(
         completed += 1;
         if let Some(predicted_tool) = scored.predicted_tool {
             predicted_tool_by_outcome.insert(
-                (scored.outcome.example_id.clone(), scored.outcome.completion_index),
+                (
+                    scored.outcome.example_id.clone(),
+                    scored.outcome.completion_index,
+                ),
                 predicted_tool,
             );
         }
         if let Some(schema_violation) = scored.schema_violation {
             schema_violations_by_outcome.insert(
-                (scored.outcome.example_id.clone(), scored.outcome.completion_index),
+                (
+                    scored.outcome.example_id.clone(),
+                    scored.outcome.completion_index,
+                ),
                 schema_violation,
             );
         }
         outcome_records.push((scored.ordinal, scored.outcome));
-        eprintln!(
-            "model={} outcome={}/{}",
-            model, completed, total_outcomes,
-        );
+        eprintln!("model={} outcome={}/{}", model, completed, total_outcomes,);
     }
     outcome_records.sort_by_key(|(ordinal, _)| *ordinal);
     outcomes.extend(outcome_records.into_iter().map(|(_, outcome)| outcome));
