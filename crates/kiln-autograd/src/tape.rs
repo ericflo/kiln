@@ -185,12 +185,11 @@ impl Tape {
 
             // 3b. KILN_DETECT_ANOMALY: scan each gradient output for
             //     NaN/Inf and panic at the producing op's tape
-            //     position on the first violation. Skip non-CPU
-            //     storages (all_finite returns Err on non-CPU; the
-            //     CUDA/Metal/Vulkan is_finite kernel lands with the
-            //     per-backend substrate). For now, the CPU autograd
-            //     path is the canonical reference + the path the CI
-            //     parity tests run under.
+            //     position on the first violation. CPU tensors use
+            //     the strided walker; CUDA tensors bridge through a
+            //     D2H copy until the per-backend is_finite reduction
+            //     kernels land. Unsupported devices are skipped so the
+            //     debug trap stays opt-in instead of breaking backward.
             if anomaly {
                 for (i, maybe_grad) in per_input.iter().enumerate() {
                     let Some(g) = maybe_grad.as_ref() else { continue };
@@ -209,11 +208,8 @@ impl Tape {
                             );
                         }
                         Err(_) => {
-                            // Non-CPU storage — the kernel for is_finite
-                            // is a follow-up; for now silently skip the
-                            // check rather than failing the backward
-                            // pass. CPU-autograd CI tests are the
-                            // anomaly-detection bedrock.
+                            // Unsupported storage/backend — the dedicated
+                            // is_finite kernels are follow-up work.
                         }
                     }
                 }
@@ -279,7 +275,44 @@ mod tests {
     use super::*;
     use crate::BackwardOp;
     use kiln_tensor::{DType, Tensor};
+    use std::ffi::OsString;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: Rust 2024 marks env mutation unsafe because it is
+            // process-global. Tests that call this helper hold ENV_LOCK.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `EnvVarGuard::set`; the guard is dropped
+            // before ENV_LOCK is released.
+            unsafe {
+                match self.previous.as_ref() {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     /// Test-only `BackwardOp` that records how many times its `apply`
     /// was called and returns a fixed gradient per input.
@@ -301,6 +334,25 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             // Echo grad_output as each input's gradient.
             Ok((0..self.input_count).map(|_| Some(grad_output.clone())).collect())
+        }
+    }
+
+    #[derive(Debug)]
+    struct NonFiniteGradOp {
+        name: &'static str,
+    }
+
+    impl BackwardOp for NonFiniteGradOp {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn input_count(&self) -> usize {
+            1
+        }
+
+        fn apply(&self, _grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
+            Ok(vec![Some(Tensor::from_slice(&[f32::NAN], vec![1])?)])
         }
     }
 
@@ -517,6 +569,70 @@ mod tests {
             .backward(out.id(), cpu_tensor(), passthrough_accumulator)
             .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn backward_detects_non_finite_grad_when_anomaly_enabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::set(crate::ENV_DETECT_ANOMALY, Some("1"));
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut tape = Tape::new();
+            let out = cpu_tensor();
+            let inp = cpu_tensor();
+            tape.record(
+                &out,
+                &[&inp],
+                Box::new(NonFiniteGradOp {
+                    name: "test/non_finite_grad",
+                }),
+            );
+            let _ = tape
+                .backward(out.id(), cpu_tensor(), passthrough_accumulator)
+                .unwrap();
+        }));
+
+        let panic = result.expect_err("expected anomaly detector to panic");
+        let msg = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("<non-string panic>");
+        assert!(
+            msg.contains("kiln_autograd: anomaly detected at tape position 0"),
+            "expected anomaly prefix and tape position, got: {msg}"
+        );
+        assert!(
+            msg.contains("op `test/non_finite_grad`"),
+            "expected op name, got: {msg}"
+        );
+        assert!(
+            msg.contains("input #0 gradient contained NaN or Inf"),
+            "expected gradient detail, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn backward_allows_non_finite_grad_when_anomaly_disabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::set(crate::ENV_DETECT_ANOMALY, None);
+
+        let mut tape = Tape::new();
+        let out = cpu_tensor();
+        let inp = cpu_tensor();
+        tape.record(
+            &out,
+            &[&inp],
+            Box::new(NonFiniteGradOp {
+                name: "test/non_finite_grad",
+            }),
+        );
+
+        let store = tape
+            .backward(out.id(), cpu_tensor(), passthrough_accumulator)
+            .unwrap();
+        let grad = store.get(inp.id()).expect("input grad");
+        assert!(!grad.all_finite().unwrap());
     }
 
     #[test]

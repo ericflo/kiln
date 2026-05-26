@@ -35,7 +35,7 @@
 //! `Tape::backward` call via [`anomaly_detection_enabled`] and not
 //! cached, so unit tests can toggle the flag between calls.
 //!
-//! # Follow-up wiring (not in this scaffold)
+//! # Tape wiring
 //!
 //! The actual finite-checks per op live in `Tape::backward` and must:
 //!
@@ -55,17 +55,17 @@
 //!    and the tape position. Panicking is intentional — the issue body
 //!    says "panics with the op's tape position on first violation."
 //! 4. Compose with the existing anti-pattern-16 version check: the
-//!    version drift check runs first (already in `tape.rs`), then the
-//!    finite check on the grad output, then `op.apply` is called. This
-//!    ordering catches stale-tape bugs separately from kernel-NaN bugs.
+//!    version drift check runs first (already in `tape.rs`), then
+//!    `op.apply` runs, then the returned per-input gradients are
+//!    finite-checked before propagation. This ordering catches
+//!    stale-tape bugs separately from kernel-NaN bugs.
 //!
 //! # Why a scaffold first
 //!
-//! Splitting the env-var surface from the per-op finite checks keeps
-//! the diff reviewable and lets follow-up PRs land the
-//! `is_finite_storage` shim on each backend independently. The follow-up
-//! that wires the checks into `Tape::backward` doesn't need to touch
-//! the env-var contract again — that contract is frozen here.
+//! Splitting the env-var surface from the per-op finite checks kept
+//! the original diff reviewable. Follow-up PRs can still land the
+//! `is_finite_storage` shim on each backend independently without
+//! changing the env-var contract again.
 
 use std::env;
 

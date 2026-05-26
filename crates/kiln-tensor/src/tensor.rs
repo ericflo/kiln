@@ -503,9 +503,10 @@ impl Tensor {
     ///
     /// CPU storage: iterates the addressable byte buffer (this method
     /// does not materialize a contiguous copy — it walks strides).
-    /// For non-CPU storage today, returns `Err` because the per-
-    /// backend `is_finite` kernel hasn't shipped yet — that's the
-    /// substrate follow-up for KILN_DETECT_ANOMALY on GPU.
+    /// CUDA storage: bridges through `cuda_to_host_copy` and runs the
+    /// CPU walker until the per-backend `is_finite` reduction kernel
+    /// replaces the D2H copy. Other non-CPU backends still return an
+    /// error until their finite-check substrate lands.
     ///
     /// This is the kt-tensor side of the
     /// `kiln_autograd::anomaly_detection_enabled()` /
