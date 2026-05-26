@@ -44,30 +44,18 @@ fn try_borrow_kt_cuda(t: &Tensor) -> Option<kiln_tensor::Tensor> {
 /// `candle_nn::ops::sigmoid` lacks a CUDA kernel, so we implement it using
 /// basic tensor operations that all have CUDA support.
 ///
-/// Phase 7 (#1082): when `KILN_USE_KT_API_NEG=1`,
-/// `KILN_USE_KT_API_EXP=1`, and/or `KILN_USE_KT_API_ADD_SCALAR=1`
-/// (or `KILN_USE_KT_API_ALL=1`) are set, route the corresponding
-/// step through the kt-API via try_kt_neg / try_kt_exp /
-/// try_kt_add_scalar. Each helper falls through to the candle
-/// composite on any precondition failure so behavior is identical
-/// with all gates off.
-///
-/// Phase 7 whole-composite migration (#1082): when
-/// `KILN_USE_KT_API_SIGMOID_COMPOSITE=1` (or
-/// `KILN_USE_KT_API_ALL=1`) is set, the entire four-step
-/// `neg -> exp -> add_scalar(1) -> recip` composite is replaced
-/// with a single `kiln_tensor::cuda_activation_unary(kind=1)` call
-/// via the kt-bridge borrow adapter. Mirrors the
-/// `KILN_USE_KT_API_RMSNORM` precedent: one env gate, one kernel
-/// dispatch, instead of fan-out across primitive kt-API gates. Falls
-/// through to the per-step composite path (or the candle path with
-/// all gates off) on any precondition failure.
+/// Phase 7 whole-composite migration (#1082): contiguous non-autograd CUDA
+/// tensors take the kt composite path by default. The entire four-step
+/// `neg -> exp -> add_scalar(1) -> recip` composite is replaced with a
+/// single `kiln_tensor::cuda_activation_unary(kind=1)` call via the kt-bridge
+/// borrow adapter. Autograd-tracked tensors continue through the existing
+/// candle-tracked composite until the training tape surface is kt-native.
 fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
-    if cuda_use_kt_api_sigmoid_composite()
-        && matches!(x.device(), Device::Cuda(_))
+    if matches!(x.device(), Device::Cuda(_))
         && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
         && x.is_contiguous()
+        && !x.track_op()
         && x.rank() > 0
     {
         if let Some(out) = try_kt_sigmoid_composite(x).context("cuda_sigmoid try_kt_sigmoid_composite")? {
@@ -127,24 +115,6 @@ fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
         }
     };
     Ok(result)
-}
-
-/// Phase 7 opt-in (#1082): whole `cuda_sigmoid` composite through
-/// the kt-API + adapters. Set `KILN_USE_KT_API_SIGMOID_COMPOSITE=1`
-/// (or `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// entire four-step neg -> exp -> add_scalar(1) -> recip composite
-/// through one `kiln_tensor::cuda_activation_unary` call with kind
-/// tag 1 (Sigmoid) via the kt-bridge borrow adapter. Pays one dtod
-/// memcpy on the output direction (same overhead pattern as
-/// try_kt_softmax_last_dim). Mirrors the
-/// `KILN_USE_KT_API_RMSNORM` precedent of replacing a multi-step
-/// composite with a single kt-API kernel dispatch.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_sigmoid_composite() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED
-        .get_or_init(|| std::env::var("KILN_USE_KT_API_SIGMOID_COMPOSITE").is_ok());
-    direct || cuda_use_kt_api_all()
 }
 
 /// Phase 7 (#1082) — kt-API sigmoid whole-composite migration
@@ -2236,21 +2206,18 @@ fn should_use_fused_rmsnorm() -> bool {
 
 /// CUDA-compatible SiLU (Swish): `x * sigmoid(x)`.
 ///
-/// Phase 7 whole-composite migration (#1082): when
-/// `KILN_USE_KT_API_SILU_COMPOSITE=1` (or `KILN_USE_KT_API_ALL=1`)
-/// is set, the entire `sigmoid(x) * x` composite is replaced with a
-/// single `kiln_tensor::cuda_activation_unary(kind=0)` call (SiLU)
-/// via the kt-bridge borrow adapter. Mirrors the
-/// `KILN_USE_KT_API_RMSNORM` precedent: one env gate, one kernel
-/// dispatch, replacing a multi-step composite. Falls through to the
-/// existing `cuda_sigmoid` + multiply path on any precondition
-/// failure so behavior is identical with the gate off.
+/// Phase 7 whole-composite migration (#1082): contiguous non-autograd CUDA
+/// tensors take the kt composite path by default. The entire `sigmoid(x) * x`
+/// composite is replaced with a single `kiln_tensor::cuda_activation_unary`
+/// call (SiLU) via the kt-bridge borrow adapter. Autograd-tracked tensors
+/// continue through the existing candle-tracked composite until the training
+/// tape surface is kt-native.
 fn cuda_silu(x: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
-    if cuda_use_kt_api_silu_composite()
-        && matches!(x.device(), Device::Cuda(_))
+    if matches!(x.device(), Device::Cuda(_))
         && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
         && x.is_contiguous()
+        && !x.track_op()
         && x.rank() > 0
     {
         if let Some(out) = try_kt_silu_composite(x).context("cuda_silu try_kt_silu_composite")? {
@@ -2259,28 +2226,6 @@ fn cuda_silu(x: &Tensor) -> Result<Tensor> {
     }
     let sig = cuda_sigmoid(x)?;
     Ok((x * sig)?)
-}
-
-/// Phase 7 opt-in (#1082): whole `cuda_silu` composite through the
-/// kt-API + adapters. Set `KILN_USE_KT_API_SILU_COMPOSITE=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// entire `sigmoid(x) * x` two-step composite through a single
-/// `kiln_tensor::cuda_activation_unary` call with kind tag 0 (SiLU)
-/// via the kt-bridge borrow adapter. Pays one dtod memcpy on the
-/// output direction.
-///
-/// Distinct from the fused-MLP `mlp_silu_mul` site (which fuses
-/// SiLU(gate) * up via a custom kernel) — this gate migrates
-/// *standalone* `cuda_silu` shapes. There are 12+ cuda_silu call
-/// sites in forward.rs (GDN gates, MLP silu mul fallback paths,
-/// training paths), all of which light up under this gate when
-/// the composite call site does not have a fused upstream.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_silu_composite() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SILU_COMPOSITE").is_ok());
-    direct || cuda_use_kt_api_all()
 }
 
 /// Phase 7 (#1082) — kt-API SiLU whole-composite migration helper.
@@ -24235,6 +24180,51 @@ mod tests {
     /// `cfg(test)`-gated and only visible inside kiln-core's own test
     /// build — from another crate's tests it appears unresolved.
     static RESIDENCY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_cuda_sigmoid_kt_default_matches_host_formula() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("CUDA unavailable, skipping test_cuda_sigmoid_kt_default_matches_host_formula");
+            return Ok(());
+        };
+        let data = [-8.0_f32, -2.0, -0.5, 0.0, 0.5, 2.0, 8.0, 16.0];
+        let x = Tensor::from_slice(&data, (2usize, 4usize), &device)?.contiguous()?;
+        let out = cuda_sigmoid(&x)?;
+        device.synchronize()?;
+        let got = out.flatten_all()?.to_vec1::<f32>()?;
+        for (idx, (&input, &actual)) in data.iter().zip(got.iter()).enumerate() {
+            let expected = 1.0 / (1.0 + (-input).exp());
+            assert!(
+                (actual - expected).abs() < 2e-5,
+                "sigmoid mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_cuda_silu_kt_default_matches_host_formula() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("CUDA unavailable, skipping test_cuda_silu_kt_default_matches_host_formula");
+            return Ok(());
+        };
+        let data = [-8.0_f32, -2.0, -0.5, 0.0, 0.5, 2.0, 8.0, 16.0];
+        let x = Tensor::from_slice(&data, (2usize, 4usize), &device)?.contiguous()?;
+        let out = cuda_silu(&x)?;
+        device.synchronize()?;
+        let got = out.flatten_all()?.to_vec1::<f32>()?;
+        for (idx, (&input, &actual)) in data.iter().zip(got.iter()).enumerate() {
+            let sigmoid = 1.0 / (1.0 + (-input).exp());
+            let expected = input * sigmoid;
+            assert!(
+                (actual - expected).abs() < 2e-5,
+                "silu mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        Ok(())
+    }
 
     /// Regression test for the 2026-05-12 → 2026-05-14 silent inference
     /// outage. Commit 997a608f widened `drop_projection_transposes_enabled`
