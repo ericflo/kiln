@@ -167,7 +167,7 @@ impl Tensor {
         let storage =
             crate::cuda_zeros(cdev, device_index, dtype, n_elements)?;
         let layout = Layout::contiguous(shape_vec);
-        Self::from_parts(storage, layout, TensorId::new())
+        Self::from_parts(storage, layout, TensorId::next())
     }
 
     /// Construct a [`Tensor`] from raw parts. Used by per-backend
