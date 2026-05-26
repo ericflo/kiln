@@ -251,8 +251,18 @@ fn cuda_use_kt_api_l2_normalize() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: token-embedding lookup (dim-0 `index_select`)
-/// through the kt-API + adapters. Set
+/// Phase 7 default-on (#1082): token-embedding lookup (dim-0
+/// `index_select`) through the kt-API + adapters. Bit-exact
+/// memcpy gather via `kiln_tensor::cuda_index_select_dim0` —
+/// identical byte output to candle's `index_select` (no
+/// arithmetic, no reordering). Production callers in
+/// [`embedding_lookup_with_index`] (bs=1 decode + batched
+/// embedding lookup). Escape hatch:
+/// `KILN_DISABLE_KT_API_EMBEDDING=1`.
+///
+/// _Historical opt-in docstring (kept for the read-through):_
+///
+/// Originally Phase 7 opt-in: set
 /// `KILN_USE_KT_API_EMBEDDING=1` (or `KILN_USE_KT_API_ALL=1`) to
 /// enable; default off. Routes the `embed_weights.index_select(&index, 0)`
 /// call inside [`embedding_lookup`] and
@@ -263,7 +273,10 @@ fn cuda_use_kt_api_l2_normalize() -> bool {
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_embedding() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_EMBEDDING").is_ok());
+    // #1082: flipped default ON. Bit-exact memcpy gather via
+    // `cuda_index_select_dim0`. Escape hatch: `KILN_DISABLE_KT_API_EMBEDDING=1`.
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_EMBEDDING").is_err());
     direct || cuda_use_kt_api_all()
 }
 
