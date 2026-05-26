@@ -11,6 +11,84 @@ the production batched capture path (`kiln-model/src/cuda_graph.rs`)
 landed in parallel. Future planners should treat this as the
 canonical "what's already done" reference.
 
+## 2026-05-26 (late evening) — lm-head buffer pre-allocation lands, still insufficient (L40S)
+
+The structural fix recommended in the prior "Next step recommendation"
+landed across three commits (`81d68b57`, `075c8ac1`, `e1f290ad`, `2b549fa9`):
+
+  - `kiln_tensor::cuda_matmul_into(a, b, dst)` — substrate variant of
+    `cuda_matmul` that writes into a caller-pre-allocated kt Tensor
+    instead of allocating an output via `CudaStorage::zeros`. Validates
+    `dst` shape/dtype/contiguity and dispatches through the same
+    cublasLt handle.
+  - `crate::forward::LM_HEAD_OUTPUT_BUFFER` thread-local +
+    `with_lm_head_output_buffer(buf, f)` installer. Mirrors the existing
+    `kiln_gdn_kernel::with_decode_gates_recurrent_outputs` pattern.
+    `try_kt_lm_head` checks the thread-local: when present and the
+    expected shape matches, it borrows `dst` as kt and calls
+    `cuda_matmul_into` instead of allocating + copying back.
+  - `CudaGraphRunner::try_capture` (bs=1) and `try_capture_batched`
+    (bs>1) pre-allocate a `[batch, 1, vocab]` candle Tensor outside the
+    capture window and install it via `with_lm_head_output_buffer`
+    around the existing `with_decode_gates_recurrent_outputs` install.
+    Both `CapturedDecodeGraph` and `CapturedBatchedDecodeGraph` carry
+    an `_lm_head_output_buffer: Tensor` field so the storage stays
+    alive for the captured graph's lifetime.
+
+Verified on L40S (sm_89, CUDA 12.4) with
+`KILN_W4A16=1 KILN_CUDA_GRAPHS=true KILN_CUDA_GRAPHS_BATCHED=1
+KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1 KILN_USE_KT_API_LM_HEAD=1` +
+`scripts/bench-concurrent-batch.py --sizes 1,2,4,8,16,32,64
+--max-tokens 128 --mode concurrent --warmup`:
+
+  - bs=1 captured-graph: **85 tok/s** (full success). Defense-in-depth
+    pinning of the bs=1 lm-head output buffer landed cleanly.
+  - bs>=2 captured-graph: **still fails with HTTP 500**, identical
+    `CUDA_ERROR_ILLEGAL_ADDRESS` count (127). One batched capture log
+    line ("CUDA graph captured for batched decode batch_size:2") shows
+    the capture itself completed; the first replay's
+    `greedy_sample_rows(captured.output_logits)` step fails.
+
+OFF baseline confirmed working on the same pod for comparison
+(`KILN_CUDA_GRAPHS_BATCHED=0 KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=0`):
+bs=1→85, bs=2→110, bs=4→152, bs=8→275, bs=16→246, bs=32→290,
+bs=64→**293 tok/s**.
+
+**Interpretation**: the lm-head output buffer is now pinned, but it is
+not the only intermediate inside the captured forward. The `rms_norm`
+output (the `normed` tensor feeding into `lm_head_forward`) is
+allocated INSIDE the closure via `kt_tensor_to_candle_cuda_copy` —
+that adapter calls `candle_core::Tensor::zeros(...)` to materialize
+its output, producing a pool-allocated buffer whose address is
+captured by the lm-head matmul kernel. On the first replay the
+buffer's pool slot may have been rotated → `ILLEGAL_ADDRESS` at the
+matmul's input read. The MLP and attention layers in
+`model_forward_paged_decode_contiguous_batch_hidden_inner` go through
+the same kt-bridge round-trip, so every layer contributes a
+candidate dangling source pointer at bs>1 (where the doubled buffer
+sizes churn the pool faster).
+
+The bs=1 path works in production by allocator-determinism luck
+across many of these pool slots; doubling the workload size at bs=2
+breaks that luck.
+
+**Next step recommendation**: extend the
+"pre-allocate-outside-capture + install-via-thread-local" pattern
+beyond just the lm-head matmul to every kt-bridge `to_candle_cuda_copy`
+call site reached during the captured forward. The most impactful
+single change is `rms_norm` (every block + final norm; 33+ calls per
+forward). After that, the kt-typed gdn / attention output paths.
+Alternatively, replace `kt_tensor_to_candle_cuda_copy` itself with a
+zero-copy bridge that wraps the kt storage into a candle Tensor
+handle (no fresh allocation); that would close all of these sites in
+one diff but requires plumbing borrowed candle storage through the
+candle backprop machinery.
+
+`KILN_CUDA_GRAPHS_BATCHED` stays DEFAULT OFF after this attempt.
+The substrate (`cuda_matmul_into`, `with_lm_head_output_buffer`)
+remains in tree as the first reusable piece of the eventual
+end-to-end pinning sweep.
+
 ## 2026-05-26 (evening) — AUTO_FREE_ON_LAUNCH drop NOT sufficient (L40S)
 
 The "drop `AUTO_FREE_ON_LAUNCH` for the batched-graph path" hypothesis
