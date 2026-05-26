@@ -290,6 +290,31 @@ impl CudaStorage {
         &self.candle_device
     }
 
+    /// Raw CUDA stream pointer for FFI dispatch — **candle-free
+    /// passthrough**.
+    ///
+    /// Returns the underlying `CUstream` handle cast to
+    /// `*mut core::ffi::c_void`, which is the type every kernel
+    /// crate's FFI declaration expects for the `stream` argument.
+    /// Callers don't need a `candle_core` or `cudarc` dependency
+    /// to plumb the stream into a kernel launch — they just take
+    /// the raw pointer and pass it through.
+    ///
+    /// This is the substrate-side accessor that unblocks dropping
+    /// `candle-core` from the kernel crates' `[dependencies]` blocks
+    /// (#1082 Tier 1 closure). Without it, every `kt_api.rs` is
+    /// forced to import `candle_core::cuda_backend::cudarc::driver::
+    /// DevicePtr` just to call `candle_device().cuda_stream()
+    /// .cu_stream() as *mut c_void`.
+    ///
+    /// Stream lifetime: the returned pointer is valid for the
+    /// lifetime of `self`. Callers passing it to a CUDA FFI must
+    /// not store it past the borrow.
+    pub fn cuda_stream_raw(&self) -> *mut core::ffi::c_void {
+        let stream = self.candle_device.cuda_stream();
+        stream.cu_stream() as *mut core::ffi::c_void
+    }
+
     /// Crate-internal accessor for the slice owner. Used by sibling
     /// FFI modules (`fp8.rs`, etc.) that need to extract a device
     /// pointer without going through `device_ptr_raw` (which discards
