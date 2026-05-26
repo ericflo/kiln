@@ -949,39 +949,37 @@ fn cuda_use_kt_api_div_scalar() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: elementwise `c - x` (scalar minus tensor)
-/// through the kt-API + adapters. Set
-/// `KILN_USE_KT_API_SCALAR_MINUS_TENSOR=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// `c - x` candle composite (today implemented as
-/// `affine(-1, c)` or open-coded `(c.broadcast_sub(&x))`)
-/// through `kiln_tensor::cuda_scalar_op` with kind tag 4
-/// (ScalarMinusTensor) via the kt-bridge borrow adapter. Pays
-/// one dtod memcpy on the output direction (the kt allocation
-/// is freshly-owned). Falls through to the candle composite
-/// when any precondition fails so behavior is identical with
-/// the gate off.
+/// Phase 7 default-on (#1082): elementwise `c - x` (scalar minus
+/// tensor) through the kt-API + adapters. Routes the `c - x`
+/// candle composite through `kiln_tensor::cuda_scalar_op` with
+/// kind tag 4 (ScalarMinusTensor) via the kt-bridge borrow
+/// adapter. Single-kernel `c - x` dispatch — IEEE-equivalent to
+/// the candle two-step `(-x) + c` composite (both are
+/// subtractions, same NaN propagation). Pays one dtod memcpy on
+/// the output direction (the kt allocation is freshly-owned).
+/// Falls through to the candle composite when any precondition
+/// fails. Escape hatch: `KILN_DISABLE_KT_API_SCALAR_MINUS_TENSOR=1`.
 ///
-/// The gate + helper are wired up for completeness; today there
-/// are no production `c - x` call sites in `forward.rs` that
-/// use this exact shape (most go through `affine(-1, c)` or
-/// inline `1.0 - x`). Future kernels that need a single-kernel
-/// "scalar minus tensor" (Dropout 1-p complement, any
-/// `1.0 - probabilities` style composites, symmetric quantization
-/// residuals) can route through this gate. Mirrors the
-/// dead-code-allowed precedent of `try_kt_paged_kv_cache_new`
-/// (638bc441) and the clamp/pow scaffolds (e9ed87f4 / 2b07eef7).
+/// Production call site: the `CudaSigmoidMulTrainingBf16`
+/// backward path's `1 - sigmoid` step (sigmoid derivative
+/// composite). Replaces the two-step `neg + add_scalar(1)` chain
+/// with a single `cuda_scalar_op` kind 4 dispatch, saving one
+/// kernel launch + one intermediate allocation per training step
+/// for every layer that runs the gated-MLP backward.
 ///
-/// Wired into the `CudaSigmoidMulTrainingBf16` backward path's
-/// `1 - sigmoid` step as of the same #1082 series — replaces the
-/// two-step `neg + add_scalar(1)` composite with a single
-/// `cuda_scalar_op` kind 4 (ScalarMinusTensor) dispatch when the
-/// gate is enabled.
+/// Same flip rationale as the sin/cos/abs/max_binary/recip/sqrt/
+/// neg/mul_scalar/add_scalar default-on flips: bit-exact by
+/// construction (or IEEE-equivalent up to subtraction operand
+/// order which does not affect IEEE semantics for finite values).
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_scalar_minus_tensor() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
+    // #1082: flipped default ON. Single-kernel `c - x` dispatch
+    // via `cuda_scalar_op` kind 4; IEEE-equivalent to the candle
+    // `(-x) + c` two-step composite. Escape hatch:
+    // `KILN_DISABLE_KT_API_SCALAR_MINUS_TENSOR=1`.
     let direct = *ENABLED
-        .get_or_init(|| std::env::var("KILN_USE_KT_API_SCALAR_MINUS_TENSOR").is_ok());
+        .get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SCALAR_MINUS_TENSOR").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -24126,6 +24124,40 @@ mod tests {
                     got[idx]
                 );
             }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_cuda_scalar_minus_tensor_kt_default_matches_host_formula() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!(
+                "CUDA unavailable, skipping test_cuda_scalar_minus_tensor_kt_default_matches_host_formula"
+            );
+            return Ok(());
+        };
+        // Values chosen to cover the `1 - sigmoid` shape and a
+        // few neighboring cases (negative input, exact zero,
+        // already-close-to-1 inputs that exercise rounding).
+        let data = [
+            0.0_f32, 0.25, 0.5, 0.75, //
+            1.0, -0.5, 2.0, -2.0,
+        ];
+        let x = Tensor::from_slice(&data, (2usize, 4usize), &device)?.contiguous()?;
+        let c = 1.0_f64;
+        let direct = try_kt_scalar_minus_tensor(&x, c)?.context(
+            "expected CUDA kt scalar_minus_tensor helper to accept contiguous F32 input",
+        )?;
+        device.synchronize()?;
+
+        let direct_vals = direct.flatten_all()?.to_vec1::<f32>()?;
+        for (idx, (&input, &actual)) in data.iter().zip(direct_vals.iter()).enumerate() {
+            let expected = c as f32 - input;
+            assert!(
+                (actual - expected).abs() < 1e-7,
+                "scalar_minus_tensor mismatch at {idx}: actual={actual} expected={expected}"
+            );
         }
         Ok(())
     }
