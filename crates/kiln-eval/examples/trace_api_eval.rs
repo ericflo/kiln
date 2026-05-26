@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use futures::stream::{self, StreamExt};
 use kiln_eval::qwen3::{extract_first_tool_call, validate_against_schema};
 use kiln_eval::scorers::{NoopJudgeRunner, Scorer, score_completion};
 use kiln_eval::{
@@ -54,6 +55,10 @@ struct Args {
     /// Evaluate at most this many suite examples.
     #[arg(long)]
     limit: Option<usize>,
+    /// Number of in-flight API requests per model. Default 1 preserves the
+    /// previous serial behavior.
+    #[arg(long, default_value_t = 1)]
+    concurrency: usize,
     /// Do not send the suite/example tool catalogue to the API.
     #[arg(long)]
     no_tools: bool,
@@ -145,7 +150,8 @@ async fn run_model(
         .collect::<Vec<_>>();
 
     let total_examples = examples.len();
-    for (idx, example) in examples.into_iter().enumerate() {
+    let mut jobs = Vec::new();
+    for example in examples.into_iter() {
         let example_id = example.resolved_id();
         let scorer = example.scorer.as_ref().unwrap_or(&suite.default_scorer);
         weights.insert(example_id.clone(), example.weight);
@@ -162,58 +168,52 @@ async fn run_model(
         let gen_params = effective_generation(suite, example, args);
         let n = gen_params.n.max(1);
         for completion_idx in 0..n {
-            let start = Instant::now();
-            let response = call_chat_api(
-                client,
-                suite,
+            jobs.push(EvalJob {
+                ordinal: jobs.len(),
                 example,
-                model,
-                &gen_params,
-                args,
-                api_key,
-                extra_body,
-            )
-            .await;
-            let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
-            let mut outcome = match response {
-                Ok(resp) => score_api_response(
-                    scorer,
-                    example,
-                    &example_id,
-                    completion_idx,
-                    resp,
-                    latency_ms,
-                    &mut predicted_tool_by_outcome,
-                    &mut schema_violations_by_outcome,
-                    suite,
-                )?,
-                Err(err) => ExampleOutcome {
-                    example_id: example_id.clone(),
-                    completion_index: completion_idx,
-                    completion_text: String::new(),
-                    kind: EvalOutcomeKind::Error,
-                    score: 0.0,
-                    detail: Some(format!("generation failed: {err}")),
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    latency_ms: Some(latency_ms),
-                    tags: example.tags.clone(),
-                    metadata: example.metadata.clone(),
-                    reasoning_text: None,
-                    unclosed_thinking: false,
-                },
-            };
-            outcome.completion_index = completion_idx;
-            outcomes.push(outcome);
+                example_id: example_id.clone(),
+                scorer,
+                completion_idx,
+                gen_params: gen_params.clone(),
+            });
         }
+    }
+
+    let total_outcomes = jobs.len();
+    let concurrency = args.concurrency.max(1);
+    eprintln!(
+        "model={} examples={} outcomes={} concurrency={}",
+        model, total_examples, total_outcomes, concurrency,
+    );
+    let mut completed = 0usize;
+    let mut outcome_records = Vec::with_capacity(total_outcomes);
+    let mut stream = stream::iter(jobs.into_iter().map(|job| async move {
+        run_api_job(client, suite, model, args, api_key, extra_body, job).await
+    }))
+    .buffered(concurrency);
+    while let Some(scored) = stream.next().await {
+        let scored = scored?;
+        completed += 1;
+        if let Some(predicted_tool) = scored.predicted_tool {
+            predicted_tool_by_outcome.insert(
+                (scored.outcome.example_id.clone(), scored.outcome.completion_index),
+                predicted_tool,
+            );
+        }
+        if let Some(schema_violation) = scored.schema_violation {
+            schema_violations_by_outcome.insert(
+                (scored.outcome.example_id.clone(), scored.outcome.completion_index),
+                schema_violation,
+            );
+        }
+        outcome_records.push((scored.ordinal, scored.outcome));
         eprintln!(
-            "model={} example={}/{} outcomes={}",
-            model,
-            idx + 1,
-            total_examples,
-            outcomes.len()
+            "model={} outcome={}/{}",
+            model, completed, total_outcomes,
         );
     }
+    outcome_records.sort_by_key(|(ordinal, _)| *ordinal);
+    outcomes.extend(outcome_records.into_iter().map(|(_, outcome)| outcome));
 
     let elapsed_secs = run_clock.elapsed().as_secs_f64();
     let metrics = AggregateMetrics::compute_with_tools_full(
@@ -234,6 +234,81 @@ async fn run_model(
         started_at: run_started.to_rfc3339(),
         finished_at: chrono::Utc::now().to_rfc3339(),
         suite_hash: suite_hash(suite)?,
+    })
+}
+
+struct EvalJob<'a> {
+    ordinal: usize,
+    example: &'a kiln_eval::EvalExample,
+    example_id: String,
+    scorer: &'a Scorer,
+    completion_idx: usize,
+    gen_params: EvalGenerationParams,
+}
+
+struct ScoredCompletion {
+    ordinal: usize,
+    outcome: ExampleOutcome,
+    predicted_tool: Option<String>,
+    schema_violation: Option<(u32, u32)>,
+}
+
+async fn run_api_job(
+    client: &reqwest::Client,
+    suite: &EvalSuite,
+    model: &str,
+    args: &Args,
+    api_key: Option<&str>,
+    extra_body: Option<&Value>,
+    job: EvalJob<'_>,
+) -> Result<ScoredCompletion> {
+    let start = Instant::now();
+    let response = call_chat_api(
+        client,
+        suite,
+        job.example,
+        model,
+        &job.gen_params,
+        args,
+        api_key,
+        extra_body,
+    )
+    .await;
+    let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let (outcome, predicted_tool, schema_violation) = match response {
+        Ok(resp) => score_api_response(
+            job.scorer,
+            job.example,
+            job.completion_idx,
+            resp,
+            latency_ms,
+            suite,
+        )?,
+        Err(err) => (
+            ExampleOutcome {
+                example_id: job.example_id.clone(),
+                completion_index: job.completion_idx,
+                completion_text: String::new(),
+                kind: EvalOutcomeKind::Error,
+                score: 0.0,
+                detail: Some(format!("generation failed: {err}")),
+                prompt_tokens: None,
+                completion_tokens: None,
+                latency_ms: Some(latency_ms),
+                tags: job.example.tags.clone(),
+                metadata: job.example.metadata.clone(),
+                reasoning_text: None,
+                unclosed_thinking: false,
+            },
+            None,
+            None,
+        ),
+    };
+    Ok(ScoredCompletion {
+        ordinal: job.ordinal,
+        outcome,
+        predicted_tool,
+        schema_violation,
     })
 }
 
@@ -311,32 +386,28 @@ async fn call_chat_api(
 fn score_api_response(
     scorer: &Scorer,
     example: &kiln_eval::EvalExample,
-    example_id: &str,
     completion_idx: usize,
     response: ApiCompletion,
     latency_ms: f64,
-    predicted_tool_by_outcome: &mut BTreeMap<(String, usize), String>,
-    schema_violations_by_outcome: &mut BTreeMap<(String, usize), (u32, u32)>,
     suite: &EvalSuite,
-) -> Result<ExampleOutcome> {
+) -> Result<(ExampleOutcome, Option<String>, Option<(u32, u32)>)> {
+    let mut predicted_tool = None;
+    let mut schema_violation = None;
     if matches!(scorer, Scorer::ToolCall { .. }) {
         let parsed = extract_first_tool_call(&response.completion_text);
         let predicted = parsed
             .as_ref()
             .map(|c| c.name.clone())
             .unwrap_or_else(|| "<none>".to_string());
-        predicted_tool_by_outcome.insert((example_id.to_string(), completion_idx), predicted);
+        predicted_tool = Some(predicted);
         if let Some(call) = parsed.as_ref() {
             if let Some(catalogue) = example.effective_tools(suite.tools.as_deref()) {
                 if let Some(chk) = validate_against_schema(call, catalogue) {
                     if !chk.is_clean() {
-                        schema_violations_by_outcome.insert(
-                            (example_id.to_string(), completion_idx),
-                            (
-                                chk.missing_required.len() as u32,
-                                chk.extra_unknown.len() as u32,
-                            ),
-                        );
+                        schema_violation = Some((
+                            chk.missing_required.len() as u32,
+                            chk.extra_unknown.len() as u32,
+                        ));
                     }
                 }
             }
@@ -348,7 +419,7 @@ fn score_api_response(
     outcome.prompt_tokens = response.prompt_tokens;
     outcome.completion_tokens = response.completion_tokens;
     outcome.latency_ms = Some(latency_ms);
-    Ok(outcome)
+    Ok((outcome, predicted_tool, schema_violation))
 }
 
 struct ApiCompletion {
