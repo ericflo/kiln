@@ -292,6 +292,17 @@ struct CapturedDecodeGraph {
     /// Their device pointers are captured by the graph and must stay alive for
     /// replay.
     _gdn_decode_outputs: Vec<Tensor>,
+    /// Pre-allocated lm-head matmul output buffer, shape `[1, 1, vocab]`.
+    /// Installed via [`crate::forward::with_lm_head_output_buffer`] at
+    /// capture time so the kt-typed lm_head matmul writes into a
+    /// graph-stable device address instead of allocating a fresh
+    /// candle Tensor inside the capture window. Without this, the
+    /// captured `slice_set` source pointer (the lm_head output)
+    /// would dangle on replay → `CUDA_ERROR_ILLEGAL_ADDRESS`. The
+    /// bs=1 path works in production by allocator-determinism luck
+    /// — pinning it here is a defense-in-depth fix that matches the
+    /// bs>1 structural fix (#1082 Phase 5).
+    _lm_head_output_buffer: Tensor,
 }
 
 /// Captured graph + stable buffers for a batched (`bs > 1`) decode step.
@@ -328,6 +339,11 @@ struct CapturedBatchedDecodeGraph {
     _paged_decode_lse: Vec<Tensor>,
     /// Per-GDN-layer fused recurrent outputs, shape `[batch, ...]`.
     _gdn_decode_outputs: Vec<Tensor>,
+    /// Pre-allocated lm-head matmul output buffer, shape `[batch, 1, vocab]`.
+    /// See [`CapturedDecodeGraph::_lm_head_output_buffer`] for the
+    /// rationale. This is the structural Phase 5 #1082 fix that
+    /// unblocks `KILN_CUDA_GRAPHS_BATCHED=1` end-to-end.
+    _lm_head_output_buffer: Tensor,
     /// Max K/V length baked into the captured kernel launch shape.
     max_seqlen_k: usize,
     // NOTE: the captured graph reads GDN recurrent/conv state via the
@@ -1390,6 +1406,16 @@ impl CudaGraphRunner {
             _ => None,
         };
         let gdn_decode_outputs = Self::new_gdn_decode_outputs(config, device)?;
+        // Phase 5 #1082 — pre-allocate the lm-head matmul output
+        // buffer OUTSIDE the capture window. Installed via
+        // `crate::forward::with_lm_head_output_buffer` below; the
+        // captured `slice_set(&logits, 0, 0)` will then memcpy from
+        // this graph-stable pointer instead of a transient
+        // pool-allocated address. Defense-in-depth for the bs=1 path
+        // (which has historically worked by allocator-determinism
+        // luck at small `[1, 1, vocab]` shapes).
+        let lm_head_output_buffer =
+            Self::new_lm_head_output_buffer(config, device, weights.embed_tokens.dtype(), 1)?;
         Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
 
         // Synchronize all pending work before capture
@@ -1410,27 +1436,32 @@ impl CudaGraphRunner {
         // Run the forward pass with the pre-allocated position buffer.
         // All kernels are captured, including RoPE which reads from
         // position_buffer's stable GPU address.
-        let logits_result = kiln_gdn_kernel::with_decode_gates_recurrent_outputs(
-            gdn_decode_outputs.clone(),
+        let logits_result = crate::forward::with_lm_head_output_buffer(
+            lm_head_output_buffer.clone(),
             || {
-                let logits = model_forward_paged_with_graph_inputs(
-                    backend,
-                    &[token_id],
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
-                    seq_len,
-                    Some(linear_state),
-                    lora,
-                    &token_buffer,
-                    &position_buffer,
-                    graph_inputs.as_ref(),
-                )?;
-                output_logits_for_capture
-                    .slice_set(&logits, 0, 0)
-                    .context("copy CUDA graph logits into stable output")?;
-                Ok::<Tensor, anyhow::Error>(output_logits_for_capture)
+                kiln_gdn_kernel::with_decode_gates_recurrent_outputs(
+                    gdn_decode_outputs.clone(),
+                    || {
+                        let logits = model_forward_paged_with_graph_inputs(
+                            backend,
+                            &[token_id],
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            Some(linear_state),
+                            lora,
+                            &token_buffer,
+                            &position_buffer,
+                            graph_inputs.as_ref(),
+                        )?;
+                        output_logits_for_capture
+                            .slice_set(&logits, 0, 0)
+                            .context("copy CUDA graph logits into stable output")?;
+                        Ok::<Tensor, anyhow::Error>(output_logits_for_capture)
+                    },
+                )
             },
         );
 
@@ -1467,6 +1498,7 @@ impl CudaGraphRunner {
                         _paged_decode_lse: paged_decode_lse,
                         max_seqlen_k,
                         _gdn_decode_outputs: gdn_decode_outputs,
+                        _lm_head_output_buffer: lm_head_output_buffer,
                     },
                 );
                 Ok(logits)
@@ -1555,6 +1587,25 @@ impl CudaGraphRunner {
         let (paged_decode_outputs, paged_decode_lse) =
             Self::new_batched_paged_decode_outputs(config, device, dtype, batch_size)?;
         let gdn_decode_outputs = Self::new_batched_gdn_decode_outputs(config, device, batch_size)?;
+        // Phase 5 #1082 — pre-allocate the lm-head matmul output buffer
+        // OUTSIDE the capture window. Installed via
+        // `crate::forward::with_lm_head_output_buffer` below so the
+        // kt-typed lm_head matmul writes directly into a graph-stable
+        // candle Tensor (the buffer here). Without this, the captured
+        // `slice_set(&logits, …)` would record a memcpy whose source is
+        // a transient candle Tensor produced by
+        // `kt_tensor_to_candle_cuda_copy` — that source pointer is
+        // freed at end-of-capture and dangling on replay, triggering
+        // `CUDA_ERROR_ILLEGAL_ADDRESS` at
+        // `greedy_sample_rows(captured.output_logits)`. The bs=1 path
+        // works in production by luck (allocator determinism at
+        // small shapes); the bs>1 path doubles the lm-head output
+        // size which churns the pool. This is the structural fix
+        // documented in bench-results/cuda-graph-status.md
+        // (2026-05-26 entry recommending the
+        // `with_lm_head_output_buffer` thread-local approach).
+        let lm_head_output_buffer =
+            Self::new_lm_head_output_buffer(config, device, dtype, batch_size)?;
 
         // Capture + forward inside a scope so the `&mut` borrow on
         // `self.batched_state_pool` (taken by `persistent_batched_state`)
@@ -1599,19 +1650,24 @@ impl CudaGraphRunner {
             // same mechanism; missing it was the root cause of the
             // observed `CUDA_ERROR_ILLEGAL_ADDRESS` faults at bs>=16
             // in the first wiring attempts.
-            let forward_result = kiln_gdn_kernel::with_decode_gates_recurrent_outputs(
-                gdn_decode_outputs.clone(),
+            let forward_result = crate::forward::with_lm_head_output_buffer(
+                lm_head_output_buffer.clone(),
                 || {
-                    crate::forward::model_forward_paged_batched_with_graph_inputs(
-                        backend,
-                        token_ids,
-                        weights,
-                        config,
-                        paged_cache,
-                        block_tables,
-                        sequence_lengths,
-                        lora,
-                        &mut graph_inputs,
+                    kiln_gdn_kernel::with_decode_gates_recurrent_outputs(
+                        gdn_decode_outputs.clone(),
+                        || {
+                            crate::forward::model_forward_paged_batched_with_graph_inputs(
+                                backend,
+                                token_ids,
+                                weights,
+                                config,
+                                paged_cache,
+                                block_tables,
+                                sequence_lengths,
+                                lora,
+                                &mut graph_inputs,
+                            )
+                        },
                     )
                 },
             );
@@ -1682,6 +1738,7 @@ impl CudaGraphRunner {
                 _paged_decode_outputs: paged_decode_outputs,
                 _paged_decode_lse: paged_decode_lse,
                 _gdn_decode_outputs: gdn_decode_outputs,
+                _lm_head_output_buffer: lm_head_output_buffer,
                 max_seqlen_k: key.max_seqlen_k,
             };
             captured
@@ -1945,6 +2002,28 @@ impl CudaGraphRunner {
     ) -> Result<Tensor> {
         Tensor::zeros((1, 1, config.vocab_size), dtype, device)
             .context("create CUDA graph output logits")
+    }
+
+    /// `[batch, 1, vocab_size]` lm-head matmul output buffer. Used as
+    /// the destination tensor for the captured-graph lm-head matmul
+    /// via [`crate::forward::with_lm_head_output_buffer`]. Phase 5
+    /// #1082 — see the comment block on
+    /// `CapturedBatchedDecodeGraph::_lm_head_output_buffer` for the
+    /// full rationale (graph-stable source pointer for the
+    /// downstream `slice_set` into `output_logits`).
+    #[cfg(feature = "cuda")]
+    fn new_lm_head_output_buffer(
+        config: &ModelConfig,
+        device: &Device,
+        dtype: candle_core::DType,
+        batch: usize,
+    ) -> Result<Tensor> {
+        anyhow::ensure!(
+            batch > 0,
+            "lm-head output buffer requires batch > 0"
+        );
+        Tensor::zeros((batch, 1, config.vocab_size), dtype, device)
+            .context("create CUDA graph lm-head output buffer")
     }
 
     #[cfg(feature = "cuda")]
