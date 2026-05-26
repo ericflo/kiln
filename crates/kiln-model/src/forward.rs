@@ -198,16 +198,16 @@ fn cuda_use_kt_api_all() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ALL").is_ok())
 }
 
-/// Phase 7 opt-in: softmax-last-dim through the kt-API + adapters.
-/// Set `KILN_USE_KT_API_SOFTMAX=1` (or `KILN_USE_KT_API_ALL=1`) to
-/// enable; default off. Routes [`cuda_softmax_last_dim`] through
-/// `kiln_tensor::cuda_softmax_last_axis`. Pays one dtod memcpy on
-/// the output direction (input goes zero-copy through the
-/// kt-bridge borrow adapter).
+/// Phase 7 default-on (#1082): softmax-last-dim through the kt-API
+/// + adapters. Routes [`cuda_softmax_last_dim`] through
+/// `kiln_tensor::cuda_softmax_last_axis` for compatible CUDA tensors.
+/// Pays one dtod memcpy on the output direction (input goes zero-copy
+/// through the kt-bridge borrow adapter). Escape hatch:
+/// `KILN_DISABLE_KT_API_SOFTMAX=1`.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_softmax() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SOFTMAX").is_ok());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SOFTMAX").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -464,9 +464,8 @@ fn cuda_use_kt_api_mean_last_dim() -> bool {
 /// Phase 7 opt-in: `sum_keepdim(-1)` through the kt-API +
 /// adapters. Set `KILN_USE_KT_API_SUM_LAST_DIM=1` (or
 /// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// `exp_shifted.sum_keepdim(D::Minus1)` reduction in
-/// [`cuda_softmax_last_dim`] (the candle-composite fallback path
-/// when `KILN_USE_KT_API_SOFTMAX` is off) through
+/// `exp_shifted.sum_keepdim(D::Minus1)` reduction in the
+/// [`cuda_softmax_last_dim`] candle-composite fallback path through
 /// `kiln_tensor::cuda_sum_last_axis` plus a zero-cost
 /// `unsqueeze(-1)` to restore the trailing-dim shape. Falls
 /// through to the candle composite when any precondition fails so
@@ -3904,12 +3903,11 @@ fn full_attn_qkv_proj_decode_if(
 /// `candle_nn::ops::softmax_last_dim` lacks a CUDA kernel, so we implement it
 /// manually: `softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))`.
 ///
-/// Phase 7 (#1082): when `KILN_USE_KT_API_SOFTMAX=1` (or
-/// `KILN_USE_KT_API_ALL=1`) is set AND the input is a contiguous CUDA
+/// Phase 7 (#1082): by default, when the input is a contiguous CUDA
 /// tensor of {F32, BF16, F16}, route through
 /// `kiln_tensor::cuda_softmax_last_axis` via the kt-bridge borrow
-/// adapter. Falls through to the portable candle composite when any
-/// precondition fails so behavior is identical with the gate off.
+/// adapter. Falls through to the portable candle composite when the
+/// default-on kt route is disabled or any precondition fails.
 fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if cuda_use_kt_api_softmax()
@@ -24038,6 +24036,53 @@ mod tests {
                 (actual - expected).abs() < 2e-5,
                 "silu mismatch at {idx}: actual={actual} expected={expected}"
             );
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_cuda_softmax_last_dim_kt_default_matches_host_formula() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!(
+                "CUDA unavailable, skipping test_cuda_softmax_last_dim_kt_default_matches_host_formula"
+            );
+            return Ok(());
+        };
+        let data = [
+            1.0_f32, 2.0, 3.0, -1.0, //
+            -4.0, -2.0, -2.0, 0.0,
+        ];
+        let x = Tensor::from_slice(&data, (2usize, 4usize), &device)?.contiguous()?;
+        let direct = try_kt_softmax_last_dim(&x)?
+            .context("expected CUDA kt softmax helper to accept contiguous F32 input")?;
+        let out = cuda_softmax_last_dim(&x)?;
+        device.synchronize()?;
+
+        let direct_vals = direct.flatten_all()?.to_vec1::<f32>()?;
+        let got = out.flatten_all()?.to_vec1::<f32>()?;
+        for (idx, (&actual, &direct_actual)) in got.iter().zip(direct_vals.iter()).enumerate() {
+            assert!(
+                (actual - direct_actual).abs() < 1e-7,
+                "default softmax path diverged from direct kt helper at {idx}: \
+                 actual={actual} direct={direct_actual}"
+            );
+        }
+
+        for row_idx in 0..2 {
+            let row = &data[row_idx * 4..(row_idx + 1) * 4];
+            let row_max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let exp_sum: f32 = row.iter().map(|v| (v - row_max).exp()).sum();
+            for col_idx in 0..4 {
+                let idx = row_idx * 4 + col_idx;
+                let expected = (data[idx] - row_max).exp() / exp_sum;
+                assert!(
+                    (got[idx] - expected).abs() < 2e-5,
+                    "softmax mismatch at row={row_idx} col={col_idx}: \
+                     actual={} expected={expected}",
+                    got[idx]
+                );
+            }
         }
         Ok(())
     }
