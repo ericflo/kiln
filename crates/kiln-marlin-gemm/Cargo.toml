@@ -9,9 +9,8 @@ description = "Vendored IST-DASLab/marlin W4A16 GEMM CUDA kernel with a thin BF1
 build = "build.rs"
 
 [dependencies]
-candle-core = { workspace = true, features = ["cuda"] }
 half = "2"
-# Phase 7 prep — kiln-tensor-typed surface alongside candle-typed.
+# Phase 7 (#1082) — kt-only crate, no candle dep.
 kiln-tensor = { workspace = true, features = ["cuda"] }
 kiln-kt-bridge = { workspace = true }
 

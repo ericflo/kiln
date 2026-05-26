@@ -34,21 +34,22 @@
 //!
 //! # API
 //!
-//! - [`marlin_w4a16_gemm`] — the BF16-facing matmul wrapper. Takes
-//!   `[m, k] bf16`, `[k/16, n*16/8] i32`, `[k/groupsize, n] f16`, and
-//!   returns `[m, n] bf16`.
+//! Phase 7 (#1082) — the crate exposes only the kt-typed surface
+//! (`marlin_w4a16_gemm_kt` + `MarlinError`) plus the candle-free host
+//! [`pack`] module. The previous candle-typed `marlin_w4a16_gemm`
+//! wrapper had zero production callers after 0841c266 (marlin_proj
+//! migration) and has been removed alongside its parity test.
+//!
+//! - [`marlin_w4a16_gemm_kt`] — F16-facing matmul over kt-typed
+//!   tensors. Callers cast BF16 → F16 at the boundary.
 //! - [`pack`] — pure-Rust port of the upstream Python packer
-//!   (`marlin/__init__.py::Layer.pack`). Both the parity test and any
-//!   future integration code use this to build the Marlin-format `B` and
-//!   permuted scales from a fake-quantized fp32 weight matrix.
+//!   (`marlin/__init__.py::Layer.pack`). Pure host code; no candle
+//!   or kt dep.
 
-use candle_core::{
-    DType, Result, Tensor, backend::BackendStorage, cuda_backend::cudarc::driver::DevicePtr,
-};
 use half::{bf16, f16};
 
 unsafe extern "C" {
-    fn kiln_marlin_w4a16_gemm(
+    pub(crate) fn kiln_marlin_w4a16_gemm(
         a: *const core::ffi::c_void,
         b: *const core::ffi::c_void,
         c: *mut core::ffi::c_void,
@@ -73,210 +74,9 @@ pub(crate) const DEFAULT_MAX_PAR: i32 = 16;
 /// Workspace tile size in `n` (Marlin's smallest `thread_n`).
 pub(crate) const WORKSPACE_TILE_N: usize = 128;
 
-/// kiln-tensor-typed surface alongside candle-typed. Same FFI.
+/// kt-typed dispatch surface — the only public matmul entry.
 mod kt_api;
 pub use kt_api::{marlin_w4a16_gemm_kt, MarlinError};
-
-/// Run the vendored Marlin W4A16 GEMM with a BF16 activation interface.
-///
-/// Inputs (all CUDA, all contiguous):
-///
-///   - `a`           : `[m, k]` bf16 input matrix.
-///   - `b_packed`    : `[k / 16, n * 16 / 8]` i32, in Marlin's tiled /
-///                     permuted packed layout (see [`pack::pack_weights`]).
-///   - `scales`      : `[k / groupsize, n]` f16, Marlin-permuted (see
-///                     [`pack::permute_scales`]). Use `groupsize = k` for
-///                     per-column quantization.
-///   - `groupsize`   : Quantization group size. Must be `-1` (== `k`) or
-///                     `128`.
-///
-/// Returns a freshly allocated `[m, n]` bf16 tensor.
-///
-/// # Constraints
-///
-///   - `k % 128 == 0`
-///   - `n % 256 == 0`
-///   - `m >= 1` (the kernel pads `m` up to a multiple of 16 internally)
-///   - `groupsize in { -1, 128 }`
-pub fn marlin_w4a16_gemm(
-    a: &Tensor,
-    b_packed: &Tensor,
-    scales: &Tensor,
-    groupsize: i32,
-) -> Result<Tensor> {
-    let device = a.device();
-    if !device.is_cuda() {
-        candle_core::bail!("kiln-marlin-gemm: a must be on CUDA");
-    }
-
-    let (m, k) = a.dims2()?;
-    let (b_rows, b_cols) = b_packed.dims2()?;
-    let (s_rows, n) = scales.dims2()?;
-
-    if k % 128 != 0 {
-        candle_core::bail!("kiln-marlin-gemm: k must be a multiple of 128 (got {k})");
-    }
-    if n % 256 != 0 {
-        candle_core::bail!("kiln-marlin-gemm: n must be a multiple of 256 (got {n})");
-    }
-
-    if b_rows != k / 16 || b_cols != n * 16 / 8 {
-        candle_core::bail!(
-            "kiln-marlin-gemm: b_packed shape [{b_rows}, {b_cols}] does not match expected \
-             [k/16={}, n*16/8={}] for k={k}, n={n}",
-            k / 16,
-            n * 16 / 8,
-        );
-    }
-
-    if !(groupsize == -1 || groupsize == 128) {
-        candle_core::bail!("kiln-marlin-gemm: groupsize must be -1 or 128 (got {groupsize})");
-    }
-    // `groupsize_for_dims` is the actual chunk size in K used for sizing the
-    // scales tensor; `-1` means per-column, i.e. one row of scales total.
-    // The kernel itself takes `-1` as a sentinel for per-column, so we keep
-    // `groupsize` as-is when forwarding to the FFI call.
-    let groupsize_for_dims: usize = if groupsize == -1 {
-        k
-    } else {
-        groupsize as usize
-    };
-    if groupsize_for_dims > k || k % groupsize_for_dims != 0 {
-        candle_core::bail!("kiln-marlin-gemm: k={k} must be divisible by groupsize={groupsize}");
-    }
-
-    let expected_s_rows = k / groupsize_for_dims;
-    if s_rows != expected_s_rows {
-        candle_core::bail!(
-            "kiln-marlin-gemm: scales rows {s_rows} != expected {expected_s_rows} \
-             (k={k}, groupsize={groupsize})"
-        );
-    }
-
-    if a.dtype() != DType::BF16 {
-        candle_core::bail!("kiln-marlin-gemm: a must be bf16 (got {:?})", a.dtype());
-    }
-    if b_packed.dtype() != DType::I32 {
-        candle_core::bail!(
-            "kiln-marlin-gemm: b_packed must be i32 (got {:?})",
-            b_packed.dtype()
-        );
-    }
-    if scales.dtype() != DType::F16 {
-        candle_core::bail!(
-            "kiln-marlin-gemm: scales must be f16 (got {:?})",
-            scales.dtype()
-        );
-    }
-
-    // The kernel is FP16-only; cast bf16 -> fp16 on the way in.
-    let a_fp16 = a.to_dtype(DType::F16)?.contiguous()?;
-    let b_packed = b_packed.contiguous()?;
-    let scales = scales.contiguous()?;
-
-    // Output is fp16 (kernel writes here), then we cast back to bf16.
-    let c_fp16 = Tensor::zeros((m, n), DType::F16, device)?;
-
-    // Workspace: int32 buffer of size at least (n / 128) * max_par, all zero.
-    let workspace_len = (n / WORKSPACE_TILE_N) * DEFAULT_MAX_PAR as usize;
-    let workspace = Tensor::zeros((workspace_len,), DType::I32, device)?;
-
-    {
-        let (a_storage, a_layout) = a_fp16.storage_and_layout();
-        let (b_storage, b_layout) = b_packed.storage_and_layout();
-        let (c_storage, c_layout) = c_fp16.storage_and_layout();
-        let (s_storage, s_layout) = scales.storage_and_layout();
-        let (w_storage, w_layout) = workspace.storage_and_layout();
-
-        let a_cuda = match &*a_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("kiln-marlin-gemm: a must be on CUDA"),
-        };
-        let b_cuda = match &*b_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("kiln-marlin-gemm: b_packed must be on CUDA"),
-        };
-        let c_cuda = match &*c_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("kiln-marlin-gemm: c must be on CUDA"),
-        };
-        let s_cuda = match &*s_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("kiln-marlin-gemm: scales must be on CUDA"),
-        };
-        let w_cuda = match &*w_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("kiln-marlin-gemm: workspace must be on CUDA"),
-        };
-
-        let stream = a_cuda.device().cuda_stream();
-        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
-        // candle 0.10's CudaDevice doesn't expose its ordinal publicly. The
-        // Marlin kernel only consults `dev` to call cudaDeviceGetAttribute
-        // when `sms == -1`. Defaulting to 0 is correct on single-GPU pods,
-        // which is what kiln targets today; multi-GPU support would need a
-        // candle API addition to surface the device index.
-        let dev_ord: i32 = 0;
-
-        let a_slice = a_cuda
-            .as_cuda_slice::<f16>()?
-            .slice(a_layout.start_offset()..);
-        let b_slice = b_cuda
-            .as_cuda_slice::<i32>()?
-            .slice(b_layout.start_offset()..);
-        let c_slice = c_cuda
-            .as_cuda_slice::<f16>()?
-            .slice(c_layout.start_offset()..);
-        let s_slice = s_cuda
-            .as_cuda_slice::<f16>()?
-            .slice(s_layout.start_offset()..);
-        let w_slice = w_cuda
-            .as_cuda_slice::<i32>()?
-            .slice(w_layout.start_offset()..);
-
-        unsafe {
-            let (a_ptr, _g1) = a_slice.device_ptr(&stream);
-            let (b_ptr, _g2) = b_slice.device_ptr(&stream);
-            let (c_ptr, _g3) = c_slice.device_ptr(&stream);
-            let (s_ptr, _g4) = s_slice.device_ptr(&stream);
-            let (w_ptr, _g5) = w_slice.device_ptr(&stream);
-
-            let status = kiln_marlin_w4a16_gemm(
-                a_ptr as *const _,
-                b_ptr as *const _,
-                c_ptr as *mut _,
-                s_ptr as *const _,
-                m as i32,
-                n as i32,
-                k as i32,
-                w_ptr as *mut _,
-                groupsize,
-                dev_ord,
-                raw_stream,
-                /* thread_k */ -1,
-                /* thread_n */ -1,
-                /* sms */ -1,
-                DEFAULT_MAX_PAR,
-            );
-
-            if status != 0 {
-                candle_core::bail!(
-                    "kiln_marlin_w4a16_gemm failed with status {status} \
-                     (1=ERR_PROB_SHAPE, 2=ERR_KERN_SHAPE) for m={m}, n={n}, k={k}, \
-                     groupsize={groupsize}"
-                );
-            }
-        }
-    }
-
-    // Cast fp16 output back to bf16 to match the rest of the kiln pipeline.
-    let c_bf16 = c_fp16.to_dtype(DType::BF16)?;
-
-    // Keep types around to silence unused-import warnings on non-CUDA hosts.
-    let _ = std::marker::PhantomData::<bf16>;
-
-    Ok(c_bf16)
-}
 
 /// Pure-Rust port of the upstream Marlin Python packer
 /// (`marlin/__init__.py::_get_perms` and `Layer.pack`).
