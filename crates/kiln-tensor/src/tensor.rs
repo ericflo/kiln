@@ -493,6 +493,96 @@ impl Tensor {
     }
 
     // ------------------------------------------------------------------
+    // Finite-element check (KILN_DETECT_ANOMALY substrate)
+    // ------------------------------------------------------------------
+
+    /// Returns `Ok(true)` iff every element of this tensor is finite
+    /// (no `NaN`, no `+Inf`, no `-Inf`). Supports F32, BF16, F16, and
+    /// FP8 dtypes — for integer/packed dtypes returns `Ok(true)`
+    /// because they have no NaN/Inf representations.
+    ///
+    /// CPU storage: iterates the addressable byte buffer (this method
+    /// does not materialize a contiguous copy — it walks strides).
+    /// For non-CPU storage today, returns `Err` because the per-
+    /// backend `is_finite` kernel hasn't shipped yet — that's the
+    /// substrate follow-up for KILN_DETECT_ANOMALY on GPU.
+    ///
+    /// This is the kt-tensor side of the
+    /// `kiln_autograd::anomaly_detection_enabled()` /
+    /// `anomaly_panic()` pair (#1082 Phase 9): when
+    /// `KILN_DETECT_ANOMALY=1`, `Tape::backward` scans each backward
+    /// op's gradient outputs via this method and panics at the
+    /// op-tape-position of the first non-finite value.
+    ///
+    /// Cost: O(numel) per call on CPU. Off-by-default in production;
+    /// CI training-parity tests opt in.
+    pub fn all_finite(&self) -> Result<bool> {
+        use crate::DType;
+        // Integer + packed dtypes have no NaN/Inf — vacuously finite.
+        if matches!(self.dtype(), DType::U8 | DType::U32 | DType::I64) {
+            return Ok(true);
+        }
+        if self.dtype().is_packed() {
+            return Ok(true);
+        }
+        if !self.device().is_cpu() {
+            return Err(Error::Msg(format!(
+                "Tensor::all_finite: only CPU storage is supported today; \
+                 device {} support lands with the per-backend is_finite \
+                 reduction kernel",
+                self.device()
+            )));
+        }
+        let cpu = self
+            .storage
+            .as_any()
+            .downcast_ref::<CpuStorage>()
+            .ok_or_else(|| {
+                Error::Msg("Tensor::all_finite: CPU device but storage isn't CpuStorage".to_string())
+            })?;
+        let per = self.dtype().size_in_bytes();
+        let shape = self.layout.shape();
+        let strides = self.layout.strides();
+        let start = self.layout.start_offset();
+        let bytes = cpu.as_bytes();
+        // Stride-walk so we don't have to materialize a contiguous
+        // copy. For each logical index, check finiteness of the
+        // element at the physical offset.
+        let rank = shape.len();
+        if rank == 0 {
+            // Scalar tensor. One element at `start`.
+            return Ok(scalar_at_is_finite(bytes, start * per, self.dtype()));
+        }
+        let mut idx = vec![0usize; rank];
+        loop {
+            let mut phys = start;
+            for (axis, &i) in idx.iter().enumerate() {
+                phys += i * strides[axis];
+            }
+            let src = phys * per;
+            if !scalar_at_is_finite(bytes, src, self.dtype()) {
+                return Ok(false);
+            }
+            // Increment row-major.
+            let mut axis = rank;
+            let mut bumped = false;
+            while axis > 0 {
+                axis -= 1;
+                idx[axis] += 1;
+                if idx[axis] < shape[axis] {
+                    bumped = true;
+                    break;
+                }
+                idx[axis] = 0;
+            }
+            if !bumped {
+                break;
+            }
+        }
+        Ok(true)
+    }
+
+    // ------------------------------------------------------------------
     // Version counter (anti-pattern 16)
     // ------------------------------------------------------------------
 
@@ -605,6 +695,40 @@ impl Tensor {
         Err(Error::Msg(format!(
             "Tensor::to_device: transition {src}→{target} requires a GPU feature (cuda/metal/vulkan); none is enabled in this build"
         )))
+    }
+}
+
+/// Helper for [`Tensor::all_finite`] — read one element at the given
+/// byte offset, decode it per dtype, and check `is_finite()`. Returns
+/// true for dtypes without NaN/Inf representations.
+fn scalar_at_is_finite(bytes: &[u8], byte_off: usize, dtype: crate::DType) -> bool {
+    use crate::DType;
+    match dtype {
+        DType::F32 => {
+            let mut buf = [0u8; 4];
+            buf.copy_from_slice(&bytes[byte_off..byte_off + 4]);
+            f32::from_le_bytes(buf).is_finite()
+        }
+        DType::BF16 => {
+            let mut buf = [0u8; 2];
+            buf.copy_from_slice(&bytes[byte_off..byte_off + 2]);
+            half::bf16::from_le_bytes(buf).to_f32().is_finite()
+        }
+        DType::F16 => {
+            let mut buf = [0u8; 2];
+            buf.copy_from_slice(&bytes[byte_off..byte_off + 2]);
+            half::f16::from_le_bytes(buf).to_f32().is_finite()
+        }
+        // FP8 E4M3FN has no Inf; only NaN at bit pattern 0x7F / 0xFF
+        // (sign bit + all-ones exponent + all-ones mantissa).
+        DType::FP8E4M3 => (bytes[byte_off] & 0x7F) != 0x7F,
+        // FP8 E5M2: exp = 5 bits + mantissa = 2 bits. exp=11111 is
+        // Inf (mantissa=00) or NaN (mantissa!=00) — either is
+        // non-finite.
+        DType::FP8E5M2 => ((bytes[byte_off] >> 2) & 0b11111) != 0b11111,
+        // U8/U32/I64/packed dtypes: handled by the early-return in
+        // Tensor::all_finite; should never reach here.
+        _ => true,
     }
 }
 
