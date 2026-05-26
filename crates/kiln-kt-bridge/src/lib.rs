@@ -502,6 +502,28 @@ pub fn kt_tensor_to_candle_cuda_copy(
 /// PR. Until then, the borrow adapter is useful for tests + the
 /// allocator-pool integration; the copying adapter remains the
 /// production-safe path for call sites that still reach `.slice()`.
+///
+/// # Contiguity contract
+///
+/// **The candle `Tensor` MUST be contiguous.** If it isn't, this
+/// function returns `BridgeError`. Callers that may receive
+/// non-contig views (typical example: anything fed from
+/// `Tensor::narrow` on a non-trailing dim, or `.transpose`'d
+/// inputs) MUST call `t.contiguous()` first and hold the resulting
+/// tensor in a local for the lifetime of the kt borrow:
+///
+/// ```ignore
+/// let a_c = a.contiguous()?;                                  // local — keeps the storage alive
+/// let a_kt = kt_tensor_from_candle_cuda_borrow(&a_c)?;       // borrow from the materialized contig copy
+/// ```
+///
+/// Already-contiguous inputs make `.contiguous()` a cheap Arc
+/// clone (no copy), so the pattern is safe to apply unconditionally
+/// at sites that may see either layout. The 2026-05-26 batched-GDN
+/// regression (`2d9d4fc4`) was caused by three `gdn_decode_*` kt
+/// call sites in `kiln-model::backend::cuda` skipping this step
+/// while the sibling `gdn_gates` kt path applied it — see that
+/// commit message for the failure mode.
 pub fn kt_tensor_from_candle_cuda_borrow(
     t: &candle_core::Tensor,
 ) -> Result<KtTensor, BridgeError> {
