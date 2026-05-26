@@ -457,7 +457,7 @@ pub fn adamw_step_f32_kt(
 /// Computes the LoRA-A projection at decode time: `hidden = x @ A`,
 /// where:
 /// - `x`: BF16 `[batch, in_dim]`
-/// - `a`: BF16 `[in_dim, rank]` (the LoRA-A matrix)
+/// - `a`: BF16 `[rank, in_dim]` (the LoRA-A matrix)
 ///
 /// Returns F32 `[batch, rank]` (the LoRA hidden state, in F32 for
 /// downstream numerical accuracy). Used by the multi-LoRA decode
@@ -474,12 +474,12 @@ pub fn lora_decode_hidden_kt(
     }
     let (batch, in_dim) = (x_shape[0], x_shape[1]);
     let a_shape = a.shape();
-    if a_shape.len() != 2 || a_shape[0] != in_dim {
+    if a_shape.len() != 2 || a_shape[1] != in_dim {
         return Err(RmsNormError::Msg(format!(
-            "kt-lora-hidden: a {a_shape:?} != [{in_dim}, rank]"
+            "kt-lora-hidden: a {a_shape:?} != [rank, {in_dim}]"
         )));
     }
-    let rank = a_shape[1];
+    let rank = a_shape[0];
 
     let x_ptr = kiln_kt_bridge::cuda_input_device_ptr(x, KtDType::BF16, "x")?;
     let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
@@ -514,7 +514,7 @@ pub fn lora_decode_hidden_kt(
 /// `out = base + scale * (hidden @ B)`, where:
 /// - `base`: BF16 `[batch, out_dim]` (the base linear projection)
 /// - `hidden`: F32 `[batch, rank]` (output of [`lora_decode_hidden_kt`])
-/// - `b`: BF16 `[rank, out_dim]` (the LoRA-B matrix)
+/// - `b`: BF16 `[out_dim, rank]` (the LoRA-B matrix)
 /// - `scale`: f32 LoRA alpha scale
 ///
 /// Returns BF16 `[batch, out_dim]`.
@@ -539,9 +539,9 @@ pub fn lora_decode_add_kt(
     }
     let rank = h_shape[1];
     let b_shape = b.shape();
-    if b_shape != [rank, out_dim] {
+    if b_shape != [out_dim, rank] {
         return Err(RmsNormError::Msg(format!(
-            "kt-lora-add: b {b_shape:?} != [{rank}, {out_dim}]"
+            "kt-lora-add: b {b_shape:?} != [{out_dim}, {rank}]"
         )));
     }
 
@@ -573,6 +573,47 @@ pub fn lora_decode_add_kt(
         )));
     }
     Ok(out)
+}
+
+/// Full kt twin of [`crate::lora_decode_add`].
+///
+/// Accepts the production decode shapes `base=[batch,1,out]`,
+/// `x=[batch,1,in]`, `a=[rank,in]`, `b=[out,rank]`, computes the hidden
+/// LoRA-A projection and fused LoRA-B add, and returns BF16
+/// `[batch,1,out]`.
+pub fn lora_decode_add_full_kt(
+    base: &KtTensor,
+    x: &KtTensor,
+    a: &KtTensor,
+    b: &KtTensor,
+    scale: f32,
+) -> Result<KtTensor, RmsNormError> {
+    if !supports_lora_decode_add_kt(base, x, a, b) {
+        return Err(RmsNormError::Msg(format!(
+            "kt-lora-decode-add: unsupported shapes base={:?} x={:?} a={:?} b={:?} dtypes=({:?},{:?},{:?},{:?})",
+            base.shape(),
+            x.shape(),
+            a.shape(),
+            b.shape(),
+            base.dtype(),
+            x.dtype(),
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    let batch = base.shape()[0];
+    let out_dim = base.shape()[2];
+    let in_dim = x.shape()[2];
+    let base2 = base
+        .reshape(vec![batch, out_dim])
+        .map_err(|e| RmsNormError::Msg(format!("kt-lora-decode-add: base reshape: {e}")))?;
+    let x2 = x
+        .reshape(vec![batch, in_dim])
+        .map_err(|e| RmsNormError::Msg(format!("kt-lora-decode-add: x reshape: {e}")))?;
+    let hidden = lora_decode_hidden_kt(&x2, a)?;
+    let out2 = lora_decode_add_kt(&base2, &hidden, b, scale)?;
+    out2.reshape(vec![batch, 1, out_dim])
+        .map_err(|e| RmsNormError::Msg(format!("kt-lora-decode-add: out reshape: {e}")))
 }
 
 /// `fused_l2_qk_norm` over `kiln_tensor::Tensor` operands.
@@ -2008,6 +2049,80 @@ mod kt_l2_qk_norm_gqa_regression {
         assert_eq!(
             k_diff, 0.0,
             "kt vs candle fused_l2_qk_norm_gqa k max_abs_diff={k_diff:e}"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod kt_lora_decode_regression {
+    //! Regression test for #1082: kt LoRA decode wrappers must follow the
+    //! same production shape convention as the candle wrapper:
+    //! `base=[batch,1,out]`, `x=[batch,1,in]`, `a=[rank,in]`,
+    //! `b=[out,rank]`.
+    use super::*;
+    use crate::lora_decode_add;
+    use candle_core::{DType, Device, Tensor};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn lora_decode_add_full_kt_matches_candle_contract() -> TestResult {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping lora_decode_add_full_kt_matches_candle_contract: {err}"
+                );
+                return Ok(());
+            }
+        };
+
+        let batch = 2usize;
+        let in_dim = 32usize;
+        let out_dim = 24usize;
+        let rank = 4usize;
+        let scale = 0.125f32;
+
+        let base_data: Vec<f32> = (0..batch * out_dim)
+            .map(|i| ((i as f32 * 0.011).sin() * 0.4))
+            .collect();
+        let x_data: Vec<f32> = (0..batch * in_dim)
+            .map(|i| ((i as f32 * 0.017).cos() * 0.5))
+            .collect();
+        let a_data: Vec<f32> = (0..rank * in_dim)
+            .map(|i| ((i as f32 * 0.019).sin() * 0.2))
+            .collect();
+        let b_data: Vec<f32> = (0..out_dim * rank)
+            .map(|i| ((i as f32 * 0.023).cos() * 0.2))
+            .collect();
+
+        let base = Tensor::from_vec(base_data, (batch, 1, out_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let x = Tensor::from_vec(x_data, (batch, 1, in_dim), &device)?.to_dtype(DType::BF16)?;
+        let a = Tensor::from_vec(a_data, (rank, in_dim), &device)?.to_dtype(DType::BF16)?;
+        let b = Tensor::from_vec(b_data, (out_dim, rank), &device)?.to_dtype(DType::BF16)?;
+
+        let out_ref = lora_decode_add(&base, &x, &a, &b, scale)?;
+
+        let base_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&base)?;
+        let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x)?;
+        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a)?;
+        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b)?;
+        assert!(supports_lora_decode_add_kt(&base_kt, &x_kt, &a_kt, &b_kt));
+
+        let out_kt = lora_decode_add_full_kt(&base_kt, &x_kt, &a_kt, &b_kt, scale)?;
+        let out_kt_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)?;
+
+        assert_eq!(out_kt_candle.dims(), &[batch, 1, out_dim]);
+        let diff = (&out_ref.to_dtype(DType::F32)? - &out_kt_candle.to_dtype(DType::F32)?)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        assert_eq!(
+            diff, 0.0,
+            "kt vs candle lora_decode_add max_abs_diff={diff:e}"
         );
         Ok(())
     }

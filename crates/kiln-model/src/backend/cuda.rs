@@ -1705,12 +1705,33 @@ impl BackendRuntime for CudaBackend {
             || x.track_op()
             || a.track_op()
             || b.track_op()
-            || !kiln_rmsnorm_kernel::supports_lora_decode_add(base, x, a, b)
         {
             return Ok(None);
         }
-        let out = kiln_rmsnorm_kernel::lora_decode_add(base, x, a, b, scale)
-            .context("cuda lora_decode_add kernel failed")?;
+        let base_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(base) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+        let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+        let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+        let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+        if !kiln_rmsnorm_kernel::supports_lora_decode_add_kt(&base_kt, &x_kt, &a_kt, &b_kt) {
+            return Ok(None);
+        }
+        let out_kt =
+            kiln_rmsnorm_kernel::lora_decode_add_full_kt(&base_kt, &x_kt, &a_kt, &b_kt, scale)
+                .map_err(|e| anyhow::anyhow!("kt lora_decode_add: {e}"))?;
+        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .with_context(|| "kt-adapter: lora_decode_add out → candle failed")?;
         Ok(Some(out))
     }
 
