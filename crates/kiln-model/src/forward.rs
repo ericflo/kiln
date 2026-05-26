@@ -334,45 +334,50 @@ fn cuda_use_kt_api_lora_add() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 (#1082) opt-in: route equal-shape `Tensor::broadcast_mul`
-/// candle calls through `kiln_tensor::cuda_elementwise_binary` with
-/// kind tag 2 (Mul) via the kt-bridge borrow adapter. Set
-/// `KILN_USE_KT_API_BROADCAST_MUL=1` (or `KILN_USE_KT_API_ALL=1`) to
-/// enable; default off.
+/// Phase 7 default-on (#1082): route equal-shape
+/// `Tensor::broadcast_mul` candle calls through
+/// `kiln_tensor::cuda_elementwise_binary` with kind tag 2 (Mul).
+/// Single-kernel `a * b` — bit-exact to candle Mul<Tensor>
+/// (shared CUDA mul intrinsic).
 ///
-/// `broadcast_mul` in `crates/kiln-model/src/cuda_train.rs` is used
-/// pervasively in normalization, attention, MLP and cross-entropy
-/// composites. Many call sites multiply two equal-shape contiguous
-/// CUDA tensors (e.g. `rms_inv_sq * rms_inv`, `prev_sumexp *
-/// prev_scale`) where the kt fast path applies one-for-one with the
-/// candle composite; sites with true broadcasting (size-1 axis
-/// expansion) fall through automatically because the helper checks
-/// `a.shape() == b.shape()` up front. Mirrors the
-/// [`cuda_use_kt_api_lora_add`] gate pattern. NVTX range
-/// `kiln/broadcast_mul_kt` brackets the migrated call so nsys
-/// traces separate the path from the candle baseline.
+/// `broadcast_mul` is used pervasively in normalization, attention,
+/// MLP and cross-entropy composites. Equal-shape sites (`rms_inv_sq
+/// * rms_inv`, `prev_sumexp * prev_scale`, etc.) hit the kt fast
+/// path; true broadcasting sites (size-1 axis expansion) fall
+/// through automatically because the helper checks
+/// `a.shape() == b.shape()` up front.
+///
+/// Escape hatch: `KILN_DISABLE_KT_API_BROADCAST_MUL=1`. Same flip
+/// rationale as the max_binary / lora_add default-on flips:
+/// shared-kernel bit-exact dispatch with an upstream shape-equality
+/// gate.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_broadcast_mul() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
+    // #1082: flipped default ON. Bit-exact `cuda_elementwise_binary`
+    // kind 2 dispatch. Escape hatch: `KILN_DISABLE_KT_API_BROADCAST_MUL=1`.
     let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_BROADCAST_MUL").is_ok());
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_BROADCAST_MUL").is_err());
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 (#1082) opt-in: route equal-shape `Tensor::broadcast_add`
-/// candle calls through `kiln_tensor::cuda_elementwise_binary` with
-/// kind tag 0 (Add). Set `KILN_USE_KT_API_BROADCAST_ADD=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off.
+/// Phase 7 default-on (#1082): route equal-shape
+/// `Tensor::broadcast_add` candle calls through
+/// `kiln_tensor::cuda_elementwise_binary` with kind tag 0 (Add).
+/// Single-kernel — bit-exact to candle Add<Tensor>.
 ///
-/// Mirror of [`cuda_use_kt_api_broadcast_mul`] — equal-shape sites
-/// (e.g. `log_sumexp_only + running_max` in the linear cross-entropy
-/// log-sum-exp combine) hit the kt fast path; true broadcasting
-/// sites fall through.
+/// Equal-shape sites (e.g. `log_sumexp_only + running_max` in the
+/// linear cross-entropy log-sum-exp combine) hit the kt fast path;
+/// true broadcasting sites fall through.
+///
+/// Escape hatch: `KILN_DISABLE_KT_API_BROADCAST_ADD=1`.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_broadcast_add() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
+    // #1082: flipped default ON. Bit-exact dispatch with shape-eq
+    // gate. Escape hatch: `KILN_DISABLE_KT_API_BROADCAST_ADD=1`.
     let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_BROADCAST_ADD").is_ok());
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_BROADCAST_ADD").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -398,21 +403,25 @@ fn cuda_use_kt_api_broadcast_sub() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 (#1082) opt-in: route equal-shape `Tensor::broadcast_div`
-/// candle calls through `kiln_tensor::cuda_elementwise_binary` with
-/// kind tag 3 (Div). Set `KILN_USE_KT_API_BROADCAST_DIV=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off.
+/// Phase 7 default-on (#1082): route equal-shape
+/// `Tensor::broadcast_div` candle calls through
+/// `kiln_tensor::cuda_elementwise_binary` with kind tag 3 (Div).
+/// Single-kernel — bit-exact to candle Div<Tensor>.
 ///
-/// Mirror of [`cuda_use_kt_api_broadcast_mul`]. Targets the
-/// `cuda_div` forward + backward in `cuda_train.rs` where the
-/// general `lhs.broadcast_div(rhs)` reduces to elementwise div when
-/// the caller passes equal-shape operands; sites with true
-/// broadcasting (softmax normalize, etc.) fall through.
+/// Targets the `cuda_div` forward + backward in `cuda_train.rs`
+/// where the general `lhs.broadcast_div(rhs)` reduces to
+/// elementwise div when the caller passes equal-shape operands;
+/// sites with true broadcasting (softmax normalize, etc.) fall
+/// through automatically via the shape-equality gate.
+///
+/// Escape hatch: `KILN_DISABLE_KT_API_BROADCAST_DIV=1`.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_broadcast_div() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
+    // #1082: flipped default ON. Bit-exact dispatch.
+    // Escape hatch: `KILN_DISABLE_KT_API_BROADCAST_DIV=1`.
     let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_BROADCAST_DIV").is_ok());
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_BROADCAST_DIV").is_err());
     direct || cuda_use_kt_api_all()
 }
 
