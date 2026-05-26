@@ -1735,6 +1735,102 @@ pub fn supports_attn_decode_qkv_prep_kt(
         && rotary_dim <= i32::MAX as usize
 }
 
+/// kt twin of [`crate::supports_l2_qk_norm`].
+pub fn supports_l2_qk_norm_kt(q: &KtTensor, k: &KtTensor) -> bool {
+    kt_is_cuda(q)
+        && kt_is_cuda(k)
+        && q.dtype() == KtDType::BF16
+        && k.dtype() == KtDType::BF16
+        && q.is_contiguous()
+        && k.is_contiguous()
+        && q.shape() == k.shape()
+        && q.rank() >= 1
+        && q.shape().last().copied().unwrap_or(0) <= 8192
+}
+
+/// kt twin of [`crate::supports_l2_qk_norm_gqa`].
+pub fn supports_l2_qk_norm_gqa_kt(q: &KtTensor, k: &KtTensor, nv: usize) -> bool {
+    if !kt_is_cuda(q)
+        || !kt_is_cuda(k)
+        || q.dtype() != KtDType::BF16
+        || k.dtype() != KtDType::BF16
+        || q.shape() != k.shape()
+        || q.rank() != 4
+    {
+        return false;
+    }
+    let dims = q.shape();
+    let nk = dims[2];
+    let dk = dims[3];
+    nk > 0 && dk == 128 && nv >= nk && nv % nk == 0
+}
+
+/// kt twin of [`crate::supports_lora_decode_add`].
+pub fn supports_lora_decode_add_kt(
+    base: &KtTensor,
+    x: &KtTensor,
+    a: &KtTensor,
+    b: &KtTensor,
+) -> bool {
+    if base.rank() != 3 || x.rank() != 3 || a.rank() != 2 || b.rank() != 2 {
+        return false;
+    }
+    let bd = base.shape();
+    let xd = x.shape();
+    let ad = a.shape();
+    let bw = b.shape();
+    let (batch, one, out_dim) = (bd[0], bd[1], bd[2]);
+    let (x_batch, x_one, in_dim) = (xd[0], xd[1], xd[2]);
+    let (rank, a_in_dim) = (ad[0], ad[1]);
+    let (b_out_dim, b_rank) = (bw[0], bw[1]);
+
+    kt_is_cuda(base)
+        && kt_is_cuda(x)
+        && kt_is_cuda(a)
+        && kt_is_cuda(b)
+        && base.dtype() == KtDType::BF16
+        && x.dtype() == KtDType::BF16
+        && a.dtype() == KtDType::BF16
+        && b.dtype() == KtDType::BF16
+        && base.is_contiguous()
+        && x.is_contiguous()
+        && a.is_contiguous()
+        && b.is_contiguous()
+        && batch == x_batch
+        && one == 1
+        && x_one == 1
+        && rank == b_rank
+        && in_dim == a_in_dim
+        && out_dim == b_out_dim
+        && batch > 0
+        && in_dim > 0
+        && out_dim > 0
+        && rank > 0
+        && rank <= 64
+        && batch <= i32::MAX as usize
+        && in_dim <= i32::MAX as usize
+        && out_dim <= i32::MAX as usize
+        && rank <= i32::MAX as usize
+}
+
+/// kt twin of [`crate::supports_optimizer_step`]. Inspects a slice of
+/// kt tensors against the same per-tensor invariants the candle
+/// predicate uses.
+pub fn supports_optimizer_step_kt(tensors: &[&KtTensor]) -> bool {
+    let Some(first) = tensors.first() else {
+        return false;
+    };
+    kt_is_cuda(first)
+        && matches!(first.dtype(), KtDType::F32 | KtDType::BF16)
+        && first.is_contiguous()
+        && tensors.iter().all(|t| {
+            kt_is_cuda(t)
+                && t.dtype() == first.dtype()
+                && t.element_count() == first.element_count()
+                && t.is_contiguous()
+        })
+}
+
 #[cfg(test)]
 mod kt_rotary_qk_regression {
     //! Regression test for #1082: the kt-typed `fused_rotary_qk_kt`
