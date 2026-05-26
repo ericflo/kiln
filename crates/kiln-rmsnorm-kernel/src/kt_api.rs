@@ -1,13 +1,9 @@
-//! `kiln_tensor::Tensor`-typed surface for the canonical
-//! `fused_rmsnorm` + `fused_rmsnorm_backward` entry points.
+//! `kiln_tensor::Tensor`-typed surface for the rmsnorm-kernel CUDA entry
+//! points.
 //!
-//! Phase 7 prep — same pattern as kiln-flash-attn + kiln-conv1d-kernel.
-//! Same FFI underneath (`kiln_fused_rmsnorm` + `kiln_fused_rmsnorm_bwd`).
-//!
-//! Only the two RMSNorm functions are ported in this PR; the rest of
-//! the rmsnorm-kernel surface (rotary, MLP fusions, LoRA, SGD/AdamW
-//! steps, etc.) follows the same template and lands in subsequent
-//! PRs.
+//! Phase 7 prep — same pattern as kiln-flash-attn + kiln-conv1d-kernel:
+//! kt-typed wrappers bottom out in the same CUDA FFI symbols while the
+//! candle-typed surface remains as the fallback/reference during migration.
 
 use kiln_kt_bridge::BridgeError;
 use kiln_tensor::{CudaStorage, DType as KtDType, Device as KtDevice, Tensor as KtTensor};
@@ -637,46 +633,50 @@ pub fn fused_l2_qk_norm_kt(
     Ok((q_out, k_out))
 }
 
-/// GQA variant of `fused_l2_qk_norm`. K has `nk` distinct heads per
-/// `ratio` (group size) Q heads. Shapes:
-/// - `q_in`, `q_out`: BF16 `[rows, hidden_q]` where `hidden_q = nk*ratio*head_dim`
-/// - `k_in`, `k_out`: BF16 `[rows, hidden_k]` where `hidden_k = nk*head_dim`
+/// GQA variant of `fused_l2_qk_norm`.
+///
+/// Inputs are unexpanded GDN Q/K tensors `[batch, seq, nk, dk]`; outputs are
+/// freshly allocated BF16 tensors `[batch, seq, nv, dk]`, with each normalized
+/// input head repeated `nv / nk` times. Semantics match the candle-typed
+/// [`crate::fused_l2_qk_norm_gqa`] wrapper.
 pub fn fused_l2_qk_norm_gqa_kt(
     q_in: &KtTensor,
     k_in: &KtTensor,
-    nk: usize,
-    ratio: usize,
-    head_dim: usize,
+    nv: usize,
     q_scale: f32,
     eps: f32,
 ) -> Result<(KtTensor, KtTensor), RmsNormError> {
-    let q_shape = q_in.shape();
-    if q_shape.len() != 2 {
+    if !supports_l2_qk_norm_gqa_kt(q_in, k_in, nv) {
         return Err(RmsNormError::Msg(format!(
-            "kt-l2-qk-norm-gqa: q must be [rows, hidden_q], got {q_shape:?}"
-        )));
-    }
-    let rows = q_shape[0];
-    let hidden_q = q_shape[1];
-    if hidden_q != nk * ratio * head_dim {
-        return Err(RmsNormError::Msg(format!(
-            "kt-l2-qk-norm-gqa: q hidden {hidden_q} != nk({nk}) * ratio({ratio}) * head_dim({head_dim})"
-        )));
-    }
-    let k_shape = k_in.shape();
-    if k_shape != [rows, nk * head_dim] {
-        return Err(RmsNormError::Msg(format!(
-            "kt-l2-qk-norm-gqa: k {k_shape:?} != [{rows}, {}]",
-            nk * head_dim
+            "kt-l2-qk-norm-gqa: unsupported shapes q={:?} k={:?} dtypes=({:?},{:?}) nv={nv}",
+            q_in.shape(),
+            k_in.shape(),
+            q_in.dtype(),
+            k_in.dtype()
         )));
     }
 
+    let q_shape = q_in.shape();
+    let batch = q_shape[0];
+    let seq = q_shape[1];
+    let nk = q_shape[2];
+    let head_dim = q_shape[3];
+    let ratio = nv / nk;
+    let rows = batch * seq * nk;
+
     // Owner-agnostic input pointers (Phase 7 v2).
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q_in, KtDType::BF16, "q_in")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_in, KtDType::BF16, "k_in")?;
-    let (q_st, _) = cuda_storage_and_byte_offset(q_in, KtDType::BF16, "q_in")?;
-    let q_out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![rows, hidden_q])?;
-    let k_out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![rows, nk * head_dim])?;
+    let q_contig = q_in
+        .contiguous()
+        .map_err(|e| RmsNormError::Msg(format!("kt-l2-qk-norm-gqa: q contiguous: {e}")))?;
+    let k_contig = k_in
+        .contiguous()
+        .map_err(|e| RmsNormError::Msg(format!("kt-l2-qk-norm-gqa: k contiguous: {e}")))?;
+    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(&q_contig, KtDType::BF16, "q_in")?;
+    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(&k_contig, KtDType::BF16, "k_in")?;
+    let (q_st, _) = cuda_storage_and_byte_offset(&q_contig, KtDType::BF16, "q_in")?;
+    let out_shape = vec![batch, seq, nv, head_dim];
+    let q_out = alloc_cuda_tensor(q_st, KtDType::BF16, out_shape.clone())?;
+    let k_out = alloc_cuda_tensor(q_st, KtDType::BF16, out_shape)?;
     let qo_ptr = kiln_kt_bridge::cuda_output_device_ptr(&q_out);
     let ko_ptr = kiln_kt_bridge::cuda_output_device_ptr(&k_out);
 
@@ -1559,6 +1559,19 @@ fn kt_is_cuda(t: &KtTensor) -> bool {
     matches!(t.device(), KtDevice::Cuda(_))
 }
 
+/// kt twin of [`crate::supports`].
+pub fn supports_rmsnorm_kt(x: &KtTensor, weight: &KtTensor) -> bool {
+    kt_is_cuda(x)
+        && kt_is_cuda(weight)
+        && x.dtype() == KtDType::BF16
+        && weight.dtype() == KtDType::BF16
+        && x.is_contiguous()
+        && weight.is_contiguous()
+        && x.rank() >= 1
+        && x.shape().last().copied().unwrap_or(0) <= 8192
+        && weight.shape() == [x.shape().last().copied().unwrap_or(0)]
+}
+
 /// kt twin of [`crate::supports_mlp_silu_mul`].
 pub fn supports_mlp_silu_mul_kt(gate: &KtTensor, up: &KtTensor) -> bool {
     kt_is_cuda(gate)
@@ -1917,4 +1930,3 @@ mod kt_rotary_qk_regression {
         Ok(())
     }
 }
-

@@ -34,6 +34,11 @@ use kiln_core::block::BlockTable;
 // a no-op (verified by the optimizer in release). This keeps the call sites
 // below free of `#[cfg(feature = "nvtx")]` noise.
 
+#[cfg(feature = "cuda")]
+fn try_borrow_kt_cuda(t: &Tensor) -> Option<kiln_tensor::Tensor> {
+    kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t).ok()
+}
+
 /// CUDA-compatible sigmoid: `1 / (1 + exp(-x))`.
 ///
 /// `candle_nn::ops::sigmoid` lacks a CUDA kernel, so we implement it using
@@ -3694,20 +3699,21 @@ fn attention_output_gate_decode_if(
         if !cuda_fused_attn_sigmoid_mul_disabled()
             && !attn_output.track_op()
             && !gate.track_op()
-            && kiln_rmsnorm_kernel::supports_sigmoid_mul(&attn_output, gate)
         {
-            // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in
-            // the same `kiln_fused_sigmoid_mul` FFI symbol.
-            kiln_nvtx::range!(c"kiln/attn/output_gate_cuda_fused_kt");
-            let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&attn_output)
-                .with_context(|| "kt-adapter: attn_output → kt failed")?;
-            let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(gate)
-                .with_context(|| "kt-adapter: gate → kt failed")?;
-            let out_kt = kiln_rmsnorm_kernel::fused_sigmoid_mul_kt(&x_kt, &g_kt)
-                .map_err(|e| anyhow::anyhow!("kt sigmoid/mul: {e}"))?;
-            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .with_context(|| "kt-adapter: out → candle failed")?;
-            return Ok(out);
+            if let (Some(x_kt), Some(g_kt)) =
+                (try_borrow_kt_cuda(&attn_output), try_borrow_kt_cuda(gate))
+            {
+                if kiln_rmsnorm_kernel::supports_sigmoid_mul_kt(&x_kt, &g_kt) {
+                    // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in
+                    // the same `kiln_fused_sigmoid_mul` FFI symbol.
+                    kiln_nvtx::range!(c"kiln/attn/output_gate_cuda_fused_kt");
+                    let out_kt = kiln_rmsnorm_kernel::fused_sigmoid_mul_kt(&x_kt, &g_kt)
+                        .map_err(|e| anyhow::anyhow!("kt sigmoid/mul: {e}"))?;
+                    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                        .with_context(|| "kt-adapter: out → candle failed")?;
+                    return Ok(out);
+                }
+            }
         }
     }
 
@@ -7303,20 +7309,23 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     {
         let kernel_disabled = std::env::var("KILN_DISABLE_RMSNORM_KERNEL").is_ok();
         let bwd_disabled = std::env::var("KILN_DISABLE_RMSNORM_BACKWARD").is_ok();
-        if !kernel_disabled && !bwd_disabled && kiln_rmsnorm_kernel::supports(x, weight) {
+        if !kernel_disabled && !bwd_disabled {
             if !x.track_op() && !weight.track_op() {
-                // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in
-                // the same `kiln_fused_rmsnorm` FFI symbol.
-                let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x)
-                    .with_context(|| "kt-adapter: rmsnorm x → kt failed")?;
-                let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
-                    .with_context(|| "kt-adapter: rmsnorm weight → kt failed")?;
-                let out_kt = kiln_rmsnorm_kernel::fused_rmsnorm_kt(&x_kt, &w_kt, eps as f32)
-                    .map_err(|e| anyhow::anyhow!("kt fused_rmsnorm: {e}"))?;
-                return kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                    .with_context(|| "kt-adapter: rmsnorm out → candle failed");
+                if let (Some(x_kt), Some(w_kt)) =
+                    (try_borrow_kt_cuda(x), try_borrow_kt_cuda(weight))
+                {
+                    if kiln_rmsnorm_kernel::supports_rmsnorm_kt(&x_kt, &w_kt) {
+                        // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in
+                        // the same `kiln_fused_rmsnorm` FFI symbol.
+                        let out_kt =
+                            kiln_rmsnorm_kernel::fused_rmsnorm_kt(&x_kt, &w_kt, eps as f32)
+                                .map_err(|e| anyhow::anyhow!("kt fused_rmsnorm: {e}"))?;
+                        return kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                            .with_context(|| "kt-adapter: rmsnorm out → candle failed");
+                    }
+                }
             }
-            if should_use_fused_rmsnorm() {
+            if should_use_fused_rmsnorm() && kiln_rmsnorm_kernel::supports(x, weight) {
                 return kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd(x, weight, eps as f32)
                     .context("fused_rmsnorm_with_autograd CustomOp2 failed");
             }
@@ -8103,27 +8112,29 @@ pub fn rotary_embedding_from_tensor(
 
     #[cfg(feature = "cuda")]
     {
-        if !cuda_fused_rotary_qk_disabled()
-            && kiln_rmsnorm_kernel::supports_rotary_qk(q, k, &cos, &sin, head_dim, rotary_dim)
-        {
-            // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in the
-            // same `kiln_fused_rotary_qk` FFI symbol.
-            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-                .with_context(|| "kt-adapter: rotary_qk q → kt failed")?;
-            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-                .with_context(|| "kt-adapter: rotary_qk k → kt failed")?;
-            let cos_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&cos)
-                .with_context(|| "kt-adapter: rotary_qk cos → kt failed")?;
-            let sin_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&sin)
-                .with_context(|| "kt-adapter: rotary_qk sin → kt failed")?;
-            let (rq_kt, rk_kt) =
-                kiln_rmsnorm_kernel::fused_rotary_qk_kt(&q_kt, &k_kt, &cos_kt, &sin_kt, rotary_dim)
+        if !cuda_fused_rotary_qk_disabled() {
+            if let (Some(q_kt), Some(k_kt), Some(cos_kt), Some(sin_kt)) = (
+                try_borrow_kt_cuda(q),
+                try_borrow_kt_cuda(k),
+                try_borrow_kt_cuda(&cos),
+                try_borrow_kt_cuda(&sin),
+            ) {
+                if kiln_rmsnorm_kernel::supports_rotary_qk_kt(
+                    &q_kt, &k_kt, &cos_kt, &sin_kt, head_dim, rotary_dim,
+                ) {
+                    // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in the
+                    // same `kiln_fused_rotary_qk` FFI symbol.
+                    let (rq_kt, rk_kt) = kiln_rmsnorm_kernel::fused_rotary_qk_kt(
+                        &q_kt, &k_kt, &cos_kt, &sin_kt, rotary_dim,
+                    )
                     .map_err(|e| anyhow::anyhow!("kt fused_rotary_qk: {e}"))?;
-            let rq = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rq_kt)
-                .with_context(|| "kt-adapter: rotary_qk rq → candle failed")?;
-            let rk = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rk_kt)
-                .with_context(|| "kt-adapter: rotary_qk rk → candle failed")?;
-            return Ok((rq, rk));
+                    let rq = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rq_kt)
+                        .with_context(|| "kt-adapter: rotary_qk rq → candle failed")?;
+                    let rk = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rk_kt)
+                        .with_context(|| "kt-adapter: rotary_qk rk → candle failed")?;
+                    return Ok((rq, rk));
+                }
+            }
         }
     }
 
@@ -8166,27 +8177,29 @@ fn rotary_embedding_from_tables(
 ) -> Result<(Tensor, Tensor)> {
     #[cfg(feature = "cuda")]
     {
-        if !cuda_fused_rotary_qk_disabled()
-            && kiln_rmsnorm_kernel::supports_rotary_qk(q, k, cos, sin, head_dim, rotary_dim)
-        {
-            // Phase 7 (#1082): kt-only. Same FFI symbol as the
-            // candle path.
-            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-                .with_context(|| "kt-adapter: rotary_qk2 q → kt failed")?;
-            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-                .with_context(|| "kt-adapter: rotary_qk2 k → kt failed")?;
-            let cos_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(cos)
-                .with_context(|| "kt-adapter: rotary_qk2 cos → kt failed")?;
-            let sin_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(sin)
-                .with_context(|| "kt-adapter: rotary_qk2 sin → kt failed")?;
-            let (rq_kt, rk_kt) =
-                kiln_rmsnorm_kernel::fused_rotary_qk_kt(&q_kt, &k_kt, &cos_kt, &sin_kt, rotary_dim)
+        if !cuda_fused_rotary_qk_disabled() {
+            if let (Some(q_kt), Some(k_kt), Some(cos_kt), Some(sin_kt)) = (
+                try_borrow_kt_cuda(q),
+                try_borrow_kt_cuda(k),
+                try_borrow_kt_cuda(cos),
+                try_borrow_kt_cuda(sin),
+            ) {
+                if kiln_rmsnorm_kernel::supports_rotary_qk_kt(
+                    &q_kt, &k_kt, &cos_kt, &sin_kt, head_dim, rotary_dim,
+                ) {
+                    // Phase 7 (#1082): kt-only. Same FFI symbol as the
+                    // candle path.
+                    let (rq_kt, rk_kt) = kiln_rmsnorm_kernel::fused_rotary_qk_kt(
+                        &q_kt, &k_kt, &cos_kt, &sin_kt, rotary_dim,
+                    )
                     .map_err(|e| anyhow::anyhow!("kt fused_rotary_qk2: {e}"))?;
-            let rq = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rq_kt)
-                .with_context(|| "kt-adapter: rotary_qk2 rq → candle failed")?;
-            let rk = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rk_kt)
-                .with_context(|| "kt-adapter: rotary_qk2 rk → candle failed")?;
-            return Ok((rq, rk));
+                    let rq = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rq_kt)
+                        .with_context(|| "kt-adapter: rotary_qk2 rq → candle failed")?;
+                    let rk = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rk_kt)
+                        .with_context(|| "kt-adapter: rotary_qk2 rk → candle failed")?;
+                    return Ok((rq, rk));
+                }
+            }
         }
     }
 
@@ -10208,18 +10221,19 @@ pub fn swiglu_ffn_gated_hidden(
         if !cuda_fused_mlp_silu_mul_disabled()
             && !gate.track_op()
             && !up.track_op()
-            && kiln_rmsnorm_kernel::supports_mlp_silu_mul(&gate, &up)
         {
-            // Phase 7 (#1082): kt-only. Same FFI symbol as the
-            // candle path.
-            let gate_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&gate)
-                .with_context(|| "kt-adapter: mlp_silu_mul gate → kt failed")?;
-            let up_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&up)
-                .with_context(|| "kt-adapter: mlp_silu_mul up → kt failed")?;
-            let out_kt = kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt(&gate_kt, &up_kt)
-                .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul: {e}"))?;
-            return kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .with_context(|| "kt-adapter: mlp_silu_mul out → candle failed");
+            if let (Some(gate_kt), Some(up_kt)) =
+                (try_borrow_kt_cuda(&gate), try_borrow_kt_cuda(&up))
+            {
+                if kiln_rmsnorm_kernel::supports_mlp_silu_mul_kt(&gate_kt, &up_kt) {
+                    // Phase 7 (#1082): kt-only. Same FFI symbol as the
+                    // candle path.
+                    let out_kt = kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt(&gate_kt, &up_kt)
+                        .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul: {e}"))?;
+                    return kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                        .with_context(|| "kt-adapter: mlp_silu_mul out → candle failed");
+                }
+            }
         }
     }
     let gate = cuda_silu(&gate)?;
@@ -10618,17 +10632,27 @@ fn swiglu_ffn_impl_no_chunk(
                                 seq_len,
                                 stage_profile,
                             )?;
-                            if kiln_rmsnorm_kernel::supports_mlp_silu_mul_packed(&gate_up, g_dim) {
+                            if let Some(gate_up_kt) = try_borrow_kt_cuda(&gate_up).filter(|t| {
+                                kiln_rmsnorm_kernel::supports_mlp_silu_mul_packed_kt(t, g_dim)
+                            }) {
                                 let stage_profile =
                                     start_mlp_stage_profile(profile_device, profile_context)?;
                                 let hidden = {
                                     kiln_nvtx::range!(c"kiln/mlp/gate_silu_hidden_mul_packed");
-                                    kiln_rmsnorm_kernel::fused_mlp_silu_mul_packed(
-                                        &gate_up, g_dim,
-                                    )
-                                    .context(
-                                        "cuda fused MLP packed silu*mul kernel failed",
-                                    )?
+                                    let hidden_kt =
+                                        kiln_rmsnorm_kernel::fused_mlp_silu_mul_packed_kt(
+                                            &gate_up_kt,
+                                            g_dim,
+                                        )
+                                        .map_err(|e| {
+                                            anyhow::anyhow!(
+                                                "kt fused_mlp_silu_mul_packed: {e}"
+                                            )
+                                        })?;
+                                    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&hidden_kt)
+                                        .with_context(|| {
+                                            "kt-adapter: mlp_silu_mul_packed out → candle failed"
+                                        })?
                                 };
                                 finish_mlp_stage_profile(
                                     profile_device,
@@ -10718,34 +10742,51 @@ fn swiglu_ffn_impl_no_chunk(
         {
             #[cfg(feature = "cuda")]
             {
-                if !cuda_fused_mlp_silu_mul_disabled()
+                let fused_hidden = if !cuda_fused_mlp_silu_mul_disabled()
                     && !gate.track_op()
                     && !up.track_op()
-                    && kiln_rmsnorm_kernel::supports_mlp_silu_mul(&gate, &up)
                 {
-                    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
-                    // Phase 7 (#1082): kt-only. Same FFI symbol.
-                    let hidden = {
-                        let gate_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&gate)
-                            .with_context(|| "kt-adapter: mlp_silu_mul2 gate → kt failed")?;
-                        let up_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&up)
-                            .with_context(|| "kt-adapter: mlp_silu_mul2 up → kt failed")?;
-                        let out_kt = kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt(&gate_kt, &up_kt)
-                            .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul2: {e}"))?;
-                        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                            .with_context(|| "kt-adapter: mlp_silu_mul2 out → candle failed")?
-                    };
-                    finish_mlp_stage_profile(
-                        profile_device,
-                        profile_context,
-                        "gate_silu_hidden_mul",
-                        seq_len,
-                        stage_profile,
-                    )?;
+                    if let (Some(gate_kt), Some(up_kt)) =
+                        (try_borrow_kt_cuda(&gate), try_borrow_kt_cuda(&up))
+                    {
+                        if kiln_rmsnorm_kernel::supports_mlp_silu_mul_kt(&gate_kt, &up_kt) {
+                            let stage_profile =
+                                start_mlp_stage_profile(profile_device, profile_context)?;
+                            // Phase 7 (#1082): kt-only. Same FFI symbol.
+                            let hidden = {
+                                let out_kt =
+                                    kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt(&gate_kt, &up_kt)
+                                        .map_err(|e| {
+                                            anyhow::anyhow!("kt fused_mlp_silu_mul2: {e}")
+                                        })?;
+                                kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                                    .with_context(|| {
+                                        "kt-adapter: mlp_silu_mul2 out → candle failed"
+                                    })?
+                            };
+                            finish_mlp_stage_profile(
+                                profile_device,
+                                profile_context,
+                                "gate_silu_hidden_mul",
+                                seq_len,
+                                stage_profile,
+                            )?;
+                            Some(hidden)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(hidden) = fused_hidden {
                     hidden
                 } else {
                     // SiLU activation: x * sigmoid(x)
-                    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                    let stage_profile =
+                        start_mlp_stage_profile(profile_device, profile_context)?;
                     let gate = cuda_silu(&gate)?;
                     finish_mlp_stage_profile(
                         profile_device,
@@ -10755,7 +10796,8 @@ fn swiglu_ffn_impl_no_chunk(
                         stage_profile,
                     )?;
                     // Element-wise multiply
-                    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                    let stage_profile =
+                        start_mlp_stage_profile(profile_device, profile_context)?;
                     let hidden = (gate * up)?;
                     finish_mlp_stage_profile(
                         profile_device,
@@ -11970,24 +12012,23 @@ fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result
         if !disabled
             && fused_forward_only_allowed
             && input_dtype == DType::BF16
-            && kiln_rmsnorm_kernel::supports_l2_qk_norm(q, k)
         {
-            // Phase 7 (#1082): kt-only. Same closeout pattern as
-            // conv1d (2ebcfb08), marlin (0841c266), GDN (86c7f134),
-            // flash-attn (9ac211e9). Bit-exact: bottoms out in the
-            // same `kiln_fused_l2_qk_norm` FFI symbol.
-            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-                .with_context(|| "kt-adapter: l2_qk_norm q → kt failed")?;
-            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-                .with_context(|| "kt-adapter: l2_qk_norm k → kt failed")?;
-            let (q_out_kt, k_out_kt) =
-                kiln_rmsnorm_kernel::fused_l2_qk_norm_kt(&q_kt, &k_kt, scale as f32, 1e-6)
-                    .map_err(|e| anyhow::anyhow!("kt fused_l2_qk_norm: {e}"))?;
-            let q_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&q_out_kt)
-                .with_context(|| "kt-adapter: l2_qk_norm q_out → candle failed")?;
-            let k_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&k_out_kt)
-                .with_context(|| "kt-adapter: l2_qk_norm k_out → candle failed")?;
-            return Ok((q_out, k_out));
+            if let (Some(q_kt), Some(k_kt)) = (try_borrow_kt_cuda(q), try_borrow_kt_cuda(k)) {
+                if kiln_rmsnorm_kernel::supports_l2_qk_norm_kt(&q_kt, &k_kt) {
+                    // Phase 7 (#1082): kt-only. Same closeout pattern as
+                    // conv1d (2ebcfb08), marlin (0841c266), GDN (86c7f134),
+                    // flash-attn (9ac211e9). Bit-exact: bottoms out in the
+                    // same `kiln_fused_l2_qk_norm` FFI symbol.
+                    let (q_out_kt, k_out_kt) =
+                        kiln_rmsnorm_kernel::fused_l2_qk_norm_kt(&q_kt, &k_kt, scale as f32, 1e-6)
+                            .map_err(|e| anyhow::anyhow!("kt fused_l2_qk_norm: {e}"))?;
+                    let q_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&q_out_kt)
+                        .with_context(|| "kt-adapter: l2_qk_norm q_out → candle failed")?;
+                    let k_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&k_out_kt)
+                        .with_context(|| "kt-adapter: l2_qk_norm k_out → candle failed")?;
+                    return Ok((q_out, k_out));
+                }
+            }
         }
     }
 
@@ -15084,19 +15125,44 @@ fn gated_deltanet_forward_decode_if(
                             && !disabled
                             && input_dtype == DType::BF16
                             && gqa_ratio > 1
-                            && kiln_rmsnorm_kernel::supports_l2_qk_norm_gqa(&q, &k, nv)
                         {
-                            kiln_nvtx::range!(c"kiln/gdn/qk_norm_gqa");
-                            Some(
-                                kiln_rmsnorm_kernel::fused_l2_qk_norm_gqa(
-                                    &q,
-                                    &k,
-                                    nv,
-                                    scale as f32,
-                                    1e-6,
-                                )
-                                .context("fused_l2_qk_norm_gqa kernel failed")?,
-                            )
+                            let q_contig = q.contiguous()?;
+                            let k_contig = k.contiguous()?;
+                            if let (Some(q_kt), Some(k_kt)) =
+                                (try_borrow_kt_cuda(&q_contig), try_borrow_kt_cuda(&k_contig))
+                            {
+                                if kiln_rmsnorm_kernel::supports_l2_qk_norm_gqa_kt(
+                                    &q_kt, &k_kt, nv,
+                                ) {
+                                    kiln_nvtx::range!(c"kiln/gdn/qk_norm_gqa");
+                                    let (q_kt, k_kt) =
+                                        kiln_rmsnorm_kernel::fused_l2_qk_norm_gqa_kt(
+                                            &q_kt,
+                                            &k_kt,
+                                            nv,
+                                            scale as f32,
+                                            1e-6,
+                                        )
+                                        .map_err(|e| {
+                                            anyhow::anyhow!("kt fused_l2_qk_norm_gqa: {e}")
+                                        })?;
+                                    let q =
+                                        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&q_kt)
+                                            .with_context(|| {
+                                                "kt-adapter: l2_qk_norm_gqa q → candle failed"
+                                            })?;
+                                    let k =
+                                        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&k_kt)
+                                            .with_context(|| {
+                                                "kt-adapter: l2_qk_norm_gqa k → candle failed"
+                                            })?;
+                                    Some((q, k))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
@@ -18560,45 +18626,83 @@ fn gqa_attention_paged_with_rope_tables(
                 ])
             {
                 if let Some((cos, sin)) = rope_tables {
-                    if kiln_rmsnorm_kernel::supports_attn_decode_qkv_prep(
-                        &q_raw,
-                        &k_raw,
-                        &attn_weights.q_norm,
-                        &attn_weights.k_norm,
-                        cos,
-                        sin,
-                        num_heads,
-                        num_kv_heads,
-                        head_dim,
-                        rotary_dim,
-                        attn_output_gate,
+                    if let (
+                        Some(q_raw_kt),
+                        Some(k_raw_kt),
+                        Some(q_norm_kt),
+                        Some(k_norm_kt),
+                        Some(cos_kt),
+                        Some(sin_kt),
+                    ) = (
+                        try_borrow_kt_cuda(&q_raw),
+                        try_borrow_kt_cuda(&k_raw),
+                        try_borrow_kt_cuda(&attn_weights.q_norm),
+                        try_borrow_kt_cuda(&attn_weights.k_norm),
+                        try_borrow_kt_cuda(cos),
+                        try_borrow_kt_cuda(sin),
                     ) {
-                        let stage_profile =
-                            start_full_attn_stage_profile(profile_device, profile_context)?;
-                        kiln_nvtx::range!(c"kiln/attn/qkv_prep_cuda_fused");
-                        let out = kiln_rmsnorm_kernel::fused_attn_decode_qkv_prep(
-                            &q_raw,
-                            &k_raw,
-                            &attn_weights.q_norm,
-                            &attn_weights.k_norm,
-                            cos,
-                            sin,
+                        if kiln_rmsnorm_kernel::supports_attn_decode_qkv_prep_kt(
+                            &q_raw_kt,
+                            &k_raw_kt,
+                            &q_norm_kt,
+                            &k_norm_kt,
+                            &cos_kt,
+                            &sin_kt,
                             num_heads,
                             num_kv_heads,
                             head_dim,
                             rotary_dim,
                             attn_output_gate,
-                            rms_norm_eps as f32,
-                        )
-                        .context("cuda fused attn decode qkv prep failed")?;
-                        finish_full_attn_stage_profile(
-                            profile_device,
-                            profile_context,
-                            "qkv_split_qk_norm_rope",
-                            seq_len,
-                            stage_profile,
-                        )?;
-                        Some(out)
+                        ) {
+                            let stage_profile =
+                                start_full_attn_stage_profile(profile_device, profile_context)?;
+                            kiln_nvtx::range!(c"kiln/attn/qkv_prep_cuda_fused");
+                            let (q_kt, k_kt, gate_kt) =
+                                kiln_rmsnorm_kernel::attn_decode_qkv_split_qk_norm_rope_kt(
+                                    &q_raw_kt,
+                                    &k_raw_kt,
+                                    &q_norm_kt,
+                                    &k_norm_kt,
+                                    &cos_kt,
+                                    &sin_kt,
+                                    num_heads,
+                                    num_kv_heads,
+                                    head_dim,
+                                    rotary_dim,
+                                    attn_output_gate,
+                                    rms_norm_eps as f32,
+                                )
+                                .map_err(|e| {
+                                    anyhow::anyhow!("kt attn_decode_qkv_prep: {e}")
+                                })?;
+                            let q = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&q_kt)
+                                .with_context(|| {
+                                    "kt-adapter: attn qkv_prep q → candle failed"
+                                })?;
+                            let k = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&k_kt)
+                                .with_context(|| {
+                                    "kt-adapter: attn qkv_prep k → candle failed"
+                                })?;
+                            let gate = match gate_kt {
+                                Some(gate_kt) => Some(
+                                    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&gate_kt)
+                                        .with_context(|| {
+                                            "kt-adapter: attn qkv_prep gate → candle failed"
+                                        })?,
+                                ),
+                                None => None,
+                            };
+                            finish_full_attn_stage_profile(
+                                profile_device,
+                                profile_context,
+                                "qkv_split_qk_norm_rope",
+                                seq_len,
+                                stage_profile,
+                            )?;
+                            Some((q, k, gate))
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
