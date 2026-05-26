@@ -290,46 +290,37 @@ Follow-up steps (not done in this PR):
    `&Tensor` storage views — needs careful kt-storage parity).
 4. Delete candle surface from `lib.rs`.
 
-### kiln-gdn-kernel — **BLOCKED** (30 candle-typed callers in kiln-model)
+### kiln-gdn-kernel — **1 production caller** (single-block fall-through remains)
 
-Candle-typed entry points still reachable in production:
+After `86c7f134` removed all 10 candle fallback branches + the
+`cuda_use_kt_api_gdn` flag + 9 redundant kt-vs-candle parity tests
+in forward.rs (483 insertions / 2,155 deletions = -1672 net LOC),
+the GDN dispatch surface in `backend/cuda.rs` is kt-only with one
+documented exception:
 
-**`crates/kiln-model/src/backend/cuda.rs`** (22 sites — all `_supports`
-predicates plus candle fallbacks for the 10 kt-wired entry points):
-- `gdn_forward_substitution`, `gdn_recurrent_forward`,
-  `gdn_chunk_prep[_supports]`, `gdn_chunk_scan[_supports]`,
-  `gdn_full_chunk_forward[_supports]`,
-  `gdn_full_chunk_forward_multiblock[_supports]`,
-  `gdn_decode_gates_recurrent[_supports]`,
-  `gdn_decode_qk_norm_gates_recurrent[_supports]`,
-  `gdn_decode_qk_norm_gates_recurrent_rmsnorm[_supports]`,
-  `gdn_gates_decline_reason`, `gdn_gates`, `gdn_gated_rms_norm[_supports]`,
-  plus the `GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE` constant.
+- `gdn_full_chunk_forward` single-block fall-through at
+  `backend/cuda.rs:~1043` — preserved because no kt-typed single-
+  block kernel exists yet; the multi-block path is fully kt-only.
 
-**`crates/kiln-model/src/forward.rs`** (6 sites): direct calls to
-`gdn_chunk_prep`, `gdn_chunk_scan`, `gdn_full_chunk_forward`,
-`gdn_full_chunk_forward_multiblock` (called outside the backend
-dispatcher path, e.g. during prefill chunk loops).
+Remaining candle-typed callers across kiln-model:
+- `crates/kiln-model/src/forward.rs` (6 sites): direct calls to
+  `gdn_chunk_prep`, `gdn_chunk_scan`, `gdn_full_chunk_forward`,
+  `gdn_full_chunk_forward_multiblock` in prefill chunk loops
+  outside the backend dispatcher path.
+- `crates/kiln-model/src/cuda_graph.rs` (2 sites):
+  `with_decode_gates_recurrent_outputs` — graph-output wrapper that
+  takes caller-owned outputs (`(out, lse)` pair) for CUDA-graph
+  capture; no kt-typed sibling exists yet.
 
-**`crates/kiln-model/src/cuda_graph.rs`** (2 sites):
-`with_decode_gates_recurrent_outputs` — graph-output wrapper.
-
-Plus crate-internal examples + tests using the candle-typed surface.
-
-The kt-API wire status (5/10 functions wired) plus the **default-on**
-flip means many entry points already route through kt at runtime, but
-the candle fallback path is still compiled and reachable. The
-`_supports` predicate calls and the `forward.rs` direct-chunked-prefill
-calls are non-trivial extra work because their inputs are still
-candle-typed at the call site.
-
-Follow-up steps (not done in this PR):
-1. Land the remaining 5/10 kt-API wires (decode_gates_recurrent
-   variants + gated_rms_norm — already listed in the status block).
-2. Add kt-typed `_supports` predicates.
-3. Migrate the forward.rs prefill-chunk-loop sites (these likely
-   require a kt-typed sibling for `with_decode_gates_recurrent_outputs`).
+Follow-up steps:
+1. Land a kt-typed single-block `gdn_full_chunk_forward_kt` to
+  eliminate the cuda.rs fall-through.
+2. Add kt-typed sibling for `with_decode_gates_recurrent_outputs`
+  with caller-owned outputs; migrate cuda_graph.rs sites.
+3. Migrate the forward.rs prefill-chunk-loop sites once #1 lands.
 4. Delete candle surface from `lib.rs`.
+5. Drop `candle-core` from Cargo.toml (substrate-blocked on the
+  same kt-bridge cleanup as conv1d/marlin).
 
 ### kiln-flash-attn — **BLOCKED** (15 candle-typed callers in kiln-model)
 
@@ -379,7 +370,7 @@ Follow-up steps (not done in this PR):
 | `kiln-conv1d-kernel`  | 0   | **No** | substrate (kt_api uses candle CudaStorage internals) |
 | `kiln-marlin-gemm`    | 0   | **No** | substrate (same as conv1d) |
 | `kiln-rmsnorm-kernel` | 53  | **No** | kt_api surface partial; needs op-family expansion |
-| `kiln-gdn-kernel`     | 30  | **No** | candle fallbacks + `_supports` + forward.rs prefill sites |
+| `kiln-gdn-kernel`     | 9   | **No** | 1 single-block fall-through + 6 forward.rs prefill + 2 cuda_graph |
 | `kiln-flash-attn`     | ~10 | **No** | `paged_kv_write_*` + PagedKvCacheKt migration |
 
 **Production-caller status:** As of `0841c266`,
