@@ -4,26 +4,30 @@ This document inventories every `candle_core` and `candle_nn` reference in
 the kiln workspace and the migration path to a candle-free build. It is
 the canonical artifact for tracking Phase 7 closeout against issue #1082.
 
-Last refreshed: **2026-05-26**, against `main` at `fdeace4b` —
-post Phase 5 default-on flip (`6d564b9a`,
-`KILN_CUDA_GRAPHS_BATCHED=1` + `_KV_FUSED=1` are now the default
-on CUDA) and KILN_DETECT_ANOMALY substrate landing
-(`3c90d064` + `fdeace4b`).
+Last refreshed: **2026-05-26**, against `main` through `aa969ceb` —
+post Phase 5 revert (`909e2e61`,
+`KILN_CUDA_GRAPHS_BATCHED=0` + `_KV_FUSED=0` remain the CUDA
+default) and KILN_DETECT_ANOMALY substrate + regression-test
+landing (`3c90d064` + `fdeace4b` + `28514162` + `aa969ceb`).
 
 **Today's batch headline:**
-- 🎉 **Phase 5 default-on** (`6d564b9a`) — bs>1 captured-batched
-  graphs + fused KV writer are default. End-to-end
-  `compute-sanitizer memcheck` clean on A6000 at the gating HEAD
-  (`a2cb9edb`).
+- **Phase 5 production posture corrected** — bs>1 captured-batched
+  graphs + fused KV writer were reverted to opt-in in `909e2e61`
+  after production bench exposed HTTP 500s. The eager-batched path is
+  healthy and remains the default (`498 tok/s @ bs=64` on A6000,
+  archived in `a215efd2`). Captured bs>1 shape-capture is fixed
+  (`68aa19c8` + `c78c4f90`), but replay still hits
+  `CUDA_ERROR_ILLEGAL_ADDRESS`; see `bench-results/cuda-graph-status.md`.
 - 🎉 **Tier 1 closed** for `kiln-conv1d-kernel` (`577f8b0c`) and
   `kiln-marlin-gemm` (`4a862711`) — `candle-core` dropped from
   both `[dependencies]` blocks.
 - 🎉 **KILN_DETECT_ANOMALY** Phase 9 trap wired end-to-end:
   scaffold (`72c2c16f`) + `Tensor::all_finite()` substrate
   primitive (`3c90d064`) + `Tape::backward` integration
-  (`fdeace4b`). Set `KILN_DETECT_ANOMALY=1` and the autograd
-  tape panics at the producing op's tape position on the first
-  NaN/Inf gradient.
+  (`fdeace4b`) + CUDA D2H bridge (`28514162`) + direct tape
+  regression test (`aa969ceb`). Set `KILN_DETECT_ANOMALY=1`
+  and the autograd tape panics at the producing op's tape
+  position on the first NaN/Inf gradient.
 - Substrate accessors added: `CudaStorage::cuda_stream_raw()`
   (`d561dbf8`), `Tensor::cuda_from_slice` + `cuda_zeros_on` +
   `primary_cuda_device` (`a5da6152`),
@@ -153,12 +157,14 @@ rm -rf vendor/candle-core/
 sed -i "/candle-core.*path.*vendor/d" Cargo.toml
 ```
 
-## Phase 5 (CUDA graph capture) — DEFAULT ON (2026-05-26)
+## Phase 5 (CUDA graph capture) — bs>1 captured path opt-in (2026-05-26)
 
 `KILN_CUDA_GRAPHS_BATCHED=1` and `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1`
-flipped from default-off to **default-on** in commit `6d564b9a`.
-This was the headline #1082 Phase 5 perf-gate item — the unblock for
-closing the kiln vs vLLM bs=64 decode-throughput gap.
+briefly flipped from default-off to default-on in commit `6d564b9a`,
+then reverted in `909e2e61` after production validation exposed
+bs>=2 HTTP 500s. The current production default is the eager-batched
+decode path, which is healthy (`498 tok/s @ bs=64` on A6000, archived
+in `a215efd2`).
 
 Validation gate that gated the flip (passed on A6000 at HEAD
 `a2cb9edb`):
@@ -168,7 +174,7 @@ Validation gate that gated the flip (passed on A6000 at HEAD
 - `compute-sanitizer memcheck` under the same configuration:
   `========= ERROR SUMMARY: 0 errors` across batches 1/4/8/16.
 
-Bug chain it took to get here (all fixed in main):
+Bug chain from the attempted default-on flip:
 1. **sccache CUDA dlink stale cache** dropped `gdn_gates` device SASS
    from the binary → `cudaLaunchKernel → cudaErrorSymbolNotFound`.
    Workaround for every fresh RunPod build: `cargo clean -p
@@ -183,12 +189,24 @@ Bug chain it took to get here (all fixed in main):
    `[B, q_heads, dk]`. cuda.rs was passing 3D to both → predicate
    always declined. Fix: predicate on 4D, squeeze for kernel
    (`a2cb9edb`).
+4. **Batched graph key/validator formula mismatch** — capture key
+   used the 128-token K/V chunk bucket, while the validator compared
+   against the actual current decode length. Fixed in `68aa19c8` and
+   refined in `c78c4f90` so stable buffer shapes stay bucketed while
+   kernel read bounds use actual `max_seqlen_k`.
+5. **Next-layer replay failure** — captured bs>=2 replay now reaches
+   post-launch sampling but hits `CUDA_ERROR_ILLEGAL_ADDRESS`, likely
+   from lm-head matmul output allocation inside the capture window.
+   This remains unfixed and documented in
+   `bench-results/cuda-graph-status.md`.
 
 See `bench-results/cuda-graph-status.md` "Phase 5 sanitizer
 sweep — 2026-05-26" for the full validation trail.
 
-Escape hatches: `KILN_CUDA_GRAPHS_BATCHED=0` and
-`KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=0`.
+Opt-in flags: `KILN_CUDA_GRAPHS_BATCHED=1` and
+`KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1`. Keep them off in production
+until the lm-head captured-output lifetime fix lands and passes a
+fresh RunPod validation cycle.
 
 ## KILN_DETECT_ANOMALY (Phase 9 trap) — wired end-to-end (2026-05-26)
 
@@ -209,6 +227,11 @@ autograd tape:
   paying an O(numel) D2H copy per scanned tensor. Covered by
   6 new CPU unit tests in `kiln-tensor::tensor::tests` (NaN,
   +Inf, -Inf, integer vacuous-true, post-transpose stride walk).
+- Tape regression (`aa969ceb`): `Tape::backward` now has a direct
+  unit test with a fake backward op returning NaN, asserting the
+  panic includes the anomaly prefix, tape position, op name, and
+  gradient detail. A companion test proves non-finite grads still
+  propagate when the env flag is disabled.
 
 Cost: O(numel) per backward step on CPU when enabled, ~5% per
 the issue body. CUDA paths pay an additional O(numel) D2H copy
