@@ -396,6 +396,156 @@ pub fn flash_attn_paged_decode_dyn_seqlen_kt(
     Ok(out_t)
 }
 
+/// `flash_attn_paged_decode_dyn_seqlen` over `kiln_tensor::Tensor`
+/// operands — **caller-owned-output variant** for CUDA-graph capture.
+///
+/// Mirrors [`flash_attn_paged_decode_dyn_seqlen_kt`] but takes the
+/// `(out, lse)` buffers as caller-owned kt-Tensors. The kernel writes
+/// in place; pointer addresses are baked into a captured CUDA graph
+/// and survive replays as long as the caller's tensors do.
+///
+/// Companion to the candle-typed
+/// [`crate::flash_attn_paged_decode_dyn_seqlen`] when `graph_outputs
+/// = Some((out, lse))`. Same shape contract:
+/// - `out` must be BF16 `[b, 1, num_heads, head_dim]`
+/// - `lse` must be F32 `[b, num_heads, 1]`
+///
+/// Returns `()` — the result is in the caller's `out` tensor. Errors
+/// on dtype/shape mismatches before any FFI dispatch.
+///
+/// Substrate addition (#1082) that closes the last candle fallback
+/// in `kiln-model::backend::cuda::flash_attn_paged_decode_contiguous_
+/// batch_dyn_seqlen_with_graph_outputs`. Bit-exact by construction —
+/// bottoms out in the same `kiln_flash_attn_fwd_paged_decode_dyn_
+/// seqlen` FFI symbol as the candle path.
+pub fn flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
+    q: &KtTensor,
+    k_pool: &KtTensor,
+    v_pool: &KtTensor,
+    block_table: &KtTensor,
+    seqused_k: &KtTensor,
+    out: &KtTensor,
+    lse: &KtTensor,
+    max_seqlen_k: usize,
+    page_block_size: usize,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<(), FlashAttnError> {
+    let q_shape = q.shape();
+    if q_shape.len() != 4 || q_shape[1] != 1 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: with_graph_outputs q must be rank-4 [b, 1, h, d], got {q_shape:?}"
+        )));
+    }
+    let (b, _q_len, num_heads, head_dim) = (q_shape[0], q_shape[1], q_shape[2], q_shape[3]);
+    let kp_shape = k_pool.shape();
+    if kp_shape.len() != 3 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: with_graph_outputs k_pool must be rank-3, got {kp_shape:?}"
+        )));
+    }
+    let num_heads_k = kp_shape[1];
+    if head_dim != 128 && head_dim != 256 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: with_graph_outputs only supports head_dim=128,256, got {head_dim}"
+        )));
+    }
+    if num_heads % num_heads_k != 0 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: with_graph_outputs num_heads ({num_heads}) % num_heads_k ({num_heads_k}) != 0"
+        )));
+    }
+    if block_table.dtype() != KtDType::U32 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: with_graph_outputs block_table must be U32, got {:?}",
+            block_table.dtype()
+        )));
+    }
+    if seqused_k.dtype() != KtDType::U32 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: with_graph_outputs seqused_k must be U32, got {:?}",
+            seqused_k.dtype()
+        )));
+    }
+    let bt_shape = block_table.shape();
+    if bt_shape.len() != 2 || bt_shape[0] != b {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: with_graph_outputs block_table must be [b, blocks], got {bt_shape:?}"
+        )));
+    }
+    let max_blocks_per_seq = bt_shape[1];
+    if seqused_k.shape() != [b] {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: with_graph_outputs seqused_k must be [b={b}], got {:?}",
+            seqused_k.shape()
+        )));
+    }
+
+    // Caller-owned output validation: shape + dtype must match the
+    // kernel's write contract exactly (the kernel writes by index,
+    // not by appending).
+    let out_expected = [b, 1, num_heads, head_dim];
+    if out.dtype() != KtDType::BF16 || out.shape() != out_expected {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: with_graph_outputs out must be BF16 {out_expected:?}, got {:?} {:?}",
+            out.dtype(),
+            out.shape()
+        )));
+    }
+    let lse_expected = [b, num_heads, 1];
+    if lse.dtype() != KtDType::F32 || lse.shape() != lse_expected {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: with_graph_outputs lse must be F32 {lse_expected:?}, got {:?} {:?}",
+            lse.dtype(),
+            lse.shape()
+        )));
+    }
+
+    // Owner-agnostic input pointers (same pattern as the non-graph variant).
+    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
+    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
+    let bt_ptr = kiln_kt_bridge::cuda_input_device_ptr(block_table, KtDType::U32, "block_table")?;
+    let sk_ptr = kiln_kt_bridge::cuda_input_device_ptr(seqused_k, KtDType::U32, "seqused_k")?;
+    // Caller-owned output pointers — the kernel writes through these
+    // addresses. They must outlive every replay of any captured CUDA
+    // graph that records this dispatch (kt-graph capture lifetime
+    // contract from `kiln-graph::CaptureSession::pin`).
+    let out_ptr = kiln_kt_bridge::cuda_input_device_ptr(out, KtDType::BF16, "out")?;
+    let lse_ptr = kiln_kt_bridge::cuda_input_device_ptr(lse, KtDType::F32, "lse")?;
+    let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
+
+    let raw_stream = q_st.cuda_stream_raw();
+
+    let status = unsafe {
+        kiln_flash_attn_fwd_paged_decode_dyn_seqlen(
+            q_ptr as *const _,
+            k_ptr as *const _,
+            v_ptr as *const _,
+            bt_ptr as *const i32,
+            sk_ptr as *const i32,
+            out_ptr as *mut _,
+            lse_ptr as *mut _,
+            b as i32,
+            num_heads as i32,
+            num_heads_k as i32,
+            head_dim as i32,
+            max_seqlen_k as i32,
+            max_blocks_per_seq as i32,
+            page_block_size as i32,
+            softmax_scale,
+            if causal { 1 } else { 0 },
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn: with_graph_outputs FFI returned {status}"
+        )));
+    }
+    Ok(())
+}
+
 // ============================================================================
 // paged_kv_write_token_major_bf16_kt
 // ============================================================================

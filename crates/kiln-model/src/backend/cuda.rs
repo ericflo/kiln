@@ -681,68 +681,79 @@ impl BackendRuntime for CudaBackend {
         // non-graph-capture path), the kt route is bit-exactly
         // equivalent because both paths bottom out in the same
         // `kiln_flash_attn_fwd_paged_decode_dyn_seqlen` FFI symbol.
-        // Phase 7 (#1082): kt path when graph_outputs is None;
-        // candle path only when caller owns the (out, lse) pair
-        // (the kt-typed entry doesn't accept caller-owned outputs
-        // yet — that's the next migration). The flag gate was
-        // removed alongside the same flag's other 3 sites; the
-        // condition reduces to `graph_outputs.is_none()`.
-        if graph_outputs.is_none() {
-            kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
-            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-                .context("flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow q -> kt")?;
-            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool).context(
-                "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow k_pool -> kt",
+        // Phase 7 (#1082): kt-only on both branches now that the
+        // kt-typed `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_
+        // outputs` sibling exists. Bit-exact: both bottom out in the
+        // same `kiln_flash_attn_fwd_paged_decode_dyn_seqlen` FFI
+        // symbol. The caller-owned-output path is the
+        // CUDA-graph-capture contract (the kernel writes through the
+        // caller's pinned `(out, lse)` pair so graph replays don't
+        // dangle on freshly-allocated scratch).
+        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
+            .context("flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow q -> kt")?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool).context(
+            "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow k_pool -> kt",
+        )?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool).context(
+            "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow v_pool -> kt",
+        )?;
+        let bt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(block_table).context(
+            "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow block_table -> kt",
+        )?;
+        let sk_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(seqused_k).context(
+            "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow seqused_k -> kt",
+        )?;
+        if let Some((out, lse)) = graph_outputs {
+            // Caller owns `(out, lse)`. Borrow into kt and write in
+            // place via the new with_graph_outputs kt entry. The
+            // returned `out` is the caller's candle tensor — the
+            // kernel mutated its underlying CUDA buffer through the
+            // kt borrow.
+            let out_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out).context(
+                "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow out -> kt",
             )?;
-            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool).context(
-                "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow v_pool -> kt",
+            let lse_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(lse).context(
+                "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow lse -> kt",
             )?;
-            let bt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(block_table).context(
-                "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow block_table -> kt",
-            )?;
-            let sk_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(seqused_k).context(
-                "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow seqused_k -> kt",
-            )?;
-            let out_kt = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt(
+            kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
                 &q_kt,
                 &k_kt,
                 &v_kt,
                 &bt_kt,
                 &sk_kt,
+                &out_kt,
+                &lse_kt,
                 max_seqlen_k,
                 page_block_size,
                 softmax_scale,
                 causal,
             )
             .map_err(|e| {
-                anyhow::anyhow!("flash_attn_paged_decode_dyn_seqlen (graph variant) kt: {e}")
+                anyhow::anyhow!(
+                    "flash_attn_paged_decode_dyn_seqlen (graph variant) kt with_graph_outputs: {e}"
+                )
             })?;
-            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).context(
-                "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: copy kt out -> candle",
-            )?;
-            return Ok(Some(out));
+            return Ok(Some(out.clone()));
         }
-        // Pass `graph_outputs` straight through to the kernel wrapper. When
-        // `Some`, the wrapper skips its `Tensor::zeros((b, 1, n_heads,
-        // head_dim))` and `Tensor::zeros((b, n_heads, 1))` allocations and
-        // writes directly into the caller-owned tensors — which the CUDA
-        // graph runner re-uses across replays — fixing the
-        // dangling-pointer hazard documented in
-        // `bench-results/cuda-graph-bs2-secondary-audit.md` suspects 3+4
-        // (#1082).
-        let out = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen(
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            seqused_k,
-            graph_outputs,
+        // No caller-owned outputs — allocate internally.
+        let out_kt = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt(
+            &q_kt,
+            &k_kt,
+            &v_kt,
+            &bt_kt,
+            &sk_kt,
             max_seqlen_k,
             page_block_size,
             softmax_scale,
             causal,
         )
-        .context("flash_attn_paged_decode_dyn_seqlen kernel failed (graph outputs)")?;
+        .map_err(|e| {
+            anyhow::anyhow!("flash_attn_paged_decode_dyn_seqlen (graph variant) kt: {e}")
+        })?;
+        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).context(
+            "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: copy kt out -> candle",
+        )?;
         Ok(Some(out))
     }
 
