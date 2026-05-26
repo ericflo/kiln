@@ -1930,3 +1930,85 @@ mod kt_rotary_qk_regression {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod kt_l2_qk_norm_gqa_regression {
+    //! Regression test for #1082: the kt-typed GQA wrapper must accept the
+    //! same rank-4 `[batch, seq, nk, dk]` unexpanded Q/K contract as the
+    //! candle-typed `fused_l2_qk_norm_gqa` wrapper. An earlier kt wrapper
+    //! shape expected rank-2 packed rows and could not be safely wired into
+    //! the production GDN decode call site.
+    use super::*;
+    use crate::fused_l2_qk_norm_gqa;
+    use candle_core::{DType, Device, Tensor};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn fused_l2_qk_norm_gqa_kt_matches_candle_rank4_contract() -> TestResult {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping fused_l2_qk_norm_gqa_kt_matches_candle_rank4_contract: {err}"
+                );
+                return Ok(());
+            }
+        };
+
+        let batch = 1usize;
+        let seq = 2usize;
+        let nk = 4usize;
+        let nv = 8usize;
+        let dk = 128usize;
+        let total = batch * seq * nk * dk;
+        let q_scale = 1.0f32 / (dk as f32).sqrt();
+        let eps = 1e-6f32;
+
+        let q_data: Vec<f32> = (0..total)
+            .map(|i| ((i as f32 * 0.017).sin() * 0.5))
+            .collect();
+        let k_data: Vec<f32> = (0..total)
+            .map(|i| ((i as f32 * 0.023).cos() * 0.5))
+            .collect();
+
+        let q = Tensor::from_vec(q_data, (batch, seq, nk, dk), &device)?
+            .to_dtype(DType::BF16)?;
+        let k = Tensor::from_vec(k_data, (batch, seq, nk, dk), &device)?
+            .to_dtype(DType::BF16)?;
+
+        let (q_ref, k_ref) = fused_l2_qk_norm_gqa(&q, &k, nv, q_scale, eps)?;
+
+        let q_kt_in = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q)?;
+        let k_kt_in = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k)?;
+        assert!(supports_l2_qk_norm_gqa_kt(&q_kt_in, &k_kt_in, nv));
+
+        let (q_kt_out, k_kt_out) =
+            fused_l2_qk_norm_gqa_kt(&q_kt_in, &k_kt_in, nv, q_scale, eps)?;
+        let q_kt_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&q_kt_out)?;
+        let k_kt_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&k_kt_out)?;
+
+        assert_eq!(q_kt_candle.dims(), &[batch, seq, nv, dk]);
+        assert_eq!(k_kt_candle.dims(), &[batch, seq, nv, dk]);
+
+        let q_diff = (&q_ref.to_dtype(DType::F32)? - &q_kt_candle.to_dtype(DType::F32)?)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        let k_diff = (&k_ref.to_dtype(DType::F32)? - &k_kt_candle.to_dtype(DType::F32)?)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        assert_eq!(
+            q_diff, 0.0,
+            "kt vs candle fused_l2_qk_norm_gqa q max_abs_diff={q_diff:e}"
+        );
+        assert_eq!(
+            k_diff, 0.0,
+            "kt vs candle fused_l2_qk_norm_gqa k max_abs_diff={k_diff:e}"
+        );
+        Ok(())
+    }
+}
