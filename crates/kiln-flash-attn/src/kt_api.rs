@@ -886,3 +886,166 @@ pub fn flash_attn_bwd_kt(
     }
     Ok((dq, dk, dv))
 }
+
+#[cfg(test)]
+mod kt_flash_attn_regression {
+    //! Regression tests for #1082: kt FlashAttention shells must match the
+    //! candle shells while both surfaces coexist. Backward intentionally
+    //! documents the shell differences: kt runs deterministic mode and returns
+    //! expanded GQA dk/dv, which the model call site collapses.
+    use super::*;
+    use crate::{flash_attn_bwd, flash_attn_fwd};
+    use candle_core::{DType, Device, Tensor};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn cuda_or_skip(name: &str) -> Result<Option<Device>, candle_core::Error> {
+        match Device::new_cuda(0) {
+            Ok(device) => Ok(Some(device)),
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping {name}: {err}");
+                Ok(None)
+            }
+        }
+    }
+
+    fn patterned(len: usize, step: f32, scale: f32) -> Vec<f32> {
+        (0..len)
+            .map(|i| {
+                ((i as f32 * step).sin() * scale) + ((i as f32 * step * 0.37).cos() * 0.05)
+            })
+            .collect()
+    }
+
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> Result<f32, candle_core::Error> {
+        let a = a.to_dtype(DType::F32)?;
+        let b = b.to_dtype(DType::F32)?;
+        (&a - &b)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()
+    }
+
+    #[test]
+    fn flash_attn_fwd_kt_matches_candle_contract() -> TestResult {
+        let Some(device) = cuda_or_skip("flash_attn_fwd_kt_matches_candle_contract")? else {
+            return Ok(());
+        };
+
+        let (b, seqlen, heads_q, heads_kv, head_dim) = (1usize, 32usize, 4usize, 2usize, 128usize);
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let q = Tensor::from_vec(
+            patterned(b * seqlen * heads_q * head_dim, 0.013, 0.35),
+            (b, seqlen, heads_q, head_dim),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let k = Tensor::from_vec(
+            patterned(b * seqlen * heads_kv * head_dim, 0.017, 0.25),
+            (b, seqlen, heads_kv, head_dim),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let v = Tensor::from_vec(
+            patterned(b * seqlen * heads_kv * head_dim, 0.019, 0.3),
+            (b, seqlen, heads_kv, head_dim),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+
+        let (out_ref, lse_ref) = flash_attn_fwd(&q, &k, &v, scale, true)?;
+
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q)?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k)?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v)?;
+        let (out_kt, lse_kt) = flash_attn_fwd_kt(&q_kt, &k_kt, &v_kt, scale, true)?;
+        let out_kt = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)?;
+        let lse_kt = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&lse_kt)?;
+
+        assert_eq!(out_kt.dims(), out_ref.dims());
+        assert_eq!(lse_kt.dims(), lse_ref.dims());
+        let out_diff = max_abs_diff(&out_ref, &out_kt)?;
+        let lse_diff = max_abs_diff(&lse_ref, &lse_kt)?;
+        assert!(
+            out_diff <= 1e-3,
+            "kt vs candle flash_attn_fwd out max_abs_diff={out_diff:e}"
+        );
+        assert!(
+            lse_diff <= 1e-5,
+            "kt vs candle flash_attn_fwd lse max_abs_diff={lse_diff:e}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn flash_attn_bwd_kt_matches_candle_contract_with_gqa_collapse() -> TestResult {
+        let Some(device) =
+            cuda_or_skip("flash_attn_bwd_kt_matches_candle_contract_with_gqa_collapse")?
+        else {
+            return Ok(());
+        };
+
+        let (b, seqlen, heads_q, heads_kv, head_dim) = (1usize, 32usize, 4usize, 2usize, 128usize);
+        let groups = heads_q / heads_kv;
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let q = Tensor::from_vec(
+            patterned(b * seqlen * heads_q * head_dim, 0.011, 0.3),
+            (b, seqlen, heads_q, head_dim),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let k = Tensor::from_vec(
+            patterned(b * seqlen * heads_kv * head_dim, 0.015, 0.25),
+            (b, seqlen, heads_kv, head_dim),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let v = Tensor::from_vec(
+            patterned(b * seqlen * heads_kv * head_dim, 0.021, 0.28),
+            (b, seqlen, heads_kv, head_dim),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let dout = Tensor::from_vec(
+            patterned(b * seqlen * heads_q * head_dim, 0.009, 0.2),
+            (b, seqlen, heads_q, head_dim),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+
+        let (out, lse) = flash_attn_fwd(&q, &k, &v, scale, true)?;
+        let (dq_ref, dk_ref, dv_ref) =
+            flash_attn_bwd(&dout, &q, &k, &v, &out, &lse, scale, true)?;
+
+        let dout_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dout)?;
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q)?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k)?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v)?;
+        let out_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&out)?;
+        let lse_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&lse)?;
+        let (dq_kt, dk_kt, dv_kt) =
+            flash_attn_bwd_kt(&dout_kt, &q_kt, &k_kt, &v_kt, &out_kt, &lse_kt, scale, true)?;
+        let dq_kt = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&dq_kt)?;
+        let dk_kt = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&dk_kt)?
+            .reshape((b, seqlen, heads_kv, groups, head_dim))?
+            .sum(3)?;
+        let dv_kt = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&dv_kt)?
+            .reshape((b, seqlen, heads_kv, groups, head_dim))?
+            .sum(3)?;
+
+        for (name, reference, kt, tol) in [
+            ("dq", &dq_ref, &dq_kt, 5e-2f32),
+            ("dk", &dk_ref, &dk_kt, 5e-2f32),
+            ("dv", &dv_ref, &dv_kt, 5e-2f32),
+        ] {
+            assert_eq!(kt.dims(), reference.dims(), "{name} dims mismatch");
+            let diff = max_abs_diff(reference, kt)?;
+            assert!(
+                diff <= tol,
+                "kt vs candle flash_attn_bwd {name} max_abs_diff={diff:e} tol={tol:e}"
+            );
+        }
+        Ok(())
+    }
+}
