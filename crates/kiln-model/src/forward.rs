@@ -306,25 +306,31 @@ fn cuda_use_kt_api_lora_delta() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 (#1082) opt-in: LoRA base + delta accumulator
-/// (`base + delta`) through the kt-API + adapters. Set
-/// `KILN_USE_KT_API_LORA_ADD=1` (or `KILN_USE_KT_API_ALL=1`) to
-/// enable; default off. Routes the final `(base + delta)?` step
-/// in [`add_lora_delta_to_base`] (and analogous call sites that
-/// add a LoRA delta on top of a base linear) through
-/// `kiln_tensor::cuda_elementwise_binary` with kind tag 0 (Add)
-/// directly, ahead of the candle `Add<Tensor>` composite.
+/// Phase 7 default-on (#1082): LoRA base + delta accumulator
+/// (`base + delta`) through the kt-API + adapters. Routes the
+/// final `(base + delta)?` step in [`add_lora_delta_to_base`]
+/// (and analogous call sites that add a LoRA delta on top of a
+/// base linear) through `kiln_tensor::cuda_elementwise_binary`
+/// with kind tag 0 (Add). Single-kernel `a + b` dispatch —
+/// bit-exact to the candle `Add<Tensor>` composite (both use
+/// the same CUDA elementwise-add intrinsic). Only the Rust shell
+/// types and the kt-bridge dtod-copy at the output boundary
+/// differ.
 ///
-/// LoRA-augmented projections run this final accumulator every
-/// forward call on every layer that has a LoRA target. Mirrors
-/// the [`cuda_use_kt_api_max_binary`] gate (other production
-/// binary op migration). NVTX range `kiln/lora_add_kt` brackets
-/// the migrated call so nsys traces separate the path from the
-/// candle baseline.
+/// LoRA-augmented projections run this accumulator every forward
+/// call on every layer with a LoRA target (q/k/v/o + gate/up/
+/// down). Three production call sites in forward.rs hit this
+/// helper. Same flip rationale as the max_binary default-on
+/// (`1f557773`): bit-exact shared-kernel dispatch.
+///
+/// Escape hatch: `KILN_DISABLE_KT_API_LORA_ADD=1`.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_lora_add() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LORA_ADD").is_ok());
+    // #1082: flipped default ON. Single-kernel
+    // `cuda_elementwise_binary` kind 0 dispatch; bit-exact to
+    // candle Add<Tensor>. Escape hatch: `KILN_DISABLE_KT_API_LORA_ADD=1`.
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_LORA_ADD").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -24124,6 +24130,35 @@ mod tests {
                     got[idx]
                 );
             }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_cuda_lora_add_kt_default_matches_host_formula() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!(
+                "CUDA unavailable, skipping test_cuda_lora_add_kt_default_matches_host_formula"
+            );
+            return Ok(());
+        };
+        let base_data = [1.0_f32, -2.0, 3.5, 0.0, 0.25, -0.5];
+        let delta_data = [0.1_f32, 0.2, -0.3, 4.0, -0.05, 0.5];
+        let base = Tensor::from_slice(&base_data, (2usize, 3usize), &device)?.contiguous()?;
+        let delta = Tensor::from_slice(&delta_data, (2usize, 3usize), &device)?.contiguous()?;
+        let out = try_kt_lora_add(&base, &delta)?
+            .context("expected CUDA kt lora_add helper to accept contiguous F32 input")?;
+        device.synchronize()?;
+
+        let got = out.flatten_all()?.to_vec1::<f32>()?;
+        for (idx, (&b, &d)) in base_data.iter().zip(delta_data.iter()).enumerate() {
+            let expected = b + d;
+            assert!(
+                (got[idx] - expected).abs() < 1e-7,
+                "lora_add mismatch at {idx}: actual={} expected={expected}",
+                got[idx]
+            );
         }
         Ok(())
     }
