@@ -1081,26 +1081,48 @@ impl BackendRuntime for CudaBackend {
                 Some(weight.to_dtype(DType::F32)
                     .with_context(|| "gdn_decode_gates: cast weight -> f32")?)
             };
-            let still_non_envelope = q.dtype() != DType::BF16
-                || k.dtype() != DType::BF16
-                || v.dtype() != DType::BF16
-                || a.dtype() != DType::BF16
-                || b.dtype() != DType::BF16
-                || state.dtype() != DType::BF16
-                || z.dtype() != DType::BF16;
-            if still_non_envelope {
+            // Cast heavy tensors too. q/k/v often arrive F32 from
+            // the conv1d kernel epilogue (kernel returns F32 by
+            // design — see forward.rs:14897). The candle-typed
+            // gdn_decode_*_supports already accepts F32 q/k/v
+            // (kiln-gdn-kernel/src/lib.rs:1047-1049) but the kt
+            // path is BF16-only — cast at the boundary so the kt
+            // surface still works for the production hot path. Cast
+            // cost is per-layer hidden-dim elements (small at B=1).
+            // `state` is NOT cast — the kernel mutates it in place
+            // and the caller's tensor would not see the writes
+            // through a fresh allocation.
+            if state.dtype() != DType::BF16 {
                 return Ok(None);
             }
+            let q_bf16 = if q.dtype() == DType::BF16 { None } else {
+                Some(q.to_dtype(DType::BF16).with_context(|| "gdn_decode_gates: cast q -> bf16")?)
+            };
+            let k_bf16 = if k.dtype() == DType::BF16 { None } else {
+                Some(k.to_dtype(DType::BF16).with_context(|| "gdn_decode_gates: cast k -> bf16")?)
+            };
+            let v_bf16 = if v.dtype() == DType::BF16 { None } else {
+                Some(v.to_dtype(DType::BF16).with_context(|| "gdn_decode_gates: cast v -> bf16")?)
+            };
+            let a_bf16 = if a.dtype() == DType::BF16 { None } else {
+                Some(a.to_dtype(DType::BF16).with_context(|| "gdn_decode_gates: cast a -> bf16")?)
+            };
+            let b_bf16 = if b.dtype() == DType::BF16 { None } else {
+                Some(b.to_dtype(DType::BF16).with_context(|| "gdn_decode_gates: cast b -> bf16")?)
+            };
+            let z_bf16 = if z.dtype() == DType::BF16 { None } else {
+                Some(z.to_dtype(DType::BF16).with_context(|| "gdn_decode_gates: cast z -> bf16")?)
+            };
             return self.gdn_decode_gates_recurrent(
-                q,
-                k,
-                v,
-                a,
-                b,
+                q_bf16.as_ref().unwrap_or(q),
+                k_bf16.as_ref().unwrap_or(k),
+                v_bf16.as_ref().unwrap_or(v),
+                a_bf16.as_ref().unwrap_or(a),
+                b_bf16.as_ref().unwrap_or(b),
                 a_log_bf16.as_ref().unwrap_or(a_log),
                 dt_bias_bf16.as_ref().unwrap_or(dt_bias),
                 state,
-                z,
+                z_bf16.as_ref().unwrap_or(z),
                 weight_f32.as_ref().unwrap_or(weight),
                 eps,
             );
@@ -1227,25 +1249,33 @@ impl BackendRuntime for CudaBackend {
                 Some(dt_bias.to_dtype(DType::BF16)
                     .with_context(|| "gdn_decode_qk_norm: cast dt_bias -> bf16")?)
             };
-            let still_non_bf16 = q.dtype() != DType::BF16
-                || k.dtype() != DType::BF16
-                || v.dtype() != DType::BF16
-                || a.dtype() != DType::BF16
-                || b.dtype() != DType::BF16
-                || state.dtype() != DType::BF16;
-            if still_non_bf16 {
-                // Heavier tensors (q/k/v/a/b/state) shouldn't be
-                // non-bf16 on the production hot path; if they are,
-                // decline rather than silently casting (a cast on
-                // those is too expensive to hide).
+            // Same heavy-tensor cast as gdn_decode_gates_recurrent
+            // above — required because conv1d kernel emits F32
+            // q/k/v.
+            if state.dtype() != DType::BF16 {
                 return Ok(None);
             }
+            let q_bf16 = if q.dtype() == DType::BF16 { None } else {
+                Some(q.to_dtype(DType::BF16).with_context(|| "gdn_decode_qk_norm: cast q -> bf16")?)
+            };
+            let k_bf16 = if k.dtype() == DType::BF16 { None } else {
+                Some(k.to_dtype(DType::BF16).with_context(|| "gdn_decode_qk_norm: cast k -> bf16")?)
+            };
+            let v_bf16 = if v.dtype() == DType::BF16 { None } else {
+                Some(v.to_dtype(DType::BF16).with_context(|| "gdn_decode_qk_norm: cast v -> bf16")?)
+            };
+            let a_bf16 = if a.dtype() == DType::BF16 { None } else {
+                Some(a.to_dtype(DType::BF16).with_context(|| "gdn_decode_qk_norm: cast a -> bf16")?)
+            };
+            let b_bf16 = if b.dtype() == DType::BF16 { None } else {
+                Some(b.to_dtype(DType::BF16).with_context(|| "gdn_decode_qk_norm: cast b -> bf16")?)
+            };
             return self.gdn_decode_qk_norm_gates_recurrent(
-                q,
-                k,
-                v,
-                a,
-                b,
+                q_bf16.as_ref().unwrap_or(q),
+                k_bf16.as_ref().unwrap_or(k),
+                v_bf16.as_ref().unwrap_or(v),
+                a_bf16.as_ref().unwrap_or(a),
+                b_bf16.as_ref().unwrap_or(b),
                 a_log_bf16.as_ref().unwrap_or(a_log),
                 dt_bias_bf16.as_ref().unwrap_or(dt_bias),
                 state,
@@ -1381,26 +1411,39 @@ impl BackendRuntime for CudaBackend {
                 Some(weight.to_dtype(DType::F32)
                     .with_context(|| "gdn_decode_rmsnorm: cast weight -> f32")?)
             };
-            let still_non_envelope = q.dtype() != DType::BF16
-                || k.dtype() != DType::BF16
-                || v.dtype() != DType::BF16
-                || a.dtype() != DType::BF16
-                || b.dtype() != DType::BF16
-                || state.dtype() != DType::BF16
-                || z.dtype() != DType::BF16;
-            if still_non_envelope {
+            // Same heavy-tensor cast as the sibling functions
+            // above — required because conv1d emits F32 q/k/v.
+            if state.dtype() != DType::BF16 {
                 return Ok(None);
             }
+            let q_bf16 = if q.dtype() == DType::BF16 { None } else {
+                Some(q.to_dtype(DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast q -> bf16")?)
+            };
+            let k_bf16 = if k.dtype() == DType::BF16 { None } else {
+                Some(k.to_dtype(DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast k -> bf16")?)
+            };
+            let v_bf16 = if v.dtype() == DType::BF16 { None } else {
+                Some(v.to_dtype(DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast v -> bf16")?)
+            };
+            let a_bf16 = if a.dtype() == DType::BF16 { None } else {
+                Some(a.to_dtype(DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast a -> bf16")?)
+            };
+            let b_bf16 = if b.dtype() == DType::BF16 { None } else {
+                Some(b.to_dtype(DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast b -> bf16")?)
+            };
+            let z_bf16 = if z.dtype() == DType::BF16 { None } else {
+                Some(z.to_dtype(DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast z -> bf16")?)
+            };
             return self.gdn_decode_qk_norm_gates_recurrent_rmsnorm(
-                q,
-                k,
-                v,
-                a,
-                b,
+                q_bf16.as_ref().unwrap_or(q),
+                k_bf16.as_ref().unwrap_or(k),
+                v_bf16.as_ref().unwrap_or(v),
+                a_bf16.as_ref().unwrap_or(a),
+                b_bf16.as_ref().unwrap_or(b),
                 a_log_bf16.as_ref().unwrap_or(a_log),
                 dt_bias_bf16.as_ref().unwrap_or(dt_bias),
                 state,
-                z,
+                z_bf16.as_ref().unwrap_or(z),
                 weight_f32.as_ref().unwrap_or(weight),
                 q_scale,
                 qk_eps,
