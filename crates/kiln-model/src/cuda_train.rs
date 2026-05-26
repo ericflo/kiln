@@ -96,6 +96,35 @@ fn cuda_train_use_kt_api_silu_save_sigmoid() -> bool {
     })
 }
 
+/// Phase 7 opt-in (#1082): when `KILN_USE_KT_API_FLASH_ATTN_BWD=1`
+/// (or `KILN_USE_KT_API_ALL=1`) is set, route the SFT/GRPO training
+/// backward dispatched from `FlashAttnPrefillCausalBackward::backward`
+/// through the kt-typed surface (`kiln_flash_attn::flash_attn_bwd_kt`)
+/// instead of the candle-typed `kiln_flash_attn::flash_attn_bwd` shim.
+/// Default off. Bit-exact by construction in the FFI sense — both
+/// candle and kt paths bottom out in the same `kiln_flash_attn_bwd`
+/// FFI symbol; only the Rust shell types change.
+///
+/// Two known shell-level differences require care at the call site:
+/// (1) the candle shim passes `deterministic=0` to the FFI; the kt
+/// shim passes `deterministic=1`. (2) the candle shim performs the
+/// GQA dk/dv group sum (`heads_q → heads_kv`) internally; the kt
+/// shim returns expanded `heads_q`-shaped dk/dv and requires the
+/// caller to sum across groups. The caller below replicates the
+/// same `reshape(...).sum(3)` collapse the candle shim uses, so the
+/// kt path is shape-compatible with the downstream reshape.
+///
+/// Same env-flag name as `forward.rs::cuda_use_kt_api_flash_attn_bwd`
+/// for consistency across the two call sites.
+fn cuda_train_use_kt_api_flash_attn_bwd() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_API_FLASH_ATTN_BWD").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    })
+}
+
 /// Backward op interface for the future CUDA-native training graph.
 pub trait CudaBackwardOp: Send + Sync + std::fmt::Debug {
     fn op_name(&self) -> &'static str;
@@ -3790,17 +3819,95 @@ impl CudaBackwardOp for FlashAttnPrefillCausalBackward {
             .context("cuda_flash_attn_prefill_causal_bf16 backward: reshape dout")?
             .contiguous()
             .context("cuda_flash_attn_prefill_causal_bf16 backward: contiguous dout")?;
-        let (dq, dk, dv) = kiln_flash_attn::flash_attn_bwd(
-            &dout,
-            &self.q,
-            &self.k,
-            &self.v,
-            &self.out,
-            &self.softmax_lse,
-            self.scale,
-            true,
-        )
-        .context("cuda_flash_attn_prefill_causal_bf16 backward: flash_attn_bwd")?;
+        // Phase 7 opt-in (#1082): route through the kt-typed FA-bwd surface
+        // when `KILN_USE_KT_API_FLASH_ATTN_BWD=1` (or `KILN_USE_KT_API_ALL=1`).
+        // The SFT/GRPO prefill backward path always has dout/q/k/v/out in BF16
+        // and softmax_lse in F32 (the cuda_flash_attn_prefill_causal_bf16
+        // forward upstream enforces BF16 q/k/v and produces F32 softmax_lse).
+        // The kt path bottoms out in the same `kiln_flash_attn_bwd` FFI symbol
+        // as the candle path — only the Rust shell types differ. Two shell-
+        // level differences are handled at the call site: (1) the kt shim
+        // passes deterministic=1 to the FFI (vs candle's 0); (2) the kt shim
+        // returns expanded heads_q-shaped dk/dv and requires the caller to
+        // sum across groups for GQA, while the candle shim does that sum
+        // internally. The GQA sum below replicates the candle shim's
+        // `reshape(b,seqlen_k,heads_kv,groups,head_dim).sum(3)` collapse so
+        // the downstream `reshape((rows, heads_kv, head_dim))` is shape-
+        // compatible across both paths. Falls through to candle when the
+        // gate is off.
+        let (dq, dk, dv) = if cuda_train_use_kt_api_flash_attn_bwd() {
+            kiln_nvtx::range!(c"kiln/cuda_train/flash_attn_bwd_kt");
+            let dout_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dout)
+                .context("cuda_flash_attn_prefill_causal_bf16 backward kt: borrow dout -> kt")?;
+            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&self.q)
+                .context("cuda_flash_attn_prefill_causal_bf16 backward kt: borrow q -> kt")?;
+            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&self.k)
+                .context("cuda_flash_attn_prefill_causal_bf16 backward kt: borrow k -> kt")?;
+            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&self.v)
+                .context("cuda_flash_attn_prefill_causal_bf16 backward kt: borrow v -> kt")?;
+            let out_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&self.out)
+                .context("cuda_flash_attn_prefill_causal_bf16 backward kt: borrow out -> kt")?;
+            let lse_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&self.softmax_lse)
+                .context("cuda_flash_attn_prefill_causal_bf16 backward kt: borrow lse -> kt")?;
+            let (dq_kt, dk_kt, dv_kt) = kiln_flash_attn::flash_attn_bwd_kt(
+                &dout_kt,
+                &q_kt,
+                &k_kt,
+                &v_kt,
+                &out_kt,
+                &lse_kt,
+                self.scale,
+                true,
+            )
+            .map_err(|e| anyhow::anyhow!(
+                "cuda_flash_attn_prefill_causal_bf16 backward kt: flash_attn_bwd_kt: {e}"
+            ))?;
+            let dq = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&dq_kt)
+                .context("cuda_flash_attn_prefill_causal_bf16 backward kt: copy dq -> candle")?;
+            let dk_expanded = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&dk_kt)
+                .context("cuda_flash_attn_prefill_causal_bf16 backward kt: copy dk -> candle")?;
+            let dv_expanded = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&dv_kt)
+                .context("cuda_flash_attn_prefill_causal_bf16 backward kt: copy dv -> candle")?;
+            // GQA group sum: the kt shim returns dk/dv with `num_heads`
+            // (= heads_q) heads; we collapse the group axis back to
+            // `num_heads_k` (= heads_kv) so the downstream reshape sees the
+            // same shape the candle path would have produced.
+            let (dk, dv) = if self.heads_kv != self.heads_q {
+                ensure!(
+                    self.heads_q % self.heads_kv == 0,
+                    "cuda_flash_attn_prefill_causal_bf16 backward kt: heads_q ({}) must be divisible by heads_kv ({})",
+                    self.heads_q,
+                    self.heads_kv,
+                );
+                let groups = self.heads_q / self.heads_kv;
+                let dk = dk_expanded
+                    .reshape((1usize, self.rows, self.heads_kv, groups, self.head_dim))
+                    .context("cuda_flash_attn_prefill_causal_bf16 backward kt: reshape dk for GQA sum")?
+                    .sum(3)
+                    .context("cuda_flash_attn_prefill_causal_bf16 backward kt: GQA sum dk")?;
+                let dv = dv_expanded
+                    .reshape((1usize, self.rows, self.heads_kv, groups, self.head_dim))
+                    .context("cuda_flash_attn_prefill_causal_bf16 backward kt: reshape dv for GQA sum")?
+                    .sum(3)
+                    .context("cuda_flash_attn_prefill_causal_bf16 backward kt: GQA sum dv")?;
+                (dk, dv)
+            } else {
+                (dk_expanded, dv_expanded)
+            };
+            (dq, dk, dv)
+        } else {
+            kiln_flash_attn::flash_attn_bwd(
+                &dout,
+                &self.q,
+                &self.k,
+                &self.v,
+                &self.out,
+                &self.softmax_lse,
+                self.scale,
+                true,
+            )
+            .context("cuda_flash_attn_prefill_causal_bf16 backward: flash_attn_bwd")?
+        };
         let dq = dq
             .reshape((self.rows, self.heads_q, self.head_dim))
             .context("cuda_flash_attn_prefill_causal_bf16 backward: reshape dq")?;
