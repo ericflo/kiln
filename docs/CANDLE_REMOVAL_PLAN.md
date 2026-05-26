@@ -424,6 +424,29 @@ Follow-up steps (not done in this PR):
    `&Tensor` storage views — needs careful kt-storage parity).
 4. Delete candle surface from `lib.rs`.
 
+**Progress 2026-05-26** — kt-typed predicate substrate complete
+(commits `8eb37f5d`, `e092671c`, `54ad5ab6`). Every candle-typed
+`supports_*` predicate in `kiln-rmsnorm-kernel/src/lib.rs` that has
+a live caller in kiln-model now has a kt-typed twin in
+`kiln-rmsnorm-kernel/src/kt_api.rs`:
+
+  - `supports_mlp_silu_mul_kt`
+  - `supports_mlp_silu_mul_packed_kt`
+  - `supports_sigmoid_mul_kt`
+  - `supports_rotary_qk_kt`
+  - `supports_attn_decode_qkv_prep_kt`
+  - `supports_l2_qk_norm_kt`
+  - `supports_l2_qk_norm_gqa_kt`
+  - `supports_lora_decode_add_kt`
+  - `supports_optimizer_step_kt`
+
+Each twin mirrors the candle predicate's shape/dtype/contig/device
+invariants over `KtTensor`. Substrate-only — no caller swaps in
+those commits. Unblocks step 3 above: forward.rs + cuda.rs sites
+can swap the candle-typed `supports_*(...)` gate to its kt twin
+once the operands are bridged once, removing the candle dependency
+at the predicate layer.
+
 ### kiln-gdn-kernel — **1 production caller** (single-block fall-through remains)
 
 After `86c7f134` removed all 10 candle fallback branches + the
