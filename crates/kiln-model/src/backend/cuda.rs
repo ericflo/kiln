@@ -1135,25 +1135,55 @@ impl BackendRuntime for CudaBackend {
         // shape mismatch was a latent bug surfaced by the Phase 5
         // sanitizer sweep (the 3D-pre-predicate ordering made
         // supports_kt always return false → caller declined).
+        //
+        // #1082 bench regression (2026-05-26): same non-contig
+        // hazard as gdn_decode_qk_norm_gates_recurrent_rmsnorm below
+        // — in the batched concurrent decode path, `a`/`b` arrive as
+        // `ab.narrow(2, .., nv)` views on the fused in-proj output
+        // and need an explicit `.contiguous()` before the kt borrow.
+        // a_log/dt_bias/state/z/weight are also materialized here
+        // for symmetry with gdn_gates and to future-proof against
+        // upstream batched-shape changes (no-op on already-contig).
+        let a_c = a
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_gates a contiguous failed")?;
+        let b_c = b
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_gates b contiguous failed")?;
+        let alog_c = a_log
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_gates a_log contiguous failed")?;
+        let dtb_c = dt_bias
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_gates dt_bias contiguous failed")?;
+        let state_c = state
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_gates state contiguous failed")?;
+        let z_c = z
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_gates z contiguous failed")?;
+        let weight_c = weight
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_gates weight contiguous failed")?;
         let q_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
             .with_context(|| "kt-adapter: gdn_decode_gates q → kt (4D for supports) failed")?;
         let k_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
             .with_context(|| "kt-adapter: gdn_decode_gates k → kt (4D for supports) failed")?;
         let v_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
             .with_context(|| "kt-adapter: gdn_decode_gates v → kt (4D for supports) failed")?;
-        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
+        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_c)
             .with_context(|| "kt-adapter: gdn_decode_gates a → kt failed")?;
-        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
+        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_c)
             .with_context(|| "kt-adapter: gdn_decode_gates b → kt failed")?;
-        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_log)
+        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&alog_c)
             .with_context(|| "kt-adapter: gdn_decode_gates a_log → kt failed")?;
-        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(dt_bias)
+        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
             .with_context(|| "kt-adapter: gdn_decode_gates dt_bias → kt failed")?;
-        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
+        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&state_c)
             .with_context(|| "kt-adapter: gdn_decode_gates state → kt failed")?;
-        let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(z)
+        let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&z_c)
             .with_context(|| "kt-adapter: gdn_decode_gates z → kt failed")?;
-        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
+        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&weight_c)
             .with_context(|| "kt-adapter: gdn_decode_gates weight → kt failed")?;
         if !kiln_gdn_kernel::gdn_decode_gates_recurrent_supports_kt(
             &q_kt_4d, &k_kt_4d, &v_kt_4d, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
@@ -1295,21 +1325,42 @@ impl BackendRuntime for CudaBackend {
         kiln_nvtx::range!(c"kiln/gdn_decode_qk_norm_gates_recurrent_bf16_kt");
         // supports_kt on 4D, kernel on 3D — see gdn_decode_gates_recurrent
         // above for the same shape-contract split.
+        //
+        // #1082 bench regression (2026-05-26): same non-contig hazard
+        // as the rmsnorm sibling below — `a`/`b` arrive as strided
+        // narrows of the fused in-proj output in the batched
+        // concurrent decode path. `.contiguous()` is a no-op on
+        // already-contig (rowwise) inputs.
+        let a_c = a
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm a contiguous failed")?;
+        let b_c = b
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm b contiguous failed")?;
+        let alog_c = a_log
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm a_log contiguous failed")?;
+        let dtb_c = dt_bias
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm dt_bias contiguous failed")?;
+        let state_c = state
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm state contiguous failed")?;
         let q_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm q → kt (4D) failed")?;
         let k_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm k → kt (4D) failed")?;
         let v_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm v → kt (4D) failed")?;
-        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
+        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_c)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm a → kt failed")?;
-        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
+        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_c)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm b → kt failed")?;
-        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_log)
+        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&alog_c)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm a_log → kt failed")?;
-        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(dt_bias)
+        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm dt_bias → kt failed")?;
-        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
+        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&state_c)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm state → kt failed")?;
         if !kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_supports_kt(
             &q_kt_4d, &k_kt_4d, &v_kt_4d, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt,
@@ -1465,25 +1516,58 @@ impl BackendRuntime for CudaBackend {
         kiln_nvtx::range!(c"kiln/gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt");
         // supports_kt on 4D, kernel on 3D — see gdn_decode_gates_recurrent
         // above for the shape-contract split.
+        //
+        // #1082 bench regression (2026-05-26): in the *batched
+        // concurrent decode* path, `a`/`b` arrive as
+        // `ab.narrow(2, .., nv)` views on the fused A/B in-proj
+        // output, producing non-contiguous last-dim views. Same
+        // upstream shape as the gdn_gates path (line ~1574), which
+        // already handles it via unconditional `.contiguous()`.
+        // Without these calls every concurrent request ≥2 returned
+        // HTTP 500 with "tensor must be contiguous" from
+        // `kt_tensor_from_candle_cuda_borrow`. `.contiguous()` is a
+        // no-op when the upstream tensor is already contiguous (the
+        // rowwise bs=1 path).
+        let a_c = a
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm a contiguous failed")?;
+        let b_c = b
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm b contiguous failed")?;
+        let alog_c = a_log
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm a_log contiguous failed")?;
+        let dtb_c = dt_bias
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm dt_bias contiguous failed")?;
+        let state_c = state
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm state contiguous failed")?;
+        let z_c = z
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm z contiguous failed")?;
+        let weight_c = weight
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm weight contiguous failed")?;
         let q_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm q → kt (4D) failed")?;
         let k_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm k → kt (4D) failed")?;
         let v_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm v → kt (4D) failed")?;
-        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
+        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_c)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm a → kt failed")?;
-        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
+        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_c)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm b → kt failed")?;
-        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_log)
+        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&alog_c)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm a_log → kt failed")?;
-        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(dt_bias)
+        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm dt_bias → kt failed")?;
-        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
+        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&state_c)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm state → kt failed")?;
-        let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(z)
+        let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&z_c)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm z → kt failed")?;
-        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
+        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&weight_c)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm weight → kt failed")?;
         if !kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt(
             &q_kt_4d, &k_kt_4d, &v_kt_4d, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
