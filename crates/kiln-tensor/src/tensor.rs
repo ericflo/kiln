@@ -525,11 +525,29 @@ impl Tensor {
         if self.dtype().is_packed() {
             return Ok(true);
         }
+        // #1082 Phase 9 follow-up: for non-CPU tensors, bridge via a
+        // `cuda_to_host_copy` D2H then run the CPU walker. This makes
+        // `KILN_DETECT_ANOMALY=1` work for CUDA-resident gradient
+        // tensors instead of returning an error and aborting the
+        // backward pass. The dedicated per-backend `is_finite`
+        // reduction kernel (planned in CANDLE_REMOVAL_PLAN.md, Phase
+        // 9) will replace this bridge once it lands — at which point
+        // the GPU anomaly scan stops paying the D2H copy on each
+        // node visit. Cost today: O(numel) bytes of D2H per scanned
+        // tensor; acceptable because anomaly detection is opt-in
+        // and runs only inside CI training-parity tests, not the
+        // production hot path.
         if !self.device().is_cpu() {
+            #[cfg(feature = "cuda")]
+            {
+                if matches!(self.device(), crate::Device::Cuda(_)) {
+                    let cpu_view = crate::cuda_to_host_copy(self)?;
+                    return cpu_view.all_finite();
+                }
+            }
             return Err(Error::Msg(format!(
-                "Tensor::all_finite: only CPU storage is supported today; \
-                 device {} support lands with the per-backend is_finite \
-                 reduction kernel",
+                "Tensor::all_finite: device {} support lands with the \
+                 per-backend is_finite reduction kernel",
                 self.device()
             )));
         }
@@ -1085,5 +1103,46 @@ mod tests {
         let t = Tensor::zeros_cpu(vec![2, 3], DType::F32);
         let e = t.move_axis(5, 0).unwrap_err();
         assert!(e.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn all_finite_cpu_true_on_all_finite_input() {
+        let t = Tensor::from_slice(&[1.0f32, 2.0, -3.5, 0.0], vec![2, 2]).unwrap();
+        assert!(t.all_finite().unwrap());
+    }
+
+    #[test]
+    fn all_finite_cpu_false_on_nan() {
+        let t = Tensor::from_slice(&[1.0f32, f32::NAN, 3.0], vec![3]).unwrap();
+        assert!(!t.all_finite().unwrap());
+    }
+
+    #[test]
+    fn all_finite_cpu_false_on_inf() {
+        let t = Tensor::from_slice(&[1.0f32, f32::INFINITY, 3.0], vec![3]).unwrap();
+        assert!(!t.all_finite().unwrap());
+    }
+
+    #[test]
+    fn all_finite_cpu_false_on_neg_inf() {
+        let t = Tensor::from_slice(&[1.0f32, f32::NEG_INFINITY, 3.0], vec![3]).unwrap();
+        assert!(!t.all_finite().unwrap());
+    }
+
+    #[test]
+    fn all_finite_integer_dtype_is_vacuously_true() {
+        let t = Tensor::from_slice(&[1u32, 2, 3, 4], vec![2, 2]).unwrap();
+        assert!(t.all_finite().unwrap());
+    }
+
+    #[test]
+    fn all_finite_after_transpose_uses_stride_walk() {
+        // A 2x2 with one NaN at logical [1, 0]; transpose makes the
+        // physical layout non-contiguous, exercising the stride walk
+        // rather than the dense scan path.
+        let t = Tensor::from_slice(&[1.0f32, 2.0, f32::NAN, 4.0], vec![2, 2]).unwrap();
+        let tt = t.transpose(0, 1).unwrap();
+        // Still contains the NaN — just at a transposed logical index.
+        assert!(!tt.all_finite().unwrap());
     }
 }

@@ -44,9 +44,13 @@
 //! 2. After each `op.apply(&grad_output)` returns its `Vec<Option<Tensor>>`,
 //!    iterate the `Some(t)` gradients and run `is_finite(t)` against
 //!    the underlying storage on whatever backend the tensor lives on.
-//!    Today's `kiln_tensor::Tensor` is mostly CPU-only in the autograd
-//!    crate; the backend-generic `is_finite` lands with the kt_api
-//!    finite-check shim (separate #1082 phase).
+//!    CPU storage uses an in-place stride walker. CUDA storage today
+//!    uses a D2H bridge (`cuda_to_host_copy` → CPU walker) so the
+//!    check is fully wired end-to-end for both CPU and CUDA training
+//!    paths under `KILN_DETECT_ANOMALY=1`. The per-backend
+//!    `is_finite_storage` reduction kernel (CUDA/Metal/Vulkan) is
+//!    planned to replace the bridge so anomaly detection on GPU
+//!    stops paying the D2H copy per node visit.
 //! 3. On first violation, call [`anomaly_panic`] with the op's `name()`
 //!    and the tape position. Panicking is intentional — the issue body
 //!    says "panics with the op's tape position on first violation."
