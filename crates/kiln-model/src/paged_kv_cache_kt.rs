@@ -38,7 +38,7 @@ use candle_core::cuda_backend::CudaDevice;
 use kiln_core::block::BlockTable;
 use kiln_tensor::{
     cuda_fp8_dequantize_direct, cuda_fp8_quantize_direct, cuda_zeros, CudaStorage,
-    DType as KtDType, Layout, StorageBackend, Tensor as KtTensor, TensorId,
+    DType as KtDType, Layout, Tensor as KtTensor, TensorId,
 };
 
 /// Paged KV cache backed by `kiln_tensor::Tensor`. Twin of

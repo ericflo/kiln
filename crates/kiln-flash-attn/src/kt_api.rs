@@ -54,17 +54,10 @@ impl From<BridgeError> for FlashAttnError {
     }
 }
 
-/// Borrow the kiln-tensor's [`CudaStorage`], returning a typed
-/// reference. Errors if the tensor isn't backed by CUDA, isn't
-/// contiguous, or has the wrong dtype.
-fn cuda_storage_of<'a>(
-    t: &'a KtTensor,
-    expected_dtype: KtDType,
-    name: &'static str,
-) -> Result<&'a CudaStorage, FlashAttnError> {
-    let (st, _) = kiln_kt_bridge::cuda_storage_and_byte_offset(t, expected_dtype, name)?;
-    Ok(st)
-}
+// `cuda_storage_of` helper was dead code post-338b1b88 — every
+// caller now uses `cuda_storage_and_byte_offset` directly via the
+// bridge or extracts pointers through `cuda_input_device_ptr` /
+// `cuda_output_device_ptr`. Removed to silence dead-code warning.
 
 /// `flash_attn_fwd` over `kiln_tensor::Tensor` operands.
 ///
