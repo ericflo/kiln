@@ -115,24 +115,21 @@ pub struct CudaBackend {
     // (KILN_DISABLE_FUSED_CONV1D), which falls back to forward.rs's
     // candle to_f32/cat/sum/narrow chain — the kt-typed path is bit-
     // exact with the previous kt-API code (same FFI symbol).
-    /// Phase 7 default-on (#1082): route all 10 GDN dispatch wires
-    /// (forward_substitution, recurrent_step, chunk_prep, chunk_scan,
-    /// gated_rms_norm, full_chunk_forward_multiblock, plus the 4
-    /// decode_* wires: gates_recurrent, qk_norm, qk_norm_gates_recurrent,
-    /// qk_norm_gates_recurrent_rmsnorm) through the kt-typed surfaces
-    /// instead of the candle-typed shims. Default ON because every
-    /// wire has byte-exact parity coverage: dedicated parity tests
-    /// landed in `d58b40ba` (recurrent_step), `b3666da0`
-    /// (forward_substitution), `b38410cb` (chunk_prep), `790ba424`
-    /// (chunk_scan + gated_rms_norm), `ee5c779a` (full_chunk_forward_
-    /// multiblock + decode_gates_recurrent), `ccb4fa82`
-    /// (decode_qk_norm), `f6c4ed70` (decode_qk_norm_rmsnorm); the
-    /// remaining decode wires are bit-exact by construction sharing
-    /// the same FFI symbols as the candle path. Three 3D->4D shape
-    /// mismatch bugs were caught and fixed by the parity work
-    /// (`e4823c7b`, `a1408c0e`, `ddd5cc00`). Set
-    /// `KILN_DISABLE_KT_API_GDN=1` to opt out (escape hatch).
-    cuda_use_kt_api_gdn: bool,
+    // Phase 7 (#1082): the cuda_use_kt_api_gdn gate was removed once
+    // all 10 GDN dispatch wires (forward_substitution, recurrent_step,
+    // chunk_prep, chunk_scan, full_chunk_forward[_multiblock],
+    // gates, gated_rms_norm, plus the 4 decode_* wires:
+    // gates_recurrent, qk_norm_gates_recurrent,
+    // qk_norm_gates_recurrent_rmsnorm) became kt-only. The whole-
+    // kernel kill switch `KILN_DISABLE_GDN_KERNEL=1` plus the per-
+    // wire decode-fused kill switches (KILN_DISABLE_FUSED_GDN_DECODE,
+    // KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT[_RMSNORM]) still
+    // fall back to forward.rs's candle reference paths. The kt-typed
+    // path is bit-exact with the previous kt-API code (same FFI
+    // symbol). One candle-typed caller survives: the single-block
+    // `kiln_gdn_kernel::gdn_full_chunk_forward` fall-through inside
+    // the multiblock dispatcher, because no kt single-block kernel
+    // wire exists yet.
     /// Phase 7 default-on (#1082): route the flash-attention-2 prefill
     /// + paged_decode kernels through the kt-typed surface
     /// (`flash_attn_fwd_kt` / `flash_attn_paged_decode_kt` /
@@ -202,14 +199,12 @@ impl CudaBackend {
         // path in `causal_conv1d_{update,prefill}`. The whole-kernel
         // kill switch `KILN_DISABLE_FUSED_CONV1D=1` still falls back
         // to forward.rs's candle to_f32/cat/sum/narrow chain.
-        // #1082: flipped default ON post byte-exact parity tests on
-        // all 10 GDN wires. The parity work caught and fixed 3 shape
-        // mismatch bugs (`e4823c7b`, `a1408c0e`, `ddd5cc00`); after
-        // those fixes the kt path matches the candle path bit-exactly
-        // because both bottom out in the same FFI symbols. Escape
-        // hatch: `KILN_DISABLE_KT_API_GDN=1`.
-        let cuda_use_kt_api_gdn = std::env::var("KILN_DISABLE_KT_API_GDN").is_err()
-            || std::env::var("KILN_USE_KT_API_ALL").is_ok();
+        // #1082: the dedicated KILN_DISABLE_KT_API_GDN gate was
+        // removed once the kt-typed GDN surface became the only path
+        // across all 10 dispatch wires. The whole-kernel kill switch
+        // `KILN_DISABLE_GDN_KERNEL=1` (plus the per-wire decode-fused
+        // kill switches) still falls back to forward.rs's candle
+        // reference paths.
         // #1082: flipped default ON. The kt path is bit-exact by
         // construction — all 4 wired flash_attn dispatch sites bottom
         // out in the same FFI symbols as the candle shim, with only
@@ -255,7 +250,6 @@ impl CudaBackend {
             gdn_decode_qk_norm_recurrent_enabled,
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled,
             fused_conv1d_enabled,
-            cuda_use_kt_api_gdn,
             cuda_use_kt_api_flash_attn,
             cuda_use_kt_api_sgd_step,
             cuda_use_kt_api_adamw_step,
@@ -265,19 +259,9 @@ impl CudaBackend {
     }
 
     /// Test-only constructor (#1082) for parity tests of the kt-API
-    /// gdn wiring. Avoids mutating process-global env state from
-    /// the test, which would race with other parallel tests in the
-    /// same binary.
-    #[cfg(test)]
-    pub(crate) fn new_with_kt_api_gdn(device: Device, kt_api: bool) -> Self {
-        let mut be = Self::new(device);
-        be.cuda_use_kt_api_gdn = kt_api;
-        be
-    }
-
-    /// Test-only constructor (#1082) for parity tests of the kt-API
     /// flash-attn wiring (paged-decode + paged-decode-dyn-seqlen).
-    /// Same race-avoidance rationale as `new_with_kt_api_gdn`.
+    /// Avoids mutating process-global env state from the test, which
+    /// would race with other parallel tests in the same binary.
     #[cfg(test)]
     pub(crate) fn new_with_kt_api_flash_attn(device: Device, kt_api: bool) -> Self {
         let mut be = Self::new(device);
@@ -826,27 +810,24 @@ impl BackendRuntime for CudaBackend {
         if a_strict.dtype() != DType::BF16 {
             return Ok(None);
         }
-        // Phase 7 opt-in (#1082): route through the kt-typed surface.
-        // Mirrors the conv1d pattern landed in `695587df`; the borrow
-        // adapter shares the underlying CUDA buffer with the candle
-        // tensor, so this is zero-copy on inputs. The output is copied
-        // back via `kt_tensor_to_candle_cuda_copy` (one dtod memcpy on
-        // the F32 forward-substitution result, mirrors marlin pattern).
+        // Phase 7 (#1082): kt-typed surface is now the only path,
+        // same closeout pattern as conv1d (2ebcfb08) and marlin
+        // (0841c266). The borrow adapter shares the underlying CUDA
+        // buffer with the candle tensor, so this is zero-copy on
+        // inputs. The output is copied back via
+        // `kt_tensor_to_candle_cuda_copy` (one dtod memcpy on the F32
+        // forward-substitution result, mirrors marlin pattern).
         kiln_nvtx::range!(c"kiln/gdn_forward_substitution_kt");
-        if self.cuda_use_kt_api_gdn {
-            let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_strict)
-                .with_context(|| "kt-adapter: gdn_forward_substitution a_strict → kt failed")?;
-            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_prime)
-                .with_context(|| "kt-adapter: gdn_forward_substitution v_prime → kt failed")?;
-            let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
-                .with_context(|| "kt-adapter: gdn_forward_substitution beta → kt failed")?;
-            let out_kt = kiln_gdn_kernel::gdn_forward_substitution_kt(&a_kt, &v_kt, &b_kt)
-                .map_err(|e| anyhow::anyhow!("kt gdn_forward_substitution: {e}"))?;
-            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .with_context(|| "kt-adapter: gdn_forward_substitution out → candle failed")?;
-            return Ok(Some(out));
-        }
-        let out = kiln_gdn_kernel::gdn_forward_substitution(a_strict, v_prime, beta)?;
+        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_strict)
+            .with_context(|| "kt-adapter: gdn_forward_substitution a_strict → kt failed")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_prime)
+            .with_context(|| "kt-adapter: gdn_forward_substitution v_prime → kt failed")?;
+        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
+            .with_context(|| "kt-adapter: gdn_forward_substitution beta → kt failed")?;
+        let out_kt = kiln_gdn_kernel::gdn_forward_substitution_kt(&a_kt, &v_kt, &b_kt)
+            .map_err(|e| anyhow::anyhow!("kt gdn_forward_substitution: {e}"))?;
+        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .with_context(|| "kt-adapter: gdn_forward_substitution out → candle failed")?;
         Ok(Some(out))
     }
 
@@ -862,34 +843,31 @@ impl BackendRuntime for CudaBackend {
         if q.dtype() != DType::BF16 {
             return Ok(None);
         }
-        // Phase 7 opt-in (#1082): route through the kt-typed surface.
-        // The borrow adapter shares the underlying CUDA buffer with
-        // the candle tensor, so the kernel's in-place mutation of
-        // `state` surfaces through the caller's `&mut Tensor` (same
-        // pattern as conv1d_update at 695587df).
-        if self.cuda_use_kt_api_gdn {
-            kiln_nvtx::range!(c"kiln/gdn_recurrent_forward_kt");
-            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-                .with_context(|| "kt-adapter: gdn_recurrent_step q → kt failed")?;
-            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-                .with_context(|| "kt-adapter: gdn_recurrent_step k → kt failed")?;
-            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-                .with_context(|| "kt-adapter: gdn_recurrent_step v → kt failed")?;
-            let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
-                .with_context(|| "kt-adapter: gdn_recurrent_step beta → kt failed")?;
-            let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
-                .with_context(|| "kt-adapter: gdn_recurrent_step g → kt failed")?;
-            let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
-                .with_context(|| "kt-adapter: gdn_recurrent_step state → kt failed")?;
-            let out_kt = kiln_gdn_kernel::gdn_recurrent_forward_kt(
-                &q_kt, &k_kt, &v_kt, &beta_kt, &g_kt, &state_kt,
-            )
-            .map_err(|e| anyhow::anyhow!("kt gdn_recurrent_forward: {e}"))?;
-            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .with_context(|| "kt-adapter: gdn_recurrent_step out → candle failed")?;
-            return Ok(Some(out));
-        }
-        let out = kiln_gdn_kernel::gdn_recurrent_forward(q, k, v, beta, g, state)?;
+        // Phase 7 (#1082): kt-typed surface is now the only path,
+        // same closeout pattern as conv1d (2ebcfb08) and marlin
+        // (0841c266). The borrow adapter shares the underlying CUDA
+        // buffer with the candle tensor, so the kernel's in-place
+        // mutation of `state` surfaces through the caller's
+        // `&mut Tensor` (same pattern as conv1d_update at 695587df).
+        kiln_nvtx::range!(c"kiln/gdn_recurrent_forward_kt");
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
+            .with_context(|| "kt-adapter: gdn_recurrent_step q → kt failed")?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
+            .with_context(|| "kt-adapter: gdn_recurrent_step k → kt failed")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+            .with_context(|| "kt-adapter: gdn_recurrent_step v → kt failed")?;
+        let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
+            .with_context(|| "kt-adapter: gdn_recurrent_step beta → kt failed")?;
+        let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
+            .with_context(|| "kt-adapter: gdn_recurrent_step g → kt failed")?;
+        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
+            .with_context(|| "kt-adapter: gdn_recurrent_step state → kt failed")?;
+        let out_kt = kiln_gdn_kernel::gdn_recurrent_forward_kt(
+            &q_kt, &k_kt, &v_kt, &beta_kt, &g_kt, &state_kt,
+        )
+        .map_err(|e| anyhow::anyhow!("kt gdn_recurrent_forward: {e}"))?;
+        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .with_context(|| "kt-adapter: gdn_recurrent_step out → candle failed")?;
         Ok(Some(out))
     }
 
@@ -902,57 +880,47 @@ impl BackendRuntime for CudaBackend {
         ks_entry: &Tensor,
         q_s: &Tensor,
     ) -> Result<Option<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)>> {
-        // Phase 7 opt-in (#1082): when kt-API GDN is on (default ON,
-        // escape hatch `KILN_DISABLE_KT_API_GDN=1`), do the kt-borrow
-        // first and then call the kt-typed `_supports_kt` predicate
-        // (7da2615a) so the entire dispatch path stays in kt-types
-        // upstream of the FFI symbol. Bit-exact by construction —
-        // `gdn_chunk_prep_supports_kt` mirrors the candle predicate's
-        // check chain one-for-one (kt `shape()/dtype()/device()` vs
-        // candle `dims()/dtype()/device()`) and both bottom out in the
-        // same `kiln_gdn_chunk_prep` FFI symbol on the success path.
-        if self.cuda_use_kt_api_gdn {
-            kiln_nvtx::range!(c"kiln/gdn_chunk_prep_kt");
-            let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
-                .with_context(|| "kt-adapter: gdn_chunk_prep g → kt failed")?;
-            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-                .with_context(|| "kt-adapter: gdn_chunk_prep v → kt failed")?;
-            let kkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(kkt)
-                .with_context(|| "kt-adapter: gdn_chunk_prep kkt → kt failed")?;
-            let qkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(qkt)
-                .with_context(|| "kt-adapter: gdn_chunk_prep qkt → kt failed")?;
-            let ks_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(ks_entry)
-                .with_context(|| "kt-adapter: gdn_chunk_prep ks_entry → kt failed")?;
-            let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s)
-                .with_context(|| "kt-adapter: gdn_chunk_prep q_s → kt failed")?;
-            if !kiln_gdn_kernel::gdn_chunk_prep_supports_kt(
-                &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt,
-            ) {
-                return Ok(None);
-            }
-            let (o0, o1, o2, o3, o4, o5) =
-                kiln_gdn_kernel::gdn_chunk_prep_kt(&g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt)
-                    .map_err(|e| anyhow::anyhow!("kt gdn_chunk_prep: {e}"))?;
-            let c0 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o0)
-                .with_context(|| "kt-adapter: gdn_chunk_prep o0 → candle failed")?;
-            let c1 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o1)
-                .with_context(|| "kt-adapter: gdn_chunk_prep o1 → candle failed")?;
-            let c2 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o2)
-                .with_context(|| "kt-adapter: gdn_chunk_prep o2 → candle failed")?;
-            let c3 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o3)
-                .with_context(|| "kt-adapter: gdn_chunk_prep o3 → candle failed")?;
-            let c4 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o4)
-                .with_context(|| "kt-adapter: gdn_chunk_prep o4 → candle failed")?;
-            let c5 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o5)
-                .with_context(|| "kt-adapter: gdn_chunk_prep o5 → candle failed")?;
-            return Ok(Some((c0, c1, c2, c3, c4, c5)));
-        }
-        if !kiln_gdn_kernel::gdn_chunk_prep_supports(g, v, kkt, qkt, ks_entry, q_s) {
+        // Phase 7 (#1082): kt-typed surface is now the only path,
+        // same closeout pattern as conv1d (2ebcfb08) and marlin
+        // (0841c266). The kt-typed predicate (`_supports_kt`,
+        // 7da2615a) and the `gdn_chunk_prep_kt` 6-tuple-returning
+        // kernel are the only call path — the candle-typed
+        // `kiln_gdn_kernel::gdn_chunk_prep[_supports]` fallback has
+        // been deleted.
+        kiln_nvtx::range!(c"kiln/gdn_chunk_prep_kt");
+        let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
+            .with_context(|| "kt-adapter: gdn_chunk_prep g → kt failed")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+            .with_context(|| "kt-adapter: gdn_chunk_prep v → kt failed")?;
+        let kkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(kkt)
+            .with_context(|| "kt-adapter: gdn_chunk_prep kkt → kt failed")?;
+        let qkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(qkt)
+            .with_context(|| "kt-adapter: gdn_chunk_prep qkt → kt failed")?;
+        let ks_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(ks_entry)
+            .with_context(|| "kt-adapter: gdn_chunk_prep ks_entry → kt failed")?;
+        let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s)
+            .with_context(|| "kt-adapter: gdn_chunk_prep q_s → kt failed")?;
+        if !kiln_gdn_kernel::gdn_chunk_prep_supports_kt(
+            &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt,
+        ) {
             return Ok(None);
         }
-        let out = kiln_gdn_kernel::gdn_chunk_prep(g, v, kkt, qkt, ks_entry, q_s)
-            .context("gdn_chunk_prep kernel failed")?;
-        Ok(Some(out))
+        let (o0, o1, o2, o3, o4, o5) =
+            kiln_gdn_kernel::gdn_chunk_prep_kt(&g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt)
+                .map_err(|e| anyhow::anyhow!("kt gdn_chunk_prep: {e}"))?;
+        let c0 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o0)
+            .with_context(|| "kt-adapter: gdn_chunk_prep o0 → candle failed")?;
+        let c1 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o1)
+            .with_context(|| "kt-adapter: gdn_chunk_prep o1 → candle failed")?;
+        let c2 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o2)
+            .with_context(|| "kt-adapter: gdn_chunk_prep o2 → candle failed")?;
+        let c3 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o3)
+            .with_context(|| "kt-adapter: gdn_chunk_prep o3 → candle failed")?;
+        let c4 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o4)
+            .with_context(|| "kt-adapter: gdn_chunk_prep o4 → candle failed")?;
+        let c5 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o5)
+            .with_context(|| "kt-adapter: gdn_chunk_prep o5 → candle failed")?;
+        Ok(Some((c0, c1, c2, c3, c4, c5)))
     }
 
     fn gdn_chunk_scan(
@@ -964,62 +932,40 @@ impl BackendRuntime for CudaBackend {
         beta: &Tensor,
         decay_last_col: &Tensor,
     ) -> Result<Option<(Tensor, Tensor)>> {
-        // Phase 7 opt-in (#1082): when kt-API GDN is on (default ON,
-        // escape hatch `KILN_DISABLE_KT_API_GDN=1`), do the kt-borrow
-        // first and then call the kt-typed `_supports_kt` predicate
-        // (7da2615a). Bit-exact by construction — the kt-typed predicate
-        // mirrors the candle predicate's check chain one-for-one and
-        // both bottom out in the same `kiln_gdn_chunk_scan` FFI symbol
-        // on the success path. gdn_chunk_scan_kt returns a 2-tuple.
-        if self.cuda_use_kt_api_gdn {
-            kiln_nvtx::range!(c"kiln/gdn_chunk_scan_kt");
-            let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_strict)
-                .with_context(|| "kt-adapter: gdn_chunk_scan a_strict → kt failed")?;
-            let m_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b_mask)
-                .with_context(|| "kt-adapter: gdn_chunk_scan b_mask → kt failed")?;
-            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_prime)
-                .with_context(|| "kt-adapter: gdn_chunk_scan v_prime → kt failed")?;
-            let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s_scaled)
-                .with_context(|| "kt-adapter: gdn_chunk_scan q_s_scaled → kt failed")?;
-            let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
-                .with_context(|| "kt-adapter: gdn_chunk_scan beta → kt failed")?;
-            let dlc_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(decay_last_col)
-                .with_context(|| "kt-adapter: gdn_chunk_scan decay_last_col → kt failed")?;
-            if !kiln_gdn_kernel::gdn_chunk_scan_supports_kt(
-                &a_kt, &m_kt, &v_kt, &qs_kt, &beta_kt, &dlc_kt,
-            ) {
-                return Ok(None);
-            }
-            let (o0, o1) = kiln_gdn_kernel::gdn_chunk_scan_kt(
-                &a_kt, &m_kt, &v_kt, &qs_kt, &beta_kt, &dlc_kt,
-            )
-            .map_err(|e| anyhow::anyhow!("kt gdn_chunk_scan: {e}"))?;
-            let c0 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o0)
-                .with_context(|| "kt-adapter: gdn_chunk_scan o0 → candle failed")?;
-            let c1 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o1)
-                .with_context(|| "kt-adapter: gdn_chunk_scan o1 → candle failed")?;
-            return Ok(Some((c0, c1)));
-        }
-        if !kiln_gdn_kernel::gdn_chunk_scan_supports(
-            a_strict,
-            b_mask,
-            v_prime,
-            q_s_scaled,
-            beta,
-            decay_last_col,
+        // Phase 7 (#1082): kt-typed surface is now the only path,
+        // same closeout pattern as conv1d (2ebcfb08) and marlin
+        // (0841c266). The kt-typed predicate (`_supports_kt`,
+        // 7da2615a) and the `gdn_chunk_scan_kt` 2-tuple-returning
+        // kernel are the only call path — the candle-typed
+        // `kiln_gdn_kernel::gdn_chunk_scan[_supports]` fallback has
+        // been deleted.
+        kiln_nvtx::range!(c"kiln/gdn_chunk_scan_kt");
+        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_strict)
+            .with_context(|| "kt-adapter: gdn_chunk_scan a_strict → kt failed")?;
+        let m_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b_mask)
+            .with_context(|| "kt-adapter: gdn_chunk_scan b_mask → kt failed")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_prime)
+            .with_context(|| "kt-adapter: gdn_chunk_scan v_prime → kt failed")?;
+        let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s_scaled)
+            .with_context(|| "kt-adapter: gdn_chunk_scan q_s_scaled → kt failed")?;
+        let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
+            .with_context(|| "kt-adapter: gdn_chunk_scan beta → kt failed")?;
+        let dlc_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(decay_last_col)
+            .with_context(|| "kt-adapter: gdn_chunk_scan decay_last_col → kt failed")?;
+        if !kiln_gdn_kernel::gdn_chunk_scan_supports_kt(
+            &a_kt, &m_kt, &v_kt, &qs_kt, &beta_kt, &dlc_kt,
         ) {
             return Ok(None);
         }
-        let out = kiln_gdn_kernel::gdn_chunk_scan(
-            a_strict,
-            b_mask,
-            v_prime,
-            q_s_scaled,
-            beta,
-            decay_last_col,
+        let (o0, o1) = kiln_gdn_kernel::gdn_chunk_scan_kt(
+            &a_kt, &m_kt, &v_kt, &qs_kt, &beta_kt, &dlc_kt,
         )
-        .context("gdn_chunk_scan kernel failed")?;
-        Ok(Some(out))
+        .map_err(|e| anyhow::anyhow!("kt gdn_chunk_scan: {e}"))?;
+        let c0 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o0)
+            .with_context(|| "kt-adapter: gdn_chunk_scan o0 → candle failed")?;
+        let c1 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o1)
+            .with_context(|| "kt-adapter: gdn_chunk_scan o1 → candle failed")?;
+        Ok(Some((c0, c1)))
     }
 
     fn gdn_full_chunk_forward(
@@ -1035,91 +981,65 @@ impl BackendRuntime for CudaBackend {
         state: &mut Tensor,
     ) -> Result<Option<Tensor>> {
         let dv_tile = kiln_gdn_kernel::GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE;
-        // Phase 7 opt-in (#1082): when kt-API GDN is on (default ON,
-        // escape hatch `KILN_DISABLE_KT_API_GDN=1`), do the kt-borrow
-        // first and then call the kt-typed `_supports_kt` predicates
-        // (7da2615a) for both the single and multiblock paths. Bit-exact
-        // by construction — the kt-typed predicates mirror the candle
-        // predicates' check chains one-for-one and both bottom out in
-        // the same `kiln_gdn_full_chunk_forward[_multiblock]` FFI
-        // symbols on the success path. State mutation surfaces through
+        // Phase 7 (#1082): kt-typed surface is now the only path,
+        // same closeout pattern as conv1d (2ebcfb08) and marlin
+        // (0841c266). Both kt-typed predicates (`_supports_kt`,
+        // `_multiblock_supports_kt`, 7da2615a) and the
+        // multiblock_kt kernel are the only candle-free wires. The
+        // single-block fall-through still uses the candle-typed
+        // `kiln_gdn_kernel::gdn_full_chunk_forward` because the
+        // kt-typed single-block kernel wire does not exist yet —
+        // see the comment below. State mutation surfaces through
         // the caller's `&mut Tensor` via the shared buffer (conv1d
         // pattern).
-        if self.cuda_use_kt_api_gdn {
-            let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
-                .with_context(|| "kt-adapter: gdn_full_chunk_forward g → kt")?;
-            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-                .with_context(|| "kt-adapter: gdn_full_chunk_forward v → kt")?;
-            let kkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(kkt)
-                .with_context(|| "kt-adapter: gdn_full_chunk_forward kkt → kt")?;
-            let qkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(qkt)
-                .with_context(|| "kt-adapter: gdn_full_chunk_forward qkt → kt")?;
-            let ks_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(ks_entry)
-                .with_context(|| "kt-adapter: gdn_full_chunk_forward ks_entry → kt")?;
-            let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s)
-                .with_context(|| "kt-adapter: gdn_full_chunk_forward q_s → kt")?;
-            let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
-                .with_context(|| "kt-adapter: gdn_full_chunk_forward beta → kt")?;
-            let kt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_t)
-                .with_context(|| "kt-adapter: gdn_full_chunk_forward k_t → kt")?;
-            let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
-                .with_context(|| "kt-adapter: gdn_full_chunk_forward state → kt")?;
-            if !kiln_gdn_kernel::gdn_full_chunk_forward_supports_kt(
-                &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
-            ) {
-                return Ok(None);
-            }
-            if self.gdn_full_chunk_forward_multiblock_enabled
-                && kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_supports_kt(
-                    &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
-                    dv_tile,
-                )
-            {
-                kiln_nvtx::range!(c"kiln/gdn_full_chunk_forward_multiblock_kt");
-                let out_kt = kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_kt(
-                    &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
-                    dv_tile,
-                )
-                .map_err(|e| anyhow::anyhow!("kt gdn_full_chunk_forward_multiblock: {e}"))?;
-                let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                    .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock out → candle")?;
-                CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-                return Ok(Some(out));
-            }
-            // Single-block kt path. The candle path falls back to
-            // `gdn_full_chunk_forward` (not `_multiblock`) when the
-            // multiblock predicate declines; mirror that here. We've
-            // borrowed all tensors as kt and confirmed kt-typed
-            // `_supports_kt` passes, but there is no kt-typed
-            // single-block kernel wire yet — fall back to the candle
-            // dispatch using the original candle `&Tensor` refs we
-            // still hold (the kt borrows are zero-copy adapters over
-            // the same underlying device storage, so the candle
-            // refs remain valid).
-            let out = kiln_gdn_kernel::gdn_full_chunk_forward(
-                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
-            )
-            .context("gdn_full_chunk_forward kernel failed")?;
-            CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-            return Ok(Some(out));
-        }
-        if !kiln_gdn_kernel::gdn_full_chunk_forward_supports(
-            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
+        let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
+            .with_context(|| "kt-adapter: gdn_full_chunk_forward g → kt")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+            .with_context(|| "kt-adapter: gdn_full_chunk_forward v → kt")?;
+        let kkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(kkt)
+            .with_context(|| "kt-adapter: gdn_full_chunk_forward kkt → kt")?;
+        let qkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(qkt)
+            .with_context(|| "kt-adapter: gdn_full_chunk_forward qkt → kt")?;
+        let ks_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(ks_entry)
+            .with_context(|| "kt-adapter: gdn_full_chunk_forward ks_entry → kt")?;
+        let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s)
+            .with_context(|| "kt-adapter: gdn_full_chunk_forward q_s → kt")?;
+        let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
+            .with_context(|| "kt-adapter: gdn_full_chunk_forward beta → kt")?;
+        let kt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_t)
+            .with_context(|| "kt-adapter: gdn_full_chunk_forward k_t → kt")?;
+        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
+            .with_context(|| "kt-adapter: gdn_full_chunk_forward state → kt")?;
+        if !kiln_gdn_kernel::gdn_full_chunk_forward_supports_kt(
+            &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
         ) {
             return Ok(None);
         }
         if self.gdn_full_chunk_forward_multiblock_enabled
-            && kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_supports(
-                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
+            && kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_supports_kt(
+                &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
+                dv_tile,
             )
         {
-            let out = kiln_gdn_kernel::gdn_full_chunk_forward_multiblock(
-                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
+            kiln_nvtx::range!(c"kiln/gdn_full_chunk_forward_multiblock_kt");
+            let out_kt = kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_kt(
+                &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
+                dv_tile,
             )
-            .context("gdn_full_chunk_forward_multiblock kernel failed")?;
+            .map_err(|e| anyhow::anyhow!("kt gdn_full_chunk_forward_multiblock: {e}"))?;
+            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock out → candle")?;
             CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.fetch_add(1, Ordering::Relaxed);
             return Ok(Some(out));
         }
+        // Single-block fall-through. We've borrowed all tensors as kt
+        // and confirmed kt-typed `_supports_kt` passes, but there is
+        // no kt-typed single-block kernel wire yet — fall back to the
+        // candle dispatch using the original candle `&Tensor` refs we
+        // still hold (the kt borrows are zero-copy adapters over the
+        // same underlying device storage, so the candle refs remain
+        // valid). Once a `gdn_full_chunk_forward_kt` lands, this
+        // candle call should be the next thing to migrate.
         let out = kiln_gdn_kernel::gdn_full_chunk_forward(
             g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
         )
@@ -1146,9 +1066,26 @@ impl BackendRuntime for CudaBackend {
         if !self.gdn_decode_fused_enabled {
             return Ok(None);
         }
-        if !kiln_gdn_kernel::gdn_decode_gates_recurrent_supports(
-            q, k, v, a, b, a_log, dt_bias, state, z, weight,
-        ) {
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
+        // same closeout pattern as conv1d (2ebcfb08) and marlin
+        // (0841c266). The candle-typed
+        // `kiln_gdn_kernel::gdn_decode_gates_recurrent[_supports]`
+        // fallback has been deleted; non-bf16 envelopes return
+        // Ok(None) so the caller's split-decode fallback engages.
+        // Production decode for Qwen3.5-4B uses bf16 for q/k/v/a/b/
+        // a_log/dt_bias/state/z and f32 for the rmsnorm weight; the
+        // bf16_kt variant is the matching production hot path.
+        if !(q.dtype() == DType::BF16
+            && k.dtype() == DType::BF16
+            && v.dtype() == DType::BF16
+            && a.dtype() == DType::BF16
+            && b.dtype() == DType::BF16
+            && a_log.dtype() == DType::BF16
+            && dt_bias.dtype() == DType::BF16
+            && state.dtype() == DType::BF16
+            && z.dtype() == DType::BF16
+            && weight.dtype() == DType::F32)
+        {
             tracing::debug!(
                 q_shape = ?q.shape(), q_dtype = ?q.dtype(),
                 k_shape = ?k.shape(), k_dtype = ?k.dtype(),
@@ -1160,95 +1097,64 @@ impl BackendRuntime for CudaBackend {
                 state_shape = ?state.shape(), state_dtype = ?state.dtype(), state_contiguous = state.is_contiguous(),
                 z_shape = ?z.shape(), z_dtype = ?z.dtype(),
                 weight_shape = ?weight.shape(), weight_dtype = ?weight.dtype(),
-                "CUDA gdn_decode_gates_recurrent declined; using split decode path"
+                "CUDA gdn_decode_gates_recurrent declined (non-bf16 envelope); using split decode path"
             );
             return Ok(None);
         }
-        // Phase 7 opt-in (#1082): route through the kt-typed bf16 surface.
-        // Production decode path for Qwen3.5-4B uses bf16 for q/k/v/a/b/a_log/
-        // dt_bias/state/z and f32 for the rmsnorm weight; the bf16_kt variant
-        // is the matching production hot path. Behind KILN_USE_KT_API_GDN gate.
-        if self.cuda_use_kt_api_gdn
-            && q.dtype() == DType::BF16
-            && k.dtype() == DType::BF16
-            && v.dtype() == DType::BF16
-            && a.dtype() == DType::BF16
-            && b.dtype() == DType::BF16
-            && a_log.dtype() == DType::BF16
-            && dt_bias.dtype() == DType::BF16
-            && state.dtype() == DType::BF16
-            && z.dtype() == DType::BF16
-            && weight.dtype() == DType::F32
-        {
-            kiln_nvtx::range!(c"kiln/gdn_decode_gates_recurrent_bf16_kt");
-            // kt_api expects 3D [B, heads, dim] but the candle method
-            // receives 4D [B, 1, heads, dim]. Squeeze the seq_len=1
-            // axis (metadata-only reshape — no copy). Without this the
-            // kt path errors at the very first shape check and the
-            // gate is effectively dead in production. Same latent bug
-            // as the rmsnorm wire fixed in 171020c.
-            let q_3d = q.squeeze(1)
-                .with_context(|| "kt-adapter: gdn_decode_gates q squeeze(1) failed")?;
-            let k_3d = k.squeeze(1)
-                .with_context(|| "kt-adapter: gdn_decode_gates k squeeze(1) failed")?;
-            let v_3d = v.squeeze(1)
-                .with_context(|| "kt-adapter: gdn_decode_gates v squeeze(1) failed")?;
-            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
-                .with_context(|| "kt-adapter: gdn_decode_gates q → kt failed")?;
-            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
-                .with_context(|| "kt-adapter: gdn_decode_gates k → kt failed")?;
-            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
-                .with_context(|| "kt-adapter: gdn_decode_gates v → kt failed")?;
-            let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
-                .with_context(|| "kt-adapter: gdn_decode_gates a → kt failed")?;
-            let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
-                .with_context(|| "kt-adapter: gdn_decode_gates b → kt failed")?;
-            let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_log)
-                .with_context(|| "kt-adapter: gdn_decode_gates a_log → kt failed")?;
-            let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(dt_bias)
-                .with_context(|| "kt-adapter: gdn_decode_gates dt_bias → kt failed")?;
-            let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
-                .with_context(|| "kt-adapter: gdn_decode_gates state → kt failed")?;
-            let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(z)
-                .with_context(|| "kt-adapter: gdn_decode_gates z → kt failed")?;
-            let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
-                .with_context(|| "kt-adapter: gdn_decode_gates weight → kt failed")?;
-            // Phase 7 follow-up (#1082): invariant check that the kt-typed
-            // predicate agrees with the candle predicate that already
-            // gated entry into this block. The shapes seen here are the
-            // *squeezed* 3D q/k/v with the seq_len=1 axis removed,
-            // matching kt_api's expected envelope. A debug_assert keeps
-            // release perf untouched; tests + dev builds catch drift
-            // between the two predicate chains.
-            debug_assert!(
-                kiln_gdn_kernel::gdn_decode_gates_recurrent_supports_kt(
-                    &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
-                ),
-                "kt-typed gdn_decode_gates_recurrent_supports_kt declined for inputs that \
-                 passed candle-typed gdn_decode_gates_recurrent_supports — predicate drift"
-            );
-            let out_kt = kiln_gdn_kernel::gdn_decode_gates_recurrent_bf16_kt(
-                &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
-                eps as f32,
-            )
-            .map_err(|e| anyhow::anyhow!("kt gdn_decode_gates_recurrent: {e}"))?;
-            let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .with_context(|| "kt-adapter: gdn_decode_gates out → candle failed")?;
-            // kt_api allocates a 3D `[B, value_heads, dv]` output (see
-            // crates/kiln-gdn-kernel/src/kt_api.rs:568) but the
-            // BackendRuntime trait + production caller expect 4D
-            // `[B, 1, value_heads, dv]` (see attn_out shape contract at
-            // forward.rs:15595). Unsqueeze the seq_len axis back at
-            // position 1; metadata-only reshape, no copy. (#1082)
-            let out = out_3d
-                .unsqueeze(1)
-                .with_context(|| "kt-adapter: gdn_decode_gates out 3D->4D unsqueeze failed")?;
-            return Ok(Some(out));
+        kiln_nvtx::range!(c"kiln/gdn_decode_gates_recurrent_bf16_kt");
+        // kt_api expects 3D [B, heads, dim] but the candle method
+        // receives 4D [B, 1, heads, dim]. Squeeze the seq_len=1
+        // axis (metadata-only reshape — no copy). Without this the
+        // kt path errors at the very first shape check and the
+        // gate is effectively dead in production. Same latent bug
+        // as the rmsnorm wire fixed in 171020c.
+        let q_3d = q.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_gates q squeeze(1) failed")?;
+        let k_3d = k.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_gates k squeeze(1) failed")?;
+        let v_3d = v.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_gates v squeeze(1) failed")?;
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
+            .with_context(|| "kt-adapter: gdn_decode_gates q → kt failed")?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
+            .with_context(|| "kt-adapter: gdn_decode_gates k → kt failed")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
+            .with_context(|| "kt-adapter: gdn_decode_gates v → kt failed")?;
+        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
+            .with_context(|| "kt-adapter: gdn_decode_gates a → kt failed")?;
+        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
+            .with_context(|| "kt-adapter: gdn_decode_gates b → kt failed")?;
+        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_log)
+            .with_context(|| "kt-adapter: gdn_decode_gates a_log → kt failed")?;
+        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(dt_bias)
+            .with_context(|| "kt-adapter: gdn_decode_gates dt_bias → kt failed")?;
+        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
+            .with_context(|| "kt-adapter: gdn_decode_gates state → kt failed")?;
+        let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(z)
+            .with_context(|| "kt-adapter: gdn_decode_gates z → kt failed")?;
+        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
+            .with_context(|| "kt-adapter: gdn_decode_gates weight → kt failed")?;
+        if !kiln_gdn_kernel::gdn_decode_gates_recurrent_supports_kt(
+            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+        ) {
+            return Ok(None);
         }
-        let out = kiln_gdn_kernel::gdn_decode_gates_recurrent(
-            q, k, v, a, b, a_log, dt_bias, state, z, weight, eps as f32,
+        let out_kt = kiln_gdn_kernel::gdn_decode_gates_recurrent_bf16_kt(
+            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+            eps as f32,
         )
-        .context("gdn_decode_gates_recurrent kernel failed")?;
+        .map_err(|e| anyhow::anyhow!("kt gdn_decode_gates_recurrent: {e}"))?;
+        let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .with_context(|| "kt-adapter: gdn_decode_gates out → candle failed")?;
+        // kt_api allocates a 3D `[B, value_heads, dv]` output (see
+        // crates/kiln-gdn-kernel/src/kt_api.rs:568) but the
+        // BackendRuntime trait + production caller expect 4D
+        // `[B, 1, value_heads, dv]` (see attn_out shape contract at
+        // forward.rs:15595). Unsqueeze the seq_len axis back at
+        // position 1; metadata-only reshape, no copy. (#1082)
+        let out = out_3d
+            .unsqueeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_gates out 3D->4D unsqueeze failed")?;
         Ok(Some(out))
     }
 
@@ -1269,9 +1175,24 @@ impl BackendRuntime for CudaBackend {
         if !self.gdn_decode_qk_norm_recurrent_enabled {
             return Ok(None);
         }
-        if !kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_supports(
-            q, k, v, a, b, a_log, dt_bias, state,
-        ) {
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
+        // same closeout pattern as conv1d (2ebcfb08) and marlin
+        // (0841c266). The candle-typed
+        // `kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent
+        // [_supports]` fallback has been deleted; non-bf16 envelopes
+        // return Ok(None) so the caller's split qk_norm fallback
+        // engages. Production decode for Qwen3.5-4B uses bf16 for all
+        // 8 input tensors; the bf16_kt variant is the matching
+        // production hot path.
+        if !(q.dtype() == DType::BF16
+            && k.dtype() == DType::BF16
+            && v.dtype() == DType::BF16
+            && a.dtype() == DType::BF16
+            && b.dtype() == DType::BF16
+            && a_log.dtype() == DType::BF16
+            && dt_bias.dtype() == DType::BF16
+            && state.dtype() == DType::BF16)
+        {
             tracing::debug!(
                 q_shape = ?q.shape(), q_dtype = ?q.dtype(),
                 k_shape = ?k.shape(), k_dtype = ?k.dtype(),
@@ -1281,95 +1202,58 @@ impl BackendRuntime for CudaBackend {
                 a_log_shape = ?a_log.shape(), a_log_dtype = ?a_log.dtype(),
                 dt_bias_shape = ?dt_bias.shape(), dt_bias_dtype = ?dt_bias.dtype(),
                 state_shape = ?state.shape(), state_dtype = ?state.dtype(), state_contiguous = state.is_contiguous(),
-                "CUDA gdn_decode_qk_norm_gates_recurrent declined; using split qk_norm path"
+                "CUDA gdn_decode_qk_norm_gates_recurrent declined (non-bf16 envelope); using split qk_norm path"
             );
             return Ok(None);
         }
-        // Phase 7 opt-in (#1082): route through the kt-typed bf16 surface.
-        // Production decode path for Qwen3.5-4B uses bf16 for all 8 input
-        // tensors; the bf16_kt variant is the matching production hot path.
-        // Behind KILN_USE_KT_API_GDN gate. Falls through to candle auto-dispatch
-        // for vf32/qf32 variants the bf16_kt does not cover.
-        if self.cuda_use_kt_api_gdn
-            && q.dtype() == DType::BF16
-            && k.dtype() == DType::BF16
-            && v.dtype() == DType::BF16
-            && a.dtype() == DType::BF16
-            && b.dtype() == DType::BF16
-            && a_log.dtype() == DType::BF16
-            && dt_bias.dtype() == DType::BF16
-            && state.dtype() == DType::BF16
-        {
-            kiln_nvtx::range!(c"kiln/gdn_decode_qk_norm_gates_recurrent_bf16_kt");
-            // kt_api expects 3D [B, heads, dim] but the candle method
-            // receives 4D [B, 1, heads, dim]. Squeeze the seq_len=1
-            // axis (metadata-only reshape — no copy). Without this the
-            // kt path errors at the very first shape check and the
-            // gate is effectively dead in production. Same latent bug
-            // as the rmsnorm wire fixed in 171020c.
-            let q_3d = q.squeeze(1)
-                .with_context(|| "kt-adapter: gdn_decode_qk_norm q squeeze(1) failed")?;
-            let k_3d = k.squeeze(1)
-                .with_context(|| "kt-adapter: gdn_decode_qk_norm k squeeze(1) failed")?;
-            let v_3d = v.squeeze(1)
-                .with_context(|| "kt-adapter: gdn_decode_qk_norm v squeeze(1) failed")?;
-            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
-                .with_context(|| "kt-adapter: gdn_decode_qk_norm q → kt failed")?;
-            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
-                .with_context(|| "kt-adapter: gdn_decode_qk_norm k → kt failed")?;
-            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
-                .with_context(|| "kt-adapter: gdn_decode_qk_norm v → kt failed")?;
-            let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
-                .with_context(|| "kt-adapter: gdn_decode_qk_norm a → kt failed")?;
-            let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
-                .with_context(|| "kt-adapter: gdn_decode_qk_norm b → kt failed")?;
-            let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_log)
-                .with_context(|| "kt-adapter: gdn_decode_qk_norm a_log → kt failed")?;
-            let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(dt_bias)
-                .with_context(|| "kt-adapter: gdn_decode_qk_norm dt_bias → kt failed")?;
-            let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
-                .with_context(|| "kt-adapter: gdn_decode_qk_norm state → kt failed")?;
-            // Phase 7 follow-up (#1082): kt-typed predicate invariant check.
-            // See sibling debug_assert! in `gdn_decode_gates_recurrent` for
-            // rationale. The kt predicate mirrors the candle envelope
-            // one-for-one; a drift here means kt_api.rs and lib.rs got
-            // out of sync.
-            debug_assert!(
-                kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_supports_kt(
-                    &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt,
-                ),
-                "kt-typed gdn_decode_qk_norm_gates_recurrent_supports_kt declined for inputs \
-                 that passed candle-typed predicate — predicate drift"
-            );
-            let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_bf16_kt(
-                &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt,
-                q_scale as f32, qk_eps as f32,
-            )
-            .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent: {e}"))?;
-            let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .with_context(|| "kt-adapter: gdn_decode_qk_norm out → candle failed")?;
-            // Same 3D->4D unsqueeze fix as gdn_decode_gates_recurrent
-            // above. The kt_api allocates 3D `[B, value_heads, dv]`
-            // (see crates/kiln-gdn-kernel/src/kt_api.rs) but the trait
-            // contract is 4D `[B, 1, value_heads, dv]`. (#1082)
-            let out = out_3d
-                .unsqueeze(1)
-                .with_context(|| "kt-adapter: gdn_decode_qk_norm out 3D->4D unsqueeze failed")?;
-            return Ok(Some(out));
+        kiln_nvtx::range!(c"kiln/gdn_decode_qk_norm_gates_recurrent_bf16_kt");
+        // kt_api expects 3D [B, heads, dim] but the candle method
+        // receives 4D [B, 1, heads, dim]. Squeeze the seq_len=1
+        // axis (metadata-only reshape — no copy). Without this the
+        // kt path errors at the very first shape check and the
+        // gate is effectively dead in production. Same latent bug
+        // as the rmsnorm wire fixed in 171020c.
+        let q_3d = q.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm q squeeze(1) failed")?;
+        let k_3d = k.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm k squeeze(1) failed")?;
+        let v_3d = v.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm v squeeze(1) failed")?;
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm q → kt failed")?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm k → kt failed")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm v → kt failed")?;
+        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm a → kt failed")?;
+        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm b → kt failed")?;
+        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_log)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm a_log → kt failed")?;
+        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(dt_bias)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm dt_bias → kt failed")?;
+        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm state → kt failed")?;
+        if !kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_supports_kt(
+            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt,
+        ) {
+            return Ok(None);
         }
-        let out = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent(
-            q,
-            k,
-            v,
-            a,
-            b,
-            a_log,
-            dt_bias,
-            state,
-            q_scale as f32,
-            qk_eps as f32,
+        let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_bf16_kt(
+            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt,
+            q_scale as f32, qk_eps as f32,
         )
-        .context("gdn_decode_qk_norm_gates_recurrent kernel failed")?;
+        .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent: {e}"))?;
+        let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm out → candle failed")?;
+        // Same 3D->4D unsqueeze fix as gdn_decode_gates_recurrent
+        // above. The kt_api allocates 3D `[B, value_heads, dv]`
+        // (see crates/kiln-gdn-kernel/src/kt_api.rs) but the trait
+        // contract is 4D `[B, 1, value_heads, dv]`. (#1082)
+        let out = out_3d
+            .unsqueeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm out 3D->4D unsqueeze failed")?;
         Ok(Some(out))
     }
 
@@ -1393,9 +1277,26 @@ impl BackendRuntime for CudaBackend {
         if !self.gdn_decode_qk_norm_recurrent_rmsnorm_enabled {
             return Ok(None);
         }
-        if !kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports(
-            q, k, v, a, b, a_log, dt_bias, state, z, weight,
-        ) {
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
+        // same closeout pattern as conv1d (2ebcfb08) and marlin
+        // (0841c266). The candle-typed
+        // `kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm
+        // [_supports]` fallback has been deleted; non-bf16 envelopes
+        // return Ok(None) so the caller's split gated_norm fallback
+        // engages. Production decode for Qwen3.5-4B uses bf16 for all
+        // 10 input tensors (with F32 weight); the bf16_kt variant is
+        // the matching production hot path.
+        if !(q.dtype() == DType::BF16
+            && k.dtype() == DType::BF16
+            && v.dtype() == DType::BF16
+            && a.dtype() == DType::BF16
+            && b.dtype() == DType::BF16
+            && a_log.dtype() == DType::BF16
+            && dt_bias.dtype() == DType::BF16
+            && state.dtype() == DType::BF16
+            && z.dtype() == DType::BF16
+            && weight.dtype() == DType::F32)
+        {
             tracing::debug!(
                 q_shape = ?q.shape(), q_dtype = ?q.dtype(),
                 k_shape = ?k.shape(), k_dtype = ?k.dtype(),
@@ -1407,101 +1308,61 @@ impl BackendRuntime for CudaBackend {
                 state_shape = ?state.shape(), state_dtype = ?state.dtype(), state_contiguous = state.is_contiguous(),
                 z_shape = ?z.shape(), z_dtype = ?z.dtype(),
                 weight_shape = ?weight.shape(), weight_dtype = ?weight.dtype(),
-                "CUDA gdn_decode_qk_norm_gates_recurrent_rmsnorm declined; using split gated_norm path"
+                "CUDA gdn_decode_qk_norm_gates_recurrent_rmsnorm declined (non-bf16 envelope); using split gated_norm path"
             );
             return Ok(None);
         }
-        // Phase 7 opt-in (#1082): route through the kt-typed bf16 surface.
-        // Production decode path for Qwen3.5-4B uses bf16 for all 10 input
-        // tensors; the bf16_kt variant is the matching production hot
-        // path. Behind KILN_USE_KT_API_GDN gate.
-        if self.cuda_use_kt_api_gdn
-            && q.dtype() == DType::BF16
-            && k.dtype() == DType::BF16
-            && v.dtype() == DType::BF16
-            && a.dtype() == DType::BF16
-            && b.dtype() == DType::BF16
-            && a_log.dtype() == DType::BF16
-            && dt_bias.dtype() == DType::BF16
-            && state.dtype() == DType::BF16
-            && z.dtype() == DType::BF16
-            && weight.dtype() == DType::F32
-        {
-            kiln_nvtx::range!(c"kiln/gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt");
-            // kt_api expects 3D [B, heads, dim] but the candle method
-            // receives 4D [B, 1, heads, dim]. Squeeze the seq_len=1
-            // axis (metadata-only reshape — no copy). Without this the
-            // kt path errors at the very first shape check and the
-            // gate is effectively dead in production.
-            let q_3d = q.squeeze(1)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm q squeeze(1) failed")?;
-            let k_3d = k.squeeze(1)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm k squeeze(1) failed")?;
-            let v_3d = v.squeeze(1)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm v squeeze(1) failed")?;
-            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm q → kt failed")?;
-            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm k → kt failed")?;
-            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm v → kt failed")?;
-            let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm a → kt failed")?;
-            let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm b → kt failed")?;
-            let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_log)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm a_log → kt failed")?;
-            let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(dt_bias)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm dt_bias → kt failed")?;
-            let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm state → kt failed")?;
-            let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(z)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm z → kt failed")?;
-            let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm weight → kt failed")?;
-            // Phase 7 follow-up (#1082): kt-typed predicate invariant check.
-            // The rmsnorm-fused variant composes the base qk_norm predicate
-            // with extra z (BF16) + weight (F32) shape gates; both halves
-            // must agree with the candle predicate.
-            debug_assert!(
-                kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt(
-                    &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
-                ),
-                "kt-typed gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt declined for \
-                 inputs that passed candle-typed predicate — predicate drift"
-            );
-            let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
-                &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
-                q_scale as f32, qk_eps as f32, rms_eps as f32,
-            )
-            .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent_rmsnorm: {e}"))?;
-            let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm out → candle failed")?;
-            // Same 3D->4D unsqueeze fix as the gdn_decode_gates_recurrent
-            // and gdn_decode_qk_norm_gates_recurrent wires above. The
-            // kt_api allocates 3D `[B, value_heads, dv]` but the trait
-            // contract is 4D `[B, 1, value_heads, dv]`. (#1082)
-            let out = out_3d
-                .unsqueeze(1)
-                .with_context(|| "kt-adapter: gdn_decode_rmsnorm out 3D->4D unsqueeze failed")?;
-            return Ok(Some(out));
+        kiln_nvtx::range!(c"kiln/gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt");
+        // kt_api expects 3D [B, heads, dim] but the candle method
+        // receives 4D [B, 1, heads, dim]. Squeeze the seq_len=1
+        // axis (metadata-only reshape — no copy). Without this the
+        // kt path errors at the very first shape check and the
+        // gate is effectively dead in production.
+        let q_3d = q.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm q squeeze(1) failed")?;
+        let k_3d = k.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm k squeeze(1) failed")?;
+        let v_3d = v.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm v squeeze(1) failed")?;
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm q → kt failed")?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm k → kt failed")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm v → kt failed")?;
+        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm a → kt failed")?;
+        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm b → kt failed")?;
+        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_log)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm a_log → kt failed")?;
+        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(dt_bias)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm dt_bias → kt failed")?;
+        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm state → kt failed")?;
+        let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(z)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm z → kt failed")?;
+        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm weight → kt failed")?;
+        if !kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt(
+            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+        ) {
+            return Ok(None);
         }
-        let out = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm(
-            q,
-            k,
-            v,
-            a,
-            b,
-            a_log,
-            dt_bias,
-            state,
-            z,
-            weight,
-            q_scale as f32,
-            qk_eps as f32,
-            rms_eps as f32,
+        let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
+            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+            q_scale as f32, qk_eps as f32, rms_eps as f32,
         )
-        .context("gdn_decode_qk_norm_gates_recurrent_rmsnorm kernel failed")?;
+        .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent_rmsnorm: {e}"))?;
+        let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm out → candle failed")?;
+        // Same 3D->4D unsqueeze fix as the gdn_decode_gates_recurrent
+        // and gdn_decode_qk_norm_gates_recurrent wires above. The
+        // kt_api allocates 3D `[B, value_heads, dv]` but the trait
+        // contract is 4D `[B, 1, value_heads, dv]`. (#1082)
+        let out = out_3d
+            .unsqueeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm out 3D->4D unsqueeze failed")?;
         Ok(Some(out))
     }
 
@@ -1527,85 +1388,65 @@ impl BackendRuntime for CudaBackend {
             );
             return Ok(None);
         }
-        if let Some(reason) = kiln_gdn_kernel::gdn_gates_decline_reason(a, b, a_log, dt_bias) {
-            tracing::debug!(
-                reason,
-                a_shape = ?a.shape(),
-                b_shape = ?b.shape(),
-                a_log_shape = ?a_log.shape(),
-                dt_bias_shape = ?dt_bias.shape(),
-                a_dtype = ?a.dtype(),
-                b_dtype = ?b.dtype(),
-                a_log_dtype = ?a_log.dtype(),
-                dt_bias_dtype = ?dt_bias.dtype(),
-                "CUDA gdn_gates declined; using Candle fallback"
-            );
-            return Ok(None);
-        }
-        // Phase 7 opt-in (#1082): route through the kt-typed bf16 surface.
-        // Production decode path for Qwen3.5-4B uses bf16 for a, b, a_log, dt_bias;
-        // the bf16_kt variant is the matching production hot path. Behind
-        // KILN_USE_KT_API_GDN gate. Falls through to candle for the
-        // mixed-precision variants (f32/f32, f32/bf16 a_log/dt_bias).
-        if self.cuda_use_kt_api_gdn
-            && a.dtype() == DType::BF16
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
+        // same closeout pattern as conv1d (2ebcfb08) and marlin
+        // (0841c266). The candle-typed
+        // `kiln_gdn_kernel::gdn_gates[_decline_reason]` fallback has
+        // been deleted; non-bf16 envelopes (f32/f32, f32/bf16) return
+        // Ok(None) so the caller's candle fallback engages. bf16 was
+        // the only envelope on the production decode/prefill path for
+        // Qwen3.5-4B GDN; the mixed-precision variants are reachable
+        // only through paths not exercised in production.
+        if !(a.dtype() == DType::BF16
             && b.dtype() == DType::BF16
             && a_log.dtype() == DType::BF16
-            && dt_bias.dtype() == DType::BF16
+            && dt_bias.dtype() == DType::BF16)
         {
-            kiln_nvtx::range!(c"kiln/gdn_gates_bf16_kt");
-            // kt_tensor_from_candle_cuda_borrow requires contiguous inputs (see
-            // kiln-kt-bridge::lib.rs: "tensor must be contiguous"). At the
-            // bs>1 / prefill GDN call site, `a` and `b` arrive as
-            // `ab.narrow(2, .., nv)` views on a fused A/B in-proj output,
-            // which are non-contiguous on the last dim. The non-kt
-            // `gdn_gates` path handles this by computing a collapsed
-            // row-stride and falling through to `.contiguous()` on declined
-            // stride; the kt wire is strict, so we make each operand
-            // contiguous here. This is a no-op when the upstream tensor is
-            // already contiguous (the seq_len==1 decode case). a_log and
-            // dt_bias are weight tensors and are already contiguous; the
-            // calls are kept for symmetry / future-proofing.
-            let a_c = a
-                .contiguous()
-                .with_context(|| "kt-adapter: gdn_gates a contiguous failed")?;
-            let b_c = b
-                .contiguous()
-                .with_context(|| "kt-adapter: gdn_gates b contiguous failed")?;
-            let alog_c = a_log
-                .contiguous()
-                .with_context(|| "kt-adapter: gdn_gates a_log contiguous failed")?;
-            let dtb_c = dt_bias
-                .contiguous()
-                .with_context(|| "kt-adapter: gdn_gates dt_bias contiguous failed")?;
-            let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_c)
-                .with_context(|| "kt-adapter: gdn_gates a → kt failed")?;
-            let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_c)
-                .with_context(|| "kt-adapter: gdn_gates b → kt failed")?;
-            let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&alog_c)
-                .with_context(|| "kt-adapter: gdn_gates a_log → kt failed")?;
-            let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
-                .with_context(|| "kt-adapter: gdn_gates dt_bias → kt failed")?;
-            // Phase 7 follow-up (#1082): kt-typed predicate invariant check.
-            // gdn_gates_decline_reason / gdn_gates_supports already gated
-            // entry above; the kt-typed mirror must agree on the same
-            // envelope (nv <= 256, matching shapes, bf16 a/b, etc).
-            debug_assert!(
-                kiln_gdn_kernel::gdn_gates_supports_kt(&a_kt, &b_kt, &alog_kt, &dtb_kt),
-                "kt-typed gdn_gates_supports_kt declined for inputs that passed candle-typed \
-                 gdn_gates_supports — predicate drift"
-            );
-            let (beta_kt, g_kt) =
-                kiln_gdn_kernel::gdn_gates_bf16_kt(&a_kt, &b_kt, &alog_kt, &dtb_kt)
-                    .map_err(|e| anyhow::anyhow!("kt gdn_gates_bf16: {e}"))?;
-            let beta = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&beta_kt)
-                .with_context(|| "kt-adapter: gdn_gates beta → candle failed")?;
-            let g = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&g_kt)
-                .with_context(|| "kt-adapter: gdn_gates g → candle failed")?;
-            return Ok(Some((beta, g)));
+            return Ok(None);
         }
-        let (beta, g) =
-            kiln_gdn_kernel::gdn_gates(a, b, a_log, dt_bias).context("gdn_gates kernel failed")?;
+        kiln_nvtx::range!(c"kiln/gdn_gates_bf16_kt");
+        // kt_tensor_from_candle_cuda_borrow requires contiguous inputs (see
+        // kiln-kt-bridge::lib.rs: "tensor must be contiguous"). At the
+        // bs>1 / prefill GDN call site, `a` and `b` arrive as
+        // `ab.narrow(2, .., nv)` views on a fused A/B in-proj output,
+        // which are non-contiguous on the last dim. The candle path
+        // used to handle this by computing a collapsed row-stride and
+        // falling through to `.contiguous()` on declined stride; with
+        // the candle path now gone, we make each operand contiguous
+        // here unconditionally. This is a no-op when the upstream
+        // tensor is already contiguous (the seq_len==1 decode case).
+        // a_log and dt_bias are weight tensors and are already
+        // contiguous; the calls are kept for symmetry / future-proofing.
+        let a_c = a
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_gates a contiguous failed")?;
+        let b_c = b
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_gates b contiguous failed")?;
+        let alog_c = a_log
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_gates a_log contiguous failed")?;
+        let dtb_c = dt_bias
+            .contiguous()
+            .with_context(|| "kt-adapter: gdn_gates dt_bias contiguous failed")?;
+        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_c)
+            .with_context(|| "kt-adapter: gdn_gates a → kt failed")?;
+        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_c)
+            .with_context(|| "kt-adapter: gdn_gates b → kt failed")?;
+        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&alog_c)
+            .with_context(|| "kt-adapter: gdn_gates a_log → kt failed")?;
+        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
+            .with_context(|| "kt-adapter: gdn_gates dt_bias → kt failed")?;
+        if !kiln_gdn_kernel::gdn_gates_supports_kt(&a_kt, &b_kt, &alog_kt, &dtb_kt) {
+            return Ok(None);
+        }
+        let (beta_kt, g_kt) =
+            kiln_gdn_kernel::gdn_gates_bf16_kt(&a_kt, &b_kt, &alog_kt, &dtb_kt)
+                .map_err(|e| anyhow::anyhow!("kt gdn_gates_bf16: {e}"))?;
+        let beta = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&beta_kt)
+            .with_context(|| "kt-adapter: gdn_gates beta → candle failed")?;
+        let g = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&g_kt)
+            .with_context(|| "kt-adapter: gdn_gates g → candle failed")?;
         Ok(Some((beta, g)))
     }
 
@@ -1784,58 +1625,48 @@ impl BackendRuntime for CudaBackend {
         if !self.gdn_gated_rms_norm_enabled {
             return Ok(None);
         }
-        if !kiln_gdn_kernel::gdn_gated_rms_norm_supports(x, z, weight) {
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
+        // same closeout pattern as conv1d (2ebcfb08) and marlin
+        // (0841c266). The candle-typed `kiln_gdn_kernel::gdn_gated_rms_
+        // norm[_supports]` fallback has been deleted; non-bf16 inputs
+        // (which the kt path declines) return Ok(None) so the caller's
+        // candle fallback engages. bf16 was the only envelope the
+        // candle path could reach in production for Qwen3.5-4B GDN.
+        if !(x.dtype() == DType::BF16
+            && z.dtype() == DType::BF16
+            && weight.dtype() == DType::BF16)
+        {
             return Ok(None);
         }
-        // Phase 7 opt-in (#1082): route through the kt-typed bf16 surface.
-        // gdn_gated_rms_norm_supports already guarantees x/z/weight are BF16
-        // on CUDA with hidden=128; the bf16_kt variant matches the production
-        // hot path. Behind KILN_USE_KT_API_GDN gate.
-        if self.cuda_use_kt_api_gdn
-            && x.dtype() == DType::BF16
-            && z.dtype() == DType::BF16
-            && weight.dtype() == DType::BF16
-        {
-            kiln_nvtx::range!(c"kiln/gdn_gated_rms_norm_bf16_kt");
-            // The kt variant expects rank-2 [rows, hidden]; flatten higher-rank
-            // x/z by folding all leading dims into rows. weight stays [hidden].
-            let x_dims = x.dims();
-            let hidden = *x_dims.last().expect("x has at least one dim (checked by supports)");
-            let rows: usize = x_dims.iter().take(x_dims.len() - 1).product();
-            let x_flat = x
-                .reshape((rows, hidden))
-                .context("kt-adapter: gdn_gated_rms_norm reshape x → [rows, hidden] failed")?;
-            let z_flat = z
-                .reshape((rows, hidden))
-                .context("kt-adapter: gdn_gated_rms_norm reshape z → [rows, hidden] failed")?;
-            let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_flat)
-                .with_context(|| "kt-adapter: gdn_gated_rms_norm x → kt failed")?;
-            let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&z_flat)
-                .with_context(|| "kt-adapter: gdn_gated_rms_norm z → kt failed")?;
-            let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
-                .with_context(|| "kt-adapter: gdn_gated_rms_norm weight → kt failed")?;
-            // Phase 7 follow-up (#1082): kt-typed predicate invariant check.
-            // x/z are reshaped to [rows, hidden] at this point — the kt
-            // predicate accepts any rank as long as the last dim is 128
-            // and weight shape matches. gdn_gated_rms_norm_supports
-            // already gated entry above; this catches kt-vs-candle drift.
-            debug_assert!(
-                kiln_gdn_kernel::gdn_gated_rms_norm_supports_kt(&x_kt, &z_kt, &w_kt),
-                "kt-typed gdn_gated_rms_norm_supports_kt declined for inputs that passed \
-                 candle-typed gdn_gated_rms_norm_supports — predicate drift"
-            );
-            let out_kt =
-                kiln_gdn_kernel::gdn_gated_rms_norm_bf16_kt(&x_kt, &z_kt, &w_kt, eps as f32)
-                    .map_err(|e| anyhow::anyhow!("kt gdn_gated_rms_norm_bf16: {e}"))?;
-            let out_flat = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .with_context(|| "kt-adapter: gdn_gated_rms_norm out → candle failed")?;
-            let out = out_flat
-                .reshape(x_dims)
-                .context("kt-adapter: gdn_gated_rms_norm reshape out → original failed")?;
-            return Ok(Some(out));
+        kiln_nvtx::range!(c"kiln/gdn_gated_rms_norm_bf16_kt");
+        // The kt variant expects rank-2 [rows, hidden]; flatten higher-rank
+        // x/z by folding all leading dims into rows. weight stays [hidden].
+        let x_dims = x.dims();
+        let hidden = *x_dims.last().expect("x has at least one dim (checked by supports_kt)");
+        let rows: usize = x_dims.iter().take(x_dims.len() - 1).product();
+        let x_flat = x
+            .reshape((rows, hidden))
+            .context("kt-adapter: gdn_gated_rms_norm reshape x → [rows, hidden] failed")?;
+        let z_flat = z
+            .reshape((rows, hidden))
+            .context("kt-adapter: gdn_gated_rms_norm reshape z → [rows, hidden] failed")?;
+        let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_flat)
+            .with_context(|| "kt-adapter: gdn_gated_rms_norm x → kt failed")?;
+        let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&z_flat)
+            .with_context(|| "kt-adapter: gdn_gated_rms_norm z → kt failed")?;
+        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
+            .with_context(|| "kt-adapter: gdn_gated_rms_norm weight → kt failed")?;
+        if !kiln_gdn_kernel::gdn_gated_rms_norm_supports_kt(&x_kt, &z_kt, &w_kt) {
+            return Ok(None);
         }
-        let out = kiln_gdn_kernel::gdn_gated_rms_norm(x, z, weight, eps as f32)
-            .context("gdn_gated_rms_norm kernel failed")?;
+        let out_kt =
+            kiln_gdn_kernel::gdn_gated_rms_norm_bf16_kt(&x_kt, &z_kt, &w_kt, eps as f32)
+                .map_err(|e| anyhow::anyhow!("kt gdn_gated_rms_norm_bf16: {e}"))?;
+        let out_flat = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .with_context(|| "kt-adapter: gdn_gated_rms_norm out → candle failed")?;
+        let out = out_flat
+            .reshape(x_dims)
+            .context("kt-adapter: gdn_gated_rms_norm reshape out → original failed")?;
         Ok(Some(out))
     }
 
@@ -1926,7 +1757,6 @@ mod tests {
             gdn_decode_qk_norm_recurrent_enabled: false,
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled: false,
             fused_conv1d_enabled: false,
-            cuda_use_kt_api_gdn: false,
             cuda_use_kt_api_flash_attn: false,
             cuda_use_kt_api_sgd_step: false,
             cuda_use_kt_api_adamw_step: false,
@@ -2297,114 +2127,6 @@ mod tests {
         )?;
 
         assert_eq!(routed.to_vec2::<f32>()?, expected.to_vec2::<f32>()?);
-        Ok(())
-    }
-
-    /// Regression for #1082: the kt-typed `gdn_gates` wire requires
-    /// contiguous inputs (kt_tensor_from_candle_cuda_borrow). At the
-    /// fused-AB in-proj path, `a` and `b` arrive as `ab.narrow(2, 0, nv)`
-    /// / `ab.narrow(2, nv, nv)` views, which are non-contiguous on the last
-    /// dim. The candle fallback `gdn_gates` accepted them via an internal
-    /// `.contiguous()` fallback; the kt wire used to fail with
-    /// "kt-bridge: kt_tensor_from_candle_cuda_borrow: tensor must be
-    /// contiguous".
-    ///
-    /// This test confirms the contiguous precondition violation is fixed:
-    /// the kt path no longer errors at the bridge borrow step for
-    /// narrowed views. The downstream `kiln_gdn_gates_bf16` FFI may
-    /// still surface the documented #1066-class status=500 corruption
-    /// failure (a separate, pre-existing issue, see the
-    /// `bench-results/cuda-graph-status.md` "blocker #2" section), so a
-    /// status=500 here is tolerated as not-a-regression for the scope
-    /// of #1082's contiguous fix. What MUST NOT appear is "tensor must
-    /// be contiguous".
-    #[test]
-    fn cuda_gdn_gates_kt_accepts_narrowed_ab_views() -> Result<()> {
-        let device = match Device::new_cuda(0) {
-            Ok(device) => device,
-            Err(err) => {
-                eprintln!(
-                    "CUDA unavailable, skipping cuda_gdn_gates_kt_accepts_narrowed_ab_views: {err}"
-                );
-                return Ok(());
-            }
-        };
-        let mut backend = CudaBackend::new(device.clone());
-        backend.cuda_use_kt_api_gdn = true;
-        backend.gdn_gates_enabled = true;
-        let nv = 32usize;
-        let batch = 2usize;
-        let seq_len = 5usize;
-        let n = batch * seq_len * nv * 2;
-        let ab_data: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
-        let ab = Tensor::from_slice(&ab_data, (batch, seq_len, nv * 2), &device)?
-            .to_dtype(DType::BF16)?;
-        // Non-contiguous narrowed views on the last dim — the exact
-        // shape the production fused-AB in-proj path produces.
-        let a = ab.narrow(2, 0, nv)?;
-        let b = ab.narrow(2, nv, nv)?;
-        assert!(!a.is_contiguous(), "narrowed `a` should be non-contiguous");
-        assert!(!b.is_contiguous(), "narrowed `b` should be non-contiguous");
-        let a_log = Tensor::from_slice(
-            &(0..nv).map(|i| (i as f32) * 0.04 - 0.5).collect::<Vec<_>>(),
-            (nv,),
-            &device,
-        )?
-        .to_dtype(DType::BF16)?;
-        let dt_bias = Tensor::from_slice(
-            &(0..nv).map(|i| (i as f32) * 0.03 + 0.1).collect::<Vec<_>>(),
-            (nv,),
-            &device,
-        )?
-        .to_dtype(DType::BF16)?;
-
-        // Pre-#1082 fix: this call failed at
-        // "kt-bridge: kt_tensor_from_candle_cuda_borrow: tensor must
-        // be contiguous". Post-fix, the call either succeeds OR hits
-        // the documented #1066-class FFI status=500 — both indicate
-        // the contiguous precondition is now satisfied at the bridge
-        // boundary.
-        match backend.gdn_gates(&a, &b, &a_log, &dt_bias) {
-            Ok(Some((beta_kt, g_kt))) => {
-                backend.cuda_use_kt_api_gdn = false;
-                let (beta_ref, g_ref) = backend
-                    .gdn_gates(&a.contiguous()?, &b.contiguous()?, &a_log, &dt_bias)?
-                    .expect("candle gdn_gates fallback should engage");
-                let beta_diff =
-                    (beta_kt.to_dtype(DType::F32)? - beta_ref.to_dtype(DType::F32)?)?
-                        .abs()?
-                        .flatten_all()?
-                        .max(0)?
-                        .to_scalar::<f32>()?;
-                let g_diff = (g_kt.to_dtype(DType::F32)? - g_ref.to_dtype(DType::F32)?)?
-                    .abs()?
-                    .flatten_all()?
-                    .max(0)?
-                    .to_scalar::<f32>()?;
-                assert_eq!(
-                    beta_diff, 0.0,
-                    "kt vs candle gdn_gates beta max_abs_diff={beta_diff:e}"
-                );
-                assert_eq!(
-                    g_diff, 0.0,
-                    "kt vs candle gdn_gates g max_abs_diff={g_diff:e}"
-                );
-            }
-            Ok(None) => {
-                panic!("kt-API gdn_gates declined dispatch unexpectedly");
-            }
-            Err(err) => {
-                let msg = format!("{err:?}");
-                assert!(
-                    !msg.contains("tensor must be contiguous"),
-                    "regression #1082 contiguous precondition still violated: {msg}"
-                );
-                eprintln!(
-                    "kt gdn_gates surfaced non-regression downstream error \
-                     (likely #1066-class FFI status=500): {msg}"
-                );
-            }
-        }
         Ok(())
     }
 }
