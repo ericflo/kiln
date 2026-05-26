@@ -4612,14 +4612,28 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
             BackpropOp::none(),
             false,
         );
-        let (out, _softmax_lse) =
-            kiln_flash_attn::flash_attn_fwd(&q, &k, &v, self.softmax_scale, self.causal).map_err(
-                |e| {
-                    candle_core::Error::Msg(format!(
-                        "CudaFlashAttentionTrainingBf16 CUDA fwd: {e:?}"
-                    ))
-                },
-            )?;
+        // Phase 7 (#1082): kt-only forward shell. Same FFI symbol as the
+        // previous candle wrapper; output is copied back to candle storage
+        // because CustomOp3 still returns candle storage.
+        kiln_nvtx::range!(c"kiln/flash_attn_fwd_kt");
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q)
+            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_fwd q: {e}")))?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k)
+            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_fwd k: {e}")))?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v)
+            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_fwd v: {e}")))?;
+        let (out_kt, _softmax_lse_kt) = kiln_flash_attn::flash_attn_fwd_kt(
+            &q_kt,
+            &k_kt,
+            &v_kt,
+            self.softmax_scale,
+            self.causal,
+        )
+        .map_err(|e| {
+            candle_core::Error::Msg(format!("CudaFlashAttentionTrainingBf16 CUDA fwd kt: {e:?}"))
+        })?;
+        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_fwd out: {e}")))?;
         let out_shape = Shape::from(out.dims().to_vec());
         let (storage, layout) = out.storage_and_layout();
         let storage = storage.try_clone(layout)?;
@@ -4637,15 +4651,32 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
         res: &Tensor,
         grad_y: &Tensor,
     ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
-        let (recomputed_out, softmax_lse) =
-            kiln_flash_attn::flash_attn_fwd(q, k, v, self.softmax_scale, self.causal).map_err(
-                |e| {
-                    candle_core::Error::Msg(format!(
-                        "CudaFlashAttentionTrainingBf16 bwd recompute: {e:?}"
-                    ))
-                },
-            )?;
-        drop(recomputed_out);
+        // Phase 7 (#1082): kt-only recompute shell. We only need
+        // softmax_lse for backward; the recomputed output can drop after
+        // the kt call returns.
+        kiln_nvtx::range!(c"kiln/flash_attn_fwd_recompute_kt");
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
+            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_fwd_recompute q: {e}")))?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
+            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_fwd_recompute k: {e}")))?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_fwd_recompute v: {e}")))?;
+        let (_recomputed_out_kt, softmax_lse_kt) = kiln_flash_attn::flash_attn_fwd_kt(
+            &q_kt,
+            &k_kt,
+            &v_kt,
+            self.softmax_scale,
+            self.causal,
+        )
+        .map_err(|e| {
+            candle_core::Error::Msg(format!(
+                "CudaFlashAttentionTrainingBf16 bwd recompute kt: {e:?}"
+            ))
+        })?;
+        let softmax_lse = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&softmax_lse_kt)
+            .map_err(|e| {
+                candle_core::Error::Msg(format!("kt-adapter: fa_fwd_recompute lse: {e}"))
+            })?;
         let dout = if grad_y.dtype() == DType::BF16 {
             grad_y.clone()
         } else {

@@ -570,7 +570,7 @@ Updated follow-up steps:
 5. Drop `candle-core` from Cargo.toml (substrate-blocked on the
    same kt-bridge cleanup as conv1d/marlin).
 
-### kiln-flash-attn — **BLOCKED** (5 candle-typed callers in kiln-model)
+### kiln-flash-attn — **BLOCKED** (3 candle-typed fallback callers in kiln-model)
 
 Candle-typed entry points still reachable in production:
 
@@ -582,10 +582,6 @@ Candle-typed entry points still reachable in production:
   / `KILN_USE_KT_API_ALL`; the candle calls are the fallback path for
   the legacy `PagedKvCache`.
 
-**`crates/kiln-model/src/forward.rs`** (2 sites):
-- `flash_attn_fwd` in `CudaFlashAttentionTrainingBf16::cuda_fwd`
-- `flash_attn_fwd` recompute in `CudaFlashAttentionTrainingBf16::bwd`
-
 Recently closed in the source tree:
 - `crates/kiln-model/src/backend/cuda.rs` routes FlashAttention forward,
   paged decode, dyn-seqlen paged decode, and graph-output dyn-seqlen
@@ -593,16 +589,13 @@ Recently closed in the source tree:
 - `crates/kiln-model/src/cuda_train.rs` routes SFT/GRPO prefill
   FlashAttention forward and backward through kt wrappers.
 - `crates/kiln-model/src/forward.rs` routes `CudaFlashAttentionTrainingBf16`
-  backward through `flash_attn_bwd_kt` and collapses expanded GQA dk/dv
-  back to heads_kv before returning gradients.
+  forward, backward recompute, and backward through kt wrappers; backward
+  collapses expanded GQA dk/dv back to heads_kv before returning gradients.
 
 Follow-up steps (not done in this PR):
-1. Migrate the two `CudaFlashAttentionTrainingBf16` `flash_attn_fwd`
-   calls to kt. The backward recompute still needs softmax_lse, so keep
-   output/lse lifetime explicit.
-2. Complete the PagedKvCacheKt migration so `paged_kv_cache.rs` can be
+1. Complete the PagedKvCacheKt migration so `paged_kv_cache.rs` can be
    removed and the 3 `paged_kv_write_*` candle entries with it.
-3. Delete candle surface from `lib.rs`.
+2. Delete candle surface from `lib.rs`.
 
 ## Audit summary
 
