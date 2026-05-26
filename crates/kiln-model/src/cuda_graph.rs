@@ -158,16 +158,28 @@ impl CudaGraphKey {
 /// Read the `KILN_CUDA_GRAPHS_BATCHED` env var.
 ///
 /// Two-stage gating: `KILN_CUDA_GRAPHS=true` enables the (existing,
-/// stable) bs=1 capture/replay path; `KILN_CUDA_GRAPHS_BATCHED=1`
-/// additionally opts into the (in-development) bs>1 capture/replay
-/// path. Both must hold for batched graphs to engage; either being
-/// off sends the bs>1 caller down the eager batched path. Defaults
-/// to off until the batched implementation is fully validated.
+/// stable) bs=1 capture/replay path; `KILN_CUDA_GRAPHS_BATCHED`
+/// additionally engages the bs>1 capture/replay path. Both must
+/// hold for batched graphs to engage; either being off sends the
+/// bs>1 caller down the eager batched path.
+///
+/// **Default flipped ON (2026-05-26)** post end-to-end
+/// `compute-sanitizer memcheck` validation on A6000 at HEAD
+/// `a2cb9edb`. Live driver runs clean (decode 74.4 tok/s, mean
+/// ITL 13.45ms, peak VRAM 11.2 GB on Qwen3.5-4B paged decode at
+/// batches 1/4/8/16) AND sanitizer reports `========= ERROR
+/// SUMMARY: 0 errors` under the full live-driver path with
+/// `KILN_CUDA_GRAPHS_BATCHED=1 KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1`.
+/// See `bench-results/cuda-graph-status.md` "Phase 5 sanitizer
+/// sweep" section for the validation trail.
+///
+/// Set `KILN_CUDA_GRAPHS_BATCHED=0` (or `false`, `no`, `off`) to
+/// opt out (escape hatch — reverts to the eager batched path).
 #[cfg(feature = "cuda")]
 fn batched_graph_enabled() -> bool {
     std::env::var("KILN_CUDA_GRAPHS_BATCHED")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// Cache key for the (planned, not-yet-wired) batched (`bs > 1`) decode

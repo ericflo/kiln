@@ -31265,16 +31265,23 @@ mod tests {
 
 /// Read the `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED` env var.
 ///
-/// When set to `1`/`true`/`yes`/`on`, the bs>1 paged-decode CUDA-graph
-/// path uses the fused batched-slot KV writer kernel
+/// When enabled, the bs>1 paged-decode CUDA-graph path uses the
+/// fused batched-slot KV writer kernel
 /// (`PagedKvCache::write_token_major_native_batch_graph_slot`) so the
 /// per-row destination slots are read from a device tensor at replay
 /// time instead of being baked into the captured kernel args.
 /// Closes suspect 1 in `bench-results/cuda-graph-bs2-secondary-audit.md`
-/// for #1082. Defaults to off until validation closes.
+/// for #1082.
+///
+/// **Default flipped ON (2026-05-26)** alongside the sibling
+/// `KILN_CUDA_GRAPHS_BATCHED` flip — same end-to-end
+/// `compute-sanitizer memcheck` validation run on A6000 at HEAD
+/// `a2cb9edb`. Both flags active under the validated configuration.
+/// Set `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=0` (or `false`, `no`,
+/// `off`) to opt out.
 #[cfg(feature = "cuda")]
 fn kv_fused_batched_enabled() -> bool {
     std::env::var("KILN_CUDA_GRAPHS_BATCHED_KV_FUSED")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
