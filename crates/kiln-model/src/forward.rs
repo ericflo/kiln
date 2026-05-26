@@ -17610,8 +17610,13 @@ impl CachedPagedDecodeMeta {
     /// Shape contract (the caller is responsible for upholding it):
     ///   * `stable_block_table_gpu` must be `[batch, max_blocks_per_seq]` u32.
     ///   * `stable_seqused_k_gpu` must be `[batch]` i32.
-    /// where `max_blocks_per_seq = ceil(max_seqlen_k / paged_cache.block_size()).max(1)`
-    /// and `max_seqlen_k = max(start_positions) + 1`.
+    /// where `max_blocks_per_seq = (max_seqlen_k / 128) * (128 / paged_cache.block_size())`
+    /// and `max_seqlen_k = ((max(start_positions) + 1).div_ceil(128)) * 128` —
+    /// the K/V chunk-bucketed value, identical to
+    /// `CudaBatchedGraphKey::new`'s formula in `cuda_graph.rs`. The bucket
+    /// ensures one captured graph can serve every decode step within
+    /// the bucket without re-capture. The exact per-row sequence length
+    /// goes into `seqused_k_tensor` row-by-row, not into this field.
     pub fn build_with_stable_buffers(
         paged_cache: &PagedKvCache,
         block_tables: &[&BlockTable],
@@ -17646,20 +17651,40 @@ impl CachedPagedDecodeMeta {
             .min()
             .context("CachedPagedDecodeMeta requires non-empty start_positions")?;
         let uniform_start_pos = max_start_pos == min_start_pos;
-        let max_seqlen_k = max_start_pos + 1;
+        let actual_max_seqlen_k = max_start_pos + 1;
 
         #[cfg(feature = "cuda")]
         let page_block_size =
             try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
         #[cfg(not(feature = "cuda"))]
         let page_block_size = paged_cache.block_size();
-        let max_blocks_per_seq =
-            ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
+
+        // #1082 Phase 5 graph-capture fix (2026-05-26): use the
+        // *bucketed* `max_seqlen_k` and the matching bucketed
+        // `max_blocks_per_seq` here — same formulas as
+        // `CudaBatchedGraphKey::new` (`cuda_graph.rs:~240-243`) and
+        // `CapturedBatchedDecodeGraph::padded_block_table`
+        // (`cuda_graph.rs:~1748`). Earlier this function used an
+        // exact ceil on `max_start_pos + 1`, which mismatched the
+        // bucketed stable buffer shape (`[batch, bucket]`) on every
+        // step except the final one of each 128-token bucket. The
+        // resulting `anyhow::ensure!` failure at the shape assert
+        // below was silently swallowed by `cuda_graph.rs:1617`
+        // (`.context("batched forward failed during graph capture")`),
+        // causing every concurrent decode request ≥2 to fall back to
+        // eager and corrupt the CUDA context. Surfaced by the
+        // diagnostic bench dispatched after 909e2e61 added
+        // `{e:#}` formatting to the swallowed warn line.
+        let max_seqlen_k = actual_max_seqlen_k.div_ceil(128) * 128;
+        let pages_per_chunk = 128 / page_block_size;
+        let max_blocks_per_seq = ((max_seqlen_k / 128) * pages_per_chunk).max(1);
 
         // Verify per-row block-table coverage matches the regular build path
         // even though we don't materialize the device tensors here. This
         // catches inconsistent block_tables / start_positions before they
-        // reach the captured kernel.
+        // reach the captured kernel. Use the *actual* per-row seqlen, not
+        // the bucketed one — block table allocation is per-row by the
+        // scheduler, which doesn't pre-allocate to the bucket boundary.
         for (row_idx, bt) in block_tables.iter().enumerate() {
             let row_seqlen = start_positions[row_idx] + 1;
             let row_blocks = bt.blocks.as_slice();
@@ -17673,11 +17698,12 @@ impl CachedPagedDecodeMeta {
 
         // Validate the stable buffer shapes match what the captured kernels
         // expect. A shape mismatch here would silently corrupt the captured
-        // launch.
+        // launch — and is exactly what was rejecting every bs≥2 step prior
+        // to the bucketed-formula fix above.
         let block_table_dims = stable_block_table_gpu.dims();
         anyhow::ensure!(
             block_table_dims == [batch, max_blocks_per_seq],
-            "CachedPagedDecodeMeta stable block_table shape mismatch: got {:?}, expected [{batch}, {max_blocks_per_seq}]",
+            "CachedPagedDecodeMeta stable block_table shape mismatch: got {:?}, expected [{batch}, {max_blocks_per_seq}] (max_seqlen_k bucketed to {max_seqlen_k} from actual {actual_max_seqlen_k})",
             block_table_dims,
         );
         let seqused_k_dims = stable_seqused_k_gpu.dims();
@@ -17689,10 +17715,14 @@ impl CachedPagedDecodeMeta {
 
         let strict_start_slots: Option<Vec<u32>> = if uniform_start_pos {
             let live_window_starts = vec![0usize; batch];
+            // Use the *actual* sequence length here — `contiguous_slot_run_starts`
+            // walks the cache to verify the slots are filled up to `len`. The
+            // bucketed value would ask about slots beyond the current decode
+            // position that haven't been written yet.
             match paged_cache.contiguous_slot_run_starts(
                 block_tables,
                 &live_window_starts,
-                max_seqlen_k,
+                actual_max_seqlen_k,
             ) {
                 Some(slots) => {
                     let v: Result<Vec<u32>> = slots
@@ -17714,6 +17744,10 @@ impl CachedPagedDecodeMeta {
         Ok(Self {
             block_table_tensor: stable_block_table_gpu.clone(),
             seqused_k_tensor: stable_seqused_k_gpu.clone(),
+            // Bucketed value matches the captured graph's stable
+            // buffer shape (so downstream kernels read a consistent
+            // upper bound). Per-row sequence length comes from
+            // `seqused_k_tensor`, not from this field.
             max_seqlen_k,
             max_blocks_per_seq,
             uniform_start_pos,
