@@ -128,6 +128,7 @@ fn build_cuda() {
     build.file(csrc_dir.join("scan_axis.cu"));
     build.file(csrc_dir.join("lerp.cu"));
     build.file(csrc_dir.join("fp8.cu"));
+    build.file(csrc_dir.join("is_finite_reduce.cu"));
     build.compile("kiln_tensor_cuda_ops");
 
     println!(
