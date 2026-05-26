@@ -1558,8 +1558,17 @@ pub fn silu_inplace_save_sigmoid_f32_kt(
             sigmoid_out.shape(),
         )));
     }
-    let elems = input_out.element_count() as i64;
-    // Both buffers are mutated in place; caller passes Owned for both.
+    let elem_count = input_out.element_count();
+    if elem_count > i64::MAX as usize {
+        return Err(RmsNormError::Msg(
+            "kt-silu-save: element count exceeds i64 kernel envelope".to_string(),
+        ));
+    }
+    if elem_count == 0 {
+        return Ok(());
+    }
+    let elems = elem_count as i64;
+    // Both buffers are mutated in place through their CUDA storage.
     let i_ptr = kiln_kt_bridge::cuda_input_device_ptr(input_out, KtDType::F32, "input_out")?;
     let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(sigmoid_out, KtDType::F32, "sigmoid_out")?;
     let (i_st, _) = cuda_storage_and_byte_offset(input_out, KtDType::F32, "input_out")?;
@@ -2294,6 +2303,62 @@ mod kt_optimizer_step_regression {
                     "dtype={dtype:?} {name} kt vs candle AdamW max_abs_diff={diff:e}"
                 );
             }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod kt_silu_save_sigmoid_regression {
+    //! Regression test for #1082: cuda training now uses the kt shell for
+    //! in-place SiLU while keeping the saved sigmoid buffer contract.
+    use super::*;
+    use crate::silu_inplace_save_sigmoid_f32;
+    use candle_core::{DType, Device, Tensor};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn silu_inplace_save_sigmoid_kt_matches_candle() -> TestResult {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping silu_inplace_save_sigmoid_kt_matches_candle: {err}"
+                );
+                return Ok(());
+            }
+        };
+
+        let data = [-3.0f32, -1.0, -0.125, 0.0, 0.5, 2.0, 4.0, 8.0];
+        let candle_input = Tensor::from_vec(data.to_vec(), (data.len(),), &device)?;
+        let kt_input = Tensor::from_vec(data.to_vec(), (data.len(),), &device)?;
+        let (_candle_out, candle_sigmoid) = silu_inplace_save_sigmoid_f32(&candle_input)?;
+
+        let kt_sigmoid = unsafe {
+            Tensor::empty(kt_input.shape().clone(), DType::F32, kt_input.device())?
+        };
+        let input_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&kt_input)?;
+        let sigmoid_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&kt_sigmoid)?;
+        silu_inplace_save_sigmoid_f32_kt(&input_kt, &sigmoid_kt)?;
+
+        for (name, candle, kt) in [
+            ("output", &candle_input, &kt_input),
+            ("sigmoid", &candle_sigmoid, &kt_sigmoid),
+        ] {
+            let diff = {
+                let candle_f32 = candle.to_dtype(DType::F32)?;
+                let kt_f32 = kt.to_dtype(DType::F32)?;
+                (&candle_f32 - &kt_f32)?
+                    .abs()?
+                    .flatten_all()?
+                    .max(0)?
+                    .to_scalar::<f32>()?
+            };
+            assert!(
+                diff <= 1e-6,
+                "{name} kt vs candle silu-save-sigmoid max_abs_diff={diff:e}"
+            );
         }
         Ok(())
     }

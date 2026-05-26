@@ -42,28 +42,6 @@ fn cuda_train_use_kt_api_lora_add_inplace() -> bool {
     })
 }
 
-/// Phase 7 opt-in (#1082): when `KILN_USE_KT_API_SILU_SAVE_SIGMOID=1`
-/// (or `KILN_USE_KT_API_ALL=1`) is set, route the in-place fused SiLU
-/// (with saved sigmoid) dispatched from `cuda_silu_inplace` through
-/// the kt-typed surface (`silu_inplace_save_sigmoid_f32_kt`) instead
-/// of the candle-typed `kiln_rmsnorm_kernel::silu_inplace_save_sigmoid_f32`.
-/// Default off. Bit-exact by construction — both paths bottom out in
-/// the same `kiln_silu_inplace_save_sigmoid_f32` FFI symbol. The
-/// candle path allocates the sigmoid output internally; the kt path
-/// requires the caller to pre-allocate the sigmoid buffer and pass
-/// both `input_out` and `sigmoid_out` as kt borrows. The pre-allocation
-/// uses the same `Tensor::empty(shape, F32, device)` call the candle
-/// path uses internally, so the resulting `Tensor` is identical in
-/// shape, dtype, device, and uninitialized memory contract.
-fn cuda_train_use_kt_api_silu_save_sigmoid() -> bool {
-    use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_KT_API_SILU_SAVE_SIGMOID").is_ok()
-            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
-    })
-}
-
 /// Phase 7 opt-in (#1082): when `KILN_USE_KT_API_FLASH_ATTN_BWD=1`
 /// (or `KILN_USE_KT_API_ALL=1`) is set, route the SFT/GRPO training
 /// backward dispatched from `FlashAttnPrefillCausalBackward::backward`
@@ -2649,45 +2627,34 @@ pub fn cuda_silu_inplace(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
         "cuda_silu_inplace: expected F32 input, got {:?}",
         input.dtype()
     );
-    // Phase 7 opt-in (#1082): when `KILN_USE_KT_API_SILU_SAVE_SIGMOID=1`
-    // (or `KILN_USE_KT_API_ALL=1`) is set, route through the kt-typed
-    // surface. Bit-exact by construction — both paths bottom out in the
-    // same `kiln_silu_inplace_save_sigmoid_f32` FFI symbol; the in-place
-    // mutation of `input` and the sigmoid write surface via the zero-copy
-    // `kt_tensor_from_candle_cuda_borrow` adapter. The candle path
-    // internally allocates the sigmoid tensor with the same shape/dtype/
-    // device contract we replicate here at the caller.
-    let (out, sigmoid) = if cuda_train_use_kt_api_silu_save_sigmoid() {
-        kiln_nvtx::range!(c"kiln/cuda_train/silu_save_sigmoid_kt");
-        let input_tensor = input.as_tensor();
-        if !input_tensor.is_contiguous() {
-            anyhow::bail!("cuda_silu_inplace kt: input must be contiguous");
-        }
-        // Pre-allocate the sigmoid output buffer with the same shape /
-        // dtype / device contract the candle path uses internally.
-        let sigmoid = unsafe {
-            candle_core::Tensor::empty(
-                input_tensor.shape().clone(),
-                DType::F32,
-                input_tensor.device(),
-            )
-        }
-        .context("cuda_silu_inplace kt: alloc sigmoid tensor")?;
-        // Zero-element fast path mirrors the candle implementation —
-        // skip the FFI launch entirely.
-        if input_tensor.elem_count() != 0 {
-            let input_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(input_tensor)
-                .context("cuda_silu_inplace kt: borrow input -> kt")?;
-            let sigmoid_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&sigmoid)
-                .context("cuda_silu_inplace kt: borrow sigmoid -> kt")?;
-            kiln_rmsnorm_kernel::silu_inplace_save_sigmoid_f32_kt(&input_kt, &sigmoid_kt)
-                .map_err(|e| anyhow::anyhow!("cuda_silu_inplace kt: silu_inplace_save_sigmoid_f32_kt: {e}"))?;
-        }
-        (input_tensor.clone(), sigmoid)
-    } else {
-        kiln_rmsnorm_kernel::silu_inplace_save_sigmoid_f32(input.as_tensor())
-            .context("cuda_silu_inplace: fused in-place SiLU")?
-    };
+    // Phase 7 (#1082): kt-only. Bit-exact with the previous candle
+    // shell because both paths call the same FFI symbol. The candle
+    // shell allocated this sigmoid buffer internally; the kt shell
+    // takes caller-owned output explicitly.
+    kiln_nvtx::range!(c"kiln/cuda_train/silu_save_sigmoid_kt");
+    let input_tensor = input.as_tensor();
+    if !input_tensor.is_contiguous() {
+        anyhow::bail!("cuda_silu_inplace kt: input must be contiguous");
+    }
+    let sigmoid = unsafe {
+        candle_core::Tensor::empty(
+            input_tensor.shape().clone(),
+            DType::F32,
+            input_tensor.device(),
+        )
+    }
+    .context("cuda_silu_inplace kt: alloc sigmoid tensor")?;
+    if input_tensor.elem_count() != 0 {
+        let input_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(input_tensor)
+            .context("cuda_silu_inplace kt: borrow input -> kt")?;
+        let sigmoid_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&sigmoid)
+            .context("cuda_silu_inplace kt: borrow sigmoid -> kt")?;
+        kiln_rmsnorm_kernel::silu_inplace_save_sigmoid_f32_kt(&input_kt, &sigmoid_kt)
+            .map_err(|e| {
+                anyhow::anyhow!("cuda_silu_inplace kt: silu_inplace_save_sigmoid_f32_kt: {e}")
+            })?;
+    }
+    let out = input_tensor.clone();
     let needs_grad =
         input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
     let output_for_backward = CudaTrainTensor::new(out.clone())?;
@@ -7357,6 +7324,52 @@ mod tests {
             assert!(
                 (actual - expected).abs() < 1e-5,
                 "silu grad mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_silu_inplace_backward_matches_cpu_reference() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_silu_inplace backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let data = vec![-1.0f32, 0.0, 2.0];
+        let param_tensor = Tensor::new(data.clone(), &device)?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let silu = cuda_silu_inplace(&param)?;
+        let loss = cuda_sum_all(&silu)?;
+
+        let mut expected_out = Vec::new();
+        let mut expected_grad = Vec::new();
+        for x in data {
+            let sigmoid = 1.0 / (1.0 + (-x).exp());
+            expected_out.push(x * sigmoid);
+            expected_grad.push(sigmoid * (1.0 + x * (1.0 - sigmoid)));
+        }
+
+        let actual_out = silu.to_vec_f32()?;
+        for (idx, (actual, expected)) in actual_out.iter().zip(expected_out.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "silu_inplace output mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        let expected_loss: f32 = expected_out.iter().sum();
+        assert!((loss.to_vec_f32()?[0] - expected_loss).abs() < 1e-5);
+
+        let grads = cuda_backward(&loss)?;
+        let actual_grad = grads.get(param_id).expect("param grad").to_vec_f32()?;
+        for (idx, (actual, expected)) in actual_grad.iter().zip(expected_grad.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "silu_inplace grad mismatch at {idx}: actual={actual} expected={expected}"
             );
         }
         Ok(())
