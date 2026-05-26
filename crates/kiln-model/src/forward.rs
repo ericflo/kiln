@@ -225,11 +225,11 @@ fn cuda_use_kt_api_argmax() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: l2-normalize (last-axis) through the kt-API +
-/// adapters. Set `KILN_USE_KT_API_L2_NORMALIZE=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
-/// [`l2_normalize`]'s F32 `x / sqrt(sum(x^2) + eps)` composite
-/// through `kiln_tensor::cuda_l2norm_last_axis`. Distinct from the
+/// Phase 7 default-on (#1082): l2-normalize (last-axis) through the
+/// kt-API + adapters. Routes [`l2_normalize`]'s F32
+/// `x / sqrt(sum(x^2) + eps)` composite through
+/// `kiln_tensor::cuda_l2norm_last_axis`. Escape hatch:
+/// `KILN_DISABLE_KT_API_L2_NORMALIZE=1`. Distinct from the
 /// existing `KILN_USE_KT_API_L2_QK_NORM` gate which targets the
 /// *fused* GDN q+k variant (`fused_l2_qk_norm`) — this one
 /// migrates the *non-fused* single-tensor primitive, which is also
@@ -237,7 +237,8 @@ fn cuda_use_kt_api_argmax() -> bool {
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_l2_normalize() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_L2_NORMALIZE").is_ok());
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_L2_NORMALIZE").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -11610,13 +11611,11 @@ fn lm_head_weighted_prep_argmax(
 /// L2 normalize the last dimension: x / sqrt(sum(x^2) + eps).
 /// Returns result in F32 regardless of input dtype.
 ///
-/// Phase 7 (#1082): when `KILN_USE_KT_API_L2_NORMALIZE=1` (or
-/// `KILN_USE_KT_API_ALL=1`) is set AND the (F32-promoted) input is
-/// a contiguous CUDA tensor, route through
+/// Phase 7 (#1082): by default, when the (F32-promoted) input is a
+/// contiguous CUDA tensor, route through
 /// `kiln_tensor::cuda_l2norm_last_axis` via the kt-bridge borrow
-/// adapter. Falls through to the portable candle composite when
-/// any precondition fails so behavior is identical with the gate
-/// off.
+/// adapter. Falls through to the portable candle composite when the
+/// default-on kt route is disabled or any precondition fails.
 fn l2_normalize(x: &Tensor) -> Result<Tensor> {
     let x_f32 = x.to_dtype(DType::F32)?;
     #[cfg(feature = "cuda")]
@@ -24079,6 +24078,50 @@ mod tests {
                 assert!(
                     (got[idx] - expected).abs() < 2e-5,
                     "softmax mismatch at row={row_idx} col={col_idx}: \
+                     actual={} expected={expected}",
+                    got[idx]
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_cuda_l2_normalize_kt_default_matches_host_formula() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!(
+                "CUDA unavailable, skipping test_cuda_l2_normalize_kt_default_matches_host_formula"
+            );
+            return Ok(());
+        };
+        let data = [3.0_f32, 4.0, 0.0, -2.0, 1.0, 2.0];
+        let x = Tensor::from_slice(&data, (2usize, 3usize), &device)?.contiguous()?;
+        let x_f32 = x.to_dtype(DType::F32)?;
+        let direct = try_kt_l2_normalize(&x_f32, 1e-6)?
+            .context("expected CUDA kt l2_normalize helper to accept contiguous F32 input")?;
+        let out = l2_normalize(&x)?;
+        device.synchronize()?;
+
+        let direct_vals = direct.flatten_all()?.to_vec1::<f32>()?;
+        let got = out.flatten_all()?.to_vec1::<f32>()?;
+        for (idx, (&actual, &direct_actual)) in got.iter().zip(direct_vals.iter()).enumerate() {
+            assert!(
+                (actual - direct_actual).abs() < 1e-7,
+                "default l2_normalize path diverged from direct kt helper at {idx}: \
+                 actual={actual} direct={direct_actual}"
+            );
+        }
+
+        for row_idx in 0..2 {
+            let row = &data[row_idx * 3..(row_idx + 1) * 3];
+            let norm = (row.iter().map(|v| v * v).sum::<f32>() + 1e-6).sqrt();
+            for col_idx in 0..3 {
+                let idx = row_idx * 3 + col_idx;
+                let expected = data[idx] / norm;
+                assert!(
+                    (got[idx] - expected).abs() < 2e-5,
+                    "l2_normalize mismatch at row={row_idx} col={col_idx}: \
                      actual={} expected={expected}",
                     got[idx]
                 );
