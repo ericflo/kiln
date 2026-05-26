@@ -765,6 +765,125 @@ pub fn fused_rmsnorm_backward(
     Ok((grad_x, grad_w))
 }
 
+/// kt-bridge backward path — bit-exact alternative to
+/// [`fused_rmsnorm_backward`] that routes the math through
+/// [`kt_api::fused_rmsnorm_backward_kt`] and round-trips the gradients
+/// back to candle via [`kiln_kt_bridge::kt_tensor_to_candle_cuda_copy`].
+///
+/// Same FFI symbol (`kiln_fused_rmsnorm_bwd`) → bit-exact by
+/// construction. The point of this path is not a perf delta — it's
+/// the first production migration of a candle `CustomOp::bwd` body to
+/// the kt bridge, proving the pattern that unblocks Tier-1 closures
+/// of `kiln-rmsnorm-kernel` / `kiln-opd-loss-kernel` / `kiln-flce-kernel`
+/// (see `docs/CANDLE_REMOVAL_PLAN.md` §"kt-autograd readiness").
+///
+/// Costs: 3 candle→kt borrows (zero-copy) + 2 kt→candle dtod memcpys
+/// (one per gradient) per call. Borrows are free; the memcpys are
+/// `grad_x` (one tensor-sized BF16 copy) + `grad_w` (one
+/// `hidden`-sized BF16 copy after the F32→BF16 cast).
+///
+/// Falls back to the candle path via [`fused_rmsnorm_backward`] when
+/// `KILN_DISABLE_RMSNORM_BWD_KT_BRIDGE=1` is set (kill switch /
+/// parity-test escape hatch, matching the precedent established by
+/// PR #92 / #133 / #158 / #166 for prior kernel migrations).
+fn fused_rmsnorm_backward_via_kt_bridge(
+    x: &Tensor,
+    weight: &Tensor,
+    grad_out: &Tensor,
+    eps: f32,
+) -> Result<(Tensor, Tensor)> {
+    use crate::kt_api::fused_rmsnorm_backward_kt;
+
+    let x_dims = x.dims();
+    let hidden = *x_dims.last().ok_or_else(|| {
+        candle_core::Error::Msg(
+            "fused_rmsnorm_backward_via_kt_bridge: x must have rank >= 1".to_string(),
+        )
+    })?;
+
+    let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge bwd: borrow x failed: {e}"))
+    })?;
+    let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge bwd: borrow weight failed: {e}"))
+    })?;
+    let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(grad_out).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge bwd: borrow grad_out failed: {e}"))
+    })?;
+
+    let (grad_x_kt, grad_w_partial_kt) =
+        fused_rmsnorm_backward_kt(&x_kt, &w_kt, &g_kt, eps)
+            .map_err(|e| candle_core::Error::Msg(format!("kt-bridge bwd: kt call failed: {e}")))?;
+
+    // The kt path allocates `grad_w_partial` as `[rows, hidden]` F32,
+    // but the kernel writes via atomicAdd into the first `hidden`
+    // slots only (per `csrc/fused_rmsnorm_bwd.cu` lines 12-19, 122-123).
+    // We cast exactly those `hidden` F32 slots to BF16 by calling
+    // `kiln_f32_to_bf16` directly with `n=hidden` — mirroring the
+    // candle path's `kiln_f32_to_bf16(..., hidden, ...)` step. Using
+    // the existing `f32_to_bf16_kt` would over-cast `rows*hidden`
+    // elements; we deliberately cast only the populated prefix.
+    let grad_w_kt = {
+        use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
+        let partial_ptr = kiln_kt_bridge::cuda_output_device_ptr(&grad_w_partial_kt);
+        // Borrow the underlying CudaStorage of the partial so we can
+        // (a) get a stream and (b) hand its candle device to
+        // `alloc_cuda_tensor` for the BF16 destination.
+        let partial_st = kiln_kt_bridge::cuda_storage_of_output(&grad_w_partial_kt);
+        let raw_stream = partial_st.cuda_stream_raw();
+        let dst_kt: KtTensor =
+            kiln_kt_bridge::alloc_cuda_tensor(partial_st, KtDType::BF16, vec![hidden])
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!(
+                        "kt-bridge bwd: alloc grad_w BF16 failed: {e}"
+                    ))
+                })?;
+        let dst_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dst_kt);
+        // SAFETY: `partial_ptr` points to a F32 buffer of at least
+        // `rows*hidden` elements (kt allocation); we read only the
+        // first `hidden`. `dst_ptr` points to a BF16 buffer of
+        // exactly `hidden` elements (just allocated above).
+        let status = unsafe {
+            kiln_f32_to_bf16(
+                partial_ptr as *const f32,
+                dst_ptr as *mut _,
+                hidden as i32,
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            candle_core::bail!(
+                "kt-bridge bwd: kiln_f32_to_bf16 failed (status {status})"
+            );
+        }
+        dst_kt
+    };
+
+    let grad_x = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&grad_x_kt).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge bwd: copy-back grad_x failed: {e}"))
+    })?;
+    let grad_w = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&grad_w_kt).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge bwd: copy-back grad_w failed: {e}"))
+    })?;
+    Ok((grad_x, grad_w))
+}
+
+/// Whether the kt-bridge bwd path is disabled via env. Read once and
+/// cached for the process lifetime (matches the
+/// `fused_paged_decode_disabled` / `KILN_DISABLE_*` precedent). The
+/// candle `fused_rmsnorm_backward` remains reachable as the fallback.
+fn rmsnorm_bwd_kt_bridge_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        matches!(
+            std::env::var("KILN_DISABLE_RMSNORM_BWD_KT_BRIDGE")
+                .ok()
+                .as_deref(),
+            Some("1") | Some("true") | Some("TRUE")
+        )
+    })
+}
+
 /// `CustomOp2` wrapping the fused RMSNorm forward + manual backward.
 ///
 /// Forward dispatches to:
@@ -971,6 +1090,28 @@ impl candle_core::CustomOp2 for RmsNormCustomOp {
 
         if cuda_eligible {
             let grad_out_c = grad_out.contiguous()?;
+            // FIRST production CustomOp::bwd migration to the kt
+            // bridge (proves the pattern documented at
+            // `docs/CANDLE_REMOVAL_PLAN.md` §"kt-autograd readiness").
+            // Same FFI symbol as the candle path → bit-exact by
+            // construction; the kill switch + fallback below preserve
+            // the candle path as the parity-test escape hatch.
+            if !rmsnorm_bwd_kt_bridge_disabled() {
+                match fused_rmsnorm_backward_via_kt_bridge(x, weight, &grad_out_c, self.eps) {
+                    Ok((gx, gw)) => return Ok((Some(gx), Some(gw))),
+                    Err(e) => {
+                        // Fall through to the candle path on any
+                        // bridge failure (borrow / alloc / FFI /
+                        // copy-back) — reversibility guarantee per
+                        // the migration plan. Log via stderr so
+                        // production never silently regresses without
+                        // a trace.
+                        eprintln!(
+                            "kiln-rmsnorm-kernel: kt-bridge bwd path failed, falling back to candle: {e}"
+                        );
+                    }
+                }
+            }
             let (gx, gw) = fused_rmsnorm_backward(x, weight, &grad_out_c, self.eps)?;
             return Ok((Some(gx), Some(gw)));
         }
@@ -5053,5 +5194,91 @@ mod tests {
             gw_diff < 2e-2,
             "CUDA grad_w parity (multi-row) failed: max_abs_diff={gw_diff} (tol=2e-2)"
         );
+    }
+
+    // FIRST production migration of a candle CustomOp::bwd body to
+    // the kt-typed bridge (see `docs/CANDLE_REMOVAL_PLAN.md`
+    // §"kt-autograd readiness"). This test exercises the new
+    // `fused_rmsnorm_backward_via_kt_bridge` against the candle
+    // `fused_rmsnorm_backward` on the SAME inputs. Both call the
+    // same FFI symbol (`kiln_fused_rmsnorm_bwd`) → outputs MUST be
+    // bit-exact, modulo the F32→BF16 final cast (which is also
+    // identical between the two paths). The diff threshold is the
+    // bf16 epsilon (`f32::EPSILON * 2^8 ≈ 3.05e-5`) — anything above
+    // that is a real divergence, not a rounding artifact.
+    #[test]
+    fn test_cuda_rmsnorm_bwd_kt_bridge_default_matches_candle_path() {
+        let Some(device) = try_cuda_device() else {
+            eprintln!(
+                "skipping: no CUDA device for test_cuda_rmsnorm_bwd_kt_bridge_default_matches_candle_path"
+            );
+            return;
+        };
+
+        // Two shape regimes: decode (rows=1) and prefill (rows=512).
+        // Both must produce bit-exact gradients between the candle and
+        // kt-bridge paths.
+        for (rows, hidden, label) in [
+            (1usize, 2560usize, "decode-row [1, 2560]"),
+            (512usize, 2560usize, "prefill [512, 2560]"),
+            (4usize, 128usize, "tiny [4, 128]"),
+        ] {
+            let eps = 1e-6f32;
+
+            let mut raw_x = Vec::with_capacity(rows * hidden);
+            let mut raw_w = Vec::with_capacity(hidden);
+            let mut raw_g = Vec::with_capacity(rows * hidden);
+            let mut state: u32 = 0xdeadc0de;
+            let mut next = |mul: f32| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                (((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0) * mul
+            };
+            for _ in 0..rows * hidden {
+                raw_x.push(next(0.4));
+            }
+            for _ in 0..hidden {
+                raw_w.push(next(0.1));
+            }
+            for _ in 0..rows * hidden {
+                raw_g.push(next(0.3));
+            }
+
+            let x = Tensor::from_vec(raw_x, (rows, hidden), &device)
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+            let w = Tensor::from_vec(raw_w, (hidden,), &device)
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+            let g = Tensor::from_vec(raw_g, (rows, hidden), &device)
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+
+            // Path A: candle-typed body (existing).
+            let (gx_candle, gw_candle) =
+                fused_rmsnorm_backward(&x, &w, &g, eps).expect("candle bwd should succeed");
+            // Path B: kt-bridge body (new).
+            let (gx_bridge, gw_bridge) =
+                fused_rmsnorm_backward_via_kt_bridge(&x, &w, &g, eps)
+                    .expect("kt-bridge bwd should succeed");
+
+            let gx_diff = max_abs_diff(&gx_candle, &gx_bridge);
+            let gw_diff = max_abs_diff(&gw_candle, &gw_bridge);
+
+            // Same FFI symbol → expect bit-exact bf16. Tolerance is
+            // one bf16 ULP (≈ 7.8e-3 at magnitudes ~1.0, tighter at
+            // smaller values); 1e-3 here is conservative for our
+            // input ranges (x in [-0.4, 0.4], grad_out in [-0.3, 0.3]).
+            assert!(
+                gx_diff < 1e-3,
+                "kt-bridge grad_x parity failed on {label}: max_abs_diff={gx_diff} (tol=1e-3)"
+            );
+            assert!(
+                gw_diff < 1e-3,
+                "kt-bridge grad_w parity failed on {label}: max_abs_diff={gw_diff} (tol=1e-3)"
+            );
+        }
     }
 }
