@@ -91,7 +91,9 @@ pub use cuda_storage::{
     host_to_cuda_copy, primary_cuda_device, CudaStorage,
 };
 #[cfg(feature = "cuda")]
-pub use cuda_matmul::{cuda_matmul, cuda_matmul_with_bias, snapshot_algo_cache};
+pub use cuda_matmul::{
+    cuda_matmul, cuda_matmul_into, cuda_matmul_with_bias, snapshot_algo_cache,
+};
 #[cfg(feature = "cuda")]
 pub use fp8::{
     cuda_fp8_dequantize, cuda_fp8_dequantize_direct, cuda_fp8_quantize,
