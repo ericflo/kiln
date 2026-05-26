@@ -493,6 +493,14 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_is_finite_storage_async(
+        x: *const core::ffi::c_void,
+        out_flag: *mut core::ffi::c_void,
+        n_elements: i64,
+        dtype_tag: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_argmax_last_axis_async(
         x: *const core::ffi::c_void,
         out: *mut core::ffi::c_void,
@@ -1801,6 +1809,130 @@ mod tests {
         let cuda = s.as_any().downcast_ref::<CudaStorage>().expect("downcast");
         assert_eq!(cuda.slice().len(), 16);
     }
+
+    // --- cuda_is_finite (#1082 Phase 9 substrate) -------------------
+
+    /// Build a CUDA F32 tensor from a host slice via host_to_cuda_copy.
+    fn cuda_f32_from_slice(dev: Arc<CudaDevice>, values: &[f32]) -> crate::Tensor {
+        let cpu = crate::Tensor::from_slice(values, vec![values.len()]).unwrap();
+        crate::host_to_cuda_copy(&cpu, dev, 0).unwrap()
+    }
+
+    #[test]
+    fn cuda_is_finite_all_finite_f32_returns_true() {
+        let Some(dev) = maybe_cuda_device() else {
+            eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
+            return;
+        };
+        let t = cuda_f32_from_slice(dev, &[1.0, 2.0, -3.5, 0.0, 1e30]);
+        assert!(super::cuda_is_finite(&t).unwrap());
+        // Also exercise the Tensor::all_finite() path that routes here.
+        assert!(t.all_finite().unwrap());
+    }
+
+    #[test]
+    fn cuda_is_finite_nan_f32_returns_false() {
+        let Some(dev) = maybe_cuda_device() else {
+            eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
+            return;
+        };
+        let t = cuda_f32_from_slice(dev, &[1.0, f32::NAN, 3.0]);
+        assert!(!super::cuda_is_finite(&t).unwrap());
+        assert!(!t.all_finite().unwrap());
+    }
+
+    #[test]
+    fn cuda_is_finite_pos_inf_f32_returns_false() {
+        let Some(dev) = maybe_cuda_device() else {
+            eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
+            return;
+        };
+        let t = cuda_f32_from_slice(dev, &[1.0, f32::INFINITY, 3.0]);
+        assert!(!super::cuda_is_finite(&t).unwrap());
+    }
+
+    #[test]
+    fn cuda_is_finite_neg_inf_f32_returns_false() {
+        let Some(dev) = maybe_cuda_device() else {
+            eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
+            return;
+        };
+        let t = cuda_f32_from_slice(dev, &[1.0, f32::NEG_INFINITY, 3.0]);
+        assert!(!super::cuda_is_finite(&t).unwrap());
+    }
+
+    #[test]
+    fn cuda_is_finite_bf16_nan_returns_false() {
+        let Some(dev) = maybe_cuda_device() else {
+            eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
+            return;
+        };
+        // Build BF16 by casting an F32 with a NaN.
+        let cpu_f32 =
+            crate::Tensor::from_slice(&[1.0f32, f32::NAN, 2.0], vec![3]).unwrap();
+        let cuda_f32 = crate::host_to_cuda_copy(&cpu_f32, dev.clone(), 0).unwrap();
+        let bf16 = crate::cuda_cast(&cuda_f32, DType::BF16).unwrap();
+        assert_eq!(bf16.dtype(), DType::BF16);
+        assert!(!super::cuda_is_finite(&bf16).unwrap());
+
+        // Sanity: an all-finite BF16 tensor returns true.
+        let cpu_ok = crate::Tensor::from_slice(&[1.0f32, 2.0, -0.5], vec![3]).unwrap();
+        let cuda_ok = crate::host_to_cuda_copy(&cpu_ok, dev, 0).unwrap();
+        let bf16_ok = crate::cuda_cast(&cuda_ok, DType::BF16).unwrap();
+        assert!(super::cuda_is_finite(&bf16_ok).unwrap());
+    }
+
+    #[test]
+    fn cuda_is_finite_f16_inf_returns_false() {
+        let Some(dev) = maybe_cuda_device() else {
+            eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
+            return;
+        };
+        let cpu_f32 =
+            crate::Tensor::from_slice(&[1.0f32, f32::INFINITY, 2.0], vec![3]).unwrap();
+        let cuda_f32 = crate::host_to_cuda_copy(&cpu_f32, dev, 0).unwrap();
+        let f16 = crate::cuda_cast(&cuda_f32, DType::F16).unwrap();
+        assert_eq!(f16.dtype(), DType::F16);
+        assert!(!super::cuda_is_finite(&f16).unwrap());
+    }
+
+    #[test]
+    fn cuda_is_finite_integer_dtype_is_vacuously_true() {
+        let Some(dev) = maybe_cuda_device() else {
+            eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
+            return;
+        };
+        // Build a CUDA U32 storage with a couple values; cuda_is_finite
+        // short-circuits before touching the kernel.
+        let storage = CudaStorage::zeros(dev, 0, DType::U32, 4).unwrap();
+        let storage_arc: crate::Storage = Arc::new(storage);
+        let t = crate::Tensor::from_parts(
+            storage_arc,
+            crate::Layout::contiguous(vec![4]),
+            crate::TensorId::next(),
+        )
+        .unwrap();
+        assert!(super::cuda_is_finite(&t).unwrap());
+        assert!(t.all_finite().unwrap());
+    }
+
+    #[test]
+    fn cuda_is_finite_non_contiguous_uses_contig_path() {
+        let Some(dev) = maybe_cuda_device() else {
+            eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
+            return;
+        };
+        // 2x2 with one NaN at logical [1, 0]; transpose to make it
+        // non-contiguous. cuda_is_finite contiguifies internally.
+        let cpu_f32 = crate::Tensor::from_slice(
+            &[1.0f32, 2.0, f32::NAN, 4.0],
+            vec![2, 2],
+        )
+        .unwrap();
+        let cuda_f32 = crate::host_to_cuda_copy(&cpu_f32, dev, 0).unwrap();
+        let tt = cuda_f32.transpose(0, 1).unwrap();
+        assert!(!super::cuda_is_finite(&tt).unwrap());
+    }
 }
 /// CUDA softmax over the trailing axis (Phase 4 substrate op).
 ///
@@ -1960,6 +2092,139 @@ pub fn cuda_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
         crate::Layout::contiguous(src.shape().to_vec()),
         crate::TensorId::next(),
     )
+}
+
+/// Phase 9 substrate op (#1082) — "any non-finite?" tensor-wide
+/// reduction on a CUDA-resident tensor. Returns `Ok(true)` if every
+/// element is finite (no NaN, no `+Inf`, no `-Inf`), `Ok(false)`
+/// otherwise.
+///
+/// Routes through `kiln_is_finite_storage_async` in
+/// `csrc/is_finite_reduce.cu`. Supported dtypes: F32, BF16, F16,
+/// F8E4M3, F8E5M2. Integer dtypes (U8/U32/I64) and packed dtypes
+/// (Int4Packed/Fp4Packed) are handled by the caller (vacuously
+/// finite — no NaN/Inf representation).
+///
+/// The kernel atomic-OR's a single u32 device buffer; we issue exactly
+/// one 4-byte D2H to read the flag back. Cost vs. the pre-Phase-9
+/// `cuda_to_host_copy(self).all_finite()` bridge:
+///
+/// | tensor bytes | D2H bytes (old) | D2H bytes (new) |
+/// |--------------|-----------------|-----------------|
+/// | N            | N               | 4               |
+///
+/// For a typical hidden-state gradient (`[1, 1024, 2560]` BF16 ≈ 5 MB)
+/// scanned once per backward op when `KILN_DETECT_ANOMALY=1`, the
+/// bridge paid ~5 MB of D2H per node; the kernel pays 4 bytes.
+///
+/// Non-contiguous inputs are contiguified into the kernel input via
+/// [`cuda_contiguous`] before launching (matching the convention of
+/// other kt-CUDA reductions like [`cuda_sum_squared_last_axis`] /
+/// [`cuda_to_host_copy`]).
+#[cfg(feature = "cuda")]
+pub fn cuda_is_finite(src: &crate::Tensor) -> Result<bool> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use crate::DType;
+
+    let dtype = src.dtype();
+    // Integer + packed dtypes have no NaN/Inf — vacuously finite.
+    // Tensor::all_finite() also early-returns for these; we replicate
+    // the contract here so direct callers of `cuda_is_finite` get the
+    // same answer.
+    if matches!(dtype, DType::U8 | DType::U32 | DType::I64) {
+        return Ok(true);
+    }
+    if dtype.is_packed() {
+        return Ok(true);
+    }
+
+    let dtype_tag: i32 = match dtype {
+        DType::F32 => 0,
+        DType::BF16 => 1,
+        DType::F16 => 2,
+        DType::F8E4M3 => 3,
+        DType::F8E5M2 => 4,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_is_finite: unsupported dtype {other}"
+            )));
+        }
+    };
+
+    // Force a contiguous, `start_offset = 0` device buffer. The
+    // kernel walks `[0..n_elements)` directly; non-contiguous strided
+    // inputs would otherwise need a separate stride-walking kernel.
+    let contig = cuda_contiguous(src)?;
+    let contig_storage = contig
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg(
+                "cuda_is_finite: contiguous'd storage must be CudaStorage".to_string(),
+            )
+        })?;
+    let candle_device = contig_storage.candle_device.clone();
+    let device_index = match contig_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!("cuda_is_finite: contig storage device must be Cuda"),
+    };
+
+    // 1-element U32 device buffer (4 bytes, zero-init). Kernel
+    // atomic-ORs a `1` into it on first non-finite hit.
+    let flag_storage = CudaStorage::zeros(
+        candle_device.clone(),
+        device_index,
+        DType::U32,
+        1,
+    )?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let x_base = match &contig_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let flag_base = match &flag_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+    };
+
+    // `cuda_contiguous` produces start_offset == 0, so no byte_off math.
+    let x_ptr = x_base as *const core::ffi::c_void;
+    let flag_ptr = flag_base as *mut core::ffi::c_void;
+
+    let n_elements = src.element_count() as i64;
+    let status = unsafe {
+        kiln_is_finite_storage_async(x_ptr, flag_ptr, n_elements, dtype_tag, raw_stream)
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_is_finite: FFI returned status {status}"
+        )));
+    }
+
+    // Read the 4-byte flag back. `memcpy_dtoh` synchronizes against
+    // the launch on the same stream.
+    let flag_slice = match &flag_storage.slice {
+        SliceOwner::Owned(s) => s,
+        SliceOwner::Borrowed { .. } => unreachable!(),
+    };
+    let mut flag_host = [0u8; 4];
+    stream
+        .memcpy_dtoh(flag_slice, &mut flag_host)
+        .map_err(|e| {
+            crate::Error::Msg(format!("cuda_is_finite: flag D2H failed: {e:?}"))
+        })?;
+    let flag = u32::from_le_bytes(flag_host);
+    Ok(flag == 0)
 }
 
 

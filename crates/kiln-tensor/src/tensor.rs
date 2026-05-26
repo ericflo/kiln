@@ -503,10 +503,12 @@ impl Tensor {
     ///
     /// CPU storage: iterates the addressable byte buffer (this method
     /// does not materialize a contiguous copy — it walks strides).
-    /// CUDA storage: bridges through `cuda_to_host_copy` and runs the
-    /// CPU walker until the per-backend `is_finite` reduction kernel
-    /// replaces the D2H copy. Other non-CPU backends still return an
-    /// error until their finite-check substrate lands.
+    /// CUDA storage: routes through `cuda_is_finite`, a per-backend
+    /// reduction kernel that atomicOr's a single u32 device flag and
+    /// reads only those 4 bytes back to the host (vs the
+    /// pre-Phase-9 D2H bridge that copied the full tensor). Other
+    /// non-CPU backends still return an error until their
+    /// finite-check substrate lands.
     ///
     /// This is the kt-tensor side of the
     /// `kiln_autograd::anomaly_detection_enabled()` /
@@ -526,22 +528,37 @@ impl Tensor {
         if self.dtype().is_packed() {
             return Ok(true);
         }
-        // #1082 Phase 9 follow-up: for non-CPU tensors, bridge via a
-        // `cuda_to_host_copy` D2H then run the CPU walker. This makes
-        // `KILN_DETECT_ANOMALY=1` work for CUDA-resident gradient
-        // tensors instead of returning an error and aborting the
-        // backward pass. The dedicated per-backend `is_finite`
-        // reduction kernel (planned in CANDLE_REMOVAL_PLAN.md, Phase
-        // 9) will replace this bridge once it lands — at which point
-        // the GPU anomaly scan stops paying the D2H copy on each
-        // node visit. Cost today: O(numel) bytes of D2H per scanned
-        // tensor; acceptable because anomaly detection is opt-in
-        // and runs only inside CI training-parity tests, not the
-        // production hot path.
+        // #1082 Phase 9: for CUDA tensors, route through the dedicated
+        // `cuda_is_finite` reduction kernel
+        // (`kiln_is_finite_storage_async` in `csrc/is_finite_reduce.cu`).
+        // The kernel atomicOr's a single u32 device flag and we read
+        // back only 4 bytes — vs the previous D2H-bridge path that
+        // copied the entire tensor through `cuda_to_host_copy`.
+        // Net cost on the `KILN_DETECT_ANOMALY=1` scan-per-backward-op
+        // path: O(numel) bytes of D2H per node → 4 bytes per node.
         if !self.device().is_cpu() {
             #[cfg(feature = "cuda")]
             {
                 if matches!(self.device(), crate::Device::Cuda(_)) {
+                    // Try the kernel for supported dtypes; fall back
+                    // to the D2H bridge for any new/unsupported
+                    // dtypes the kernel doesn't cover.
+                    let supported = matches!(
+                        self.dtype(),
+                        DType::F32
+                            | DType::BF16
+                            | DType::F16
+                            | DType::F8E4M3
+                            | DType::F8E5M2
+                    );
+                    if supported {
+                        return crate::cuda_is_finite(self);
+                    }
+                    // Fallback: keep the bridge for any dtype the
+                    // kernel doesn't yet handle (none today; this is
+                    // forward-looking defense for future dtypes that
+                    // land on CUDA without a corresponding
+                    // is_finite_reduce.cu branch).
                     let cpu_view = crate::cuda_to_host_copy(self)?;
                     return cpu_view.all_finite();
                 }
