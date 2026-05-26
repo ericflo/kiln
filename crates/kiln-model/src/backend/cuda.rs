@@ -126,10 +126,10 @@ pub struct CudaBackend {
     // KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT[_RMSNORM]) still
     // fall back to forward.rs's candle reference paths. The kt-typed
     // path is bit-exact with the previous kt-API code (same FFI
-    // symbol). One candle-typed caller survives: the single-block
-    // `kiln_gdn_kernel::gdn_full_chunk_forward` fall-through inside
-    // the multiblock dispatcher, because no kt single-block kernel
-    // wire exists yet.
+    // symbol). All 11 GDN dispatch wires (including the formerly
+    // candle-typed single-block `gdn_full_chunk_forward` fall-through
+    // inside the multiblock dispatcher) are now kt-only after the
+    // `gdn_full_chunk_forward_kt` single-block wire landed.
     // Phase 7 (#1082): all 4 flash-attn dispatch sites in this
     // backend are now kt-only after `aab07fa7` landed the
     // `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs`
@@ -937,16 +937,15 @@ impl BackendRuntime for CudaBackend {
         state: &mut Tensor,
     ) -> Result<Option<Tensor>> {
         let dv_tile = kiln_gdn_kernel::GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE;
-        // Phase 7 (#1082): kt-typed surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). Both kt-typed predicates (`_supports_kt`,
-        // `_multiblock_supports_kt`, 7da2615a) and the
-        // multiblock_kt kernel are the only candle-free wires. The
-        // single-block fall-through still uses the candle-typed
-        // `kiln_gdn_kernel::gdn_full_chunk_forward` because the
-        // kt-typed single-block kernel wire does not exist yet —
-        // see the comment below. State mutation surfaces through
-        // the caller's `&mut Tensor` via the shared buffer (conv1d
+        // Phase 7 (#1082): kt-typed surface is now the only path
+        // (single-block + multiblock), same closeout pattern as
+        // conv1d (2ebcfb08), marlin (0841c266), and the flash-attn
+        // paged-decode `_with_graph_outputs` site (aab07fa7). Both
+        // kt-typed predicates (`_supports_kt`, `_multiblock_supports_kt`,
+        // 7da2615a) and both kt kernels (`gdn_full_chunk_forward_kt`
+        // single-block, `gdn_full_chunk_forward_multiblock_kt`) are
+        // the only wires. State mutation surfaces through the
+        // caller's `&mut Tensor` via the shared buffer (conv1d
         // pattern).
         let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
             .with_context(|| "kt-adapter: gdn_full_chunk_forward g → kt")?;
@@ -988,18 +987,22 @@ impl BackendRuntime for CudaBackend {
             CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.fetch_add(1, Ordering::Relaxed);
             return Ok(Some(out));
         }
-        // Single-block fall-through. We've borrowed all tensors as kt
-        // and confirmed kt-typed `_supports_kt` passes, but there is
-        // no kt-typed single-block kernel wire yet — fall back to the
-        // candle dispatch using the original candle `&Tensor` refs we
-        // still hold (the kt borrows are zero-copy adapters over the
-        // same underlying device storage, so the candle refs remain
-        // valid). Once a `gdn_full_chunk_forward_kt` lands, this
-        // candle call should be the next thing to migrate.
-        let out = kiln_gdn_kernel::gdn_full_chunk_forward(
-            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
+        // Single-block fall-through. Phase 7 (#1082): now kt-only,
+        // closing the last candle-typed gdn caller in this backend.
+        // The `gdn_full_chunk_forward_kt` wire bottoms out in the
+        // same `kiln_gdn_full_chunk_forward` FFI symbol as the old
+        // candle dispatch, so this migration is bit-exact. We reuse
+        // the kt borrows already established above — they are zero-
+        // copy adapters over the same CUDA storage as the caller's
+        // `&Tensor` / `&mut Tensor` refs, and `state` mutation
+        // surfaces through the shared buffer (multiblock pattern).
+        kiln_nvtx::range!(c"kiln/gdn_full_chunk_forward_kt");
+        let out_kt = kiln_gdn_kernel::gdn_full_chunk_forward_kt(
+            &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
         )
-        .context("gdn_full_chunk_forward kernel failed")?;
+        .map_err(|e| anyhow::anyhow!("kt gdn_full_chunk_forward: {e}"))?;
+        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .with_context(|| "kt-adapter: gdn_full_chunk_forward out → candle")?;
         CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
         Ok(Some(out))
     }
