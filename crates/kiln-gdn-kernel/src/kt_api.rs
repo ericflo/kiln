@@ -10,7 +10,6 @@
 //! 16 FFI entry points (recurrent variants, chunk_prep, chunk_scan,
 //! full_chunk_forward, etc.) follow the same template.
 
-use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 use kiln_kt_bridge::BridgeError;
 use kiln_tensor::{CudaStorage, DType as KtDType, Device as KtDevice, Tensor as KtTensor};
 
@@ -131,8 +130,7 @@ pub fn gdn_forward_substitution_kt(
     let w_ptr = kiln_kt_bridge::cuda_output_device_ptr(&w_out);
     
 
-    let stream = a_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = a_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_forward_substitution(
             a_ptr as *const _,
             vp_ptr as *const _,
@@ -229,8 +227,7 @@ pub fn gdn_recurrent_forward_kt(
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
     
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_recurrent_forward(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -331,8 +328,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
     
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -481,8 +477,7 @@ pub fn gdn_full_chunk_forward_kt(
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
     
 
-    let stream = g_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = g_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_full_chunk_forward(
             g_ptr as *const _,
             v_ptr as *const _,
@@ -569,8 +564,7 @@ pub fn gdn_decode_gates_recurrent_bf16_kt(
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
     
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_decode_gates_recurrent_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -655,8 +649,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_bf16_kt(
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
     
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -745,8 +738,7 @@ pub fn gdn_decode_gates_recurrent_vf32_bf16_kt(
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
     
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_decode_gates_recurrent_vf32_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -827,8 +819,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt(
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
     
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_vf32_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -908,8 +899,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16_kt(
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
     
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -989,8 +979,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16_kt(
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
     
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -1077,8 +1066,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16_kt(
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
     
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -1168,8 +1156,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16_kt(
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
     
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -1259,8 +1246,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16_kt(
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
     
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -1405,8 +1391,7 @@ pub fn gdn_full_chunk_forward_multiblock_kt(
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
     
 
-    let stream = g_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = g_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_full_chunk_forward_multiblock(
             g_ptr as *const _,
             v_ptr as *const _,
@@ -1480,8 +1465,7 @@ pub fn gdn_gated_rms_norm_bf16_kt(
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
     
 
-    let stream = x_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = x_st.cuda_stream_raw();
     let status = unsafe {        kiln_gdn_gated_rms_norm_bf16(
             x_ptr as *const _,
             z_ptr as *const _,
@@ -1603,8 +1587,7 @@ pub fn gdn_gates_bf16_kt(
     
     
 
-    let stream = a_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = a_st.cuda_stream_raw();
 
     let status = unsafe {        kiln_gdn_gates_bf16(
             a_ptr as *const _,
@@ -1657,8 +1640,7 @@ pub fn gdn_gates_bf16_f32_params_kt(
     
     
 
-    let stream = a_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = a_st.cuda_stream_raw();
 
     let status = unsafe {        kiln_gdn_gates_bf16_f32_params(
             a_ptr as *const _,
@@ -1710,8 +1692,7 @@ pub fn gdn_gates_bf16_f32_bf16_params_kt(
     
     
 
-    let stream = a_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = a_st.cuda_stream_raw();
 
     let status = unsafe {        kiln_gdn_gates_bf16_f32_bf16_params(
             a_ptr as *const _,
@@ -1835,8 +1816,7 @@ pub fn gdn_chunk_prep_kt(
     
     
 
-    let stream = g_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = g_st.cuda_stream_raw();
 
 
 
@@ -1949,8 +1929,7 @@ pub fn gdn_chunk_scan_kt(
     
     
 
-    let stream = a_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = a_st.cuda_stream_raw();
 
     let status = unsafe {        kiln_gdn_chunk_scan(
             a_ptr as *const _,

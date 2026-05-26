@@ -9,7 +9,6 @@
 //! steps, etc.) follows the same template and lands in subsequent
 //! PRs.
 
-use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 use kiln_kt_bridge::BridgeError;
 use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 
@@ -100,8 +99,7 @@ pub fn fused_rmsnorm_kt(
     }
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
 
-    let stream = x_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = x_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_fused_rmsnorm(
@@ -178,8 +176,7 @@ pub fn fused_rmsnorm_backward_kt(
     let gx_ptr = kiln_kt_bridge::cuda_output_device_ptr(&grad_x);
     let gw_ptr = kiln_kt_bridge::cuda_output_device_ptr(&grad_w_partial);
 
-    let stream = x_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = x_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_fused_rmsnorm_bwd(
@@ -275,8 +272,7 @@ pub fn fused_rotary_qk_kt(
     let qo_ptr = kiln_kt_bridge::cuda_output_device_ptr(&q_out);
     let ko_ptr = kiln_kt_bridge::cuda_output_device_ptr(&k_out);
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_fused_rotary_qk(
@@ -329,8 +325,7 @@ pub fn fused_mlp_silu_mul_kt(
     let out = alloc_cuda_tensor(g_st, KtDType::BF16, shape)?;
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
 
-    let stream = g_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = g_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_fused_mlp_silu_mul_bf16(
@@ -377,8 +372,7 @@ pub fn sgd_step_f32_kt(
     let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(grad, KtDType::F32, "grad")?;
     let (p_st, _) = cuda_storage_and_byte_offset(param, KtDType::F32, "param")?;
 
-    let stream = p_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = p_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_sgd_step_f32(p_ptr as *mut f32, g_ptr as *const f32, lr, n, raw_stream)
@@ -435,8 +429,7 @@ pub fn adamw_step_f32_kt(
         kiln_kt_bridge::cuda_input_device_ptr(second_moment, KtDType::F32, "second_moment")?;
     let (p_st, _) = cuda_storage_and_byte_offset(param, KtDType::F32, "param")?;
 
-    let stream = p_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = p_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_adamw_step_f32(
@@ -498,8 +491,7 @@ pub fn lora_decode_hidden_kt(
     let hidden = alloc_cuda_tensor(x_st, KtDType::F32, vec![batch, rank])?;
     let h_ptr = kiln_kt_bridge::cuda_output_device_ptr(&hidden);
 
-    let stream = x_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = x_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_lora_decode_hidden_bf16(
@@ -564,8 +556,7 @@ pub fn lora_decode_add_kt(
     let out = alloc_cuda_tensor(base_st, KtDType::BF16, vec![batch, out_dim])?;
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
 
-    let stream = base_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = base_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_lora_decode_add_bf16(
@@ -623,8 +614,7 @@ pub fn fused_l2_qk_norm_kt(
     let qo_ptr = kiln_kt_bridge::cuda_output_device_ptr(&q_out);
     let ko_ptr = kiln_kt_bridge::cuda_output_device_ptr(&k_out);
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_fused_l2_qk_norm(
@@ -690,8 +680,7 @@ pub fn fused_l2_qk_norm_gqa_kt(
     let qo_ptr = kiln_kt_bridge::cuda_output_device_ptr(&q_out);
     let ko_ptr = kiln_kt_bridge::cuda_output_device_ptr(&k_out);
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_fused_l2_qk_norm_gqa(
@@ -761,8 +750,7 @@ pub fn fused_rotary_one_kt(
     let out = alloc_cuda_tensor(x_st, KtDType::BF16, vec![batch, seq_len, heads, head_dim])?;
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
 
-    let stream = x_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = x_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_fused_rotary_one(
@@ -818,8 +806,7 @@ pub fn fused_sigmoid_mul_kt(
     let out = alloc_cuda_tensor(x_st, KtDType::BF16, shape)?;
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
 
-    let stream = x_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = x_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_fused_sigmoid_mul_bf16(
@@ -906,8 +893,7 @@ pub fn attn_decode_qkv_split_qk_norm_rope_kt(
         .map(|go| kiln_kt_bridge::cuda_output_device_ptr(go) as *mut _)
         .unwrap_or(core::ptr::null_mut());
 
-    let stream = qr_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = qr_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_attn_decode_qkv_split_qk_norm_rope_bf16(
@@ -981,8 +967,7 @@ pub fn causal_depthwise_conv1d_kt(
     let out = alloc_cuda_tensor(i_st, KtDType::F32, vec![rows, channels])?;
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
 
-    let stream = i_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = i_st.cuda_stream_raw();
     let status = unsafe {
         kiln_causal_depthwise_conv1d_f32(
             i_ptr as *const f32,
@@ -1036,8 +1021,7 @@ pub fn causal_depthwise_conv1d_inplace_kt(
     let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::F32, "weight")?;
     let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::F32, "state")?;
     let (i_st, _) = cuda_storage_and_byte_offset(input_out, KtDType::F32, "input_out")?;
-    let stream = i_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = i_st.cuda_stream_raw();
     let status = unsafe {
         kiln_causal_depthwise_conv1d_inplace_f32(
             i_ptr as *mut f32,
@@ -1081,8 +1065,7 @@ pub fn causal_depthwise_conv1d_bwd_input_kt(
     let (g_st, _) = cuda_storage_and_byte_offset(grad_out, KtDType::F32, "grad_out")?;
     let gi = alloc_cuda_tensor(g_st, KtDType::F32, vec![rows, channels])?;
     let gi_ptr = kiln_kt_bridge::cuda_output_device_ptr(&gi);
-    let stream = g_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = g_st.cuda_stream_raw();
     let status = unsafe {
         kiln_causal_depthwise_conv1d_bwd_input_f32(
             g_ptr as *const f32,
@@ -1135,8 +1118,7 @@ pub fn causal_depthwise_conv1d_bwd_weight_kt(
     let (g_st, _) = cuda_storage_and_byte_offset(grad_out, KtDType::F32, "grad_out")?;
     let gw = alloc_cuda_tensor(g_st, KtDType::F32, vec![channels, kernel])?;
     let gw_ptr = kiln_kt_bridge::cuda_output_device_ptr(&gw);
-    let stream = g_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = g_st.cuda_stream_raw();
     let status = unsafe {
         kiln_causal_depthwise_conv1d_bwd_weight_f32(
             g_ptr as *const f32,
@@ -1181,8 +1163,7 @@ pub fn causal_depthwise_conv1d_bwd_state_kt(
     let (g_st, _) = cuda_storage_and_byte_offset(grad_out, KtDType::F32, "grad_out")?;
     let gs = alloc_cuda_tensor(g_st, KtDType::F32, vec![channels, kernel - 1])?;
     let gs_ptr = kiln_kt_bridge::cuda_output_device_ptr(&gs);
-    let stream = g_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = g_st.cuda_stream_raw();
     let status = unsafe {
         kiln_causal_depthwise_conv1d_bwd_state_f32(
             g_ptr as *const f32,
@@ -1223,8 +1204,7 @@ pub fn f32_to_bf16_kt(src: &KtTensor) -> Result<KtTensor, RmsNormError> {
     let out = alloc_cuda_tensor(s_st, KtDType::BF16, shape)?;
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
 
-    let stream = s_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = s_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_f32_to_bf16(s_ptr as *const f32, o_ptr as *mut _, n as i32, raw_stream)
@@ -1258,8 +1238,7 @@ pub fn sgd_step_bf16_kt(
     let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(grad, KtDType::BF16, "grad")?;
     let (p_st, _) = cuda_storage_and_byte_offset(param, KtDType::BF16, "param")?;
 
-    let stream = p_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = p_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_sgd_step_bf16(p_ptr as *mut _, g_ptr as *const _, lr, n, raw_stream)
@@ -1313,8 +1292,7 @@ pub fn adamw_step_bf16_kt(
         kiln_kt_bridge::cuda_input_device_ptr(second_moment, KtDType::BF16, "second_moment")?;
     let (p_st, _) = cuda_storage_and_byte_offset(param, KtDType::BF16, "param")?;
 
-    let stream = p_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = p_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_adamw_step_bf16(
@@ -1384,8 +1362,7 @@ pub fn fused_rotary_one_bwd_kt(
     let out = alloc_cuda_tensor(y_st, KtDType::BF16, vec![batch, seq_len, heads, head_dim])?;
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
 
-    let stream = y_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = y_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_fused_rotary_one_bwd(
@@ -1439,8 +1416,7 @@ pub fn fused_mlp_silu_mul_packed_kt(
     }
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
 
-    let stream = gu_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = gu_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_fused_mlp_silu_mul_packed_bf16(
@@ -1502,8 +1478,7 @@ pub fn lora_add_inplace_f32_kt(
     let b_ptr = kiln_kt_bridge::cuda_input_device_ptr(b, KtDType::F32, "b")?;
     let (base_st, _) = cuda_storage_and_byte_offset(base, KtDType::F32, "base")?;
 
-    let stream = base_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = base_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_lora_add_inplace_f32(
@@ -1548,8 +1523,7 @@ pub fn silu_inplace_save_sigmoid_f32_kt(
     let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(sigmoid_out, KtDType::F32, "sigmoid_out")?;
     let (i_st, _) = cuda_storage_and_byte_offset(input_out, KtDType::F32, "input_out")?;
 
-    let stream = i_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = i_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_silu_inplace_save_sigmoid_f32(

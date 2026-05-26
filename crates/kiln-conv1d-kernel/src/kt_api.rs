@@ -7,7 +7,6 @@
 //! candle-typed `causal_conv1d_update` / `causal_conv1d_prefill`
 //! remain in place; Phase 7 deletes them when call sites migrate.
 
-use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 use kiln_kt_bridge::BridgeError;
 use kiln_tensor::{CudaStorage, DType as KtDType, Device as KtDevice, Tensor as KtTensor};
 
@@ -129,8 +128,7 @@ pub fn causal_conv1d_update_kt(
     let out = alloc_cuda_tensor(x_st, KtDType::F32, vec![batch, channels, 1])?;
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
 
-    let stream = x_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = x_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_causal_conv1d_update_bf16_f32(
@@ -229,8 +227,7 @@ pub fn causal_conv1d_prefill_kt(
     let out = alloc_cuda_tensor(x_st, KtDType::F32, vec![batch, channels, seq_len])?;
     let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
 
-    let stream = x_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = x_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_causal_conv1d_prefill_bf16_f32(

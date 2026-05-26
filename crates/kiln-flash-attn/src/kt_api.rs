@@ -19,7 +19,6 @@
 //! public entry points port in subsequent PRs using the same
 //! pattern.
 
-use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 use kiln_kt_bridge::BridgeError;
 use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 
@@ -122,8 +121,7 @@ pub fn flash_attn_fwd_kt(
     let out_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out_t);
     let lse_ptr = kiln_kt_bridge::cuda_output_device_ptr(&lse_t);
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_flash_attn_fwd(
@@ -263,8 +261,7 @@ pub fn flash_attn_paged_decode_kt(
     let out_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out_t);
     let lse_ptr = kiln_kt_bridge::cuda_output_device_ptr(&lse_t);
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_flash_attn_fwd_paged_decode(
@@ -375,8 +372,7 @@ pub fn flash_attn_paged_decode_dyn_seqlen_kt(
     let out_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out_t);
     let lse_ptr = kiln_kt_bridge::cuda_output_device_ptr(&lse_t);
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_flash_attn_fwd_paged_decode_dyn_seqlen(
@@ -460,8 +456,7 @@ pub fn paged_kv_write_token_major_bf16_kt(
     let vp_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
     let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
 
-    let stream = k_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = k_st.cuda_stream_raw();
     let status = unsafe {
         kiln_paged_kv_write_token_major_bf16(
             kp_ptr as *mut _,
@@ -525,8 +520,7 @@ pub fn paged_kv_write_token_major_bf16_slot_kt(
     let sl_ptr = kiln_kt_bridge::cuda_input_device_ptr(slot, KtDType::U32, "slot")?;
     let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
 
-    let stream = k_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = k_st.cuda_stream_raw();
     let status = unsafe {
         kiln_paged_kv_write_token_major_bf16_slot(
             kp_ptr as *mut _,
@@ -625,8 +619,7 @@ pub fn paged_kv_write_token_major_bf16_batch_slot_kt(
     let sl_ptr = kiln_kt_bridge::cuda_input_device_ptr(slots, KtDType::U32, "slots")?;
     let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
 
-    let stream = k_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = k_st.cuda_stream_raw();
     let status = unsafe {
         kiln_paged_kv_write_token_major_bf16_batch_slot(
             kp_ptr as *mut _,
@@ -716,8 +709,7 @@ pub fn flash_attn_bwd_kt(
     let sd_ptr = kiln_kt_bridge::cuda_output_device_ptr(&softmax_d);
     let da_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dq_accum);
 
-    let stream = q_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = q_st.cuda_stream_raw();
 
     let status = unsafe {
         kiln_flash_attn_bwd(

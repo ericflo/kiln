@@ -8,7 +8,6 @@
 //! `marlin_w4a16_gemm` which still includes the internal cast) until
 //! Phase 7 lands.
 
-use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 use kiln_kt_bridge::BridgeError;
 use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
 
@@ -149,8 +148,7 @@ pub fn marlin_w4a16_gemm_kt(
     let c_ptr = kiln_kt_bridge::cuda_output_device_ptr(&c);
     let w_ptr = kiln_kt_bridge::cuda_output_device_ptr(&workspace);
 
-    let stream = a_st.candle_device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let raw_stream = a_st.cuda_stream_raw();
     let dev_ord: i32 = 0;
 
     let status = unsafe {
