@@ -425,21 +425,21 @@ fn cuda_use_kt_api_broadcast_div() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: last-dim `Tensor::cat` through the kt-API +
-/// adapters. Set `KILN_USE_KT_API_CONCAT_LAST_DIM=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// rotary-embedding output concat in [`apply_rope`] (the
-/// `[r1, r2]` / `[r1, r2, x_pass]` join along the trailing axis)
-/// through `kiln_tensor::cuda_concat` via the kt-bridge borrow
-/// adapter. Pays one dtod memcpy on the output direction (the
-/// kt allocation is freshly-owned). Falls through to the candle
-/// `Tensor::cat` composite when any precondition fails so behavior
-/// is identical with the gate off.
+/// Phase 7 default-on (#1082): last-dim `Tensor::cat` through the
+/// kt-API + adapters. Routes the rotary-embedding output concat
+/// in [`apply_rope`] (the `[r1, r2]` / `[r1, r2, x_pass]` join
+/// along the trailing axis) through `kiln_tensor::cuda_concat`.
+/// Bit-exact to the candle `Tensor::cat` composite (memcpy
+/// concatenation; same byte layout). Falls through on
+/// precondition fail. Escape hatch:
+/// `KILN_DISABLE_KT_API_CONCAT_LAST_DIM=1`.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_concat_last_dim() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
+    // #1082: flipped default ON. Bit-exact memcpy concat via
+    // `cuda_concat`. Escape hatch: `KILN_DISABLE_KT_API_CONCAT_LAST_DIM=1`.
     let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_CONCAT_LAST_DIM").is_ok());
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CONCAT_LAST_DIM").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -574,76 +574,52 @@ fn cuda_use_kt_api_min_last_dim() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: `Tensor::cat` along axis 0 through the kt-API +
-/// adapters. Set `KILN_USE_KT_API_CAT_DIM0=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
-/// `Tensor::cat(&refs, 0)` call sites (per-tile gradient
-/// accumulation in CudaLoraAddBf16 backward, batch-state assembly
-/// in `from_batch_rows`, debug instrumentation) through
-/// `kiln_tensor::cuda_concat` with axis=0 via the kt-bridge borrow
-/// adapter. Pays one dtod memcpy on the output direction (the kt
-/// allocation is freshly-owned). Falls through to the candle
-/// `Tensor::cat` composite when any precondition fails so behavior
-/// is identical with the gate off.
-///
-/// Distinct from `KILN_USE_KT_API_CONCAT_LAST_DIM` which targets
-/// last-axis concat (the rotary-embedding output join in
-/// `apply_rope`) — this gate covers the axis-0 join, which is the
-/// other common cat axis in `forward.rs`.
+/// Phase 7 default-on (#1082): `Tensor::cat` along axis 0
+/// through the kt-API + adapters. Routes `Tensor::cat(&refs, 0)`
+/// production sites (per-tile gradient accumulation in
+/// CudaLoraAddBf16 backward, batch-state assembly in
+/// `from_batch_rows`, debug instrumentation) through
+/// `kiln_tensor::cuda_concat` axis=0. Bit-exact memcpy
+/// concatenation; same byte layout as candle. Falls through on
+/// precondition fail. Escape hatch: `KILN_DISABLE_KT_API_CAT_DIM0=1`.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_cat_dim0() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_CAT_DIM0").is_ok());
+    // #1082: flipped default ON. Bit-exact memcpy concat axis=0.
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM0").is_err());
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: `Tensor::cat` along axis 2 through the kt-API +
-/// adapters. Set `KILN_USE_KT_API_CAT_DIM2=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
-/// `Tensor::cat(&refs, 2)` call sites in the depthwise conv1d
-/// prefill/decode paths (conv_state + new tokens join along the
-/// time axis) and the GDN backward future-row windowing through
-/// `kiln_tensor::cuda_concat` with axis=2 via the kt-bridge
-/// borrow adapter. Pays one dtod memcpy on the output direction
-/// (the kt allocation is freshly-owned). Falls through to the
-/// candle `Tensor::cat` composite when any precondition fails so
-/// behavior is identical with the gate off.
-///
-/// Distinct from `KILN_USE_KT_API_CONCAT_LAST_DIM` and
-/// `KILN_USE_KT_API_CAT_DIM0` — those cover axis=-1 (rotary qk
-/// join) and axis=0 (batch-state assembly) respectively. This
-/// gate covers axis=2, which is the time axis on the
-/// `[batch, channels, time]` conv1d layout the GDN
-/// `gated_short_conv_*` paths use.
+/// Phase 7 default-on (#1082): `Tensor::cat` along axis 2
+/// through the kt-API + adapters. Routes the depthwise conv1d
+/// `conv_state + new tokens` time-axis join in
+/// prefill/decode and the GDN backward future-row windowing
+/// through `kiln_tensor::cuda_concat` axis=2. Bit-exact memcpy
+/// concatenation. Falls through on precondition fail. Escape
+/// hatch: `KILN_DISABLE_KT_API_CAT_DIM2=1`.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_cat_dim2() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_CAT_DIM2").is_ok());
+    // #1082: flipped default ON. Bit-exact memcpy concat axis=2.
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM2").is_err());
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: `Tensor::cat` along axis 1 through the kt-API +
-/// adapters. Set `KILN_USE_KT_API_CAT_DIM1=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes the
-/// `Tensor::cat(&refs, 1)` call sites in `forward.rs` (streaming
-/// GDN tile outputs along the T axis, chunked CUDA training MLP
-/// concat, chunked full-attention pre-o cat) through
-/// `kiln_tensor::cuda_concat(_, 1)` via the kt-bridge borrow
-/// adapter. Inputs go zero-copy through the borrow adapter; the
-/// output uses the standard freshly-owned kt allocation + dtod
-/// copy-back to candle. Falls through to the candle `Tensor::cat`
-/// composite when any precondition fails so behavior is identical
-/// with the gate off.
-///
-/// Distinct from `KILN_USE_KT_API_CAT_DIM0` (per-tile grad cats
-/// along the leading row axis) and `KILN_USE_KT_API_CAT_DIM2`
-/// (`[batch, channels, time]` conv1d layout). This gate covers
-/// `[batch, time, ...]` concat patterns where the sequence/time
-/// axis is the middle dimension.
+/// Phase 7 default-on (#1082): `Tensor::cat` along axis 1
+/// through the kt-API + adapters. Routes the production
+/// `Tensor::cat(&refs, 1)` sites (streaming GDN tile outputs
+/// along T, chunked CUDA training MLP concat, chunked
+/// full-attention pre-o cat) through `kiln_tensor::cuda_concat`
+/// axis=1. Bit-exact memcpy concatenation. Falls through on
+/// precondition fail. Escape hatch: `KILN_DISABLE_KT_API_CAT_DIM1=1`.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_cat_dim1() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_CAT_DIM1").is_ok());
+    // #1082: flipped default ON. Bit-exact memcpy concat axis=1.
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM1").is_err());
     direct || cuda_use_kt_api_all()
 }
 
