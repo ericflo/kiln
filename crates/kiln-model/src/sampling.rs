@@ -64,15 +64,12 @@ pub fn greedy_sample(logits: &Tensor) -> Result<u32> {
 pub fn greedy_sample_rows(logits: &Tensor) -> Result<Vec<u32>> {
     let dims = logits.dims();
     anyhow::ensure!(!dims.is_empty(), "logits tensor must have at least one dim");
-    // Phase 7 (#1082): when `KILN_USE_KT_API_SAMPLING_ARGMAX=1` (or
-    // `KILN_USE_KT_API_ALL=1`) is set AND `logits` is a contiguous
-    // CUDA tensor of {F32, BF16, F16} with rank >= 1, route the
-    // per-row argmax through `kiln_tensor::cuda_argmax_last_axis`
-    // via the kt-bridge borrow adapter. This replaces the candle
-    // `argmax(vocab_dim) + flatten_all + to_vec1::<u32>()`
-    // composite with a single fused kernel + one I64->u32 host
-    // copy. Falls through to the candle composite when any
-    // precondition fails so behavior is identical with the gate off.
+    // Phase 7 (#1082): contiguous CUDA logits of {F32, BF16, F16}
+    // with rank >= 1 take the kt row-argmax path by default. This
+    // replaces the candle `argmax(vocab_dim) + flatten_all +
+    // to_vec1::<u32>()` composite with a single fused kernel + one
+    // I64->u32 host copy. Falls through to the candle composite when
+    // any compatibility precondition fails.
     #[cfg(feature = "cuda")]
     if let Some(ids) = crate::forward::try_kt_sampling_argmax_rows(logits)? {
         return Ok(ids);
@@ -714,6 +711,40 @@ mod tests {
         )?
         .reshape((2, 2, 3))?;
         assert_eq!(greedy_sample_rows(&logits)?, vec![1, 0, 2, 1]);
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_cuda_greedy_sample_rows_kt_default_matches_expected() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!(
+                "CUDA unavailable, skipping test_cuda_greedy_sample_rows_kt_default_matches_expected"
+            );
+            return Ok(());
+        };
+
+        let values = [
+            1.0_f32, 2.0, 9.0, 0.0, // max index 2
+            7.0, 4.0, 3.0, 1.0, // max index 0
+            -1.0, -2.0, -3.0, 0.0, // max index 3
+            0.0, 5.0, 4.0, 3.0, // max index 1
+        ];
+        let expected = vec![2, 0, 3, 1];
+        let logits = Tensor::new(&values, &device)?.reshape((2, 2, 4))?;
+
+        assert_eq!(
+            crate::forward::try_kt_sampling_argmax_rows(&logits)?,
+            Some(expected.clone())
+        );
+        assert_eq!(greedy_sample_rows(&logits)?, expected);
+
+        let bf16_logits = logits.to_dtype(DType::BF16)?;
+        assert_eq!(
+            crate::forward::try_kt_sampling_argmax_rows(&bf16_logits)?,
+            Some(vec![2, 0, 3, 1])
+        );
+        assert_eq!(greedy_sample_rows(&bf16_logits)?, vec![2, 0, 3, 1]);
         Ok(())
     }
 
