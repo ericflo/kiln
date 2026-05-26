@@ -125,6 +125,31 @@ fn cuda_train_use_kt_api_flash_attn_bwd() -> bool {
     })
 }
 
+/// Phase 7 opt-in (#1082): when `KILN_USE_KT_API_FLASH_ATTN_FWD=1`
+/// (or `KILN_USE_KT_API_ALL=1`) is set, route the SFT/GRPO training
+/// forward in `cuda_flash_attn_prefill_causal_bf16` through the
+/// kt-typed `flash_attn_fwd_kt` surface instead of the candle-typed
+/// `flash_attn_fwd` shim. Default off — flips on once per-call
+/// parity coverage lands.
+///
+/// Bit-exact by construction: both candle and kt paths bottom out in
+/// the same `kiln_flash_attn_fwd` FFI symbol; only the Rust shell
+/// types change. The candle shim and the kt shim both return
+/// `(out_4d, softmax_lse)`; the kt-side `softmax_lse` is wired into
+/// the `FlashAttnPrefillCausalBackward` slot below the same way.
+///
+/// Mirrors the `cuda_use_kt_api_flash_attn` / `_flash_attn_bwd`
+/// gating in `backend/cuda.rs` and the sibling `_flash_attn_bwd`
+/// gate above.
+fn cuda_train_use_kt_api_flash_attn_fwd() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_KT_API_FLASH_ATTN_FWD").is_ok()
+            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
+    })
+}
+
 /// Backward op interface for the future CUDA-native training graph.
 pub trait CudaBackwardOp: Send + Sync + std::fmt::Debug {
     fn op_name(&self) -> &'static str;
@@ -3678,8 +3703,26 @@ pub fn cuda_flash_attn_prefill_causal_bf16(
         .context("cuda_flash_attn_prefill_causal_bf16: reshape v")?
         .contiguous()
         .context("cuda_flash_attn_prefill_causal_bf16: contiguous v")?;
-    let (out_4d, softmax_lse) = kiln_flash_attn::flash_attn_fwd(&q_4d, &k_4d, &v_4d, scale, true)
-        .context("cuda_flash_attn_prefill_causal_bf16: flash_attn_fwd")?;
+    let (out_4d, softmax_lse) = if cuda_train_use_kt_api_flash_attn_fwd() {
+        kiln_nvtx::range!(c"kiln/cuda_train/flash_attn_fwd_kt");
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_4d)
+            .context("cuda_flash_attn_prefill_causal_bf16: kt borrow q_4d")?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_4d)
+            .context("cuda_flash_attn_prefill_causal_bf16: kt borrow k_4d")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_4d)
+            .context("cuda_flash_attn_prefill_causal_bf16: kt borrow v_4d")?;
+        let (out_kt, lse_kt) =
+            kiln_flash_attn::flash_attn_fwd_kt(&q_kt, &k_kt, &v_kt, scale, true)
+                .map_err(|e| anyhow::anyhow!("kt flash_attn_fwd: {e}"))?;
+        let out_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .context("cuda_flash_attn_prefill_causal_bf16: kt out -> candle copy")?;
+        let lse_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&lse_kt)
+            .context("cuda_flash_attn_prefill_causal_bf16: kt lse -> candle copy")?;
+        (out_cd, lse_cd)
+    } else {
+        kiln_flash_attn::flash_attn_fwd(&q_4d, &k_4d, &v_4d, scale, true)
+            .context("cuda_flash_attn_prefill_causal_bf16: flash_attn_fwd")?
+    };
     let out = out_4d
         .reshape((rows, heads_q, head_dim))
         .context("cuda_flash_attn_prefill_causal_bf16: reshape output")?;
