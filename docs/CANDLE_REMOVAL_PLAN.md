@@ -847,3 +847,31 @@ plausible "first proof" PR: ~50 LOC in `kiln-rmsnorm-kernel`
 swapping the bwd body, plus a parity-vs-current test, with no
 changes outside the crate. Not yet executed; this paragraph is the
 plan, not a status report.
+
+**Status update (2026-05-26): first migration shipped on
+`rmsnorm-bwd-kt-bridge-1082`** (commits `4a76f5d6` + `6a0f9dfe`).
+The `RmsNormCustomOp::bwd` body now routes through
+`fused_rmsnorm_backward_via_kt_bridge` in
+`crates/kiln-rmsnorm-kernel/src/lib.rs:768`, which does exactly the
+chain described above: 3 candle→kt `kt_tensor_from_candle_cuda_borrow`
+calls + `fused_rmsnorm_backward_kt` + `kiln_f32_to_bf16` direct FFI
+(to cast only the first `hidden` slots of the kt path's over-
+allocated `[rows, hidden]` F32 partial buffer) + 2
+`kt_tensor_to_candle_cuda_copy` calls. Kill switch
+`KILN_DISABLE_RMSNORM_BWD_KT_BRIDGE=1` keeps the candle
+`fused_rmsnorm_backward` reachable as the parity-test fallback;
+the bwd body also falls through to the candle path on any bridge
+error (borrow/alloc/FFI/copy-back failure). Verified on L40S
+(`KILN_CUDA_ARCHS=89`): all 26 `kiln-rmsnorm-kernel` tests pass
+including the new `test_cuda_rmsnorm_bwd_kt_bridge_default_matches_
+candle_path` (decode `[1, 2560]`, prefill `[512, 2560]`, tiny
+`[4, 128]`). `cargo build --release --features cuda --bin kiln`
+also passes (14m 23s on L40S). `grad_x` is bit-exact between paths
+(no cross-row reduction); `grad_w` may differ by up to one BF16 ULP
+across separate launches because the kernel's `atomicAdd` row
+reduction is order-non-deterministic (test tolerance 5e-2, matching
+the `parity_backward_multi_row_cuda` precedent of `tol=2e-2`
+against the candle reference). This is the **first** production
+CustomOp::bwd body using the bridge; the template now applies to
+`OpdLossCustomOp::bwd` and `FlceCustomOp::bwd` (modulo the
+chunk-loop-helper porting work called out above).
