@@ -1416,66 +1416,6 @@ pub(crate) fn cuda_use_kt_api_matmul() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: route the on-device penalty pass in
-/// [`crate::sampling::sample_with_full_params`] through the
-/// kt-API. Default off; set
-/// `KILN_USE_KT_API_SAMPLING_PENALTIES=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to flip the gate.
-///
-/// The penalty pass applies repetition + presence + frequency
-/// adjustments to the last-position logits at the small set of
-/// *unique* history token ids. Today it's expressed as:
-///
-/// 1. `last_position_logits.to_dtype(F32)` (zero-cost on F32).
-/// 2. `logits.index_select(&indices, 0)` to gather the small
-///    `[unique]` slice of current logit values (one kernel).
-/// 3. Per-id host-side scalar arithmetic to compute the per-id
-///    `delta = post_penalty - pre_penalty`.
-/// 4. `logits.index_add(&indices, &delta, 0)` to scatter the
-///    deltas back into the full vocab slot (one kernel).
-///
-/// The kt-API equivalent composes
-/// `kiln_tensor::cuda_index_select_dim0` for the gather, the same
-/// host-side delta computation (it's a few hundred floats max —
-/// not worth a kernel), and `kiln_tensor::cuda_scatter_add_dim0`
-/// for the in-place add. Each candle op pays kt-bridge borrow +
-/// copy-back; the kt-API path pays one borrow + one copy-back
-/// total because the kt tensor stays in kt-storage between the
-/// two kernels. For decode hot-loops the win is *not* the
-/// kernels (they're already on-device under candle) but the
-/// downstream argmax/softmax/sampling step: once `adjusted_logits`
-/// is in kt-storage, the follow-up softmax+sample fast path can
-/// keep the tensor in kt-storage end-to-end without a candle
-/// round-trip per decode step.
-///
-/// Distinct from the existing `KILN_USE_KT_API_SCATTER_ADD_DIM0`
-/// gate (which targets the prefill `index_add` on the embedding
-/// gradient path inside `embed_backward`) so the sampler hook
-/// can be A/B-tested in isolation.
-///
-/// Wiring the gate without yet migrating the call site is an
-/// intentional incremental step (#1082, Phase 7). The sampler
-/// module [`crate::sampling`] uses candle's `Tensor::index_select`
-/// and `Tensor::index_add` directly, both of which return new
-/// candle tensors; switching them to the kt-API composite
-/// requires the borrow + reduce + copy-back composite written
-/// out by hand (kt has no `Tensor::index_add(dim)` method by
-/// design — it exposes `cuda_scatter_add_dim0(&out, &indices,
-/// &updates) -> ()` which mutates the output in place).
-///
-/// Today this gate is unused. The first call-site migration will
-/// branch on it. Returning a bool through `OnceLock` matches the
-/// other Phase 7 gates so the cost is one atomic read per call
-/// (negligible vs. the penalty pass it gates).
-#[cfg(feature = "cuda")]
-#[allow(dead_code)]
-pub(crate) fn cuda_use_kt_api_sampling_penalties() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SAMPLING_PENALTIES").is_ok());
-    direct || cuda_use_kt_api_sampling_all()
-}
-
 /// Phase 7 opt-in: route the on-device softmax inside the
 /// sampler (last-dim, F32 input) through
 /// `kiln_tensor::cuda_softmax_last_axis`. Default off; set
@@ -1520,27 +1460,25 @@ pub(crate) fn cuda_use_kt_api_sampling_softmax() -> bool {
     direct || cuda_use_kt_api_sampling_all()
 }
 
-/// Phase 7 opt-in: meta-flag that enables the remaining gated
-/// kt-API sampler family (`KILN_USE_KT_API_SAMPLING_PENALTIES`,
-/// `KILN_USE_KT_API_SAMPLING_SOFTMAX`) at once. Set
+/// Phase 7 opt-in: meta-flag for the remaining gated kt-API
+/// sampler softmax path. Set
 /// `KILN_USE_KT_API_SAMPLING_ALL=1` (or `KILN_USE_KT_API_ALL=1`)
-/// to flip those sampler-related kt-API gates to true in one go.
-/// Batched greedy argmax is already kt-default for compatible CUDA
-/// tensors and no longer has a gate.
+/// to flip sampler softmax to true. Batched greedy argmax and
+/// sampling penalties are already kt-default for compatible CUDA
+/// tensors and no longer have gates.
 ///
 /// This is the sampler-family analog of the cross-cutting
 /// `KILN_USE_KT_API_ALL` meta-flag: useful for benching the gated
-/// sampler kt-API path end-to-end without having to set each
-/// individual env var. This function still consults
+/// sampler kt-API path end-to-end. This function still consults
 /// `cuda_use_kt_api_all()` as the highest-priority short-circuit,
 /// so `KILN_USE_KT_API_ALL=1` continues to enable everything
 /// (including the sampler family); this flag is the narrower
 /// "everything gated sampler, nothing else" knob.
 ///
-/// Penalty and softmax gates short-circuit through this helper,
-/// mirroring how the cross-cutting `KILN_USE_KT_API_ALL` flag is
-/// wired. Returning a bool through `OnceLock` matches the other
-/// Phase 7 gates so the cost is one atomic read per call.
+/// The softmax gate short-circuits through this helper, mirroring
+/// how the cross-cutting `KILN_USE_KT_API_ALL` flag is wired.
+/// Returning a bool through `OnceLock` matches the other Phase 7
+/// gates so the cost is one atomic read per call.
 #[cfg(feature = "cuda")]
 #[allow(dead_code)]
 pub(crate) fn cuda_use_kt_api_sampling_all() -> bool {

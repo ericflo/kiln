@@ -203,35 +203,63 @@ fn apply_penalties_on_device(
     let flat = flat.to_dtype(DType::F32)?;
     let device = flat.device().clone();
 
-    // Count unique history tokens.
-    let mut counts: std::collections::HashMap<u32, u32> = std::collections::HashMap::with_capacity(history.len());
-    for &t in history {
-        *counts.entry(t).or_default() += 1;
+    #[cfg(feature = "cuda")]
+    if let Some(out) =
+        try_kt_apply_penalties_on_device(&flat, history, repetition, presence, frequency)?
+    {
+        return Ok(out);
     }
+
+    let (counts, unique) = sorted_history_counts(history);
     if counts.is_empty() {
         return Ok(flat);
     }
-    // Stable ordering for the indices tensor — keeps the on-device
-    // scatter deterministic across runs.
-    let mut unique: Vec<u32> = counts.keys().copied().collect();
-    unique.sort_unstable();
 
     // Gather current logit values for those token ids.
     let indices = Tensor::new(unique.as_slice(), &device)?;
     let current: Vec<f32> = flat.index_select(&indices, 0)?.to_vec1()?;
+    let deltas = penalty_deltas(&unique, &counts, &current, repetition, presence, frequency);
 
-    let rep_active = repetition.is_finite()
-        && repetition > 0.0
-        && (repetition - 1.0).abs() > f32::EPSILON;
+    let delta_tensor = Tensor::new(deltas.as_slice(), &device)?;
+    // `index_add` returns a new tensor with `source` added at the given
+    // `indices` along dim 0. Available on every backend candle ships
+    // (CPU, CUDA, Metal, Vulkan-via-candle), so no backend-specific
+    // branching needed here.
+    Ok(flat.index_add(&indices, &delta_tensor, 0)?)
+}
+
+fn sorted_history_counts(history: &[u32]) -> (std::collections::BTreeMap<u32, u32>, Vec<u32>) {
+    let mut counts = std::collections::BTreeMap::new();
+    for &t in history {
+        *counts.entry(t).or_default() += 1;
+    }
+    let unique = counts.keys().copied().collect();
+    (counts, unique)
+}
+
+fn penalty_deltas(
+    unique: &[u32],
+    counts: &std::collections::BTreeMap<u32, u32>,
+    current: &[f32],
+    repetition: f32,
+    presence: f32,
+    frequency: f32,
+) -> Vec<f32> {
+    let rep_active =
+        repetition.is_finite() && repetition > 0.0 && (repetition - 1.0).abs() > f32::EPSILON;
     let presence_active = presence.is_finite() && presence != 0.0;
     let frequency_active = frequency.is_finite() && frequency != 0.0;
 
-    let mut deltas: Vec<f32> = Vec::with_capacity(unique.len());
+    let mut deltas = Vec::with_capacity(unique.len());
     for (i, &tok) in unique.iter().enumerate() {
         let orig = current[i];
         let mut new = orig;
         if rep_active {
-            new = if new > 0.0 { new / repetition } else { new * repetition };
+            new = if new > 0.0 {
+                new / repetition
+            } else {
+                new * repetition
+            };
         }
         if presence_active {
             new -= presence;
@@ -242,13 +270,61 @@ fn apply_penalties_on_device(
         }
         deltas.push(new - orig);
     }
+    deltas
+}
 
+#[cfg(feature = "cuda")]
+fn try_kt_apply_penalties_on_device(
+    flat: &Tensor,
+    history: &[u32],
+    repetition: f32,
+    presence: f32,
+    frequency: f32,
+) -> Result<Option<Tensor>> {
+    if !matches!(flat.device(), Device::Cuda(_))
+        || flat.dtype() != DType::F32
+        || !flat.is_contiguous()
+        || flat.rank() != 1
+    {
+        return Ok(None);
+    }
+
+    let (counts, unique) = sorted_history_counts(history);
+    if counts.is_empty() {
+        return Ok(Some(flat.clone()));
+    }
+
+    kiln_nvtx::range!(c"kiln/sampling_penalties_kt");
+
+    let device = flat.device().clone();
+    let indices = Tensor::new(unique.as_slice(), &device)?;
+    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(flat) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let indices_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&indices) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let current_kt = match kiln_tensor::cuda_index_select_dim0(&out_kt, &indices_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let current = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&current_kt)
+        .map_err(|e| anyhow::anyhow!("kt sampling penalties gather copy-back failed: {e}"))?;
+    let current: Vec<f32> = current.to_vec1()?;
+    let deltas = penalty_deltas(&unique, &counts, &current, repetition, presence, frequency);
     let delta_tensor = Tensor::new(deltas.as_slice(), &device)?;
-    // `index_add` returns a new tensor with `source` added at the given
-    // `indices` along dim 0. Available on every backend candle ships
-    // (CPU, CUDA, Metal, Vulkan-via-candle), so no backend-specific
-    // branching needed here.
-    Ok(flat.index_add(&indices, &delta_tensor, 0)?)
+    let delta_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&delta_tensor) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    if kiln_tensor::cuda_scatter_add_dim0(&out_kt, &indices_kt, &delta_kt).is_err() {
+        return Ok(None);
+    }
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .map_err(|e| anyhow::anyhow!("kt sampling penalties output copy-back failed: {e}"))?;
+    Ok(Some(out))
 }
 
 /// Sample from an already-temperature-pre-scaling logits tensor with
@@ -1028,6 +1104,76 @@ mod tests {
         let a = sample_with_full_params(&logits, &params, &history)?;
         let b = sample_with_params(&logits, 1.0, 1.0, 0, Some(123))?;
         assert_eq!(a, b, "no-op penalty path must match legacy sampler");
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_cuda_sampling_penalties_kt_default_matches_candle_path() -> Result<()> {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!(
+                "CUDA unavailable, skipping test_cuda_sampling_penalties_kt_default_matches_candle_path"
+            );
+            return Ok(());
+        };
+        let cpu = Device::Cpu;
+        let values = [
+            0.0_f32, 5.0, -2.0, 3.0, 1.0, 0.5, // ignored non-last position
+            0.5, 8.0, -4.0, 2.0, 1.5, 0.0, // sampled last position
+        ];
+        let history = [1_u32, 1, 2, 4];
+        let repetition = 2.0;
+        let presence = 0.5;
+        let frequency = 0.25;
+
+        let cuda_logits = Tensor::new(&values, &cuda)?.reshape((2, 6))?;
+        let got = apply_penalties_on_device(
+            &cuda_logits,
+            &history,
+            repetition,
+            presence,
+            frequency,
+        )?;
+
+        let cuda_flat = last_position_logits(&cuda_logits)?.to_dtype(DType::F32)?;
+        let got_direct = try_kt_apply_penalties_on_device(
+            &cuda_flat,
+            &history,
+            repetition,
+            presence,
+            frequency,
+        )?
+        .context("expected CUDA kt penalty path to run")?;
+
+        let cpu_logits = Tensor::new(&values, &cpu)?.reshape((2, 6))?;
+        let expected = apply_penalties_on_device(
+            &cpu_logits,
+            &history,
+            repetition,
+            presence,
+            frequency,
+        )?;
+
+        let got = got.to_vec1::<f32>()?;
+        let got_direct = got_direct.to_vec1::<f32>()?;
+        let expected = expected.to_vec1::<f32>()?;
+        assert_eq!(got.len(), expected.len());
+        assert_eq!(got_direct.len(), expected.len());
+        for (idx, ((g, gd), e)) in got
+            .iter()
+            .zip(got_direct.iter())
+            .zip(expected.iter())
+            .enumerate()
+        {
+            assert!(
+                (g - e).abs() <= 1e-6,
+                "penalty logit mismatch at {idx}: got {g}, expected {e}"
+            );
+            assert!(
+                (gd - e).abs() <= 1e-6,
+                "direct kt penalty logit mismatch at {idx}: got {gd}, expected {e}"
+            );
+        }
         Ok(())
     }
 
