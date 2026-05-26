@@ -1,9 +1,9 @@
 # Phase 5 — CUDA graph capture status (#1082)
 
-Snapshot taken on `main` at `76069cd6` (post-Phase 7 FP8 wire-up).
-Inventories what's already shipped vs. what still gates the
-"command-list / graph capture (per backend), with batched cuda-graph
-as the headline" milestone for Phase 5.
+Snapshot taken on `main` at `6d564b9a` (Phase 5 default-on flip).
+Inventories what's shipped, what's gated default-on/default-off, and
+what remains for the "command-list / graph capture (per backend),
+with batched cuda-graph as the headline" milestone for Phase 5.
 
 This doc is the antidote to "the substrate isn't ready yet" planning
 drift — the substrate (`kiln-graph` + `kiln-tensor::Allocator`) and
@@ -11,18 +11,26 @@ the production batched capture path (`kiln-model/src/cuda_graph.rs`)
 landed in parallel. Future planners should treat this as the
 canonical "what's already done" reference.
 
-## Headline
+## Headline (2026-05-26)
+
+🎉 **`KILN_CUDA_GRAPHS_BATCHED=1` AND `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1`
+are now DEFAULT ON** (commit `6d564b9a`). End-to-end `compute-sanitizer
+memcheck` on A6000 at HEAD `a2cb9edb` passed: live driver runs clean
+(decode 74.4 tok/s, mean ITL 13.45ms, peak VRAM 11.2 GB on Qwen3.5-4B
+W4A16 paged decode at bs=1/4/8/16) AND sanitizer reports
+`========= ERROR SUMMARY: 0 errors`.
 
 - The **bs=1 production CUDA graph capture/replay path is live**
-  under `KILN_CUDA_GRAPHS=true` (on by default).
-- The **bs>1 batched capture/replay path is in-tree** under
-  `KILN_CUDA_GRAPHS_BATCHED=1` (off by default). **All four root-cause
+  under `KILN_CUDA_GRAPHS=true` (on by default; unchanged).
+- The **bs>1 batched capture/replay path is live** under
+  `KILN_CUDA_GRAPHS_BATCHED` (now default-on). All four root-cause
   intra-graph alloc suspects from `cuda-graph-bs2-secondary-audit.md`
-  are now closed** (see "Phase 5 bs>1 progress" below).
-- One end-to-end `compute-sanitizer` sweep on the full Qwen3.5-4B chat-
-  completion driver with `KILN_CUDA_GRAPHS_BATCHED=1
-  KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1` is the remaining validation gate
-  before flipping `KILN_CUDA_GRAPHS_BATCHED=1` to default-on.
+  closed (see "Phase 5 bs>1 progress" below). Escape hatch:
+  `KILN_CUDA_GRAPHS_BATCHED=0`.
+- The **fused batched-slot KV writer** is live under
+  `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED` (now default-on). Closes
+  suspect 1 of `cuda-graph-bs2-secondary-audit.md`. Escape hatch:
+  `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=0`.
 - The **substrate crates** (`kiln-graph`, `kiln-graph-cuda`,
   `kiln-graph-metal`, `kiln-graph-vulkan`) ship the backend-agnostic
   types but the per-backend impls are scaffolds.
