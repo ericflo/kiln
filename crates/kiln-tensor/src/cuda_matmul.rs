@@ -364,10 +364,10 @@ pub fn cuda_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
     let mut expected_out_shape = a_shape[..a_rank - 2].to_vec();
     expected_out_shape.push(m);
     expected_out_shape.push(n);
-    if dst.dims() != expected_out_shape.as_slice() {
+    if dst.shape() != expected_out_shape.as_slice() {
         return Err(crate::Error::Msg(format!(
             "cuda_matmul_into: dst shape {:?} != expected {:?}",
-            dst.dims(),
+            dst.shape(),
             expected_out_shape
         )));
     }
