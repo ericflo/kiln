@@ -135,10 +135,20 @@ impl Tape {
             std::collections::HashMap::new();
         grads.insert(loss_id, seed_grad);
 
+        // Read KILN_DETECT_ANOMALY once up-front so the per-node loop
+        // doesn't pay the env-var lookup cost per iteration. When
+        // set, each backward op's gradient outputs are scanned for
+        // NaN/Inf via `Tensor::all_finite()`; the first violation
+        // panics with `anomaly_panic` so corruption surfaces at the
+        // op that produced the non-finite value, not 100 steps
+        // later when loss diverges. Off-by-default (~5% per-step
+        // cost when on); CI training-parity tests opt in.
+        let anomaly = crate::anomaly::anomaly_detection_enabled();
+
         // Walk nodes in reverse insertion order. (Insertion order is
         // already topo-sorted producer-before-consumer because each
         // forward op records before its consumers.)
-        for node in self.nodes.iter().rev() {
+        for (node_index, node) in self.nodes.iter().enumerate().rev() {
             // 1. Anti-pattern 16: input version check via the live
             //    Arc<AtomicU64> handles captured at record() time.
             for (i, recorded_version) in node.input_versions.iter().enumerate() {
@@ -171,6 +181,42 @@ impl Tape {
                     per_input.len(),
                     node.input_count_decl()
                 )));
+            }
+
+            // 3b. KILN_DETECT_ANOMALY: scan each gradient output for
+            //     NaN/Inf and panic at the producing op's tape
+            //     position on the first violation. Skip non-CPU
+            //     storages (all_finite returns Err on non-CPU; the
+            //     CUDA/Metal/Vulkan is_finite kernel lands with the
+            //     per-backend substrate). For now, the CPU autograd
+            //     path is the canonical reference + the path the CI
+            //     parity tests run under.
+            if anomaly {
+                for (i, maybe_grad) in per_input.iter().enumerate() {
+                    let Some(g) = maybe_grad.as_ref() else { continue };
+                    match g.all_finite() {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            crate::anomaly::anomaly_panic(
+                                node_index,
+                                node.op.name(),
+                                &format!(
+                                    "input #{i} gradient contained NaN or Inf \
+                                     (shape {:?}, dtype {:?})",
+                                    g.shape(),
+                                    g.dtype()
+                                ),
+                            );
+                        }
+                        Err(_) => {
+                            // Non-CPU storage — the kernel for is_finite
+                            // is a follow-up; for now silently skip the
+                            // check rather than failing the backward
+                            // pass. CPU-autograd CI tests are the
+                            // anomaly-detection bedrock.
+                        }
+                    }
+                }
             }
 
             // 4. Accumulate into the per-id grad map.
