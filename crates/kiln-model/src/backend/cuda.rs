@@ -130,23 +130,15 @@ pub struct CudaBackend {
     // `kiln_gdn_kernel::gdn_full_chunk_forward` fall-through inside
     // the multiblock dispatcher, because no kt single-block kernel
     // wire exists yet.
-    /// Phase 7 default-on (#1082): route the flash-attention-2 prefill
-    /// + paged_decode kernels through the kt-typed surface
-    /// (`flash_attn_fwd_kt` / `flash_attn_paged_decode_kt` /
-    /// `flash_attn_paged_decode_dyn_seqlen_kt`) instead of the
-    /// candle-typed `kiln_flash_attn::flash_attn` shim. Default ON
-    /// because the kt path matches the candle path bit-exactly: both
-    /// bottom out in the same FFI symbols (`kiln_flash_attn_fwd`,
-    /// `kiln_flash_attn_fwd_paged_decode`,
-    /// `kiln_flash_attn_fwd_paged_decode_dyn_seqlen`); only the Rust
-    /// shell types change. The candle wrapper discards softmax_lse;
-    /// the kt path does the same (we only return `out`). The
-    /// `with_graph_outputs` site retains its `graph_outputs.is_none()`
-    /// guard — when callers own the output tensors (CUDA-graph capture
-    /// path), the candle wrapper is still used because the kt surface
-    /// does not yet take a caller-owned `(out, lse)` pair. Set
-    /// `KILN_DISABLE_KT_API_FLASH_ATTN=1` to opt out (escape hatch).
-    cuda_use_kt_api_flash_attn: bool,
+    // Phase 7 (#1082): the cuda_use_kt_api_flash_attn gate was
+    // removed once the kt-typed surface became the only path on
+    // the 3 sites that don't take caller-owned graph outputs
+    // (`flash_attn`, `flash_attn_paged_decode`,
+    // `flash_attn_paged_decode_contiguous_batch_dyn_seqlen`). The
+    // 4th site (`_with_graph_outputs`) still routes the
+    // `graph_outputs == Some(...)` case through the candle wrapper
+    // because the kt-typed entry doesn't accept caller-owned (out,
+    // lse) pairs yet; the `graph_outputs == None` case is kt.
     /// Phase 7 opt-in (#1082): route the SGD optimizer step through
     /// the kt-typed surface (`sgd_step_{f32,bf16}_kt`) instead of the
     /// candle-typed `kiln_rmsnorm_kernel::sgd_step_inplace` shim.
@@ -211,8 +203,9 @@ impl CudaBackend {
         // the Rust shell types changing. The `with_graph_outputs`
         // site retains its `graph_outputs.is_none()` guard so the
         // caller-owned-output path keeps using the candle wrapper.
-        // Escape hatch: `KILN_DISABLE_KT_API_FLASH_ATTN=1`.
-        let cuda_use_kt_api_flash_attn = std::env::var("KILN_DISABLE_KT_API_FLASH_ATTN").is_err();
+        // KILN_DISABLE_KT_API_FLASH_ATTN gate removed alongside the
+        // 3 sites where the kt-typed path is the only path. The
+        // 4th site checks `graph_outputs.is_none()` directly.
         // #1082: opt-in (default off). The kt path is bit-exact by
         // construction — both candle and kt paths bottom out in
         // the same `kiln_sgd_step_{f32,bf16}` FFI symbols; only the
@@ -250,23 +243,11 @@ impl CudaBackend {
             gdn_decode_qk_norm_recurrent_enabled,
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled,
             fused_conv1d_enabled,
-            cuda_use_kt_api_flash_attn,
             cuda_use_kt_api_sgd_step,
             cuda_use_kt_api_adamw_step,
             lora_decode_add_enabled,
             gdn_full_chunk_forward_multiblock_enabled,
         }
-    }
-
-    /// Test-only constructor (#1082) for parity tests of the kt-API
-    /// flash-attn wiring (paged-decode + paged-decode-dyn-seqlen).
-    /// Avoids mutating process-global env state from the test, which
-    /// would race with other parallel tests in the same binary.
-    #[cfg(test)]
-    pub(crate) fn new_with_kt_api_flash_attn(device: Device, kt_api: bool) -> Self {
-        let mut be = Self::new(device);
-        be.cuda_use_kt_api_flash_attn = kt_api;
-        be
     }
 
     pub fn training_capabilities_static() -> TrainingCapabilities {
@@ -554,32 +535,27 @@ impl BackendRuntime for CudaBackend {
         if q.dtype() != DType::BF16 {
             return Ok(None);
         }
-        // Phase 7 opt-in (#1082): route through the kt-typed surface.
-        // The kt path bottoms out in the same `kiln_flash_attn_fwd` FFI
-        // symbol as the candle shim, so it's bit-exactly equivalent;
-        // only the Rust shell types change. The candle wrapper
-        // discards softmax_lse, so the kt path does the same here.
-        if self.cuda_use_kt_api_flash_attn {
-            kiln_nvtx::range!(c"kiln/flash_attn_kt");
-            // Match candle shim's contiguous-input contract.
-            let q_c = q.contiguous().context("flash_attn kt: q contiguous")?;
-            let k_c = k.contiguous().context("flash_attn kt: k contiguous")?;
-            let v_c = v.contiguous().context("flash_attn kt: v contiguous")?;
-            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_c)
-                .context("flash_attn kt: borrow q -> kt")?;
-            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_c)
-                .context("flash_attn kt: borrow k -> kt")?;
-            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_c)
-                .context("flash_attn kt: borrow v -> kt")?;
-            let (out_kt, _lse_kt) =
-                kiln_flash_attn::flash_attn_fwd_kt(&q_kt, &k_kt, &v_kt, softmax_scale, causal)
-                    .map_err(|e| anyhow::anyhow!("flash_attn kt: flash_attn_fwd_kt: {e}"))?;
-            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .context("flash_attn kt: copy kt out -> candle")?;
-            return Ok(Some(out));
-        }
-        let out = kiln_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
-            .context("flash_attn kernel failed")?;
+        // Phase 7 (#1082): kt-typed surface is now the only path.
+        // Same closeout pattern as conv1d (2ebcfb08), marlin
+        // (0841c266), GDN (86c7f134). Bit-exact: bottoms out in
+        // the same `kiln_flash_attn_fwd` FFI symbol as the candle
+        // shim; candle wrapper discards softmax_lse, kt path does
+        // the same here.
+        kiln_nvtx::range!(c"kiln/flash_attn_kt");
+        let q_c = q.contiguous().context("flash_attn kt: q contiguous")?;
+        let k_c = k.contiguous().context("flash_attn kt: k contiguous")?;
+        let v_c = v.contiguous().context("flash_attn kt: v contiguous")?;
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_c)
+            .context("flash_attn kt: borrow q -> kt")?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_c)
+            .context("flash_attn kt: borrow k -> kt")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_c)
+            .context("flash_attn kt: borrow v -> kt")?;
+        let (out_kt, _lse_kt) =
+            kiln_flash_attn::flash_attn_fwd_kt(&q_kt, &k_kt, &v_kt, softmax_scale, causal)
+                .map_err(|e| anyhow::anyhow!("flash_attn kt: flash_attn_fwd_kt: {e}"))?;
+        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .context("flash_attn kt: copy kt out -> candle")?;
         Ok(Some(out))
     }
 
@@ -597,48 +573,30 @@ impl BackendRuntime for CudaBackend {
         if any_tracks_op(&[q, k_pool, v_pool, block_table]) || q.dtype() != DType::BF16 {
             return Ok(None);
         }
-        // Phase 7 opt-in (#1082): route through the kt-typed surface.
-        // The kt path bottoms out in the same
-        // `kiln_flash_attn_fwd_paged_decode` FFI symbol as the candle
-        // shim, so it's bit-exactly equivalent; only the Rust shell
-        // types change. The candle wrapper discards softmax_lse; the
-        // kt path does the same here.
-        if self.cuda_use_kt_api_flash_attn {
-            kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_kt");
-            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-                .context("flash_attn_paged_decode kt: borrow q -> kt")?;
-            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
-                .context("flash_attn_paged_decode kt: borrow k_pool -> kt")?;
-            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
-                .context("flash_attn_paged_decode kt: borrow v_pool -> kt")?;
-            let bt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(block_table)
-                .context("flash_attn_paged_decode kt: borrow block_table -> kt")?;
-            let out_kt = kiln_flash_attn::flash_attn_paged_decode_kt(
-                &q_kt,
-                &k_kt,
-                &v_kt,
-                &bt_kt,
-                total_seqlen_k,
-                page_block_size,
-                softmax_scale,
-                causal,
-            )
-            .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode kt: {e}"))?;
-            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .context("flash_attn_paged_decode kt: copy kt out -> candle")?;
-            return Ok(Some(out));
-        }
-        let out = kiln_flash_attn::flash_attn_paged_decode(
-            q,
-            k_pool,
-            v_pool,
-            block_table,
+        // Phase 7 (#1082): kt-only. Bit-exact with the candle path
+        // — both bottom out in `kiln_flash_attn_fwd_paged_decode`.
+        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_kt");
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
+            .context("flash_attn_paged_decode kt: borrow q -> kt")?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
+            .context("flash_attn_paged_decode kt: borrow k_pool -> kt")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
+            .context("flash_attn_paged_decode kt: borrow v_pool -> kt")?;
+        let bt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(block_table)
+            .context("flash_attn_paged_decode kt: borrow block_table -> kt")?;
+        let out_kt = kiln_flash_attn::flash_attn_paged_decode_kt(
+            &q_kt,
+            &k_kt,
+            &v_kt,
+            &bt_kt,
             total_seqlen_k,
             page_block_size,
             softmax_scale,
             causal,
         )
-        .context("flash_attn_paged_decode kernel failed")?;
+        .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode kt: {e}"))?;
+        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .context("flash_attn_paged_decode kt: copy kt out -> candle")?;
         Ok(Some(out))
     }
 
@@ -657,57 +615,38 @@ impl BackendRuntime for CudaBackend {
         if any_tracks_op(&[q, k_pool, v_pool, block_table, seqused_k]) || q.dtype() != DType::BF16 {
             return Ok(None);
         }
-        // Phase 7 opt-in (#1082): route through the kt-typed surface.
-        // The kt path bottoms out in the same
-        // `kiln_flash_attn_fwd_paged_decode_dyn_seqlen` FFI symbol as
-        // the candle shim, so it's bit-exactly equivalent; only the
-        // Rust shell types change. This entry point always passes
-        // `graph_outputs = None` to the candle wrapper, so it can be
-        // unconditionally routed through the kt surface (which does
-        // not yet take a caller-owned graph_outputs pair; the
-        // graph-output-write variant lives in the
-        // `_with_graph_outputs` sibling below).
-        if self.cuda_use_kt_api_flash_attn {
-            kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
-            let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-                .context("flash_attn_paged_decode_dyn_seqlen kt: borrow q -> kt")?;
-            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
-                .context("flash_attn_paged_decode_dyn_seqlen kt: borrow k_pool -> kt")?;
-            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
-                .context("flash_attn_paged_decode_dyn_seqlen kt: borrow v_pool -> kt")?;
-            let bt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(block_table)
-                .context("flash_attn_paged_decode_dyn_seqlen kt: borrow block_table -> kt")?;
-            let sk_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(seqused_k)
-                .context("flash_attn_paged_decode_dyn_seqlen kt: borrow seqused_k -> kt")?;
-            let out_kt = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt(
-                &q_kt,
-                &k_kt,
-                &v_kt,
-                &bt_kt,
-                &sk_kt,
-                max_seqlen_k,
-                page_block_size,
-                softmax_scale,
-                causal,
-            )
-            .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode_dyn_seqlen kt: {e}"))?;
-            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .context("flash_attn_paged_decode_dyn_seqlen kt: copy kt out -> candle")?;
-            return Ok(Some(out));
-        }
-        let out = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen(
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            seqused_k,
-            None,
+        // Phase 7 (#1082): kt-only. Bit-exact with the candle path
+        // — both bottom out in
+        // `kiln_flash_attn_fwd_paged_decode_dyn_seqlen`. This entry
+        // always passed `graph_outputs = None`; the caller-owned-
+        // output variant lives in `_with_graph_outputs` below and
+        // still uses the candle wrapper because the kt-typed entry
+        // doesn't accept a caller-owned (out, lse) pair yet.
+        kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
+            .context("flash_attn_paged_decode_dyn_seqlen kt: borrow q -> kt")?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
+            .context("flash_attn_paged_decode_dyn_seqlen kt: borrow k_pool -> kt")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
+            .context("flash_attn_paged_decode_dyn_seqlen kt: borrow v_pool -> kt")?;
+        let bt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(block_table)
+            .context("flash_attn_paged_decode_dyn_seqlen kt: borrow block_table -> kt")?;
+        let sk_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(seqused_k)
+            .context("flash_attn_paged_decode_dyn_seqlen kt: borrow seqused_k -> kt")?;
+        let out_kt = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt(
+            &q_kt,
+            &k_kt,
+            &v_kt,
+            &bt_kt,
+            &sk_kt,
             max_seqlen_k,
             page_block_size,
             softmax_scale,
             causal,
         )
-        .context("flash_attn_paged_decode_dyn_seqlen kernel failed")?;
+        .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode_dyn_seqlen kt: {e}"))?;
+        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .context("flash_attn_paged_decode_dyn_seqlen kt: copy kt out -> candle")?;
         Ok(Some(out))
     }
 
@@ -742,7 +681,13 @@ impl BackendRuntime for CudaBackend {
         // non-graph-capture path), the kt route is bit-exactly
         // equivalent because both paths bottom out in the same
         // `kiln_flash_attn_fwd_paged_decode_dyn_seqlen` FFI symbol.
-        if self.cuda_use_kt_api_flash_attn && graph_outputs.is_none() {
+        // Phase 7 (#1082): kt path when graph_outputs is None;
+        // candle path only when caller owns the (out, lse) pair
+        // (the kt-typed entry doesn't accept caller-owned outputs
+        // yet — that's the next migration). The flag gate was
+        // removed alongside the same flag's other 3 sites; the
+        // condition reduces to `graph_outputs.is_none()`.
+        if graph_outputs.is_none() {
             kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
             let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
                 .context("flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow q -> kt")?;
@@ -1757,7 +1702,6 @@ mod tests {
             gdn_decode_qk_norm_recurrent_enabled: false,
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled: false,
             fused_conv1d_enabled: false,
-            cuda_use_kt_api_flash_attn: false,
             cuda_use_kt_api_sgd_step: false,
             cuda_use_kt_api_adamw_step: false,
             lora_decode_add_enabled: false,
