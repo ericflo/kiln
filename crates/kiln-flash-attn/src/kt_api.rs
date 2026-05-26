@@ -15,9 +15,10 @@
 //! migrate one site at a time. When the migration completes, the
 //! candle-typed API is deleted.
 //!
-//! Today only `flash_attn_fwd_kt` lands here; the remaining four
-//! public entry points port in subsequent PRs using the same
-//! pattern.
+//! The active kt surface now covers forward, backward, paged decode,
+//! dynamic-seqlen paged decode, and paged-KV writes. The candle-typed
+//! API remains only as the migration reference until every caller is
+//! moved.
 
 use kiln_kt_bridge::BridgeError;
 use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
