@@ -590,14 +590,14 @@ fn sample_full_distribution_unsorted(scaled: &Tensor, seed: Option<u64>) -> Resu
     }
 
     let fallback_idx = (values.len() - 1) as u32;
-    let Some(weights) = softmax_weights_from_logits(&values) else {
+    let Some(weights) = softmax_probs_from_logits(&values) else {
         return Ok(fallback_idx);
     };
 
     sample_from_distribution_weights(&weights, seed, fallback_idx)
 }
 
-fn softmax_weights_from_logits(values: &[f32]) -> Option<Vec<f32>> {
+fn softmax_probs_from_logits(values: &[f32]) -> Option<Vec<f32>> {
     let max_logit = values
         .iter()
         .copied()
@@ -614,6 +614,13 @@ fn softmax_weights_from_logits(values: &[f32]) -> Option<Vec<f32>> {
         } else {
             0.0
         });
+    }
+    let sum: f32 = weights.iter().sum();
+    if !sum.is_finite() || sum <= 0.0 {
+        return None;
+    }
+    for weight in weights.iter_mut() {
+        *weight /= sum;
     }
     Some(weights)
 }
@@ -1244,10 +1251,10 @@ mod tests {
 
     #[test]
     #[cfg(feature = "cuda")]
-    fn test_cuda_sampling_softmax_kt_helper_matches_host_weights() -> Result<()> {
+    fn test_cuda_sampling_softmax_kt_helper_matches_host_probs() -> Result<()> {
         let Ok(cuda) = Device::new_cuda(0) else {
             eprintln!(
-                "CUDA unavailable, skipping test_cuda_sampling_softmax_kt_helper_matches_host_weights"
+                "CUDA unavailable, skipping test_cuda_sampling_softmax_kt_helper_matches_host_probs"
             );
             return Ok(());
         };
@@ -1256,7 +1263,7 @@ mod tests {
 
         let got = try_kt_full_distribution_probs(&logits)?
             .context("expected CUDA kt sampler softmax path to run")?;
-        let expected = softmax_weights_from_logits(&values).context("host softmax weights")?;
+        let expected = softmax_probs_from_logits(&values).context("host softmax probs")?;
         assert_eq!(got.len(), expected.len());
         for (idx, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
             assert!(
