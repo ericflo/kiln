@@ -1128,24 +1128,19 @@ impl BackendRuntime for CudaBackend {
             );
         }
         kiln_nvtx::range!(c"kiln/gdn_decode_gates_recurrent_bf16_kt");
-        // kt_api expects 3D [B, heads, dim] but the candle method
-        // receives 4D [B, 1, heads, dim]. Squeeze the seq_len=1
-        // axis (metadata-only reshape — no copy). Without this the
-        // kt path errors at the very first shape check and the
-        // gate is effectively dead in production. Same latent bug
-        // as the rmsnorm wire fixed in 171020c.
-        let q_3d = q.squeeze(1)
-            .with_context(|| "kt-adapter: gdn_decode_gates q squeeze(1) failed")?;
-        let k_3d = k.squeeze(1)
-            .with_context(|| "kt-adapter: gdn_decode_gates k squeeze(1) failed")?;
-        let v_3d = v.squeeze(1)
-            .with_context(|| "kt-adapter: gdn_decode_gates v squeeze(1) failed")?;
-        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
-            .with_context(|| "kt-adapter: gdn_decode_gates q → kt failed")?;
-        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
-            .with_context(|| "kt-adapter: gdn_decode_gates k → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
-            .with_context(|| "kt-adapter: gdn_decode_gates v → kt failed")?;
+        // Run supports_kt on the ORIGINAL 4D tensors — the kt
+        // predicate's shape contract is 4D `[B, 1, q_heads, dk]`
+        // per kt_api.rs:2199-2203. Then squeeze for the kernel call
+        // which expects 3D `[B, heads, dim]`. The kernel/predicate
+        // shape mismatch was a latent bug surfaced by the Phase 5
+        // sanitizer sweep (the 3D-pre-predicate ordering made
+        // supports_kt always return false → caller declined).
+        let q_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
+            .with_context(|| "kt-adapter: gdn_decode_gates q → kt (4D for supports) failed")?;
+        let k_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
+            .with_context(|| "kt-adapter: gdn_decode_gates k → kt (4D for supports) failed")?;
+        let v_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+            .with_context(|| "kt-adapter: gdn_decode_gates v → kt (4D for supports) failed")?;
         let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
             .with_context(|| "kt-adapter: gdn_decode_gates a → kt failed")?;
         let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
@@ -1161,10 +1156,24 @@ impl BackendRuntime for CudaBackend {
         let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
             .with_context(|| "kt-adapter: gdn_decode_gates weight → kt failed")?;
         if !kiln_gdn_kernel::gdn_decode_gates_recurrent_supports_kt(
-            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+            &q_kt_4d, &k_kt_4d, &v_kt_4d, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
         ) {
             return Ok(None);
         }
+        // Squeeze for the kernel call (3D-expecting). Metadata-only
+        // reshape on contiguous inputs; no copy.
+        let q_3d = q.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_gates q squeeze(1) failed")?;
+        let k_3d = k.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_gates k squeeze(1) failed")?;
+        let v_3d = v.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_gates v squeeze(1) failed")?;
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
+            .with_context(|| "kt-adapter: gdn_decode_gates q 3D → kt failed")?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
+            .with_context(|| "kt-adapter: gdn_decode_gates k 3D → kt failed")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
+            .with_context(|| "kt-adapter: gdn_decode_gates v 3D → kt failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_gates_recurrent_bf16_kt(
             &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
             eps as f32,
@@ -1284,24 +1293,14 @@ impl BackendRuntime for CudaBackend {
             );
         }
         kiln_nvtx::range!(c"kiln/gdn_decode_qk_norm_gates_recurrent_bf16_kt");
-        // kt_api expects 3D [B, heads, dim] but the candle method
-        // receives 4D [B, 1, heads, dim]. Squeeze the seq_len=1
-        // axis (metadata-only reshape — no copy). Without this the
-        // kt path errors at the very first shape check and the
-        // gate is effectively dead in production. Same latent bug
-        // as the rmsnorm wire fixed in 171020c.
-        let q_3d = q.squeeze(1)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm q squeeze(1) failed")?;
-        let k_3d = k.squeeze(1)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm k squeeze(1) failed")?;
-        let v_3d = v.squeeze(1)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm v squeeze(1) failed")?;
-        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm q → kt failed")?;
-        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm k → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm v → kt failed")?;
+        // supports_kt on 4D, kernel on 3D — see gdn_decode_gates_recurrent
+        // above for the same shape-contract split.
+        let q_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm q → kt (4D) failed")?;
+        let k_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm k → kt (4D) failed")?;
+        let v_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm v → kt (4D) failed")?;
         let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm a → kt failed")?;
         let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
@@ -1313,10 +1312,23 @@ impl BackendRuntime for CudaBackend {
         let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm state → kt failed")?;
         if !kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_supports_kt(
-            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt,
+            &q_kt_4d, &k_kt_4d, &v_kt_4d, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt,
         ) {
             return Ok(None);
         }
+        // Squeeze for the kernel call (3D-expecting).
+        let q_3d = q.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm q squeeze(1) failed")?;
+        let k_3d = k.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm k squeeze(1) failed")?;
+        let v_3d = v.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm v squeeze(1) failed")?;
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm q 3D → kt failed")?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm k 3D → kt failed")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
+            .with_context(|| "kt-adapter: gdn_decode_qk_norm v 3D → kt failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_bf16_kt(
             &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt,
             q_scale as f32, qk_eps as f32,
@@ -1451,23 +1463,14 @@ impl BackendRuntime for CudaBackend {
             );
         }
         kiln_nvtx::range!(c"kiln/gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt");
-        // kt_api expects 3D [B, heads, dim] but the candle method
-        // receives 4D [B, 1, heads, dim]. Squeeze the seq_len=1
-        // axis (metadata-only reshape — no copy). Without this the
-        // kt path errors at the very first shape check and the
-        // gate is effectively dead in production.
-        let q_3d = q.squeeze(1)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm q squeeze(1) failed")?;
-        let k_3d = k.squeeze(1)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm k squeeze(1) failed")?;
-        let v_3d = v.squeeze(1)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm v squeeze(1) failed")?;
-        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm q → kt failed")?;
-        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm k → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm v → kt failed")?;
+        // supports_kt on 4D, kernel on 3D — see gdn_decode_gates_recurrent
+        // above for the shape-contract split.
+        let q_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm q → kt (4D) failed")?;
+        let k_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm k → kt (4D) failed")?;
+        let v_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm v → kt (4D) failed")?;
         let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm a → kt failed")?;
         let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b)
@@ -1483,10 +1486,23 @@ impl BackendRuntime for CudaBackend {
         let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm weight → kt failed")?;
         if !kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt(
-            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+            &q_kt_4d, &k_kt_4d, &v_kt_4d, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
         ) {
             return Ok(None);
         }
+        // Squeeze for the kernel call (3D-expecting).
+        let q_3d = q.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm q squeeze(1) failed")?;
+        let k_3d = k.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm k squeeze(1) failed")?;
+        let v_3d = v.squeeze(1)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm v squeeze(1) failed")?;
+        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm q 3D → kt failed")?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm k 3D → kt failed")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
+            .with_context(|| "kt-adapter: gdn_decode_rmsnorm v 3D → kt failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
             &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
             q_scale as f32, qk_eps as f32, rms_eps as f32,
