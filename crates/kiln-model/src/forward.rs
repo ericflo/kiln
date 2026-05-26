@@ -325,14 +325,6 @@ fn cuda_use_kt_api_l2_qk_norm() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: flash_attn_fwd through the kt-API + adapters.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_flash_attn_fwd() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_FLASH_ATTN_FWD").is_ok());
-    direct || cuda_use_kt_api_all()
-}
-
 /// Phase 7 opt-in: flash_attn_bwd through the kt-API + adapters.
 /// Routes the FA-bwd recompute path in `CudaFlashAttentionTrainingBf16::bwd`
 /// through `kiln_flash_attn::flash_attn_bwd_kt` when
@@ -342,15 +334,6 @@ fn cuda_use_kt_api_flash_attn_fwd() -> bool {
 fn cuda_use_kt_api_flash_attn_bwd() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_FLASH_ATTN_BWD").is_ok());
-    direct || cuda_use_kt_api_all()
-}
-
-/// Phase 7 opt-in: GDN full_chunk_forward (+ multiblock) through
-/// the kt-API + adapters.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_gdn_full_chunk() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_GDN_FULL_CHUNK").is_ok());
     direct || cuda_use_kt_api_all()
 }
 
