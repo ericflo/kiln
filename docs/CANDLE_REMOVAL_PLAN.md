@@ -642,3 +642,117 @@ status snapshot above when they disagree (the status snapshot reports
 "X/Y kt_api functions wired", which counts kt-API _coverage_; this
 section reports the candle-typed _caller count_, which is what gates
 dropping the dep).
+
+## kiln-autograd readiness for CustomOp migration (investigated 2026-05-26)
+
+Investigation into whether `crates/kiln-autograd/` is ready to replace
+candle's `CustomOp1/2/3` traits in production training paths (for
+`#1082`). Findings:
+
+**Substrate state.** `kiln-autograd` exposes a complete tape over
+`kiln_tensor::Tensor` + `TensorId`: `BackwardOp` trait
+(`name`/`input_count`/`apply`/`requires_input`), `Tape`
+(record/backward/clear/reachable_from) with anti-pattern 16
+version-counter enforcement, `GradStore`, `KILN_DETECT_ANOMALY` wired
+end-to-end, and 30+ concrete `BackwardOp` implementations under
+`src/backwards/` (matmul, reduce, embedding, rmsnorm, layernorm, rope,
+cross-entropy, all elementwise + activation + trig families, etc.).
+`MatmulBackward`/`AddBackward`/`MulBackward`/`EmbeddingBackward` all
+run on CUDA-resident tensors today, verified by
+`crates/kiln-kt-bridge/tests/cuda_backward_parity.rs`. Gap:
+`SoftmaxLastDimBackward` and other `backwards/activation.rs` ops use a
+`load_f32` helper that hard-requires `CpuStorage` and error out on
+CUDA (intentional; tracked by `cuda_softmax_backward_currently_errors_
+on_cuda_storage`). Same applies to several other backwards that hand-
+roll their math; the CUDA-ready set today is the subset that goes
+through `kiln_tensor::ops::*` which already dispatch to CUDA.
+
+**Production caller count: zero.** `grep kiln_autograd crates/`
+shows only test-only consumers (`kiln-kt-bridge` dev-dep,
+`kiln-tensor` dev-dep, `kiln-optim` dev-dep) plus `kiln-autograd`'s
+own internal tests. No `kiln-model`/`kiln-train`/`kiln-server` file
+imports `kiln_autograd::*`. The tape is built but unused by
+production. Production training uses candle's `Var` + `AdamW` +
+`loss.backward()` exclusively, and every fused-with-backward kernel
+(`RmsNormCustomOp`, `FlceCustomOp`, `OpdLossCustomOp`,
+`InjectTensorGradient`, the 7 `CudaLora*`/`CudaSigmoidMul*`/
+`CudaFlashAttention*`/`CudaRotaryOne*` ops in `forward.rs`) is a
+candle `CustomOp{1,2,3}` whose `bwd()` returns candle Tensors.
+
+**Bridge story.** `crates/kiln-kt-bridge/src/lib.rs` already has every
+primitive needed for a candle `CustomOp::bwd` body to compute via kt
+ops and hand the result back to candle's autograd. The relevant
+helpers (all `pub`, all CUDA-tested):
+`kt_tensor_from_candle_cuda_borrow` (zero-copy candle→kt),
+`kt_tensor_from_candle_cuda_copy` (copying variant),
+`kt_tensor_to_candle_cuda_copy` (kt→candle, used in 14+ kt-API
+production sites in `forward.rs::rms_norm`). Candle's autograd
+(`vendor/candle-core/src/backprop.rs:644-670`) consumes whatever
+`Tensor` value `c.bwd(...)` returns and `grads.insert_or_add`'s it
+keyed on the input `Tensor`'s id — it does not require the gradient
+to have been produced by candle ops, only that it's a candle `Tensor`
+of matching shape and dtype on the same device. **Therefore: candle
+backward can be satisfied by a kt-computed gradient, round-tripped
+through `kt_tensor_to_candle_cuda_copy` at the `bwd()` boundary.**
+There is no need for kt-autograd's `Tape` to drive candle's backprop
+walker — the seam is at one op's `bwd()` body, not at the graph
+level. (One device-to-device memcpy per migrated op per training step
+is the bridge cost; ungated by anything except the v2 borrow direction
+for kt→candle, which is a follow-up.)
+
+**Recommended first migration: `RmsNormCustomOp::bwd`** (in
+`crates/kiln-rmsnorm-kernel/src/lib.rs:830`). Rationale:
+(a) the forward and backward kt entry points already exist
+(`fused_rmsnorm_kt`, `fused_rmsnorm_backward_kt` in
+`crates/kiln-rmsnorm-kernel/src/kt_api.rs:65,130`) and call the same
+FFI symbols as the candle `bwd()` body, so bit-exact parity is by
+construction; (b) inputs are just `(x, weight)` BF16 + scalar `eps`,
+no per-position masks or chunk-loop state; (c) the failure mode is
+isolated — a regression shows up at one call site
+(`kiln-model/src/forward.rs::rms_norm`'s training branch) instead of
+spreading across 32 layers' worth of fused-attn or 14 trainer call
+sites; (d) the crate is already on the Tier-1 closure list as
+**BLOCKED**, with this exact gap (autograd-aware migration) called
+out in the audit. The other candidates are strictly more entangled:
+`InjectTensorGradient` is a clever hack that only stores an upstream
+Tensor — there's nothing to migrate, the bwd already just returns
+the stored tensor; `OpdLossCustomOp::bwd` and `FlceCustomOp::bwd`
+both close over `Vec<u32>`/`Vec<bool>`/`chunk_size` and call into
+chunk-loop helpers (`backward_dhidden` and friends) that are still
+pure-candle multi-hundred-line bodies; the `CudaLora*`/
+`CudaFlashAttention*` ops in `forward.rs` are all `CustomOp3` with
+LoRA-state entanglement and live inside the 5000-line forward path.
+`VulkanRmsNormOp` is similarly small but Vulkan-only — CUDA migrates
+more callers per unit work.
+
+**Recommended approach: (a) the bridge approach for the first
+migration, sequenced into (b) over many later PRs.** The bridge
+approach replaces `RmsNormCustomOp::bwd`'s body — currently a
+candle-side `kiln_fused_rmsnorm_bwd` FFI call wrapped in
+`Tensor::from_storage` and `BackpropOp::none()` — with the kt-typed
+chain `kt_tensor_from_candle_cuda_borrow(x) +
+kt_tensor_from_candle_cuda_borrow(weight) +
+kt_tensor_from_candle_cuda_borrow(grad_y) →
+fused_rmsnorm_backward_kt(...) → kt_tensor_to_candle_cuda_copy(...)`.
+Candle's `CustomOp2 for RmsNormCustomOp` itself stays as the
+candle-autograd integration surface; only the body changes. This:
+(1) proves the bridge end-to-end on one of the smallest possible
+surfaces; (2) is reversible — flip back to the candle-FFI body if
+parity fails; (3) deletes zero LOC of candle structurally, so it
+doesn't yet advance Tier 5, but it does prove that the
+`kt_tensor_to_candle_cuda_copy` boundary works for autograd-tracked
+tensors at training time (today it's only exercised on inference
+paths via the `track_op()` check). Once the bridge pattern is
+proven for rmsnorm, the same template applies to the other 10
+`CustomOp{1,2,3}` impls, and only after every candle-typed `bwd`
+body is using the bridge does the full migration to (b) make sense
+— at which point the whole training loop swaps from `loss.backward()`
+to `tape.backward(loss_id, ...)` in a single coordinated PR, the kt
+`Tape`/`BackwardOp` replace the candle `Op::CustomOp{1,2,3}`
+recording sites, and the candle `Var`/`AdamW`/`Variables` machinery
+gets replaced (the `kiln-optim` crate already has the kt-side
+equivalents wired to `kiln-autograd` per its dev-dep). Smallest
+plausible "first proof" PR: ~50 LOC in `kiln-rmsnorm-kernel`
+swapping the bwd body, plus a parity-vs-current test, with no
+changes outside the crate. Not yet executed; this paragraph is the
+plan, not a status report.
