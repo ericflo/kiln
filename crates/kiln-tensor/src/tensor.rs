@@ -721,11 +721,11 @@ fn scalar_at_is_finite(bytes: &[u8], byte_off: usize, dtype: crate::DType) -> bo
         }
         // FP8 E4M3FN has no Inf; only NaN at bit pattern 0x7F / 0xFF
         // (sign bit + all-ones exponent + all-ones mantissa).
-        DType::FP8E4M3 => (bytes[byte_off] & 0x7F) != 0x7F,
+        DType::F8E4M3 => (bytes[byte_off] & 0x7F) != 0x7F,
         // FP8 E5M2: exp = 5 bits + mantissa = 2 bits. exp=11111 is
         // Inf (mantissa=00) or NaN (mantissa!=00) — either is
         // non-finite.
-        DType::FP8E5M2 => ((bytes[byte_off] >> 2) & 0b11111) != 0b11111,
+        DType::F8E5M2 => ((bytes[byte_off] >> 2) & 0b11111) != 0b11111,
         // U8/U32/I64/packed dtypes: handled by the early-return in
         // Tensor::all_finite; should never reach here.
         _ => true,
