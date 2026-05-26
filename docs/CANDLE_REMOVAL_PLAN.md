@@ -197,21 +197,27 @@ autograd tape:
 - Scaffold (`72c2c16f`): `anomaly_detection_enabled()` +
   `anomaly_panic()` in `kiln-autograd::anomaly`.
 - Substrate (`3c90d064`): `Tensor::all_finite()` walks the strided
-  view (CPU storage; non-CPU returns `Err` pending per-backend
-  is_finite kernel). Handles F32, BF16, F16, FP8E4M3 (no-Inf
+  view (CPU storage). Handles F32, BF16, F16, FP8E4M3 (no-Inf
   format), FP8E5M2.
 - Tape wire (`fdeace4b`): `Tape::backward` reads
   `anomaly_detection_enabled()` once at top, then after each
   `op.apply()` scans returned grads. On first non-finite,
   `anomaly_panic` with the producing op's tape position.
+- CUDA bridge (`28514162`): `Tensor::all_finite()` now uses a
+  `cuda_to_host_copy` D2H bridge for CUDA-resident tensors so
+  the trap works end-to-end for GPU training paths today,
+  paying an O(numel) D2H copy per scanned tensor. Covered by
+  6 new CPU unit tests in `kiln-tensor::tensor::tests` (NaN,
+  +Inf, -Inf, integer vacuous-true, post-transpose stride walk).
 
 Cost: O(numel) per backward step on CPU when enabled, ~5% per
-the issue body. Off-by-default in production; CI training-parity
-tests opt in via `KILN_DETECT_ANOMALY=1`.
+the issue body. CUDA paths pay an additional O(numel) D2H copy
+per scanned tensor. Off-by-default in production; CI training-
+parity tests opt in via `KILN_DETECT_ANOMALY=1`.
 
-Remaining: per-backend `is_finite_storage` kernels
-(CUDA/Metal/Vulkan) for the GPU training paths, then enable the
-trap in the SFT parity CI.
+Remaining: per-backend `is_finite_storage` reduction kernels
+(CUDA/Metal/Vulkan) to replace the D2H bridge once the kernel
+substrate lands, then enable the trap in the SFT parity CI.
 
 ## Build matrix coverage required before each tier closes
 
