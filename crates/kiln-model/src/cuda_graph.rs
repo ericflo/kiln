@@ -1616,9 +1616,44 @@ impl CudaGraphRunner {
                 },
             );
 
-            let graph_result = stream.end_capture(
-                candle_core::cuda_backend::cudarc::driver::sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            );
+            // NOTE: We deliberately do NOT pass
+            // `CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH` for the
+            // bs>1 batched-capture path. Instead we pass the CUDA
+            // "no flags" value (0). cudarc's
+            // `CUgraphInstantiate_flags_enum` does not expose a `_NONE`
+            // variant, so we transmute `0u32` — `cuGraphInstantiate`
+            // accepts 0 as "no flags" (this is the official
+            // `CUDA_GRAPH_INSTANTIATE_FLAG_NONE` value in the CUDA C
+            // headers), and the safe wrapper passes the enum through
+            // as `flags as u32 as u64` to the FFI call.
+            //
+            // Root cause this avoids (see bench-results/cuda-graph-status.md
+            // 2026-05-26 section): the captured region contains
+            // intermediate tensor allocations (notably the lm-head matmul
+            // output) that Candle's matmul pool returns from a host-side
+            // allocator. AUTO_FREE_ON_LAUNCH frees device allocations
+            // recorded as `cudaMemAllocNode` between replays, and the
+            // captured `slice_set` source pointer ends up dangling on the
+            // next replay → `CUDA_ERROR_ILLEGAL_ADDRESS` at
+            // `greedy_sample_rows(captured.output_logits)`.
+            //
+            // Trading memory for correctness: each batched-graph bucket
+            // keeps its intermediate buffers alive for the lifetime of
+            // the captured graph. For a fixed workload with a small
+            // number of `(batch_size, max_seqlen_k)` buckets, this cost
+            // is acceptable. If memory growth becomes a concern, the
+            // structural fix is to pre-allocate the lm-head output
+            // buffer outside the capture window via a `matmul_into(dst)`
+            // variant (see status doc for design notes).
+            //
+            // The bs=1 path at line ~1438 still uses
+            // AUTO_FREE_ON_LAUNCH unchanged — it has shipped in
+            // production for over a year and the matmul output for
+            // shape `[1, 1, vocab]` lands at a deterministic pool
+            // address in practice.
+            let no_flags: candle_core::cuda_backend::cudarc::driver::sys::CUgraphInstantiate_flags =
+                unsafe { std::mem::transmute::<u32, _>(0u32) };
+            let graph_result = stream.end_capture(no_flags);
 
             forward_result.context("batched forward failed during graph capture")?;
             let graph = match graph_result {
