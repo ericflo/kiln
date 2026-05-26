@@ -211,17 +211,26 @@ fn cuda_use_kt_api_softmax() -> bool {
     direct || cuda_use_kt_api_all()
 }
 
-/// Phase 7 opt-in: lm_head argmax (1-D flattened logits) through the
-/// kt-API + adapters. Set `KILN_USE_KT_API_ARGMAX=1` (or
-/// `KILN_USE_KT_API_ALL=1`) to enable; default off. Routes
+/// Phase 7 default-on (#1082): lm_head argmax (1-D flattened
+/// logits) through the kt-API + adapters. Routes
 /// [`lm_head_argmax`]'s final `argmax(0)` through
-/// `kiln_tensor::cuda_argmax_last_axis` (which is the only axis on a
-/// 1-D tensor). Returns the scalar I64 token id back through the
-/// kt-bridge copy-back adapter.
+/// `kiln_tensor::cuda_argmax_last_axis` (which is the only axis
+/// on a 1-D tensor). Returns the scalar I64 token id back through
+/// the kt-bridge copy-back adapter.
+///
+/// Bit-exact by construction: argmax is order-deterministic over
+/// the full input (first-occurrence wins for ties). Both candle
+/// and kt walk the same vocab vector and return the same index.
+/// Same flip rationale as the sampling-level greedy argmax
+/// default-on (`c250abb5`, `4eda8a24`).
+///
+/// Escape hatch: `KILN_DISABLE_KT_API_ARGMAX=1`.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_argmax() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ARGMAX").is_ok());
+    // #1082: flipped default ON. Bit-exact deterministic argmax.
+    // Escape hatch: `KILN_DISABLE_KT_API_ARGMAX=1`.
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_ARGMAX").is_err());
     direct || cuda_use_kt_api_all()
 }
 
