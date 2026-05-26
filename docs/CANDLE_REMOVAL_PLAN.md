@@ -132,18 +132,29 @@ sed -i "/candle-core.*path.*vendor/d" Cargo.toml
 | Tier 4 close       | Full matrix |
 | Tier 5 delete      | Full matrix + a fresh `cargo tree -i candle-core` returning empty |
 
-## Status snapshot (2026-05-25, refreshed)
+## Status snapshot (2026-05-26, refreshed)
 
 - Tier 0: ✅ already candle-free (kiln-core, kiln-scheduler, kiln-nvtx).
-- Tier 1: 🟡 in flight — all 5 kernel crates have kt_api surfaces.
+- Tier 1: 🟢 **conv1d-kernel + marlin-gemm closed (`577f8b0c` + `4a862711`)**;
+  3 kernel crates still in flight. The substrate accessor
+  `Tensor::cuda_from_slice` (`a5da6152`) is the template that
+  unblocks the rest — each crate just needs a candle-typed surface
+  delete + a candle-free test rewrite.
   **Production wiring breakthrough** (#695587df): first kt_api production wire
   for a non-rmsnorm kernel crate. kiln-conv1d-kernel's `causal_conv1d_update_kt`
   + `causal_conv1d_prefill_kt` are now both wired in `CudaBackend` at
   `crates/kiln-model/src/backend/cuda.rs:1004` and `:1038`.
   Status by crate:
     - kiln-rmsnorm-kernel: 7 production `_kt` callers in forward.rs ✓
-    - kiln-conv1d-kernel: 2/2 kt_api functions wired in CudaBackend ✓ + byte-exact parity tests at B=1/C=8192 (`69a5f68c` update + `1cb0c107` prefill, 0 mismatches across 8192/65536 output elements and 24576 conv_state elements). **Default ON** — env gate flipped from `KILN_USE_KT_API_CONV1D` opt-in to `KILN_DISABLE_KT_API_CONV1D` opt-out as the first Tier 1 default flip.
-    - kiln-marlin-gemm: 1/1 kt_api function wired in marlin_proj::matmul_bf16 ✓ (`8b415107` + `668b0847` bridge extension for I32→U32)
+    - **kiln-conv1d-kernel: ✅ CLOSED** (`577f8b0c`, 2026-05-26) —
+      candle-typed lib.rs surface deleted, in-lib parity scaffolds
+      removed, `tests/kt_v2_smoke.rs` rewritten candle-free via
+      `Tensor::cuda_from_slice`, `candle-core` dropped from
+      Cargo.toml. `cargo tree -i candle-core` is empty.
+    - **kiln-marlin-gemm: ✅ CLOSED** (`4a862711`, 2026-05-26) —
+      same template: candle-typed `marlin_w4a16_gemm` deleted,
+      `tests/parity.rs` removed (replaced by candle-free kt smoke),
+      `candle-core` dropped from Cargo.toml.
     - kiln-gdn-kernel: 5/10 kt_api functions wired in CudaBackend ✓ (`forward_substitution`/`14c17570`, `recurrent_forward`/`7a357a3d`, `chunk_prep`/`68a3667e`, `chunk_scan`/`1edc82dc`, `full_chunk_forward_multiblock`/`57b37c00`) — 5 remaining (decode_gates_recurrent variants + gated_rms_norm)
     - kiln-flash-attn: 4/5 production wires ✓ (`flash_attn_fwd_kt` at `f3b7e797`, `flash_attn_paged_decode_kt` at `c49c1995`, `flash_attn_paged_decode_dyn_seqlen_kt` at `7fe3011f`, no-graph-outputs `dyn_seqlen` variant at `276482d6`) + 2/5 functions used internally by `paged_kv_cache_kt.rs` (`paged_kv_write_token_major_bf16_slot_kt` + `_bf16_kt`); 1 entry point remaining (`flash_attn_bwd_kt` for the training path) + the `with_graph_outputs` kt-API extension. **Default ON** — env gate flipped from `KILN_USE_KT_API_FLASH_ATTN` opt-in to `KILN_DISABLE_KT_API_FLASH_ATTN` opt-out. Bit-exact by construction: all 4 wired sites bottom out in the same FFI symbols as the candle shim. The `with_graph_outputs` site keeps its `graph_outputs.is_none()` guard so the CUDA-graph caller-owned-output path still uses the candle wrapper.
     - kiln-opd-loss-kernel: separate phase (full rewrite for Phase B)
