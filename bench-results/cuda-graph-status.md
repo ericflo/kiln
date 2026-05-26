@@ -11,6 +11,72 @@ the production batched capture path (`kiln-model/src/cuda_graph.rs`)
 landed in parallel. Future planners should treat this as the
 canonical "what's already done" reference.
 
+## 2026-05-26 (evening) — AUTO_FREE_ON_LAUNCH drop NOT sufficient (L40S)
+
+The "drop `AUTO_FREE_ON_LAUNCH` for the batched-graph path" hypothesis
+from the working-hypothesis section below was tested on an L40S pod
+(sm_89) and **does not fix the bs>=2 fault**. Findings:
+
+- Build: cudarc `CUgraphInstantiate_flags_enum` does not expose a
+  `_NONE` variant. Worked around by transmuting `0u32` (the official
+  `CUDA_GRAPH_INSTANTIATE_FLAG_NONE` value per the CUDA C headers).
+  Build succeeds (target/release/kiln, 71 MB, 50s incremental).
+- Serve startup is healthy: `kiln serve` with
+  `KILN_W4A16=1 KILN_CUDA_GRAPHS=true KILN_CUDA_GRAPHS_BATCHED=1
+  KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1` loads the model
+  (Qwen3.5-4B from `/workspace/Qwen3.5-4B`), allocates a 25.5 GB
+  paged KV cache, and is ready in ~14s.
+- bs=1 concurrent bench (`scripts/bench-concurrent-batch.py
+  --sizes 1,2,4,8,16,32,64 --max-tokens 128 --mode concurrent
+  --warmup`): **80.95 tok/s** (full success). bs=1 captured-graph
+  path is unaffected by the change.
+- bs=2 onwards: **all fail HTTP 500** with the SAME
+  `CUDA_ERROR_ILLEGAL_ADDRESS`. Final bench JSON shows bs=2..64
+  all return `successes=0` with HTTP 500 errors.
+- Critically, the serve log proves the change took effect at the
+  capture site: **`"CUDA graph captured for batched decode",
+  batch_size:2, max_seqlen_k:128`** appears once (capture succeeded),
+  immediately followed by:
+
+  ```
+  WARN batched graph replay: argmax failed, falling back to eager
+  batch_size:2 max_seqlen_k:128
+  error:DriverError(CUDA_ERROR_ILLEGAL_ADDRESS, "an illegal memory access was encountered")
+  ```
+
+  Then 126 cascaded `batched real generation failed` errors as the
+  CUDA context stays poisoned for the remainder of the bench window.
+
+**Interpretation**: capture itself is now clean (no swallowed error,
+graph instantiation completes), confirming the previous theory that
+the capture was being broken by `slice_set` referencing buffers that
+the AUTO_FREE flag would free out from under the captured nodes was
+at least partially wrong. The actual failure now lands on the very
+first replay's `greedy_sample_rows(captured.output_logits)` step —
+either:
+
+1. The lm-head matmul output buffer is still being churned across
+   replays even without AUTO_FREE_ON_LAUNCH (because Candle's pool
+   allocator is host-side, not a `cudaMemAllocNode`, so the flag
+   never applied to it in the first place — AUTO_FREE only frees
+   device allocations that the graph's `cudaMemAllocNode` recorded),
+   OR
+2. Some other intermediate inside the captured forward writes to
+   a pool-allocated buffer that the post-replay `slice_set` /
+   `greedy_sample_rows` then reads, and the address has churned.
+
+**Next step recommendation**: ship the structural fix described in
+the "Working hypothesis" section below — pre-allocate the lm-head
+output buffer outside the capture window and thread it through
+`graph_inputs.lm_head_buffer`. This requires either a `matmul_into(dst)`
+kt-typed variant or a thread-local mechanism mirroring the existing
+`with_decode_gates_recurrent_outputs` pattern (used to fix the same
+class of fault for GDN). The thread-local approach is the smaller
+diff and matches the existing pattern exactly.
+
+`KILN_CUDA_GRAPHS_BATCHED` stays DEFAULT OFF. Production decode
+continues to use the eager-batched path (498 tok/s @ bs=64 on A6000).
+
 ## Headline (2026-05-26 — REVERTED)
 
 ⚠️ **`KILN_CUDA_GRAPHS_BATCHED` and `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED`
