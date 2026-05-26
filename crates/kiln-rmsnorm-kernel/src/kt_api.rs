@@ -1482,7 +1482,7 @@ pub fn fused_mlp_silu_mul_packed_kt(
 /// `base += scale * (hidden @ B)` in F32, where:
 /// - `base`:   F32 `[rows, out_dim]` — mutated in place
 /// - `hidden`: F32 `[rows, rank]`
-/// - `b`:      F32 `[rank, out_dim]`
+/// - `b`:      F32 `[out_dim, rank]`
 ///
 /// `scale` is the LoRA alpha/rank scaling factor.
 #[allow(clippy::too_many_arguments)]
@@ -1506,14 +1506,22 @@ pub fn lora_add_inplace_f32_kt(
         )));
     }
     let rank = h_shape[1];
-    if b.shape() != [rank, out_dim] {
+    if b.shape() != [out_dim, rank] {
         return Err(RmsNormError::Msg(format!(
-            "kt-lora-add: b {:?} != [{rank}, {out_dim}]",
+            "kt-lora-add: b {:?} != [{out_dim}, {rank}]",
             b.shape()
         )));
     }
+    if rows > i32::MAX as usize || out_dim > i32::MAX as usize || rank > i32::MAX as usize {
+        return Err(RmsNormError::Msg(
+            "kt-lora-add: dimensions exceed i32 kernel envelope".to_string(),
+        ));
+    }
+    if rows == 0 || out_dim == 0 || rank == 0 {
+        return Ok(());
+    }
 
-    // In-place op — `base` is mutated. Caller convention: pass Owned `base`.
+    // In-place op: `base` is mutated through its CUDA storage.
     let base_ptr = kiln_kt_bridge::cuda_input_device_ptr(base, KtDType::F32, "base")?;
     let h_ptr = kiln_kt_bridge::cuda_input_device_ptr(hidden, KtDType::F32, "hidden")?;
     let b_ptr = kiln_kt_bridge::cuda_input_device_ptr(b, KtDType::F32, "b")?;
@@ -2070,7 +2078,7 @@ mod kt_lora_decode_regression {
     //! `base=[batch,1,out]`, `x=[batch,1,in]`, `a=[rank,in]`,
     //! `b=[out,rank]`.
     use super::*;
-    use crate::lora_decode_add;
+    use crate::{lora_add_inplace_f32, lora_decode_add};
     use candle_core::{DType, Device, Tensor};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -2132,6 +2140,57 @@ mod kt_lora_decode_regression {
         assert_eq!(
             diff, 0.0,
             "kt vs candle lora_decode_add max_abs_diff={diff:e}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lora_add_inplace_f32_kt_matches_candle_contract() -> TestResult {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping lora_add_inplace_f32_kt_matches_candle_contract: {err}"
+                );
+                return Ok(());
+            }
+        };
+
+        let rows = 2usize;
+        let out_dim = 5usize;
+        let rank = 3usize;
+        let scale = 0.375f32;
+
+        let base_data: Vec<f32> = (0..rows * out_dim)
+            .map(|i| ((i as f32 * 0.13).sin() * 0.5))
+            .collect();
+        let hidden_data: Vec<f32> = (0..rows * rank)
+            .map(|i| ((i as f32 * 0.17).cos() * 0.25))
+            .collect();
+        let b_data: Vec<f32> = (0..out_dim * rank)
+            .map(|i| ((i as f32 * 0.19).sin() * 0.4))
+            .collect();
+
+        let candle_base = Tensor::from_vec(base_data.clone(), (rows, out_dim), &device)?;
+        let kt_base = Tensor::from_vec(base_data, (rows, out_dim), &device)?;
+        let hidden = Tensor::from_vec(hidden_data, (rows, rank), &device)?;
+        let b = Tensor::from_vec(b_data, (out_dim, rank), &device)?;
+
+        lora_add_inplace_f32(&candle_base, &hidden, &b, scale)?;
+
+        let base_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&kt_base)?;
+        let hidden_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&hidden)?;
+        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b)?;
+        lora_add_inplace_f32_kt(&base_kt, &hidden_kt, &b_kt, scale)?;
+
+        let diff = (&candle_base - &kt_base)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        assert!(
+            diff <= 1e-6,
+            "kt vs candle lora_add_inplace_f32 max_abs_diff={diff:e}"
         );
         Ok(())
     }

@@ -26,22 +26,6 @@ pub fn next_cuda_train_op_id() -> u64 {
     NEXT_CUDA_TRAIN_OP_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Phase 7 opt-in (#1082): when `KILN_USE_KT_API_LORA_ADD_INPLACE=1`
-/// (or `KILN_USE_KT_API_ALL=1`) is set, route the in-place LoRA add
-/// dispatched from `cuda_lora_linear_fused` through the kt-typed
-/// surface (`lora_add_inplace_f32_kt`) instead of the candle-typed
-/// `kiln_rmsnorm_kernel::lora_add_inplace_f32`. Default off. The
-/// kt path is bit-exact by construction (same `kiln_lora_add_inplace_f32`
-/// FFI symbol); only the Rust shell types change.
-fn cuda_train_use_kt_api_lora_add_inplace() -> bool {
-    use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_KT_API_LORA_ADD_INPLACE").is_ok()
-            || std::env::var("KILN_USE_KT_API_ALL").is_ok()
-    })
-}
-
 /// Phase 7 opt-in (#1082): when `KILN_USE_KT_API_FLASH_ATTN_BWD=1`
 /// (or `KILN_USE_KT_API_ALL=1`) is set, route the SFT/GRPO training
 /// backward dispatched from `FlashAttnPrefillCausalBackward::backward`
@@ -1416,27 +1400,20 @@ pub fn cuda_lora_linear_fused(
         .context("cuda_lora_linear_fused: hidden matmul")?
         .contiguous()
         .context("cuda_lora_linear_fused: contiguous hidden")?;
-    // Phase 7 opt-in (#1082): when `KILN_USE_KT_API_LORA_ADD_INPLACE=1`
-    // (or `KILN_USE_KT_API_ALL=1`) is set, route the in-place LoRA
-    // add through the kt-typed surface (`lora_add_inplace_f32_kt`).
-    // Bit-exact by construction — both candle and kt paths bottom
-    // out in the same `kiln_lora_add_inplace_f32` FFI symbol; the
-    // in-place mutation surfaces in `base_out` via the zero-copy
-    // `kt_tensor_from_candle_cuda_borrow` adapter.
-    if cuda_train_use_kt_api_lora_add_inplace() {
-        kiln_nvtx::range!(c"kiln/cuda_train/lora_add_inplace_kt");
-        let base_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&base_out)
-            .context("cuda_lora_linear_fused kt: borrow base_out -> kt")?;
-        let hidden_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&hidden)
-            .context("cuda_lora_linear_fused kt: borrow hidden -> kt")?;
-        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b.as_tensor())
-            .context("cuda_lora_linear_fused kt: borrow b -> kt")?;
-        kiln_rmsnorm_kernel::lora_add_inplace_f32_kt(&base_kt, &hidden_kt, &b_kt, scale)
-            .map_err(|e| anyhow::anyhow!("cuda_lora_linear_fused kt: lora_add_inplace_f32_kt: {e}"))?;
-    } else {
-        kiln_rmsnorm_kernel::lora_add_inplace_f32(&base_out, &hidden, b.as_tensor(), scale)
-            .context("cuda_lora_linear_fused: in-place LoRA add")?;
-    }
+    // Phase 7 (#1082): kt-only. Bit-exact with the previous candle
+    // shell because both paths call the same FFI symbol; the in-place
+    // mutation surfaces in `base_out` via the kt bridge.
+    kiln_nvtx::range!(c"kiln/cuda_train/lora_add_inplace_kt");
+    let base_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&base_out)
+        .context("cuda_lora_linear_fused kt: borrow base_out -> kt")?;
+    let hidden_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&hidden)
+        .context("cuda_lora_linear_fused kt: borrow hidden -> kt")?;
+    let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b.as_tensor())
+        .context("cuda_lora_linear_fused kt: borrow b -> kt")?;
+    kiln_rmsnorm_kernel::lora_add_inplace_f32_kt(&base_kt, &hidden_kt, &b_kt, scale)
+        .map_err(|e| {
+            anyhow::anyhow!("cuda_lora_linear_fused kt: lora_add_inplace_f32_kt: {e}")
+        })?;
 
     let needs_grad = input.requires_grad()
         || input.grad_fn().is_some()
@@ -7278,6 +7255,73 @@ mod tests {
             assert!(
                 (actual - expected).abs() < 1e-5,
                 "softplus grad mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_lora_linear_fused_forward_matches_cpu_reference() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_lora_linear_fused smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let rows = 2usize;
+        let in_dim = 3usize;
+        let out_dim = 4usize;
+        let rank = 2usize;
+        let scale = 0.5f32;
+        let input_data = vec![0.2f32, -0.4, 0.8, -1.0, 0.5, 0.25];
+        let base_data = vec![
+            0.1f32, -0.2, 0.3, 0.4, -0.5, 0.6, -0.7, 0.8, 0.9, -1.0, 1.1, -1.2,
+        ];
+        let a_data = vec![0.3f32, -0.1, 0.2, -0.4, 0.7, 0.5];
+        let b_data = vec![0.6f32, -0.2, -0.3, 0.4, 0.8, 0.1, -0.5, 0.9];
+
+        let input = CudaTrainTensor::new(Tensor::from_vec(
+            input_data.clone(),
+            (rows, in_dim),
+            &device,
+        )?)?;
+        let base_weight = CudaTrainTensor::new(Tensor::from_vec(
+            base_data.clone(),
+            (in_dim, out_dim),
+            &device,
+        )?)?;
+        let a = CudaTrainTensor::new(Tensor::from_vec(a_data.clone(), (rank, in_dim), &device)?)?;
+        let b = CudaTrainTensor::new(Tensor::from_vec(b_data.clone(), (out_dim, rank), &device)?)?;
+
+        let actual = cuda_lora_linear_fused(&input, &base_weight, &a, &b, scale)?.to_vec_f32()?;
+
+        let mut expected = vec![0.0f32; rows * out_dim];
+        for row in 0..rows {
+            let mut hidden = vec![0.0f32; rank];
+            for r in 0..rank {
+                for i in 0..in_dim {
+                    hidden[r] += input_data[row * in_dim + i] * a_data[r * in_dim + i];
+                }
+            }
+            for j in 0..out_dim {
+                let mut base_acc = 0.0f32;
+                for i in 0..in_dim {
+                    base_acc += input_data[row * in_dim + i] * base_data[i * out_dim + j];
+                }
+                let mut delta = 0.0f32;
+                for r in 0..rank {
+                    delta += hidden[r] * b_data[j * rank + r];
+                }
+                expected[row * out_dim + j] = base_acc + scale * delta;
+            }
+        }
+
+        for (idx, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "lora fused output mismatch at {idx}: actual={actual} expected={expected}"
             );
         }
         Ok(())
