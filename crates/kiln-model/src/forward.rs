@@ -21499,6 +21499,9 @@ pub fn model_forward_paged_last_token_resident(
     positions_gpu: Option<&Tensor>,
 ) -> Result<Tensor> {
     // Resident path requires backend support AND the buffer pool to fit.
+    // Only consumed on `#[cfg(feature = "vulkan")]` below; the allow
+    // silences the unused-variable warning on CUDA-only builds.
+    #[cfg_attr(not(feature = "vulkan"), allow(unused_variables))]
     let route_resident = backend.supports_resident_decode()
         && resident_decode_pool_ready(backend, config);
 
