@@ -4,7 +4,14 @@ This document inventories every `candle_core` and `candle_nn` reference in
 the kiln workspace and the migration path to a candle-free build. It is
 the canonical artifact for tracking Phase 7 closeout against issue #1082.
 
-Last refreshed: 2026-05-25, against `main` post-merge of `ce/1082-pagedkv-accessors-migrate` (`40666082`) + 9 Metal/Vulkan kernel wires (`ddee82e6`, `1471dafb`, `b5ec4874`, `a88d0842`, `93ad0360`, `bb2e6283`, `5d9dcef3`, `742cf7e4`, `c846f188`) + 10 cuda_train.rs kt-API wires (`ddd8379c` through `e99a1a42`).
+Last refreshed: 2026-05-26, against `main` at `0841c266` —
+substrate-level `CudaStorage::cuda_stream_raw()` accessor landed
+(`d561dbf8`) plus mechanical migration of all 55 stream-extraction
+sites + 5 dead `DevicePtr` imports across the 5 kernel-crate
+`kt_api.rs` files (`338b1b88`). Production candle-typed callers
+removed for `kiln-conv1d-kernel` (`2ebcfb08`) and
+`kiln-marlin-gemm::marlin_w4a16_gemm` (`0841c266`); `cuda_train.rs`
+FA-backward migrated to `flash_attn_bwd_kt` (`89273e20`).
 
 ## Workspace candle footprint
 
@@ -203,30 +210,38 @@ a one-line PR. Until then the `pub fn supports*` / `pub fn causal_conv1d_*`
 candle-typed surface stays as test-internal scaffolding only — no
 production caller remains.
 
-### kiln-marlin-gemm — **BLOCKED** (5 candle-typed callers in kiln-model + 1 test)
+### kiln-marlin-gemm — **0 production candle-typed callers** (substrate-blocked on dep drop)
 
-Candle-typed entry points still reachable in production:
-- `kiln_marlin_gemm::pack::quantize_and_pack` — `crates/kiln-model/src/marlin_proj.rs:131`
-- `kiln_marlin_gemm::marlin_w4a16_gemm` — `crates/kiln-model/src/marlin_proj.rs:381`
-- `kiln_marlin_gemm::marlin_w4a16_gemm` — `crates/kiln-model/src/marlin_proj.rs:402`
-- `kiln_marlin_gemm::marlin_w4a16_gemm` — `crates/kiln-model/src/forward.rs:30696` (parity-test scaffolding `out_candle` reference)
+After `0841c266` (`marlin_proj::matmul_bf16` migrated to use
+`matmul_bf16_2d_kt` as the only path; `cuda_use_kt_api_marlin()`
+gate + `KILN_DISABLE_KT_API_MARLIN` env removed; the
+`test_marlin_w4a16_gemm_kt_api_parity` scaffold in forward.rs
+deleted), production no longer calls candle-typed
+`kiln_marlin_gemm::marlin_w4a16_gemm`.
 
-Other workspace consumers of the candle-typed surface:
-- `crates/kiln-marlin-gemm/tests/parity.rs:20` — own crate's parity test
-- `crates/kiln-model/tests/marlin_qproj_parity.rs:82` — `kiln_marlin_gemm::pack::quantize_and_pack`
+Audit clarification: `kiln_marlin_gemm::pack::quantize_and_pack`
+(`marlin_proj.rs:131`) is **not** candle-typed — its signature is
+`(weight: &[f32], k: usize, n: usize, groupsize: i64) -> (Vec<i32>,
+Vec<f16>, Vec<f32>)`. Pure host types, no candle dep. The audit
+grep matched on crate path; the call site does not impose a
+candle dep on `kiln-marlin-gemm`.
 
-The kt-API wire (`marlin_w4a16_gemm_kt`) is default-on for the matmul
-path, but `pack::quantize_and_pack` (the offline weight-packing routine)
-still hands back candle tensors. Until pack is migrated to the kt-typed
-surface (or moved behind a feature flag separate from the matmul path),
-the crate cannot drop candle-core.
+Remaining candle-typed callers are all `#[cfg(test)]`:
+- `crates/kiln-marlin-gemm/tests/parity.rs:20` — crate-local parity
+- `crates/kiln-model/tests/marlin_qproj_parity.rs:82` — pack test
 
-Follow-up steps (not done in this PR):
-1. Add `kt_api::quantize_and_pack_kt` returning `kiln_tensor::Tensor`s.
-2. Migrate `marlin_proj.rs:131` to it.
-3. Migrate the parity-test scaffolding in `forward.rs:30696` to compare
-   kt outputs (or wrap the comparison in `#[cfg(test)]`).
-4. Delete the candle public functions from `lib.rs`.
+Same substrate-level blockers as `kiln-conv1d-kernel` gate the
+`Cargo.toml` `candle-core` drop:
+1. `kt_api.rs` uses `kiln_kt_bridge::cuda_storage_and_byte_offset`
+   which still goes through the candle-typed CudaStorage. (Resolved
+   by `338b1b88` for stream extraction; same accessor pattern needed
+   for the `Arc<CudaDevice>` itself before pure-kt allocator routes
+   land.)
+2. In-lib `#[cfg(test)]` parity scaffolds use candle for input
+   construction.
+
+Once the substrate-side blockers clear, the `Cargo.toml` drop is a
+one-line PR.
 
 ### kiln-rmsnorm-kernel — **BLOCKED** (53 candle-typed callers in kiln-model)
 
@@ -361,18 +376,28 @@ Follow-up steps (not done in this PR):
 
 | Crate | Candle-typed callers (kiln-model) | Can drop candle now? | Blocker |
 |---|---|---|---|
-| `kiln-conv1d-kernel`  | 4   | **No** | `supports*` predicates + fallback path callers |
-| `kiln-marlin-gemm`    | 5+1 | **No** | `pack::quantize_and_pack` + matmul fallback |
+| `kiln-conv1d-kernel`  | 0   | **No** | substrate (kt_api uses candle CudaStorage internals) |
+| `kiln-marlin-gemm`    | 0   | **No** | substrate (same as conv1d) |
 | `kiln-rmsnorm-kernel` | 53  | **No** | kt_api surface partial; needs op-family expansion |
-| `kiln-gdn-kernel`     | 30  | **No** | 5/10 wires remaining + `_supports` + forward.rs prefill sites |
-| `kiln-flash-attn`     | 15  | **No** | `flash_attn_bwd_kt` + PagedKvCacheKt migration |
+| `kiln-gdn-kernel`     | 30  | **No** | candle fallbacks + `_supports` + forward.rs prefill sites |
+| `kiln-flash-attn`     | ~10 | **No** | `paged_kv_write_*` + PagedKvCacheKt migration |
 
-**Conclusion: none of the 5 Tier 1 kernel crates can drop `candle-core`
-from their `Cargo.toml` in this pass.** Each has known follow-up work
-listed above. The smallest residual surface is on `kiln-conv1d-kernel`
-(4 sites), which is therefore the closest to candle removal once kt-API
-`supports*` predicates land and the fallback path is removed (or guarded
-to a `#[cfg(test)]` parity scaffold).
+**Production-caller status:** As of `0841c266`,
+`kiln-conv1d-kernel` and `kiln-marlin-gemm` have **zero**
+candle-typed production callers in `kiln-model`. Their
+`Cargo.toml` `candle-core` deps remain only because the substrate
+itself (`kiln-tensor::CudaStorage` + `kiln-kt-bridge`) still goes
+through candle for CUDA context ownership.
+
+**Substrate path forward**: extend the
+`CudaStorage::cuda_stream_raw()` pattern landed in `d561dbf8` to
+the full Arc<CudaDevice> internals, then the kernel-crate
+`kt_api.rs` files can call `CudaStorage` accessors without any
+candle import — at which point `kiln-conv1d-kernel` and
+`kiln-marlin-gemm` drop candle in one mechanical PR each. The
+in-lib `#[cfg(test)]` parity scaffolds + a candle-free CPU
+construction path on `kiln_tensor::Tensor` are the parallel
+unblock.
 
 The audit numbers in this section supersede the per-crate counts in the
 status snapshot above when they disagree (the status snapshot reports
