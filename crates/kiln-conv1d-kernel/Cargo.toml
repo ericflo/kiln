@@ -9,10 +9,8 @@ description = "Vendored mamba-ssm causal_conv1d_update CUDA kernel (decode-only,
 build = "build.rs"
 
 [dependencies]
-candle-core = { workspace = true, features = ["cuda"] }
 half = "2"
-# Phase 7 prep — kiln-tensor-typed surface alongside candle-typed.
-# Both call the same FFI; Phase 7 deletes the candle path.
+# Phase 7 (#1082) — kt-only crate, no candle dep.
 kiln-tensor = { workspace = true, features = ["cuda"] }
 kiln-kt-bridge = { workspace = true }
 
