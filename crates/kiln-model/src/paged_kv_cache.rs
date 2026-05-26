@@ -25,28 +25,6 @@ fn cuda_paged_kv_write_token_major_disabled() -> bool {
         .get_or_init(|| std::env::var_os("KILN_DISABLE_CUDA_PAGED_KV_WRITE_TOKEN_MAJOR").is_some())
 }
 
-/// Phase 7 opt-in (#1082): route `paged_kv_write_token_major_bf16{,_slot,_batch_slot}`
-/// through the kt-API + adapters. Bottoms out in the same FFI symbols
-/// (`kiln_paged_kv_write_token_major_bf16{,_slot,_batch_slot}`) as the candle
-/// shims, so bit-exactly equivalent by construction; only the Rust shell
-/// types change. Enable with `KILN_USE_KT_API_PAGED_KV_WRITE=1` or
-/// `KILN_USE_KT_API_ALL=1`. Default off until parity testing and CI
-/// soak land.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_paged_kv_write() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_PAGED_KV_WRITE").is_ok());
-    direct || cuda_use_kt_api_all_local()
-}
-
-/// Mirror of [`crate::forward::cuda_use_kt_api_all`] visible here. Avoids a
-/// public cross-module dependency just to read the master switch.
-#[cfg(feature = "cuda")]
-fn cuda_use_kt_api_all_local() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ALL").is_ok())
-}
-
 /// Paged KV cache that stores K/V in block-organized pool tensors.
 ///
 /// Instead of pre-allocating `[max_seq_len]` per sequence (as [`KvCache`] does),
@@ -266,30 +244,31 @@ impl PagedKvCache {
             return Ok(false);
         }
         let (k_pool, v_pool) = &self.layers[layer_idx];
-        // Phase 7 opt-in (#1082): route through the kt-typed surface.
-        // Bottoms out in the same `kiln_paged_kv_write_token_major_bf16_slot`
-        // FFI symbol as the candle shim, so bit-exactly equivalent; only
-        // the Rust shell types change. Falls through to the candle path
-        // when the gate is off.
-        if cuda_use_kt_api_paged_kv_write() {
-            kiln_nvtx::range!(c"kiln/paged_kv_write_token_major_bf16_slot_kt");
-            let kp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
-                .context("paged_kv_write kt_slot: borrow k_pool -> kt")?;
-            let vp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
-                .context("paged_kv_write kt_slot: borrow v_pool -> kt")?;
-            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-                .context("paged_kv_write kt_slot: borrow k -> kt")?;
-            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-                .context("paged_kv_write kt_slot: borrow v -> kt")?;
-            let slot_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(slot)
-                .context("paged_kv_write kt_slot: borrow slot -> kt")?;
-            kiln_flash_attn::paged_kv_write_token_major_bf16_slot_kt(
-                &kp_kt, &vp_kt, &k_kt, &v_kt, &slot_kt,
-            )
-            .map_err(|e| anyhow::anyhow!("paged_kv_write kt_slot: {e}"))?;
-            return Ok(true);
-        }
-        kiln_flash_attn::paged_kv_write_token_major_bf16_slot(k_pool, v_pool, k, v, slot)?;
+        // Phase 7 (#1082): kt-only. Bottoms out in the same
+        // `kiln_paged_kv_write_token_major_bf16_slot` FFI symbol as the
+        // candle shim did; only the Rust shell type changes. The old candle
+        // wrapper materialized contiguous k/v/slot views before taking raw
+        // CUDA pointers, so do that explicitly before borrowing kt views.
+        kiln_nvtx::range!(c"kiln/paged_kv_write_token_major_bf16_slot_kt");
+        let k_c = k.contiguous().context("paged_kv_write kt_slot: k contiguous")?;
+        let v_c = v.contiguous().context("paged_kv_write kt_slot: v contiguous")?;
+        let slot_c = slot
+            .contiguous()
+            .context("paged_kv_write kt_slot: slot contiguous")?;
+        let kp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
+            .context("paged_kv_write kt_slot: borrow k_pool -> kt")?;
+        let vp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
+            .context("paged_kv_write kt_slot: borrow v_pool -> kt")?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_c)
+            .context("paged_kv_write kt_slot: borrow k -> kt")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_c)
+            .context("paged_kv_write kt_slot: borrow v -> kt")?;
+        let slot_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&slot_c)
+            .context("paged_kv_write kt_slot: borrow slot -> kt")?;
+        kiln_flash_attn::paged_kv_write_token_major_bf16_slot_kt(
+            &kp_kt, &vp_kt, &k_kt, &v_kt, &slot_kt,
+        )
+        .map_err(|e| anyhow::anyhow!("paged_kv_write kt_slot: {e}"))?;
         Ok(true)
     }
 
@@ -339,40 +318,31 @@ impl PagedKvCache {
         // element_count == batch * kv_heads * head_dim check is exact.
         let k = k.squeeze(1)?;
         let v = v.squeeze(1)?;
-        // Phase 7 opt-in (#1082): route through the kt-typed surface.
+        // Phase 7 (#1082): kt-only. Route through the kt-typed surface.
         // Bottoms out in the same `kiln_paged_kv_write_token_major_bf16_batch_slot`
-        // FFI symbol as the candle shim, so bit-exactly equivalent; only
-        // the Rust shell types change. Falls through to the candle path
-        // when the gate is off. We require both contiguous K/V and a
-        // contiguous slots tensor for the borrow adapter (the candle path
-        // calls `.contiguous()?` internally; we do the same here so the
-        // gate flip preserves observed behavior under non-contiguous inputs).
-        if cuda_use_kt_api_paged_kv_write() {
-            kiln_nvtx::range!(c"kiln/paged_kv_write_token_major_bf16_batch_slot_kt");
-            let k_c = k.contiguous().context("paged_kv_write kt_batch_slot: k contiguous")?;
-            let v_c = v.contiguous().context("paged_kv_write kt_batch_slot: v contiguous")?;
-            let slots_c = slots
-                .contiguous()
-                .context("paged_kv_write kt_batch_slot: slots contiguous")?;
-            let kp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
-                .context("paged_kv_write kt_batch_slot: borrow k_pool -> kt")?;
-            let vp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
-                .context("paged_kv_write kt_batch_slot: borrow v_pool -> kt")?;
-            let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_c)
-                .context("paged_kv_write kt_batch_slot: borrow k -> kt")?;
-            let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_c)
-                .context("paged_kv_write kt_batch_slot: borrow v -> kt")?;
-            let slots_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&slots_c)
-                .context("paged_kv_write kt_batch_slot: borrow slots -> kt")?;
-            kiln_flash_attn::paged_kv_write_token_major_bf16_batch_slot_kt(
-                &kp_kt, &vp_kt, &k_kt, &v_kt, &slots_kt,
-            )
-            .map_err(|e| anyhow::anyhow!("paged_kv_write kt_batch_slot: {e}"))?;
-            return Ok(true);
-        }
-        kiln_flash_attn::paged_kv_write_token_major_bf16_batch_slot(
-            k_pool, v_pool, &k, &v, slots,
-        )?;
+        // FFI symbol as the candle shim did. We require contiguous K/V/slots
+        // for the borrow adapter; the old candle wrapper called
+        // `.contiguous()?` internally, so materialize the same locals here.
+        kiln_nvtx::range!(c"kiln/paged_kv_write_token_major_bf16_batch_slot_kt");
+        let k_c = k.contiguous().context("paged_kv_write kt_batch_slot: k contiguous")?;
+        let v_c = v.contiguous().context("paged_kv_write kt_batch_slot: v contiguous")?;
+        let slots_c = slots
+            .contiguous()
+            .context("paged_kv_write kt_batch_slot: slots contiguous")?;
+        let kp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
+            .context("paged_kv_write kt_batch_slot: borrow k_pool -> kt")?;
+        let vp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
+            .context("paged_kv_write kt_batch_slot: borrow v_pool -> kt")?;
+        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_c)
+            .context("paged_kv_write kt_batch_slot: borrow k -> kt")?;
+        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_c)
+            .context("paged_kv_write kt_batch_slot: borrow v -> kt")?;
+        let slots_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&slots_c)
+            .context("paged_kv_write kt_batch_slot: borrow slots -> kt")?;
+        kiln_flash_attn::paged_kv_write_token_major_bf16_batch_slot_kt(
+            &kp_kt, &vp_kt, &k_kt, &v_kt, &slots_kt,
+        )
+        .map_err(|e| anyhow::anyhow!("paged_kv_write kt_batch_slot: {e}"))?;
         Ok(true)
     }
 
@@ -409,30 +379,25 @@ impl PagedKvCache {
                     && matches!(k.device(), Device::Cuda(_))
                     && matches!(v.device(), Device::Cuda(_))
                 {
-                    // Phase 7 opt-in (#1082): route through the kt-typed
-                    // surface when `KILN_USE_KT_API_PAGED_KV_WRITE=1` (or
-                    // `KILN_USE_KT_API_ALL=1`) is set. Bottoms out in the
-                    // same `kiln_paged_kv_write_token_major_bf16` FFI
-                    // symbol as the candle shim, so bit-exactly equivalent;
-                    // only the Rust shell types change. Falls through to
-                    // the candle path when the gate is off.
-                    if cuda_use_kt_api_paged_kv_write() {
-                        kiln_nvtx::range!(c"kiln/paged_kv_write_token_major_bf16_kt");
-                        let kp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
-                            .context("paged_kv_write kt_host: borrow k_pool -> kt")?;
-                        let vp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
-                            .context("paged_kv_write kt_host: borrow v_pool -> kt")?;
-                        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-                            .context("paged_kv_write kt_host: borrow k -> kt")?;
-                        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-                            .context("paged_kv_write kt_host: borrow v -> kt")?;
-                        kiln_flash_attn::paged_kv_write_token_major_bf16_kt(
-                            &kp_kt, &vp_kt, &k_kt, &v_kt, slot,
-                        )
-                        .map_err(|e| anyhow::anyhow!("paged_kv_write kt_host: {e}"))?;
-                        return Ok(true);
-                    }
-                    kiln_flash_attn::paged_kv_write_token_major_bf16(k_pool, v_pool, k, v, slot)?;
+                    // Phase 7 (#1082): kt-only. Bottoms out in the same
+                    // `kiln_paged_kv_write_token_major_bf16` FFI symbol as
+                    // the candle shim did; the CUDA kernel kill switch above
+                    // still controls whether this fast path is eligible.
+                    kiln_nvtx::range!(c"kiln/paged_kv_write_token_major_bf16_kt");
+                    let k_c = k.contiguous().context("paged_kv_write kt_host: k contiguous")?;
+                    let v_c = v.contiguous().context("paged_kv_write kt_host: v contiguous")?;
+                    let kp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
+                        .context("paged_kv_write kt_host: borrow k_pool -> kt")?;
+                    let vp_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
+                        .context("paged_kv_write kt_host: borrow v_pool -> kt")?;
+                    let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_c)
+                        .context("paged_kv_write kt_host: borrow k -> kt")?;
+                    let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_c)
+                        .context("paged_kv_write kt_host: borrow v -> kt")?;
+                    kiln_flash_attn::paged_kv_write_token_major_bf16_kt(
+                        &kp_kt, &vp_kt, &k_kt, &v_kt, slot,
+                    )
+                    .map_err(|e| anyhow::anyhow!("paged_kv_write kt_host: {e}"))?;
                     return Ok(true);
                 }
             }
@@ -910,6 +875,42 @@ pub(crate) fn contiguous_slot_run_starts(
 mod tests {
     use super::*;
     use crate::kv_cache::KvCache;
+
+    #[cfg(feature = "cuda")]
+    fn assert_cache_pools_equal(actual: &PagedKvCache, expected: &PagedKvCache) -> Result<()> {
+        let (actual_k, actual_v) = actual.pool_tensors(0).context("actual pool tensors")?;
+        let (expected_k, expected_v) = expected.pool_tensors(0).context("expected pool tensors")?;
+        let actual_k = actual_k.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let expected_k = expected_k
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let actual_v = actual_v.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let expected_v = expected_v
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        assert_eq!(actual_k.len(), expected_k.len());
+        assert_eq!(actual_v.len(), expected_v.len());
+        for i in 0..actual_k.len() {
+            assert!(
+                (actual_k[i] - expected_k[i]).abs() < 1e-6,
+                "K pool mismatch at {i}: actual={} expected={}",
+                actual_k[i],
+                expected_k[i]
+            );
+        }
+        for i in 0..actual_v.len() {
+            assert!(
+                (actual_v[i] - expected_v[i]).abs() < 1e-6,
+                "V pool mismatch at {i}: actual={} expected={}",
+                actual_v[i],
+                expected_v[i]
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_contiguous_slot_run_start_detection() {
@@ -1637,11 +1638,80 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_write_token_major_native_cuda_kt_host_slot_matches_slice_set() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!(
+                "CUDA unavailable, skipping test_write_token_major_native_cuda_kt_host_slot_matches_slice_set"
+            );
+            return Ok(());
+        };
+        let heads = 2usize;
+        let head_dim = 8usize;
+        let slot = 2usize;
+        let cache = PagedKvCache::new(1, 4, 1, heads, head_dim, DType::BF16, &device)?;
+        let ref_cache = PagedKvCache::new(1, 4, 1, heads, head_dim, DType::BF16, &device)?;
+        let mut bt = BlockTable::new();
+        bt.push(slot as u32);
+
+        let elems = heads * head_dim;
+        let k_data: Vec<f32> = (0..elems).map(|i| (i as f32 - 7.0) * 0.03125).collect();
+        let k = Tensor::from_slice(&k_data, (1usize, 1usize, heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let v = (k.to_dtype(DType::F32)? + 25.0)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+
+        assert!(cache.write_token_major_native(0, &bt, 0, &k, &v)?);
+        let (ref_k_pool, ref_v_pool) = ref_cache.pool_tensors(0).context("ref pool tensors")?;
+        ref_k_pool.slice_set(&k.squeeze(1)?.contiguous()?, 0, slot)?;
+        ref_v_pool.slice_set(&v.squeeze(1)?.contiguous()?, 0, slot)?;
+        device.synchronize()?;
+
+        assert_cache_pools_equal(&cache, &ref_cache)
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_write_token_major_native_graph_slot_cuda_kt_matches_slice_set() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!(
+                "CUDA unavailable, skipping test_write_token_major_native_graph_slot_cuda_kt_matches_slice_set"
+            );
+            return Ok(());
+        };
+        let heads = 2usize;
+        let head_dim = 8usize;
+        let slot = 3usize;
+        let cache = PagedKvCache::new(1, 4, 1, heads, head_dim, DType::BF16, &device)?;
+        let ref_cache = PagedKvCache::new(1, 4, 1, heads, head_dim, DType::BF16, &device)?;
+
+        let elems = heads * head_dim;
+        let k_data: Vec<f32> = (0..elems).map(|i| (i as f32 + 1.0) * 0.015625).collect();
+        let k = Tensor::from_slice(&k_data, (1usize, 1usize, heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let v = (k.to_dtype(DType::F32)? - 11.0)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let slot_t = Tensor::from_slice(&[slot as u32], 1usize, &device)?.contiguous()?;
+
+        assert!(cache.write_token_major_native_graph_slot(0, &k, &v, &slot_t)?);
+        let (ref_k_pool, ref_v_pool) = ref_cache.pool_tensors(0).context("ref pool tensors")?;
+        ref_k_pool.slice_set(&k.squeeze(1)?.contiguous()?, 0, slot)?;
+        ref_v_pool.slice_set(&v.squeeze(1)?.contiguous()?, 0, slot)?;
+        device.synchronize()?;
+
+        assert_cache_pools_equal(&cache, &ref_cache)
+    }
+
     /// Closes suspect 1 in #1082: the fused batched-slot writer must
-    /// land the same byte pattern in the K/V pool as the legacy per-row
-    /// `write_token_major_native_batch` path for every row, with no
-    /// silent off-by-row mistakes from the per-row 2D-grid kernel
-    /// dispatch. Requires CUDA. Skips on CPU-only builds.
+    /// land the same byte pattern in the K/V pool as direct `slice_set`
+    /// reference writes for every row, with no silent off-by-row mistakes
+    /// from the per-row 2D-grid kernel dispatch. Requires CUDA. Skips on
+    /// CPU-only builds.
     #[cfg(feature = "cuda")]
     #[test]
     fn test_write_token_major_native_batch_graph_slot_matches_per_row() -> Result<()> {
@@ -1686,7 +1756,9 @@ mod tests {
         assert!(ok, "batched-graph-slot writer should accept bf16 [batch,1,kv_heads,head_dim]");
         device.synchronize()?;
 
-        // Reference: per-row write of the same K/V into a fresh cache.
+        // Reference: direct per-row slice_set writes of the same K/V into a
+        // fresh cache. This keeps the test anchored to candle's tensor write
+        // semantics now that both production CUDA writer variants are kt-only.
         let ref_cache = PagedKvCache::new(
             1,
             total_slots,
@@ -1696,65 +1768,16 @@ mod tests {
             DType::BF16,
             &device,
         )?;
-        let mut bts: Vec<BlockTable> = (0..batch)
-            .map(|i| {
-                let mut bt = BlockTable::new();
-                bt.push(slots[i]);
-                bt
-            })
-            .collect();
-        let bt_refs: Vec<&BlockTable> = bts.iter_mut().map(|bt| &*bt).collect();
-        let start_positions = vec![0usize; batch];
-        assert!(ref_cache.write_token_major_native_batch(
-            0,
-            &bt_refs,
-            &start_positions,
-            &k,
-            &v,
-        )?);
+        let (ref_k_pool, ref_v_pool) = ref_cache.pool_tensors(0).context("ref pool tensors")?;
+        let k_flat = k.squeeze(1)?.contiguous()?;
+        let v_flat = v.squeeze(1)?.contiguous()?;
+        for (idx, slot) in slots.iter().copied().enumerate() {
+            ref_k_pool.slice_set(&k_flat.narrow(0, idx, 1)?, 0, slot as usize)?;
+            ref_v_pool.slice_set(&v_flat.narrow(0, idx, 1)?, 0, slot as usize)?;
+        }
         device.synchronize()?;
 
-        // Byte-level equality of the full pool tensor across both caches.
-        let (k_pool_fused, v_pool_fused) = cache
-            .pool_tensors(0)
-            .expect("layer 0 pool tensors");
-        let (k_pool_ref, v_pool_ref) = ref_cache
-            .pool_tensors(0)
-            .expect("ref layer 0 pool tensors");
-        let kf = k_pool_fused
-            .to_dtype(DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        let kr = k_pool_ref
-            .to_dtype(DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        let vf = v_pool_fused
-            .to_dtype(DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        let vr = v_pool_ref
-            .to_dtype(DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        assert_eq!(kf.len(), kr.len());
-        for i in 0..kf.len() {
-            assert!(
-                (kf[i] - kr[i]).abs() < 1e-6,
-                "K pool mismatch at {i}: fused={} ref={}",
-                kf[i],
-                kr[i]
-            );
-        }
-        for i in 0..vf.len() {
-            assert!(
-                (vf[i] - vr[i]).abs() < 1e-6,
-                "V pool mismatch at {i}: fused={} ref={}",
-                vf[i],
-                vr[i]
-            );
-        }
-        Ok(())
+        assert_cache_pools_equal(&cache, &ref_cache)
     }
 
     #[test]

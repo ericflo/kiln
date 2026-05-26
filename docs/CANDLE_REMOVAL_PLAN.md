@@ -570,17 +570,11 @@ Updated follow-up steps:
 5. Drop `candle-core` from Cargo.toml (substrate-blocked on the
    same kt-bridge cleanup as conv1d/marlin).
 
-### kiln-flash-attn — **BLOCKED** (3 candle-typed fallback callers in kiln-model)
+### kiln-flash-attn — **BLOCKED** (candle-typed library surface remains)
 
-Candle-typed entry points still reachable in production:
-
-**`crates/kiln-model/src/paged_kv_cache.rs`** (3 fallback sites):
-- `paged_kv_write_token_major_bf16_slot`,
-  `paged_kv_write_token_major_bf16_batch_slot`,
-  `paged_kv_write_token_major_bf16`.
-- kt wrappers are already wired behind `KILN_USE_KT_API_PAGED_KV_WRITE`
-  / `KILN_USE_KT_API_ALL`; the candle calls are the fallback path for
-  the legacy `PagedKvCache`.
+Candle-typed entry points still exist in `crates/kiln-flash-attn/src/lib.rs`
+as parity/reference surfaces, but the kiln-model production CUDA call sites now
+route through kt wrappers:
 
 Recently closed in the source tree:
 - `crates/kiln-model/src/backend/cuda.rs` routes FlashAttention forward,
@@ -591,11 +585,19 @@ Recently closed in the source tree:
 - `crates/kiln-model/src/forward.rs` routes `CudaFlashAttentionTrainingBf16`
   forward, backward recompute, and backward through kt wrappers; backward
   collapses expanded GQA dk/dv back to heads_kv before returning gradients.
+- `crates/kiln-model/src/paged_kv_cache.rs` routes the 3 CUDA BF16
+  paged-KV writer fast paths through kt wrappers unconditionally:
+  `paged_kv_write_token_major_bf16_slot_kt`,
+  `paged_kv_write_token_major_bf16_batch_slot_kt`, and
+  `paged_kv_write_token_major_bf16_kt`. The
+  `KILN_DISABLE_CUDA_PAGED_KV_WRITE_TOKEN_MAJOR` kernel kill switch remains;
+  non-CUDA, Metal, FP8, and multi-token fallback behavior is unchanged.
 
 Follow-up steps (not done in this PR):
 1. Complete the PagedKvCacheKt migration so `paged_kv_cache.rs` can be
-   removed and the 3 `paged_kv_write_*` candle entries with it.
-2. Delete candle surface from `lib.rs`.
+   removed.
+2. Delete candle surface from `lib.rs` once no parity/reference callers need
+   the `candle_core::Tensor` wrappers.
 
 ## Audit summary
 

@@ -19052,8 +19052,8 @@ fn gqa_attention_paged_with_rope_tables(
                         &v_cache_token_major,
                         inputs.kv_slot,
                     )?;
-                    // Phase 7 #1082: when the candle writer succeeded and a
-                    // kt twin cache is plumbed through (i.e. the
+                    // Phase 7 #1082: when the legacy PagedKvCache writer
+                    // succeeded and a kt twin cache is plumbed through (i.e. the
                     // `KILN_USE_KT_PAGED_KV_CACHE` gate is on and the
                     // owning struct allocated a kt cache via
                     // `try_kt_paged_kv_cache_new`), mirror the same write
@@ -19065,7 +19065,7 @@ fn gqa_attention_paged_with_rope_tables(
                     // immediately in downstream reads. When `kt_paged_cache`
                     // is `None` (default), the helper short-circuits to
                     // `Ok(false)` and this branch is zero overhead — the
-                    // candle write above is the only thing that ran.
+                    // legacy cache write above is the only thing that ran.
                     if done && kt_paged_cache.is_some() {
                         let _kt_done =
                             try_kt_paged_kv_write_token_major_native_graph_slot(
