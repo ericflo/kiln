@@ -9746,6 +9746,71 @@ fn cuda_rotary_one_training_bf16_supported(
         && sin.dims() == [seq_len, rotary_dim / 2]
 }
 
+/// Process-wide kill switch for [`fused_rotary_one_backward_via_kt_bridge`].
+///
+/// Set `KILN_DISABLE_ROTARY_ONE_BWD_KT_BRIDGE=1` to fall back to the
+/// candle-typed `kiln_rmsnorm_kernel::rotary_one_bwd_bf16` path. The
+/// fallback is also taken automatically on any kt-bridge error
+/// (borrow / FFI / copy-back), matching the precedent established by
+/// `fused_rmsnorm_backward_via_kt_bridge` in commit `341da876`.
+#[cfg(feature = "cuda")]
+fn rotary_one_bwd_kt_bridge_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        matches!(
+            std::env::var("KILN_DISABLE_ROTARY_ONE_BWD_KT_BRIDGE")
+                .ok()
+                .as_deref(),
+            Some("1") | Some("true") | Some("TRUE")
+        )
+    })
+}
+
+/// kt-bridge variant of `kiln_rmsnorm_kernel::rotary_one_bwd_bf16` —
+/// borrows `grad_y`/`cos`/`sin` as kt-Tensors, dispatches the same
+/// `kiln_fused_rotary_one_bwd` FFI symbol via
+/// [`kiln_rmsnorm_kernel::fused_rotary_one_bwd_kt`], and copies the
+/// kt output back into a candle `Tensor`.
+///
+/// Same FFI symbol → bit-exact by construction. The point of this
+/// path is the SECOND production migration of a candle `CustomOp::bwd`
+/// body to the kt bridge (template proven by commit `341da876` for
+/// `RmsNormCustomOp::bwd`; see `docs/CANDLE_REMOVAL_PLAN.md`
+/// §"kt-autograd readiness" for the full plan). Unlike the rmsnorm
+/// migration this op returns a single gradient so there is no
+/// over-allocated F32 partial buffer to special-case — just one
+/// dtod memcpy on the way back to candle.
+///
+/// Falls back to the candle path when
+/// `KILN_DISABLE_ROTARY_ONE_BWD_KT_BRIDGE=1` is set or on any bridge
+/// error (borrow / kt FFI / copy-back failure) so a regression never
+/// silently breaks training.
+#[cfg(feature = "cuda")]
+fn fused_rotary_one_backward_via_kt_bridge(
+    grad_y: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    rotary_dim: usize,
+) -> std::result::Result<Tensor, candle_core::Error> {
+    let grad_y_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(grad_y).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge rotary_one bwd: borrow grad_y failed: {e}"))
+    })?;
+    let cos_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(cos).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge rotary_one bwd: borrow cos failed: {e}"))
+    })?;
+    let sin_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(sin).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge rotary_one bwd: borrow sin failed: {e}"))
+    })?;
+    let grad_x_kt =
+        kiln_rmsnorm_kernel::fused_rotary_one_bwd_kt(&grad_y_kt, &cos_kt, &sin_kt, rotary_dim)
+            .map_err(|e| {
+                candle_core::Error::Msg(format!("kt-bridge rotary_one bwd: kt call failed: {e}"))
+            })?;
+    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&grad_x_kt).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge rotary_one bwd: copy-back grad_x failed: {e}"))
+    })
+}
+
 #[cfg(feature = "cuda")]
 #[derive(Debug, Clone, Copy)]
 struct CudaRotaryOneBf16 {
@@ -9852,6 +9917,26 @@ impl CustomOp3 for CudaRotaryOneBf16 {
             self.head_dim,
             self.rotary_dim,
         ) {
+            // SECOND production CustomOp::bwd migration to the kt
+            // bridge (after `RmsNormCustomOp::bwd` in commit
+            // `341da876`). Same FFI symbol
+            // (`kiln_fused_rotary_one_bwd`) → bit-exact by
+            // construction. Kill switch
+            // `KILN_DISABLE_ROTARY_ONE_BWD_KT_BRIDGE=1` keeps the
+            // candle path reachable as the parity-test escape hatch;
+            // the bwd body also falls through to the candle path on
+            // any bridge failure (borrow / FFI / copy-back) so a
+            // regression never silently breaks training.
+            if !rotary_one_bwd_kt_bridge_disabled() {
+                match fused_rotary_one_backward_via_kt_bridge(grad_y, cos, sin, self.rotary_dim) {
+                    Ok(grad_x) => return Ok((Some(grad_x), None, None)),
+                    Err(e) => {
+                        eprintln!(
+                            "kiln-model: CudaRotaryOneBf16 kt-bridge bwd path failed, falling back to candle: {e}"
+                        );
+                    }
+                }
+            }
             let grad_x = kiln_rmsnorm_kernel::rotary_one_bwd_bf16(
                 grad_y,
                 cos,
@@ -31571,6 +31656,98 @@ mod tests {
             std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
             std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
         }
+    }
+
+    /// SECOND production migration of a candle `CustomOp::bwd` body to
+    /// the kt-typed bridge (after `RmsNormCustomOp::bwd` in commit
+    /// `341da876`; see `docs/CANDLE_REMOVAL_PLAN.md` §"kt-autograd
+    /// readiness"). This test exercises the new
+    /// `fused_rotary_one_backward_via_kt_bridge` against the candle
+    /// `kiln_rmsnorm_kernel::rotary_one_bwd_bf16` on the SAME inputs.
+    /// Both call the same FFI symbol (`kiln_fused_rotary_one_bwd`) →
+    /// outputs MUST be bit-exact. Unlike rmsnorm there is no
+    /// atomicAdd row reduction here (the kernel writes per-token
+    /// gradients element-wise), so we keep the tolerance tight at
+    /// 1e-3 (well under one bf16 ULP at our input magnitudes).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_cuda_rotary_one_bwd_kt_bridge_default_matches_candle_path() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!(
+                "CUDA unavailable, skipping test_cuda_rotary_one_bwd_kt_bridge_default_matches_candle_path"
+            );
+            return Ok(());
+        };
+
+        // Three shape regimes: decode (seq_len=1), prefill (seq_len=64),
+        // and tiny. head_dim=256 / rotary_dim=64 mirrors the
+        // Qwen3.5-4B layout (rope_theta=10M, partial_rotary=0.25 →
+        // 64/256).
+        for (batch, seq_len, heads, head_dim, rotary_dim, label) in [
+            (1usize, 1usize, 16usize, 256usize, 64usize, "decode [1,1,16,256] r=64"),
+            (1, 64, 16, 256, 64, "prefill [1,64,16,256] r=64"),
+            (2, 8, 4, 128, 64, "tiny [2,8,4,128] r=64"),
+        ] {
+            let half = rotary_dim / 2;
+
+            let mut state: u32 = 0xfacefeed;
+            let mut next = |mul: f32| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                (((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0) * mul
+            };
+
+            let grad_n = batch * seq_len * heads * head_dim;
+            let mut raw_g = Vec::with_capacity(grad_n);
+            for _ in 0..grad_n {
+                raw_g.push(next(0.3));
+            }
+            let g = Tensor::from_vec(raw_g, (batch, seq_len, heads, head_dim), &device)?
+                .to_dtype(DType::BF16)?;
+
+            // cos/sin tables: [S, R/2] F32, values in [-1, 1].
+            let mut raw_cos = Vec::with_capacity(seq_len * half);
+            let mut raw_sin = Vec::with_capacity(seq_len * half);
+            for _ in 0..seq_len * half {
+                raw_cos.push(next(1.0));
+                raw_sin.push(next(1.0));
+            }
+            let cos = Tensor::from_vec(raw_cos, (seq_len, half), &device)?;
+            let sin = Tensor::from_vec(raw_sin, (seq_len, half), &device)?;
+
+            assert!(
+                kiln_rmsnorm_kernel::supports_rotary_one_bwd_bf16(&g, &cos, &sin, head_dim, rotary_dim),
+                "supports check failed on {label}"
+            );
+
+            // Path A: candle-typed body (existing).
+            let gx_candle = kiln_rmsnorm_kernel::rotary_one_bwd_bf16(
+                &g, &cos, &sin, head_dim, rotary_dim,
+            )
+            .expect("candle rotary_one_bwd should succeed");
+
+            // Path B: kt-bridge body (new).
+            let gx_bridge = fused_rotary_one_backward_via_kt_bridge(&g, &cos, &sin, rotary_dim)
+                .expect("kt-bridge rotary_one_bwd should succeed");
+
+            device.synchronize()?;
+
+            // Compare in f32 to keep the diff math precise.
+            let a = gx_candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let b = gx_bridge.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            assert_eq!(a.len(), b.len(), "shape mismatch on {label}");
+            let mut max_diff: f32 = 0.0;
+            for (x, y) in a.iter().zip(b.iter()) {
+                let d = (x - y).abs();
+                if d > max_diff {
+                    max_diff = d;
+                }
+            }
+            assert!(
+                max_diff < 1e-3,
+                "kt-bridge rotary_one_bwd parity failed on {label}: max_abs_diff={max_diff:e} (tol=1e-3)"
+            );
+        }
+        Ok(())
     }
 }
 
