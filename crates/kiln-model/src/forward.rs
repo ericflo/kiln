@@ -10764,6 +10764,76 @@ fn mlp_proj_forward_decode_if(
     )
 }
 
+/// Pre-allocated lm-head output buffer installed by the captured-graph
+/// runner. When present, [`try_kt_lm_head`] writes the matmul result
+/// directly into this candle Tensor via [`kiln_tensor::cuda_matmul_into`]
+/// instead of allocating a fresh per-call output. The buffer's device
+/// pointer is then stable across captured-graph replays, so the
+/// downstream `slice_set(&logits, …)` records a memcpy whose source
+/// address remains valid on every replay.
+///
+/// This is the lm-head twin of `kiln_gdn_kernel::with_decode_gates_recurrent_outputs`
+/// — the same pre-allocate-outside-capture / install-via-thread-local
+/// trick that fixed the GDN decode kernel's intra-capture allocation
+/// hazard (`cuda_graph.rs:1592-1601` documentation). Phase 5 #1082.
+#[cfg(feature = "cuda")]
+thread_local! {
+    static LM_HEAD_OUTPUT_BUFFER: std::cell::RefCell<Option<Tensor>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install a pre-allocated lm-head output buffer for the duration of
+/// `f`. The buffer must be a CUDA candle Tensor of shape
+/// `[batch, 1, vocab]` (or any shape that matches the expected
+/// lm-head output shape for the captured forward) and dtype matching
+/// `weights.embed_tokens.dtype()`. On exit, the previous slot value
+/// is restored.
+///
+/// See [`LM_HEAD_OUTPUT_BUFFER`] for why this exists.
+#[cfg(feature = "cuda")]
+pub fn with_lm_head_output_buffer<R>(buf: Tensor, f: impl FnOnce() -> R) -> R {
+    let previous = LM_HEAD_OUTPUT_BUFFER.with(|cell| cell.replace(Some(buf)));
+    let result = f();
+    LM_HEAD_OUTPUT_BUFFER.with(|cell| {
+        let _ = cell.replace(previous);
+    });
+    result
+}
+
+/// Attempt to consume the thread-local lm-head output buffer if its
+/// shape and dtype match the caller-provided expectations. Returns
+/// `Ok(None)` if no buffer is installed, the shape doesn't match, the
+/// dtype doesn't match, or the buffer isn't on a CUDA device.
+///
+/// On success the returned `Tensor` is a candle clone of the
+/// pre-allocated buffer (storage Arc is shared; the wrapper is a new
+/// `Tensor` handle with the same dims). The caller is responsible
+/// for writing the matmul result into that storage via
+/// `kiln_tensor::cuda_matmul_into`.
+#[cfg(feature = "cuda")]
+fn try_take_lm_head_output_buffer(
+    expected_shape: &[usize],
+    expected_dtype: DType,
+) -> Option<Tensor> {
+    LM_HEAD_OUTPUT_BUFFER.with(|cell| {
+        let borrowed = cell.borrow();
+        let buf = borrowed.as_ref()?;
+        if !matches!(buf.device(), Device::Cuda(_)) {
+            return None;
+        }
+        if buf.dtype() != expected_dtype {
+            return None;
+        }
+        if buf.dims() != expected_shape {
+            return None;
+        }
+        if !buf.is_contiguous() {
+            return None;
+        }
+        Some(buf.clone())
+    })
+}
+
 fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "metal")]
     {
@@ -11231,14 +11301,47 @@ fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<Tensor>>
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
+
+    let mut out_shape: Vec<usize> = l_dims[..l_dims.len() - 1].to_vec();
+    out_shape.push(out_n);
+
+    // Phase 5 #1082 — if a captured-graph runner installed a
+    // pre-allocated lm-head output buffer matching our expected shape
+    // and dtype, write the matmul result directly into it instead of
+    // allocating a transient candle Tensor via
+    // `kt_tensor_to_candle_cuda_copy`. The pre-allocated buffer's
+    // device pointer is graph-stable across replays, so the downstream
+    // `slice_set(&logits, …)` records a memcpy whose source address
+    // remains valid on every replay — fixing the
+    // `CUDA_ERROR_ILLEGAL_ADDRESS` fault at
+    // `greedy_sample_rows(captured.output_logits)` documented in
+    // `bench-results/cuda-graph-status.md` (2026-05-26 entries).
+    if let Some(dst_candle) = try_take_lm_head_output_buffer(&out_shape, x.dtype()) {
+        // The thread-local hands us a candle Tensor shaped like
+        // `[batch, 1, vocab]`. Reshape it to the 2-D `[lead, out_n]`
+        // matmul output shape, borrow it as kt, write into it.
+        let dst2d = match dst_candle.reshape((lead, out_n)) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+        let dst_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dst2d) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+        if kiln_tensor::cuda_matmul_into(&lhs_kt, &rhs_kt, &dst_kt).is_err() {
+            return Ok(None);
+        }
+        // Return the original `[batch, 1, vocab]`-shaped candle wrapper
+        // so the caller's slice_set reads from the graph-stable buffer.
+        return Ok(Some(dst_candle));
+    }
+
     let out_kt = match kiln_tensor::cuda_matmul(&lhs_kt, &rhs_kt) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
     let out2d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_lm_head: candle copy-back failed: {e}"))?;
-    let mut out_shape: Vec<usize> = l_dims[..l_dims.len() - 1].to_vec();
-    out_shape.push(out_n);
     Ok(Some(out2d.reshape(out_shape)?))
 }
 
