@@ -4,14 +4,45 @@ This document inventories every `candle_core` and `candle_nn` reference in
 the kiln workspace and the migration path to a candle-free build. It is
 the canonical artifact for tracking Phase 7 closeout against issue #1082.
 
-Last refreshed: 2026-05-26, against `main` at `0841c266` —
-substrate-level `CudaStorage::cuda_stream_raw()` accessor landed
-(`d561dbf8`) plus mechanical migration of all 55 stream-extraction
-sites + 5 dead `DevicePtr` imports across the 5 kernel-crate
-`kt_api.rs` files (`338b1b88`). Production candle-typed callers
-removed for `kiln-conv1d-kernel` (`2ebcfb08`) and
-`kiln-marlin-gemm::marlin_w4a16_gemm` (`0841c266`); `cuda_train.rs`
-FA-backward migrated to `flash_attn_bwd_kt` (`89273e20`).
+Last refreshed: **2026-05-26**, against `main` at `fdeace4b` —
+post Phase 5 default-on flip (`6d564b9a`,
+`KILN_CUDA_GRAPHS_BATCHED=1` + `_KV_FUSED=1` are now the default
+on CUDA) and KILN_DETECT_ANOMALY substrate landing
+(`3c90d064` + `fdeace4b`).
+
+**Today's batch headline:**
+- 🎉 **Phase 5 default-on** (`6d564b9a`) — bs>1 captured-batched
+  graphs + fused KV writer are default. End-to-end
+  `compute-sanitizer memcheck` clean on A6000 at the gating HEAD
+  (`a2cb9edb`).
+- 🎉 **Tier 1 closed** for `kiln-conv1d-kernel` (`577f8b0c`) and
+  `kiln-marlin-gemm` (`4a862711`) — `candle-core` dropped from
+  both `[dependencies]` blocks.
+- 🎉 **KILN_DETECT_ANOMALY** Phase 9 trap wired end-to-end:
+  scaffold (`72c2c16f`) + `Tensor::all_finite()` substrate
+  primitive (`3c90d064`) + `Tape::backward` integration
+  (`fdeace4b`). Set `KILN_DETECT_ANOMALY=1` and the autograd
+  tape panics at the producing op's tape position on the first
+  NaN/Inf gradient.
+- Substrate accessors added: `CudaStorage::cuda_stream_raw()`
+  (`d561dbf8`), `Tensor::cuda_from_slice` + `cuda_zeros_on` +
+  `primary_cuda_device` (`a5da6152`),
+  `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs`
+  (`aab07fa7`).
+- Cuda.rs candle fallback branches removed (kt-only): conv1d
+  (`2ebcfb08`), GDN 10 sites (`86c7f134`), flash-attn 4 sites
+  including `_with_graph_outputs` (`9ac211e9` + `aab07fa7`),
+  GDN single-block (`29321870`).
+- Forward.rs cleanups: 5 default-on rmsnorm-family flag helpers
+  deleted (`58607c30`), flash-attn captured-graph site migrated
+  to kt (`fe5418a4`).
+- GDN auto-cast for non-BF16 a_log/dt_bias + heavy q/k/v/a/b/z
+  tensors (`010b5e40` + `66e5cb29`), GDN supports_kt 4D vs
+  kernel 3D wire fix (`a2cb9edb`).
+
+**Today's net diff:** ~37 commits, large net deletions across
+kiln-model (~-3000 LOC of candle fallback branches and
+intra-process parity tests).
 
 ## Workspace candle footprint
 
@@ -122,6 +153,66 @@ rm -rf vendor/candle-core/
 sed -i "/candle-core.*path.*vendor/d" Cargo.toml
 ```
 
+## Phase 5 (CUDA graph capture) — DEFAULT ON (2026-05-26)
+
+`KILN_CUDA_GRAPHS_BATCHED=1` and `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=1`
+flipped from default-off to **default-on** in commit `6d564b9a`.
+This was the headline #1082 Phase 5 perf-gate item — the unblock for
+closing the kiln vs vLLM bs=64 decode-throughput gap.
+
+Validation gate that gated the flip (passed on A6000 at HEAD
+`a2cb9edb`):
+- Live `kiln-bench --paged` Qwen3.5-4B W4A16 + paged + batched +
+  KV-fused: exit 0, decode 74.4 tok/s, mean ITL 13.45 ms, peak VRAM
+  11.2 GB at batch=1.
+- `compute-sanitizer memcheck` under the same configuration:
+  `========= ERROR SUMMARY: 0 errors` across batches 1/4/8/16.
+
+Bug chain it took to get here (all fixed in main):
+1. **sccache CUDA dlink stale cache** dropped `gdn_gates` device SASS
+   from the binary → `cudaLaunchKernel → cudaErrorSymbolNotFound`.
+   Workaround for every fresh RunPod build: `cargo clean -p
+   kiln-gdn-kernel && SCCACHE_RECACHE=1`. A permanent build.rs fix
+   (hash the .o into the dlink cache key) is tracked separately.
+2. **GDN BF16-envelope mismatch** — kt path required all-BF16 but
+   `kiln-conv1d-kernel` emits F32 q/k/v by design + safetensors
+   loader keeps `a_log` / `dt_bias` "as-is" (often F32). Fix:
+   auto-cast at dispatch (`010b5e40` + `66e5cb29`).
+3. **supports_kt shape contract** — kt predicate expects 4D
+   `[B, 1, q_heads, dk]` but kt kernel expects 3D
+   `[B, q_heads, dk]`. cuda.rs was passing 3D to both → predicate
+   always declined. Fix: predicate on 4D, squeeze for kernel
+   (`a2cb9edb`).
+
+See `bench-results/cuda-graph-status.md` "Phase 5 sanitizer
+sweep — 2026-05-26" for the full validation trail.
+
+Escape hatches: `KILN_CUDA_GRAPHS_BATCHED=0` and
+`KILN_CUDA_GRAPHS_BATCHED_KV_FUSED=0`.
+
+## KILN_DETECT_ANOMALY (Phase 9 trap) — wired end-to-end (2026-05-26)
+
+The `KILN_DETECT_ANOMALY=1` NaN/Inf trap is now live across the
+autograd tape:
+- Scaffold (`72c2c16f`): `anomaly_detection_enabled()` +
+  `anomaly_panic()` in `kiln-autograd::anomaly`.
+- Substrate (`3c90d064`): `Tensor::all_finite()` walks the strided
+  view (CPU storage; non-CPU returns `Err` pending per-backend
+  is_finite kernel). Handles F32, BF16, F16, FP8E4M3 (no-Inf
+  format), FP8E5M2.
+- Tape wire (`fdeace4b`): `Tape::backward` reads
+  `anomaly_detection_enabled()` once at top, then after each
+  `op.apply()` scans returned grads. On first non-finite,
+  `anomaly_panic` with the producing op's tape position.
+
+Cost: O(numel) per backward step on CPU when enabled, ~5% per
+the issue body. Off-by-default in production; CI training-parity
+tests opt in via `KILN_DETECT_ANOMALY=1`.
+
+Remaining: per-backend `is_finite_storage` kernels
+(CUDA/Metal/Vulkan) for the GPU training paths, then enable the
+trap in the SFT parity CI.
+
 ## Build matrix coverage required before each tier closes
 
 | Tier | Required CI green |
@@ -145,18 +236,47 @@ sed -i "/candle-core.*path.*vendor/d" Cargo.toml
   + `causal_conv1d_prefill_kt` are now both wired in `CudaBackend` at
   `crates/kiln-model/src/backend/cuda.rs:1004` and `:1038`.
   Status by crate:
-    - kiln-rmsnorm-kernel: 7 production `_kt` callers in forward.rs ✓
     - **kiln-conv1d-kernel: ✅ CLOSED** (`577f8b0c`, 2026-05-26) —
       candle-typed lib.rs surface deleted, in-lib parity scaffolds
       removed, `tests/kt_v2_smoke.rs` rewritten candle-free via
       `Tensor::cuda_from_slice`, `candle-core` dropped from
-      Cargo.toml. `cargo tree -i candle-core` is empty.
+      Cargo.toml. `cargo tree -i candle-core` is empty at the
+      crate's direct-dep level.
     - **kiln-marlin-gemm: ✅ CLOSED** (`4a862711`, 2026-05-26) —
       same template: candle-typed `marlin_w4a16_gemm` deleted,
       `tests/parity.rs` removed (replaced by candle-free kt smoke),
       `candle-core` dropped from Cargo.toml.
-    - kiln-gdn-kernel: 5/10 kt_api functions wired in CudaBackend ✓ (`forward_substitution`/`14c17570`, `recurrent_forward`/`7a357a3d`, `chunk_prep`/`68a3667e`, `chunk_scan`/`1edc82dc`, `full_chunk_forward_multiblock`/`57b37c00`) — 5 remaining (decode_gates_recurrent variants + gated_rms_norm)
-    - kiln-flash-attn: 4/5 production wires ✓ (`flash_attn_fwd_kt` at `f3b7e797`, `flash_attn_paged_decode_kt` at `c49c1995`, `flash_attn_paged_decode_dyn_seqlen_kt` at `7fe3011f`, no-graph-outputs `dyn_seqlen` variant at `276482d6`) + 2/5 functions used internally by `paged_kv_cache_kt.rs` (`paged_kv_write_token_major_bf16_slot_kt` + `_bf16_kt`); 1 entry point remaining (`flash_attn_bwd_kt` for the training path) + the `with_graph_outputs` kt-API extension. **Default ON** — env gate flipped from `KILN_USE_KT_API_FLASH_ATTN` opt-in to `KILN_DISABLE_KT_API_FLASH_ATTN` opt-out. Bit-exact by construction: all 4 wired sites bottom out in the same FFI symbols as the candle shim. The `with_graph_outputs` site keeps its `graph_outputs.is_none()` guard so the CUDA-graph caller-owned-output path still uses the candle wrapper.
+    - **kiln-gdn-kernel: 🟡 cuda.rs fully kt-only** — all 10
+      dispatch sites + the single-block `gdn_full_chunk_forward`
+      path migrated (`86c7f134`, `29321870`). Auto-cast added for
+      non-BF16 a_log/dt_bias/q/k/v/a/b/z (`010b5e40`, `66e5cb29`)
+      because the upstream conv1d kernel emits F32 q/k/v + the
+      safetensors loader keeps a_log/dt_bias "as-is" (often F32).
+      supports_kt 4D vs kernel 3D shape contract split fix
+      (`a2cb9edb`). Remaining: 6 forward.rs prefill-chunk-loop
+      sites (tests), 2 cuda_graph.rs sites (`with_decode_gates_
+      recurrent_outputs` needs a kt sibling that accepts caller-
+      owned outputs). `kt_api.rs` already candle-import-free.
+    - **kiln-flash-attn: 🟡 cuda.rs fully kt-only** — all 4 sites
+      migrated, including `_with_graph_outputs` via the new
+      `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs`
+      substrate (`aab07fa7`). Forward.rs captured-graph site also
+      kt (`fe5418a4`). Remaining: 3 candle-typed CustomOp2 shim
+      sites in forward.rs (`impl CustomOp2 for
+      CudaFlashAttentionTrainingBf16` — autograd integration);
+      `paged_kv_cache.rs` 3 sites (`paged_kv_write_*` —
+      PagedKvCacheKt migration); 2 env-gated cuda_train.rs sites
+      (default-off pending parity testing). `kt_api.rs` already
+      candle-import-free.
+    - **kiln-rmsnorm-kernel: 🟡 5 default-on flag helpers removed
+      from forward.rs** (`58607c30`) — rmsnorm / rotary_qk×2 /
+      sigmoid_mul / mlp_silu_mul×2 / l2_qk_norm now kt-only.
+      Remaining: ~32 candle-typed callers across forward.rs
+      (CustomOp1 internals + lora_add_*_storage + supports_*
+      predicates + rotary_one_bf16_storage); cuda.rs (sgd_step,
+      adamw_step — env-gated opt-in); cuda_train.rs (25 sites in
+      training-only paths). `kt_api.rs` already
+      candle-import-free.
     - kiln-opd-loss-kernel: separate phase (full rewrite for Phase B)
 - Tier 2: 🟡 in flight — flce-kernel Phase B is the standout rewrite effort.
   Metal + Vulkan backends now have real kernel wires landed for 9 ops
