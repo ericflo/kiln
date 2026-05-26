@@ -189,7 +189,35 @@ parity-tolerance row fails the Phase 9 audit.
 
 ---
 
-## kt_api production-driveable state for the candle-removal migration (#1082, 2026-05-25)
+## kt_api production-driveable state for the candle-removal migration (#1082, 2026-05-26)
+
+**Two Tier 1 kernel crates have fully dropped `candle-core` from their
+`Cargo.toml`:** `kiln-conv1d-kernel` (`577f8b0c`) and
+`kiln-marlin-gemm` (`4a862711`). Both passed A6000 cargo check
+verification; `cargo tree -i candle-core` is empty at the direct-dep
+level for both.
+
+**All flash-attn dispatch sites in `backend/cuda.rs` are kt-only
+post-aab07fa7** (the new `flash_attn_paged_decode_dyn_seqlen_kt_with_
+graph_outputs` kt entry closed the last fallback). Similarly the
+forward.rs captured-graph site for paged decode is kt-only post-fe5418a4.
+
+**All 5 default-on rmsnorm-family flag helpers in forward.rs deleted
+post-58607c30:** `rmsnorm`, `rotary_qk` (×2 sites), `sigmoid_mul`,
+`mlp_silu_mul` (×2 sites), `l2_qk_norm` are kt-only paths. The
+`KILN_DISABLE_KT_API_*` escape hatches retired alongside.
+
+**Substrate addition (`a5da6152`):** `Tensor::cuda_from_slice` and
+`cuda_zeros_on` give kernel-crate test code candle-free CUDA
+construction. Combined with `CudaStorage::cuda_stream_raw()`
+(`d561dbf8`), kernel crates with zero production candle-typed
+callers can now drop `candle-core` from their `Cargo.toml` via a
+mechanical 3-step PR (delete lib.rs candle-typed surface, migrate
+test scaffold, drop dep).
+
+---
+
+
 
 This section snapshots the Phase 7 (developer experience) kt_api
 migration as visible from a profiling / hot-path perspective. The
