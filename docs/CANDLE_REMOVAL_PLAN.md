@@ -107,7 +107,7 @@ For each Tier-1 crate, removing candle means:
 
 | Crate | Notes |
 |---|---|
-| `kiln-opd-loss-kernel`  | Smaller surface; mirror the rmsnorm path. |
+| `kiln-opd-loss-kernel`  | **Blocked by 3 live candle-typed callers in `kiln-train`** (investigated 2026-05-26 against HEAD `8e21c8fe`): `src/opd.rs:68` imports `opd_top_k_reverse_kl_phase_a_per_position` + `DEFAULT_CHUNK_SIZE` for the production forward path; `src/opd.rs:3034` imports `opd_top_k_reverse_kl_phase_b` (cfg-test); `tests/vk_cuda_opd_parity.rs:20` imports `opd_top_k_reverse_kl_phase_b_per_position`. kt-typed entry points already exist (`opd_top_k_reverse_kl_kt`, `opd_top_k_reverse_kl_per_position_kt`, `compute_per_position_metrics_kt`) — production path migration is the unblocker; same shape as the rmsnorm/gdn blockers. Crate `Cargo.toml` still depends on `candle-core` + `candle-nn` (dev). |
 | `kiln-flce-kernel`      | **Largest single rewrite.** Phase A is pure-candle, Phase B is the raw-CUDA replacement. Driving Phase B to closeout is its own multi-PR effort (see crate-level `phase_b.rs`). |
 | `kiln-mps`              | Apple Silicon only; Metal storage substrate lives here. |
 | `kiln-vulkan-kernel`    | 20 .rs files importing candle. Most are integration shims that can be removed once `kiln-tensor`s Vulkan backend is fully wired (current scaffolds: ~30 `vulkan_fwd: Ok(None)` sites). |
