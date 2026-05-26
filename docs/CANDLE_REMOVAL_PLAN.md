@@ -55,7 +55,7 @@ intra-process parity tests).
 
 41  kiln-kt-bridge
 27  kiln-model
-20  kiln-vulkan-kernel
+20  kiln-vulkan-kernel  (NB: actually 8 as of 2026-05-26 HEAD eea56b23; table stale)
  9  kiln-train
  6  kiln-server
  6  kiln-gdn-kernel
@@ -110,7 +110,98 @@ For each Tier-1 crate, removing candle means:
 | `kiln-opd-loss-kernel`  | **Blocked by 3 live candle-typed callers in `kiln-train`** (investigated 2026-05-26 against HEAD `8e21c8fe`): `src/opd.rs:68` imports `opd_top_k_reverse_kl_phase_a_per_position` + `DEFAULT_CHUNK_SIZE` for the production forward path; `src/opd.rs:3034` imports `opd_top_k_reverse_kl_phase_b` (cfg-test); `tests/vk_cuda_opd_parity.rs:20` imports `opd_top_k_reverse_kl_phase_b_per_position`. kt-typed entry points already exist (`opd_top_k_reverse_kl_kt`, `opd_top_k_reverse_kl_per_position_kt`, `compute_per_position_metrics_kt`) — production path migration is the unblocker; same shape as the rmsnorm/gdn blockers. Crate `Cargo.toml` still depends on `candle-core` + `candle-nn` (dev). |
 | `kiln-flce-kernel`      | **Largest single rewrite.** Phase A is pure-candle, Phase B is the raw-CUDA replacement. Driving Phase B to closeout is its own multi-PR effort (see crate-level `phase_b.rs`). |
 | `kiln-mps`              | Apple Silicon only; Metal storage substrate lives here. |
-| `kiln-vulkan-kernel`    | 20 .rs files importing candle. Most are integration shims that can be removed once `kiln-tensor`s Vulkan backend is fully wired (current scaffolds: ~30 `vulkan_fwd: Ok(None)` sites). |
+| `kiln-vulkan-kernel`    | **Investigated 2026-05-26 against HEAD `eea56b23`** — 8 .rs files importing candle, 13 import lines total (61 .rs files in the crate). Footprint is now ~60% smaller than the earlier "20 files" estimate after 14+ #1082 cleanup commits over the past 3 weeks (latest: `e047c579` de-candle `vk_flce_parity` test factories). Crate `vk_ops/` (31 files) is **fully candle-free**. Top 3 remaining blockers are all rooted in the **legacy candle-typed `kernels::dispatch_*` surface** — see "kiln-vulkan-kernel blocker breakdown" below. |
+
+#### kiln-vulkan-kernel blocker breakdown (2026-05-26, HEAD `eea56b23`)
+
+The 13 remaining candle import lines split into 3 distinct blocker families.
+**Crucially, none of them require kt-autograd** (the bottleneck for rmsnorm /
+gdn / opd-loss closures). The blocker here is just the legacy
+candle-typed dispatch API surface.
+
+**Family 1 — `kernels.rs` legacy dispatch surface (1 import line, ~10K LOC of
+fns):** `src/kernels.rs:5` imports `{DType, Device, Tensor}`. ~30 of the 49
+`pub fn dispatch_*` functions return `Tensor` or `(Tensor, …)` and take `&Tensor`
+inputs (e.g. `dispatch_mlp_gate_up_decode_cached:4553`,
+`dispatch_qwen_rmsnorm_forward:2003`,
+`dispatch_gdn_in_proj_decode_cached_bf16_weights:1176`). Six public helper fns
+also have candle in their signature (`extract_tensor_bytes:908`,
+`extract_tensor_packed_bf16_bytes_pub:926`, `create_tensor_from_data:951`,
+`buffer_to_tensor:977`, `upload_tensor_f32_buffer:1099`,
+`upload_tensor_bf16_packed_buffer:1126`). These are called from
+**off-limits crates** (`kiln-model/src/{forward.rs, backend/vulkan.rs,
+backend/vulkan_linear_op.rs, backend/vulkan_lora_op.rs, vk_decode_resident.rs}`
+and `kiln-train/src/vk_train.rs`) — ~30 call sites total across the workspace.
+The legacy dispatch surface cannot move until those production callers
+migrate, which is a kiln-model concern outside this crate.
+
+**Family 2 — `vk_tensor.rs` candle bridge (5 import lines):** `src/vk_tensor.rs:16`
+imports `{CpuStorage, DType, Device, Storage, Tensor}`. Used by
+`VkTensor::from_candle` / `to_candle` / `fresh_param_id` (`TensorId` minting
+via candle 1-element `Tensor::zeros`). The doc-comment on
+`fresh_param_id:340` explicitly flags this as the contained candle dep — only
+this one fn body needs to swap once a kt-native `TensorId` lands. External
+callers (`kiln-model/src/{vk_forward.rs, forward.rs, backend/vulkan.rs}`,
+`kiln-train/src/{trainer.rs, vk_train.rs, echo.rs}`, and 2 train tests)
+all use `from_candle` / `to_candle` to bridge their candle Tensor inputs
+into the vk-native autograd tape and read results back out. Blocked on
+**kt-native `TensorId` substitute**, *not* kt-autograd (vk_autograd already
+runs in pure VkTensor space).
+
+**Family 3 — parity tests + examples calling the legacy dispatch surface (7
+import lines across 5 files):** `tests/gdn_parity.rs:2` (106 legacy
+`dispatch_*` call sites in this test alone), `tests/vk_matmul_parity.rs:292`
+(one scoped `Var`-based analytical-gradient oracle inside `mod tests`),
+`tests/vk_flce_parity.rs:203` (same pattern — scoped candle autograd oracle),
+`examples/decode_microbench.rs:15` (microbench feeds `dispatch_*_cached*`),
+`examples/vk_mlp_probe.rs:45` (only uses candle to build `make_x() -> Tensor`
+because `dispatch_mlp_gate_up_decode_cached` takes `&Tensor`), and
+`src/resident.rs:1832` (the `#[cfg(test)] mod tests` block — 22 parity tests
+that compare `_resident` raw-buffer dispatchers against the legacy candle
+baselines). All of Family 3 either consumes the legacy dispatch surface
+(blocked on Family 1) or uses `Var`-based candle autograd as a deliberate
+oracle (acceptable scoped use).
+
+**Recommended next concrete steps (in priority order):**
+
+1. **Add `_bytes` siblings for the most-used legacy dispatchers.** The
+   `dispatch_kernel_bytes:436` precedent (landed in `60c48916`) and the
+   `upload_*_buffer_from_slice` helpers (`6f1cabdc`) already show the
+   pattern: factor the dispatch body to take `&[u8]` + shape instead of
+   `&Tensor`, keep the candle-typed wrapper for backward compat. Start
+   with `dispatch_mlp_gate_up_decode_cached_bytes` — the single change
+   would let `examples/vk_mlp_probe.rs` drop candle entirely (file is
+   already 95% candle-free; only `make_x() -> Tensor` and one
+   `Tensor::from_vec` call need to swap). This is the smallest
+   self-contained #1082 commit available in the crate right now and
+   establishes the pattern for the rest of Family 1.
+
+2. **Mint a kt-native `TensorId` substitute.** The `vk_tensor.rs`
+   blocker is gated on one new type — a 64-bit monotonic id minted by
+   `kiln-tensor` (or `kiln-core`). Once that exists, change `pub use
+   candle_core::TensorId` to point at the new type, swap
+   `fresh_param_id`'s body from `Tensor::zeros(…).id()` to the new
+   minter, and `vk_tensor.rs`'s candle surface goes from 5 import
+   lines to 0. All external `VkTensor::from_candle` / `to_candle`
+   callers stay on candle (they live in off-limits crates and bridge
+   candle-typed inputs/outputs — they're naturally part of the
+   kiln-model / kiln-train migrations later). **This unblocker is
+   independent of kt-autograd.**
+
+3. **Defer Family 3 entirely.** Parity tests + microbenches that
+   consume the legacy `dispatch_*` API are correctly blocked on Family
+   1; the scoped `Var` oracles in `vk_matmul_parity.rs` and
+   `vk_flce_parity.rs` are acceptable as long as candle remains a
+   workspace dep, and become trivial to remove once kt has an
+   analytical-grad oracle. No standalone action needed here.
+
+**What's NOT a blocker:** kt-autograd (CustomOp1/2/3 → BackwardOp). The
+vk-native autograd tape (`vk_autograd.rs` + `VkBackwardOp` trait) already
+runs in pure VkTensor space — it imports `TensorId` only to key the
+gradient store, and that import flows through `vk_tensor.rs`'s
+`pub use candle_core::TensorId` (Family 2). Once the kt-native `TensorId`
+substitute lands (step 2), `vk_autograd.rs` is candle-free with no other
+changes.
 
 ### Tier 3 — `kiln-model` (the forward pass)
 
