@@ -22,6 +22,25 @@ path = "src/bench.rs"
 name = "kiln-eval"
 path = "src/bin/kiln_eval_cli.rs"
 
+# These three examples consume the kt-typed entries on kiln-model's
+# public surface (GpuWeights::from_model_weights_kt, etc.) via
+# kiln_kt_bridge::kt_device_from_candle. kt-bridge is CUDA-only, so the
+# kt entries — and these examples — require --features cuda.
+[[example]]
+name = "flce_phase_a_validation_bench"
+path = "examples/flce_phase_a_validation_bench.rs"
+required-features = ["cuda"]
+
+[[example]]
+name = "flce_preflight_bench"
+path = "examples/flce_preflight_bench.rs"
+required-features = ["cuda"]
+
+[[example]]
+name = "phase10_rmsnorm_bench"
+path = "examples/phase10_rmsnorm_bench.rs"
+required-features = ["cuda"]
+
 [dependencies]
 kiln-core = { workspace = true }
 kiln-eval = { workspace = true }
