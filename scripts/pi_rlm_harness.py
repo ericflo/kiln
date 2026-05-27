@@ -5,7 +5,7 @@ The proxy makes one Pi provider turn behave like an RLM turn:
 
 1. Store Pi's full `messages` + `tools` payload as external environment state.
 2. Ask an upstream OpenAI-compatible model for bounded JSON actions.
-3. Execute internal inspect/search/slice/subcall/subrlm actions against state.
+3. Execute internal inspect/search/slice/subcall/spawn_agent actions against state.
 4. Return exactly one normal assistant response or OpenAI tool call to Pi.
 
 The model-facing contract deliberately uses fixed-size windows:
@@ -14,8 +14,8 @@ The model-facing contract deliberately uses fixed-size windows:
 - 4096 tokens for the dynamic environment summary and observations.
 - 4096 tokens for each model output.
 
-Token limits are enforced approximately by characters in this Python harness.
-Kiln-side training/eval should enforce them with the real tokenizer.
+Token limits are enforced with a Hugging Face `tokenizer.json` when supplied.
+Use Qwen3.5's tokenizer for production harness runs.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ INPUT_TOKENS = 4096
 OUTPUT_TOKENS = 4096
 CHARS_PER_TOKEN = 4
 MAX_OBSERVATION_CHARS = INPUT_TOKENS * CHARS_PER_TOKEN
+DEFAULT_CHILD_AGENT_ITERS = 8
 
 RLM_SYSTEM_PROMPT = f"""You are the root controller for a Recursive Language Model (RLM) harness.
 
@@ -65,7 +66,7 @@ Return one JSON object and no prose. Valid actions:
 {{"action":"search","query":"needle","regex":false,"max_matches":8}}
 {{"action":"slice","index":0,"start":0,"length":4096}}
 {{"action":"subcall","prompt":"bounded prompt","system":"optional system","max_tokens":1024}}
-{{"action":"subrlm","prompt":"bounded prompt","max_tokens":1024}}
+{{"action":"spawn_agent","task":"child task","message_refs":[0,3],"slices":[{{"index":2,"start":0,"length":4096}}],"max_iters":8}}
 {{"action":"finish","content":"assistant text for Pi"}}
 {{"action":"finish","tool_call":{{"name":"Bash","arguments":{{"cmd":"..."}}}}}}
 
@@ -73,6 +74,9 @@ Rules:
 - First inspect/search before asking broad semantic subcalls.
 - Use code/tool calls only in the final `finish.tool_call`; internal actions are
   harness actions, not Pi-visible tools.
+- Use `spawn_agent` when a subtask deserves its own full recursive loop. The
+  child gets its own environment, can inspect/search/slice/subcall/spawn_agent,
+  and returns its final result as an observation to you.
 - For Pi tools, preserve the recorded OpenAI function-call shape: tool name plus
   JSON arguments object.
 - Stop as soon as the next Pi-visible assistant response or tool call is clear.
@@ -81,6 +85,84 @@ Rules:
 
 def approx_token_chars(tokens: int) -> int:
     return tokens * CHARS_PER_TOKEN
+
+
+class TokenBudget:
+    def __init__(self, tokenizer_path: Path | None, require_tokenizer: bool = False):
+        self.tokenizer_path = tokenizer_path
+        self.tokenizer = None
+        if tokenizer_path is not None:
+            try:
+                from tokenizers import Tokenizer  # type: ignore
+
+                self.tokenizer = Tokenizer.from_file(str(tokenizer_path))
+            except Exception as exc:
+                if require_tokenizer:
+                    raise RuntimeError(f"failed to load tokenizer {tokenizer_path}: {exc}") from exc
+                print(
+                    f"pi-rlm-harness: warning: failed to load tokenizer {tokenizer_path}: {exc}; "
+                    "falling back to char approximation",
+                    file=sys.stderr,
+                )
+        elif require_tokenizer:
+            raise RuntimeError(
+                "Qwen3.5 tokenizer required but not found; pass --tokenizer "
+                "or set KILN_TOKENIZER_PATH/KILN_MODEL_PATH"
+            )
+
+    @property
+    def exact(self) -> bool:
+        return self.tokenizer is not None
+
+    def count(self, text: str) -> int:
+        if self.tokenizer is None:
+            return max(1, (len(text) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN)
+        return len(self.tokenizer.encode(text).ids)
+
+    def clip(self, text: str, token_limit: int) -> str:
+        if self.count(text) <= token_limit:
+            return text
+        # Binary-search the longest prefix that fits after adding a notice.
+        notice = "\n...[token clipped]..."
+        lo = 0
+        hi = len(text)
+        best = ""
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate = text[:mid] + notice
+            if self.count(candidate) <= token_limit:
+                best = candidate
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return best or notice.strip()
+
+
+def discover_tokenizer_path(explicit: str | None) -> Path | None:
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(explicit))
+    if env_path := os_environ("KILN_TOKENIZER_PATH"):
+        candidates.append(Path(env_path))
+    if model_path := os_environ("KILN_MODEL_PATH"):
+        candidates.append(Path(model_path) / "tokenizer.json")
+    candidates.extend(
+        [
+            Path("Qwen3.5-4B/tokenizer.json"),
+            Path("/workspace/Qwen3.5-4B/tokenizer.json"),
+        ]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def os_environ(key: str) -> str | None:
+    import os
+
+    value = os.environ.get(key)
+    return value if value else None
 
 
 def clip_text(text: str, max_chars: int) -> str:
@@ -177,28 +259,43 @@ class RlmResult:
     tool_call: dict[str, Any] | None = None
     trace: list[dict[str, Any]] = field(default_factory=list)
     fallback_used: bool = False
+    request_id: str = ""
+    depth: int = 0
 
 
 @dataclass
 class RlmEnvironment:
     request_id: str
+    depth: int
     messages: list[dict[str, Any]]
     tools: list[dict[str, Any]]
     upstream_request: dict[str, Any]
     state_dir: Path
+    budget: TokenBudget
+    parent_id: str | None = None
+    artifacts: dict[str, Any] = field(default_factory=dict)
     observations: list[dict[str, Any]] = field(default_factory=list)
 
     def persist(self, result: RlmResult | None = None) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             "request_id": self.request_id,
+            "parent_id": self.parent_id,
+            "depth": self.depth,
             "created_at_unix": time.time(),
             "messages": self.messages,
             "tools": self.tools,
+            "artifacts": self.artifacts,
             "observations": self.observations,
+            "tokenizer": {
+                "path": str(self.budget.tokenizer_path) if self.budget.tokenizer_path else None,
+                "exact": self.budget.exact,
+            },
         }
         if result is not None:
             payload["result"] = {
+                "request_id": result.request_id,
+                "depth": result.depth,
                 "content": result.content,
                 "tool_call": result.tool_call,
                 "fallback_used": result.fallback_used,
@@ -216,7 +313,8 @@ class RlmEnvironment:
                     "index": index,
                     "role": msg.get("role", ""),
                     "chars": len(content),
-                    "preview": clip_text(content, 240),
+                    "qwen_tokens": self.budget.count(content),
+                    "preview": self.budget.clip(content, 80),
                     "has_tool_calls": bool(msg.get("tool_calls")),
                     "tool_call_id": msg.get("tool_call_id"),
                     "name": msg.get("name"),
@@ -229,11 +327,15 @@ class RlmEnvironment:
         tool_names = [tool_name(t) for t in self.tools if tool_name(t)]
         return {
             "request_id": self.request_id,
+            "parent_id": self.parent_id,
+            "depth": self.depth,
             "message_count": len(self.messages),
             "tool_count": len(self.tools),
             "tool_names": tool_names,
-            "latest_user_preview": clip_text(latest_user, 1200),
+            "latest_user_preview": self.budget.clip(latest_user, 300),
             "messages": inventory,
+            "artifact_keys": sorted(self.artifacts.keys()),
+            "tokenizer_exact": self.budget.exact,
         }
 
     def observe(self, action: dict[str, Any], output: Any) -> dict[str, Any]:
@@ -246,7 +348,7 @@ class RlmEnvironment:
 
     def bounded_observations(self) -> str:
         raw = pretty_json(self.observations[-8:])
-        return clip_text(raw, MAX_OBSERVATION_CHARS)
+        return self.budget.clip(raw, INPUT_TOKENS)
 
     def inspect(self, action: dict[str, Any]) -> Any:
         target = action.get("target", "summary")
@@ -264,13 +366,16 @@ class RlmEnvironment:
                 "index": index,
                 "role": msg.get("role", ""),
                 "chars": len(text),
-                "content_preview": clip_text(text, 4000),
+                "qwen_tokens": self.budget.count(text),
+                "content_preview": self.budget.clip(text, 1000),
                 "tool_calls": msg.get("tool_calls"),
                 "tool_call_id": msg.get("tool_call_id"),
                 "name": msg.get("name"),
             }
         if target == "observations":
             return self.observations
+        if target == "artifacts":
+            return self.artifacts
         return {"error": f"unknown inspect target {target!r}"}
 
     def search(self, action: dict[str, Any]) -> Any:
@@ -328,6 +433,75 @@ class RlmEnvironment:
             "content": text[start : start + length],
         }
 
+    def materialize_child_messages(self, action: dict[str, Any]) -> list[dict[str, Any]]:
+        task = str(action.get("task") or action.get("prompt") or "")
+        if not task:
+            task = "Solve the delegated subtask using the provided child environment."
+        child_messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a recursive child agent. Your parent delegated a bounded "
+                    "subtask. Use the same RLM harness actions to inspect the child "
+                    "environment and return a final result to the parent."
+                ),
+            },
+            {"role": "user", "content": task},
+        ]
+
+        for ref in action.get("message_refs") or []:
+            try:
+                index = int(ref)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < len(self.messages):
+                text = message_text(self.messages[index])
+                child_messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"[parent_message index={index} role={self.messages[index].get('role', '')}]\n"
+                            f"{text}"
+                        ),
+                    }
+                )
+
+        for item in action.get("slices") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                index = int(item.get("index", -1))
+                start = max(0, int(item.get("start", 0)))
+                length = min(max(1, int(item.get("length", 4096))), MAX_OBSERVATION_CHARS)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < len(self.messages):
+                text = message_text(self.messages[index])
+                label = str(item.get("label") or f"parent_message_{index}_slice")
+                child_messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"[{label} index={index} start={start} length={length}]\n"
+                            f"{text[start:start + length]}"
+                        ),
+                    }
+                )
+
+        for artifact in action.get("artifacts") or []:
+            if not isinstance(artifact, dict):
+                continue
+            name = str(artifact.get("name") or f"artifact_{len(child_messages)}")
+            content = artifact.get("content", "")
+            child_messages.append(
+                {
+                    "role": "user",
+                    "content": f"[artifact {name}]\n{json_dumps(content)}",
+                }
+            )
+
+        return child_messages
+
 
 class RlmController:
     def __init__(
@@ -336,24 +510,36 @@ class RlmController:
         state_dir: Path,
         max_iters: int,
         max_depth: int,
+        budget: TokenBudget,
     ):
         self.upstream = upstream
         self.state_dir = state_dir
         self.max_iters = max_iters
         self.max_depth = max_depth
+        self.budget = budget
 
-    def run(self, payload: dict[str, Any], depth: int = 0) -> RlmResult:
+    def run(
+        self,
+        payload: dict[str, Any],
+        depth: int = 0,
+        parent_id: str | None = None,
+        max_iters_override: int | None = None,
+    ) -> RlmResult:
         request_id = request_id_from_payload(payload)
         env = RlmEnvironment(
             request_id=request_id,
+            parent_id=parent_id,
+            depth=depth,
             messages=list(payload.get("messages") or []),
             tools=list(payload.get("tools") or []),
             upstream_request=payload,
             state_dir=self.state_dir,
+            budget=self.budget,
         )
         env.persist()
         trace: list[dict[str, Any]] = []
-        for step in range(self.max_iters):
+        max_iters = max_iters_override or self.max_iters
+        for step in range(max_iters):
             root_payload = {
                 "model": payload.get("model") or self.upstream.model,
                 "messages": [
@@ -376,6 +562,8 @@ class RlmController:
             kind = str(action.get("action", "")).lower()
             if kind == "finish":
                 result = self.finish(action, trace)
+                result.request_id = request_id
+                result.depth = depth
                 env.persist(result)
                 return result
             output = self.execute(env, action, depth)
@@ -383,6 +571,8 @@ class RlmController:
             trace[-1]["observation"] = obs
             env.persist()
         result = self.direct_fallback(payload, trace)
+        result.request_id = request_id
+        result.depth = depth
         env.persist(result)
         return result
 
@@ -393,7 +583,7 @@ class RlmController:
             "environment_summary": env.summary(),
             "recent_observations": env.observations[-8:],
         }
-        return clip_text(pretty_json(body), approx_token_chars(INPUT_TOKENS))
+        return self.budget.clip(pretty_json(body), INPUT_TOKENS)
 
     def execute(self, env: RlmEnvironment, action: dict[str, Any], depth: int) -> Any:
         kind = str(action.get("action", "")).lower()
@@ -405,24 +595,49 @@ class RlmController:
             return env.slice(action)
         if kind == "subcall":
             return self.subcall(action)
-        if kind == "subrlm":
-            if depth >= self.max_depth:
-                return self.subcall(action)
-            prompt = str(action.get("prompt", ""))
-            sub_payload = {
-                "model": env.upstream_request.get("model") or self.upstream.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "tools": env.tools,
-                "max_tokens": min(int(action.get("max_tokens", 1024)), OUTPUT_TOKENS),
-                "temperature": 0.0,
-            }
-            result = self.run(sub_payload, depth + 1)
-            return {
-                "content": result.content,
-                "tool_call": result.tool_call,
-                "fallback_used": result.fallback_used,
-            }
+        if kind in ("spawn_agent", "subrlm", "agent"):
+            return self.spawn_agent(env, action, depth)
         return {"error": f"unknown action {kind!r}"}
+
+    def spawn_agent(self, env: RlmEnvironment, action: dict[str, Any], depth: int) -> Any:
+        if depth >= self.max_depth:
+            return {
+                "error": "max_depth reached",
+                "depth": depth,
+                "max_depth": self.max_depth,
+            }
+        child_id = str(action.get("id") or f"{env.request_id}.child{len(env.observations)}")
+        child_messages = env.materialize_child_messages(action)
+        child_max_iters = min(
+            max(1, int(action.get("max_iters", DEFAULT_CHILD_AGENT_ITERS))),
+            self.max_iters,
+        )
+        child_payload = {
+            "model": env.upstream_request.get("model") or self.upstream.model,
+            "messages": child_messages,
+            "tools": env.tools if action.get("copy_tools", True) else [],
+            "max_tokens": min(int(action.get("max_tokens", OUTPUT_TOKENS)), OUTPUT_TOKENS),
+            "temperature": float(action.get("temperature", 0.0)),
+            "metadata": {
+                "request_id": sanitize_id(child_id),
+                "parent_request_id": env.request_id,
+                "spawn_depth": depth + 1,
+            },
+        }
+        result = self.run(
+            child_payload,
+            depth + 1,
+            parent_id=env.request_id,
+            max_iters_override=child_max_iters,
+        )
+        return {
+            "child_request_id": result.request_id,
+            "depth": result.depth,
+            "content": result.content,
+            "tool_call": result.tool_call,
+            "fallback_used": result.fallback_used,
+            "trace_steps": len(result.trace),
+        }
 
     def subcall(self, action: dict[str, Any]) -> Any:
         prompt = str(action.get("prompt", ""))
@@ -430,7 +645,7 @@ class RlmController:
         messages = []
         if isinstance(system, str) and system:
             messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": clip_text(prompt, approx_token_chars(INPUT_TOKENS))})
+        messages.append({"role": "user", "content": self.budget.clip(prompt, INPUT_TOKENS)})
         max_tokens = min(int(action.get("max_tokens", 1024)), OUTPUT_TOKENS)
         text = self.upstream.first_text(
             {
@@ -682,12 +897,13 @@ def self_test() -> None:
     tmp = Path("/tmp/pi-rlm-harness-self-test")
     upstream = FakeUpstream(
         [
+            '{"action":"spawn_agent","task":"Find the likely command.","message_refs":[1],"max_iters":3}',
             '{"action":"inspect","target":"summary"}',
-            '{"action":"search","query":"failing doctest","max_matches":2}',
+            '{"action":"finish","content":"Use pytest for the failing doctest."}',
             '{"action":"finish","tool_call":{"name":"Bash","arguments":{"cmd":"pytest -q"}}}',
         ]
     )
-    controller = RlmController(upstream, tmp, max_iters=4, max_depth=1)
+    controller = RlmController(upstream, tmp, max_iters=4, max_depth=2, budget=TokenBudget(None))
     result = controller.run(
         {
             "model": DEFAULT_MODEL,
@@ -711,6 +927,7 @@ def self_test() -> None:
     assert result.tool_call["function"]["name"] == "Bash"
     assert json.loads(result.tool_call["function"]["arguments"])["cmd"] == "pytest -q"
     assert (tmp / "self-test.json").exists()
+    assert (tmp / "self-test.child0.json").exists()
     print("pi_rlm_harness self-test passed")
 
 
@@ -722,7 +939,20 @@ def main() -> int:
     parser.add_argument("--api-key", default="kiln", help="upstream API key")
     parser.add_argument("--state-dir", default=DEFAULT_STATE_DIR, help="directory for external RLM state")
     parser.add_argument("--max-iters", type=int, default=8, help="max root RLM actions per Pi turn")
-    parser.add_argument("--max-depth", type=int, default=1, help="max recursive subrlm depth")
+    parser.add_argument("--max-depth", type=int, default=2, help="max recursive child-agent depth")
+    parser.add_argument(
+        "--tokenizer",
+        help=(
+            "Qwen3.5 tokenizer.json. Defaults to KILN_TOKENIZER_PATH, "
+            "KILN_MODEL_PATH/tokenizer.json, ./Qwen3.5-4B/tokenizer.json, "
+            "or /workspace/Qwen3.5-4B/tokenizer.json"
+        ),
+    )
+    parser.add_argument(
+        "--require-tokenizer",
+        action="store_true",
+        help="fail startup unless the Qwen3.5 tokenizer can be loaded",
+    )
     parser.add_argument("--self-test", action="store_true", help="run local parser/controller smoke test")
     args = parser.parse_args()
 
@@ -731,8 +961,18 @@ def main() -> int:
         return 0
 
     host, port = parse_listen(args.listen)
+    tokenizer_path = discover_tokenizer_path(args.tokenizer)
+    budget = TokenBudget(tokenizer_path, require_tokenizer=args.require_tokenizer)
+    if budget.exact:
+        print(f"pi-rlm-harness using Qwen tokenizer {tokenizer_path}", flush=True)
+    else:
+        print(
+            "pi-rlm-harness warning: Qwen tokenizer not loaded; using char approximation",
+            file=sys.stderr,
+            flush=True,
+        )
     upstream = UpstreamClient(args.upstream, args.api_key, args.model)
-    controller = RlmController(upstream, Path(args.state_dir), args.max_iters, args.max_depth)
+    controller = RlmController(upstream, Path(args.state_dir), args.max_iters, args.max_depth, budget)
     server = ProxyServer((host, port), Handler)
     server.controller = controller
     server.upstream = upstream

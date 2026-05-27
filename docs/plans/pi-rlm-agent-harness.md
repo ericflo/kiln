@@ -15,6 +15,8 @@ python3 scripts/pi_rlm_harness.py \
   --listen 127.0.0.1:8421 \
   --upstream http://127.0.0.1:8420/v1 \
   --model Qwen3.5-4B \
+  --tokenizer /workspace/Qwen3.5-4B/tokenizer.json \
+  --require-tokenizer \
   --state-dir .kiln/pi-rlm-harness
 ```
 
@@ -88,14 +90,22 @@ environment summary plus bounded observations from these internal actions:
 {"action":"search","query":"needle","regex":false,"max_matches":8}
 {"action":"slice","index":0,"start":0,"length":4096}
 {"action":"subcall","prompt":"bounded prompt","system":"optional","max_tokens":1024}
-{"action":"subrlm","prompt":"bounded prompt","max_tokens":1024}
+{"action":"spawn_agent","task":"child task","message_refs":[0,3],"slices":[{"index":2,"start":0,"length":4096}],"max_iters":8}
 {"action":"finish","content":"assistant text for Pi"}
 {"action":"finish","tool_call":{"name":"Bash","arguments":{"cmd":"pytest -q"}}}
 ```
 
-`subcall` is a bounded semantic call to the upstream model. `subrlm` recursively
-invokes the same harness contract on a bounded prompt, capped by `--max-depth`.
-The final `finish.tool_call` is the only tool call Pi sees and executes.
+`subcall` is a bounded semantic call to the upstream model. `spawn_agent` is the
+load-bearing recursive primitive: it creates a child RLM environment from parent
+message references, exact slices, and optional artifacts, then runs the same
+controller loop at `depth+1`. That child can itself inspect/search/slice,
+subcall, and spawn more child agents until `--max-depth` is reached. The child
+returns its final content/tool-call proposal as a parent observation; the final
+top-level `finish.tool_call` is the only tool call Pi sees and executes.
+
+The prototype keeps `subrlm` as a compatibility alias for `spawn_agent`, but the
+training target should use `spawn_agent` so traces are explicit about recursive
+agent creation.
 
 ## Fixed-Window Adapter Shape
 
@@ -118,6 +128,18 @@ shape:
 The important compression is not "summarize the whole Pi session into 4096
 tokens." The full session remains in `E`. The 4096-token dynamic input is just
 the root controller's current observation.
+
+Window enforcement must use the Qwen3.5 tokenizer, not character counts. The
+Python prototype loads `tokenizer.json` from:
+
+- `--tokenizer`
+- `KILN_TOKENIZER_PATH`
+- `KILN_MODEL_PATH/tokenizer.json`
+- `./Qwen3.5-4B/tokenizer.json`
+- `/workspace/Qwen3.5-4B/tokenizer.json`
+
+Production and training runs should pass `--require-tokenizer`; char fallback is
+only for local script smoke tests.
 
 This collapses Pi's visible multi-turn assistant behavior into a sequence of
 single supervised root decisions:
