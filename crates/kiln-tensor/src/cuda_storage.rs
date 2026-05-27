@@ -85,10 +85,12 @@ impl std::fmt::Debug for SliceOwner {
 
 /// CUDA-backed storage. Byte-typed; dtype carried alongside for dispatch.
 ///
-/// The handed-down `CudaSlice<u8>` is allocated via candle's
-/// `CudaDevice` accessor today; Phase 7 swaps that for a direct cudarc
-/// `CudaContext::default_stream().alloc_zeros::<u8>` once the candle
-/// dep is gone.
+/// The handed-down `CudaSlice<u8>` is allocated via cudarc directly
+/// (`CudaContext::default_stream().alloc_zeros::<u8>`); the storage no
+/// longer holds an `Arc<CudaDevice>` field — the candle wrapper, when
+/// needed by legacy FFI sites, is derived on-demand from `device_index`
+/// via [`primary_cuda_device`]. This was the #1082 CP-1 final lift:
+/// dropping the candle device field in favor of the cudarc context.
 ///
 /// Storage can be either owned (allocated by kt) or borrowed (sharing
 /// an external CUDA buffer with a keep-alive Arc) — see [`SliceOwner`].
@@ -101,10 +103,14 @@ pub struct CudaStorage {
     dtype: DType,
     /// The byte buffer (owned or borrowed).
     slice: SliceOwner,
-    /// Candle CUDA device handle. Held for stream affinity (Phase 1.x
-    /// `StreamPlanner` reads it) and for the in-flight kernel-crate
-    /// FFI calls that take `&CudaDevice` as their first argument.
-    candle_device: Arc<CudaDevice>,
+    /// Cudarc CUDA context this storage was allocated on. Held for
+    /// stream affinity — every kernel-launch path reads
+    /// `self.ctx.default_stream()` to get the primary stream handle.
+    /// Replaces the previous `candle_device: Arc<CudaDevice>` field
+    /// (#1082 CP-1 final lift). Callers that still need the candle
+    /// `Arc<CudaDevice>` derive it via `self.candle_device()` which
+    /// routes through `primary_cuda_device(device_index)`.
+    ctx: Arc<CudaContext>,
 }
 
 impl CudaStorage {
@@ -134,13 +140,12 @@ impl CudaStorage {
         n_elements: usize,
     ) -> Result<Self> {
         let ctx = candle_device.cuda_stream().context().clone();
-        let mut storage = Self::zeros_ctx(&ctx, device_index, dtype, n_elements)?;
-        // Substitute the caller's existing candle device wrapper for
-        // the one zeros_ctx derived via primary_cuda_device — keeps
-        // BLAS/cuRAND handle caches on the candle wrapper warm for
-        // every downstream call site that reads .candle_device().
-        storage.candle_device = candle_device;
-        Ok(storage)
+        // #1082 CP-1 final lift: field is now `ctx: Arc<CudaContext>`,
+        // so the candle wrapper is discarded after deriving the
+        // context (it's the same primary context that every candle
+        // CudaDevice for this ordinal wraps internally — stream
+        // affinity is preserved).
+        Self::zeros_ctx(&ctx, device_index, dtype, n_elements)
     }
 
     /// Allocate `n_elements` worth of bytes for `dtype` on the cudarc
@@ -155,19 +160,16 @@ impl CudaStorage {
     /// ordinal of `ctx`'s owning device. Stored as the
     /// [`Device::Cuda`] variant.
     ///
-    /// # Why the storage's `candle_device` field is still populated
+    /// # Storage no longer holds a candle device
     ///
-    /// The internal `candle_device: Arc<CudaDevice>` field is still
-    /// load-bearing for downstream callers: every kernel-crate FFI
-    /// site reaches `self.candle_device.cuda_stream()` to plumb a
-    /// `CUstream` into its launch, and the candle `CudaDevice` wrapper
-    /// caches BLAS/cuRAND handles that production code re-uses. Until
-    /// every caller migrates to the cudarc-direct stream accessor
-    /// (`cuda_stream_raw()`), this constructor derives the candle
-    /// wrapper from [`primary_cuda_device`] (which calls
-    /// `candle_core::Device::new_cuda(device_index)`) so the resulting
-    /// `CudaStorage` is drop-in-compatible with every existing
-    /// downstream call site.
+    /// After the #1082 CP-1 final lift the storage holds an
+    /// `Arc<CudaContext>` directly. Kernel-crate FFI sites that still
+    /// need a candle `Arc<CudaDevice>` derive it on-demand via the
+    /// `.candle_device()` accessor, which routes through
+    /// [`primary_cuda_device`] and returns a fresh owned Arc. Every
+    /// path that only needs the stream pointer should use
+    /// `cuda_stream_raw()` (or read `.context()` and call
+    /// `.default_stream()`) to avoid the candle materialization.
     ///
     /// # Stream-affinity contract
     ///
@@ -177,7 +179,7 @@ impl CudaStorage {
     /// `BackendDevice::new` calls `context.default_stream()` itself —
     /// see `vendor/candle-core/src/cuda_backend/device.rs:279`). So
     /// the allocation lands on the same logical CUDA stream that every
-    /// kernel-crate FFI will read via `candle_device.cuda_stream()`.
+    /// kernel-crate FFI will read via either accessor.
     /// This matches the existing default-stream allocation path used by
     /// [`Self::zeros`] today.
     ///
@@ -185,10 +187,11 @@ impl CudaStorage {
     ///
     /// Once every kernel-crate FFI site migrates to the candle-free
     /// stream accessor (`cuda_stream_raw()`), the storage's
-    /// `candle_device` field can be dropped entirely. At that point
-    /// this constructor stops needing to call `primary_cuda_device`
-    /// and `Self::zeros` is folded into this entry. See the
-    /// order-of-operations doc in `cuda_allocator.rs` lines 75-95.
+    /// candle device materialization on the storage side is fully
+    /// retired. `Self::zeros` is retained as a back-compat wrapper
+    /// taking a candle `Arc<CudaDevice>` and folding to this entry.
+    /// See the order-of-operations doc in `cuda_allocator.rs` lines
+    /// 75-95.
     pub fn zeros_ctx(
         ctx: &Arc<CudaContext>,
         device_index: usize,
@@ -206,15 +209,13 @@ impl CudaStorage {
                      failed: {e:?}"
                 ))
             })?;
-        // Derive the candle device wrapper for the back-compat field.
-        // This is the one residual candle dependency in this path; it
-        // goes away in the future `candle_device` field-removal step.
-        let candle_device = primary_cuda_device(device_index)?;
+        // #1082 CP-1 final lift: field is `ctx: Arc<CudaContext>` — no
+        // candle device materialization needed in the storage.
         Ok(CudaStorage {
             device: Device::Cuda(device_index),
             dtype,
             slice: SliceOwner::Owned(slice),
-            candle_device,
+            ctx: ctx.clone(),
         })
     }
 
@@ -241,11 +242,15 @@ impl CudaStorage {
                 )));
             }
         }
+        // #1082 CP-1 final lift: derive ctx from the caller-supplied
+        // candle wrapper for back-compat signature. Future signature
+        // flip should take `ctx: &Arc<CudaContext>` directly.
+        let ctx = candle_device.cuda_stream().context().clone();
         Ok(CudaStorage {
             device: Device::Cuda(device_index),
             dtype,
             slice: SliceOwner::Owned(slice),
-            candle_device,
+            ctx,
         })
     }
 
@@ -283,6 +288,9 @@ impl CudaStorage {
                 )));
             }
         }
+        // #1082 CP-1 final lift: derive ctx from caller-supplied candle
+        // wrapper for back-compat signature.
+        let ctx = candle_device.cuda_stream().context().clone();
         Ok(CudaStorage {
             device: Device::Cuda(device_index),
             dtype,
@@ -291,7 +299,7 @@ impl CudaStorage {
                 byte_len,
                 _keep_alive: keep_alive,
             },
-            candle_device,
+            ctx,
         })
     }
 
@@ -359,7 +367,7 @@ impl CudaStorage {
                 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
                 // Use a default-stream device_ptr just to extract the raw bits;
                 // the SyncOnDrop is dropped immediately, recording nothing.
-                let stream = self.candle_device.cuda_stream();
+                let stream = self.ctx.default_stream();
                 let (ptr, _g) = s.device_ptr(&stream);
                 (ptr, s.len())
             }
@@ -371,60 +379,46 @@ impl CudaStorage {
     /// Used by FFI sites + the Phase 1.x `StreamPlanner` to read
     /// stream affinity.
     ///
-    /// # STOP — #1082 field-drop frontier
+    /// # #1082 CP-1 final lift: now derived, not stored
     ///
-    /// This accessor is the last remaining substrate-level dependency
-    /// on candle's `CudaDevice` wrapper from kernel-crate FFI surfaces.
-    /// Roughly 16 call sites across `kiln-tensor` (cuda_matmul, fp8,
-    /// ops/{broadcast,flip,like,repeat,repeat_interleave,roll,scatter_add,
-    /// triangular}), `kiln-model/paged_kv_cache_kt.rs`, and
-    /// `kiln-kt-bridge/lib.rs` read `.candle_device().clone()` to forward
-    /// an `Arc<CudaDevice>` into helper functions whose signatures still
-    /// take a candle device parameter (typically `host_to_cuda_copy`,
-    /// `cuda_matmul_into`, and the FP8 quantize entry points).
+    /// The previous `candle_device: Arc<CudaDevice>` field was dropped
+    /// in favor of `ctx: Arc<CudaContext>` (#1082). This accessor now
+    /// returns a freshly-derived `Arc<CudaDevice>` via
+    /// [`primary_cuda_device`] on every call — the result wraps the
+    /// same primary CUDA context that `self.ctx` points to, so stream
+    /// affinity is preserved. Note the signature change from
+    /// `&Arc<CudaDevice>` to owned `Arc<CudaDevice>`; the previous
+    /// reference form is impossible without a stored field.
     ///
-    /// Dropping the `candle_device` field — the next CP-1 lift step
-    /// after this commit — requires:
-    /// 1. Migrating those helper function signatures off `Arc<CudaDevice>`
-    ///    to either `Arc<CudaContext>` or `device_index: usize` + a
-    ///    `primary_cuda_device(device_index)` derivation inside the helper.
-    /// 2. Switching every `.candle_device().clone()` at the call site to
-    ///    derive the candle wrapper on-demand from the storage's
-    ///    `.context()` and `primary_cuda_device(device_index)` — or
-    ///    plumb a `CudaContext` through instead.
-    /// 3. Then this accessor and the field are both removable.
-    ///
-    /// The "≤15 sites" estimate in earlier CP-1 docs missed the
-    /// helper-fan-out: each `.candle_device().clone()` forwards into a
-    /// signature that also needs updating. Full sweep is ~16 sites + ~6
-    /// helper signatures — bigger than a single lift commit. Track under
-    /// #1082.
-    pub fn candle_device(&self) -> &Arc<CudaDevice> {
-        &self.candle_device
+    /// Callers that need the candle wrapper repeatedly should cache
+    /// the return value rather than re-deriving per access. Better
+    /// still, migrate to `.context()` and use the cudarc API directly
+    /// — every remaining `candle_device()` caller in `kiln-tensor` is
+    /// a back-compat bridge that should eventually go away under
+    /// #1082's broader candle-free push.
+    pub fn candle_device(&self) -> Arc<CudaDevice> {
+        primary_cuda_device(self.device_index())
+            .expect("CudaStorage::candle_device(): primary_cuda_device failed; this should be unreachable since the storage's ctx already lives on the same device")
+    }
+
+    /// Internal helper: extract the CUDA device ordinal stored on this
+    /// storage. Private alias for the `device` field's inner usize.
+    #[inline]
+    fn device_index(&self) -> usize {
+        match self.device {
+            Device::Cuda(i) => i,
+            _ => unreachable!("CudaStorage::device is always Cuda"),
+        }
     }
 
     /// The underlying cudarc `CudaContext` this storage was allocated
     /// on — **candle-free passthrough**.
     ///
-    /// Derived from `candle_device.cuda_stream().context().clone()` —
-    /// i.e. the *same* `Arc<CudaContext>` that candle's `CudaDevice`
-    /// wraps internally. Stream affinity is preserved because both
-    /// candle's `cuda_stream()` and any new `ctx.default_stream()` on
-    /// the returned context point at the same underlying CUDA primary
-    /// context (candle's `CudaDevice::new_cuda` always retains the
-    /// primary context for the given ordinal).
-    ///
-    /// This is the substrate-side accessor that unblocks the #1082
-    /// Phase 7 migration of `CudaAllocator` (and other downstream
-    /// callers) to hold `Arc<CudaContext>` directly without depending
-    /// on candle's `CudaDevice` wrapper. The internal storage field
-    /// continues to hold the candle `Arc<CudaDevice>` for now (so
-    /// every existing `alloc_zeros::<u8>` + `cuda_stream()` path keeps
-    /// working unchanged); the field flip to `Arc<CudaContext>` is a
-    /// follow-up step that can land after all callers have migrated
-    /// to read `.context()` instead of `.candle_device()`.
+    /// After the #1082 CP-1 final lift the storage holds an
+    /// `Arc<CudaContext>` directly, so this is a cheap Arc clone —
+    /// no candle wrapper materialization, no `cuda_stream()` chain.
     pub fn context(&self) -> Arc<CudaContext> {
-        self.candle_device.cuda_stream().context().clone()
+        self.ctx.clone()
     }
 
     /// Raw CUDA stream pointer for FFI dispatch — **candle-free
@@ -448,7 +442,7 @@ impl CudaStorage {
     /// lifetime of `self`. Callers passing it to a CUDA FFI must
     /// not store it past the borrow.
     pub fn cuda_stream_raw(&self) -> *mut core::ffi::c_void {
-        let stream = self.candle_device.cuda_stream();
+        let stream = self.ctx.default_stream();
         stream.cu_stream() as *mut core::ffi::c_void
     }
 
@@ -958,7 +952,7 @@ pub fn cuda_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
         })?;
 
     // Allocate the destination — contiguous, same dtype, same shape.
-    let candle_device = src_storage.candle_device.clone();
+    let candle_device = src_storage.candle_device();
     let device_index = match src_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!("CudaStorage::device is always Cuda"),
@@ -1106,7 +1100,7 @@ pub fn cuda_index_select_dim0(
             )
         })?;
 
-    let candle_device = src_storage.candle_device.clone();
+    let candle_device = src_storage.candle_device();
     let device_index = match src_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!("CudaStorage::device is always Cuda"),
@@ -1265,7 +1259,7 @@ pub fn cuda_index_select_axis_n(
             )
         })?;
 
-    let candle_device = src_storage.candle_device.clone();
+    let candle_device = src_storage.candle_device();
     let device_index = match src_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!("CudaStorage::device is always Cuda"),
@@ -1398,7 +1392,7 @@ pub fn cuda_elementwise_binary(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_elementwise_binary: b must be CUDA".to_string()))?;
 
-    let candle_device = a_storage.candle_device.clone();
+    let candle_device = a_storage.candle_device();
     let device_index = match a_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -1530,7 +1524,7 @@ pub fn cuda_binary_minmax(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_binary_minmax: b must be CUDA".to_string()))?;
 
-    let candle_device = a_storage.candle_device.clone();
+    let candle_device = a_storage.candle_device();
     let device_index = match a_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -1648,7 +1642,7 @@ pub fn cuda_lerp(a: &crate::Tensor, b: &crate::Tensor, weight: f32) -> Result<cr
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_lerp: b must be CUDA".to_string()))?;
 
-    let candle_device = a_storage.candle_device.clone();
+    let candle_device = a_storage.candle_device();
     let device_index = match a_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -1753,7 +1747,7 @@ pub fn cuda_activation_unary(x: &crate::Tensor, kind: i32) -> Result<crate::Tens
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_activation_unary: x must be CUDA".to_string()))?;
 
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -1860,7 +1854,7 @@ pub fn cuda_cast(src: &crate::Tensor, target: crate::DType) -> Result<crate::Ten
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_cast: src must be CUDA".to_string()))?;
 
-    let candle_device = src_storage.candle_device.clone();
+    let candle_device = src_storage.candle_device();
     let device_index = match src_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -2036,7 +2030,7 @@ pub fn cuda_scatter_add_dim0(
             crate::Error::Msg("cuda_scatter_add_dim0: indices must be CUDA storage".to_string())
         })?;
 
-    let candle_device = out_storage.candle_device.clone();
+    let candle_device = out_storage.candle_device();
     let stream = candle_device.cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
@@ -2316,7 +2310,7 @@ pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
         || crate::Error::Msg("cuda_softmax_last_axis: input must be CUDA".to_string()),
     )?;
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -2506,7 +2500,7 @@ pub fn cuda_is_finite(src: &crate::Tensor) -> Result<bool> {
                 "cuda_is_finite: contiguous'd storage must be CudaStorage".to_string(),
             )
         })?;
-    let candle_device = contig_storage.candle_device.clone();
+    let candle_device = contig_storage.candle_device();
     let device_index = match contig_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!("cuda_is_finite: contig storage device must be Cuda"),
@@ -2728,7 +2722,7 @@ pub fn cuda_sum_squared_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
         || crate::Error::Msg("cuda_sum_squared_last_axis: input must be CUDA".to_string()),
     )?;
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -2840,7 +2834,7 @@ pub fn cuda_l2norm_last_axis(x: &crate::Tensor, eps: f32) -> Result<crate::Tenso
                 "cuda_l2norm_last_axis: sum_sq must be CUDA (internal invariant)".to_string(),
             )
         })?;
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -2993,7 +2987,7 @@ pub fn cuda_rmsnorm_last_axis(
         .ok_or_else(|| {
             crate::Error::Msg("cuda_rmsnorm_last_axis: weight must be CUDA".to_string())
         })?;
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -3154,7 +3148,7 @@ pub fn cuda_layernorm_last_axis(
         .ok_or_else(|| {
             crate::Error::Msg("cuda_layernorm_last_axis: bias must be CUDA".to_string())
         })?;
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -3292,7 +3286,7 @@ pub fn cuda_masked_fill(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_masked_fill: mask must be CUDA".to_string()))?;
 
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -3402,7 +3396,7 @@ pub fn cuda_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
         || crate::Error::Msg("cuda_argmax_last_axis: input must be CUDA".to_string()),
     )?;
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -3559,7 +3553,7 @@ pub fn cuda_cross_entropy_loss(
             )
         })?;
 
-    let candle_device = logits_storage.candle_device.clone();
+    let candle_device = logits_storage.candle_device();
     let device_index = match logits_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -3740,7 +3734,7 @@ fn cuda_reduce_last_axis_impl(x: &crate::Tensor, divisor: f32, label: &str) -> R
     let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
         || crate::Error::Msg(format!("{label}: input must be CUDA")),
     )?;
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -3878,7 +3872,7 @@ fn cuda_reduce_arbitrary_axis_impl(
             .ok_or_else(|| {
                 crate::Error::Msg(format!("{label}: input must be CUDA"))
             })?;
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -4046,7 +4040,7 @@ fn cuda_minmax_arbitrary_axis_impl(
             .ok_or_else(|| {
                 crate::Error::Msg(format!("{label}: input must be CUDA"))
             })?;
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -4171,7 +4165,7 @@ pub fn cuda_bool_reduce_axis(
         .as_any()
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg(format!("{label}: input must be CUDA")))?;
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -4330,7 +4324,7 @@ pub fn cuda_concat(inputs: &[&crate::Tensor], axis: usize) -> Result<crate::Tens
         .ok_or_else(|| {
             crate::Error::Msg("cuda_concat: input 0 must be CUDA storage".to_string())
         })?;
-    let candle_device = first_storage.candle_device.clone();
+    let candle_device = first_storage.candle_device();
     let device_index = match first_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!("CudaStorage::device is always Cuda"),
@@ -4545,7 +4539,7 @@ pub fn cuda_rope(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_rope: sin must be CUDA".to_string()))?;
 
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -4684,7 +4678,7 @@ pub fn cuda_dropout(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_dropout: x must be CUDA".to_string()))?;
 
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -4813,7 +4807,7 @@ pub fn cuda_scalar_op(x: &crate::Tensor, kind: i32, c: f32) -> Result<crate::Ten
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_scalar_op: x must be CUDA".to_string()))?;
 
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -4918,7 +4912,7 @@ pub fn cuda_clamp_pow(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_clamp_pow: x must be CUDA".to_string()))?;
 
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -5036,7 +5030,7 @@ pub fn cuda_compare(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_compare: b must be CUDA".to_string()))?;
 
-    let candle_device = a_storage.candle_device.clone();
+    let candle_device = a_storage.candle_device();
     let device_index = match a_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -5170,7 +5164,7 @@ pub fn cuda_where_select(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_where_select: f must be CUDA".to_string()))?;
 
-    let candle_device = t_storage.candle_device.clone();
+    let candle_device = t_storage.candle_device();
     let device_index = match t_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -5283,7 +5277,7 @@ pub fn cuda_diagonal_extract(x: &crate::Tensor) -> Result<crate::Tensor> {
         .as_any()
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_diagonal_extract: x must be CUDA".to_string()))?;
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -5370,7 +5364,7 @@ pub fn cuda_diag_build(v: &crate::Tensor) -> Result<crate::Tensor> {
         .as_any()
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_diag_build: v must be CUDA".to_string()))?;
-    let candle_device = v_storage.candle_device.clone();
+    let candle_device = v_storage.candle_device();
     let device_index = match v_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -5497,7 +5491,7 @@ fn cuda_scan_axis_impl(
         .as_any()
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg(format!("{label}: input must be CUDA")))?;
-    let candle_device = x_storage.candle_device.clone();
+    let candle_device = x_storage.candle_device();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
