@@ -1,19 +1,20 @@
-//! Smoke test: the kt-API gdn-kernel entries accept both Owned and
-//! Borrowed kt-Tensors (Phase 7 v2 borrow-compat).
+//! Candle-free smoke test for the kt-API gdn-kernel `gdn_gates_bf16_kt`
+//! entry. Constructs CUDA tensors directly via the `Tensor::cuda_from_slice`
+//! substrate helper (#1082 / `a5da6152`) — no `candle_core` import
+//! required.
 //!
-//! Validates that the migration from `.slice().slice(off..).device_ptr()`
-//! to `kt-bridge::cuda_input_device_ptr` / `cuda_output_device_ptr`
-//! preserves correctness AND enables the zero-copy candle→kt path.
+//! The legacy "BORROW adapter" smoke (zero-copy candle→kt round-trip)
+//! moved to `crates/kiln-kt-bridge/tests/` where the adapter actually
+//! lives. This file tests the kt API in isolation, mirroring the
+//! `kiln-conv1d-kernel` / `kiln-marlin-gemm` Tier-1 precedent.
 
-
-
-use candle_core::backend::BackendDevice;
-use candle_core::{DType as CandleDType, Device as CandleDevice, Tensor as CandleTensor};
+use half::bf16;
 
 use kiln_gdn_kernel::gdn_gates_bf16_kt;
+use kiln_tensor::Tensor;
 
-fn try_cuda() -> Option<CandleDevice> {
-    CandleDevice::new_cuda(0).ok()
+fn cuda_available() -> bool {
+    kiln_tensor::primary_cuda_device(0).is_ok()
 }
 
 fn pattern(n: usize, seed: u64) -> Vec<f32> {
@@ -26,15 +27,18 @@ fn pattern(n: usize, seed: u64) -> Vec<f32> {
     out
 }
 
-/// gdn_gates_bf16_kt accepts Borrowed kt-Tensors (zero-copy from
-/// candle). Smoke-tests that the migration doesn't panic on the
-/// Borrowed path.
+fn pattern_bf16(n: usize, seed: u64) -> Vec<bf16> {
+    pattern(n, seed).into_iter().map(bf16::from_f32).collect()
+}
+
+/// `gdn_gates_bf16_kt` dispatches successfully on candle-free
+/// kt CUDA inputs.
 #[test]
-fn gdn_gates_bf16_kt_accepts_borrowed() {
-    let Some(dev) = try_cuda() else {
+fn gdn_gates_bf16_kt_dispatches_on_kt_inputs() {
+    if !cuda_available() {
         eprintln!("CUDA not available; skipping");
         return;
-    };
+    }
 
     let b = 1usize;
     let h = 2usize;
@@ -42,42 +46,35 @@ fn gdn_gates_bf16_kt_accepts_borrowed() {
     let nv = h * c;
     let rows = b * c;
 
-    // gates_bf16 inputs: a [rows, nv], b [rows, nv], a_log [rows, nv],
+    // gates_bf16 inputs: a [rows, nv], b [rows, nv], a_log [nv],
     // dt_bias [nv]. All BF16.
-    let a_cd = CandleTensor::from_vec(pattern(rows * nv, 1), (rows, nv), &dev)
-        .unwrap()
-        .to_dtype(CandleDType::BF16)
-        .unwrap();
-    let b_cd = CandleTensor::from_vec(pattern(rows * nv, 2), (rows, nv), &dev)
-        .unwrap()
-        .to_dtype(CandleDType::BF16)
-        .unwrap();
-    let al_cd = CandleTensor::from_vec(pattern(nv, 3), (nv,), &dev)
-        .unwrap()
-        .to_dtype(CandleDType::BF16)
-        .unwrap();
-    let dt_cd = CandleTensor::from_vec(pattern(nv, 4), (nv,), &dev)
-        .unwrap()
-        .to_dtype(CandleDType::BF16)
-        .unwrap();
+    let a = Tensor::cuda_from_slice(
+        &pattern_bf16(rows * nv, 1),
+        vec![rows, nv],
+        0,
+    )
+    .expect("a");
+    let b_in = Tensor::cuda_from_slice(
+        &pattern_bf16(rows * nv, 2),
+        vec![rows, nv],
+        0,
+    )
+    .expect("b");
+    let a_log = Tensor::cuda_from_slice(
+        &pattern_bf16(nv, 3),
+        vec![nv],
+        0,
+    )
+    .expect("a_log");
+    let dt_bias = Tensor::cuda_from_slice(
+        &pattern_bf16(nv, 4),
+        vec![nv],
+        0,
+    )
+    .expect("dt_bias");
 
-    // Use the BORROW adapter — zero-copy from candle to kt.
-    let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_cd).unwrap();
-    let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_cd).unwrap();
-    let al_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&al_cd).unwrap();
-    let dt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dt_cd).unwrap();
-
-    // The migration's critical correctness property: the call must
-    // not panic on `CudaStorage::slice()` (which the old impl
-    // called, and which panics on Borrowed storage).
-    let (beta, g) = gdn_gates_bf16_kt(&a_kt, &b_kt, &al_kt, &dt_kt)
-        .expect("gdn_gates_bf16_kt on borrowed inputs");
-
-    let cuda_dev = match dev {
-        CandleDevice::Cuda(ref c) => c,
-        _ => unreachable!(),
-    };
-    cuda_dev.synchronize().unwrap();
+    let (beta, g) = gdn_gates_bf16_kt(&a, &b_in, &a_log, &dt_bias)
+        .expect("gdn_gates_bf16_kt on kt inputs");
 
     assert_eq!(beta.shape(), &[rows, nv]);
     assert_eq!(g.shape(), &[rows, nv]);
