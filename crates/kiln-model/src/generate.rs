@@ -566,6 +566,66 @@ impl DecodeBatcherConfig {
         let _ = device;
         env_flag_enabled("KILN_DECODE_BATCHER", true)
     }
+
+    /// kt-typed parallel of [`Self::from_env_for_backend`].
+    ///
+    /// Same behaviour as the candle-typed entry but takes a
+    /// `&kiln_tensor::Device` so callers that have migrated off candle's
+    /// `Device` enum don't have to bridge at every call site. Part of the
+    /// staged migration in #1082.
+    pub fn from_env_for_backend_kt(device: &kiln_tensor::Device, backend_name: &str) -> Self {
+        let mut config = Self::from_env();
+        if std::env::var_os("KILN_DECODE_BATCH_MAX").is_none() {
+            config.max_batch = default_decode_batcher_max_batch_kt(device, backend_name);
+        }
+        if std::env::var_os("KILN_DECODE_BATCH_WAIT_US").is_none() {
+            config.wait = default_decode_batcher_wait_kt(device, backend_name);
+        }
+        if env_flag_value("KILN_DECODE_BATCH_MIXED_SEQ").is_none() {
+            config.allow_mixed_seq_lens =
+                default_decode_batcher_allow_mixed_seq_lens_kt(device, backend_name);
+        }
+        config
+    }
+
+    /// kt-typed parallel of [`Self::from_env_for_device`].
+    pub fn from_env_for_device_kt(device: &kiln_tensor::Device) -> Self {
+        Self::from_env_for_backend_kt(device, "")
+    }
+
+    /// kt-typed parallel of [`Self::enabled_for_device`].
+    pub fn enabled_for_device_kt(device: &kiln_tensor::Device) -> bool {
+        let _ = device;
+        env_flag_enabled("KILN_DECODE_BATCHER", true)
+    }
+}
+
+fn default_decode_batcher_max_batch_kt(device: &kiln_tensor::Device, backend_name: &str) -> usize {
+    if matches!(device, kiln_tensor::Device::Cuda(_)) || backend_name == "cuda" {
+        1
+    } else {
+        DecodeBatcherConfig::default().max_batch
+    }
+}
+
+fn default_decode_batcher_allow_mixed_seq_lens_kt(
+    device: &kiln_tensor::Device,
+    backend_name: &str,
+) -> bool {
+    matches!(device, kiln_tensor::Device::Metal(_)) || backend_name == "vulkan"
+}
+
+fn default_decode_batcher_wait_kt(
+    device: &kiln_tensor::Device,
+    backend_name: &str,
+) -> std::time::Duration {
+    if matches!(device, kiln_tensor::Device::Metal(_)) || backend_name == "metal" {
+        std::time::Duration::from_micros(100)
+    } else if backend_name == "vulkan" {
+        std::time::Duration::from_micros(5_000)
+    } else {
+        std::time::Duration::ZERO
+    }
 }
 
 fn default_decode_batcher_max_batch(device: &Device, backend_name: &str) -> usize {
