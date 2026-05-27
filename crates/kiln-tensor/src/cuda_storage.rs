@@ -2409,17 +2409,18 @@ pub fn cuda_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
             )
         })?;
 
-    let candle_device = contig_storage.candle_device().clone();
     let dtype = src.dtype();
     let n_elements = src.element_count();
     let byte_len = dtype.packed_buffer_bytes(n_elements);
 
-    // Issue the D2H memcpy through candle's stream wrapper. The
+    // Issue the D2H memcpy through the cudarc default stream. The
     // stream's `memcpy_dtoh` synchronizes on completion (per cudarc
-    // 0.19's CudaStream semantics).
+    // 0.19's CudaStream semantics). Pulling the stream from
+    // contig_storage.context() instead of .candle_device().cuda_stream()
+    // retires another .candle_device() read (#1082).
     let slice = contig_storage.slice();
     let mut host_bytes = vec![0u8; byte_len];
-    let stream = candle_device.cuda_stream();
+    let stream = contig_storage.context().default_stream();
     stream
         .memcpy_dtoh(slice, &mut host_bytes)
         .map_err(|e| {
