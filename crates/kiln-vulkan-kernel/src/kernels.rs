@@ -6060,14 +6060,50 @@ pub fn dispatch_gdn_gates_cached(
     nv: usize,
     out_shape: &[usize],
 ) -> Result<(Tensor, Tensor)> {
+    let a_data = extract_tensor_bytes(a)?.0;
+    let b_data = extract_tensor_bytes(b)?.0;
+    let output_dtype = a.dtype();
+    let (beta_data, g_data) = dispatch_gdn_gates_cached_bytes_core(
+        vk_device, &a_data, &b_data, a_log, dt_bias, nv, out_shape,
+    )?;
+    let beta_tensor = create_tensor_from_data(&beta_data, out_shape, output_dtype)?;
+    let g_tensor = create_tensor_from_data(&g_data, out_shape, output_dtype)?;
+    Ok((beta_tensor, g_tensor))
+}
+
+/// Candle-free variant of [`dispatch_gdn_gates_cached`].
+///
+/// Takes `a` and `b` as raw f32 bytes with shape `out_shape` and
+/// returns the `(beta, g)` outputs as raw f32 bytes — both with the
+/// same `out_shape`. `a_log` and `dt_bias` remain VulkanBuffer-typed
+/// because they're pre-uploaded cached weight buffers. (#1082)
+pub fn dispatch_gdn_gates_cached_bytes(
+    vk_device: &VulkanDevice,
+    a_data: &[u8],
+    b_data: &[u8],
+    a_log: &VulkanBuffer,
+    dt_bias: &VulkanBuffer,
+    nv: usize,
+    out_shape: &[usize],
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    dispatch_gdn_gates_cached_bytes_core(
+        vk_device, a_data, b_data, a_log, dt_bias, nv, out_shape,
+    )
+}
+
+fn dispatch_gdn_gates_cached_bytes_core(
+    vk_device: &VulkanDevice,
+    a_data: &[u8],
+    b_data: &[u8],
+    a_log: &VulkanBuffer,
+    dt_bias: &VulkanBuffer,
+    nv: usize,
+    out_shape: &[usize],
+) -> Result<(Vec<u8>, Vec<u8>)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
-
-    // Extract input data
-    let a_data = extract_tensor_bytes(a)?.0;
-    let b_data = extract_tensor_bytes(b)?.0;
 
     // Compile shader
     let glsl_path = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/gdn_gates.comp");
@@ -6103,7 +6139,7 @@ pub fn dispatch_gdn_gates_cached(
     let (beta_data, g_data) = if gdn_gates_single_submit_enabled() {
         let mut outputs = run_compute_pipeline_with_transfers_readbacks(
             vk_device,
-            &[(&a_buf, &a_data), (&b_buf, &b_data)],
+            &[(&a_buf, a_data), (&b_buf, b_data)],
             &[(&beta_buf, output_size), (&g_buf, output_size)],
             &spirv,
             &all_handles,
@@ -6126,7 +6162,7 @@ pub fn dispatch_gdn_gates_cached(
                 host_visible_mt,
                 queue,
                 *command_pool,
-                &[(&a_buf, &a_data), (&b_buf, &b_data)],
+                &[(&a_buf, a_data), (&b_buf, b_data)],
             )?;
         } else {
             let command_pool = vk_device.transient_command_pool()?;
@@ -6136,7 +6172,7 @@ pub fn dispatch_gdn_gates_cached(
                 queue,
                 *command_pool,
                 &a_buf,
-                &a_data,
+                a_data,
             )?;
             VulkanBuffer::upload_data_with_command_pool(
                 device,
@@ -6144,7 +6180,7 @@ pub fn dispatch_gdn_gates_cached(
                 queue,
                 *command_pool,
                 &b_buf,
-                &b_data,
+                b_data,
             )?;
         }
 
@@ -6197,10 +6233,7 @@ pub fn dispatch_gdn_gates_cached(
     drop(beta_buf);
     drop(g_buf);
 
-    let output_dtype = a.dtype();
-    let beta_tensor = create_tensor_from_data(&beta_data, out_shape, output_dtype)?;
-    let g_tensor = create_tensor_from_data(&g_data, out_shape, output_dtype)?;
-    Ok((beta_tensor, g_tensor))
+    Ok((beta_data, g_data))
 }
 
 /// Dispatch GDN gated RMSNorm kernel.
