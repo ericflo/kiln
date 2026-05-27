@@ -974,7 +974,7 @@ impl VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-        let (_b, _seq_len, _num_heads, head_dim) = q.dims4()?;
+        let (batch, seq_len, num_heads, head_dim) = q.dims4()?;
         // sdpa_prefill_f32.comp uses local_size_x=128. Larger head_dim
         // would need a multi-pass reduction the v1 kernel doesn't do.
         if head_dim > 128 {
@@ -1003,13 +1003,25 @@ impl VulkanBackend {
             v.to_dtype(DType::F32)?
         };
 
-        let out_f32 = kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(
+        let q_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q_f32)?.0;
+        let k_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k_f32)?.0;
+        let v_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v_f32)?.0;
+        let out_data = kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32_bytes(
             vk_device,
-            &q_f32,
-            &k_f32,
-            &v_f32,
+            &q_data,
+            &k_data,
+            &v_data,
+            batch,
+            seq_len,
+            num_heads,
+            head_dim,
             softmax_scale,
             causal,
+        )?;
+        let out_f32 = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &out_data,
+            &[batch, seq_len, num_heads, head_dim],
+            DType::F32,
         )?;
 
         let out = if in_dtype == DType::F32 {

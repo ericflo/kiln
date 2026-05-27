@@ -10632,6 +10632,26 @@ pub fn dispatch_gdn_chunk_scan(
 /// Constraints: `head_dim` must be ≤ 128 (the workgroup size). For
 /// Qwen3.5-4B head_dim=128 this is exact; smaller head_dim wastes
 /// some threads but produces correct output.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_sdpa_prefill_f32_bytes(
+    vk_device: &VulkanDevice,
+    q_data: &[u8],
+    k_data: &[u8],
+    v_data: &[u8],
+    batch: usize,
+    seq_len: usize,
+    num_heads: usize,
+    head_dim: usize,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<Vec<u8>> {
+    let q = build_cpu_f32_tensor_from_bytes(q_data, &[batch, seq_len, num_heads, head_dim])?;
+    let k = build_cpu_f32_tensor_from_bytes(k_data, &[batch, seq_len, num_heads, head_dim])?;
+    let v = build_cpu_f32_tensor_from_bytes(v_data, &[batch, seq_len, num_heads, head_dim])?;
+    let out = dispatch_sdpa_prefill_f32(vk_device, &q, &k, &v, softmax_scale, causal)?;
+    Ok(extract_tensor_bytes(&out)?.0)
+}
+
 pub fn dispatch_sdpa_prefill_f32(
     vk_device: &VulkanDevice,
     q: &Tensor,
