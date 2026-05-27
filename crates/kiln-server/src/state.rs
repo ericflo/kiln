@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{Mutex, watch};
 
-use candle_core::DType;
+use kiln_tensor::DType;
 use kiln_core::block::BlockManager;
 use kiln_core::config::ModelConfig;
 use kiln_core::config_hashes::ConfigHashes;
@@ -1685,15 +1685,19 @@ impl AppState {
         // Used by the auto-sizer retry loop below. CUDA OOM bubbles up here as
         // an `Err` from `Tensor::empty`, which we catch and retry with a smaller
         // budget instead of panicking on the first failure.
+        //
+        // Routes through the `_kt` constructor so this site no longer names
+        // `candle_core::DType` or `candle_core::Device` — the bridge happens
+        // inside `new_uninit_with_fp8_kt` instead. (#1082)
         let allocate_cache = |n: usize| -> anyhow::Result<PagedKvCache> {
-            PagedKvCache::new_uninit_with_fp8(
+            PagedKvCache::new_uninit_with_fp8_kt(
                 model_config.num_full_attention_layers,
                 n,
                 block_size,
                 model_config.num_kv_heads,
                 model_config.head_dim,
                 kv_dtype,
-                &device,
+                &device_kt,
                 fp8_enabled,
             )
         };
@@ -3352,15 +3356,18 @@ mod tests {
     /// allocation" return value in the auto-sizer retry tests below. The
     /// values are dummies — only the act of returning Ok(...) matters for
     /// the loop logic.
+    ///
+    /// Routes through `new_uninit_with_fp8_kt` so this test stops naming
+    /// `candle_core::Device` directly. (#1082)
     fn dummy_cpu_cache() -> PagedKvCache {
-        PagedKvCache::new_uninit_with_fp8(
+        PagedKvCache::new_uninit_with_fp8_kt(
             1,  // num_full_attn_layers
             8,  // num_blocks
             16, // block_size
             1,  // num_kv_heads
             4,  // head_dim
             DType::F32,
-            &cpu_device(),
+            &kiln_tensor::Device::Cpu,
             false,
         )
         .expect("CPU PagedKvCache allocation never fails for tiny shape")

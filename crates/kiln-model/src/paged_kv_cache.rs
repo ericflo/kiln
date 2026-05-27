@@ -208,6 +208,43 @@ impl PagedKvCache {
         )
     }
 
+    /// kt-typed parallel entry to [`Self::new_uninit_with_fp8`] (#1082).
+    ///
+    /// Same shape as [`Self::new_kt`]: takes `kiln_tensor::DType` +
+    /// `&kiln_tensor::Device`, bridges at the boundary, and delegates
+    /// to the candle-typed constructor. Lets kiln-server's
+    /// `AppState::new_real` allocate paged caches without importing
+    /// `candle_core::DType` at the call site.
+    ///
+    /// See [`Self::new_kt`] for the error / Vulkan-CPU-placeholder
+    /// semantics; they apply here verbatim.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_uninit_with_fp8_kt(
+        num_full_attn_layers: usize,
+        num_blocks: usize,
+        block_size: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        dtype: kiln_tensor::DType,
+        device: &kiln_tensor::Device,
+        fp8: bool,
+    ) -> Result<Self> {
+        let candle_dtype = kiln_kt_bridge::kt_dtype_to_candle(dtype)
+            .map_err(|e| anyhow::anyhow!("PagedKvCache::new_uninit_with_fp8_kt dtype: {e}"))?;
+        let candle_device = kiln_kt_bridge::candle_device_from_kt(device)
+            .map_err(|e| anyhow::anyhow!("PagedKvCache::new_uninit_with_fp8_kt device: {e}"))?;
+        Self::new_uninit_with_fp8(
+            num_full_attn_layers,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            candle_dtype,
+            &candle_device,
+            fp8,
+        )
+    }
+
     fn new_impl(
         num_full_attn_layers: usize,
         num_blocks: usize,
