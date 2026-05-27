@@ -2305,15 +2305,22 @@ impl BackendRuntime for VulkanBackend {
             )?
         } else {
             let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached(
+            let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&dispatch_x)?.0;
+            let out_data = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bytes(
                 vk_device,
-                &dispatch_x,
+                &x_data,
                 &weight_buf,
                 row_count,
                 hidden,
                 out_dim,
+                false,
             )
-            .context("linear_decode kernel failed")?
+            .context("linear_decode kernel failed")?;
+            kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &out_data,
+                &[row_count, 1, out_dim],
+                DType::F32,
+            )?
         };
         let out = if seq_len == 1 {
             out
