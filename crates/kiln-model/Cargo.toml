@@ -44,6 +44,15 @@ kiln-tensor = { workspace = true }
 # that previously imported candle's TensorId). Feature-gated under
 # `vulkan` since only the vulkan path needs it today. (#1082)
 kiln-tensor-id = { workspace = true, optional = true }
+# Direct cudarc dep (#1082): the cudarc bindings re-exported via
+# candle_core::cuda_backend::cudarc::* are pure pass-throughs to the
+# cudarc crate. Importing them directly drops two
+# `use candle_core::cuda_backend::cudarc::...` imports in
+# paged_kv_cache_kt.rs without changing any runtime behavior. The
+# version is pinned in the workspace to match what candle-core 0.10
+# vendors so types unify across the dep graph (same pattern landed in
+# kiln-tensor commit 4ee1b7f9 and kiln-blas commit 0d201199).
+cudarc = { workspace = true, optional = true }
 kiln-nvtx = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
@@ -55,7 +64,7 @@ objc2-metal = { version = "0.3", optional = true }
 
 
 [features]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-conv1d-kernel", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-marlin-gemm", "dep:kiln-rmsnorm-kernel", "dep:kiln-tensor-id", "kiln-kt-bridge/cuda", "kiln-tensor/cuda", "dep:half"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:cudarc", "dep:kiln-conv1d-kernel", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-marlin-gemm", "dep:kiln-rmsnorm-kernel", "dep:kiln-tensor-id", "kiln-kt-bridge/cuda", "kiln-tensor/cuda", "dep:half"]
 # Phase 7 (#1082): opt-in feature to compile the candle-typed GDN
 # parity tests in forward.rs against `kiln_gdn_kernel::gdn_chunk_*`
 # / `gdn_full_chunk_forward*`. Production decode goes through the
