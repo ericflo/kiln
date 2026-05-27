@@ -4446,6 +4446,27 @@ fn split_batched_qkv_output(
 /// `[batch, max_seqlen, num_kv_heads, head_dim]`, and `seq_lens` gives the
 /// active prefix length for each row. Output is `[batch, 1, num_heads,
 /// head_dim]`.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_paged_attn_decode_batch_f32_bytes(
+    vk_device: &VulkanDevice,
+    q_data: &[u8],
+    k_data: &[u8],
+    v_data: &[u8],
+    batch: usize,
+    num_heads: usize,
+    head_dim: usize,
+    max_seqlen: usize,
+    num_kv_heads: usize,
+    seq_lens: &[u32],
+    softmax_scale: f32,
+) -> Result<Vec<u8>> {
+    let q = build_cpu_f32_tensor_from_bytes(q_data, &[batch, 1, num_heads, head_dim])?;
+    let k = build_cpu_f32_tensor_from_bytes(k_data, &[batch, max_seqlen, num_kv_heads, head_dim])?;
+    let v = build_cpu_f32_tensor_from_bytes(v_data, &[batch, max_seqlen, num_kv_heads, head_dim])?;
+    let out = dispatch_paged_attn_decode_batch_f32(vk_device, &q, &k, &v, seq_lens, softmax_scale)?;
+    Ok(extract_tensor_bytes(&out)?.0)
+}
+
 pub fn dispatch_paged_attn_decode_batch_f32(
     vk_device: &VulkanDevice,
     q: &Tensor,

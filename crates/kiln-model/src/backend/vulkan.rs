@@ -1975,15 +1975,28 @@ impl BackendRuntime for VulkanBackend {
             .reshape((batch, max_seqlen_k, num_kv_heads, head_dim))?
             .contiguous()?;
 
-        let out = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_f32(
+        let q_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(q)?.0;
+        let k_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k_compact)?.0;
+        let v_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v_compact)?.0;
+        let out_data = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_f32_bytes(
             vk_device,
-            q,
-            &k_compact,
-            &v_compact,
+            &q_data,
+            &k_data,
+            &v_data,
+            batch,
+            num_heads,
+            head_dim,
+            max_seqlen_k,
+            num_kv_heads,
             &seq_lens,
             softmax_scale,
         )
         .context("paged_attn_decode_batch kernel failed")?;
+        let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &out_data,
+            &[batch, 1, num_heads, head_dim],
+            DType::F32,
+        )?;
         Ok(Some(out))
     }
 
