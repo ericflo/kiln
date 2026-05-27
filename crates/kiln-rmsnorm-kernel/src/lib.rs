@@ -24,7 +24,9 @@
 //!    SwiGLU MLPs. (kt-typed only; the candle-typed wrappers were removed
 //!    in (#1082).)
 //! 6. [`fused_sigmoid_mul_kt`] — fused bf16 `x * sigmoid(gate)` for attention
-//!    output gates.
+//!    output gates. The candle-typed `fused_sigmoid_mul` entry was removed
+//!    in (#1082); `fused_sigmoid_mul_storage` remains as the candle CustomOp2
+//!    backing for `CudaSigmoidMulTrainingBf16`.
 //!
 //! # Why
 //!
@@ -747,78 +749,7 @@ pub fn supports_sigmoid_mul(x: &Tensor, gate: &Tensor) -> bool {
         && x.elem_count() <= i64::MAX as usize
 }
 
-/// Run fused bf16 `x * sigmoid(gate)`.
-pub fn fused_sigmoid_mul(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
-    if !supports_sigmoid_mul(x, gate) {
-        candle_core::bail!(
-            "kiln-rmsnorm-kernel: sigmoid_mul unsupported shapes x={:?} gate={:?} dtypes=({:?},{:?})",
-            x.shape(),
-            gate.shape(),
-            x.dtype(),
-            gate.dtype()
-        );
-    }
-
-    let x = x.contiguous()?;
-    let gate = gate.contiguous()?;
-    let out = unsafe { Tensor::empty(x.dims(), DType::BF16, x.device())? };
-    let elems = x.elem_count();
-    if elems == 0 {
-        return Ok(out);
-    }
-
-    {
-        let (x_storage, x_layout) = x.storage_and_layout();
-        let (gate_storage, gate_layout) = gate.storage_and_layout();
-        let (out_storage, out_layout) = out.storage_and_layout();
-
-        let x_cuda = match &*x_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("kiln-rmsnorm-kernel: sigmoid_mul x must be on CUDA"),
-        };
-        let gate_cuda = match &*gate_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("kiln-rmsnorm-kernel: sigmoid_mul gate must be on CUDA"),
-        };
-        let out_cuda = match &*out_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("kiln-rmsnorm-kernel: sigmoid_mul out must be on CUDA"),
-        };
-
-        let stream = x_cuda.device().cuda_stream();
-        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
-
-        let x_slice = x_cuda
-            .as_cuda_slice::<bf16>()?
-            .slice(x_layout.start_offset()..);
-        let gate_slice = gate_cuda
-            .as_cuda_slice::<bf16>()?
-            .slice(gate_layout.start_offset()..);
-        let out_slice = out_cuda
-            .as_cuda_slice::<bf16>()?
-            .slice(out_layout.start_offset()..);
-
-        unsafe {
-            let (x_ptr, _g1) = x_slice.device_ptr(&stream);
-            let (gate_ptr, _g2) = gate_slice.device_ptr(&stream);
-            let (out_ptr, _g3) = out_slice.device_ptr(&stream);
-            let status = kiln_fused_sigmoid_mul_bf16(
-                x_ptr as *const _,
-                gate_ptr as *const _,
-                out_ptr as *mut _,
-                elems as i64,
-                raw_stream,
-            );
-            if status != 0 {
-                candle_core::bail!("kiln_fused_sigmoid_mul_bf16 failed with status {status}");
-            }
-        }
-    }
-
-    Ok(out)
-}
-
-/// Storage-level variant of [`fused_sigmoid_mul`] for CUDA custom ops.
+/// Storage-level fused bf16 `x * sigmoid(gate)` for CUDA custom ops.
 ///
 /// Computes `out = x * sigmoid(gate)` for matching contiguous BF16 CUDA
 /// tensors. `out` may alias neither input.
@@ -2285,52 +2216,6 @@ mod tests {
 
     fn try_cuda_device() -> Option<Device> {
         Device::new_cuda(0).ok()
-    }
-
-    fn reference_sigmoid_mul(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
-        let dtype = x.dtype();
-        let x = x.to_dtype(DType::F32)?;
-        let gate = gate.to_dtype(DType::F32)?;
-        let sigmoid = (gate.neg()?.exp()? + 1.0)?.recip()?;
-        (x * sigmoid)?.to_dtype(dtype)
-    }
-
-
-    #[test]
-    fn sigmoid_mul_parity_qwen_attn_gate_shape() {
-        let Some(device) = try_cuda_device() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-
-        let batch = 1usize;
-        let seq_len = 2usize;
-        let hidden = 4096usize;
-        let total = batch * seq_len * hidden;
-        let mut x_raw = Vec::with_capacity(total);
-        let mut gate_raw = Vec::with_capacity(total);
-        fill_pseudo_random(&mut x_raw, total, 0x5151_0101, 1.5);
-        fill_pseudo_random(&mut gate_raw, total, 0x9191_0202, 3.0);
-
-        let x = Tensor::from_vec(x_raw, (batch, seq_len, hidden), &device)
-            .unwrap()
-            .to_dtype(DType::BF16)
-            .unwrap();
-        let gate = Tensor::from_vec(gate_raw, (batch, seq_len, hidden), &device)
-            .unwrap()
-            .to_dtype(DType::BF16)
-            .unwrap();
-
-        assert!(supports_sigmoid_mul(&x, &gate));
-        let reference = reference_sigmoid_mul(&x, &gate).unwrap();
-        let fused = fused_sigmoid_mul(&x, &gate).expect("fused sigmoid mul");
-        assert_eq!(fused.dims(), &[batch, seq_len, hidden]);
-
-        let diff = max_abs_diff(&reference, &fused);
-        assert!(
-            diff < 1e-2,
-            "sigmoid*mul parity failed: max_abs_diff={diff} exceeds 1e-2 tolerance"
-        );
     }
 
     fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
