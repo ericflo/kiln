@@ -81,17 +81,9 @@ fn apply_triangle(t: &Tensor, keep_upper: bool, name: &str) -> Result<Tensor> {
     if let crate::Device::Cuda(device_index) = t.device() {
         let host = crate::cuda_to_host_copy(t)?;
         let cpu_out = apply_triangle_cpu(&host, keep_upper, name)?;
-        let cuda_storage = t
-            .storage()
-            .as_any()
-            .downcast_ref::<crate::CudaStorage>()
-            .ok_or_else(|| {
-                Error::from_str(
-                    "triangular: input claims CUDA device but storage is not CudaStorage",
-                )
-            })?;
-        let candle_device = cuda_storage.candle_device().clone();
-        return crate::host_to_cuda_copy(&cpu_out, candle_device, device_index);
+        // host_to_cuda_copy_ctx (#1082) derives the candle device from
+        // device_index, so no .candle_device() read is needed.
+        return crate::host_to_cuda_copy_ctx(&cpu_out, device_index);
     }
 
     apply_triangle_cpu(t, keep_upper, name)
