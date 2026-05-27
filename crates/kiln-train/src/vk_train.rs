@@ -22,7 +22,7 @@
 //! ```
 
 use anyhow::{Context, Result, bail};
-use candle_core::TensorId;
+use kiln_tensor_id::TensorId;
 use kiln_core::config::ModelConfig;
 use kiln_core::env_flag::env_flag;
 use kiln_core::tokenizer::KilnTokenizer;
@@ -1668,13 +1668,12 @@ pub fn vk_train_step(
     )
 }
 
-/// Mint a synthetic candle TensorId — used to wrap a boundary
+/// Mint a synthetic kt-native TensorId — used to wrap a boundary
 /// activation as a parameter leaf so its gradient can be captured
-/// from a sub-tape.
+/// from a sub-tape. Backed by `kiln_tensor_id`'s atomic counter; no
+/// candle round-trip required. (#1082)
 fn mint_fresh_tensor_id() -> Result<TensorId> {
-    use candle_core::{Device, Tensor, Var};
-    let dummy = Tensor::from_vec(vec![0.0_f32], (1,), &Device::Cpu)?;
-    Ok(Var::from_tensor(&dummy)?.id())
+    Ok(TensorId::next())
 }
 
 fn vk_embedding_hidden(weights: &VkModelWeights, input_ids: &[u32]) -> Result<VkTensor> {

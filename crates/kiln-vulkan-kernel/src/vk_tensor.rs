@@ -20,9 +20,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Re-export so callers outside `vk_tensor.rs` (e.g. `vk_autograd.rs`)
 /// can refer to the parameter-id type without an explicit candle import.
-/// Today this is `candle_core::TensorId`; once issue #1082 lands the
-/// kt-native parameter-id type, only this `pub use` needs to swap. (#1082)
-pub use candle_core::TensorId;
+/// Sourced from the dependency-free leaf crate `kiln-tensor-id`, which
+/// breaks the would-be `kiln-tensor <-> kiln-vulkan-kernel` cargo path
+/// cycle (see `kiln-tensor-id/src/lib.rs` for the cycle analysis). (#1082)
+pub use kiln_tensor_id::TensorId;
 
 /// Element type of a `VkTensor`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -332,18 +333,11 @@ impl VkTensor {
     }
 
     /// Mint a fresh `TensorId` for use as a parameter id, without
-    /// requiring callers to import candle. Today this still goes through
-    /// `candle_core::Tensor` (the only way to obtain a unique TensorId
-    /// from outside candle), but the candle dependency is contained in
-    /// this single function — when issue #1082 lands the kt-native
-    /// parameter-id type, only this body needs to swap. (#1082)
+    /// requiring callers to import candle. Now backed by the
+    /// `kiln-tensor-id` leaf crate's atomic counter — no candle round
+    /// trip required. (#1082)
     pub fn fresh_param_id() -> TensorId {
-        // A 1-element f32 CPU tensor is the cheapest legal Tensor to
-        // construct; we never store it, only read its id. The Tensor is
-        // dropped immediately after this call returns.
-        Tensor::zeros(&[1], DType::F32, &Device::Cpu)
-            .expect("VkTensor::fresh_param_id: candle Tensor::zeros(&[1], F32, Cpu) failed")
-            .id()
+        TensorId::next()
     }
 
     /// Build a parameter leaf directly from an f32 slice. Candle-free

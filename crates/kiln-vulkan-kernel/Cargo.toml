@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 candle-core = { workspace = true }
+kiln-tensor-id = { workspace = true }
 anyhow = { workspace = true }
 half = "2"
 bytemuck = { version = "1", features = ["extern_crate_alloc"] }

@@ -22,7 +22,8 @@
 #![cfg(feature = "vulkan")]
 
 use anyhow::{Context, Result, bail};
-use candle_core::{DType, Device, Tensor, TensorId, Var};
+use candle_core::{DType, Device, Tensor};
+use kiln_tensor_id::TensorId;
 use kiln_core::config::ModelConfig;
 use kiln_vulkan_kernel::vk_autograd::{VkGradStore, vk_backward};
 use kiln_vulkan_kernel::vk_ops::attention::{
@@ -90,29 +91,31 @@ impl VkLoraPair {
 
         let a_t = Tensor::from_vec(a_data, (rank, in_features), &Device::Cpu)?;
         let b_t = Tensor::from_vec(b_data, (out_features, rank), &Device::Cpu)?;
-        let a_var = Var::from_tensor(&a_t)?;
-        let b_var = Var::from_tensor(&b_t)?;
         let a_vk = VkTensor::from_candle(&a_t, Arc::clone(device))?;
         let b_vk = VkTensor::from_candle(&b_t, Arc::clone(device))?;
+        // Mint kt-native TensorIds for the LoRA parameter pair; the Vk
+        // optimizer book and grad store both key on these. (#1082)
+        let a_id = TensorId::next();
+        let b_id = TensorId::next();
         let a = VkTensor::parameter(
             Arc::clone(a_vk.buffer()),
             a_vk.shape().to_vec(),
             a_vk.dtype(),
             Arc::clone(a_vk.device()),
-            a_var.id(),
+            a_id,
         );
         let b = VkTensor::parameter(
             Arc::clone(b_vk.buffer()),
             b_vk.shape().to_vec(),
             b_vk.dtype(),
             Arc::clone(b_vk.device()),
-            b_var.id(),
+            b_id,
         );
         Ok(Self {
             a,
             b,
-            a_id: a_var.id(),
-            b_id: b_var.id(),
+            a_id,
+            b_id,
             scale: alpha / (rank as f32),
         })
     }

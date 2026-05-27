@@ -12623,6 +12623,7 @@ mod tests {
     #[cfg(feature = "vulkan")]
     #[test]
     fn vk_grpo_loss_matches_existing_trainer_selected_logprob_loss_and_hidden_grad() -> Result<()> {
+        use kiln_tensor_id::TensorId;
         use kiln_vulkan_kernel::vk_autograd::vk_backward;
         use kiln_vulkan_kernel::vk_ops::flce::{vk_grpo_loss, vk_selected_log_probs};
         use kiln_vulkan_kernel::{VkTensor, VulkanDevice};
@@ -12699,7 +12700,7 @@ mod tests {
             hidden_vk_base.shape().to_vec(),
             hidden_vk_base.dtype(),
             Arc::clone(hidden_vk_base.device()),
-            hidden_var.id(),
+            TensorId::next(),
         );
         let weight_vk = VkTensor::from_candle(&weight, Arc::clone(&vk_device))?;
         let ref_vk = VkTensor::from_candle(&ref_log_probs_t, Arc::clone(&vk_device))?;
