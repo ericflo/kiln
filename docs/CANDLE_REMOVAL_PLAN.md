@@ -1057,3 +1057,68 @@ three operands per CustomOp, call the fused `*_bwd_kt`, copy two
 or three gradients back, add `KILN_DISABLE_LORA_*_BWD_KT_BRIDGE`
 env opt-outs and a parity test per op (template proven by the
 rmsnorm + rotary-one migrations).
+
+## kt-autograd autograd-interop blocker (2026-05-27)
+
+Investigation of the OPD production caller migration
+(`crates/kiln-train/src/opd.rs:1207`, agent
+`a25da2894a7d3b8cf`) surfaced a fundamental architectural
+barrier shared by **opd-loss-kernel + flce-kernel +
+rmsnorm-kernel** Tier-1 closures: the candle-typed phase-A
+forward entries these crates expose are NOT thin CustomOp
+wrappers. They are **fat candle-autograd composites** built
+from generic candle ops (`index_select`, `matmul`,
+`log_softmax_last`, `exp`, broadcast subtract, multiply,
+`sum_keepdim`). The whole point is that candle's autograd
+graph captures the composite and backprops gradients to LoRA
+parameters via `mean_kl.backward()` (`opd.rs:2725`).
+
+The kt-typed forward entries (`opd_top_k_reverse_kl_per_position_kt`,
+`fused_linear_cross_entropy_phase_b_backward_kt`, etc.)
+return `KtTensor` results, and `kiln-tensor` has no
+`Var`/`GraphNode`/`backward` machinery. There is no autograd
+in `kiln-tensor` today (the `kiln-autograd` crate exists with
+a `BackwardOp` trait + `Tape` + 30+ `BackwardOp` impls but
+**zero production callers** — see "kt-autograd readiness
+investigation" §14f02e8c).
+
+Three plausible unblocks:
+
+- **(A) Add candle autograd interop to `KtTensor`** — either
+  (i) wrap the kt forward+backward in a candle `CustomOp` that
+  registers gradients on candle's tape, or (ii) thread a
+  `Var`-equivalent through kt-tensor. Option (i) is
+  per-call-site bridge code; option (ii) is implementing
+  autograd in kt-tensor (large, multi-PR substrate work).
+
+- **(B) Switch production callers to the Phase-B CustomOp
+  path.** Phase B already uses the kt-bridge for its
+  `OpdLossCustomOp::bwd` body (migrated 2026-05-27, PR
+  #1388) and would route through `kiln-kt-bridge` end-to-end.
+  Algorithmic / perf-validation call, not a typed-migration
+  call.
+
+- **(C) Inline the phase-A composite into the trainer
+  crate** (`per_position_phase_a` → `opd.rs`, the FLCE phase A
+  body → `trainer.rs`). Removes the public phase-A entry from
+  the kernel crate but leaves both crates candle-typed for
+  this path — it's just reshuffling where the candle code
+  lives. Doesn't drop the kernel crate's candle dep.
+
+For now, **defer the Tier-1 close** for opd-loss-kernel,
+flce-kernel, and rmsnorm-kernel. The kt-typed forward +
+bridged-backward surfaces are in place; what's missing is the
+autograd-tape interop layer that lets a caller composing kt
+ops still call `.backward()`. Option (A.i) — a candle
+`CustomOp` shim that wraps a fused kt forward+backward — is
+the smallest unit of work that would unblock all three
+crates. Sketch: a single `KtForwardOp<F, B>` candle
+`CustomOp` parameterized by a forward closure (kt) and a
+backward closure (kt) that registers itself on candle's
+tape, allowing `kiln-train` callers to swap
+`per_position_phase_a(...)` → `opd_top_k_reverse_kl_per_position_kt(...)`
+under a CustomOp shim that preserves `mean_kl.backward()`.
+
+The same shim would unblock the FLCE phase A migration and
+the rmsnorm-kernel `fused_rmsnorm_with_autograd` candle-typed
+entry — that's the actual leverage point.
