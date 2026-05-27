@@ -15,7 +15,7 @@
 //! compile path (which links `cuda` against `candle-core` but has no
 //! GPU) doesn't spuriously fail.
 //!
-//! # Phase 7 candle-removal — partial UNBLOCK (read accessor landed)
+//! # Phase 7 candle-removal — partial UNBLOCK (allocation path candle-free)
 //!
 //! As of the b39f5712 commit (`kiln-tensor: add CudaStorage::context()
 //! accessor`), [`CudaStorage::context()`] returns the same
@@ -25,14 +25,32 @@
 //! cudarc-typed `Arc<CudaContext>` is now reachable without storage
 //! changes.**
 //!
-//! That `context()` accessor unblocks step 4 below in the "additive"
-//! direction: this allocator can grow a second `Arc<CudaContext>` field
-//! populated alongside `candle_device` (e.g. via a new `with_ctx`
-//! constructor), and downstream callers can start reading `.context()`
-//! from any existing `CudaStorage` to wean off candle one site at a
-//! time. The **field flip** that fully removes the candle-typed
+//! Subsequent commits:
+//! - 03b8a34c (`CudaAllocator gains Arc<CudaContext> companion field`)
+//!   grew this struct with a second `ctx: Arc<CudaContext>` field
+//!   populated from `candle_device.cuda_stream().context()` at
+//!   construction time, and added a `context()` accessor for
+//!   downstream callers that only need the cudarc handle.
+//! - d3caf46b (`add CudaStorage::zeros_ctx parallel constructor`)
+//!   landed the candle-free allocation entry on the storage side.
+//! - **this commit**: flipped this allocator's `warm()` and `alloc()`
+//!   internal call sites from `CudaStorage::zeros(candle_device, ...)`
+//!   to `CudaStorage::zeros_ctx(&self.ctx, ...)`. The actual cudarc
+//!   `alloc_zeros::<u8>` call is now reached through this allocator's
+//!   `Arc<CudaContext>` companion field, NOT through the candle
+//!   `CudaDevice::alloc_zeros` wrapper. The `candle_device` field is
+//!   no longer load-bearing for allocation; it is only kept around so
+//!   the existing `candle_device()` getter keeps compiling for
+//!   downstream callers (Phase 5's `CaptureSession` etc.) that have
+//!   not yet migrated to `.context()`.
+//!
+//! The **field flip** that fully removes the candle-typed
 //! `candle_device: Arc<CudaDevice>` is still blocked on the storage-
-//! side refactor (steps 1-3 below).
+//! side `candle_device` field flip (the produced `CudaStorage` still
+//! carries a candle device for downstream FFI sites that read
+//! `cuda_stream()`), but every downstream caller can now migrate to
+//! `.context()` independently — and this allocator no longer creates
+//! any new candle-flavored allocations internally.
 //!
 //! # Original audit (call-graph dependencies)
 //!
@@ -189,12 +207,22 @@ impl CudaAllocator {
     /// Phase 5's `CaptureSession::begin()` calls this for every
     /// `(dtype, n_elements)` the captured graph needs before
     /// flipping to `Frozen`.
+    ///
+    /// Internally routes through [`CudaStorage::zeros_ctx`] (the
+    /// candle-free `Arc<CudaContext>` allocation entry, landed in
+    /// d3caf46b) instead of [`CudaStorage::zeros`]. The actual CUDA
+    /// allocation goes straight through cudarc's
+    /// `ctx.default_stream().alloc_zeros::<u8>` with no candle device
+    /// involvement; the produced `CudaStorage` still carries a
+    /// back-compat `candle_device` field for downstream FFI sites
+    /// that read `cuda_stream()` (those sites migrate to
+    /// `cuda_stream_raw()` in a follow-up sweep).
     pub fn warm(&mut self, dtype: DType, n_elements: usize, count: usize) -> Result<()> {
         let bytes_per = dtype.packed_buffer_bytes(n_elements);
         let slot = self.cache.entry((dtype, n_elements)).or_default();
         for _ in 0..count {
             let cuda =
-                CudaStorage::zeros(self.candle_device.clone(), self.device_index, dtype, n_elements)?;
+                CudaStorage::zeros_ctx(&self.ctx, self.device_index, dtype, n_elements)?;
             let storage: Storage = Arc::new(cuda);
             slot.push(storage);
             self.reserved_bytes += bytes_per;
@@ -257,8 +285,11 @@ impl Allocator for CudaAllocator {
                 dtype.packed_buffer_bytes(n_elements),
             )),
             AllocatorMode::Owned | AllocatorMode::Pool => {
-                let cuda = CudaStorage::zeros(
-                    self.candle_device.clone(),
+                // Route through the candle-free zeros_ctx entry
+                // (d3caf46b) — the actual cudarc allocation skips the
+                // candle `CudaDevice::alloc_zeros` wrapper entirely.
+                let cuda = CudaStorage::zeros_ctx(
+                    &self.ctx,
                     self.device_index,
                     dtype,
                     n_elements,
