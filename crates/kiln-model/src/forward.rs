@@ -6930,6 +6930,29 @@ impl GpuWeights {
             mtp,
         })
     }
+
+    /// kt-typed parallel entry to [`Self::from_model_weights`] (#1082 Tier 3).
+    ///
+    /// Takes a `kiln_tensor::Device` instead of `candle_core::Device`,
+    /// bridges at the boundary, and delegates to the existing
+    /// candle-typed constructor. The returned `GpuWeights` still holds
+    /// candle Tensors internally — the kt typing applies only to the
+    /// public surface so kiln-server can call this without importing
+    /// `candle_core` at the call site.
+    ///
+    /// Errors when the kt Device has no candle equivalent on this build
+    /// (e.g. `Vulkan(_)`; kiln-server's Vulkan path uses a CPU candle
+    /// device by convention — pass `kiln_tensor::Device::Cpu` instead).
+    #[cfg(feature = "cuda")]
+    pub fn from_model_weights_kt(
+        weights: &ModelWeights,
+        config: &kiln_core::config::ModelConfig,
+        device: &kiln_tensor::Device,
+    ) -> Result<Self> {
+        let candle_device =
+            kiln_kt_bridge::candle_device_from_kt(device).map_err(|e| anyhow::anyhow!("{e}"))?;
+        Self::from_model_weights(weights, config, &candle_device)
+    }
 }
 
 // ---------------------------------------------------------------------------
