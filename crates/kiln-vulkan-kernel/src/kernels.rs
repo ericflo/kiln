@@ -5937,47 +5937,6 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit(
 // Specialized dispatch functions for GDN kernels
 // ---------------------------------------------------------------------------
 
-/// Dispatch GDN gates kernel.
-///
-/// beta = sigmoid(b)
-/// g    = -exp(A_log) * softplus(a + dt_bias)
-///
-/// Inputs:  a[B,T,nv], b[B,T,nv], A_log[nv], dt_bias[nv]
-/// Outputs: beta[B,T,nv], g[B,T,nv]
-pub fn dispatch_gdn_gates(
-    vk_device: &VulkanDevice,
-    a: &Tensor,
-    b: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
-    out_shape: &[usize],
-) -> Result<(Tensor, Tensor)> {
-    let nv = a_log.elem_count();
-    anyhow::ensure!(
-        dt_bias.elem_count() == nv,
-        "gdn_gates: dt_bias has {} elements, expected {}",
-        dt_bias.elem_count(),
-        nv
-    );
-    let a_log_buf = upload_tensor_f32_buffer(vk_device, a_log)?;
-    let dt_bias_buf = upload_tensor_f32_buffer(vk_device, dt_bias)?;
-    let a_data = extract_tensor_bytes(a)?.0;
-    let b_data = extract_tensor_bytes(b)?.0;
-    let output_dtype = a.dtype();
-    let (beta_data, g_data) = dispatch_gdn_gates_cached_bytes_core(
-        vk_device,
-        &a_data,
-        &b_data,
-        &a_log_buf,
-        &dt_bias_buf,
-        nv,
-        out_shape,
-    )?;
-    let beta_tensor = create_tensor_from_data(&beta_data, out_shape, output_dtype)?;
-    let g_tensor = create_tensor_from_data(&g_data, out_shape, output_dtype)?;
-    Ok((beta_tensor, g_tensor))
-}
-
 pub fn dispatch_gdn_gates_cached_bytes(
     vk_device: &VulkanDevice,
     a_data: &[u8],
@@ -6135,38 +6094,6 @@ fn dispatch_gdn_gates_cached_bytes_core(
     drop(g_buf);
 
     Ok((beta_data, g_data))
-}
-
-/// Dispatch GDN gated RMSNorm kernel.
-///
-/// out = rms_norm(x, weight, eps) * silu(z)
-///
-/// Inputs: x[...hidden], z[...hidden], weight[hidden]
-/// Output: out[...hidden]
-pub fn dispatch_gdn_gated_rms_norm(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    z: &Tensor,
-    weight: &Tensor,
-    eps: f32,
-    out_shape: &[usize],
-) -> Result<Tensor> {
-    let hidden = weight.elem_count();
-    let weight_buf = upload_tensor_f32_buffer(vk_device, weight)?;
-    let x_data = extract_tensor_bytes(x)?.0;
-    let z_data = extract_tensor_bytes(z)?.0;
-    let output_dtype = x.dtype();
-    let output_data = dispatch_gdn_gated_rms_norm_cached_bytes_core(
-        vk_device,
-        &x_data,
-        &z_data,
-        &weight_buf,
-        hidden,
-        eps,
-        out_shape,
-    )?;
-    create_tensor_from_data(&output_data, out_shape, output_dtype)
-        .context("failed to create gdn_gated_rms_norm output tensor")
 }
 
 pub fn dispatch_gdn_gated_rms_norm_cached_bytes(
