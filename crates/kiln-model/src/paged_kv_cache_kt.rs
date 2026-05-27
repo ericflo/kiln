@@ -339,8 +339,12 @@ impl PagedKvCacheKt {
             let (v_src_base, _) = v_src_cuda.device_ptr_raw();
             let (k_dst_base, _) = k_dst_cuda.device_ptr_raw();
             let (v_dst_base, _) = v_dst_cuda.device_ptr_raw();
-            let stream = k_dst_cuda.candle_device().cuda_stream();
-            let raw_stream = stream.cu_stream();
+            // #1082: prefer cuda_stream_raw() over candle_device().cuda_stream()
+            // to avoid touching the candle device wrapper from kernel-crate FFI.
+            // cuda_stream_raw() returns the same underlying CUstream cast as
+            // *mut c_void; we re-cast back to sys::CUstream for cudarc's API.
+            let raw_stream = k_dst_cuda.cuda_stream_raw()
+                as candle_core::cuda_backend::cudarc::driver::sys::CUstream;
             unsafe {
                 cudarc_result::memcpy_dtod_async(
                     k_dst_base + dst_byte_off as u64,
@@ -392,8 +396,10 @@ impl PagedKvCacheKt {
         let (k_dst_base, _) = k_dst_cuda.device_ptr_raw();
         let (v_dst_base, _) = v_dst_cuda.device_ptr_raw();
 
-        let stream = k_dst_cuda.candle_device().cuda_stream();
-        let raw_stream = stream.cu_stream();
+        // #1082: prefer cuda_stream_raw() over candle_device().cuda_stream()
+        // to avoid touching the candle device wrapper from kernel-crate FFI.
+        let raw_stream = k_dst_cuda.cuda_stream_raw()
+            as candle_core::cuda_backend::cudarc::driver::sys::CUstream;
 
         unsafe {
             cudarc_result::memcpy_dtod_async(
