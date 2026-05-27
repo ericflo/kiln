@@ -4,13 +4,260 @@ This document inventories every `candle_core` and `candle_nn` reference in
 the kiln workspace and the migration path to a candle-free build. It is
 the canonical artifact for tracking Phase 7 closeout against issue #1082.
 
-Last refreshed: **2026-05-26**, against `main` through `aa969ceb` —
-post Phase 5 revert (`909e2e61`,
-`KILN_CUDA_GRAPHS_BATCHED=0` + `_KV_FUSED=0` remain the CUDA
-default) and KILN_DETECT_ANOMALY substrate + regression-test
-landing (`3c90d064` + `fdeace4b` + `28514162` + `aa969ceb`).
+Last refreshed: **2026-05-27**, against `main` through `213ea9fb` —
+post the Tier-4/5 consolidation doc (`efcebad6`, see
+[`issue-1082-tier-4-5-roadmap-2026-05-27.md`](./issue-1082-tier-4-5-roadmap-2026-05-27.md))
+and the subsequent **58 substrate-completion commits** (CP-1 CUDA
+storage candle-free, CP-2 Metal storage bridge unlock,
+kiln-vulkan-kernel `_bytes` siblings, etc.).
 
-**Today's batch headline:**
+## Status as of 2026-05-27 — substrate completion pass
+
+This is the post-roadmap status block. The roadmap doc
+(`efcebad6`) named CP-1/CP-2/CP-3 as the next three substrate
+items. CP-1 and CP-2 substrate landed in the same day, alongside
+significant `kiln-vulkan-kernel` `_bytes` sibling expansion and
+production-caller migrations. Below tracks per-tier completion as
+of HEAD `213ea9fb`.
+
+### Tier completion at a glance
+
+| Tier | State | Notes |
+|---|---|---|
+| Tier 0 | ✅ closed | kiln-core / kiln-scheduler / kiln-nvtx never depended on candle. |
+| Tier 1 | 🟢 **3 of ~6 kernel crates closed** — `kiln-conv1d-kernel` (`577f8b0c`), `kiln-marlin-gemm` (`4a862711`), `kiln-flash-attn` (`981dc190`). `kiln-rmsnorm-kernel` / `kiln-gdn-kernel` / `kiln-opd-loss-kernel` / `kiln-flce-kernel` still carry `candle-core` but kt_api + `KtForwardOp` + bwd-kt-bridge are now in place. | 4 `CustomOp::bwd` migrated to kt-bridge: rmsnorm (`341da876`), rotary-one (`d99a15a3`), opd (`0c1be227` + `34524a7b`), flce (`ab2da23f` + PR #1389). 3 production-caller migrations through `KtForwardOp1` shim: opd (`f214f168` + `7dfb6639`), rmsnorm (`0442782c`), flce (`72339698`). LoRA bwd migration STOPped (`cca536cb` + `038cd756`). |
+| Tier 2 | 🟡 in flight | `kiln-vulkan-kernel` `_bytes` sibling sweep aggressively expanding (13 new entries this batch). `kiln-flce-kernel` Phase B kt-bridge complete; remaining Phase B Rust work pending. `kiln-opd-loss-kernel` substrate complete. |
+| Tier 3 | 🟡 in flight | `kiln-model` `_kt` boundary API now complete: `model_forward_kt` (`5bd48ef1`), `GpuWeights::*_kt` (`53e8149a` + `f9fbcc2a`), `PagedKvCache::new_kt` (`efdb16d2`), `runtime_backend::for_device_kt` (`89bd66c1`), `kiln-server::device::select_device_kt` (`dfd44932`). Internal 27 candle-using files are unchanged — that's the next residual after substrate lands. |
+| Tier 4 | ⏳ unblocked but unstarted | The `kiln-kt-bridge::forward_op::KtForwardOp{1,2,3}` shim (`095f1c74`) IS the closure-template that lets the inside of every fused op be pure kt. Final bridge deletion still gated on CP-4 (kt-native autograd `Var`/`Tape` adoption in production — multi-PR substrate). |
+| Tier 5 | ⏳ blocked | `cargo tree -i candle-core` still finds 11 crates with direct candle deps. Vendor delete gated on every prior tier closing. |
+
+### CP-1 (CUDA storage candle removal) — substantively complete
+
+The roadmap doc named CP-1 as the highest-leverage substrate item.
+The substrate is now in place. Order-of-operations from
+`cuda_allocator.rs:18-78` STOP doc executed:
+
+| Step | Commit(s) |
+|---|---|
+| `CudaStorage::context()` accessor (read-bridge) | `b39f5712` |
+| `CudaStorage::zeros_ctx` parallel constructor | `d3caf46b` |
+| `CudaAllocator` gains `Arc<CudaContext>` companion field | `03b8a34c` |
+| `CudaAllocator` allocates via `zeros_ctx` (candle-free) | `e2bddd72` |
+| `CudaAllocator::candle_device` field dropped | `6155e2e6` |
+| `CudaStorage::zeros` folded into `zeros_ctx` | `1a2f49eb` |
+| **`CudaStorage::candle_device` field DROPPED** | `5c3cd353` |
+| `CudaAllocator` candle-typed back-compat ctors dropped | `fcc9bac7` |
+| `host_to_cuda_copy_ctx` + 8 ops/* migrations | `ee448b8e` → `81beb373` / `2d809d6d` / `cfa659be` / `b43829b3` / `db863ac3` / `bab7a9ef` / `cf94b3ca` |
+| `cuda_zeros_ctx` + `ops/scatter_add` + `kt-bridge alloc_cuda_tensor` | `8f0a14f5` / `2c74715e` / `a3538eff` |
+| `cuda_to_host_copy` uses `ctx.default_stream()` | `9e79e2fe` |
+| `paged_kv_cache_kt` FFI uses `cuda_stream_raw` + `host_to_cuda_copy_ctx` | `4348dc5e` / `22d30186` |
+| `kiln-tensor::fp8` quantize/dequantize use `zeros_ctx` + `cuda_stream_raw` | `7aa8a5a5` |
+| `cuda_matmul` ctx-based (cold-start + main path) | `5856fada` / `44f74060` |
+| `kiln-blas::CublasLtMatmulHandle::new_ctx` | `f7075c90` |
+| Remaining candle cudarc re-exports → direct cudarc | `4ee1b7f9` |
+| Remaining direct cudarc deps (kiln-blas + kiln-tensor::fp8 history) | `0d201199` / `c84ac6f4` |
+
+`CudaStorage` is now stored as `Arc<CudaContext>` with no
+`candle_device` field. Every production CUDA allocation reaches
+`ctx.default_stream()` directly. The roadmap's CP-1 description
+("~1–2 substrate PRs + ≤15 FFI sweep sites") materialized as ~20
+small commits across kernel crates and kiln-tensor ops. STOP doc
+on the residual `candle_device()` field-drop frontier:
+`16047451`.
+
+### CP-2 (Metal storage candle removal) — bridge unlock complete, field-drop STOP-doc'd
+
+Parallel-track to CP-1, same shape. The bridge unlock landed; the
+final field-drop is STOP-doc'd by a 232-site `candle_metal_kernels`
+FFI fan-out in `kiln-model::backend::metal` that is downstream of
+Tier 3.
+
+| Step | Commit(s) |
+|---|---|
+| `MetalStorage::metal_device_handle()` accessor | `3e5ff091` |
+| `MetalAllocator` gains metal-rs `Device` companion field | `ee5f1f06` |
+| `MetalStorage::zeros_kt` parallel constructor | `3ac74949` |
+| `MetalAllocator` allocates via `zeros_kt` (candle-free) | `181a3a39` |
+| `MetalAllocator` candle-typed back-compat ctors dropped | `6fe20e21` |
+| STOP doc: kiln-tensor metal_allocator candle removal | `3e9c9b45` |
+
+The roadmap's CP-2 description still applies for the next chunk
+of Metal work: the residual is field-drop on `MetalStorage` itself,
+which fan-outs into ~232 candle-metal-kernels FFI sites. That's
+gated on Tier 3.
+
+### `kiln-vulkan-kernel` `_bytes` sibling expansion (CP-6 progress)
+
+The roadmap named CP-6 as the largest single mechanical piece of
+the vulkan kernel work. This batch landed **13 new `_bytes`
+sibling entries** in `kiln-vulkan-kernel::kernels` — covering the
+hottest production dispatchers:
+
+- `dispatch_mlp_gate_up_decode_cached_bytes` (`59400637`)
+- `dispatch_qwen_rmsnorm_forward_bytes` (`ec78e6ce`)
+- `dispatch_qwen_rmsnorm_backward_bytes` (`bb47e0c6`)
+- `dispatch_causal_conv1d_update_bytes` (`22a08ef3`)
+- `dispatch_linear_decode_cached_bytes` (`37827ab1`)
+- `dispatch_linear_decode_cached_bf16_weights_transposed_bytes` (`ab6240e0`)
+- `dispatch_linear_decode_cached_bf16_weights_offset_bytes` (`2a202486`)
+- `dispatch_gdn_gates_cached_bytes` (`bacd5156`)
+- `dispatch_gdn_gated_rms_norm_cached_bytes` (`32cc1a8d`)
+- `dispatch_mlp_decode_cached_bf16_*_bytes` (`e2fa8a87`)
+- `dispatch_full_attn_qkv_decode_cached_batched_bf16_bytes` + `dispatch_gdn_in_proj_decode_cached_bf16_bytes` (`8d9985bb`)
+
+Plus three consumer migrations through `_bytes` dispatch:
+- `vk_mlp_probe.rs` fully candle-free (`59400637`)
+- `examples/decode_microbench.rs` Zone A + Zone B candle-free (`524cd57d` + `c876cc74`); supporting `dispatch_*_bytes` shims + TODO captured in `3cd31909`
+- `kiln-model::backend::vulkan_lora_op.rs` fwd route through `_bytes` (`98b95a1b`)
+- `kiln-model::backend::vulkan_linear_op.rs` fwd + bwd route through `_bytes` (`0e675e64`)
+- `forward.rs::VulkanRmsNormOp::bwd` routes through `_bytes` (`5c304539`)
+
+### TensorId leaf-crate hoist (CP-6 unblocker for vk_tensor)
+
+The `kiln-tensor-id` leaf crate (`fea65fbe`) provides the kt-native
+`TensorId` substitute that the roadmap doc named as Family 2's
+unblocker. `kiln-vulkan-kernel::vk_tensor.rs` swapped `pub use
+candle_core::TensorId` for `kiln_tensor_id::TensorId` (`07e8d342`).
+The matching swap in `kiln-model::backend::cuda.rs` landed at the
+HEAD of this batch (`213ea9fb`).
+
+### Generic `KtForwardOp` shim — pattern landed and proliferating
+
+`kiln-kt-bridge::forward_op::KtForwardOp{1,2,3}` (`095f1c74`) is
+the closure-parameterized candle `CustomOp{1,2,3}` shim that
+unblocks Tier-1 close on opd-loss / flce / rmsnorm. Per-crate
+shim entries:
+
+- `kiln-rmsnorm-kernel::kt_forward_op::fused_rmsnorm_via_kt_forward_op` (`aba53219`)
+- `kiln-flce-kernel::kt_forward_op::fused_linear_cross_entropy_phase_b_via_kt_forward_op` (`72339698`)
+- `kiln-opd-loss-kernel::kt_forward_op::opd_top_k_reverse_kl_per_position_via_kt_forward_op` (under `34524a7b`)
+
+First three production callers flipped through the shim:
+
+- `kiln-model::forward::rms_norm` (`0442782c`)
+- `kiln-train::opd.rs` per-position (`f214f168`)
+- `kiln-train::opd.rs` full-kt forward closure (`7dfb6639`)
+- `kiln-flce-kernel` full-kt-roundtrip forward closure (under `34524a7b`)
+
+### IndexSelectOp axis-N gather + KtBridge metal feature mapping
+
+Two smaller substrate completions that landed in this batch:
+- `IndexSelectOp` axis-N gather added (`52c8b048`) — kt-tensor
+  primitive needed by FLCE bwd's chunk-loop.
+- `kiln-kt-bridge` metal feature + `Device::Metal` mapping
+  (`ae315509`) + panic-catch test (`344c6d4a`).
+
+### Cuda-gate cleanup + Cargo hygiene (Tier-3 boundary readiness)
+
+The Tier-3 `_kt` parallel entries (`model_forward_kt`,
+`GpuWeights::*_kt`, `PagedKvCache::new_kt`,
+`runtime_backend::for_device_kt`) are now compilable on **non-CUDA
+builds**. Cuda gates dropped from the `Device/DType _kt` helpers
+(`fa8730d6`), and split bridge helpers from cuda-only adapters
+(`42031508`).
+
+### Per-file `kiln-server` / `kiln-train` cleanup
+
+Mechanical migrations off candle `Device`/`DType` references where
+the underlying API didn't actually need candle: `completions.rs`
+metal device match → kt (`f93e21fa`), `bench.rs` dtype matches
+consolidated (`8997dede`), `main.rs` precompile helpers retyped
+to `kt::Device` (`c49c1d74`), `state.rs` test CPU device usage
+consolidated (`1351087d`), Metal/Cuda dispatch through kt-bridge
+(`269d8f88`). On the train side: redundant `candle_core` test
+imports dropped (`0cd36f96`, `c6d9b009`, `8f9d38fe`, `bb6ab0f2`);
+cuda-gated candle imports consolidated in `trainer.rs`
+(`176bd897`); adapter L2-norm receipt path migrated to kt
+(`806f839d`).
+
+### STOP docs added in this batch
+
+- `docs/kiln-tensor-metal-allocator-stop-2026-05-27.md` (`3e9c9b45`)
+- `kiln-tensor::candle_device()` field-drop frontier (`16047451`,
+  in-source on `cuda_storage.rs`)
+- `kiln-kt-bridge`: three in-source notes on parity tests that
+  must stay on candle (`88b2f527`, `924b6ea0`, `3298058a`)
+- `kiln-model`: in-source on `vk_resident_decode_parity` and
+  `marlin_qproj_parity` (`afc46478`, `8b0d13c8`)
+
+### Fresh footprint audit (2026-05-27, HEAD `213ea9fb`)
+
+`grep -rln "use candle_core\|use candle_nn" crates/`, by crate:
+
+```
+43  kiln-kt-bridge       — by-design (the bridge IS the boundary)
+27  kiln-model           — Tier 3 (forward.rs + cuda_train.rs + backends; unchanged)
+ 7  kiln-vulkan-kernel   — down from 8; Tier 2 (kernels.rs Family 1, vk_tensor.rs Family 2 swap pending kt-native TensorId proliferation)
+ 7  kiln-train           — Tier-3-downstream; gated on GpuWeights/ModelRunner internals
+ 5  kiln-opd-loss-kernel — Tier 1 (kt-bridge complete; production caller swap progressing)
+ 5  kiln-flce-kernel     — Tier 1 (kt-bridge complete; Phase B residual)
+ 4  kiln-rmsnorm-kernel  — Tier 1 (kt_api + KtForwardOp + bwd-kt-bridge complete; ~32 production callers to swap)
+ 3  kiln-tensor          — down from 4; cuda_storage candle_device field DROPPED (`5c3cd353`). Residual: metal storage + a CPU-only file.
+ 3  kiln-server          — Tier-3-downstream (already STOP-doc'd)
+ 2  kiln-gdn-kernel      — Tier 1 (chunk-family candle-typed surface remains)
+ 2  kiln-blas            — optional `cublaslt`/`probe` features
+
+11  total crates with `candle*` direct import.
+```
+
+Net change since the roadmap doc: 110 files → ~108 files, with
+the most-leverage change being `kiln-tensor::cuda_storage`
+shedding its `candle_device` field entirely.
+
+### Top 3 next-tasks (post-this-batch critical path)
+
+1. **CP-4 — kt-typed autograd `Var` / `Tape` adoption substrate.**
+   Now the highest-leverage remaining item. The `KtForwardOp` shim
+   is a stop-gap that wraps fused kt forward+backward inside
+   candle's autograd graph; converting the rest of the training
+   loop (`Var` / `loss.backward()` → `kiln_autograd::Tape::backward`)
+   is the precondition for Tier-4 (kt-bridge deletion). Already
+   sketched in `CANDLE_REMOVAL_PLAN.md` §"kt-autograd
+   autograd-interop blocker (2026-05-27)" — multi-PR substrate
+   work (`kiln_tensor::Tensor::tape_id`, `kiln_autograd::Var`,
+   cross-crate parity tests for ≥1k training steps).
+
+2. **CP-3 — `model_forward_kt` for non-CUDA backends.** The
+   roadmap originally listed CP-3 as a parallel substrate. The
+   `_kt` boundary API is now in place and compilable on non-CUDA
+   builds (`fa8730d6`). What remains is the
+   `kt_tensor_from_candle_metal_borrow` /
+   `kt_tensor_from_candle_cpu_borrow` helpers + the corresponding
+   backend dispatch inside `model_forward_kt`. ~1 PR. Once this
+   lands, `kiln-server`'s candle-removal STOP doc
+   ([`kiln-server-candle-removal-stop-2026-05-27.md`](./kiln-server-candle-removal-stop-2026-05-27.md))
+   becomes mechanical migration work.
+
+3. **`kiln-model` 27 candle-using files (Tier-3 closeout).**
+   Largest residual surface left. The `_kt` boundary API exists,
+   but the internal Tensor type is woven through forward.rs,
+   cuda_train.rs, all 4 backends, paged_kv_cache.rs, fp8.rs,
+   marlin_proj.rs, sampling.rs, lora_loader.rs, etc. Best handled
+   as ongoing Phase-7 gate-flipping work (`try_kt_*` opt-in →
+   default-on after parity cycles), in parallel with CP-3 and
+   CP-4 substrate landing.
+
+**Eventually:** `MetalStorage::candle_device` field-drop (blocked
+on the ~232 `candle_metal_kernels` FFI sites in
+`kiln-model::backend::metal`); remaining `kiln-vulkan-kernel`
+`_bytes` parallel entries (the 13 listed above cover the hottest
+production dispatchers; the legacy candle-typed wrappers on
+`dispatch_*` still serve parity tests); `KtForwardOp` shim
+deletion (gated on CP-4); `kiln-kt-bridge` deletion (Tier 4 end);
+`vendor/candle-core/` delete (Tier 5 end).
+
+**STOP-doc references:** see
+[`kiln-server-candle-removal-stop-2026-05-27.md`](./kiln-server-candle-removal-stop-2026-05-27.md),
+[`lora-bwd-kt-migration-stop-2026-05-27.md`](./lora-bwd-kt-migration-stop-2026-05-27.md),
+[`issue-1082-tier-4-5-roadmap-2026-05-27.md`](./issue-1082-tier-4-5-roadmap-2026-05-27.md),
+and in-source STOPs on `kiln-tensor::cuda_storage` (line 16047451),
+`kiln-tensor::cuda_allocator`, `kiln-tensor::metal_allocator`,
+parity test scaffolds in `kiln-{rmsnorm,gdn,flce,opd-loss}-kernel`,
+and `kiln-{rmsnorm,vulkan-kernel}` example STOPs.
+
+---
+
+**Earlier batch headline (2026-05-26 — preserved for history):**
 - **Phase 5 production posture corrected** — bs>1 captured-batched
   graphs + fused KV writer were reverted to opt-in in `909e2e61`
   after production bench exposed HTTP 500s. The eager-batched path is
