@@ -78,6 +78,54 @@ impl PagedKvCache {
         )
     }
 
+    /// kt-typed parallel entry to [`Self::new`] (#1082 Tier 3).
+    ///
+    /// Takes `kiln_tensor::DType` + `&kiln_tensor::Device` instead of
+    /// the candle equivalents, bridges at the boundary, and delegates
+    /// to the existing candle-typed constructor. The returned
+    /// `PagedKvCache` still owns candle Tensors internally — the kt
+    /// typing applies only to the public surface so kiln-server can
+    /// call this without importing `candle_core` at the call site.
+    ///
+    /// Errors when the kt Device has no candle equivalent on this
+    /// build (e.g. `Vulkan(_)`; kiln-server's Vulkan path uses a CPU
+    /// candle device by convention) or when the kt DType cannot be
+    /// represented in candle (e.g. `F8E4M3` — use [`Self::new_with_fp8`]
+    /// with the dequant dtype + `fp8=true`).
+    ///
+    /// Distinct from the existing `PagedKvCacheKt` twin in
+    /// `paged_kv_cache_kt.rs`: that type holds `kiln_tensor::Tensor`
+    /// pools end-to-end and is the right migration target once
+    /// kiln-model's full-attention writers/readers migrate; this
+    /// constructor is the minimum-effort wrapper that unblocks
+    /// kiln-server's `use candle_core::DType;` / candle Device import
+    /// today (per the STOP doc on the kiln-server candle removal).
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_kt(
+        num_full_attn_layers: usize,
+        num_blocks: usize,
+        block_size: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        dtype: kiln_tensor::DType,
+        device: &kiln_tensor::Device,
+    ) -> Result<Self> {
+        let candle_dtype = kiln_kt_bridge::kt_dtype_to_candle(dtype)
+            .map_err(|e| anyhow::anyhow!("PagedKvCache::new_kt dtype: {e}"))?;
+        let candle_device = kiln_kt_bridge::candle_device_from_kt(device)
+            .map_err(|e| anyhow::anyhow!("PagedKvCache::new_kt device: {e}"))?;
+        Self::new(
+            num_full_attn_layers,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            candle_dtype,
+            &candle_device,
+        )
+    }
+
     /// Create a new paged KV cache with uninitialized pre-allocated pool tensors.
     ///
     /// Use this only when every logical position included in later reads or raw
