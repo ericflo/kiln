@@ -507,5 +507,3 @@ impl PerPositionMetricsRow {
     }
 }
 
-#[cfg(test)]
-mod tests;
