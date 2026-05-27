@@ -1,13 +1,13 @@
 //! Parity test for the fused GDN gates CUDA kernel.
 //!
-//! The kernel in `kiln_gdn_kernel::gdn_gates` replaces the 8-op candle
-//! chain in `kiln-model::forward::gated_deltanet_forward` Step 6:
+//! The kernel in `kiln_gdn_kernel::gdn_gates_bf16_kt` replaces the 8-op
+//! candle chain in `kiln-model::forward::gated_deltanet_forward` Step 6:
 //!
 //!   beta = sigmoid(b)                                  // bf16
 //!   g    = -exp(A_log) * softplus(a + dt_bias)         // bf16
 //!
 //! This test constructs a small `[B, T, nv]` workload, runs the fused
-//! kernel, runs the exact candle-op reference path side-by-side, and
+//! kernel, runs a pure-Rust F32 host reference path side-by-side, and
 //! asserts element-wise closeness within a 1e-2 absolute tolerance in
 //! bf16 (the same budget `marlin_w4a16_gemm` uses).
 //!
@@ -19,9 +19,20 @@
 //!
 //! Gracefully no-ops on non-CUDA hosts so that `cargo test` on a
 //! CPU-only dev box doesn't fail.
+//!
+//! Phase 7 candle-removal (#1082): migrated off candle Tensors to the
+//! kt-typed surface (`gdn_gates_bf16_kt` / `gdn_gates_supports_kt`).
+//! Inputs are constructed via `Tensor::cuda_from_slice`; outputs are
+//! pulled back via `cuda_to_host_copy`.
 
-use candle_core::{DType, Device, Tensor};
-use kiln_gdn_kernel::{gdn_gates, gdn_gates_supports};
+use half::bf16;
+
+use kiln_gdn_kernel::{gdn_gates_bf16_kt, gdn_gates_supports_kt};
+use kiln_tensor::{cuda_to_host_copy, CpuStorage, DType, Tensor};
+
+fn cuda_available() -> bool {
+    kiln_tensor::primary_cuda_device(0).is_ok()
+}
 
 fn lcg_seed(state: &mut u64) -> f32 {
     *state = state
@@ -46,10 +57,9 @@ fn sigmoid_f32(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-/// Reference path: the exact candle chain used today in
-/// `gated_deltanet_forward` Step 6. We reimplement the F32 recipe here
-/// so the test isn't tautological — this is the *algorithmic* oracle,
-/// not a second copy of the kernel.
+/// Reference path: the exact F32 recipe described in the kernel docs.
+/// We reimplement it here in pure Rust so the test isn't tautological —
+/// this is the *algorithmic* oracle, not a second copy of the kernel.
 fn reference_host(
     a_host: &[f32],
     b_host: &[f32],
@@ -80,7 +90,31 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
         .fold(0.0f32, f32::max)
 }
 
-fn run_case(device: &Device, b: usize, t: usize, nv: usize, seed: u64, label: &str) {
+/// Convert host F32 values into BF16 for kernel ingest.
+fn to_bf16_vec(values: &[f32]) -> Vec<bf16> {
+    values.iter().map(|&v| bf16::from_f32(v)).collect()
+}
+
+/// Read a CUDA-resident BF16 kt-Tensor back to host F32.
+fn read_bf16_host_as_f32(t: &Tensor) -> Vec<f32> {
+    let host = cuda_to_host_copy(t).expect("cuda → host copy");
+    assert_eq!(host.dtype(), DType::BF16);
+    let cpu = host
+        .storage()
+        .as_any()
+        .downcast_ref::<CpuStorage>()
+        .expect("CpuStorage");
+    let bytes = cpu.as_bytes();
+    let n = bytes.len() / 2;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let v = bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
+        out.push(v);
+    }
+    out
+}
+
+fn run_case(b: usize, t: usize, nv: usize, seed: u64, label: &str) {
     let rows = b * t;
 
     // Host tensors. Activations near N(0, 0.25); per-head params near
@@ -90,54 +124,29 @@ fn run_case(device: &Device, b: usize, t: usize, nv: usize, seed: u64, label: &s
     let a_log_host = fill(seed ^ 0xA_106, nv, 0.2);
     let dt_bias_host = fill(seed ^ 0xDE_B1A5, nv, 0.2);
 
-    // Build CUDA bf16 tensors the kernel expects.
-    let a_cpu = Tensor::from_vec(a_host.clone(), (b, t, nv), &Device::Cpu).unwrap();
-    let a = a_cpu
-        .to_dtype(DType::BF16)
-        .unwrap()
-        .to_device(device)
-        .unwrap();
-    let b_cpu = Tensor::from_vec(b_host.clone(), (b, t, nv), &Device::Cpu).unwrap();
-    let b_in = b_cpu
-        .to_dtype(DType::BF16)
-        .unwrap()
-        .to_device(device)
-        .unwrap();
-    let a_log_cpu = Tensor::from_vec(a_log_host.clone(), (nv,), &Device::Cpu).unwrap();
-    let a_log = a_log_cpu
-        .to_dtype(DType::BF16)
-        .unwrap()
-        .to_device(device)
-        .unwrap();
-    let dt_bias_cpu = Tensor::from_vec(dt_bias_host.clone(), (nv,), &Device::Cpu).unwrap();
-    let dt_bias = dt_bias_cpu
-        .to_dtype(DType::BF16)
-        .unwrap()
-        .to_device(device)
-        .unwrap();
+    // Convert host F32 → BF16 and upload to CUDA via the kt substrate
+    // helper (`Tensor::cuda_from_slice`, #1082 candle-free constructor).
+    let a_bf16 = to_bf16_vec(&a_host);
+    let b_bf16 = to_bf16_vec(&b_host);
+    let a_log_bf16 = to_bf16_vec(&a_log_host);
+    let dt_bias_bf16 = to_bf16_vec(&dt_bias_host);
+
+    let a = Tensor::cuda_from_slice(&a_bf16, vec![b, t, nv], 0).expect("upload a");
+    let b_in = Tensor::cuda_from_slice(&b_bf16, vec![b, t, nv], 0).expect("upload b");
+    let a_log = Tensor::cuda_from_slice(&a_log_bf16, vec![nv], 0).expect("upload a_log");
+    let dt_bias =
+        Tensor::cuda_from_slice(&dt_bias_bf16, vec![nv], 0).expect("upload dt_bias");
 
     assert!(
-        gdn_gates_supports(&a, &b_in, &a_log, &dt_bias),
+        gdn_gates_supports_kt(&a, &b_in, &a_log, &dt_bias),
         "{label}: envelope check failed"
     );
 
-    let (beta, g) = gdn_gates(&a, &b_in, &a_log, &dt_bias).expect("fused gates kernel");
+    let (beta, g) = gdn_gates_bf16_kt(&a, &b_in, &a_log, &dt_bias).expect("fused gates kernel");
 
     // Pull back to host F32 for comparison.
-    let beta_host: Vec<f32> = beta
-        .to_dtype(DType::F32)
-        .unwrap()
-        .flatten_all()
-        .unwrap()
-        .to_vec1::<f32>()
-        .unwrap();
-    let g_host: Vec<f32> = g
-        .to_dtype(DType::F32)
-        .unwrap()
-        .flatten_all()
-        .unwrap()
-        .to_vec1::<f32>()
-        .unwrap();
+    let beta_host: Vec<f32> = read_bf16_host_as_f32(&beta);
+    let g_host: Vec<f32> = read_bf16_host_as_f32(&g);
 
     let (beta_ref, g_ref) = reference_host(&a_host, &b_host, &a_log_host, &dt_bias_host, rows, nv);
 
@@ -159,20 +168,17 @@ fn run_case(device: &Device, b: usize, t: usize, nv: usize, seed: u64, label: &s
 }
 
 #[test]
-fn gdn_gates_parity_vs_candle_reference() {
-    let device = match Device::new_cuda(0) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("Skipping gdn_gates parity test: no CUDA device ({e})");
-            return;
-        }
-    };
+fn gdn_gates_parity_vs_host_reference() {
+    if !cuda_available() {
+        eprintln!("Skipping gdn_gates parity test: no CUDA device");
+        return;
+    }
 
     // Decode-shape (B=1, T=1) and prefill-shape (B=1, T=32) across a
     // couple of head counts inside the envelope. Qwen3.5-4B GDN layers
     // use nv in the 32-128 range, so we exercise both ends.
-    run_case(&device, 1, 1, 32, 0xDEAD_BEEF, "decode/nv=32");
-    run_case(&device, 1, 1, 128, 0xCAFE_F00D, "decode/nv=128");
-    run_case(&device, 2, 32, 64, 0xFACE_0FF, "prefill/B=2,T=32,nv=64");
-    run_case(&device, 1, 128, 128, 0x5EED_BEEF, "prefill/T=128,nv=128");
+    run_case(1, 1, 32, 0xDEAD_BEEF, "decode/nv=32");
+    run_case(1, 1, 128, 0xCAFE_F00D, "decode/nv=128");
+    run_case(2, 32, 64, 0xFACE_0FF, "prefill/B=2,T=32,nv=64");
+    run_case(1, 128, 128, 0x5EED_BEEF, "prefill/T=128,nv=128");
 }
