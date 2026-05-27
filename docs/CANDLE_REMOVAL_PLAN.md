@@ -928,3 +928,47 @@ kt-typed primitives, which the existing per-step `try_kt_*`
 wirings already do. No closer-than-status-quo migration is
 available without new kernel work; revisit when the fused
 backward lands.
+
+**STOP on the three LoRA `CustomOp::bwd` bodies
+(`CudaLoraAddF32`, `CudaLoraLinearBf16`, `CudaLoraAddBf16` — all in
+`crates/kiln-model/src/forward.rs`, 2026-05-27 audit on branch
+`ce/lora-bwd-kt-bridge-1082`)**: same shape as the
+`CudaSigmoidMulTrainingBf16::bwd` STOP above. Forward kt entry
+points exist in `crates/kiln-rmsnorm-kernel/src/kt_api.rs`
+(`lora_decode_hidden_kt`, `lora_decode_add_kt`,
+`lora_decode_add_full_kt`, `lora_add_inplace_f32_kt`) wrapping the
+forward FFI symbols (`kiln_lora_decode_hidden_bf16`,
+`kiln_lora_decode_add_bf16`, `kiln_lora_add_inplace_f32`). **No
+backward FFI symbol exists for any LoRA op** — `grep -rn
+"kiln_lora.*bwd\|lora.*_bwd_kt\|lora.*_backward_kt" crates/`
+returns zero matches. Each LoRA `bwd` is implemented as an
+out-of-line element-wise composite of generic ops:
+`CudaLoraAddF32::bwd` is two `matmul`s + `scale` + dtype conversions
+(no tile loop); `CudaLoraLinearBf16::bwd` and `CudaLoraAddBf16::bwd`
+are tile-looped composites of `narrow` + `matmul` + `scale` + (for
+the Bf16 add) axis-0 `cat`, and the matmul/scale/cat steps are
+*already* fine-grained-kt-migrated in-place via
+`try_kt_mul_scalar` / `try_kt_cat_dim0` driven by the
+`KILN_USE_KT_API_*` Phase-7 gates. A bridge-style rewrite would
+need either (a) brand-new fused `kiln_lora_add_bwd_f32`,
+`kiln_lora_linear_bwd_bf16`, and `kiln_lora_add_bwd_bf16` kernels
+in `kiln-rmsnorm-kernel/csrc/` (out of scope under the current
+task constraint — only `crates/kiln-model/src/forward.rs` is
+touchable for these migrations), or (b) hand-composing every step
+in kt-typed primitives, which the existing per-step `try_kt_*`
+wirings already do. The bridge template proven by `341da876`
+(`fused_rmsnorm_backward_kt`) and `d99a15a3`
+(`fused_rotary_one_bwd_kt`) relies on a *single* FFI symbol giving
+bit-exact parity by construction. Re-wrapping a multi-step Rust
+composite under a "bridge" helper would not change the kernel calls
+(they'd still be generic `cuda_matmul` / `cuda_scalar_op` /
+`cuda_concat` via `try_kt_*`), would not increase kt coverage
+beyond what the Phase-7 gates already provide, and would not be
+bit-exact by construction the way the rmsnorm/rotary-one bridges
+are. **Revisit when fused `kiln_lora_*_bwd` FFI kernels land in
+`kiln-rmsnorm-kernel`** (different crate / different agent) — at
+that point the migration template is purely mechanical: borrow
+three operands per CustomOp, call the fused `*_bwd_kt`, copy two
+or three gradients back, add `KILN_DISABLE_LORA_*_BWD_KT_BRIDGE`
+env opt-outs and a parity test per op (template proven by the
+rmsnorm + rotary-one migrations).
