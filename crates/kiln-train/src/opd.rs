@@ -1725,12 +1725,21 @@ pub fn opd_train_synthetic_validation(
     num_steps: usize,
     learning_rate: f64,
 ) -> Result<(f32, f32)> {
-    // NOTE(#1082): `use candle_core::Var;` dropped — only one call site
-    // below (`Var::from_vec`) and it now uses the fully-qualified
-    // `candle_core::Var::from_vec` path so opd.rs's candle `use` count
-    // drops by 1 more.
-    use candle_nn::Optimizer;
-    use candle_nn::optim::{AdamW, ParamsAdamW};
+    // NOTE(#1082): All three function-scope candle imports dropped:
+    //   * `use candle_core::Var;` — sole call site below is now
+    //     `candle_core::Var::from_vec` fully-qualified.
+    //   * `use candle_nn::optim::{AdamW, ParamsAdamW};` — the
+    //     two call sites (`ParamsAdamW { .. }` literal and
+    //     `AdamW::new(...)` factory) are now fully-qualified as
+    //     `candle_nn::optim::ParamsAdamW` /
+    //     `candle_nn::optim::AdamW`.
+    //   * `use candle_nn::Optimizer;` — the only call site is
+    //     `optimizer.backward_step(&loss)?`, dispatched via UFCS as
+    //     `<candle_nn::optim::AdamW as candle_nn::Optimizer>::backward_step(&mut optimizer, &loss)`
+    //     so the trait no longer needs to be in lexical scope.
+    // Combined with the production `Var` drop in `opd_train`, opd.rs's
+    // candle `use` count drops from 5 to 1 (just the module-level
+    // `use candle_core::Tensor;`).
 
     let device = candle_core::Device::Cpu;
 
@@ -1779,14 +1788,14 @@ pub fn opd_train_synthetic_validation(
     }
 
     // AdamW with default betas.
-    let params_adamw = ParamsAdamW {
+    let params_adamw = candle_nn::optim::ParamsAdamW {
         lr: learning_rate,
         beta1: 0.9,
         beta2: 0.999,
         eps: 1e-8,
         weight_decay: 0.0,
     };
-    let mut optimizer = AdamW::new(vec![hidden.clone()], params_adamw)?;
+    let mut optimizer = candle_nn::optim::AdamW::new(vec![hidden.clone()], params_adamw)?;
 
     let mut first_loss: f32 = f32::NAN;
     let mut last_loss: f32 = f32::NAN;
@@ -1807,9 +1816,13 @@ pub fn opd_train_synthetic_validation(
             first_loss = lv;
         }
         last_loss = lv;
-        optimizer
-            .backward_step(&loss)
-            .with_context(|| format!("backward step {step}"))?;
+        // UFCS dispatch so we don't need `use candle_nn::Optimizer;` in
+        // scope; same lowering as `optimizer.backward_step(&loss)`.
+        <candle_nn::optim::AdamW as candle_nn::Optimizer>::backward_step(
+            &mut optimizer,
+            &loss,
+        )
+        .with_context(|| format!("backward step {step}"))?;
     }
 
     Ok((first_loss, last_loss))
