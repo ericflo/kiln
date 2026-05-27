@@ -9,15 +9,10 @@ description = "Vendored Gated DeltaNet (GDN) chunk forward-substitution CUDA ker
 build = "build.rs"
 
 [dependencies]
-candle-core = { workspace = true, features = ["cuda"] }
 half = "2"
-# Phase 7 prep — kiln-tensor-typed surface alongside candle-typed.
+# Phase 7 closeout (#1082) — kiln-tensor-typed surface is the only path.
 kiln-tensor = { workspace = true, features = ["cuda"] }
 kiln-kt-bridge = { workspace = true, features = ["cuda"] }
 
 [build-dependencies]
 cc = "1"
-
-[dev-dependencies]
-candle-nn = { workspace = true }
-anyhow = { workspace = true }
