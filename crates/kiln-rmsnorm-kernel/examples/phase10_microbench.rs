@@ -9,6 +9,18 @@
 //!
 //! Run:
 //!   cargo run --release -p kiln-rmsnorm-kernel --example phase10_microbench
+//!
+//! TODO(#1082): delete-when-candle-removed, do not migrate. This bench's
+//! entire purpose is to compare the *candle CustomOp2-backed*
+//! `fused_rmsnorm_with_autograd` against the *candle op-chain*
+//! `rms_norm_candle` reference. Both arms route through `candle_core::Var`
+//! autograd. There is no kt-typed autograd substrate today (see
+//! `docs/CANDLE_REMOVAL_PLAN.md` lines 660-668: "Expand `kt_api` to cover:
+//! optimizer steps, training matmuls (...), depthwise conv1d
+//! forward+backward, attn decode prep, mlp silu mul" — multi-PR work).
+//! When candle is finally removed, this example becomes meaningless
+//! (the "candle op-chain" baseline ceases to exist) and the file should
+//! be deleted alongside `fused_rmsnorm_with_autograd` rather than ported.
 
 use candle_core::Result;
 use candle_core::{DType, Device, Tensor, Var};
