@@ -3435,10 +3435,27 @@ impl BackendRuntime for VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-        let out = kiln_vulkan_kernel::kernels::dispatch_gdn_forward_substitution(
-            vk_device, a_strict, v_prime, beta,
+        let v_dims = v_prime.dims();
+        let (batch, heads, chunk, dv) = (v_dims[0], v_dims[1], v_dims[2], v_dims[3]);
+        let a_strict_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(a_strict)?.0;
+        let v_prime_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(v_prime)?.0;
+        let beta_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(beta)?.0;
+        let out_data = kiln_vulkan_kernel::kernels::dispatch_gdn_forward_substitution_bytes(
+            vk_device,
+            &a_strict_bytes,
+            &v_prime_bytes,
+            &beta_bytes,
+            batch,
+            heads,
+            chunk,
+            dv,
         )
         .context("gdn_forward_substitution kernel failed")?;
+        let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &out_data,
+            &[batch, heads, chunk, dv],
+            DType::F32,
+        )?;
         Ok(Some(out))
     }
 

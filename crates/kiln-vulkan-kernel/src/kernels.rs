@@ -968,6 +968,18 @@ fn build_cpu_f32_tensor_from_bytes(data: &[u8], shape: &[usize]) -> Result<Tenso
     create_tensor_from_data(data, shape, DType::F32)
 }
 
+fn build_cpu_bf16_tensor_from_bytes(data: &[u8], shape: &[usize]) -> Result<Tensor> {
+    let expected: usize = shape.iter().product::<usize>() * 2;
+    anyhow::ensure!(
+        data.len() == expected,
+        "build_cpu_bf16_tensor_from_bytes: expected {expected} bytes for shape {:?}, got {}",
+        shape,
+        data.len()
+    );
+    let half_slice: &[half::bf16] = bytemuck::cast_slice(data);
+    Tensor::from_slice(half_slice, shape, &Device::Cpu).context("build bf16 cpu tensor")
+}
+
 /// Decode a registry-resident `VulkanBuffer` back into a candle CPU
 /// Tensor of the requested `shape` and `dtype`.
 ///
@@ -8381,6 +8393,24 @@ fn run_two_stage_compute_pipeline_with_transfers(
 /// Computes W = (I + A_strict)^{-1} (beta * V_prime)
 /// A_strict: [B,H,C,C] lower-triangular, V_prime: [B,H,C,dv], beta: [B,H,C]
 /// Output: W: [B,H,C,dv]
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_forward_substitution_bytes(
+    vk_device: &VulkanDevice,
+    a_strict_bf16: &[u8],
+    v_prime_bf16: &[u8],
+    beta_bf16: &[u8],
+    batch: usize,
+    heads: usize,
+    chunk: usize,
+    dv: usize,
+) -> Result<Vec<u8>> {
+    let a_strict = build_cpu_bf16_tensor_from_bytes(a_strict_bf16, &[batch, heads, chunk, chunk])?;
+    let v_prime = build_cpu_bf16_tensor_from_bytes(v_prime_bf16, &[batch, heads, chunk, dv])?;
+    let beta = build_cpu_bf16_tensor_from_bytes(beta_bf16, &[batch, heads, chunk])?;
+    let out = dispatch_gdn_forward_substitution(vk_device, &a_strict, &v_prime, &beta)?;
+    Ok(extract_tensor_bytes(&out)?.0)
+}
+
 pub fn dispatch_gdn_forward_substitution(
     vk_device: &VulkanDevice,
     a_strict: &Tensor,
