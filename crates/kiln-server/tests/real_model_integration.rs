@@ -5,6 +5,14 @@ use std::collections::HashMap;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+// TODO(#1082): migrate this test off candle once GpuWeights / GpuLayerWeights /
+// GpuFullAttentionWeights / GpuFfnWeights expose kt-typed constructors. The
+// `tiny_weights` helper below builds candle `Tensor`s directly into those
+// struct fields (which are themselves candle `Tensor`s in production), and
+// `AppState::new_real` still takes a `candle_core::Device`. Swapping the local
+// `Device::Cpu` bindings to `kt::Device::Cpu` here would only add bridge
+// conversions without removing the candle dependency, so this file stays on
+// candle until the underlying production types are retyped.
 use candle_core::{DType, Device, Tensor};
 use serde_json::{Value, json};
 use tower::ServiceExt; // for `oneshot`
