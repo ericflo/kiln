@@ -1,11 +1,24 @@
 //! Parity test for the fused GDN gated RMSNorm CUDA kernel.
 //!
-//! The kernel in `kiln_gdn_kernel::gdn_gated_rms_norm` replaces the
-//! candle chain `to_f32 -> rms_norm -> silu -> mul -> bf16` used by
+//! The kernel in `kiln_gdn_kernel::gdn_gated_rms_norm_bf16_kt` fuses
+//! the candle chain `to_f32 -> rms_norm -> silu -> mul -> bf16` used by
 //! `kiln-model` in the `kiln/gdn/gated_norm` NVTX range.
+//!
+//! Phase 7 candle-removal (#1082): migrated off candle Tensors to the
+//! kt-typed surface (`gdn_gated_rms_norm_bf16_kt` /
+//! `gdn_gated_rms_norm_supports_kt`). Inputs are constructed via
+//! `Tensor::cuda_from_slice`; the reference path is a pure-Rust F32
+//! host loop (the kernel's documented algorithm). Outputs are pulled
+//! back via `cuda_to_host_copy` and compared element-wise in F32.
 
-use candle_core::{DType, Device, Tensor};
-use kiln_gdn_kernel::{gdn_gated_rms_norm, gdn_gated_rms_norm_supports};
+use half::bf16;
+
+use kiln_gdn_kernel::{gdn_gated_rms_norm_bf16_kt, gdn_gated_rms_norm_supports_kt};
+use kiln_tensor::{cuda_to_host_copy, CpuStorage, DType, Tensor};
+
+fn cuda_available() -> bool {
+    kiln_tensor::primary_cuda_device(0).is_ok()
+}
 
 fn lcg_seed(state: &mut u64) -> f32 {
     *state = state
@@ -20,96 +33,118 @@ fn fill(seed: u64, n: usize, scale: f32) -> Vec<f32> {
     (0..n).map(|_| lcg_seed(&mut state) * scale).collect()
 }
 
-fn sigmoid(x: &Tensor) -> candle_core::Result<Tensor> {
-    let neg_x = x.neg()?;
-    let exp_neg_x = neg_x.exp()?;
-    let one_plus = (exp_neg_x + 1.0)?;
-    one_plus.recip()
+fn sigmoid_f32(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
 }
 
-fn silu(x: &Tensor) -> candle_core::Result<Tensor> {
-    Ok((x * sigmoid(x)?)?)
+fn silu_f32(x: f32) -> f32 {
+    x * sigmoid_f32(x)
 }
 
-fn reference(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) -> candle_core::Result<Tensor> {
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let z_f32 = z.to_dtype(DType::F32)?;
-    let w_f32 = weight.to_dtype(DType::F32)?;
-    let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
-    let rms_inv = (variance + eps)?.sqrt()?.recip()?;
-    let normed = x_f32.broadcast_mul(&rms_inv)?.broadcast_mul(&w_f32)?;
-    Ok((normed * silu(&z_f32)?)?)
-}
-
-fn run_case(
-    device: &Device,
-    batch: usize,
-    seq_len: usize,
-    heads: usize,
+/// Pure-Rust F32 host reference: the *algorithmic* oracle for the
+/// fused gated RMSNorm kernel. Computes
+/// `(x / rms(x)) * weight * silu(z)` row by row over the last axis.
+fn reference_host(
+    x_host: &[f32],
+    z_host: &[f32],
+    weight_host: &[f32],
+    rows: usize,
     hidden: usize,
-    seed: u64,
-    label: &str,
-) {
-    let elems = batch * seq_len * heads * hidden;
-    let x_data = fill(seed ^ 0xA11C_E5, elems, 2.0);
-    let z_data = fill(seed ^ 0x6A7E, elems, 4.0);
-    let w_data: Vec<f32> = fill(seed ^ 0xBEEF, hidden, 0.5)
+    eps: f32,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; rows * hidden];
+    for r in 0..rows {
+        let row_off = r * hidden;
+        // RMS over the last axis (mean of squares + eps, then sqrt).
+        let mut sum_sq = 0.0f32;
+        for h in 0..hidden {
+            let v = x_host[row_off + h];
+            sum_sq += v * v;
+        }
+        let variance = sum_sq / hidden as f32;
+        let rms_inv = 1.0 / (variance + eps).sqrt();
+        for h in 0..hidden {
+            let xn = x_host[row_off + h] * rms_inv * weight_host[h];
+            out[row_off + h] = xn * silu_f32(z_host[row_off + h]);
+        }
+    }
+    out
+}
+
+fn to_bf16_vec(values: &[f32]) -> Vec<bf16> {
+    values.iter().map(|&v| bf16::from_f32(v)).collect()
+}
+
+fn read_bf16_host_as_f32(t: &Tensor) -> Vec<f32> {
+    let host = cuda_to_host_copy(t).expect("cuda → host copy");
+    assert_eq!(host.dtype(), DType::BF16);
+    let cpu = host
+        .storage()
+        .as_any()
+        .downcast_ref::<CpuStorage>()
+        .expect("CpuStorage");
+    let bytes = cpu.as_bytes();
+    let n = bytes.len() / 2;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let v = bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
+        out.push(v);
+    }
+    out
+}
+
+fn run_case(batch: usize, seq_len: usize, heads: usize, hidden: usize, seed: u64, label: &str) {
+    // The kt API takes 2D `[rows, hidden]` inputs — the candle path's
+    // 4D `(B, T, H, hidden)` collapses to the same row count.
+    let rows = batch * seq_len * heads;
+    let elems = rows * hidden;
+
+    let x_host = fill(seed ^ 0xA11C_E5, elems, 2.0);
+    let z_host = fill(seed ^ 0x6A7E, elems, 4.0);
+    let w_host: Vec<f32> = fill(seed ^ 0xBEEF, hidden, 0.5)
         .into_iter()
         .map(|v| v + 1.0)
         .collect();
 
-    let x = Tensor::from_vec(x_data, (batch, seq_len, heads, hidden), &Device::Cpu)
-        .unwrap()
-        .to_dtype(DType::BF16)
-        .unwrap()
-        .to_device(device)
-        .unwrap();
-    let z = Tensor::from_vec(z_data, (batch, seq_len, heads, hidden), &Device::Cpu)
-        .unwrap()
-        .to_dtype(DType::BF16)
-        .unwrap()
-        .to_device(device)
-        .unwrap();
-    let weight = Tensor::from_vec(w_data, (hidden,), &Device::Cpu)
-        .unwrap()
-        .to_dtype(DType::BF16)
-        .unwrap()
-        .to_device(device)
-        .unwrap();
+    let x_bf16 = to_bf16_vec(&x_host);
+    let z_bf16 = to_bf16_vec(&z_host);
+    let w_bf16 = to_bf16_vec(&w_host);
+
+    let x = Tensor::cuda_from_slice(&x_bf16, vec![rows, hidden], 0).expect("upload x");
+    let z = Tensor::cuda_from_slice(&z_bf16, vec![rows, hidden], 0).expect("upload z");
+    let weight = Tensor::cuda_from_slice(&w_bf16, vec![hidden], 0).expect("upload weight");
 
     assert!(
-        gdn_gated_rms_norm_supports(&x, &z, &weight),
+        gdn_gated_rms_norm_supports_kt(&x, &z, &weight),
         "{label}: envelope check failed"
     );
 
-    let fused = gdn_gated_rms_norm(&x, &z, &weight, 1e-6).expect("fused gated RMSNorm");
-    let fallback = reference(&x, &z, &weight, 1e-6).expect("fallback gated RMSNorm");
+    let fused = gdn_gated_rms_norm_bf16_kt(&x, &z, &weight, 1e-6).expect("fused gated RMSNorm");
 
-    assert_eq!(fused.dims(), fallback.dims());
+    assert_eq!(fused.shape(), &[rows, hidden]);
     assert_eq!(fused.dtype(), DType::BF16);
 
-    let diff = (fused.to_dtype(DType::F32).unwrap()
-        - fallback
-            .to_dtype(DType::BF16)
-            .unwrap()
-            .to_dtype(DType::F32)
-            .unwrap())
-    .unwrap();
-    let abs = diff.abs().unwrap();
-    let max = abs
-        .flatten_all()
-        .unwrap()
-        .max(0)
-        .unwrap()
-        .to_scalar::<f32>()
-        .unwrap();
-    let mean = abs
-        .flatten_all()
-        .unwrap()
-        .mean(0)
-        .unwrap()
-        .to_scalar::<f32>()
-        .unwrap();
+    // BF16-round-trip the host reference so the comparison sees the
+    // same precision the kernel writes.
+    let ref_f32 = reference_host(&x_host, &z_host, &w_host, rows, hidden, 1e-6);
+    let ref_bf16_round_tripped: Vec<f32> = ref_f32
+        .iter()
+        .map(|&v| bf16::from_f32(v).to_f32())
+        .collect();
+    let got_f32 = read_bf16_host_as_f32(&fused);
+
+    let abs: Vec<f32> = got_f32
+        .iter()
+        .zip(ref_bf16_round_tripped.iter())
+        .map(|(a, b)| (a - b).abs())
+        .collect();
+    let max = abs.iter().cloned().fold(0.0f32, f32::max);
+    let mean = if abs.is_empty() {
+        0.0
+    } else {
+        abs.iter().sum::<f32>() / abs.len() as f32
+    };
+
     println!(
         "[{label}] shape=[{batch},{seq_len},{heads},{hidden}] max_abs={max:.3e} mean_abs={mean:.3e}"
     );
@@ -121,15 +156,12 @@ fn run_case(
 }
 
 #[test]
-fn gdn_gated_rms_norm_parity_vs_candle_reference() {
-    let device = match Device::new_cuda(0) {
-        Ok(device) => device,
-        Err(err) => {
-            eprintln!("Skipping gdn_gated_rms_norm parity test: no CUDA device ({err})");
-            return;
-        }
-    };
+fn gdn_gated_rms_norm_parity_vs_host_reference() {
+    if !cuda_available() {
+        eprintln!("Skipping gdn_gated_rms_norm parity test: no CUDA device");
+        return;
+    }
 
-    run_case(&device, 1, 1, 32, 128, 0xCAFE_F00D, "decode");
-    run_case(&device, 1, 64, 32, 128, 0xDEAD_BEEF, "prefill/T=64");
+    run_case(1, 1, 32, 128, 0xCAFE_F00D, "decode");
+    run_case(1, 64, 32, 128, 0xDEAD_BEEF, "prefill/T=64");
 }
