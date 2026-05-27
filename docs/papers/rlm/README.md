@@ -107,9 +107,11 @@ Use these before writing code:
   experiment with bounded child calls and evidence-gated parent synthesis.
 
 The source manifest also includes metadata-only notes for the Alex Zhang blog,
-Prime Intellect blog, alphaXiv RL post, Daytona guides, RAW Works commentary,
-Drew Breunig commentary, and Claude Code RLM skill. Those pages are not mirrored
-verbatim because no clear reuse license was found during this pass.
+Prime Intellect blog, alphaXiv RL post, RLM-Qwen3-8B model card, DSPy RLM docs,
+Predict-RLM, fleet-rlm, Daytona guides, RAW Works commentary, Drew Breunig
+commentary, Claude Code RLM skill, and other implementation articles. Those
+pages are not mirrored verbatim because no clear reuse license was found during
+this pass or because their package/model-card licensing needs separate handling.
 
 ## Adjacent Work
 

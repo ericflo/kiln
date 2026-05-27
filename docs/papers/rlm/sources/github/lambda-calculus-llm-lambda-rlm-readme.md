@@ -5,7 +5,7 @@ source_url: "https://github.com/lambda-calculus-LLM/lambda-RLM"
 raw_url: "https://raw.githubusercontent.com/lambda-calculus-LLM/lambda-RLM/main/README.md"
 license: "MIT"
 license_url: "https://raw.githubusercontent.com/lambda-calculus-LLM/lambda-RLM/main/LICENSE"
-generated_utc: "2026-05-27T02:05:44+00:00"
+generated_utc: "2026-05-27T02:09:42+00:00"
 ---
 
 # lambda-calculus-llm-lambda-rlm-readme

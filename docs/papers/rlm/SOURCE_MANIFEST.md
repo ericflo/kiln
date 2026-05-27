@@ -1,6 +1,6 @@
 # RLM Source Manifest
 
-Generated: 2026-05-27T02:05:45+00:00
+Generated: 2026-05-27T02:09:42+00:00
 
 This manifest records which sources were mirrored verbatim and which were indexed as metadata only. Full-text mirroring is limited to sources with a clear reuse license, primarily CC BY 4.0/CC0 arXiv HTML and MIT-licensed GitHub READMEs.
 
@@ -28,14 +28,22 @@ This manifest records which sources were mirrored verbatim and which were indexe
 | adjacent-memory | Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory | metadata only | [sources/arxiv/2504.19413-mem0.md](sources/arxiv/2504.19413-mem0.md) | https://arxiv.org/abs/2504.19413 |
 | adjacent-recursive-agents | THREAD: Thinking Deeper with Recursive Spawning | verbatim arXiv HTML conversion (mirrorable license) | [sources/arxiv/2405.17402-thread-recursive-spawning.md](sources/arxiv/2405.17402-thread-recursive-spawning.md) | https://arxiv.org/abs/2405.17402 |
 | blog | Build deep Recursive Language Models | metadata only | [sources/web/daytona-deep-rlm-guide.md](sources/web/daytona-deep-rlm-guide.md) | https://www.daytona.io/docs/ja/recursive-language-models/ |
+| blog | How the Recursive Language Model Works | metadata only | [sources/web/dsprrr-how-rlm-works.md](sources/web/dsprrr-how-rlm-works.md) | https://jameshwade.github.io/dsprrr/articles/how-rlm-works.html |
+| blog | Predict-RLM documentation | metadata only | [sources/web/predict-rlm-docs.md](sources/web/predict-rlm-docs.md) | https://predict-rlm-docs.docsalot.dev/ |
+| blog | RLM-Qwen3-8B model card | metadata only | [sources/web/huggingface-rlm-qwen3-8b.md](sources/web/huggingface-rlm-qwen3-8b.md) | https://huggingface.co/a1zhang/rlm-qwen3-8b |
 | blog | RLM: Recursive Language Models for Claude Code | metadata only | [sources/web/tenobrus-claude-rlm.md](sources/web/tenobrus-claude-rlm.md) | https://github.com/Tenobrus/claude-rlm |
 | blog | RLMs are the New Reasoning Models | metadata only | [sources/web/raw-works-rlms-new-reasoning-models.md](sources/web/raw-works-rlms-new-reasoning-models.md) | https://raw.works/rlms-are-the-new-reasoning-models/ |
 | blog | Recursive Language Model Guides | metadata only | [sources/web/daytona-rlm-guides.md](sources/web/daytona-rlm-guides.md) | https://www.daytona.io/docs/en/guides/rlm/ |
 | blog | Recursive Language Models | metadata only | [sources/web/alex-zhang-rlm-blog.md](sources/web/alex-zhang-rlm-blog.md) | https://alexzhang13.github.io/blog/2025/rlm/ |
 | blog | Recursive Language Models as Memory Systems | metadata only | [sources/web/raw-works-rlms-memory-systems.md](sources/web/raw-works-rlms-memory-systems.md) | https://raw.works/recursive-language-models-as-memory-systems/ |
+| blog | Recursive Language Models in ADK for Enterprise AI Agents | metadata only | [sources/web/supergok-adk-rlm.md](sources/web/supergok-adk-rlm.md) | https://supergok.com/recursive-language-models-adk-enterprise-ai/ |
 | blog | Recursive Language Models: the paradigm of 2026 | metadata only | [sources/web/prime-intellect-rlm-blog.md](sources/web/prime-intellect-rlm-blog.md) | https://www.primeintellect.ai/blog/rlm |
 | blog | Reinforcing Recursive Language Models | metadata only | [sources/web/alphaxiv-reinforcing-rlms.md](sources/web/alphaxiv-reinforcing-rlms.md) | https://www.alphaxiv.org/blog/reinforcement-learning-for-rlms |
 | blog | The Potential of RLMs | metadata only | [sources/web/dbreunig-potential-of-rlms.md](sources/web/dbreunig-potential-of-rlms.md) | https://www.dbreunig.com/ |
+| blog | dspy.RLM documentation | metadata only | [sources/web/dspy-rlm-docs.md](sources/web/dspy-rlm-docs.md) | https://github.com/stanfordnlp/dspy/blob/main/docs/docs/api/modules/RLM.md |
+| blog | fleet-rlm PyPI project | metadata only | [sources/web/fleet-rlm-pypi.md](sources/web/fleet-rlm-pypi.md) | https://pypi.org/project/fleet-rlm/ |
+| blog | fullstackwebdev/rlm_repl | metadata only | [sources/web/fullstackwebdev-rlm-repl.md](sources/web/fullstackwebdev-rlm-repl.md) | https://github.com/fullstackwebdev/rlm_repl |
+| blog | rlm.md Recursive Language Models | metadata only | [sources/web/rlm-md.md](sources/web/rlm-md.md) | https://rlm.md/ |
 | core | Recursive Language Models | verbatim arXiv HTML conversion (mirrorable license) | [sources/arxiv/2512.24601-recursive-language-models.md](sources/arxiv/2512.24601-recursive-language-models.md) | https://arxiv.org/abs/2512.24601 |
 | direct-adjacent | LCM: Lossless Context Management | verbatim arXiv HTML conversion (mirrorable license) | [sources/arxiv/2605.04050-lossless-context-management.md](sources/arxiv/2605.04050-lossless-context-management.md) | https://arxiv.org/abs/2605.04050 |
 | direct-application | Recursive language models for jailbreak detection: a procedural defense for tool-augmented agents | metadata only | [sources/arxiv/2602.16520-rlm-jailbreak-detection.md](sources/arxiv/2602.16520-rlm-jailbreak-detection.md) | https://arxiv.org/abs/2602.16520 |

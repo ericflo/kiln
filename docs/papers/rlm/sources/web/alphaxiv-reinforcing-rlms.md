@@ -3,7 +3,7 @@ source_type: "web-metadata"
 title: "Reinforcing Recursive Language Models"
 source_url: "https://www.alphaxiv.org/blog/reinforcement-learning-for-rlms"
 date: "2026-05-13"
-generated_utc: "2026-05-27T02:05:45+00:00"
+generated_utc: "2026-05-27T02:09:42+00:00"
 ---
 
 # Reinforcing Recursive Language Models
