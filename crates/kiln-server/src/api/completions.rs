@@ -3248,8 +3248,9 @@ fn native_mtp_allowed_for_state(state: &AppState) -> bool {
         return true;
     };
     let runner_guard = runner.read().unwrap();
-    match runner_guard.weights.embed_tokens.device() {
-        candle_core::Device::Metal(_) => native_mtp_enabled_for_metal(),
+    // Migrated to kt::Device via GpuWeights::device_kt() (#1082).
+    match runner_guard.weights.device_kt() {
+        kiln_tensor::Device::Metal(_) => native_mtp_enabled_for_metal(),
         _ => true,
     }
 }
@@ -3259,8 +3260,9 @@ fn long_prompt_skip_layer_min_prompt_tokens_for_state(state: &AppState) -> usize
         return LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT;
     };
     let runner_guard = runner.read().unwrap();
-    match runner_guard.weights.embed_tokens.device() {
-        candle_core::Device::Metal(_) => LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+    // Migrated to kt::Device via GpuWeights::device_kt() (#1082).
+    match runner_guard.weights.device_kt() {
+        kiln_tensor::Device::Metal(_) => LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
         _ => LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
     }
 }
@@ -3580,6 +3582,12 @@ fn mock_prompt_logprobs(
     out
 }
 
+// TODO(#1082): blocked by candle-typed prompt-logprobs path. `model_forward`,
+// `LinearAttentionState`, and the surrounding tensor math (log_sum_exp,
+// broadcast_as, to_dtype) all still surface candle Tensor today.
+// `model_forward_kt` exists but is CUDA-only, while `real_prompt_logprobs`
+// must also serve CPU/Metal/Vulkan. Migrate once the kt-typed forward path
+// covers non-CUDA backends.
 fn log_softmax_last_dim(x: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
     let lse = x
         .log_sum_exp(candle_core::D::Minus1)?
