@@ -6315,6 +6315,80 @@ pub fn dispatch_causal_conv1d_update(
     conv_state: &Tensor,
     kernel_size: usize,
 ) -> Result<(Tensor, Tensor)> {
+    // Extract input data + shapes
+    let x_data = extract_tensor_bytes(x)?.0;
+    let weight_data = extract_tensor_bytes(weight)?.0;
+    let state_data = extract_tensor_bytes(conv_state)?.0;
+
+    let dims = x.dims();
+    anyhow::ensure!(
+        dims.len() == 3,
+        "causal_conv1d_update: x must be 3-D, got {:?}",
+        dims
+    );
+    let (batch, channels, seq_len) = (dims[0], dims[1], dims[2]);
+    let conv_state_shape = conv_state.dims().as_ref().to_vec();
+
+    let (out_data, state_data_out) = dispatch_causal_conv1d_update_bytes_core(
+        vk_device,
+        &x_data,
+        &weight_data,
+        &state_data,
+        batch,
+        channels,
+        seq_len,
+        kernel_size,
+    )?;
+
+    let out_shape: Vec<usize> = dims.to_vec();
+    let out_tensor = create_tensor_from_data(&out_data, &out_shape, DType::F32)?;
+    let state_tensor = create_tensor_from_data(&state_data_out, &conv_state_shape, DType::F32)?;
+    Ok((out_tensor, state_tensor))
+}
+
+/// Candle-free variant of [`dispatch_causal_conv1d_update`].
+///
+/// Takes `x` (bf16), `weight` (bf16), and `conv_state` (f32) as raw
+/// bytes, plus the unpacked shape `[batch, channels, seq_len]` and the
+/// fixed `kernel_size`. Returns the `(out, new_conv_state)` pair as
+/// raw f32 bytes. The two outputs share the same flat byte layout as
+/// their tensor counterparts: `out` is `[batch, channels, seq_len]` f32
+/// and `new_conv_state` is `[batch, channels, kernel_size - 1]` f32.
+/// (#1082)
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_causal_conv1d_update_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_data: &[u8],
+    state_data: &[u8],
+    batch: usize,
+    channels: usize,
+    seq_len: usize,
+    kernel_size: usize,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    dispatch_causal_conv1d_update_bytes_core(
+        vk_device,
+        x_data,
+        weight_data,
+        state_data,
+        batch,
+        channels,
+        seq_len,
+        kernel_size,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_causal_conv1d_update_bytes_core(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_data: &[u8],
+    state_data: &[u8],
+    batch: usize,
+    channels: usize,
+    seq_len: usize,
+    kernel_size: usize,
+) -> Result<(Vec<u8>, Vec<u8>)> {
     if kernel_size != 4 {
         anyhow::bail!("causal_conv1d: only kernel_size=4 supported");
     }
@@ -6323,15 +6397,6 @@ pub fn dispatch_causal_conv1d_update(
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
-
-    // Extract input data
-    let x_data = extract_tensor_bytes(x)?.0;
-    let weight_data = extract_tensor_bytes(weight)?.0;
-    let state_data = extract_tensor_bytes(conv_state)?.0;
-
-    // Parse shape [B, C, T]
-    let dims = x.dims();
-    let (batch, channels, seq_len) = (dims[0], dims[1], dims[2]);
 
     // Create input buffers (uploads scheduled inside single-submit helper)
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)?;
@@ -6380,13 +6445,13 @@ pub fn dispatch_causal_conv1d_update(
     ];
     let state_wg = (batch * channels) as u32;
 
-    let (out_data, state_data) = if causal_conv1d_single_submit_enabled() {
+    let (out_data, state_data_out) = if causal_conv1d_single_submit_enabled() {
         let readbacks = run_two_stage_compute_pipeline_with_transfers(
             vk_device,
             &[
-                (&x_buf, &x_data),
-                (&weight_buf, &weight_data),
-                (&state_buf, &state_data),
+                (&x_buf, x_data),
+                (&weight_buf, weight_data),
+                (&state_buf, state_data),
             ],
             &[&out_buf, &state_buf],
             &spirv_output,
@@ -6414,7 +6479,7 @@ pub fn dispatch_causal_conv1d_update(
                 queue,
                 *command_pool,
                 &x_buf,
-                &x_data,
+                x_data,
             )?;
             VulkanBuffer::upload_data_with_command_pool(
                 device,
@@ -6422,7 +6487,7 @@ pub fn dispatch_causal_conv1d_update(
                 queue,
                 *command_pool,
                 &weight_buf,
-                &weight_data,
+                weight_data,
             )?;
             VulkanBuffer::upload_data_with_command_pool(
                 device,
@@ -6430,7 +6495,7 @@ pub fn dispatch_causal_conv1d_update(
                 queue,
                 *command_pool,
                 &state_buf,
-                &state_data,
+                state_data,
             )?;
         }
         run_compute_pipeline(
@@ -6473,12 +6538,7 @@ pub fn dispatch_causal_conv1d_update(
     drop(state_buf);
     drop(out_buf);
 
-    // Create output tensors
-    let out_shape = x.dims().as_ref().to_vec();
-    let out_tensor = create_tensor_from_data(&out_data, &out_shape, DType::F32)?;
-    let state_tensor =
-        create_tensor_from_data(&state_data, conv_state.dims().as_ref(), DType::F32)?;
-    Ok((out_tensor, state_tensor))
+    Ok((out_data, state_data_out))
 }
 
 /// Dispatch causal_conv1d prefill kernel (multi-token path).
