@@ -55,7 +55,7 @@ objc2-metal = { version = "0.3", optional = true }
 
 
 [features]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-conv1d-kernel", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-marlin-gemm", "dep:kiln-rmsnorm-kernel", "kiln-kt-bridge/cuda", "kiln-tensor/cuda", "dep:half"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-conv1d-kernel", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-marlin-gemm", "dep:kiln-rmsnorm-kernel", "dep:kiln-tensor-id", "kiln-kt-bridge/cuda", "kiln-tensor/cuda", "dep:half"]
 # Phase 7 (#1082): opt-in feature to compile the candle-typed GDN
 # parity tests in forward.rs against `kiln_gdn_kernel::gdn_chunk_*`
 # / `gdn_full_chunk_forward*`. Production decode goes through the

@@ -18,6 +18,13 @@ impl TensorId {
         static COUNTER: atomic::AtomicUsize = atomic::AtomicUsize::new(1);
         Self(COUNTER.fetch_add(1, atomic::Ordering::Relaxed))
     }
+
+    /// Extract the raw `usize` payload. Used by the Phase 7 (#1082) Candle
+    /// removal migration to bridge `candle_core::TensorId` to the kt-native
+    /// `kiln_tensor_id::TensorId` (which wraps a `u64`).
+    pub const fn as_raw(self) -> usize {
+        self.0
+    }
 }
 
 pub struct Tensor_ {

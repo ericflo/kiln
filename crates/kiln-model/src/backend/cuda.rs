@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
+use kiln_tensor_id::TensorId;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -12,7 +13,19 @@ use std::sync::{Mutex, OnceLock};
 use super::{BackendRuntime, TrainingCapabilities};
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
-static CUDA_RESIDENT_TENSOR_IDS: OnceLock<Mutex<HashSet<candle_core::TensorId>>> = OnceLock::new();
+/// Bridge `candle_core::TensorId` -> kt-native `kiln_tensor_id::TensorId`.
+///
+/// Phase 7 (#1082) Candle removal: the CUDA resident-activation registry
+/// keys on the kt-native id so the type matches the rest of the migration
+/// (vk_forward.rs already runs on `kiln_tensor_id::TensorId`). The
+/// underlying value is the candle id's raw counter widened from `usize`
+/// to `u64`; both ids share the same per-process uniqueness guarantee.
+#[inline]
+fn kt_id_from_candle(tensor: &Tensor) -> TensorId {
+    TensorId::from_raw(tensor.id().as_raw() as u64)
+}
+
+static CUDA_RESIDENT_TENSOR_IDS: OnceLock<Mutex<HashSet<TensorId>>> = OnceLock::new();
 static CUDA_SGD_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_ADAMW_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_LINEAR_PREFILL_SUCCESSES: AtomicU64 = AtomicU64::new(0);
@@ -72,7 +85,7 @@ fn any_tracks_op(tensors: &[&Tensor]) -> bool {
     tensors.iter().any(|tensor| tensor.track_op())
 }
 
-fn with_cuda_resident_ids<R>(f: impl FnOnce(&mut HashSet<candle_core::TensorId>) -> R) -> R {
+fn with_cuda_resident_ids<R>(f: impl FnOnce(&mut HashSet<TensorId>) -> R) -> R {
     let registry = CUDA_RESIDENT_TENSOR_IDS.get_or_init(|| Mutex::new(HashSet::new()));
     let mut guard = registry
         .lock()
@@ -255,26 +268,26 @@ impl BackendRuntime for CudaBackend {
 
     fn register_resident_activation(&self, tensor: &Tensor) -> Result<()> {
         with_cuda_resident_ids(|ids| {
-            ids.insert(tensor.id());
+            ids.insert(kt_id_from_candle(tensor));
         });
         Ok(())
     }
 
     fn evict_resident_activation(&self, tensor: &Tensor) {
         with_cuda_resident_ids(|ids| {
-            ids.remove(&tensor.id());
+            ids.remove(&kt_id_from_candle(tensor));
         });
     }
 
     fn update_resident_activation(&self, tensor: &Tensor) -> Result<()> {
         with_cuda_resident_ids(|ids| {
-            ids.insert(tensor.id());
+            ids.insert(kt_id_from_candle(tensor));
         });
         Ok(())
     }
 
     fn has_resident_activation(&self, tensor: &Tensor) -> bool {
-        with_cuda_resident_ids(|ids| ids.contains(&tensor.id()))
+        with_cuda_resident_ids(|ids| ids.contains(&kt_id_from_candle(tensor)))
     }
 
     fn dispatch_sgd_step(&self, param: &Tensor, grad: &Tensor, lr: f32) -> Result<bool> {
