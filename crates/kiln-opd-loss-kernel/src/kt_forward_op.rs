@@ -24,24 +24,22 @@
 //! as the Phase B `OpdLossCustomOp::bwd` body (migrated to the kt
 //! bridge in commit `0c1be227`).
 //!
-//! # Why the forward closure uses candle ops, not kt ops
+//! # Forward closure runs the full kt entry
 //!
-//! The kt-typed forward
-//! ([`crate::opd_top_k_reverse_kl_per_position_kt`]) currently
-//! depends on `kiln-tensor`'s `IndexSelectOp` along **axis 1** of
-//! `head_t` (to gather K columns per active token). The kt substrate's
-//! CUDA `IndexSelectOp::cuda_fwd` only handles axis 0 today, so the
-//! axis-1 path falls through to `cpu_fwd`, which then errors on the
-//! CUDA storage downcast. Until the kt substrate grows axis-N CUDA
-//! gather (separate substrate PR), the shim's forward closure runs
-//! the per-position Phase A candle composite (`index_select` →
-//! `matmul` → `log_softmax_last_dim` → `exp` → broadcast subtract →
-//! multiply → `sum`) on the leaf candle tensors handed to it by
-//! [`KtForwardOp1::cuda_fwd`]. This still buys the autograd-graph
-//! collapse (1 candle node instead of ~8) and the fused kt CUDA
-//! backward (the actual perf-and-memory win) — and once the kt
-//! substrate axis-N gather lands, swapping the forward closure to
-//! the kt entry is a localised change here.
+//! The forward closure runs the kt-typed
+//! [`crate::opd_top_k_reverse_kl_per_position_kt`] composite end-to-
+//! end on CUDA. The kt entry's `head_t.index_select(1, ...)` gather
+//! along axis 1 is now supported by the kt-tensor CUDA substrate
+//! (see `crates/kiln-tensor/src/ops/index_select.rs::cuda_fwd` and the
+//! `kiln_index_select_axis_n_kernel` in
+//! `crates/kiln-tensor/csrc/index_select.cu` — both landed earlier in
+//! (#1082)). The forward closure borrows the candle CUDA tensors into
+//! kt (`kt_tensor_from_candle_cuda_borrow`, zero-copy), runs the kt
+//! per-position composite, and copies the `[T_active]` F32 result
+//! back to candle (`kt_tensor_to_candle_cuda_copy`). The backward
+//! closure already runs through the fused kt CUDA kernel
+//! (`opd_top_k_reverse_kl_phase_b_bwd_kt`), so the full kt round-trip
+//! for OPD per-position is now in place.
 //!
 //! # Envelope and fallback
 //!
@@ -282,51 +280,81 @@ fn cuda_via_kt_forward_op(
 
     // ----- Forward closure ------------------------------------------------
     //
-    // Computes the per-position reverse-KL as the same composite that
-    // [`crate::opd_top_k_reverse_kl_phase_a_per_position`] uses,
-    // but on the leaf candle tensor handed in by
-    // [`KtForwardOp1::cuda_fwd`]. The kt-typed forward
-    // (`crate::opd_top_k_reverse_kl_per_position_kt`) is the
-    // semantic target here, but it relies on kt-tensor's
-    // `IndexSelectOp` along axis 1 of `head_t`, which the kt CUDA
-    // substrate doesn't support today (axis 0 only — see
-    // `crates/kiln-tensor/src/ops/index_select.rs:117`); the kt
-    // forward then falls through to `cpu_fwd`, which can't downcast
-    // CUDA storage. Running the candle composite inside this closure
-    // still buys the autograd-graph collapse — candle sees a single
-    // CustomOp node instead of the original ~8-op composite — and
-    // the backward path below runs through the fused kt CUDA kernel,
-    // which is the actual perf-and-memory win for the OPD trainer.
-    // Once the kt substrate gains axis-N CUDA gather, this closure
-    // can swap to the kt entry without changing the production
-    // caller.
+    // Computes the per-position reverse-KL via the kt-typed forward
+    // [`crate::opd_top_k_reverse_kl_per_position_kt`]. The forward
+    // borrows the candle CUDA tensors into kt (zero-copy), runs the
+    // kt composite (`index_select` along axis 0 of `hidden` AND axis 1
+    // of `head_t`, matmul, log_softmax, KL reduction), and copies the
+    // result back to a candle CUDA tensor.
+    //
+    // This swap (over the previous candle composite) is unblocked by
+    // the kt-tensor axis-N `IndexSelectOp::cuda_fwd` substrate change
+    // earlier in (#1082). Until that landed, the axis-1 gather of
+    // `head_t` fell through to `cpu_fwd`, which couldn't downcast
+    // CUDA storage. With axis-N CUDA gather available, the kt entry
+    // runs end-to-end on the GPU and the OPD per-position path is now
+    // fully kt-typed (forward + backward both go through the fused
+    // kt FFI symbols).
     let forward = move |hidden_in: &Tensor| -> candle_core::Result<Tensor> {
-        // Re-use the candle Phase A per-position kernel verbatim so
-        // there's a single source-of-truth implementation for the
-        // forward math, and any future change there propagates here
-        // automatically. `device` is implicit in `hidden_in`'s
-        // storage; we just re-resolve it.
-        let dev = hidden_in.device().clone();
-        let per_position = opd_top_k_reverse_kl_phase_a_per_position(
-            hidden_in,
-            &head_t_owned,
+        // Force-contiguous both inputs before borrowing into kt; the
+        // borrow path requires contiguous storage (same constraint
+        // the backward closure enforces).
+        let hidden_c = hidden_in.contiguous().map_err(|e| {
+            candle_core::Error::Msg(format!(
+                "opd kt-shim fwd: contiguous hidden: {e}"
+            ))
+        })?;
+        let head_t_c = head_t_owned.contiguous().map_err(|e| {
+            candle_core::Error::Msg(format!(
+                "opd kt-shim fwd: contiguous head_t: {e}"
+            ))
+        })?;
+
+        let hidden_kt = kt_tensor_from_candle_cuda_borrow(&hidden_c).map_err(|e| {
+            candle_core::Error::Msg(format!(
+                "opd kt-shim fwd: borrow hidden: {e}"
+            ))
+        })?;
+        let head_t_kt = kt_tensor_from_candle_cuda_borrow(&head_t_c).map_err(|e| {
+            candle_core::Error::Msg(format!(
+                "opd kt-shim fwd: borrow head_t: {e}"
+            ))
+        })?;
+
+        let per_position_kt = crate::opd_top_k_reverse_kl_per_position_kt(
+            &hidden_kt,
+            &head_t_kt,
             &indices_fwd,
             &logprobs_fwd,
             &mask_fwd,
             top_k,
-            &dev,
         )
         .map_err(|e| {
             candle_core::Error::Msg(format!(
-                "opd kt-shim fwd: phase-A per-position composite: {e}"
+                "opd kt-shim fwd: kt per-position call: {e}"
             ))
         })?;
-        // Phase A returns `[T_active]` F32 on `device`. The shim
-        // expects a candle CUDA tensor back; phase_a built it via
-        // `Tensor::from_vec(..., device)` / `matmul` / etc., so it's
-        // already on the input device. Force contiguous before the
-        // shim unwraps storage, since the trailing `sum(D::Minus1)`
-        // can produce a non-contiguous view in some shape regimes.
+
+        // The kt entry returns `[T_active]` F32. The trailing
+        // `sum_axis(1)` in `per_position_forward_kt` can yield a
+        // non-contiguous view in some regimes, so be defensive
+        // before the copy-back.
+        let per_position_kt_c = if per_position_kt.is_contiguous() {
+            per_position_kt
+        } else {
+            per_position_kt.contiguous().map_err(|e| {
+                candle_core::Error::Msg(format!(
+                    "opd kt-shim fwd: contiguous per_position: {e}"
+                ))
+            })?
+        };
+
+        let per_position = kt_tensor_to_candle_cuda_copy(&per_position_kt_c).map_err(|e| {
+            candle_core::Error::Msg(format!(
+                "opd kt-shim fwd: copy-back per_position: {e}"
+            ))
+        })?;
+
         per_position.contiguous().map_err(|e| {
             candle_core::Error::Msg(format!(
                 "opd kt-shim fwd: contiguous per-position: {e}"
