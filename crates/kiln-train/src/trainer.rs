@@ -12738,7 +12738,15 @@ mod tests {
             .flatten_all()?
             .to_vec1::<f32>()?;
 
-        let hidden_vk_base = VkTensor::from_candle(hidden, Arc::clone(&vk_device))?;
+        // Candle-free uploads: the host f32 slices that fed `hidden_var`,
+        // `weight`, and `ref_log_probs_t` are still in scope, so go
+        // straight to VkTensor leaves instead of doing a
+        // `Tensor::from_vec → VkTensor::from_candle` round-trip. (#1082)
+        let hidden_vk_base = VkTensor::from_f32_slice(
+            &hidden_data,
+            vec![num_active, hidden_dim],
+            Arc::clone(&vk_device),
+        )?;
         let hidden_vk = VkTensor::parameter(
             Arc::clone(hidden_vk_base.buffer()),
             hidden_vk_base.shape().to_vec(),
@@ -12746,8 +12754,16 @@ mod tests {
             Arc::clone(hidden_vk_base.device()),
             TensorId::next(),
         );
-        let weight_vk = VkTensor::from_candle(&weight, Arc::clone(&vk_device))?;
-        let ref_vk = VkTensor::from_candle(&ref_log_probs_t, Arc::clone(&vk_device))?;
+        let weight_vk = VkTensor::from_f32_slice(
+            &weight_data,
+            vec![vocab, hidden_dim],
+            Arc::clone(&vk_device),
+        )?;
+        let ref_vk = VkTensor::from_f32_slice(
+            ref_log_probs.as_slice(),
+            vec![ref_log_probs.len()],
+            Arc::clone(&vk_device),
+        )?;
 
         let vk_log_probs = vk_selected_log_probs(&hidden_vk, &weight_vk, &labels, 4)?;
         let vk_loss = vk_grpo_loss(

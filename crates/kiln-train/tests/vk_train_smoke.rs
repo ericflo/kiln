@@ -59,8 +59,10 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 }
 
 fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &candle_core::Device::Cpu)?;
-    VkTensor::from_candle(&t, Arc::clone(dev))
+    // Candle-free upload: go straight from the host f32 slice to a
+    // VkTensor leaf via the kt-native `from_f32_slice`, skipping the
+    // `Tensor::from_vec → VkTensor::from_candle` round-trip. (#1082)
+    VkTensor::from_f32_slice(data, shape.to_vec(), Arc::clone(dev))
 }
 
 fn linspace(n: usize, start: f32, end: f32) -> Vec<f32> {

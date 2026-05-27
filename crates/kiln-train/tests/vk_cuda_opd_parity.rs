@@ -144,12 +144,16 @@ fn run_vulkan_per_position(
     }
     let active_count = active_hidden.len() / hidden_size;
 
-    let hidden_candle =
-        Tensor::from_vec(active_hidden, (active_count, hidden_size), &candle_core::Device::Cpu)?;
-    let head_candle =
-        Tensor::from_vec(head_vh.to_vec(), (vocab_size, hidden_size), &candle_core::Device::Cpu)?;
-    let hidden_vt = VkTensor::from_candle(&hidden_candle, Arc::clone(dev))?;
-    let head_vt = VkTensor::from_candle(&head_candle, Arc::clone(dev))?;
+    // Candle-free upload of pre-gathered host slices: skip the
+    // `Tensor::from_vec → VkTensor::from_candle` round-trip and feed
+    // bytes straight into the Vulkan device. (#1082)
+    let hidden_vt = VkTensor::from_f32_slice(
+        &active_hidden,
+        vec![active_count, hidden_size],
+        Arc::clone(dev),
+    )?;
+    let head_vt =
+        VkTensor::from_f32_slice(head_vh, vec![vocab_size, hidden_size], Arc::clone(dev))?;
     let _ = seq_len;
     let per_pos = vk_opd_top_k_reverse_kl_per_position(&hidden_vt, &head_vt, idx, lpq, top_k)?;
     per_pos.to_vec_f32()
