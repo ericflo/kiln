@@ -122,10 +122,11 @@ pub fn alloc_cuda_tensor(
     dtype: KtDType,
     shape: Vec<usize>,
 ) -> Result<KtTensor, BridgeError> {
-    let candle_device = source.candle_device().clone();
+    // cuda_zeros_ctx (#1082) derives the candle device internally from
+    // device_index, so we don't read .candle_device() off source.
     let device_index = source.device().index().unwrap_or(0);
     let n: usize = shape.iter().product();
-    let storage = kiln_tensor::cuda_zeros(candle_device, device_index, dtype, n)
+    let storage = kiln_tensor::cuda_zeros_ctx(device_index, dtype, n)
         .map_err(|e| BridgeError::new(format!("kt-bridge alloc: {e}")))?;
     KtTensor::from_parts(
         storage,
