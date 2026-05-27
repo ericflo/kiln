@@ -3420,6 +3420,33 @@ pub fn dispatch_linear_decode_sample_bytes(
 ///
 /// This is intended for greedy batched LM-head decode. It keeps the vocab
 /// logits on the Vulkan device and reads back only `[batch]` token ids.
+pub fn dispatch_linear_decode_argmax_batched_cached_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_t: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    out_dim: usize,
+) -> Result<Vec<u32>> {
+    dispatch_linear_decode_argmax_batched_cached_impl_bytes(
+        vk_device, x_data, weight_t, batch, hidden, out_dim, false,
+    )
+}
+
+pub fn dispatch_linear_decode_argmax_batched_cached_bf16_weights_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_t: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    out_dim: usize,
+) -> Result<Vec<u32>> {
+    dispatch_linear_decode_argmax_batched_cached_impl_bytes(
+        vk_device, x_data, weight_t, batch, hidden, out_dim, true,
+    )
+}
+
+// Tensor-typed wrappers kept temporarily for callers that haven't migrated yet (#1082).
 pub fn dispatch_linear_decode_argmax_batched_cached(
     vk_device: &VulkanDevice,
     x: &Tensor,
@@ -3428,8 +3455,9 @@ pub fn dispatch_linear_decode_argmax_batched_cached(
     hidden: usize,
     out_dim: usize,
 ) -> Result<Vec<u32>> {
-    dispatch_linear_decode_argmax_batched_cached_impl(
-        vk_device, x, weight_t, batch, hidden, out_dim, false,
+    let x_data = extract_tensor_bytes(x)?.0;
+    dispatch_linear_decode_argmax_batched_cached_bytes(
+        vk_device, &x_data, weight_t, batch, hidden, out_dim,
     )
 }
 
@@ -3441,14 +3469,15 @@ pub fn dispatch_linear_decode_argmax_batched_cached_bf16_weights(
     hidden: usize,
     out_dim: usize,
 ) -> Result<Vec<u32>> {
-    dispatch_linear_decode_argmax_batched_cached_impl(
-        vk_device, x, weight_t, batch, hidden, out_dim, true,
+    let x_data = extract_tensor_bytes(x)?.0;
+    dispatch_linear_decode_argmax_batched_cached_bf16_weights_bytes(
+        vk_device, &x_data, weight_t, batch, hidden, out_dim,
     )
 }
 
-fn dispatch_linear_decode_argmax_batched_cached_impl(
+fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
     vk_device: &VulkanDevice,
-    x: &Tensor,
+    x_data: &[u8],
     weight_t: &VulkanBuffer,
     batch: usize,
     hidden: usize,
@@ -3465,7 +3494,6 @@ fn dispatch_linear_decode_argmax_batched_cached_impl(
         out_dim > 0,
         "batched linear argmax: out_dim must be nonzero"
     );
-    let x_data = extract_tensor_bytes(x)?.0;
     anyhow::ensure!(
         x_data.len() == batch * hidden * 4,
         "batched linear argmax: x buffer has {} bytes, expected {}",

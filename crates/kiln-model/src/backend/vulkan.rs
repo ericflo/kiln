@@ -2742,11 +2742,12 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(x)?.0;
         let tokens = if self.use_bf16_packed_linear_weight(weight_t) {
             let weight_buf = self.cached_bf16_packed_weight_buffer(weight_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached_bf16_weights(
+            kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached_bf16_weights_bytes(
                 vk_device,
-                x,
+                &x_data,
                 &weight_buf,
                 batch,
                 hidden,
@@ -2754,9 +2755,9 @@ impl BackendRuntime for VulkanBackend {
             )
         } else {
             let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached(
+            kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached_bytes(
                 vk_device,
-                x,
+                &x_data,
                 &weight_buf,
                 batch,
                 hidden,
