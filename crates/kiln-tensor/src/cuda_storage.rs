@@ -115,24 +115,32 @@ impl CudaStorage {
     /// `device_index` is the CUDA device index — must match the index
     /// of the candle device's owning context. Stored as the
     /// [`Device::Cuda`] variant.
+    ///
+    /// #1082 substrate fold: this is now a thin wrapper around
+    /// [`Self::zeros_ctx`]. It derives the cudarc `CudaContext` from
+    /// `candle_device.cuda_stream().context().clone()` (the same
+    /// context candle's `CudaDevice` already wraps internally —
+    /// stream affinity is preserved because `ctx.default_stream()`
+    /// and `candle_device.cuda_stream()` both return the primary
+    /// context's default stream for the given ordinal). The
+    /// caller-provided `candle_device` overwrites the back-compat
+    /// field on the returned storage so existing kernel-crate FFI
+    /// sites that read `.candle_device()` keep getting the same
+    /// wrapper they passed in.
     pub fn zeros(
         candle_device: Arc<CudaDevice>,
         device_index: usize,
         dtype: DType,
         n_elements: usize,
     ) -> Result<Self> {
-        let byte_len = dtype.packed_buffer_bytes(n_elements);
-        let slice = candle_device
-            .alloc_zeros::<u8>(byte_len)
-            .map_err(|e| {
-                Error::Msg(format!("CudaStorage::zeros: alloc_zeros<u8>({byte_len}) failed: {e:?}"))
-            })?;
-        Ok(CudaStorage {
-            device: Device::Cuda(device_index),
-            dtype,
-            slice: SliceOwner::Owned(slice),
-            candle_device,
-        })
+        let ctx = candle_device.cuda_stream().context().clone();
+        let mut storage = Self::zeros_ctx(&ctx, device_index, dtype, n_elements)?;
+        // Substitute the caller's existing candle device wrapper for
+        // the one zeros_ctx derived via primary_cuda_device — keeps
+        // BLAS/cuRAND handle caches on the candle wrapper warm for
+        // every downstream call site that reads .candle_device().
+        storage.candle_device = candle_device;
+        Ok(storage)
     }
 
     /// Allocate `n_elements` worth of bytes for `dtype` on the cudarc
