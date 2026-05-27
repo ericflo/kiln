@@ -1549,8 +1549,6 @@ pub fn lora_add_inplace_f32_kt(
     Ok(())
 }
 
-/// `silu_inplace_save_sigmoid_f32` over kt operands.
-///
 /// Apply SiLU in place to `input_out`, simultaneously writing
 /// `sigmoid_out = sigmoid(input)` into a separate buffer (saved for
 /// the backward pass). Both buffers are F32 with the same element
@@ -2367,58 +2365,8 @@ mod kt_optimizer_step_regression {
     }
 }
 
-#[cfg(test)]
-mod kt_silu_save_sigmoid_regression {
-    //! Regression test for #1082: cuda training now uses the kt shell for
-    //! in-place SiLU while keeping the saved sigmoid buffer contract.
-    use super::*;
-    use crate::silu_inplace_save_sigmoid_f32;
-    use candle_core::{DType, Device, Tensor};
-
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-    #[test]
-    fn silu_inplace_save_sigmoid_kt_matches_candle() -> TestResult {
-        let device = match Device::new_cuda(0) {
-            Ok(device) => device,
-            Err(err) => {
-                eprintln!(
-                    "CUDA unavailable, skipping silu_inplace_save_sigmoid_kt_matches_candle: {err}"
-                );
-                return Ok(());
-            }
-        };
-
-        let data = [-3.0f32, -1.0, -0.125, 0.0, 0.5, 2.0, 4.0, 8.0];
-        let candle_input = Tensor::from_vec(data.to_vec(), (data.len(),), &device)?;
-        let kt_input = Tensor::from_vec(data.to_vec(), (data.len(),), &device)?;
-        let (_candle_out, candle_sigmoid) = silu_inplace_save_sigmoid_f32(&candle_input)?;
-
-        let kt_sigmoid = unsafe {
-            Tensor::empty(kt_input.shape().clone(), DType::F32, kt_input.device())?
-        };
-        let input_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&kt_input)?;
-        let sigmoid_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&kt_sigmoid)?;
-        silu_inplace_save_sigmoid_f32_kt(&input_kt, &sigmoid_kt)?;
-
-        for (name, candle, kt) in [
-            ("output", &candle_input, &kt_input),
-            ("sigmoid", &candle_sigmoid, &kt_sigmoid),
-        ] {
-            let diff = {
-                let candle_f32 = candle.to_dtype(DType::F32)?;
-                let kt_f32 = kt.to_dtype(DType::F32)?;
-                (&candle_f32 - &kt_f32)?
-                    .abs()?
-                    .flatten_all()?
-                    .max(0)?
-                    .to_scalar::<f32>()?
-            };
-            assert!(
-                diff <= 1e-6,
-                "{name} kt vs candle silu-save-sigmoid max_abs_diff={diff:e}"
-            );
-        }
-        Ok(())
-    }
-}
+// Note: the candle-vs-kt regression test `silu_inplace_save_sigmoid_kt_matches_candle`
+// was deleted in (#1082) when its candle-typed parity oracle
+// (`silu_inplace_save_sigmoid_f32`) was removed. The kt-typed entry
+// `silu_inplace_save_sigmoid_f32_kt` is covered by the `tests/kt_v2_smoke.rs`
+// integration test and the in-crate fmh CustomOp1 backing it.

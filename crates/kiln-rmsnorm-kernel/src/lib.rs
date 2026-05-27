@@ -1364,65 +1364,6 @@ pub fn causal_depthwise_conv1d_f32_inplace(
     Ok(input_out.clone())
 }
 
-pub fn silu_inplace_save_sigmoid_f32(input_out: &Tensor) -> Result<(Tensor, Tensor)> {
-    if input_out.dtype() != DType::F32 {
-        candle_core::bail!(
-            "silu_inplace_save_sigmoid_f32: expected F32 input, got {:?}",
-            input_out.dtype()
-        );
-    }
-    if !input_out.is_contiguous() {
-        candle_core::bail!("silu_inplace_save_sigmoid_f32: input must be contiguous");
-    }
-    let elems = input_out.elem_count();
-    if elems > i64::MAX as usize {
-        candle_core::bail!(
-            "silu_inplace_save_sigmoid_f32: element count exceeds i64 kernel envelope"
-        );
-    }
-    if elems == 0 {
-        let sigmoid =
-            unsafe { Tensor::empty(input_out.shape().clone(), DType::F32, input_out.device())? };
-        return Ok((input_out.clone(), sigmoid));
-    }
-
-    let sigmoid =
-        unsafe { Tensor::empty(input_out.shape().clone(), DType::F32, input_out.device())? };
-    {
-        let (storage, layout) = input_out.storage_and_layout();
-        let cuda = match &*storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("silu_inplace_save_sigmoid_f32: input must be CUDA"),
-        };
-        let (sigmoid_storage, sigmoid_layout) = sigmoid.storage_and_layout();
-        let sigmoid_cuda = match &*sigmoid_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("silu_inplace_save_sigmoid_f32: sigmoid output must be CUDA"),
-        };
-        let stream = cuda.device().cuda_stream();
-        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
-        let slice = cuda.as_cuda_slice::<f32>()?.slice(layout.start_offset()..);
-        let sigmoid_slice = sigmoid_cuda
-            .as_cuda_slice::<f32>()?
-            .slice(sigmoid_layout.start_offset()..);
-
-        let status = unsafe {
-            let (ptr, _guard) = slice.device_ptr(&stream);
-            let (sigmoid_ptr, _sigmoid_guard) = sigmoid_slice.device_ptr(&stream);
-            kiln_silu_inplace_save_sigmoid_f32(
-                ptr as *mut f32,
-                sigmoid_ptr as *mut f32,
-                elems as i64,
-                raw_stream,
-            )
-        };
-        if status != 0 {
-            candle_core::bail!("kiln_silu_inplace_save_sigmoid_f32 failed with status {status}");
-        }
-    }
-    Ok((input_out.clone(), sigmoid))
-}
-
 pub fn causal_depthwise_conv1d_f32_bwd_input(grad_out: &Tensor, weight: &Tensor) -> Result<Tensor> {
     let (rows, channels) = grad_out.dims2()?;
     let kernel = *weight.dims().last().ok_or_else(|| {
