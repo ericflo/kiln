@@ -6265,14 +6265,48 @@ pub fn dispatch_gdn_gated_rms_norm_cached(
     eps: f32,
     out_shape: &[usize],
 ) -> Result<Tensor> {
+    let x_data = extract_tensor_bytes(x)?.0;
+    let z_data = extract_tensor_bytes(z)?.0;
+    let output_dtype = x.dtype();
+    let output_data = dispatch_gdn_gated_rms_norm_cached_bytes_core(
+        vk_device, &x_data, &z_data, weight, hidden, eps, out_shape,
+    )?;
+    create_tensor_from_data(&output_data, out_shape, output_dtype)
+        .context("failed to create gdn_gated_rms_norm output tensor")
+}
+
+/// Candle-free variant of [`dispatch_gdn_gated_rms_norm_cached`].
+///
+/// Takes `x` and `z` as raw f32 bytes (each with shape `out_shape`)
+/// plus the cached `weight` VulkanBuffer, and returns the output as
+/// raw f32 bytes with the same `out_shape`. (#1082)
+pub fn dispatch_gdn_gated_rms_norm_cached_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    z_data: &[u8],
+    weight: &VulkanBuffer,
+    hidden: usize,
+    eps: f32,
+    out_shape: &[usize],
+) -> Result<Vec<u8>> {
+    dispatch_gdn_gated_rms_norm_cached_bytes_core(
+        vk_device, x_data, z_data, weight, hidden, eps, out_shape,
+    )
+}
+
+fn dispatch_gdn_gated_rms_norm_cached_bytes_core(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    z_data: &[u8],
+    weight: &VulkanBuffer,
+    hidden: usize,
+    eps: f32,
+    out_shape: &[usize],
+) -> Result<Vec<u8>> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
-
-    // Extract input data
-    let x_data = extract_tensor_bytes(x)?.0;
-    let z_data = extract_tensor_bytes(z)?.0;
 
     // Compile shader
     let glsl_path = concat!(
@@ -6309,7 +6343,7 @@ pub fn dispatch_gdn_gated_rms_norm_cached(
     let output_data = if gdn_gated_norm_single_submit_enabled() {
         run_compute_pipeline_with_transfers_readback(
             vk_device,
-            &[(&x_buf, &x_data), (&z_buf, &z_data)],
+            &[(&x_buf, x_data), (&z_buf, z_data)],
             &out_buf,
             output_size,
             &spirv,
@@ -6326,7 +6360,7 @@ pub fn dispatch_gdn_gated_rms_norm_cached(
                 host_visible_mt,
                 queue,
                 *command_pool,
-                &[(&x_buf, &x_data), (&z_buf, &z_data)],
+                &[(&x_buf, x_data), (&z_buf, z_data)],
             )?;
         } else {
             let command_pool = vk_device.transient_command_pool()?;
@@ -6336,7 +6370,7 @@ pub fn dispatch_gdn_gated_rms_norm_cached(
                 queue,
                 *command_pool,
                 &x_buf,
-                &x_data,
+                x_data,
             )?;
             VulkanBuffer::upload_data_with_command_pool(
                 device,
@@ -6344,7 +6378,7 @@ pub fn dispatch_gdn_gated_rms_norm_cached(
                 queue,
                 *command_pool,
                 &z_buf,
-                &z_data,
+                z_data,
             )?;
         }
 
@@ -6372,8 +6406,7 @@ pub fn dispatch_gdn_gated_rms_norm_cached(
     drop(z_buf);
     drop(out_buf);
 
-    create_tensor_from_data(&output_data, out_shape, x.dtype())
-        .context("failed to create gdn_gated_rms_norm output tensor")
+    Ok(output_data)
 }
 
 /// Dispatch causal_conv1d update kernel (single-token decode path).
