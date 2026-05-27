@@ -6488,6 +6488,23 @@ impl GpuWeights {
             .count()
     }
 
+    /// kt-typed device accessor for the weight tensors (#1082 Tier 3).
+    ///
+    /// Returns the `kiln_tensor::Device` corresponding to the candle
+    /// device that backs the `embed_tokens` tensor. Callers (in
+    /// `kiln-server`) that currently do `weights.embed_tokens.device()`
+    /// and feed the resulting `&candle_core::Device` into downstream
+    /// candle APIs can use this accessor to surface a kt Device at the
+    /// public boundary while the internal storage stays candle-typed.
+    ///
+    /// Until `GpuWeights` migrates off candle Tensors (the Tier 3
+    /// `KtWeights` rewrite this commit is downstream of), this is the
+    /// only canonical kt-typed accessor on the struct's surface.
+    #[cfg(feature = "cuda")]
+    pub fn device_kt(&self) -> kiln_tensor::Device {
+        kiln_kt_bridge::kt_device_from_candle(self.embed_tokens.device())
+    }
+
     /// Convert `ModelWeights` (CPU bytes) into candle tensors on the given device.
     ///
     /// `config` is used to precompute the rotary `inv_freq` tensor once so the RoPE
