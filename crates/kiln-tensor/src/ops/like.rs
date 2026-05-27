@@ -53,13 +53,12 @@ pub fn full_like(t: &Tensor, value: f32) -> Result<Tensor> {
             TensorId::next(),
         )?;
         // Lift to CUDA on the same device as the source.
-        let cuda_storage = t
-            .storage()
-            .as_any()
-            .downcast_ref::<crate::CudaStorage>()
-            .ok_or_else(|| Error::from_str("full_like: input claims CUDA device but storage is not CudaStorage"))?;
-        let candle_device = cuda_storage.candle_device().clone();
-        return crate::host_to_cuda_copy(&cpu_t, candle_device, device_index);
+        //
+        // host_to_cuda_copy_ctx (#1082) derives the candle device
+        // internally from device_index, so we don't need to downcast
+        // the source storage just to forward .candle_device().clone()
+        // into the helper.
+        return crate::host_to_cuda_copy_ctx(&cpu_t, device_index);
     }
 
     let dtype = t.dtype();
