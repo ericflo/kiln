@@ -2536,8 +2536,16 @@ pub fn save_cuda_lora_adapter_dir(
 
 #[cfg(test)]
 mod tests {
+    // NOTE(#1082): `Device` and `Tensor` are inherited from `use super::*`
+    // (re-exported via the module-level `use candle_core::{DType, Device, Tensor, TensorId}`).
+    // Removing the redundant local candle_core import reduces this file's
+    // candle import count by 1 as part of full candle removal (#1082).
+    // TODO(#1082): the remaining module-level candle_core import is blocked
+    // by pervasive `CudaTrainTensor::new(Tensor::...)` construction (245+
+    // sites) and `candle_core::safetensors::{save,load}` I/O — those need
+    // a coordinated kt-typed wrapper landing before this file can drop
+    // candle entirely.
     use super::*;
-    use candle_core::{Device, Tensor};
     use kiln_model::cuda_train::CudaOwnedFullAttentionLayer;
 
     fn test_lora_pair(
