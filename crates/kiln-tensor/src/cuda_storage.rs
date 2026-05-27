@@ -107,47 +107,14 @@ pub struct CudaStorage {
     /// stream affinity — every kernel-launch path reads
     /// `self.ctx.default_stream()` to get the primary stream handle.
     /// Replaces the previous `candle_device: Arc<CudaDevice>` field
-    /// (#1082 CP-1 final lift). Callers that still need the candle
-    /// `Arc<CudaDevice>` derive it via `self.candle_device()` which
-    /// routes through `primary_cuda_device(device_index)`.
+    /// (#1082 CP-1 final lift). With the `.candle_device()` accessor
+    /// removed (#1082 aggressive cleanup), callers that need a candle
+    /// `Arc<CudaDevice>` must derive one externally via
+    /// [`primary_cuda_device`] from `self.device()`.
     ctx: Arc<CudaContext>,
 }
 
 impl CudaStorage {
-    /// Allocate `n_elements` worth of bytes for `dtype` on
-    /// `candle_device`. Buffer is zero-initialized via candle's
-    /// `alloc_zeros::<u8>(n)`.
-    ///
-    /// `device_index` is the CUDA device index — must match the index
-    /// of the candle device's owning context. Stored as the
-    /// [`Device::Cuda`] variant.
-    ///
-    /// #1082 substrate fold: this is now a thin wrapper around
-    /// [`Self::zeros_ctx`]. It derives the cudarc `CudaContext` from
-    /// `candle_device.cuda_stream().context().clone()` (the same
-    /// context candle's `CudaDevice` already wraps internally —
-    /// stream affinity is preserved because `ctx.default_stream()`
-    /// and `candle_device.cuda_stream()` both return the primary
-    /// context's default stream for the given ordinal). The
-    /// caller-provided `candle_device` overwrites the back-compat
-    /// field on the returned storage so existing kernel-crate FFI
-    /// sites that read `.candle_device()` keep getting the same
-    /// wrapper they passed in.
-    pub fn zeros(
-        candle_device: Arc<CudaDevice>,
-        device_index: usize,
-        dtype: DType,
-        n_elements: usize,
-    ) -> Result<Self> {
-        let ctx = candle_device.cuda_stream().context().clone();
-        // #1082 CP-1 final lift: field is now `ctx: Arc<CudaContext>`,
-        // so the candle wrapper is discarded after deriving the
-        // context (it's the same primary context that every candle
-        // CudaDevice for this ordinal wraps internally — stream
-        // affinity is preserved).
-        Self::zeros_ctx(&ctx, device_index, dtype, n_elements)
-    }
-
     /// Allocate `n_elements` worth of bytes for `dtype` on the cudarc
     /// `CudaContext` `ctx`, **candle-free** in the allocation path.
     ///
@@ -160,38 +127,11 @@ impl CudaStorage {
     /// ordinal of `ctx`'s owning device. Stored as the
     /// [`Device::Cuda`] variant.
     ///
-    /// # Storage no longer holds a candle device
-    ///
-    /// After the #1082 CP-1 final lift the storage holds an
-    /// `Arc<CudaContext>` directly. Kernel-crate FFI sites that still
-    /// need a candle `Arc<CudaDevice>` derive it on-demand via the
-    /// `.candle_device()` accessor, which routes through
-    /// [`primary_cuda_device`] and returns a fresh owned Arc. Every
-    /// path that only needs the stream pointer should use
-    /// `cuda_stream_raw()` (or read `.context()` and call
-    /// `.default_stream()`) to avoid the candle materialization.
-    ///
-    /// # Stream-affinity contract
-    ///
-    /// Both `ctx.default_stream()` and the candle `CudaDevice` returned
-    /// by `primary_cuda_device(device_index)` wrap the SAME underlying
-    /// CUDA primary context for the given ordinal (candle's
-    /// `BackendDevice::new` calls `context.default_stream()` itself —
-    /// see `vendor/candle-core/src/cuda_backend/device.rs:279`). So
-    /// the allocation lands on the same logical CUDA stream that every
-    /// kernel-crate FFI will read via either accessor.
-    /// This matches the existing default-stream allocation path used by
-    /// [`Self::zeros`] today.
-    ///
-    /// # Future direction
-    ///
-    /// Once every kernel-crate FFI site migrates to the candle-free
-    /// stream accessor (`cuda_stream_raw()`), the storage's
-    /// candle device materialization on the storage side is fully
-    /// retired. `Self::zeros` is retained as a back-compat wrapper
-    /// taking a candle `Arc<CudaDevice>` and folding to this entry.
-    /// See the order-of-operations doc in `cuda_allocator.rs` lines
-    /// 75-95.
+    /// #1082: this is now the **sole** zeros constructor on `CudaStorage`.
+    /// The candle-typed `Self::zeros(candle_device, ...)` back-compat
+    /// wrapper has been deleted; the free function [`cuda_zeros`] still
+    /// accepts a candle device for external callers (kiln-model) and
+    /// internally derives the ctx and routes here.
     pub fn zeros_ctx(
         ctx: &Arc<CudaContext>,
         device_index: usize,
@@ -219,32 +159,18 @@ impl CudaStorage {
         })
     }
 
-    /// Wrap an existing `CudaSlice<u8>` allocated by the caller.
-    ///
-    /// Validates the slice length against
-    /// `dtype.size_in_bytes()` for non-packed dtypes (must be a
-    /// multiple); packed dtypes have no per-element alignment.
-    pub fn from_slice(
-        candle_device: Arc<CudaDevice>,
-        device_index: usize,
-        dtype: DType,
-        slice: CudaSlice<u8>,
-    ) -> Result<Self> {
-        // #1082 substrate fold: thin wrapper around [`Self::from_slice_ctx`]
-        // — derives the cudarc `CudaContext` from the caller-supplied
-        // candle wrapper. Future signature flip drops the candle wrapper.
-        let ctx = candle_device.cuda_stream().context().clone();
-        Self::from_slice_ctx(&ctx, device_index, dtype, slice)
-    }
-
     /// Wrap an existing `CudaSlice<u8>` allocated by the caller —
     /// **candle-free** entry point.
     ///
-    /// Same validation contract as [`Self::from_slice`] (slice length
-    /// must be a multiple of `dtype.size_in_bytes()` for non-packed
-    /// dtypes), but takes a cudarc `Arc<CudaContext>` directly. No
-    /// candle `CudaDevice` materialization happens on the storage
+    /// Validates slice length against `dtype.size_in_bytes()` for
+    /// non-packed dtypes (must be a multiple); packed dtypes have no
+    /// per-element alignment. Takes a cudarc `Arc<CudaContext>` directly
+    /// — no candle `CudaDevice` materialization happens on the storage
     /// side.
+    ///
+    /// #1082: this is now the **sole** from-slice constructor on
+    /// `CudaStorage`. The candle-typed `Self::from_slice(candle_device, ...)`
+    /// back-compat wrapper has been deleted.
     pub fn from_slice_ctx(
         ctx: &Arc<CudaContext>,
         device_index: usize,
@@ -272,7 +198,7 @@ impl CudaStorage {
     }
 
     /// Wrap an externally-owned CUDA buffer as a kt `CudaStorage`
-    /// without copying.
+    /// without copying — **candle-free** entry point.
     ///
     /// `keep_alive` is an opaque Arc that must outlive every read
     /// from `device_ptr`. Typical pattern: pass an Arc-wrapped candle
@@ -282,34 +208,16 @@ impl CudaStorage {
     /// `device_ptr` + `byte_len` describe the borrowed region. The
     /// caller is responsible for the byte_len matching dtype × element
     /// count (this constructor does the same alignment check as
-    /// [`Self::from_slice`]).
+    /// [`Self::from_slice_ctx`]).
     ///
     /// The Phase 7 zero-copy candle→kt adapter is the canonical
     /// caller. Kernel-crate kt-API sites that reach `.slice()` will
     /// panic on a borrowed storage — they must migrate to the
     /// dtype/owner-aware accessor that lands alongside the adapter.
-    pub fn from_borrowed(
-        candle_device: Arc<CudaDevice>,
-        device_index: usize,
-        dtype: DType,
-        device_ptr: CUdeviceptr,
-        byte_len: usize,
-        keep_alive: Arc<dyn Any + Send + Sync>,
-    ) -> Result<Self> {
-        // #1082 substrate fold: thin wrapper around
-        // [`Self::from_borrowed_ctx`] — derives ctx from the caller-supplied
-        // candle wrapper. Future signature flip drops the candle wrapper.
-        let ctx = candle_device.cuda_stream().context().clone();
-        Self::from_borrowed_ctx(&ctx, device_index, dtype, device_ptr, byte_len, keep_alive)
-    }
-
-    /// Wrap an externally-owned CUDA buffer as a kt `CudaStorage`
-    /// without copying — **candle-free** entry point parallel to
-    /// [`Self::from_borrowed`].
     ///
-    /// Same `keep_alive` / alignment-check contract as `from_borrowed`,
-    /// but takes a cudarc `Arc<CudaContext>` directly. No candle
-    /// `CudaDevice` materialization happens on the storage side.
+    /// #1082: this is now the **sole** from-borrowed constructor on
+    /// `CudaStorage`. The candle-typed `Self::from_borrowed(candle_device, ...)`
+    /// back-compat wrapper has been deleted.
     pub fn from_borrowed_ctx(
         ctx: &Arc<CudaContext>,
         device_index: usize,
@@ -411,41 +319,10 @@ impl CudaStorage {
         }
     }
 
-    /// The candle CUDA device handle this storage was allocated on.
-    /// Used by FFI sites + the Phase 1.x `StreamPlanner` to read
-    /// stream affinity.
-    ///
-    /// # #1082 CP-1 final lift: now derived, not stored
-    ///
-    /// The previous `candle_device: Arc<CudaDevice>` field was dropped
-    /// in favor of `ctx: Arc<CudaContext>` (#1082). This accessor now
-    /// returns a freshly-derived `Arc<CudaDevice>` via
-    /// [`primary_cuda_device`] on every call — the result wraps the
-    /// same primary CUDA context that `self.ctx` points to, so stream
-    /// affinity is preserved. Note the signature change from
-    /// `&Arc<CudaDevice>` to owned `Arc<CudaDevice>`; the previous
-    /// reference form is impossible without a stored field.
-    ///
-    /// Callers that need the candle wrapper repeatedly should cache
-    /// the return value rather than re-deriving per access. Better
-    /// still, migrate to `.context()` and use the cudarc API directly
-    /// — every remaining `candle_device()` caller in `kiln-tensor` is
-    /// a back-compat bridge that should eventually go away under
-    /// #1082's broader candle-free push.
-    pub fn candle_device(&self) -> Arc<CudaDevice> {
-        primary_cuda_device(self.device_index())
-            .expect("CudaStorage::candle_device(): primary_cuda_device failed; this should be unreachable since the storage's ctx already lives on the same device")
-    }
-
-    /// Internal helper: extract the CUDA device ordinal stored on this
-    /// storage. Private alias for the `device` field's inner usize.
-    #[inline]
-    fn device_index(&self) -> usize {
-        match self.device {
-            Device::Cuda(i) => i,
-            _ => unreachable!("CudaStorage::device is always Cuda"),
-        }
-    }
+    // #1082: the previous private `device_index()` helper was retired
+    // alongside the public `candle_device()` accessor. Callers should
+    // pattern-match on `self.device()` directly (or read `self.context()`
+    // when they only need stream affinity).
 
     /// The underlying cudarc `CudaContext` this storage was allocated
     /// on — **candle-free passthrough**.
