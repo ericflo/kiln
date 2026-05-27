@@ -156,6 +156,40 @@ impl PagedKvCache {
         )
     }
 
+    /// kt-typed parallel entry to [`Self::new_uninit`] (#1082).
+    ///
+    /// Convenience wrapper: same shape as [`Self::new_kt`] but
+    /// allocates pool tensors uninitialized (no eager device
+    /// zero-fill). Delegates to
+    /// [`Self::new_uninit_with_fp8_kt`] with `fp8=false`, so the
+    /// same `kt -> candle` bridging path applies — see that method
+    /// for error / Vulkan-CPU-placeholder semantics.
+    ///
+    /// As with [`Self::new_uninit`], unwritten slots contain
+    /// arbitrary data and must remain outside each sequence's
+    /// active `0..seq_len` window until populated by
+    /// [`Self::write`]. (#1082)
+    pub fn new_uninit_kt(
+        num_full_attn_layers: usize,
+        num_blocks: usize,
+        block_size: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        dtype: kiln_tensor::DType,
+        device: &kiln_tensor::Device,
+    ) -> Result<Self> {
+        Self::new_uninit_with_fp8_kt(
+            num_full_attn_layers,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            dtype,
+            device,
+            false,
+        )
+    }
+
     /// Create a new paged KV cache with optional FP8 quantization and zero-filled pools.
     pub fn new_with_fp8(
         num_full_attn_layers: usize,
@@ -177,6 +211,46 @@ impl PagedKvCache {
             device,
             fp8,
             PoolInit::Zeroed,
+        )
+    }
+
+    /// kt-typed parallel entry to [`Self::new_with_fp8`] (#1082).
+    ///
+    /// Zero-filled-pool sibling of [`Self::new_uninit_with_fp8_kt`].
+    /// Takes `kiln_tensor::DType` + `&kiln_tensor::Device`, bridges
+    /// at the boundary, and delegates to the candle-typed
+    /// constructor which routes through `PoolInit::Zeroed`. Use this
+    /// when callers may read positions that have not been written
+    /// yet (e.g. training paths that scan the full active window);
+    /// use [`Self::new_uninit_with_fp8_kt`] for inference paths that
+    /// stay strictly inside the written prefix.
+    ///
+    /// See [`Self::new_kt`] for the error / Vulkan-CPU-placeholder
+    /// semantics; they apply here verbatim. (#1082)
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_fp8_kt(
+        num_full_attn_layers: usize,
+        num_blocks: usize,
+        block_size: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        dtype: kiln_tensor::DType,
+        device: &kiln_tensor::Device,
+        fp8: bool,
+    ) -> Result<Self> {
+        let candle_dtype = kiln_kt_bridge::kt_dtype_to_candle(dtype)
+            .map_err(|e| anyhow::anyhow!("PagedKvCache::new_with_fp8_kt dtype: {e}"))?;
+        let candle_device = kiln_kt_bridge::candle_device_from_kt(device)
+            .map_err(|e| anyhow::anyhow!("PagedKvCache::new_with_fp8_kt device: {e}"))?;
+        Self::new_with_fp8(
+            num_full_attn_layers,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            candle_dtype,
+            &candle_device,
+            fp8,
         )
     }
 
