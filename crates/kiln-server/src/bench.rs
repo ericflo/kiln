@@ -121,6 +121,25 @@ fn runtime_backend_for_bench(
     Ok(backend)
 }
 
+/// Map the configured model dtype to the candle compute dtype used by the
+/// KV cache / paged cache allocators below. Consolidates five identical
+/// inline match blocks that previously appeared throughout this file
+/// (issue #1082, candle removal).
+fn kiln_config_dtype_to_candle(dtype: kiln_core::config::DType) -> candle_core::DType {
+    match dtype {
+        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
+        kiln_core::config::DType::FP16 => candle_core::DType::F16,
+        kiln_core::config::DType::FP32 => candle_core::DType::F32,
+    }
+}
+
+/// Returns true when the candle device is a Metal device. Routes through
+/// the kt-bridge so this file stops naming the candle Metal variant directly
+/// (issue #1082, candle removal).
+fn device_is_metal(device: &candle_core::Device) -> bool {
+    kiln_kt_bridge::kt_device_from_candle(device).backend() == kiln_tensor::Backend::Metal
+}
+
 struct BenchGdnRecurrentResidentStateScope<'a> {
     backend: &'a dyn kiln_model::BackendRuntime,
     active: bool,
@@ -709,11 +728,7 @@ fn bench_latency(
     let actual_prompt_tokens = prompt_token_ids.len();
 
     let device = weights.embed_tokens.device();
-    let dtype = match config.dtype {
-        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
-        kiln_core::config::DType::FP16 => candle_core::DType::F16,
-        kiln_core::config::DType::FP32 => candle_core::DType::F32,
-    };
+    let dtype = kiln_config_dtype_to_candle(config.dtype);
 
     let max_total = actual_prompt_tokens + max_output_tokens;
     let mut kv_cache = KvCache::new(
@@ -864,11 +879,7 @@ fn bench_latency_paged(
     let actual_prompt_tokens = prompt_token_ids.len();
 
     let device = weights.embed_tokens.device();
-    let dtype = match config.dtype {
-        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
-        kiln_core::config::DType::FP16 => candle_core::DType::F16,
-        kiln_core::config::DType::FP32 => candle_core::DType::F32,
-    };
+    let dtype = kiln_config_dtype_to_candle(config.dtype);
 
     let max_total = actual_prompt_tokens + max_output_tokens;
     let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
@@ -958,9 +969,7 @@ fn bench_latency_paged(
         )
         .context("paged prefill forward pass (streaming) failed")?;
         greedy_sample(&logits)?
-    } else if matches!(device, candle_core::Device::Metal(_))
-        || backend.supports_linear_decode_argmax()
-    {
+    } else if device_is_metal(device) || backend.supports_linear_decode_argmax() {
         model_forward_paged_last_token_greedy(
             &*backend,
             &prompt_token_ids,
@@ -1017,9 +1026,7 @@ fn bench_latency_paged(
         }
 
         let step_start = Instant::now();
-        next_token = if matches!(device, candle_core::Device::Metal(_))
-            || backend.supports_linear_decode_argmax()
-        {
+        next_token = if device_is_metal(device) || backend.supports_linear_decode_argmax() {
             model_forward_paged_next_token_greedy(
                 &*backend,
                 next_token,
@@ -1493,11 +1500,7 @@ fn bench_latency_skiplayer(
     let actual_prompt_tokens = prompt_token_ids.len();
 
     let device = weights.embed_tokens.device();
-    let dtype = match config.dtype {
-        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
-        kiln_core::config::DType::FP16 => candle_core::DType::F16,
-        kiln_core::config::DType::FP32 => candle_core::DType::F32,
-    };
+    let dtype = kiln_config_dtype_to_candle(config.dtype);
 
     // Skip-layer verifies `[last_token, draft_0, ..., draft_k-1]` in one
     // forward pass. Near the end of generation those speculative KV writes can
@@ -1705,11 +1708,7 @@ fn bench_latency_paged_skiplayer(
     let actual_prompt_tokens = prompt_token_ids.len();
 
     let device = weights.embed_tokens.device();
-    let dtype = match config.dtype {
-        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
-        kiln_core::config::DType::FP16 => candle_core::DType::F16,
-        kiln_core::config::DType::FP32 => candle_core::DType::F32,
-    };
+    let dtype = kiln_config_dtype_to_candle(config.dtype);
 
     // Verification writes `[last_token, draft_0, ..., draft_k-1]` starting at
     // `base_pos`. Reserve headroom so late-generation verify windows do not
@@ -1981,11 +1980,7 @@ fn bench_latency_paged_mtp(
     let actual_prompt_tokens = prompt_token_ids.len();
 
     let device = weights.embed_tokens.device();
-    let dtype = match config.dtype {
-        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
-        kiln_core::config::DType::FP16 => candle_core::DType::F16,
-        kiln_core::config::DType::FP32 => candle_core::DType::F32,
-    };
+    let dtype = kiln_config_dtype_to_candle(config.dtype);
 
     // Reserve enough blocks to cover prompt + 2*max_output_tokens (each MTP
     // step writes up to 2 base-cache slots: [last_token, draft_token]).
