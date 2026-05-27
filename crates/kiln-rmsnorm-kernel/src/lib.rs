@@ -847,16 +847,15 @@ fn matmul_f32_bf16w_dims(lhs: &Tensor, weight: &Tensor) -> Result<(usize, usize,
     Ok((m, k, n))
 }
 
-pub fn supports_matmul_f32_bf16w(lhs: &Tensor, weight: &Tensor) -> bool {
-    matches!(lhs.device(), Device::Cuda(_))
+pub fn matmul_f32_bf16w(lhs: &Tensor, weight: &Tensor) -> Result<Tensor> {
+    // Inlined predicate (was `pub fn supports_matmul_f32_bf16w`, deleted in (#1082) —
+    // zero external callers, only the precondition check inside this fn).
+    let supports = matches!(lhs.device(), Device::Cuda(_))
         && matches!(weight.device(), Device::Cuda(_))
         && lhs.dtype() == DType::F32
         && weight.dtype() == DType::BF16
-        && matmul_f32_bf16w_dims(lhs, weight).is_ok()
-}
-
-pub fn matmul_f32_bf16w(lhs: &Tensor, weight: &Tensor) -> Result<Tensor> {
-    if !supports_matmul_f32_bf16w(lhs, weight) {
+        && matmul_f32_bf16w_dims(lhs, weight).is_ok();
+    if !supports {
         candle_core::bail!(
             "matmul_f32_bf16w unsupported lhs={:?} weight={:?} dtypes=({:?},{:?})",
             lhs.shape(),
