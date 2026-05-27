@@ -21,6 +21,7 @@ Use Qwen3.5's tokenizer for production harness runs.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shlex
@@ -93,6 +94,7 @@ class TokenBudget:
     def __init__(self, tokenizer_path: Path | None, require_tokenizer: bool = False):
         self.tokenizer_path = tokenizer_path
         self.tokenizer = None
+        self._count_cache: dict[str, int] = {}
         if tokenizer_path is not None:
             try:
                 from tokenizers import Tokenizer  # type: ignore
@@ -119,7 +121,15 @@ class TokenBudget:
     def count(self, text: str) -> int:
         if self.tokenizer is None:
             return max(1, (len(text) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN)
-        return len(self.tokenizer.encode(text).ids)
+        key = token_cache_key(text)
+        cached = self._count_cache.get(key)
+        if cached is not None:
+            return cached
+        count = len(self.tokenizer.encode(text).ids)
+        if len(self._count_cache) > 8192:
+            self._count_cache.clear()
+        self._count_cache[key] = count
+        return count
 
     def clip(self, text: str, token_limit: int) -> str:
         if self.count(text) <= token_limit:
@@ -158,6 +168,13 @@ def discover_tokenizer_path(explicit: str | None) -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def token_cache_key(text: str) -> str:
+    if len(text) <= 512:
+        return f"s:{text}"
+    digest = hashlib.blake2b(text.encode("utf-8", errors="ignore"), digest_size=16).hexdigest()
+    return f"b:{len(text)}:{digest}"
 
 
 def os_environ(key: str) -> str | None:
@@ -525,12 +542,21 @@ class RlmController:
         max_iters: int,
         max_depth: int,
         budget: TokenBudget,
+        adapter: str | None = None,
     ):
         self.upstream = upstream
         self.state_dir = state_dir
         self.max_iters = max_iters
         self.max_depth = max_depth
         self.budget = budget
+        self.adapter = adapter
+
+    def apply_adapter(self, payload: dict[str, Any], source: dict[str, Any] | None = None) -> dict[str, Any]:
+        if source is not None and "adapter" in source:
+            payload["adapter"] = source.get("adapter")
+        elif self.adapter is not None:
+            payload["adapter"] = self.adapter
+        return payload
 
     def run(
         self,
@@ -565,6 +591,7 @@ class RlmController:
                 "max_tokens": OUTPUT_TOKENS,
                 "chat_template_kwargs": {"enable_thinking": False},
             }
+            self.apply_adapter(root_payload, payload)
             raw = self.upstream.first_text(root_payload)
             action = first_json_object(raw)
             if action is None:
@@ -699,6 +726,7 @@ class RlmController:
                 "spawn_depth": depth + 1,
             },
         }
+        self.apply_adapter(child_payload, env.upstream_request)
         result = self.run(
             child_payload,
             depth + 1,
@@ -722,15 +750,15 @@ class RlmController:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": self.budget.clip(prompt, INPUT_TOKENS)})
         max_tokens = min(int(action.get("max_tokens", 1024)), OUTPUT_TOKENS)
-        text = self.upstream.first_text(
-            {
-                "model": action.get("model") or self.upstream.model,
-                "messages": messages,
-                "temperature": float(action.get("temperature", 0.0)),
-                "max_tokens": max_tokens,
-                "chat_template_kwargs": {"enable_thinking": False},
-            }
-        )
+        subcall_payload = {
+            "model": action.get("model") or self.upstream.model,
+            "messages": messages,
+            "temperature": float(action.get("temperature", 0.0)),
+            "max_tokens": max_tokens,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        self.apply_adapter(subcall_payload, action)
+        text = self.upstream.first_text(subcall_payload)
         return {"content": text}
 
     def finish(self, action: dict[str, Any], trace: list[dict[str, Any]]) -> RlmResult:
@@ -743,6 +771,7 @@ class RlmController:
         fallback = dict(payload)
         fallback["stream"] = False
         fallback["max_tokens"] = min(int(fallback.get("max_tokens", OUTPUT_TOKENS)), OUTPUT_TOKENS)
+        self.apply_adapter(fallback, payload)
         resp = self.upstream.chat(fallback)
         choices = resp.get("choices") or []
         if not choices:
@@ -1341,6 +1370,13 @@ def main() -> int:
     parser.add_argument("--listen", default=DEFAULT_LISTEN, help="HOST:PORT to serve")
     parser.add_argument("--upstream", default=DEFAULT_UPSTREAM, help="upstream OpenAI-compatible /v1 base URL")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="upstream model id")
+    parser.add_argument(
+        "--adapter",
+        help=(
+            "per-request Kiln adapter name for internal RLM calls; pass an "
+            "empty string to force the base model when the server has a default adapter"
+        ),
+    )
     parser.add_argument("--api-key", default="kiln", help="upstream API key")
     parser.add_argument("--state-dir", default=DEFAULT_STATE_DIR, help="directory for external RLM state")
     parser.add_argument("--max-iters", type=int, default=8, help="max root RLM actions per Pi turn")
@@ -1403,7 +1439,7 @@ def main() -> int:
             flush=True,
         )
     upstream = UpstreamClient(args.upstream, args.api_key, args.model)
-    controller = RlmController(upstream, Path(args.state_dir), args.max_iters, args.max_depth, budget)
+    controller = RlmController(upstream, Path(args.state_dir), args.max_iters, args.max_depth, budget, args.adapter)
     if args.eval_suite:
         report = run_eval_suite(
             controller,
