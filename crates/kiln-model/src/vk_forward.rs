@@ -89,28 +89,25 @@ impl VkLoraPair {
             .collect();
         let b_data: Vec<f32> = vec![0.0_f32; out_features * rank];
 
-        let a_t = Tensor::from_vec(a_data, (rank, in_features), &Device::Cpu)?;
-        let b_t = Tensor::from_vec(b_data, (out_features, rank), &Device::Cpu)?;
-        let a_vk = VkTensor::from_candle(&a_t, Arc::clone(device))?;
-        let b_vk = VkTensor::from_candle(&b_t, Arc::clone(device))?;
-        // Mint kt-native TensorIds for the LoRA parameter pair; the Vk
-        // optimizer book and grad store both key on these. (#1082)
-        let a_id = TensorId::next();
-        let b_id = TensorId::next();
-        let a = VkTensor::parameter(
-            Arc::clone(a_vk.buffer()),
-            a_vk.shape().to_vec(),
-            a_vk.dtype(),
-            Arc::clone(a_vk.device()),
-            a_id,
-        );
-        let b = VkTensor::parameter(
-            Arc::clone(b_vk.buffer()),
-            b_vk.shape().to_vec(),
-            b_vk.dtype(),
-            Arc::clone(b_vk.device()),
-            b_id,
-        );
+        // Candle-free upload: go straight from host f32 slices to VkTensor
+        // parameter leaves via the kt-native `parameter_from_f32_slice`
+        // path (which mints a fresh `TensorId` per leaf and is the
+        // candle-free replacement for the
+        // `Tensor::from_vec → VkTensor::from_candle → VkTensor::parameter`
+        // bridge). The leaf shape/dtype/device that the grad store and
+        // AdamW dispatch key on are unchanged. (#1082)
+        let a = VkTensor::parameter_from_f32_slice(
+            &a_data,
+            vec![rank, in_features],
+            Arc::clone(device),
+        )?;
+        let b = VkTensor::parameter_from_f32_slice(
+            &b_data,
+            vec![out_features, rank],
+            Arc::clone(device),
+        )?;
+        let a_id = a.param_id().expect("parameter leaf has TensorId");
+        let b_id = b.param_id().expect("parameter leaf has TensorId");
         Ok(Self {
             a,
             b,
@@ -366,10 +363,11 @@ pub fn vk_compute_rope_tables_range(
             sin[ti * half + hi] = f.sin();
         }
     }
-    let cos_t = Tensor::from_vec(cos, (len, half), &Device::Cpu)?;
-    let sin_t = Tensor::from_vec(sin, (len, half), &Device::Cpu)?;
-    let cos_vk = VkTensor::from_candle(&cos_t, Arc::clone(device))?;
-    let sin_vk = VkTensor::from_candle(&sin_t, Arc::clone(device))?;
+    // Candle-free upload: build VkTensor leaves directly from the
+    // computed host-side f32 cos/sin tables. Skips the
+    // `Tensor::from_vec → VkTensor::from_candle` round-trip. (#1082)
+    let cos_vk = VkTensor::from_f32_slice(&cos, vec![len, half], Arc::clone(device))?;
+    let sin_vk = VkTensor::from_f32_slice(&sin, vec![len, half], Arc::clone(device))?;
     Ok((cos_vk, sin_vk))
 }
 
