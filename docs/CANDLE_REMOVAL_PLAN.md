@@ -341,6 +341,21 @@ Remaining: per-backend `is_finite_storage` reduction kernels for
 Metal and Vulkan (CUDA done). Then enable the trap in the SFT
 parity CI.
 
+## Device-parametric kt constructors (FLCE bwd unblock) — 2026-05-26
+
+`Tensor::zeros_on(device, shape, dtype)` and
+`Tensor::from_vec_on::<E>(device, vec, shape)` land the substrate
+piece that lets `FlceCustomOp::bwd`'s kt chunk loop build its
+accumulator + per-chunk one-hot mask on the same device as the input
+`hidden`. Without these, the existing CPU-only `zeros_cpu` /
+`from_vec` constructors forced the loop to CPU and tripped
+`dispatch2`'s device-match check when called with a CUDA `hidden`.
+CPU + CUDA paths covered; Metal / Vulkan return `Err` until their
+substrate lands (the FLCE bwd kt-bridge can't hit those today).
+`scatter_add` CUDA forward already exists (axis=0, U32 1-D indices,
+F32/BF16 contig) via `cuda_scatter_add_dim0` — sufficient for FLCE
+bwd's scatter back into `[seq_len, hidden_size]`.
+
 ## Build matrix coverage required before each tier closes
 
 | Tier | Required CI green |
