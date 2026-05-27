@@ -53,7 +53,31 @@ use candle_core::{
     Tensor,
 };
 
+#[cfg(feature = "cuda")]
+use std::sync::OnceLock;
+
 use crate::{DEFAULT_CHUNK_SIZE, FlceProvider};
+
+/// Process-wide kill switch for [`fused_linear_cross_entropy_phase_b_backward_via_kt_bridge`].
+///
+/// Set `KILN_DISABLE_FLCE_BWD_KT_BRIDGE=1` to fall back to the candle-typed
+/// `backward_dhidden` path (same math; this is purely a reversibility /
+/// parity-test escape hatch). Mirrors the precedent established by
+/// `fused_rmsnorm_backward_via_kt_bridge` (commit `341da876`),
+/// `fused_rotary_one_backward_via_kt_bridge` (commit `d99a15a3`), and
+/// `opd_loss_phase_b_backward_via_kt_bridge` (commit `0c1be227`).
+#[cfg(feature = "cuda")]
+fn flce_bwd_kt_bridge_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        matches!(
+            std::env::var("KILN_DISABLE_FLCE_BWD_KT_BRIDGE")
+                .ok()
+                .as_deref(),
+            Some("1") | Some("true") | Some("TRUE")
+        )
+    })
+}
 
 /// Phase B entry point: chunked FLCE with a manual-backward [`CustomOp1`].
 ///
@@ -284,6 +308,42 @@ impl CustomOp1 for FlceCustomOp {
         _loss: &Tensor,
         grad_loss: &Tensor,
     ) -> candle_core::Result<Option<Tensor>> {
+        // CUDA kt-bridge fast path. Route through the kt-typed backward
+        // (`fused_linear_cross_entropy_phase_b_backward_kt`) when:
+        //   (a) hidden lives on CUDA,
+        //   (b) no `FlceProvider` is bound (the kt entry has no provider
+        //       hook; the candle path's provider escape is the parity
+        //       oracle for provider-bound chunk matmuls),
+        //   (c) the kill switch `KILN_DISABLE_FLCE_BWD_KT_BRIDGE=1` is not
+        //       set.
+        //
+        // FOURTH production migration of a candle `CustomOp::bwd` body to
+        // the kt bridge (after `RmsNormCustomOp::bwd` in commit `341da876`,
+        // `CudaRotaryOneBf16::bwd` in commit `d99a15a3`, and
+        // `OpdLossCustomOp::bwd` in commit `0c1be227`). The kt backward
+        // implements the same two-pass chunk-recompute algorithm as
+        // `backward_dhidden` over `kiln_tensor::Tensor` ops — numerically
+        // equivalent up to floating-point associativity in the chunked
+        // sum-exp accumulation. Falls back to the candle path on any
+        // bridge failure (borrow / kt FFI / copy-back) so a regression
+        // never silently breaks training.
+        #[cfg(feature = "cuda")]
+        {
+            let on_cuda = matches!(hidden.device(), Device::Cuda(_));
+            if on_cuda && self.provider.is_none() && !flce_bwd_kt_bridge_disabled() {
+                match fused_linear_cross_entropy_phase_b_backward_via_kt_bridge(
+                    self, hidden, grad_loss,
+                ) {
+                    Ok(dh) => return Ok(Some(dh)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "kiln-flce-kernel: kt-bridge bwd path failed, falling back to candle: {e}"
+                        );
+                    }
+                }
+            }
+        }
+
         backward_dhidden(
             hidden,
             &self.head_t,
@@ -296,6 +356,83 @@ impl CustomOp1 for FlceCustomOp {
         .map(Some)
         .map_err(|e| candle_core::Error::Msg(format!("flce phase b bwd: {e:#}")))
     }
+}
+
+/// kt-bridge variant of [`FlceCustomOp::bwd`] — borrows `hidden`/`head_t`/`grad_loss`
+/// as kt-Tensors and dispatches the same two-pass chunked recompute as the
+/// candle [`backward_dhidden`] via
+/// [`crate::kt_api::fused_linear_cross_entropy_phase_b_backward_kt`], then
+/// copies the resulting `dhidden` back into a candle `Tensor`.
+///
+/// `head_t` is captured by the op instance and may not be contiguous.
+/// `grad_loss` arrives as the upstream scalar gradient on the loss output
+/// and is cast to F32 + made contiguous before borrowing.
+///
+/// Falls back to the candle path when
+/// `KILN_DISABLE_FLCE_BWD_KT_BRIDGE=1` is set (handled by the caller) or
+/// on any bridge error.
+#[cfg(feature = "cuda")]
+fn fused_linear_cross_entropy_phase_b_backward_via_kt_bridge(
+    op: &FlceCustomOp,
+    hidden: &Tensor,
+    grad_loss: &Tensor,
+) -> std::result::Result<Tensor, candle_core::Error> {
+    use crate::kt_api::fused_linear_cross_entropy_phase_b_backward_kt;
+
+    // `head_t` is op state and may not be contiguous (the candle reference
+    // path materialises per-chunk slices itself). The kt borrow adapter
+    // requires contiguous inputs, so force-contiguous here and hold the
+    // local so its storage outlives the kt-Tensor borrow.
+    let head_t_c = op
+        .head_t
+        .contiguous()
+        .map_err(|e| candle_core::Error::Msg(format!("kt-bridge flce bwd: head_t contiguous: {e}")))?;
+
+    // `grad_loss` is the upstream scalar gradient (`d_loss / d_loss`,
+    // typically 1.0). The kt entry casts and reshapes internally but
+    // requires F32 + contiguous on CUDA storage.
+    let grad_loss_f32 = grad_loss
+        .to_dtype(DType::F32)
+        .map_err(|e| candle_core::Error::Msg(format!("kt-bridge flce bwd: cast grad_loss: {e}")))?;
+    let grad_loss_c = grad_loss_f32
+        .contiguous()
+        .map_err(|e| candle_core::Error::Msg(format!("kt-bridge flce bwd: contiguous grad_loss: {e}")))?;
+
+    let hidden_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(hidden).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge flce bwd: borrow hidden failed: {e}"))
+    })?;
+    let head_t_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&head_t_c).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge flce bwd: borrow head_t failed: {e}"))
+    })?;
+    let grad_loss_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&grad_loss_c).map_err(|e| {
+            candle_core::Error::Msg(format!("kt-bridge flce bwd: borrow grad_loss failed: {e}"))
+        })?;
+
+    let d_hidden_kt = fused_linear_cross_entropy_phase_b_backward_kt(
+        &hidden_kt,
+        &head_t_kt,
+        &op.input_ids,
+        &op.label_mask,
+        op.chunk_size,
+        &grad_loss_kt,
+    )
+    .map_err(|e| candle_core::Error::Msg(format!("kt-bridge flce bwd: kt call failed: {e}")))?;
+
+    // The kt entry's `scatter_add` produces a contiguous `[1, seq_len,
+    // hidden_size]` output but be defensive — copy-back across the bridge
+    // requires contiguous storage on the source side.
+    let d_hidden_kt_contig = if d_hidden_kt.is_contiguous() {
+        d_hidden_kt
+    } else {
+        d_hidden_kt.contiguous().map_err(|e| {
+            candle_core::Error::Msg(format!("kt-bridge flce bwd: contiguous d_hidden: {e}"))
+        })?
+    };
+
+    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&d_hidden_kt_contig).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge flce bwd: copy-back d_hidden failed: {e}"))
+    })
 }
 
 /// Forward implementation that runs over a leaf hidden tensor and returns
@@ -921,6 +1058,202 @@ mod tests {
         assert!(
             diff < 1e-2 || rel < 1e-2,
             "bf16 grad parity failed: max_abs={diff:.2e} rel={rel:.2e}",
+        );
+        Ok(())
+    }
+}
+
+// =====================================================================
+// CUDA kt-bridge backward parity. The kt-bridge body
+// (`fused_linear_cross_entropy_phase_b_backward_via_kt_bridge`) drives
+// the kt-typed backward over the same two-pass chunked recompute as
+// `backward_dhidden`; the test below confirms the two paths agree
+// element-wise within FLCE-bwd-grade tolerance (atomic-free here but
+// f32 chunk-sumexp associativity still applies).
+// =====================================================================
+#[cfg(all(test, feature = "cuda"))]
+mod cuda_kt_bwd_parity {
+    use super::*;
+    use candle_core::Var;
+
+    fn random_case_cuda(
+        seq_len: usize,
+        hidden_size: usize,
+        vocab_size: usize,
+        device: &Device,
+    ) -> Result<(Tensor, Tensor, Vec<u32>, Vec<bool>)> {
+        let total_h = seq_len * hidden_size;
+        let hidden_vec: Vec<f32> = (0..total_h)
+            .map(|i| (i as f32 * 0.013).sin() * 0.5)
+            .collect();
+        let hidden = Tensor::from_vec(hidden_vec, (1, seq_len, hidden_size), device)?;
+        let total_head = hidden_size * vocab_size;
+        let head_vec: Vec<f32> = (0..total_head)
+            .map(|i| ((i as f32 + 7.0) * 0.007).cos() * 0.25)
+            .collect();
+        let head_t = Tensor::from_vec(head_vec, (hidden_size, vocab_size), device)?;
+        let input_ids: Vec<u32> = (0..seq_len as u32)
+            .map(|i| (i * 31 + 5) % vocab_size as u32)
+            .collect();
+        let label_mask: Vec<bool> = (0..seq_len).map(|i| i > 0 && i % 2 == 1).collect();
+        Ok((hidden, head_t, input_ids, label_mask))
+    }
+
+    /// Compare bridge-path gradient against candle-path gradient on
+    /// the same CUDA inputs by flipping the kill switch. Both paths
+    /// share the same forward (`CustomOp1::cuda_fwd`); we use the
+    /// candle-typed `backward_dhidden` as the parity oracle by setting
+    /// `KILN_DISABLE_FLCE_BWD_KT_BRIDGE=1` for one half of the run.
+    ///
+    /// Tolerance ~5e-2 to absorb both BF16 cast noise and the
+    /// f32 chunk-sumexp associativity drift between the two paths.
+    /// FLCE backward is atomic-free (no `atomicAdd` in the chunk
+    /// accumulator) so this is tighter than OPD's tolerance, but the
+    /// shared `to_f32` upcasts of bf16 head_t still introduce ULP
+    /// noise from differing kt vs candle reduction orders.
+    #[test]
+    fn cuda_kt_bridge_bwd_parity_bf16() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping cuda_kt_bridge_bwd_parity_bf16: no CUDA device");
+                return Ok(());
+            }
+        };
+        let (hidden_init_f32, head_t_f32, ids, mask) = random_case_cuda(16, 8, 64, &device)?;
+        let hidden_init = hidden_init_f32.to_dtype(DType::BF16)?.contiguous()?;
+        let head_bf = head_t_f32.to_dtype(DType::BF16)?.contiguous()?;
+
+        // Reference path: force the candle backward by setting the kill switch.
+        // `OnceLock` caches the env read at first call within the process,
+        // so we read it BEFORE the kt-bridge path ever runs.
+        unsafe { std::env::set_var("KILN_DISABLE_FLCE_BWD_KT_BRIDGE", "1") };
+        // Touch the kill switch once to seal the OnceLock to `true`.
+        let disabled = flce_bwd_kt_bridge_disabled();
+        assert!(
+            disabled,
+            "expected kill switch to seal as true after set_var('1')"
+        );
+
+        let hidden_var_ref = Var::from_tensor(&hidden_init)?;
+        let loss_ref = fused_linear_cross_entropy_phase_b(
+            hidden_var_ref.as_tensor(),
+            &head_bf,
+            &ids,
+            &mask,
+            &device,
+            16,
+        )?;
+        let grads_ref = loss_ref.backward()?;
+        let grad_hidden_ref = grads_ref
+            .get(hidden_var_ref.as_tensor())
+            .ok_or_else(|| anyhow!("no ref grad for hidden"))?
+            .clone();
+
+        // The kill switch is OnceLock-cached for the lifetime of the
+        // process — once sealed to `true` the kt-bridge path cannot
+        // run in this binary. Instead, invoke the bridge helper
+        // *directly* on the same inputs to exercise the new code
+        // path. The helper is internal to this module so we can call
+        // it without recreating the op outside.
+        let op = FlceCustomOp {
+            head_t: head_bf.clone(),
+            input_ids: ids.clone(),
+            label_mask: mask.clone(),
+            chunk_size: 16,
+            provider: None,
+        };
+        let grad_loss = Tensor::new(1.0f32, &device)?;
+        let hidden_contig = hidden_init.contiguous()?;
+        let grad_hidden_kt = fused_linear_cross_entropy_phase_b_backward_via_kt_bridge(
+            &op,
+            &hidden_contig,
+            &grad_loss,
+        )
+        .map_err(|e| anyhow!("kt-bridge bwd path: {e}"))?;
+
+        assert_eq!(grad_hidden_ref.dims(), grad_hidden_kt.dims());
+
+        let diff = (&grad_hidden_ref.to_dtype(DType::F32)?
+            - &grad_hidden_kt.to_dtype(DType::F32)?)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let max_ref = grad_hidden_ref
+            .to_dtype(DType::F32)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let rel = if max_ref > 1e-6 { diff / max_ref } else { diff };
+        assert!(
+            diff < 5e-2 || rel < 5e-2,
+            "bf16 kt-bridge vs candle parity: max_abs={diff:.2e} max_ref={max_ref:.4} rel={rel:.2e}",
+        );
+        Ok(())
+    }
+
+    /// Same as above but f32. Same shared associativity drift, but no
+    /// BF16 cast noise — the tolerance can be tighter.
+    #[test]
+    fn cuda_kt_bridge_bwd_parity_f32() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping cuda_kt_bridge_bwd_parity_f32: no CUDA device");
+                return Ok(());
+            }
+        };
+        let (hidden_init, head_t, ids, mask) = random_case_cuda(16, 8, 64, &device)?;
+
+        // Build the reference grad via the candle path with the kill
+        // switch on (this path is OnceLock-cached so a previous test
+        // in the same binary may already have set it to true).
+        unsafe { std::env::set_var("KILN_DISABLE_FLCE_BWD_KT_BRIDGE", "1") };
+        let _ = flce_bwd_kt_bridge_disabled();
+
+        let hidden_var_ref = Var::from_tensor(&hidden_init)?;
+        let loss_ref = fused_linear_cross_entropy_phase_b(
+            hidden_var_ref.as_tensor(),
+            &head_t,
+            &ids,
+            &mask,
+            &device,
+            16,
+        )?;
+        let grads_ref = loss_ref.backward()?;
+        let grad_hidden_ref = grads_ref
+            .get(hidden_var_ref.as_tensor())
+            .ok_or_else(|| anyhow!("no ref grad for hidden"))?
+            .clone();
+
+        // Call the bridge helper directly to exercise the new path
+        // (see the bf16 sibling test for why this is necessary).
+        let op = FlceCustomOp {
+            head_t: head_t.clone(),
+            input_ids: ids.clone(),
+            label_mask: mask.clone(),
+            chunk_size: 16,
+            provider: None,
+        };
+        let grad_loss = Tensor::new(1.0f32, &device)?;
+        let hidden_contig = hidden_init.contiguous()?;
+        let grad_hidden_kt = fused_linear_cross_entropy_phase_b_backward_via_kt_bridge(
+            &op,
+            &hidden_contig,
+            &grad_loss,
+        )
+        .map_err(|e| anyhow!("kt-bridge bwd path: {e}"))?;
+
+        assert_eq!(grad_hidden_ref.dims(), grad_hidden_kt.dims());
+        let diff = (&grad_hidden_ref - &grad_hidden_kt)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let max_ref = grad_hidden_ref.abs()?.max_all()?.to_scalar::<f32>()?;
+        let rel = if max_ref > 1e-6 { diff / max_ref } else { diff };
+        assert!(
+            diff < 1e-3 || rel < 1e-3,
+            "f32 kt-bridge vs candle parity: max_abs={diff:.2e} max_ref={max_ref:.4} rel={rel:.2e}",
         );
         Ok(())
     }
