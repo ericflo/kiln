@@ -2027,18 +2027,44 @@ impl BackendRuntime for VulkanBackend {
             let z_buf = self.cached_bf16_packed_weight_buffer(in_proj_z_t)?;
             let a_buf = self.cached_bf16_packed_weight_buffer(in_proj_a_t)?;
             let b_buf = self.cached_bf16_packed_weight_buffer(in_proj_b_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights(
-                vk_device,
-                &dispatch_x,
-                &qkv_buf,
-                &z_buf,
-                &a_buf,
-                &b_buf,
-                hidden,
-                qkv_dim,
-                z_dim,
-                a_dim,
-                b_dim,
+            let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&dispatch_x)?.0;
+            let (qkv_b, z_b, a_b, b_b) =
+                kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
+                    vk_device,
+                    &x_data,
+                    row_count,
+                    &qkv_buf,
+                    &z_buf,
+                    &a_buf,
+                    &b_buf,
+                    hidden,
+                    qkv_dim,
+                    z_dim,
+                    a_dim,
+                    b_dim,
+                )
+                .context("gdn_in_proj_decode kernel failed")?;
+            (
+                kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &qkv_b,
+                    &[row_count, 1, qkv_dim],
+                    DType::F32,
+                )?,
+                kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &z_b,
+                    &[row_count, 1, z_dim],
+                    DType::F32,
+                )?,
+                kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &a_b,
+                    &[row_count, 1, a_dim],
+                    DType::F32,
+                )?,
+                kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &b_b,
+                    &[row_count, 1, b_dim],
+                    DType::F32,
+                )?,
             )
         } else {
             let qkv_buf = self.cached_f32_weight_buffer(in_proj_qkv_t)?;
@@ -2058,8 +2084,8 @@ impl BackendRuntime for VulkanBackend {
                 a_dim,
                 b_dim,
             )
-        }
-        .context("gdn_in_proj_decode kernel failed")?;
+            .context("gdn_in_proj_decode kernel failed")?
+        };
         let result = if seq_len == 1 {
             (qkv, z, a, b)
         } else {
@@ -2237,14 +2263,22 @@ impl BackendRuntime for VulkanBackend {
         };
         let out = if self.use_bf16_packed_linear_weight(weight_t) {
             let weight_buf = self.cached_bf16_packed_weight_buffer(weight_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights(
+            let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&dispatch_x)?.0;
+            let out_data = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bytes(
                 vk_device,
-                &dispatch_x,
+                &x_data,
                 &weight_buf,
                 row_count,
                 hidden,
                 out_dim,
+                true,
             )
+            .context("linear_decode kernel failed")?;
+            kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &out_data,
+                &[row_count, 1, out_dim],
+                DType::F32,
+            )?
         } else {
             let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
             kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached(
@@ -2255,8 +2289,8 @@ impl BackendRuntime for VulkanBackend {
                 hidden,
                 out_dim,
             )
-        }
-        .context("linear_decode kernel failed")?;
+            .context("linear_decode kernel failed")?
+        };
         let out = if seq_len == 1 {
             out
         } else {
@@ -2423,17 +2457,24 @@ impl BackendRuntime for VulkanBackend {
             chunk_len
         };
         let out = if sub_chunk_len == chunk_len {
-            kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset(
-                vk_device.as_ref(),
-                &dispatch_x,
-                weight_buffer.as_ref(),
-                row_count,
-                hidden_x,
-                chunk_len,
-                chunk_start,
-                full_out_dim,
-            )
-            .context("VulkanBackend: linear_prefill_apply_offset dispatch failed")?
+            let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&dispatch_x)?.0;
+            let out_bytes =
+                kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset_bytes(
+                    vk_device.as_ref(),
+                    &x_data,
+                    weight_buffer.as_ref(),
+                    row_count,
+                    hidden_x,
+                    chunk_len,
+                    chunk_start,
+                    full_out_dim,
+                )
+                .context("VulkanBackend: linear_prefill_apply_offset dispatch failed")?;
+            kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &out_bytes,
+                &[row_count, 1, chunk_len],
+                DType::F32,
+            )?
         } else {
             // One-shot trace so the operator can see when FLCE chunks
             // are themselves being sub-chunked. Combined with the
@@ -2465,12 +2506,13 @@ impl BackendRuntime for VulkanBackend {
             // smaller `chunk_len` per submit.
             let mut sub_outputs: Vec<Tensor> = Vec::new();
             let mut sub_offset = 0usize;
+            let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&dispatch_x)?.0;
             while sub_offset < chunk_len {
                 let cur_len = (chunk_len - sub_offset).min(sub_chunk_len);
-                let sub =
-                    kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset(
+                let sub_bytes =
+                    kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset_bytes(
                         vk_device.as_ref(),
-                        &dispatch_x,
+                        &x_data,
                         weight_buffer.as_ref(),
                         row_count,
                         hidden_x,
@@ -2485,6 +2527,11 @@ impl BackendRuntime for VulkanBackend {
                           chunk_start={chunk_start}, chunk_len={chunk_len}) failed"
                         )
                     })?;
+                let sub = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &sub_bytes,
+                    &[row_count, 1, cur_len],
+                    DType::F32,
+                )?;
                 sub_outputs.push(sub);
                 sub_offset += cur_len;
             }
@@ -3014,10 +3061,29 @@ impl BackendRuntime for VulkanBackend {
             let q_buf = self.cached_bf16_packed_weight_buffer(q_weight_t)?;
             let k_buf = self.cached_bf16_packed_weight_buffer(k_weight_t)?;
             let v_buf = self.cached_bf16_packed_weight_buffer(v_weight_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights(
-                vk_device, x, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
+            let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(x)?.0;
+            let (q_b, k_b, v_b) =
+                kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
+                    vk_device, &x_data, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
+                )
+                .context("full_attn_qkv_decode_batched_bf16w kernel failed")?;
+            (
+                kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &q_b,
+                    &[batch, 1, q_dim],
+                    DType::F32,
+                )?,
+                kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &k_b,
+                    &[batch, 1, k_dim],
+                    DType::F32,
+                )?,
+                kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &v_b,
+                    &[batch, 1, v_dim],
+                    DType::F32,
+                )?,
             )
-            .context("full_attn_qkv_decode_batched_bf16w kernel failed")?
         } else {
             let q_buf = self.cached_f32_weight_buffer(q_weight_t)?;
             let k_buf = self.cached_f32_weight_buffer(k_weight_t)?;
@@ -3071,15 +3137,22 @@ impl BackendRuntime for VulkanBackend {
         } else {
             x.reshape((row_count, 1usize, hidden))?
         };
-        let out = kiln_vulkan_kernel::kernels::dispatch_mlp_gate_up_decode_cached(
+        let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&dispatch_x)?.0;
+        let out_data = kiln_vulkan_kernel::kernels::dispatch_mlp_gate_up_decode_cached_bytes(
             vk_device,
-            &dispatch_x,
-            &gate_buf,
-            &up_buf,
+            &x_data,
+            row_count,
             hidden,
             intermediate,
+            &gate_buf,
+            &up_buf,
         )
         .context("mlp_gate_up_decode kernel failed")?;
+        let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &out_data,
+            &[row_count, 1, intermediate],
+            DType::F32,
+        )?;
         let out = if seq_len == 1 {
             out
         } else {
@@ -3143,9 +3216,11 @@ impl BackendRuntime for VulkanBackend {
                 let gate_buf = self.cached_bf16_packed_weight_buffer(gate_weight_t)?;
                 let up_buf = self.cached_bf16_packed_weight_buffer(up_weight_t)?;
                 let down_buf = self.cached_f32_weight_buffer(down_weight_t)?;
-                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_gate_up_f32_down(
+                let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&dispatch_x)?.0;
+                let out_data = kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes(
                     vk_device,
-                    &dispatch_x,
+                    &x_data,
+                    row_count,
                     &gate_buf,
                     &up_buf,
                     &down_buf,
@@ -3153,13 +3228,21 @@ impl BackendRuntime for VulkanBackend {
                     intermediate,
                     out_dim,
                 )
+                .context("mlp_decode kernel failed")?;
+                kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &out_data,
+                    &[row_count, 1, out_dim],
+                    DType::F32,
+                )?
             } else if use_bf16_mlp_weights {
                 let gate_buf = self.cached_bf16_packed_weight_buffer(gate_weight_t)?;
                 let up_buf = self.cached_bf16_packed_weight_buffer(up_weight_t)?;
                 let down_buf = self.cached_bf16_packed_weight_buffer(down_weight_t)?;
-                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights(
+                let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&dispatch_x)?.0;
+                let out_data = kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights_bytes(
                     vk_device,
-                    &dispatch_x,
+                    &x_data,
+                    row_count,
                     &gate_buf,
                     &up_buf,
                     &down_buf,
@@ -3167,6 +3250,12 @@ impl BackendRuntime for VulkanBackend {
                     intermediate,
                     out_dim,
                 )
+                .context("mlp_decode kernel failed")?;
+                kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &out_data,
+                    &[row_count, 1, out_dim],
+                    DType::F32,
+                )?
             } else {
                 let gate_buf = self.cached_f32_weight_buffer(gate_weight_t)?;
                 let up_buf = self.cached_f32_weight_buffer(up_weight_t)?;
@@ -3181,8 +3270,8 @@ impl BackendRuntime for VulkanBackend {
                     intermediate,
                     out_dim,
                 )
-            }
-            .context("mlp_decode kernel failed")?;
+                .context("mlp_decode kernel failed")?
+            };
         let out = if seq_len == 1 {
             out
         } else {
@@ -3563,16 +3652,23 @@ impl BackendRuntime for VulkanBackend {
 
         // Output shape matches input shape [B, T, nv]
         let out_shape = a.dims().as_ref().to_vec();
-        let (beta, g) = kiln_vulkan_kernel::kernels::dispatch_gdn_gates_cached(
+        let a_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(a)?.0;
+        let b_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(b)?.0;
+        let output_dtype = a.dtype();
+        let (beta_b, g_b) = kiln_vulkan_kernel::kernels::dispatch_gdn_gates_cached_bytes(
             vk_device,
-            a,
-            b,
+            &a_data,
+            &b_data,
             &a_log_buf,
             &dt_bias_buf,
             nv,
             &out_shape,
         )
         .context("gdn_gates kernel failed")?;
+        let beta =
+            kiln_vulkan_kernel::kernels::create_tensor_from_data(&beta_b, &out_shape, output_dtype)?;
+        let g =
+            kiln_vulkan_kernel::kernels::create_tensor_from_data(&g_b, &out_shape, output_dtype)?;
         Ok(Some((beta, g)))
     }
 
@@ -3601,16 +3697,24 @@ impl BackendRuntime for VulkanBackend {
 
         // Output shape matches x shape
         let out_shape = x.dims().as_ref().to_vec();
-        let out = kiln_vulkan_kernel::kernels::dispatch_gdn_gated_rms_norm_cached(
+        let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(x)?.0;
+        let z_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(z)?.0;
+        let output_dtype = x.dtype();
+        let out_data = kiln_vulkan_kernel::kernels::dispatch_gdn_gated_rms_norm_cached_bytes(
             vk_device,
-            x,
-            z,
+            &x_data,
+            &z_data,
             &weight_buf,
             hidden,
             eps as f32,
             &out_shape,
         )
         .context("gdn_gated_rms_norm kernel failed")?;
+        let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &out_data,
+            &out_shape,
+            output_dtype,
+        )?;
         Ok(Some(out))
     }
 
@@ -3632,14 +3736,37 @@ impl BackendRuntime for VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-        let (out, new_state) = kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_update(
-            vk_device,
-            x,
-            weight,
-            conv_state,
-            kernel_size,
-        )
-        .context("causal_conv1d_update kernel failed")?;
+        let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(x)?.0;
+        let weight_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(weight)?.0;
+        let state_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(conv_state)?.0;
+        let dims = x.dims();
+        anyhow::ensure!(
+            dims.len() == 3,
+            "causal_conv1d_update: x must be 3-D, got {:?}",
+            dims
+        );
+        let (batch, channels, seq_len) = (dims[0], dims[1], dims[2]);
+        let conv_state_shape = conv_state.dims().as_ref().to_vec();
+        let (out_data, state_data_out) =
+            kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_update_bytes(
+                vk_device,
+                &x_data,
+                &weight_data,
+                &state_data,
+                batch,
+                channels,
+                seq_len,
+                kernel_size,
+            )
+            .context("causal_conv1d_update kernel failed")?;
+        let out_shape: Vec<usize> = dims.to_vec();
+        let out =
+            kiln_vulkan_kernel::kernels::create_tensor_from_data(&out_data, &out_shape, DType::F32)?;
+        let new_state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &state_data_out,
+            &conv_state_shape,
+            DType::F32,
+        )?;
         *conv_state = new_state;
         Ok(Some(out))
     }

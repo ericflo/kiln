@@ -329,17 +329,42 @@ impl CustomOp1 for VulkanLinearOp {
                     row_count,
                     self.hidden,
                     self.out_dim,
-                ),
-                WeightLayout::Bf16Packed => kernels::dispatch_linear_decode_cached_bf16_weights(
-                    self.vk_device.as_ref(),
-                    &dispatch_x,
-                    self.weight_buffer.as_ref(),
-                    row_count,
-                    self.hidden,
-                    self.out_dim,
-                ),
+                )
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("VulkanLinearOp dispatch: {e:?}"))
+                })?,
+                WeightLayout::Bf16Packed => {
+                    let x_data = kernels::extract_tensor_bytes(&dispatch_x)
+                        .map_err(|e| {
+                            candle_core::Error::Msg(format!(
+                                "VulkanLinearOp extract x bytes: {e:?}"
+                            ))
+                        })?
+                        .0;
+                    let out_bytes = kernels::dispatch_linear_decode_cached_bytes(
+                        self.vk_device.as_ref(),
+                        &x_data,
+                        self.weight_buffer.as_ref(),
+                        row_count,
+                        self.hidden,
+                        self.out_dim,
+                        true,
+                    )
+                    .map_err(|e| {
+                        candle_core::Error::Msg(format!("VulkanLinearOp dispatch: {e:?}"))
+                    })?;
+                    kernels::create_tensor_from_data(
+                        &out_bytes,
+                        &[row_count, 1, self.out_dim],
+                        DType::F32,
+                    )
+                    .map_err(|e| {
+                        candle_core::Error::Msg(format!(
+                            "VulkanLinearOp build out tensor: {e:?}"
+                        ))
+                    })?
+                }
             }
-            .map_err(|e| candle_core::Error::Msg(format!("VulkanLinearOp dispatch: {e:?}")))?
         };
 
         // Restore the original leading dims with `out_dim` swapped in for
@@ -612,17 +637,26 @@ pub fn dispatch_forward_only(
             row_count,
             hidden,
             out_dim,
-        ),
-        WeightLayout::Bf16Packed => kernels::dispatch_linear_decode_cached_bf16_weights(
-            vk_device,
-            &dispatch_x,
-            weight_buffer,
-            row_count,
-            hidden,
-            out_dim,
-        ),
-    }
-    .context("dispatch_forward_only: kernel dispatch")?;
+        )
+        .context("dispatch_forward_only: kernel dispatch")?,
+        WeightLayout::Bf16Packed => {
+            let x_data = kernels::extract_tensor_bytes(&dispatch_x)
+                .context("dispatch_forward_only: extract x bytes")?
+                .0;
+            let out_bytes = kernels::dispatch_linear_decode_cached_bytes(
+                vk_device,
+                &x_data,
+                weight_buffer,
+                row_count,
+                hidden,
+                out_dim,
+                true,
+            )
+            .context("dispatch_forward_only: kernel dispatch")?;
+            kernels::create_tensor_from_data(&out_bytes, &[row_count, 1, out_dim], DType::F32)
+                .context("dispatch_forward_only: build out tensor")?
+        }
+    };
     let mut out_dims = dims;
     *out_dims.last_mut().unwrap() = out_dim;
     out.reshape(out_dims.as_slice())
@@ -846,7 +880,10 @@ mod tests {
     /// reference for their respective slices.
     #[test]
     fn vulkan_linear_offset_parity() -> Result<()> {
-        use kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset;
+        use kiln_vulkan_kernel::kernels::{
+            create_tensor_from_data, dispatch_linear_decode_cached_bf16_weights_offset_bytes,
+            extract_tensor_bytes,
+        };
 
         let Ok(vk_device) = VulkanDevice::new() else {
             eprintln!("no Vulkan device, skipping");
@@ -873,9 +910,10 @@ mod tests {
 
         // Chunk slice via the offset variant. The kernel returns
         // [batch_rows, 1, out_dim]; reshape to match the reference.
-        let chunk_out_raw = dispatch_linear_decode_cached_bf16_weights_offset(
+        let x_bytes = extract_tensor_bytes(&x)?.0;
+        let chunk_bytes = dispatch_linear_decode_cached_bf16_weights_offset_bytes(
             &vk_device,
-            &x,
+            &x_bytes,
             &weight_buffer,
             t,
             hidden,
@@ -883,6 +921,8 @@ mod tests {
             chunk_offset,
             full_out_dim,
         )?;
+        let chunk_out_raw =
+            create_tensor_from_data(&chunk_bytes, &[t, 1, chunk_len], DType::F32)?;
         let chunk_out = chunk_out_raw.reshape((1, t, chunk_len))?;
 
         // Reference: do the matmul against the same slice on CPU.
@@ -912,7 +952,10 @@ mod tests {
     /// VulkanLinearOp::bwd to compute dx without re-uploading W.T.
     #[test]
     fn vulkan_linear_transposed_parity() -> Result<()> {
-        use kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed;
+        use kiln_vulkan_kernel::kernels::{
+            create_tensor_from_data, dispatch_linear_decode_cached_bf16_weights_transposed_bytes,
+            extract_tensor_bytes,
+        };
 
         let Ok(vk_device) = VulkanDevice::new() else {
             eprintln!("no Vulkan device, skipping");
@@ -939,14 +982,16 @@ mod tests {
 
         // Vulkan: out = x @ W.T  (W.T shape [forward_n, forward_k] →
         // out shape [batch, forward_k]).
-        let out_raw = dispatch_linear_decode_cached_bf16_weights_transposed(
+        let x_bytes = extract_tensor_bytes(&x)?.0;
+        let out_bytes = dispatch_linear_decode_cached_bf16_weights_transposed_bytes(
             &vk_device,
-            &x,
+            &x_bytes,
             &weight_buffer,
             batch,
             forward_n, // k_dim (inner sum)
             forward_k, // n_dim (output dim)
         )?;
+        let out_raw = create_tensor_from_data(&out_bytes, &[batch, 1, forward_k], DType::F32)?;
         let out = out_raw.reshape((batch, forward_k))?;
 
         // Reference: candle CPU broadcast_matmul of x (f32) @ W.T (f32).
@@ -976,7 +1021,9 @@ mod tests {
     /// `forward::rms_norm_fallback`.
     #[test]
     fn vulkan_qwen_rmsnorm_forward_parity() -> Result<()> {
-        use kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward;
+        use kiln_vulkan_kernel::kernels::{
+            create_tensor_from_data, dispatch_qwen_rmsnorm_forward_bytes, extract_tensor_bytes,
+        };
 
         let Ok(vk_device) = VulkanDevice::new() else {
             eprintln!("no Vulkan device, skipping");
@@ -997,7 +1044,11 @@ mod tests {
         let weight = Tensor::from_vec(w_data, (hidden,), &device)?;
 
         // Vulkan path.
-        let vulkan_out = dispatch_qwen_rmsnorm_forward(&vk_device, &x, &weight, eps)?;
+        let x_bytes = extract_tensor_bytes(&x)?.0;
+        let weight_bytes = extract_tensor_bytes(&weight)?.0;
+        let out_bytes =
+            dispatch_qwen_rmsnorm_forward_bytes(&vk_device, &x_bytes, &weight_bytes, rows, hidden, eps)?;
+        let vulkan_out = create_tensor_from_data(&out_bytes, &[rows, hidden], DType::F32)?;
 
         // CPU baseline mirroring rms_norm_fallback.
         let variance = x.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
@@ -1024,7 +1075,9 @@ mod tests {
     /// autograd gradient for the same forward.
     #[test]
     fn vulkan_qwen_rmsnorm_backward_parity() -> Result<()> {
-        use kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_backward;
+        use kiln_vulkan_kernel::kernels::{
+            create_tensor_from_data, dispatch_qwen_rmsnorm_backward_bytes, extract_tensor_bytes,
+        };
 
         let Ok(vk_device) = VulkanDevice::new() else {
             eprintln!("no Vulkan device, skipping");
@@ -1049,7 +1102,19 @@ mod tests {
         let grad_y = Tensor::from_vec(grad_y_data, (rows, hidden), &device)?;
 
         // Vulkan path.
-        let vulkan_grad_x = dispatch_qwen_rmsnorm_backward(&vk_device, &x, &weight, &grad_y, eps)?;
+        let x_bytes = extract_tensor_bytes(&x)?.0;
+        let weight_bytes = extract_tensor_bytes(&weight)?.0;
+        let grad_y_bytes = extract_tensor_bytes(&grad_y)?.0;
+        let grad_x_bytes = dispatch_qwen_rmsnorm_backward_bytes(
+            &vk_device,
+            &x_bytes,
+            &weight_bytes,
+            &grad_y_bytes,
+            rows,
+            hidden,
+            eps,
+        )?;
+        let vulkan_grad_x = create_tensor_from_data(&grad_x_bytes, &[rows, hidden], DType::F32)?;
 
         // Candle autograd reference: build forward as a candle graph
         // over a Var, compute loss = sum(y * grad_y), backward, read
@@ -1272,12 +1337,13 @@ mod tests {
         let mut chunks: Vec<Tensor> = Vec::new();
         let chunk_size = 4usize;
         let mut start = 0usize;
+        let dispatch_x_bytes = kernels::extract_tensor_bytes(&dispatch_x)?.0;
         while start < out_dim {
             let len = (out_dim - start).min(chunk_size);
-            let chunk =
-                kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset(
+            let chunk_bytes =
+                kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset_bytes(
                     vk_device.as_ref(),
-                    &dispatch_x,
+                    &dispatch_x_bytes,
                     weight_buffer.as_ref(),
                     t,
                     hidden,
@@ -1285,6 +1351,8 @@ mod tests {
                     start,
                     out_dim,
                 )?;
+            let chunk =
+                kernels::create_tensor_from_data(&chunk_bytes, &[t, 1, len], DType::F32)?;
             chunks.push(chunk);
             start += len;
         }
