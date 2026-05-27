@@ -125,8 +125,11 @@ impl CustomOp3 for VulkanLoraOp {
             return Ok((cpu_storage, Shape::from(out_dims.as_slice())));
         }
 
-        // Wrap the x storage in a Tensor so we can call the kernel
-        // dispatch helpers (which expect &Tensor).
+        // Wrap the x storage in a Tensor briefly so we can extract its
+        // raw f32 bytes via `extract_tensor_bytes`. After this the two
+        // matmul dispatches go through the candle-free `_bytes` entry
+        // points, so the intermediate hidden activation never has to
+        // round-trip through candle storage. (#1082)
         let storage = Storage::Cpu(s_x.clone());
         let x_tensor = Tensor::from_storage(
             storage,
@@ -146,30 +149,33 @@ impl CustomOp3 for VulkanLoraOp {
             .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp reshape x: {e:?}")))?
             .contiguous()
             .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp x contiguous: {e:?}")))?;
+        let x_2d_bytes = kernels::extract_tensor_bytes(&x_2d)
+            .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp extract x bytes: {e:?}")))?
+            .0;
 
         // hidden = x @ A.T. Transposed kernel against the A buffer
-        // (treated as [n_dim=rank, k_dim=in_features]).
-        let hidden = kernels::dispatch_linear_decode_cached_bf16_weights_transposed(
+        // (treated as [n_dim=rank, k_dim=in_features]). The `_bytes`
+        // variant takes raw f32 bytes and returns raw f32 bytes shaped
+        // logically as `[row_count, 1, rank]` — we keep the result as
+        // bytes so the next dispatch can consume it without a candle
+        // round trip.
+        let hidden_bytes = kernels::dispatch_linear_decode_cached_bf16_weights_transposed_bytes(
             self.vk_device.as_ref(),
-            &x_2d,
+            &x_2d_bytes,
             self.a_buffer.as_ref(),
             row_count,
             self.in_features,
             self.rank,
         )
         .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp x@A.T: {e:?}")))?;
-        let hidden_2d = hidden
-            .reshape((row_count, self.rank))
-            .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp reshape hidden: {e:?}")))?
-            .contiguous()
-            .map_err(|e| {
-                candle_core::Error::Msg(format!("VulkanLoraOp hidden contiguous: {e:?}"))
-            })?;
 
         // delta_unscaled = hidden @ B.T. Same kernel against B buffer.
-        let delta_unscaled = kernels::dispatch_linear_decode_cached_bf16_weights_transposed(
+        // The `hidden_bytes` buffer is already row-major `[row_count,
+        // rank]` (the trailing `1` in the logical shape is a no-op for
+        // contiguous layouts), so we pass it straight in.
+        let delta_bytes = kernels::dispatch_linear_decode_cached_bf16_weights_transposed_bytes(
             self.vk_device.as_ref(),
-            &hidden_2d,
+            &hidden_bytes,
             self.b_buffer.as_ref(),
             row_count,
             self.rank,
@@ -178,9 +184,15 @@ impl CustomOp3 for VulkanLoraOp {
         .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp hidden@B.T: {e:?}")))?;
         let mut out_dims: Vec<usize> = x_dims[..x_dims.len() - 1].to_vec();
         out_dims.push(self.out_features);
-        let delta_unscaled = delta_unscaled
-            .reshape(out_dims.as_slice())
-            .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp reshape out: {e:?}")))?;
+        // Materialize the final f32 result back into a candle Tensor so
+        // the rest of the op (scale, dtype cast, storage extraction)
+        // can keep using candle ops unchanged.
+        let delta_unscaled = kernels::create_tensor_from_data(
+            &delta_bytes,
+            out_dims.as_slice(),
+            DType::F32,
+        )
+        .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp build delta tensor: {e:?}")))?;
         let delta_scaled = (delta_unscaled * self.scale as f64)
             .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp scale: {e:?}")))?;
         let delta_typed = if delta_scaled.dtype() == self.out_dtype {
