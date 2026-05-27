@@ -100,7 +100,12 @@ impl PagedKvCache {
     /// constructor is the minimum-effort wrapper that unblocks
     /// kiln-server's `use candle_core::DType;` / candle Device import
     /// today (per the STOP doc on the kiln-server candle removal).
-    #[cfg(feature = "cuda")]
+    ///
+    /// Always-on (no cuda feature gate): only uses
+    /// `kiln_kt_bridge::kt_dtype_to_candle` +
+    /// `kiln_kt_bridge::candle_device_from_kt`, which are pure
+    /// `candle <-> kt` enum mappings with no CUDA toolchain
+    /// dependency. (#1082)
     #[allow(clippy::too_many_arguments)]
     pub fn new_kt(
         num_full_attn_layers: usize,

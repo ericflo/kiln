@@ -24,14 +24,21 @@ kiln-gdn-kernel = { workspace = true, optional = true }
 kiln-marlin-gemm = { workspace = true, optional = true }
 kiln-rmsnorm-kernel = { workspace = true, optional = true }
 kiln-vulkan-kernel = { workspace = true, optional = true }
-# Phase 7 migration adapter: lets candle-typed call sites round-trip
-# through the kt-API for A/B parity testing. Pulled in under `cuda`
-# alongside the other kernel crates.
-kiln-kt-bridge = { workspace = true, optional = true }
-# Direct dep so kiln-model can reference kiln_tensor types in the
-# kt-twin modules (e.g. `paged_kv_cache_kt.rs`). Feature-gated under
-# `cuda` so non-GPU builds stay candle-only.
-kiln-tensor = { workspace = true, optional = true }
+# Phase 7 migration adapter: pure `candle <-> kt` Device/DType enum
+# mapping is always-on so the kt-typed Device/DType wrappers on
+# kiln-model's public surface (`for_device_kt`, `device_kt`,
+# `PagedKvCache::new_kt`, `GpuWeights::from_model_weights_kt`) compile
+# on every build — kiln-server needs them in its multi-backend src/
+# code regardless of CUDA. The kt-bridge `cuda` feature is forwarded
+# under kiln-model's `cuda` to pull in the CudaStorage downcast +
+# device-pointer helpers used by the model's CUDA fused-op call sites.
+# (#1082)
+kiln-kt-bridge = { workspace = true }
+# Direct dep so kiln-model can reference kiln_tensor types (Device,
+# DType, Tensor) on its public surface. Multi-backend builds also need
+# the base types; the `cuda` feature is forwarded under kiln-model's
+# `cuda` to enable CUDA-specific kt-tensor code paths.
+kiln-tensor = { workspace = true }
 # Leaf crate that defines the kt-native `TensorId` used by
 # `vk_forward.rs` for LoRA parameter ids (and by other Vk* call sites
 # that previously imported candle's TensorId). Feature-gated under
@@ -48,7 +55,7 @@ objc2-metal = { version = "0.3", optional = true }
 
 
 [features]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-conv1d-kernel", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-marlin-gemm", "dep:kiln-rmsnorm-kernel", "dep:kiln-kt-bridge", "dep:kiln-tensor", "kiln-tensor/cuda", "dep:half"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-conv1d-kernel", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-marlin-gemm", "dep:kiln-rmsnorm-kernel", "kiln-kt-bridge/cuda", "kiln-tensor/cuda", "dep:half"]
 # Phase 7 (#1082): opt-in feature to compile the candle-typed GDN
 # parity tests in forward.rs against `kiln_gdn_kernel::gdn_chunk_*`
 # / `gdn_full_chunk_forward*`. Production decode goes through the

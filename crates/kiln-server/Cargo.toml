@@ -22,10 +22,11 @@ path = "src/bench.rs"
 name = "kiln-eval"
 path = "src/bin/kiln_eval_cli.rs"
 
-# These three examples consume the kt-typed entries on kiln-model's
-# public surface (GpuWeights::from_model_weights_kt, etc.) via
-# kiln_kt_bridge::kt_device_from_candle. kt-bridge is CUDA-only, so the
-# kt entries — and these examples — require --features cuda.
+# These three examples drive the CUDA fused-op call sites end-to-end,
+# so they require --features cuda. The kt-typed entries on
+# kiln-model's public surface (GpuWeights::from_model_weights_kt, etc.)
+# themselves are available on every build now — the cuda gate here is
+# about the model-loading + CUDA-only fused-op chain the benches run.
 [[example]]
 name = "flce_phase_a_validation_bench"
 path = "examples/flce_phase_a_validation_bench.rs"
@@ -47,7 +48,14 @@ kiln-eval = { workspace = true }
 kiln-model = { workspace = true }
 kiln-scheduler = { workspace = true }
 kiln-tensor = { workspace = true }
-kiln-kt-bridge = { workspace = true, optional = true }
+# Pure `candle <-> kt` Device/DType enum-mapping helpers are
+# always-on so the multi-backend src/ code (Linux/default,
+# Linux/Vulkan, macOS/Metal) can call the kt-typed entries on
+# kiln-model's public surface (`for_device_kt`, `device_kt`,
+# `PagedKvCache::new_kt`, `GpuWeights::from_model_weights_kt`)
+# without a CUDA toolchain. The `cuda` feature is forwarded under
+# kiln-server's `cuda` to pull in the CUDA-specific helpers. (#1082)
+kiln-kt-bridge = { workspace = true }
 kiln-train = { workspace = true }
 candle-core = { workspace = true }
 axum = { workspace = true }
@@ -83,7 +91,7 @@ sha2 = { workspace = true }
 regex = "1"
 
 [features]
-cuda = ["kiln-model/cuda", "kiln-tensor/cuda", "kiln-train/cuda", "dep:kiln-kt-bridge"]
+cuda = ["kiln-model/cuda", "kiln-tensor/cuda", "kiln-train/cuda", "kiln-kt-bridge/cuda"]
 metal = ["kiln-model/metal", "kiln-tensor/metal"]
 vulkan = ["kiln-model/vulkan", "kiln-train/vulkan"]
 # Forward kiln-model's NVTX feature so kiln-bench / kiln binaries emit ranges

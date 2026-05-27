@@ -1248,13 +1248,17 @@ pub fn for_device(device: &Device) -> Arc<dyn BackendRuntime> {
 ///
 /// `kt::Device::Cuda(_)` and `kt::Device::Metal(_)` only resolve when the
 /// matching cargo feature is enabled. Without that feature, the
-/// underlying `candle_device_from_kt` would error out — but on this build
-/// `kt::Device::Metal(_)` only reaches `for_device_kt` from a candle
-/// `Device::Cpu` round-trip (kt-bridge's CUDA-only restriction maps
-/// non-Cuda candle devices to `kt::Device::Cpu`), so the case is
-/// vanishingly rare in production. We treat unmappable kt Devices as a
-/// CPU device, matching the existing fallback for any non-CUDA backend.
-#[cfg(feature = "cuda")]
+/// underlying `candle_device_from_kt` returns a `BridgeError` (the
+/// `Cuda(i)` arm calls candle's `new_cuda`, which delegates to the
+/// `dummy_cuda_backend` stub on builds without candle's cuda feature
+/// and errors at runtime). We treat unmappable kt Devices as a CPU
+/// device, matching the existing fallback for any non-CUDA backend.
+///
+/// This is always-on (no cuda feature gate): it only uses
+/// `kiln_kt_bridge::candle_device_from_kt`, which is a pure
+/// `candle <-> kt` Device enum mapping with no CUDA toolchain
+/// dependency — multi-backend builds (Metal, Vulkan, CPU) of
+/// kiln-server can call this entry without `--features cuda`. (#1082)
 pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
     // Vulkan goes through the candle-CPU sentinel path so the runtime
     // detection inside `for_device` runs unchanged.

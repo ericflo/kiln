@@ -6500,7 +6500,11 @@ impl GpuWeights {
     /// Until `GpuWeights` migrates off candle Tensors (the Tier 3
     /// `KtWeights` rewrite this commit is downstream of), this is the
     /// only canonical kt-typed accessor on the struct's surface.
-    #[cfg(feature = "cuda")]
+    ///
+    /// Always-on (no cuda feature gate): only uses
+    /// `kiln_kt_bridge::kt_device_from_candle`, which is a pure
+    /// `candle <-> kt` Device enum mapping with no CUDA toolchain
+    /// dependency. (#1082)
     pub fn device_kt(&self) -> kiln_tensor::Device {
         kiln_kt_bridge::kt_device_from_candle(self.embed_tokens.device())
     }
@@ -6943,7 +6947,11 @@ impl GpuWeights {
     /// Errors when the kt Device has no candle equivalent on this build
     /// (e.g. `Vulkan(_)`; kiln-server's Vulkan path uses a CPU candle
     /// device by convention — pass `kiln_tensor::Device::Cpu` instead).
-    #[cfg(feature = "cuda")]
+    ///
+    /// Always-on (no cuda feature gate): only uses
+    /// `kiln_kt_bridge::candle_device_from_kt`, which is a pure
+    /// `candle <-> kt` Device enum mapping with no CUDA toolchain
+    /// dependency. (#1082)
     pub fn from_model_weights_kt(
         weights: &ModelWeights,
         config: &kiln_core::config::ModelConfig,
