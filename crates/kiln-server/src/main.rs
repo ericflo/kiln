@@ -675,7 +675,11 @@ fn spawn_backend_prewarm(state: AppState) {
     let (is_gpu, is_vulkan, device) = {
         let runner_guard = runner.read().unwrap();
         let device = runner_guard.weights.embed_tokens.device().clone();
-        let is_metal = matches!(device, candle_core::Device::Metal(_));
+        // kt-typed metal detection so this call site no longer pattern-matches
+        // on `candle_core::Device` directly. The bridge helper is always-on
+        // (no cuda feature gate). (#1082)
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
+        let is_metal = matches!(device_kt, kiln_tensor::Device::Metal(_));
         let is_vulkan = runner_guard.backend_name() == "vulkan";
         (is_metal || is_vulkan, is_vulkan, device)
     };
@@ -701,11 +705,16 @@ fn spawn_backend_prewarm(state: AppState) {
         tracing::info!("starting background inference prewarm");
         let prewarm_start = std::time::Instant::now();
         let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            // Bridge once at the seam so the precompile helpers below take
+            // `&kiln_tensor::Device` (kt) on their public surface. The
+            // `device` local is still candle for downstream consumers that
+            // haven't migrated. (#1082)
+            let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
             // Pipeline compilation does not allocate KV/model working buffers, so
             // keep it outside the opportunistic GPU lock. If the first live
             // request wins the lock, it should still benefit from compiled
             // custom kernels rather than paying lazy compile latency itself.
-            precompile_metal_custom_kernels(&device);
+            precompile_metal_custom_kernels(&device_kt);
 
             // Prewarm is opportunistic. If a live request or training job has
             // the GPU first, skip prewarm rather than sitting in front of it.
@@ -714,8 +723,8 @@ fn spawn_backend_prewarm(state: AppState) {
                 return Ok(());
             };
 
-            precompile_metal_custom_kernels(&device);
-            precompile_vulkan_custom_kernels(&device);
+            precompile_metal_custom_kernels(&device_kt);
+            precompile_vulkan_custom_kernels(&device_kt);
             // Write lock — `prewarm_backend_decode_weights` now mutates
             // `weights` to stub the pre-transposed bf16 caches after Vulkan
             // upload (frees ~6-7 GB of candle CPU residency). Prewarm runs
@@ -814,14 +823,31 @@ fn warm_tokenizer(tokenizer: &KilnTokenizer) {
     }
 }
 
+// Helpers below take `&kiln_tensor::Device` (kt) on the public surface so
+// main.rs no longer pattern-matches against `candle_core::Device` at the
+// call site. The metal helper still bridges to candle internally for
+// `kiln_model::backend::metal::precompile_custom_kernels`, which remains
+// candle-typed (TODO(#1082): migrate that API to kt and drop the bridge
+// here). The Vulkan helper never used its device parameter, so the kt
+// retyping is purely a surface-area shift. (#1082)
 #[cfg(feature = "metal")]
-fn precompile_metal_custom_kernels(device: &candle_core::Device) {
-    if !matches!(device, candle_core::Device::Metal(_)) {
+fn precompile_metal_custom_kernels(device: &kiln_tensor::Device) {
+    if !matches!(device, kiln_tensor::Device::Metal(_)) {
         return;
     }
+    // TODO(#1082): kiln_model::backend::metal::precompile_custom_kernels is
+    // still candle-typed; bridge at this seam until that API gets a kt-typed
+    // parallel. `candle_device_from_kt` is always-on (no cuda gate).
+    let candle_device = match kiln_kt_bridge::candle_device_from_kt(device) {
+        Ok(d) => d,
+        Err(err) => {
+            tracing::warn!(error = %err, "kt -> candle bridge failed for Metal precompile");
+            return;
+        }
+    };
 
     let start = std::time::Instant::now();
-    match kiln_model::backend::metal::precompile_custom_kernels(device) {
+    match kiln_model::backend::metal::precompile_custom_kernels(&candle_device) {
         Ok(()) => tracing::info!(
             elapsed_ms = start.elapsed().as_millis() as u64,
             "Metal custom kernels precompiled during background prewarm"
@@ -834,10 +860,10 @@ fn precompile_metal_custom_kernels(device: &candle_core::Device) {
 }
 
 #[cfg(not(feature = "metal"))]
-fn precompile_metal_custom_kernels(_device: &candle_core::Device) {}
+fn precompile_metal_custom_kernels(_device: &kiln_tensor::Device) {}
 
 #[cfg(feature = "vulkan")]
-fn precompile_vulkan_custom_kernels(_device: &candle_core::Device) {
+fn precompile_vulkan_custom_kernels(_device: &kiln_tensor::Device) {
     let start = std::time::Instant::now();
     match kiln_model::backend::vulkan::precompile_custom_kernels() {
         Ok(()) => tracing::info!(
@@ -852,7 +878,7 @@ fn precompile_vulkan_custom_kernels(_device: &candle_core::Device) {
 }
 
 #[cfg(not(feature = "vulkan"))]
-fn precompile_vulkan_custom_kernels(_device: &candle_core::Device) {}
+fn precompile_vulkan_custom_kernels(_device: &kiln_tensor::Device) {}
 
 /// Wait for SIGTERM or SIGINT, then signal shutdown. Receiving a *second*
 /// signal while still draining short-circuits straight to process exit so
