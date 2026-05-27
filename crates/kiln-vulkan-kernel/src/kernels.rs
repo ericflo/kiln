@@ -960,6 +960,14 @@ pub fn create_tensor_from_data(data: &[u8], shape: &[usize], dtype: DType) -> Re
     }
 }
 
+/// Build a CPU F32 candle Tensor from raw f32 bytes plus shape. Used
+/// internally by the `*_bytes` dispatch shims so callers can stay
+/// candle-free even when the underlying impl still needs a Tensor.
+/// (#1082)
+fn build_cpu_f32_tensor_from_bytes(data: &[u8], shape: &[usize]) -> Result<Tensor> {
+    create_tensor_from_data(data, shape, DType::F32)
+}
+
 /// Decode a registry-resident `VulkanBuffer` back into a candle CPU
 /// Tensor of the requested `shape` and `dtype`.
 ///
@@ -4845,6 +4853,40 @@ pub fn dispatch_mlp_decode_cached_bf16_weights(
     )
 }
 
+/// Candle-free variant of [`dispatch_mlp_decode_cached_bf16_weights`].
+///
+/// Takes `x` as raw f32 bytes `[batch, 1, hidden]` and returns the
+/// output as raw f32 bytes `[batch, 1, out_dim]`. The bytes shim
+/// reconstructs a CPU Tensor internally so callers do not need any
+/// candle types in their own crate. (#1082)
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_mlp_decode_cached_bf16_weights_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    batch: usize,
+    gate_weight_t: &VulkanBuffer,
+    up_weight_t: &VulkanBuffer,
+    down_weight_t: &VulkanBuffer,
+    hidden: usize,
+    intermediate: usize,
+    out_dim: usize,
+) -> Result<Vec<u8>> {
+    let x = build_cpu_f32_tensor_from_bytes(x_data, &[batch, 1, hidden])?;
+    let out = dispatch_mlp_decode_cached_impl(
+        vk_device,
+        &x,
+        gate_weight_t,
+        up_weight_t,
+        down_weight_t,
+        hidden,
+        intermediate,
+        out_dim,
+        true,
+        true,
+    )?;
+    Ok(extract_tensor_bytes(&out)?.0)
+}
+
 /// Dispatch single-token SwiGLU MLP with packed BF16 gate/up weights and an
 /// F32 down-projection weight.
 #[allow(clippy::too_many_arguments)]
@@ -4870,6 +4912,41 @@ pub fn dispatch_mlp_decode_cached_bf16_gate_up_f32_down(
         true,
         false,
     )
+}
+
+/// Candle-free variant of [`dispatch_mlp_decode_cached_bf16_gate_up_f32_down`].
+///
+/// Same byte-layout contract as
+/// [`dispatch_mlp_decode_cached_bf16_weights_bytes`] — x is f32 bytes
+/// `[batch, 1, hidden]`, output is f32 bytes `[batch, 1, out_dim]`. The
+/// only difference is the down-projection weight is f32 instead of
+/// packed bf16. (#1082)
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    batch: usize,
+    gate_weight_t: &VulkanBuffer,
+    up_weight_t: &VulkanBuffer,
+    down_weight_t: &VulkanBuffer,
+    hidden: usize,
+    intermediate: usize,
+    out_dim: usize,
+) -> Result<Vec<u8>> {
+    let x = build_cpu_f32_tensor_from_bytes(x_data, &[batch, 1, hidden])?;
+    let out = dispatch_mlp_decode_cached_impl(
+        vk_device,
+        &x,
+        gate_weight_t,
+        up_weight_t,
+        down_weight_t,
+        hidden,
+        intermediate,
+        out_dim,
+        true,
+        false,
+    )?;
+    Ok(extract_tensor_bytes(&out)?.0)
 }
 
 #[allow(clippy::too_many_arguments)]
