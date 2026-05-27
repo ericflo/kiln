@@ -12,6 +12,19 @@
 use std::time::Instant;
 
 use anyhow::Result;
+// TODO(#1082): Full candle removal here is blocked on the kernel API itself.
+// Every `dispatch_*_decode_cached*` entry point this microbench exercises
+// (full_attn QKV, GDN in_proj, MLP gate_up + down, RMSNorm, causal_conv1d,
+// etc.) is currently typed on `&candle_core::Tensor` for its `x`/weight
+// inputs, and the upload helpers used below (`upload_tensor_*_buffer`) also
+// take `&Tensor`. Migrating this example to a pure kt::Tensor / `Vec<f32>` +
+// shape representation requires either:
+//   (a) bytes-based variants of all the Vulkan decode-path dispatch entries
+//       analogous to `dispatch_kernel_bytes`, or
+//   (b) retyping those entries on `&kt::Tensor` (the candle-free
+//       successor in `kiln_tensor`).
+// Until that lands, this example must keep `use candle_core::*` for the
+// host-side Tensor construction it threads into the dispatch calls.
 use candle_core::{DType, Device, Tensor};
 use half::bf16;
 use kiln_vulkan_kernel::buffer::VulkanBuffer;
@@ -1572,3 +1585,4 @@ fn run_full_token_resident_paged(
 fn main() -> Result<()> {
     run()
 }
+

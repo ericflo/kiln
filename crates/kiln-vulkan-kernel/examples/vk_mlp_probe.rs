@@ -42,6 +42,14 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+// TODO(#1082): Full candle removal here is blocked on the kernel API itself.
+// `dispatch_mlp_gate_up_decode_cached` in `kiln-vulkan-kernel::kernels` is
+// typed on `&candle_core::Tensor` for its `x` input. Once that entry point
+// (and the rest of the Vulkan decode-path dispatch surface) grows a bytes-
+// based variant analogous to `dispatch_kernel_bytes`, this `use candle_core`
+// can be dropped and `make_x` can return a raw `Vec<f32>` + shape pair.
+// Weights are already candle-free (see `make_bf16_weight` +
+// `upload_bf16_packed_buffer_from_slice`).
 use candle_core::{Device, Tensor};
 use half::bf16;
 use kiln_vulkan_kernel::buffer::VulkanBuffer;
@@ -72,8 +80,10 @@ fn make_bf16_weight(seed: u64, rows: usize, cols: usize) -> Vec<bf16> {
 }
 
 fn make_x(batch: usize) -> Result<Tensor> {
-    // Decode dispatch shape: [batch, 1, hidden], FP32. Still candle:
-    // `dispatch_mlp_gate_up_decode_cached` itself takes &Tensor today.
+    // Decode dispatch shape: [batch, 1, hidden], FP32.
+    // TODO(#1082): Still candle because `dispatch_mlp_gate_up_decode_cached`
+    // itself takes `&candle_core::Tensor`. Replace with a `Vec<f32>` + shape
+    // tuple once the dispatch entry grows a bytes-based variant.
     let n = batch * HIDDEN;
     let data: Vec<f32> = (0..n)
         .map(|i| ((i % 31) as f32 - 15.0) * 0.01)
@@ -219,3 +229,4 @@ fn main() -> Result<()> {
     }
     Ok(())
 }
+
