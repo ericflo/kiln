@@ -2686,9 +2686,10 @@ impl BackendRuntime for VulkanBackend {
         } else {
             self.cached_f32_weight_buffer(weight_t)?
         };
-        let token = kiln_vulkan_kernel::kernels::dispatch_linear_decode_sample(
+        let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(x)?.0;
+        let token = kiln_vulkan_kernel::kernels::dispatch_linear_decode_sample_bytes(
             vk_device,
-            x,
+            &x_data,
             &weight_buf,
             packed_bf16,
             hidden,

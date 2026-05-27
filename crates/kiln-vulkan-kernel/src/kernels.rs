@@ -3178,6 +3178,46 @@ pub fn dispatch_linear_decode_sample(
     min_p: f32,
     seed: u64,
 ) -> Result<u32> {
+    let x_data = extract_tensor_bytes(x)?.0;
+    dispatch_linear_decode_sample_bytes(
+        vk_device,
+        &x_data,
+        weight_t,
+        packed_bf16_weights,
+        hidden,
+        out_dim,
+        history_indices,
+        history_counts,
+        repetition_penalty,
+        presence_penalty,
+        frequency_penalty,
+        temperature,
+        top_k,
+        top_p,
+        min_p,
+        seed,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_linear_decode_sample_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_t: &VulkanBuffer,
+    packed_bf16_weights: bool,
+    hidden: usize,
+    out_dim: usize,
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalty: f32,
+    presence_penalty: f32,
+    frequency_penalty: f32,
+    temperature: f32,
+    top_k: u32,
+    top_p: f32,
+    min_p: f32,
+    seed: u64,
+) -> Result<u32> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -3195,7 +3235,6 @@ pub fn dispatch_linear_decode_sample(
         history_indices.len(),
         history_counts.len()
     );
-    let x_data = extract_tensor_bytes(x)?.0;
     anyhow::ensure!(
         x_data.len() == hidden * 4,
         "linear_decode_sample: x buffer has {} bytes, expected {}",
