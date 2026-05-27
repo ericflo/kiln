@@ -623,7 +623,12 @@ pub fn rotary_one_bwd_bf16(
 }
 
 /// Storage-level single-tensor BF16 RoPE backward for CUDA custom ops.
-pub fn rotary_one_bwd_bf16_storage(
+///
+/// Downgraded from `pub` to private in (#1082): zero external callers —
+/// the only consumer is [`rotary_one_bwd_bf16`] above, which still calls
+/// this helper after extracting the storage and layouts. Shrinks the
+/// candle-typed public surface of this crate by one entry.
+fn rotary_one_bwd_bf16_storage(
     grad_x_cuda: &CudaStorage,
     grad_x_layout: &Layout,
     grad_y_cuda: &CudaStorage,
