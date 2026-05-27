@@ -5,6 +5,30 @@
 //! a strong signal that wiring FLCE into the trainer will produce the same
 //! gradient signal (modulo floating-point associativity in the chunked
 //! reduction).
+//!
+//! TODO(#1082): This file stays on candle until candle is removed from the
+//! workspace, then it should be DELETED alongside `cuda_kernel_backward`
+//! / `fused_linear_cross_entropy_phase_b*` (the candle-typed FLCE surface
+//! these tests exercise).
+//!
+//! Why we can't migrate the CPU parity tests today:
+//!   - `naive_loss` uses candle's high-level CPU tensor ops as the parity
+//!     oracle (log_sum_exp, gather, matmul on a CPU `Device::Cpu` tensor).
+//!     There is no kt-typed equivalent that runs on CPU without the
+//!     candle backend wiring underneath.
+//!
+//! Why we can't migrate the CUDA parity tests today:
+//!   - `cuda_kt_forward_op_parity` uses `candle_core::Var` to drive a
+//!     `loss.backward()` round-trip and read `grads.get(hidden)`. There
+//!     is no kt-typed autograd substrate yet — see
+//!     `docs/CANDLE_REMOVAL_PLAN.md` lines 655-668. Building one is
+//!     multi-PR scope.
+//!
+//! When candle is finally dropped, the candle-typed
+//! `fused_linear_cross_entropy_phase_b_via_kt_forward_op` shim is the
+//! object under test and would also be deleted, so this whole file goes
+//! with it. See precedent commits `46a838ff` (vulkan-kernel docs) and
+//! `acd00bb4` (rmsnorm phase10_microbench docs).
 
 use anyhow::Result;
 use candle_core::{D, DType, Device, Tensor};
