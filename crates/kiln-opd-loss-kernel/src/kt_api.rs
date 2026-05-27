@@ -30,7 +30,10 @@
 //! 2. [`opd_top_k_reverse_kl_kt`] — kt-typed scalar-mean forward
 //!    entry point. Re-implements the gather + matmul + log-softmax
 //!    + reverse-KL reduction over [`kiln_tensor`] ops; mirrors the
-//!    Phase A candle reference (`crate::opd_top_k_reverse_kl_phase_a`).
+//!    Phase A candle reference (the per-position variant
+//!    `crate::opd_top_k_reverse_kl_phase_a_per_position` — the
+//!    scalar-mean phase_a entry was deleted in #1082 since the
+//!    only callers were internal dead code).
 //! 3. [`opd_top_k_reverse_kl_per_position_kt`] — kt-typed per-
 //!    position forward entry point. Same forward kernel as the
 //!    scalar entry point but without the final `mean_all`.
@@ -346,13 +349,15 @@ fn per_position_forward_kt(
 
 /// kt-typed entry point for OPD scalar-mean reverse-KL.
 ///
-/// Re-implements the candle Phase A reference
-/// (`crate::opd_top_k_reverse_kl_phase_a`) over `kiln_tensor` ops.
-/// Numerically equivalent up to floating-point associativity in the
-/// matmul and the per-row log-softmax / KL reductions.
+/// Re-implements the (now-deleted, #1082) candle Phase A scalar-mean
+/// reference over `kiln_tensor` ops. Numerically equivalent up to
+/// floating-point associativity in the matmul and the per-row
+/// log-softmax / KL reductions.
 ///
-/// # Shape contract (matches the candle-typed
-/// [`crate::opd_top_k_reverse_kl`] entry point)
+/// # Shape contract (matches the (deleted, #1082) candle-typed
+/// `opd_top_k_reverse_kl` dispatch entry — see `phase_b` for the
+/// surviving candle-typed scalar-mean surface,
+/// [`crate::opd_top_k_reverse_kl_phase_b`])
 ///
 /// - `hidden`: `[1, T, H]` student hidden states.
 /// - `head_t`: `[H, V]` transposed LM head (matches kiln's

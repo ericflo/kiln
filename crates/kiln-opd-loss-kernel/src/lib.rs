@@ -70,17 +70,16 @@
 //!
 //! Mirrors `kiln-flce-kernel`'s split:
 //!
-//! - **Phase A** ([`opd_top_k_reverse_kl_phase_a`]) — pure-candle reference
-//!   implementation. Builds `[T_active, K]` student logits via per-token
-//!   gather + batched matmul, runs the renormalised reverse-KL in candle
-//!   ops, and lets candle autograd handle the backward. Used as the parity
-//!   oracle and as the default path on CPU.
+//! - **Phase A** ([`opd_top_k_reverse_kl_phase_a_per_position`]) — pure-
+//!   candle reference implementation. Builds `[T_active, K]` student
+//!   logits via per-token gather + batched matmul, runs the renormalised
+//!   reverse-KL in candle ops, and lets candle autograd handle the
+//!   backward. Now used only as the fallback path inside the kt-forward-op
+//!   shim ([`opd_top_k_reverse_kl_per_position_via_kt_forward_op`]) when
+//!   the kt envelope (`{K∈16,32} × {F32,BF16} × CUDA`) doesn't apply.
 //! - **Phase B** ([`opd_top_k_reverse_kl_phase_b`]) — `CustomOp1` whose
 //!   `bwd()` runs the manual analytic backward. Forward stores only the
 //!   scalar loss; the chunk intermediates are dropped on return.
-//!
-//! [`opd_top_k_reverse_kl`] dispatches to Phase A or B based on the
-//! `KILN_OPD_LOSS_PHASE_A=1` env var (default: Phase B).
 //!
 //! # Numerical contract
 //!
@@ -121,21 +120,10 @@ pub use kt_forward_op::{
 /// one chunk, but very-long-context training keeps the option open.
 pub const DEFAULT_CHUNK_SIZE: usize = 4096;
 
-/// Read the `KILN_OPD_LOSS_PHASE_A` env var. When set (`1` / `true` /
-/// `yes`), the dispatch helper [`opd_top_k_reverse_kl`] routes to Phase A;
-/// otherwise it routes to Phase B (the production default).
-pub fn use_phase_a() -> bool {
-    std::env::var("KILN_OPD_LOSS_PHASE_A")
-        .map(|v| {
-            let v = v.to_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        })
-        .unwrap_or(false)
-}
-
 /// Read the `KILN_DISABLE_OPD_LOSS_KERNEL` env var. When set (`1` / `true`
-/// / `yes`), [`opd_top_k_reverse_kl`] forces Phase A even when the caller
-/// passes parameters that would otherwise activate Phase B. Mirrors the
+/// / `yes`), the kernel-dispatch path in `phase_b` forces the candle-on-CUDA
+/// reference fallback even when the caller passes parameters that would
+/// otherwise activate the raw-CUDA Phase B kernel. Mirrors the
 /// `KILN_DISABLE_*` kill-switch convention used elsewhere in kiln (PR #92,
 /// #133, #158, #166).
 pub fn kernel_disabled() -> bool {
@@ -234,78 +222,6 @@ fn validate_inputs(
     Ok((seq_len, hidden_size, vocab_size, active_count, top_k))
 }
 
-/// Dispatch to Phase A or Phase B based on the `KILN_OPD_LOSS_PHASE_A`
-/// env var (default Phase B). Production trainer call sites should use
-/// this entry point so a single env-var flip toggles every OPD-loss
-/// call. The `KILN_DISABLE_OPD_LOSS_KERNEL` kill switch forces Phase A
-/// even when the env var is unset.
-pub fn opd_top_k_reverse_kl(
-    hidden: &Tensor,
-    head_t: &Tensor,
-    teacher_topk_indices: &[u32],
-    teacher_topk_logprobs: &[f32],
-    label_mask: &[bool],
-    top_k: usize,
-    device: &Device,
-    chunk_size: usize,
-) -> Result<Tensor> {
-    if use_phase_a() || kernel_disabled() {
-        opd_top_k_reverse_kl_phase_a(
-            hidden,
-            head_t,
-            teacher_topk_indices,
-            teacher_topk_logprobs,
-            label_mask,
-            top_k,
-            device,
-        )
-    } else {
-        opd_top_k_reverse_kl_phase_b(
-            hidden,
-            head_t,
-            teacher_topk_indices,
-            teacher_topk_logprobs,
-            label_mask,
-            top_k,
-            device,
-            chunk_size,
-        )
-    }
-}
-
-/// Phase A entry point: pure-candle reference implementation, autograd
-/// flows through the gather and matmul intermediates. Used as the parity
-/// oracle for Phase B and as the default path when
-/// `KILN_OPD_LOSS_PHASE_A=1` is set.
-///
-/// Returns scalar f32 mean reverse KL over active positions, or a zero
-/// scalar tensor when no positions are active.
-pub fn opd_top_k_reverse_kl_phase_a(
-    hidden: &Tensor,
-    head_t: &Tensor,
-    teacher_topk_indices: &[u32],
-    teacher_topk_logprobs: &[f32],
-    label_mask: &[bool],
-    top_k: usize,
-    device: &Device,
-) -> Result<Tensor> {
-    let (_, _, _, active_count, _) = validate_inputs(
-        hidden,
-        head_t,
-        teacher_topk_indices,
-        teacher_topk_logprobs,
-        label_mask,
-        top_k,
-    )?;
-    if active_count == 0 {
-        return Tensor::new(0.0f32, device).context("zero scalar loss (no active rows)");
-    }
-
-    let per_pos =
-        per_position_phase_a(hidden, head_t, teacher_topk_indices, teacher_topk_logprobs, label_mask, top_k, device)?;
-    Ok(per_pos.mean_all()?)
-}
-
 /// Phase A per-position reverse-KL. Returns a `[T_active]` f32 tensor.
 /// Used by the trainer when constructing the per-token advantage
 /// `A_t = -KL_t` for the GRPO importance-sampling loss (§3.1, step 4 of
@@ -334,8 +250,7 @@ pub fn opd_top_k_reverse_kl_phase_a_per_position(
     per_position_phase_a(hidden, head_t, teacher_topk_indices, teacher_topk_logprobs, label_mask, top_k, device)
 }
 
-/// Per-position helper shared by [`opd_top_k_reverse_kl_phase_a`] and
-/// [`opd_top_k_reverse_kl_phase_a_per_position`].
+/// Per-position helper used by [`opd_top_k_reverse_kl_phase_a_per_position`].
 ///
 /// Math:
 ///

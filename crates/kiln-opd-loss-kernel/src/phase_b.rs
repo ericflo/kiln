@@ -309,7 +309,10 @@ fn opd_loss_phase_b_backward_via_kt_bridge(
 }
 
 /// Phase B entry point — scalar mean reverse-KL. Behaviourally identical
-/// to [`crate::opd_top_k_reverse_kl_phase_a`] up to f32 associativity.
+/// to the (now-deleted, #1082) `phase_a` scalar-mean candle reference
+/// up to f32 associativity. The per-position phase-A reference
+/// (`crate::opd_top_k_reverse_kl_phase_a_per_position`) is still the
+/// fallback inside the kt-forward-op shim.
 pub fn opd_top_k_reverse_kl_phase_b(
     hidden: &Tensor,
     head_t: &Tensor,
