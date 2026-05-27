@@ -3075,22 +3075,39 @@ impl BackendRuntime for VulkanBackend {
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
         let bf16 = self.use_bf16_packed_full_attn_qkv_weights(&[q_weight_t, k_weight_t, v_weight_t]);
         let out = if batch == 1 {
-            if bf16 {
+            let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(x)?.0;
+            let (q_b, k_b, v_b) = if bf16 {
                 let q_buf = self.cached_bf16_packed_weight_buffer(q_weight_t)?;
                 let k_buf = self.cached_bf16_packed_weight_buffer(k_weight_t)?;
                 let v_buf = self.cached_bf16_packed_weight_buffer(v_weight_t)?;
-                kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_bf16_weights(
-                    vk_device, x, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
+                kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_bf16_weights_bytes(
+                    vk_device, &x_data, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
                 )
             } else {
                 let q_buf = self.cached_f32_weight_buffer(q_weight_t)?;
                 let k_buf = self.cached_f32_weight_buffer(k_weight_t)?;
                 let v_buf = self.cached_f32_weight_buffer(v_weight_t)?;
-                kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached(
-                    vk_device, x, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
+                kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_bytes(
+                    vk_device, &x_data, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
                 )
             }
-            .context("full_attn_qkv_decode kernel failed")?
+            .context("full_attn_qkv_decode kernel failed")?;
+            let q = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &q_b,
+                &[1, 1, q_dim],
+                DType::F32,
+            )?;
+            let k = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &k_b,
+                &[1, 1, k_dim],
+                DType::F32,
+            )?;
+            let v = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &v_b,
+                &[1, 1, v_dim],
+                DType::F32,
+            )?;
+            (q, k, v)
         } else if bf16 {
             let q_buf = self.cached_bf16_packed_weight_buffer(q_weight_t)?;
             let k_buf = self.cached_bf16_packed_weight_buffer(k_weight_t)?;
@@ -3122,10 +3139,28 @@ impl BackendRuntime for VulkanBackend {
             let q_buf = self.cached_f32_weight_buffer(q_weight_t)?;
             let k_buf = self.cached_f32_weight_buffer(k_weight_t)?;
             let v_buf = self.cached_f32_weight_buffer(v_weight_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched(
-                vk_device, x, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
-            )
-            .context("full_attn_qkv_decode_batched kernel failed")?
+            let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(x)?.0;
+            let (q_b, k_b, v_b) =
+                kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bytes(
+                    vk_device, &x_data, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
+                )
+                .context("full_attn_qkv_decode_batched kernel failed")?;
+            let q = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &q_b,
+                &[batch, 1, q_dim],
+                DType::F32,
+            )?;
+            let k = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &k_b,
+                &[batch, 1, k_dim],
+                DType::F32,
+            )?;
+            let v = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &v_b,
+                &[batch, 1, v_dim],
+                DType::F32,
+            )?;
+            (q, k, v)
         };
         Ok(Some(out))
     }
