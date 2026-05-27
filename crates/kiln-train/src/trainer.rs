@@ -14273,7 +14273,7 @@ mod tests {
         // (missing => zero) are mathematically equivalent for parity, so
         // we treat them as equivalent here.
         let grad_or_zero =
-            |grads: &HashMap<candle_core::TensorId, candle_core::Tensor>, var: &Var| -> Result<candle_core::Tensor> {
+            |grads: &HashMap<candle_core::TensorId, candle_core::Tensor>, var: &candle_core::Var| -> Result<candle_core::Tensor> {
                 let id = var.as_tensor().id();
                 match grads.get(&id) {
                     Some(g) => Ok(g.clone()),
