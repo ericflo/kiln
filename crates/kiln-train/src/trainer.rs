@@ -8,47 +8,76 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-// NOTE(#1082): Dropped the cuda-gated `use candle_core::{CudaStorage,
-// backend::BackendStorage};` from the module top. The only call site —
-// `InjectTensorGradient::cuda_fwd` near the bottom of this file — now refers
-// to `candle_core::CudaStorage` inline and accesses the device via the
-// `pub device: CudaDevice` field directly (avoiding the
-// `BackendStorage::device()` trait method) so neither symbol needs a
-// module-level import. trainer.rs candle `use` count drops from 2 to 1.
-// TODO(#1082): the remaining candle_core import is blocked by pervasive
-// `Tensor`/`Var`/`Device`/`DType` use (500+ sites) and
-// `candle_core::safetensors::{save,load}` adapter I/O — those need a
-// coordinated kt-typed wrapper landing before this file can drop candle
-// entirely.
-// NOTE(#1082): Dropped `use candle_core::{CpuStorage, CustomOp1, DType,
-// Device, Layout, Shape, Tensor, Var};` — every reference to each of the
-// 8 imported items is now inline-qualified as `candle_core::Tensor` /
-// `candle_core::Var` / `candle_core::Device::Cpu` / `candle_core::DType::F32`
-// etc. throughout the ~13k-line file. This drops trainer.rs candle `use`
-// count from 1 to 0 as part of the per-file `use candle_*` reduction in
-// full candle removal (#1082).
+// NOTE(#1082): trainer.rs has zero `use candle_*` imports at module top —
+// every candle reference is inline-qualified. The historical reductions
+// landed in two passes:
 //
-// Approximate per-symbol inline-qualified site counts:
-//   * `Tensor`         ~270 sites (struct fields, fn sigs, constructors,
-//                                 generic params, slice/Vec types,
-//                                 method references in `.map(...)`)
-//   * `Var`            ~140 sites (LoraParams/AdamWMoments struct fields,
-//                                 Vec<&Var> in optimizer steps,
-//                                 Var::from_tensor/zeros/set/rand_f)
-//   * `DType`          ~120 sites (DType::F32 / BF16 / F16 / U32 type
-//                                 casts and constructor dtype params)
-//   * `Device`         ~120 sites (Device::Cpu / Cuda(_) / Metal(_) /
-//                                 new_cuda(0), `&Device` fn params)
-//   * `CpuStorage`     2 sites in InjectTensorGradient::cpu_fwd
-//   * `CustomOp1`      1 site (`impl CustomOp1 for InjectTensorGradient`)
-//   * `Layout`         2 sites in InjectTensorGradient::cpu_fwd/cuda_fwd
-//   * `Shape`          2 sites in InjectTensorGradient::cpu_fwd
+//   1. Dropped the cuda-gated `use candle_core::{CudaStorage,
+//      backend::BackendStorage};`. The only call site —
+//      `InjectTensorGradient::cuda_fwd` near the bottom of this file — now
+//      refers to `candle_core::CudaStorage` inline and accesses the device
+//      via the `pub device: CudaDevice` field directly (avoiding the
+//      `BackendStorage::device()` trait method). Drops `use` count 2 -> 1.
+//
+//   2. Dropped `use candle_core::{CpuStorage, CustomOp1, DType, Device,
+//      Layout, Shape, Tensor, Var};` — every reference to each of the 8
+//      imported items is now inline-qualified as `candle_core::Tensor` /
+//      `candle_core::Var` / `candle_core::Device::Cpu` /
+//      `candle_core::DType::F32` etc. throughout the ~16k-line file.
+//      Drops `use` count 1 -> 0.
+//
+// TODO(#1082): the candle_core dep itself stays because there are ~590
+// inline `candle_core::*` references (Tensor / Var / Device / DType / D /
+// safetensors / backprop / Shape / TensorId / CudaStorage / Layout /
+// CustomOp1 / CpuStorage). Dropping candle entirely is blocked by:
+//   - pervasive `Tensor`/`Var`/`Device`/`DType` use in struct fields and
+//     fn sigs (LoraParams, AdamWMoments, OptimizerState, ~70+ fn sigs);
+//   - `candle_core::safetensors::{save,load}` adapter I/O;
+//   - `candle_core::Var` as the canonical trainable parameter type
+//     consumed by `loss.backward()` and produced by every per-segment
+//     forward.
+// Those need a coordinated kt-typed wrapper landing before this file can
+// drop candle entirely. Tracked under Phase 7 (kt-typed OPD / FLCE /
+// RMSNorm forward+backward landings).
+//
+// Approximate per-symbol inline-qualified `candle_core::*` site counts
+// (post-b890535a; recount the file with `grep -c 'candle_core::<Sym>'`
+// before claiming a fresh count):
+//   * `Tensor`       ~263 sites (struct fields, fn sigs, constructors:
+//                                Tensor::new / zeros / from_vec / cat /
+//                                ones / detach / randn / from_slice /
+//                                zeros_like; generic params
+//                                Result<Tensor> / Option<Tensor> /
+//                                Vec<Tensor> / &Tensor / &[Tensor] /
+//                                Vec<&Tensor> / HashMap<String, Tensor>
+//                                / HashMap<TensorId, Tensor>)
+//   * `DType`        ~118 sites (DType::F32 / BF16 / F16 / U32 casts +
+//                                constructor dtype params)
+//   * `Device`       ~117 sites (Device::Cpu / Cuda(_) / Metal(_) /
+//                                new_cuda(0), `&Device` fn params)
+//   * `Var`           ~72 sites (LoraParams / AdamWMoments / SGD state
+//                                fields, Vec<&Var> in optimizer steps,
+//                                Var::from_tensor / zeros / set / rand_f)
+//   * `TensorId`      ~24 sites (HashMap<TensorId, ...> for gradient
+//                                + AdamW moment lookups)
+//   * `D`             ~21 sites (`D::Minus1` for reduce / argmax dims)
+//   * `safetensors`     6 sites (adapter I/O: `save` / `load`)
+//   * `backprop`        6 sites (custom backward via `backprop::*`)
+//   * `Shape`           4 sites (InjectTensorGradient + zeros constructor)
+//   * `CpuStorage`      3 sites (InjectTensorGradient::cpu_fwd return)
+//   * `CudaStorage`     3 sites (InjectTensorGradient::cuda_fwd, gated)
+//   * `Layout`          2 sites (InjectTensorGradient::cpu_fwd/cuda_fwd)
+//   * `CustomOp1`       1 site  (`impl CustomOp1 for InjectTensorGradient`)
 //
 // The candle dep itself stays because:
 //   * `candle_core::Var` is the canonical trainable parameter type used
 //     throughout SFT/GRPO autograd
 //   * `candle_core::Tensor` is the autograd-tracked tensor consumed
 //     by `loss.backward()` and produced by every per-segment forward
+//   * `candle_core::backprop` provides the `GradStore` API used by every
+//     SGD / AdamW optimizer step in this file
+//   * `candle_core::safetensors::{save, load}` is the adapter on-disk
+//     format
 //   * Migrating off candle autograd is the larger Phase 7 task tracked
 //     by the kt-typed OPD/FLCE/RMSNorm forward+backward landings.
 use rand::rngs::StdRng;
@@ -7655,10 +7684,13 @@ impl candle_core::CustomOp1 for InjectTensorGradient {
     ) -> candle_core::Result<(candle_core::CudaStorage, candle_core::Shape)> {
         // (#1082) `CudaStorage` is fully-qualified inline (only this function
         // touches it) and the `device` field is accessed directly rather than
-        // via the `BackendStorage::device()` trait method, eliminating the
-        // last cfg(cuda)-gated module-level `use candle_core::{CudaStorage,
-        // backend::BackendStorage};`. trainer.rs candle import count drops
-        // from 2 use statements to 1.
+        // via the `BackendStorage::device()` trait method, eliminating what
+        // was the last cfg(cuda)-gated module-level `use candle_core::{
+        // CudaStorage, backend::BackendStorage};`. Combined with the followup
+        // inline-qualification of the remaining `use candle_core::{...}`
+        // imports (b890535a), trainer.rs candle `use` count is now 0; every
+        // candle reference in this file is inline-qualified. See the module
+        // header comment for the full per-symbol breakdown.
         let device = &storage.device;
         let out_slice = device.clone_htod(&[0.0f32])?;
         Ok((
