@@ -370,6 +370,35 @@ impl CudaStorage {
     /// The candle CUDA device handle this storage was allocated on.
     /// Used by FFI sites + the Phase 1.x `StreamPlanner` to read
     /// stream affinity.
+    ///
+    /// # STOP — #1082 field-drop frontier
+    ///
+    /// This accessor is the last remaining substrate-level dependency
+    /// on candle's `CudaDevice` wrapper from kernel-crate FFI surfaces.
+    /// Roughly 16 call sites across `kiln-tensor` (cuda_matmul, fp8,
+    /// ops/{broadcast,flip,like,repeat,repeat_interleave,roll,scatter_add,
+    /// triangular}), `kiln-model/paged_kv_cache_kt.rs`, and
+    /// `kiln-kt-bridge/lib.rs` read `.candle_device().clone()` to forward
+    /// an `Arc<CudaDevice>` into helper functions whose signatures still
+    /// take a candle device parameter (typically `host_to_cuda_copy`,
+    /// `cuda_matmul_into`, and the FP8 quantize entry points).
+    ///
+    /// Dropping the `candle_device` field — the next CP-1 lift step
+    /// after this commit — requires:
+    /// 1. Migrating those helper function signatures off `Arc<CudaDevice>`
+    ///    to either `Arc<CudaContext>` or `device_index: usize` + a
+    ///    `primary_cuda_device(device_index)` derivation inside the helper.
+    /// 2. Switching every `.candle_device().clone()` at the call site to
+    ///    derive the candle wrapper on-demand from the storage's
+    ///    `.context()` and `primary_cuda_device(device_index)` — or
+    ///    plumb a `CudaContext` through instead.
+    /// 3. Then this accessor and the field are both removable.
+    ///
+    /// The "≤15 sites" estimate in earlier CP-1 docs missed the
+    /// helper-fan-out: each `.candle_device().clone()` forwards into a
+    /// signature that also needs updating. Full sweep is ~16 sites + ~6
+    /// helper signatures — bigger than a single lift commit. Track under
+    /// #1082.
     pub fn candle_device(&self) -> &Arc<CudaDevice> {
         &self.candle_device
     }
