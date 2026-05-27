@@ -7652,7 +7652,7 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
 /// `kiln/mean_last_dim_kt` brackets the migrated call so nsys
 /// traces separate the path from the baseline composite.
 #[cfg(feature = "cuda")]
-fn try_kt_mean_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
+pub(crate) fn try_kt_mean_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_mean_last_dim() {
         return Ok(None);
     }

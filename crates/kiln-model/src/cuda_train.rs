@@ -894,12 +894,26 @@ pub fn cuda_rmsnorm(
         hidden
     );
 
-    let variance = input
+    let sq = input
         .as_tensor()
         .sqr()
-        .context("cuda_rmsnorm: square input")?
-        .mean_keepdim(D::Minus1)
-        .context("cuda_rmsnorm: row variance")?;
+        .context("cuda_rmsnorm: square input")?;
+    // Phase 7 (#1082): route `mean_keepdim(-1)` through
+    // `try_kt_mean_last_dim_keepdim` (single-kernel
+    // `cuda_mean_last_axis` + zero-cost `unsqueeze(-1)`). Falls
+    // through to the candle composite when
+    // `KILN_USE_KT_API_MEAN_LAST_DIM` (or `KILN_USE_KT_API_ALL`) is
+    // off or any precondition fails so behavior is identical with
+    // the gate off. Mirrors the existing `try_kt_rsqrt` wiring
+    // below.
+    let variance = match crate::forward::try_kt_mean_last_dim_keepdim(&sq)
+        .context("cuda_rmsnorm: try_kt_mean_last_dim_keepdim")?
+    {
+        Some(out) => out,
+        None => sq
+            .mean_keepdim(D::Minus1)
+            .context("cuda_rmsnorm: row variance")?,
+    };
     // Phase 7 (#1082): route the `(variance + eps).sqrt().recip()` chain
     // through `try_kt_rsqrt` (fused single-kernel `cuda_activation_unary`
     // kind tag 22 — sqrt + recip in one pass). Falls through to the candle
@@ -4098,12 +4112,22 @@ impl CudaBackwardOp for RmsNormBackward {
             .context("cuda_rmsnorm backward: u * input")?
             .sum_keepdim(D::Minus1)
             .context("cuda_rmsnorm backward: row dot")?;
-        let variance = input
+        let sq = input
             .as_tensor()
             .sqr()
-            .context("cuda_rmsnorm backward: square input")?
-            .mean_keepdim(D::Minus1)
-            .context("cuda_rmsnorm backward: row variance")?;
+            .context("cuda_rmsnorm backward: square input")?;
+        // Phase 7 (#1082): mirrors the forward `cuda_rmsnorm`
+        // mean_keepdim wiring — route `mean_keepdim(-1)` through
+        // `try_kt_mean_last_dim_keepdim` with a candle fallback so
+        // behavior is identical when the gate is off.
+        let variance = match crate::forward::try_kt_mean_last_dim_keepdim(&sq)
+            .context("cuda_rmsnorm backward: try_kt_mean_last_dim_keepdim")?
+        {
+            Some(out) => out,
+            None => sq
+                .mean_keepdim(D::Minus1)
+                .context("cuda_rmsnorm backward: row variance")?,
+        };
         // Phase 7 (#1082): fuse the `.sqrt().recip()` chain via
         // `try_kt_rsqrt` (single-kernel `cuda_activation_unary` kind tag 22).
         // Mirrors the forward `cuda_rmsnorm` rsqrt wiring. Falls through to
