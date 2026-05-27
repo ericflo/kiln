@@ -2,6 +2,7 @@
 name = "kiln-vulkan-kernel"
 description = "Vulkan compute kernels for Kiln (GLSL compute shaders)"
 version.workspace = true
+publish = false
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
