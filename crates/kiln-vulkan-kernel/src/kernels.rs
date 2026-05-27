@@ -1180,6 +1180,50 @@ pub fn dispatch_gdn_in_proj_decode_cached(
     )
 }
 
+/// Candle-free variant of [`dispatch_gdn_in_proj_decode_cached_bf16_weights`].
+///
+/// Takes `x` as raw f32 bytes `[batch, 1, hidden]` and returns the
+/// `(qkv, z, a, b)` outputs as raw f32 bytes — each shaped
+/// `[batch, 1, *_dim]` in row-major order. The shim reconstructs a CPU
+/// Tensor internally so callers can stay candle-free. (#1082)
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    batch: usize,
+    qkv_weight_t: &VulkanBuffer,
+    z_weight_t: &VulkanBuffer,
+    a_weight_t: &VulkanBuffer,
+    b_weight_t: &VulkanBuffer,
+    hidden: usize,
+    qkv_dim: usize,
+    z_dim: usize,
+    a_dim: usize,
+    b_dim: usize,
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let x = build_cpu_f32_tensor_from_bytes(x_data, &[batch, 1, hidden])?;
+    let (qkv, z, a, b) = dispatch_gdn_in_proj_decode_cached_impl(
+        vk_device,
+        &x,
+        qkv_weight_t,
+        z_weight_t,
+        a_weight_t,
+        b_weight_t,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        true,
+    )?;
+    Ok((
+        extract_tensor_bytes(&qkv)?.0,
+        extract_tensor_bytes(&z)?.0,
+        extract_tensor_bytes(&a)?.0,
+        extract_tensor_bytes(&b)?.0,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_gdn_in_proj_decode_cached_bf16_weights(
     vk_device: &VulkanDevice,
@@ -4089,6 +4133,46 @@ pub fn dispatch_full_attn_qkv_decode_cached_batched_bf16_weights(
         v_dim,
         true,
     )
+}
+
+/// Candle-free variant of
+/// [`dispatch_full_attn_qkv_decode_cached_batched_bf16_weights`].
+///
+/// Takes `x` as raw f32 bytes `[batch, 1, hidden]` and returns the
+/// `(q, k, v)` outputs as raw f32 bytes — each shaped `[batch, 1, *_dim]`
+/// in row-major order. The shim reconstructs a CPU Tensor internally
+/// so callers can stay candle-free. (#1082)
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    q_weight_t: &VulkanBuffer,
+    k_weight_t: &VulkanBuffer,
+    v_weight_t: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    q_dim: usize,
+    k_dim: usize,
+    v_dim: usize,
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let x = build_cpu_f32_tensor_from_bytes(x_data, &[batch, 1, hidden])?;
+    let (q, k, v) = dispatch_full_attn_qkv_decode_cached_batched_impl(
+        vk_device,
+        &x,
+        q_weight_t,
+        k_weight_t,
+        v_weight_t,
+        batch,
+        hidden,
+        q_dim,
+        k_dim,
+        v_dim,
+        true,
+    )?;
+    let q_bytes = extract_tensor_bytes(&q)?.0;
+    let k_bytes = extract_tensor_bytes(&k)?.0;
+    let v_bytes = extract_tensor_bytes(&v)?.0;
+    Ok((q_bytes, k_bytes, v_bytes))
 }
 
 #[allow(clippy::too_many_arguments)]
