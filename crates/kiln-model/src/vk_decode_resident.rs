@@ -206,8 +206,15 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     let k_norm_buf = backend.cached_f32_weight_buffer(&attn.k_norm)?;
 
     // --- rope cos/sin upload (per-step, single position) -------------
-    let rope_cos_buf = upload_tensor_f32(vk_device, rope_cos)?;
-    let rope_sin_buf = upload_tensor_f32(vk_device, rope_sin)?;
+    // Inlined the former `upload_tensor_f32` wrapper: call the
+    // candle-shim crate-level helper directly so the only candle-typed
+    // upload surface in this file is the single decode-input bridge
+    // point at function entry (not a hop through a local one-liner
+    // wrapper). (#1082)
+    let rope_cos_buf =
+        kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(vk_device, rope_cos)?;
+    let rope_sin_buf =
+        kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(vk_device, rope_sin)?;
 
     // --- activation buffer acquisition (pooled, persistent across
     //     resident decode calls on the same backend) -----------------
@@ -496,10 +503,6 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
         FA_CALLS.fetch_add(1, Ordering::Relaxed);
     }
     Ok(Some(out_tensor))
-}
-
-fn upload_tensor_f32(vk_device: &VulkanDevice, t: &Tensor) -> Result<VulkanBuffer> {
-    kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(vk_device, t)
 }
 
 fn f32_slice_to_bytes(data: &[f32]) -> Vec<u8> {
