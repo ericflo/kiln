@@ -102,16 +102,19 @@ pub fn cuda_fp8_quantize_with_scale(
             crate::Error::Msg("cuda_fp8_quantize_with_scale: src must be CUDA".to_string())
         })?;
 
-    let candle_device = src_storage.candle_device().clone();
     let device_index = match src_storage.device() {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
     let n = src.element_count();
-    let out_storage = CudaStorage::zeros(candle_device.clone(), device_index, DType::U8, n)?;
+    // CudaStorage::zeros_ctx (#1082) replaces the old
+    // CudaStorage::zeros(candle_device, ...) — the cudarc CudaContext is
+    // pulled directly off src_storage, no .candle_device() read.
+    let ctx = src_storage.context();
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, DType::U8, n)?;
 
-    let stream = candle_device.cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let stream = ctx.default_stream();
+    let raw_stream = src_storage.cuda_stream_raw();
 
     let src_base = match src_storage.slice_owner() {
         SliceOwner::Owned(s) => {
@@ -278,16 +281,18 @@ pub fn cuda_fp8_dequantize(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_fp8_dequantize: src must be CUDA".to_string()))?;
 
-    let candle_device = src_storage.candle_device().clone();
     let device_index = match src_storage.device() {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
     let n = src.element_count();
-    let out_storage = CudaStorage::zeros(candle_device.clone(), device_index, target_dtype, n)?;
+    // CudaStorage::zeros_ctx + cuda_stream_raw (#1082) — no
+    // .candle_device() read on this hot dequant path.
+    let ctx = src_storage.context();
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, target_dtype, n)?;
 
-    let stream = candle_device.cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let stream = ctx.default_stream();
+    let raw_stream = src_storage.cuda_stream_raw();
 
     let src_base = match src_storage.slice_owner() {
         SliceOwner::Owned(s) => {
