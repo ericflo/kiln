@@ -136,21 +136,16 @@ impl DeviceOp1 for FlipOp {
         let indices_host: Vec<u32> = (0..n as u32).rev().collect();
         let indices_cpu = Tensor::from_slice(&indices_host, vec![n])?;
 
-        // Resolve the candle CudaDevice from `x`'s storage so the
-        // indices land on the matching device.
-        let x_storage = x
-            .storage()
-            .as_any()
-            .downcast_ref::<crate::CudaStorage>()
-            .ok_or_else(|| crate::Error::from_str("flip::cuda_fwd: x must be CUDA storage"))?;
-        let candle_device = x_storage.candle_device().clone();
+        // Resolve the destination CUDA device index from `x`'s device
+        // tag so the indices land on the matching device.
+        // host_to_cuda_copy_ctx (#1082) derives the candle device
+        // internally from device_index, so no downcast is needed.
         let device_index = match x.device() {
             crate::Device::Cuda(i) => i,
             _ => return Ok(None),
         };
 
-        let indices_cuda =
-            crate::host_to_cuda_copy(&indices_cpu, candle_device, device_index)?;
+        let indices_cuda = crate::host_to_cuda_copy_ctx(&indices_cpu, device_index)?;
         Ok(Some(crate::cuda_index_select_dim0(x, &indices_cuda)?))
     }
 
