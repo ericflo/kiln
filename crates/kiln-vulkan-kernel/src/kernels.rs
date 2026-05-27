@@ -2026,25 +2026,56 @@ pub fn dispatch_qwen_rmsnorm_forward(
         hidden,
     );
 
-    let device = vk_device.device();
-    let queue = vk_device.queue();
-    let device_local_mt = vk_device.device_local_mem_type();
-    let host_visible_mt = vk_device.host_visible_mem_type();
-
     let x_data = extract_tensor_bytes(x)?.0;
+    let weight_data = extract_tensor_bytes(weight)?.0;
+    let out_data =
+        dispatch_qwen_rmsnorm_forward_bytes_core(vk_device, &x_data, &weight_data, rows, hidden, eps)?;
+    create_tensor_from_data(&out_data, &dims, DType::F32)
+}
+
+/// Candle-free variant of [`dispatch_qwen_rmsnorm_forward`].
+///
+/// Takes `x` and `weight` as raw f32 bytes and returns the output as
+/// raw f32 bytes. The caller passes the logical `rows` (flattened
+/// product of all but the last input dim) and `hidden` (last input
+/// dim) explicitly — there is no `x_shape` because RMSNorm only
+/// touches one row at a time. (#1082)
+pub fn dispatch_qwen_rmsnorm_forward_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_data: &[u8],
+    rows: usize,
+    hidden: usize,
+    eps: f32,
+) -> Result<Vec<u8>> {
+    dispatch_qwen_rmsnorm_forward_bytes_core(vk_device, x_data, weight_data, rows, hidden, eps)
+}
+
+fn dispatch_qwen_rmsnorm_forward_bytes_core(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_data: &[u8],
+    rows: usize,
+    hidden: usize,
+    eps: f32,
+) -> Result<Vec<u8>> {
     anyhow::ensure!(
         x_data.len() == rows * hidden * 4,
         "qwen_rmsnorm_forward: x buffer has {} bytes, expected {}",
         x_data.len(),
         rows * hidden * 4
     );
-    let weight_data = extract_tensor_bytes(weight)?.0;
     anyhow::ensure!(
         weight_data.len() == hidden * 4,
         "qwen_rmsnorm_forward: weight buffer has {} bytes, expected {}",
         weight_data.len(),
         hidden * 4
     );
+
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
 
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
         .context("qwen_rmsnorm_forward: create x buffer")?;
@@ -2065,10 +2096,10 @@ pub fn dispatch_qwen_rmsnorm_forward(
     let push_constants: [u32; 3] = [rows as u32, hidden as u32, eps.to_bits()];
     let workgroups = rows as u32;
 
-    let out_data = if qwen_rmsnorm_single_submit_enabled() {
+    if qwen_rmsnorm_single_submit_enabled() {
         run_compute_pipeline_with_transfers_readback(
             vk_device,
-            &[(&x_buf, &x_data), (&weight_buf, &weight_data)],
+            &[(&x_buf, x_data), (&weight_buf, weight_data)],
             &out_buf,
             out_size,
             &spirv,
@@ -2076,7 +2107,7 @@ pub fn dispatch_qwen_rmsnorm_forward(
             &push_constants,
             workgroups,
         )
-        .context("qwen_rmsnorm_forward: single-submit dispatch")?
+        .context("qwen_rmsnorm_forward: single-submit dispatch")
     } else {
         {
             let command_pool = vk_device.transient_command_pool()?;
@@ -2086,7 +2117,7 @@ pub fn dispatch_qwen_rmsnorm_forward(
                 queue,
                 *command_pool,
                 &x_buf,
-                &x_data,
+                x_data,
             )
             .context("qwen_rmsnorm_forward: upload x")?;
             VulkanBuffer::upload_data_with_command_pool(
@@ -2095,7 +2126,7 @@ pub fn dispatch_qwen_rmsnorm_forward(
                 queue,
                 *command_pool,
                 &weight_buf,
-                &weight_data,
+                weight_data,
             )
             .context("qwen_rmsnorm_forward: upload weight")?;
         }
@@ -2116,9 +2147,8 @@ pub fn dispatch_qwen_rmsnorm_forward(
             *command_pool,
             &out_buf,
         )
-        .context("qwen_rmsnorm_forward: read back out")?
-    };
-    create_tensor_from_data(&out_data, &dims, DType::F32)
+        .context("qwen_rmsnorm_forward: read back out")
+    }
 }
 
 /// Qwen3.5-style RMSNorm backward.
