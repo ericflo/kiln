@@ -51,7 +51,7 @@ use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 
 use cudarc::driver::sys::CUstream;
-use cudarc::driver::{CudaSlice, DevicePtr};
+use cudarc::driver::{CudaContext, CudaSlice, DevicePtr};
 use candle_core::cuda_backend::CudaDevice;
 
 use crate::{AlgoCache, AlgoCacheValue, BackendMatmul,
@@ -233,9 +233,14 @@ struct HandleInner {
     /// `NonNull` because we error out on a null create rather than
     /// constructing.
     ctx: NonNull<KilnCublasLtCtx>,
-    /// Candle CUDA device — used to allocate the workspace + query
-    /// the default stream for `BackendMatmul::plan()`.
-    device: Arc<CudaDevice>,
+    /// Cudarc CUDA context — used to allocate the workspace + query
+    /// the default stream. Owning this directly (rather than going
+    /// through `candle_core::cuda_backend::CudaDevice`) is the #1082
+    /// candle-free entry: callers that already have an
+    /// `Arc<CudaContext>` (e.g. from `CudaStorage::context()`) no
+    /// longer need to materialize a candle wrapper to construct the
+    /// handle.
+    cuda_ctx: Arc<CudaContext>,
     /// 0-based CUDA device index this handle is bound to.
     device_index: usize,
     /// Persistent autotune cache. Shared across handles so warm
@@ -250,9 +255,9 @@ struct HandleInner {
 }
 
 // SAFETY: cublasLt context is documented as thread-safe (per
-// NVIDIA cuBLAS docs: "cublasLt is fully thread-safe"). The internal
-// CudaDevice is already Arc'd and thread-safe. The mutexes guard the
-// only mutable state.
+// NVIDIA cuBLAS docs: "cublasLt is fully thread-safe"). The cudarc
+// `CudaContext` is already `Arc`'d and thread-safe (its inner state
+// uses interior locking). The mutexes guard the only mutable state.
 unsafe impl Send for HandleInner {}
 unsafe impl Sync for HandleInner {}
 
@@ -269,15 +274,21 @@ impl std::fmt::Debug for CublasLtMatmulHandle {
 }
 
 impl CublasLtMatmulHandle {
-    /// Construct a new handle bound to `device`. The handle takes a
-    /// shared reference to the algo cache so multiple handles on the
-    /// same process can amortize autotune across themselves.
+    /// Construct a new handle bound to the cudarc `CudaContext` `ctx`.
+    /// This is the **candle-free entry** (#1082) — callers that already
+    /// have an `Arc<CudaContext>` (e.g. from `CudaStorage::context()`)
+    /// can construct a handle directly without materializing a candle
+    /// `CudaDevice` wrapper.
+    ///
+    /// The handle takes a shared reference to the algo cache so
+    /// multiple handles on the same process can amortize autotune
+    /// across themselves.
     ///
     /// `workspace_max_bytes` controls the per-call workspace cap.
     /// Defaults to [`WorkspacePool::DEFAULT_MAX_BYTES`] (32 MiB) when
     /// `None`.
-    pub fn new(
-        device: Arc<CudaDevice>,
+    pub fn new_ctx(
+        cuda_ctx: Arc<CudaContext>,
         device_index: usize,
         algo_cache: Arc<Mutex<AlgoCache>>,
         workspace_max_bytes: Option<u64>,
@@ -299,7 +310,7 @@ impl CublasLtMatmulHandle {
         Ok(CublasLtMatmulHandle {
             inner: Arc::new(HandleInner {
                 ctx,
-                device,
+                cuda_ctx,
                 device_index,
                 algo_cache,
                 workspace_pool: Mutex::new(pool),
@@ -308,9 +319,47 @@ impl CublasLtMatmulHandle {
         })
     }
 
+    /// Construct a new handle bound to the candle `CudaDevice` `device`.
+    ///
+    /// This is the legacy candle-wrapper entry, retained so existing
+    /// tests + downstream call sites that still hold a candle device
+    /// don't break. New code should prefer [`Self::new_ctx`] and hold
+    /// `Arc<CudaContext>` directly — see the #1082 substrate work.
+    ///
+    /// Internally derives the cudarc `CudaContext` from
+    /// `device.cuda_stream().context()` (candle's `CudaDevice` is a
+    /// thin wrapper around `Arc<CudaContext>` plus extra state).
+    pub fn new(
+        device: Arc<CudaDevice>,
+        device_index: usize,
+        algo_cache: Arc<Mutex<AlgoCache>>,
+        workspace_max_bytes: Option<u64>,
+    ) -> Result<Self, FfiError> {
+        let cuda_ctx = Arc::clone(device.cuda_stream().context());
+        Self::new_ctx(cuda_ctx, device_index, algo_cache, workspace_max_bytes)
+    }
+
     /// Construct with a fresh, empty algo cache. Convenience for
     /// tests + per-process initialization when the application has
     /// no pre-shipped cache to load.
+    ///
+    /// Candle-free entry. See [`Self::new_ctx`] for the underlying
+    /// `Arc<CudaContext>`-based constructor.
+    pub fn with_fresh_cache_ctx(
+        cuda_ctx: Arc<CudaContext>,
+        device_index: usize,
+        workspace_max_bytes: Option<u64>,
+    ) -> Result<Self, FfiError> {
+        Self::new_ctx(
+            cuda_ctx,
+            device_index,
+            Arc::new(Mutex::new(AlgoCache::new())),
+            workspace_max_bytes,
+        )
+    }
+
+    /// Construct with a fresh, empty algo cache from a candle device.
+    /// Legacy entry; prefer [`Self::with_fresh_cache_ctx`].
     pub fn with_fresh_cache(
         device: Arc<CudaDevice>,
         device_index: usize,
@@ -349,11 +398,15 @@ impl CublasLtMatmulHandle {
         self.inner.device_index
     }
 
-    /// The candle `CudaDevice` this handle was constructed with.
-    /// Used by call sites to allocate output tensors on the same
-    /// device + stream.
-    pub fn device(&self) -> &Arc<CudaDevice> {
-        &self.inner.device
+    /// The cudarc `CudaContext` this handle was constructed with
+    /// (either directly via [`Self::new_ctx`] or derived from the
+    /// candle `CudaDevice` passed to [`Self::new`]). Used by call
+    /// sites that need to allocate output tensors or query the
+    /// default stream without going through candle.
+    ///
+    /// This is the **candle-free accessor** (#1082).
+    pub fn cuda_context(&self) -> &Arc<CudaContext> {
+        &self.inner.cuda_ctx
     }
 
     /// Clone the handle (cheap — internal `Arc`).
@@ -516,16 +569,20 @@ impl CublasLtMatmulHandle {
             Some(s) => (s.len() as u64) < desired_bytes,
         };
         if need_alloc {
+            // Allocate via the cudarc default stream — same code path
+            // candle's `CudaDevice::alloc_zeros` reaches into, just
+            // without the candle wrapper. See #1082 substrate notes.
             let new_buf = self
                 .inner
-                .device
+                .cuda_ctx
+                .default_stream()
                 .alloc_zeros::<u8>(desired_bytes as usize)
                 .map_err(|_| FfiError::Preference)?;
             *buf_slot = Some(new_buf);
         }
 
         let buf_ref = buf_slot.as_ref().expect("just initialized");
-        let stream = self.inner.device.cuda_stream();
+        let stream = self.inner.cuda_ctx.default_stream();
         let (raw_ptr, _g) = buf_ref.device_ptr(&stream);
         let byte_len = buf_ref.len() as u64;
         Ok((raw_ptr as *mut c_void, byte_len))
