@@ -224,3 +224,230 @@ fn cpu_parity_strided_chunk_slice() -> Result<()> {
     );
     Ok(())
 }
+
+// =====================================================================
+// CUDA parity for the new `KtForwardOp1`-based shim
+// (`fused_linear_cross_entropy_phase_b_via_kt_forward_op`).
+//
+// The shim collapses the candle composite ((Phase-B `CustomOp1` whose
+// `bwd()` already routes through the kt bridge from commit `ab2da23f`))
+// into a single candle `CustomOp1` whose backward closure calls the
+// kt-typed CUDA backward directly. The tests verify that the resulting
+// `(loss, dhidden)` pair matches the candle Phase-B reference path
+// element-wise, both with and without the kill switch on (out-of-
+// envelope inputs must bit-match the Phase-B path because the kill
+// switch routes both runs through the same code).
+// =====================================================================
+#[cfg(all(test, feature = "cuda"))]
+mod cuda_kt_forward_op_parity {
+    use super::*;
+    use crate::{
+        fused_linear_cross_entropy_phase_b, fused_linear_cross_entropy_phase_b_via_kt_forward_op,
+        kt_forward_op_disabled,
+    };
+    use anyhow::anyhow;
+    use candle_core::Var;
+
+    /// Helper: run the kt-shim entry through a `Var::backward()` round-
+    /// trip and return `(loss, dhidden)`. `disable` controls the
+    /// `KILN_DISABLE_FLCE_KT_FORWARD_OP` env var — `true` forces the
+    /// candle Phase-B fallback (parity oracle), `false` runs the kt-
+    /// shim CUDA fast path.
+    fn run_shim(
+        device: &Device,
+        hidden_typed: &Tensor,
+        head_t: &Tensor,
+        input_ids: &[u32],
+        label_mask: &[bool],
+        chunk_size: usize,
+        disable: bool,
+    ) -> Result<(Tensor, Tensor)> {
+        let prior = std::env::var("KILN_DISABLE_FLCE_KT_FORWARD_OP").ok();
+        // SAFETY: `kt_forward_op_disabled()` reads the env on each
+        // call (no caching), so the toggle is reversible per-test.
+        unsafe {
+            if disable {
+                std::env::set_var("KILN_DISABLE_FLCE_KT_FORWARD_OP", "1");
+            } else {
+                std::env::remove_var("KILN_DISABLE_FLCE_KT_FORWARD_OP");
+            }
+        }
+        assert_eq!(
+            kt_forward_op_disabled(),
+            disable,
+            "env toggle didn't take effect for disable={disable}"
+        );
+
+        let hidden_var = Var::from_tensor(hidden_typed)?;
+        let loss = fused_linear_cross_entropy_phase_b_via_kt_forward_op(
+            hidden_var.as_tensor(),
+            head_t,
+            input_ids,
+            label_mask,
+            device,
+            chunk_size,
+            None,
+        )?;
+        let grads = loss.backward()?;
+        let g = grads
+            .get(hidden_var.as_tensor())
+            .ok_or_else(|| anyhow!("no grad on hidden"))?
+            .clone();
+        device.synchronize()?;
+
+        // Restore the prior env value.
+        unsafe {
+            match prior.as_ref() {
+                Some(v) => std::env::set_var("KILN_DISABLE_FLCE_KT_FORWARD_OP", v),
+                None => std::env::remove_var("KILN_DISABLE_FLCE_KT_FORWARD_OP"),
+            }
+        }
+
+        Ok((loss, g))
+    }
+
+    /// Run the candle Phase-B reference path (without going through
+    /// the shim) and return `(loss, dhidden)`. This is the parity
+    /// oracle — same code path the trainer used before the shim.
+    fn run_phase_b_reference(
+        device: &Device,
+        hidden_typed: &Tensor,
+        head_t: &Tensor,
+        input_ids: &[u32],
+        label_mask: &[bool],
+        chunk_size: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        let hidden_var = Var::from_tensor(hidden_typed)?;
+        let loss = fused_linear_cross_entropy_phase_b(
+            hidden_var.as_tensor(),
+            head_t,
+            input_ids,
+            label_mask,
+            device,
+            chunk_size,
+        )?;
+        let grads = loss.backward()?;
+        let g = grads
+            .get(hidden_var.as_tensor())
+            .ok_or_else(|| anyhow!("no grad on hidden"))?
+            .clone();
+        device.synchronize()?;
+        Ok((loss, g))
+    }
+
+    fn assert_close(
+        a: &Tensor,
+        b: &Tensor,
+        atol: f32,
+        label: &str,
+    ) -> Result<f32> {
+        let a_f32 = a.to_dtype(DType::F32)?;
+        let b_f32 = b.to_dtype(DType::F32)?;
+        let abs_err = (&a_f32 - &b_f32)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let max_a = a_f32.abs()?.max_all()?.to_scalar::<f32>()?;
+        let rel = if max_a > 1e-6 { abs_err / max_a } else { abs_err };
+        assert!(
+            abs_err < atol || rel < atol,
+            "{label}: max_abs={abs_err:.3e} max_ref={max_a:.4} rel={rel:.3e} \
+             (tol={atol:.0e})"
+        );
+        Ok(abs_err)
+    }
+
+    fn run_parity(dtype: DType, atol: f32, label: &'static str) -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping {label}: no CUDA device");
+                return Ok(());
+            }
+        };
+
+        // Shape choices:
+        //   - seq_len=64 / hidden_size=64 / vocab_size=1024 so the
+        //     chunked vocab loop covers multiple chunks at chunk=16,
+        //   - label_mask makes every odd index active (31 active rows
+        //     for seq_len=64) — odd count catches off-by-one bugs in
+        //     scatter back.
+        let seq_len = 64;
+        let hidden_size = 64;
+        let vocab_size = 1024;
+        let chunk_size = 16;
+        let (hidden_f32, head_f32, ids, mask) =
+            random_case(seq_len, hidden_size, vocab_size, &device)?;
+        let hidden_typed = hidden_f32.to_dtype(dtype)?.contiguous()?;
+        let head_t = head_f32.to_dtype(dtype)?.contiguous()?;
+
+        // Reference: candle Phase-B directly.
+        let (loss_ref, dh_ref) =
+            run_phase_b_reference(&device, &hidden_typed, &head_t, &ids, &mask, chunk_size)?;
+        // Test path: kt-shim with kill switch off.
+        let (loss_kt, dh_kt) =
+            run_shim(&device, &hidden_typed, &head_t, &ids, &mask, chunk_size, false)?;
+
+        assert_eq!(loss_ref.dims(), loss_kt.dims(), "{label}: loss shape mismatch");
+        assert_eq!(dh_ref.dims(), dh_kt.dims(), "{label}: dh shape mismatch");
+
+        let fwd_err = assert_close(&loss_ref, &loss_kt, atol, label)?;
+        let bwd_err = assert_close(&dh_ref, &dh_kt, atol, label)?;
+        eprintln!(
+            "{label}: max_abs_fwd={fwd_err:.3e} max_abs_bwd={bwd_err:.3e} (tol={atol:.0e})"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn kt_forward_op_parity_f32() -> Result<()> {
+        run_parity(DType::F32, 1e-3, "flce-kt-forward-op f32")
+    }
+
+    #[test]
+    fn kt_forward_op_parity_bf16() -> Result<()> {
+        run_parity(DType::BF16, 5e-2, "flce-kt-forward-op bf16")
+    }
+
+    // -----------------------------------------------------------------
+    // Out-of-envelope: F16 dtype must short-circuit to the Phase-B
+    // path. We verify by checking that toggling the kill switch
+    // produces bit-identical output (both code branches take the
+    // candle Phase-B path).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn kt_forward_op_oob_dtype_falls_back_to_phase_b() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping: no CUDA device");
+                return Ok(());
+            }
+        };
+        // F16 is outside the kt-bwd envelope.
+        let (hidden_f32, head_f32, ids, mask) = random_case(32, 32, 256, &device)?;
+        let hidden_typed = hidden_f32.to_dtype(DType::F16)?.contiguous()?;
+        let head_t = head_f32.to_dtype(DType::F16)?.contiguous()?;
+
+        let (loss_a, dh_a) =
+            run_shim(&device, &hidden_typed, &head_t, &ids, &mask, 16, true)?;
+        let (loss_b, dh_b) =
+            run_shim(&device, &hidden_typed, &head_t, &ids, &mask, 16, false)?;
+
+        // Both paths must route through Phase B (kill switch on AND
+        // out-of-envelope both fall back to the same code path), so
+        // the output is bit-identical.
+        let loss_diff = (&loss_a.to_dtype(DType::F32)? - &loss_b.to_dtype(DType::F32)?)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let dh_diff = (&dh_a.to_dtype(DType::F32)? - &dh_b.to_dtype(DType::F32)?)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        assert_eq!(loss_diff, 0.0, "F16 loss should bit-match: {loss_diff:.3e}");
+        assert_eq!(dh_diff, 0.0, "F16 dh should bit-match: {dh_diff:.3e}");
+        Ok(())
+    }
+}

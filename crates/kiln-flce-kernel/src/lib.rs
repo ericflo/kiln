@@ -52,6 +52,11 @@ pub use kt_api::{
     FlceError, FlceMatmulProviderKt, FlceProviderKt, fused_linear_cross_entropy_phase_b_kt,
 };
 
+mod kt_forward_op;
+pub use kt_forward_op::{
+    fused_linear_cross_entropy_phase_b_via_kt_forward_op, kt_forward_op_disabled,
+};
+
 /// Optional matmul override hook for the FLCE chunked head pass.
 ///
 /// The default Phase B forward materializes the head as F32 (`head_t.to_dtype(F32)`,
@@ -158,7 +163,21 @@ pub fn fused_linear_cross_entropy_dispatch_with_provider(
         let _ = provider;
         fused_linear_cross_entropy(hidden, head_t, input_ids, label_mask, device, chunk_size)
     } else {
-        fused_linear_cross_entropy_phase_b_with_provider(
+        // (#1082) Production path now routes through the
+        // `KtForwardOp1` candle-autograd shim (commit `095f1c74`) over
+        // the kt-typed forward + backward kernels. The shim falls
+        // back to the candle Phase-B `CustomOp1` path when:
+        //   - a `provider` is bound (the trainer's Vulkan FLCE escape;
+        //     the shim has no provider plumbing),
+        //   - `hidden` is not on CUDA,
+        //   - `dtype` ∉ {F32, BF16} or hidden/head dtypes differ,
+        //   - `active_count == 0` or `seq_len < 2`,
+        //   - or the kill switch `KILN_DISABLE_FLCE_KT_FORWARD_OP=1`
+        //     is set.
+        // The autograd chain through `loss.backward()` is preserved
+        // in either case — both the shim and the Phase-B path are
+        // candle `CustomOp1`s parented on `hidden`.
+        fused_linear_cross_entropy_phase_b_via_kt_forward_op(
             hidden, head_t, input_ids, label_mask, device, chunk_size, provider,
         )
     }
