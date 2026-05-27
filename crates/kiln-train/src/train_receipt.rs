@@ -11,10 +11,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Tensor};
 use kiln_core::config::ModelConfig;
 use kiln_core::config_hashes::ConfigHashes;
 use kiln_core::tokenizer::KilnTokenizer;
+use kiln_tensor as kt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -1354,7 +1355,12 @@ pub fn lora_delta_norm_summary_from_adapter(
     if !adapter_model.exists() {
         return Ok(Vec::new());
     }
-    let tensors = candle_core::safetensors::load(&adapter_model, &Device::Cpu)
+    // (#1082) Adapter L2-norm receipt path uses kt safetensors + kt L2 norm
+    // computation. This is a CPU-only, autograd-free diagnostic loop, which is
+    // why it can be migrated independently of the trainer's gradient-norm path
+    // (that still feeds `tensor_l2_norm` candle gradients).
+    let tensors = kt::safetensors::load_cpu(&adapter_model)
+        .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("load adapter tensors {}", adapter_model.display()))?;
 
     let mut pairs: BTreeMap<(usize, String), ProjectionPair> = BTreeMap::new();
@@ -1362,7 +1368,7 @@ pub fn lora_delta_norm_summary_from_adapter(
         let Some(parsed) = parse_peft_lora_key(&key) else {
             continue;
         };
-        let norm = tensor_l2_norm(&tensor)
+        let norm = tensor_l2_norm_kt(&tensor)
             .with_context(|| format!("compute l2 norm for adapter tensor {key}"))?;
         let pair = pairs.entry((parsed.layer, parsed.module)).or_default();
         match parsed.kind {
@@ -1543,6 +1549,40 @@ pub(crate) fn tensor_l2_norm(tensor: &Tensor) -> Result<f64> {
         .sum_all()?
         .to_scalar::<f32>()?;
     Ok((sum_sq as f64).sqrt())
+}
+
+/// kt-tensor counterpart to [`tensor_l2_norm`].
+///
+/// Used by [`lora_delta_norm_summary_from_adapter`] after its
+/// safetensors loader migrated from `candle_core::safetensors::load`
+/// to `kt::safetensors::load_cpu` (#1082). Casts to F32 first so the
+/// accumulator preserves precision when the underlying adapter weight
+/// is BF16/F16; otherwise `l2_norm_scalar` would round-trip through
+/// the input dtype and lose precision on the returned scalar.
+pub(crate) fn tensor_l2_norm_kt(tensor: &kt::Tensor) -> Result<f64> {
+    let f32_t = if tensor.dtype() == kt::DType::F32 {
+        tensor.clone()
+    } else {
+        kt::ops::cast::cast(tensor, kt::DType::F32)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("cast adapter tensor to f32 for l2 norm")?
+    };
+    let norm_t = kt::ops::tensor_norm::l2_norm_scalar(&f32_t)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("kt l2_norm_scalar")?;
+    let storage = norm_t.storage();
+    let cpu = storage
+        .as_any()
+        .downcast_ref::<kt::CpuStorage>()
+        .context("kt l2_norm_scalar must produce CpuStorage")?;
+    let bytes = cpu.as_bytes();
+    anyhow::ensure!(
+        bytes.len() >= 4,
+        "kt l2_norm_scalar produced fewer than 4 bytes: {}",
+        bytes.len()
+    );
+    let scalar = f32::from_le_bytes(bytes[..4].try_into().unwrap());
+    Ok(scalar as f64)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1987,6 +2027,103 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("down_proj") && warning.contains("extreme"))
         );
+    }
+
+    /// (#1082) Direct parity check for the candle→kt migration of
+    /// `lora_delta_norm_summary_from_adapter`. Builds a tiny PEFT-shaped
+    /// adapter file with known weights, then verifies `tensor_l2_norm_kt`
+    /// matches `tensor_l2_norm` to numerical tolerance for the same inputs.
+    #[test]
+    fn tensor_l2_norm_kt_matches_candle_for_f32_inputs() -> Result<()> {
+        let xs: Vec<f32> = vec![1.0, -2.0, 3.0, -4.0, 5.0];
+        let expected = ((1.0_f64).powi(2)
+            + (2.0_f64).powi(2)
+            + (3.0_f64).powi(2)
+            + (4.0_f64).powi(2)
+            + (5.0_f64).powi(2))
+        .sqrt();
+
+        let cand =
+            Tensor::from_vec(xs.clone(), (xs.len(),), &candle_core::Device::Cpu)?;
+        let cand_norm = tensor_l2_norm(&cand)?;
+        assert!(
+            (cand_norm - expected).abs() < 1e-5,
+            "candle norm {cand_norm} != expected {expected}"
+        );
+
+        let kt_t = kt::Tensor::from_vec(xs, vec![5])
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let kt_norm = tensor_l2_norm_kt(&kt_t)?;
+        assert!(
+            (kt_norm - expected).abs() < 1e-5,
+            "kt norm {kt_norm} != expected {expected}"
+        );
+        assert!(
+            (kt_norm - cand_norm).abs() < 1e-5,
+            "kt norm {kt_norm} != candle norm {cand_norm}"
+        );
+        Ok(())
+    }
+
+    /// (#1082) End-to-end check that `lora_delta_norm_summary_from_adapter`
+    /// still produces correct PEFT-shaped summaries after migrating its
+    /// safetensors loader from `candle_core::safetensors::load` to
+    /// `kt::safetensors::load_cpu`.
+    #[test]
+    fn lora_delta_norm_summary_from_adapter_kt_loader_round_trip() -> Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("adapter_model.safetensors");
+
+        // Two PEFT-shaped LoRA pairs for layer 0 / q_proj, with known
+        // L2 norms (3/4/5 right triangles).
+        let a: Vec<f32> = vec![3.0, 0.0, 0.0, 4.0]; // 2x2, L2 = 5
+        let b: Vec<f32> = vec![6.0, 0.0, 0.0, 8.0]; // 2x2, L2 = 10
+        let to_bytes = |v: &[f32]| -> Vec<u8> {
+            let mut out = Vec::with_capacity(v.len() * 4);
+            for f in v {
+                out.extend_from_slice(&f.to_le_bytes());
+            }
+            out
+        };
+        let entries: Vec<(String, Vec<u8>)> = vec![
+            (
+                "base_model.model.model.layers.0.q_proj.lora_A.weight".to_string(),
+                to_bytes(&a),
+            ),
+            (
+                "base_model.model.model.layers.0.q_proj.lora_B.weight".to_string(),
+                to_bytes(&b),
+            ),
+        ];
+        let views: Vec<(&str, ::safetensors::tensor::TensorView<'_>)> = entries
+            .iter()
+            .map(|(k, bytes)| {
+                let v = ::safetensors::tensor::TensorView::new(
+                    ::safetensors::Dtype::F32,
+                    vec![2, 2],
+                    bytes,
+                )
+                .expect("tensor view");
+                (k.as_str(), v)
+            })
+            .collect();
+        ::safetensors::serialize_to_file(views, None, &path)
+            .map_err(|e| anyhow::anyhow!("serialize_to_file: {e}"))?;
+
+        let summaries = lora_delta_norm_summary_from_adapter(dir.path(), 2.0)?;
+        assert_eq!(summaries.len(), 1);
+        let s = &summaries[0];
+        assert_eq!(s.module, "q_proj");
+        assert_eq!(s.pair_count, 1);
+        assert!((s.a_l2_mean - 5.0).abs() < 1e-5, "a={} != 5", s.a_l2_mean);
+        assert!((s.b_l2_mean - 10.0).abs() < 1e-5, "b={} != 10", s.b_l2_mean);
+        // delta upper bound = a_l2 * b_l2 * alpha_over_rank = 5 * 10 * 2 = 100
+        assert!(
+            (s.delta_l2_upper_bound_max - 100.0).abs() < 1e-4,
+            "delta_max={} != 100",
+            s.delta_l2_upper_bound_max
+        );
+        Ok(())
     }
 
     #[test]
