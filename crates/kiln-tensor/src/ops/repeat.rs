@@ -145,19 +145,15 @@ impl DeviceOp1 for RepeatOp {
         }
         let indices_cpu = Tensor::from_slice(&indices_host, vec![total])?;
 
-        let x_storage = x
-            .storage()
-            .as_any()
-            .downcast_ref::<crate::CudaStorage>()
-            .ok_or_else(|| crate::Error::from_str("repeat::cuda_fwd: x must be CUDA storage"))?;
-        let candle_device = x_storage.candle_device().clone();
+        // host_to_cuda_copy_ctx (#1082) derives the candle device
+        // internally from device_index, so no .candle_device() read
+        // is needed.
         let device_index = match x.device() {
             crate::Device::Cuda(i) => i,
             _ => return Ok(None),
         };
 
-        let indices_cuda =
-            crate::host_to_cuda_copy(&indices_cpu, candle_device, device_index)?;
+        let indices_cuda = crate::host_to_cuda_copy_ctx(&indices_cpu, device_index)?;
         Ok(Some(crate::cuda_index_select_dim0(x, &indices_cuda)?))
     }
 
