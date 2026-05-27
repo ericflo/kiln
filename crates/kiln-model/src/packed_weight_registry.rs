@@ -412,7 +412,7 @@ impl GpuPackedWeightRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{Device, Tensor};
+    use candle_core::Device;
 
     #[test]
     fn validates_layer_kind_against_qwen35_pattern() {
