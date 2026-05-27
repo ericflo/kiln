@@ -34,7 +34,6 @@
 //! audit doc.
 
 use anyhow::{Context, Result};
-use candle_core::Device;
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::forward::GpuWeights;
@@ -384,10 +383,11 @@ fn main() -> Result<()> {
     )
     .context("load_model")?;
     let device = kiln_server::device::select_device()?;
-    if matches!(device, Device::Cpu) {
+    let kt_device = kiln_kt_bridge::kt_device_from_candle(&device);
+    if matches!(kt_device, kiln_tensor::Device::Cpu) {
         anyhow::bail!("CUDA device required");
     }
-    let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)
+    let gpu_weights = GpuWeights::from_model_weights_kt(&model_weights, &model_config, &kt_device)
         .context("from_model_weights")?;
     drop(model_weights);
 

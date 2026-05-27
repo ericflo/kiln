@@ -2041,6 +2041,7 @@ dependencies = [
  "indicatif 0.18.4",
  "kiln-core",
  "kiln-eval",
+ "kiln-kt-bridge",
  "kiln-model",
  "kiln-scheduler",
  "kiln-tensor",
