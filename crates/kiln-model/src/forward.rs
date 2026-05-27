@@ -7106,8 +7106,23 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
                 }
             }
             if should_use_fused_rmsnorm() && kiln_rmsnorm_kernel::supports(x, weight) {
-                return kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd(x, weight, eps as f32)
-                    .context("fused_rmsnorm_with_autograd CustomOp2 failed");
+                // Phase 7 (#1082): kt-forward-op shim production caller.
+                // Replaces the candle-typed `fused_rmsnorm_with_autograd`
+                // (CustomOp2 over `kiln_fused_rmsnorm` forward + the
+                // kt-bridged `kiln_fused_rmsnorm_bwd` backward since
+                // commit `341da876`) with a single `KtForwardOp2`
+                // (commit `095f1c74`) whose forward AND backward both
+                // run through the kt-typed entries. Bit-exact with the
+                // prior path — same FFI symbols, same envelope —
+                // and falls back to `fused_rmsnorm_with_autograd`
+                // automatically when the kt-shim envelope misses
+                // (kill switch `KILN_DISABLE_RMSNORM_KT_FORWARD_OP=1`,
+                // non-CUDA, non-BF16, hidden > 8192, etc.). See
+                // `kiln-rmsnorm-kernel/src/kt_forward_op.rs` for the
+                // design rationale. Mirrors the OPD migration template
+                // in commit `f214f168`.
+                return kiln_rmsnorm_kernel::fused_rmsnorm_via_kt_forward_op(x, weight, eps as f32)
+                    .context("fused_rmsnorm_via_kt_forward_op shim failed");
             }
         }
     }
