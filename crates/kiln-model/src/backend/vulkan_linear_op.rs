@@ -261,36 +261,63 @@ impl CustomOp1 for VulkanLinearOp {
                     "VulkanLinearOp::cpu_fwd first chunked dispatch"
                 );
             });
-            let mut chunk_outputs: Vec<Tensor> = Vec::new();
+            // Extract the f32 bytes of `dispatch_x` once and reuse them
+            // across every per-chunk submit — the chunks differ only in
+            // their slice of the bf16 weight buffer, not in the activation.
+            // The `_bytes` dispatch entry keeps the chunk loop candle-free
+            // and assembles the final `[row_count, 1, out_dim]` output by
+            // copying each chunk's row stride into place rather than
+            // going through `Tensor::cat`. (#1082)
+            let dispatch_x_bytes = kernels::extract_tensor_bytes(&dispatch_x)
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!(
+                        "VulkanLinearOp chunked extract x bytes: {e:?}"
+                    ))
+                })?
+                .0;
+            let mut out_bytes = vec![0u8; row_count * self.out_dim * 4];
             let mut chunk_start = 0usize;
             while chunk_start < self.out_dim {
                 let chunk_len = (self.out_dim - chunk_start).min(chunk_out_dim);
-                let chunk_out = kernels::dispatch_linear_decode_cached_bf16_weights_offset(
-                    self.vk_device.as_ref(),
-                    &dispatch_x,
-                    self.weight_buffer.as_ref(),
-                    row_count,
-                    self.hidden,
-                    chunk_len,
-                    chunk_start,
-                    self.out_dim,
-                )
-                .map_err(|e| {
-                    candle_core::Error::Msg(format!(
-                        "VulkanLinearOp chunked dispatch (start={chunk_start}, \
-                         len={chunk_len}, full={}): {e:?}",
-                        self.out_dim
-                    ))
-                })?;
-                chunk_outputs.push(chunk_out);
+                let chunk_bytes =
+                    kernels::dispatch_linear_decode_cached_bf16_weights_offset_bytes(
+                        self.vk_device.as_ref(),
+                        &dispatch_x_bytes,
+                        self.weight_buffer.as_ref(),
+                        row_count,
+                        self.hidden,
+                        chunk_len,
+                        chunk_start,
+                        self.out_dim,
+                    )
+                    .map_err(|e| {
+                        candle_core::Error::Msg(format!(
+                            "VulkanLinearOp chunked dispatch (start={chunk_start}, \
+                             len={chunk_len}, full={}): {e:?}",
+                            self.out_dim
+                        ))
+                    })?;
+                // Each chunk's bytes are row-major `[row_count, chunk_len]`
+                // (4 bytes/elem). Scatter rows into the right column slice
+                // of the final `[row_count, out_dim]` byte buffer.
+                let chunk_row_bytes = chunk_len * 4;
+                let out_row_bytes = self.out_dim * 4;
+                let chunk_col_offset = chunk_start * 4;
+                for r in 0..row_count {
+                    let src = &chunk_bytes[r * chunk_row_bytes..(r + 1) * chunk_row_bytes];
+                    let dst_start = r * out_row_bytes + chunk_col_offset;
+                    out_bytes[dst_start..dst_start + chunk_row_bytes].copy_from_slice(src);
+                }
                 chunk_start += chunk_len;
             }
-            // Each chunk output is `[row_count, 1, chunk_len]`. Concat
-            // along the last dim reproduces the single-shot output.
-            Tensor::cat(&chunk_outputs, 2).map_err(|e| {
+            kernels::create_tensor_from_data(
+                &out_bytes,
+                &[row_count, 1, self.out_dim],
+                DType::F32,
+            )
+            .map_err(|e| {
                 candle_core::Error::Msg(format!(
-                    "VulkanLinearOp chunked concat ({} chunks): {e:?}",
-                    chunk_outputs.len()
+                    "VulkanLinearOp chunked build out tensor: {e:?}"
                 ))
             })?
         } else {
@@ -388,8 +415,17 @@ impl CustomOp1 for VulkanLinearOp {
             let dispatch_x = grad_y_f32
                 .reshape((row_count, self.out_dim))
                 .map_err(|e| candle_core::Error::Msg(format!("bwd reshape grad_y: {e:?}")))?;
+            // Pull the f32 bytes of `dispatch_x` once. Both the chunked
+            // and single-shot transposed dispatches go through the
+            // candle-free `_bytes` entry, so the per-chunk loop never
+            // wraps / unwraps a `Tensor`. (#1082)
+            let dispatch_x_bytes = kernels::extract_tensor_bytes(&dispatch_x)
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("bwd extract grad_y bytes: {e:?}"))
+                })?
+                .0;
             let oversized = dispatch_exceeds_safety_ceiling(row_count, self.out_dim, self.hidden);
-            let dx_3d = if oversized {
+            let dx_bytes = if oversized {
                 let other_dims = self.out_dim.saturating_mul(self.hidden);
                 let chunk_batch = max_chunk_dim_for_flop(other_dims);
                 let chunk_count = row_count.div_ceil(chunk_batch);
@@ -409,19 +445,21 @@ impl CustomOp1 for VulkanLinearOp {
                         "VulkanLinearOp::bwd first chunked dispatch"
                     );
                 });
-                let mut chunk_outputs: Vec<Tensor> = Vec::new();
+                // Pre-size the final `[row_count, hidden]` byte buffer
+                // and copy each chunk's bytes into the right row slice.
+                // Chunks split along axis 0, so concat is a straight
+                // contiguous append (no row-interleaving needed).
+                let mut out_bytes = vec![0u8; row_count * self.hidden * 4];
+                let in_row_bytes = self.out_dim * 4;
+                let out_row_bytes = self.hidden * 4;
                 let mut chunk_start = 0usize;
                 while chunk_start < row_count {
                     let chunk_len = (row_count - chunk_start).min(chunk_batch);
-                    let chunk_dy = dispatch_x.narrow(0, chunk_start, chunk_len).map_err(|e| {
-                        candle_core::Error::Msg(format!(
-                            "bwd narrow grad_y (start={chunk_start}, \
-                                 len={chunk_len}): {e:?}"
-                        ))
-                    })?;
-                    let chunk_dx = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed(
+                    let chunk_dy_bytes = &dispatch_x_bytes
+                        [chunk_start * in_row_bytes..(chunk_start + chunk_len) * in_row_bytes];
+                    let chunk_dx_bytes = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed_bytes(
                         self.vk_device.as_ref(),
-                        &chunk_dy,
+                        chunk_dy_bytes,
                         self.weight_buffer.as_ref(),
                         chunk_len,
                         self.out_dim,
@@ -433,19 +471,16 @@ impl CustomOp1 for VulkanLinearOp {
                              len={chunk_len}): {e:?}"
                         ))
                     })?;
-                    chunk_outputs.push(chunk_dx);
+                    let dst_start = chunk_start * out_row_bytes;
+                    out_bytes[dst_start..dst_start + chunk_len * out_row_bytes]
+                        .copy_from_slice(&chunk_dx_bytes);
                     chunk_start += chunk_len;
                 }
-                Tensor::cat(&chunk_outputs, 0).map_err(|e| {
-                    candle_core::Error::Msg(format!(
-                        "bwd chunked concat ({} chunks): {e:?}",
-                        chunk_outputs.len()
-                    ))
-                })?
+                out_bytes
             } else {
-                kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed(
+                kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed_bytes(
                     self.vk_device.as_ref(),
-                    &dispatch_x,
+                    &dispatch_x_bytes,
                     self.weight_buffer.as_ref(),
                     row_count,
                     self.out_dim,
@@ -453,12 +488,16 @@ impl CustomOp1 for VulkanLinearOp {
                 )
                 .map_err(|e| candle_core::Error::Msg(format!("bwd transposed dispatch: {e:?}")))?
             };
-            // dx_3d is [row_count, 1, hidden]; restore caller's leading dims.
+            // `dx_bytes` is row-major `[row_count, hidden]` (4 bytes/elem).
+            // Rebuild the candle Tensor with the caller's leading dims.
             let mut out_dims: Vec<usize> = dims[..dims.len() - 1].to_vec();
             out_dims.push(self.hidden);
-            let dx_f32 = dx_3d
-                .reshape(out_dims.as_slice())
-                .map_err(|e| candle_core::Error::Msg(format!("bwd reshape dx: {e:?}")))?;
+            let dx_f32 = kernels::create_tensor_from_data(
+                &dx_bytes,
+                out_dims.as_slice(),
+                DType::F32,
+            )
+            .map_err(|e| candle_core::Error::Msg(format!("bwd build dx tensor: {e:?}")))?;
             let dx = if self.out_dtype == DType::F32 {
                 dx_f32
             } else {
