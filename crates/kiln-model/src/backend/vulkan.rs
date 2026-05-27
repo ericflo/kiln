@@ -1928,19 +1928,31 @@ impl BackendRuntime for VulkanBackend {
         // never materializes a `batch * max_seqlen_k * num_kv_heads * head_dim`
         // compacted tensor and never runs a CPU index_select over the pool.
         if paged_decode_gpu_gather_enabled() && batch > 1 {
-            let out = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_paged_f32(
+            let q_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(q)?.0;
+            let k_pool_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(k_pool)?.0;
+            let v_pool_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(v_pool)?.0;
+            let out_data = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_paged_f32_bytes(
                 vk_device,
-                q,
-                k_pool,
-                v_pool,
+                &q_data,
+                &k_pool_data,
+                &v_pool_data,
+                batch,
+                num_heads,
+                head_dim,
+                total_slots,
+                num_kv_heads,
                 &block_data,
                 &seq_lens,
-                batch,
                 max_blocks_per_seq,
                 page_block_size,
                 softmax_scale,
             )
             .context("paged_attn_decode_batch_paged kernel failed")?;
+            let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &out_data,
+                &[batch, 1, num_heads, head_dim],
+                DType::F32,
+            )?;
             return Ok(Some(out));
         }
 

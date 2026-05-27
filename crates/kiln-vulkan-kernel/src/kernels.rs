@@ -4635,6 +4635,41 @@ pub fn dispatch_paged_attn_decode_batch_f32(
 /// (i.e., when `batch * max_seqlen > total_slots`), which is the typical
 /// shape for multi-batch decode at non-trivial context lengths.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_paged_attn_decode_batch_paged_f32_bytes(
+    vk_device: &VulkanDevice,
+    q_data: &[u8],
+    k_pool_data: &[u8],
+    v_pool_data: &[u8],
+    batch: usize,
+    num_heads: usize,
+    head_dim: usize,
+    total_slots: usize,
+    num_kv_heads: usize,
+    block_table_u32: &[u32],
+    seq_lens: &[u32],
+    max_blocks_per_seq: usize,
+    page_block_size: usize,
+    softmax_scale: f32,
+) -> Result<Vec<u8>> {
+    let q = build_cpu_f32_tensor_from_bytes(q_data, &[batch, 1, num_heads, head_dim])?;
+    let k_pool = build_cpu_f32_tensor_from_bytes(k_pool_data, &[total_slots, num_kv_heads, head_dim])?;
+    let v_pool = build_cpu_f32_tensor_from_bytes(v_pool_data, &[total_slots, num_kv_heads, head_dim])?;
+    let out = dispatch_paged_attn_decode_batch_paged_f32(
+        vk_device,
+        &q,
+        &k_pool,
+        &v_pool,
+        block_table_u32,
+        seq_lens,
+        batch,
+        max_blocks_per_seq,
+        page_block_size,
+        softmax_scale,
+    )?;
+    Ok(extract_tensor_bytes(&out)?.0)
+}
+
 pub fn dispatch_paged_attn_decode_batch_paged_f32(
     vk_device: &VulkanDevice,
     q: &Tensor,
