@@ -20,7 +20,14 @@ candle-core = { workspace = true }
 # through `kiln-kt-bridge` for storage downcast + device-pointer
 # extraction. CUDA-only on the backward; gated by the `cuda` feature.
 kiln-tensor = { workspace = true }
-kiln-kt-bridge = { workspace = true }
+# Optional: only used by the CUDA backward bridge path
+# (`opd_top_k_reverse_kl_phase_b_bwd_kt`) which itself is
+# `#[cfg(feature = "cuda")]`. Pulling it in unconditionally drags
+# `cudarc` into non-CUDA CI matrix jobs (Linux/default,
+# Linux/Vulkan, macOS/Metal), which fail at the `nvcc --version`
+# probe in cudarc's build.rs. Gated under the `cuda` feature
+# along with `candle-core/cuda` + `kiln-tensor/cuda`.
+kiln-kt-bridge = { workspace = true, optional = true }
 anyhow = { workspace = true }
 half = "2"
 # `tracing` for the warn-on-fallback path in cuda_fwd. Cheap dep and
@@ -37,7 +44,7 @@ tracing = { workspace = true }
 # reference path; a raw-CUDA C-ABI kernel + `build.rs` lands in the next
 # milestone (see `docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md`
 # §9.2). The CPU reference path is the parity oracle.
-cuda = ["candle-core/cuda", "kiln-tensor/cuda"]
+cuda = ["candle-core/cuda", "kiln-tensor/cuda", "dep:kiln-kt-bridge"]
 
 [dev-dependencies]
 candle-nn = { workspace = true }
