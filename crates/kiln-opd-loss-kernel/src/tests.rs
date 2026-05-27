@@ -1083,3 +1083,175 @@ mod cuda_kt_bwd_parity {
         run_parity(32, DType::F32, OpdLossOutputKt::PerPosition, 1e-4, "f32/K32/per-pos")
     }
 }
+
+// =====================================================================
+// CUDA `OpdLossCustomOp::bwd` kt-bridge wiring parity:
+// the default `bwd` body (which routes through
+// `opd_loss_phase_b_backward_via_kt_bridge`) must agree at one BF16 ULP
+// with the candle path (`KILN_DISABLE_OPD_LOSS_KERNEL=1` forces the
+// analytic candle backward — the same parity oracle the existing
+// `cuda_bwd_kernel_matches_candle_*` tests use against this kernel).
+//
+// THIRD production migration of a candle `CustomOp::bwd` body to the
+// kt-typed bridge (after `RmsNormCustomOp::bwd` in commit `341da876`
+// and `CudaRotaryOneBf16::bwd` in commit `d99a15a3`; see
+// `docs/CANDLE_REMOVAL_PLAN.md` §"kt-autograd readiness"). Both
+// kernel-routed paths call the same FFI symbols
+// (`kiln_opd_topk_kl_bwd_{bf16,f32}`) → outputs MUST agree at the
+// same kernel-vs-candle tolerance the existing
+// `cuda_bwd_kernel_matches_candle_*` tests use (1e-4 F32, 5e-2 BF16).
+// =====================================================================
+
+#[cfg(feature = "cuda")]
+mod cuda_opd_bwd_kt_bridge_wiring_parity {
+    use super::*;
+
+    fn run_one(
+        top_k: usize,
+        dtype: DType,
+        per_position: bool,
+        atol: f32,
+        label: &str,
+    ) -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping {label}: no CUDA device");
+                return Ok(());
+            }
+        };
+
+        // Use a small but representative shape — enough rows to exercise
+        // the kernel's reductions, small enough to keep the test cheap.
+        let seq_len = 32;
+        let hidden_size = 64;
+        let vocab_size = 1024;
+        let active_period = 2;
+        let (hidden_f32, head_f32, idx, lp, mask) =
+            random_case(seq_len, hidden_size, vocab_size, top_k, active_period, &device)?;
+        let hidden_init = hidden_f32.to_dtype(dtype)?.contiguous()?;
+        let head_t = head_f32.to_dtype(dtype)?.contiguous()?;
+
+        // Helper that runs the bwd through the public Phase B entry +
+        // candle autograd. Output mode + reduction match the kt mod's
+        // `run_candle_bwd` convention: ScalarMean → `.backward()`,
+        // PerPosition → `.sum_all().backward()`.
+        let run = |label: &str| -> Result<Tensor> {
+            let hidden_var = Var::from_tensor(&hidden_init)?;
+            let loss = if per_position {
+                opd_top_k_reverse_kl_phase_b_per_position(
+                    hidden_var.as_tensor(),
+                    &head_t,
+                    &idx,
+                    &lp,
+                    &mask,
+                    top_k,
+                    &device,
+                    DEFAULT_CHUNK_SIZE,
+                )?
+                .sum_all()?
+            } else {
+                opd_top_k_reverse_kl_phase_b(
+                    hidden_var.as_tensor(),
+                    &head_t,
+                    &idx,
+                    &lp,
+                    &mask,
+                    top_k,
+                    &device,
+                    DEFAULT_CHUNK_SIZE,
+                )?
+            };
+            let grads = loss.backward()?;
+            let g = grads
+                .get(hidden_var.as_tensor())
+                .ok_or_else(|| anyhow!("{label}: no grad on hidden"))?
+                .clone();
+            Ok(g)
+        };
+
+        // Path A: analytic candle backward (parity oracle). Setting
+        // KILN_DISABLE_OPD_LOSS_KERNEL=1 forces both fwd + bwd onto
+        // the candle reference path. `kernel_disabled()` reads the
+        // env each call (no caching) so the toggle is reversible.
+        let prior = std::env::var("KILN_DISABLE_OPD_LOSS_KERNEL").ok();
+        unsafe {
+            std::env::set_var("KILN_DISABLE_OPD_LOSS_KERNEL", "1");
+        }
+        let g_ref = run("candle reference")?;
+        unsafe {
+            match prior.as_ref() {
+                Some(v) => std::env::set_var("KILN_DISABLE_OPD_LOSS_KERNEL", v),
+                None => std::env::remove_var("KILN_DISABLE_OPD_LOSS_KERNEL"),
+            }
+        }
+
+        // Path B: default — kt-bridge wired through `OpdLossCustomOp::bwd`.
+        // `opd_bwd_kt_bridge_disabled()` is OnceLock-cached so we don't
+        // touch its env var here; the default unset value is "kt-bridge
+        // enabled", which is exactly what we want to exercise.
+        let g_bridge = run("kt-bridge default")?;
+
+        device.synchronize()?;
+        assert_eq!(g_ref.dims(), g_bridge.dims(), "{label}: shape mismatch");
+
+        let ref_v = g_ref.to_dtype(DType::F32)?;
+        let bridge_v = g_bridge.to_dtype(DType::F32)?;
+        let diff = (&ref_v - &bridge_v)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let max_ref = ref_v.abs()?.max_all()?.to_scalar::<f32>()?;
+        let rel = if max_ref > 1e-6 { diff / max_ref } else { diff };
+        assert!(
+            diff < atol || rel < atol,
+            "{label}: abs_diff={diff:.2e} max_ref={max_ref:.4} rel={rel:.2e} (tol={atol:.0e})"
+        );
+        Ok(())
+    }
+
+    // Tolerances mirror the existing `cuda_bwd_kernel_matches_candle_*`
+    // tests: F32 at 1e-4, BF16 at 5e-2. The kernel-vs-candle delta is
+    // identical on both paths (same FFI symbols); the bridge only
+    // changes the storage downcast plumbing.
+
+    #[test]
+    fn opd_bwd_kt_bridge_bf16_k16_scalar_mean() -> Result<()> {
+        run_one(16, DType::BF16, false, 5e-2, "bf16/K16/scalar_mean")
+    }
+
+    #[test]
+    fn opd_bwd_kt_bridge_bf16_k32_scalar_mean() -> Result<()> {
+        run_one(32, DType::BF16, false, 5e-2, "bf16/K32/scalar_mean")
+    }
+
+    #[test]
+    fn opd_bwd_kt_bridge_f32_k16_scalar_mean() -> Result<()> {
+        run_one(16, DType::F32, false, 1e-4, "f32/K16/scalar_mean")
+    }
+
+    #[test]
+    fn opd_bwd_kt_bridge_f32_k32_scalar_mean() -> Result<()> {
+        run_one(32, DType::F32, false, 1e-4, "f32/K32/scalar_mean")
+    }
+
+    #[test]
+    fn opd_bwd_kt_bridge_bf16_k16_per_position() -> Result<()> {
+        run_one(16, DType::BF16, true, 5e-2, "bf16/K16/per_position")
+    }
+
+    #[test]
+    fn opd_bwd_kt_bridge_bf16_k32_per_position() -> Result<()> {
+        run_one(32, DType::BF16, true, 5e-2, "bf16/K32/per_position")
+    }
+
+    #[test]
+    fn opd_bwd_kt_bridge_f32_k16_per_position() -> Result<()> {
+        run_one(16, DType::F32, true, 1e-4, "f32/K16/per_position")
+    }
+
+    #[test]
+    fn opd_bwd_kt_bridge_f32_k32_per_position() -> Result<()> {
+        run_one(32, DType::F32, true, 1e-4, "f32/K32/per_position")
+    }
+}

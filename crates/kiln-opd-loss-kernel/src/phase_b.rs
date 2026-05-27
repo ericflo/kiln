@@ -75,6 +75,9 @@ use candle_core::{CudaStorage, backend::BackendStorage};
 
 use crate::{log_softmax_last, DEFAULT_CHUNK_SIZE};
 
+#[cfg(feature = "cuda")]
+use std::sync::OnceLock;
+
 // FFI declarations for the raw CUDA fused kernel (§9.2 of the grand
 // plan). These are linked in only when the `cuda` feature is active —
 // the `build.rs` compiles `csrc/opd_topk_kl.cu` and produces
@@ -185,6 +188,124 @@ pub(crate) fn cuda_kernel_supports(top_k: usize, dtype: DType) -> bool {
 #[allow(dead_code)]
 pub(crate) fn cuda_kernel_supports(_top_k: usize, _dtype: DType) -> bool {
     false
+}
+
+/// Process-wide kill switch for [`opd_loss_phase_b_backward_via_kt_bridge`].
+///
+/// Set `KILN_DISABLE_OPD_BWD_KT_BRIDGE=1` to fall back to the candle-typed
+/// `cuda_kernel_backward` path (same FFI symbols; this is purely a
+/// reversibility / parity-test escape hatch). Mirrors the precedent
+/// established by `fused_rmsnorm_backward_via_kt_bridge`
+/// (commit `341da876`) and `fused_rotary_one_backward_via_kt_bridge`
+/// (commit `d99a15a3`).
+#[cfg(feature = "cuda")]
+fn opd_bwd_kt_bridge_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        matches!(
+            std::env::var("KILN_DISABLE_OPD_BWD_KT_BRIDGE")
+                .ok()
+                .as_deref(),
+            Some("1") | Some("true") | Some("TRUE")
+        )
+    })
+}
+
+/// kt-bridge variant of [`OpdLossCustomOp::cuda_kernel_backward`] —
+/// borrows `hidden`/`head_t`/`grad_loss` as kt-Tensors, dispatches the
+/// same `kiln_opd_topk_kl_bwd_{bf16,f32}` FFI symbols via
+/// [`crate::kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt`], and copies
+/// the kt output back into a candle `Tensor`.
+///
+/// Same FFI symbols → bit-exact by construction. The kt entry handles
+/// the active-row gather, teacher tensor upload, kernel dispatch, and
+/// the `scatter_add` back into `[1, T, H]` — identical to the candle
+/// path. The bridge is purely a thin storage downcast + device-pointer
+/// extraction layer.
+///
+/// This is the **third** production migration of a candle `CustomOp::bwd`
+/// body to the kt bridge (after `RmsNormCustomOp::bwd` in commit
+/// `341da876` and `CudaRotaryOneBf16::bwd` in commit `d99a15a3`; see
+/// `docs/CANDLE_REMOVAL_PLAN.md` §"kt-autograd readiness"). The op
+/// returns a single gradient (`d_hidden`) so there is no
+/// over-allocated F32 partial buffer to special-case — just one kt
+/// substrate call + one dtod memcpy on the way back to candle.
+///
+/// `grad_loss` is cast to F32 in candle land first (the kt entry
+/// validates F32 input) and made contiguous before borrowing.
+///
+/// Falls back to the candle path when
+/// `KILN_DISABLE_OPD_BWD_KT_BRIDGE=1` is set or on any bridge error
+/// (borrow / kt FFI / copy-back failure) so a regression never
+/// silently breaks training.
+#[cfg(feature = "cuda")]
+fn opd_loss_phase_b_backward_via_kt_bridge(
+    op: &OpdLossCustomOp,
+    hidden: &Tensor,
+    grad_loss: &Tensor,
+) -> std::result::Result<Tensor, candle_core::Error> {
+    use crate::kt_api::{opd_top_k_reverse_kl_phase_b_bwd_kt, OpdLossOutputKt};
+
+    // `head_t` is owned by the op instance and may not be contiguous.
+    // The kt entry validates `head_t.dtype() == hidden.dtype()` (same
+    // check the candle path performs via `cuda_kernel_supports`).
+    let head_t_c = op
+        .head_t
+        .contiguous()
+        .map_err(|e| candle_core::Error::Msg(format!("kt-bridge opd bwd: head_t contiguous: {e}")))?;
+
+    // `grad_loss` arrives as the upstream gradient on the loss output.
+    // The kt entry requires F32 + contiguous on CUDA. ScalarMean accepts
+    // any 1-element shape (the kt entry reshapes to `[1]` internally);
+    // PerPosition requires a 1-D `[T_active]` shape (kt entry validates).
+    let grad_loss_f32 = grad_loss
+        .to_dtype(DType::F32)
+        .map_err(|e| candle_core::Error::Msg(format!("kt-bridge opd bwd: cast grad_loss: {e}")))?;
+    let grad_loss_c = grad_loss_f32
+        .contiguous()
+        .map_err(|e| candle_core::Error::Msg(format!("kt-bridge opd bwd: contiguous grad_loss: {e}")))?;
+
+    let hidden_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(hidden).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge opd bwd: borrow hidden failed: {e}"))
+    })?;
+    let head_t_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&head_t_c).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge opd bwd: borrow head_t failed: {e}"))
+    })?;
+    let grad_loss_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&grad_loss_c).map_err(
+        |e| candle_core::Error::Msg(format!("kt-bridge opd bwd: borrow grad_loss failed: {e}")),
+    )?;
+
+    let output_mode_kt = match op.output_mode {
+        OpdLossOutput::ScalarMean => OpdLossOutputKt::ScalarMean,
+        OpdLossOutput::PerPosition => OpdLossOutputKt::PerPosition,
+    };
+
+    let d_hidden_kt = opd_top_k_reverse_kl_phase_b_bwd_kt(
+        &hidden_kt,
+        &head_t_kt,
+        &op.teacher_topk_indices,
+        &op.teacher_topk_logprobs,
+        &op.label_mask,
+        &grad_loss_kt,
+        op.top_k,
+        output_mode_kt,
+    )
+    .map_err(|e| candle_core::Error::Msg(format!("kt-bridge opd bwd: kt call failed: {e}")))?;
+
+    // The kt entry's `scatter_add` produces a contiguous `[1, T, H]`
+    // output but be defensive — copy-back across the bridge requires
+    // contiguous storage on the source side.
+    let d_hidden_kt_contig = if d_hidden_kt.is_contiguous() {
+        d_hidden_kt
+    } else {
+        d_hidden_kt.contiguous().map_err(|e| {
+            candle_core::Error::Msg(format!("kt-bridge opd bwd: contiguous d_hidden: {e}"))
+        })?
+    };
+
+    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&d_hidden_kt_contig).map_err(|e| {
+        candle_core::Error::Msg(format!("kt-bridge opd bwd: copy-back d_hidden failed: {e}"))
+    })
 }
 
 /// Phase B entry point — scalar mean reverse-KL. Behaviourally identical
@@ -401,6 +522,28 @@ impl CustomOp1 for OpdLossCustomOp {
         #[cfg(feature = "cuda")]
         {
             if route_kernel {
+                // THIRD production CustomOp::bwd migration to the kt
+                // bridge (after `RmsNormCustomOp::bwd` in commit
+                // `341da876` and `CudaRotaryOneBf16::bwd` in commit
+                // `d99a15a3`). Same FFI symbols
+                // (`kiln_opd_topk_kl_bwd_{bf16,f32}`) as the candle
+                // path → bit-exact by construction. Kill switch
+                // `KILN_DISABLE_OPD_BWD_KT_BRIDGE=1` keeps the candle
+                // `cuda_kernel_backward` reachable as the parity-test
+                // escape hatch; this body also falls through to the
+                // candle path on any bridge failure (borrow / kt FFI /
+                // copy-back) so a regression never silently breaks
+                // training.
+                if !opd_bwd_kt_bridge_disabled() {
+                    match opd_loss_phase_b_backward_via_kt_bridge(self, hidden, grad_loss) {
+                        Ok(dh) => return Ok(Some(dh)),
+                        Err(e) => {
+                            eprintln!(
+                                "kiln-opd-loss-kernel: kt-bridge bwd path failed, falling back to candle: {e}"
+                            );
+                        }
+                    }
+                }
                 match self.cuda_kernel_backward(hidden, grad_loss) {
                     Ok(dh) => return Ok(Some(dh)),
                     Err(e) => {

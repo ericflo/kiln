@@ -107,7 +107,7 @@ For each Tier-1 crate, removing candle means:
 
 | Crate | Notes |
 |---|---|
-| `kiln-opd-loss-kernel`  | **Blocked by 3 live candle-typed callers in `kiln-train`** (investigated 2026-05-26 against HEAD `8e21c8fe`): `src/opd.rs:68` imports `opd_top_k_reverse_kl_phase_a_per_position` + `DEFAULT_CHUNK_SIZE` for the production forward path; `src/opd.rs:3034` imports `opd_top_k_reverse_kl_phase_b` (cfg-test); `tests/vk_cuda_opd_parity.rs:20` imports `opd_top_k_reverse_kl_phase_b_per_position`. kt-typed entry points already exist (`opd_top_k_reverse_kl_kt`, `opd_top_k_reverse_kl_per_position_kt`, `compute_per_position_metrics_kt`); CUDA kt-typed backward substrate (`opd_top_k_reverse_kl_phase_b_bwd_kt`, F32/BF16, K∈{16,32}, ScalarMean+PerPosition) wraps the same `kiln_opd_topk_kl_bwd_*` FFI symbols as the candle path — bridge wiring through `OpdLossCustomOp::bwd` is the next step. Production path migration is the remaining unblocker; same shape as the rmsnorm/gdn blockers. Crate `Cargo.toml` still depends on `candle-core` + `candle-nn` (dev). |
+| `kiln-opd-loss-kernel`  | **Blocked by 3 live candle-typed callers in `kiln-train`** (investigated 2026-05-26 against HEAD `8e21c8fe`): `src/opd.rs:68` imports `opd_top_k_reverse_kl_phase_a_per_position` + `DEFAULT_CHUNK_SIZE` for the production forward path; `src/opd.rs:3034` imports `opd_top_k_reverse_kl_phase_b` (cfg-test); `tests/vk_cuda_opd_parity.rs:20` imports `opd_top_k_reverse_kl_phase_b_per_position`. kt-typed entry points already exist (`opd_top_k_reverse_kl_kt`, `opd_top_k_reverse_kl_per_position_kt`, `compute_per_position_metrics_kt`); CUDA kt-typed backward substrate (`opd_top_k_reverse_kl_phase_b_bwd_kt`, F32/BF16, K∈{16,32}, ScalarMean+PerPosition) wraps the same `kiln_opd_topk_kl_bwd_*` FFI symbols as the candle path. **`OpdLossCustomOp::bwd` migrated to the kt bridge on 2026-05-27** (branch `ce/opd-loss-bwd-kt-bridge-1082-v2`; status block below) — bwd CustomOp surface is now kt-routed. Production forward path migration remains the unblocker; same shape as the rmsnorm/gdn blockers. Crate `Cargo.toml` still depends on `candle-core` + `candle-nn` (dev). |
 | `kiln-flce-kernel`      | **Largest single rewrite.** Phase A is pure-candle, Phase B is the raw-CUDA replacement. Driving Phase B to closeout is its own multi-PR effort (see crate-level `phase_b.rs`). |
 | `kiln-mps`              | Apple Silicon only; Metal storage substrate lives here. |
 | `kiln-vulkan-kernel`    | **Investigated 2026-05-26 against HEAD `eea56b23`** — 8 .rs files importing candle, 13 import lines total (61 .rs files in the crate). Footprint is now ~60% smaller than the earlier "20 files" estimate after 14+ #1082 cleanup commits over the past 3 weeks (latest: `e047c579` de-candle `vk_flce_parity` test factories). Crate `vk_ops/` (31 files) is **fully candle-free**. Top 3 remaining blockers are all rooted in the **legacy candle-typed `kernels::dispatch_*` surface** — see "kiln-vulkan-kernel blocker breakdown" below. |
@@ -912,6 +912,35 @@ covers decode `[1,1,16,256]`, prefill `[1,64,16,256]`, and tiny
 `[2,8,4,128]` shapes at `r=64` (matching the Qwen3.5-4B
 `partial_rotary=0.25` head layout) with a tight 1e-3 tolerance
 (no atomicAdd → expect bit-exact within bf16 round-trip).
+
+**Status update (2026-05-27): third migration shipped on
+`ce/opd-loss-bwd-kt-bridge-1082-v2`** —
+`OpdLossCustomOp::bwd` (in `crates/kiln-opd-loss-kernel/src/phase_b.rs`)
+now routes through `opd_loss_phase_b_backward_via_kt_bridge`, which
+mirrors the rmsnorm / rotary-one template: 3 candle→kt
+`kt_tensor_from_candle_cuda_borrow` calls (`hidden`, `head_t` after
+`.contiguous()`, `grad_loss` after F32 cast + `.contiguous()`) + 1
+`opd_top_k_reverse_kl_phase_b_bwd_kt` call (the substrate landed in
+`dc092849`, wraps the same FFI symbols
+`kiln_opd_topk_kl_bwd_{bf16,f32}` the candle path calls) + 1
+`kt_tensor_to_candle_cuda_copy` for the single returned `d_hidden`
+gradient. The kt entry itself does the active-row gather, teacher
+tensor upload, kernel dispatch, and `scatter_add` back into the
+`[1, T, H]` zero buffer — identical to the candle
+`OpdLossCustomOp::cuda_kernel_backward` body. Same FFI symbols →
+bit-exact by construction (no atomicAdd row reduction in this op, so
+no cross-launch BF16 ULP wobble like rmsnorm had). Kill switch
+`KILN_DISABLE_OPD_BWD_KT_BRIDGE=1` keeps the candle
+`cuda_kernel_backward` reachable as the parity-test escape hatch; the
+bwd body also falls through on any bridge failure (borrow / kt FFI /
+copy-back). Parity tests
+`cuda_opd_bwd_kt_bridge_wiring_parity::opd_bwd_kt_bridge_{bf16,f32}_k{16,32}_{scalar_mean,per_position}`
+(8 cases — full BF16+F32 × K16+K32 × ScalarMean+PerPosition envelope)
+verify against the analytic candle reference path
+(`KILN_DISABLE_OPD_LOSS_KERNEL=1` forces the candle-on-CUDA fallback
+in `bwd`); tolerances are 1e-4 (F32) / 5e-2 (BF16, matching the
+existing `cuda_bwd_kernel_matches_candle_bf16_k32` precedent for the
+same kernel-vs-candle parity baseline).
 
 **STOP on `CudaSigmoidMulTrainingBf16::bwd`**: it has no matching
 single-FFI kt-backward entry-point. The candle path is implemented
