@@ -2078,11 +2078,16 @@ dependencies = [
  "half",
  "kiln-autograd",
  "kiln-blas",
+ "kiln-tensor-id",
  "kiln-vulkan-kernel",
  "memmap2",
  "safetensors 0.7.0",
  "thiserror 2.0.18",
 ]
+
+[[package]]
+name = "kiln-tensor-id"
+version = "0.2.19"
 
 [[package]]
 name = "kiln-train"

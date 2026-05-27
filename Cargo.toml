@@ -25,6 +25,7 @@ members = [
     "crates/kiln-scheduler",
     "crates/kiln-server",
     "crates/kiln-tensor",
+    "crates/kiln-tensor-id",
     "crates/kiln-train",
     "crates/kiln-vulkan-blas",
     "crates/kiln-vulkan-kernel",
@@ -60,6 +61,7 @@ default-members = [
     "crates/kiln-scheduler",
     "crates/kiln-server",
     "crates/kiln-tensor",
+    "crates/kiln-tensor-id",
     "crates/kiln-train",
     "crates/kiln-vulkan-blas",
 ]
@@ -159,6 +161,7 @@ kiln-param = { path = "crates/kiln-param" }
 kiln-scheduler = { path = "crates/kiln-scheduler" }
 kiln-server = { path = "crates/kiln-server" }
 kiln-tensor = { path = "crates/kiln-tensor" }
+kiln-tensor-id = { path = "crates/kiln-tensor-id" }
 kiln-train = { path = "crates/kiln-train" }
 
 [patch.crates-io]

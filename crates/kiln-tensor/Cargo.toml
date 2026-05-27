@@ -19,6 +19,13 @@ cc = "1"
 # See `src/lib.rs` for the public-API stability statement.
 
 [dependencies]
+# `TensorId` lives in `kiln-tensor-id` (a dependency-free leaf crate) so
+# that `kiln-vulkan-kernel` can also depend on it without creating the
+# `kiln-tensor -> kiln-vulkan-kernel -> kiln-tensor` cargo path-dep cycle.
+# kiln-tensor re-exports `TensorId` for backwards compatibility — all
+# existing `kiln_tensor::TensorId` callers continue to work unchanged.
+kiln-tensor-id = { workspace = true }
+
 # Error machinery — Result wraps a thiserror enum, but a public callable
 # bail! macro mirrors candle's ergonomic shape so 491+ migration sites
 # can mechanically swap `candle_core::bail!(...)` -> `kiln_tensor::bail!(...)`.

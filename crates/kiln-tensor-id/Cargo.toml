@@ -1,0 +1,15 @@
+[package]
+name = "kiln-tensor-id"
+description = "Stable identity (TensorId) for kiln Tensors / Parameters. Leaf crate with zero kiln-* deps so it can be shared between kiln-tensor and kiln-vulkan-kernel without inducing a cargo path-dep cycle."
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Intentional dependency-free leaf crate. The whole point of this crate
+# is that *both* `kiln-tensor` (which depends on `kiln-vulkan-kernel`
+# under the `vulkan` feature) and `kiln-vulkan-kernel` itself can pull
+# `TensorId` from a common location. Adding any kiln-* dep here would
+# defeat that purpose.
+[dependencies]
