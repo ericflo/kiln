@@ -8,6 +8,17 @@
 //! Expected speedup: 1.5-2.5x for autoregressive decode, depending on the
 //! acceptance rate (which depends on how well the first N layers predict the
 //! full model's output).
+//!
+//! # Phase 7 kt migration (#1082)
+//!
+//! `logits_to_probs` (used by the rejection-sampling resample path) takes a
+//! CUDA fast path that does temperature scaling and softmax on-device via
+//! `kiln_tensor::cuda_scalar_op` + `cuda_softmax_last_axis`, then a single
+//! D2H copy of the resulting probabilities. The candle host-side path is
+//! preserved as a fallback for CPU tensors and any kt-bridge precondition
+//! failure. The candle Tensor surface is preserved so the rest of the
+//! MTP / speculative call graph (logits returned by `model_forward_*`)
+//! remains candle-typed.
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
@@ -161,7 +172,19 @@ fn draft_forward(
 /// Compute softmax probabilities from logits for the last position.
 ///
 /// Returns a Vec of probabilities indexed by token ID.
+///
+/// Phase 7 (#1082): CUDA inputs take an on-device fast path that scales by
+/// temperature via `kiln_tensor::cuda_scalar_op` and computes the softmax
+/// via `kiln_tensor::cuda_softmax_last_axis` before a single D2H copy. The
+/// candle host-side path below is preserved for CPU tensors and any
+/// bridge-precondition failure (non-contiguous last-position slice,
+/// unsupported dtype, etc.).
 fn logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Vec<f32>> {
+    #[cfg(feature = "cuda")]
+    if let Some(probs) = try_kt_logits_to_probs(logits, temperature)? {
+        return Ok(probs);
+    }
+
     let dims = logits.dims();
 
     // Extract logits for the last position
@@ -195,6 +218,61 @@ fn logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Vec<f32>> {
     }
 
     Ok(probs)
+}
+
+/// Phase 7 (#1082): CUDA fast path for `logits_to_probs`. Extracts the
+/// last-position slice as a 1-D contiguous kt tensor, runs the temperature
+/// scaling + softmax on-device, then issues a single D2H copy of the
+/// resulting F32 probabilities. Returns `Ok(None)` on any precondition
+/// failure so the caller falls through to the candle host path.
+#[cfg(feature = "cuda")]
+fn try_kt_logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Option<Vec<f32>>> {
+    use candle_core::Device as CandleDevice;
+    if !matches!(logits.device(), CandleDevice::Cuda(_)) {
+        return Ok(None);
+    }
+    if !matches!(logits.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+        return Ok(None);
+    }
+    let dims = logits.dims();
+    let last_logits = if dims.len() >= 2 {
+        let seq_len = dims[dims.len() - 2];
+        logits
+            .narrow(dims.len() - 2, seq_len - 1, 1)?
+            .squeeze(dims.len() - 2)?
+    } else {
+        logits.clone()
+    };
+    let flat = last_logits.flatten_all()?.contiguous()?;
+    // Always run the softmax in F32 — `kt::cuda_softmax_last_axis` supports
+    // BF16/F16, but the rejection-sample consumer takes a `Vec<f32>` so
+    // promoting up front is cheaper than promoting on D2H.
+    let flat_f32 = if flat.dtype() != DType::F32 {
+        flat.to_dtype(DType::F32)?
+    } else {
+        flat
+    };
+    let kt_in = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&flat_f32) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // Optional temperature scaling. `ScalarKind::DivScalar = 3`. Matches
+    // the host path's `*v /= temperature` for `temperature > 0.0 && != 1.0`.
+    let kt_scaled = if temperature > 0.0 && temperature != 1.0 {
+        match kiln_tensor::cuda_scalar_op(&kt_in, 3, temperature) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        }
+    } else {
+        kt_in
+    };
+    let kt_probs = match kiln_tensor::cuda_softmax_last_axis(&kt_scaled) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let probs_t = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_probs)
+        .map_err(|e| anyhow::anyhow!("try_kt_logits_to_probs: copy-back failed: {e}"))?;
+    Ok(Some(probs_t.to_vec1::<f32>()?))
 }
 
 /// Perform rejection sampling for speculative decoding.
