@@ -230,11 +230,32 @@ impl CudaStorage {
         dtype: DType,
         slice: CudaSlice<u8>,
     ) -> Result<Self> {
+        // #1082 substrate fold: thin wrapper around [`Self::from_slice_ctx`]
+        // — derives the cudarc `CudaContext` from the caller-supplied
+        // candle wrapper. Future signature flip drops the candle wrapper.
+        let ctx = candle_device.cuda_stream().context().clone();
+        Self::from_slice_ctx(&ctx, device_index, dtype, slice)
+    }
+
+    /// Wrap an existing `CudaSlice<u8>` allocated by the caller —
+    /// **candle-free** entry point.
+    ///
+    /// Same validation contract as [`Self::from_slice`] (slice length
+    /// must be a multiple of `dtype.size_in_bytes()` for non-packed
+    /// dtypes), but takes a cudarc `Arc<CudaContext>` directly. No
+    /// candle `CudaDevice` materialization happens on the storage
+    /// side.
+    pub fn from_slice_ctx(
+        ctx: &Arc<CudaContext>,
+        device_index: usize,
+        dtype: DType,
+        slice: CudaSlice<u8>,
+    ) -> Result<Self> {
         if !dtype.is_packed() {
             let per = dtype.size_in_bytes();
             if per > 0 && !slice.len().is_multiple_of(per) {
                 return Err(Error::Msg(format!(
-                    "CudaStorage::from_slice: slice len {} is not a multiple of \
+                    "CudaStorage::from_slice_ctx: slice len {} is not a multiple of \
                      size_in_bytes({:?}) = {}",
                     slice.len(),
                     dtype,
@@ -242,15 +263,11 @@ impl CudaStorage {
                 )));
             }
         }
-        // #1082 CP-1 final lift: derive ctx from the caller-supplied
-        // candle wrapper for back-compat signature. Future signature
-        // flip should take `ctx: &Arc<CudaContext>` directly.
-        let ctx = candle_device.cuda_stream().context().clone();
         Ok(CudaStorage {
             device: Device::Cuda(device_index),
             dtype,
             slice: SliceOwner::Owned(slice),
-            ctx,
+            ctx: ctx.clone(),
         })
     }
 
@@ -279,18 +296,37 @@ impl CudaStorage {
         byte_len: usize,
         keep_alive: Arc<dyn Any + Send + Sync>,
     ) -> Result<Self> {
+        // #1082 substrate fold: thin wrapper around
+        // [`Self::from_borrowed_ctx`] — derives ctx from the caller-supplied
+        // candle wrapper. Future signature flip drops the candle wrapper.
+        let ctx = candle_device.cuda_stream().context().clone();
+        Self::from_borrowed_ctx(&ctx, device_index, dtype, device_ptr, byte_len, keep_alive)
+    }
+
+    /// Wrap an externally-owned CUDA buffer as a kt `CudaStorage`
+    /// without copying — **candle-free** entry point parallel to
+    /// [`Self::from_borrowed`].
+    ///
+    /// Same `keep_alive` / alignment-check contract as `from_borrowed`,
+    /// but takes a cudarc `Arc<CudaContext>` directly. No candle
+    /// `CudaDevice` materialization happens on the storage side.
+    pub fn from_borrowed_ctx(
+        ctx: &Arc<CudaContext>,
+        device_index: usize,
+        dtype: DType,
+        device_ptr: CUdeviceptr,
+        byte_len: usize,
+        keep_alive: Arc<dyn Any + Send + Sync>,
+    ) -> Result<Self> {
         if !dtype.is_packed() {
             let per = dtype.size_in_bytes();
             if per > 0 && !byte_len.is_multiple_of(per) {
                 return Err(Error::Msg(format!(
-                    "CudaStorage::from_borrowed: byte_len {byte_len} is not a multiple of \
+                    "CudaStorage::from_borrowed_ctx: byte_len {byte_len} is not a multiple of \
                      size_in_bytes({dtype:?}) = {per}"
                 )));
             }
         }
-        // #1082 CP-1 final lift: derive ctx from caller-supplied candle
-        // wrapper for back-compat signature.
-        let ctx = candle_device.cuda_stream().context().clone();
         Ok(CudaStorage {
             device: Device::Cuda(device_index),
             dtype,
@@ -299,7 +335,7 @@ impl CudaStorage {
                 byte_len,
                 _keep_alive: keep_alive,
             },
-            ctx,
+            ctx: ctx.clone(),
         })
     }
 
