@@ -2392,12 +2392,57 @@ pub fn dispatch_linear_decode_cached_bf16_weights_transposed(
     k_dim: usize,
     n_dim: usize,
 ) -> Result<Tensor> {
+    let x_data = extract_tensor_bytes(x)?.0;
+    let out_data = dispatch_linear_decode_cached_bf16_weights_transposed_bytes_core(
+        vk_device,
+        &x_data,
+        weight_buffer,
+        batch,
+        k_dim,
+        n_dim,
+    )?;
+    create_tensor_from_data(&out_data, &[batch, 1, n_dim], DType::F32)
+}
+
+/// Candle-free variant of
+/// [`dispatch_linear_decode_cached_bf16_weights_transposed`].
+///
+/// Takes `x` as raw f32 bytes `[batch, k_dim]` (or equivalently
+/// `[batch, 1, k_dim]`) and returns the output as raw f32 bytes
+/// shaped `[batch, 1, n_dim]` in row-major order. The candle entry
+/// is a thin shim that delegates to the shared bytes core.
+/// (#1082)
+pub fn dispatch_linear_decode_cached_bf16_weights_transposed_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_buffer: &VulkanBuffer,
+    batch: usize,
+    k_dim: usize,
+    n_dim: usize,
+) -> Result<Vec<u8>> {
+    dispatch_linear_decode_cached_bf16_weights_transposed_bytes_core(
+        vk_device,
+        x_data,
+        weight_buffer,
+        batch,
+        k_dim,
+        n_dim,
+    )
+}
+
+fn dispatch_linear_decode_cached_bf16_weights_transposed_bytes_core(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_buffer: &VulkanBuffer,
+    batch: usize,
+    k_dim: usize,
+    n_dim: usize,
+) -> Result<Vec<u8>> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    let x_data = extract_tensor_bytes(x)?.0;
     anyhow::ensure!(
         x_data.len() == batch * k_dim * 4,
         "linear_decode_transposed: x buffer has {} bytes, expected {}",
@@ -2415,7 +2460,7 @@ pub fn dispatch_linear_decode_cached_bf16_weights_transposed(
             queue,
             *command_pool,
             &x_buf,
-            &x_data,
+            x_data,
         )
         .context("failed to upload linear_decode_transposed x buffer")?;
     }
@@ -2441,18 +2486,15 @@ pub fn dispatch_linear_decode_cached_bf16_weights_transposed(
     )
     .context("linear_decode_batched_transposed_bf16w kernel failed")?;
 
-    let out_data = {
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::read_back_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &out_buf,
-        )
-        .context("failed to read back linear_decode_transposed output")?
-    };
-    create_tensor_from_data(&out_data, &[batch, 1, n_dim], DType::F32)
+    let command_pool = vk_device.transient_command_pool()?;
+    VulkanBuffer::read_back_with_command_pool(
+        device,
+        host_visible_mt,
+        queue,
+        *command_pool,
+        &out_buf,
+    )
+    .context("failed to read back linear_decode_transposed output")
 }
 
 fn dispatch_linear_decode_cached_impl(
