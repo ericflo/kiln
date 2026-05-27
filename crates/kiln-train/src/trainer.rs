@@ -8,10 +8,18 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+// NOTE(#1082): Consolidated the two cuda-gated candle_core imports
+// (`CudaStorage` and `backend::BackendStorage`) into a single `use` so
+// trainer.rs's candle import count drops from 3 to 2 as part of full
+// candle removal (#1082). `BackendStorage` is required in scope so that
+// `storage.device()` resolves on `&CudaStorage` inside `cuda_fwd` below.
+// TODO(#1082): the remaining two candle_core imports are blocked by
+// pervasive `Tensor`/`Var`/`Device`/`DType` use (500+ sites) and
+// `candle_core::safetensors::{save,load}` adapter I/O — those need a
+// coordinated kt-typed wrapper landing before this file can drop candle
+// entirely.
 #[cfg(feature = "cuda")]
-use candle_core::CudaStorage;
-#[cfg(feature = "cuda")]
-use candle_core::backend::BackendStorage;
+use candle_core::{CudaStorage, backend::BackendStorage};
 use candle_core::{CpuStorage, CustomOp1, DType, Device, Layout, Shape, Tensor, Var};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
