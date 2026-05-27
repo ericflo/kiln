@@ -1875,6 +1875,33 @@ pub fn dispatch_linear_decode_cached_bf16_weights(
     dispatch_linear_decode_cached_impl(vk_device, x, weight_t, batch, hidden, out_dim, true)
 }
 
+/// Candle-free variant of [`dispatch_linear_decode_cached`] /
+/// [`dispatch_linear_decode_cached_bf16_weights`].
+///
+/// Takes `x` as raw f32 bytes `[batch, 1, hidden]` and returns the
+/// output as raw f32 bytes `[batch, 1, out_dim]`. Pass
+/// `packed_bf16_weights = true` to select the bf16-packed weight shader
+/// variants. (#1082)
+pub fn dispatch_linear_decode_cached_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_t: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    out_dim: usize,
+    packed_bf16_weights: bool,
+) -> Result<Vec<u8>> {
+    dispatch_linear_decode_cached_bytes_core(
+        vk_device,
+        x_data,
+        weight_t,
+        batch,
+        hidden,
+        out_dim,
+        packed_bf16_weights,
+    )
+}
+
 /// Variant of [`dispatch_linear_decode_cached_bf16_weights`] that takes a
 /// SLICE of a larger weight buffer.
 ///
@@ -2385,12 +2412,33 @@ fn dispatch_linear_decode_cached_impl(
     out_dim: usize,
     packed_bf16_weights: bool,
 ) -> Result<Tensor> {
+    let x_data = extract_tensor_bytes(x)?.0;
+    let out_data = dispatch_linear_decode_cached_bytes_core(
+        vk_device,
+        &x_data,
+        weight_t,
+        batch,
+        hidden,
+        out_dim,
+        packed_bf16_weights,
+    )?;
+    create_tensor_from_data(&out_data, &[batch, 1, out_dim], DType::F32)
+}
+
+fn dispatch_linear_decode_cached_bytes_core(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_t: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    out_dim: usize,
+    packed_bf16_weights: bool,
+) -> Result<Vec<u8>> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    let x_data = extract_tensor_bytes(x)?.0;
     anyhow::ensure!(
         x_data.len() == batch * hidden * 4,
         "linear_decode: x buffer has {} bytes, expected {}",
@@ -2398,13 +2446,13 @@ fn dispatch_linear_decode_cached_impl(
         batch * hidden * 4
     );
     if linear_decode_single_submit_enabled() {
-        return dispatch_linear_decode_cached_single_submit(
+        return dispatch_linear_decode_cached_single_submit_bytes(
             vk_device,
             weight_t,
             batch,
             hidden,
             out_dim,
-            &x_data,
+            x_data,
             packed_bf16_weights,
         );
     }
@@ -2419,7 +2467,7 @@ fn dispatch_linear_decode_cached_impl(
             queue,
             *command_pool,
             &x_buf,
-            &x_data,
+            x_data,
         )
         .context("failed to upload linear_decode x buffer")?;
     }
@@ -2490,21 +2538,18 @@ fn dispatch_linear_decode_cached_impl(
         .context("linear_decode_batched kernel failed")?;
     }
 
-    let out_data = {
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::read_back_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &out_buf,
-        )
-        .context("failed to read back linear_decode output")?
-    };
-    create_tensor_from_data(&out_data, &[batch, 1, out_dim], DType::F32)
+    let command_pool = vk_device.transient_command_pool()?;
+    VulkanBuffer::read_back_with_command_pool(
+        device,
+        host_visible_mt,
+        queue,
+        *command_pool,
+        &out_buf,
+    )
+    .context("failed to read back linear_decode output")
 }
 
-fn dispatch_linear_decode_cached_single_submit(
+fn dispatch_linear_decode_cached_single_submit_bytes(
     vk_device: &VulkanDevice,
     weight_t: &VulkanBuffer,
     batch: usize,
@@ -2512,7 +2557,7 @@ fn dispatch_linear_decode_cached_single_submit(
     out_dim: usize,
     x_data: &[u8],
     packed_bf16_weights: bool,
-) -> Result<Tensor> {
+) -> Result<Vec<u8>> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -2697,8 +2742,7 @@ fn dispatch_linear_decode_cached_single_submit(
         device.free_command_buffers(*cmd_pool, &command_buffers);
     }
 
-    let out_data = VulkanBuffer::read_host_visible(device, &out_stage)?;
-    create_tensor_from_data(&out_data, &[batch, 1, out_dim], DType::F32)
+    VulkanBuffer::read_host_visible(device, &out_stage)
 }
 
 /// Dispatch a single-token transposed linear projection and return argmax.
