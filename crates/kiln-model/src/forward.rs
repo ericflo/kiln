@@ -21050,6 +21050,53 @@ pub fn model_forward(
     Ok(logits)
 }
 
+/// kt-typed parallel entry to [`model_forward`] (#1082 Tier 3).
+///
+/// Delegates to the existing candle-typed `model_forward` and wraps the
+/// returned logits tensor as a `kiln_tensor::Tensor` via the kt-bridge
+/// zero-copy borrow adapter. This is the surface kiln-server needs in
+/// order to consume forward outputs through `kiln_tensor::ops::*`
+/// instead of `candle_core::Tensor` methods (per the STOP doc on the
+/// kiln-server candle removal).
+///
+/// `GpuWeights` is still candle-typed internally — see
+/// [`GpuWeights::device_kt`] for the matching kt-typed device accessor.
+/// `kv_cache` / `linear_state` remain candle-typed because their
+/// underlying tensors are still candle Tensors; the kt typing applies
+/// at the I/O boundary only.
+///
+/// Errors when the returned candle tensor isn't contiguous or isn't on
+/// a CUDA device. The hot decode path satisfies both today — but the
+/// kt borrow contract is explicit so a future non-contiguous output
+/// surfaces a typed bridge error instead of silently misbehaving.
+#[cfg(feature = "cuda")]
+pub fn model_forward_kt(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    kv_cache: Option<&mut KvCache>,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<kiln_tensor::Tensor> {
+    let logits = model_forward(
+        backend,
+        token_ids,
+        weights,
+        config,
+        kv_cache,
+        linear_state,
+        lora,
+    )?;
+    let logits = if logits.is_contiguous() {
+        logits
+    } else {
+        logits.contiguous()?
+    };
+    kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&logits)
+        .map_err(|e| anyhow::anyhow!("model_forward_kt borrow: {e}"))
+}
+
 /// Run a subset of transformer layers on an existing hidden state.
 ///
 /// Processes layers `[start_layer..end_layer)` without embedding or LM head.
