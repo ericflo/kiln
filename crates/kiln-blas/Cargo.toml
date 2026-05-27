@@ -14,36 +14,32 @@ build = "build.rs"
 #   trait + Epilogue + MatmulRequest) — compile on every host without
 #   `--features probe` or `--features cublaslt`.
 # - **Probe FFI + cublasLt baseline** — gated behind `--features probe`.
-#   Pulls candle-core (cuda) as the cudarc vendor for the standalone
-#   probe example.
+#   Pulls cudarc directly for the driver-side types; the actual probe
+#   numerics live in C/CUDA (`csrc/cublaslt_probe.cu`).
 # - **CublasLtMatmulHandle** — gated behind `--features cublaslt`. The
 #   production matmul executor that lifts the probe into a reusable
 #   handle with workspace pool + algo cache integration.
 #
-# This lets `kiln-tensor` and other crates depend on `kiln-blas` for
-# the autotune cache + workspace policy without needing the CUDA
-# toolchain to build, AND lets the CUDA-feature path pull in the real
-# matmul handle without dragging in the probe-only baseline code.
+# #1082: this crate no longer depends on `candle-core`. The previous
+# rationale for keeping candle around was "shared cudarc vendor"; now
+# that the workspace pins `cudarc` directly at the same version every
+# crate uses, candle-core is dead weight here and is gone.
 
 [features]
 default = []
-# Builds the cublasLt probe binary alongside candle's gemm baseline.
-# Pulls candle-core (cuda) + the build.rs cublasLt link.
-probe = ["dep:candle-core", "dep:cudarc"]
+# Builds the cublasLt probe binary. Pulls cudarc directly + triggers the
+# build.rs cublasLt link.
+probe = ["dep:cudarc"]
 # Builds the production `CublasLtMatmulHandle` (cublasLt context +
-# matmul executor). Also pulls candle-core (cuda) for the shared
-# cudarc version, plus a direct `cudarc` dep for the driver types
-# (`CUstream`, `CudaSlice`, `DevicePtr`) that previously routed
-# through candle re-exports. Issue #1082 seam-removal step.
-cublaslt = ["dep:candle-core", "dep:cudarc"]
+# matmul executor). Pulls cudarc directly for the driver types
+# (`CudaContext`, `CudaSlice`, `CUstream`, `DevicePtr`). Issue #1082
+# completed the candle removal.
+cublaslt = ["dep:cudarc"]
 
 [dependencies]
-# Candle is the cudarc vendor under the `probe` / `cublaslt` features;
-# absent on the default build so the backend-agnostic types compile on
-# every host.
-candle-core = { workspace = true, features = ["cuda"], optional = true }
-# Direct cudarc — replaces candle re-exports of driver/sys types.
-# Same workspace pin as candle vendors so the compiled crate unifies.
+# Direct cudarc — the sole CUDA substrate dependency. Pinned by the
+# workspace so the compiled crate unifies with every other kiln crate
+# that holds a `CudaContext` / `CudaSlice<u8>`.
 cudarc = { workspace = true, optional = true }
 half = "2"
 
@@ -54,10 +50,9 @@ serde_json = { workspace = true }
 [build-dependencies]
 cc = "1"
 
-# The probe example links the cublasLt FFI and pulls candle-core (cuda),
-# both gated behind --features probe. Mark required-features so plain
-# `cargo build` / `cargo test` on hosts without a CUDA toolchain don't
-# try to compile it.
+# The probe example links the cublasLt FFI under `--features probe`.
+# Mark required-features so plain `cargo build` / `cargo test` on hosts
+# without a CUDA toolchain don't try to compile it.
 [[example]]
 name = "cublaslt_mlp_probe"
 required-features = ["probe"]
