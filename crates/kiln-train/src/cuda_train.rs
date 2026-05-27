@@ -417,7 +417,7 @@ pub fn cuda_gdn_gated_rmsnorm(
     let shifted_weight =
         (weight.as_tensor() - 1.0f64).context("cuda_gdn_gated_rmsnorm: shift norm weight")?;
     let shifted_weight =
-        CudaTraincandle_core::Tensor::new(shifted_weight).context("cuda_gdn_gated_rmsnorm: wrap weight")?;
+        CudaTrainTensor::new(shifted_weight).context("cuda_gdn_gated_rmsnorm: wrap weight")?;
     let normed = cuda_rmsnorm(input, &shifted_weight, eps)?;
     let activated_gate = cuda_silu(gate)?;
     cuda_mul(&normed, &activated_gate)
@@ -521,7 +521,7 @@ fn cuda_gdn_l2_normalize_head_rows(input: &CudaTrainTensor, scale: f32) -> Resul
         input.dims()
     );
     let head_dim = input.dims()[1];
-    let zeros = CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+    let zeros = CudaTrainTensor::new(candle_core::Tensor::zeros(
         (head_dim,),
         candle_core::DType::F32,
         input.as_tensor().device(),
@@ -893,8 +893,8 @@ fn cuda_compute_rope_tables(
     let cos = candle_core::Tensor::from_vec(cos, (rows, half), device).context("cuda model RoPE cos table")?;
     let sin = candle_core::Tensor::from_vec(sin, (rows, half), device).context("cuda model RoPE sin table")?;
     Ok(Some((
-        CudaTraincandle_core::Tensor::new(cos)?,
-        CudaTraincandle_core::Tensor::new(sin)?,
+        CudaTrainTensor::new(cos)?,
+        CudaTrainTensor::new(sin)?,
     )))
 }
 
@@ -1742,13 +1742,13 @@ fn cuda_linear_attention_state_zeros_for_model(
         let conv_rows = linear.conv_kernel.saturating_sub(1);
         let conv_n = batch * conv_channels * conv_rows;
         layers.push(CudaGdnLayerState {
-            recurrent_state: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            recurrent_state: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 recurrent_shape,
                 candle_core::DType::F32,
                 device,
             )?)?,
             recurrent_n_elements: recurrent_n,
-            conv_state: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            conv_state: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (batch, conv_channels, conv_rows),
                 candle_core::DType::F32,
                 device,
@@ -2554,7 +2554,7 @@ mod tests {
     // Removing the redundant local candle_core import reduces this file's
     // candle import count by 1 as part of full candle removal (#1082).
     // TODO(#1082): the remaining module-level candle_core import is blocked
-    // by pervasive `CudaTraincandle_core::Tensor::new(Tensor::...)` construction (245+
+    // by pervasive `CudaTrainTensor::new(Tensor::...)` construction (245+
     // sites) and `candle_core::safetensors::{save,load}` I/O — those need
     // a coordinated kt-typed wrapper landing before this file can drop
     // candle entirely.
@@ -2598,7 +2598,7 @@ mod tests {
             }
         };
 
-        let input = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let input = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0],
             (1usize, 2usize),
             &device,
@@ -2632,7 +2632,7 @@ mod tests {
             }
         };
 
-        let input = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let input = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0],
             (1usize, 2usize),
             &device,
@@ -2671,12 +2671,12 @@ mod tests {
             }
         };
 
-        let input = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let input = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.5f32, -1.0, 1.5, 0.25],
             (2usize, 2usize),
             &device,
         )?)?;
-        let base = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let base = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.2f32, -0.4, 0.1, 0.3],
             (2usize, 2usize),
             &device,
@@ -2720,46 +2720,46 @@ mod tests {
             }
         };
 
-        let input = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let input = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.25f32, -0.4, 0.75, 0.1],
             (2usize, 2usize),
             &device,
         )?)?;
-        let input_norm = CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?;
-        let q_weight = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let input_norm = CudaTrainTensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?;
+        let q_weight = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.2f32, -0.3, 0.05, 0.4],
             (2usize, 2usize),
             &device,
         )?)?;
-        let k_weight = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let k_weight = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.1f32, 0.6, 0.8, -0.2],
             (2usize, 2usize),
             &device,
         )?)?;
-        let v_weight = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let v_weight = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.7f32, -0.2, -0.5, 0.6],
             (2usize, 2usize),
             &device,
         )?)?;
-        let q_norm = CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?;
-        let k_norm = CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?;
-        let o_weight = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let q_norm = CudaTrainTensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?;
+        let k_norm = CudaTrainTensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?;
+        let o_weight = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.3f32, -0.4, 0.8, 0.2],
             (2usize, 2usize),
             &device,
         )?)?;
-        let post_norm = CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?;
-        let gate_weight = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let post_norm = CudaTrainTensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?;
+        let gate_weight = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.25f32, -0.15, 0.35, 0.05],
             (2usize, 2usize),
             &device,
         )?)?;
-        let up_weight = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let up_weight = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.45f32, 0.2, -0.1, 0.55],
             (2usize, 2usize),
             &device,
         )?)?;
-        let down_weight = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let down_weight = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.6f32, -0.25, 0.15, 0.5],
             (2usize, 2usize),
             &device,
@@ -2840,51 +2840,51 @@ mod tests {
             }
         };
 
-        let token_embedding = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let token_embedding = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.1f32, -0.2, 0.3, 0.4, 0.5, -1.0, 1.5, 0.25],
             (4usize, 2usize),
             &device,
         )?)?;
         let layer = CudaOwnedFullAttentionLayer {
-            input_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            input_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize,),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            q_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            q_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.2f32, -0.3, 0.05, 0.4],
                 (2usize, 2usize),
                 &device,
             )?)?,
-            k_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            k_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.1f32, 0.6, 0.8, -0.2],
                 (2usize, 2usize),
                 &device,
             )?)?,
-            v_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            v_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.7f32, -0.2, -0.5, 0.6],
                 (2usize, 2usize),
                 &device,
             )?)?,
-            q_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?,
-            k_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?,
-            o_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            q_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?,
+            k_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?,
+            o_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.3f32, -0.4, 0.8, 0.2],
                 (2usize, 2usize),
                 &device,
             )?)?,
-            post_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?,
-            gate_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            post_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?,
+            gate_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.25f32, -0.15, 0.35, 0.05],
                 (2usize, 2usize),
                 &device,
             )?)?,
-            up_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            up_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.45f32, 0.2, -0.1, 0.55],
                 (2usize, 2usize),
                 &device,
             )?)?,
-            down_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            down_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.6f32, -0.25, 0.15, 0.5],
                 (2usize, 2usize),
                 &device,
@@ -2897,12 +2897,12 @@ mod tests {
         };
         let model = CudaModelWeights {
             token_embedding,
-            final_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            final_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize,),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            lm_head_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            lm_head_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.2f32, -0.1, 0.3, 0.4, 0.05, -0.2],
                 (2usize, 3usize),
                 &device,
@@ -3016,25 +3016,25 @@ mod tests {
         };
 
         let full = CudaOwnedFullAttentionLayer {
-            input_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            input_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize,),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            q_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize, 2usize), candle_core::DType::F32, &device)?)?,
-            k_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize, 2usize), candle_core::DType::F32, &device)?)?,
-            v_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize, 2usize), candle_core::DType::F32, &device)?)?,
-            q_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?,
-            k_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?,
-            o_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize, 2usize), candle_core::DType::F32, &device)?)?,
-            post_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?,
-            gate_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            q_weight: CudaTrainTensor::new(candle_core::Tensor::zeros((2usize, 2usize), candle_core::DType::F32, &device)?)?,
+            k_weight: CudaTrainTensor::new(candle_core::Tensor::zeros((2usize, 2usize), candle_core::DType::F32, &device)?)?,
+            v_weight: CudaTrainTensor::new(candle_core::Tensor::zeros((2usize, 2usize), candle_core::DType::F32, &device)?)?,
+            q_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?,
+            k_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?,
+            o_weight: CudaTrainTensor::new(candle_core::Tensor::zeros((2usize, 2usize), candle_core::DType::F32, &device)?)?,
+            post_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?)?,
+            gate_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize, 4usize),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            up_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize, 4usize), candle_core::DType::F32, &device)?)?,
-            down_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            up_weight: CudaTrainTensor::new(candle_core::Tensor::zeros((2usize, 4usize), candle_core::DType::F32, &device)?)?,
+            down_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (4usize, 2usize),
                 candle_core::DType::F32,
                 &device,
@@ -3046,45 +3046,45 @@ mod tests {
             attn_output_gate: false,
         };
         let linear = CudaOwnedLinearAttentionLayer {
-            layer_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            layer_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize,),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            in_proj_qkv_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            in_proj_qkv_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize, 6usize),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            in_proj_z_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            in_proj_z_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize, 2usize),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            in_proj_a_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            in_proj_a_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize, 1usize),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            in_proj_b_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            in_proj_b_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize, 1usize),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            conv1d_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            conv1d_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (6usize, 1usize, 3usize),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            a_log: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, &device)?)?,
-            a_log_gates: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, &device)?)?,
-            dt_bias: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, &device)?)?,
-            gated_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            a_log: CudaTrainTensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, &device)?)?,
+            a_log_gates: CudaTrainTensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, &device)?)?,
+            dt_bias: CudaTrainTensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, &device)?)?,
+            gated_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize,),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            out_proj_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            out_proj_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize, 2usize),
                 candle_core::DType::F32,
                 &device,
@@ -3097,17 +3097,17 @@ mod tests {
             eps: 1e-6,
         };
         let model = CudaModelWeights {
-            token_embedding: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            token_embedding: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (4usize, 2usize),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            final_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            final_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize,),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            lm_head_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            lm_head_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize, 4usize),
                 candle_core::DType::F32,
                 &device,
@@ -3167,7 +3167,7 @@ mod tests {
         assert!(grads.get(z_pair.b_id).is_some());
 
         let conv_state =
-            CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize, 6usize), candle_core::DType::F32, &device)?)?;
+            CudaTrainTensor::new(candle_core::Tensor::zeros((2usize, 6usize), candle_core::DType::F32, &device)?)?;
         let conv_qkv = cuda_gdn_lora_conv_qkv(&input, linear_layer, &lora_layers[1], &conv_state)?;
         assert_eq!(conv_qkv.q.dims(), &[2, 2]);
         assert_eq!(conv_qkv.k.dims(), &[2, 2]);
@@ -3181,7 +3181,7 @@ mod tests {
         let gate_grads = cuda_backward(&gate_loss)?;
         assert!(gate_grads.get(input_id).is_some());
 
-        let recurrent_out = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let recurrent_out = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.15f32, -0.2, 0.35, 0.45],
             (2usize, 2usize),
             &device,
@@ -3199,7 +3199,7 @@ mod tests {
         assert!(out_grads.get(out_pair.b_id).is_some());
 
         let recurrent_state =
-            CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((2usize, 2usize), candle_core::DType::F32, &device)?)?;
+            CudaTrainTensor::new(candle_core::Tensor::zeros((2usize, 2usize), candle_core::DType::F32, &device)?)?;
         let layer_out = cuda_gdn_lora_layer(
             &input,
             linear_layer,
@@ -3229,47 +3229,47 @@ mod tests {
 
         let conv_weight: Vec<f32> = (0..6).flat_map(|_| [0.0f32, 0.0, 1.0]).collect();
         let linear = CudaOwnedLinearAttentionLayer {
-            layer_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            layer_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize,),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            in_proj_qkv_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            in_proj_qkv_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![
                     0.2f32, -0.1, 0.4, 0.3, -0.2, 0.5, -0.3, 0.25, 0.1, -0.4, 0.6, 0.2,
                 ],
                 (2usize, 6usize),
                 &device,
             )?)?,
-            in_proj_z_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            in_proj_z_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.3f32, -0.2, 0.1, 0.4],
                 (2usize, 2usize),
                 &device,
             )?)?,
-            in_proj_a_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            in_proj_a_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.2f32, -0.1],
                 (2usize, 1usize),
                 &device,
             )?)?,
-            in_proj_b_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            in_proj_b_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![-0.3f32, 0.25],
                 (2usize, 1usize),
                 &device,
             )?)?,
-            conv1d_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            conv1d_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 conv_weight,
                 (6usize, 1usize, 3usize),
                 &device,
             )?)?,
-            a_log: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, &device)?)?,
-            a_log_gates: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, &device)?)?,
-            dt_bias: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, &device)?)?,
-            gated_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            a_log: CudaTrainTensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, &device)?)?,
+            a_log_gates: CudaTrainTensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, &device)?)?,
+            dt_bias: CudaTrainTensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, &device)?)?,
+            gated_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize,),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            out_proj_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            out_proj_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.4f32, -0.2, 0.15, 0.35],
                 (2usize, 2usize),
                 &device,
@@ -3282,17 +3282,17 @@ mod tests {
             eps: 1e-6,
         };
         let model = CudaModelWeights {
-            token_embedding: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            token_embedding: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.25f32, -0.5, 0.75, 1.0, -0.3, 0.2, 0.4, -0.1],
                 (4usize, 2usize),
                 &device,
             )?)?,
-            final_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            final_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize,),
                 candle_core::DType::F32,
                 &device,
             )?)?,
-            lm_head_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            lm_head_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.2f32, -0.1, 0.4, 0.3, -0.2, 0.5, 0.1, -0.4],
                 (2usize, 4usize),
                 &device,
@@ -3382,13 +3382,13 @@ mod tests {
             }
         };
 
-        let input = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let input = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.5f32, -1.0, 1.5, 0.25],
             (2usize, 2usize),
             &device,
         )?)?;
         let input_norm =
-            CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
+            CudaTrainTensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let q_tensor = candle_core::Tensor::from_vec(
             vec![0.2f32, -0.3, 0.05, 0.4, 0.4, 0.1, -0.2, 0.3],
             (2usize, 4usize),
@@ -3403,14 +3403,14 @@ mod tests {
         let v_id = v_tensor.id();
         let v_weight = CudaTrainTensor::parameter(v_tensor, v_id)?;
         let q_norm =
-            CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
+            CudaTrainTensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let k_norm =
-            CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
+            CudaTrainTensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let o_tensor = candle_core::Tensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize), &device)?;
         let o_id = o_tensor.id();
         let o_weight = CudaTrainTensor::parameter(o_tensor, o_id)?;
         let post_norm =
-            CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
+            CudaTrainTensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let gate_tensor =
             candle_core::Tensor::from_vec(vec![0.25f32, -0.15, 0.35, 0.05], (2usize, 2usize), &device)?;
         let gate_id = gate_tensor.id();
@@ -3423,12 +3423,12 @@ mod tests {
             candle_core::Tensor::from_vec(vec![0.6f32, -0.25, 0.15, 0.5], (2usize, 2usize), &device)?;
         let down_id = down_tensor.id();
         let down_weight = CudaTrainTensor::parameter(down_tensor, down_id)?;
-        let cos = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let cos = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![1.0f32, 0.0],
             (2usize, 1usize),
             &device,
         )?)?;
-        let sin = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let sin = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.0f32, 1.0],
             (2usize, 1usize),
             &device,
@@ -3506,7 +3506,7 @@ mod tests {
         let embedding_id = embedding_tensor.id();
         let embedding = CudaTrainTensor::parameter(embedding_tensor, embedding_id)?;
         let input_norm =
-            CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
+            CudaTrainTensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let q_tensor = candle_core::Tensor::from_vec(
             vec![0.2f32, -0.3, 0.05, 0.4, 0.4, 0.1, -0.2, 0.3],
             (2usize, 4usize),
@@ -3521,14 +3521,14 @@ mod tests {
         let v_id = v_tensor.id();
         let v_weight = CudaTrainTensor::parameter(v_tensor, v_id)?;
         let q_norm =
-            CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
+            CudaTrainTensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let k_norm =
-            CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
+            CudaTrainTensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let o_tensor = candle_core::Tensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize), &device)?;
         let o_id = o_tensor.id();
         let o_weight = CudaTrainTensor::parameter(o_tensor, o_id)?;
         let post_norm =
-            CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
+            CudaTrainTensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let gate_tensor =
             candle_core::Tensor::from_vec(vec![0.25f32, -0.15, 0.35, 0.05], (2usize, 2usize), &device)?;
         let gate_id = gate_tensor.id();
@@ -3542,7 +3542,7 @@ mod tests {
         let down_id = down_tensor.id();
         let down_weight = CudaTrainTensor::parameter(down_tensor, down_id)?;
         let final_norm =
-            CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
+            CudaTrainTensor::new(candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let lm_head_tensor = candle_core::Tensor::from_vec(
             vec![0.2f32, -0.1, 0.3, 0.4, 0.05, -0.2],
             (2usize, 3usize),
@@ -3550,12 +3550,12 @@ mod tests {
         )?;
         let lm_head_id = lm_head_tensor.id();
         let lm_head = CudaTrainTensor::parameter(lm_head_tensor, lm_head_id)?;
-        let cos = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let cos = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![1.0f32, 0.0],
             (2usize, 1usize),
             &device,
         )?)?;
-        let sin = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let sin = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.0f32, 1.0],
             (2usize, 1usize),
             &device,
@@ -3630,7 +3630,7 @@ mod tests {
             }
         };
 
-        let input = CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+        let input = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0],
             (1usize, 2usize),
             &device,
@@ -3828,47 +3828,47 @@ mod tests {
         // including the recurrent / conv state plumbing.
         let conv_weight: Vec<f32> = (0..6).flat_map(|_| [0.0f32, 0.0, 1.0]).collect();
         let linear = CudaOwnedLinearAttentionLayer {
-            layer_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            layer_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize,),
                 candle_core::DType::F32,
                 device,
             )?)?,
-            in_proj_qkv_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            in_proj_qkv_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![
                     0.2f32, -0.1, 0.4, 0.3, -0.2, 0.5, -0.3, 0.25, 0.1, -0.4, 0.6, 0.2,
                 ],
                 (2usize, 6usize),
                 device,
             )?)?,
-            in_proj_z_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            in_proj_z_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.3f32, -0.2, 0.1, 0.4],
                 (2usize, 2usize),
                 device,
             )?)?,
-            in_proj_a_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            in_proj_a_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.2f32, -0.1],
                 (2usize, 1usize),
                 device,
             )?)?,
-            in_proj_b_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            in_proj_b_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![-0.3f32, 0.25],
                 (2usize, 1usize),
                 device,
             )?)?,
-            conv1d_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            conv1d_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 conv_weight,
                 (6usize, 1usize, 3usize),
                 device,
             )?)?,
-            a_log: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, device)?)?,
-            a_log_gates: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, device)?)?,
-            dt_bias: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, device)?)?,
-            gated_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            a_log: CudaTrainTensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, device)?)?,
+            a_log_gates: CudaTrainTensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, device)?)?,
+            dt_bias: CudaTrainTensor::new(candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, device)?)?,
+            gated_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize,),
                 candle_core::DType::F32,
                 device,
             )?)?,
-            out_proj_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            out_proj_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.4f32, -0.2, 0.15, 0.35],
                 (2usize, 2usize),
                 device,
@@ -3881,17 +3881,17 @@ mod tests {
             eps: 1e-6,
         };
         let model = CudaModelWeights {
-            token_embedding: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            token_embedding: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.25f32, -0.5, 0.75, 1.0, -0.3, 0.2, 0.4, -0.1],
                 (4usize, 2usize),
                 device,
             )?)?,
-            final_norm_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::zeros(
+            final_norm_weight: CudaTrainTensor::new(candle_core::Tensor::zeros(
                 (2usize,),
                 candle_core::DType::F32,
                 device,
             )?)?,
-            lm_head_weight: CudaTraincandle_core::Tensor::new(candle_core::Tensor::from_vec(
+            lm_head_weight: CudaTrainTensor::new(candle_core::Tensor::from_vec(
                 vec![0.2f32, -0.1, 0.4, 0.3, -0.2, 0.5, 0.1, -0.4],
                 (2usize, 4usize),
                 device,
