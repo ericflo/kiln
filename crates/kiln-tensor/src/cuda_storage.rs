@@ -135,6 +135,81 @@ impl CudaStorage {
         })
     }
 
+    /// Allocate `n_elements` worth of bytes for `dtype` on the cudarc
+    /// `CudaContext` `ctx`, **candle-free** in the allocation path.
+    ///
+    /// Buffer is zero-initialized via `ctx.default_stream()
+    /// .alloc_zeros::<u8>(byte_len)` — i.e. straight through cudarc with
+    /// no `candle_core::cuda_backend::CudaDevice` involvement on the
+    /// allocation side.
+    ///
+    /// `device_index` is the CUDA device ordinal — must match the
+    /// ordinal of `ctx`'s owning device. Stored as the
+    /// [`Device::Cuda`] variant.
+    ///
+    /// # Why the storage's `candle_device` field is still populated
+    ///
+    /// The internal `candle_device: Arc<CudaDevice>` field is still
+    /// load-bearing for downstream callers: every kernel-crate FFI
+    /// site reaches `self.candle_device.cuda_stream()` to plumb a
+    /// `CUstream` into its launch, and the candle `CudaDevice` wrapper
+    /// caches BLAS/cuRAND handles that production code re-uses. Until
+    /// every caller migrates to the cudarc-direct stream accessor
+    /// (`cuda_stream_raw()`), this constructor derives the candle
+    /// wrapper from [`primary_cuda_device`] (which calls
+    /// `candle_core::Device::new_cuda(device_index)`) so the resulting
+    /// `CudaStorage` is drop-in-compatible with every existing
+    /// downstream call site.
+    ///
+    /// # Stream-affinity contract
+    ///
+    /// Both `ctx.default_stream()` and the candle `CudaDevice` returned
+    /// by `primary_cuda_device(device_index)` wrap the SAME underlying
+    /// CUDA primary context for the given ordinal (candle's
+    /// `BackendDevice::new` calls `context.default_stream()` itself —
+    /// see `vendor/candle-core/src/cuda_backend/device.rs:279`). So
+    /// the allocation lands on the same logical CUDA stream that every
+    /// kernel-crate FFI will read via `candle_device.cuda_stream()`.
+    /// This matches the existing default-stream allocation path used by
+    /// [`Self::zeros`] today.
+    ///
+    /// # Future direction
+    ///
+    /// Once every kernel-crate FFI site migrates to the candle-free
+    /// stream accessor (`cuda_stream_raw()`), the storage's
+    /// `candle_device` field can be dropped entirely. At that point
+    /// this constructor stops needing to call `primary_cuda_device`
+    /// and `Self::zeros` is folded into this entry. See the
+    /// order-of-operations doc in `cuda_allocator.rs` lines 75-95.
+    pub fn zeros_ctx(
+        ctx: &Arc<CudaContext>,
+        device_index: usize,
+        dtype: DType,
+        n_elements: usize,
+    ) -> Result<Self> {
+        let byte_len = dtype.packed_buffer_bytes(n_elements);
+        // Candle-free allocation through cudarc's default-stream entry.
+        let slice = ctx
+            .default_stream()
+            .alloc_zeros::<u8>(byte_len)
+            .map_err(|e| {
+                Error::Msg(format!(
+                    "CudaStorage::zeros_ctx: ctx.default_stream().alloc_zeros::<u8>({byte_len}) \
+                     failed: {e:?}"
+                ))
+            })?;
+        // Derive the candle device wrapper for the back-compat field.
+        // This is the one residual candle dependency in this path; it
+        // goes away in the future `candle_device` field-removal step.
+        let candle_device = primary_cuda_device(device_index)?;
+        Ok(CudaStorage {
+            device: Device::Cuda(device_index),
+            dtype,
+            slice: SliceOwner::Owned(slice),
+            candle_device,
+        })
+    }
+
     /// Wrap an existing `CudaSlice<u8>` allocated by the caller.
     ///
     /// Validates the slice length against
