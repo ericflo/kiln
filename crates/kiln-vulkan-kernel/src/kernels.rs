@@ -4558,11 +4558,6 @@ pub fn dispatch_mlp_gate_up_decode_cached(
     hidden: usize,
     intermediate: usize,
 ) -> Result<Tensor> {
-    let device = vk_device.device();
-    let queue = vk_device.queue();
-    let device_local_mt = vk_device.device_local_mem_type();
-    let host_visible_mt = vk_device.host_visible_mem_type();
-
     let x_dims = x.dims();
     anyhow::ensure!(
         x_dims.len() == 3 && x_dims[1] == 1 && x_dims[2] == hidden,
@@ -4571,6 +4566,58 @@ pub fn dispatch_mlp_gate_up_decode_cached(
     );
     let batch = x_dims[0];
     let x_data = extract_tensor_bytes(x)?.0;
+    let out_data = dispatch_mlp_gate_up_decode_cached_bytes_core(
+        vk_device,
+        &x_data,
+        batch,
+        hidden,
+        intermediate,
+        gate_weight_t,
+        up_weight_t,
+    )?;
+    create_tensor_from_data(&out_data, &[batch, 1, intermediate], DType::F32)
+}
+
+/// Candle-free variant of [`dispatch_mlp_gate_up_decode_cached`].
+///
+/// Takes the input as raw f32 bytes `[batch, 1, hidden]` and returns
+/// the output as raw f32 bytes `[batch, 1, intermediate]`. Callers
+/// construct their own tensor wrapper (or none) as appropriate.
+/// (#1082)
+pub fn dispatch_mlp_gate_up_decode_cached_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    batch: usize,
+    hidden: usize,
+    intermediate: usize,
+    gate_weight_t: &VulkanBuffer,
+    up_weight_t: &VulkanBuffer,
+) -> Result<Vec<u8>> {
+    dispatch_mlp_gate_up_decode_cached_bytes_core(
+        vk_device,
+        x_data,
+        batch,
+        hidden,
+        intermediate,
+        gate_weight_t,
+        up_weight_t,
+    )
+}
+
+fn dispatch_mlp_gate_up_decode_cached_bytes_core(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    batch: usize,
+    hidden: usize,
+    intermediate: usize,
+    gate_weight_t: &VulkanBuffer,
+    up_weight_t: &VulkanBuffer,
+) -> Result<Vec<u8>> {
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
     anyhow::ensure!(
         x_data.len() == batch * hidden * 4,
         "mlp_gate_up_decode: x buffer has {} bytes, expected {}",
@@ -4619,11 +4666,11 @@ pub fn dispatch_mlp_gate_up_decode_cached(
         (batch * intermediate.div_ceil(128)) as u32
     };
 
-    let out_data = if mlp_gate_up_single_submit_enabled() {
+    if mlp_gate_up_single_submit_enabled() {
         run_compute_pipeline_with_transfer_readback(
             vk_device,
             &x_buf,
-            &x_data,
+            x_data,
             &out_buf,
             out_size,
             &spirv,
@@ -4631,7 +4678,7 @@ pub fn dispatch_mlp_gate_up_decode_cached(
             &push_constants,
             workgroups,
         )
-        .context("mlp_gate_up_decode single-submit kernel failed")?
+        .context("mlp_gate_up_decode single-submit kernel failed")
     } else {
         {
             let command_pool = vk_device.transient_command_pool()?;
@@ -4641,7 +4688,7 @@ pub fn dispatch_mlp_gate_up_decode_cached(
                 queue,
                 *command_pool,
                 &x_buf,
-                &x_data,
+                x_data,
             )
             .context("failed to upload mlp_gate_up_decode x buffer")?;
         }
@@ -4662,9 +4709,8 @@ pub fn dispatch_mlp_gate_up_decode_cached(
             *command_pool,
             &out_buf,
         )
-        .context("failed to read back mlp_gate_up_decode output")?
-    };
-    create_tensor_from_data(&out_data, &[batch, 1, intermediate], DType::F32)
+        .context("failed to read back mlp_gate_up_decode output")
+    }
 }
 
 /// Dispatch single-token SwiGLU MLP with the hidden activation kept on Vulkan.

@@ -42,20 +42,11 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-// TODO(#1082): Full candle removal here is blocked on the kernel API itself.
-// `dispatch_mlp_gate_up_decode_cached` in `kiln-vulkan-kernel::kernels` is
-// typed on `&candle_core::Tensor` for its `x` input. Once that entry point
-// (and the rest of the Vulkan decode-path dispatch surface) grows a bytes-
-// based variant analogous to `dispatch_kernel_bytes`, this `use candle_core`
-// can be dropped and `make_x` can return a raw `Vec<f32>` + shape pair.
-// Weights are already candle-free (see `make_bf16_weight` +
-// `upload_bf16_packed_buffer_from_slice`).
-use candle_core::{Device, Tensor};
 use half::bf16;
 use kiln_vulkan_kernel::buffer::VulkanBuffer;
 use kiln_vulkan_kernel::device::VulkanDevice;
 use kiln_vulkan_kernel::kernels::{
-    dispatch_mlp_gate_up_decode_cached, upload_bf16_packed_buffer_from_slice,
+    dispatch_mlp_gate_up_decode_cached_bytes, upload_bf16_packed_buffer_from_slice,
 };
 
 const HIDDEN: usize = 2560;
@@ -79,16 +70,15 @@ fn make_bf16_weight(seed: u64, rows: usize, cols: usize) -> Vec<bf16> {
         .collect()
 }
 
-fn make_x(batch: usize) -> Result<Tensor> {
-    // Decode dispatch shape: [batch, 1, hidden], FP32.
-    // TODO(#1082): Still candle because `dispatch_mlp_gate_up_decode_cached`
-    // itself takes `&candle_core::Tensor`. Replace with a `Vec<f32>` + shape
-    // tuple once the dispatch entry grows a bytes-based variant.
+fn make_x(batch: usize) -> Vec<f32> {
+    // Decode dispatch shape: [batch, 1, hidden], FP32 — candle-free
+    // host buffer; the bytes-based dispatch entry takes `&[u8]` + an
+    // explicit `batch` + `hidden` (the shape is `[batch, 1, hidden]`).
+    // (#1082)
     let n = batch * HIDDEN;
-    let data: Vec<f32> = (0..n)
+    (0..n)
         .map(|i| ((i % 31) as f32 - 15.0) * 0.01)
-        .collect();
-    Tensor::from_vec(data, (batch, 1, HIDDEN), &Device::Cpu).map_err(Into::into)
+        .collect()
 }
 
 fn median(mut v: Vec<f64>) -> f64 {
@@ -103,17 +93,18 @@ fn time_one_shape(
     batch: usize,
     iters: usize,
 ) -> Result<f64> {
-    let x = make_x(batch)?;
+    let x = make_x(batch);
+    let x_bytes: &[u8] = bytemuck::cast_slice(&x);
     for _ in 0..WARMUP_ITERS {
-        let _ = dispatch_mlp_gate_up_decode_cached(
-            vk_device, &x, gate_buf, up_buf, HIDDEN, INTERMEDIATE,
+        let _ = dispatch_mlp_gate_up_decode_cached_bytes(
+            vk_device, x_bytes, batch, HIDDEN, INTERMEDIATE, gate_buf, up_buf,
         )?;
     }
     let mut times = Vec::with_capacity(iters);
     for _ in 0..iters {
         let t0 = Instant::now();
-        let _ = dispatch_mlp_gate_up_decode_cached(
-            vk_device, &x, gate_buf, up_buf, HIDDEN, INTERMEDIATE,
+        let _ = dispatch_mlp_gate_up_decode_cached_bytes(
+            vk_device, x_bytes, batch, HIDDEN, INTERMEDIATE, gate_buf, up_buf,
         )?;
         times.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
