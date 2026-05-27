@@ -170,6 +170,82 @@ impl Tensor {
         Self::from_parts(storage, layout, TensorId::next())
     }
 
+    /// Allocate a fresh zero-initialized tensor on the given device.
+    ///
+    /// Device-parametric companion to [`Self::zeros_cpu`] /
+    /// [`Self::cuda_zeros_on`]: the caller picks the device, the
+    /// constructor routes to the matching backend allocator. Enables
+    /// callers that derive the destination device from an input
+    /// tensor's storage (e.g. accumulators in chunked
+    /// `dispatch2`-based ops where mixing a CPU accumulator with a
+    /// CUDA input would otherwise fail the device-match check).
+    ///
+    /// | `device`        | Behavior                                  |
+    /// |-----------------|-------------------------------------------|
+    /// | `Device::Cpu`   | identical to [`Self::zeros_cpu`]          |
+    /// | `Device::Cuda(i)` (with `cuda` feature) | routes to [`Self::cuda_zeros_on`] |
+    /// | `Device::Cuda(_)` (without `cuda` feature) | `Err` — cuda not linked |
+    /// | `Device::Metal(_)` / `Device::Vulkan(_)` | `Err` — NYI (substrate-side, #1082) |
+    ///
+    /// The FLCE backward (`FlceCustomOp::bwd`) is the first kt-bridge
+    /// consumer; the Metal / Vulkan branches are unreachable from that
+    /// path today and stay `Err` to surface accidental routing instead
+    /// of silently falling back to CPU.
+    pub fn zeros_on(device: Device, shape: Vec<usize>, dtype: DType) -> Result<Self> {
+        match device {
+            Device::Cpu => Ok(Self::zeros_cpu(shape, dtype)),
+            #[cfg(feature = "cuda")]
+            Device::Cuda(i) => Self::cuda_zeros_on(shape, dtype, i),
+            #[cfg(not(feature = "cuda"))]
+            Device::Cuda(_) => Err(Error::Msg(
+                "Tensor::zeros_on: CUDA device requested but `cuda` feature is not enabled"
+                    .to_string(),
+            )),
+            other @ (Device::Metal(_) | Device::Vulkan(_)) => Err(Error::Msg(format!(
+                "Tensor::zeros_on: device {other} is not yet implemented (issue #1082)"
+            ))),
+        }
+    }
+
+    /// Build a tensor on the given device from a typed [`Vec`].
+    ///
+    /// Device-parametric companion to [`Self::from_vec`] /
+    /// [`Self::cuda_from_slice`]: the caller picks the device, the
+    /// constructor either lands directly on CPU or stages-then-uploads
+    /// for CUDA. Same routing table as [`Self::zeros_on`].
+    ///
+    /// Internally the CUDA path builds a CPU tensor via
+    /// [`Self::from_vec`] and uploads via [`crate::host_to_cuda_copy`]
+    /// — the same path [`Self::cuda_from_slice`] uses. The element
+    /// type `E` parameter mirrors [`Self::from_vec`] / [`Self::from_slice`].
+    pub fn from_vec_on<E: Element>(
+        device: Device,
+        values: Vec<E>,
+        shape: Vec<usize>,
+    ) -> Result<Self> {
+        match device {
+            Device::Cpu => Self::from_vec(values, shape),
+            #[cfg(feature = "cuda")]
+            Device::Cuda(i) => {
+                // Stage on the host first, then H2D into a freshly
+                // allocated CUDA buffer. Identical to the body of
+                // `cuda_from_slice` but spelled out to keep both
+                // constructors callable in isolation.
+                let cpu = Self::from_vec(values, shape)?;
+                let cdev = crate::primary_cuda_device(i)?;
+                crate::host_to_cuda_copy(&cpu, cdev, i)
+            }
+            #[cfg(not(feature = "cuda"))]
+            Device::Cuda(_) => Err(Error::Msg(
+                "Tensor::from_vec_on: CUDA device requested but `cuda` feature is not enabled"
+                    .to_string(),
+            )),
+            other @ (Device::Metal(_) | Device::Vulkan(_)) => Err(Error::Msg(format!(
+                "Tensor::from_vec_on: device {other} is not yet implemented (issue #1082)"
+            ))),
+        }
+    }
+
     /// Construct a [`Tensor`] from raw parts. Used by per-backend
     /// storage impls (Phase 1.6+ CUDA, 1.7 Metal, 1.8 Vulkan) and by
     /// view ops in this module.
@@ -1162,5 +1238,121 @@ mod tests {
         let tt = t.transpose(0, 1).unwrap();
         // Still contains the NaN — just at a transposed logical index.
         assert!(!tt.all_finite().unwrap());
+    }
+
+    // ------------------------------------------------------------------
+    // Device-parametric constructors (zeros_on / from_vec_on)
+    //
+    // These constructors unblock the `FlceCustomOp::bwd` kt-bridge:
+    // the chunk loop accumulator + per-chunk one-hot mask have to land
+    // on the same device as the input `hidden`, otherwise `dispatch2`
+    // fails the device-match check (#1082).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn zeros_on_cpu_matches_zeros_cpu() {
+        let t = Tensor::zeros_on(Device::Cpu, vec![2, 3], DType::F32).unwrap();
+        assert_eq!(t.device(), Device::Cpu);
+        assert_eq!(t.shape(), &[2, 3]);
+        assert_eq!(t.dtype(), DType::F32);
+        assert_eq!(t.element_count(), 6);
+        // Zero-init: every byte is 0.
+        let cpu = t.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
+        assert!(cpu.as_bytes().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn from_vec_on_cpu_matches_from_vec() {
+        let v = vec![1.0f32, 2.0, 3.0, 4.0];
+        let t = Tensor::from_vec_on(Device::Cpu, v.clone(), vec![2, 2]).unwrap();
+        assert_eq!(t.device(), Device::Cpu);
+        assert_eq!(t.shape(), &[2, 2]);
+        assert_eq!(t.dtype(), DType::F32);
+        let cpu = t.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
+        let back: Vec<f32> = bytemuck::cast_slice::<u8, f32>(cpu.as_bytes()).to_vec();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn from_vec_on_cpu_shape_mismatch_errors() {
+        let v = vec![1.0f32, 2.0, 3.0];
+        let e = Tensor::from_vec_on(Device::Cpu, v, vec![2, 2]).unwrap_err();
+        assert!(e.to_string().contains("has 4 elements"));
+    }
+
+    #[test]
+    fn zeros_on_metal_errors_until_substrate_lands() {
+        // Per-backend Metal/Vulkan branches stay Err until #1082
+        // substrate work picks them up; callers that hit these today
+        // should see an explicit error instead of a silent CPU
+        // fallback that would later trip a device-mismatch assert.
+        let e = Tensor::zeros_on(Device::Metal(0), vec![2], DType::F32).unwrap_err();
+        assert!(e.to_string().contains("metal:0"));
+        let e = Tensor::zeros_on(Device::Vulkan(0), vec![2], DType::F32).unwrap_err();
+        assert!(e.to_string().contains("vulkan:0"));
+    }
+
+    #[test]
+    fn from_vec_on_metal_errors_until_substrate_lands() {
+        let e = Tensor::from_vec_on(Device::Metal(0), vec![1.0f32], vec![1]).unwrap_err();
+        assert!(e.to_string().contains("metal:0"));
+        let e = Tensor::from_vec_on(Device::Vulkan(0), vec![1.0f32], vec![1]).unwrap_err();
+        assert!(e.to_string().contains("vulkan:0"));
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    #[test]
+    fn zeros_on_cuda_without_feature_errors() {
+        let e = Tensor::zeros_on(Device::Cuda(0), vec![2], DType::F32).unwrap_err();
+        assert!(e.to_string().contains("cuda"));
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    #[test]
+    fn from_vec_on_cuda_without_feature_errors() {
+        let e = Tensor::from_vec_on(Device::Cuda(0), vec![1.0f32], vec![1]).unwrap_err();
+        assert!(e.to_string().contains("cuda"));
+    }
+
+    // CUDA-only tests: verify the storage lands on CUDA, the shape /
+    // dtype / element_count survive the round-trip, and a host-side
+    // readback recovers the original bytes (zero-init for `zeros_on`,
+    // the source vec for `from_vec_on`).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn zeros_on_cuda_lands_on_device() {
+        if !crate::cuda_is_available() {
+            eprintln!("skip: no CUDA device available");
+            return;
+        }
+        let t = Tensor::zeros_on(Device::Cuda(0), vec![3, 4], DType::F32).unwrap();
+        assert_eq!(t.device(), Device::Cuda(0));
+        assert_eq!(t.shape(), &[3, 4]);
+        assert_eq!(t.dtype(), DType::F32);
+        assert_eq!(t.element_count(), 12);
+        // Round-trip via D2H readback.
+        let host = crate::cuda_to_host_copy(&t).unwrap();
+        let cpu = host.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
+        let back: Vec<f32> = bytemuck::cast_slice::<u8, f32>(cpu.as_bytes()).to_vec();
+        assert_eq!(back, vec![0.0f32; 12]);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn from_vec_on_cuda_lands_on_device_with_content() {
+        if !crate::cuda_is_available() {
+            eprintln!("skip: no CUDA device available");
+            return;
+        }
+        let v = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let t = Tensor::from_vec_on(Device::Cuda(0), v.clone(), vec![2, 3]).unwrap();
+        assert_eq!(t.device(), Device::Cuda(0));
+        assert_eq!(t.shape(), &[2, 3]);
+        assert_eq!(t.dtype(), DType::F32);
+        // Round-trip via D2H readback.
+        let host = crate::cuda_to_host_copy(&t).unwrap();
+        let cpu = host.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
+        let back: Vec<f32> = bytemuck::cast_slice::<u8, f32>(cpu.as_bytes()).to_vec();
+        assert_eq!(back, v);
     }
 }
