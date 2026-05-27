@@ -1770,7 +1770,7 @@ pub fn opd_train_synthetic_validation(
     let head_vec: Vec<f32> = (0..(hidden_size * vocab_size))
         .map(|i| ((i as f32 + 7.0) * 0.0007).cos() * 0.2)
         .collect();
-    let head_t = candle_core::candle_core::Tensor::from_vec(head_vec, (hidden_size, vocab_size), &device)?;
+    let head_t = candle_core::Tensor::from_vec(head_vec, (hidden_size, vocab_size), &device)?;
 
     // Synthetic teacher: pick K random vocab indices per active
     // position; logprobs uniform over the K support (so the
@@ -3210,8 +3210,8 @@ mod tests {
     #[test]
     fn opd_step_loss_rejects_empty_positions() {
         let device = candle_core::Device::Cpu;
-        let student_hidden = Tensor::zeros((1, 4, 8), candle_core::DType::F32, &device).unwrap();
-        let head_t = Tensor::zeros((8, 16), candle_core::DType::F32, &device).unwrap();
+        let student_hidden = candle_core::Tensor::zeros((1, 4, 8), candle_core::DType::F32, &device).unwrap();
+        let head_t = candle_core::Tensor::zeros((8, 16), candle_core::DType::F32, &device).unwrap();
         let fixture = FixtureLogitSource::uniform_topk("test", 16, 4);
         let teacher: Arc<dyn LogitSource> = Arc::new(fixture);
         let err = opd_step_loss_simple(
@@ -3314,8 +3314,8 @@ mod tests {
     #[test]
     fn opd_step_loss_rejects_mismatched_asymmetric_lengths() {
         let device = candle_core::Device::Cpu;
-        let student_hidden = Tensor::zeros((1, 4, 8), candle_core::DType::F32, &device).unwrap();
-        let head_t = Tensor::zeros((8, 16), candle_core::DType::F32, &device).unwrap();
+        let student_hidden = candle_core::Tensor::zeros((1, 4, 8), candle_core::DType::F32, &device).unwrap();
+        let head_t = candle_core::Tensor::zeros((8, 16), candle_core::DType::F32, &device).unwrap();
         let fixture = FixtureLogitSource::uniform_topk("test", 16, 4);
         let teacher: Arc<dyn LogitSource> = Arc::new(fixture);
         // teacher_active_positions has 1 entry but active_positions has 2.
