@@ -2624,6 +2624,33 @@ pub fn host_to_cuda_copy(
     )
 }
 
+/// Host → CUDA copy — **candle-free entry point** parallel to
+/// [`host_to_cuda_copy`].
+///
+/// Same semantics as `host_to_cuda_copy`, but the caller only supplies
+/// `device_index`. The candle `Arc<CudaDevice>` is derived internally
+/// via [`primary_cuda_device`], which routes through candle's primary
+/// context retain (the same handle every other call site holds).
+///
+/// This is the migration path for the #1082 candle_device field-drop
+/// frontier. Call sites that previously held `.candle_device().clone()`
+/// just to forward it into `host_to_cuda_copy` should switch to this
+/// variant: it removes one `.candle_device()` read from each site, and
+/// once every site is migrated, the underlying field on `CudaStorage`
+/// becomes droppable.
+///
+/// When the field flip lands and `host_to_cuda_copy` itself stops
+/// taking `Arc<CudaDevice>`, this `_ctx` variant becomes a thin
+/// re-export of the same body.
+#[cfg(feature = "cuda")]
+pub fn host_to_cuda_copy_ctx(
+    src: &crate::Tensor,
+    device_index: usize,
+) -> Result<crate::Tensor> {
+    let candle_device = primary_cuda_device(device_index)?;
+    host_to_cuda_copy(src, candle_device, device_index)
+}
+
 /// CUDA per-row sum-of-squares reduction over the trailing axis
 /// (Phase 4 substrate op).
 ///

@@ -89,7 +89,7 @@ pub use cuda_storage::{
     cuda_rmsnorm_last_axis, cuda_rope, cuda_scalar_op, cuda_scatter_add_dim0, cuda_sum_axis,
     cuda_diag_build, cuda_diagonal_extract, cuda_softmax_last_axis, cuda_sum_last_axis,
     cuda_is_finite, cuda_sum_squared_last_axis, cuda_to_host_copy, cuda_where_select, cuda_zeros,
-    host_to_cuda_copy, primary_cuda_device, CudaStorage,
+    host_to_cuda_copy, host_to_cuda_copy_ctx, primary_cuda_device, CudaStorage,
 };
 #[cfg(feature = "cuda")]
 pub use cuda_matmul::{
