@@ -359,11 +359,16 @@ async fn main() -> Result<()> {
         tracing::debug!(
             "training endpoints available — in-process LoRA training (no sidecar needed)"
         );
+        // Bridge the candle device once at the seam: `AppState::new_real` takes
+        // `kt::Device` after #1082. `device` itself is still candle here because
+        // `GpuWeights::from_model_weights` above expects candle; that migration
+        // is tracked separately under #1082.
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
         AppState::new_real(
             model_config,
             runner,
             tokenizer,
-            device,
+            device_kt,
             adapter_dir,
             &config.memory,
             config.server.request_timeout_secs,
