@@ -40,7 +40,9 @@
 // transformations instead of bespoke per-kernel CustomOp wrappers.
 pub mod forward_op;
 
-use kiln_tensor::{CudaStorage, DType as KtDType, StorageBackend, Tensor as KtTensor};
+use kiln_tensor::{
+    CudaStorage, Device as KtDevice, DType as KtDType, StorageBackend, Tensor as KtTensor,
+};
 
 /// Generic error for kt-API bridge operations.
 ///
@@ -213,6 +215,91 @@ pub fn candle_dtype_to_kt(d: candle_core::DType) -> Result<KtDType, BridgeError>
             )));
         }
     })
+}
+
+/// Map kt's `DType` to candle's `DType`. Returns `BridgeError` for
+/// variants that have no candle equivalent (e.g. `F8E4M3`, `F8E5M2`,
+/// `Int4Packed`, `Fp4Packed`).
+///
+/// Inverse of [`candle_dtype_to_kt`], modulo the irreversible `I32→U32`
+/// candle-side leg used by Marlin. This direction can produce only the
+/// dtypes candle natively supports.
+///
+/// Phase 7 of #1082 uses this to translate kt-typed inputs at
+/// `kiln-model`'s public surface (the `_kt` parallel entries) into the
+/// candle dtype the underlying call path still expects.
+pub fn kt_dtype_to_candle(d: KtDType) -> Result<candle_core::DType, BridgeError> {
+    use candle_core::DType as C;
+    Ok(match d {
+        KtDType::F32 => C::F32,
+        KtDType::BF16 => C::BF16,
+        KtDType::F16 => C::F16,
+        KtDType::U32 => C::U32,
+        KtDType::U8 => C::U8,
+        KtDType::I64 => C::I64,
+        other => {
+            return Err(BridgeError::new(format!(
+                "kt-bridge: kt dtype {other:?} has no candle equivalent"
+            )));
+        }
+    })
+}
+
+/// Map a candle `Device` to a `kiln_tensor::Device`.
+///
+/// Multi-GPU stays out of scope for #1082 (anti-pattern 12); the kt
+/// `Cuda` variant carries a `device_index: usize` that this adapter
+/// reads from `candle_core::DeviceLocation`.
+///
+/// `candle_core::Device::Cpu` maps to `kt::Device::Cpu`. This crate is
+/// always built with the CUDA feature (no kt-bridge non-CUDA path), so
+/// `Metal(_)` and any future candle backend that surfaces through the
+/// `#[non_exhaustive]` candle enum degrades to `kt::Device::Cpu`. The
+/// kiln-server Vulkan-active path also carries a candle CPU device by
+/// convention (see `kiln-model::backend::mod::for_device`).
+pub fn kt_device_from_candle(d: &candle_core::Device) -> KtDevice {
+    use candle_core::backend::BackendDevice;
+    use candle_core::DeviceLocation;
+    match d {
+        candle_core::Device::Cpu => KtDevice::Cpu,
+        candle_core::Device::Cuda(c) => match c.location() {
+            DeviceLocation::Cuda { gpu_id } => KtDevice::Cuda(gpu_id),
+            // Cuda backend reports a non-Cuda location — degrade to CPU
+            // rather than panic. Real call sites construct via
+            // `candle_core::Device::new_cuda(i)` and always carry a
+            // Cuda location; this arm is defensive only.
+            _ => KtDevice::Cpu,
+        },
+        // kt-bridge is CUDA-only; Metal/Vulkan/etc. fall back to CPU.
+        _ => KtDevice::Cpu,
+    }
+}
+
+/// Map a `kiln_tensor::Device` to a candle `Device`.
+///
+/// Inverse of [`kt_device_from_candle`]. Returns `BridgeError` if the kt
+/// Device variant has no candle equivalent on this build. `Metal(_)`
+/// requires candle's `metal` feature (not enabled in kt-bridge); the
+/// kiln-server Metal path therefore goes through a separate adapter.
+/// `Vulkan(_)` has no candle backend in any feature combination —
+/// kiln-server's Vulkan path keeps a candle CPU device by convention.
+///
+/// Phase 7 of #1082 uses this to translate kt-typed inputs at
+/// `kiln-model`'s public surface (the `_kt` parallel entries) into the
+/// candle `Device` the underlying call path still expects.
+pub fn candle_device_from_kt(d: &KtDevice) -> Result<candle_core::Device, BridgeError> {
+    match d {
+        KtDevice::Cpu => Ok(candle_core::Device::Cpu),
+        KtDevice::Cuda(i) => candle_core::Device::new_cuda(*i).map_err(|e| {
+            BridgeError::new(format!(
+                "kt-bridge: candle_device_from_kt: new_cuda({i}): {e}"
+            ))
+        }),
+        other => Err(BridgeError::new(format!(
+            "kt-bridge: candle_device_from_kt: kt Device {other:?} has no candle equivalent \
+             on this build (kt-bridge is CUDA-only)"
+        ))),
+    }
 }
 
 /// Phase 7 candle→kt adapter — **copying variant**.
@@ -682,5 +769,39 @@ mod tests {
         assert_eq!(candle_dtype_to_kt(candle_core::DType::I32).unwrap(), KtDType::U32);
         assert_eq!(candle_dtype_to_kt(candle_core::DType::U8).unwrap(), KtDType::U8);
         assert_eq!(candle_dtype_to_kt(candle_core::DType::I64).unwrap(), KtDType::I64);
+    }
+
+    #[test]
+    fn kt_dtype_to_candle_basic() {
+        assert_eq!(kt_dtype_to_candle(KtDType::F32).unwrap(), candle_core::DType::F32);
+        assert_eq!(kt_dtype_to_candle(KtDType::BF16).unwrap(), candle_core::DType::BF16);
+        assert_eq!(kt_dtype_to_candle(KtDType::F16).unwrap(), candle_core::DType::F16);
+        assert_eq!(kt_dtype_to_candle(KtDType::U32).unwrap(), candle_core::DType::U32);
+        assert_eq!(kt_dtype_to_candle(KtDType::U8).unwrap(), candle_core::DType::U8);
+        assert_eq!(kt_dtype_to_candle(KtDType::I64).unwrap(), candle_core::DType::I64);
+        // FP8 and packed quantized variants have no candle counterpart.
+        assert!(kt_dtype_to_candle(KtDType::F8E4M3).is_err());
+        assert!(kt_dtype_to_candle(KtDType::Int4Packed).is_err());
+    }
+
+    #[test]
+    fn kt_device_from_candle_cpu_roundtrip() {
+        // The CPU arm has no GPU dependency — exercise it unconditionally.
+        let d = candle_core::Device::Cpu;
+        assert_eq!(kt_device_from_candle(&d), KtDevice::Cpu);
+    }
+
+    #[test]
+    fn candle_device_from_kt_cpu_roundtrip() {
+        let d = candle_device_from_kt(&KtDevice::Cpu).unwrap();
+        assert!(matches!(d, candle_core::Device::Cpu));
+    }
+
+    #[test]
+    fn candle_device_from_kt_vulkan_errors() {
+        // Vulkan is unsupported through candle; this should surface a
+        // BridgeError rather than silently degrade.
+        let e = candle_device_from_kt(&KtDevice::Vulkan(0)).unwrap_err();
+        assert!(e.to_string().contains("no candle equivalent"));
     }
 }
