@@ -454,10 +454,9 @@ fn gather_head_columns(
     Ok(transposed)
 }
 
-/// log_softmax along the last dimension. candle does have
-/// `candle_nn::ops::log_softmax` but we re-implement it here to avoid an
-/// extra dependency and to keep the autograd graph minimal: this version
-/// produces a single subtraction node off the input.
+/// log_softmax along the last dimension. We re-implement it here (rather
+/// than pulling in a `candle_nn`-style helper) to keep the autograd graph
+/// minimal: this version produces a single subtraction node off the input.
 pub(crate) fn log_softmax_last(x: &Tensor) -> Result<Tensor> {
     let lse = x.log_sum_exp(D::Minus1)?.unsqueeze(D::Minus1)?;
     let broadcast = lse.broadcast_as(x.shape())?;

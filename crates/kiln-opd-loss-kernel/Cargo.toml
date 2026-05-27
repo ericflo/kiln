@@ -45,6 +45,3 @@ tracing = { workspace = true }
 # milestone (see `docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md`
 # §9.2). The CPU reference path is the parity oracle.
 cuda = ["candle-core/cuda", "kiln-tensor/cuda", "dep:kiln-kt-bridge", "kiln-kt-bridge?/cuda"]
-
-[dev-dependencies]
-candle-nn = { workspace = true }
