@@ -2078,6 +2078,7 @@ dependencies = [
  "candle-metal-kernels",
  "candle-nn",
  "cc",
+ "cudarc 0.19.4",
  "half",
  "kiln-autograd",
  "kiln-blas",

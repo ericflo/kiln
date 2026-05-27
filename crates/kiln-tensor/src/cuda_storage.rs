@@ -35,6 +35,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use candle_core::cuda_backend::CudaDevice;
+use candle_core::cuda_backend::cudarc::driver::CudaContext;
 use candle_core::cuda_backend::cudarc::driver::CudaSlice;
 use candle_core::cuda_backend::cudarc::driver::sys::CUdeviceptr;
 
@@ -288,6 +289,30 @@ impl CudaStorage {
     /// stream affinity.
     pub fn candle_device(&self) -> &Arc<CudaDevice> {
         &self.candle_device
+    }
+
+    /// The underlying cudarc `CudaContext` this storage was allocated
+    /// on — **candle-free passthrough**.
+    ///
+    /// Derived from `candle_device.cuda_stream().context().clone()` —
+    /// i.e. the *same* `Arc<CudaContext>` that candle's `CudaDevice`
+    /// wraps internally. Stream affinity is preserved because both
+    /// candle's `cuda_stream()` and any new `ctx.default_stream()` on
+    /// the returned context point at the same underlying CUDA primary
+    /// context (candle's `CudaDevice::new_cuda` always retains the
+    /// primary context for the given ordinal).
+    ///
+    /// This is the substrate-side accessor that unblocks the #1082
+    /// Phase 7 migration of `CudaAllocator` (and other downstream
+    /// callers) to hold `Arc<CudaContext>` directly without depending
+    /// on candle's `CudaDevice` wrapper. The internal storage field
+    /// continues to hold the candle `Arc<CudaDevice>` for now (so
+    /// every existing `alloc_zeros::<u8>` + `cuda_stream()` path keeps
+    /// working unchanged); the field flip to `Arc<CudaContext>` is a
+    /// follow-up step that can land after all callers have migrated
+    /// to read `.context()` instead of `.candle_device()`.
+    pub fn context(&self) -> Arc<CudaContext> {
+        self.candle_device.cuda_stream().context().clone()
     }
 
     /// Raw CUDA stream pointer for FFI dispatch — **candle-free
