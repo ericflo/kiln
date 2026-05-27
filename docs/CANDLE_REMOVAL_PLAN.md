@@ -412,6 +412,50 @@ This is the **fourth** production migration of a candle
 in commit `341da876`, `CudaRotaryOneBf16::bwd` in commit
 `d99a15a3`, and `OpdLossCustomOp::bwd` in commit `0c1be227`).
 
+### Generic `KtForwardOp` CustomOp shim landed — 2026-05-27
+
+After four bespoke `CustomOp::bwd` migrations (`RmsNormCustomOp` /
+`CudaRotaryOneBf16` / `OpdLossCustomOp` / `FlceCustomOp`) we extracted
+the boilerplate into a generic shim — `kiln_kt_bridge::forward_op::
+KtForwardOp{1,2,3}` — that is parameterized over forward and backward
+**closures**. Each shim implements the matching candle
+[`CustomOp1`](vendor/candle-core/src/custom_op.rs) /
+[`CustomOp2`](vendor/candle-core/src/custom_op.rs) /
+[`CustomOp3`](vendor/candle-core/src/custom_op.rs) trait, plumbs the
+`cuda_fwd` hook through to the closure (constructing a leaf candle
+`Tensor` from the supplied `(CudaStorage, Layout)` pair so the closure
+sees a normal `&Tensor`), and forwards the candle backward callback to
+the bwd closure unchanged.
+
+**Why closures, not a trait**: each kernel returns different kt
+output types, saves different inputs in the op instance, and has
+kernel-specific contiguity / dtype-cast fixups that don't fit a
+single associated-type contract. Closures sidestep all of this — the
+captured environment IS the saved state, and the closure body IS the
+kt-typed kernel call + bridge round-trip (or whatever else the
+caller needs).
+
+**Production-caller migration is now mechanical**. A
+`kiln-train::opd.rs` caller that today writes
+`opd_top_k_reverse_kl_phase_a_per_position(hidden, head_t, ...)`
+(returning a candle `Tensor` via the fat
+`OpdLossCustomOp`) can be replaced with a few-line
+`KtForwardOp1::new` definition that bridges hidden as kt, calls the
+existing kt-typed entry point, and copies the result back — keeping
+candle autograd integration via `apply_op1_arc` while the inside of
+the op is pure kt. ~50-80 LOC per caller, fully testable in
+isolation.
+
+**Coverage**: 4 CPU unit tests (name plumbing + CPU rejection
+contract) + 6 CUDA parity tests (`tests/cuda_forward_op_parity.rs`).
+The CUDA tests exercise a trivial `y = scale * x` kt kernel pair
+through the shim and compare against candle's `affine` reference
++ analytical gradient on CPU, both in f32 (tolerance 1e-5) and bf16
+(tolerance 5e-2), including a chained-shim case
+(`y = shim(shim(x))`) and a downstream-op chain
+(`l = sum(shim(x).^2)`) to exercise the autograd graph extension
+end-to-end.
+
 ## Build matrix coverage required before each tier closes
 
 | Tier | Required CI green |

@@ -35,6 +35,11 @@
 //! Errors use the generic [`BridgeError`]; downstream crates can
 //! convert via `?` into their own typed errors via `From`.
 
+// Generic candle CustomOp shim for kt-typed forward+backward kernel pairs
+// (#1082). Lets production-caller migrations be per-call-site mechanical
+// transformations instead of bespoke per-kernel CustomOp wrappers.
+pub mod forward_op;
+
 use kiln_tensor::{CudaStorage, DType as KtDType, StorageBackend, Tensor as KtTensor};
 
 /// Generic error for kt-API bridge operations.
