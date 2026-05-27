@@ -29630,7 +29630,15 @@ mod tests {
     /// kiln's GDN prefill shape (B=1, nv=32, C=64, dv=128), then asserts
     /// that the fused `gdn_chunk_prep` kernel produces the same six
     /// output tensors as the candle-op reference chain it replaces.
-    #[cfg(feature = "cuda")]
+    ///
+    /// Phase 7 (#1082): gated behind `legacy-candle-parity` because it
+    /// drives the candle-typed `kiln_gdn_kernel::gdn_chunk_prep` entry
+    /// directly. The production decode path uses the kt-typed surface
+    /// (`gdn_chunk_prep_kt`); kt predicate coverage lives in
+    /// `kiln-gdn-kernel::kt_api::predicate_tests`. Enable with
+    /// `--features cuda,legacy-candle-parity` when validating kernel
+    /// changes against the candle reference.
+    #[cfg(all(feature = "cuda", feature = "legacy-candle-parity"))]
     #[test]
     fn test_gdn_chunk_prep_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
@@ -29746,7 +29754,11 @@ mod tests {
     }
 
     /// Parity check for the fused post-prep prefill chunk body.
-    #[cfg(feature = "cuda")]
+    ///
+    /// Phase 7 (#1082): gated behind `legacy-candle-parity` — see
+    /// `test_gdn_chunk_prep_matches_fallback` doc above. Production
+    /// dispatch goes through `gdn_chunk_scan_kt`.
+    #[cfg(all(feature = "cuda", feature = "legacy-candle-parity"))]
     #[test]
     fn test_gdn_chunk_body_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
@@ -29845,7 +29857,11 @@ mod tests {
     }
 
     /// Parity check for the fused full-chunk CUDA prefill path.
-    #[cfg(feature = "cuda")]
+    ///
+    /// Phase 7 (#1082): gated behind `legacy-candle-parity` — see
+    /// `test_gdn_chunk_prep_matches_fallback` doc above. Production
+    /// dispatch goes through `gdn_full_chunk_forward_kt`.
+    #[cfg(all(feature = "cuda", feature = "legacy-candle-parity"))]
     #[test]
     fn test_gdn_full_chunk_forward_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
@@ -29969,7 +29985,11 @@ mod tests {
     /// statement than "matches the candle reference within tolerance": each
     /// output cell is computed by a single thread on both paths with the same
     /// FMA chain and bf16 rounding, so equality is the contract.
-    #[cfg(feature = "cuda")]
+    ///
+    /// Phase 7 (#1082): gated behind `legacy-candle-parity` — uses the
+    /// candle-typed `gdn_full_chunk_forward[_multiblock]` entries.
+    /// Production dispatch is via the kt-typed equivalents.
+    #[cfg(all(feature = "cuda", feature = "legacy-candle-parity"))]
     #[test]
     fn test_gdn_full_chunk_forward_multiblock_byte_eq_single_block() -> Result<()> {
         use half::bf16;
