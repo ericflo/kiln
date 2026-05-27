@@ -525,6 +525,39 @@ pub fn cuda_zeros(
     Ok(Arc::new(storage))
 }
 
+/// Candle-free parallel entry point for [`cuda_zeros`].
+///
+/// Allocates a zero-filled [`crate::Storage`] on the given CUDA device,
+/// taking only `device_index` — the candle `Arc<CudaDevice>` (still
+/// required by [`CudaStorage::zeros`]) is derived internally via
+/// [`primary_cuda_device`].
+///
+/// Same migration purpose as [`host_to_cuda_copy_ctx`]: call sites that
+/// previously held `.candle_device().clone()` just to forward into
+/// `cuda_zeros` should switch to this variant to retire the
+/// `.candle_device()` read from their substrate dependency surface.
+/// Once every site is migrated and the underlying field flips,
+/// `cuda_zeros_ctx` becomes a thin alias for the same body.
+///
+/// Allocations route through [`CudaStorage::zeros_ctx`], which uses
+/// `ctx.default_stream().alloc_zeros::<u8>()` directly via cudarc —
+/// no candle alloc path is touched.
+#[cfg(feature = "cuda")]
+pub fn cuda_zeros_ctx(
+    device_index: usize,
+    dtype: DType,
+    n_elements: usize,
+) -> Result<crate::Storage> {
+    // Derive the cudarc CudaContext for the given ordinal. We bounce
+    // through primary_cuda_device for now since that's the established
+    // accessor; once the field-drop happens, this can route directly
+    // through cudarc::driver::CudaContext::new(device_index).
+    let candle_device = primary_cuda_device(device_index)?;
+    let ctx = candle_device.cuda_stream().context().clone();
+    let storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n_elements)?;
+    Ok(Arc::new(storage))
+}
+
 // ----------------------------------------------------------------------
 // CUDA-side Tensor::contiguous (Phase 1 substrate op)
 // ----------------------------------------------------------------------
