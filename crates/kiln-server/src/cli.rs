@@ -2532,10 +2532,7 @@ fn merge_pi_settings_config(
     } else {
         (PI_PROVIDER_ID, PI_MODEL_ID)
     };
-    root_obj.insert(
-        "defaultProvider".to_string(),
-        serde_json::json!(provider),
-    );
+    root_obj.insert("defaultProvider".to_string(), serde_json::json!(provider));
     root_obj.insert("defaultModel".to_string(), serde_json::json!(model));
     Ok(root)
 }
@@ -2680,8 +2677,8 @@ pub async fn run_eval_adapter(
     scorer: &Path,
     output: &Path,
 ) -> anyhow::Result<()> {
-    let summary = crate::eval_adapter_cli::run_eval_adapter(
-        crate::eval_adapter_cli::EvalAdapterOptions {
+    let summary =
+        crate::eval_adapter_cli::run_eval_adapter(crate::eval_adapter_cli::EvalAdapterOptions {
             url: url.to_string(),
             adapter: adapter.to_string(),
             tasks: tasks.to_path_buf(),
@@ -2689,9 +2686,8 @@ pub async fn run_eval_adapter(
             request_template: request_template.to_path_buf(),
             scorer: scorer.to_path_buf(),
             output: output.to_path_buf(),
-        },
-    )
-    .await?;
+        })
+        .await?;
 
     println!(
         "{} eval-adapter completed: {} pair(s), mean lift {:.6}, stdev {:.6}, zero_count {}, wrote {}",
@@ -3062,9 +3058,13 @@ mod tests {
         )
         .unwrap();
 
-        run_pi_setup("http://localhost:8420", Some(models_path.to_str().unwrap()), None)
-            .await
-            .unwrap();
+        run_pi_setup(
+            "http://localhost:8420",
+            Some(models_path.to_str().unwrap()),
+            None,
+        )
+        .await
+        .unwrap();
 
         let models = read_json(&models_path);
         assert_eq!(models["unrelatedTopLevel"], true);
@@ -3174,7 +3174,10 @@ mod tests {
             providers[PI_RLM_PROVIDER_ID]["models"][0]["id"],
             PI_RLM_MODEL_ID
         );
-        assert_eq!(providers[PI_RLM_PROVIDER_ID]["models"][0]["maxTokens"], 4096);
+        assert_eq!(
+            providers[PI_RLM_PROVIDER_ID]["models"][0]["maxTokens"],
+            4096
+        );
         assert_eq!(
             providers[PI_RLM_PROVIDER_ID]["models"][0]["contextWindow"],
             16384

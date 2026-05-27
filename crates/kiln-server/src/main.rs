@@ -108,14 +108,8 @@ async fn main() -> Result<()> {
                 adapter_smoke_test,
                 url,
             } => {
-                return cli::run_train_grpo(
-                    url,
-                    file,
-                    adapter,
-                    *lora_rank,
-                    *adapter_smoke_test,
-                )
-                .await;
+                return cli::run_train_grpo(url, file, adapter, *lora_rank, *adapter_smoke_test)
+                    .await;
             }
             TrainCommands::Status { job_id, url } => {
                 return cli::run_train_status(url, job_id.as_deref()).await;
@@ -483,7 +477,8 @@ async fn main() -> Result<()> {
         if !archived.is_empty() {
             let mut jobs = state.training_jobs.write().unwrap();
             for job in archived.iter() {
-                jobs.entry(job.job_id.clone()).or_insert_with(|| job.clone());
+                jobs.entry(job.job_id.clone())
+                    .or_insert_with(|| job.clone());
             }
             tracing::info!(
                 count = archived.len(),
@@ -500,7 +495,8 @@ async fn main() -> Result<()> {
         if !archived.is_empty() {
             let mut jobs = state.eval_jobs.write().unwrap();
             for job in archived.iter() {
-                jobs.entry(job.job_id.clone()).or_insert_with(|| job.clone());
+                jobs.entry(job.job_id.clone())
+                    .or_insert_with(|| job.clone());
             }
             tracing::info!(
                 count = archived.len(),
