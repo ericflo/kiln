@@ -60,3 +60,43 @@ pub fn select_device_with_options(cuda_graphs: bool) -> Result<Device> {
     tracing::info!("no GPU feature active — using CPU");
     Ok(Device::Cpu)
 }
+
+/// kt-typed parallel of [`select_device`].
+///
+/// Same selection logic as [`select_device`], but returns a
+/// `kiln_tensor::Device` so callers that have migrated off candle's
+/// `Device` enum don't have to bridge at every call site. Part of the
+/// staged migration in #1082 — the existing candle-typed entries above
+/// stay live until every caller switches over.
+pub fn select_device_kt() -> Result<kiln_tensor::Device> {
+    select_device_with_options_kt(false)
+}
+
+/// kt-typed parallel of [`select_device_with_options`].
+///
+/// Delegates to the candle-typed [`select_device_with_options`] so the
+/// CUDA-stream / event-tracking side-effects on the candle device still
+/// fire for any downstream code that still expects them, then maps the
+/// result to `kiln_tensor::Device` via the always-on
+/// `kt_device_from_candle` bridge helper.
+///
+/// On the Vulkan path, [`select_device_with_options`] returns a candle
+/// `Device::Cpu` by convention (it marks Vulkan active in the process and
+/// the Vulkan backend manages its own `vk::Device`). The bridge helper
+/// would map that to `kt::Device::Cpu`, so we override here under the
+/// `vulkan` feature and check `kiln_model::backend::vulkan_active()` to
+/// surface a `kt::Device::Vulkan(0)` to kt-typed callers. Without this
+/// override, kt-typed callers couldn't distinguish "CPU because no GPU"
+/// from "CPU as Vulkan placeholder".
+pub fn select_device_with_options_kt(cuda_graphs: bool) -> Result<kiln_tensor::Device> {
+    let candle_device = select_device_with_options(cuda_graphs)?;
+
+    #[cfg(feature = "vulkan")]
+    if kiln_model::backend::vulkan_active() {
+        // select_device_with_options returned Device::Cpu as the Vulkan
+        // placeholder. Tell kt-typed callers the truth.
+        return Ok(kiln_tensor::Device::Vulkan(0));
+    }
+
+    Ok(kiln_kt_bridge::kt_device_from_candle(&candle_device))
+}
