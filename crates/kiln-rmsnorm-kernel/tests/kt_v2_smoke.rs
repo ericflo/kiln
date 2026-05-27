@@ -1,17 +1,20 @@
-//! Smoke test: the kt-API rmsnorm-kernel entry accepts Borrowed
-//! kt-Tensors (Phase 7 v2 borrow-compat).
+//! Candle-free smoke test for the kt-API rmsnorm-kernel `fused_rmsnorm_kt`
+//! entry. Constructs CUDA tensors directly via the `Tensor::cuda_from_slice`
+//! substrate helper (#1082 / `a5da6152`) — no `candle_core` import
+//! required.
 //!
-//! Validates that the migration from .slice().slice(off..).device_ptr()
-//! to kiln_kt_bridge::cuda_input_device_ptr / cuda_output_device_ptr
-//! preserves correctness AND enables the zero-copy candle->kt path.
+//! The legacy "BORROW adapter" smoke (zero-copy candle→kt round-trip)
+//! moved to `crates/kiln-kt-bridge/tests/` where the adapter actually
+//! lives. This file tests the kt API in isolation, mirroring the
+//! `kiln-conv1d-kernel` / `kiln-marlin-gemm` Tier-1 precedent.
 
-use candle_core::backend::BackendDevice;
-use candle_core::{DType as CandleDType, Device as CandleDevice, Tensor as CandleTensor};
+use half::bf16;
 
 use kiln_rmsnorm_kernel::fused_rmsnorm_kt;
+use kiln_tensor::Tensor;
 
-fn try_cuda() -> Option<CandleDevice> {
-    CandleDevice::new_cuda(0).ok()
+fn cuda_available() -> bool {
+    kiln_tensor::primary_cuda_device(0).is_ok()
 }
 
 fn pattern(n: usize, seed: u64) -> Vec<f32> {
@@ -24,45 +27,39 @@ fn pattern(n: usize, seed: u64) -> Vec<f32> {
     out
 }
 
-/// fused_rmsnorm_kt accepts Borrowed kt-Tensors (zero-copy from
-/// candle). Smoke-tests that the migration doesn't panic on the
-/// Borrowed path.
+fn pattern_bf16(n: usize, seed: u64) -> Vec<bf16> {
+    pattern(n, seed).into_iter().map(bf16::from_f32).collect()
+}
+
+/// `fused_rmsnorm_kt` dispatches successfully on candle-free
+/// kt CUDA inputs.
 #[test]
-fn fused_rmsnorm_kt_accepts_borrowed() {
-    let Some(dev) = try_cuda() else {
+fn fused_rmsnorm_kt_dispatches_on_kt_inputs() {
+    if !cuda_available() {
         eprintln!("CUDA not available; skipping");
         return;
-    };
+    }
 
     let rows = 4usize;
     let hidden = 64usize;
 
     // fused_rmsnorm_kt: x [rows, hidden] BF16, weight [hidden] BF16,
     // returns [rows, hidden] BF16.
-    let x_cd = CandleTensor::from_vec(pattern(rows * hidden, 1), (rows, hidden), &dev)
-        .unwrap()
-        .to_dtype(CandleDType::BF16)
-        .unwrap();
-    let w_cd = CandleTensor::from_vec(pattern(hidden, 2), (hidden,), &dev)
-        .unwrap()
-        .to_dtype(CandleDType::BF16)
-        .unwrap();
+    let x = Tensor::cuda_from_slice(
+        &pattern_bf16(rows * hidden, 1),
+        vec![rows, hidden],
+        0,
+    )
+    .expect("x");
+    let w = Tensor::cuda_from_slice(
+        &pattern_bf16(hidden, 2),
+        vec![hidden],
+        0,
+    )
+    .expect("w");
 
-    // Use the BORROW adapter — zero-copy from candle to kt.
-    let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_cd).unwrap();
-    let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&w_cd).unwrap();
-
-    // The migration's critical correctness property: the call must
-    // not panic on CudaStorage::slice() (which the old impl
-    // called, and which panics on Borrowed storage).
-    let out = fused_rmsnorm_kt(&x_kt, &w_kt, 1e-6)
-        .expect("fused_rmsnorm_kt on borrowed inputs");
-
-    let cuda_dev = match dev {
-        CandleDevice::Cuda(ref c) => c,
-        _ => unreachable!(),
-    };
-    cuda_dev.synchronize().unwrap();
+    let out = fused_rmsnorm_kt(&x, &w, 1e-6)
+        .expect("fused_rmsnorm_kt on kt inputs");
 
     assert_eq!(out.shape(), &[rows, hidden]);
 }
