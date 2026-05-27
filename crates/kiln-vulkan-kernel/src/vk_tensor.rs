@@ -13,7 +13,6 @@
 
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
-use candle_core::{CpuStorage, DType, Device, Storage, Tensor};
 use half::bf16;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,21 +36,6 @@ impl VkDType {
         match self {
             VkDType::F32 => 4,
             VkDType::Bf16 => 2,
-        }
-    }
-
-    pub fn to_candle(self) -> DType {
-        match self {
-            VkDType::F32 => DType::F32,
-            VkDType::Bf16 => DType::BF16,
-        }
-    }
-
-    pub fn from_candle(d: DType) -> Result<Self> {
-        match d {
-            DType::F32 => Ok(VkDType::F32),
-            DType::BF16 => Ok(VkDType::Bf16),
-            other => anyhow::bail!("VkTensor: unsupported candle dtype {:?}", other),
         }
     }
 }
@@ -249,9 +233,9 @@ impl VkTensor {
     }
 
     /// Upload an f32 slice as a fresh F32 VkTensor leaf. Candle-free
-    /// constructor for tests/examples that only need bytes → GPU; mirrors
-    /// the F32 fast-path of [`Self::from_candle`] without the candle
-    /// dependency. (#1082)
+    /// constructor for tests/examples that only need bytes → GPU; the
+    /// F32 fast-path that used to live behind a `VkTensor::from_candle`
+    /// candle-Tensor bridge before that bridge was deleted in #1082.
     pub fn from_f32_slice(
         data: &[f32],
         shape: Vec<usize>,
@@ -453,131 +437,6 @@ impl VkTensor {
         Ok(bytes)
     }
 
-    /// Upload a candle Tensor to GPU as a fresh VkTensor leaf.
-    ///
-    /// Only F32 and BF16 are accepted. The tensor is forced contiguous;
-    /// strided views are materialized first.
-    pub fn from_candle(t: &Tensor, device: Arc<VulkanDevice>) -> Result<Self> {
-        let dtype = VkDType::from_candle(t.dtype())?;
-        if let Some((bytes_vec, shape)) = contiguous_cpu_tensor_bytes(t, dtype)? {
-            let nelem = shape.iter().product();
-            let buffer = VulkanBuffer::create_device_local(
-                device.device(),
-                device.device_local_mem_type(),
-                device_buffer_bytes(nelem, dtype) as u64,
-            )
-            .context("VkTensor::from_candle: device-local buffer")?;
-            VulkanBuffer::upload_data(
-                device.device(),
-                device.host_visible_mem_type(),
-                device.queue(),
-                device.queue_family_index(),
-                &buffer,
-                &bytes_vec,
-            )
-            .context("VkTensor::from_candle: upload")?;
-            return Ok(Self::from_buffer(Arc::new(buffer), shape, dtype, device));
-        }
-
-        let t = t
-            .contiguous()
-            .context("VkTensor::from_candle: contiguous")?;
-        let shape: Vec<usize> = t.dims().to_vec();
-        let nelem: usize = shape.iter().product();
-        let bytes_vec = match dtype {
-            VkDType::F32 => {
-                let data: Vec<f32> = t
-                    .flatten_all()?
-                    .to_vec1::<f32>()
-                    .context("VkTensor::from_candle: f32 readout")?;
-                let mut bytes = Vec::with_capacity(nelem * 4);
-                for v in data {
-                    bytes.extend_from_slice(&v.to_le_bytes());
-                }
-                bytes
-            }
-            VkDType::Bf16 => {
-                let data: Vec<bf16> = t
-                    .flatten_all()?
-                    .to_vec1::<bf16>()
-                    .context("VkTensor::from_candle: bf16 readout")?;
-                let mut bytes = Vec::with_capacity(nelem * 2);
-                for v in data {
-                    bytes.extend_from_slice(&v.to_bits().to_le_bytes());
-                }
-                bytes
-            }
-        };
-        let buffer = VulkanBuffer::create_device_local(
-            device.device(),
-            device.device_local_mem_type(),
-            device_buffer_bytes(nelem, dtype) as u64,
-        )
-        .context("VkTensor::from_candle: device-local buffer")?;
-        VulkanBuffer::upload_data(
-            device.device(),
-            device.host_visible_mem_type(),
-            device.queue(),
-            device.queue_family_index(),
-            &buffer,
-            &bytes_vec,
-        )
-        .context("VkTensor::from_candle: upload")?;
-        Ok(Self::from_buffer(Arc::new(buffer), shape, dtype, device))
-    }
-
-    /// Read back to a candle Tensor on CPU. Used at save/parity boundaries.
-    pub fn to_candle(&self) -> Result<Tensor> {
-        let dev = &self.0.device;
-        let bytes = VulkanBuffer::read_back(
-            dev.device(),
-            dev.host_visible_mem_type(),
-            dev.queue(),
-            dev.queue_family_index(),
-            &self.0.storage,
-        )
-        .context("VkTensor::to_candle: read_back")?;
-        let nelem = self.num_elements();
-        match self.0.dtype {
-            VkDType::F32 => {
-                anyhow::ensure!(
-                    bytes.len() >= nelem * 4,
-                    "VkTensor::to_candle f32: buffer holds {} bytes, expected {}",
-                    bytes.len(),
-                    nelem * 4
-                );
-                let mut data = Vec::with_capacity(nelem);
-                for i in 0..nelem {
-                    let off = i * 4;
-                    data.push(f32::from_le_bytes([
-                        bytes[off],
-                        bytes[off + 1],
-                        bytes[off + 2],
-                        bytes[off + 3],
-                    ]));
-                }
-                Tensor::from_vec(data, self.0.shape.clone(), &Device::Cpu)
-                    .context("VkTensor::to_candle: f32 tensor build")
-            }
-            VkDType::Bf16 => {
-                anyhow::ensure!(
-                    bytes.len() >= nelem * 2,
-                    "VkTensor::to_candle bf16: buffer holds {} bytes, expected {}",
-                    bytes.len(),
-                    nelem * 2
-                );
-                let mut data = Vec::with_capacity(nelem);
-                for i in 0..nelem {
-                    let off = i * 2;
-                    let bits = u16::from_le_bytes([bytes[off], bytes[off + 1]]);
-                    data.push(bf16::from_bits(bits));
-                }
-                Tensor::from_vec(data, self.0.shape.clone(), &Device::Cpu)
-                    .context("VkTensor::to_candle: bf16 tensor build")
-            }
-        }
-    }
-
     /// Read back as a flat Vec<f32>, converting BF16 to F32. For tests.
     pub fn to_vec_f32(&self) -> Result<Vec<f32>> {
         let dev = &self.0.device;
@@ -617,47 +476,6 @@ impl VkTensor {
     }
 }
 
-fn contiguous_cpu_tensor_bytes(
-    tensor: &Tensor,
-    dtype: VkDType,
-) -> Result<Option<(Vec<u8>, Vec<usize>)>> {
-    let (storage, layout) = tensor.storage_and_layout();
-    let Some((start, end)) = layout.contiguous_offsets() else {
-        return Ok(None);
-    };
-    let shape = layout.shape().dims().to_vec();
-    match (&*storage, dtype) {
-        (Storage::Cpu(CpuStorage::F32(data)), VkDType::F32) => {
-            anyhow::ensure!(
-                end <= data.len(),
-                "VkTensor::from_candle: f32 CPU storage range {start}..{end} exceeds len {}",
-                data.len()
-            );
-            Ok(Some((
-                bytemuck::cast_slice(&data[start..end]).to_vec(),
-                shape,
-            )))
-        }
-        (Storage::Cpu(CpuStorage::BF16(data)), VkDType::Bf16) => {
-            anyhow::ensure!(
-                end <= data.len(),
-                "VkTensor::from_candle: bf16 CPU storage range {start}..{end} exceeds len {}",
-                data.len()
-            );
-            let slice = &data[start..end];
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    slice.as_ptr().cast::<u8>(),
-                    std::mem::size_of_val(slice),
-                )
-                .to_vec()
-            };
-            Ok(Some((bytes, shape)))
-        }
-        _ => Ok(None),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,8 +490,12 @@ mod tests {
     #[test]
     fn vk_tensor_f32_roundtrip() {
         let Some(dev) = vk_dev() else { return };
-        let t = Tensor::from_vec(vec![1.0_f32, 2.0, 3.0, 4.0], (2, 2), &Device::Cpu).unwrap();
-        let vt = VkTensor::from_candle(&t, Arc::clone(&dev)).unwrap();
+        let vt = VkTensor::from_f32_slice(
+            &[1.0_f32, 2.0, 3.0, 4.0],
+            vec![2, 2],
+            Arc::clone(&dev),
+        )
+        .unwrap();
         assert_eq!(vt.shape(), &[2, 2]);
         assert_eq!(vt.dtype(), VkDType::F32);
         let back = vt.to_vec_f32().unwrap();
@@ -683,19 +505,19 @@ mod tests {
     #[test]
     fn vk_tensor_bf16_roundtrip() {
         let Some(dev) = vk_dev() else { return };
-        let data: Vec<bf16> = vec![1.0, 2.5, -3.25, 0.125]
-            .into_iter()
-            .map(bf16::from_f32)
-            .collect();
-        let t = Tensor::from_vec(data.clone(), (4,), &Device::Cpu).unwrap();
-        let vt = VkTensor::from_candle(&t, Arc::clone(&dev)).unwrap();
+        let data: Vec<f32> = vec![1.0, 2.5, -3.25, 0.125];
+        let vt =
+            VkTensor::from_f32_slice_as_bf16(&data, vec![4], Arc::clone(&dev)).unwrap();
         let back = vt.to_vec_f32().unwrap();
         for (i, expected) in data.iter().enumerate() {
+            // BF16 round-trip via host `bf16::from_f32` introduces the
+            // usual ~1/256 mantissa rounding.
+            let expected_bf16 = bf16::from_f32(*expected).to_f32();
             assert!(
-                (back[i] - expected.to_f32()).abs() < 1e-6,
+                (back[i] - expected_bf16).abs() < 1e-6,
                 "idx {i}: {} vs {}",
                 back[i],
-                expected
+                expected_bf16
             );
         }
     }
@@ -703,10 +525,44 @@ mod tests {
     #[test]
     fn detach_clears_grad_fn() {
         let Some(dev) = vk_dev() else { return };
-        let t = Tensor::from_vec(vec![1.0_f32], (1,), &Device::Cpu).unwrap();
-        let vt = VkTensor::from_candle(&t, dev).unwrap();
+        let vt = VkTensor::from_f32_slice(&[1.0_f32], vec![1], dev).unwrap();
         let detached = vt.detach();
         assert!(detached.grad_fn().is_none());
         assert!(!detached.requires_grad());
+    }
+
+    #[test]
+    fn vk_tensor_from_bytes_f32_matches_from_f32_slice() {
+        let Some(dev) = vk_dev() else { return };
+        let data: Vec<f32> = vec![3.14, -1.0, 2.718, 0.0];
+        let mut bytes = Vec::with_capacity(data.len() * 4);
+        for v in &data {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let vt_bytes = VkTensor::from_bytes(
+            &bytes,
+            vec![data.len()],
+            VkDType::F32,
+            Arc::clone(&dev),
+        )
+        .unwrap();
+        let vt_slice =
+            VkTensor::from_f32_slice(&data, vec![data.len()], Arc::clone(&dev)).unwrap();
+        let from_bytes = vt_bytes.to_vec_f32().unwrap();
+        let from_slice = vt_slice.to_vec_f32().unwrap();
+        assert_eq!(from_bytes, from_slice);
+        assert_eq!(from_bytes, data);
+    }
+
+    #[test]
+    fn vk_tensor_to_bytes_truncates_to_logical_size() {
+        let Some(dev) = vk_dev() else { return };
+        // 3 BF16 elements = 6 logical bytes, but the device buffer is
+        // padded to a 4-byte boundary internally. `to_bytes()` must
+        // truncate to 6 bytes.
+        let data = vec![1.0_f32, 2.0, 3.0];
+        let vt = VkTensor::from_f32_slice_as_bf16(&data, vec![3], dev).unwrap();
+        let bytes = vt.to_bytes().unwrap();
+        assert_eq!(bytes.len(), 6);
     }
 }
