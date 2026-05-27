@@ -45,7 +45,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use candle_core::MetalDevice;
 use candle_metal_kernels::metal::Device as MetalRawDevice;
 
 use crate::{
@@ -81,16 +80,20 @@ pub struct MetalAllocator {
 }
 
 impl MetalAllocator {
-    /// Construct in `Owned` mode bound to `candle_device` at the
-    /// given Metal device index.
+    /// Construct in `Owned` mode bound to `metal_device_handle` at the
+    /// given Metal device index — the canonical, **candle-free**
+    /// constructor entry.
     ///
-    /// Back-compat shim: extracts the metal-rs `Device` companion via
-    /// `candle_device.metal_device().clone()` and forwards to the
-    /// candle-free allocation path. The `candle_device` argument is
-    /// otherwise unused — the allocator no longer stores it. See the
-    /// `metal_device_handle` field doc.
-    pub fn new(candle_device: Arc<MetalDevice>, device_index: usize) -> Self {
-        let metal_device_handle = candle_device.metal_device().clone();
+    /// The previously-shipped candle-flavored `new` / `with_mode`
+    /// entries (which extracted the metal-rs handle from a candle
+    /// `MetalDevice`) were removed alongside the `metal_allocator`
+    /// candle import drop (#1082); the only callers were in-source
+    /// `#[cfg(test)]` and have been migrated to this entry. External
+    /// callers needing a candle wrapper can derive one on demand via
+    /// [`crate::primary_metal_device`].
+    ///
+    /// Mirror of [`crate::CudaAllocator::new_ctx`].
+    pub fn new_ctx(metal_device_handle: MetalRawDevice, device_index: usize) -> Self {
         MetalAllocator {
             metal_device_handle,
             device_index,
@@ -101,12 +104,16 @@ impl MetalAllocator {
         }
     }
 
-    pub fn with_mode(
-        candle_device: Arc<MetalDevice>,
+    /// Construct directly in a given mode (tests, capture session) —
+    /// the **candle-free** entry.
+    ///
+    /// Mirror of [`crate::CudaAllocator::with_mode_ctx`].
+    pub fn with_mode_ctx(
+        metal_device_handle: MetalRawDevice,
         device_index: usize,
         mode: AllocatorMode,
     ) -> Self {
-        let mut a = Self::new(candle_device, device_index);
+        let mut a = Self::new_ctx(metal_device_handle, device_index);
         a.mode = mode;
         a
     }
@@ -211,29 +218,25 @@ impl Allocator for MetalAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device as CandleDevice;
 
     fn metal_test_enabled() -> bool {
         std::env::var("KILN_TENSOR_METAL_TEST").ok().as_deref() == Some("1")
     }
 
-    fn maybe_metal_device() -> Option<Arc<MetalDevice>> {
+    fn maybe_metal_raw_device() -> Option<MetalRawDevice> {
         if !metal_test_enabled() {
             return None;
         }
-        match CandleDevice::new_metal(0).ok()? {
-            CandleDevice::Metal(d) => Some(Arc::new(d)),
-            _ => None,
-        }
+        MetalRawDevice::system_default()
     }
 
     #[test]
     fn metal_allocator_starts_in_owned_mode() {
-        let Some(dev) = maybe_metal_device() else {
+        let Some(dev) = maybe_metal_raw_device() else {
             eprintln!("skip: KILN_TENSOR_METAL_TEST unset or no Metal device");
             return;
         };
-        let a = MetalAllocator::new(dev, 0);
+        let a = MetalAllocator::new_ctx(dev, 0);
         assert_eq!(a.mode(), AllocatorMode::Owned);
         assert_eq!(a.device(), Device::Metal(0));
         assert_eq!(a.reserved_bytes(), 0);
@@ -241,11 +244,11 @@ mod tests {
 
     #[test]
     fn metal_pool_warm_serves_alloc() {
-        let Some(dev) = maybe_metal_device() else {
+        let Some(dev) = maybe_metal_raw_device() else {
             eprintln!("skip: KILN_TENSOR_METAL_TEST unset or no Metal device");
             return;
         };
-        let mut a = MetalAllocator::with_mode(dev, 0, AllocatorMode::Pool);
+        let mut a = MetalAllocator::with_mode_ctx(dev, 0, AllocatorMode::Pool);
         a.warm(DType::F32, 16, 2).unwrap();
         assert_eq!(a.cache_len(DType::F32, 16), 2);
         let _s = a.alloc(DType::F32, 16).unwrap();
@@ -254,11 +257,11 @@ mod tests {
 
     #[test]
     fn metal_frozen_alloc_fails_on_cache_miss() {
-        let Some(dev) = maybe_metal_device() else {
+        let Some(dev) = maybe_metal_raw_device() else {
             eprintln!("skip: KILN_TENSOR_METAL_TEST unset or no Metal device");
             return;
         };
-        let mut a = MetalAllocator::with_mode(dev, 0, AllocatorMode::Frozen);
+        let mut a = MetalAllocator::with_mode_ctx(dev, 0, AllocatorMode::Frozen);
         let e = a.alloc(DType::F32, 4).unwrap_err();
         assert!(e.to_string().contains("MetalAllocator::alloc"), "got: {e}");
     }
