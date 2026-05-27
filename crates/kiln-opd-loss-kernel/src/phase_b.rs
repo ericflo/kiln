@@ -107,7 +107,11 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
-    fn kiln_opd_topk_kl_bwd_bf16(
+    // crate-visible so `kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt`
+    // can wrap the same FFI symbols the candle `cuda_kernel_backward`
+    // body calls. Bit-exact by construction across the candle and
+    // kt-typed paths.
+    pub(crate) fn kiln_opd_topk_kl_bwd_bf16(
         hidden: *const core::ffi::c_void,
         head_t: *const core::ffi::c_void,
         topk_indices: *const core::ffi::c_void,
@@ -123,7 +127,7 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
-    fn kiln_opd_topk_kl_bwd_f32(
+    pub(crate) fn kiln_opd_topk_kl_bwd_f32(
         hidden: *const core::ffi::c_void,
         head_t: *const core::ffi::c_void,
         topk_indices: *const core::ffi::c_void,

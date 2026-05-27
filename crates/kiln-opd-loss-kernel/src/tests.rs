@@ -853,3 +853,233 @@ fn cpu_kl_of_matched_distribution_is_zero() -> Result<()> {
     assert!(lv.abs() < 1e-6, "KL of matched distribution: got {lv:e}");
     Ok(())
 }
+
+// =====================================================================
+// CUDA kt-bridge parity: `opd_top_k_reverse_kl_phase_b_bwd_kt`
+// must agree bit-near-exact with the candle `cuda_kernel_backward`
+// body (same FFI symbols, just routed through `kiln_kt_bridge`).
+// =====================================================================
+
+#[cfg(feature = "cuda")]
+mod cuda_kt_bwd_parity {
+    use super::*;
+    use crate::kt_api::{opd_top_k_reverse_kl_phase_b_bwd_kt, OpdLossOutputKt};
+    use kiln_kt_bridge::{kt_tensor_from_candle_cuda_copy, kt_tensor_to_candle_cuda_copy};
+    use kiln_tensor::Tensor as KtTensor;
+
+    /// Drive the candle Phase B backward to convergence and read the
+    /// gradient on `hidden` for a given dtype + K + output_mode.
+    ///
+    /// Returns `(d_hidden_candle, hidden_cuda, head_cuda, idx, lp, mask)`
+    /// so the kt parity site can re-use the same inputs.
+    fn run_candle_bwd(
+        device: &Device,
+        seq_len: usize,
+        hidden_size: usize,
+        vocab_size: usize,
+        top_k: usize,
+        active_period: usize,
+        dtype: DType,
+        output_mode: crate::phase_b::OpdLossOutput,
+    ) -> Result<(Tensor, Tensor, Tensor, Vec<u32>, Vec<f32>, Vec<bool>)> {
+        let (hidden_f32, head_f32, idx, lp, mask) = random_case(
+            seq_len, hidden_size, vocab_size, top_k, active_period, device,
+        )?;
+        let hidden_typed = hidden_f32.to_dtype(dtype)?.contiguous()?;
+        let head_typed = head_f32.to_dtype(dtype)?.contiguous()?;
+
+        let hidden_var = Var::from_tensor(&hidden_typed)?;
+        let loss = match output_mode {
+            crate::phase_b::OpdLossOutput::ScalarMean => opd_top_k_reverse_kl_phase_b(
+                hidden_var.as_tensor(),
+                &head_typed,
+                &idx,
+                &lp,
+                &mask,
+                top_k,
+                device,
+                DEFAULT_CHUNK_SIZE,
+            )?,
+            crate::phase_b::OpdLossOutput::PerPosition => {
+                // Per-position path: sum-reduce so upstream grad is 1s.
+                opd_top_k_reverse_kl_phase_b_per_position(
+                    hidden_var.as_tensor(),
+                    &head_typed,
+                    &idx,
+                    &lp,
+                    &mask,
+                    top_k,
+                    device,
+                    DEFAULT_CHUNK_SIZE,
+                )?
+                .sum_all()?
+            }
+        };
+        let grads = loss.backward()?;
+        let g = grads
+            .get(hidden_var.as_tensor())
+            .ok_or_else(|| anyhow!("candle bwd: no grad on hidden"))?
+            .clone();
+        Ok((g, hidden_typed, head_typed, idx, lp, mask))
+    }
+
+    /// Run the kt-bridge backward on the same inputs and return
+    /// `d_hidden_kt` as a candle tensor (round-tripped via the bridge).
+    fn run_kt_bwd(
+        hidden_cuda: &Tensor,
+        head_cuda: &Tensor,
+        idx: &[u32],
+        lp: &[f32],
+        mask: &[bool],
+        top_k: usize,
+        output_mode: OpdLossOutputKt,
+        active_count: usize,
+    ) -> Result<Tensor> {
+        let kt_hidden = kt_tensor_from_candle_cuda_copy(hidden_cuda)
+            .map_err(|e| anyhow!("hidden copy: {}", e.message))?;
+        let kt_head = kt_tensor_from_candle_cuda_copy(head_cuda)
+            .map_err(|e| anyhow!("head copy: {}", e.message))?;
+
+        // Build kt grad_loss on the same CUDA device as hidden. For
+        // ScalarMean we use a single 1.0 (matches `loss.backward()` in
+        // candle which seeds the loss with a unit gradient). For
+        // PerPosition we use all-ones of length T_active (matches the
+        // `.sum_all().backward()` we used above).
+        let device_index = match kt_hidden.device() {
+            kiln_tensor::Device::Cuda(i) => i,
+            other => return Err(anyhow!("kt hidden not CUDA: {other}")),
+        };
+        let kt_grad_loss = match output_mode {
+            OpdLossOutputKt::ScalarMean => {
+                KtTensor::cuda_from_slice(&[1.0_f32], vec![1], device_index)?
+            }
+            OpdLossOutputKt::PerPosition => KtTensor::cuda_from_slice(
+                &vec![1.0_f32; active_count],
+                vec![active_count],
+                device_index,
+            )?,
+        };
+
+        let kt_d_hidden = opd_top_k_reverse_kl_phase_b_bwd_kt(
+            &kt_hidden, &kt_head, idx, lp, mask, &kt_grad_loss, top_k, output_mode,
+        )
+        .map_err(|e| anyhow!("kt-bwd: {e}"))?;
+        // Make contiguous before crossing the bridge boundary — the
+        // scatter_add output is already row-major contiguous, but be
+        // defensive.
+        let kt_d_hidden_contig = if kt_d_hidden.is_contiguous() {
+            kt_d_hidden
+        } else {
+            kt_d_hidden
+                .contiguous()
+                .map_err(|e| anyhow!("kt-bwd contiguous: {e}"))?
+        };
+        kt_tensor_to_candle_cuda_copy(&kt_d_hidden_contig)
+            .map_err(|e| anyhow!("d_hidden bridge back: {}", e.message))
+    }
+
+    fn assert_close(g_candle: &Tensor, g_kt: &Tensor, atol: f32, label: &str) -> Result<()> {
+        let diff = (&g_candle.to_dtype(DType::F32)? - &g_kt.to_dtype(DType::F32)?)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let max_c = g_candle
+            .to_dtype(DType::F32)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let rel = if max_c > 1e-6 { diff / max_c } else { diff };
+        assert!(
+            diff < atol || rel < atol,
+            "{label}: abs_diff={diff:.2e} max_candle={max_c:.4} rel={rel:.2e}"
+        );
+        Ok(())
+    }
+
+    fn run_parity(
+        top_k: usize,
+        dtype: DType,
+        output_mode: OpdLossOutputKt,
+        atol: f32,
+        label: &'static str,
+    ) -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping {label}: no CUDA device");
+                return Ok(());
+            }
+        };
+        // Shapes large enough to exercise the kernel's per-row reductions
+        // but small enough to keep the test cheap.
+        let seq_len = 32;
+        let hidden_size = 16;
+        let vocab_size = 256;
+        let active_period = 2;
+
+        let inner_mode = match output_mode {
+            OpdLossOutputKt::ScalarMean => crate::phase_b::OpdLossOutput::ScalarMean,
+            OpdLossOutputKt::PerPosition => crate::phase_b::OpdLossOutput::PerPosition,
+        };
+        let (g_candle, hidden_cuda, head_cuda, idx, lp, mask) = run_candle_bwd(
+            &device,
+            seq_len,
+            hidden_size,
+            vocab_size,
+            top_k,
+            active_period,
+            dtype,
+            inner_mode,
+        )?;
+        let active_count = mask.iter().filter(|&&m| m).count();
+        let g_kt = run_kt_bwd(
+            &hidden_cuda, &head_cuda, &idx, &lp, &mask, top_k, output_mode, active_count,
+        )?;
+
+        // Shapes must match.
+        assert_eq!(g_candle.dims(), g_kt.dims(), "{label}: shape mismatch");
+        assert_close(&g_candle, &g_kt, atol, label)
+    }
+
+    #[test]
+    fn cuda_parity_bf16_k16_scalar_mean() -> Result<()> {
+        // Tolerance ~1 BF16 ULP at unit scale, with headroom for the
+        // accumulated K=16 reductions inside the kernel.
+        run_parity(16, DType::BF16, OpdLossOutputKt::ScalarMean, 5e-3, "bf16/K16/mean")
+    }
+
+    #[test]
+    fn cuda_parity_bf16_k32_scalar_mean() -> Result<()> {
+        run_parity(32, DType::BF16, OpdLossOutputKt::ScalarMean, 5e-3, "bf16/K32/mean")
+    }
+
+    #[test]
+    fn cuda_parity_f32_k16_scalar_mean() -> Result<()> {
+        run_parity(16, DType::F32, OpdLossOutputKt::ScalarMean, 1e-4, "f32/K16/mean")
+    }
+
+    #[test]
+    fn cuda_parity_f32_k32_scalar_mean() -> Result<()> {
+        run_parity(32, DType::F32, OpdLossOutputKt::ScalarMean, 1e-4, "f32/K32/mean")
+    }
+
+    #[test]
+    fn cuda_parity_bf16_k16_per_position() -> Result<()> {
+        run_parity(16, DType::BF16, OpdLossOutputKt::PerPosition, 5e-3, "bf16/K16/per-pos")
+    }
+
+    #[test]
+    fn cuda_parity_bf16_k32_per_position() -> Result<()> {
+        run_parity(32, DType::BF16, OpdLossOutputKt::PerPosition, 5e-3, "bf16/K32/per-pos")
+    }
+
+    #[test]
+    fn cuda_parity_f32_k16_per_position() -> Result<()> {
+        run_parity(16, DType::F32, OpdLossOutputKt::PerPosition, 1e-4, "f32/K16/per-pos")
+    }
+
+    #[test]
+    fn cuda_parity_f32_k32_per_position() -> Result<()> {
+        run_parity(32, DType::F32, OpdLossOutputKt::PerPosition, 1e-4, "f32/K32/per-pos")
+    }
+}

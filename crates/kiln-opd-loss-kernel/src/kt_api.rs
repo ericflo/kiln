@@ -53,10 +53,14 @@
 
 use kiln_tensor::{
     ops::{
-        exp, index_select, log_softmax_last_dim, matmul, mean_all, mul, neg, sub, sum_axis, to_f32,
+        exp, index_select, log_softmax_last_dim, matmul, mean_all, mul, neg, scatter_add, sub,
+        sum_axis, to_f32,
     },
-    Error as KtError, Tensor as KtTensor,
+    DType as KtDType, Error as KtError, Tensor as KtTensor,
 };
+
+#[cfg(feature = "cuda")]
+use kiln_kt_bridge::BridgeError;
 
 /// Error type for the kiln-tensor-typed OPD loss surface.
 ///
@@ -105,6 +109,13 @@ impl OpdLossError {
 impl From<KtError> for OpdLossError {
     fn from(e: KtError) -> Self {
         OpdLossError::Kt(e)
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl From<BridgeError> for OpdLossError {
+    fn from(e: BridgeError) -> Self {
+        OpdLossError::Msg(format!("kt-opd-loss bridge: {}", e.message))
     }
 }
 
@@ -595,6 +606,300 @@ pub fn compute_per_position_metrics_kt(
         teacher_entropy: read_f32_vec(&teacher_entropy)?,
         reverse_kl: read_f32_vec(&reverse_kl)?,
     })
+}
+
+/// kt-typed mirror of [`crate::phase_b::OpdLossOutput`].
+///
+/// Selects whether the backward consumes a scalar `grad_loss`
+/// (ScalarMean — the standard loss-scalar autograd contract) or a
+/// per-position `grad_loss` of shape `[T_active]` (PerPosition — used
+/// when the trainer hands out a per-token upstream gradient).
+///
+/// Kept public so call sites on the kt substrate don't have to drag
+/// in the candle-typed `phase_b::OpdLossOutput`. The two enums are
+/// 1:1 isomorphic; convert between them with a match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpdLossOutputKt {
+    /// Mean over active positions; `grad_loss` is a 0-D or 1-element
+    /// scalar tensor. The kernel multiplies by `grad_loss / T_active`.
+    ScalarMean,
+    /// Per-position vector of shape `[T_active]`; the kernel multiplies
+    /// position-wise.
+    PerPosition,
+}
+
+/// CUDA-only kt-typed backward for the fused OPD top-K reverse-KL
+/// kernel.
+///
+/// Wraps the same FFI symbols
+/// (`kiln_opd_topk_kl_bwd_{bf16,f32}`) the candle backward path uses
+/// (`crate::phase_b::OpdLossCustomOp::cuda_kernel_backward`), so the
+/// two are bit-exact by construction. Substrate-only: this entry
+/// point does not migrate the `CustomOp1::bwd` body — a follow-up
+/// task wires the bridge through `OpdLossCustomOp::bwd` once this
+/// kt-typed substrate is in place.
+///
+/// # Shape contract
+///
+/// - `hidden`: `[1, T, H]` student hidden states. BF16 or F32.
+/// - `head_t`: `[H, V]` transposed LM head, same dtype as hidden.
+/// - `teacher_topk_indices`: `[T_active * K]` row-major flat — the
+///   teacher's top-K vocab indices at each active position.
+/// - `teacher_topk_logprobs`: `[T_active * K]` row-major flat —
+///   matching log-probabilities at those indices (log_softmax over
+///   the full teacher vocab).
+/// - `label_mask`: `[T]` booleans selecting active positions.
+/// - `grad_loss`: depends on `output_mode`:
+///   - `ScalarMean`: 0-D or 1-element F32 tensor on CUDA.
+///   - `PerPosition`: 1-D `[T_active]` F32 tensor on CUDA.
+/// - `top_k`: K, must be in {16, 32} (milestone-5 fast-path set; see
+///   `crate::phase_b::cuda_kernel_supports`).
+/// - `output_mode`: scalar-mean vs per-position selector.
+///
+/// # Returns
+///
+/// `d_hidden` of shape `[1, T, H]` in the same dtype as `hidden`. The
+/// active-row gradients are computed by the fused kernel; non-active
+/// positions are zero (via `scatter_add` into a zero buffer along
+/// axis 0).
+///
+/// # Errors
+///
+/// Returns [`OpdLossError::Msg`] when:
+/// - `top_k` / `dtype` are outside `cuda_kernel_supports`.
+/// - any input is non-contiguous / non-CUDA / wrong dtype.
+/// - `grad_loss` shape disagrees with `output_mode`.
+/// - the FFI kernel returns a non-zero status.
+#[cfg(feature = "cuda")]
+pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    grad_loss: &KtTensor,
+    top_k: usize,
+    output_mode: OpdLossOutputKt,
+) -> Result<KtTensor, OpdLossError> {
+    use kiln_kt_bridge::{
+        alloc_cuda_tensor, cuda_input_device_ptr, cuda_output_device_ptr,
+        cuda_storage_and_byte_offset,
+    };
+    use kiln_tensor::Device as KtDevice;
+
+    // -- 1. Validate shapes / dtype envelope ----------------------------
+    let (_, _, _vocab_size_decl, _, _) = validate_inputs_kt(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        top_k,
+    )?;
+
+    // K + dtype gate (mirrors `phase_b::cuda_kernel_supports`).
+    let dtype = hidden.dtype();
+    if !matches!(dtype, KtDType::F32 | KtDType::BF16) {
+        return Err(OpdLossError::msg(format!(
+            "kt-opd-loss bwd: unsupported dtype {dtype}; only F32 / BF16 are wired",
+        )));
+    }
+    if top_k != 16 && top_k != 32 {
+        return Err(OpdLossError::msg(format!(
+            "kt-opd-loss bwd: top_k must be in {{16, 32}}; got {top_k}",
+        )));
+    }
+    if head_t.dtype() != dtype {
+        return Err(OpdLossError::msg(format!(
+            "kt-opd-loss bwd: head_t dtype {} != hidden dtype {dtype}",
+            head_t.dtype(),
+        )));
+    }
+
+    let seq_len = hidden.shape()[1];
+    let hidden_size = hidden.shape()[2];
+    let vocab_size = head_t.shape()[1];
+
+    // -- 2. Resolve device + active rows --------------------------------
+    let device_index = match hidden.device() {
+        KtDevice::Cuda(i) => i,
+        other => {
+            return Err(OpdLossError::msg(format!(
+                "kt-opd-loss bwd: hidden must be on CUDA, got {other}",
+            )));
+        }
+    };
+
+    let active_positions: Vec<u32> = label_mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+        .collect();
+    let active_count = active_positions.len();
+
+    // Short-circuit: no active rows ⇒ d_hidden is all zeros in the
+    // input dtype on the input device. Skip the kernel entirely; this
+    // matches `cuda_kernel_backward`'s early return.
+    if active_count == 0 {
+        let (h_st, _) = cuda_storage_and_byte_offset(hidden, dtype, "hidden")?;
+        let zeros = alloc_cuda_tensor(h_st, dtype, vec![1, seq_len, hidden_size])?;
+        return Ok(zeros);
+    }
+
+    // -- 3. Upload host-side teacher tensors + scatter inputs -----------
+    //
+    // active_indices (U32, [T_active]) — both the gather of hidden rows
+    // and the scatter of d_hidden rows use the same index buffer.
+    let active_indices = KtTensor::cuda_from_slice(
+        active_positions.as_slice(),
+        vec![active_count],
+        device_index,
+    )?;
+
+    // Gather active hidden rows on device, then take contiguous.
+    let hidden_2d = hidden.squeeze(0)?;
+    let active_hidden = index_select(&hidden_2d, 0, &active_indices)?.contiguous()?;
+
+    // Ensure head_t is contiguous; the kernel reads from start_offset 0.
+    let head_t_contig = if head_t.is_contiguous() {
+        head_t.clone()
+    } else {
+        head_t.contiguous()?
+    };
+
+    // Upload teacher tensors as 2-D for the FFI (`[T_active, K]`).
+    let topk_idx_dev = KtTensor::cuda_from_slice(
+        teacher_topk_indices,
+        vec![active_count, top_k],
+        device_index,
+    )?;
+    let topk_lp_q_dev = KtTensor::cuda_from_slice(
+        teacher_topk_logprobs,
+        vec![active_count, top_k],
+        device_index,
+    )?;
+
+    // Normalise grad_loss to a 1-D contiguous F32 tensor on device,
+    // shape {ScalarMean: [1], PerPosition: [active_count]}.
+    let grad_loss_dev: KtTensor;
+    let (output_mode_i32, scale_factor) = match output_mode {
+        OpdLossOutputKt::ScalarMean => {
+            if grad_loss.dtype() != KtDType::F32 {
+                return Err(OpdLossError::msg(format!(
+                    "kt-opd-loss bwd: ScalarMean grad_loss must be F32, got {}",
+                    grad_loss.dtype(),
+                )));
+            }
+            let n: usize = grad_loss.shape().iter().product();
+            if n != 1 {
+                return Err(OpdLossError::msg(format!(
+                    "kt-opd-loss bwd: ScalarMean grad_loss must have 1 element, got shape {:?}",
+                    grad_loss.shape(),
+                )));
+            }
+            grad_loss_dev = grad_loss.reshape(vec![1])?.contiguous()?;
+            (0_i32, 1.0_f32 / (active_count as f32))
+        }
+        OpdLossOutputKt::PerPosition => {
+            if grad_loss.dtype() != KtDType::F32 {
+                return Err(OpdLossError::msg(format!(
+                    "kt-opd-loss bwd: PerPosition grad_loss must be F32, got {}",
+                    grad_loss.dtype(),
+                )));
+            }
+            let s = grad_loss.shape();
+            if s.len() != 1 || s[0] != active_count {
+                return Err(OpdLossError::msg(format!(
+                    "kt-opd-loss bwd: PerPosition grad_loss must have shape [{active_count}], got {s:?}",
+                )));
+            }
+            grad_loss_dev = if grad_loss.is_contiguous() {
+                grad_loss.clone()
+            } else {
+                grad_loss.contiguous()?
+            };
+            (1_i32, 1.0_f32)
+        }
+    };
+
+    // -- 4. Allocate output buffer [T_active, H] on device --------------
+    let (h_st, _) = cuda_storage_and_byte_offset(hidden, dtype, "hidden")?;
+    let d_hidden_active =
+        alloc_cuda_tensor(h_st, dtype, vec![active_count, hidden_size])?;
+
+    // -- 5. Pull device pointers ----------------------------------------
+    //
+    // active_hidden / head_t_contig are typed in hidden's dtype
+    // (F32 or BF16); the K indices are U32; logprobs and grad_loss
+    // are F32.
+    let h_ptr = cuda_input_device_ptr(&active_hidden, dtype, "active_hidden")?;
+    let head_ptr = cuda_input_device_ptr(&head_t_contig, dtype, "head_t")?;
+    let i_ptr = cuda_input_device_ptr(&topk_idx_dev, KtDType::U32, "topk_idx")?;
+    let l_ptr =
+        cuda_input_device_ptr(&topk_lp_q_dev, KtDType::F32, "topk_lp_q")?;
+    let g_ptr =
+        cuda_input_device_ptr(&grad_loss_dev, KtDType::F32, "grad_loss")?;
+    let d_ptr = cuda_output_device_ptr(&d_hidden_active);
+    let raw_stream = h_st.cuda_stream_raw();
+
+    // -- 6. Dispatch the FFI --------------------------------------------
+    //
+    // Same kernel symbols the candle path uses; bit-exact by
+    // construction. The output buffer is freshly zero-allocated via
+    // `alloc_cuda_tensor`, so the kernel's writes land in a clean
+    // F32/BF16 tile of the expected size.
+    let status = unsafe {
+        match dtype {
+            KtDType::F32 => crate::phase_b::kiln_opd_topk_kl_bwd_f32(
+                h_ptr as *const _,
+                head_ptr as *const _,
+                i_ptr as *const _,
+                l_ptr as *const _,
+                g_ptr as *const _,
+                scale_factor,
+                d_ptr as *mut _,
+                active_count as i32,
+                hidden_size as i32,
+                vocab_size as i32,
+                top_k as i32,
+                output_mode_i32,
+                raw_stream,
+            ),
+            KtDType::BF16 => crate::phase_b::kiln_opd_topk_kl_bwd_bf16(
+                h_ptr as *const _,
+                head_ptr as *const _,
+                i_ptr as *const _,
+                l_ptr as *const _,
+                g_ptr as *const _,
+                scale_factor,
+                d_ptr as *mut _,
+                active_count as i32,
+                hidden_size as i32,
+                vocab_size as i32,
+                top_k as i32,
+                output_mode_i32,
+                raw_stream,
+            ),
+            other => {
+                return Err(OpdLossError::msg(format!(
+                    "kt-opd-loss bwd: unreachable dtype {other:?}",
+                )));
+            }
+        }
+    };
+    if status != 0 {
+        return Err(OpdLossError::msg(format!(
+            "kt-opd-loss bwd: kiln_opd_topk_kl_bwd_* returned status {status}",
+        )));
+    }
+
+    // -- 7. Scatter `[T_active, H]` back into `[T, H]`, unsqueeze to ---
+    //       `[1, T, H]`. `scatter_add` on CUDA supports axis=0 + 1-D
+    //       U32 indices + F32/BF16 values + contiguous inputs — the
+    //       exact envelope we built above.
+    let d_hidden_2d = scatter_add(&d_hidden_active, 0, &active_indices, seq_len)?;
+    let d_hidden_3d = d_hidden_2d.reshape(vec![1, seq_len, hidden_size])?;
+    Ok(d_hidden_3d)
 }
 
 #[cfg(test)]

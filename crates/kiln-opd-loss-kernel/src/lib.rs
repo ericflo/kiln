@@ -103,9 +103,12 @@ pub use phase_b::{
 
 pub mod kt_api;
 pub use kt_api::{
-    OpdLossError, PerPositionMetricsKt, compute_per_position_metrics_kt,
+    OpdLossError, OpdLossOutputKt, PerPositionMetricsKt, compute_per_position_metrics_kt,
     opd_top_k_reverse_kl_kt, opd_top_k_reverse_kl_per_position_kt,
 };
+
+#[cfg(feature = "cuda")]
+pub use kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt;
 
 /// Default chunk size when iterating along the active-token dimension. Used
 /// by Phase B to bound the temporary `[chunk_T, K]` intermediate. For
