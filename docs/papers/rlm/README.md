@@ -97,9 +97,18 @@ Use these before writing code:
   RL/eval environment framework that includes RLM harnesses and RLMEnv work.
 - [Prime RLM SWE environment](sources/github/primeintellect-rlm-swe-v1-env-readme.md):
   example of packaging an RLM harness for software-engineering tasks.
+- [Hampton IO RLM](sources/github/hampton-io-rlm-readme.md): TypeScript RLM
+  implementation with JavaScript REPL, sandboxing, CLI, streaming, tracing, and
+  multi-provider support.
+- [Aleph](sources/github/hmbown-aleph-readme.md): MCP server and skill that
+  exposes RLM-style external working state, search, code execution, evidence,
+  and recursive subqueries to agent clients.
+- [RLM-FORGE](sources/github/q00-rlm-forge-readme.md): small runtime-lifted RLM
+  experiment with bounded child calls and evidence-gated parent synthesis.
 
 The source manifest also includes metadata-only notes for the Alex Zhang blog,
-Prime Intellect blog, and alphaXiv RL post. Those pages are not mirrored
+Prime Intellect blog, alphaXiv RL post, Daytona guides, RAW Works commentary,
+Drew Breunig commentary, and Claude Code RLM skill. Those pages are not mirrored
 verbatim because no clear reuse license was found during this pass.
 
 ## Adjacent Work
@@ -111,10 +120,17 @@ RLM sits in a larger context-management ecosystem. The most relevant clusters:
   [U-Fold](sources/arxiv/2601.18285-u-fold.md) study branch/return or proactive
   folding for agents. These are closest to RLM at the agent-control level.
 - Compression and context engineering: [ACON](sources/arxiv/2510.00615-acon.md),
+  [ReSum](sources/arxiv/2509.13313-resum.md),
   [PAACE](sources/arxiv/2512.16970-paace.md), [Active Context Compression](sources/arxiv/2601.07190-active-context-compression.md),
   and [Agentic Context Engineering](sources/arxiv/2510.04618-agentic-context-engineering.md)
   are the strongest foils for the RLM claim that source-preserving external
   context beats repeated lossy compaction on dense tasks.
+- Recursive and coding-agent variants:
+  [THREAD](sources/arxiv/2405.17402-thread-recursive-spawning.md) studies
+  recursive spawning before RLMs, while
+  [Coding Agents are Effective Long-Context Processors](sources/arxiv/2603.20432-coding-agents-long-context.md)
+  argues that filesystem/tool-native coding agents can externalize long-context
+  processing as an alternative to latent attention or semantic search.
 - Memory systems: [MEM1](sources/arxiv/2506.15841-mem1.md), [LightMem](sources/arxiv/2510.18866-lightmem.md),
   [Mem0](sources/arxiv/2504.19413-mem0.md), and the
   [gist-memory reading agent](sources/arxiv/2402.09727-gist-memory-reading-agent.md)
@@ -126,7 +142,9 @@ RLM sits in a larger context-management ecosystem. The most relevant clusters:
   inside the model rather than through an inference scaffold.
 - Evaluation: [RULER](sources/arxiv/2404.06654-ruler.md) and
   [OOLONG](sources/arxiv/2511.02817-oolong.md) are required background for
-  interpreting RLM long-context claims.
+  interpreting RLM long-context claims. [LongMemEval](sources/arxiv/2410.10813-longmemeval.md)
+  and [LongCoT](sources/arxiv/2604.14140-longcot.md) broaden the eval view to
+  long-term interactive memory and long-horizon reasoning traces.
 
 ## Practical Design Notes
 
@@ -180,7 +198,7 @@ uv run --with requests --with beautifulsoup4 --with markdownify \
   python docs/papers/rlm/tools/fetch_rlm_sources.py
 ```
 
-Full-text mirroring is intentionally conservative. CC BY 4.0 arXiv HTML and
-MIT-licensed READMEs are mirrored as markdown with attribution. Non-CC-BY arXiv
+Full-text mirroring is intentionally conservative. CC BY 4.0/CC0 arXiv HTML and
+MIT-licensed READMEs are mirrored as markdown with attribution. Other arXiv
 records, web articles, and blogs are indexed with metadata and relevance notes
 instead of full-text copies.

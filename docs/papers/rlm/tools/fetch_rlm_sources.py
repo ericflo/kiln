@@ -27,6 +27,8 @@ WEB_DIR = ROOT / "sources" / "web"
 
 
 CC_BY_4 = "http://creativecommons.org/licenses/by/4.0/"
+CC0_1 = "http://creativecommons.org/publicdomain/zero/1.0/"
+MIRRORABLE_ARXIV_LICENSES = {CC_BY_4, CC0_1}
 CA_BUNDLE = Path("/etc/ssl/certs/ca-certificates.crt")
 
 
@@ -118,6 +120,18 @@ ARXIV_SOURCES: list[ArxivSource] = [
         ["https://www.losslesscontext.ai/"],
     ),
     ArxivSource(
+        "2603.20432",
+        "2603.20432-coding-agents-long-context",
+        "adjacent-coding-agents",
+        "Shows that coding agents can externalize long-context processing through filesystems and native tools, a close comparison point for RLM's prompt-as-environment interface.",
+    ),
+    ArxivSource(
+        "2405.17402",
+        "2405.17402-thread-recursive-spawning",
+        "adjacent-recursive-agents",
+        "THREAD is an early recursive-spawning framework cited by the RLM paper; it dynamically creates child threads to decompose work and return only useful tokens to parents.",
+    ),
+    ArxivSource(
         "2510.11967",
         "2510.11967-context-folding",
         "adjacent-context-folding",
@@ -140,6 +154,12 @@ ARXIV_SOURCES: list[ArxivSource] = [
         "2510.00615-acon",
         "adjacent-context-compression",
         "ACON optimizes context-compression guidelines for long-horizon LLM agents and is a strong foil for RLM's avoid-lossy-compaction framing.",
+    ),
+    ArxivSource(
+        "2509.13313",
+        "2509.13313-resum",
+        "adjacent-context-compression",
+        "ReSum is a context-summarization baseline and training recipe for long-horizon web agents; it frames the main compaction alternative to RLM-style source-preserving recursion.",
     ),
     ArxivSource(
         "2512.16970",
@@ -232,15 +252,52 @@ ARXIV_SOURCES: list[ArxivSource] = [
         "RULER grounds the long-context degradation and needle/retrieval evaluation setting used by many RLM discussions.",
     ),
     ArxivSource(
+        "2410.10813",
+        "2410.10813-longmemeval",
+        "evaluation",
+        "LongMemEval is a long-term interactive memory benchmark; useful for comparing RLM source-addressability with indexed/retrieved chat memory systems.",
+        ["https://github.com/xiaowu0162/LongMemEval"],
+    ),
+    ArxivSource(
         "2511.02817",
         "2511.02817-oolong",
         "evaluation",
         "OOLONG evaluates long-context reasoning and aggregation; it is one of the main benchmark families in RLM and reproductions.",
     ),
+    ArxivSource(
+        "2604.14140",
+        "2604.14140-longcot",
+        "evaluation",
+        "LongCoT benchmarks long-horizon chain-of-thought reasoning over problems requiring tens to hundreds of thousands of reasoning tokens.",
+    ),
 ]
 
 
 GITHUB_READMES: list[GitHubReadme] = [
+    GitHubReadme(
+        "hampton-io-rlm-readme",
+        "https://raw.githubusercontent.com/hampton-io/RLM/main/README.md",
+        "https://github.com/hampton-io/RLM",
+        "MIT",
+        "https://raw.githubusercontent.com/hampton-io/RLM/main/LICENSE",
+        "Node.js/TypeScript RLM implementation with JavaScript REPL, sandboxing, streaming, tracing, CLI, and multi-provider support.",
+    ),
+    GitHubReadme(
+        "hmbown-aleph-readme",
+        "https://raw.githubusercontent.com/Hmbown/aleph/main/README.md",
+        "https://github.com/Hmbown/aleph",
+        "MIT",
+        "https://raw.githubusercontent.com/Hmbown/aleph/main/LICENSE",
+        "MCP server and skill for RLM-style external working state, search indexes, code execution, evidence, and recursion.",
+    ),
+    GitHubReadme(
+        "q00-rlm-forge-readme",
+        "https://raw.githubusercontent.com/Q00/rlm-forge/main/README.md",
+        "https://github.com/Q00/rlm-forge",
+        "MIT",
+        "https://raw.githubusercontent.com/Q00/rlm-forge/main/LICENSE",
+        "Small runtime-lifted RLM experiment with bounded inner calls, evidence manifests, and deterministic TraceGuard checks.",
+    ),
     GitHubReadme(
         "alexzhang13-rlm-readme",
         "https://raw.githubusercontent.com/alexzhang13/rlm/main/README.md",
@@ -301,6 +358,54 @@ GITHUB_READMES: list[GitHubReadme] = [
 
 
 WEB_SOURCES: list[WebSource] = [
+    WebSource(
+        "raw-works-rlms-new-reasoning-models",
+        "RLMs are the New Reasoning Models",
+        "https://raw.works/rlms-are-the-new-reasoning-models/",
+        "2026-02",
+        "Commentary connecting RLMs, coding agents as long-context processors, benchmark contamination concerns, and RAW Works' recursive coding-agent experiments.",
+        "No explicit reuse license found during corpus generation; indexed with metadata only.",
+    ),
+    WebSource(
+        "raw-works-rlms-memory-systems",
+        "Recursive Language Models as Memory Systems",
+        "https://raw.works/recursive-language-models-as-memory-systems/",
+        "2026",
+        "Frames RLMs as memory systems rather than just long-context workarounds; useful conceptual bridge to LongMemEval and memory-agent work.",
+        "No explicit reuse license found during corpus generation; indexed with metadata only.",
+    ),
+    WebSource(
+        "daytona-rlm-guides",
+        "Recursive Language Model Guides",
+        "https://www.daytona.io/docs/en/guides/rlm/",
+        "2026",
+        "Daytona implementation guides for recursive RLM agents and DSPy RLMs with isolated Daytona-backed interpreters.",
+        "No explicit reuse license found during corpus generation; indexed with metadata only.",
+    ),
+    WebSource(
+        "daytona-deep-rlm-guide",
+        "Build deep Recursive Language Models",
+        "https://www.daytona.io/docs/ja/recursive-language-models/",
+        "2026",
+        "Detailed sandboxed coding-agent RLM guide that extends single-level recursion to sub-agents in isolated Daytona sandboxes.",
+        "No explicit reuse license found during corpus generation; indexed with metadata only.",
+    ),
+    WebSource(
+        "dbreunig-potential-of-rlms",
+        "The Potential of RLMs",
+        "https://www.dbreunig.com/",
+        "2026",
+        "Secondary analysis from Drew Breunig's site; included as a pointer because an RLM post surfaced during source discovery but was not mirrored.",
+        "No explicit reuse license found during corpus generation; indexed with metadata only.",
+    ),
+    WebSource(
+        "tenobrus-claude-rlm",
+        "RLM: Recursive Language Models for Claude Code",
+        "https://github.com/Tenobrus/claude-rlm",
+        "2026",
+        "Claude Code skill design for filesystem and bash-based recursive delegation; metadata only because no license file was found in the quick source check.",
+        "No explicit reuse license found during corpus generation; indexed with metadata only.",
+    ),
     WebSource(
         "alex-zhang-rlm-blog",
         "Recursive Language Models",
@@ -392,7 +497,7 @@ def parse_arxiv_abs(source: ArxivSource) -> dict[str, object]:
         "pdf_url": one("citation_pdf_url"),
         "page_url": page_url,
         "license_url": license_url,
-        "cc_by": license_url == CC_BY_4,
+        "mirrorable": license_url in MIRRORABLE_ARXIV_LICENSES,
         "category": source.category,
         "relevance": source.relevance,
         "related": source.related,
@@ -434,7 +539,7 @@ def convert_arxiv_fulltext(source: ArxivSource, metadata: dict[str, object]) -> 
         header
         + f"# {metadata['title']}\n\n"
         + "## Corpus Note\n\n"
-        + "This file is a mechanical markdown conversion of arXiv HTML for a CC BY 4.0 paper. "
+        + "This file is a mechanical markdown conversion of arXiv HTML for a paper with a mirrorable reuse license. "
         + "Use the source links below as canonical when citing or checking equations, tables, or figures.\n\n"
         + f"- Source: {metadata['page_url']}\n"
         + f"- PDF: {metadata['pdf_url']}\n"
@@ -458,13 +563,13 @@ def write_arxiv_metadata(
     license_url = str(metadata["license_url"] or "unknown")
     if fulltext_unavailable:
         mirror_status = (
-            "Metadata only. The arXiv record advertises CC BY 4.0, but arXiv HTML was unavailable "
+            "Metadata only. The arXiv record advertises a mirrorable reuse license, but arXiv HTML was unavailable "
             "during generation, so no mechanical full-text markdown was mirrored."
         )
-    elif metadata["cc_by"]:
-        mirror_status = "Full markdown mirrored in this corpus because the arXiv record is CC BY 4.0."
+    elif metadata["mirrorable"]:
+        mirror_status = "Full markdown mirrored in this corpus because the arXiv record has a mirrorable reuse license."
     else:
-        mirror_status = "Metadata only. The arXiv record did not advertise CC BY 4.0, so the full paper is not mirrored verbatim here."
+        mirror_status = "Metadata only. The arXiv record did not advertise a mirrorable reuse license, so the full paper is not mirrored verbatim here."
     return normalize_markdown(
         frontmatter(
             {
@@ -594,7 +699,7 @@ def write_manifest(entries: list[dict[str, str]]) -> None:
         "# RLM Source Manifest\n\n"
         f"Generated: {generated_at()}\n\n"
         "This manifest records which sources were mirrored verbatim and which were indexed as metadata only. "
-        "Full-text mirroring is limited to sources with a clear reuse license, primarily CC BY 4.0 arXiv HTML and MIT-licensed GitHub READMEs.\n\n"
+        "Full-text mirroring is limited to sources with a clear reuse license, primarily CC BY 4.0/CC0 arXiv HTML and MIT-licensed GitHub READMEs.\n\n"
         + "\n".join(rows)
         + "\n"
     )
@@ -610,11 +715,11 @@ def main() -> None:
         metadata = parse_arxiv_abs(source)
         status = "metadata only"
         output_path = ARXIV_DIR / f"{source.slug}.md"
-        if metadata["cc_by"]:
+        if metadata["mirrorable"]:
             converted = convert_arxiv_fulltext(source, metadata)
             if converted:
                 write_text(output_path, converted)
-                status = "verbatim arXiv HTML conversion (CC BY 4.0)"
+                status = "verbatim arXiv HTML conversion (mirrorable license)"
             else:
                 write_text(output_path, write_arxiv_metadata(source, metadata, fulltext_unavailable=True))
                 status = "metadata only; arXiv HTML unavailable"
