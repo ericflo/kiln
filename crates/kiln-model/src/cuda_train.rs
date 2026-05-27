@@ -919,8 +919,19 @@ pub fn cuda_rmsnorm(
     // kind tag 22 — sqrt + recip in one pass). Falls through to the candle
     // two-step composite when KILN_USE_KT_API_RSQRT is off or any
     // precondition fails so behavior is identical with the gate off.
-    let variance_plus_eps = (variance + eps as f64)
-        .context("cuda_rmsnorm: add eps")?;
+    // Phase 7 (#1082): route `variance + eps` through `try_kt_add_scalar`
+    // (single-kernel `cuda_scalar_op` kind 0 = AddScalar). Mirrors the
+    // existing wiring in `forward.rs::rms_norm_fallback`. Falls through
+    // to the candle `+ f64` composite when `KILN_USE_KT_API_ADD_SCALAR`
+    // (or `KILN_USE_KT_API_ALL`) is off or any precondition fails so
+    // behavior is identical with the gate off.
+    let variance_plus_eps = match crate::forward::try_kt_add_scalar(&variance, eps as f64)
+        .context("cuda_rmsnorm: try_kt_add_scalar")?
+    {
+        Some(out) => out,
+        None => (variance + eps as f64)
+            .context("cuda_rmsnorm: add eps")?,
+    };
     let rms_inv = match crate::forward::try_kt_rsqrt(&variance_plus_eps)
         .context("cuda_rmsnorm: try_kt_rsqrt")?
     {
@@ -4132,8 +4143,17 @@ impl CudaBackwardOp for RmsNormBackward {
         // `try_kt_rsqrt` (single-kernel `cuda_activation_unary` kind tag 22).
         // Mirrors the forward `cuda_rmsnorm` rsqrt wiring. Falls through to
         // the candle composite when KILN_USE_KT_API_RSQRT is off.
-        let variance_plus_eps = (variance + self.eps as f64)
-            .context("cuda_rmsnorm backward: add eps")?;
+        // Phase 7 (#1082): mirrors the forward `cuda_rmsnorm` add-scalar
+        // wiring — route `variance + eps` through `try_kt_add_scalar`
+        // with a candle fallback so behavior is identical when the
+        // gate is off.
+        let variance_plus_eps = match crate::forward::try_kt_add_scalar(&variance, self.eps as f64)
+            .context("cuda_rmsnorm backward: try_kt_add_scalar")?
+        {
+            Some(out) => out,
+            None => (variance + self.eps as f64)
+                .context("cuda_rmsnorm backward: add eps")?,
+        };
         let rms_inv = match crate::forward::try_kt_rsqrt(&variance_plus_eps)
             .context("cuda_rmsnorm backward: try_kt_rsqrt")?
         {
