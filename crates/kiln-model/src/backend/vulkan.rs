@@ -24,7 +24,18 @@ use crate::forward::{GpuAttentionWeights, GpuWeights};
 /// FlashAttention-2, Gated DeltaNet, and supporting operations.
 #[derive(Debug)]
 pub struct VulkanBackend {
+    /// Candle device the backend was constructed with — always `Device::Cpu`
+    /// today because candle-core has no native Vulkan device. Retained for
+    /// the kernel trait methods that still consume `candle_core::Tensor`
+    /// parameters (they live on this candle CPU device until kt-typed
+    /// siblings land). (#1082)
     device: Device,
+    /// `kiln_tensor::Device` form advertised by `BackendRuntime::device()`.
+    /// `kt::Device::Vulkan(0)` when the Vulkan logical device is up;
+    /// `kt::Device::Cpu` otherwise, matching the CPU-fallback advertised
+    /// by `name()` when `vulkan_device` is `None`. Cached at construction
+    /// so the hot trait accessor does not bridge per call. (#1082)
+    device_kt: kiln_tensor::Device,
     /// Cached at construction: reading env vars per decode step × 24 GDN layers
     /// shows up in decode NVTX captures. Env vars don't change at runtime.
     gdn_enabled: bool,
@@ -345,8 +356,21 @@ impl VulkanBackend {
             }
         };
 
+        // Advertise `kt::Device::Vulkan(0)` when the logical device is up,
+        // matching what `for_device_kt` callers would have constructed.
+        // When the device failed to come up we still need a sensible kt
+        // identity for the BackendRuntime accessor; the CPU fallback path
+        // returns `kt::Device::Cpu` so trait callers consistently see "no
+        // Vulkan" without a separate predicate. (#1082)
+        let device_kt = if vulkan_device.is_some() {
+            kiln_tensor::Device::Vulkan(0)
+        } else {
+            kiln_kt_bridge::kt_device_from_candle(&device)
+        };
+
         Self {
             device,
+            device_kt,
             gdn_enabled,
             gdn_prefill_in_proj_enabled,
             gdn_gates_enabled,
@@ -1010,8 +1034,8 @@ impl BackendRuntime for VulkanBackend {
         if self.has_vulkan() { "vulkan" } else { "cpu" }
     }
 
-    fn device(&self) -> &Device {
-        &self.device
+    fn device(&self) -> kiln_tensor::Device {
+        self.device_kt
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

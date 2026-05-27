@@ -116,9 +116,17 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// `/health` and logs.
     fn name(&self) -> &'static str;
 
-    /// The candle `Device` this backend drives. All tensors passed to trait
-    /// methods must live on this device.
-    fn device(&self) -> &Device;
+    /// The `kiln_tensor::Device` this backend drives. All tensors passed to
+    /// trait methods must live on this device.
+    ///
+    /// Returned by value: `kiln_tensor::Device` is `Copy` and small (one
+    /// discriminant + a `usize` index). Phase 7 of #1082 migrated the
+    /// return type off `&candle_core::Device` so backend selection no
+    /// longer threads candle types through every trait method. Backends
+    /// that still need a candle `Device` internally (e.g. for the kernel
+    /// trait methods that take `candle_core::Tensor` parameters) keep a
+    /// candle device cached alongside the kt one and bridge as needed.
+    fn device(&self) -> kiln_tensor::Device;
 
     /// `dyn Any` downcast target. Used by the Vulkan-resident decode
     /// fast-path in `transformer_block_paged_with_rope_tables` to recover
@@ -1317,6 +1325,29 @@ mod tests {
             !cuda.supports_resident_decode(),
             "CUDA backend must decline resident decode; gate (c) requires CUDA path unchanged"
         );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_backend_device_accessor_returns_kt() {
+        // #1082 Phase 7: BackendRuntime::device() returns kt::Device by
+        // value. The CUDA backend must round-trip the cuda(i) device
+        // identity through the kt enum without losing the index.
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let cuda = cuda::CudaBackend::new(device);
+        assert_eq!(cuda.device(), kiln_tensor::Device::Cuda(0));
+    }
+
+    #[test]
+    fn cpu_backend_device_accessor_returns_kt() {
+        // Mirrors the CUDA assertion above for the always-available CPU
+        // path. Confirms the trait surface stayed kt-typed even on the
+        // portable fallback. (#1082)
+        let cpu = cpu::CpuBackend::new(Device::Cpu);
+        assert_eq!(cpu.device(), kiln_tensor::Device::Cpu);
     }
 
     #[cfg(feature = "vulkan")]
