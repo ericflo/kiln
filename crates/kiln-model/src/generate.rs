@@ -6474,7 +6474,6 @@ impl ModelRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{Device, Tensor};
 
     /// Create a tiny model config for testing.
     ///
