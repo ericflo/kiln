@@ -176,18 +176,11 @@ impl DeviceOp2 for ScatterAddOp {
 
         validate(values, indices, self.axis, self.target_dim)?;
 
-        // Pull the candle_device + device index off the values tensor so we
-        // can allocate a same-device zero-filled output.
-        let cuda_storage = values
-            .storage()
-            .as_any()
-            .downcast_ref::<crate::CudaStorage>()
-            .ok_or_else(|| {
-                crate::Error::Msg(
-                    "ScatterAddOp::cuda_fwd: values must be CUDA storage".to_string(),
-                )
-            })?;
-        let candle_device = cuda_storage.candle_device().clone();
+        // Pull the device index off the values tensor so we can
+        // allocate a same-device zero-filled output via
+        // cuda_zeros_ctx (#1082): the helper derives the candle
+        // device internally from device_index, so no .candle_device()
+        // read is needed.
         let device_index = match values.device() {
             crate::Device::Cuda(i) => i,
             other => {
@@ -204,12 +197,7 @@ impl DeviceOp2 for ScatterAddOp {
         out_shape.extend_from_slice(&values.shape()[1..]);
         let n_out_elements: usize = out_shape.iter().product();
 
-        let storage = crate::cuda_zeros(
-            candle_device,
-            device_index,
-            values.dtype(),
-            n_out_elements,
-        )?;
+        let storage = crate::cuda_zeros_ctx(device_index, values.dtype(), n_out_elements)?;
         let out = Tensor::from_parts(storage, Layout::contiguous(out_shape), TensorId::next())?;
 
         // In-place atomic scatter-add into the zero-filled output.
