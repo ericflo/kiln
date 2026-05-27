@@ -13,11 +13,14 @@ cc = "1"
 
 [dependencies]
 candle-core = { workspace = true }
-# kt-typed parallel surface (see `kt_api`). Phase 7 prep — no CUDA
-# feature is needed here because the kt-typed trait+stubs live at the
-# Rust level only; the CUDA FFI in `phase_b.rs` still routes through
-# candle storage today.
+# kt-typed parallel surface (see `kt_api`). The forward path is pure
+# kt-tensor ops; the backward kt entry point
+# (`opd_top_k_reverse_kl_phase_b_bwd_kt`) wraps the same CUDA FFI
+# symbols as the candle path (`kiln_opd_topk_kl_bwd_*`), routing
+# through `kiln-kt-bridge` for storage downcast + device-pointer
+# extraction. CUDA-only on the backward; gated by the `cuda` feature.
 kiln-tensor = { workspace = true }
+kiln-kt-bridge = { workspace = true }
 anyhow = { workspace = true }
 half = "2"
 # `tracing` for the warn-on-fallback path in cuda_fwd. Cheap dep and

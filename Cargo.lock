@@ -1787,7 +1787,6 @@ dependencies = [
 name = "kiln-conv1d-kernel"
 version = "0.2.19"
 dependencies = [
- "candle-core",
  "cc",
  "half",
  "kiln-kt-bridge",
@@ -1834,7 +1833,6 @@ dependencies = [
 name = "kiln-flash-attn"
 version = "0.2.19"
 dependencies = [
- "candle-core",
  "cc",
  "half",
  "kiln-kt-bridge",
@@ -1913,7 +1911,6 @@ dependencies = [
 name = "kiln-marlin-gemm"
 version = "0.2.19"
 dependencies = [
- "candle-core",
  "cc",
  "half",
  "kiln-kt-bridge",
@@ -1980,6 +1977,7 @@ dependencies = [
  "candle-nn",
  "cc",
  "half",
+ "kiln-kt-bridge",
  "kiln-tensor",
  "tracing",
 ]
