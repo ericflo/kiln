@@ -37,6 +37,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use candle_core::cuda_backend::cudarc::driver::CudaContext;
 use kiln_blas::{
     AlgoCache, CublasLtMatmulHandle, Epilogue, MatmulLayout, MatmulRequest,
 };
@@ -73,11 +74,15 @@ fn handle_registry() -> &'static HandleRegistry {
 /// Acquire (or cold-start) a handle for `device_index`.
 ///
 /// The handle registry is keyed by device index, so warm-path lookups
-/// don't need a candle device at all. Cold start materializes the
-/// candle wrapper internally via `primary_cuda_device(device_index)`
-/// — this matches the substrate-wide candle-free entry pattern (#1082)
-/// and lets call sites drop their .candle_device().clone() reads.
-fn get_or_init_handle(device_index: usize) -> Result<Arc<CublasLtMatmulHandle>> {
+/// don't need any extra state — only a cold start needs the cudarc
+/// `CudaContext` to construct the underlying cublasLt handle. Callers
+/// pass it through from the storage they already have on hand
+/// (`a_storage.context()`), so the lookup stays fully candle-free
+/// (#1082).
+fn get_or_init_handle(
+    device_index: usize,
+    cuda_ctx: &Arc<CudaContext>,
+) -> Result<Arc<CublasLtMatmulHandle>> {
     let reg = handle_registry();
     let mut by_device = reg
         .by_device
@@ -86,20 +91,18 @@ fn get_or_init_handle(device_index: usize) -> Result<Arc<CublasLtMatmulHandle>> 
     if let Some(h) = by_device.get(&device_index) {
         return Ok(Arc::clone(h));
     }
-    // Cold-start the handle for this device. The candle CudaDevice is
-    // still required by CublasLtMatmulHandle::new in kiln-blas (its
-    // own API still takes Arc<CudaDevice>); derive it here so callers
-    // don't need to.
-    let candle_device = crate::primary_cuda_device(device_index)?;
-    let handle = CublasLtMatmulHandle::new(
-        candle_device,
+    // Cold-start the handle for this device via the candle-free
+    // CublasLtMatmulHandle::new_ctx entry (#1082). No
+    // primary_cuda_device materialization needed.
+    let handle = CublasLtMatmulHandle::new_ctx(
+        Arc::clone(cuda_ctx),
         device_index,
         Arc::clone(&reg.shared_cache),
         None,
     )
     .map_err(|e| {
         crate::Error::Msg(format!(
-            "cuda_matmul: CublasLtMatmulHandle::new failed for device {device_index}: {e}"
+            "cuda_matmul: CublasLtMatmulHandle::new_ctx failed for device {device_index}: {e}"
         ))
     })?;
     let arc = Arc::new(handle);
@@ -233,7 +236,10 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_n_elements)?;
 
     // ---- acquire handle ----
-    let handle = get_or_init_handle(device_index)?;
+    // Cold start passes the cudarc CudaContext through to
+    // CublasLtMatmulHandle::new_ctx (#1082) — no candle wrapper
+    // materialization required on the cold path.
+    let handle = get_or_init_handle(device_index, &ctx)?;
 
     // ---- per-batch dispatch ----
     let bpe = dtype.size_in_bytes();
@@ -432,8 +438,13 @@ pub fn cuda_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
             )));
         }
     };
+    // Stream + handle both source the cudarc CudaContext off the
+    // input storage — no candle device materialization needed
+    // (#1082).
+    let ctx = a_storage.context();
+
     // ---- acquire handle ----
-    let handle = get_or_init_handle(device_index)?;
+    let handle = get_or_init_handle(device_index, &ctx)?;
 
     // ---- per-batch dispatch ----
     let batch: usize = a_shape[..a_rank - 2].iter().product::<usize>().max(1);
@@ -442,9 +453,6 @@ pub fn cuda_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
     let b_batch_stride = (k_b * n * bpe) as u64;
     let c_batch_stride = (m * n * bpe) as u64;
 
-    // Stream comes from the source storage's cudarc context — no
-    // .candle_device() read (#1082).
-    let ctx = a_storage.context();
     let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream();
 
@@ -624,7 +632,10 @@ pub fn cuda_matmul_with_bias(
     let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_n_elements)?;
 
     // ---- acquire handle ----
-    let handle = get_or_init_handle(device_index)?;
+    // Cold start passes the cudarc CudaContext through to
+    // CublasLtMatmulHandle::new_ctx (#1082) — no candle wrapper
+    // materialization required on the cold path.
+    let handle = get_or_init_handle(device_index, &ctx)?;
 
     // ---- per-batch dispatch ----
     let bpe = dtype.size_in_bytes();
