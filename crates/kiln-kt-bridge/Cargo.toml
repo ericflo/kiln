@@ -24,6 +24,18 @@ default = []
 # no CUDA dep themselves. (#1082)
 cuda = ["candle-core/cuda", "kiln-tensor/cuda"]
 
+# Enables Metal-aware Device enum mapping in `kt_device_from_candle`
+# and `candle_device_from_kt`. Without this feature, the helpers still
+# compile but `candle_core::Device::Metal(_)` inputs are skipped (the
+# arm is `#[cfg(feature = "metal")]`-gated) and the inverse Metal arm
+# errors out with `BridgeError`. The feature forwards
+# `candle-core/metal` so that `MetalDevice::location()` returns a real
+# `DeviceLocation::Metal { gpu_id }` instead of the
+# `dummy_metal_backend` `fail!()` stub. `kiln-tensor/metal` is
+# forwarded for parity with the `cuda` pattern; the `KtDevice::Metal(_)`
+# variant itself is unconditional on the kt side. (#1082)
+metal = ["candle-core/metal", "kiln-tensor/metal"]
+
 [dependencies]
 # Candle is always present; the `cuda` feature forwards `candle-core/cuda`
 # (and `kiln-tensor/cuda`) to pull in the cudarc-typed code paths. The

@@ -259,19 +259,32 @@ pub fn kt_dtype_to_candle(d: KtDType) -> Result<candle_core::DType, BridgeError>
 
 /// Map a candle `Device` to a `kiln_tensor::Device`.
 ///
-/// Multi-GPU stays out of scope for #1082 (anti-pattern 12); the kt
-/// `Cuda` variant carries a `device_index: usize` that this adapter
-/// reads from `candle_core::DeviceLocation`.
+/// Multi-GPU stays out of scope for #1082 (anti-pattern 12); the
+/// `Cuda` / `Metal` variants carry a `device_index: usize` that this
+/// adapter reads from `candle_core::DeviceLocation`.
 ///
-/// `candle_core::Device::Cpu` maps to `kt::Device::Cpu`. `Metal(_)`
-/// and any future candle backend that surfaces through the
-/// `#[non_exhaustive]` candle enum degrade to `kt::Device::Cpu` —
-/// kt-bridge intentionally only mints `kt::Device::Cuda(i)` (the cuda
-/// adapter machinery in this crate gates on `feature = "cuda"`, but
-/// this pure enum-mapping helper compiles on every build because
-/// `candle_core::Device`/`DeviceLocation` are part of candle's base
-/// API). The kiln-server Vulkan-active path carries a candle CPU
-/// device by convention (see `kiln-model::backend::mod::for_device`).
+/// `candle_core::Device::Cpu` maps to `kt::Device::Cpu`.
+///
+/// `candle_core::Device::Cuda(_)` maps to `kt::Device::Cuda(gpu_id)`
+/// via `c.location()` — the cuda adapter machinery elsewhere in this
+/// crate gates on `feature = "cuda"`, but this enum-mapping arm
+/// compiles unconditionally because `candle_core::Device`/`Location`
+/// are part of candle's base API.
+///
+/// `candle_core::Device::Metal(_)` maps to `kt::Device::Metal(gpu_id)`
+/// **when this crate is built with `feature = "metal"`**, which
+/// forwards `candle-core/metal` so that `MetalDevice::location()`
+/// returns a real `DeviceLocation::Metal { gpu_id }` instead of the
+/// `dummy_metal_backend` `fail!()` stub. Without the metal feature,
+/// the Metal arm is skipped and any `Device::Metal(_)` falls into the
+/// catch-all CPU branch — but constructing such a device requires
+/// `Device::new_metal`, which itself errors on a non-metal build, so
+/// reaching that branch with a Metal device is a contradiction in
+/// practice.
+///
+/// Vulkan and any future candle backends degrade to `kt::Device::Cpu`.
+/// The kiln-server Vulkan-active path carries a candle CPU device by
+/// convention (see `kiln-model::backend::mod::for_device`).
 pub fn kt_device_from_candle(d: &candle_core::Device) -> KtDevice {
     use candle_core::backend::BackendDevice;
     use candle_core::DeviceLocation;
@@ -285,7 +298,25 @@ pub fn kt_device_from_candle(d: &candle_core::Device) -> KtDevice {
             // Cuda location; this arm is defensive only.
             _ => KtDevice::Cpu,
         },
-        // kt-bridge is CUDA-only; Metal/Vulkan/etc. fall back to CPU.
+        // Metal arm is gated on `feature = "metal"` because the
+        // dummy_metal_backend's MetalDevice::location() `fail!()`s at
+        // runtime. With the metal feature on, candle-core/metal is
+        // pulled in and the real impl returns
+        // `DeviceLocation::Metal { gpu_id }`. (#1082)
+        #[cfg(feature = "metal")]
+        candle_core::Device::Metal(m) => match m.location() {
+            DeviceLocation::Metal { gpu_id } => KtDevice::Metal(gpu_id),
+            // Metal backend reports a non-Metal location — defensive
+            // arm; the real `MetalDevice::location()` impl always
+            // returns `DeviceLocation::Metal`.
+            _ => KtDevice::Cpu,
+        },
+        // Without `feature = "metal"`, the Metal arm cannot call
+        // `m.location()` safely. Constructing such a device is
+        // impossible on a non-metal build anyway (`Device::new_metal`
+        // errors at runtime), so reaching this fallthrough with a
+        // Metal device is a contradiction in practice. Vulkan and
+        // other future backends also degrade to CPU.
         _ => KtDevice::Cpu,
     }
 }
@@ -293,17 +324,23 @@ pub fn kt_device_from_candle(d: &candle_core::Device) -> KtDevice {
 /// Map a `kiln_tensor::Device` to a candle `Device`.
 ///
 /// Inverse of [`kt_device_from_candle`]. Returns `BridgeError` if the kt
-/// Device variant has no candle equivalent on this build. `Metal(_)`
-/// requires candle's `metal` feature (not enabled in kt-bridge); the
-/// kiln-server Metal path therefore goes through a separate adapter.
-/// `Vulkan(_)` has no candle backend in any feature combination —
-/// kiln-server's Vulkan path keeps a candle CPU device by convention.
+/// Device variant has no candle equivalent on this build.
 ///
 /// `Cuda(i)` calls `candle_core::Device::new_cuda(i)`, which on builds
 /// without candle's cuda feature returns a runtime error from the
 /// `dummy_cuda_backend` stub (this helper still compiles — only the
 /// runtime arm fails). On `kiln-kt-bridge --features cuda` it
 /// successfully constructs a real cuda device.
+///
+/// `Metal(i)` calls `candle_core::Device::new_metal(i)` **when this
+/// crate is built with `feature = "metal"`** (which forwards
+/// `candle-core/metal`). Without the metal feature the arm is omitted
+/// and `KtDevice::Metal(_)` falls through to the catch-all that
+/// surfaces a typed `BridgeError`. The kiln-server Metal path is
+/// expected to enable this feature.
+///
+/// `Vulkan(_)` has no candle backend in any feature combination —
+/// kiln-server's Vulkan path keeps a candle CPU device by convention.
 ///
 /// Phase 7 of #1082 uses this to translate kt-typed inputs at
 /// `kiln-model`'s public surface (the `_kt` parallel entries) into the
@@ -314,6 +351,16 @@ pub fn candle_device_from_kt(d: &KtDevice) -> Result<candle_core::Device, Bridge
         KtDevice::Cuda(i) => candle_core::Device::new_cuda(*i).map_err(|e| {
             BridgeError::new(format!(
                 "kt-bridge: candle_device_from_kt: new_cuda({i}): {e}"
+            ))
+        }),
+        // Inverse Metal arm — gated on `feature = "metal"`. Without
+        // the feature, `Device::new_metal` would route to the
+        // `dummy_metal_backend` `fail!()` stub; surface a typed
+        // BridgeError instead. (#1082)
+        #[cfg(feature = "metal")]
+        KtDevice::Metal(i) => candle_core::Device::new_metal(*i).map_err(|e| {
+            BridgeError::new(format!(
+                "kt-bridge: candle_device_from_kt: new_metal({i}): {e}"
             ))
         }),
         other => Err(BridgeError::new(format!(
@@ -830,5 +877,38 @@ mod tests {
         // BridgeError rather than silently degrade.
         let e = candle_device_from_kt(&KtDevice::Vulkan(0)).unwrap_err();
         assert!(e.to_string().contains("no candle equivalent"));
+    }
+
+    /// Without `feature = "metal"`, the inverse helper must surface a
+    /// typed BridgeError instead of attempting `Device::new_metal`
+    /// (which would route to the `dummy_metal_backend` `fail!()`
+    /// stub). (#1082)
+    #[cfg(not(feature = "metal"))]
+    #[test]
+    fn candle_device_from_kt_metal_errors_without_feature() {
+        let e = candle_device_from_kt(&KtDevice::Metal(0)).unwrap_err();
+        assert!(
+            e.to_string().contains("no candle equivalent"),
+            "expected 'no candle equivalent', got: {e}"
+        );
+    }
+
+    /// With `feature = "metal"`, the inverse helper attempts the real
+    /// `Device::new_metal` path instead of falling through to the
+    /// "no candle equivalent" branch. On a non-Apple builder the
+    /// underlying `new_metal` call still errors (no Metal-capable GPU),
+    /// but with a Metal-backend message — proving the kt-bridge
+    /// dispatch took the Metal arm rather than the fallthrough. (#1082)
+    #[cfg(feature = "metal")]
+    #[test]
+    fn candle_device_from_kt_metal_dispatches_with_feature() {
+        match candle_device_from_kt(&KtDevice::Metal(0)) {
+            Ok(d) => assert!(matches!(d, candle_core::Device::Metal(_))),
+            Err(e) => assert!(
+                !e.to_string().contains("no candle equivalent"),
+                "metal feature on but inverse helper still fell through to the \
+                 unsupported-on-this-build branch: {e}"
+            ),
+        }
     }
 }
