@@ -61,7 +61,11 @@ impl EvalGenerator for OrderedMockGenerator {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<PreparedPrompt, String>> + Send + '_>,
     > {
-        Box::pin(async move { Ok(PreparedPrompt { tokens: vec![1, 2, 3] }) })
+        Box::pin(async move {
+            Ok(PreparedPrompt {
+                tokens: vec![1, 2, 3],
+            })
+        })
     }
 
     fn run(
@@ -116,8 +120,8 @@ async fn builtin_qwen3_agentic_core_validates_and_lists_tools() {
 #[tokio::test]
 async fn executor_e2e_with_realistic_qwen3_xml_replies() {
     // Use a custom suite so we can control the order of replies exactly.
-    use kiln_eval::scorers::{ArgsScoring, NameMatch, Scorer};
     use kiln_eval::EvalExample;
+    use kiln_eval::scorers::{ArgsScoring, NameMatch, Scorer};
 
     let suite = EvalSuite {
         name: "agentic-smoke".into(),
@@ -145,8 +149,7 @@ async fn executor_e2e_with_realistic_qwen3_xml_replies() {
                 id: Some("read-hosts".into()),
                 messages: vec![EvalChatMessage::new("user", "Read /etc/hosts.")],
                 target: Some(
-                    r#"{"tool_calls":[{"name":"Read","arguments":{"path":"/etc/hosts"}}]}"#
-                        .into(),
+                    r#"{"tool_calls":[{"name":"Read","arguments":{"path":"/etc/hosts"}}]}"#.into(),
                 ),
                 tags: vec!["agentic".into()],
                 ..Default::default()
@@ -155,8 +158,7 @@ async fn executor_e2e_with_realistic_qwen3_xml_replies() {
                 id: Some("read-fail-wrong-tool".into()),
                 messages: vec![EvalChatMessage::new("user", "Read /etc/hosts.")],
                 target: Some(
-                    r#"{"tool_calls":[{"name":"Read","arguments":{"path":"/etc/hosts"}}]}"#
-                        .into(),
+                    r#"{"tool_calls":[{"name":"Read","arguments":{"path":"/etc/hosts"}}]}"#.into(),
                 ),
                 tags: vec!["agentic".into()],
                 ..Default::default()
