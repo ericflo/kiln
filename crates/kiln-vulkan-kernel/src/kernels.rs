@@ -3214,46 +3214,6 @@ fn dispatch_linear_decode_argmax_cached_single_submit(
 pub const TOPK_SAMPLE_KERNEL_K_MAX: u32 = 64;
 
 #[allow(clippy::too_many_arguments)]
-pub fn dispatch_linear_decode_sample(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    weight_t: &VulkanBuffer,
-    packed_bf16_weights: bool,
-    hidden: usize,
-    out_dim: usize,
-    history_indices: &[u32],
-    history_counts: &[u32],
-    repetition_penalty: f32,
-    presence_penalty: f32,
-    frequency_penalty: f32,
-    temperature: f32,
-    top_k: u32,
-    top_p: f32,
-    min_p: f32,
-    seed: u64,
-) -> Result<u32> {
-    let x_data = extract_tensor_bytes(x)?.0;
-    dispatch_linear_decode_sample_bytes(
-        vk_device,
-        &x_data,
-        weight_t,
-        packed_bf16_weights,
-        hidden,
-        out_dim,
-        history_indices,
-        history_counts,
-        repetition_penalty,
-        presence_penalty,
-        frequency_penalty,
-        temperature,
-        top_k,
-        top_p,
-        min_p,
-        seed,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub fn dispatch_linear_decode_sample_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
