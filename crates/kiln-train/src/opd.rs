@@ -1795,7 +1795,7 @@ pub fn opd_train_synthetic_validation(
         eps: 1e-8,
         weight_decay: 0.0,
     };
-    let mut optimizer = candle_nn::optim::AdamW::new(vec![hidden.clone()], params_adamw)?;
+    let mut optimizer = <candle_nn::optim::AdamW as candle_nn::Optimizer>::new(vec![hidden.clone()], params_adamw)?;
 
     let mut first_loss: f32 = f32::NAN;
     let mut last_loss: f32 = f32::NAN;
