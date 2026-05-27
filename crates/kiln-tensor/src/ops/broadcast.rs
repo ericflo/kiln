@@ -203,14 +203,11 @@ impl DeviceOp1 for BroadcastOp {
 
         let in_total: usize = in_shape.iter().product();
 
-        // Resolve the candle CudaDevice from `x`'s storage so indices
-        // land on the matching device.
-        let x_storage = x
-            .storage()
-            .as_any()
-            .downcast_ref::<crate::CudaStorage>()
-            .ok_or_else(|| Error::from_str("broadcast_to::cuda_fwd: x must be CUDA storage"))?;
-        let candle_device = x_storage.candle_device().clone();
+        // Resolve the destination CUDA device index from `x`'s device
+        // tag so indices land on the matching device.
+        // host_to_cuda_copy_ctx (#1082) derives the candle device
+        // internally from device_index, eliminating the need to
+        // downcast x's storage to read .candle_device().
         let device_index = match x.device() {
             crate::Device::Cuda(i) => i,
             _ => return Ok(None),
@@ -222,8 +219,7 @@ impl DeviceOp1 for BroadcastOp {
         // Build the gather indices on CPU, then ship to CUDA.
         let indices_host = self.gather_indices(in_shape);
         let indices_cpu = Tensor::from_slice(&indices_host, vec![target_total])?;
-        let indices_cuda =
-            crate::host_to_cuda_copy(&indices_cpu, candle_device, device_index)?;
+        let indices_cuda = crate::host_to_cuda_copy_ctx(&indices_cpu, device_index)?;
 
         let gathered = crate::cuda_index_select_dim0(&x_flat, &indices_cuda)?;
 
