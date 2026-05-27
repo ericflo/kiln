@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Issue #1082: parity test for FP8 (E4M3FN) quantize / dequantize
 //! on CUDA.
 //!

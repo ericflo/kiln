@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA `cuda_activation_unary` (extended with the
 //! unary-math kinds 5..=14 in #1082) vs kt CPU references.
 //!

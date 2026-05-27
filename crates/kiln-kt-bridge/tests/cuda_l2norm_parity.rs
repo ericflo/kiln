@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA L2-norm (`L2NormOp::cuda_fwd` /
 //! `cuda_l2norm_last_axis`) vs kt CPU reference (`ops::l2_norm`).
 //!

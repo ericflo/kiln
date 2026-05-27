@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA scatter-add (`ScatterAddOp::cuda_fwd` /
 //! `cuda_scatter_add_dim0`) vs kt CPU reference (`ops::scatter_add`).
 //!

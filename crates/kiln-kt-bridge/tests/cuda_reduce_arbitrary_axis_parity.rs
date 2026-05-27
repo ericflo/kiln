@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Issue #1082: parity test for sum/mean reductions over any axis,
 //! not just the last one. Validates `ReduceOp::cuda_fwd` /
 //! `cuda_sum_axis` / `cuda_mean_axis` against the canonical CPU

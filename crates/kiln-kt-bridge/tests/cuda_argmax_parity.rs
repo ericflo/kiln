@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA argmax_last_axis vs kt CPU argmax_last_dim.
 //!
 //! Phase 4 substrate validation. Confirms the kernel in

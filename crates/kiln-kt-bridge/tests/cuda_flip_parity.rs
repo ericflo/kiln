@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA `flip(axes=[0])` vs kt CPU reference.
 //!
 //! Phase 4 substrate validation. `FlipOp::cuda_fwd` routes through

@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA RMSNorm (`RmsNormOp::cuda_fwd` /
 //! `cuda_rmsnorm_last_axis`) vs kt CPU reference (`ops::rms_norm`).
 //!

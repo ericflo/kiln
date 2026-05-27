@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: `kiln_tensor::cuda_matmul` vs candle's `Tensor::matmul`.
 //!
 //! Phase 2.x of #1082 — closes the loop on the cublasLt-backed kt

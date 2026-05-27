@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! `Tensor::to_device` — unified device-transfer API surface (issue #1082).
 //!
 //! The method wraps the existing `host_to_cuda_copy` / `cuda_to_host_copy`

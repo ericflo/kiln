@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Round-trip test: CUDA buffer → host kt-Tensor → byte-identical
 //! to a CPU kt-Tensor built from the same source data.
 

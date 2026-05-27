@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA concat (`ConcatOp::cuda_fwd` / `cuda_concat`
 //! / the `ops::concat` dispatch on all-CUDA inputs) vs kt CPU
 //! reference (`ops::concat` on CPU tensors).

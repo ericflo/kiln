@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! H2D + D2H round-trip — host_to_cuda_copy ∘ cuda_to_host_copy = identity.
 
 use std::sync::Arc;

@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA reduce-last-axis (`ReduceOp::cuda_fwd` /
 //! `cuda_sum_last_axis` / `cuda_mean_last_axis`) vs kt CPU reference
 //! (`ops::sum_axis` / `ops::mean_axis`).

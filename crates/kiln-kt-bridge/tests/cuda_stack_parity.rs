@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA stack (`ops::stack` on all-CUDA inputs) vs kt
 //! CPU reference (`ops::stack` on CPU tensors).
 //!

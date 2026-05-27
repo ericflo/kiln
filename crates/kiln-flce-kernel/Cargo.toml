@@ -34,7 +34,7 @@ tracing = { workspace = true }
 # CUDA forward errors out at runtime ("CUDA not enabled"); the CPU path works
 # either way. kiln-train re-exports this feature via its own `cuda` feature
 # so `cargo build --features cuda --bin kiln-bench` activates it.
-cuda = ["candle-core/cuda", "kiln-tensor/cuda", "dep:kiln-kt-bridge"]
+cuda = ["candle-core/cuda", "kiln-tensor/cuda", "dep:kiln-kt-bridge", "kiln-kt-bridge?/cuda"]
 
 [dev-dependencies]
 candle-nn = { workspace = true }

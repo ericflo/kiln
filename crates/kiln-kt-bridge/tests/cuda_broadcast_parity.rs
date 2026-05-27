@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA `broadcast_to` vs kt CPU reference.
 //!
 //! Issue #1082 — sub-phase: broadcast cuda_fwd wiring.

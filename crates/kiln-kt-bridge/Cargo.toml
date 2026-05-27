@@ -5,15 +5,34 @@ publish = false
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared helpers for Phase 7 kt-API ports (CudaStorage downcast, alloc, device-pointer extraction) used by the kernel crates."
+description = "Shared helpers for Phase 7 kt-API ports (CudaStorage downcast, alloc, device-pointer extraction, plus pure candle<->kt Device/DType mapping)."
+
+[features]
+default = []
+# Enables the CUDA-touching helpers (CudaStorage downcast, alloc,
+# device-pointer extraction, candle CUDA Tensor borrow/copy adapters,
+# and the `forward_op` CustomOp shim). Pulls candle-core (cuda) and
+# kiln-tensor (cuda) so the cudarc-typed code paths compile.
+#
+# Without this feature, kiln-kt-bridge still exposes the four pure
+# `candle <-> kt` Device/DType enum-mapping helpers
+# (`candle_dtype_to_kt`, `kt_dtype_to_candle`, `kt_device_from_candle`,
+# `candle_device_from_kt`) so multi-backend builds (Metal, Vulkan, CPU)
+# of `kiln-model` / `kiln-server` can use them without dragging in a
+# CUDA toolchain. The mapping helpers only touch candle's `Device` /
+# `DType` enums, which are part of the candle-core base API and have
+# no CUDA dep themselves. (#1082)
+cuda = ["candle-core/cuda", "kiln-tensor/cuda"]
 
 [dependencies]
-# Same CUDA pinning as the kernel crates. kiln-kt-bridge always uses
-# kiln-tensor's cuda feature — there is no non-CUDA build.
-candle-core = { workspace = true, features = ["cuda"] }
-kiln-tensor = { workspace = true, features = ["cuda"] }
+# Candle is always present; the `cuda` feature forwards `candle-core/cuda`
+# (and `kiln-tensor/cuda`) to pull in the cudarc-typed code paths. The
+# pure `candle <-> kt` Device/DType enum-mapping helpers only need the
+# candle base API and compile on every host without a CUDA toolchain.
+candle-core = { workspace = true }
+kiln-tensor = { workspace = true }
 # Half-precision floats — needed for the per-dtype `as_cuda_slice<T>()`
-# dispatch in the candle-to-kt copying adapter.
+# dispatch in the candle-to-kt copying adapter (cuda feature only).
 half = "2"
 
 [dev-dependencies]

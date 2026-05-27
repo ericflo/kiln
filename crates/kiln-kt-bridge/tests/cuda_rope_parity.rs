@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA RoPE (`RopeOp::cuda_fwd` / `cuda_rope`) vs
 //! kt CPU reference (`ops::rope::rope`).
 //!

@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA LayerNorm (`LayerNormOp::cuda_fwd` /
 //! `cuda_layernorm_last_axis`) vs kt CPU reference (`ops::layer_norm`).
 //!

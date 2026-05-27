@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! CUDA-side end-to-end parity test for [`kiln_kt_bridge::forward_op`]
 //! ((#1082) — see `docs/CANDLE_REMOVAL_PLAN.md`).
 //!

@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: `cuda_matmul_with_bias` vs decomposed
 //! `cuda_matmul + cuda_elementwise_binary(Add)`.
 //!

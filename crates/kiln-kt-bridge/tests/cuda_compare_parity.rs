@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA element-wise comparison ops (eq / ne / lt /
 //! le / gt / ge) vs kt CPU reference.
 //!

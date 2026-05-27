@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA `add_scalar` / `sub_scalar` / `mul_scalar` /
 //! `div_scalar` vs kt CPU reference.
 //!

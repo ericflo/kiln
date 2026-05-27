@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA masked-fill (`MaskedFillOp::cuda_fwd` /
 //! `cuda_masked_fill`) vs kt CPU reference (`ops::masked_fill`).
 //!

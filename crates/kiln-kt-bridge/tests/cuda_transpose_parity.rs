@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA `transpose(d0, d1)` / `permute(axes)` followed
 //! by `.contiguous()` produces byte-identical output to the CPU
 //! reference (`.transpose(...).contiguous()` on a `CpuStorage`-backed

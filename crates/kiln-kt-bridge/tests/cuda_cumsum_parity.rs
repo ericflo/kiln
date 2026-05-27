@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA `cuda_cumsum_axis` vs kt CPU `ops::cumsum`.
 //!
 //! Phase 6 substrate validation (#1082). Confirms the scan kernel in

@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA embedding lookup vs kt CPU reference.
 //!
 //! Phase 4 substrate validation. `EmbeddingOp::cuda_fwd` routes

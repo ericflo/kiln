@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA cross-entropy
 //! (`CrossEntropyOp::cuda_fwd` / `cuda_cross_entropy_loss`) vs kt CPU
 //! reference (`ops::cross_entropy`).

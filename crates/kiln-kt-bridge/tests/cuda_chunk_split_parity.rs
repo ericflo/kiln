@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA chunk / split_with_sizes
 //! (`ChunkOp::cuda_fwd` / `SplitWithSizesOp::cuda_fwd` / `ops::chunk`
 //! / `ops::split_with_sizes` on CUDA inputs) vs kt CPU reference.

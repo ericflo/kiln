@@ -38,11 +38,18 @@
 // Generic candle CustomOp shim for kt-typed forward+backward kernel pairs
 // (#1082). Lets production-caller migrations be per-call-site mechanical
 // transformations instead of bespoke per-kernel CustomOp wrappers.
+//
+// CustomOp1/2/3 + CudaStorage live behind candle-core's CUDA feature, so
+// the shim is only compiled when the `cuda` feature is on. The pure
+// `candle <-> kt` Device/DType enum-mapping helpers below stay
+// unconditional so multi-backend builds (Metal/Vulkan/CPU) can use them
+// without a CUDA toolchain.
+#[cfg(feature = "cuda")]
 pub mod forward_op;
 
-use kiln_tensor::{
-    CudaStorage, Device as KtDevice, DType as KtDType, StorageBackend, Tensor as KtTensor,
-};
+use kiln_tensor::{Device as KtDevice, DType as KtDType};
+#[cfg(feature = "cuda")]
+use kiln_tensor::{CudaStorage, StorageBackend, Tensor as KtTensor};
 
 /// Generic error for kt-API bridge operations.
 ///
@@ -78,6 +85,7 @@ impl std::error::Error for BridgeError {}
 /// - `t.dtype() != expected`
 /// - `t.is_contiguous() == false`
 /// - the storage isn't a `CudaStorage` (i.e. CPU or another GPU)
+#[cfg(feature = "cuda")]
 pub fn cuda_storage_and_byte_offset<'a>(
     t: &'a KtTensor,
     expected: KtDType,
@@ -108,6 +116,7 @@ pub fn cuda_storage_and_byte_offset<'a>(
 ///
 /// Used to allocate output tensors that mirror the candle path's
 /// `Tensor::zeros((shape), dtype, device)` pattern.
+#[cfg(feature = "cuda")]
 pub fn alloc_cuda_tensor(
     source: &CudaStorage,
     dtype: KtDType,
@@ -129,6 +138,7 @@ pub fn alloc_cuda_tensor(
 /// Borrow the underlying [`CudaStorage`] of a fresh kt-allocated
 /// output tensor. Panics if the storage isn't CUDA — only call this
 /// on tensors just returned from [`alloc_cuda_tensor`].
+#[cfg(feature = "cuda")]
 pub fn cuda_storage_of_output(t: &KtTensor) -> &CudaStorage {
     t.storage()
         .as_any()
@@ -157,6 +167,7 @@ pub fn cuda_storage_of_output(t: &KtTensor) -> &CudaStorage {
 /// the current call shapes. Future multi-stream kt-API additions
 /// must re-introduce explicit synchronization at the StreamPlanner
 /// layer.
+#[cfg(feature = "cuda")]
 pub fn cuda_input_device_ptr(
     t: &KtTensor,
     expected: KtDType,
@@ -175,6 +186,7 @@ pub fn cuda_input_device_ptr(
 /// Owner-agnostic device-pointer extraction for an output kt-Tensor
 /// (always `Owned` since [`alloc_cuda_tensor`] produces owned
 /// storage). Returns the base pointer; outputs use start_offset=0.
+#[cfg(feature = "cuda")]
 pub fn cuda_output_device_ptr(t: &KtTensor) -> u64 {
     let st = cuda_storage_of_output(t);
     st.device_ptr_raw().0
@@ -251,12 +263,15 @@ pub fn kt_dtype_to_candle(d: KtDType) -> Result<candle_core::DType, BridgeError>
 /// `Cuda` variant carries a `device_index: usize` that this adapter
 /// reads from `candle_core::DeviceLocation`.
 ///
-/// `candle_core::Device::Cpu` maps to `kt::Device::Cpu`. This crate is
-/// always built with the CUDA feature (no kt-bridge non-CUDA path), so
-/// `Metal(_)` and any future candle backend that surfaces through the
-/// `#[non_exhaustive]` candle enum degrades to `kt::Device::Cpu`. The
-/// kiln-server Vulkan-active path also carries a candle CPU device by
-/// convention (see `kiln-model::backend::mod::for_device`).
+/// `candle_core::Device::Cpu` maps to `kt::Device::Cpu`. `Metal(_)`
+/// and any future candle backend that surfaces through the
+/// `#[non_exhaustive]` candle enum degrade to `kt::Device::Cpu` —
+/// kt-bridge intentionally only mints `kt::Device::Cuda(i)` (the cuda
+/// adapter machinery in this crate gates on `feature = "cuda"`, but
+/// this pure enum-mapping helper compiles on every build because
+/// `candle_core::Device`/`DeviceLocation` are part of candle's base
+/// API). The kiln-server Vulkan-active path carries a candle CPU
+/// device by convention (see `kiln-model::backend::mod::for_device`).
 pub fn kt_device_from_candle(d: &candle_core::Device) -> KtDevice {
     use candle_core::backend::BackendDevice;
     use candle_core::DeviceLocation;
@@ -284,6 +299,12 @@ pub fn kt_device_from_candle(d: &candle_core::Device) -> KtDevice {
 /// `Vulkan(_)` has no candle backend in any feature combination —
 /// kiln-server's Vulkan path keeps a candle CPU device by convention.
 ///
+/// `Cuda(i)` calls `candle_core::Device::new_cuda(i)`, which on builds
+/// without candle's cuda feature returns a runtime error from the
+/// `dummy_cuda_backend` stub (this helper still compiles — only the
+/// runtime arm fails). On `kiln-kt-bridge --features cuda` it
+/// successfully constructs a real cuda device.
+///
 /// Phase 7 of #1082 uses this to translate kt-typed inputs at
 /// `kiln-model`'s public surface (the `_kt` parallel entries) into the
 /// candle `Device` the underlying call path still expects.
@@ -297,7 +318,7 @@ pub fn candle_device_from_kt(d: &KtDevice) -> Result<candle_core::Device, Bridge
         }),
         other => Err(BridgeError::new(format!(
             "kt-bridge: candle_device_from_kt: kt Device {other:?} has no candle equivalent \
-             on this build (kt-bridge is CUDA-only)"
+             on this build"
         ))),
     }
 }
@@ -324,6 +345,7 @@ pub fn candle_device_from_kt(d: &KtDevice) -> Result<candle_core::Device, Bridge
 /// row-major strides). If the candle tensor's `layout.start_offset()` is
 /// non-zero, only the live elements are copied — the kt-Tensor doesn't
 /// inherit any unused prefix from the candle storage.
+#[cfg(feature = "cuda")]
 #[allow(clippy::needless_pass_by_value)]
 pub fn kt_tensor_from_candle_cuda_copy(
     t: &candle_core::Tensor,
@@ -453,6 +475,7 @@ pub fn kt_tensor_from_candle_cuda_copy(
 /// The candle Tensor's layout is contiguous (start_offset = 0,
 /// row-major strides). Non-contiguous kt sources must be made
 /// contiguous before this call.
+#[cfg(feature = "cuda")]
 pub fn kt_tensor_to_candle_cuda_copy(
     t: &KtTensor,
 ) -> Result<candle_core::Tensor, BridgeError> {
@@ -616,6 +639,7 @@ pub fn kt_tensor_to_candle_cuda_copy(
 /// call sites in `kiln-model::backend::cuda` skipping this step
 /// while the sibling `gdn_gates` kt path applied it — see that
 /// commit message for the failure mode.
+#[cfg(feature = "cuda")]
 pub fn kt_tensor_from_candle_cuda_borrow(
     t: &candle_core::Tensor,
 ) -> Result<KtTensor, BridgeError> {
@@ -730,7 +754,6 @@ pub fn kt_tensor_from_candle_cuda_borrow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiln_tensor::Tensor;
 
     #[test]
     fn error_implements_display() {
@@ -744,15 +767,19 @@ mod tests {
         assert!(e.to_string().contains("boxed"));
     }
 
+    #[cfg(feature = "cuda")]
     #[test]
     fn cpu_tensor_is_rejected_as_cuda() {
+        use kiln_tensor::Tensor;
         let t = Tensor::from_slice(&[1.0f32, 2.0], vec![2]).unwrap();
         let e = cuda_storage_and_byte_offset(&t, KtDType::F32, "x").unwrap_err();
         assert!(e.to_string().contains("must be CUDA"));
     }
 
+    #[cfg(feature = "cuda")]
     #[test]
     fn wrong_dtype_is_rejected() {
+        use kiln_tensor::Tensor;
         let t = Tensor::from_slice(&[1.0f32, 2.0], vec![2]).unwrap();
         let e = cuda_storage_and_byte_offset(&t, KtDType::BF16, "x").unwrap_err();
         assert!(e.to_string().contains("must be"));

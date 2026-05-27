@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! CUDA backward-op parity tests.
 //!
 //! Phase 6b of #1082 — exercises the already-existing `kiln-autograd`

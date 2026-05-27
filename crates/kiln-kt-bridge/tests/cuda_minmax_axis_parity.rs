@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Issue #1082: parity test for min/max reductions over any axis.
 //! Validates `cuda_min_axis` / `cuda_max_axis` against the canonical
 //! CPU reference in `ops::min_axis` / `ops::max_axis`, and the

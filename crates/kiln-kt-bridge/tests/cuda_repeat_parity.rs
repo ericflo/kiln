@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA `repeat(axis=0, n)` vs kt CPU reference.
 //!
 //! Phase 4 substrate validation. `RepeatOp::cuda_fwd` routes through

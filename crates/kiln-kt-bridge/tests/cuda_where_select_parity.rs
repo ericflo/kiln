@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity tests for the CUDA `where_select` kernel vs CPU reference.
 //!
 //! The CUDA kernel (`csrc/where_select.cu`) does per-element select

@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA `clamp(x, lo, hi)` and `pow(x, p)` vs kt CPU
 //! reference.
 //!

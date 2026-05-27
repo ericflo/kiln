@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity tests for the CUDA `diagonal` extract / `diag` construct
 //! kernels vs CPU reference.
 //!

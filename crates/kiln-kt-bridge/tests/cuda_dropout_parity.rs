@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity test: kt CUDA `dropout` vs contract (distribution + scale).
 //!
 //! Issue #1082 — sub-phase: dropout cuda_fwd wiring.

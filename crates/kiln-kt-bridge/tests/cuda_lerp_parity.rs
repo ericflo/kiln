@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Issue #1082: parity test for elementwise linear interpolation
 //! `lerp(a, b, w) = a + w * (b - a)` on CUDA. Validates `cuda_lerp`
 //! (and the transparent dispatch through `ops::lerp` when both

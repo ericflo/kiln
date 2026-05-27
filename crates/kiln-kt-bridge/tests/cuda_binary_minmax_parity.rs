@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Issue #1082: parity test for elementwise `minimum` / `maximum`
 //! on CUDA. Validates `cuda_binary_minmax` (and the transparent
 //! dispatch through `ops::minimum` / `ops::maximum` when both inputs

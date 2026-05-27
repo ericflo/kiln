@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 //! Parity tests for `eye_on_device` against the CPU reference.
 //!
 //! `eye_on_device(n, dtype, Cuda(_))` builds an identity matrix on
