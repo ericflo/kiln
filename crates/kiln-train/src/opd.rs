@@ -60,7 +60,22 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use candle_core::Tensor;
+// NOTE(#1082): Dropped `use candle_core::Tensor;` — all 29 remaining
+// candle `Tensor` references in this file (struct fields on
+// `OpdStepInputs` / `OpdStepOutputs` / `StableOpdLossInputs` /
+// `StableOpdLossOutputs`, `opd_step_loss_simple` signature params, the
+// segment-checkpoint helper's `run_forward` return type, the
+// `boundary_states: Vec<...>` accumulator, the `Tensor::new` /
+// `Tensor::from_vec` constructors in production fallbacks and test
+// modules) are now inline-qualified as `candle_core::Tensor`. This
+// drops opd.rs candle `use` count from 1 to 0 as part of the per-file
+// `use candle_*` reduction in full candle removal (#1082).
+//
+// The candle dep itself stays because `compute_stable_opd_loss` returns
+// `Tensor`s that the trainer's `.backward()` roots on, and the
+// underlying KL+SFT composition still uses candle autograd. Drop the
+// candle dep once the entire OPD loss path migrates to kt-typed
+// autograd via `KtForwardOp1` / `KtForwardOp2` (kt_api.rs Phase 7).
 use serde::{Deserialize, Serialize};
 
 use crate::logit_source::{LogitSource, LogprobBatch};
@@ -1024,10 +1039,10 @@ pub struct OpdStepInputs<'a> {
     /// `[1, tokens.len(), hidden_size]`. Produced by the trainer's
     /// segment-checkpointed forward pass (`trainer.rs` already produces
     /// this — `opd_train` will plumb it in).
-    pub student_hidden: &'a Tensor,
+    pub student_hidden: &'a candle_core::Tensor,
     /// Frozen LM head weights, shape `[H, V]`. Matches the layout used
     /// by `kiln-flce-kernel` and `kiln-model::forward::embed_tokens_t`.
-    pub head_t: &'a Tensor,
+    pub head_t: &'a candle_core::Tensor,
     /// Teacher source. Queried for top-K logprobs at `active_positions`
     /// (or `teacher_active_positions` if set).
     pub teacher: Arc<dyn LogitSource>,
@@ -1068,9 +1083,9 @@ pub struct OpdStepInputs<'a> {
 pub struct OpdStepOutputs {
     /// Per-position reverse KL, shape `[T_active]` f32. Lives on the
     /// same device as `student_hidden`.
-    pub per_position_kl: Tensor,
+    pub per_position_kl: candle_core::Tensor,
     /// Mean over active positions of `per_position_kl`. Scalar f32.
-    pub mean_kl: Tensor,
+    pub mean_kl: candle_core::Tensor,
     /// Number of active positions (T_active).
     pub active_count: usize,
 }
@@ -1253,8 +1268,8 @@ pub fn opd_step_loss(inputs: OpdStepInputs<'_>) -> Result<OpdStepOutputs> {
 pub fn opd_step_loss_simple(
     tokens: &[u32],
     active_positions: &[usize],
-    student_hidden: &Tensor,
-    head_t: &Tensor,
+    student_hidden: &candle_core::Tensor,
+    head_t: &candle_core::Tensor,
     teacher: Arc<dyn LogitSource>,
     loss: OpdLossGranularity,
     top_k: usize,
@@ -1359,18 +1374,18 @@ impl Default for StableOpdCoefficients {
 #[derive(Debug)]
 pub struct StableOpdLossInputs<'a> {
     /// Per-position OPD KL from the loss kernel, shape `[T_active]`.
-    pub per_position_kl: &'a Tensor,
+    pub per_position_kl: &'a candle_core::Tensor,
     /// Optional `KL(π_θ || π_ref)` per-position tensor of the same
     /// shape. Caller computes this from a reference forward pass (the
     /// previous-checkpoint adapter held as `π_ref`). If `None`, the
     /// β·KL_ref term is skipped (equivalent to β_kl = 0 for this
     /// step).
-    pub per_position_kl_ref: Option<&'a Tensor>,
+    pub per_position_kl_ref: Option<&'a candle_core::Tensor>,
     /// Optional SFT loss on a golden-trajectory minibatch (already a
     /// scalar tensor). Caller computes this from a separate
     /// `kiln-flce-kernel` cross-entropy pass on the golden batch. If
     /// `None`, the λ·SFT term is skipped.
-    pub sft_loss: Option<&'a Tensor>,
+    pub sft_loss: Option<&'a candle_core::Tensor>,
     /// Stable-OPD coefficients as resolved by the guardrail engine.
     pub coefficients: StableOpdCoefficients,
 }
@@ -1379,16 +1394,16 @@ pub struct StableOpdLossInputs<'a> {
 #[derive(Debug)]
 pub struct StableOpdLossOutputs {
     /// `L_total` — the scalar the trainer calls `.backward()` on.
-    pub total: Tensor,
+    pub total: candle_core::Tensor,
     /// `mean(L_OPD)` — the per-token reverse KL piece (the
     /// "headline" metric the dashboard shows).
-    pub mean_opd: Tensor,
+    pub mean_opd: candle_core::Tensor,
     /// `β · mean(KL_ref)` — the reference-policy regularizer piece,
     /// or zeros tensor when omitted.
-    pub mean_kl_ref: Tensor,
+    pub mean_kl_ref: candle_core::Tensor,
     /// `λ · sft_loss` — the golden-SFT piece, or zeros tensor when
     /// omitted.
-    pub sft_term: Tensor,
+    pub sft_term: candle_core::Tensor,
 }
 
 // ---------------------------------------------------------------------------
@@ -1672,12 +1687,12 @@ pub fn compute_stable_opd_loss(inputs: StableOpdLossInputs<'_>) -> Result<Stable
 
     let mean_kl_ref = match inputs.per_position_kl_ref {
         Some(t) => t.mean_all().context("mean(per_position_kl_ref)")?,
-        None => Tensor::new(0.0_f32, device).context("zero kl_ref scalar")?,
+        None => candle_core::Tensor::new(0.0_f32, device).context("zero kl_ref scalar")?,
     };
 
     let sft_term = match inputs.sft_loss {
         Some(t) => t.clone(),
-        None => Tensor::new(0.0_f32, device).context("zero sft scalar")?,
+        None => candle_core::Tensor::new(0.0_f32, device).context("zero sft scalar")?,
     };
 
     let beta = inputs.coefficients.beta_kl;
@@ -1685,12 +1700,12 @@ pub fn compute_stable_opd_loss(inputs: StableOpdLossInputs<'_>) -> Result<Stable
 
     // total = mean_opd + β · mean_kl_ref + λ · sft_term.
     let kl_ref_scaled = if beta == 0.0 {
-        Tensor::new(0.0_f32, device)?
+        candle_core::Tensor::new(0.0_f32, device)?
     } else {
         mean_kl_ref.affine(beta, 0.0)?
     };
     let sft_scaled = if lambda == 0.0 {
-        Tensor::new(0.0_f32, device)?
+        candle_core::Tensor::new(0.0_f32, device)?
     } else {
         sft_term.affine(lambda, 0.0)?
     };
@@ -1755,7 +1770,7 @@ pub fn opd_train_synthetic_validation(
     let head_vec: Vec<f32> = (0..(hidden_size * vocab_size))
         .map(|i| ((i as f32 + 7.0) * 0.0007).cos() * 0.2)
         .collect();
-    let head_t = candle_core::Tensor::from_vec(head_vec, (hidden_size, vocab_size), &device)?;
+    let head_t = candle_core::candle_core::Tensor::from_vec(head_vec, (hidden_size, vocab_size), &device)?;
 
     // Synthetic teacher: pick K random vocab indices per active
     // position; logprobs uniform over the K support (so the
@@ -2019,7 +2034,7 @@ fn sample_student_rollout(
     let num_segments = default_segments.min(model_config.num_layers);
     let segments =
         crate::trainer::compute_segment_boundaries(model_config.num_layers, num_segments);
-    let run_forward = |seq: &[u32]| -> Result<Tensor> {
+    let run_forward = |seq: &[u32]| -> Result<candle_core::Tensor> {
         let positions: Vec<u32> = (0..seq.len() as u32).collect();
         let (embed_hidden, _) = model_forward_embed(seq, weights)?;
         let mut linear_state = LinearAttentionState::new_for_inference(model_config, &device)?;
@@ -2653,7 +2668,7 @@ pub fn opd_train(
 
                 // === Step 1: detached forward; save segment boundaries ===
                 let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
-                let mut boundary_states: Vec<Tensor> = Vec::with_capacity(segments.len() + 1);
+                let mut boundary_states: Vec<candle_core::Tensor> = Vec::with_capacity(segments.len() + 1);
                 boundary_states.push(embed_hidden.detach());
                 {
                     let mut current = boundary_states[0].clone();
@@ -2778,7 +2793,7 @@ pub fn opd_train(
                 drop(final_var);
 
                 // === Step 3: walk segments in reverse, accumulate LoRA grads ===
-                let mut accumulated_grads: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
+                let mut accumulated_grads: HashMap<candle_core::TensorId, candle_core::Tensor> = HashMap::new();
                 let all_vars = params.all_vars();
                 for seg_idx in (0..segments.len()).rev() {
                     let (seg_start, seg_end) = segments[seg_idx];
@@ -2819,7 +2834,7 @@ pub fn opd_train(
                 }
 
                 // Move CPU-spilled gradients back to the device for the optimizer step.
-                let grads_on_device: HashMap<candle_core::TensorId, Tensor> = accumulated_grads
+                let grads_on_device: HashMap<candle_core::TensorId, candle_core::Tensor> = accumulated_grads
                     .into_iter()
                     .map(|(k, v)| {
                         let v = if v.device().same_device(&device) {
@@ -3140,11 +3155,11 @@ mod tests {
         let hidden_vec: Vec<f32> = (0..(seq_len * hidden_size))
             .map(|i| (i as f32 * 0.011).sin() * 0.3)
             .collect();
-        let student_hidden = Tensor::from_vec(hidden_vec, (1, seq_len, hidden_size), &device)?;
+        let student_hidden = candle_core::Tensor::from_vec(hidden_vec, (1, seq_len, hidden_size), &device)?;
         let head_vec: Vec<f32> = (0..(hidden_size * vocab_size))
             .map(|i| ((i as f32 + 11.0) * 0.005).cos() * 0.2)
             .collect();
-        let head_t = Tensor::from_vec(head_vec, (hidden_size, vocab_size), &device)?;
+        let head_t = candle_core::Tensor::from_vec(head_vec, (hidden_size, vocab_size), &device)?;
 
         let tokens: Vec<u32> = (0..seq_len)
             .map(|i| ((i * 7 + 3) % vocab_size) as u32)
@@ -3228,7 +3243,7 @@ mod tests {
         let student_hidden_vec: Vec<f32> = (0..1 * student_seq_len * hidden_size)
             .map(|i| ((i * 13 + 7) % 1000) as f32 / 1000.0)
             .collect();
-        let student_hidden = Tensor::from_vec(
+        let student_hidden = candle_core::Tensor::from_vec(
             student_hidden_vec,
             (1, student_seq_len, hidden_size),
             &device,
@@ -3236,7 +3251,7 @@ mod tests {
         let head_vec: Vec<f32> = (0..hidden_size * vocab_size)
             .map(|i| ((i * 11 + 5) % 1000) as f32 / 1000.0)
             .collect();
-        let head_t = Tensor::from_vec(head_vec, (hidden_size, vocab_size), &device)?;
+        let head_t = candle_core::Tensor::from_vec(head_vec, (hidden_size, vocab_size), &device)?;
 
         let student_tokens: Vec<u32> = (0..student_seq_len)
             .map(|i| ((i * 7 + 3) % vocab_size) as u32)
@@ -3521,9 +3536,9 @@ mod tests {
     fn stable_opd_loss_composition_matches_paper_formula() -> Result<()> {
         let device = candle_core::Device::Cpu;
         // OPD per-position: 5 active positions, values 0.1..0.5
-        let kl = Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4, 0.5], 5, &device)?;
-        let kl_ref = Tensor::from_vec(vec![0.05f32, 0.05, 0.05, 0.05, 0.05], 5, &device)?;
-        let sft = Tensor::new(2.0_f32, &device)?;
+        let kl = candle_core::Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4, 0.5], 5, &device)?;
+        let kl_ref = candle_core::Tensor::from_vec(vec![0.05f32, 0.05, 0.05, 0.05, 0.05], 5, &device)?;
+        let sft = candle_core::Tensor::new(2.0_f32, &device)?;
         let coeffs = StableOpdCoefficients {
             beta_kl: 0.01,
             lambda_sft: 0.1,
@@ -3549,7 +3564,7 @@ mod tests {
     #[test]
     fn stable_opd_loss_omits_optional_terms_when_none() -> Result<()> {
         let device = candle_core::Device::Cpu;
-        let kl = Tensor::from_vec(vec![0.1f32, 0.2, 0.3], 3, &device)?;
+        let kl = candle_core::Tensor::from_vec(vec![0.1f32, 0.2, 0.3], 3, &device)?;
         let coeffs = StableOpdCoefficients::off();
         let out = compute_stable_opd_loss(StableOpdLossInputs {
             per_position_kl: &kl,
@@ -3871,8 +3886,8 @@ mod tests {
     #[test]
     fn stable_opd_doubled_changes_loss_when_ref_present() -> Result<()> {
         let device = candle_core::Device::Cpu;
-        let kl = Tensor::from_vec(vec![0.1_f32; 4], 4, &device)?;
-        let kl_ref = Tensor::from_vec(vec![1.0_f32; 4], 4, &device)?;
+        let kl = candle_core::Tensor::from_vec(vec![0.1_f32; 4], 4, &device)?;
+        let kl_ref = candle_core::Tensor::from_vec(vec![1.0_f32; 4], 4, &device)?;
         let base = StableOpdCoefficients::auto_default();
         let doubled = base.doubled();
         let out_base = compute_stable_opd_loss(StableOpdLossInputs {
