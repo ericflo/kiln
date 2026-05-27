@@ -112,6 +112,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use candle_core::cuda_backend::CudaDevice;
+use candle_core::cuda_backend::cudarc::driver::CudaContext;
 
 use crate::{
     allocator_frozen_error, Allocator, AllocatorMode, CudaStorage, DType, Device, Result, Storage,
@@ -128,6 +129,20 @@ pub struct CudaAllocator {
     /// b39f5712), so downstream callers can already migrate to
     /// `.context()` without waiting for this field to flip.
     candle_device: Arc<CudaDevice>,
+    /// Cudarc `CudaContext` companion handle, derived from
+    /// `candle_device.cuda_stream().context().clone()` at construction
+    /// time — the **same** underlying CUDA primary context as
+    /// `candle_device`, just exposed without the candle wrapper.
+    ///
+    /// Held alongside `candle_device` so callers that only need the
+    /// context can read it from this allocator (via [`Self::context()`])
+    /// without going through candle. This is the interim "additive"
+    /// move ahead of the field flip — downstream consumers can migrate
+    /// off `.candle_device()` to `.context()` site-by-site, and when
+    /// the storage-side refactor (step 3 of the top-of-file order)
+    /// lands, this allocator's `candle_device` field can be dropped in
+    /// favor of just this `ctx` handle.
+    ctx: Arc<CudaContext>,
     /// CUDA device index — matches the index of `candle_device`'s
     /// owning context.
     device_index: usize,
@@ -141,10 +156,13 @@ pub struct CudaAllocator {
 
 impl CudaAllocator {
     /// Construct in `Owned` mode bound to `candle_device` at the
-    /// given CUDA index.
+    /// given CUDA index. The cudarc-typed `ctx` companion is derived
+    /// from the candle device internally — see the `ctx` field doc.
     pub fn new(candle_device: Arc<CudaDevice>, device_index: usize) -> Self {
+        let ctx = candle_device.cuda_stream().context().clone();
         CudaAllocator {
             candle_device,
+            ctx,
             device_index,
             mode: AllocatorMode::Owned,
             cache: HashMap::new(),
@@ -198,6 +216,14 @@ impl CudaAllocator {
     /// Borrow the underlying candle device handle.
     pub fn candle_device(&self) -> &Arc<CudaDevice> {
         &self.candle_device
+    }
+
+    /// Borrow the cudarc `CudaContext` companion handle (the same
+    /// underlying CUDA primary context as `candle_device`, exposed
+    /// without the candle wrapper). See the `ctx` field doc for the
+    /// migration rationale.
+    pub fn context(&self) -> &Arc<CudaContext> {
+        &self.ctx
     }
 }
 
