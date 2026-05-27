@@ -8,6 +8,16 @@
 //!   scale = max(abs(tensor)) / 448.0
 //!   quantized = clamp(round(tensor / scale), -448, 448)
 //!   dequantized = quantized * scale
+//!
+//! # Phase 7 kt migration (#1082)
+//!
+//! CUDA inputs route through the on-device `kiln_tensor::cuda_fp8_*` kernels
+//! via `kiln_kt_bridge`, keeping the buffer on-device for the whole quant /
+//! dequant. CPU inputs (and any bridge-precondition failure) fall back to
+//! the legacy host-side implementation below. Tests still cover the CPU path
+//! directly via candle. The candle-typed surface is preserved so the rest of
+//! kiln-model (`kv_cache.rs`, `paged_kv_cache.rs`) can call into this module
+//! without seeing any kt types.
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
@@ -23,7 +33,15 @@ const E4M3_MAX: f32 = 448.0;
 ///
 /// For typical attention K/V values (which are normalized and usually in ±10 range),
 /// this provides good precision without scaling.
+///
+/// CUDA tensors take the on-device `kiln_tensor::cuda_fp8_quantize_direct` path
+/// via kt bridge so the buffer never bounces through host memory. CPU tensors
+/// take the legacy host path.
 pub fn quantize_to_fp8_direct(tensor: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if let Some(out) = try_kt_quantize_to_fp8_direct(tensor)? {
+        return Ok(out);
+    }
     let tensor_f32 = tensor.to_dtype(DType::F32)?;
     let data = tensor_f32.flatten_all()?.to_vec1::<f32>()?;
     let fp8_bytes: Vec<u8> = data.iter().map(|&v| f32_to_e4m3(v)).collect();
@@ -32,7 +50,36 @@ pub fn quantize_to_fp8_direct(tensor: &Tensor) -> Result<Tensor> {
     Ok(quantized)
 }
 
+/// Phase 7 (#1082): contiguous CUDA tensor of {F32, BF16, F16} bridges to
+/// `kiln_tensor::cuda_fp8_quantize_direct`. Returns `Ok(None)` on any
+/// precondition failure so the caller falls through to the host path.
+#[cfg(feature = "cuda")]
+fn try_kt_quantize_to_fp8_direct(t: &Tensor) -> Result<Option<Tensor>> {
+    if !matches!(t.device(), Device::Cuda(_)) || !t.is_contiguous() {
+        return Ok(None);
+    }
+    if !matches!(t.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+        return Ok(None);
+    }
+    let kt_in = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t) {
+        Ok(k) => k,
+        Err(_) => return Ok(None),
+    };
+    let kt_out = match kiln_tensor::cuda_fp8_quantize_direct(&kt_in) {
+        Ok(k) => k,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_out).map_err(|e| {
+        anyhow::anyhow!("try_kt_quantize_to_fp8_direct: candle copy-back failed: {e}")
+    })?;
+    Ok(Some(out))
+}
+
 /// Convert FP8 storage back to target dtype without scaling (scale = 1.0).
+///
+/// CUDA tensors take the on-device `kiln_tensor::cuda_fp8_dequantize_direct`
+/// path via kt bridge. CPU tensors fall through to the legacy host path
+/// in [`dequantize_from_fp8`].
 pub fn dequantize_from_fp8_direct(
     quantized: &Tensor,
     target_dtype: DType,
@@ -46,7 +93,14 @@ pub fn dequantize_from_fp8_direct(
 /// Returns `(quantized_u8, scale)` where:
 /// - `quantized_u8` has the same shape as input but dtype U8
 /// - `scale` is a scalar f32 used to dequantize: `dequant = fp8_to_f32(u8_val) * scale`
+///
+/// CUDA tensors take the on-device `kiln_tensor::cuda_fp8_quantize` path
+/// via kt bridge. CPU tensors take the legacy host path.
 pub fn quantize_to_fp8(tensor: &Tensor) -> Result<(Tensor, f32)> {
+    #[cfg(feature = "cuda")]
+    if let Some(pair) = try_kt_quantize_to_fp8(tensor)? {
+        return Ok(pair);
+    }
     // Compute absmax scale
     let tensor_f32 = tensor.to_dtype(DType::F32)?;
     let abs_max = tensor_f32.abs()?.max(0)?.max(0)?;
@@ -73,13 +127,45 @@ pub fn quantize_to_fp8(tensor: &Tensor) -> Result<(Tensor, f32)> {
     Ok((quantized, scale))
 }
 
+/// Phase 7 (#1082): contiguous CUDA tensor of {F32, BF16, F16} bridges to
+/// `kiln_tensor::cuda_fp8_quantize` (per-tensor absmax scaling). Returns
+/// `Ok(None)` on any precondition failure so the caller falls through to
+/// the host path.
+#[cfg(feature = "cuda")]
+fn try_kt_quantize_to_fp8(t: &Tensor) -> Result<Option<(Tensor, f32)>> {
+    if !matches!(t.device(), Device::Cuda(_)) || !t.is_contiguous() {
+        return Ok(None);
+    }
+    if !matches!(t.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+        return Ok(None);
+    }
+    let kt_in = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t) {
+        Ok(k) => k,
+        Err(_) => return Ok(None),
+    };
+    let (kt_out, scale) = match kiln_tensor::cuda_fp8_quantize(&kt_in) {
+        Ok(pair) => pair,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_out)
+        .map_err(|e| anyhow::anyhow!("try_kt_quantize_to_fp8: candle copy-back failed: {e}"))?;
+    Ok(Some((out, scale)))
+}
+
 /// Convert FP8 storage (U8 tensor + scale) back to the target dtype.
+///
+/// CUDA inputs take the on-device `kiln_tensor::cuda_fp8_dequantize` path
+/// via kt bridge. CPU inputs take the legacy host path.
 pub fn dequantize_from_fp8(
     quantized: &Tensor,
     scale: f32,
     target_dtype: DType,
     device: &Device,
 ) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if let Some(out) = try_kt_dequantize_from_fp8(quantized, scale, target_dtype, device)? {
+        return Ok(out);
+    }
     let data = quantized.flatten_all()?.to_vec1::<u8>()?;
     let f32_vals: Vec<f32> = data.iter().map(|&b| e4m3_to_f32(b) * scale).collect();
 
@@ -88,6 +174,51 @@ pub fn dequantize_from_fp8(
     result
         .to_dtype(target_dtype)
         .context("dequantize dtype conversion")
+}
+
+/// Phase 7 (#1082): contiguous CUDA U8 tensor bridges to
+/// `kiln_tensor::cuda_fp8_dequantize`. The target device must match the
+/// input device (we don't support cross-device dequant on this fast
+/// path — bridge precondition). Returns `Ok(None)` on any precondition
+/// failure so the caller falls through to the host path.
+#[cfg(feature = "cuda")]
+fn try_kt_dequantize_from_fp8(
+    quantized: &Tensor,
+    scale: f32,
+    target_dtype: DType,
+    device: &Device,
+) -> Result<Option<Tensor>> {
+    if !matches!(quantized.device(), Device::Cuda(_)) || !quantized.is_contiguous() {
+        return Ok(None);
+    }
+    if quantized.dtype() != DType::U8 {
+        return Ok(None);
+    }
+    // Only handle dequant onto the same CUDA device as the input. Any
+    // cross-device case falls back to the host path which already supports
+    // the general case via `Tensor::from_vec(.., device)`.
+    if !matches!(device, Device::Cuda(_)) || !quantized.device().same_device(device) {
+        return Ok(None);
+    }
+    if !matches!(target_dtype, DType::F32 | DType::BF16 | DType::F16) {
+        return Ok(None);
+    }
+    let kt_dtype = match kiln_kt_bridge::candle_dtype_to_kt(target_dtype) {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    let kt_in = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(quantized) {
+        Ok(k) => k,
+        Err(_) => return Ok(None),
+    };
+    let kt_out = match kiln_tensor::cuda_fp8_dequantize(&kt_in, scale, kt_dtype) {
+        Ok(k) => k,
+        Err(_) => return Ok(None),
+    };
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_out).map_err(|e| {
+        anyhow::anyhow!("try_kt_dequantize_from_fp8: candle copy-back failed: {e}")
+    })?;
+    Ok(Some(out))
 }
 
 /// Convert an f32 value to E4M3FN bit pattern.
