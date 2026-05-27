@@ -1370,16 +1370,76 @@ pub fn vk_step_backward(loss: &VkTensor) -> Result<VkGradStore> {
 // Real-weights bridge: candle GpuWeights → VkModelWeights
 // ---------------------------------------------------------------------------
 
-/// Convert a candle tensor to VkTensor, preserving F32 / BF16 dtype.
-/// Anything else (F16, etc.) bails — vk-native is BF16-or-F32-only.
-fn vk_from_candle_typed(t: &Tensor, device: &Arc<VulkanDevice>) -> Result<VkTensor> {
-    match t.dtype() {
-        DType::F32 | DType::BF16 => VkTensor::from_candle(t, Arc::clone(device)),
+/// Extract a candle CPU tensor as `(little-endian bytes, shape, VkDType)`.
+///
+/// Forces the tensor contiguous and onto CPU before flattening. The
+/// returned byte buffer is laid out exactly as `VkTensor::from_bytes`
+/// expects (F32 = 4 bytes/elem LE, BF16 = 2 bytes/elem LE u16 bits).
+///
+/// Only F32 / BF16 candle dtypes are accepted; anything else bails
+/// since vk-native is F32-or-BF16-only. (#1082)
+fn candle_tensor_to_vk_bytes(t: &Tensor) -> Result<(Vec<u8>, Vec<usize>, VkDType)> {
+    let dtype = match t.dtype() {
+        DType::F32 => VkDType::F32,
+        DType::BF16 => VkDType::Bf16,
         other => bail!(
             "vk-native: unsupported tensor dtype {:?} (only F32 and BF16 are supported)",
             other
         ),
-    }
+    };
+    let t = t.contiguous().context("candle_tensor_to_vk_bytes: contiguous")?;
+    let t = t.to_device(&Device::Cpu)
+        .context("candle_tensor_to_vk_bytes: to CPU")?;
+    let shape: Vec<usize> = t.dims().to_vec();
+    let nelem: usize = shape.iter().product();
+    let bytes = match dtype {
+        VkDType::F32 => {
+            let data: Vec<f32> = t
+                .flatten_all()?
+                .to_vec1::<f32>()
+                .context("candle_tensor_to_vk_bytes: f32 readout")?;
+            let mut bytes = Vec::with_capacity(nelem * 4);
+            for v in data {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            bytes
+        }
+        VkDType::Bf16 => {
+            // Read BF16 → F32 in candle (lossless: BF16 values are an
+            // exact subset of F32, the low 16 mantissa bits are simply
+            // zeroed). Repack to BF16 LE bytes on the host by keeping
+            // the high 16 bits of each F32 — no rounding needed because
+            // the candle→F32 cast leaves the low 16 bits zero.
+            //
+            // This avoids depending on `half::bf16` directly from this
+            // crate (kiln-model only pulls in `half` under the `cuda`
+            // feature). (#1082)
+            let data: Vec<f32> = t
+                .to_dtype(DType::F32)
+                .context("candle_tensor_to_vk_bytes: bf16→f32 cast")?
+                .flatten_all()?
+                .to_vec1::<f32>()
+                .context("candle_tensor_to_vk_bytes: bf16-as-f32 readout")?;
+            let mut bytes = Vec::with_capacity(nelem * 2);
+            for v in data {
+                let bf16_bits = (v.to_bits() >> 16) as u16;
+                bytes.extend_from_slice(&bf16_bits.to_le_bytes());
+            }
+            bytes
+        }
+    };
+    Ok((bytes, shape, dtype))
+}
+
+/// Convert a candle tensor to VkTensor, preserving F32 / BF16 dtype.
+/// Anything else (F16, etc.) bails — vk-native is BF16-or-F32-only.
+///
+/// Lowers to `VkTensor::from_bytes` (candle-free upload boundary). The
+/// candle-typed bytes extraction is local to this file so `vk_tensor.rs`
+/// stays candle-free. (#1082)
+fn vk_from_candle_typed(t: &Tensor, device: &Arc<VulkanDevice>) -> Result<VkTensor> {
+    let (bytes, shape, dtype) = candle_tensor_to_vk_bytes(t)?;
+    VkTensor::from_bytes(&bytes, shape, dtype, Arc::clone(device))
 }
 
 /// Force-upload a small candle tensor as F32. Used for RMSNorm
@@ -1391,8 +1451,9 @@ fn vk_from_candle_as_f32(t: &Tensor, device: &Arc<VulkanDevice>) -> Result<VkTen
         DType::F32 => t.clone(),
         _ => t.to_dtype(DType::F32)?,
     };
-    let t_cpu = t_f32.to_device(&Device::Cpu)?;
-    VkTensor::from_candle(&t_cpu, Arc::clone(device))
+    let (bytes, shape, dtype) = candle_tensor_to_vk_bytes(&t_f32)?;
+    debug_assert_eq!(dtype, VkDType::F32);
+    VkTensor::from_bytes(&bytes, shape, dtype, Arc::clone(device))
 }
 
 /// Pick a projection weight from candle, handling the case where the
