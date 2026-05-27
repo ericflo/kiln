@@ -33,24 +33,31 @@
 //!   downstream callers that only need the cudarc handle.
 //! - d3caf46b (`add CudaStorage::zeros_ctx parallel constructor`)
 //!   landed the candle-free allocation entry on the storage side.
-//! - **this commit**: flipped this allocator's `warm()` and `alloc()`
-//!   internal call sites from `CudaStorage::zeros(candle_device, ...)`
-//!   to `CudaStorage::zeros_ctx(&self.ctx, ...)`. The actual cudarc
-//!   `alloc_zeros::<u8>` call is now reached through this allocator's
-//!   `Arc<CudaContext>` companion field, NOT through the candle
-//!   `CudaDevice::alloc_zeros` wrapper. The `candle_device` field is
-//!   no longer load-bearing for allocation; it is only kept around so
-//!   the existing `candle_device()` getter keeps compiling for
-//!   downstream callers (Phase 5's `CaptureSession` etc.) that have
-//!   not yet migrated to `.context()`.
+//! - e2bddd72 (`CudaAllocator allocates via zeros_ctx — candle-free`)
+//!   flipped this allocator's `warm()` and `alloc()` internal call
+//!   sites from `CudaStorage::zeros(candle_device, ...)` to
+//!   `CudaStorage::zeros_ctx(&self.ctx, ...)`. The actual cudarc
+//!   `alloc_zeros::<u8>` call now reaches CUDA through this
+//!   allocator's `Arc<CudaContext>` companion field, NOT the candle
+//!   `CudaDevice::alloc_zeros` wrapper.
+//! - **this commit**: **dropped the `candle_device` field entirely**.
+//!   `CudaAllocator` now carries only `Arc<CudaContext>` on the
+//!   CUDA-handle side. The existing `new(candle_device, ...)` and
+//!   `with_mode(candle_device, ...)` entries are kept as back-compat
+//!   shims that derive the `ctx` from the candle device wrapper and
+//!   forward to the new `new_ctx` / `with_mode_ctx` constructors,
+//!   so the in-source `#[cfg(test)]` callers (the only external
+//!   touchpoints today) keep compiling unchanged. The
+//!   `candle_device()` getter is gone — call sites that need a candle
+//!   device wrapper derive one via
+//!   `kiln_tensor::primary_cuda_device(allocator.device_index())` or
+//!   read it from the produced `CudaStorage.candle_device()`.
 //!
-//! The **field flip** that fully removes the candle-typed
-//! `candle_device: Arc<CudaDevice>` is still blocked on the storage-
-//! side `candle_device` field flip (the produced `CudaStorage` still
-//! carries a candle device for downstream FFI sites that read
-//! `cuda_stream()`), but every downstream caller can now migrate to
-//! `.context()` independently — and this allocator no longer creates
-//! any new candle-flavored allocations internally.
+//! **CP-1 on the allocator side is now structurally complete.** The
+//! produced `CudaStorage` still carries a candle device for kernel-
+//! crate FFI sites that read `cuda_stream()` — the storage-side field
+//! flip (the next CP-1 lift step) is independent of this allocator
+//! and unblocked by the `zeros_ctx` constructor that already exists.
 //!
 //! # Original audit (call-graph dependencies)
 //!
@@ -138,31 +145,27 @@ use crate::{
 
 #[derive(Debug)]
 pub struct CudaAllocator {
-    /// Candle CUDA device handle. Held for stream affinity + the
-    /// `alloc_zeros::<u8>` helper. The Phase 7 swap to a direct
-    /// cudarc `CudaContext` field is still blocked on
-    /// `CudaStorage::zeros` migrating first (step 1 in the top-of-
-    /// file order-of-operations); the *read*-side bridge is now
-    /// available via [`CudaStorage::context()`] (step 0, landed in
-    /// b39f5712), so downstream callers can already migrate to
-    /// `.context()` without waiting for this field to flip.
-    candle_device: Arc<CudaDevice>,
-    /// Cudarc `CudaContext` companion handle, derived from
-    /// `candle_device.cuda_stream().context().clone()` at construction
-    /// time — the **same** underlying CUDA primary context as
-    /// `candle_device`, just exposed without the candle wrapper.
+    /// Cudarc `CudaContext` — the **only** CUDA-side handle this
+    /// allocator carries after #1082 Phase 7 CP-1 step 3.
     ///
-    /// Held alongside `candle_device` so callers that only need the
-    /// context can read it from this allocator (via [`Self::context()`])
-    /// without going through candle. This is the interim "additive"
-    /// move ahead of the field flip — downstream consumers can migrate
-    /// off `.candle_device()` to `.context()` site-by-site, and when
-    /// the storage-side refactor (step 3 of the top-of-file order)
-    /// lands, this allocator's `candle_device` field can be dropped in
-    /// favor of just this `ctx` handle.
+    /// Used to allocate device memory via
+    /// `ctx.default_stream().alloc_zeros::<u8>(byte_len)` through the
+    /// [`CudaStorage::zeros_ctx`] entry (landed in d3caf46b). The
+    /// previously-held `candle_device: Arc<CudaDevice>` field was
+    /// dropped — every internal allocation site already routes through
+    /// this context handle (post-e2bddd72), and the field had zero
+    /// external callers in the workspace (confirmed via
+    /// `grep -rn 'CudaAllocator::candle_device' crates/`).
+    ///
+    /// Callers that need the candle wrapper can derive it on demand
+    /// via `kiln_tensor::primary_cuda_device(allocator.device_index())`
+    /// — or, more typically, read it directly from the produced
+    /// `CudaStorage.candle_device()` (which is still load-bearing for
+    /// kernel-crate FFI sites until they migrate to
+    /// `cuda_stream_raw()`).
     ctx: Arc<CudaContext>,
-    /// CUDA device index — matches the index of `candle_device`'s
-    /// owning context.
+    /// CUDA device ordinal — matches the ordinal of `ctx`'s owning
+    /// device.
     device_index: usize,
     mode: AllocatorMode,
     /// Free-list cache keyed on `(dtype, n_elements)`. See
@@ -173,13 +176,16 @@ pub struct CudaAllocator {
 }
 
 impl CudaAllocator {
-    /// Construct in `Owned` mode bound to `candle_device` at the
-    /// given CUDA index. The cudarc-typed `ctx` companion is derived
-    /// from the candle device internally — see the `ctx` field doc.
-    pub fn new(candle_device: Arc<CudaDevice>, device_index: usize) -> Self {
-        let ctx = candle_device.cuda_stream().context().clone();
+    /// Construct in `Owned` mode bound to `ctx` at the given CUDA
+    /// ordinal — the **candle-free** constructor entry.
+    ///
+    /// This is the canonical constructor going forward; the
+    /// candle-flavored [`Self::new`] / [`Self::with_mode`] entries
+    /// derive `ctx` from a candle `CudaDevice` and call into this one,
+    /// so existing call sites (only the in-source `#[cfg(test)]`
+    /// callers today) keep compiling unchanged.
+    pub fn new_ctx(ctx: Arc<CudaContext>, device_index: usize) -> Self {
         CudaAllocator {
-            candle_device,
             ctx,
             device_index,
             mode: AllocatorMode::Owned,
@@ -189,7 +195,33 @@ impl CudaAllocator {
         }
     }
 
+    /// Construct directly in a given mode (tests, capture session) —
+    /// **candle-free** entry.
+    pub fn with_mode_ctx(
+        ctx: Arc<CudaContext>,
+        device_index: usize,
+        mode: AllocatorMode,
+    ) -> Self {
+        let mut a = Self::new_ctx(ctx, device_index);
+        a.mode = mode;
+        a
+    }
+
+    /// Construct in `Owned` mode bound to `candle_device` at the
+    /// given CUDA ordinal.
+    ///
+    /// Back-compat entry: extracts the cudarc `Arc<CudaContext>` via
+    /// `candle_device.cuda_stream().context()` and forwards to
+    /// [`Self::new_ctx`]. The allocator no longer stores the candle
+    /// device handle — see the `ctx` field doc.
+    pub fn new(candle_device: Arc<CudaDevice>, device_index: usize) -> Self {
+        let ctx = candle_device.cuda_stream().context().clone();
+        Self::new_ctx(ctx, device_index)
+    }
+
     /// Construct directly in a given mode (tests, capture session).
+    ///
+    /// Back-compat entry — see [`Self::new`].
     pub fn with_mode(
         candle_device: Arc<CudaDevice>,
         device_index: usize,
@@ -241,17 +273,19 @@ impl CudaAllocator {
             .unwrap_or(0)
     }
 
-    /// Borrow the underlying candle device handle.
-    pub fn candle_device(&self) -> &Arc<CudaDevice> {
-        &self.candle_device
-    }
-
-    /// Borrow the cudarc `CudaContext` companion handle (the same
-    /// underlying CUDA primary context as `candle_device`, exposed
-    /// without the candle wrapper). See the `ctx` field doc for the
-    /// migration rationale.
+    /// Borrow the cudarc `CudaContext` handle this allocator was
+    /// constructed with. The same handle used for every internal
+    /// allocation via `ctx.default_stream().alloc_zeros::<u8>` (see
+    /// [`Self::warm`] / `Allocator::alloc`).
     pub fn context(&self) -> &Arc<CudaContext> {
         &self.ctx
+    }
+
+    /// The CUDA device ordinal this allocator is bound to. Useful for
+    /// callers that need to derive a candle `CudaDevice` on demand via
+    /// [`crate::primary_cuda_device`].
+    pub fn device_index(&self) -> usize {
+        self.device_index
     }
 }
 
