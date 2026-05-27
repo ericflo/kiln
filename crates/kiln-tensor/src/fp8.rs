@@ -79,7 +79,7 @@ pub fn cuda_fp8_quantize_with_scale(
     src: &crate::Tensor,
     scale: f32,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     if !scale.is_finite() || scale == 0.0 {
         return Err(crate::Error::Msg(format!(
@@ -257,7 +257,7 @@ pub fn cuda_fp8_dequantize(
     scale: f32,
     target_dtype: DType,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     if src.dtype() != DType::U8 {
         return Err(crate::Error::Msg(format!(

@@ -49,6 +49,11 @@ memmap2 = { workspace = true }
 # this with a direct cudarc dependency.
 candle-core = { workspace = true, optional = true }
 
+# Direct cudarc — replaces candle re-exports of driver types
+# (`DevicePtr`) in `fp8.rs`. Same workspace pin as candle vendors so
+# the compiled crate unifies. Issue #1082 seam-removal step.
+cudarc = { workspace = true, optional = true }
+
 # Optional — only under `metal`. `metal_storage.rs` references
 # `candle_metal_kernels::metal::Buffer` / `MTLStorageMode` directly;
 # candle-core does NOT re-export the `candle_metal_kernels` crate, so
@@ -80,7 +85,7 @@ default = []
 # `candle_core::cuda_backend::cudarc::driver::*` matching the pattern in
 # kiln-conv1d-kernel / kiln-flash-attn / kiln-model::cuda_graph. This is
 # the SINGLE candle hook in kiln-tensor; Phase 7 replaces it.
-cuda = ["dep:candle-core", "candle-core?/cuda", "dep:kiln-blas"]
+cuda = ["dep:candle-core", "candle-core?/cuda", "dep:cudarc", "dep:kiln-blas"]
 # Reserved for Phase 1.7. Same pattern as `cuda`.
 metal = ["dep:candle-core", "candle-core?/metal", "dep:candle-metal-kernels", "dep:candle-nn", "candle-nn?/metal"]
 # Phase 1.8 — Vulkan storage. Does NOT go through candle: lifts
