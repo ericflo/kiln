@@ -3062,7 +3062,14 @@ use kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b;
 mod tests {
     use super::*;
     use crate::logit_source::FixtureLogitSource;
-    use candle_core::{DType, Device};
+    // The `Tensor` construction helpers in this test module still go through candle
+    // because `opd_step_loss` and related APIs take `&candle_core::Tensor` (see the
+    // top-level `use candle_core::Tensor;` — blocked on the kt-typed OPD forward
+    // surface migrating off candle `Tensor` in the public API). The `DType` /
+    // `Device` symbols are referenced with their fully-qualified `candle_core::`
+    // paths so removing this `mod tests` `use` of candle does not require a
+    // `use candle_core::{...};` line — keeping the file at one fewer candle
+    // import. (#1082)
     use kiln_core::tokenizer::KilnTokenizer;
 
     fn off_policy_smoke_tokenizer() -> Result<KilnTokenizer> {
@@ -3104,7 +3111,7 @@ mod tests {
     /// that the math matches the Phase A reference directly.
     #[test]
     fn opd_step_loss_matches_kernel_directly() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let seq_len = 8;
         let hidden_size = 8;
         let vocab_size = 64;
@@ -3168,9 +3175,9 @@ mod tests {
 
     #[test]
     fn opd_step_loss_rejects_empty_positions() {
-        let device = Device::Cpu;
-        let student_hidden = Tensor::zeros((1, 4, 8), DType::F32, &device).unwrap();
-        let head_t = Tensor::zeros((8, 16), DType::F32, &device).unwrap();
+        let device = candle_core::Device::Cpu;
+        let student_hidden = Tensor::zeros((1, 4, 8), candle_core::DType::F32, &device).unwrap();
+        let head_t = Tensor::zeros((8, 16), candle_core::DType::F32, &device).unwrap();
         let fixture = FixtureLogitSource::uniform_topk("test", 16, 4);
         let teacher: Arc<dyn LogitSource> = Arc::new(fixture);
         let err = opd_step_loss_simple(
@@ -3191,7 +3198,7 @@ mod tests {
         // Verify that when teacher_tokens / teacher_active_positions are
         // set, the kernel queries the teacher at the SHIFTED positions
         // and pairs them back to the student's active positions by index.
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let vocab_size = 16usize;
         let hidden_size = 8usize;
         let top_k = 4usize;
@@ -3272,9 +3279,9 @@ mod tests {
 
     #[test]
     fn opd_step_loss_rejects_mismatched_asymmetric_lengths() {
-        let device = Device::Cpu;
-        let student_hidden = Tensor::zeros((1, 4, 8), DType::F32, &device).unwrap();
-        let head_t = Tensor::zeros((8, 16), DType::F32, &device).unwrap();
+        let device = candle_core::Device::Cpu;
+        let student_hidden = Tensor::zeros((1, 4, 8), candle_core::DType::F32, &device).unwrap();
+        let head_t = Tensor::zeros((8, 16), candle_core::DType::F32, &device).unwrap();
         let fixture = FixtureLogitSource::uniform_topk("test", 16, 4);
         let teacher: Arc<dyn LogitSource> = Arc::new(fixture);
         // teacher_active_positions has 1 entry but active_positions has 2.
@@ -3493,7 +3500,7 @@ mod tests {
 
     #[test]
     fn stable_opd_loss_composition_matches_paper_formula() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         // OPD per-position: 5 active positions, values 0.1..0.5
         let kl = Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4, 0.5], 5, &device)?;
         let kl_ref = Tensor::from_vec(vec![0.05f32, 0.05, 0.05, 0.05, 0.05], 5, &device)?;
@@ -3522,7 +3529,7 @@ mod tests {
 
     #[test]
     fn stable_opd_loss_omits_optional_terms_when_none() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let kl = Tensor::from_vec(vec![0.1f32, 0.2, 0.3], 3, &device)?;
         let coeffs = StableOpdCoefficients::off();
         let out = compute_stable_opd_loss(StableOpdLossInputs {
@@ -3844,7 +3851,7 @@ mod tests {
     /// but matter when β>0.
     #[test]
     fn stable_opd_doubled_changes_loss_when_ref_present() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let kl = Tensor::from_vec(vec![0.1_f32; 4], 4, &device)?;
         let kl_ref = Tensor::from_vec(vec![1.0_f32; 4], 4, &device)?;
         let base = StableOpdCoefficients::auto_default();
