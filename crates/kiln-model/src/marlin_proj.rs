@@ -160,15 +160,11 @@ pub fn upload_packed(packed: PackedHost, device: &Device) -> Result<MarlinPacked
     } else {
         k / groupsize as usize
     };
-    let b_packed = Tensor::from_vec(
-        b_packed_vec,
-        (k / 16, n * 16 / 8),
-        &candle_core::Device::Cpu,
-    )
-    .context("marlin_proj: build host b_packed tensor")?
-    .to_device(device)
-    .context("marlin_proj: upload b_packed to device")?;
-    let scales = Tensor::from_vec(scales_vec, (num_groups, n), &candle_core::Device::Cpu)
+    let b_packed = Tensor::from_vec(b_packed_vec, (k / 16, n * 16 / 8), &Device::Cpu)
+        .context("marlin_proj: build host b_packed tensor")?
+        .to_device(device)
+        .context("marlin_proj: upload b_packed to device")?;
+    let scales = Tensor::from_vec(scales_vec, (num_groups, n), &Device::Cpu)
         .context("marlin_proj: build host scales tensor")?
         .to_device(device)
         .context("marlin_proj: upload scales to device")?;
