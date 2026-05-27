@@ -90,6 +90,123 @@ impl MetalStorage {
         })
     }
 
+    /// Allocate `n_elements` worth of bytes for `dtype` on the metal-rs
+    /// `device`, **candle-free** in the allocation path.
+    ///
+    /// Buffer is allocated through
+    /// `device.new_buffer(byte_len, MTLResourceOptions::StorageModeShared)`
+    /// (Apple Silicon UMA — host and GPU share physical memory). Zero
+    /// initialization happens via a direct `core::ptr::write_bytes` on
+    /// the buffer's UMA `.contents()` pointer; no blit-command-encoder
+    /// is required because Shared-mode buffers are CPU-addressable.
+    ///
+    /// `device_index` is the Metal device ordinal — must match the
+    /// ordinal of `device`'s owning system device. Stored as the
+    /// [`Device::Metal`] variant.
+    ///
+    /// # Why the storage's `candle_device` field is still populated
+    ///
+    /// The internal `candle_device: Arc<MetalDevice>` field is still
+    /// load-bearing for downstream callers: every kernel-crate FFI
+    /// site in `kiln-model::backend::metal` clones it as
+    /// `(*candle_device_arc).clone()` to plumb a `MetalDevice` by
+    /// value into `candle_metal_kernels::*` calls, and the candle
+    /// `MetalDevice` wrapper caches compute pipelines + holds the
+    /// shared command-queue that production code re-uses. Until every
+    /// caller migrates to a raw-metal-rs FFI surface (`MTLDevice` +
+    /// `MTLCommandQueue` directly), this constructor derives the
+    /// candle wrapper from [`primary_metal_device`] (which calls
+    /// `candle_core::Device::new_metal(device_index)`) so the
+    /// resulting `MetalStorage` is drop-in-compatible with every
+    /// existing downstream call site.
+    ///
+    /// # Device-affinity contract
+    ///
+    /// Both `device` (the metal-rs handle the caller passes) and the
+    /// candle `MetalDevice` returned by `primary_metal_device(device_index)`
+    /// wrap the same `MTLDevice` protocol object for the given
+    /// ordinal — candle's `MetalDevice::new` (via `Device::all()`)
+    /// resolves the same registry-ID-indexed physical GPU that
+    /// metal-rs's `Device::system_default()` / `Device::all()` returns.
+    /// The new buffer is therefore addressable by every kernel-crate
+    /// FFI that consumes `candle_device.metal_device()`.
+    ///
+    /// # UMA + zero-init safety
+    ///
+    /// Apple Silicon UMA guarantees that an `MTLStorageModeShared`
+    /// buffer's `contents()` pointer is CPU-addressable and points at
+    /// the same physical bytes the GPU sees. `core::ptr::write_bytes`
+    /// (memset) on that pointer with value 0 is well-defined for any
+    /// `byte_len` allocation — there is no `MTLBuffer didModifyRange`
+    /// requirement on Shared mode (unlike Managed mode on Intel
+    /// Macs). For `byte_len == 0`, we explicitly skip the alloc + fill
+    /// and synthesize a 1-byte placeholder buffer to match candle's
+    /// `allocate_zeros(0)` semantics (which goes through
+    /// `buf_size(0) = 1.next_power_of_two() = 1`).
+    ///
+    /// # Future direction
+    ///
+    /// Once every kernel-crate FFI site migrates to a raw-metal-rs
+    /// `MTLDevice` + `MTLCommandQueue` surface (out of scope here),
+    /// the storage's `candle_device` field can be dropped entirely
+    /// and this constructor stops needing to call
+    /// [`primary_metal_device`]. At that point `Self::zeros` is
+    /// folded into this entry. See the order-of-operations doc in
+    /// `metal_allocator.rs` lines 56-78.
+    ///
+    /// Mirror of [`crate::CudaStorage::zeros_ctx`] (commit d3caf46b) —
+    /// same shape, same rationale (the parallel-constructor step of
+    /// the CP-1/CP-2 substrate lift documented in
+    /// `docs/issue-1082-tier-4-5-roadmap-2026-05-27.md`).
+    pub fn zeros_kt(
+        device: &MetalRawDevice,
+        device_index: usize,
+        dtype: DType,
+        n_elements: usize,
+    ) -> Result<Self> {
+        use candle_metal_kernels::metal::MTLResourceOptions;
+
+        let byte_len = dtype.packed_buffer_bytes(n_elements);
+        // Candle-free allocation through metal-rs. Apple's MTLDevice
+        // rejects newBufferWithLength:options: for length=0 (returns
+        // nil), so round up to 1 byte to match candle's buf_size(0) = 1
+        // behavior. The dtype-derived byte_len on the StorageBackend
+        // side still reads from buffer.length(), so the 0-len case is
+        // self-consistent (the byte_len reported by the StorageBackend
+        // will be 1, matching what candle's zeros() returns today).
+        let alloc_len = byte_len.max(1);
+        let buffer = device
+            .new_buffer(alloc_len, MTLResourceOptions::StorageModeShared)
+            .map_err(|e| {
+                Error::Msg(format!(
+                    "MetalStorage::zeros_kt: device.new_buffer({alloc_len}, Shared) \
+                     failed: {e:?}"
+                ))
+            })?;
+        // Zero-fill via UMA contents pointer — no command-queue
+        // required on Shared-mode buffers.
+        //
+        // SAFETY: `buffer.contents()` returns a non-null `*mut u8` for
+        // Shared-mode buffers on Apple Silicon UMA. `alloc_len` is the
+        // exact length passed to `newBufferWithLength:options:`, so the
+        // write_bytes call stays within the buffer's allocation. The
+        // buffer is single-owner (just freshly allocated, no Arc clone
+        // outstanding yet) so there are no aliasing concerns.
+        unsafe {
+            core::ptr::write_bytes(buffer.contents(), 0u8, alloc_len);
+        }
+        // Derive the candle device wrapper for the back-compat field.
+        // This is the one residual candle dependency in this path; it
+        // goes away in the future `candle_device` field-removal step.
+        let candle_device = primary_metal_device(device_index)?;
+        Ok(MetalStorage {
+            device: Device::Metal(device_index),
+            dtype,
+            buffer: Arc::new(buffer),
+            candle_device,
+        })
+    }
+
     /// Wrap an existing `Arc<metal::Buffer>` allocated by the caller.
     ///
     /// Validates the buffer length against `dtype.size_in_bytes()`
@@ -207,6 +324,36 @@ pub fn metal_zeros(
 ) -> Result<crate::Storage> {
     let storage = MetalStorage::zeros(candle_device, device_index, dtype, n_elements)?;
     Ok(Arc::new(storage))
+}
+
+/// Resolve the primary candle `MetalDevice` for the given Metal device
+/// ordinal — public mirror of [`crate::primary_cuda_device`] for the
+/// Metal backend.
+///
+/// Calls `candle_core::Device::new_metal(device_index)` and unwraps to
+/// `Arc<MetalDevice>`. Used by [`MetalStorage::zeros_kt`] to populate
+/// the back-compat `candle_device` field on storage allocated via the
+/// candle-free metal-rs path; also exposed publicly so downstream test
+/// code can construct Metal tensors candle-free at the construction
+/// boundary.
+///
+/// # Phase 7 (#1082) note
+///
+/// Once every kernel-crate FFI site migrates to a raw-metal-rs
+/// `MTLDevice` + `MTLCommandQueue` surface, the storage-side
+/// `candle_device` field disappears and this helper retires. Until
+/// then it stays as the single residual candle hook in the
+/// substrate's allocation path.
+#[allow(dead_code)]
+pub fn primary_metal_device(device_index: usize) -> Result<Arc<MetalDevice>> {
+    match candle_core::Device::new_metal(device_index)
+        .map_err(|e| Error::Msg(format!("primary_metal_device({device_index}): {e}")))?
+    {
+        candle_core::Device::Metal(d) => Ok(Arc::new(d)),
+        _ => Err(Error::Msg(format!(
+            "primary_metal_device({device_index}): expected Metal device"
+        ))),
+    }
 }
 
 

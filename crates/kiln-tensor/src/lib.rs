@@ -106,7 +106,7 @@ pub use metal_allocator::MetalAllocator;
 pub use metal_storage::{
     metal_activation_unary, metal_cast, metal_elementwise_binary, metal_index_select_dim0,
     metal_layernorm_last_axis, metal_rmsnorm_last_axis, metal_softmax_last_axis, metal_zeros,
-    MetalStorage,
+    primary_metal_device, MetalStorage,
 };
 #[cfg(feature = "vulkan")]
 pub use vulkan_allocator::VulkanAllocator;
