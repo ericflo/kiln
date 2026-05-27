@@ -194,6 +194,24 @@ impl KvCache {
         self.fp8
     }
 
+    /// kt-typed accessor for the cache's stored compute dtype (#1082).
+    ///
+    /// Mirror of `PagedKvCache::compute_dtype_kt`. Returns the
+    /// dequant target dtype as `kiln_tensor::DType` so callers can
+    /// match against kt types without importing
+    /// `candle_core::DType`. For FP8 caches this is the dtype the
+    /// pool dequantizes to on [`Self::update`]; for native caches
+    /// it is the storage dtype itself.
+    ///
+    /// Errors only if the internal candle dtype cannot be mapped to
+    /// a kt dtype, which would indicate a constructor invariant
+    /// violation. See `PagedKvCache::compute_dtype_kt` for the full
+    /// rationale on the error path. (#1082)
+    pub fn compute_dtype_kt(&self) -> Result<kiln_tensor::DType> {
+        kiln_kt_bridge::candle_dtype_to_kt(self.compute_dtype)
+            .map_err(|e| anyhow::anyhow!("KvCache::compute_dtype_kt: {e}"))
+    }
+
     /// Append new K/V for a full-attention layer and return the full
     /// (cached + new) K/V tensors in compute dtype.
     ///
