@@ -1553,7 +1553,7 @@ impl AppState {
         model_config: ModelConfig,
         runner: ModelRunner,
         tokenizer: KilnTokenizer,
-        device: kiln_tensor::Device,
+        device_kt: kiln_tensor::Device,
         adapter_dir: PathBuf,
         memory_cfg: &crate::config::MemoryConfig,
         request_timeout_secs: u64,
@@ -1612,10 +1612,8 @@ impl AppState {
         // Detect VRAM once and reuse it for both auto-sizing and reporting so
         // startup doesn't repeat the same probe/logging path.
         let vram_info = kiln_core::vram::detect_vram();
-        // `device` is already `kt::Device` after the #1082 migration; clone
-        // it into `device_kt` so existing `&device_kt` call sites below keep
-        // type-checking without further churn.
-        let device_kt = device.clone();
+        // `device_kt` is the (already kt-typed) device param after #1082;
+        // the previous candle->kt bridge that lived here is gone.
         let total_vram = detected_gpu_total_memory(&device_kt, &vram_info);
         let is_metal = is_metal_device(&device_kt);
 
@@ -1913,9 +1911,9 @@ impl AppState {
                 ),
             ))
         });
-        let decode_batcher = if DecodeBatcherConfig::enabled_for_device_kt(&device) {
+        let decode_batcher = if DecodeBatcherConfig::enabled_for_device_kt(&device_kt) {
             let backend_name = runner.read().unwrap().backend_name();
-            let config = DecodeBatcherConfig::from_env_for_backend_kt(&device, backend_name);
+            let config = DecodeBatcherConfig::from_env_for_backend_kt(&device_kt, backend_name);
             tracing::info!(
                 backend = backend_name,
                 max_batch = config.max_batch,
