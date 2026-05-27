@@ -1233,6 +1233,46 @@ pub fn for_device(device: &Device) -> Arc<dyn BackendRuntime> {
     }
 }
 
+/// kt-typed parallel entry to [`for_device`] (#1082 Tier 3).
+///
+/// Takes a `kiln_tensor::Device` instead of `candle_core::Device`, bridges
+/// at the boundary, and delegates to the existing candle-typed
+/// implementation. Returns the same `Arc<dyn BackendRuntime>` — the trait
+/// surface itself is still candle-typed today; per-method kt-typed twins
+/// land in follow-up commits.
+///
+/// `kt::Device::Vulkan(_)` maps to a candle `Cpu` device so the runtime
+/// Vulkan detection in [`for_device`] still fires (candle has no native
+/// `Device::Vulkan`; the existing CPU-device-with-Vulkan-active sentinel
+/// pattern is preserved).
+///
+/// `kt::Device::Cuda(_)` and `kt::Device::Metal(_)` only resolve when the
+/// matching cargo feature is enabled. Without that feature, the
+/// underlying `candle_device_from_kt` would error out — but on this build
+/// `kt::Device::Metal(_)` only reaches `for_device_kt` from a candle
+/// `Device::Cpu` round-trip (kt-bridge's CUDA-only restriction maps
+/// non-Cuda candle devices to `kt::Device::Cpu`), so the case is
+/// vanishingly rare in production. We treat unmappable kt Devices as a
+/// CPU device, matching the existing fallback for any non-CUDA backend.
+#[cfg(feature = "cuda")]
+pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
+    // Vulkan goes through the candle-CPU sentinel path so the runtime
+    // detection inside `for_device` runs unchanged.
+    if matches!(device, kiln_tensor::Device::Vulkan(_)) {
+        return for_device(&Device::Cpu);
+    }
+    match kiln_kt_bridge::candle_device_from_kt(device) {
+        Ok(cd) => for_device(&cd),
+        Err(_) => {
+            // Unmappable kt Device (e.g. Metal without the candle metal
+            // feature). Fall back to the candle CPU path; that matches
+            // `for_device`'s default arm and keeps the function total.
+            for_device(&Device::Cpu)
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
