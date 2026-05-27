@@ -37,7 +37,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use candle_core::cuda_backend::cudarc::driver::CudaContext;
+use cudarc::driver::CudaContext;
 use kiln_blas::{
     AlgoCache, CublasLtMatmulHandle, Epilogue, MatmulLayout, MatmulRequest,
 };

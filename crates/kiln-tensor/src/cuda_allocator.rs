@@ -137,7 +137,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use candle_core::cuda_backend::CudaDevice;
-use candle_core::cuda_backend::cudarc::driver::CudaContext;
+use cudarc::driver::CudaContext;
 
 use crate::{
     allocator_frozen_error, Allocator, AllocatorMode, CudaStorage, DType, Device, Result, Storage,
