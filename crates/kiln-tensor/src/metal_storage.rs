@@ -45,6 +45,7 @@ use candle_core::metal_backend::MetalDevice;
 // re-export it under `metal_backend`. Depend on it directly under the
 // `metal` feature so this path resolves.
 use candle_metal_kernels::metal::Buffer as MetalBuffer;
+use candle_metal_kernels::metal::Device as MetalRawDevice;
 
 use crate::{DType, Device, Error, Result, StorageBackend};
 
@@ -130,6 +131,35 @@ impl MetalStorage {
     /// kernels in `kiln-model::backend::metal` consume.
     pub fn candle_device(&self) -> &Arc<MetalDevice> {
         &self.candle_device
+    }
+
+    /// The underlying metal-rs `Device` this storage was allocated
+    /// on — **candle-free passthrough**.
+    ///
+    /// Returns an owned [`candle_metal_kernels::metal::Device`] (cheap
+    /// `Retained<ProtocolObject<dyn MTLDevice>>` clone via NSObject
+    /// `retain`). The returned device wraps the SAME `MTLDevice`
+    /// protocol object that candle's `MetalDevice` holds internally —
+    /// candle's `MetalDevice::metal_device()` returns `&Device` from
+    /// the same `candle_metal_kernels::metal` crate that this re-export
+    /// uses, so the wire type is identical.
+    ///
+    /// This is the substrate-side accessor that unblocks the #1082
+    /// Phase 7 CP-2 migration of `MetalAllocator` (and other
+    /// downstream callers) to hold `metal-rs::Device` directly without
+    /// depending on candle's `MetalDevice` wrapper. The internal
+    /// storage field continues to hold the candle `Arc<MetalDevice>`
+    /// for now (so every existing kernel-crate FFI site reading
+    /// `self.candle_device.clone()` keeps working unchanged); the
+    /// field flip to a raw `Arc<MetalRawDevice>` is a follow-up step
+    /// that can land after all callers have migrated to read
+    /// `.metal_device_handle()` instead of `.candle_device()`.
+    ///
+    /// Mirror of [`crate::CudaStorage::context`] — same shape, same
+    /// rationale (the read-bridge step of the CP-1/CP-2 substrate lift
+    /// documented in `docs/issue-1082-tier-4-5-roadmap-2026-05-27.md`).
+    pub fn metal_device_handle(&self) -> MetalRawDevice {
+        self.candle_device.metal_device().clone()
     }
 
     /// Returns `true` iff this storage's buffer is in a UMA-compatible
