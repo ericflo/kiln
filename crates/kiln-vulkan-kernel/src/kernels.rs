@@ -1180,6 +1180,48 @@ pub fn dispatch_gdn_in_proj_decode_cached(
     )
 }
 
+/// Candle-free f32 weights variant of [`dispatch_gdn_in_proj_decode_cached`].
+///
+/// Same semantics as the bf16-packed _bytes variant but for f32 weights.
+/// (#1082)
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_in_proj_decode_cached_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    batch: usize,
+    qkv_weight_t: &VulkanBuffer,
+    z_weight_t: &VulkanBuffer,
+    a_weight_t: &VulkanBuffer,
+    b_weight_t: &VulkanBuffer,
+    hidden: usize,
+    qkv_dim: usize,
+    z_dim: usize,
+    a_dim: usize,
+    b_dim: usize,
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let x = build_cpu_f32_tensor_from_bytes(x_data, &[batch, 1, hidden])?;
+    let (qkv, z, a, b) = dispatch_gdn_in_proj_decode_cached_impl(
+        vk_device,
+        &x,
+        qkv_weight_t,
+        z_weight_t,
+        a_weight_t,
+        b_weight_t,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        false,
+    )?;
+    Ok((
+        extract_tensor_bytes(&qkv)?.0,
+        extract_tensor_bytes(&z)?.0,
+        extract_tensor_bytes(&a)?.0,
+        extract_tensor_bytes(&b)?.0,
+    ))
+}
+
 /// Candle-free bf16-packed weights variant of [`dispatch_gdn_in_proj_decode_cached`].
 ///
 /// Takes `x` as raw f32 bytes `[batch, 1, hidden]` and returns the

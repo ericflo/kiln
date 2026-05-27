@@ -2095,20 +2095,45 @@ impl BackendRuntime for VulkanBackend {
             let z_buf = self.cached_f32_weight_buffer(in_proj_z_t)?;
             let a_buf = self.cached_f32_weight_buffer(in_proj_a_t)?;
             let b_buf = self.cached_f32_weight_buffer(in_proj_b_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached(
-                vk_device,
-                &dispatch_x,
-                &qkv_buf,
-                &z_buf,
-                &a_buf,
-                &b_buf,
-                hidden,
-                qkv_dim,
-                z_dim,
-                a_dim,
-                b_dim,
+            let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&dispatch_x)?.0;
+            let (qkv_b, z_b, a_b, b_b) =
+                kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bytes(
+                    vk_device,
+                    &x_data,
+                    row_count,
+                    &qkv_buf,
+                    &z_buf,
+                    &a_buf,
+                    &b_buf,
+                    hidden,
+                    qkv_dim,
+                    z_dim,
+                    a_dim,
+                    b_dim,
+                )
+                .context("gdn_in_proj_decode kernel failed")?;
+            (
+                kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &qkv_b,
+                    &[row_count, 1, qkv_dim],
+                    DType::F32,
+                )?,
+                kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &z_b,
+                    &[row_count, 1, z_dim],
+                    DType::F32,
+                )?,
+                kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &a_b,
+                    &[row_count, 1, a_dim],
+                    DType::F32,
+                )?,
+                kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &b_b,
+                    &[row_count, 1, b_dim],
+                    DType::F32,
+                )?,
             )
-            .context("gdn_in_proj_decode kernel failed")?
         };
         let result = if seq_len == 1 {
             (qkv, z, a, b)
