@@ -315,17 +315,6 @@ impl StorageBackend for MetalStorage {
     }
 }
 
-/// Construct a fresh [`crate::Storage`] handle holding a [`MetalStorage`].
-pub fn metal_zeros(
-    candle_device: Arc<MetalDevice>,
-    device_index: usize,
-    dtype: DType,
-    n_elements: usize,
-) -> Result<crate::Storage> {
-    let storage = MetalStorage::zeros(candle_device, device_index, dtype, n_elements)?;
-    Ok(Arc::new(storage))
-}
-
 /// Resolve the primary candle `MetalDevice` for the given Metal device
 /// ordinal — public mirror of [`crate::primary_cuda_device`] for the
 /// Metal backend.
@@ -1606,17 +1595,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn metal_zeros_returns_arc_storage() {
-        let Some(dev) = maybe_metal_device() else {
-            eprintln!("skip: KILN_TENSOR_METAL_TEST unset or no Metal device");
-            return;
-        };
-        let s: crate::Storage = metal_zeros(dev, 0, DType::F32, 4).unwrap();
-        assert_eq!(s.dtype(), DType::F32);
-        assert_eq!(s.device(), Device::Metal(0));
-        let metal_s = s.as_any().downcast_ref::<MetalStorage>().expect("downcast");
-        // UMA invariant: Shared-mode buffer (Apple Silicon default).
-        assert!(metal_s.is_unified_memory());
-    }
 }
