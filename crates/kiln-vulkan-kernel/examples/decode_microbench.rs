@@ -12,19 +12,27 @@
 use std::time::Instant;
 
 use anyhow::Result;
-// TODO(#1082): Full candle removal here is blocked on the kernel API itself.
-// Every `dispatch_*_decode_cached*` entry point this microbench exercises
-// (full_attn QKV, GDN in_proj, MLP gate_up + down, RMSNorm, causal_conv1d,
-// etc.) is currently typed on `&candle_core::Tensor` for its `x`/weight
-// inputs, and the upload helpers used below (`upload_tensor_*_buffer`) also
-// take `&Tensor`. Migrating this example to a pure kt::Tensor / `Vec<f32>` +
-// shape representation requires either:
-//   (a) bytes-based variants of all the Vulkan decode-path dispatch entries
-//       analogous to `dispatch_kernel_bytes`, or
-//   (b) retyping those entries on `&kt::Tensor` (the candle-free
-//       successor in `kiln_tensor`).
-// Until that lands, this example must keep `use candle_core::*` for the
-// host-side Tensor construction it threads into the dispatch calls.
+// TODO(#1082): Substrate landed — every top-level dispatch this microbench
+// exercises now has a candle-free `*_bytes` companion in
+// `kiln_vulkan_kernel::kernels`:
+//   - dispatch_mlp_gate_up_decode_cached_bytes
+//   - dispatch_mlp_decode_cached_bf16_weights_bytes
+//   - dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes
+//   - dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes
+//   - dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes
+//   - dispatch_linear_decode_cached_bytes
+//   - dispatch_qwen_rmsnorm_forward_bytes
+//   - dispatch_causal_conv1d_update_bytes
+//   - dispatch_gdn_gates_cached_bytes
+//   - dispatch_gdn_gated_rms_norm_cached_bytes
+// Weight upload is already candle-free via
+// upload_bf16_packed_buffer_from_slice / upload_f32_buffer_from_slice.
+//
+// What remains for THIS example: the resident-path helpers
+// (`run_full_step_resident*`, `run_full_token_resident*`) still depend on
+// candle-typed entries in `kiln_vulkan_kernel::resident` that have not yet
+// grown bytes variants. Once those land, this example can drop
+// `use candle_core::*` entirely. Tracked as a follow-up under #1082.
 use candle_core::{DType, Device, Tensor};
 use half::bf16;
 use kiln_vulkan_kernel::buffer::VulkanBuffer;
