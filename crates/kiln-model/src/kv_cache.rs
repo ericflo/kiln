@@ -65,6 +65,86 @@ impl KvCache {
         )
     }
 
+    /// kt-typed parallel entry to [`Self::new`] (#1082 Tier 3).
+    ///
+    /// Takes `kiln_tensor::DType` + `&kiln_tensor::Device` instead of
+    /// the candle equivalents, bridges at the boundary, and delegates
+    /// to the existing candle-typed constructor. The returned
+    /// `KvCache` still owns candle Tensors internally — the kt
+    /// typing applies only to the public surface so callers in
+    /// kiln-server / kiln-model can build a contiguous KV cache
+    /// without importing `candle_core::DType` + `candle_core::Device`
+    /// at the call site.
+    ///
+    /// Errors when the kt Device has no candle equivalent on this
+    /// build (e.g. `Vulkan(_)`; the kiln-server Vulkan path uses a
+    /// CPU candle device by convention) or when the kt DType cannot
+    /// be represented in candle (e.g. `F8E4M3` — use
+    /// [`Self::new_with_fp8_kt`] with the dequant dtype + `fp8=true`).
+    ///
+    /// Matches the shape of `PagedKvCache::new_kt`: same kt -> candle
+    /// boundary, same delegation pattern. See that constructor for
+    /// the rationale on why this minimum-effort wrapper unblocks
+    /// candle-import removal at upstream call sites today even
+    /// though the cache's interior storage remains candle. (#1082)
+    pub fn new_kt(
+        num_full_attn_layers: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        max_seq_len: usize,
+        dtype: kiln_tensor::DType,
+        device: &kiln_tensor::Device,
+    ) -> Result<Self> {
+        let candle_dtype = kiln_kt_bridge::kt_dtype_to_candle(dtype)
+            .map_err(|e| anyhow::anyhow!("KvCache::new_kt dtype: {e}"))?;
+        let candle_device = kiln_kt_bridge::candle_device_from_kt(device)
+            .map_err(|e| anyhow::anyhow!("KvCache::new_kt device: {e}"))?;
+        Self::new(
+            num_full_attn_layers,
+            num_kv_heads,
+            head_dim,
+            max_seq_len,
+            candle_dtype,
+            &candle_device,
+        )
+    }
+
+    /// kt-typed parallel entry to [`Self::new_with_fp8`] (#1082).
+    ///
+    /// Same shape as [`Self::new_kt`]: takes `kiln_tensor::DType` +
+    /// `&kiln_tensor::Device`, bridges at the boundary, and delegates
+    /// to the candle-typed constructor. The `fp8` flag passes
+    /// through unchanged.
+    ///
+    /// See [`Self::new_kt`] for the error / Vulkan-CPU-placeholder
+    /// semantics; they apply here verbatim. Mirrors
+    /// `PagedKvCache::new_uninit_with_fp8_kt` for the contiguous
+    /// cache shape. (#1082)
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_fp8_kt(
+        num_full_attn_layers: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        max_seq_len: usize,
+        dtype: kiln_tensor::DType,
+        device: &kiln_tensor::Device,
+        fp8: bool,
+    ) -> Result<Self> {
+        let candle_dtype = kiln_kt_bridge::kt_dtype_to_candle(dtype)
+            .map_err(|e| anyhow::anyhow!("KvCache::new_with_fp8_kt dtype: {e}"))?;
+        let candle_device = kiln_kt_bridge::candle_device_from_kt(device)
+            .map_err(|e| anyhow::anyhow!("KvCache::new_with_fp8_kt device: {e}"))?;
+        Self::new_with_fp8(
+            num_full_attn_layers,
+            num_kv_heads,
+            head_dim,
+            max_seq_len,
+            candle_dtype,
+            &candle_device,
+            fp8,
+        )
+    }
+
     /// Create a new KV cache with optional FP8 quantization.
     pub fn new_with_fp8(
         num_full_attn_layers: usize,
