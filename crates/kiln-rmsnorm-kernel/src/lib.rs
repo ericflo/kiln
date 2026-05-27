@@ -2,27 +2,26 @@
 //!
 //! This crate hosts decode-critical Liger-style fused norm kernels for kiln:
 //!
-//! 1. [`fused_rmsnorm`] — Qwen3.5-style RMSNorm `(1 + w) * x * rsqrt(mean(x^2) + eps)`.
-//!    Replaces the ~11 candle ops behind `kiln-model::forward::rms_norm`.
-//!    Used by `kiln/norm/pre_attn` and `kiln/norm/pre_mlp`.
-//! 2. [`fused_rmsnorm_via_kt_forward_op`] — Phase 10 long-context training path:
-//!    same forward semantics as [`fused_rmsnorm`], plus a manual CUDA
-//!    backward kernel wired through `KtForwardOp2` (a kt-typed candle
-//!    `CustomOp2`) so the autograd engine saves only `x` and `weight`
+//! 1. [`fused_rmsnorm_via_kt_forward_op`] — Phase 10 long-context training path:
+//!    Qwen3.5-style RMSNorm `(1 + w) * x * rsqrt(mean(x^2) + eps)` plus a
+//!    manual CUDA backward kernel wired through `KtForwardOp2` (a kt-typed
+//!    candle `CustomOp2`) so the autograd engine saves only `x` and `weight`
 //!    (not the F32 intermediates that the candle-op chain materializes).
-//!    For Qwen3.5-4B at T=8192 this avoids ~32 × 2 saved F32 RMSNorm
-//!    intermediates per training segment.
-//! 3. [`fused_l2_qk_norm`] — fused L2-norm(Q) + scale(Q) + L2-norm(K) used by
-//!    GDN linear attention. Replaces the ~11 candle ops behind the
+//!    Replaces the ~11 candle ops behind `kiln-model::forward::rms_norm`.
+//!    Used by `kiln/norm/pre_attn` and `kiln/norm/pre_mlp`. For Qwen3.5-4B
+//!    at T=8192 this avoids ~32 × 2 saved F32 RMSNorm intermediates per
+//!    training segment.
+//! 2. [`fused_l2_qk_norm_kt`] — fused L2-norm(Q) + scale(Q) + L2-norm(K) used
+//!    by GDN linear attention. Replaces the ~11 candle ops behind the
 //!    `kiln/gdn/qk_norm` block in `forward.rs`.
-//! 4. [`fused_l2_qk_norm_gqa`] — CUDA GDN GQA fast path that normalizes
+//! 3. [`fused_l2_qk_norm_gqa_kt`] — CUDA GDN GQA fast path that normalizes
 //!    unexpanded `[B, T, nk, dk]` Q/K and emits expanded `[B, T, nv, dk]`
 //!    outputs in one launch.
-//! 5. [`fused_rotary_qk`] — decode/paged-attention RoPE(Q,K) for contiguous
+//! 4. [`fused_rotary_qk_kt`] — decode/paged-attention RoPE(Q,K) for contiguous
 //!    bf16 Q/K tensors using precomputed f32 cos/sin tables.
-//! 6. [`fused_mlp_silu_mul`] — fused bf16 `silu(gate) * up` for Qwen3.5
+//! 5. [`fused_mlp_silu_mul_kt`] — fused bf16 `silu(gate) * up` for Qwen3.5
 //!    SwiGLU MLPs.
-//! 7. [`fused_sigmoid_mul`] — fused bf16 `x * sigmoid(gate)` for attention
+//! 6. [`fused_sigmoid_mul_kt`] — fused bf16 `x * sigmoid(gate)` for attention
 //!    output gates.
 //!
 //! # Why
@@ -48,14 +47,14 @@
 //!
 //! # APIs
 //!
-//! - [`fused_rmsnorm`] — candle-compatible wrapper around the RMSNorm kernel.
 //! - [`fused_rmsnorm_via_kt_forward_op`] — autograd-aware RMSNorm forward
 //!   (uses the manual CUDA backward via `KtForwardOp2` when grads are propagated).
-//! - [`supports`] — `(x, weight)` capability check for the RMSNorm kernel.
-//! - [`fused_l2_qk_norm`] — candle-compatible wrapper around the GDN QK
-//!   fused-norm kernel. Returns `(q_out, k_out)`.
-//! - [`supports_l2_qk_norm`] — capability check for the QK kernel.
-//! - [`fused_l2_qk_norm_gqa`] / [`supports_l2_qk_norm_gqa`] — GDN GQA
+//! - [`supports`] — `(x, weight)` capability check for the RMSNorm kernel
+//!   (used by the kt-shim production caller).
+//! - [`fused_l2_qk_norm_kt`] — kt-typed wrapper around the GDN QK fused-norm
+//!   kernel. Returns `(q_out, k_out)`.
+//! - [`supports_l2_qk_norm_kt`] — capability check for the QK kernel.
+//! - [`fused_l2_qk_norm_gqa_kt`] / [`supports_l2_qk_norm_gqa_kt`] — GDN GQA
 //!   head-expand + QK norm CUDA path.
 //!
 //! # Envelope
@@ -405,119 +404,6 @@ pub fn supports(x: &Tensor, weight: &Tensor) -> bool {
         && x.rank() >= 1
         && x.dims().last().copied().unwrap_or(0) <= 8192
         && weight.dims() == &[x.dims().last().copied().unwrap_or(0)]
-}
-
-/// Run the fused RMSNorm kernel.
-///
-/// Inputs:
-///   - `x`: bf16, CUDA, contiguous, any rank; last dim is the normalised axis.
-///   - `weight`: bf16, CUDA, contiguous, shape `[hidden]` matching `x.last_dim()`.
-///   - `eps`: epsilon inside the rsqrt. Qwen3.5 uses 1e-6.
-///
-/// Returns a freshly allocated bf16 tensor with the same shape as `x`.
-///
-/// Semantics: `out = (1 + weight) * x * rsqrt(mean(x^2, dim=-1) + eps)` cast
-/// back to bf16. Matches `kiln-model::forward::rms_norm` (Qwen3.5-style,
-/// weight centred on 0).
-pub fn fused_rmsnorm(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-    let device = x.device();
-
-    if x.dtype() != DType::BF16 || weight.dtype() != DType::BF16 {
-        candle_core::bail!(
-            "kiln-rmsnorm-kernel: both x and weight must be bf16 (got {:?}, {:?})",
-            x.dtype(),
-            weight.dtype()
-        );
-    }
-
-    let x_dims = x.dims().to_vec();
-    let hidden = *x_dims.last().ok_or_else(|| {
-        candle_core::Error::Msg("kiln-rmsnorm-kernel: x must have rank >= 1".to_string())
-    })?;
-
-    let weight_dims = weight.dims();
-    if weight_dims.len() != 1 || weight_dims[0] != hidden {
-        candle_core::bail!(
-            "kiln-rmsnorm-kernel: weight shape {:?} does not match x last dim {hidden}",
-            weight_dims
-        );
-    }
-
-    if hidden > 8192 {
-        candle_core::bail!(
-            "kiln-rmsnorm-kernel: hidden dim {hidden} exceeds kernel envelope (<= 8192)"
-        );
-    }
-
-    let rows: usize = x_dims[..x_dims.len() - 1].iter().product();
-    if rows == 0 {
-        // Empty leading axis — nothing to do. Return a zeros tensor with the
-        // same shape so callers don't have to special-case.
-        return Tensor::zeros(x_dims.as_slice(), DType::BF16, device);
-    }
-
-    let x = x.contiguous()?;
-    let weight = weight.contiguous()?;
-
-    let out = if cuda_empty_kernel_outputs_enabled() {
-        unsafe { Tensor::empty(x_dims.as_slice(), DType::BF16, device)? }
-    } else {
-        Tensor::zeros(x_dims.as_slice(), DType::BF16, device)?
-    };
-
-    {
-        let (x_storage, x_layout) = x.storage_and_layout();
-        let (w_storage, w_layout) = weight.storage_and_layout();
-        let (o_storage, o_layout) = out.storage_and_layout();
-
-        let x_cuda = match &*x_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("kiln-rmsnorm-kernel: x must be on CUDA"),
-        };
-        let w_cuda = match &*w_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("kiln-rmsnorm-kernel: weight must be on CUDA"),
-        };
-        let o_cuda = match &*o_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("kiln-rmsnorm-kernel: out must be on CUDA"),
-        };
-
-        let stream = x_cuda.device().cuda_stream();
-        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
-
-        let x_slice = x_cuda
-            .as_cuda_slice::<bf16>()?
-            .slice(x_layout.start_offset()..);
-        let w_slice = w_cuda
-            .as_cuda_slice::<bf16>()?
-            .slice(w_layout.start_offset()..);
-        let o_slice = o_cuda
-            .as_cuda_slice::<bf16>()?
-            .slice(o_layout.start_offset()..);
-
-        unsafe {
-            let (x_ptr, _g1) = x_slice.device_ptr(&stream);
-            let (w_ptr, _g2) = w_slice.device_ptr(&stream);
-            let (o_ptr, _g3) = o_slice.device_ptr(&stream);
-
-            let status = kiln_fused_rmsnorm(
-                x_ptr as *const _,
-                w_ptr as *const _,
-                o_ptr as *mut _,
-                rows as i32,
-                hidden as i32,
-                eps,
-                raw_stream,
-            );
-
-            if status != 0 {
-                candle_core::bail!("kiln_fused_rmsnorm failed with status {status}");
-            }
-        }
-    }
-
-    Ok(out)
 }
 
 /// Whether the fused L2 QK-norm kernel is available for the given Q, K tensors.
@@ -3379,7 +3265,8 @@ mod tests {
 
     // Reference implementation — mirrors `kiln-model::forward::rms_norm`
     // exactly (including the F32 cast + Qwen3.5 `(1 + w)` convention).
-    // Used as the correctness oracle for `fused_rmsnorm`.
+    // Used as the correctness oracle for the kt-typed `fused_rmsnorm_kt`
+    // and as a pre-norm helper for the L2 QK-norm tests.
     fn reference_rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
         let x_f32 = x.to_dtype(DType::F32)?;
         let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
@@ -3439,59 +3326,6 @@ mod tests {
         let gate = gate.to_dtype(DType::F32)?;
         let sigmoid = (gate.neg()?.exp()? + 1.0)?.recip()?;
         (x * sigmoid)?.to_dtype(dtype)
-    }
-
-    #[test]
-    fn parity_decode_row() {
-        let Some(device) = try_cuda_device() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-
-        // Qwen3.5-4B decode shape: [batch=1, seq=1, hidden=2560].
-        let hidden = 2560usize;
-        let rows = 1usize;
-        let eps = 1e-6;
-
-        // Deterministic pseudo-random input (seeded), so the parity test is
-        // reproducible without adding a dev-dep on `rand`.
-        let mut raw_x = Vec::with_capacity(rows * hidden);
-        let mut raw_w = Vec::with_capacity(hidden);
-        let mut state: u32 = 0x1234_5678;
-        for _ in 0..rows * hidden {
-            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-            let f = ((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0;
-            raw_x.push(f * 0.5);
-        }
-        for _ in 0..hidden {
-            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-            let f = ((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0;
-            raw_w.push(f * 0.1);
-        }
-
-        let x_f32 = Tensor::from_vec(raw_x, (rows, hidden), &device).unwrap();
-        let w_f32 = Tensor::from_vec(raw_w, (hidden,), &device).unwrap();
-        let x = x_f32.to_dtype(DType::BF16).unwrap();
-        let w = w_f32.to_dtype(DType::BF16).unwrap();
-
-        let y_ref = reference_rms_norm(&x, &w, eps).unwrap();
-        let y_fused = fused_rmsnorm(&x, &w, eps as f32).unwrap();
-
-        let diff = (&y_ref - &y_fused)
-            .unwrap()
-            .to_dtype(DType::F32)
-            .unwrap()
-            .abs()
-            .unwrap()
-            .max_all()
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap();
-
-        assert!(
-            diff < 1e-2,
-            "parity failed: max_abs_diff={diff} exceeds 1e-2 tolerance"
-        );
     }
 
     #[test]
@@ -3746,111 +3580,6 @@ mod tests {
         assert!(
             diff < 1e-2,
             "sigmoid*mul parity failed: max_abs_diff={diff} exceeds 1e-2 tolerance"
-        );
-    }
-
-    #[test]
-    fn parity_multi_row() {
-        let Some(device) = try_cuda_device() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-
-        // Prefill-like shape: [batch=1, seq=512, hidden=2560].
-        let hidden = 2560usize;
-        let rows = 512usize;
-        let eps = 1e-6;
-
-        let mut raw_x = Vec::with_capacity(rows * hidden);
-        let mut raw_w = Vec::with_capacity(hidden);
-        let mut state: u32 = 0xcafe_babe;
-        for _ in 0..rows * hidden {
-            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-            let f = ((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0;
-            raw_x.push(f * 0.7);
-        }
-        for _ in 0..hidden {
-            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-            let f = ((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0;
-            raw_w.push(f * 0.1);
-        }
-
-        let x_f32 = Tensor::from_vec(raw_x, (rows, hidden), &device).unwrap();
-        let w_f32 = Tensor::from_vec(raw_w, (hidden,), &device).unwrap();
-        let x = x_f32.to_dtype(DType::BF16).unwrap();
-        let w = w_f32.to_dtype(DType::BF16).unwrap();
-
-        let y_ref = reference_rms_norm(&x, &w, eps).unwrap();
-        let y_fused = fused_rmsnorm(&x, &w, eps as f32).unwrap();
-
-        let diff = (&y_ref - &y_fused)
-            .unwrap()
-            .to_dtype(DType::F32)
-            .unwrap()
-            .abs()
-            .unwrap()
-            .max_all()
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap();
-
-        assert!(
-            diff < 1e-2,
-            "parity failed: max_abs_diff={diff} exceeds 1e-2 tolerance"
-        );
-    }
-
-    #[test]
-    fn parity_with_batch_dim() {
-        let Some(device) = try_cuda_device() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-
-        // [batch=2, seq=3, hidden=2560] — exercises 3D reshape path.
-        let b = 2usize;
-        let s = 3usize;
-        let hidden = 2560usize;
-        let eps = 1e-6;
-
-        let mut raw_x = Vec::with_capacity(b * s * hidden);
-        let mut raw_w = Vec::with_capacity(hidden);
-        let mut state: u32 = 0xdead_beef;
-        for _ in 0..b * s * hidden {
-            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-            let f = ((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0;
-            raw_x.push(f * 0.3);
-        }
-        for _ in 0..hidden {
-            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-            let f = ((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0;
-            raw_w.push(f * 0.1);
-        }
-
-        let x_f32 = Tensor::from_vec(raw_x, (b, s, hidden), &device).unwrap();
-        let w_f32 = Tensor::from_vec(raw_w, (hidden,), &device).unwrap();
-        let x = x_f32.to_dtype(DType::BF16).unwrap();
-        let w = w_f32.to_dtype(DType::BF16).unwrap();
-
-        let y_ref = reference_rms_norm(&x, &w, eps).unwrap();
-        let y_fused = fused_rmsnorm(&x, &w, eps as f32).unwrap();
-
-        assert_eq!(y_fused.dims(), &[b, s, hidden]);
-
-        let diff = (&y_ref - &y_fused)
-            .unwrap()
-            .to_dtype(DType::F32)
-            .unwrap()
-            .abs()
-            .unwrap()
-            .max_all()
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap();
-
-        assert!(
-            diff < 1e-2,
-            "parity failed: max_abs_diff={diff} exceeds 1e-2 tolerance"
         );
     }
 
