@@ -356,6 +356,31 @@ substrate lands (the FLCE bwd kt-bridge can't hit those today).
 F32/BF16 contig) via `cuda_scatter_add_dim0` — sufficient for FLCE
 bwd's scatter back into `[seq_len, hidden_size]`.
 
+### FLCE bwd kt rewrite consumes the device-parametric ctors — 2026-05-27
+
+`fused_linear_cross_entropy_phase_b_backward_kt`
+(`crates/kiln-flce-kernel/src/kt_api.rs`) now derives the destination
+device from `hidden.device()` and routes the three CPU-only call sites
+through the new device-parametric constructors:
+
+- `active_idx` (U32 indices for `index_select` + `scatter_add`) —
+  `from_vec_on(device, ...)`
+- `dhidden_active` (F32 chunk-loop accumulator) — `zeros_on(device, ...)`
+- per-chunk `one_hot` mask — `from_vec_on(device, ...)`
+
+Every op in the chain (`to_f32` / `cast`, `narrow`, `contiguous`,
+`matmul`, `max_axis`, `broadcast_to`, `sub`, `exp`, `sum_axis`, `mul`,
+`mul_scalar`, `div`, `add`, `maximum`, `index_select` axis=0/U32,
+`scatter_add` axis=0/U32) already has a CUDA dispatch, so the rewrite
+keeps the chunk loop on-device with no other substrate changes
+required. A `#[cfg(feature = "cuda")] fn kt_backward_cuda_parity_
+against_candle_phase_b` test compares the kt-CUDA backward against the
+candle Phase B autograd backward on CPU; tolerance is 5e-2 to absorb
+atomicAdd ordering + chunk-loop FP associativity (same convention as
+the rmsnorm-kernel kt-CUDA parity tests). Sub-agent follow-up (the
+`FlceCustomOp::bwd` ~80-LOC bridge) can now reuse the rmsnorm /
+rotary_one template directly.
+
 ## Build matrix coverage required before each tier closes
 
 | Tier | Required CI green |

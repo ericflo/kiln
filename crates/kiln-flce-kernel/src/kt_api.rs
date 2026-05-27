@@ -41,7 +41,7 @@ use kiln_tensor::{
         broadcast_to, exp, gather, index_select, ln, matmul, max_axis, mean_all, mul, mul_scalar,
         scatter_add, sub, sum_axis, to_f32,
     },
-    DType as KtDType, Error as KtError, Tensor as KtTensor,
+    DType as KtDType, Device as KtDevice, Error as KtError, Tensor as KtTensor,
 };
 
 /// Error type for the kiln-tensor-typed FLCE surface.
@@ -524,7 +524,15 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
         .map_err(FlceError::Kt)?
         .contiguous()
         .map_err(FlceError::Kt)?;
-    let active_idx = KtTensor::from_vec(active_positions.clone(), vec![num_active])
+    // Derive the destination device from the input `hidden`'s storage
+    // so that every downstream allocator + dispatch stays on-device.
+    // `dispatch2` rejects mixed-device inputs (CPU + CUDA would error),
+    // so allocating `active_idx` / accumulator / one_hot via the
+    // CPU-only `from_vec` / `zeros_cpu` constructors would break the
+    // chain the moment `hidden` lives on CUDA. `*_on` is the
+    // device-parametric companion that routes to the matching backend.
+    let device: KtDevice = hidden.device();
+    let active_idx = KtTensor::from_vec_on(device, active_positions.clone(), vec![num_active])
         .map_err(FlceError::Kt)?;
     let active_hidden = index_select(&shift_hidden, 0, &active_idx).map_err(FlceError::Kt)?;
     let active_hidden_f32 = to_f32(&active_hidden).map_err(FlceError::Kt)?;
@@ -619,8 +627,13 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
         .contiguous()
         .map_err(FlceError::Kt)?;
 
+    // Allocate the chunk accumulator on the same device as `hidden`
+    // so the `kiln_tensor::ops::add(&dhidden_active, &chunk_contrib)`
+    // call inside the loop stays on device and never has to round-trip
+    // through CPU.
     let mut dhidden_active =
-        KtTensor::zeros_cpu(vec![num_active, hidden_size], KtDType::F32);
+        KtTensor::zeros_on(device, vec![num_active, hidden_size], KtDType::F32)
+            .map_err(FlceError::Kt)?;
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
@@ -652,8 +665,15 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
                 one_hot_data[row_idx * chunk_len + col] = 1.0;
             }
         }
-        let one_hot = KtTensor::from_vec(one_hot_data, vec![num_active, chunk_len])
-            .map_err(FlceError::Kt)?;
+        // One-hot lives on the same device as `hidden` (and as
+        // `softmax_chunk`, which already lives on-device because all
+        // upstream tensors are derived from `hidden` / `head_t`). The
+        // host-side `one_hot_data` Vec is staged on CPU then uploaded
+        // via `from_vec_on` for CUDA, mirroring how `cuda_from_slice`
+        // would do it manually.
+        let one_hot =
+            KtTensor::from_vec_on(device, one_hot_data, vec![num_active, chunk_len])
+                .map_err(FlceError::Kt)?;
 
         // diff = softmax - one_hot
         let diff = sub(&softmax_chunk, &one_hot).map_err(FlceError::Kt)?;
@@ -1280,6 +1300,123 @@ mod tests {
         assert!(
             max_abs < 1e-4 || rel < 1e-4,
             "chunk parity bwd: max_abs={max_abs:.2e} max_mag={max_mag:.6} rel={rel:.2e}"
+        );
+    }
+
+    /// CUDA parity: run the kt-typed FLCE Phase B backward on a CUDA
+    /// device and compare against the candle Phase B autograd backward
+    /// on CPU. The kt path is the same code under test as the CPU
+    /// parity tests above — the new CPU/CUDA bifurcation is purely in
+    /// the `zeros_on` / `from_vec_on` constructors that pick the
+    /// `dhidden_active` accumulator, the `active_idx` index buffer,
+    /// and the per-chunk `one_hot` mask backing storage.
+    ///
+    /// Tolerance follows the post-#1082 atomicAdd convention: the
+    /// chunk-loop accumulator + `scatter_add` involve atomic
+    /// reductions whose summation order is non-deterministic. The
+    /// rmsnorm-kernel kt-CUDA parity tests use `1e-2` for the same
+    /// reason; ~5e-2 here gives us headroom for the chunk-loop's
+    /// additional FP associativity (multiple `add` calls per element).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn kt_backward_cuda_parity_against_candle_phase_b() {
+        // Probe for a CUDA device. Skip if unavailable so the test is
+        // safe to run on CPU-only CI / dev machines.
+        if !kiln_tensor::cuda_is_available() {
+            eprintln!("skipping kt_backward_cuda_parity: no CUDA device");
+            return;
+        }
+        let device_index = 0usize;
+        let device = KtDevice::Cuda(device_index);
+
+        let seq_len = 16usize;
+        let hidden_size = 8usize;
+        let vocab_size = 64usize;
+        let chunk_size = 16usize;
+
+        let total_h = seq_len * hidden_size;
+        let hidden_vec: Vec<f32> = (0..total_h)
+            .map(|i| (i as f32 * 0.013).sin() * 0.5)
+            .collect();
+        let total_head = hidden_size * vocab_size;
+        let head_vec: Vec<f32> = (0..total_head)
+            .map(|i| ((i as f32 + 7.0) * 0.007).cos() * 0.25)
+            .collect();
+        let ids: Vec<u32> = (0..seq_len as u32)
+            .map(|i| (i * 31 + 5) % vocab_size as u32)
+            .collect();
+        let mask: Vec<bool> = (0..seq_len).map(|i| i > 0 && i % 2 == 1).collect();
+
+        // CPU candle reference: Phase B forward + autograd backward.
+        use candle_core::{Device as CDevice, Tensor as CTensor, Var};
+        let cdev = CDevice::Cpu;
+        let hidden_c =
+            CTensor::from_vec(hidden_vec.clone(), (1, seq_len, hidden_size), &cdev).unwrap();
+        let head_c =
+            CTensor::from_vec(head_vec.clone(), (hidden_size, vocab_size), &cdev).unwrap();
+        let hidden_var = Var::from_tensor(&hidden_c).unwrap();
+        let loss_pb = crate::fused_linear_cross_entropy_phase_b(
+            hidden_var.as_tensor(),
+            &head_c,
+            &ids,
+            &mask,
+            &cdev,
+            chunk_size,
+        )
+        .unwrap();
+        let grads = loss_pb.backward().unwrap();
+        let grad_pb = grads.get(hidden_var.as_tensor()).unwrap().clone();
+        let pb_flat: Vec<f32> = grad_pb.flatten_all().unwrap().to_vec1().unwrap();
+
+        // kt-typed backward on CUDA. Build inputs directly on device
+        // so the rewritten function's `hidden.device()` picks Cuda(0).
+        let hidden_kt =
+            KtTensor::from_vec_on(device, hidden_vec.clone(), vec![1, seq_len, hidden_size])
+                .expect("alloc hidden kt cuda");
+        let head_kt =
+            KtTensor::from_vec_on(device, head_vec.clone(), vec![hidden_size, vocab_size])
+                .expect("alloc head kt cuda");
+        // grad_loss is a rank-0 scalar; keep it on the same device so
+        // `to_f32`/`reshape`/`broadcast_to` inside the backward stay
+        // on-device.
+        let grad_loss_kt = KtTensor::from_vec_on(device, vec![1.0f32], vec![])
+            .expect("alloc grad scalar kt cuda");
+
+        let grad_kt = fused_linear_cross_entropy_phase_b_backward_kt(
+            &hidden_kt,
+            &head_kt,
+            &ids,
+            &mask,
+            chunk_size,
+            &grad_loss_kt,
+        )
+        .expect("kt backward cuda");
+
+        // Move the CUDA result back to host for comparison.
+        let grad_kt_host =
+            kiln_tensor::cuda_to_host_copy(&grad_kt).expect("cuda_to_host_copy grad_kt");
+        let kt_vec = read_f32_vec(&grad_kt_host);
+        assert_eq!(
+            kt_vec.len(),
+            pb_flat.len(),
+            "kt-cuda backward shape mismatch with candle Phase B"
+        );
+
+        let mut max_abs = 0.0f32;
+        let mut max_pb_mag = 0.0f32;
+        for (k, p) in kt_vec.iter().zip(pb_flat.iter()) {
+            max_abs = max_abs.max((k - p).abs());
+            max_pb_mag = max_pb_mag.max(p.abs());
+        }
+        let rel = if max_pb_mag > 1e-6 {
+            max_abs / max_pb_mag
+        } else {
+            max_abs
+        };
+        // atomicAdd ordering + chunked FP associativity: ~5e-2 tol.
+        assert!(
+            max_abs < 5e-2 || rel < 5e-2,
+            "kt-cuda bwd vs candle Phase B bwd: max_abs={max_abs:.2e} max_pb={max_pb_mag:.6} rel={rel:.2e}",
         );
     }
 }
