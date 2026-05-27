@@ -1542,57 +1542,84 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device as CandleDevice;
+    use candle_metal_kernels::metal::MTLResourceOptions;
 
     fn metal_test_enabled() -> bool {
         std::env::var("KILN_TENSOR_METAL_TEST").ok().as_deref() == Some("1")
     }
 
-    fn maybe_metal_device() -> Option<Arc<MetalDevice>> {
+    /// Candle-free Metal device handle for the tests below.
+    ///
+    /// Mirrors the `maybe_metal_raw_device` pattern in
+    /// `metal_allocator.rs` — uses `MetalRawDevice::system_default()`
+    /// (the `candle_metal_kernels::metal` re-export of Apple's `metal`
+    /// crate's `Device::system_default`) so the test mod does not need
+    /// `candle_core::Device::new_metal(0)`. This drops the
+    /// `use candle_core::Device as CandleDevice` import that the test
+    /// mod previously carried — one less candle hook in
+    /// `metal_storage.rs` (#1082 candle removal).
+    fn maybe_metal_raw_device() -> Option<MetalRawDevice> {
         if !metal_test_enabled() {
             return None;
         }
-        match CandleDevice::new_metal(0).ok()? {
-            CandleDevice::Metal(d) => Some(Arc::new(d)),
-            _ => None,
-        }
+        MetalRawDevice::system_default()
     }
 
     #[test]
     fn zeros_round_sizes() {
-        let Some(dev) = maybe_metal_device() else {
+        let Some(dev) = maybe_metal_raw_device() else {
             eprintln!("skip: KILN_TENSOR_METAL_TEST unset or no Metal device");
             return;
         };
-        let storage = MetalStorage::zeros(dev.clone(), 0, DType::BF16, 64).unwrap();
+        // Exercise the candle-free metal-rs allocation path.
+        // `zeros_kt` round-trips through `device.new_buffer` directly
+        // (no candle blit-encoder), matching what `MetalAllocator`
+        // already uses in production. The metal-rs `new_buffer` does
+        // NOT round up to slab sizes the way candle's `allocate_zeros`
+        // did, so `byte_len()` reports exactly the dtype-derived
+        // byte_len now (BF16 * 64 = 128 bytes exactly).
+        let storage = MetalStorage::zeros_kt(&dev, 0, DType::BF16, 64).unwrap();
         assert_eq!(storage.device(), Device::Metal(0));
         assert_eq!(storage.dtype(), DType::BF16);
-        // Candle's metal allocator rounds up to its slab size; only assert
-        // that the byte_len is *at least* what we asked for.
         assert!(storage.byte_len() >= 128);
 
-        let storage = MetalStorage::zeros(dev, 0, DType::Int4Packed, 16).unwrap();
+        let storage = MetalStorage::zeros_kt(&dev, 0, DType::Int4Packed, 16).unwrap();
         assert!(storage.byte_len() >= 8);
     }
 
     #[test]
     fn from_buffer_validates_alignment() {
-        let Some(dev) = maybe_metal_device() else {
+        let Some(dev) = maybe_metal_raw_device() else {
             eprintln!("skip: KILN_TENSOR_METAL_TEST unset or no Metal device");
             return;
         };
-        // 17 bytes is not a multiple of f32 (4). The allocator may round
-        // up our request, so this only tests the *post-round-up* size
-        // when we explicitly pass a 17-byte buffer.
-        let small = dev.allocate_zeros(17).unwrap();
+        // 17 bytes is not a multiple of f32 (4). metal-rs does NOT
+        // round up `new_buffer`-sized allocations the way candle's
+        // `allocate_zeros` did (which went through candle's slab
+        // cache), so `raw_len` here equals 17 — the unaligned-len
+        // branch of the test below is the one that fires.
+        //
+        // `MetalStorage::from_buffer` still requires `Arc<MetalDevice>`
+        // (the back-compat field is load-bearing for downstream
+        // kernel-crate FFI sites that consume `.candle_device()`); we
+        // derive that wrapper via the public `primary_metal_device`
+        // helper rather than reaching for `candle_core::Device::new_metal`
+        // directly. The helper is documented as the substrate's single
+        // residual candle hook — the same hook `MetalStorage::zeros_kt`
+        // already calls internally, so this test does not add to the
+        // candle surface.
+        let candle_dev = primary_metal_device(0).unwrap();
+        let small = dev
+            .new_buffer(17, MTLResourceOptions::StorageModeShared)
+            .unwrap();
         let raw_len = small.length() as usize;
-        let result = MetalStorage::from_buffer(dev, 0, DType::F32, small);
+        let small_arc = Arc::new(small);
+        let result = MetalStorage::from_buffer(candle_dev, 0, DType::F32, small_arc);
         if raw_len.is_multiple_of(4) {
-            // Allocator rounded up; the validation passes.
+            // metal-rs rounded up (host-specific behavior); validation passes.
             assert!(result.is_ok());
         } else {
             assert!(result.unwrap_err().to_string().contains("not a multiple"));
         }
     }
-
 }
