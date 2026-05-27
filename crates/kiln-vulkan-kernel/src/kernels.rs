@@ -1180,7 +1180,7 @@ pub fn dispatch_gdn_in_proj_decode_cached(
     )
 }
 
-/// Candle-free variant of [`dispatch_gdn_in_proj_decode_cached_bf16_weights`].
+/// Candle-free bf16-packed weights variant of [`dispatch_gdn_in_proj_decode_cached`].
 ///
 /// Takes `x` as raw f32 bytes `[batch, 1, hidden]` and returns the
 /// `(qkv, z, a, b)` outputs as raw f32 bytes — each shaped
@@ -1224,37 +1224,6 @@ pub fn dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_gdn_in_proj_decode_cached_bf16_weights(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    qkv_weight_t: &VulkanBuffer,
-    z_weight_t: &VulkanBuffer,
-    a_weight_t: &VulkanBuffer,
-    b_weight_t: &VulkanBuffer,
-    hidden: usize,
-    qkv_dim: usize,
-    z_dim: usize,
-    a_dim: usize,
-    b_dim: usize,
-) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
-    dispatch_gdn_in_proj_decode_cached_impl(
-        vk_device,
-        x,
-        qkv_weight_t,
-        z_weight_t,
-        a_weight_t,
-        b_weight_t,
-        hidden,
-        qkv_dim,
-        z_dim,
-        a_dim,
-        b_dim,
-        true,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn dispatch_gdn_in_proj_decode_cached_impl(
     vk_device: &VulkanDevice,
     x: &Tensor,
@@ -1916,24 +1885,6 @@ pub fn dispatch_linear_decode_cached(
     dispatch_linear_decode_cached_impl(vk_device, x, weight_t, batch, hidden, out_dim, false)
 }
 
-pub fn dispatch_linear_decode_cached_bf16_weights(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    weight_t: &VulkanBuffer,
-    batch: usize,
-    hidden: usize,
-    out_dim: usize,
-) -> Result<Tensor> {
-    dispatch_linear_decode_cached_impl(vk_device, x, weight_t, batch, hidden, out_dim, true)
-}
-
-/// Candle-free variant of [`dispatch_linear_decode_cached`] /
-/// [`dispatch_linear_decode_cached_bf16_weights`].
-///
-/// Takes `x` as raw f32 bytes `[batch, 1, hidden]` and returns the
-/// output as raw f32 bytes `[batch, 1, out_dim]`. Pass
-/// `packed_bf16_weights = true` to select the bf16-packed weight shader
-/// variants. (#1082)
 pub fn dispatch_linear_decode_cached_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -1954,53 +1905,6 @@ pub fn dispatch_linear_decode_cached_bytes(
     )
 }
 
-/// Variant of [`dispatch_linear_decode_cached_bf16_weights`] that takes a
-/// SLICE of a larger weight buffer.
-///
-/// `weight_buffer` holds a row-major bf16-packed `[hidden, full_out_dim]`
-/// matrix. This function dispatches the matmul against the column slice
-/// `weight_buffer[:, weight_offset .. weight_offset + out_dim]` without
-/// requiring a fresh upload of the slice — the same buffer can be reused
-/// across many chunked dispatches.
-///
-/// `weight_offset` is in bf16 elements (i.e., the column index in the
-/// original matrix). Output shape is `[batch, 1, out_dim]`.
-///
-/// Used by the FLCE chunked-head loop and by VulkanLinearOp's backward
-/// path so a once-uploaded weight buffer can serve many chunked /
-/// transposed dispatches.
-pub fn dispatch_linear_decode_cached_bf16_weights_offset(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    weight_buffer: &VulkanBuffer,
-    batch: usize,
-    hidden: usize,
-    out_dim: usize,
-    weight_offset: usize,
-    full_out_dim: usize,
-) -> Result<Tensor> {
-    let x_data = extract_tensor_bytes(x)?.0;
-    let out_data = dispatch_linear_decode_cached_bf16_weights_offset_bytes_core(
-        vk_device,
-        &x_data,
-        weight_buffer,
-        batch,
-        hidden,
-        out_dim,
-        weight_offset,
-        full_out_dim,
-    )?;
-    create_tensor_from_data(&out_data, &[batch, 1, out_dim], DType::F32)
-}
-
-/// Candle-free variant of
-/// [`dispatch_linear_decode_cached_bf16_weights_offset`].
-///
-/// Takes `x` as raw f32 bytes `[batch, hidden]` (row-major) and
-/// returns the output as raw f32 bytes `[batch, 1, out_dim]`. The
-/// candle entry point becomes a thin shim around the shared bytes
-/// core. (#1082)
-#[allow(clippy::too_many_arguments)]
 pub fn dispatch_linear_decode_cached_bf16_weights_offset_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -2121,57 +2025,6 @@ fn dispatch_linear_decode_cached_bf16_weights_offset_bytes_core(
     }
 }
 
-/// Qwen3.5-style RMSNorm forward: `(1 + weight) * x * rsqrt(mean(x^2) + eps)`.
-///
-/// `x` is `[..., hidden]` F32; `weight` is `[hidden]` F32. Returns a
-/// freshly-allocated F32 tensor with the same shape as `x`. The kernel
-/// tiles one row per workgroup; the leading dims of `x` are flattened
-/// to the row count.
-///
-/// Used by the Vulkan training path to replace the candle CPU
-/// `rms_norm_fallback` per-layer cost (allocates `x_f32`, `variance`,
-/// `rms_inv`, `normed`, `w_plus_one`, then casts back). At T=2500 with
-/// ~64 RMSNorm calls per forward this was a substantial CPU contributor.
-pub fn dispatch_qwen_rmsnorm_forward(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    weight: &Tensor,
-    eps: f32,
-) -> Result<Tensor> {
-    anyhow::ensure!(
-        x.dtype() == DType::F32,
-        "qwen_rmsnorm_forward: x must be F32, got {:?}",
-        x.dtype()
-    );
-    anyhow::ensure!(
-        weight.dtype() == DType::F32,
-        "qwen_rmsnorm_forward: weight must be F32, got {:?}",
-        weight.dtype()
-    );
-    let dims = x.shape().dims().to_vec();
-    let hidden = *dims.last().context("qwen_rmsnorm_forward: x has no dims")?;
-    let rows: usize = dims[..dims.len() - 1].iter().product();
-    anyhow::ensure!(
-        weight.dims() == [hidden],
-        "qwen_rmsnorm_forward: weight shape {:?} does not match hidden {}",
-        weight.dims(),
-        hidden,
-    );
-
-    let x_data = extract_tensor_bytes(x)?.0;
-    let weight_data = extract_tensor_bytes(weight)?.0;
-    let out_data =
-        dispatch_qwen_rmsnorm_forward_bytes_core(vk_device, &x_data, &weight_data, rows, hidden, eps)?;
-    create_tensor_from_data(&out_data, &dims, DType::F32)
-}
-
-/// Candle-free variant of [`dispatch_qwen_rmsnorm_forward`].
-///
-/// Takes `x` and `weight` as raw f32 bytes and returns the output as
-/// raw f32 bytes. The caller passes the logical `rows` (flattened
-/// product of all but the last input dim) and `hidden` (last input
-/// dim) explicitly — there is no `x_shape` because RMSNorm only
-/// touches one row at a time. (#1082)
 pub fn dispatch_qwen_rmsnorm_forward_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -2283,84 +2136,6 @@ fn dispatch_qwen_rmsnorm_forward_bytes_core(
     }
 }
 
-/// Qwen3.5-style RMSNorm backward.
-///
-/// Given the forward inputs (`x`, `weight`, `eps`) and the gradient of
-/// the loss w.r.t. the forward output (`grad_y`), returns `dL/dx` with
-/// the same shape as `x`. `dL/dw` is intentionally NOT computed — the
-/// Qwen3.5 base RMSNorm weights are frozen during LoRA training.
-///
-/// All tensors are F32 row-major. Used by the Vulkan training path
-/// (RmsNormCustomOp1) to backprop without materializing the chain of
-/// candle intermediates that would otherwise dominate the per-layer
-/// backward cost on long-context training.
-pub fn dispatch_qwen_rmsnorm_backward(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    weight: &Tensor,
-    grad_y: &Tensor,
-    eps: f32,
-) -> Result<Tensor> {
-    anyhow::ensure!(
-        x.dtype() == DType::F32,
-        "qwen_rmsnorm_backward: x must be F32, got {:?}",
-        x.dtype()
-    );
-    anyhow::ensure!(
-        weight.dtype() == DType::F32,
-        "qwen_rmsnorm_backward: weight must be F32, got {:?}",
-        weight.dtype()
-    );
-    anyhow::ensure!(
-        grad_y.dtype() == DType::F32,
-        "qwen_rmsnorm_backward: grad_y must be F32, got {:?}",
-        grad_y.dtype()
-    );
-    anyhow::ensure!(
-        x.dims() == grad_y.dims(),
-        "qwen_rmsnorm_backward: x dims {:?} != grad_y dims {:?}",
-        x.dims(),
-        grad_y.dims()
-    );
-
-    let dims = x.shape().dims().to_vec();
-    let hidden = *dims
-        .last()
-        .context("qwen_rmsnorm_backward: x has no dims")?;
-    let rows: usize = dims[..dims.len() - 1].iter().product();
-    anyhow::ensure!(
-        weight.dims() == [hidden],
-        "qwen_rmsnorm_backward: weight shape {:?} does not match hidden {}",
-        weight.dims(),
-        hidden,
-    );
-
-    let x_data = extract_tensor_bytes(x)?.0;
-    let weight_data = extract_tensor_bytes(weight)?.0;
-    let grad_y_data = extract_tensor_bytes(grad_y)?.0;
-
-    let out_data = dispatch_qwen_rmsnorm_backward_bytes_core(
-        vk_device,
-        &x_data,
-        &weight_data,
-        &grad_y_data,
-        rows,
-        hidden,
-        eps,
-    )?;
-    create_tensor_from_data(&out_data, &dims, DType::F32)
-}
-
-/// Candle-free variant of [`dispatch_qwen_rmsnorm_backward`].
-///
-/// Takes `x`, `weight`, and `grad_y` as raw f32 bytes and returns
-/// `grad_x` as raw f32 bytes with the same layout as `x`. The caller
-/// passes the logical `rows` (flattened product of all but the last
-/// input dim) and `hidden` (last input dim) explicitly — there is no
-/// `x_shape` because RMSNorm-backward only touches one row at a time.
-/// `grad_y` and `x` must have identical layout (the candle entry
-/// already enforces matching dims). The candle entry becomes a thin
-/// shim around the shared bytes core. (#1082)
 pub fn dispatch_qwen_rmsnorm_backward_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -2491,48 +2266,6 @@ fn dispatch_qwen_rmsnorm_backward_bytes_core(
     .context("qwen_rmsnorm_backward: read back grad_x")
 }
 
-/// Matmul against the TRANSPOSE of a bf16-packed weight buffer.
-///
-/// `weight_buffer` holds a row-major bf16-packed matrix of shape
-/// `[forward_k, forward_n]` (the same buffer the forward kernel
-/// dispatches against). This function dispatches:
-///
-/// `out[batch, n_dim] = x[batch, k_dim] * W.T`
-///
-/// where `W.T` has shape `[forward_n, forward_k]` and `k_dim = forward_n`,
-/// `n_dim = forward_k`. Used by VulkanLinearOp::bwd to compute
-/// `dx = dy @ weight_t.T` against the same buffer the forward dispatch
-/// uploaded — no separate upload of the transposed weight needed.
-///
-/// Output shape is `[batch, 1, n_dim]`.
-pub fn dispatch_linear_decode_cached_bf16_weights_transposed(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    weight_buffer: &VulkanBuffer,
-    batch: usize,
-    k_dim: usize,
-    n_dim: usize,
-) -> Result<Tensor> {
-    let x_data = extract_tensor_bytes(x)?.0;
-    let out_data = dispatch_linear_decode_cached_bf16_weights_transposed_bytes_core(
-        vk_device,
-        &x_data,
-        weight_buffer,
-        batch,
-        k_dim,
-        n_dim,
-    )?;
-    create_tensor_from_data(&out_data, &[batch, 1, n_dim], DType::F32)
-}
-
-/// Candle-free variant of
-/// [`dispatch_linear_decode_cached_bf16_weights_transposed`].
-///
-/// Takes `x` as raw f32 bytes `[batch, k_dim]` (or equivalently
-/// `[batch, 1, k_dim]`) and returns the output as raw f32 bytes
-/// shaped `[batch, 1, n_dim]` in row-major order. The candle entry
-/// is a thin shim that delegates to the shared bytes core.
-/// (#1082)
 pub fn dispatch_linear_decode_cached_bf16_weights_transposed_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -4269,43 +4002,6 @@ pub fn dispatch_full_attn_qkv_decode_cached_batched(
     )
 }
 
-/// BF16-weight batched variant of [`dispatch_full_attn_qkv_decode_cached_batched`].
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_full_attn_qkv_decode_cached_batched_bf16_weights(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    q_weight_t: &VulkanBuffer,
-    k_weight_t: &VulkanBuffer,
-    v_weight_t: &VulkanBuffer,
-    batch: usize,
-    hidden: usize,
-    q_dim: usize,
-    k_dim: usize,
-    v_dim: usize,
-) -> Result<(Tensor, Tensor, Tensor)> {
-    dispatch_full_attn_qkv_decode_cached_batched_impl(
-        vk_device,
-        x,
-        q_weight_t,
-        k_weight_t,
-        v_weight_t,
-        batch,
-        hidden,
-        q_dim,
-        k_dim,
-        v_dim,
-        true,
-    )
-}
-
-/// Candle-free variant of
-/// [`dispatch_full_attn_qkv_decode_cached_batched_bf16_weights`].
-///
-/// Takes `x` as raw f32 bytes `[batch, 1, hidden]` and returns the
-/// `(q, k, v)` outputs as raw f32 bytes — each shaped `[batch, 1, *_dim]`
-/// in row-major order. The shim reconstructs a CPU Tensor internally
-/// so callers can stay candle-free. (#1082)
-#[allow(clippy::too_many_arguments)]
 pub fn dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -4875,44 +4571,6 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32(
     create_tensor_from_data(&out_data, &[batch, 1usize, num_heads, head_dim], DType::F32)
 }
 
-/// Dispatch a cached fused single-token SwiGLU gate/up projection.
-///
-/// `x` is `[batch, 1, hidden]`; both weights are `[hidden, intermediate]`. The
-/// returned tensor is f32 CPU `[batch, 1, intermediate]` after `silu(gate) * up`.
-pub fn dispatch_mlp_gate_up_decode_cached(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    gate_weight_t: &VulkanBuffer,
-    up_weight_t: &VulkanBuffer,
-    hidden: usize,
-    intermediate: usize,
-) -> Result<Tensor> {
-    let x_dims = x.dims();
-    anyhow::ensure!(
-        x_dims.len() == 3 && x_dims[1] == 1 && x_dims[2] == hidden,
-        "mlp_gate_up_decode: x shape {:?} does not match [batch, 1, {hidden}]",
-        x_dims
-    );
-    let batch = x_dims[0];
-    let x_data = extract_tensor_bytes(x)?.0;
-    let out_data = dispatch_mlp_gate_up_decode_cached_bytes_core(
-        vk_device,
-        &x_data,
-        batch,
-        hidden,
-        intermediate,
-        gate_weight_t,
-        up_weight_t,
-    )?;
-    create_tensor_from_data(&out_data, &[batch, 1, intermediate], DType::F32)
-}
-
-/// Candle-free variant of [`dispatch_mlp_gate_up_decode_cached`].
-///
-/// Takes the input as raw f32 bytes `[batch, 1, hidden]` and returns
-/// the output as raw f32 bytes `[batch, 1, intermediate]`. Callers
-/// construct their own tensor wrapper (or none) as appropriate.
-/// (#1082)
 pub fn dispatch_mlp_gate_up_decode_cached_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -5074,39 +4732,6 @@ pub fn dispatch_mlp_decode_cached(
     )
 }
 
-/// Dispatch single-token SwiGLU MLP with packed BF16 immutable weights.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_mlp_decode_cached_bf16_weights(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    gate_weight_t: &VulkanBuffer,
-    up_weight_t: &VulkanBuffer,
-    down_weight_t: &VulkanBuffer,
-    hidden: usize,
-    intermediate: usize,
-    out_dim: usize,
-) -> Result<Tensor> {
-    dispatch_mlp_decode_cached_impl(
-        vk_device,
-        x,
-        gate_weight_t,
-        up_weight_t,
-        down_weight_t,
-        hidden,
-        intermediate,
-        out_dim,
-        true,
-        true,
-    )
-}
-
-/// Candle-free variant of [`dispatch_mlp_decode_cached_bf16_weights`].
-///
-/// Takes `x` as raw f32 bytes `[batch, 1, hidden]` and returns the
-/// output as raw f32 bytes `[batch, 1, out_dim]`. The bytes shim
-/// reconstructs a CPU Tensor internally so callers do not need any
-/// candle types in their own crate. (#1082)
-#[allow(clippy::too_many_arguments)]
 pub fn dispatch_mlp_decode_cached_bf16_weights_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -5134,41 +4759,6 @@ pub fn dispatch_mlp_decode_cached_bf16_weights_bytes(
     Ok(extract_tensor_bytes(&out)?.0)
 }
 
-/// Dispatch single-token SwiGLU MLP with packed BF16 gate/up weights and an
-/// F32 down-projection weight.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_mlp_decode_cached_bf16_gate_up_f32_down(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    gate_weight_t: &VulkanBuffer,
-    up_weight_t: &VulkanBuffer,
-    down_weight_t: &VulkanBuffer,
-    hidden: usize,
-    intermediate: usize,
-    out_dim: usize,
-) -> Result<Tensor> {
-    dispatch_mlp_decode_cached_impl(
-        vk_device,
-        x,
-        gate_weight_t,
-        up_weight_t,
-        down_weight_t,
-        hidden,
-        intermediate,
-        out_dim,
-        true,
-        false,
-    )
-}
-
-/// Candle-free variant of [`dispatch_mlp_decode_cached_bf16_gate_up_f32_down`].
-///
-/// Same byte-layout contract as
-/// [`dispatch_mlp_decode_cached_bf16_weights_bytes`] — x is f32 bytes
-/// `[batch, 1, hidden]`, output is f32 bytes `[batch, 1, out_dim]`. The
-/// only difference is the down-projection weight is f32 instead of
-/// packed bf16. (#1082)
-#[allow(clippy::too_many_arguments)]
 pub fn dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -6371,36 +5961,23 @@ pub fn dispatch_gdn_gates(
     );
     let a_log_buf = upload_tensor_f32_buffer(vk_device, a_log)?;
     let dt_bias_buf = upload_tensor_f32_buffer(vk_device, dt_bias)?;
-    dispatch_gdn_gates_cached(vk_device, a, b, &a_log_buf, &dt_bias_buf, nv, out_shape)
-}
-
-/// Dispatch GDN gates kernel with cached immutable A_log and dt_bias buffers.
-pub fn dispatch_gdn_gates_cached(
-    vk_device: &VulkanDevice,
-    a: &Tensor,
-    b: &Tensor,
-    a_log: &VulkanBuffer,
-    dt_bias: &VulkanBuffer,
-    nv: usize,
-    out_shape: &[usize],
-) -> Result<(Tensor, Tensor)> {
     let a_data = extract_tensor_bytes(a)?.0;
     let b_data = extract_tensor_bytes(b)?.0;
     let output_dtype = a.dtype();
     let (beta_data, g_data) = dispatch_gdn_gates_cached_bytes_core(
-        vk_device, &a_data, &b_data, a_log, dt_bias, nv, out_shape,
+        vk_device,
+        &a_data,
+        &b_data,
+        &a_log_buf,
+        &dt_bias_buf,
+        nv,
+        out_shape,
     )?;
     let beta_tensor = create_tensor_from_data(&beta_data, out_shape, output_dtype)?;
     let g_tensor = create_tensor_from_data(&g_data, out_shape, output_dtype)?;
     Ok((beta_tensor, g_tensor))
 }
 
-/// Candle-free variant of [`dispatch_gdn_gates_cached`].
-///
-/// Takes `a` and `b` as raw f32 bytes with shape `out_shape` and
-/// returns the `(beta, g)` outputs as raw f32 bytes — both with the
-/// same `out_shape`. `a_log` and `dt_bias` remain VulkanBuffer-typed
-/// because they're pre-uploaded cached weight buffers. (#1082)
 pub fn dispatch_gdn_gates_cached_bytes(
     vk_device: &VulkanDevice,
     a_data: &[u8],
@@ -6576,34 +6153,22 @@ pub fn dispatch_gdn_gated_rms_norm(
 ) -> Result<Tensor> {
     let hidden = weight.elem_count();
     let weight_buf = upload_tensor_f32_buffer(vk_device, weight)?;
-    dispatch_gdn_gated_rms_norm_cached(vk_device, x, z, &weight_buf, hidden, eps, out_shape)
-}
-
-/// Dispatch GDN gated RMSNorm kernel with cached immutable norm weight.
-pub fn dispatch_gdn_gated_rms_norm_cached(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    z: &Tensor,
-    weight: &VulkanBuffer,
-    hidden: usize,
-    eps: f32,
-    out_shape: &[usize],
-) -> Result<Tensor> {
     let x_data = extract_tensor_bytes(x)?.0;
     let z_data = extract_tensor_bytes(z)?.0;
     let output_dtype = x.dtype();
     let output_data = dispatch_gdn_gated_rms_norm_cached_bytes_core(
-        vk_device, &x_data, &z_data, weight, hidden, eps, out_shape,
+        vk_device,
+        &x_data,
+        &z_data,
+        &weight_buf,
+        hidden,
+        eps,
+        out_shape,
     )?;
     create_tensor_from_data(&output_data, out_shape, output_dtype)
         .context("failed to create gdn_gated_rms_norm output tensor")
 }
 
-/// Candle-free variant of [`dispatch_gdn_gated_rms_norm_cached`].
-///
-/// Takes `x` and `z` as raw f32 bytes (each with shape `out_shape`)
-/// plus the cached `weight` VulkanBuffer, and returns the output as
-/// raw f32 bytes with the same `out_shape`. (#1082)
 pub fn dispatch_gdn_gated_rms_norm_cached_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -6733,63 +6298,6 @@ fn dispatch_gdn_gated_rms_norm_cached_bytes_core(
     Ok(output_data)
 }
 
-/// Dispatch causal_conv1d update kernel (single-token decode path).
-///
-/// Depthwise conv1d with kernel_size=4, silu-fused.
-/// `x`: `[B, C, 1]` bf16. `weight`: `[C, K]` bf16. `conv_state`: `[B, C, K-1]` f32.
-/// Returns `out: [B, C, 1]` f32 and updates `conv_state` in-place.
-///
-/// Two-dispatch approach to avoid data races on conv_state:
-/// 1. `causal_conv1d.comp` — computes output only (no state writes)
-/// 2. `causal_conv1d_state_advance.comp` — advances state per (b, c) pair
-pub fn dispatch_causal_conv1d_update(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    weight: &Tensor,
-    conv_state: &Tensor,
-    kernel_size: usize,
-) -> Result<(Tensor, Tensor)> {
-    // Extract input data + shapes
-    let x_data = extract_tensor_bytes(x)?.0;
-    let weight_data = extract_tensor_bytes(weight)?.0;
-    let state_data = extract_tensor_bytes(conv_state)?.0;
-
-    let dims = x.dims();
-    anyhow::ensure!(
-        dims.len() == 3,
-        "causal_conv1d_update: x must be 3-D, got {:?}",
-        dims
-    );
-    let (batch, channels, seq_len) = (dims[0], dims[1], dims[2]);
-    let conv_state_shape = conv_state.dims().as_ref().to_vec();
-
-    let (out_data, state_data_out) = dispatch_causal_conv1d_update_bytes_core(
-        vk_device,
-        &x_data,
-        &weight_data,
-        &state_data,
-        batch,
-        channels,
-        seq_len,
-        kernel_size,
-    )?;
-
-    let out_shape: Vec<usize> = dims.to_vec();
-    let out_tensor = create_tensor_from_data(&out_data, &out_shape, DType::F32)?;
-    let state_tensor = create_tensor_from_data(&state_data_out, &conv_state_shape, DType::F32)?;
-    Ok((out_tensor, state_tensor))
-}
-
-/// Candle-free variant of [`dispatch_causal_conv1d_update`].
-///
-/// Takes `x` (bf16), `weight` (bf16), and `conv_state` (f32) as raw
-/// bytes, plus the unpacked shape `[batch, channels, seq_len]` and the
-/// fixed `kernel_size`. Returns the `(out, new_conv_state)` pair as
-/// raw f32 bytes. The two outputs share the same flat byte layout as
-/// their tensor counterparts: `out` is `[batch, channels, seq_len]` f32
-/// and `new_conv_state` is `[batch, channels, kernel_size - 1]` f32.
-/// (#1082)
-#[allow(clippy::too_many_arguments)]
 pub fn dispatch_causal_conv1d_update_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -7670,7 +7178,7 @@ fn run_compute_pipeline_with_transfer_readback(
 /// Single-submit multi-upload + dispatch + multi-readback. Variant of
 /// `run_compute_pipeline_with_transfer_readback` for kernels that take
 /// several disjoint input buffers AND produce several disjoint output
-/// buffers (e.g. `dispatch_gdn_gates_cached`'s beta + g pair). Schedules
+/// buffers (e.g. `dispatch_gdn_gates_cached_bytes`'s beta + g pair). Schedules
 /// all host→device copies, the compute dispatch, and every device→host
 /// readback into one command buffer.
 #[allow(clippy::too_many_arguments)]

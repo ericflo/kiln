@@ -7274,11 +7274,25 @@ fn try_vulkan_rmsnorm_forward(x: &Tensor, weight: &Tensor, eps: f32) -> Result<O
     } else {
         weight.to_dtype(DType::F32)?
     };
-    let out_f32 = kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward(
+    let x_dims = x_f32.shape().dims().to_vec();
+    let hidden = *x_dims
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("rmsnorm: x has no dims"))?;
+    let rows: usize = x_dims[..x_dims.len() - 1].iter().product();
+    let x_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x_f32)?.0;
+    let w_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&w_f32)?.0;
+    let out_bytes = kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward_bytes(
         vk_device.as_ref(),
-        &x_f32,
-        &w_f32,
+        &x_bytes,
+        &w_bytes,
+        rows,
+        hidden,
         eps,
+    )?;
+    let out_f32 = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &out_bytes,
+        &x_dims,
+        DType::F32,
     )?;
     let out = if out_f32.dtype() == in_dtype {
         out_f32
@@ -7363,13 +7377,34 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
                     candle_core::Error::Msg(format!("rmsnorm fwd weight→f32: {e:?}"))
                 })?
             };
-            let out_f32 = kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward(
+            let x_dims = x_f32.shape().dims().to_vec();
+            let hidden = *x_dims.last().ok_or_else(|| {
+                candle_core::Error::Msg("rmsnorm fwd: x has no dims".to_string())
+            })?;
+            let rows: usize = x_dims[..x_dims.len() - 1].iter().product();
+            let x_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x_f32)
+                .map_err(|e| candle_core::Error::Msg(format!("rmsnorm fwd extract x: {e:?}")))?
+                .0;
+            let w_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&w_f32)
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("rmsnorm fwd extract weight: {e:?}"))
+                })?
+                .0;
+            let out_bytes = kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward_bytes(
                 self.vk_device.as_ref(),
-                &x_f32,
-                &w_f32,
+                &x_bytes,
+                &w_bytes,
+                rows,
+                hidden,
                 self.eps,
             )
             .map_err(|e| candle_core::Error::Msg(format!("rmsnorm fwd dispatch: {e:?}")))?;
+            let out_f32 = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &out_bytes,
+                &x_dims,
+                DType::F32,
+            )
+            .map_err(|e| candle_core::Error::Msg(format!("rmsnorm fwd rebuild: {e:?}")))?;
             let out = if out_f32.dtype() == self.out_dtype {
                 out_f32
             } else {

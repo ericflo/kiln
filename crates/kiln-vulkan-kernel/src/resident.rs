@@ -1825,9 +1825,9 @@ pub fn dispatch_paged_kv_write_slot_resident(
 mod tests {
     use super::*;
     use crate::kernels::{
-        dispatch_linear_decode_cached, dispatch_linear_decode_cached_bf16_weights,
-        dispatch_qwen_rmsnorm_forward, extract_tensor_bytes,
-        upload_tensor_bf16_packed_buffer, upload_tensor_f32_buffer,
+        create_tensor_from_data, dispatch_linear_decode_cached,
+        dispatch_linear_decode_cached_bytes, dispatch_qwen_rmsnorm_forward_bytes,
+        extract_tensor_bytes, upload_tensor_bf16_packed_buffer, upload_tensor_f32_buffer,
     };
     use candle_core::{Device, Tensor};
     use half::bf16;
@@ -1902,8 +1902,13 @@ mod tests {
         let w = make_bf16_weight(hidden, out_dim);
         let w_buf = upload_tensor_bf16_packed_buffer(&dev, &w).unwrap();
 
-        let baseline = dispatch_linear_decode_cached_bf16_weights(
-            &dev, &x, &w_buf, batch, hidden, out_dim,
+        let x_data = extract_tensor_bytes(&x).unwrap().0;
+        let baseline_bytes = dispatch_linear_decode_cached_bytes(
+            &dev, &x_data, &w_buf, batch, hidden, out_dim, true,
+        )
+        .unwrap();
+        let baseline = create_tensor_from_data(
+            &baseline_bytes, &[batch, 1, out_dim], candle_core::DType::F32,
         )
         .unwrap();
         let baseline = baseline
@@ -1936,8 +1941,13 @@ mod tests {
         let w = make_bf16_weight(hidden, out_dim);
         let w_buf = upload_tensor_bf16_packed_buffer(&dev, &w).unwrap();
 
-        let baseline = dispatch_linear_decode_cached_bf16_weights(
-            &dev, &x, &w_buf, batch, hidden, out_dim,
+        let x_data = extract_tensor_bytes(&x).unwrap().0;
+        let baseline_bytes = dispatch_linear_decode_cached_bytes(
+            &dev, &x_data, &w_buf, batch, hidden, out_dim, true,
+        )
+        .unwrap();
+        let baseline = create_tensor_from_data(
+            &baseline_bytes, &[batch, 1, out_dim], candle_core::DType::F32,
         )
         .unwrap();
         let baseline = baseline
@@ -1999,7 +2009,7 @@ mod tests {
 
     #[test]
     fn mlp_decode_bf16w_resident_matches_nonresident_b1() {
-        use crate::kernels::dispatch_mlp_decode_cached_bf16_weights;
+        use crate::kernels::dispatch_mlp_decode_cached_bf16_weights_bytes;
         let Some(dev) = try_device() else { return };
         let batch = 1;
         let hidden = 64;
@@ -2013,9 +2023,11 @@ mod tests {
         let u_buf = upload_tensor_bf16_packed_buffer(&dev, &up).unwrap();
         let d_buf = upload_tensor_bf16_packed_buffer(&dev, &down).unwrap();
 
-        let baseline = dispatch_mlp_decode_cached_bf16_weights(
+        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let baseline_bytes = dispatch_mlp_decode_cached_bf16_weights_bytes(
             &dev,
-            &x,
+            &x_bytes,
+            batch,
             &g_buf,
             &u_buf,
             &d_buf,
@@ -2024,7 +2036,10 @@ mod tests {
             out_dim,
         )
         .unwrap();
-        let baseline = baseline.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let baseline: Vec<f32> = baseline_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
 
         let x_buf = upload_x(&dev, &x);
         let scratch = alloc_out(&dev, (batch * intermediate * 4) as u64);
@@ -2053,7 +2068,7 @@ mod tests {
 
     #[test]
     fn mlp_decode_bf16w_resident_matches_nonresident_b4() {
-        use crate::kernels::dispatch_mlp_decode_cached_bf16_weights;
+        use crate::kernels::dispatch_mlp_decode_cached_bf16_weights_bytes;
         let Some(dev) = try_device() else { return };
         let batch = 4;
         let hidden = 64;
@@ -2067,9 +2082,11 @@ mod tests {
         let u_buf = upload_tensor_bf16_packed_buffer(&dev, &up).unwrap();
         let d_buf = upload_tensor_bf16_packed_buffer(&dev, &down).unwrap();
 
-        let baseline = dispatch_mlp_decode_cached_bf16_weights(
+        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let baseline_bytes = dispatch_mlp_decode_cached_bf16_weights_bytes(
             &dev,
-            &x,
+            &x_bytes,
+            batch,
             &g_buf,
             &u_buf,
             &d_buf,
@@ -2078,7 +2095,10 @@ mod tests {
             out_dim,
         )
         .unwrap();
-        let baseline = baseline.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let baseline: Vec<f32> = baseline_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
 
         let x_buf = upload_x(&dev, &x);
         let scratch = alloc_out(&dev, (batch * intermediate * 4) as u64);
@@ -2142,7 +2162,7 @@ mod tests {
 
     #[test]
     fn full_attn_qkv_bf16w_batched_resident_matches_nonresident() {
-        use crate::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights;
+        use crate::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes;
         let Some(dev) = try_device() else { return };
         let batch = 4;
         let hidden = 96;
@@ -2157,13 +2177,14 @@ mod tests {
         let k_buf = upload_tensor_bf16_packed_buffer(&dev, &k_w).unwrap();
         let v_buf = upload_tensor_bf16_packed_buffer(&dev, &v_w).unwrap();
 
-        let (q_t, k_t, v_t) = dispatch_full_attn_qkv_decode_cached_batched_bf16_weights(
-            &dev, &x, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
+        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let (q_bytes, k_bytes, v_bytes) = dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
+            &dev, &x_bytes, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
         )
         .unwrap();
-        let q_v = q_t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        let k_v = k_t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        let v_v = v_t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let q_v: Vec<f32> = q_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let k_v: Vec<f32> = k_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let v_v: Vec<f32> = v_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         let total_out = q_dim + k_dim + v_dim;
         let mut expected: Vec<f32> = Vec::with_capacity(batch * total_out);
         for r in 0..batch {
@@ -2187,7 +2208,7 @@ mod tests {
 
     #[test]
     fn gdn_in_proj_bf16w_resident_matches_nonresident_b1() {
-        use crate::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights;
+        use crate::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes;
         let Some(dev) = try_device() else { return };
         let hidden = 96;
         let qkv_dim = 64;
@@ -2205,14 +2226,21 @@ mod tests {
         let a_buf = upload_tensor_bf16_packed_buffer(&dev, &a_w).unwrap();
         let b_buf = upload_tensor_bf16_packed_buffer(&dev, &b_w).unwrap();
 
-        let (qkv_t, z_t, a_t, b_t) = dispatch_gdn_in_proj_decode_cached_bf16_weights(
-            &dev, &x, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim, z_dim, a_dim, b_dim,
+        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let (qkv_b, z_b, a_b, b_b) = dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
+            &dev, &x_bytes, 1, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim, z_dim, a_dim, b_dim,
         )
         .unwrap();
-        let mut expected: Vec<f32> = qkv_t.flatten_all().unwrap().to_vec1().unwrap();
-        expected.extend(z_t.flatten_all().unwrap().to_vec1::<f32>().unwrap());
-        expected.extend(a_t.flatten_all().unwrap().to_vec1::<f32>().unwrap());
-        expected.extend(b_t.flatten_all().unwrap().to_vec1::<f32>().unwrap());
+        let to_f32 = |bytes: &[u8]| -> Vec<f32> {
+            bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
+        };
+        let mut expected: Vec<f32> = to_f32(&qkv_b);
+        expected.extend(to_f32(&z_b));
+        expected.extend(to_f32(&a_b));
+        expected.extend(to_f32(&b_b));
 
         let x_buf = upload_x(&dev, &x);
         let out_buf = alloc_out(&dev, (total_out * 4) as u64);
@@ -2229,7 +2257,7 @@ mod tests {
 
     #[test]
     fn gdn_gates_resident_matches_nonresident() {
-        use crate::kernels::dispatch_gdn_gates_cached;
+        use crate::kernels::dispatch_gdn_gates_cached_bytes;
         let Some(dev) = try_device() else { return };
         let batch = 2;
         let nv = 8;
@@ -2262,18 +2290,26 @@ mod tests {
         let a_log_buf = upload_tensor_f32_buffer(&dev, &a_log).unwrap();
         let dt_bias_buf = upload_tensor_f32_buffer(&dev, &dt_bias).unwrap();
 
-        let (beta_t, g_t) = dispatch_gdn_gates_cached(
+        let a_bytes = extract_tensor_bytes(&a).unwrap().0;
+        let b_bytes = extract_tensor_bytes(&b).unwrap().0;
+        let (beta_bytes, g_bytes) = dispatch_gdn_gates_cached_bytes(
             &dev,
-            &a,
-            &b,
+            &a_bytes,
+            &b_bytes,
             &a_log_buf,
             &dt_bias_buf,
             nv,
             &[batch, t, nv],
         )
         .unwrap();
-        let beta_exp = beta_t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        let g_exp = g_t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let beta_exp: Vec<f32> = beta_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let g_exp: Vec<f32> = g_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
 
         let a_buf_d = upload_tensor_f32_buffer(&dev, &a).unwrap();
         let b_buf_d = upload_tensor_f32_buffer(&dev, &b).unwrap();
@@ -2303,7 +2339,7 @@ mod tests {
 
     #[test]
     fn gdn_gated_rms_norm_resident_matches_nonresident() {
-        use crate::kernels::dispatch_gdn_gated_rms_norm_cached;
+        use crate::kernels::dispatch_gdn_gated_rms_norm_cached_bytes;
         let Some(dev) = try_device() else { return };
         let rows = 6;
         let hidden = 64;
@@ -2328,17 +2364,22 @@ mod tests {
         .unwrap();
         let weight_buf = upload_tensor_f32_buffer(&dev, &weight).unwrap();
 
-        let baseline = dispatch_gdn_gated_rms_norm_cached(
+        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let z_bytes = extract_tensor_bytes(&z).unwrap().0;
+        let baseline_bytes = dispatch_gdn_gated_rms_norm_cached_bytes(
             &dev,
-            &x,
-            &z,
+            &x_bytes,
+            &z_bytes,
             &weight_buf,
             hidden,
             eps,
             &[rows, hidden],
         )
         .unwrap();
-        let expected = baseline.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let expected: Vec<f32> = baseline_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
 
         let x_buf = upload_tensor_f32_buffer(&dev, &x).unwrap();
         let z_buf = upload_tensor_f32_buffer(&dev, &z).unwrap();
@@ -2641,8 +2682,15 @@ mod tests {
         )
         .unwrap();
 
-        let baseline = dispatch_qwen_rmsnorm_forward(&dev, &x, &weight, eps).unwrap();
-        let baseline = baseline.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let weight_bytes = extract_tensor_bytes(&weight).unwrap().0;
+        let baseline_bytes =
+            dispatch_qwen_rmsnorm_forward_bytes(&dev, &x_bytes, &weight_bytes, rows, hidden, eps)
+                .unwrap();
+        let baseline: Vec<f32> = baseline_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
 
         let x_buf = upload_tensor_f32_buffer(&dev, &x).unwrap();
         let weight_buf = upload_tensor_f32_buffer(&dev, &weight).unwrap();
