@@ -15,7 +15,26 @@
 //! compile path (which links `cuda` against `candle-core` but has no
 //! GPU) doesn't spuriously fail.
 //!
-//! # Phase 7 candle-removal — STOP (blocked on `CudaStorage::zeros`)
+//! # Phase 7 candle-removal — partial UNBLOCK (read accessor landed)
+//!
+//! As of the b39f5712 commit (`kiln-tensor: add CudaStorage::context()
+//! accessor`), [`CudaStorage::context()`] returns the same
+//! `Arc<cudarc::driver::CudaContext>` that candle's `CudaDevice` wraps
+//! internally — derived via `candle_device.cuda_stream().context()
+//! .clone()`. **The bridge from candle's `Arc<CudaDevice>` to a
+//! cudarc-typed `Arc<CudaContext>` is now reachable without storage
+//! changes.**
+//!
+//! That `context()` accessor unblocks step 4 below in the "additive"
+//! direction: this allocator can grow a second `Arc<CudaContext>` field
+//! populated alongside `candle_device` (e.g. via a new `with_ctx`
+//! constructor), and downstream callers can start reading `.context()`
+//! from any existing `CudaStorage` to wean off candle one site at a
+//! time. The **field flip** that fully removes the candle-typed
+//! `candle_device: Arc<CudaDevice>` is still blocked on the storage-
+//! side refactor (steps 1-3 below).
+//!
+//! # Original audit (call-graph dependencies)
 //!
 //! The original plan was for Phase 7 to swap `Arc<CudaDevice>` for
 //! `Arc<cudarc::driver::CudaContext>` here. After auditing the actual
@@ -55,6 +74,10 @@
 //!
 //! Order-of-operations for the lift (tracked under #1082):
 //!
+//! 0. **DONE (b39f5712)**: Add `CudaStorage::context() ->
+//!    Arc<CudaContext>` accessor. Derives the cudarc context from
+//!    candle's existing `CudaDevice::cuda_stream().context().clone()`
+//!    with no struct change. This is the read-side bridge.
 //! 1. Add a parallel `CudaStorage::zeros_kt(ctx: Arc<CudaContext>, ...)`
 //!    that allocates via `ctx.default_stream().alloc_zeros::<u8>` and
 //!    stores `Arc<CudaContext>` instead of `Arc<CudaDevice>` on
@@ -69,6 +92,14 @@
 //!    → `ctx: Arc<cudarc::driver::CudaContext>`) and one import
 //!    (`use cudarc::driver::CudaContext;` replacing
 //!    `use candle_core::cuda_backend::CudaDevice;`).
+//!
+//! Interim moves (additive, can land in any order once step 0 is in):
+//!
+//! - Grow this allocator's struct with a second `ctx: Arc<CudaContext>`
+//!   field populated from `candle_device.cuda_stream().context()` at
+//!   construction. Add a `ctx()` accessor. Downstream callers that
+//!   only need the context (rather than the full candle wrapper) can
+//!   migrate without waiting for the storage-side field flip.
 //!
 //! Doing step 4 first (the swap implied by the prior docstring) would
 //! either require an `Arc<CudaContext>` → `Arc<CudaDevice>` conversion
@@ -90,8 +121,12 @@ use crate::{
 pub struct CudaAllocator {
     /// Candle CUDA device handle. Held for stream affinity + the
     /// `alloc_zeros::<u8>` helper. The Phase 7 swap to a direct
-    /// cudarc `CudaContext` is blocked on `CudaStorage::zeros`
-    /// migrating first — see the STOP note at the top of this file.
+    /// cudarc `CudaContext` field is still blocked on
+    /// `CudaStorage::zeros` migrating first (step 1 in the top-of-
+    /// file order-of-operations); the *read*-side bridge is now
+    /// available via [`CudaStorage::context()`] (step 0, landed in
+    /// b39f5712), so downstream callers can already migrate to
+    /// `.context()` without waiting for this field to flip.
     candle_device: Arc<CudaDevice>,
     /// CUDA device index — matches the index of `candle_device`'s
     /// owning context.
