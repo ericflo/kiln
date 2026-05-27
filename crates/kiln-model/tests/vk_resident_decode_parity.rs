@@ -18,6 +18,28 @@
 //! correctness; when the entry point is still delegating to the
 //! legacy fn, the test verifies the delegation contract stays
 //! bit-identical.
+//!
+//! # TODO(#1082): candle-removal STOP
+//!
+//! This test cannot drop its `candle_core::Device` import today.
+//!
+//! - `kiln_core::paged_kv_cache::PagedKvCache::new` takes a
+//!   `&candle_core::Device` and a `candle_core::DType` (see the
+//!   `build_cache` helper below, which maps `kiln_core::config::DType`
+//!   → `candle_core::DType` explicitly).
+//! - `kiln_model::backend::for_device` takes `&candle_core::Device`.
+//! - `GpuWeights::from_model_weights` and the
+//!   `model_forward_paged_last_token*` entry points are candle-typed.
+//!
+//! Migrating off candle requires the Tier 7 `PagedKvCacheKt` work
+//! (tracked in `forward.rs` around `try_kt_paged_kv_cache_new` /
+//! `PagedKvCacheKt::new`, ~line 1430-1616). Until the kt twin is
+//! wired into the forward path, this test must construct candle
+//! `Device::Cpu` + candle `DType` to feed the existing API.
+//!
+//! Precedent for STOP-doc-only commits in this sweep: 6d3fc88d
+//! (kiln-opd-loss-kernel), 9a95adc2 (kiln-flce-kernel), acd00bb4
+//! (kiln-rmsnorm-kernel phase10_microbench).
 
 #![cfg(feature = "vulkan")]
 
