@@ -407,7 +407,6 @@ pub fn linear_with_lora_t(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
 
     #[test]
     fn test_parse_peft_key_self_attn() {
