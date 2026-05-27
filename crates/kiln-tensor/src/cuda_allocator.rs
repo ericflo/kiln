@@ -40,18 +40,17 @@
 //!   `alloc_zeros::<u8>` call now reaches CUDA through this
 //!   allocator's `Arc<CudaContext>` companion field, NOT the candle
 //!   `CudaDevice::alloc_zeros` wrapper.
-//! - **this commit**: **dropped the `candle_device` field entirely**.
-//!   `CudaAllocator` now carries only `Arc<CudaContext>` on the
-//!   CUDA-handle side. The existing `new(candle_device, ...)` and
-//!   `with_mode(candle_device, ...)` entries are kept as back-compat
-//!   shims that derive the `ctx` from the candle device wrapper and
-//!   forward to the new `new_ctx` / `with_mode_ctx` constructors,
-//!   so the in-source `#[cfg(test)]` callers (the only external
-//!   touchpoints today) keep compiling unchanged. The
-//!   `candle_device()` getter is gone — call sites that need a candle
-//!   device wrapper derive one via
-//!   `kiln_tensor::primary_cuda_device(allocator.device_index())` or
-//!   read it from the produced `CudaStorage.candle_device()`.
+//! - **dropped the `candle_device` field entirely**. `CudaAllocator`
+//!   now carries only `Arc<CudaContext>` on the CUDA-handle side.
+//! - **this commit**: **dropped the candle-typed back-compat
+//!   constructors** (`new(Arc<CudaDevice>, ...)` and
+//!   `with_mode(Arc<CudaDevice>, ...)`). The only callers were the
+//!   in-source `#[cfg(test)]` tests, which now construct an
+//!   `Arc<CudaContext>` directly via `CudaContext::new(0)` and call
+//!   `new_ctx` / `with_mode_ctx`. The `candle_device()` getter is
+//!   gone — call sites that need a candle device wrapper derive one
+//!   via `kiln_tensor::primary_cuda_device(allocator.device_index())`
+//!   or read it from the produced `CudaStorage.candle_device()`.
 //!
 //! **CP-1 on the allocator side is now structurally complete.** The
 //! produced `CudaStorage` still carries a candle device for kernel-
@@ -136,7 +135,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use candle_core::cuda_backend::CudaDevice;
 use cudarc::driver::CudaContext;
 
 use crate::{
@@ -177,13 +175,13 @@ pub struct CudaAllocator {
 
 impl CudaAllocator {
     /// Construct in `Owned` mode bound to `ctx` at the given CUDA
-    /// ordinal — the **candle-free** constructor entry.
+    /// ordinal — the canonical, candle-free constructor entry.
     ///
-    /// This is the canonical constructor going forward; the
-    /// candle-flavored [`Self::new`] / [`Self::with_mode`] entries
-    /// derive `ctx` from a candle `CudaDevice` and call into this one,
-    /// so existing call sites (only the in-source `#[cfg(test)]`
-    /// callers today) keep compiling unchanged.
+    /// The previously-shipped candle-flavored `new` / `with_mode`
+    /// entries (which derived `ctx` from a candle `CudaDevice`) were
+    /// removed alongside the `cuda_allocator` candle import drop
+    /// (#1082); the only callers were in-source `#[cfg(test)]` and
+    /// have been migrated to this entry.
     pub fn new_ctx(ctx: Arc<CudaContext>, device_index: usize) -> Self {
         CudaAllocator {
             ctx,
@@ -203,31 +201,6 @@ impl CudaAllocator {
         mode: AllocatorMode,
     ) -> Self {
         let mut a = Self::new_ctx(ctx, device_index);
-        a.mode = mode;
-        a
-    }
-
-    /// Construct in `Owned` mode bound to `candle_device` at the
-    /// given CUDA ordinal.
-    ///
-    /// Back-compat entry: extracts the cudarc `Arc<CudaContext>` via
-    /// `candle_device.cuda_stream().context()` and forwards to
-    /// [`Self::new_ctx`]. The allocator no longer stores the candle
-    /// device handle — see the `ctx` field doc.
-    pub fn new(candle_device: Arc<CudaDevice>, device_index: usize) -> Self {
-        let ctx = candle_device.cuda_stream().context().clone();
-        Self::new_ctx(ctx, device_index)
-    }
-
-    /// Construct directly in a given mode (tests, capture session).
-    ///
-    /// Back-compat entry — see [`Self::new`].
-    pub fn with_mode(
-        candle_device: Arc<CudaDevice>,
-        device_index: usize,
-        mode: AllocatorMode,
-    ) -> Self {
-        let mut a = Self::new(candle_device, device_index);
         a.mode = mode;
         a
     }
@@ -351,29 +324,25 @@ impl Allocator for CudaAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device as CandleDevice;
 
     fn cuda_test_enabled() -> bool {
         std::env::var("KILN_TENSOR_CUDA_TEST").ok().as_deref() == Some("1")
     }
 
-    fn maybe_cuda_device() -> Option<Arc<CudaDevice>> {
+    fn maybe_cuda_ctx() -> Option<Arc<CudaContext>> {
         if !cuda_test_enabled() {
             return None;
         }
-        match CandleDevice::new_cuda(0).ok()? {
-            CandleDevice::Cuda(d) => Some(Arc::new(d)),
-            _ => None,
-        }
+        CudaContext::new(0).ok()
     }
 
     #[test]
     fn cuda_allocator_starts_in_owned_mode() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(ctx) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
-        let a = CudaAllocator::new(dev, 0);
+        let a = CudaAllocator::new_ctx(ctx, 0);
         assert_eq!(a.mode(), AllocatorMode::Owned);
         assert_eq!(a.device(), Device::Cuda(0));
         assert_eq!(a.reserved_bytes(), 0);
@@ -381,11 +350,11 @@ mod tests {
 
     #[test]
     fn cuda_owned_alloc_increments_reserved() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(ctx) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
-        let mut a = CudaAllocator::new(dev, 0);
+        let mut a = CudaAllocator::new_ctx(ctx, 0);
         let s = a.alloc(DType::BF16, 32).unwrap();
         assert_eq!(s.dtype(), DType::BF16);
         assert_eq!(s.byte_len(), 64);
@@ -395,11 +364,11 @@ mod tests {
 
     #[test]
     fn cuda_pool_alloc_serves_from_warm_cache() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(ctx) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
-        let mut a = CudaAllocator::with_mode(dev, 0, AllocatorMode::Pool);
+        let mut a = CudaAllocator::with_mode_ctx(ctx, 0, AllocatorMode::Pool);
         a.warm(DType::F32, 16, 2).unwrap();
         assert_eq!(a.cache_len(DType::F32, 16), 2);
         let _s1 = a.alloc(DType::F32, 16).unwrap();
@@ -410,11 +379,11 @@ mod tests {
 
     #[test]
     fn cuda_frozen_alloc_fails_on_cache_miss() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(ctx) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
-        let mut a = CudaAllocator::with_mode(dev, 0, AllocatorMode::Frozen);
+        let mut a = CudaAllocator::with_mode_ctx(ctx, 0, AllocatorMode::Frozen);
         let e = a.alloc(DType::F32, 4).unwrap_err();
         assert!(
             e.to_string().contains("CudaAllocator::alloc"),
@@ -424,11 +393,11 @@ mod tests {
 
     #[test]
     fn cuda_frozen_alloc_succeeds_when_warm_cache_has_match() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(ctx) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
-        let mut a = CudaAllocator::with_mode(dev, 0, AllocatorMode::Pool);
+        let mut a = CudaAllocator::with_mode_ctx(ctx, 0, AllocatorMode::Pool);
         a.warm(DType::F32, 4, 1).unwrap();
         a.set_mode(AllocatorMode::Frozen).unwrap();
         let s = a.alloc(DType::F32, 4).unwrap();
@@ -437,11 +406,11 @@ mod tests {
 
     #[test]
     fn cuda_set_mode_transitions_freely() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(ctx) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
-        let mut a = CudaAllocator::new(dev, 0);
+        let mut a = CudaAllocator::new_ctx(ctx, 0);
         a.set_mode(AllocatorMode::Pool).unwrap();
         assert_eq!(a.mode(), AllocatorMode::Pool);
         a.set_mode(AllocatorMode::Frozen).unwrap();
