@@ -60,8 +60,6 @@
 //! `qk_norm`) and the two RMSNorm stages — these are upstream of the
 //! chunkwise recurrence and are *not* covered by this crate.
 
-use half::bf16;
-
 /// kiln-tensor-typed surface. Same FFI used by the kernels.
 mod kt_api;
 pub use kt_api::{
