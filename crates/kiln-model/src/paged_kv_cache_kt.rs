@@ -32,8 +32,16 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use candle_core::cuda_backend::cudarc::driver::result as cudarc_result;
+// #1082: cudarc imported directly instead of through
+// candle_core::cuda_backend::cudarc::*. The candle re-export is a pure
+// pass-through to the cudarc crate (candle-core wraps cudarc verbatim),
+// so this drops two candle imports without changing runtime behavior.
+// Pattern lifted from kiln-tensor commit 4ee1b7f9 and kiln-blas commit
+// 0d201199. CudaDevice still comes from candle for now — it's a parameter
+// type on the public `PagedKvCacheKt::new*` surface and changing it
+// would ripple to every caller (see forward.rs:1539, etc.).
 use candle_core::cuda_backend::CudaDevice;
+use cudarc::driver::result as cudarc_result;
 
 use kiln_core::block::BlockTable;
 use kiln_tensor::{
@@ -343,8 +351,9 @@ impl PagedKvCacheKt {
             // to avoid touching the candle device wrapper from kernel-crate FFI.
             // cuda_stream_raw() returns the same underlying CUstream cast as
             // *mut c_void; we re-cast back to sys::CUstream for cudarc's API.
+            // CUstream cast uses the direct cudarc dep (no candle indirection).
             let raw_stream = k_dst_cuda.cuda_stream_raw()
-                as candle_core::cuda_backend::cudarc::driver::sys::CUstream;
+                as cudarc::driver::sys::CUstream;
             unsafe {
                 cudarc_result::memcpy_dtod_async(
                     k_dst_base + dst_byte_off as u64,
@@ -398,8 +407,9 @@ impl PagedKvCacheKt {
 
         // #1082: prefer cuda_stream_raw() over candle_device().cuda_stream()
         // to avoid touching the candle device wrapper from kernel-crate FFI.
+        // CUstream cast uses the direct cudarc dep (no candle indirection).
         let raw_stream = k_dst_cuda.cuda_stream_raw()
-            as candle_core::cuda_backend::cudarc::driver::sys::CUstream;
+            as cudarc::driver::sys::CUstream;
 
         unsafe {
             cudarc_result::memcpy_dtod_async(
