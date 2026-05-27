@@ -29,17 +29,22 @@ build = "build.rs"
 default = []
 # Builds the cublasLt probe binary alongside candle's gemm baseline.
 # Pulls candle-core (cuda) + the build.rs cublasLt link.
-probe = ["dep:candle-core"]
+probe = ["dep:candle-core", "dep:cudarc"]
 # Builds the production `CublasLtMatmulHandle` (cublasLt context +
 # matmul executor). Also pulls candle-core (cuda) for the shared
-# cudarc version.
-cublaslt = ["dep:candle-core"]
+# cudarc version, plus a direct `cudarc` dep for the driver types
+# (`CUstream`, `CudaSlice`, `DevicePtr`) that previously routed
+# through candle re-exports. Issue #1082 seam-removal step.
+cublaslt = ["dep:candle-core", "dep:cudarc"]
 
 [dependencies]
 # Candle is the cudarc vendor under the `probe` / `cublaslt` features;
 # absent on the default build so the backend-agnostic types compile on
 # every host.
 candle-core = { workspace = true, features = ["cuda"], optional = true }
+# Direct cudarc — replaces candle re-exports of driver/sys types.
+# Same workspace pin as candle vendors so the compiled crate unifies.
+cudarc = { workspace = true, optional = true }
 half = "2"
 
 # Timing + JSON output.

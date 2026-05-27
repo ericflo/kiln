@@ -50,8 +50,8 @@ use std::os::raw::{c_int, c_uchar};
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 
-use candle_core::cuda_backend::cudarc::driver::sys::CUstream;
-use candle_core::cuda_backend::cudarc::driver::{CudaSlice, DevicePtr};
+use cudarc::driver::sys::CUstream;
+use cudarc::driver::{CudaSlice, DevicePtr};
 use candle_core::cuda_backend::CudaDevice;
 
 use crate::{AlgoCache, AlgoCacheValue, BackendMatmul,

@@ -124,6 +124,25 @@ flate2 = "1"
 # Tensor compute
 candle-core = "0.10"
 candle-nn = "0.10"
+
+# cudarc — direct CUDA driver bindings. Pinned to match the version
+# candle-core 0.10 vendors so cudarc types unify in cargo's graph
+# (kiln-blas exchanges CUstream / CudaSlice / DevicePtr with candle-
+# owned CudaDevice). Issue #1082 Phase 7 swap-out of candle proceeds
+# crate-by-crate; this dep is the seam for crates that only need
+# cudarc and not the full candle Tensor surface.
+cudarc = { version = "0.19.4", default-features = false, features = [
+    "std",
+    "cublas",
+    "cublaslt",
+    "curand",
+    "driver",
+    "nvrtc",
+    "f16",
+    "f8",
+    "cuda-version-from-build-system",
+    "dynamic-linking",
+] }
 kiln-conv1d-kernel = { path = "crates/kiln-conv1d-kernel" }
 kiln-flash-attn = { path = "crates/kiln-flash-attn" }
 kiln-flce-kernel = { path = "crates/kiln-flce-kernel" }
