@@ -646,7 +646,29 @@ can swap the candle-typed `supports_*(...)` gate to its kt twin
 once the operands are bridged once, removing the candle dependency
 at the predicate layer.
 
-### kiln-gdn-kernel — **1 production caller** (single-block fall-through remains)
+### kiln-gdn-kernel — **1 production caller** (single-block fall-through remains; wrapper removed 2026-05-27)
+
+> **Progress update 2026-05-27** — agent `gdn-kernel-close-1082`
+> removed `with_decode_gates_recurrent_outputs` + the
+> `DECODE_GATES_RECURRENT_OUTPUTS` thread-local +
+> `next_decode_gates_recurrent_output` from
+> `crates/kiln-gdn-kernel/src/lib.rs`, deleted the three candle-typed
+> decode entries (`gdn_decode_gates_recurrent`,
+> `gdn_decode_qk_norm_gates_recurrent`,
+> `gdn_decode_qk_norm_gates_recurrent_rmsnorm` and their `_supports`
+> predicates), and updated both `cuda_graph.rs` call sites to invoke
+> the inner closure directly (kt path owns its allocations). Also
+> gated the four GDN parity tests in `crates/kiln-model/src/forward.rs`
+> behind a new `legacy-candle-parity` feature flag. The chunk-family
+> candle-typed surface (`gdn_chunk_prep`, `gdn_chunk_scan`,
+> `gdn_full_chunk_forward[_multiblock]`) is still in lib.rs and
+> Cargo.toml still depends on `candle-core` — these are non-blocking
+> for the Tier-1 close because cuda_graph.rs no longer imports any
+> candle-typed gdn entries. See PR for branch `ce/gdn-kernel-close-1082`.
+> Net delta: -1,587 LOC in lib.rs (decode candle entries + four in-crate
+> parity tests removed).
+
+
 
 After `86c7f134` removed all 10 candle fallback branches + the
 `cuda_use_kt_api_gdn` flag + 9 redundant kt-vs-candle parity tests

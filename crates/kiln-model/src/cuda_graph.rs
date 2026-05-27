@@ -1436,32 +1436,38 @@ impl CudaGraphRunner {
         // Run the forward pass with the pre-allocated position buffer.
         // All kernels are captured, including RoPE which reads from
         // position_buffer's stable GPU address.
+        // Phase 7 closeout (#1082): the captured kt-path GDN decode
+        // kernels allocate their own outputs (per gdn_decode_*_kt
+        // entries in kiln-gdn-kernel/src/kt_api.rs) and never read
+        // the legacy `with_decode_gates_recurrent_outputs`
+        // thread-local. `gdn_decode_outputs` stays as a struct field
+        // (`_gdn_decode_outputs`) so the pre-allocated graph-stable
+        // buffers remain alive for the lifetime of the captured
+        // graph — same buffer-ownership rationale as
+        // `_paged_decode_outputs`. The wrapper is gone; the inner
+        // closure is invoked directly.
+        let _ = &gdn_decode_outputs;
         let logits_result = crate::forward::with_lm_head_output_buffer(
             lm_head_output_buffer.clone(),
             || {
-                kiln_gdn_kernel::with_decode_gates_recurrent_outputs(
-                    gdn_decode_outputs.clone(),
-                    || {
-                        let logits = model_forward_paged_with_graph_inputs(
-                            backend,
-                            &[token_id],
-                            weights,
-                            config,
-                            paged_cache,
-                            block_table,
-                            seq_len,
-                            Some(linear_state),
-                            lora,
-                            &token_buffer,
-                            &position_buffer,
-                            graph_inputs.as_ref(),
-                        )?;
-                        output_logits_for_capture
-                            .slice_set(&logits, 0, 0)
-                            .context("copy CUDA graph logits into stable output")?;
-                        Ok::<Tensor, anyhow::Error>(output_logits_for_capture)
-                    },
-                )
+                let logits = model_forward_paged_with_graph_inputs(
+                    backend,
+                    &[token_id],
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    Some(linear_state),
+                    lora,
+                    &token_buffer,
+                    &position_buffer,
+                    graph_inputs.as_ref(),
+                )?;
+                output_logits_for_capture
+                    .slice_set(&logits, 0, 0)
+                    .context("copy CUDA graph logits into stable output")?;
+                Ok::<Tensor, anyhow::Error>(output_logits_for_capture)
             },
         );
 
@@ -1640,34 +1646,34 @@ impl CudaGraphRunner {
                 .begin_capture(CU_STREAM_CAPTURE_MODE_RELAXED)
                 .map_err(|e| anyhow::anyhow!("begin_capture (batched): {e}"))?;
 
-            // Install pre-allocated GDN recurrent outputs into the
-            // GDN kernel's thread-local for the duration of the
-            // captured forward. Without this, the GDN decode kernel
-            // would `Tensor::zeros(...)` its outputs INSIDE the
-            // capture window — those allocations get freed by
-            // `AUTO_FREE_ON_LAUNCH` and the graph's recorded
-            // pointers go stale on replay. The bs=1 path uses the
-            // same mechanism; missing it was the root cause of the
-            // observed `CUDA_ERROR_ILLEGAL_ADDRESS` faults at bs>=16
-            // in the first wiring attempts.
+            // Phase 7 closeout (#1082): the kt-path GDN decode
+            // kernels allocate their own outputs and never read the
+            // legacy thread-local; the wrapper has been removed.
+            // `gdn_decode_outputs` stays as a struct field
+            // (`_gdn_decode_outputs`) so the pre-allocated
+            // graph-stable buffers remain alive for the lifetime of
+            // the captured graph — same buffer-ownership rationale
+            // as `_paged_decode_outputs`. (Historical context: with
+            // the candle-typed path, the GDN decode kernel would
+            // `Tensor::zeros(...)` outputs INSIDE capture, those got
+            // freed by `AUTO_FREE_ON_LAUNCH`, and recorded pointers
+            // went stale on replay — observed as
+            // `CUDA_ERROR_ILLEGAL_ADDRESS` at bs>=16. The kt path
+            // sidesteps that by owning its allocations end-to-end.)
+            let _ = &gdn_decode_outputs;
             let forward_result = crate::forward::with_lm_head_output_buffer(
                 lm_head_output_buffer.clone(),
                 || {
-                    kiln_gdn_kernel::with_decode_gates_recurrent_outputs(
-                        gdn_decode_outputs.clone(),
-                        || {
-                            crate::forward::model_forward_paged_batched_with_graph_inputs(
-                                backend,
-                                token_ids,
-                                weights,
-                                config,
-                                paged_cache,
-                                block_tables,
-                                sequence_lengths,
-                                lora,
-                                &mut graph_inputs,
-                            )
-                        },
+                    crate::forward::model_forward_paged_batched_with_graph_inputs(
+                        backend,
+                        token_ids,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_tables,
+                        sequence_lengths,
+                        lora,
+                        &mut graph_inputs,
                     )
                 },
             );
