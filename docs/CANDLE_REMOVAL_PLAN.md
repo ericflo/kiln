@@ -875,3 +875,41 @@ against the candle reference). This is the **first** production
 CustomOp::bwd body using the bridge; the template now applies to
 `OpdLossCustomOp::bwd` and `FlceCustomOp::bwd` (modulo the
 chunk-loop-helper porting work called out above).
+
+**Status update (2026-05-27): second migration shipped on
+`ce/kiln-model-bwd-kt-bridge-1082-v2`** —
+`CudaRotaryOneBf16::bwd` (in `crates/kiln-model/src/forward.rs`)
+now routes through `fused_rotary_one_backward_via_kt_bridge`,
+which mirrors the rmsnorm template: 3 candle→kt
+`kt_tensor_from_candle_cuda_borrow` calls +
+`fused_rotary_one_bwd_kt` (same FFI symbol
+`kiln_fused_rotary_one_bwd` as the candle path) + 1
+`kt_tensor_to_candle_cuda_copy` for the single returned gradient.
+Unlike rmsnorm there is no over-allocated F32 partial buffer (the
+op writes per-token element-wise gradients with no cross-row
+reduction), so the bridge helper is purely borrow + FFI + copy-back
+with no special-casing. Kill switch
+`KILN_DISABLE_ROTARY_ONE_BWD_KT_BRIDGE=1` keeps the candle
+`rotary_one_bwd_bf16` reachable as the parity-test fallback; the
+bwd body also falls through on any bridge failure. Parity test
+`test_cuda_rotary_one_bwd_kt_bridge_default_matches_candle_path`
+covers decode `[1,1,16,256]`, prefill `[1,64,16,256]`, and tiny
+`[2,8,4,128]` shapes at `r=64` (matching the Qwen3.5-4B
+`partial_rotary=0.25` head layout) with a tight 1e-3 tolerance
+(no atomicAdd → expect bit-exact within bf16 round-trip).
+
+**STOP on `CudaSigmoidMulTrainingBf16::bwd`**: it has no matching
+single-FFI kt-backward entry-point. The candle path is implemented
+as an out-of-line element-wise composite
+(neg / exp / + 1 / recip / mul / 1 - s / × × ×), and that composite
+is *already* heavily kt-migrated in-place via the fine-grained
+`try_kt_neg` / `try_kt_exp` / `try_kt_add_scalar` / `try_kt_recip` /
+`try_kt_scalar_minus_tensor` helpers driven by the
+`KILN_USE_KT_API_*` Phase-7 gates. A bridge-style rewrite would
+need either (a) a brand-new fused `kiln_fused_sigmoid_mul_bwd`
+kernel in `kiln-rmsnorm-kernel/csrc/` (out of scope — different
+crate / different agent), or (b) hand-composing every step in
+kt-typed primitives, which the existing per-step `try_kt_*`
+wirings already do. No closer-than-status-quo migration is
+available without new kernel work; revisit when the fused
+backward lands.
