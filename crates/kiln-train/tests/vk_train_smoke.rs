@@ -17,8 +17,13 @@
 #![cfg(feature = "vulkan")]
 
 use anyhow::Result;
-use candle_core::shape::ShapeWithOneHole;
-use candle_core::{Device, Tensor};
+// TODO(#1082): drop this candle import once kiln_model's `GpuWeights`, the
+// `VkTensor::from_candle` upload boundary, and `candle_core::safetensors::{load,save}`
+// I/O accept kt::Tensor instead of candle Tensor. As of this commit those APIs still
+// require candle types. `ShapeWithOneHole`, `Device::Cpu`, and the rare `DType::F32`
+// are spelled fully-qualified at call sites so the remaining `use` only pulls in
+// `Tensor`.
+use candle_core::Tensor;
 use kiln_core::config::{DType, ModelConfig};
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::forward::{
@@ -54,7 +59,7 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 }
 
 fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
-    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
+    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &candle_core::Device::Cpu)?;
     VkTensor::from_candle(&t, Arc::clone(dev))
 }
 
@@ -284,8 +289,11 @@ fn tiny_gpu_grpo_model_config() -> ModelConfig {
     }
 }
 
-fn cpu_tensor(data: Vec<f32>, shape: impl ShapeWithOneHole) -> Result<Tensor> {
-    Ok(Tensor::from_vec(data, shape, &Device::Cpu)?)
+fn cpu_tensor(
+    data: Vec<f32>,
+    shape: impl candle_core::shape::ShapeWithOneHole,
+) -> Result<Tensor> {
+    Ok(Tensor::from_vec(data, shape, &candle_core::Device::Cpu)?)
 }
 
 fn transpose_2d(t: &Tensor) -> Result<Tensor> {
@@ -363,7 +371,8 @@ fn vk_from_gpu_weights_restores_stubbed_tied_embedding_on_device() -> Result<()>
     let config = tiny_gpu_grpo_model_config();
     let mut weights = build_tiny_gpu_grpo_weights()?;
     let expected = weights.embed_tokens.flatten_all()?.to_vec1::<f32>()?;
-    weights.embed_tokens = Tensor::zeros((1usize,), candle_core::DType::F32, &Device::Cpu)?;
+    weights.embed_tokens =
+        Tensor::zeros((1usize,), candle_core::DType::F32, &candle_core::Device::Cpu)?;
 
     let vk_weights = VkModelWeights::from_gpu_weights(&weights, &config, &dev)?;
     assert_eq!(
@@ -2082,7 +2091,10 @@ fn vk_native_grpo_jsonl_smoke_streams_and_saves_adapter() -> Result<()> {
     )?;
 
     let loaded =
-        candle_core::safetensors::load(out.join("adapter_model.safetensors"), &Device::Cpu)?;
+        candle_core::safetensors::load(
+            out.join("adapter_model.safetensors"),
+            &candle_core::Device::Cpu,
+        )?;
     assert_vk_adapter_config_targets(&out)?;
     for key in [
         "self_attn.q_proj.lora_A.weight",
@@ -2104,7 +2116,8 @@ fn vk_native_grpo_jsonl_smoke_streams_and_saves_adapter() -> Result<()> {
         checkpoint.display()
     );
     assert_vk_adapter_config_targets(checkpoint.parent().unwrap())?;
-    let checkpoint_loaded = candle_core::safetensors::load(&checkpoint, &Device::Cpu)?;
+    let checkpoint_loaded =
+        candle_core::safetensors::load(&checkpoint, &candle_core::Device::Cpu)?;
     assert!(
         checkpoint_loaded
             .keys()
@@ -2394,7 +2407,7 @@ fn vk_native_opd_train_smoke_saves_adapter() -> Result<()> {
         "vk-native OPD adapter not found at {}",
         adapter_path.display()
     );
-    let loaded = candle_core::safetensors::load(&adapter_path, &Device::Cpu)?;
+    let loaded = candle_core::safetensors::load(&adapter_path, &candle_core::Device::Cpu)?;
     for key in [
         "self_attn.q_proj.lora_A.weight",
         "self_attn.o_proj.lora_A.weight",

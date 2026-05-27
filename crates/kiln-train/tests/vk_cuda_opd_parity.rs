@@ -16,7 +16,12 @@
 #![cfg(all(feature = "cuda", feature = "vulkan"))]
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+// TODO(#1082): drop this candle import once `opd_top_k_reverse_kl_phase_b_per_position`
+// (CUDA OPD kernel API) and `VkTensor::from_candle` (Vulkan upload boundary) accept
+// kt::Tensor instead of candle Tensor. Both APIs still take candle types as of this
+// commit. `DType` / `Device::Cpu` / `Device::new_cuda` are spelled fully-qualified at
+// call sites to keep this file at a single candle `use`.
+use candle_core::Tensor;
 use kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_per_position;
 use kiln_vulkan_kernel::vk_ops::opd::vk_opd_top_k_reverse_kl_per_position;
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
@@ -30,8 +35,8 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
     VulkanDevice::new().ok().map(Arc::new)
 }
 
-fn cuda_dev() -> Option<Device> {
-    Device::new_cuda(0).ok()
+fn cuda_dev() -> Option<candle_core::Device> {
+    candle_core::Device::new_cuda(0).ok()
 }
 
 /// Build a deterministic test case usable for both backends.
@@ -86,7 +91,7 @@ fn deterministic_case(
 }
 
 fn run_cuda_per_position(
-    cuda: &Device,
+    cuda: &candle_core::Device,
     hidden: &[f32],
     head_vh: &[f32],
     idx: &[u32],
@@ -112,7 +117,7 @@ fn run_cuda_per_position(
         cuda,
         4096,
     )?;
-    let v: Vec<f32> = per_pos.to_dtype(DType::F32)?.to_vec1()?;
+    let v: Vec<f32> = per_pos.to_dtype(candle_core::DType::F32)?.to_vec1()?;
     Ok(v)
 }
 
@@ -140,9 +145,9 @@ fn run_vulkan_per_position(
     let active_count = active_hidden.len() / hidden_size;
 
     let hidden_candle =
-        Tensor::from_vec(active_hidden, (active_count, hidden_size), &Device::Cpu)?;
+        Tensor::from_vec(active_hidden, (active_count, hidden_size), &candle_core::Device::Cpu)?;
     let head_candle =
-        Tensor::from_vec(head_vh.to_vec(), (vocab_size, hidden_size), &Device::Cpu)?;
+        Tensor::from_vec(head_vh.to_vec(), (vocab_size, hidden_size), &candle_core::Device::Cpu)?;
     let hidden_vt = VkTensor::from_candle(&hidden_candle, Arc::clone(dev))?;
     let head_vt = VkTensor::from_candle(&head_candle, Arc::clone(dev))?;
     let _ = seq_len;
