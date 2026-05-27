@@ -1255,3 +1255,290 @@ mod cuda_opd_bwd_kt_bridge_wiring_parity {
         run_one(32, DType::F32, true, 1e-4, "f32/K32/per_position")
     }
 }
+
+// =====================================================================
+// `opd_top_k_reverse_kl_per_position_via_kt_forward_op` end-to-end
+// parity: the new `KtForwardOp1`-shim entry that the OPD trainer
+// (`kiln-train/src/opd.rs`) now calls instead of
+// `opd_top_k_reverse_kl_phase_a_per_position` must agree with the
+// candle Phase A reference on both forward AND backward.
+//
+// FOURTH (and first production-caller-driven) migration of a candle-
+// typed forward to the kt bridge (after `OpdLossCustomOp::bwd` in
+// commit `0c1be227`, `RmsNormCustomOp::bwd` in commit `341da876`,
+// `CudaRotaryOneBf16::bwd` in commit `d99a15a3`). See `kt_forward_op.rs`
+// for the design rationale.
+//
+// Tolerances:
+// - F32: 1e-4 forward + 1e-4 backward — matches the existing
+//   `cuda_kt_bwd_parity` band for f32 paths.
+// - BF16: 5e-2 forward + 5e-2 backward — matches the existing
+//   `cuda_bwd_kernel_matches_candle_*` band for bf16 paths.
+//
+// All tests skip silently when no CUDA device is reachable; they're
+// gated on `feature = "cuda"` and run as part of `cargo test -p
+// kiln-opd-loss-kernel --features cuda --release`.
+// =====================================================================
+
+#[cfg(feature = "cuda")]
+mod cuda_kt_forward_op_parity {
+    use super::*;
+    use crate::{
+        kt_forward_op_disabled, opd_top_k_reverse_kl_per_position_via_kt_forward_op,
+    };
+
+    /// Helper: drive the per-position OPD loss to convergence via the
+    /// `kt_forward_op` entry, then read `(per_position_kl, d_hidden)`.
+    /// `disable` controls the `KILN_DISABLE_OPD_KT_FORWARD_OP` env var
+    /// — `true` forces the candle Phase A fallback (parity oracle),
+    /// `false` runs the kt-shim CUDA fast path.
+    ///
+    /// Uses `loss.sum_all().backward()` to make the upstream gradient
+    /// on `per_position_kl` exactly 1.0 at every active position —
+    /// same convention as `cuda_kt_bwd_parity::run_candle_bwd` for
+    /// the PerPosition mode.
+    fn run(
+        device: &Device,
+        hidden_typed: &Tensor,
+        head_t: &Tensor,
+        idx: &[u32],
+        lp: &[f32],
+        mask: &[bool],
+        top_k: usize,
+        disable: bool,
+    ) -> Result<(Tensor, Tensor)> {
+        let prior = std::env::var("KILN_DISABLE_OPD_KT_FORWARD_OP").ok();
+        // SAFETY: `kt_forward_op_disabled()` reads the env on each
+        // call (no caching), so the toggle is reversible per-test.
+        unsafe {
+            if disable {
+                std::env::set_var("KILN_DISABLE_OPD_KT_FORWARD_OP", "1");
+            } else {
+                std::env::remove_var("KILN_DISABLE_OPD_KT_FORWARD_OP");
+            }
+        }
+        // Sanity that the env actually took effect (gives a clearer
+        // failure than "tolerances drifted" if the toggle is wedged).
+        assert_eq!(
+            kt_forward_op_disabled(),
+            disable,
+            "env toggle didn't take effect for disable={disable}"
+        );
+
+        let hidden_var = Var::from_tensor(hidden_typed)?;
+        let per_position = opd_top_k_reverse_kl_per_position_via_kt_forward_op(
+            hidden_var.as_tensor(),
+            head_t,
+            idx,
+            lp,
+            mask,
+            top_k,
+            device,
+        )?;
+        let loss = per_position.sum_all()?;
+        let grads = loss.backward()?;
+        let g = grads
+            .get(hidden_var.as_tensor())
+            .ok_or_else(|| anyhow!("no grad on hidden"))?
+            .clone();
+        device.synchronize()?;
+
+        // Restore the prior env value so subsequent tests aren't
+        // accidentally polluted.
+        unsafe {
+            match prior.as_ref() {
+                Some(v) => std::env::set_var("KILN_DISABLE_OPD_KT_FORWARD_OP", v),
+                None => std::env::remove_var("KILN_DISABLE_OPD_KT_FORWARD_OP"),
+            }
+        }
+
+        Ok((per_position, g))
+    }
+
+    fn assert_close(
+        a: &Tensor,
+        b: &Tensor,
+        atol: f32,
+        label: &str,
+    ) -> Result<f32> {
+        let a_f32 = a.to_dtype(DType::F32)?;
+        let b_f32 = b.to_dtype(DType::F32)?;
+        let abs_err = (&a_f32 - &b_f32)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let max_a = a_f32.abs()?.max_all()?.to_scalar::<f32>()?;
+        let rel = if max_a > 1e-6 { abs_err / max_a } else { abs_err };
+        assert!(
+            abs_err < atol || rel < atol,
+            "{label}: max_abs={abs_err:.3e} max_ref={max_a:.4} rel={rel:.3e} \
+             (tol={atol:.0e})"
+        );
+        Ok(abs_err)
+    }
+
+    fn run_parity(
+        top_k: usize,
+        dtype: DType,
+        atol: f32,
+        label: &'static str,
+    ) -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping {label}: no CUDA device");
+                return Ok(());
+            }
+        };
+
+        // Shapes chosen to exercise:
+        //   - hidden_size 64 (bigger than K, so the matmul / kernel
+        //     reductions cover at least one warp's worth of lanes),
+        //   - vocab_size 1024 (kt scatter_add covers a non-trivial vocab),
+        //   - seq_len 64 / active_period 2 → 31 active rows (odd count
+        //     to catch off-by-one bugs in scatter_add row mapping).
+        let seq_len = 64;
+        let hidden_size = 64;
+        let vocab_size = 1024;
+        let active_period = 2;
+        let (hidden_f32, head_f32, idx, lp, mask) = random_case(
+            seq_len, hidden_size, vocab_size, top_k, active_period, &device,
+        )?;
+        let hidden_typed = hidden_f32.to_dtype(dtype)?.contiguous()?;
+        let head_t = head_f32.to_dtype(dtype)?.contiguous()?;
+
+        // Path A: candle Phase A fallback (kill switch on).
+        let (fwd_phase_a, bwd_phase_a) =
+            run(&device, &hidden_typed, &head_t, &idx, &lp, &mask, top_k, true)?;
+        // Path B: kt-shim (default, kill switch off).
+        let (fwd_kt, bwd_kt) =
+            run(&device, &hidden_typed, &head_t, &idx, &lp, &mask, top_k, false)?;
+
+        assert_eq!(
+            fwd_phase_a.dims(),
+            fwd_kt.dims(),
+            "{label}: fwd shape mismatch"
+        );
+        assert_eq!(
+            bwd_phase_a.dims(),
+            bwd_kt.dims(),
+            "{label}: bwd shape mismatch"
+        );
+
+        let fwd_err = assert_close(&fwd_phase_a, &fwd_kt, atol, label)?;
+        let bwd_err = assert_close(&bwd_phase_a, &bwd_kt, atol, label)?;
+        eprintln!(
+            "{label}: max_abs_fwd={fwd_err:.3e} max_abs_bwd={bwd_err:.3e} (tol={atol:.0e})"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn kt_forward_op_parity_f32_k16() -> Result<()> {
+        run_parity(16, DType::F32, 1e-4, "kt-forward-op f32/K16")
+    }
+
+    #[test]
+    fn kt_forward_op_parity_f32_k32() -> Result<()> {
+        run_parity(32, DType::F32, 1e-4, "kt-forward-op f32/K32")
+    }
+
+    #[test]
+    fn kt_forward_op_parity_bf16_k16() -> Result<()> {
+        run_parity(16, DType::BF16, 5e-2, "kt-forward-op bf16/K16")
+    }
+
+    #[test]
+    fn kt_forward_op_parity_bf16_k32() -> Result<()> {
+        run_parity(32, DType::BF16, 5e-2, "kt-forward-op bf16/K32")
+    }
+
+    // -----------------------------------------------------------------
+    // Out-of-envelope tests: K=8 and K=64 must short-circuit to the
+    // Phase A path. We verify by checking that toggling the kill
+    // switch produces bit-identical output (since both paths take
+    // the same code branch).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn kt_forward_op_oob_k8_falls_back_to_phase_a() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping: no CUDA device");
+                return Ok(());
+            }
+        };
+        let top_k = 8usize;
+        let (hidden_f32, head_f32, idx, lp, mask) =
+            random_case(32, 32, 256, top_k, 2, &device)?;
+        let hidden_typed = hidden_f32.to_dtype(DType::F32)?.contiguous()?;
+        let head_t = head_f32.to_dtype(DType::F32)?.contiguous()?;
+
+        let (fwd_a, bwd_a) =
+            run(&device, &hidden_typed, &head_t, &idx, &lp, &mask, top_k, true)?;
+        let (fwd_b, bwd_b) =
+            run(&device, &hidden_typed, &head_t, &idx, &lp, &mask, top_k, false)?;
+
+        // Both paths route through Phase A, so the floating-point
+        // output must be bit-identical.
+        let fwd_diff = (&fwd_a - &fwd_b)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let bwd_diff = (&bwd_a - &bwd_b)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        assert_eq!(
+            fwd_diff, 0.0,
+            "K=8 fwd should bit-match: {fwd_diff:.3e}"
+        );
+        assert_eq!(
+            bwd_diff, 0.0,
+            "K=8 bwd should bit-match: {bwd_diff:.3e}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn kt_forward_op_oob_dtype_falls_back_to_phase_a() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping: no CUDA device");
+                return Ok(());
+            }
+        };
+        // F16 is outside the envelope (kt bwd only supports F32/BF16).
+        let top_k = 16usize;
+        let (hidden_f32, head_f32, idx, lp, mask) =
+            random_case(32, 32, 256, top_k, 2, &device)?;
+        let hidden_typed = hidden_f32.to_dtype(DType::F16)?.contiguous()?;
+        let head_t = head_f32.to_dtype(DType::F16)?.contiguous()?;
+
+        let (fwd_a, bwd_a) =
+            run(&device, &hidden_typed, &head_t, &idx, &lp, &mask, top_k, true)?;
+        let (fwd_b, bwd_b) =
+            run(&device, &hidden_typed, &head_t, &idx, &lp, &mask, top_k, false)?;
+
+        // Both paths route through Phase A.
+        let fwd_diff = (&fwd_a - &fwd_b)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let bwd_diff = (&bwd_a.to_dtype(DType::F32)? - &bwd_b.to_dtype(DType::F32)?)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        assert_eq!(
+            fwd_diff, 0.0,
+            "F16 fwd should bit-match: {fwd_diff:.3e}"
+        );
+        assert_eq!(
+            bwd_diff, 0.0,
+            "F16 bwd should bit-match: {bwd_diff:.3e}"
+        );
+        Ok(())
+    }
+}

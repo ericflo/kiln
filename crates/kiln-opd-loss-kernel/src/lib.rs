@@ -110,6 +110,11 @@ pub use kt_api::{
 #[cfg(feature = "cuda")]
 pub use kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt;
 
+mod kt_forward_op;
+pub use kt_forward_op::{
+    kt_forward_op_disabled, opd_top_k_reverse_kl_per_position_via_kt_forward_op,
+};
+
 /// Default chunk size when iterating along the active-token dimension. Used
 /// by Phase B to bound the temporary `[chunk_T, K]` intermediate. For
 /// typical OPD configs (T_active ≤ 8192, K = 32) the whole batch fits in

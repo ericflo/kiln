@@ -65,7 +65,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::logit_source::{LogitSource, LogprobBatch};
 use crate::{ChatMessage, Optimizer, default_alpha, default_rank};
-use kiln_opd_loss_kernel::{DEFAULT_CHUNK_SIZE, opd_top_k_reverse_kl_phase_a_per_position};
+// (#1082) Production caller migration: the per-position OPD loss now
+// routes through `KtForwardOp1` (kiln-kt-bridge::forward_op::KtForwardOp1,
+// commit `095f1c74`) over the kt-typed forward
+// (`opd_top_k_reverse_kl_per_position_kt`) and kt-typed backward
+// (`opd_top_k_reverse_kl_phase_b_bwd_kt`). The shim falls back to the
+// candle Phase A reference path when (a) the kill switch
+// `KILN_DISABLE_OPD_KT_FORWARD_OP=1` is set, (b) we're not on CUDA,
+// (c) `top_k` is not 16 or 32, (d) `hidden.dtype()` is not F32 or BF16,
+// or (e) `hidden.dtype() != head_t.dtype()` — so the autograd chain
+// through `mean_kl.backward()` is preserved on every code path.
+use kiln_opd_loss_kernel::{
+    DEFAULT_CHUNK_SIZE, opd_top_k_reverse_kl_per_position_via_kt_forward_op,
+};
 
 /// §6 default top-K for the `TeacherTopK` loss path. Picked by Fu et al.
 /// (2026) ablation table 3: K = 32 is the optimum across math and
@@ -1199,12 +1211,25 @@ pub fn opd_step_loss(inputs: OpdStepInputs<'_>) -> Result<OpdStepOutputs> {
         chunk_size
     };
 
-    // Phase A is the default until the CUDA kernel lands; the trainer
-    // can opt into Phase B via the env var. Phase A's autograd graph
-    // is built off `student_hidden`'s autograd parents (LoRA Vars), so
-    // the resulting `mean_kl.backward()` flows gradients into the LoRA
-    // parameters the trainer is optimizing.
-    let per_position_kl = opd_top_k_reverse_kl_phase_a_per_position(
+    // (#1082) The per-position OPD loss now routes through the
+    // `KtForwardOp1` candle-autograd shim (commit `095f1c74`) over the
+    // kt-typed forward + backward kernels. The shim collapses the old
+    // pure-candle Phase A composite (~8 candle ops: `index_select` →
+    // `matmul` → `log_softmax_last` → `exp` → broadcast subtract →
+    // multiply → `sum`) into a single `CustomOp1` whose backward calls
+    // the same fused `kiln_opd_topk_kl_bwd_*` FFI symbols the Phase B
+    // candle path already uses (bit-exact by construction).
+    //
+    // Out-of-envelope inputs (non-CUDA, K ∉ {16, 32}, dtype ∉
+    // {F32, BF16}, or `hidden.dtype() != head_t.dtype()`) fall back
+    // to the pure-candle Phase A reference path so this call still
+    // covers the full OPD trainer envelope; the kill switch
+    // `KILN_DISABLE_OPD_KT_FORWARD_OP=1` forces that fallback
+    // regardless. In every code path the resulting tensor remains an
+    // autograd descendant of `student_hidden`'s LoRA-Var parents, so
+    // `mean_kl.backward()` flows gradients into the LoRA parameters
+    // the trainer is optimizing.
+    let per_position_kl = opd_top_k_reverse_kl_per_position_via_kt_forward_op(
         student_hidden,
         head_t,
         &teacher_topk_indices,

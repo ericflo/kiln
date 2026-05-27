@@ -247,12 +247,57 @@ fn per_position_forward_kt(
     let active_count = active_positions.len();
     debug_assert!(active_count > 0, "caller short-circuits empty");
 
+    // All host-built index / scratch tensors below must live on the
+    // same device as `hidden` — kt's `DeviceOp2` ops (`index_select`,
+    // `sub`, `mul`, etc.) reject mixed-device inputs. Pre-#1082
+    // production callers of `opd_top_k_reverse_kl_per_position_kt`
+    // were all CPU; the OPD-trainer migration introduced via
+    // `kiln-opd-loss-kernel::kt_forward_op` (commit (#1082)) is the
+    // first CUDA caller, which is why this device-awareness fix
+    // landed alongside the production-caller migration.
+    use kiln_tensor::Device as KtDevice;
+    let dev = hidden.device();
+    let upload_u32 = |vals: &[u32], shape: Vec<usize>| -> Result<KtTensor, OpdLossError> {
+        match dev {
+            KtDevice::Cpu => KtTensor::from_vec(vals.to_vec(), shape).map_err(OpdLossError::Kt),
+            #[cfg(feature = "cuda")]
+            KtDevice::Cuda(i) => {
+                KtTensor::cuda_from_slice(vals, shape, i).map_err(OpdLossError::Kt)
+            }
+            #[cfg(not(feature = "cuda"))]
+            other => Err(OpdLossError::msg(format!(
+                "kt-opd-loss: unsupported device for index tensor {other}"
+            ))),
+            #[cfg(feature = "cuda")]
+            other => Err(OpdLossError::msg(format!(
+                "kt-opd-loss: unsupported device for index tensor {other}"
+            ))),
+        }
+    };
+    let upload_f32 = |vals: &[f32], shape: Vec<usize>| -> Result<KtTensor, OpdLossError> {
+        match dev {
+            KtDevice::Cpu => KtTensor::from_vec(vals.to_vec(), shape).map_err(OpdLossError::Kt),
+            #[cfg(feature = "cuda")]
+            KtDevice::Cuda(i) => {
+                KtTensor::cuda_from_slice(vals, shape, i).map_err(OpdLossError::Kt)
+            }
+            #[cfg(not(feature = "cuda"))]
+            other => Err(OpdLossError::msg(format!(
+                "kt-opd-loss: unsupported device for q_logprobs {other}"
+            ))),
+            #[cfg(feature = "cuda")]
+            other => Err(OpdLossError::msg(format!(
+                "kt-opd-loss: unsupported device for q_logprobs {other}"
+            ))),
+        }
+    };
+
     // Step 1: gather active rows from hidden and cast to F32.
     //
     // hidden is `[1, T, H]`; squeeze batch dim → `[T, H]`. Then
     // index_select(0, active_positions) → `[T_active, H]`.
     let hidden_2d = hidden.squeeze(0)?;
-    let active_idx = KtTensor::from_vec(active_positions.to_vec(), vec![active_count])?;
+    let active_idx = upload_u32(active_positions, vec![active_count])?;
     let active_hidden = index_select(&hidden_2d, 0, &active_idx)?;
     let active_hidden_f32 = to_f32(&active_hidden)?;
     let head_t_f32 = to_f32(head_t)?;
@@ -264,10 +309,7 @@ fn per_position_forward_kt(
     // `[H, T_active * K]`. Reshape to `[H, T_active, K]` and
     // permute to `[T_active, H, K]`.
     let hidden_size = head_t.shape()[0];
-    let flat_indices = KtTensor::from_vec(
-        teacher_topk_indices.to_vec(),
-        vec![active_count * top_k],
-    )?;
+    let flat_indices = upload_u32(teacher_topk_indices, vec![active_count * top_k])?;
     let gathered = index_select(&head_t_f32, 1, &flat_indices)?;
     let reshaped = gathered.reshape(vec![hidden_size, active_count, top_k])?;
     let head_gather = reshaped.permute(&[1, 0, 2])?.contiguous()?;
@@ -282,12 +324,10 @@ fn per_position_forward_kt(
     // Step 4: renormalise both distributions over the K support.
     //
     // `log_softmax_last_dim` requires contiguous inputs. The matmul
-    // output is contiguous, and we build q_logprobs fresh.
+    // output is contiguous, and we build q_logprobs fresh on the
+    // same device as `s_logits` (= hidden's device).
     let s_logits = s_logits.contiguous()?;
-    let q_logprobs = KtTensor::from_vec(
-        teacher_topk_logprobs.to_vec(),
-        vec![active_count, top_k],
-    )?;
+    let q_logprobs = upload_f32(teacher_topk_logprobs, vec![active_count, top_k])?;
     let log_p_hat = log_softmax_last_dim(&s_logits)?;
     let log_q_hat = log_softmax_last_dim(&q_logprobs)?;
 
