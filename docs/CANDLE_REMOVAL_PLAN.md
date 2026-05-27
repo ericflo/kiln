@@ -381,6 +381,37 @@ the rmsnorm-kernel kt-CUDA parity tests). Sub-agent follow-up (the
 `FlceCustomOp::bwd` ~80-LOC bridge) can now reuse the rmsnorm /
 rotary_one template directly.
 
+### FLCE bwd CustomOp1 migrated to the kt bridge — 2026-05-27
+
+`FlceCustomOp::bwd` (`crates/kiln-flce-kernel/src/phase_b.rs`) now
+routes through the kt-typed backward when (a) `hidden` lives on
+CUDA, (b) no `FlceProvider` is bound to the op (the kt entry has no
+provider hook — the candle path's provider escape is the parity
+oracle for provider-bound chunk matmuls), and (c) the kill switch
+`KILN_DISABLE_FLCE_BWD_KT_BRIDGE=1` is unset. Bridge helper
+`fused_linear_cross_entropy_phase_b_backward_via_kt_bridge` borrows
+`hidden`/`head_t`/`grad_loss` as kt-Tensors via
+`kt_tensor_from_candle_cuda_borrow` (zero-copy), invokes
+`fused_linear_cross_entropy_phase_b_backward_kt`, and copies the
+resulting `[1, seq_len, hidden_size]` `dhidden` back via
+`kt_tensor_to_candle_cuda_copy`. Falls back to candle's
+`backward_dhidden` on any bridge failure so a regression never
+silently breaks training.
+
+`crates/kiln-flce-kernel/Cargo.toml` gates `kiln-kt-bridge` behind
+`dep:kiln-kt-bridge` in the `cuda` feature (same pattern as the OPD
+CI fix `fe4cfd1e`) so non-CUDA matrix jobs do not drag `cudarc`
+through `nvcc --version` probes. CUDA parity covered by
+`cuda_kt_bwd_parity::cuda_kt_bridge_bwd_parity_{f32,bf16}` —
+tolerance 1e-3 (f32) / 5e-2 (bf16); shared chunk-sumexp associativity
+drift between kt and candle reduction orders, no atomicAdd in the
+FLCE chunk accumulator.
+
+This is the **fourth** production migration of a candle
+`CustomOp::bwd` body to the kt bridge (after `RmsNormCustomOp::bwd`
+in commit `341da876`, `CudaRotaryOneBf16::bwd` in commit
+`d99a15a3`, and `OpdLossCustomOp::bwd` in commit `0c1be227`).
+
 ## Build matrix coverage required before each tier closes
 
 | Tier | Required CI green |

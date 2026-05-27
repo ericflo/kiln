@@ -14,14 +14,27 @@ candle-core = { workspace = true }
 # Rust level only; it does not invoke any CUDA FFI yet (kiln-flce
 # has no FFI of its own, unlike the other Phase 7 kernel crates).
 kiln-tensor = { workspace = true }
+# Optional: only used by the CUDA backward bridge path
+# (`fused_linear_cross_entropy_phase_b_backward_via_kt_bridge`) which
+# is itself `#[cfg(feature = "cuda")]`. Pulling it in unconditionally
+# drags `cudarc` into non-CUDA CI matrix jobs (Linux/default,
+# Linux/Vulkan, macOS/Metal), which fail at the `nvcc --version` probe
+# in cudarc's build.rs. Gated under the `cuda` feature along with
+# `candle-core/cuda` + `kiln-tensor/cuda`. Mirrors the precedent set
+# by kiln-opd-loss-kernel (commit `fe4cfd1e`).
+kiln-kt-bridge = { workspace = true, optional = true }
 anyhow = { workspace = true }
+# `tracing` for the warn-on-fallback log emitted when the kt-bridge
+# backward path declines or fails. Cheap dep already pulled in by
+# every consumer of kiln-train.
+tracing = { workspace = true }
 
 [features]
 # Enable the CUDA path in `FlceCustomOp::cuda_fwd`. Without this feature the
 # CUDA forward errors out at runtime ("CUDA not enabled"); the CPU path works
 # either way. kiln-train re-exports this feature via its own `cuda` feature
 # so `cargo build --features cuda --bin kiln-bench` activates it.
-cuda = ["candle-core/cuda", "kiln-tensor/cuda"]
+cuda = ["candle-core/cuda", "kiln-tensor/cuda", "dep:kiln-kt-bridge"]
 
 [dev-dependencies]
 candle-nn = { workspace = true }

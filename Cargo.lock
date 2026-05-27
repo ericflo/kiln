@@ -1846,7 +1846,9 @@ dependencies = [
  "anyhow",
  "candle-core",
  "candle-nn",
+ "kiln-kt-bridge",
  "kiln-tensor",
+ "tracing",
 ]
 
 [[package]]
