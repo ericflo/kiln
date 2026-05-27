@@ -1979,12 +1979,66 @@ pub fn dispatch_linear_decode_cached_bf16_weights_offset(
     weight_offset: usize,
     full_out_dim: usize,
 ) -> Result<Tensor> {
+    let x_data = extract_tensor_bytes(x)?.0;
+    let out_data = dispatch_linear_decode_cached_bf16_weights_offset_bytes_core(
+        vk_device,
+        &x_data,
+        weight_buffer,
+        batch,
+        hidden,
+        out_dim,
+        weight_offset,
+        full_out_dim,
+    )?;
+    create_tensor_from_data(&out_data, &[batch, 1, out_dim], DType::F32)
+}
+
+/// Candle-free variant of
+/// [`dispatch_linear_decode_cached_bf16_weights_offset`].
+///
+/// Takes `x` as raw f32 bytes `[batch, hidden]` (row-major) and
+/// returns the output as raw f32 bytes `[batch, 1, out_dim]`. The
+/// candle entry point becomes a thin shim around the shared bytes
+/// core. (#1082)
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_linear_decode_cached_bf16_weights_offset_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_buffer: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    out_dim: usize,
+    weight_offset: usize,
+    full_out_dim: usize,
+) -> Result<Vec<u8>> {
+    dispatch_linear_decode_cached_bf16_weights_offset_bytes_core(
+        vk_device,
+        x_data,
+        weight_buffer,
+        batch,
+        hidden,
+        out_dim,
+        weight_offset,
+        full_out_dim,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_linear_decode_cached_bf16_weights_offset_bytes_core(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_buffer: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    out_dim: usize,
+    weight_offset: usize,
+    full_out_dim: usize,
+) -> Result<Vec<u8>> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    let x_data = extract_tensor_bytes(x)?.0;
     anyhow::ensure!(
         x_data.len() == batch * hidden * 4,
         "linear_decode_offset: x buffer has {} bytes, expected {}",
@@ -2020,11 +2074,11 @@ pub fn dispatch_linear_decode_cached_bf16_weights_offset(
     ];
     let workgroups = (batch * out_dim.div_ceil(32)) as u32;
 
-    let out_data = if linear_decode_single_submit_enabled() {
+    if linear_decode_single_submit_enabled() {
         run_compute_pipeline_with_transfer_readback(
             vk_device,
             &x_buf,
-            &x_data,
+            x_data,
             &out_buf,
             out_size,
             &spirv,
@@ -2032,7 +2086,7 @@ pub fn dispatch_linear_decode_cached_bf16_weights_offset(
             &push_constants,
             workgroups,
         )
-        .context("linear_decode_batched_offset_bf16w single-submit kernel failed")?
+        .context("linear_decode_batched_offset_bf16w single-submit kernel failed")
     } else {
         {
             let command_pool = vk_device.transient_command_pool()?;
@@ -2042,7 +2096,7 @@ pub fn dispatch_linear_decode_cached_bf16_weights_offset(
                 queue,
                 *command_pool,
                 &x_buf,
-                &x_data,
+                x_data,
             )
             .context("failed to upload linear_decode_offset x buffer")?;
         }
@@ -2063,9 +2117,8 @@ pub fn dispatch_linear_decode_cached_bf16_weights_offset(
             *command_pool,
             &out_buf,
         )
-        .context("failed to read back linear_decode_offset output")?
-    };
-    create_tensor_from_data(&out_data, &[batch, 1, out_dim], DType::F32)
+        .context("failed to read back linear_decode_offset output")
+    }
 }
 
 /// Qwen3.5-style RMSNorm forward: `(1 + weight) * x * rsqrt(mean(x^2) + eps)`.
