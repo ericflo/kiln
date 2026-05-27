@@ -19,11 +19,14 @@ use anyhow::Result;
 // companions in `kiln_vulkan_kernel::kernels`. Weight uploads use
 // `upload_bf16_packed_buffer_from_slice` / `upload_f32_buffer_from_slice`.
 //
-// What still pins `candle_core` in this file: the resident-path helpers
-// (`run_full_step_resident*`, `run_full_token_resident*`) depend on
-// candle-typed entries in `kiln_vulkan_kernel::resident` and on
-// `upload_tensor_*_buffer` shims that have not yet grown bytes variants.
-// Once those land, this example can drop `use candle_core::*` entirely.
+// The resident-path helpers (`run_full_step_resident*`,
+// `run_full_token_resident*`) have also been migrated to the candle-free
+// `*_from_slice` upload helpers and no longer construct candle Tensors.
+//
+// What still pins `candle_core` in this file: the `run()` setup at the
+// top uses the candle-typed `make_bf16_weight` + `upload_bf16_packed`
+// shims (plus a `down_w.to_dtype(DType::F32)` conversion). These can be
+// migrated when their candle-free counterparts are wired through Zone A.
 // Tracked as a follow-up under #1082.
 use candle_core::{DType, Device, Tensor};
 use half::bf16;
@@ -413,29 +416,17 @@ fn run_full_step_resident(
     let dev_arc = Arc::new(VulkanDevice::new()?);
     let pool = DecodeResidentPool::try_new(&dev_arc, HIDDEN, INTERMEDIATE, 64)?
         .expect("RTX 6000 Ada has plenty of room for the resident pool");
-    let weight_norm = upload_tensor_f32_buffer(
-        device,
-        &Tensor::ones(HIDDEN, DType::F32, &Device::Cpu)?,
-    )?;
-    let weight_qknorm = upload_tensor_f32_buffer(
-        device,
-        &Tensor::ones(head_dim, DType::F32, &Device::Cpu)?,
-    )?;
-    let out_w = upload_tensor_bf16_packed_buffer(device, &make_bf16_weight(Q_DIM, HIDDEN)?)?;
+    // Candle-free uploads via *_from_slice helpers. (#1082)
+    let weight_norm = upload_f32_buffer_from_slice(device, &vec![1.0f32; HIDDEN])?;
+    let weight_qknorm = upload_f32_buffer_from_slice(device, &vec![1.0f32; head_dim])?;
+    let out_w =
+        upload_bf16_packed_buffer_from_slice(device, &make_bf16_weight_slice(Q_DIM, HIDDEN))?;
 
     // Synthetic RoPE cos/sin tables for 1 position (the new decode token).
-    let cos_t = Tensor::from_vec(
-        (0..half_rot).map(|i| ((i as f32) * 0.13).cos()).collect::<Vec<_>>(),
-        (1, half_rot),
-        &Device::Cpu,
-    )?;
-    let sin_t = Tensor::from_vec(
-        (0..half_rot).map(|i| ((i as f32) * 0.13).sin()).collect::<Vec<_>>(),
-        (1, half_rot),
-        &Device::Cpu,
-    )?;
-    let cos_buf = upload_tensor_f32_buffer(device, &cos_t)?;
-    let sin_buf = upload_tensor_f32_buffer(device, &sin_t)?;
+    let cos_data: Vec<f32> = (0..half_rot).map(|i| ((i as f32) * 0.13).cos()).collect();
+    let sin_data: Vec<f32> = (0..half_rot).map(|i| ((i as f32) * 0.13).sin()).collect();
+    let cos_buf = upload_f32_buffer_from_slice(device, &cos_data)?;
+    let sin_buf = upload_f32_buffer_from_slice(device, &sin_data)?;
 
     for &batch in batches {
         // Pre-allocate the per-block intermediate buffers once. In a real
@@ -749,28 +740,16 @@ fn run_full_step_resident_batched(
     let dev_arc = Arc::new(VulkanDevice::new()?);
     let _pool = DecodeResidentPool::try_new(&dev_arc, HIDDEN, INTERMEDIATE, 64)?
         .expect("RTX 6000 Ada has plenty of room for the resident pool");
-    let weight_norm = upload_tensor_f32_buffer(
-        device,
-        &Tensor::ones(HIDDEN, DType::F32, &Device::Cpu)?,
-    )?;
-    let weight_qknorm = upload_tensor_f32_buffer(
-        device,
-        &Tensor::ones(head_dim, DType::F32, &Device::Cpu)?,
-    )?;
-    let out_w = upload_tensor_bf16_packed_buffer(device, &make_bf16_weight(Q_DIM, HIDDEN)?)?;
+    // Candle-free uploads via *_from_slice helpers. (#1082)
+    let weight_norm = upload_f32_buffer_from_slice(device, &vec![1.0f32; HIDDEN])?;
+    let weight_qknorm = upload_f32_buffer_from_slice(device, &vec![1.0f32; head_dim])?;
+    let out_w =
+        upload_bf16_packed_buffer_from_slice(device, &make_bf16_weight_slice(Q_DIM, HIDDEN))?;
 
-    let cos_t = Tensor::from_vec(
-        (0..half_rot).map(|i| ((i as f32) * 0.13).cos()).collect::<Vec<_>>(),
-        (1, half_rot),
-        &Device::Cpu,
-    )?;
-    let sin_t = Tensor::from_vec(
-        (0..half_rot).map(|i| ((i as f32) * 0.13).sin()).collect::<Vec<_>>(),
-        (1, half_rot),
-        &Device::Cpu,
-    )?;
-    let cos_buf = upload_tensor_f32_buffer(device, &cos_t)?;
-    let sin_buf = upload_tensor_f32_buffer(device, &sin_t)?;
+    let cos_data: Vec<f32> = (0..half_rot).map(|i| ((i as f32) * 0.13).cos()).collect();
+    let sin_data: Vec<f32> = (0..half_rot).map(|i| ((i as f32) * 0.13).sin()).collect();
+    let cos_buf = upload_f32_buffer_from_slice(device, &cos_data)?;
+    let sin_buf = upload_f32_buffer_from_slice(device, &sin_data)?;
 
     // Shader paths reused across every iteration.
     let rmsnorm_shader = concat!(
@@ -1022,28 +1001,16 @@ fn run_full_token_resident_batched(
     let max_seqlen = 256usize;
     let softmax_scale = (head_dim as f32).sqrt().recip();
 
-    let weight_norm = upload_tensor_f32_buffer(
-        device,
-        &Tensor::ones(HIDDEN, DType::F32, &Device::Cpu)?,
-    )?;
-    let weight_qknorm = upload_tensor_f32_buffer(
-        device,
-        &Tensor::ones(head_dim, DType::F32, &Device::Cpu)?,
-    )?;
-    let out_w = upload_tensor_bf16_packed_buffer(device, &make_bf16_weight(Q_DIM, HIDDEN)?)?;
+    // Candle-free uploads via *_from_slice helpers. (#1082)
+    let weight_norm = upload_f32_buffer_from_slice(device, &vec![1.0f32; HIDDEN])?;
+    let weight_qknorm = upload_f32_buffer_from_slice(device, &vec![1.0f32; head_dim])?;
+    let out_w =
+        upload_bf16_packed_buffer_from_slice(device, &make_bf16_weight_slice(Q_DIM, HIDDEN))?;
 
-    let cos_t = Tensor::from_vec(
-        (0..half_rot).map(|i| ((i as f32) * 0.13).cos()).collect::<Vec<_>>(),
-        (1, half_rot),
-        &Device::Cpu,
-    )?;
-    let sin_t = Tensor::from_vec(
-        (0..half_rot).map(|i| ((i as f32) * 0.13).sin()).collect::<Vec<_>>(),
-        (1, half_rot),
-        &Device::Cpu,
-    )?;
-    let cos_buf = upload_tensor_f32_buffer(device, &cos_t)?;
-    let sin_buf = upload_tensor_f32_buffer(device, &sin_t)?;
+    let cos_data: Vec<f32> = (0..half_rot).map(|i| ((i as f32) * 0.13).cos()).collect();
+    let sin_data: Vec<f32> = (0..half_rot).map(|i| ((i as f32) * 0.13).sin()).collect();
+    let cos_buf = upload_f32_buffer_from_slice(device, &cos_data)?;
+    let sin_buf = upload_f32_buffer_from_slice(device, &sin_data)?;
 
     let rmsnorm_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1313,28 +1280,16 @@ fn run_full_token_resident_paged(
     // Per-step write slot for *this* decode token.
     let write_slot = cur_seq_len;
 
-    let weight_norm = upload_tensor_f32_buffer(
-        device,
-        &Tensor::ones(HIDDEN, DType::F32, &Device::Cpu)?,
-    )?;
-    let weight_qknorm = upload_tensor_f32_buffer(
-        device,
-        &Tensor::ones(head_dim, DType::F32, &Device::Cpu)?,
-    )?;
-    let out_w = upload_tensor_bf16_packed_buffer(device, &make_bf16_weight(Q_DIM, HIDDEN)?)?;
+    // Candle-free uploads via *_from_slice helpers. (#1082)
+    let weight_norm = upload_f32_buffer_from_slice(device, &vec![1.0f32; HIDDEN])?;
+    let weight_qknorm = upload_f32_buffer_from_slice(device, &vec![1.0f32; head_dim])?;
+    let out_w =
+        upload_bf16_packed_buffer_from_slice(device, &make_bf16_weight_slice(Q_DIM, HIDDEN))?;
 
-    let cos_t = Tensor::from_vec(
-        (0..half_rot).map(|i| ((i as f32) * 0.13).cos()).collect::<Vec<_>>(),
-        (1, half_rot),
-        &Device::Cpu,
-    )?;
-    let sin_t = Tensor::from_vec(
-        (0..half_rot).map(|i| ((i as f32) * 0.13).sin()).collect::<Vec<_>>(),
-        (1, half_rot),
-        &Device::Cpu,
-    )?;
-    let cos_buf = upload_tensor_f32_buffer(device, &cos_t)?;
-    let sin_buf = upload_tensor_f32_buffer(device, &sin_t)?;
+    let cos_data: Vec<f32> = (0..half_rot).map(|i| ((i as f32) * 0.13).cos()).collect();
+    let sin_data: Vec<f32> = (0..half_rot).map(|i| ((i as f32) * 0.13).sin()).collect();
+    let cos_buf = upload_f32_buffer_from_slice(device, &cos_data)?;
+    let sin_buf = upload_f32_buffer_from_slice(device, &sin_data)?;
 
     let rmsnorm_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
