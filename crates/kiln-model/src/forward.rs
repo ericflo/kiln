@@ -7400,6 +7400,13 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
             _y: &Tensor,
             grad_y: &Tensor,
         ) -> candle_core::Result<Option<Tensor>> {
+            // Route the backward through the candle-free
+            // `dispatch_qwen_rmsnorm_backward_bytes` entry point. We
+            // still pull bytes out of candle tensors at the boundary
+            // (these are autograd inputs from the surrounding op so
+            // they have to come in as `&Tensor`), but the dispatch
+            // call itself no longer hands a `Tensor` to the kernel
+            // crate. (#1082)
             let x_f32 = if x.dtype() == DType::F32 {
                 x.clone()
             } else {
@@ -7415,14 +7422,67 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
             } else {
                 grad_y.to_dtype(DType::F32)?
             };
-            let dx_f32 = kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_backward(
+            // Validate shape preconditions that the candle entry
+            // previously enforced via dim asserts. We compute
+            // `rows = product(dims[..-1])` and `hidden = dims[-1]`
+            // up front and pass them as explicit kernel args.
+            let dims = x_f32.shape().dims().to_vec();
+            if dims.is_empty() {
+                return Err(candle_core::Error::Msg(
+                    "rmsnorm bwd: x has no dims".into(),
+                ));
+            }
+            let hidden = *dims.last().unwrap();
+            let rows: usize = dims[..dims.len() - 1].iter().product();
+            if w_f32.dims() != [hidden] {
+                return Err(candle_core::Error::Msg(format!(
+                    "rmsnorm bwd: weight shape {:?} does not match hidden {}",
+                    w_f32.dims(),
+                    hidden
+                )));
+            }
+            if grad_y_f32.dims() != dims.as_slice() {
+                return Err(candle_core::Error::Msg(format!(
+                    "rmsnorm bwd: grad_y dims {:?} != x dims {:?}",
+                    grad_y_f32.dims(),
+                    dims
+                )));
+            }
+            let x_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x_f32)
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("rmsnorm bwd extract x bytes: {e:?}"))
+                })?
+                .0;
+            let w_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&w_f32)
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("rmsnorm bwd extract w bytes: {e:?}"))
+                })?
+                .0;
+            let grad_y_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&grad_y_f32)
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!(
+                        "rmsnorm bwd extract grad_y bytes: {e:?}"
+                    ))
+                })?
+                .0;
+            let dx_bytes = kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_backward_bytes(
                 self.vk_device.as_ref(),
-                &x_f32,
-                &w_f32,
-                &grad_y_f32,
+                &x_bytes,
+                &w_bytes,
+                &grad_y_bytes,
+                rows,
+                hidden,
                 self.eps,
             )
             .map_err(|e| candle_core::Error::Msg(format!("rmsnorm bwd dispatch: {e:?}")))?;
+            let dx_f32 = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &dx_bytes,
+                dims.as_slice(),
+                DType::F32,
+            )
+            .map_err(|e| {
+                candle_core::Error::Msg(format!("rmsnorm bwd build dx tensor: {e:?}"))
+            })?;
             let dx = if self.out_dtype == DType::F32 {
                 dx_f32
             } else {
