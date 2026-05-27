@@ -71,10 +71,13 @@ fn handle_registry() -> &'static HandleRegistry {
 }
 
 /// Acquire (or cold-start) a handle for `device_index`.
-fn get_or_init_handle(
-    device_index: usize,
-    candle_device: Arc<candle_core::cuda_backend::CudaDevice>,
-) -> Result<Arc<CublasLtMatmulHandle>> {
+///
+/// The handle registry is keyed by device index, so warm-path lookups
+/// don't need a candle device at all. Cold start materializes the
+/// candle wrapper internally via `primary_cuda_device(device_index)`
+/// — this matches the substrate-wide candle-free entry pattern (#1082)
+/// and lets call sites drop their .candle_device().clone() reads.
+fn get_or_init_handle(device_index: usize) -> Result<Arc<CublasLtMatmulHandle>> {
     let reg = handle_registry();
     let mut by_device = reg
         .by_device
@@ -83,7 +86,11 @@ fn get_or_init_handle(
     if let Some(h) = by_device.get(&device_index) {
         return Ok(Arc::clone(h));
     }
-    // Cold-start the handle for this device.
+    // Cold-start the handle for this device. The candle CudaDevice is
+    // still required by CublasLtMatmulHandle::new in kiln-blas (its
+    // own API still takes Arc<CudaDevice>); derive it here so callers
+    // don't need to.
+    let candle_device = crate::primary_cuda_device(device_index)?;
     let handle = CublasLtMatmulHandle::new(
         candle_device,
         device_index,
@@ -214,19 +221,19 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
             )));
         }
     };
-    let candle_device = a_storage.candle_device().clone();
-
     // ---- allocate output ----
+    // CudaStorage::zeros_ctx (#1082) — the cudarc CudaContext is pulled
+    // directly off a_storage.context(), no .candle_device() read.
+    let ctx = a_storage.context();
     let batch: usize = a_shape[..a_rank - 2].iter().product::<usize>().max(1);
     let mut out_shape = a_shape[..a_rank - 2].to_vec();
     out_shape.push(m);
     out_shape.push(n);
     let out_n_elements = batch * m * n;
-    let out_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, dtype, out_n_elements)?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_n_elements)?;
 
     // ---- acquire handle ----
-    let handle = get_or_init_handle(device_index, candle_device.clone())?;
+    let handle = get_or_init_handle(device_index)?;
 
     // ---- per-batch dispatch ----
     let bpe = dtype.size_in_bytes();
@@ -234,7 +241,7 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let b_batch_stride = (k_b * n * bpe) as u64;
     let c_batch_stride = (m * n * bpe) as u64;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream();
 
     // Base device pointers for each operand. `device_ptr_raw` honors
@@ -425,10 +432,8 @@ pub fn cuda_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
             )));
         }
     };
-    let candle_device = a_storage.candle_device().clone();
-
     // ---- acquire handle ----
-    let handle = get_or_init_handle(device_index, candle_device.clone())?;
+    let handle = get_or_init_handle(device_index)?;
 
     // ---- per-batch dispatch ----
     let batch: usize = a_shape[..a_rank - 2].iter().product::<usize>().max(1);
@@ -437,7 +442,10 @@ pub fn cuda_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
     let b_batch_stride = (k_b * n * bpe) as u64;
     let c_batch_stride = (m * n * bpe) as u64;
 
-    let stream = candle_device.cuda_stream();
+    // Stream comes from the source storage's cudarc context — no
+    // .candle_device() read (#1082).
+    let ctx = a_storage.context();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream();
 
     let (a_base, _) = a_storage.device_ptr_raw();
@@ -604,19 +612,19 @@ pub fn cuda_matmul_with_bias(
             )));
         }
     };
-    let candle_device = a_storage.candle_device().clone();
-
     // ---- allocate output ----
+    // CudaStorage::zeros_ctx (#1082) + .context() default stream — no
+    // .candle_device() read on this matmul path.
+    let ctx = a_storage.context();
     let batch: usize = a_shape[..a_rank - 2].iter().product::<usize>().max(1);
     let mut out_shape = a_shape[..a_rank - 2].to_vec();
     out_shape.push(m);
     out_shape.push(n);
     let out_n_elements = batch * m * n;
-    let out_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, dtype, out_n_elements)?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_n_elements)?;
 
     // ---- acquire handle ----
-    let handle = get_or_init_handle(device_index, candle_device.clone())?;
+    let handle = get_or_init_handle(device_index)?;
 
     // ---- per-batch dispatch ----
     let bpe = dtype.size_in_bytes();
@@ -624,7 +632,7 @@ pub fn cuda_matmul_with_bias(
     let c_batch_stride = (m * n * bpe) as u64;
     // B is 2-D and shared across batches — no stride.
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream();
 
     let (a_base, _) = a_storage.device_ptr_raw();
