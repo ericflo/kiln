@@ -567,10 +567,22 @@ pub fn kt_tensor_to_candle_cuda_copy(
         })?;
     let src_byte_off = t.layout().start_offset() * bytes_per_elem;
 
-    let candle_device_arc = src_cuda.candle_device().clone();
-    // Validate that the kt source is genuinely CUDA-backed (matches the
-    // BridgeError contract; CPU/Metal kt storages would surface as a
-    // downcast failure higher up).
+    // #1082: derive a candle CudaDevice for the destination candle
+    // Tensor::zeros allocation from the kt source's device index. This
+    // retires the .candle_device() read on the kt side. The function as
+    // a whole still allocates a candle Tensor, so a candle CudaDevice
+    // wrapper is required somewhere — we derive it candle-free via
+    // primary_cuda_device, the same helper kt itself uses.
+    let device_index = match src_cuda.device() {
+        kiln_tensor::Device::Cuda(i) => i,
+        other => {
+            return Err(BridgeError::new(format!(
+                "kt-bridge to_candle: expected Cuda kt device, got {other:?}"
+            )));
+        }
+    };
+    let candle_device_arc = kiln_tensor::primary_cuda_device(device_index)
+        .map_err(|e| BridgeError::new(format!("kt-bridge to_candle: primary_cuda_device({device_index}): {e}")))?;
     match candle_device_arc.location() {
         DeviceLocation::Cuda { .. } => {}
         other => {
@@ -727,6 +739,12 @@ pub fn kt_tensor_from_candle_cuda_borrow(
             )));
         }
     };
+    // #1082: derive the cudarc CudaContext from the candle device for
+    // the `from_borrowed_ctx` candle-free constructor below. The candle
+    // device handle is still used here only to read its underlying
+    // primary context; once the candle Tensor adapter itself is
+    // candle-free this whole function changes.
+    let ctx = candle_device_arc.cuda_stream().context().clone();
     let stream = candle_device_arc.cuda_stream();
     let off = layout.start_offset();
     let byte_off = off * bytes_per_elem;
@@ -780,15 +798,15 @@ pub fn kt_tensor_from_candle_cuda_borrow(
     let keep_alive: std::sync::Arc<dyn std::any::Any + Send + Sync> =
         std::sync::Arc::new(t.clone());
 
-    let storage = CudaStorage::from_borrowed(
-        candle_device_arc,
+    let storage = CudaStorage::from_borrowed_ctx(
+        &ctx,
         device_index,
         kt_dtype,
         src_ptr,
         total_bytes,
         keep_alive,
     )
-    .map_err(|e| BridgeError::new(format!("kt-bridge borrow: from_borrowed: {e}")))?;
+    .map_err(|e| BridgeError::new(format!("kt-bridge borrow: from_borrowed_ctx: {e}")))?;
     let storage_arc: kiln_tensor::Storage = std::sync::Arc::new(storage);
 
     KtTensor::from_parts(
