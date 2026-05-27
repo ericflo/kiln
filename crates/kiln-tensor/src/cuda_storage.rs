@@ -988,13 +988,12 @@ pub fn cuda_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
         })?;
 
     // Allocate the destination — contiguous, same dtype, same shape.
-    let candle_device = src_storage.candle_device();
+    let ctx = src_storage.context();
     let device_index = match src_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!("CudaStorage::device is always Cuda"),
     };
-    let dst_storage = CudaStorage::zeros(
-        candle_device.clone(),
+    let dst_storage = CudaStorage::zeros_ctx(&ctx,
         device_index,
         src.dtype(),
         n_elements,
@@ -1002,7 +1001,7 @@ pub fn cuda_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
 
     // Extract raw device pointers. Source base + start_offset; dst
     // base.
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let src_base = match &src_storage.slice {
@@ -1136,19 +1135,18 @@ pub fn cuda_index_select_dim0(
             )
         })?;
 
-    let candle_device = src_storage.candle_device();
+    let ctx = src_storage.context();
     let device_index = match src_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!("CudaStorage::device is always Cuda"),
     };
-    let dst_storage = CudaStorage::zeros(
-        candle_device.clone(),
+    let dst_storage = CudaStorage::zeros_ctx(&ctx,
         device_index,
         src.dtype(),
         n_out_elements,
     )?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let src_base = match &src_storage.slice {
@@ -1295,19 +1293,18 @@ pub fn cuda_index_select_axis_n(
             )
         })?;
 
-    let candle_device = src_storage.candle_device();
+    let ctx = src_storage.context();
     let device_index = match src_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!("CudaStorage::device is always Cuda"),
     };
-    let dst_storage = CudaStorage::zeros(
-        candle_device.clone(),
+    let dst_storage = CudaStorage::zeros_ctx(&ctx,
         device_index,
         src.dtype(),
         n_out_elements,
     )?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let src_base = match &src_storage.slice {
@@ -1428,19 +1425,18 @@ pub fn cuda_elementwise_binary(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_elementwise_binary: b must be CUDA".to_string()))?;
 
-    let candle_device = a_storage.candle_device();
+    let ctx = a_storage.context();
     let device_index = match a_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let out_storage = CudaStorage::zeros(
-        candle_device.clone(),
+    let out_storage = CudaStorage::zeros_ctx(&ctx,
         device_index,
         dtype,
         n,
     )?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let a_base = match &a_storage.slice {
@@ -1560,15 +1556,15 @@ pub fn cuda_binary_minmax(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_binary_minmax: b must be CUDA".to_string()))?;
 
-    let candle_device = a_storage.candle_device();
+    let ctx = a_storage.context();
     let device_index = match a_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
     let n = a.element_count();
-    let out_storage = CudaStorage::zeros(candle_device.clone(), device_index, dtype, n)?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let a_base = match &a_storage.slice {
@@ -1678,15 +1674,15 @@ pub fn cuda_lerp(a: &crate::Tensor, b: &crate::Tensor, weight: f32) -> Result<cr
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_lerp: b must be CUDA".to_string()))?;
 
-    let candle_device = a_storage.candle_device();
+    let ctx = a_storage.context();
     let device_index = match a_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
     let n = a.element_count();
-    let out_storage = CudaStorage::zeros(candle_device.clone(), device_index, dtype, n)?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let a_base = match &a_storage.slice {
@@ -1783,19 +1779,18 @@ pub fn cuda_activation_unary(x: &crate::Tensor, kind: i32) -> Result<crate::Tens
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_activation_unary: x must be CUDA".to_string()))?;
 
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let out_storage = CudaStorage::zeros(
-        candle_device.clone(),
+    let out_storage = CudaStorage::zeros_ctx(&ctx,
         device_index,
         dtype,
         n,
     )?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -1890,19 +1885,18 @@ pub fn cuda_cast(src: &crate::Tensor, target: crate::DType) -> Result<crate::Ten
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_cast: src must be CUDA".to_string()))?;
 
-    let candle_device = src_storage.candle_device();
+    let ctx = src_storage.context();
     let device_index = match src_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let dst_storage = CudaStorage::zeros(
-        candle_device.clone(),
+    let dst_storage = CudaStorage::zeros_ctx(&ctx,
         device_index,
         target,
         n,
     )?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let src_base = match &src_storage.slice {
@@ -2066,8 +2060,8 @@ pub fn cuda_scatter_add_dim0(
             crate::Error::Msg("cuda_scatter_add_dim0: indices must be CUDA storage".to_string())
         })?;
 
-    let candle_device = out_storage.candle_device();
-    let stream = candle_device.cuda_stream();
+    let ctx = out_storage.context();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let upd_base = match &upd_storage.slice {
@@ -2346,15 +2340,15 @@ pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
         || crate::Error::Msg("cuda_softmax_last_axis: input must be CUDA".to_string()),
     )?;
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
     let out_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, dtype, x.element_count())?;
+        CudaStorage::zeros_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -2536,7 +2530,7 @@ pub fn cuda_is_finite(src: &crate::Tensor) -> Result<bool> {
                 "cuda_is_finite: contiguous'd storage must be CudaStorage".to_string(),
             )
         })?;
-    let candle_device = contig_storage.candle_device();
+    let ctx = contig_storage.context();
     let device_index = match contig_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!("cuda_is_finite: contig storage device must be Cuda"),
@@ -2544,14 +2538,13 @@ pub fn cuda_is_finite(src: &crate::Tensor) -> Result<bool> {
 
     // 1-element U32 device buffer (4 bytes, zero-init). Kernel
     // atomic-ORs a `1` into it on first non-finite hit.
-    let flag_storage = CudaStorage::zeros(
-        candle_device.clone(),
+    let flag_storage = CudaStorage::zeros_ctx(&ctx,
         device_index,
         DType::U32,
         1,
     )?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &contig_storage.slice {
@@ -2758,20 +2751,19 @@ pub fn cuda_sum_squared_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
         || crate::Error::Msg("cuda_sum_squared_last_axis: input must be CUDA".to_string()),
     )?;
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
     // Output is always F32.
-    let out_storage = CudaStorage::zeros(
-        candle_device.clone(),
+    let out_storage = CudaStorage::zeros_ctx(&ctx,
         device_index,
         crate::DType::F32,
         n_rows as usize,
     )?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -2870,15 +2862,15 @@ pub fn cuda_l2norm_last_axis(x: &crate::Tensor, eps: f32) -> Result<crate::Tenso
                 "cuda_l2norm_last_axis: sum_sq must be CUDA (internal invariant)".to_string(),
             )
         })?;
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
     let out_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, dtype, x.element_count())?;
+        CudaStorage::zeros_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -3023,15 +3015,15 @@ pub fn cuda_rmsnorm_last_axis(
         .ok_or_else(|| {
             crate::Error::Msg("cuda_rmsnorm_last_axis: weight must be CUDA".to_string())
         })?;
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
     let out_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, dtype, x.element_count())?;
+        CudaStorage::zeros_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -3184,15 +3176,15 @@ pub fn cuda_layernorm_last_axis(
         .ok_or_else(|| {
             crate::Error::Msg("cuda_layernorm_last_axis: bias must be CUDA".to_string())
         })?;
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
     let out_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, dtype, x.element_count())?;
+        CudaStorage::zeros_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -3322,14 +3314,14 @@ pub fn cuda_masked_fill(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_masked_fill: mask must be CUDA".to_string()))?;
 
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let out_storage = CudaStorage::zeros(candle_device.clone(), device_index, dtype, n)?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -3432,7 +3424,7 @@ pub fn cuda_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
         || crate::Error::Msg("cuda_argmax_last_axis: input must be CUDA".to_string()),
     )?;
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -3441,14 +3433,13 @@ pub fn cuda_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     // Output: shape = leading axes, dtype = I64.
     let out_shape: Vec<usize> = shape[..rank - 1].to_vec();
     let out_elem_count: usize = out_shape.iter().product::<usize>().max(1);
-    let out_storage = CudaStorage::zeros(
-        candle_device.clone(),
+    let out_storage = CudaStorage::zeros_ctx(&ctx,
         device_index,
         crate::DType::I64,
         out_elem_count,
     )?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -3589,7 +3580,7 @@ pub fn cuda_cross_entropy_loss(
             )
         })?;
 
-    let candle_device = logits_storage.candle_device();
+    let ctx = logits_storage.context();
     let device_index = match logits_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -3597,15 +3588,13 @@ pub fn cuda_cross_entropy_loss(
 
     // Allocate per-row F32 scratch and a 4-byte error flag. Both
     // start zeroed.
-    let row_loss_storage = CudaStorage::zeros(
-        candle_device.clone(),
+    let row_loss_storage = CudaStorage::zeros_ctx(&ctx,
         device_index,
         crate::DType::F32,
         batch,
     )?;
     // For row_err we use a 1-element U32 buffer (4 bytes, zero-init).
-    let row_err_storage = CudaStorage::zeros(
-        candle_device.clone(),
+    let row_err_storage = CudaStorage::zeros_ctx(&ctx,
         device_index,
         crate::DType::U32,
         1,
@@ -3614,9 +3603,9 @@ pub fn cuda_cross_entropy_loss(
     // Scalar output buffer (1 element at the input dtype). Reusing
     // `CudaStorage::zeros` to get a zero-initialized buffer; the
     // kernel overwrites it.
-    let out_storage = CudaStorage::zeros(candle_device.clone(), device_index, dtype, 1)?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, 1)?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let logits_base = match &logits_storage.slice {
@@ -3770,7 +3759,7 @@ fn cuda_reduce_last_axis_impl(x: &crate::Tensor, divisor: f32, label: &str) -> R
     let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
         || crate::Error::Msg(format!("{label}: input must be CUDA")),
     )?;
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -3779,9 +3768,9 @@ fn cuda_reduce_last_axis_impl(x: &crate::Tensor, divisor: f32, label: &str) -> R
     let out_shape: Vec<usize> = shape[..rank - 1].to_vec();
     let out_elem_count: usize = out_shape.iter().product::<usize>().max(1);
     let out_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, dtype, out_elem_count)?;
+        CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_elem_count)?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -3908,7 +3897,7 @@ fn cuda_reduce_arbitrary_axis_impl(
             .ok_or_else(|| {
                 crate::Error::Msg(format!("{label}: input must be CUDA"))
             })?;
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -3918,9 +3907,9 @@ fn cuda_reduce_arbitrary_axis_impl(
     out_shape.remove(axis);
     let out_elem_count: usize = (outer as usize) * (inner as usize);
     let out_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, dtype, out_elem_count)?;
+        CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_elem_count)?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -4076,7 +4065,7 @@ fn cuda_minmax_arbitrary_axis_impl(
             .ok_or_else(|| {
                 crate::Error::Msg(format!("{label}: input must be CUDA"))
             })?;
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -4085,9 +4074,9 @@ fn cuda_minmax_arbitrary_axis_impl(
     out_shape.remove(axis);
     let out_elem_count: usize = (outer as usize) * (inner as usize);
     let out_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, dtype, out_elem_count)?;
+        CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_elem_count)?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -4201,7 +4190,7 @@ pub fn cuda_bool_reduce_axis(
         .as_any()
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg(format!("{label}: input must be CUDA")))?;
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
@@ -4210,14 +4199,13 @@ pub fn cuda_bool_reduce_axis(
     let mut out_shape: Vec<usize> = shape.to_vec();
     out_shape.remove(axis);
     let out_elem_count: usize = (outer as usize) * (inner as usize);
-    let out_storage = CudaStorage::zeros(
-        candle_device.clone(),
+    let out_storage = CudaStorage::zeros_ctx(&ctx,
         device_index,
         crate::DType::U8,
         out_elem_count,
     )?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -4360,7 +4348,7 @@ pub fn cuda_concat(inputs: &[&crate::Tensor], axis: usize) -> Result<crate::Tens
         .ok_or_else(|| {
             crate::Error::Msg("cuda_concat: input 0 must be CUDA storage".to_string())
         })?;
-    let candle_device = first_storage.candle_device();
+    let ctx = first_storage.context();
     let device_index = match first_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!("CudaStorage::device is always Cuda"),
@@ -4369,10 +4357,10 @@ pub fn cuda_concat(inputs: &[&crate::Tensor], axis: usize) -> Result<crate::Tens
     // Allocate destination — same device, same dtype, total elements.
     let n_out_elements: usize = out_shape.iter().product();
     let dst_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, dtype, n_out_elements)?;
+        CudaStorage::zeros_ctx(&ctx, device_index, dtype, n_out_elements)?;
 
     // Collect per-input source pointers (base + start_offset bytes).
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let mut src_ptrs: Vec<*const core::ffi::c_void> = Vec::with_capacity(inputs.len());
@@ -4575,14 +4563,14 @@ pub fn cuda_rope(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_rope: sin must be CUDA".to_string()))?;
 
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let out_storage = CudaStorage::zeros(candle_device.clone(), device_index, x_dtype, n)?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, x_dtype, n)?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let cs_bpe = cs_dtype.size_in_bytes();
@@ -4714,17 +4702,17 @@ pub fn cuda_dropout(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_dropout: x must be CUDA".to_string()))?;
 
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
 
-    let y_storage = CudaStorage::zeros(candle_device.clone(), device_index, dtype, n)?;
+    let y_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
     let mask_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, crate::DType::U8, n)?;
+        CudaStorage::zeros_ctx(&ctx, device_index, crate::DType::U8, n)?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -4843,19 +4831,18 @@ pub fn cuda_scalar_op(x: &crate::Tensor, kind: i32, c: f32) -> Result<crate::Ten
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_scalar_op: x must be CUDA".to_string()))?;
 
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let out_storage = CudaStorage::zeros(
-        candle_device.clone(),
+    let out_storage = CudaStorage::zeros_ctx(&ctx,
         device_index,
         dtype,
         n,
     )?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -4948,14 +4935,14 @@ pub fn cuda_clamp_pow(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_clamp_pow: x must be CUDA".to_string()))?;
 
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let out_storage = CudaStorage::zeros(candle_device.clone(), device_index, dtype, n)?;
+    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -5066,20 +5053,19 @@ pub fn cuda_compare(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_compare: b must be CUDA".to_string()))?;
 
-    let candle_device = a_storage.candle_device();
+    let ctx = a_storage.context();
     let device_index = match a_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
     // Output is U8 (one byte per element).
-    let out_storage = CudaStorage::zeros(
-        candle_device.clone(),
+    let out_storage = CudaStorage::zeros_ctx(&ctx,
         device_index,
         crate::DType::U8,
         n,
     )?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let a_base = match &a_storage.slice {
@@ -5200,15 +5186,15 @@ pub fn cuda_where_select(
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_where_select: f must be CUDA".to_string()))?;
 
-    let candle_device = t_storage.candle_device();
+    let ctx = t_storage.context();
     let device_index = match t_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
     let out_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, dtype, n)?;
+        CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let mask_base = match &mask_storage.slice {
@@ -5313,15 +5299,15 @@ pub fn cuda_diagonal_extract(x: &crate::Tensor) -> Result<crate::Tensor> {
         .as_any()
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_diagonal_extract: x must be CUDA".to_string()))?;
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
     let out_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, dtype, n)?;
+        CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -5400,16 +5386,16 @@ pub fn cuda_diag_build(v: &crate::Tensor) -> Result<crate::Tensor> {
         .as_any()
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg("cuda_diag_build: v must be CUDA".to_string()))?;
-    let candle_device = v_storage.candle_device();
+    let ctx = v_storage.context();
     let device_index = match v_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
     // Pre-zero the output; the kernel only writes the n diagonal entries.
     let out_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, dtype, n * n)?;
+        CudaStorage::zeros_ctx(&ctx, device_index, dtype, n * n)?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let v_base = match &v_storage.slice {
@@ -5527,15 +5513,15 @@ fn cuda_scan_axis_impl(
         .as_any()
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| crate::Error::Msg(format!("{label}: input must be CUDA")))?;
-    let candle_device = x_storage.candle_device();
+    let ctx = x_storage.context();
     let device_index = match x_storage.device {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
     let out_storage =
-        CudaStorage::zeros(candle_device.clone(), device_index, dtype, x.element_count())?;
+        CudaStorage::zeros_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let stream = candle_device.cuda_stream();
+    let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
