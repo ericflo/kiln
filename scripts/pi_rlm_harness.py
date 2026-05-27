@@ -892,8 +892,14 @@ class FakeUpstream(UpstreamClient):
         }
 
 
-def self_test() -> None:
+def self_test(tokenizer_path: Path | None = None, require_tokenizer: bool = False) -> None:
     assert first_json_object('```json\n{"action":"inspect"}\n```') == {"action": "inspect"}
+    budget = TokenBudget(tokenizer_path, require_tokenizer=require_tokenizer)
+    if require_tokenizer:
+        assert budget.exact
+        clipped = budget.clip("hello " * 10_000, INPUT_TOKENS)
+        assert budget.count(clipped) <= INPUT_TOKENS
+
     tmp = Path("/tmp/pi-rlm-harness-self-test")
     upstream = FakeUpstream(
         [
@@ -903,7 +909,7 @@ def self_test() -> None:
             '{"action":"finish","tool_call":{"name":"Bash","arguments":{"cmd":"pytest -q"}}}',
         ]
     )
-    controller = RlmController(upstream, tmp, max_iters=4, max_depth=2, budget=TokenBudget(None))
+    controller = RlmController(upstream, tmp, max_iters=4, max_depth=2, budget=budget)
     result = controller.run(
         {
             "model": DEFAULT_MODEL,
@@ -956,12 +962,12 @@ def main() -> int:
     parser.add_argument("--self-test", action="store_true", help="run local parser/controller smoke test")
     args = parser.parse_args()
 
+    tokenizer_path = discover_tokenizer_path(args.tokenizer)
     if args.self_test:
-        self_test()
+        self_test(tokenizer_path, require_tokenizer=args.require_tokenizer)
         return 0
 
     host, port = parse_listen(args.listen)
-    tokenizer_path = discover_tokenizer_path(args.tokenizer)
     budget = TokenBudget(tokenizer_path, require_tokenizer=args.require_tokenizer)
     if budget.exact:
         print(f"pi-rlm-harness using Qwen tokenizer {tokenizer_path}", flush=True)
