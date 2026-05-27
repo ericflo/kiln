@@ -3329,9 +3329,11 @@ impl BackendRuntime for VulkanBackend {
                 let gate_buf = self.cached_f32_weight_buffer(gate_weight_t)?;
                 let up_buf = self.cached_f32_weight_buffer(up_weight_t)?;
                 let down_buf = self.cached_f32_weight_buffer(down_weight_t)?;
-                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached(
+                let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&dispatch_x)?.0;
+                let out_data = kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bytes(
                     vk_device,
-                    &dispatch_x,
+                    &x_data,
+                    row_count,
                     &gate_buf,
                     &up_buf,
                     &down_buf,
@@ -3339,7 +3341,12 @@ impl BackendRuntime for VulkanBackend {
                     intermediate,
                     out_dim,
                 )
-                .context("mlp_decode kernel failed")?
+                .context("mlp_decode kernel failed")?;
+                kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &out_data,
+                    &[row_count, 1, out_dim],
+                    DType::F32,
+                )?
             };
         let out = if seq_len == 1 {
             out

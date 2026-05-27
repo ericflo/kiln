@@ -4911,6 +4911,34 @@ pub fn dispatch_mlp_decode_cached(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_mlp_decode_cached_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    batch: usize,
+    gate_weight_t: &VulkanBuffer,
+    up_weight_t: &VulkanBuffer,
+    down_weight_t: &VulkanBuffer,
+    hidden: usize,
+    intermediate: usize,
+    out_dim: usize,
+) -> Result<Vec<u8>> {
+    let x = build_cpu_f32_tensor_from_bytes(x_data, &[batch, 1, hidden])?;
+    let out = dispatch_mlp_decode_cached_impl(
+        vk_device,
+        &x,
+        gate_weight_t,
+        up_weight_t,
+        down_weight_t,
+        hidden,
+        intermediate,
+        out_dim,
+        false,
+        false,
+    )?;
+    Ok(extract_tensor_bytes(&out)?.0)
+}
+
 pub fn dispatch_mlp_decode_cached_bf16_weights_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
