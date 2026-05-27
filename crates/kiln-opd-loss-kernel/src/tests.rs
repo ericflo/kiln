@@ -11,6 +11,34 @@
 //! All three must agree at 1e-5 at f32 (forward) and 1e-4 (backward), and
 //! 1e-2 at bf16. The naive path is identical to Phase A in formula but
 //! verifies the index_select / matmul / log_softmax composition end-to-end.
+//!
+//! TODO(#1082): This file stays on candle until candle is removed from the
+//! workspace, then it should be DELETED alongside the candle-typed
+//! `opd_top_k_reverse_kl_phase_b*` entries (Phase A + Phase B candle
+//! references) that it exists to validate.
+//!
+//! Why we can't migrate today:
+//!   - The whole point of this test module is to compare the **fused
+//!     CUDA bwd kernel** against the **candle autograd Phase A / Phase B
+//!     paths** as the parity oracle. The candle path is the oracle —
+//!     deleting it (or replacing it with a hand-rolled pure-Rust
+//!     reference) loses the property under test.
+//!   - The CUDA bwd parity tests (`cuda_bwd_parity_for_k*`) use
+//!     `candle_core::Var` to drive `loss.backward()` and read
+//!     `grads.get(hidden)`. There is no kt-typed autograd substrate yet
+//!     — see `docs/CANDLE_REMOVAL_PLAN.md` lines 655-668.
+//!   - The kt-typed bwd parity test (in `cuda_kt_bwd_parity_smoke`) is
+//!     already in this file and already routes through the kt bridge;
+//!     it's the candle-side oracle that's still required, not the
+//!     kernel itself.
+//!
+//! When candle is finally dropped, both `opd_top_k_reverse_kl_phase_a`
+//! and `opd_top_k_reverse_kl_phase_b` (the candle-typed surface these
+//! tests exercise) are themselves deleted. The kt-typed fast path
+//! (`opd_top_k_reverse_kl_phase_b_bwd_kt`) remains, and any future
+//! parity coverage must be a pure-kt / numerical hand-coded oracle.
+//! See precedent commits `46a838ff` (vulkan-kernel docs) and
+//! `acd00bb4` (rmsnorm phase10_microbench docs).
 
 use anyhow::{Result, anyhow};
 use candle_core::{DType, Device, Tensor, Var};
