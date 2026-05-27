@@ -477,22 +477,28 @@ impl PagedKvCacheKt {
                 idx_data.push(slot_u32);
             }
 
-            // Build the indices kt-Tensor: candle H2D for the
-            // upload, then wrap as kt-borrowed.
-            let k_pool_storage = k_pool
-                .storage()
-                .as_any()
-                .downcast_ref::<CudaStorage>()
-                .ok_or_else(|| anyhow::anyhow!("kt pkv read: k_pool must be CUDA storage"))?;
-            let candle_device = k_pool_storage.candle_device().clone();
-            let device = candle_core::Device::Cuda((*candle_device).clone());
-            let candle_indices =
-                candle_core::Tensor::new(idx_data.as_slice(), &device).map_err(|e| {
-                    anyhow::anyhow!("kt pkv read: build candle indices: {e}")
-                })?;
+            // Build the indices kt-Tensor: kt CPU H2D via the candle-
+            // free host_to_cuda_copy_ctx (#1082). The previous candle
+            // detour (build candle Tensor on the source device, then
+            // borrow back) read .candle_device() off the k_pool
+            // CudaStorage purely to satisfy candle's Tensor::new; the
+            // kt path collapses that into a direct device_index lift.
+            let device_index = match k_pool.device() {
+                kiln_tensor::Device::Cuda(i) => i,
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "kt pkv read: k_pool must be CUDA device, got {other}"
+                    ));
+                }
+            };
+            let kt_indices_cpu = kiln_tensor::Tensor::from_slice(
+                idx_data.as_slice(),
+                vec![idx_data.len()],
+            )
+            .map_err(|e| anyhow::anyhow!("kt pkv read: build indices cpu: {e}"))?;
             let kt_indices =
-                kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&candle_indices)
-                    .map_err(|e| anyhow::anyhow!("kt pkv read: borrow indices: {e}"))?;
+                kiln_tensor::host_to_cuda_copy_ctx(&kt_indices_cpu, device_index)
+                    .map_err(|e| anyhow::anyhow!("kt pkv read: H2D indices: {e}"))?;
 
             let k = kiln_tensor::cuda_index_select_dim0(k_pool, &kt_indices)
                 .map_err(|e| anyhow::anyhow!("kt pkv read: index_select k_pool: {e}"))?;
