@@ -379,6 +379,80 @@ impl VkTensor {
         ))
     }
 
+    /// Upload raw little-endian bytes as a fresh `VkTensor` leaf.
+    ///
+    /// Candle-free general-purpose upload boundary: the caller lays the
+    /// bytes out as the dtype expects (F32 = 4 bytes/element LE, BF16 =
+    /// 2 bytes/element LE u16 bits) and we round the device allocation
+    /// up to the BF16 word-pair size where needed. This is the canonical
+    /// upload boundary for code that already has a flat byte buffer in
+    /// the right shape — including the candle bridge in
+    /// `kiln-model::vk_forward`, which extracts bytes from candle CPU
+    /// storage and hands them to this constructor instead of going
+    /// through a now-deleted `VkTensor::from_candle` round-trip. (#1082)
+    pub fn from_bytes(
+        bytes: &[u8],
+        shape: Vec<usize>,
+        dtype: VkDType,
+        device: Arc<VulkanDevice>,
+    ) -> Result<Self> {
+        let nelem: usize = shape.iter().product();
+        let expected = nelem * dtype.byte_size();
+        anyhow::ensure!(
+            bytes.len() == expected,
+            "VkTensor::from_bytes: got {} bytes for shape {:?} dtype {:?} (expected {})",
+            bytes.len(),
+            shape,
+            dtype,
+            expected
+        );
+        let buffer = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            device_buffer_bytes(nelem, dtype) as u64,
+        )
+        .context("VkTensor::from_bytes: device-local buffer")?;
+        VulkanBuffer::upload_data(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            &buffer,
+            bytes,
+        )
+        .context("VkTensor::from_bytes: upload")?;
+        Ok(Self::from_buffer(Arc::new(buffer), shape, dtype, device))
+    }
+
+    /// Read back raw little-endian bytes for this tensor. Candle-free
+    /// counterpart to the now-deleted `to_candle`: callers that just
+    /// want the flat byte buffer (e.g. to write a safetensors file,
+    /// compare against a reference byte slice, or hand to a candle
+    /// `Tensor::from_raw_buffer` at a higher layer that still owns
+    /// candle) skip the candle round-trip. Bytes are truncated to
+    /// `num_elements() * dtype.byte_size()` to strip the padding word
+    /// that BF16 device buffers may carry. (#1082)
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let dev = &self.0.device;
+        let mut bytes = VulkanBuffer::read_back(
+            dev.device(),
+            dev.host_visible_mem_type(),
+            dev.queue(),
+            dev.queue_family_index(),
+            &self.0.storage,
+        )
+        .context("VkTensor::to_bytes: read_back")?;
+        let logical = self.num_elements() * self.0.dtype.byte_size();
+        anyhow::ensure!(
+            bytes.len() >= logical,
+            "VkTensor::to_bytes: buffer holds {} bytes, expected at least {}",
+            bytes.len(),
+            logical
+        );
+        bytes.truncate(logical);
+        Ok(bytes)
+    }
+
     /// Upload a candle Tensor to GPU as a fresh VkTensor leaf.
     ///
     /// Only F32 and BF16 are accepted. The tensor is forced contiguous;
