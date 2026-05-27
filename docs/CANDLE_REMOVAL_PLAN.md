@@ -419,9 +419,9 @@ After four bespoke `CustomOp::bwd` migrations (`RmsNormCustomOp` /
 the boilerplate into a generic shim — `kiln_kt_bridge::forward_op::
 KtForwardOp{1,2,3}` — that is parameterized over forward and backward
 **closures**. Each shim implements the matching candle
-[`CustomOp1`](vendor/candle-core/src/custom_op.rs) /
-[`CustomOp2`](vendor/candle-core/src/custom_op.rs) /
-[`CustomOp3`](vendor/candle-core/src/custom_op.rs) trait, plumbs the
+[`CustomOp1`](../vendor/candle-core/src/custom_op.rs) /
+[`CustomOp2`](../vendor/candle-core/src/custom_op.rs) /
+[`CustomOp3`](../vendor/candle-core/src/custom_op.rs) trait, plumbs the
 `cuda_fwd` hook through to the closure (constructing a leaf candle
 `Tensor` from the supplied `(CudaStorage, Layout)` pair so the closure
 sees a normal `&Tensor`), and forwards the candle backward callback to
