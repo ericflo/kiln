@@ -107,6 +107,13 @@ The prototype keeps `subrlm` as a compatibility alias for `spawn_agent`, but the
 training target should use `spawn_agent` so traces are explicit about recursive
 agent creation.
 
+The harness now treats invalid controller actions as environment observations
+instead of silently passing them through. Unknown actions, malformed slices,
+empty searches, invalid spawns, and final tool calls to unknown Pi tools are
+fed back into the loop as structured observations. That gives SFT/GRPO a clean
+negative trace: the model sees the invalid action, sees the harness rejection,
+and gets another chance before max-iteration fallback.
+
 ## Fixed-Window Adapter Shape
 
 The adapter should be trained to operate one root RLM step with a fixed prompt
@@ -151,6 +158,84 @@ single supervised root decisions:
 (prefix, env_summary, obs_t) -> finish with Pi-visible tool call
 ```
 
+Each deployed controller step is now persisted with its exact fixed-window
+training prompt:
+
+```json
+{
+  "prompt_messages": [
+    {"role":"system","content":"<8192-token RLM prefix>"},
+    {"role":"user","content":"<4096-token dynamic observation>"}
+  ],
+  "action": {"action":"search","query":"pytest"},
+  "observation": {"action":{...},"output":{...}},
+  "prompt_tokens": 3170,
+  "action_tokens": 12
+}
+```
+
+That makes the state directory directly useful for training and audit instead
+of merely useful for debugging.
+
+## ECHO Is a Natural Fit
+
+Yes: ECHO is probably one of the load-bearing pieces for making this a strong
+RLM rather than a brittle prompt trick.
+
+In the RLM loop there are two token classes:
+
+```text
+Action tokens:
+  root controller JSON such as inspect/search/slice/spawn_agent/finish
+
+Observation tokens:
+  harness responses such as message inventories, search hits, slices,
+  child-agent returns, validation errors, and max-depth notices
+```
+
+That is exactly Kiln's agentic trajectory schema:
+
+```json
+[
+  {"role":"assistant","kind":"action","content":"{\"action\":\"search\",\"query\":\"...\"}"},
+  {"role":"tool","kind":"observation","content":"{\"output\":[...]}"},
+  {"role":"assistant","kind":"action","content":"{\"action\":\"spawn_agent\",...}"},
+  {"role":"tool","kind":"observation","content":"{\"child_request_id\":\"...\"}"}
+]
+```
+
+GRPO alone learns only from final reward assigned to action tokens. ECHO adds
+environment cross-entropy on the observation tokens, so the adapter learns the
+terminal dynamics of its own harness: what an inspect result looks like, where
+search spans appear, how validation failures are phrased, how child agents
+return, and how much evidence is usually needed before a final Pi tool call.
+That matters because recursive agents are only useful if the model can predict
+the information flow created by its own internal actions.
+
+The harness can now export both forms:
+
+```bash
+# Per-step SFT rows that exactly match deployed fixed-window root decisions.
+python3 scripts/pi_rlm_harness.py \
+  --export-state-dir .kiln/pi-rlm-harness \
+  --export-sft-jsonl /tmp/pi-rlm-root-actions.sft.jsonl
+
+# Agentic GRPO/ECHO groups: one JSONL line per root/child environment.
+python3 scripts/pi_rlm_harness.py \
+  --export-state-dir .kiln/pi-rlm-harness \
+  --export-echo-jsonl /tmp/pi-rlm-rollouts.echo.jsonl \
+  --export-default-reward 1.0
+
+# Sanity-check masks before training.
+kiln trajectory inspect /tmp/pi-rlm-rollouts.echo.jsonl \
+  --tokenizer /workspace/Qwen3.5-4B/tokenizer.json
+```
+
+The exported ECHO rows use `rollouts[].trajectory` with `kind:"action"` and
+`kind:"observation"`, which Kiln's `/v1/train/agentic` and `/v1/train/grpo`
+already accept. The `text` field is the `<TURN_BREAK>`-joined action stream for
+legacy compatibility; ECHO consumes the structured `trajectory`.
+
 ## Training Data
 
 There are three useful datasets.
@@ -179,6 +264,14 @@ every root step:
 Filter out malformed JSON, over-window samples, one-step lucky direct answers
 when training decomposition, and trajectories that never finish.
 
+The harness exports this directly:
+
+```bash
+python3 scripts/pi_rlm_harness.py \
+  --export-state-dir .kiln/pi-rlm-harness \
+  --export-sft-jsonl train.rlm_actions.sft.jsonl
+```
+
 2. Production-trace tool-call eval rows
 
 Use PR #1383's idea: materialize every production assistant tool-call turn as:
@@ -191,6 +284,23 @@ target = canonical semantic tool_calls JSON
 Then run the RLM harness against `prompt`. It passes if the harness eventually
 returns the same semantic Pi-visible tool call, even if it used any number of
 internal inspect/search/slice/subcall steps first.
+
+The harness has a local same-tool-eventually runner for this:
+
+```bash
+python3 scripts/pi_rlm_harness.py \
+  --upstream http://127.0.0.1:8420/v1 \
+  --model Qwen3.5-4B \
+  --tokenizer /workspace/Qwen3.5-4B/tokenizer.json \
+  --require-tokenizer \
+  --eval-suite production_trace_suite.json \
+  --eval-output production_trace.rlm_report.json
+```
+
+The Python runner intentionally scores only the harness-specific question:
+"did the recursive loop eventually emit the target Pi-visible tool call?" The
+full PR #1383 scorer remains the richer Rust path for bash/Python/path
+equivalence, Wilson intervals, provenance slicing, and large audit reports.
 
 3. Negative and efficiency rows
 
@@ -227,9 +337,27 @@ reward =
   -0.2 if max_iters fallback is used
 ```
 
-For agentic rollouts with real tool observations, keep ECHO enabled so the model
-also learns the environment dynamics around tool results. For the pure
-trace-suite setting, the main reward is "same tool eventually."
+For RLM rollouts, keep ECHO enabled. The observation tokens are not external
+shell output; they are the harness dynamics themselves. That is still exactly
+what ECHO is for. Use the exported `rollouts.echo.jsonl` shape and start with
+Kiln's default `loss.echo.lambda = 0.05`.
+
+Useful ablations:
+
+```text
+SFT only:
+  train root-action JSON on exact fixed-window rows
+
+SFT -> GRPO:
+  reward final same-tool-eventually pass/fail
+
+SFT -> GRPO + ECHO:
+  same reward, plus env-CE on inspect/search/slice/spawn observations
+
+SFT -> ECHO-only maintenance:
+  no_policy_loss=true on strong accepted traces to improve harness dynamics
+  without pushing policy away from accepted behavior
+```
 
 ## Eval Protocol
 
@@ -270,6 +398,8 @@ Phase 1: production trace eval
 - Bring PR #1383's `production_trace` importer into the target branch.
 - Add a runner mode that hits the harness endpoint.
 - Score "same tool eventually" from final harness output.
+- For quick local checks before the Rust scorer lands, run
+  `scripts/pi_rlm_harness.py --eval-suite ... --eval-output ...`.
 
 Phase 2: teacher trajectory collection
 
@@ -277,12 +407,16 @@ Phase 2: teacher trajectory collection
 - Persist root-step SFT examples plus final outcome metadata.
 - Add strict tokenizer window checks: 8192 prefix, 4096 dynamic input, 4096
   output.
+- Export both `*.sft.jsonl` and `*.echo.jsonl` from the same state directory.
+- Inspect exported ECHO masks with `kiln trajectory inspect` before training.
 
 Phase 3: adapter training
 
 - SFT root actions.
 - Evaluate on production trace suite.
 - GRPO on sampled trace rows with semantic tool-call reward.
+- Keep ECHO enabled for action/observation RLM traces; run one no-ECHO ablation
+  and one ECHO-only maintenance ablation so the contribution is measurable.
 - Keep adapters behind Pi A/B until pass rate, latency, and fallback rate beat
   the base harness.
 

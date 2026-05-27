@@ -156,6 +156,62 @@ requests.post("http://localhost:8420/v1/train/agentic", json={
 
 See [docs/ECHO_GUIDE.md](docs/ECHO_GUIDE.md) for full ECHO usage (CLI flags, env vars, verifier-free adaptation per paper §5.5, and the receipt-grade `env_ce_drop_pct` diagnostic).
 
+### Recursive Pi / RLM harness
+
+This branch also contains a research harness for turning Pi into a Recursive Language Model client without changing Pi's visible API. Pi sends a normal OpenAI-compatible request to a local proxy; the proxy stores the full Pi transcript and tools as external state; Qwen3.5-4B sees only a fixed-window controller prompt and emits internal JSON actions until it is ready to return one normal assistant message or one normal Pi-visible tool call.
+
+```bash
+python3 scripts/pi_rlm_harness.py \
+  --listen 127.0.0.1:8421 \
+  --upstream http://127.0.0.1:8420/v1 \
+  --model Qwen3.5-4B \
+  --tokenizer /workspace/Qwen3.5-4B/tokenizer.json \
+  --require-tokenizer
+
+kiln pi-setup \
+  --url http://127.0.0.1:8420 \
+  --rlm-url http://127.0.0.1:8421
+```
+
+The fixed adapter contract is:
+
+```text
+8192 tokens: stable RLM prefix, action schema, Pi tool-call contract
+4096 tokens: dynamic environment summary, exact slices, recent observations
+4096 tokens: one JSON internal action or final Pi-visible finish action
+```
+
+The recursive primitive is `spawn_agent`, not a plain summarization call. A child receives a materialized child environment from parent message references, exact slices, and optional artifacts, then runs the same controller at `depth + 1`. That child can inspect/search/slice/subcall/spawn again before returning its final proposal as an observation to the parent. The only tool call Pi executes is the top-level final `finish.tool_call`.
+
+ECHO fits the harness directly. Internal controller JSON is `kind:"action"`; harness responses are `kind:"observation"`. The same state directory can be exported as exact fixed-window SFT rows and as agentic GRPO/ECHO rollout groups:
+
+```bash
+python3 scripts/pi_rlm_harness.py \
+  --export-state-dir .kiln/pi-rlm-harness \
+  --export-sft-jsonl /tmp/pi-rlm-root-actions.sft.jsonl
+
+python3 scripts/pi_rlm_harness.py \
+  --export-state-dir .kiln/pi-rlm-harness \
+  --export-echo-jsonl /tmp/pi-rlm-rollouts.echo.jsonl
+
+kiln trajectory inspect /tmp/pi-rlm-rollouts.echo.jsonl \
+  --tokenizer /workspace/Qwen3.5-4B/tokenizer.json
+```
+
+For production-trace evals, use the same-tool-eventually runner against a suite generated from tool-call traces:
+
+```bash
+python3 scripts/pi_rlm_harness.py \
+  --upstream http://127.0.0.1:8420/v1 \
+  --model Qwen3.5-4B \
+  --tokenizer /workspace/Qwen3.5-4B/tokenizer.json \
+  --require-tokenizer \
+  --eval-suite production_trace_suite.json \
+  --eval-output production_trace.rlm_report.json
+```
+
+That report answers the harness-specific question: after any number of internal inspect/search/slice/subcall/spawn steps, did the RLM eventually emit the same semantic Pi-visible tool call? The richer Rust production-trace scorer handles large audit reports, Wilson intervals, and deeper Bash/Python command equivalence.
+
 ### Off-policy OPD teacher data
 
 For saturated tasks where reward-only GRPO is low signal, kiln-train also

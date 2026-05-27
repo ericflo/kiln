@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import sys
 import time
 import uuid
@@ -44,6 +45,7 @@ OUTPUT_TOKENS = 4096
 CHARS_PER_TOKEN = 4
 MAX_OBSERVATION_CHARS = INPUT_TOKENS * CHARS_PER_TOKEN
 DEFAULT_CHILD_AGENT_ITERS = 8
+TURN_BREAK = "<TURN_BREAK>"
 
 RLM_SYSTEM_PROMPT = f"""You are the root controller for a Recursive Language Model (RLM) harness.
 
@@ -202,6 +204,18 @@ def first_json_object(text: str) -> dict[str, Any] | None:
         if isinstance(value, dict):
             return value
     return None
+
+
+def is_int_like(value: Any) -> bool:
+    try:
+        int(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def action_text(action: dict[str, Any]) -> str:
+    return json_dumps(action)
 
 
 def parse_listen(value: str) -> tuple[str, int]:
@@ -540,12 +554,13 @@ class RlmController:
         trace: list[dict[str, Any]] = []
         max_iters = max_iters_override or self.max_iters
         for step in range(max_iters):
+            prompt_messages = [
+                {"role": "system", "content": RLM_SYSTEM_PROMPT},
+                {"role": "user", "content": self.root_user_prompt(env, depth, step)},
+            ]
             root_payload = {
                 "model": payload.get("model") or self.upstream.model,
-                "messages": [
-                    {"role": "system", "content": RLM_SYSTEM_PROMPT},
-                    {"role": "user", "content": self.root_user_prompt(env, depth, step)},
-                ],
+                "messages": prompt_messages,
                 "temperature": 0.0,
                 "max_tokens": OUTPUT_TOKENS,
                 "chat_template_kwargs": {"enable_thinking": False},
@@ -558,7 +573,22 @@ class RlmController:
                     "content": raw,
                     "warning": "model did not emit JSON action",
                 }
-            trace.append({"step": step, "raw": raw, "action": action})
+            trace.append(
+                {
+                    "step": step,
+                    "prompt_messages": prompt_messages,
+                    "prompt_tokens": sum(self.budget.count(m["content"]) for m in prompt_messages),
+                    "raw": raw,
+                    "action": action,
+                    "action_tokens": self.budget.count(action_text(action)),
+                }
+            )
+            validation_error = self.validate_action(env, action)
+            if validation_error is not None:
+                obs = env.observe(action, validation_error)
+                trace[-1]["observation"] = obs
+                env.persist()
+                continue
             kind = str(action.get("action", "")).lower()
             if kind == "finish":
                 result = self.finish(action, trace)
@@ -598,6 +628,51 @@ class RlmController:
         if kind in ("spawn_agent", "subrlm", "agent"):
             return self.spawn_agent(env, action, depth)
         return {"error": f"unknown action {kind!r}"}
+
+    def validate_action(self, env: RlmEnvironment, action: dict[str, Any]) -> dict[str, Any] | None:
+        kind = str(action.get("action", "")).lower()
+        valid = {"inspect", "search", "slice", "subcall", "spawn_agent", "subrlm", "agent", "finish"}
+        if kind not in valid:
+            return {
+                "error": "invalid_action",
+                "message": f"unknown action {kind!r}",
+                "valid_actions": sorted(valid),
+            }
+        if kind == "inspect":
+            target = str(action.get("target", "summary"))
+            if target not in {"summary", "message", "tools", "observations", "artifacts"}:
+                return {"error": "invalid_action", "message": f"unknown inspect target {target!r}"}
+            if target == "message" and not is_int_like(action.get("index")):
+                return {"error": "invalid_action", "message": "inspect message requires integer index"}
+        if kind == "search" and not str(action.get("query", "")):
+            return {"error": "invalid_action", "message": "search requires non-empty query"}
+        if kind == "slice":
+            if not is_int_like(action.get("index")):
+                return {"error": "invalid_action", "message": "slice requires integer index"}
+            if not is_int_like(action.get("start", 0)) or not is_int_like(action.get("length", 4096)):
+                return {"error": "invalid_action", "message": "slice start/length must be integers"}
+        if kind in {"spawn_agent", "subrlm", "agent"}:
+            if self.max_depth <= env.depth:
+                return {"error": "max_depth reached", "depth": env.depth, "max_depth": self.max_depth}
+            if not str(action.get("task") or action.get("prompt") or ""):
+                return {"error": "invalid_action", "message": "spawn_agent requires task or prompt"}
+        if kind == "finish":
+            tool_call = action.get("tool_call")
+            content = action.get("content")
+            if tool_call is None and content is None:
+                return {"error": "invalid_action", "message": "finish requires content or tool_call"}
+            if tool_call is not None:
+                if not isinstance(tool_call, dict) or not tool_call.get("name"):
+                    return {"error": "invalid_action", "message": "finish.tool_call requires name"}
+                available = {name for name in (tool_name(t) for t in env.tools) if name}
+                name = str(tool_call.get("name"))
+                if available and name not in available:
+                    return {
+                        "error": "invalid_action",
+                        "message": f"finish.tool_call uses unknown Pi tool {name!r}",
+                        "available_tools": sorted(available),
+                    }
+        return None
 
     def spawn_agent(self, env: RlmEnvironment, action: dict[str, Any], depth: int) -> Any:
         if depth >= self.max_depth:
@@ -868,6 +943,290 @@ def stream_chunk(result: RlmResult, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def iter_state_payloads(state_dir: Path) -> list[tuple[Path, dict[str, Any]]]:
+    payloads = []
+    for path in sorted(state_dir.glob("*.json")):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict) and isinstance(value.get("result"), dict):
+            payloads.append((path, value))
+    return payloads
+
+
+def export_sft_jsonl(state_dir: Path, output: Path) -> int:
+    count = 0
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8") as f:
+        for path, payload in iter_state_payloads(state_dir):
+            result = payload.get("result") or {}
+            for entry in result.get("trace") or []:
+                if not isinstance(entry, dict) or not isinstance(entry.get("action"), dict):
+                    continue
+                prompt_messages = entry.get("prompt_messages")
+                if not isinstance(prompt_messages, list):
+                    continue
+                row = {
+                    "messages": list(prompt_messages)
+                    + [{"role": "assistant", "content": action_text(entry["action"])}],
+                    "metadata": {
+                        "source": "pi_rlm_harness",
+                        "state_file": str(path),
+                        "request_id": payload.get("request_id"),
+                        "parent_id": payload.get("parent_id"),
+                        "depth": payload.get("depth"),
+                        "step": entry.get("step"),
+                        "prompt_tokens": entry.get("prompt_tokens"),
+                        "action_tokens": entry.get("action_tokens"),
+                        "final_tool": final_tool_name(result),
+                        "fallback_used": bool(result.get("fallback_used")),
+                    },
+                }
+                f.write(json_dumps(row) + "\n")
+                count += 1
+    return count
+
+
+def export_echo_jsonl(state_dir: Path, output: Path, default_reward: float = 1.0) -> int:
+    count = 0
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8") as f:
+        for path, payload in iter_state_payloads(state_dir):
+            row = echo_group_from_payload(path, payload, default_reward)
+            if row is None:
+                continue
+            f.write(json_dumps(row) + "\n")
+            count += 1
+    return count
+
+
+def echo_group_from_payload(path: Path, payload: dict[str, Any], default_reward: float) -> dict[str, Any] | None:
+    result = payload.get("result") or {}
+    trace = result.get("trace") or []
+    if not trace:
+        return None
+    prompt_messages = next(
+        (entry.get("prompt_messages") for entry in trace if isinstance(entry, dict) and entry.get("prompt_messages")),
+        None,
+    )
+    if not isinstance(prompt_messages, list):
+        return None
+
+    trajectory = []
+    action_segments = []
+    for entry in trace:
+        if not isinstance(entry, dict) or not isinstance(entry.get("action"), dict):
+            continue
+        action_json = action_text(entry["action"])
+        action_segments.append(action_json)
+        trajectory.append({"role": "assistant", "content": action_json, "kind": "action"})
+        if isinstance(entry.get("observation"), dict):
+            trajectory.append(
+                {
+                    "role": "tool",
+                    "content": json_dumps(entry["observation"]),
+                    "kind": "observation",
+                }
+            )
+    if not trajectory:
+        return None
+
+    reward = float(result.get("reward", 0.0 if result.get("fallback_used") else default_reward))
+    return {
+        "messages": prompt_messages,
+        "rollouts": [
+            {
+                "text": TURN_BREAK.join(action_segments),
+                "reward": reward,
+                "trajectory": trajectory,
+            }
+        ],
+        "metadata": {
+            "source": "pi_rlm_harness",
+            "state_file": str(path),
+            "request_id": payload.get("request_id"),
+            "parent_id": payload.get("parent_id"),
+            "depth": payload.get("depth"),
+            "trace_steps": len(trace),
+            "final_tool": final_tool_name(result),
+            "fallback_used": bool(result.get("fallback_used")),
+            "echo_ready": any(seg.get("kind") == "observation" for seg in trajectory),
+        },
+    }
+
+
+def final_tool_name(result: dict[str, Any]) -> str | None:
+    tool_call = result.get("tool_call")
+    if not isinstance(tool_call, dict):
+        return None
+    fn = tool_call.get("function")
+    if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+        return fn["name"]
+    return None
+
+
+def run_eval_suite(controller: RlmController, suite_path: Path, output: Path | None, limit: int | None) -> dict[str, Any]:
+    suite = json.loads(suite_path.read_text(encoding="utf-8"))
+    examples = suite.get("examples") or []
+    if limit is not None:
+        examples = examples[:limit]
+    rows = []
+    stats = {"total": 0, "scored": 0, "passed": 0, "failed": 0, "skipped": 0, "fallback_used": 0}
+    for index, example in enumerate(examples):
+        if not isinstance(example, dict):
+            continue
+        stats["total"] += 1
+        example_id = str(example.get("id") or f"example-{index}")
+        target = target_tool_call_from_text(example.get("target"))
+        if target is None:
+            stats["skipped"] += 1
+            rows.append({"id": example_id, "status": "skipped", "reason": "no target tool_call"})
+            continue
+        payload = {
+            "model": suite.get("model") or DEFAULT_MODEL,
+            "messages": eval_messages(suite, example),
+            "tools": example.get("tools") or suite.get("tools") or [],
+            "metadata": {
+                "trace_id": sanitize_id(f"{suite.get('name', 'suite')}.{example_id}"),
+                "suite": suite.get("name"),
+                "example_id": example_id,
+            },
+            "max_tokens": OUTPUT_TOKENS,
+            "temperature": 0.0,
+        }
+        result = controller.run(payload)
+        predicted = simple_tool_call(result.tool_call)
+        scored = score_tool_call(predicted, target)
+        stats["scored"] += 1
+        if scored["pass"]:
+            stats["passed"] += 1
+        else:
+            stats["failed"] += 1
+        if result.fallback_used:
+            stats["fallback_used"] += 1
+        rows.append(
+            {
+                "id": example_id,
+                "status": "scored",
+                "pass": scored["pass"],
+                "score": scored["score"],
+                "reason": scored["reason"],
+                "target": target,
+                "predicted": predicted,
+                "trace_steps": len(result.trace),
+                "fallback_used": result.fallback_used,
+                "request_id": result.request_id,
+            }
+        )
+    accuracy = (stats["passed"] / stats["scored"]) if stats["scored"] else 0.0
+    report = {
+        "suite": suite.get("name") or suite_path.name,
+        "suite_path": str(suite_path),
+        "accuracy": accuracy,
+        "stats": stats,
+        "examples": rows,
+    }
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(pretty_json(report) + "\n", encoding="utf-8")
+    return report
+
+
+def eval_messages(suite: dict[str, Any], example: dict[str, Any]) -> list[dict[str, Any]]:
+    messages = list(example.get("messages") or [])
+    system_prompt = suite.get("system_prompt")
+    if isinstance(system_prompt, str) and system_prompt:
+        has_system = bool(messages and isinstance(messages[0], dict) and messages[0].get("role") == "system")
+        if not has_system:
+            messages.insert(0, {"role": "system", "content": system_prompt})
+    return messages
+
+
+def target_tool_call_from_text(target: Any) -> dict[str, Any] | None:
+    if not isinstance(target, str) or not target.strip():
+        return None
+    parsed = first_json_object(target)
+    if parsed is None:
+        try:
+            parsed_any = json.loads(target)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed_any, dict):
+            return None
+        parsed = parsed_any
+    calls = parsed.get("tool_calls") or parsed.get("toolCalls")
+    if isinstance(calls, list) and calls:
+        return simple_tool_call(calls[0])
+    return simple_tool_call(parsed)
+
+
+def simple_tool_call(tool_call: Any) -> dict[str, Any] | None:
+    if not isinstance(tool_call, dict):
+        return None
+    fn = tool_call.get("function")
+    if isinstance(fn, dict):
+        name = fn.get("name")
+        arguments = parse_arguments(fn.get("arguments"))
+    else:
+        name = tool_call.get("name")
+        arguments = parse_arguments(tool_call.get("arguments"))
+    if not isinstance(name, str) or not name:
+        return None
+    return {"name": name, "arguments": arguments}
+
+
+def score_tool_call(predicted: dict[str, Any] | None, target: dict[str, Any]) -> dict[str, Any]:
+    if predicted is None:
+        return {"pass": False, "score": 0.0, "reason": "no predicted tool_call"}
+    if predicted["name"] != target["name"]:
+        return {
+            "pass": False,
+            "score": 0.0,
+            "reason": f"tool mismatch: predicted {predicted['name']} target {target['name']}",
+        }
+    if arguments_match(predicted["name"], predicted.get("arguments"), target.get("arguments")):
+        return {"pass": True, "score": 1.0, "reason": "semantic tool_call match"}
+    return {"pass": False, "score": 0.5, "reason": "tool matched but arguments differed"}
+
+
+def arguments_match(tool: str, predicted: Any, target: Any) -> bool:
+    if normalized_json(predicted) == normalized_json(target):
+        return True
+    if tool == "Bash":
+        return normalize_shell_command(command_arg(predicted)) == normalize_shell_command(command_arg(target))
+    return False
+
+
+def command_arg(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("cmd", "command", "script"):
+            if isinstance(value.get(key), str):
+                return value[key]
+    return str(value or "")
+
+
+def normalize_shell_command(command: str) -> str:
+    command = command.strip()
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+    if len(parts) >= 3 and parts[0] in {"bash", "sh"} and parts[1] in {"-c", "-lc"}:
+        command = parts[2]
+    return re.sub(r"\s+", " ", command.strip())
+
+
+def normalized_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: normalized_json(value[k]) for k in sorted(value)}
+    if isinstance(value, list):
+        return [normalized_json(v) for v in value]
+    if isinstance(value, str):
+        return value.strip()
+    return value
+
+
 class FakeUpstream(UpstreamClient):
     def __init__(self, responses: list[str]):
         self.responses = responses
@@ -901,6 +1260,11 @@ def self_test(tokenizer_path: Path | None = None, require_tokenizer: bool = Fals
         assert budget.count(clipped) <= INPUT_TOKENS
 
     tmp = Path("/tmp/pi-rlm-harness-self-test")
+    tmp.mkdir(parents=True, exist_ok=True)
+    for path in tmp.glob("*.json"):
+        path.unlink()
+    for path in tmp.glob("*.jsonl"):
+        path.unlink()
     upstream = FakeUpstream(
         [
             '{"action":"spawn_agent","task":"Find the likely command.","message_refs":[1],"max_iters":3}',
@@ -934,6 +1298,41 @@ def self_test(tokenizer_path: Path | None = None, require_tokenizer: bool = Fals
     assert json.loads(result.tool_call["function"]["arguments"])["cmd"] == "pytest -q"
     assert (tmp / "self-test.json").exists()
     assert (tmp / "self-test.child0.json").exists()
+    assert export_sft_jsonl(tmp, tmp / "root-actions.sft.jsonl") == 4
+    assert export_echo_jsonl(tmp, tmp / "rollouts.echo.jsonl") == 2
+    echo_row = json.loads((tmp / "rollouts.echo.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert echo_row["rollouts"][0]["trajectory"][0]["kind"] == "action"
+    assert any(seg["kind"] == "observation" for seg in echo_row["rollouts"][0]["trajectory"])
+
+    eval_suite = {
+        "name": "same-tool-self-test",
+        "default_scorer": {"kind": "tool_call"},
+        "generation": {"temperature": 0.0, "max_tokens": 256},
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "Bash", "parameters": {"type": "object"}},
+            }
+        ],
+        "examples": [
+            {
+                "id": "bash-pytest",
+                "messages": [{"role": "user", "content": "Run tests"}],
+                "target": '{"tool_calls":[{"name":"Bash","arguments":{"cmd":"pytest -q"}}]}',
+            }
+        ],
+    }
+    suite_path = tmp / "same-tool-suite.json"
+    suite_path.write_text(pretty_json(eval_suite) + "\n", encoding="utf-8")
+    eval_controller = RlmController(
+        FakeUpstream(['{"action":"finish","tool_call":{"name":"Bash","arguments":{"cmd":"bash -lc \\"pytest -q\\""}}}']),
+        tmp / "eval-state",
+        max_iters=2,
+        max_depth=1,
+        budget=budget,
+    )
+    eval_report = run_eval_suite(eval_controller, suite_path, tmp / "same-tool-report.json", None)
+    assert eval_report["stats"]["passed"] == 1
     print("pi_rlm_harness self-test passed")
 
 
@@ -960,6 +1359,18 @@ def main() -> int:
         help="fail startup unless the Qwen3.5 tokenizer can be loaded",
     )
     parser.add_argument("--self-test", action="store_true", help="run local parser/controller smoke test")
+    parser.add_argument("--eval-suite", help="run a same-tool-eventually EvalSuite JSON against the harness")
+    parser.add_argument("--eval-output", help="write same-tool-eventually eval report JSON")
+    parser.add_argument("--eval-limit", type=int, help="evaluate at most this many examples")
+    parser.add_argument("--export-state-dir", help="state directory to export; defaults to --state-dir")
+    parser.add_argument("--export-sft-jsonl", help="write fixed-window root-action SFT rows from harness state")
+    parser.add_argument("--export-echo-jsonl", help="write agentic GRPO/ECHO rollout groups from harness state")
+    parser.add_argument(
+        "--export-default-reward",
+        type=float,
+        default=1.0,
+        help="reward assigned to non-fallback exported ECHO rollouts",
+    )
     args = parser.parse_args()
 
     tokenizer_path = discover_tokenizer_path(args.tokenizer)
@@ -969,6 +1380,20 @@ def main() -> int:
 
     host, port = parse_listen(args.listen)
     budget = TokenBudget(tokenizer_path, require_tokenizer=args.require_tokenizer)
+    if args.export_sft_jsonl or args.export_echo_jsonl:
+        export_state_dir = Path(args.export_state_dir or args.state_dir)
+        if args.export_sft_jsonl:
+            count = export_sft_jsonl(export_state_dir, Path(args.export_sft_jsonl))
+            print(f"exported {count} SFT root-action row(s) from {export_state_dir}", flush=True)
+        if args.export_echo_jsonl:
+            count = export_echo_jsonl(
+                export_state_dir,
+                Path(args.export_echo_jsonl),
+                default_reward=args.export_default_reward,
+            )
+            print(f"exported {count} ECHO rollout group(s) from {export_state_dir}", flush=True)
+        return 0
+
     if budget.exact:
         print(f"pi-rlm-harness using Qwen tokenizer {tokenizer_path}", flush=True)
     else:
@@ -979,6 +1404,22 @@ def main() -> int:
         )
     upstream = UpstreamClient(args.upstream, args.api_key, args.model)
     controller = RlmController(upstream, Path(args.state_dir), args.max_iters, args.max_depth, budget)
+    if args.eval_suite:
+        report = run_eval_suite(
+            controller,
+            Path(args.eval_suite),
+            Path(args.eval_output) if args.eval_output else None,
+            args.eval_limit,
+        )
+        print(
+            "same-tool-eventually: "
+            f"{report['stats']['passed']}/{report['stats']['scored']} passed "
+            f"accuracy={report['accuracy']:.3f} "
+            f"fallbacks={report['stats']['fallback_used']}",
+            flush=True,
+        )
+        return 0
+
     server = ProxyServer((host, port), Handler)
     server.controller = controller
     server.upstream = upstream
