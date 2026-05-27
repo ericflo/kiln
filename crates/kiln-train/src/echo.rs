@@ -50,6 +50,11 @@
 //! parallel `step_loss` calls with parallel inputs and outputs.
 
 use anyhow::{Context, Result};
+// TODO(#1082): blocked by FLCE backward — `fused_linear_cross_entropy_dispatch_with_provider`
+// still takes candle `Tensor` and the returned `mean_ce` participates in `loss.backward()`.
+// `kiln_flce_kernel::fused_linear_cross_entropy_phase_b_kt` exists but is forward-only and
+// lacks `provider` plumbing. Migrate this `Tensor` import once the kt-typed FLCE forward+
+// backward + provider trait land (kt_api.rs Phase 7 target).
 use candle_core::Tensor;
 
 use kiln_flce_kernel::{
@@ -202,15 +207,21 @@ pub fn echo_step_loss(inputs: EchoStepInputs<'_>) -> Result<Option<EchoStepOutpu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{DType, Device};
+    // The `Tensor` construction helpers in this test module still go through candle
+    // because `echo_step_loss` takes `&candle_core::Tensor` (see the `Tensor` use
+    // statement above — blocked on the FLCE kt-typed forward+backward landing).
+    // The `DType` / `Device` symbols are referenced with their fully-qualified
+    // `candle_core::` paths so removing this `mod tests` `use` of candle does not
+    // require a `use candle_core::{...};` line — keeping the file at one candle
+    // import instead of two. (#1082)
 
     /// Smoke test: empty env_mask returns Ok(None) without touching the
     /// FLCE kernel.
     #[test]
     fn echo_step_loss_empty_mask_short_circuits() -> Result<()> {
-        let device = Device::Cpu;
-        let hidden = Tensor::zeros((1, 4, 8), DType::F32, &device)?;
-        let head_t = Tensor::zeros((8, 16), DType::F32, &device)?;
+        let device = candle_core::Device::Cpu;
+        let hidden = Tensor::zeros((1, 4, 8), candle_core::DType::F32, &device)?;
+        let head_t = Tensor::zeros((8, 16), candle_core::DType::F32, &device)?;
         let tokens = vec![0u32, 1, 2, 3];
         let env_mask = vec![false; 4];
         let result = echo_step_loss(EchoStepInputs {
@@ -229,9 +240,9 @@ mod tests {
     /// Length mismatch is caught with a clear error.
     #[test]
     fn echo_step_loss_length_mismatch_errors() -> Result<()> {
-        let device = Device::Cpu;
-        let hidden = Tensor::zeros((1, 4, 8), DType::F32, &device)?;
-        let head_t = Tensor::zeros((8, 16), DType::F32, &device)?;
+        let device = candle_core::Device::Cpu;
+        let hidden = Tensor::zeros((1, 4, 8), candle_core::DType::F32, &device)?;
+        let head_t = Tensor::zeros((8, 16), candle_core::DType::F32, &device)?;
         let tokens = vec![0u32, 1, 2, 3];
         let env_mask = vec![false, true, false]; // length 3 != 4
         let err = echo_step_loss(EchoStepInputs {
@@ -251,9 +262,9 @@ mod tests {
     /// total_obs_len=0 with active env_mask is a builder bug; refuse.
     #[test]
     fn echo_step_loss_zero_obs_len_with_active_mask_errors() -> Result<()> {
-        let device = Device::Cpu;
-        let hidden = Tensor::zeros((1, 4, 8), DType::F32, &device)?;
-        let head_t = Tensor::zeros((8, 16), DType::F32, &device)?;
+        let device = candle_core::Device::Cpu;
+        let hidden = Tensor::zeros((1, 4, 8), candle_core::DType::F32, &device)?;
+        let head_t = Tensor::zeros((8, 16), candle_core::DType::F32, &device)?;
         let tokens = vec![0u32, 1, 2, 3];
         // Bit at index 2 is active under next-token shift (env_mask[i+1] true at i+1=2).
         let env_mask = vec![false, false, true, false];
@@ -277,7 +288,7 @@ mod tests {
     /// kernel output when total_obs_len != env_count).
     #[test]
     fn echo_step_loss_paper_normalization_rescales_correctly() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let seq_len = 8;
         let hidden_size = 4;
         let vocab = 8;
@@ -286,10 +297,10 @@ mod tests {
         // deterministic.
         let hidden_data: Vec<f32> = (0..seq_len * hidden_size).map(|i| (i as f32) * 0.01).collect();
         let hidden = Tensor::from_vec(hidden_data, (1, seq_len, hidden_size), &device)?
-            .to_dtype(DType::F32)?;
+            .to_dtype(candle_core::DType::F32)?;
         let head_data: Vec<f32> = (0..hidden_size * vocab).map(|i| (i as f32) * 0.1).collect();
         let head_t = Tensor::from_vec(head_data, (hidden_size, vocab), &device)?
-            .to_dtype(DType::F32)?;
+            .to_dtype(candle_core::DType::F32)?;
 
         let tokens: Vec<u32> = (0..seq_len).map(|i| (i as u32) % vocab as u32).collect();
 
