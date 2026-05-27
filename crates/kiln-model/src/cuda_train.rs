@@ -2574,7 +2574,7 @@ pub fn cuda_silu_inplace(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
         anyhow::bail!("cuda_silu_inplace kt: input must be contiguous");
     }
     let sigmoid = unsafe {
-        candle_core::Tensor::empty(
+        Tensor::empty(
             input_tensor.shape().clone(),
             DType::F32,
             input_tensor.device(),
