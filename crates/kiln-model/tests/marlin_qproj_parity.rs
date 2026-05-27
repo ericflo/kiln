@@ -17,6 +17,25 @@
 //! `kiln-marlin-gemm`'s own parity test already asserts tighter elementwise
 //! bounds against a dequant baseline; this test confirms the forward plumbing
 //! preserves that fidelity end to end.
+//!
+//! # TODO(#1082): candle-removal STOP
+//!
+//! This test cannot drop its `candle_core::{DType, Device, Tensor}` import
+//! today. The system under test (`kiln_model::forward::q_proj_forward`) is
+//! candle-typed: its signature consumes `candle_core::Tensor` inputs and
+//! reads `Tensor` fields from `GpuFullAttentionWeights`. The
+//! `MarlinPackedProj` struct itself also holds `candle_core::Tensor`
+//! fields for `b_packed` and `scales`.
+//!
+//! Migrating this test to kt requires migrating `q_proj_forward` (and the
+//! whole `forward.rs` decode path) to kt-typed signatures, which is the
+//! Tier 3 substrate work tracked in `docs/CANDLE_REMOVAL_PLAN.md` lines
+//! 595-620. Until that lands, this `Tensor::from_vec` + `to_device` +
+//! `to_dtype` construction pattern is the only way to feed the function.
+//!
+//! Precedent for STOP-doc-only commits in this sweep: 6d3fc88d
+//! (kiln-opd-loss-kernel), 9a95adc2 (kiln-flce-kernel), acd00bb4
+//! (kiln-rmsnorm-kernel phase10_microbench).
 
 #[cfg(feature = "cuda")]
 use candle_core::{DType, Device, Tensor};
