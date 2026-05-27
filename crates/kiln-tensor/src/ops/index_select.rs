@@ -111,35 +111,65 @@ impl DeviceOp2 for IndexSelectOp {
 
     #[cfg(feature = "cuda")]
     fn cuda_fwd(&self, input: &Tensor, indices: &Tensor) -> Result<Option<Tensor>> {
-        // The CUDA substrate currently only provides dim0 gather
-        // (via kernel kiln_index_select_dim0_async). For axis != 0
-        // we fall through to CPU until a generic axis kernel ships.
-        if self.axis != 0 {
-            return Ok(None);
-        }
+        // The CUDA substrate exposes two paths:
+        //   - `cuda_index_select_dim0` — legacy fast path along axis 0
+        //     (one block per output row, full row-byte copy).
+        //   - `cuda_index_select_axis_n` — generic axis-N gather
+        //     (2-D grid: (ids_dim, left_size); per-block row copy).
+        //
+        // Both require U32 indices and contiguous, non-packed inputs.
+        // I64 indices and packed dtypes still fall through to CPU.
         if input.dtype().is_packed() {
             return Ok(None);
         }
         if !input.is_contiguous() || !indices.is_contiguous() {
             return Ok(None);
         }
-        //  requires U32 indices. Fall through
-        // to CPU for I64.
         if indices.dtype() != DType::U32 {
             return Ok(None);
         }
-        // Multi-dim indices: flatten → gather → reshape.
-        if indices.rank() == 1 {
-            Ok(Some(crate::cuda_index_select_dim0(input, indices)?))
+        // Storage check — both src and indices must be CUDA-backed. If
+        // either side is on a different backend the dispatcher would
+        // normally route us elsewhere, but be defensive in case a
+        // mixed-storage tensor pair sneaks through.
+        if input
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::CudaStorage>()
+            .is_none()
+            || indices
+                .storage()
+                .as_any()
+                .downcast_ref::<crate::CudaStorage>()
+                .is_none()
+        {
+            return Ok(None);
+        }
+        if self.axis == 0 {
+            // Preserve the dim0 fast path. Multi-D indices flatten →
+            // gather → reshape so the legacy kernel can run its
+            // single-axis blocks.
+            if indices.rank() == 1 {
+                Ok(Some(crate::cuda_index_select_dim0(input, indices)?))
+            } else {
+                let n_indices = indices.element_count();
+                let flat_ids = indices.reshape(vec![n_indices])?;
+                let gathered = crate::cuda_index_select_dim0(input, &flat_ids)?;
+                // gathered shape: [n_indices, ...rest_of_input_dims_after_dim0]
+                // Final shape: [..indices.shape, ...rest]
+                let mut out_shape = indices.shape().to_vec();
+                out_shape.extend_from_slice(&input.shape()[1..]);
+                Ok(Some(gathered.reshape(out_shape)?))
+            }
         } else {
-            let n_indices = indices.element_count();
-            let flat_ids = indices.reshape(vec![n_indices])?;
-            let gathered = crate::cuda_index_select_dim0(input, &flat_ids)?;
-            // gathered shape: [n_indices, ...rest_of_input_dims_after_dim0]
-            // Final shape: [..indices.shape, ...rest]
-            let mut out_shape = indices.shape().to_vec();
-            out_shape.extend_from_slice(&input.shape()[1..]);
-            Ok(Some(gathered.reshape(out_shape)?))
+            // Generic axis-N kernel handles arbitrary axis and the
+            // multi-D indices case directly (output shape is
+            // `src.shape[..axis] ++ indices.shape ++ src.shape[axis+1..]`).
+            Ok(Some(crate::cuda_index_select_axis_n(
+                input,
+                self.axis,
+                indices,
+            )?))
         }
     }
 
@@ -433,5 +463,182 @@ mod tests {
         assert_eq!(op.name(), "index_select");
         assert!(op.determinism().is_constructive());
         assert_eq!(op.axis(), 1);
+    }
+
+    /// CUDA parity for `index_select` across all axes of a rank-4 tensor.
+    /// Compares the CUDA path (which now routes through the axis-N
+    /// kernel for `axis != 0`) against the CPU reference for bit-exact
+    /// equality on F32. (#1082 axis-N gather extension)
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_index_select_axis_parity_f32() {
+        let cdev = match candle_core::Device::cuda_if_available(0) {
+            Ok(candle_core::Device::Cuda(c)) => c,
+            _ => return,
+        };
+        let cdev = std::sync::Arc::new(cdev);
+
+        // rank-4 source `[A, B, C, D]` with distinct values so axis
+        // confusion shows up as a mismatch instead of a coincidence.
+        let a = 3usize;
+        let b = 4usize;
+        let c = 5usize;
+        let d = 2usize;
+        let n = a * b * c * d;
+        let values: Vec<f32> = (0..n).map(|i| (i as f32) * 0.5 - 7.0).collect();
+        let cpu_x = Tensor::from_slice(&values, vec![a, b, c, d]).unwrap();
+        let cuda_x = cpu_x
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+
+        let dims = [a, b, c, d];
+        // For each axis pick a few interesting indices (out-of-order +
+        // duplicates) of length K.
+        let test_cases: [(usize, Vec<u32>); 4] = [
+            (0, vec![2, 0, 1, 0]),
+            (1, vec![3, 0, 2, 1, 2]),
+            (2, vec![4, 1, 0, 3, 2, 4]),
+            (3, vec![1, 0, 1, 0, 1]),
+        ];
+
+        for (axis, idx_vec) in test_cases.iter() {
+            let cpu_ids = Tensor::from_slice(idx_vec.as_slice(), vec![idx_vec.len()]).unwrap();
+            let cuda_ids = cpu_ids
+                .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+                .unwrap();
+
+            let cpu_out = index_select(&cpu_x, *axis, &cpu_ids).unwrap();
+            let cuda_out = index_select(&cuda_x, *axis, &cuda_ids).unwrap();
+
+            // Shape parity
+            let expected_shape: Vec<usize> = dims[..*axis]
+                .iter()
+                .copied()
+                .chain(std::iter::once(idx_vec.len()))
+                .chain(dims[*axis + 1..].iter().copied())
+                .collect();
+            assert_eq!(
+                cpu_out.shape(),
+                expected_shape.as_slice(),
+                "cpu shape mismatch for axis {axis}"
+            );
+            assert_eq!(
+                cuda_out.shape(),
+                expected_shape.as_slice(),
+                "cuda shape mismatch for axis {axis}"
+            );
+
+            // Value parity: D2H-copy the CUDA output and compare bytes.
+            let cuda_out_cpu = cuda_out
+                .to_device(crate::Device::Cpu, None)
+                .unwrap();
+            let cpu_vec = read_f32(&cpu_out);
+            let cuda_vec = read_f32(&cuda_out_cpu);
+            assert_eq!(
+                cpu_vec.len(),
+                cuda_vec.len(),
+                "len mismatch for axis {axis}"
+            );
+            for (i, (c, g)) in cpu_vec.iter().zip(cuda_vec.iter()).enumerate() {
+                assert_eq!(
+                    c.to_bits(),
+                    g.to_bits(),
+                    "axis {axis} element {i}: cpu={c} cuda={g}"
+                );
+            }
+        }
+    }
+
+    /// CUDA parity for axis-N gather with multi-D indices: the kernel
+    /// path should treat indices.shape as a flattened K and produce
+    /// `src.shape[..axis] ++ indices.shape ++ src.shape[axis+1..]`.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_index_select_axis_n_multi_d_indices() {
+        let cdev = match candle_core::Device::cuda_if_available(0) {
+            Ok(candle_core::Device::Cuda(c)) => c,
+            _ => return,
+        };
+        let cdev = std::sync::Arc::new(cdev);
+
+        // `[2, 3]` source, gather axis 1 with `[[0,2],[1,1]]` indices.
+        // Expected output shape `[2, 2, 2]` (matches the CPU test
+        // `multi_dim_indices_broadcast_into_axis`).
+        let cpu_x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
+        let cuda_x = cpu_x
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+        let cpu_ids = Tensor::from_slice(&[0u32, 2, 1, 1], vec![2, 2]).unwrap();
+        let cuda_ids = cpu_ids
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+
+        let cuda_out = index_select(&cuda_x, 1, &cuda_ids).unwrap();
+        let cuda_out_cpu = cuda_out
+            .to_device(crate::Device::Cpu, None)
+            .unwrap();
+        assert_eq!(cuda_out.shape(), &[2, 2, 2]);
+        // Row 0 (orig [1,2,3]) at indices [[0,2],[1,1]] -> [[1,3],[2,2]]
+        // Row 1 (orig [4,5,6]) at indices [[0,2],[1,1]] -> [[4,6],[5,5]]
+        assert_eq!(
+            read_f32(&cuda_out_cpu),
+            vec![1.0, 3.0, 2.0, 2.0, 4.0, 6.0, 5.0, 5.0]
+        );
+    }
+
+    /// CUDA parity for axis-N gather on BF16. Compares against the CPU
+    /// reference via bytewise equality.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_index_select_axis_parity_bf16() {
+        use half::bf16;
+        let cdev = match candle_core::Device::cuda_if_available(0) {
+            Ok(candle_core::Device::Cuda(c)) => c,
+            _ => return,
+        };
+        let cdev = std::sync::Arc::new(cdev);
+
+        // rank-3 BF16 source `[B, H, K]` with distinct values.
+        let bdim = 2usize;
+        let h = 4usize;
+        let k = 6usize;
+        let n = bdim * h * k;
+        let values: Vec<bf16> = (0..n).map(|i| bf16::from_f32(i as f32 * 0.25 - 1.0)).collect();
+        let cpu_x = Tensor::from_slice(&values, vec![bdim, h, k]).unwrap();
+        let cuda_x = cpu_x
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+
+        // Gather along axis 1 (heads).
+        let ids_vec = vec![3u32, 0, 2, 1];
+        let cpu_ids = Tensor::from_slice(ids_vec.as_slice(), vec![ids_vec.len()]).unwrap();
+        let cuda_ids = cpu_ids
+            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .unwrap();
+
+        let cpu_out = index_select(&cpu_x, 1, &cpu_ids).unwrap();
+        let cuda_out = index_select(&cuda_x, 1, &cuda_ids).unwrap();
+
+        assert_eq!(cpu_out.shape(), &[bdim, ids_vec.len(), k]);
+        assert_eq!(cuda_out.shape(), &[bdim, ids_vec.len(), k]);
+
+        let cuda_out_cpu = cuda_out
+            .to_device(crate::Device::Cpu, None)
+            .unwrap();
+        let cpu_bytes = cpu_out
+            .storage()
+            .as_any()
+            .downcast_ref::<CpuStorage>()
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        let cuda_bytes = cuda_out_cpu
+            .storage()
+            .as_any()
+            .downcast_ref::<CpuStorage>()
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        assert_eq!(cpu_bytes, cuda_bytes, "bf16 axis-1 bytes differ");
     }
 }

@@ -418,6 +418,17 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_index_select_axis_n_async(
+        src: *const core::ffi::c_void,
+        dst: *mut core::ffi::c_void,
+        indices_u32: *const core::ffi::c_void,
+        right_bytes: i64,
+        ids_dim: i64,
+        src_dim: i64,
+        left_size: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_lerp_async(
         a: *const core::ffi::c_void,
         b: *const core::ffi::c_void,
@@ -993,6 +1004,166 @@ pub fn cuda_index_select_dim0(
         crate::TensorId::next(),
     )
     .map_err(|e| crate::Error::Msg(format!("cuda_index_select_dim0: wrap: {e}")))
+}
+
+/// CUDA-side `index_select` along an arbitrary axis.
+///
+/// Generalizes [`cuda_index_select_dim0`] to gather slices from any
+/// axis of `src`. Output shape is
+/// `src.shape[..axis] ++ indices.shape ++ src.shape[axis+1..]`.
+///
+/// Requirements:
+/// - `src` is CUDA-backed and contiguous.
+/// - `indices` is CUDA-backed, contiguous, U32 dtype.
+/// - `src.rank() >= 1` and `axis < src.rank()`.
+/// - Packed dtypes (e.g. quantized) are not supported.
+///
+/// `axis == 0` is dispatched through the same kernel; callers that
+/// want the legacy dim0 fast path (single-axis blocks) should call
+/// [`cuda_index_select_dim0`] directly.
+#[cfg(feature = "cuda")]
+pub fn cuda_index_select_axis_n(
+    src: &crate::Tensor,
+    axis: usize,
+    indices: &crate::Tensor,
+) -> Result<crate::Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use std::any::Any as _;
+
+    if src.dtype().is_packed() {
+        return Err(crate::Error::Msg(
+            "cuda_index_select_axis_n: packed dtype not supported".to_string(),
+        ));
+    }
+    if indices.dtype() != crate::DType::U32 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_index_select_axis_n: indices dtype must be U32, got {}",
+            indices.dtype()
+        )));
+    }
+    if !src.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_index_select_axis_n: src must be contiguous (call .contiguous()? first)"
+                .to_string(),
+        ));
+    }
+    if !indices.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_index_select_axis_n: indices must be contiguous".to_string(),
+        ));
+    }
+
+    let src_shape = src.shape();
+    if src_shape.is_empty() {
+        return Err(crate::Error::Msg(
+            "cuda_index_select_axis_n: src must have rank >= 1".to_string(),
+        ));
+    }
+    if axis >= src_shape.len() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_index_select_axis_n: axis {axis} out of bounds (src rank {})",
+            src_shape.len()
+        )));
+    }
+
+    let src_dim = src_shape[axis];
+    let left_size: usize = src_shape[..axis].iter().product();
+    let right_size: usize = src_shape[axis + 1..].iter().product();
+    let bpe = src.dtype().size_in_bytes();
+    let right_bytes = (right_size * bpe) as i64;
+    let ids_dim = indices.element_count();
+
+    let mut out_shape: Vec<usize> = src_shape[..axis].to_vec();
+    out_shape.extend_from_slice(indices.shape());
+    out_shape.extend_from_slice(&src_shape[axis + 1..]);
+    let n_out_elements = left_size * ids_dim * right_size;
+
+    let src_storage = src
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_index_select_axis_n: src must be CUDA storage".to_string())
+        })?;
+    let idx_storage = indices
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg(
+                "cuda_index_select_axis_n: indices must be CUDA storage".to_string(),
+            )
+        })?;
+
+    let candle_device = src_storage.candle_device.clone();
+    let device_index = match src_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!("CudaStorage::device is always Cuda"),
+    };
+    let dst_storage = CudaStorage::zeros(
+        candle_device.clone(),
+        device_index,
+        src.dtype(),
+        n_out_elements,
+    )?;
+
+    let stream = candle_device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let src_base = match &src_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let idx_base = match &idx_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let dst_base = match &dst_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+    };
+
+    let src_byte_off = (src.layout().start_offset() * bpe) as u64;
+    let idx_byte_off = (indices.layout().start_offset() * crate::DType::U32.size_in_bytes()) as u64;
+
+    let src_ptr = (src_base + src_byte_off) as *const core::ffi::c_void;
+    let idx_ptr = (idx_base + idx_byte_off) as *const core::ffi::c_void;
+    let dst_ptr = dst_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_index_select_axis_n_async(
+            src_ptr,
+            dst_ptr,
+            idx_ptr,
+            right_bytes,
+            ids_dim as i64,
+            src_dim as i64,
+            left_size as i64,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_index_select_axis_n: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(dst_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(out_shape),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| crate::Error::Msg(format!("cuda_index_select_axis_n: wrap: {e}")))
 }
 
 /// CUDA-side element-wise binary op: `out[i] = op(a[i], b[i])` for
