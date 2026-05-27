@@ -2,6 +2,30 @@
 
 //! Round-trip test: CUDA buffer → host kt-Tensor → byte-identical
 //! to a CPU kt-Tensor built from the same source data.
+//!
+//! # TODO(#1082): candle-removal STOP — by design
+//!
+//! This test cannot drop its `candle_core::{Device, Tensor}` imports
+//! today. The test exists specifically to verify the candle→kt
+//! bridge: it builds CUDA-side inputs with
+//! `CandleTensor::from_vec(.., &candle_cuda_device)` and bridges
+//! them via `kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow`,
+//! then asserts that `kiln_tensor::cuda_to_host_copy` produces
+//! byte-identical host storage.
+//!
+//! `kt_tensor_from_candle_cuda_borrow` exists specifically to
+//! bridge candle CUDA tensors into kt — removing candle from the
+//! test would remove its reason to exist. When candle is finally
+//! dropped from `kiln-tensor`, the borrow helper and this whole
+//! test file go together (rewrite the round-trip against the
+//! pure-kt allocator route).
+//!
+//! Substrate dependency tracked in `docs/CANDLE_REMOVAL_PLAN.md`
+//! lines 579-585.
+//!
+//! Precedent for STOP-doc-only commits in this sweep: 6d3fc88d
+//! (kiln-opd-loss-kernel), 9a95adc2 (kiln-flce-kernel), acd00bb4
+//! (kiln-rmsnorm-kernel phase10_microbench).
 
 use candle_core::{Device as CandleDevice, Tensor as CandleTensor};
 
