@@ -24623,8 +24623,13 @@ mod tests {
             "fixed-linear-test"
         }
 
-        fn device(&self) -> &Device {
-            &self.device
+        fn device(&self) -> kiln_tensor::Device {
+            // Test mock — synthesizes kt identity from the candle device
+            // held in the struct. Production backends cache this; the
+            // test path bridges per call because the struct existed
+            // before the kt accessor and a field add would churn many
+            // setups. (#1082)
+            kiln_kt_bridge::kt_device_from_candle(&self.device)
         }
 
         fn linear_decode(&self, _x: &Tensor, _weight_t: &Tensor) -> Result<Option<Tensor>> {
@@ -24652,8 +24657,8 @@ mod tests {
             "fixed-mlp-test"
         }
 
-        fn device(&self) -> &Device {
-            &self.device
+        fn device(&self) -> kiln_tensor::Device {
+            kiln_kt_bridge::kt_device_from_candle(&self.device)
         }
 
         fn mlp_decode(

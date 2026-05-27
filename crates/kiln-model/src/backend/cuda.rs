@@ -110,7 +110,15 @@ fn cuda_optimizer_tensors_supported_for_kt(tensors: &[&Tensor]) -> bool {
 
 #[derive(Debug)]
 pub struct CudaBackend {
+    /// Original candle CUDA device. Kept alongside the kt-typed device so
+    /// the many trait methods that still consume `candle_core::Tensor`
+    /// parameters can pass through to candle without re-bridging. Phase 7
+    /// of #1082 moved the `BackendRuntime::device()` accessor to return
+    /// `kiln_tensor::Device` by value; the candle device is now internal.
     device: Device,
+    /// `kiln_tensor::Device` form of `device`, cached at construction so
+    /// the hot trait accessor does not bridge per call. (#1082)
+    device_kt: kiln_tensor::Device,
     /// Cached at construction: reading env vars per decode step × 24 GDN layers
     /// shows up in decode NVTX captures. Env vars don't change at runtime.
     gdn_enabled: bool,
@@ -220,8 +228,10 @@ impl CudaBackend {
         let lora_decode_add_enabled = std::env::var("KILN_DISABLE_CUDA_LORA_DECODE_ADD").is_err();
         let gdn_full_chunk_forward_multiblock_enabled = gdn_enabled
             && std::env::var("KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK").is_err();
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
         Self {
             device,
+            device_kt,
             gdn_enabled,
             gdn_gates_enabled,
             gdn_gated_rms_norm_enabled,
@@ -254,8 +264,8 @@ impl BackendRuntime for CudaBackend {
         "cuda"
     }
 
-    fn device(&self) -> &Device {
-        &self.device
+    fn device(&self) -> kiln_tensor::Device {
+        self.device_kt
     }
 
     fn training_capabilities(&self) -> TrainingCapabilities {
@@ -1962,8 +1972,15 @@ mod tests {
     use super::*;
 
     fn test_backend() -> CudaBackend {
+        // Test mock uses a CPU candle device because the unit tests in
+        // this module only exercise the candle-typed surface; the
+        // device_kt field tracks it via the same bridge the production
+        // constructor uses. (#1082)
+        let device = Device::Cpu;
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
         CudaBackend {
-            device: Device::Cpu,
+            device,
+            device_kt,
             gdn_enabled: false,
             gdn_gates_enabled: false,
             gdn_gated_rms_norm_enabled: false,

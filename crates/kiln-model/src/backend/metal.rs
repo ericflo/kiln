@@ -116,7 +116,15 @@ impl MetalTransposedCoopGemvTile {
 
 #[derive(Debug)]
 pub struct MetalBackend {
+    /// Original candle Metal device. Retained alongside the kt-typed
+    /// device so trait methods that still consume `candle_core::Tensor`
+    /// parameters continue to dispatch through candle without bridging.
+    /// (#1082)
     device: Device,
+    /// `kiln_tensor::Device` form of `device`, cached at construction so
+    /// the `BackendRuntime::device()` accessor does not bridge per call.
+    /// (#1082)
+    device_kt: kiln_tensor::Device,
     /// Cached at construction to keep env-var reads off per-token support gates.
     disable: MetalKernelDisables,
 }
@@ -155,8 +163,10 @@ impl MetalBackend {
             matches!(device, Device::Metal(_)),
             "MetalBackend created on non-Metal device"
         );
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
         Self {
             device,
+            device_kt,
             disable: MetalKernelDisables::from_env(),
         }
     }
@@ -258,8 +268,8 @@ impl BackendRuntime for MetalBackend {
         "metal"
     }
 
-    fn device(&self) -> &Device {
-        &self.device
+    fn device(&self) -> kiln_tensor::Device {
+        self.device_kt
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {

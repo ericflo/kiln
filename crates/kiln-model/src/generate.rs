@@ -2221,15 +2221,15 @@ impl ModelRunner {
         );
 
         let use_greedy_prefill_token = params.is_effectively_greedy()
-            && matches!(self.backend.device(), candle_core::Device::Metal(_))
-            && !streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len());
+            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+            && !streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prefill_tokens.len());
         let split_pos =
             strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size);
         let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
         let prefill_start = std::time::Instant::now();
         let prefill_source = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len()) {
+            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prefill_tokens.len()) {
                 if let Some(split_pos) = split_pos {
                     let head_tokens = &prompt_tokens[cached_tokens..split_pos];
                     let _ = model_forward_paged_streaming_with_progress(
@@ -2454,7 +2454,7 @@ impl ModelRunner {
         let prefill_start = std::time::Instant::now();
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len()) {
+            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prefill_tokens.len()) {
                 if let Some(split_pos) = split_pos {
                     let head_tokens = &prompt_tokens[cached_tokens..split_pos];
                     let _ = model_forward_paged_streaming_with_progress(
@@ -3351,7 +3351,7 @@ impl ModelRunner {
         let _skip_scope =
             crate::forward::VulkanSkipGdnStateReadbackScope::new(skip_gdn_state_readback);
         if params.is_effectively_greedy()
-            && matches!(self.backend.device(), candle_core::Device::Metal(_))
+            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
         {
             let pc_guard = lock_paged_cache(paged_cache)?;
             let token = model_forward_paged_next_token_greedy(
@@ -3518,7 +3518,7 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming_with_progress(
                     &*self.backend,
                     prompt_tokens,
@@ -3650,7 +3650,7 @@ impl ModelRunner {
         // before the decode loop starts. The decode loop then re-acquires the
         // cache per step.
         let streaming_prefill =
-            streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len());
+            streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len());
         let prefill_source = {
             let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill {
@@ -3669,7 +3669,7 @@ impl ModelRunner {
                     .context("prefill forward pass (paged, streaming) failed")?,
                 )
             } else if params.is_effectively_greedy()
-                && matches!(self.backend.device(), candle_core::Device::Metal(_))
+                && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
             {
                 PrefillSampleSource::GreedyToken(
                     model_forward_paged_last_token_greedy(
@@ -3762,7 +3762,7 @@ impl ModelRunner {
             }
 
             next_token = if params.is_effectively_greedy()
-                && matches!(self.backend.device(), candle_core::Device::Metal(_))
+                && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
             {
                 // Metal greedy path bypasses the CUDA graph runner entirely.
                 let pc_guard = lock_paged_cache(paged_cache)?;
@@ -3829,7 +3829,7 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -4012,7 +4012,7 @@ impl ModelRunner {
         // Long Metal prompts use tiled streaming prefill by default; env
         // overrides can force either path.
         let streaming_prefill =
-            streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len());
+            streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len());
         let prefill_source = if streaming_prefill {
             PrefillSampleSource::Logits(
                 model_forward_paged_streaming(
@@ -4029,7 +4029,7 @@ impl ModelRunner {
                 .context("prefill forward pass (paged, streaming) failed")?,
             )
         } else if params.is_effectively_greedy()
-            && matches!(self.backend.device(), candle_core::Device::Metal(_))
+            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
         {
             PrefillSampleSource::GreedyToken(
                 model_forward_paged_last_token_greedy(
@@ -4127,7 +4127,7 @@ impl ModelRunner {
             }
 
             next_token = if params.is_effectively_greedy()
-                && matches!(self.backend.device(), candle_core::Device::Metal(_))
+                && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
             {
                 let token = model_forward_paged_next_token_greedy(
                     &*self.backend,
@@ -4505,7 +4505,7 @@ impl ModelRunner {
         // Prefill: feed the prompt through the base model and capture the
         // post-final-norm last hidden row as the seed `h_prev`.
         let (prefill_logits, mut h_prev) =
-            if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming_last_token_with_last_hidden(
                     &*self.backend,
                     prompt_tokens,
@@ -4952,7 +4952,7 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         let (prefill_logits, mut h_prev) =
-            if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming_last_token_with_last_hidden(
                     &*self.backend,
                     &prompt_tokens,
@@ -5226,7 +5226,7 @@ impl ModelRunner {
             let mut linear_state = runner_guard.new_linear_state()?;
             let logits = {
                 let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
-                if streaming_prefill_enabled_for(runner_guard.backend.device(), prompt_tokens.len())
+                if streaming_prefill_enabled_for(runner_guard.weights.embed_tokens.device(), prompt_tokens.len())
                 {
                     model_forward_paged_streaming(
                         &*runner_guard.backend,
@@ -5451,7 +5451,7 @@ impl ModelRunner {
                     let logits = {
                         let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
                         if streaming_prefill_enabled_for(
-                            runner_guard.backend.device(),
+                            runner_guard.weights.embed_tokens.device(),
                             prompt_tokens.len(),
                         ) {
                             if let Some(split_pos) = split_pos {
@@ -5841,7 +5841,7 @@ impl ModelRunner {
         let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 if let Some(split_pos) = split_pos {
                     let head_tokens = &prompt_tokens[cached_tokens..split_pos];
                     let _ = model_forward_paged_streaming(
@@ -5957,7 +5957,7 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -6113,7 +6113,7 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -6311,7 +6311,7 @@ impl ModelRunner {
         // Prefill. Long Metal prompts use tiled streaming prefill by default;
         // env overrides can force either path.
         let prefill_result =
-            if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     &prompt_tokens,
@@ -6414,7 +6414,7 @@ impl ModelRunner {
             }
 
             next_token = if params.is_effectively_greedy()
-                && matches!(self.backend.device(), candle_core::Device::Metal(_))
+                && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
             {
                 let token = match model_forward_paged_next_token_greedy(
                     &*self.backend,

@@ -12895,8 +12895,17 @@ mod tests {
             self.name
         }
 
-        fn device(&self) -> &Device {
-            &self.device
+        fn device(&self) -> kiln_tensor::Device {
+            // Test mock always constructs with `Device::Cpu` via
+            // `NamedTestBackend::runtime`, so the kt identity is the
+            // CPU variant. Avoiding the `kiln_kt_bridge` crate keeps
+            // the dep edge to `kiln-train` unchanged for this trait
+            // signature migration. (#1082)
+            debug_assert!(
+                matches!(self.device, Device::Cpu),
+                "NamedTestBackend mock only constructs with Device::Cpu"
+            );
+            kiln_tensor::Device::Cpu
         }
     }
 
