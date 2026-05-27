@@ -83,6 +83,16 @@ use std::sync::OnceLock;
 /// kiln-tensor-typed surface alongside candle-typed. Same FFI.
 /// Phase 7 deletes the candle path.
 mod kt_api;
+
+/// `KtForwardOp2`-based candle-autograd shim that replaces the
+/// `RmsNormCustomOp` CustomOp2 wrapper at the production caller in
+/// `kiln-model::forward::rms_norm`. See `kt_forward_op.rs` for the
+/// full design rationale and migration template — this is the
+/// rmsnorm sibling of the OPD migration in commit `f214f168`.
+mod kt_forward_op;
+pub use kt_forward_op::{
+    fused_rmsnorm_via_kt_forward_op, kt_forward_op_disabled as rmsnorm_kt_forward_op_disabled,
+};
 pub use kt_api::{
     adamw_step_bf16_kt, adamw_step_f32_kt, attn_decode_qkv_split_qk_norm_rope_kt,
     causal_depthwise_conv1d_bwd_input_kt, causal_depthwise_conv1d_bwd_state_kt,
@@ -5293,6 +5303,261 @@ mod tests {
             assert!(
                 gw_diff < 5e-2,
                 "kt-bridge grad_w parity failed on {label}: max_abs_diff={gw_diff} (tol=5e-2 — atomicAdd cross-launch non-determinism budget)"
+            );
+        }
+    }
+
+    // =====================================================================
+    // `fused_rmsnorm_via_kt_forward_op` end-to-end parity: the new
+    // `KtForwardOp2`-shim entry that the kiln-model production caller
+    // (`crates/kiln-model/src/forward.rs::rms_norm`) now uses instead
+    // of `fused_rmsnorm_with_autograd` must agree with the candle
+    // CustomOp2 reference on both forward AND backward.
+    //
+    // SECOND production-caller-driven migration to the `KtForwardOp`
+    // shim (after OPD per-position reverse-KL in commit `f214f168`).
+    // See `kt_forward_op.rs` for the design rationale.
+    //
+    // Tolerances:
+    // - Forward: 5e-2 (BF16 round-trip — same envelope as the
+    //   existing `parity_backward_decode_row_cuda` tests). The
+    //   forward output should in fact be bit-exact (same FFI), but
+    //   we allow the BF16 quantum to absorb any reduction-order ULP
+    //   noise should the kt path's contig clone re-pack the input
+    //   bytes.
+    // - Backward grad_x: 1e-3 (same FFI, no cross-row reduction).
+    // - Backward grad_w: 5e-2 (atomicAdd cross-launch
+    //   non-determinism budget — same as the existing
+    //   `parity_kt_bridge_bwd_*_cuda` test above).
+    //
+    // All tests skip silently when no CUDA device is reachable; they
+    // run as part of `cargo test -p kiln-rmsnorm-kernel --features cuda
+    // --release`.
+    // =====================================================================
+
+    mod cuda_kt_forward_op_parity {
+        use super::*;
+        use crate::{fused_rmsnorm_via_kt_forward_op, rmsnorm_kt_forward_op_disabled};
+        use candle_core::Var;
+
+        /// Build a deterministic random bf16 `(x, weight, grad_out)`
+        /// triple on `device` matching the kt-shim envelope. Seed is
+        /// chosen per call site so the four parity tests pull
+        /// disjoint draws.
+        fn random_case(
+            rows: usize,
+            hidden: usize,
+            seed: u32,
+            device: &Device,
+        ) -> (Tensor, Tensor, Tensor) {
+            let mut state = seed;
+            let mut next = |mul: f32| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                (((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0) * mul
+            };
+            let raw_x: Vec<f32> = (0..rows * hidden).map(|_| next(0.4)).collect();
+            let raw_w: Vec<f32> = (0..hidden).map(|_| next(0.1)).collect();
+            let raw_g: Vec<f32> = (0..rows * hidden).map(|_| next(0.3)).collect();
+
+            let x = Tensor::from_vec(raw_x, (rows, hidden), device)
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+            let w = Tensor::from_vec(raw_w, (hidden,), device)
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+            let g = Tensor::from_vec(raw_g, (rows, hidden), device)
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+            (x, w, g)
+        }
+
+        /// Drive the shim end-to-end: forward + backward via
+        /// `.sum_all().backward()` after a `broadcast_mul(grad_out)`.
+        /// Returns `(y, grad_x, grad_w)`. `disable` toggles the
+        /// `KILN_DISABLE_RMSNORM_KT_FORWARD_OP` env var, so we can
+        /// compare the kt-shim path against the candle CustomOp2
+        /// fallback path within the same test.
+        fn run_shim(
+            device: &Device,
+            x: &Tensor,
+            w: &Tensor,
+            g: &Tensor,
+            eps: f32,
+            disable: bool,
+        ) -> (Tensor, Tensor, Tensor) {
+            let prior = std::env::var("KILN_DISABLE_RMSNORM_KT_FORWARD_OP").ok();
+            // SAFETY: `rmsnorm_kt_forward_op_disabled()` reads the env
+            // on each call (no caching), so the toggle is reversible
+            // per-test.
+            unsafe {
+                if disable {
+                    std::env::set_var("KILN_DISABLE_RMSNORM_KT_FORWARD_OP", "1");
+                } else {
+                    std::env::remove_var("KILN_DISABLE_RMSNORM_KT_FORWARD_OP");
+                }
+            }
+            assert_eq!(
+                rmsnorm_kt_forward_op_disabled(),
+                disable,
+                "env toggle didn't take effect for disable={disable}"
+            );
+
+            let x_var = Var::from_tensor(x).unwrap();
+            let w_var = Var::from_tensor(w).unwrap();
+            let y =
+                fused_rmsnorm_via_kt_forward_op(x_var.as_tensor(), w_var.as_tensor(), eps)
+                    .unwrap();
+            let loss = (y.broadcast_mul(g)).unwrap().sum_all().unwrap();
+            let grads = loss.backward().unwrap();
+            let gx = grads.get(x_var.as_tensor()).cloned().unwrap();
+            let gw = grads.get(w_var.as_tensor()).cloned().unwrap();
+            device.synchronize().unwrap();
+
+            // Restore env so subsequent tests are not polluted.
+            unsafe {
+                match prior.as_ref() {
+                    Some(v) => std::env::set_var("KILN_DISABLE_RMSNORM_KT_FORWARD_OP", v),
+                    None => std::env::remove_var("KILN_DISABLE_RMSNORM_KT_FORWARD_OP"),
+                }
+            }
+
+            (y, gx, gw)
+        }
+
+        /// Core parity test: kt-shim (disable=false) vs candle CustomOp2
+        /// fallback (disable=true).
+        fn run_parity(rows: usize, hidden: usize, seed: u32, label: &'static str) {
+            let Some(device) = try_cuda_device() else {
+                eprintln!("skipping {label}: no CUDA device");
+                return;
+            };
+            let eps = 1e-6f32;
+            let (x, w, g) = random_case(rows, hidden, seed, &device);
+
+            // Path A: candle CustomOp2 fallback (kill switch on).
+            let (y_candle, gx_candle, gw_candle) =
+                run_shim(&device, &x, &w, &g, eps, true);
+            // Path B: kt-shim (default, kill switch off).
+            let (y_kt, gx_kt, gw_kt) = run_shim(&device, &x, &w, &g, eps, false);
+
+            assert_eq!(y_candle.dims(), y_kt.dims(), "{label}: fwd shape mismatch");
+            assert_eq!(gx_candle.dims(), gx_kt.dims(), "{label}: gx shape mismatch");
+            assert_eq!(gw_candle.dims(), gw_kt.dims(), "{label}: gw shape mismatch");
+
+            let y_diff = max_abs_diff(&y_candle, &y_kt);
+            let gx_diff = max_abs_diff(&gx_candle, &gx_kt);
+            let gw_diff = max_abs_diff(&gw_candle, &gw_kt);
+
+            // Forward: same FFI, same envelope. The current path may
+            // re-contig (cheap copy) so bytes are identical; allow a
+            // small BF16 ULP envelope as a belt-and-suspenders.
+            assert!(
+                y_diff < 5e-2,
+                "{label}: fwd parity failed: max_abs_diff={y_diff} (tol=5e-2)"
+            );
+            // grad_x: no cross-row reduction → bit-exact in practice.
+            assert!(
+                gx_diff < 1e-3,
+                "{label}: bwd grad_x parity failed: max_abs_diff={gx_diff} (tol=1e-3)"
+            );
+            // grad_w: atomicAdd cross-launch non-determinism →
+            // ≤ 1 BF16 ULP after the F32→BF16 cast.
+            assert!(
+                gw_diff < 5e-2,
+                "{label}: bwd grad_w parity failed: max_abs_diff={gw_diff} (tol=5e-2 — atomicAdd cross-launch budget)"
+            );
+            eprintln!(
+                "{label}: max_abs_fwd={y_diff:.3e} max_abs_gx={gx_diff:.3e} max_abs_gw={gw_diff:.3e}"
+            );
+        }
+
+        #[test]
+        fn kt_forward_op_parity_bf16_decode_row() {
+            // Qwen3.5-4B decode shape: [batch=1, seq=1, hidden=2560].
+            run_parity(1, 2560, 0xa11c_e000, "kt-forward-op bf16/decode_row[1,2560]");
+        }
+
+        #[test]
+        fn kt_forward_op_parity_bf16_multi_row() {
+            // Multi-row exercises the cross-row atomicAdd in
+            // `kiln_fused_rmsnorm_bwd` — the realistic training
+            // shape for one segment of Phase 10 long-context.
+            run_parity(64, 2560, 0xa11c_e001, "kt-forward-op bf16/multi_row[64,2560]");
+        }
+
+        #[test]
+        fn kt_forward_op_parity_bf16_small_hidden() {
+            // Small hidden tests the warp-size boundary in the
+            // kernel (hidden=64 = 2 warps for bf16 lanes).
+            run_parity(16, 64, 0xa11c_e002, "kt-forward-op bf16/small_hidden[16,64]");
+        }
+
+        #[test]
+        fn kt_forward_op_parity_bf16_large_hidden() {
+            // Just under the 8192 envelope ceiling.
+            run_parity(4, 4096, 0xa11c_e003, "kt-forward-op bf16/large_hidden[4,4096]");
+        }
+
+        // -----------------------------------------------------------------
+        // Out-of-envelope: CPU input must short-circuit to the candle
+        // CustomOp2 fallback (the kt-shim envelope requires CUDA).
+        // Verified by toggling the kill switch and checking that the
+        // output is bit-identical across both paths (since both take
+        // the same `fused_rmsnorm_with_autograd` candle branch through
+        // its `cpu_fwd`). F32-on-CUDA is also out-of-envelope but the
+        // candle CUDA `cuda_fwd` requires BF16 too — so there is no
+        // F32-on-CUDA reference path to compare against. CPU is the
+        // realistic OOB axis.
+        // -----------------------------------------------------------------
+
+        #[test]
+        fn kt_forward_op_oob_cpu_falls_back_to_candle_custom_op() {
+            // CPU is always available — no try_cuda_device() guard.
+            let device = Device::Cpu;
+            let rows = 4usize;
+            let hidden = 64usize;
+            let eps = 1e-6f32;
+
+            // Build F32 inputs on CPU. The kt-shim envelope requires
+            // CUDA, so both paths route through the candle CustomOp2
+            // `cpu_fwd` + the fallback closed-form backward in
+            // `RmsNormCustomOp::bwd` (the CPU branch of
+            // `rmsnorm_backward_fallback`).
+            let mut state: u32 = 0xcccc_aaaa;
+            let mut next = |mul: f32| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                (((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0) * mul
+            };
+            let raw_x: Vec<f32> = (0..rows * hidden).map(|_| next(0.4)).collect();
+            let raw_w: Vec<f32> = (0..hidden).map(|_| next(0.1)).collect();
+            let raw_g: Vec<f32> = (0..rows * hidden).map(|_| next(0.3)).collect();
+
+            let x = Tensor::from_vec(raw_x, (rows, hidden), &device).unwrap();
+            let w = Tensor::from_vec(raw_w, (hidden,), &device).unwrap();
+            let g = Tensor::from_vec(raw_g, (rows, hidden), &device).unwrap();
+
+            // Both paths should route through the candle CustomOp2's
+            // `cpu_fwd` (CPU is out-of-envelope for the kt-shim).
+            let (y_a, gx_a, gw_a) = run_shim(&device, &x, &w, &g, eps, true);
+            let (y_b, gx_b, gw_b) = run_shim(&device, &x, &w, &g, eps, false);
+
+            let y_diff = max_abs_diff(&y_a, &y_b);
+            let gx_diff = max_abs_diff(&gx_a, &gx_b);
+            let gw_diff = max_abs_diff(&gw_a, &gw_b);
+            assert_eq!(
+                y_diff, 0.0,
+                "CPU fwd should bit-match candle CustomOp2: {y_diff:.3e}"
+            );
+            assert_eq!(
+                gx_diff, 0.0,
+                "CPU grad_x should bit-match: {gx_diff:.3e}"
+            );
+            assert_eq!(
+                gw_diff, 0.0,
+                "CPU grad_w should bit-match: {gw_diff:.3e}"
             );
         }
     }
