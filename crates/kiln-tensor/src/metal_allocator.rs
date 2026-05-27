@@ -3,89 +3,44 @@
 //! Mirrors [`crate::CudaAllocator`]'s contract: Owned/Pool/Frozen
 //! mode handling, `warm()` for pre-Frozen pool population,
 //! `reserved_bytes` / `peak_reserved_bytes` accounting. Backed by
-//! [`MetalStorage::zeros`] through the existing
-//! `Arc<MetalDevice>` plumbing.
+//! [`MetalStorage::zeros_kt`] through the candle-free metal-rs
+//! `Device` plumbing.
 //!
 //! GPU-only tests live behind `KILN_TENSOR_METAL_TEST=1` so the CI
 //! compile path (which links `metal` against `candle-core` but has no
 //! Metal device) doesn't spuriously fail.
 //!
-//! # Phase 7 candle-removal — STOP (blocked on `MetalStorage::zeros`)
+//! # Phase 7 candle-removal — partial UNBLOCK (allocation path candle-free)
 //!
-//! The original plan was for Phase 7 to swap `Arc<MetalDevice>` for a
-//! direct metal-rs `Arc<MTLDevice>` + command-queue handle pair here.
-//! After auditing the actual call graph (#1082 phase 7 audit), that
-//! swap **cannot land in this file in isolation** — it is the exact
-//! same shape as the [`crate::CudaAllocator`] STOP:
+//! The allocation path is now candle-free at this allocator's
+//! surface. Both `warm()` and `alloc()` route through
+//! [`MetalStorage::zeros_kt`] — the candle-free metal-rs entry — and
+//! the previously-held `candle_device: Arc<MetalDevice>` field has
+//! been dropped. `MetalAllocator` now carries only the metal-rs
+//! `metal_device_handle: MetalRawDevice` companion on the device-
+//! handle side.
 //!
-//! 1. Every code path in `MetalAllocator` that touches the device
-//!    handle (both `warm()` and `alloc()`) immediately forwards it to
-//!    `MetalStorage::zeros(candle_device, device_index, dtype, n)`.
-//! 2. `MetalStorage::zeros` itself stores `Arc<MetalDevice>` on the
-//!    returned `MetalStorage` and uses it for
-//!    `candle_device.allocate_zeros(byte_len)` — which reaches into
-//!    candle's internal buffer cache (`MetalDevice.buffers:
-//!    RwLock<HashMap<...>>`), allocates with `RESOURCE_OPTIONS`
-//!    (`MTLStorageModeShared`), and zero-fills via a blit-command
-//!    encoder owned by the `MetalDevice`. None of that state lives in
-//!    metal-rs / objc2-metal directly — it is candle's own buffer-cache
-//!    and command-queue plumbing layered on top of `MTLDevice`.
-//! 3. The downstream `MetalStorage` accessor `candle_device()` is read
-//!    by every kernel call site in `crates/kiln-tensor/src/metal_storage.rs`
-//!    (e.g. `(*candle_device_arc).clone()` passed to
-//!    `candle_metal_kernels::*`). Those FFI sites take a
-//!    `MetalDevice` by value, not an `MTLDevice`. Swapping the type
-//!    on `MetalAllocator` alone would force a fresh `MetalDevice`
-//!    construction per `alloc()` call, which would break command-queue
-//!    affinity with every kernel-crate handle that was set up against
-//!    the original `MetalDevice` — and would lose the shared buffer
-//!    cache that `allocate_zeros` relies on.
-//! 4. `MetalAllocator::new` / `with_mode` have **zero external
-//!    callers** today (`grep -rn 'MetalAllocator::new' crates/` —
-//!    only the in-file constructors plus `pub use
-//!    metal_allocator::MetalAllocator` in `lib.rs`). Swapping the
-//!    constructor signature alone would not free any downstream from
-//!    candle either.
+//! **Mirror of the CudaAllocator chain** (commits 03b8a34c add
+//! companion, e2bddd72 swap allocation to `zeros_ctx`, 6155e2e6
+//! drop `candle_device` field, fcc9bac7 drop back-compat
+//! constructors). The Metal side now mirrors all four shapes —
+//! `metal_device_handle` companion already lived here from the
+//! additive step, the allocation swap + field drop both land in this
+//! commit, and the back-compat constructor drop follows in a sibling
+//! commit.
 //!
-//! Therefore Phase 7 candle removal for the Metal allocator surface
-//! is **blocked on `MetalStorage::zeros` migrating first** to take an
-//! `Arc<metal::Device>` (and the rest of `MetalStorage` losing its
-//! `candle_device: Arc<MetalDevice>` field). Once `MetalStorage`
-//! accepts a raw `MTLDevice` + command-queue pair, this allocator
-//! becomes a trivial type-substitution that recompiles with no
-//! behavior change (the only thing changing is the type of the field
-//! stored next to the `device_index`).
-//!
-//! Order-of-operations for the lift (tracked under #1082):
-//!
-//! 1. Add a parallel `MetalStorage::zeros_kt(dev: Arc<metal::Device>,
-//!    queue: Arc<metal::CommandQueue>, ...)` that allocates a
-//!    `Shared`-mode `MTLBuffer` directly via
-//!    `dev.new_buffer(size, MTLResourceStorageModeShared)` and zero-
-//!    fills via its own blit-command-encoder against `queue`,
-//!    bypassing `MetalDevice.buffers` entirely (or carrying a kiln-
-//!    owned cache).
-//! 2. Migrate the multi-site kernel-crate FFI surface in
-//!    `metal_storage.rs` (every `(*candle_device_arc).clone()` site
-//!    feeding `candle_metal_kernels::*`) to take an `MTLDevice` +
-//!    `CommandQueue` pair instead of a `MetalDevice`.
-//! 3. Flip `MetalStorage::zeros` itself to take
-//!    `Arc<metal::Device>` + `Arc<metal::CommandQueue>`, drop the
-//!    `candle_device` field.
-//! 4. Then this file changes one type
-//!    (`candle_device: Arc<MetalDevice>` →
-//!    `device: Arc<metal::Device>` + `queue: Arc<metal::CommandQueue>`)
-//!    and one import (`use candle_metal_kernels::metal::Device;` or
-//!    `use objc2_metal::ProtocolObject<dyn MTLDevice>;` replacing
-//!    `use candle_core::MetalDevice;`).
-//!
-//! Doing step 4 first (the swap implied by the prior docstring) would
-//! either require an `Arc<MTLDevice>` → `Arc<MetalDevice>` conversion
-//! at every `alloc()` call (impossible without holding the
-//! `MetalDevice` somewhere) or would silently break command-queue
-//! affinity + the shared buffer cache across the kernel-crate FFI
-//! surface. Both are worse than holding the substrate stable until
-//! step 1 lands.
+//! **CP-1 on the allocator side is now structurally complete.** The
+//! produced `MetalStorage` still carries a candle `MetalDevice` for
+//! kernel-crate FFI (every `(*candle_device_arc).clone()` site in
+//! `kiln-model::backend::metal` feeds `candle_metal_kernels::*` by
+//! value). The storage-side field drop (CP-2) is gated on migrating
+//! those ~232 FFI sites to a raw `MTLDevice` + `MTLCommandQueue`
+//! surface — that is the next, much larger refactor and stays out
+//! of scope here. The internal residual at the substrate boundary
+//! is now confined to [`crate::primary_metal_device`] inside
+//! `MetalStorage::zeros_kt`, which derives an `Arc<MetalDevice>`
+//! to populate the storage's back-compat field; that helper retires
+//! when the storage-side field is dropped.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -99,39 +54,24 @@ use crate::{
 
 #[derive(Debug)]
 pub struct MetalAllocator {
-    /// Candle Metal device handle. Held for command-queue affinity +
-    /// the `allocate_zeros` helper (which reaches candle's internal
-    /// buffer cache + blit-encoder). The Phase 7 swap to a direct
-    /// metal-rs `MTLDevice` + `CommandQueue` pair is blocked on
-    /// `MetalStorage::zeros` migrating first — see the STOP note at
-    /// the top of this file.
+    /// Metal-rs `Device` handle — the **candle-free** device handle
+    /// this allocator forwards into [`MetalStorage::zeros_kt`] on
+    /// every `warm()` / `alloc()`.
     ///
-    /// Once every downstream caller migrates off `.candle_device()`
-    /// to `.metal_device_handle()` and `MetalStorage::zeros` switches
-    /// to the candle-free `zeros_ctx` path (CP-2 steps 3-4), this
-    /// field can be dropped entirely in favor of the
-    /// `metal_device_handle` companion below.
-    candle_device: Arc<MetalDevice>,
-    /// Metal-rs `Device` companion handle, derived from
-    /// `candle_device.metal_device().clone()` at construction time —
-    /// the **same** underlying `MTLDevice` protocol object as
-    /// `candle_device`, just exposed without the candle wrapper.
+    /// The previously-held `candle_device: Arc<MetalDevice>` field
+    /// was dropped alongside the allocation-path swap from
+    /// `MetalStorage::zeros(candle_device, ...)` to
+    /// `MetalStorage::zeros_kt(&metal_device_handle, ...)`. External
+    /// callers needing a candle wrapper can derive one on demand via
+    /// [`crate::primary_metal_device`] using the stored
+    /// `device_index`, or read it from the produced
+    /// `MetalStorage.candle_device()` (which is still load-bearing
+    /// for the kernel-crate FFI sites that consume `MetalDevice` by
+    /// value — see `metal_storage.rs` field doc).
     ///
-    /// Held alongside `candle_device` so callers that only need the
-    /// raw device can read it from this allocator (via
-    /// [`Self::metal_device_handle()`]) without going through candle.
-    /// This is the interim "additive" move ahead of the field flip —
-    /// downstream consumers can migrate off `.candle_device()` to
-    /// `.metal_device_handle()` site-by-site, and when the storage-side
-    /// refactor (CP-2 step 3, `MetalStorage::zeros_kt`) lands, this
-    /// allocator's `candle_device` field can be dropped in favor of
-    /// just this `metal_device_handle` handle plus a `CommandQueue`
-    /// companion for the zero-fill blit encoder.
-    ///
-    /// Mirror of [`crate::CudaAllocator::context`] (commit 03b8a34c) —
-    /// same shape, same rationale (the additive-companion step of the
-    /// CP-1/CP-2 substrate lift documented in
-    /// `docs/issue-1082-tier-4-5-roadmap-2026-05-27.md`).
+    /// Mirror of [`crate::CudaAllocator::context`] (commit
+    /// 03b8a34c added the companion; commit 6155e2e6 dropped the
+    /// candle field; this allocator now matches that shape).
     metal_device_handle: MetalRawDevice,
     device_index: usize,
     mode: AllocatorMode,
@@ -142,13 +82,16 @@ pub struct MetalAllocator {
 
 impl MetalAllocator {
     /// Construct in `Owned` mode bound to `candle_device` at the
-    /// given Metal device index. The metal-rs `metal_device_handle`
-    /// companion is derived from the candle device internally — see
-    /// the `metal_device_handle` field doc.
+    /// given Metal device index.
+    ///
+    /// Back-compat shim: extracts the metal-rs `Device` companion via
+    /// `candle_device.metal_device().clone()` and forwards to the
+    /// candle-free allocation path. The `candle_device` argument is
+    /// otherwise unused — the allocator no longer stores it. See the
+    /// `metal_device_handle` field doc.
     pub fn new(candle_device: Arc<MetalDevice>, device_index: usize) -> Self {
         let metal_device_handle = candle_device.metal_device().clone();
         MetalAllocator {
-            candle_device,
             metal_device_handle,
             device_index,
             mode: AllocatorMode::Owned,
@@ -172,8 +115,13 @@ impl MetalAllocator {
         let bytes_per = dtype.packed_buffer_bytes(n_elements);
         let slot = self.cache.entry((dtype, n_elements)).or_default();
         for _ in 0..count {
-            let metal = MetalStorage::zeros(
-                self.candle_device.clone(),
+            // Route through the candle-free zeros_kt entry — the
+            // resulting MetalStorage still carries a candle MetalDevice
+            // internally (derived via primary_metal_device for the
+            // back-compat field), but this allocator no longer touches
+            // the candle wrapper directly.
+            let metal = MetalStorage::zeros_kt(
+                &self.metal_device_handle,
                 self.device_index,
                 dtype,
                 n_elements,
@@ -195,16 +143,19 @@ impl MetalAllocator {
             .unwrap_or(0)
     }
 
-    pub fn candle_device(&self) -> &Arc<MetalDevice> {
-        &self.candle_device
-    }
-
-    /// Borrow the metal-rs `Device` companion handle (the same
-    /// underlying `MTLDevice` protocol object as `candle_device`,
-    /// exposed without the candle wrapper). See the
-    /// `metal_device_handle` field doc for the migration rationale.
+    /// Borrow the metal-rs `Device` companion handle — the canonical,
+    /// candle-free device-handle accessor. Callers that need a candle
+    /// `MetalDevice` wrapper can derive one on demand via
+    /// [`crate::primary_metal_device`] using
+    /// [`Self::device_index()`], or read it from a produced
+    /// `MetalStorage.candle_device()`.
     pub fn metal_device_handle(&self) -> &MetalRawDevice {
         &self.metal_device_handle
+    }
+
+    /// The Metal device ordinal this allocator is bound to.
+    pub fn device_index(&self) -> usize {
+        self.device_index
     }
 }
 
@@ -231,8 +182,10 @@ impl Allocator for MetalAllocator {
                 dtype.packed_buffer_bytes(n_elements),
             )),
             AllocatorMode::Owned | AllocatorMode::Pool => {
-                let metal = MetalStorage::zeros(
-                    self.candle_device.clone(),
+                // Route through the candle-free zeros_kt entry — see
+                // the matching note in `warm()`.
+                let metal = MetalStorage::zeros_kt(
+                    &self.metal_device_handle,
                     self.device_index,
                     dtype,
                     n_elements,
