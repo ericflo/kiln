@@ -8,18 +8,18 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-// NOTE(#1082): Consolidated the two cuda-gated candle_core imports
-// (`CudaStorage` and `backend::BackendStorage`) into a single `use` so
-// trainer.rs's candle import count drops from 3 to 2 as part of full
-// candle removal (#1082). `BackendStorage` is required in scope so that
-// `storage.device()` resolves on `&CudaStorage` inside `cuda_fwd` below.
-// TODO(#1082): the remaining two candle_core imports are blocked by
-// pervasive `Tensor`/`Var`/`Device`/`DType` use (500+ sites) and
+// NOTE(#1082): Dropped the cuda-gated `use candle_core::{CudaStorage,
+// backend::BackendStorage};` from the module top. The only call site —
+// `InjectTensorGradient::cuda_fwd` near the bottom of this file — now refers
+// to `candle_core::CudaStorage` inline and accesses the device via the
+// `pub device: CudaDevice` field directly (avoiding the
+// `BackendStorage::device()` trait method) so neither symbol needs a
+// module-level import. trainer.rs candle `use` count drops from 2 to 1.
+// TODO(#1082): the remaining candle_core import is blocked by pervasive
+// `Tensor`/`Var`/`Device`/`DType` use (500+ sites) and
 // `candle_core::safetensors::{save,load}` adapter I/O — those need a
 // coordinated kt-typed wrapper landing before this file can drop candle
 // entirely.
-#[cfg(feature = "cuda")]
-use candle_core::{CudaStorage, backend::BackendStorage};
 use candle_core::{CpuStorage, CustomOp1, DType, Device, Layout, Shape, Tensor, Var};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -7620,13 +7620,19 @@ impl CustomOp1 for InjectTensorGradient {
     #[cfg(feature = "cuda")]
     fn cuda_fwd(
         &self,
-        storage: &CudaStorage,
+        storage: &candle_core::CudaStorage,
         _layout: &Layout,
-    ) -> candle_core::Result<(CudaStorage, Shape)> {
-        let device = storage.device();
+    ) -> candle_core::Result<(candle_core::CudaStorage, Shape)> {
+        // (#1082) `CudaStorage` is fully-qualified inline (only this function
+        // touches it) and the `device` field is accessed directly rather than
+        // via the `BackendStorage::device()` trait method, eliminating the
+        // last cfg(cuda)-gated module-level `use candle_core::{CudaStorage,
+        // backend::BackendStorage};`. trainer.rs candle import count drops
+        // from 2 use statements to 1.
+        let device = &storage.device;
         let out_slice = device.clone_htod(&[0.0f32])?;
         Ok((
-            CudaStorage::wrap_cuda_slice(out_slice, device.clone()),
+            candle_core::CudaStorage::wrap_cuda_slice(out_slice, device.clone()),
             Shape::from(()),
         ))
     }
