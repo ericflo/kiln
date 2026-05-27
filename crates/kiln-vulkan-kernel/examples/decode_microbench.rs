@@ -12,32 +12,27 @@
 use std::time::Instant;
 
 use anyhow::Result;
-// TODO(#1082): Substrate landed — every top-level dispatch this microbench
-// exercises now has a candle-free `*_bytes` companion in
-// `kiln_vulkan_kernel::kernels`:
-//   - dispatch_mlp_gate_up_decode_cached_bytes
-//   - dispatch_mlp_decode_cached_bf16_weights_bytes
-//   - dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes
-//   - dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes
-//   - dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes
-//   - dispatch_linear_decode_cached_bytes
-//   - dispatch_qwen_rmsnorm_forward_bytes
-//   - dispatch_causal_conv1d_update_bytes
-//   - dispatch_gdn_gates_cached_bytes
-//   - dispatch_gdn_gated_rms_norm_cached_bytes
-// Weight upload is already candle-free via
-// upload_bf16_packed_buffer_from_slice / upload_f32_buffer_from_slice.
+// TODO(#1082): The top-level dispatch surface this microbench exercises in
+// `run()` (full_attn_qkv, mlp gate_up, mlp_bf16_gu_f32_d, mlp_bf16w,
+// linear_decode, causal_conv1d_update, gdn_gated_norm, qwen_rmsnorm,
+// gdn_gates, gdn_in_proj) is now called through the candle-free `*_bytes`
+// companions in `kiln_vulkan_kernel::kernels`. Weight uploads use
+// `upload_bf16_packed_buffer_from_slice` / `upload_f32_buffer_from_slice`.
 //
-// What remains for THIS example: the resident-path helpers
-// (`run_full_step_resident*`, `run_full_token_resident*`) still depend on
-// candle-typed entries in `kiln_vulkan_kernel::resident` that have not yet
-// grown bytes variants. Once those land, this example can drop
-// `use candle_core::*` entirely. Tracked as a follow-up under #1082.
+// What still pins `candle_core` in this file: the resident-path helpers
+// (`run_full_step_resident*`, `run_full_token_resident*`) depend on
+// candle-typed entries in `kiln_vulkan_kernel::resident` and on
+// `upload_tensor_*_buffer` shims that have not yet grown bytes variants.
+// Once those land, this example can drop `use candle_core::*` entirely.
+// Tracked as a follow-up under #1082.
 use candle_core::{DType, Device, Tensor};
 use half::bf16;
 use kiln_vulkan_kernel::buffer::VulkanBuffer;
 use kiln_vulkan_kernel::device::VulkanDevice;
-use kiln_vulkan_kernel::kernels::{upload_tensor_bf16_packed_buffer, upload_tensor_f32_buffer};
+use kiln_vulkan_kernel::kernels::{
+    upload_bf16_packed_buffer_from_slice, upload_f32_buffer_from_slice,
+    upload_tensor_bf16_packed_buffer, upload_tensor_f32_buffer,
+};
 
 // Used by run_full_step_resident — keep the module-level imports here so the
 // helper itself stays terse.
@@ -64,6 +59,16 @@ fn make_bf16_weight(rows: usize, cols: usize) -> Result<Tensor> {
         .map(|i| bf16::from_f32(((i % 31) as f32 - 15.0) * 0.01))
         .collect();
     Tensor::from_vec(data, (rows, cols), &Device::Cpu).map_err(Into::into)
+}
+
+/// Candle-free counterpart to `make_bf16_weight` for the bytes-typed
+/// dispatch entries. Returns a flat `Vec<bf16>` with the same fill
+/// pattern as `make_bf16_weight`. (#1082)
+fn make_bf16_weight_slice(rows: usize, cols: usize) -> Vec<bf16> {
+    let n = rows * cols;
+    (0..n)
+        .map(|i| bf16::from_f32(((i % 31) as f32 - 15.0) * 0.01))
+        .collect()
 }
 
 fn upload_bf16_packed(device: &VulkanDevice, t: &Tensor) -> Result<VulkanBuffer> {
@@ -142,10 +147,12 @@ fn run() -> Result<()> {
     if want("full_attn_qkv") {
         println!("== full_attn QKV (fused, bf16w) ==");
         for &batch in &batches {
-            let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
+            // x = zeros [batch, 1, HIDDEN] f32. Bytes-typed dispatch
+            // takes &[u8] directly — no candle Tensor staging. (#1082)
+            let x_bytes = vec![0u8; batch * HIDDEN * 4];
             time("full_attn_qkv_decode", batch, || {
-                kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights(
-                    &device, &x, &q_buf, &k_buf, &v_buf, batch, HIDDEN, Q_DIM, K_DIM, V_DIM,
+                kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
+                    &device, &x_bytes, &q_buf, &k_buf, &v_buf, batch, HIDDEN, Q_DIM, K_DIM, V_DIM,
                 )?;
                 Ok(())
             })?;
@@ -156,11 +163,12 @@ fn run() -> Result<()> {
     if want("mlp_bf16_gu_f32_d") {
         println!("== MLP gate_up + down (bf16 g/u, f32 down) ==");
         for &batch in &batches {
-            let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
+            let x_bytes = vec![0u8; batch * HIDDEN * 4];
             time("mlp_decode_bf16_gu_f32_d", batch, || {
-                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_gate_up_f32_down(
+                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes(
                     &device,
-                    &x,
+                    &x_bytes,
+                    batch,
                     &gate_buf,
                     &up_buf,
                     &down_f32_buf,
@@ -177,11 +185,12 @@ fn run() -> Result<()> {
     if want("mlp_bf16w") {
         println!("== MLP gate_up + down (full bf16) ==");
         for &batch in &batches {
-            let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
+            let x_bytes = vec![0u8; batch * HIDDEN * 4];
             time("mlp_decode_bf16w", batch, || {
-                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights(
+                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights_bytes(
                     &device,
-                    &x,
+                    &x_bytes,
+                    batch,
                     &gate_buf,
                     &up_buf,
                     &down_buf,
@@ -199,12 +208,14 @@ fn run() -> Result<()> {
         // Q-out / GDN-out shape: take Q dim → hidden. Exercises the
         // standalone bf16w linear decode used for attention out_proj.
         println!("== linear_decode_cached_bf16w (Q out, q_dim→hidden) ==");
-        let q_out_buf = upload_bf16_packed(&device, &make_bf16_weight(Q_DIM, HIDDEN)?)?;
+        // Build the bf16w buffer from a candle-free bf16 slice. (#1082)
+        let q_out_weight = make_bf16_weight_slice(Q_DIM, HIDDEN);
+        let q_out_buf = upload_bf16_packed_buffer_from_slice(&device, &q_out_weight)?;
         for &batch in &batches {
-            let x = Tensor::zeros((batch, 1, Q_DIM), DType::F32, &Device::Cpu)?;
+            let x_bytes = vec![0u8; batch * Q_DIM * 4];
             time("linear_decode_bf16w_qout", batch, || {
-                kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights(
-                    &device, &x, &q_out_buf, batch, Q_DIM, HIDDEN,
+                kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bytes(
+                    &device, &x_bytes, &q_out_buf, batch, Q_DIM, HIDDEN, /*packed_bf16_weights=*/ true,
                 )?;
                 Ok(())
             })?;
@@ -216,17 +227,23 @@ fn run() -> Result<()> {
         println!("== causal_conv1d_update (B,C=2048,T=1) ==");
         let channels = 2048usize;
         let kernel_size = 4usize;
-        let weight = Tensor::zeros((channels, kernel_size), DType::F32, &Device::Cpu)?;
+        // weight shape [channels, kernel_size], state shape
+        // [batch, channels, kernel_size - 1], x shape [batch, channels, 1].
+        // All f32. The bytes-typed dispatch takes them as &[u8]. (#1082)
+        let weight_bytes = vec![0u8; channels * kernel_size * 4];
         for &batch in &batches {
-            let x = Tensor::zeros((batch, channels, 1usize), DType::F32, &Device::Cpu)?;
-            let state = Tensor::zeros(
-                (batch, channels, kernel_size - 1),
-                DType::F32,
-                &Device::Cpu,
-            )?;
+            let x_bytes = vec![0u8; batch * channels * 1 * 4];
+            let state_bytes = vec![0u8; batch * channels * (kernel_size - 1) * 4];
             time("causal_conv1d_update", batch, || {
-                kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_update(
-                    &device, &x, &weight, &state, kernel_size,
+                kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_update_bytes(
+                    &device,
+                    &x_bytes,
+                    &weight_bytes,
+                    &state_bytes,
+                    batch,
+                    channels,
+                    1,
+                    kernel_size,
                 )?;
                 Ok(())
             })?;
@@ -236,16 +253,17 @@ fn run() -> Result<()> {
 
     if want("gdn_gated_norm") {
         println!("== gdn_gated_rms_norm_cached (hidden=2560) ==");
-        let weight_t = Tensor::ones(HIDDEN, DType::F32, &Device::Cpu)?;
-        let weight = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&device, &weight_t)?;
+        // Weight = ones(HIDDEN, f32). Candle-free upload via from_slice.
+        let weight_data: Vec<f32> = vec![1.0; HIDDEN];
+        let weight = upload_f32_buffer_from_slice(&device, &weight_data)?;
         for &batch in &batches {
-            let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
-            let z = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
+            let x_bytes = vec![0u8; batch * HIDDEN * 4];
+            let z_bytes = vec![0u8; batch * HIDDEN * 4];
             time("gdn_gated_norm_cached", batch, || {
-                kiln_vulkan_kernel::kernels::dispatch_gdn_gated_rms_norm_cached(
+                kiln_vulkan_kernel::kernels::dispatch_gdn_gated_rms_norm_cached_bytes(
                     &device,
-                    &x,
-                    &z,
+                    &x_bytes,
+                    &z_bytes,
                     &weight,
                     HIDDEN,
                     1e-6,
@@ -259,12 +277,20 @@ fn run() -> Result<()> {
 
     if want("qwen_rmsnorm") {
         println!("== qwen_rmsnorm_forward (hidden=2560 per row) ==");
-        let weight = Tensor::ones(HIDDEN, DType::F32, &Device::Cpu)?;
+        // weight = ones(HIDDEN). Both x and weight are passed as raw
+        // f32 bytes to the candle-free dispatch. (#1082)
+        let weight_data: Vec<f32> = vec![1.0; HIDDEN];
+        let weight_bytes: &[u8] = bytemuck::cast_slice(&weight_data);
         for &batch in &batches {
-            let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
+            let x_bytes = vec![0u8; batch * HIDDEN * 4];
             time("qwen_rmsnorm_forward", batch, || {
-                kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward(
-                    &device, &x, &weight, 1e-6,
+                kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward_bytes(
+                    &device,
+                    &x_bytes,
+                    weight_bytes,
+                    /*rows=*/ batch,
+                    HIDDEN,
+                    1e-6,
                 )?;
                 Ok(())
             })?;
@@ -276,16 +302,18 @@ fn run() -> Result<()> {
         println!("== gdn_gates_cached (a/b + a_log/dt_bias) ==");
         // Match Qwen3.5 GDN gates: a/b shape [batch, 1, nv]. nv = linear_num_value_heads = 32.
         let nv = 32usize;
-        let a_log = upload_bf16_packed(&device, &make_bf16_weight(1, nv)?)?;
-        let dt_bias = upload_bf16_packed(&device, &make_bf16_weight(1, nv)?)?;
+        let a_log_w = make_bf16_weight_slice(1, nv);
+        let dt_bias_w = make_bf16_weight_slice(1, nv);
+        let a_log = upload_bf16_packed_buffer_from_slice(&device, &a_log_w)?;
+        let dt_bias = upload_bf16_packed_buffer_from_slice(&device, &dt_bias_w)?;
         for &batch in &batches {
-            let a = Tensor::zeros((batch, 1, nv), DType::F32, &Device::Cpu)?;
-            let b = Tensor::zeros((batch, 1, nv), DType::F32, &Device::Cpu)?;
+            let a_bytes = vec![0u8; batch * 1 * nv * 4];
+            let b_bytes = vec![0u8; batch * 1 * nv * 4];
             time("gdn_gates_cached", batch, || {
-                kiln_vulkan_kernel::kernels::dispatch_gdn_gates_cached(
+                kiln_vulkan_kernel::kernels::dispatch_gdn_gates_cached_bytes(
                     &device,
-                    &a,
-                    &b,
+                    &a_bytes,
+                    &b_bytes,
                     &a_log,
                     &dt_bias,
                     nv,
@@ -300,10 +328,10 @@ fn run() -> Result<()> {
     if want("gdn_in_proj") {
         println!("== GDN in_proj (qkv|z|a|b fused, bf16w) ==");
         for &batch in &batches {
-            let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
+            let x_bytes = vec![0u8; batch * HIDDEN * 4];
             time("gdn_in_proj_decode", batch, || {
-                kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights(
-                    &device, &x, &qkv_buf, &z_buf, &a_buf, &b_buf, HIDDEN, QKV_DIM, Z_DIM, A_DIM, B_DIM,
+                kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
+                    &device, &x_bytes, batch, &qkv_buf, &z_buf, &a_buf, &b_buf, HIDDEN, QKV_DIM, Z_DIM, A_DIM, B_DIM,
                 )?;
                 Ok(())
             })?;
