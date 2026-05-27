@@ -10,6 +10,26 @@
 //!   3. CUDA(0) → CPU.
 //!   4. Round-trip CPU → CUDA → CPU preserves bytes exactly.
 //!   5. CPU → CUDA without `candle_device` parameter errors cleanly.
+//!
+//! # TODO(#1082): candle-removal STOP — by design
+//!
+//! This test cannot drop its `candle_core::Device` import today.
+//! `Tensor::to_device(KtDevice::Cuda(0), Some(Arc<CudaDevice>))` is
+//! itself the bridge surface under test: the second parameter is a
+//! `candle_core::CudaDevice` (per `kiln_tensor::host_to_cuda_copy`
+//! at `cuda_storage.rs:2442-2446`). Until the substrate-level
+//! `Arc<CudaDevice>` dep is broken (Tier 4-5 substrate work tracked
+//! in `docs/CANDLE_REMOVAL_PLAN.md` lines 579-585), this test must
+//! continue to construct `CandleDevice::new_cuda(0)` to feed
+//! `to_device`.
+//!
+//! When the substrate-side dep clears, this whole test file should
+//! be rewritten against the pure-kt allocator route rather than
+//! ported piecemeal.
+//!
+//! Precedent for STOP-doc-only commits in this sweep: 6d3fc88d
+//! (kiln-opd-loss-kernel), 9a95adc2 (kiln-flce-kernel), acd00bb4
+//! (kiln-rmsnorm-kernel phase10_microbench).
 
 use std::sync::Arc;
 
