@@ -545,13 +545,20 @@ impl StorageBackend for CudaStorage {
 /// Construct a fresh [`crate::Storage`] handle (`Arc<dyn StorageBackend>`)
 /// holding a [`CudaStorage`]. Convenience constructor matching the CPU
 /// `cpu_zeros` helper.
+///
+/// #1082: the back-compat candle-typed input is retained for external
+/// callers (notably `kiln-model::paged_kv_cache_kt`); internally this
+/// derives the cudarc `CudaContext` from the candle device and routes
+/// through [`CudaStorage::zeros_ctx`] — no candle-typed `CudaStorage::zeros`
+/// is involved.
 pub fn cuda_zeros(
     candle_device: Arc<CudaDevice>,
     device_index: usize,
     dtype: DType,
     n_elements: usize,
 ) -> Result<crate::Storage> {
-    let storage = CudaStorage::zeros(candle_device, device_index, dtype, n_elements)?;
+    let ctx = candle_device.cuda_stream().context().clone();
+    let storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n_elements)?;
     Ok(Arc::new(storage))
 }
 
@@ -2140,12 +2147,13 @@ mod tests {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
-        let storage = CudaStorage::zeros(dev.clone(), 0, DType::BF16, 64).unwrap();
+        let ctx = dev.cuda_stream().context().clone();
+        let storage = CudaStorage::zeros_ctx(&ctx, 0, DType::BF16, 64).unwrap();
         assert_eq!(storage.device(), Device::Cuda(0));
         assert_eq!(storage.dtype(), DType::BF16);
         assert_eq!(storage.byte_len(), 128);
 
-        let storage = CudaStorage::zeros(dev, 0, DType::Int4Packed, 16).unwrap();
+        let storage = CudaStorage::zeros_ctx(&ctx, 0, DType::Int4Packed, 16).unwrap();
         assert_eq!(storage.byte_len(), 8); // 16 elements packed -> 8 bytes
     }
 
@@ -2155,8 +2163,9 @@ mod tests {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
+        let ctx = dev.cuda_stream().context().clone();
         let slice = dev.alloc_zeros::<u8>(17).unwrap();
-        let err = CudaStorage::from_slice(dev.clone(), 0, DType::F32, slice).unwrap_err();
+        let err = CudaStorage::from_slice_ctx(&ctx, 0, DType::F32, slice).unwrap_err();
         assert!(err.to_string().contains("not a multiple"));
     }
 
@@ -2269,7 +2278,8 @@ mod tests {
         };
         // Build a CUDA U32 storage with a couple values; cuda_is_finite
         // short-circuits before touching the kernel.
-        let storage = CudaStorage::zeros(dev, 0, DType::U32, 4).unwrap();
+        let ctx = dev.cuda_stream().context().clone();
+        let storage = CudaStorage::zeros_ctx(&ctx, 0, DType::U32, 4).unwrap();
         let storage_arc: crate::Storage = Arc::new(storage);
         let t = crate::Tensor::from_parts(
             storage_arc,
@@ -2662,6 +2672,11 @@ pub fn host_to_cuda_copy(
     // Allocate the device buffer + issue H2D memcpy. We use
     // candle's `clone_htod` which wraps cudarc's H2D for a slice;
     // it returns a fresh CudaSlice<u8> ready to wrap.
+    //
+    // #1082: derive the cudarc CudaContext from the back-compat candle
+    // device input and route through [`CudaStorage::from_slice_ctx`]; the
+    // candle-typed `CudaStorage::from_slice` constructor is being deleted.
+    let ctx = candle_device.cuda_stream().context().clone();
     let device_slice = {
         let stream = candle_device.cuda_stream();
         stream
@@ -2671,7 +2686,7 @@ pub fn host_to_cuda_copy(
             })?
     };
     let cuda_storage =
-        CudaStorage::from_slice(candle_device, device_index, dtype, device_slice)?;
+        CudaStorage::from_slice_ctx(&ctx, device_index, dtype, device_slice)?;
 
     let storage_arc: crate::Storage = Arc::new(cuda_storage);
     crate::Tensor::from_parts(
