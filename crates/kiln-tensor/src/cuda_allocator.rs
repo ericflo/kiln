@@ -15,10 +15,67 @@
 //! compile path (which links `cuda` against `candle-core` but has no
 //! GPU) doesn't spuriously fail.
 //!
-//! Phase 7 swaps `Arc<CudaDevice>` for a direct
-//! `Arc<cudarc::driver::CudaContext>` — the public API of this
-//! struct stays stable because allocation goes through
-//! `CudaStorage::zeros`, which is the candle-removal lift target.
+//! # Phase 7 candle-removal — STOP (blocked on `CudaStorage::zeros`)
+//!
+//! The original plan was for Phase 7 to swap `Arc<CudaDevice>` for
+//! `Arc<cudarc::driver::CudaContext>` here. After auditing the actual
+//! call graph (#1082 phase 7 audit), that swap **cannot land in this
+//! file in isolation**:
+//!
+//! 1. Every code path in `CudaAllocator` that touches the device
+//!    handle (both `warm()` and `alloc()`) immediately forwards it to
+//!    `CudaStorage::zeros(candle_device, device_index, dtype, n)`.
+//! 2. `CudaStorage::zeros` itself stores `Arc<CudaDevice>` on the
+//!    returned `CudaStorage` and uses it for both `alloc_zeros::<u8>`
+//!    and the `cuda_stream()` accessor that every kernel-crate FFI
+//!    site reads.
+//! 3. There is no `Arc<CudaContext> → Arc<CudaDevice>` adapter — the
+//!    relationship runs the other way: candle's `CudaDevice` *wraps*
+//!    a `cudarc::driver::CudaContext`. Holding a `CudaContext` here
+//!    would force this allocator to construct a fresh `CudaDevice`
+//!    per `alloc()` call, which would break stream affinity with
+//!    every kernel-crate handle that was set up against the original
+//!    `CudaDevice`.
+//! 4. `CudaAllocator::new` / `with_mode` have **zero external
+//!    callers** today (`grep -rn 'CudaAllocator::new' crates/` —
+//!    only `pub use cuda_allocator::CudaAllocator` in `lib.rs`).
+//!    Swapping the constructor signature alone would not free any
+//!    downstream from candle either.
+//!
+//! Therefore Phase 7 candle removal for the CUDA allocator surface
+//! is **blocked on `CudaStorage::zeros` migrating first** to take an
+//! `Arc<cudarc::driver::CudaContext>` (and the rest of `CudaStorage`
+//! losing its `candle_device: Arc<CudaDevice>` field — see the parallel
+//! STOP note in `cuda_storage.rs` line 343 about the substrate
+//! transition for the `candle_device` field becoming
+//! `Arc<cudarc::driver::CudaContext>`). Once `CudaStorage` accepts a
+//! `CudaContext`, this allocator becomes a trivial type-substitution
+//! that recompiles with no behavior change (the only thing changing
+//! is the type of the field stored next to the `device_index`).
+//!
+//! Order-of-operations for the lift (tracked under #1082):
+//!
+//! 1. Add a parallel `CudaStorage::zeros_kt(ctx: Arc<CudaContext>, ...)`
+//!    that allocates via `ctx.default_stream().alloc_zeros::<u8>` and
+//!    stores `Arc<CudaContext>` instead of `Arc<CudaDevice>` on
+//!    `CudaStorage` (likely via an internal enum + dual accessors so
+//!    the existing kernel-crate FFI sites keep compiling unchanged).
+//! 2. Migrate the dozen-plus kernel-crate FFI call sites that reach
+//!    `.candle_device().cuda_stream()` to a `cuda_stream_raw()` /
+//!    `CUstream` accessor that already exists on `CudaStorage`.
+//! 3. Flip `CudaStorage::zeros` itself to take `Arc<CudaContext>`,
+//!    drop the `candle_device` field.
+//! 4. Then this file changes one type (`candle_device: Arc<CudaDevice>`
+//!    → `ctx: Arc<cudarc::driver::CudaContext>`) and one import
+//!    (`use cudarc::driver::CudaContext;` replacing
+//!    `use candle_core::cuda_backend::CudaDevice;`).
+//!
+//! Doing step 4 first (the swap implied by the prior docstring) would
+//! either require an `Arc<CudaContext>` → `Arc<CudaDevice>` conversion
+//! at every `alloc()` call (impossible without holding the
+//! `CudaDevice` somewhere) or would silently break stream affinity
+//! across the kernel-crate FFI surface. Both are worse than holding
+//! the substrate stable until step 1 lands.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,8 +89,9 @@ use crate::{
 #[derive(Debug)]
 pub struct CudaAllocator {
     /// Candle CUDA device handle. Held for stream affinity + the
-    /// `alloc_zeros::<u8>` helper. Phase 7 swaps to a direct cudarc
-    /// `CudaContext`.
+    /// `alloc_zeros::<u8>` helper. The Phase 7 swap to a direct
+    /// cudarc `CudaContext` is blocked on `CudaStorage::zeros`
+    /// migrating first — see the STOP note at the top of this file.
     candle_device: Arc<CudaDevice>,
     /// CUDA device index — matches the index of `candle_device`'s
     /// owning context.
