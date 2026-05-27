@@ -461,8 +461,7 @@ fn main() -> Result<()> {
         kiln_model::LoadModelOptions { load_mtp: false },
     )
     .context("load_model")?;
-    let device = kiln_server::device::select_device()?;
-    let kt_device = kiln_kt_bridge::kt_device_from_candle(&device);
+    let kt_device = kiln_server::device::select_device_kt()?;
     if matches!(kt_device, kiln_tensor::Device::Cpu) {
         anyhow::bail!("CUDA device required — validation measures real VRAM");
     }

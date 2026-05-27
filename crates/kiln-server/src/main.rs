@@ -8,7 +8,7 @@ use clap::Parser;
 use kiln_server::api;
 use kiln_server::cli::{self, AdapterCommands, Cli, Commands, TrainCommands, TrajectoryCommands};
 use kiln_server::config::KilnConfig;
-use kiln_server::device::select_device_with_options;
+use kiln_server::device::select_device_with_options_kt;
 use kiln_server::state;
 
 use kiln_core::config::ModelConfig;
@@ -318,7 +318,7 @@ async fn main() -> Result<()> {
         // Real inference mode: load model weights and create ModelRunner.
         tracing::debug!("loading model weights from {mp}");
         let load_spinner = cli::make_startup_spinner("selecting device");
-        let device = select_device_with_options(config.memory.cuda_graphs)?;
+        let device_kt = select_device_with_options_kt(config.memory.cuda_graphs)?;
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message(format!("loading model weights from {mp}"));
         }
@@ -330,7 +330,8 @@ async fn main() -> Result<()> {
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message("uploading weights to GPU");
         }
-        let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)?;
+        let gpu_weights =
+            GpuWeights::from_model_weights_kt(&model_weights, &model_config, &device_kt)?;
         drop(model_weights);
         tracing::info!("CPU model weights dropped after GPU upload");
 
@@ -359,11 +360,6 @@ async fn main() -> Result<()> {
         tracing::debug!(
             "training endpoints available — in-process LoRA training (no sidecar needed)"
         );
-        // Bridge the candle device once at the seam: `AppState::new_real` takes
-        // `kt::Device` after #1082. `device` itself is still candle here because
-        // `GpuWeights::from_model_weights` above expects candle; that migration
-        // is tracked separately under #1082.
-        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
         AppState::new_real(
             model_config,
             runner,
@@ -677,16 +673,17 @@ fn spawn_backend_prewarm(state: AppState) {
         return;
     };
 
-    let (is_gpu, is_vulkan, device) = {
+    let (is_gpu, is_vulkan, device_kt) = {
         let runner_guard = runner.read().unwrap();
-        let device = runner_guard.weights.embed_tokens.device().clone();
-        // kt-typed metal detection so this call site no longer pattern-matches
-        // on `candle_core::Device` directly. The bridge helper is always-on
-        // (no cuda feature gate). (#1082)
-        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
+        // Bridge the embed-tokens device once at this seam so the rest of the
+        // prewarm path carries kt::Device. `embed_tokens.device()` is still
+        // candle-typed because the GpuWeights struct fields are candle Tensors
+        // (tracked separately under #1082).
+        let device_kt =
+            kiln_kt_bridge::kt_device_from_candle(&runner_guard.weights.embed_tokens.device());
         let is_metal = matches!(device_kt, kiln_tensor::Device::Metal(_));
         let is_vulkan = runner_guard.backend_name() == "vulkan";
-        (is_metal || is_vulkan, is_vulkan, device)
+        (is_metal || is_vulkan, is_vulkan, device_kt)
     };
     if !is_gpu {
         return;
@@ -710,11 +707,9 @@ fn spawn_backend_prewarm(state: AppState) {
         tracing::info!("starting background inference prewarm");
         let prewarm_start = std::time::Instant::now();
         let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            // Bridge once at the seam so the precompile helpers below take
-            // `&kiln_tensor::Device` (kt) on their public surface. The
-            // `device` local is still candle for downstream consumers that
-            // haven't migrated. (#1082)
-            let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
+            // `device_kt` was bridged at the read-side of the runner above
+            // (where `embed_tokens.device()` returns candle); the closure
+            // receives the kt-typed binding directly. (#1082)
             // Pipeline compilation does not allocate KV/model working buffers, so
             // keep it outside the opportunistic GPU lock. If the first live
             // request wins the lock, it should still benefit from compiled
