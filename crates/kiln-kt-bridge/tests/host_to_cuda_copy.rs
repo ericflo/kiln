@@ -1,6 +1,31 @@
 #![cfg(feature = "cuda")]
 
 //! H2D + D2H round-trip — host_to_cuda_copy ∘ cuda_to_host_copy = identity.
+//!
+//! # TODO(#1082): candle-removal STOP — by design
+//!
+//! This test cannot drop its `candle_core::{Device, Tensor}` imports
+//! today. It is testing kt-bridge surfaces that are candle-typed by
+//! definition:
+//!
+//! - `kiln_tensor::host_to_cuda_copy(&kt_tensor, Arc<CudaDevice>, usize)`
+//!   takes a `candle_core::CudaDevice` (`cuda_storage.rs:2442-2446`).
+//!   The test must build `CandleDevice::new_cuda(0)` to feed it.
+//! - The `host_to_cuda_copy_validates_input_device` test verifies the
+//!   CPU-source-required error path by constructing a CUDA-side
+//!   `CandleTensor::from_vec` and bridging it via
+//!   `kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow` — that
+//!   borrow helper exists specifically to bridge candle→kt and is
+//!   not removable until candle is.
+//!
+//! Until the substrate-level `Arc<CudaDevice>` dep on
+//! `host_to_cuda_copy` is broken (Tier 4-5 substrate work tracked
+//! in `docs/CANDLE_REMOVAL_PLAN.md` lines 579-585), the candle
+//! imports here stay.
+//!
+//! Precedent for STOP-doc-only commits in this sweep: 6d3fc88d
+//! (kiln-opd-loss-kernel), 9a95adc2 (kiln-flce-kernel), acd00bb4
+//! (kiln-rmsnorm-kernel phase10_microbench).
 
 use std::sync::Arc;
 
