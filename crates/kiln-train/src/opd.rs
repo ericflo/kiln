@@ -1725,7 +1725,10 @@ pub fn opd_train_synthetic_validation(
     num_steps: usize,
     learning_rate: f64,
 ) -> Result<(f32, f32)> {
-    use candle_core::Var;
+    // NOTE(#1082): `use candle_core::Var;` dropped — only one call site
+    // below (`Var::from_vec`) and it now uses the fully-qualified
+    // `candle_core::Var::from_vec` path so opd.rs's candle `use` count
+    // drops by 1 more.
     use candle_nn::Optimizer;
     use candle_nn::optim::{AdamW, ParamsAdamW};
 
@@ -1736,7 +1739,7 @@ pub fn opd_train_synthetic_validation(
     let init: Vec<f32> = (0..(seq_len * hidden_size))
         .map(|i| (i as f32 * 0.013).sin() * 0.3)
         .collect();
-    let hidden = Var::from_vec(init, (1, seq_len, hidden_size), &device)?;
+    let hidden = candle_core::Var::from_vec(init, (1, seq_len, hidden_size), &device)?;
 
     // Frozen head — represents the LM projection. We pick a fixed
     // random head; the training surface is the hidden Var.
@@ -2083,7 +2086,10 @@ pub fn opd_train(
     use crate::trainer::{
         TrainableLoraParams, accumulate_grads, compute_segment_boundaries, lora_weights_detached,
     };
-    use candle_core::Var;
+    // NOTE(#1082): `use candle_core::Var;` dropped — only two call sites
+    // inside this function (`Var::from_tensor` boundary states) and both
+    // now use the fully-qualified `candle_core::Var::from_tensor` path so
+    // opd.rs's candle `use` count drops by 1.
     use kiln_model::backend;
     use kiln_model::forward::{
         LinearAttentionState, model_forward_embed, model_forward_final_norm, model_forward_segment,
@@ -2661,7 +2667,7 @@ pub fn opd_train(
                 // === Step 2: OPD loss at the final boundary ===
                 // Build a Var so candle autograd routes the kernel's backward
                 // into `final_var.grad()`.
-                let final_var = Var::from_tensor(&final_hidden)?;
+                let final_var = candle_core::Var::from_tensor(&final_hidden)?;
                 let normed =
                     model_forward_final_norm(final_var.as_tensor(), weights, model_config)?;
                 // §20 asymmetric teacher conditioning: if this prompt
@@ -2764,7 +2770,7 @@ pub fn opd_train(
                 for seg_idx in (0..segments.len()).rev() {
                     let (seg_start, seg_end) = segments[seg_idx];
                     let seg_input = boundary_states[seg_idx].clone();
-                    let seg_input_var = Var::from_tensor(&seg_input)?;
+                    let seg_input_var = candle_core::Var::from_tensor(&seg_input)?;
                     let mut state = LinearAttentionState::new(model_config, &device)?;
                     let lora_for_seg = params.as_lora_weights();
                     let seg_output = model_forward_segment(
