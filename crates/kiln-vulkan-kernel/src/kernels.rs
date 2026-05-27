@@ -2335,14 +2335,85 @@ pub fn dispatch_qwen_rmsnorm_backward(
         hidden,
     );
 
+    let x_data = extract_tensor_bytes(x)?.0;
+    let weight_data = extract_tensor_bytes(weight)?.0;
+    let grad_y_data = extract_tensor_bytes(grad_y)?.0;
+
+    let out_data = dispatch_qwen_rmsnorm_backward_bytes_core(
+        vk_device,
+        &x_data,
+        &weight_data,
+        &grad_y_data,
+        rows,
+        hidden,
+        eps,
+    )?;
+    create_tensor_from_data(&out_data, &dims, DType::F32)
+}
+
+/// Candle-free variant of [`dispatch_qwen_rmsnorm_backward`].
+///
+/// Takes `x`, `weight`, and `grad_y` as raw f32 bytes and returns
+/// `grad_x` as raw f32 bytes with the same layout as `x`. The caller
+/// passes the logical `rows` (flattened product of all but the last
+/// input dim) and `hidden` (last input dim) explicitly — there is no
+/// `x_shape` because RMSNorm-backward only touches one row at a time.
+/// `grad_y` and `x` must have identical layout (the candle entry
+/// already enforces matching dims). The candle entry becomes a thin
+/// shim around the shared bytes core. (#1082)
+pub fn dispatch_qwen_rmsnorm_backward_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_data: &[u8],
+    grad_y_data: &[u8],
+    rows: usize,
+    hidden: usize,
+    eps: f32,
+) -> Result<Vec<u8>> {
+    dispatch_qwen_rmsnorm_backward_bytes_core(
+        vk_device,
+        x_data,
+        weight_data,
+        grad_y_data,
+        rows,
+        hidden,
+        eps,
+    )
+}
+
+fn dispatch_qwen_rmsnorm_backward_bytes_core(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_data: &[u8],
+    grad_y_data: &[u8],
+    rows: usize,
+    hidden: usize,
+    eps: f32,
+) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        x_data.len() == rows * hidden * 4,
+        "qwen_rmsnorm_backward: x buffer has {} bytes, expected {}",
+        x_data.len(),
+        rows * hidden * 4
+    );
+    anyhow::ensure!(
+        weight_data.len() == hidden * 4,
+        "qwen_rmsnorm_backward: weight buffer has {} bytes, expected {}",
+        weight_data.len(),
+        hidden * 4
+    );
+    anyhow::ensure!(
+        grad_y_data.len() == rows * hidden * 4,
+        "qwen_rmsnorm_backward: grad_y buffer has {} bytes, expected {}",
+        grad_y_data.len(),
+        rows * hidden * 4
+    );
+
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    let x_data = extract_tensor_bytes(x)?.0;
-    let weight_data = extract_tensor_bytes(weight)?.0;
-    let grad_y_data = extract_tensor_bytes(grad_y)?.0;
     let out_len = x_data.len();
 
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
@@ -2364,7 +2435,7 @@ pub fn dispatch_qwen_rmsnorm_backward(
             queue,
             *command_pool,
             &x_buf,
-            &x_data,
+            x_data,
         )
         .context("qwen_rmsnorm_backward: upload x")?;
         VulkanBuffer::upload_data_with_command_pool(
@@ -2373,7 +2444,7 @@ pub fn dispatch_qwen_rmsnorm_backward(
             queue,
             *command_pool,
             &weight_buf,
-            &weight_data,
+            weight_data,
         )
         .context("qwen_rmsnorm_backward: upload weight")?;
         VulkanBuffer::upload_data_with_command_pool(
@@ -2382,7 +2453,7 @@ pub fn dispatch_qwen_rmsnorm_backward(
             queue,
             *command_pool,
             &grad_y_buf,
-            &grad_y_data,
+            grad_y_data,
         )
         .context("qwen_rmsnorm_backward: upload grad_y")?;
     }
@@ -2409,18 +2480,15 @@ pub fn dispatch_qwen_rmsnorm_backward(
     )
     .context("qwen_rmsnorm_backward: kernel dispatch")?;
 
-    let out_data = {
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::read_back_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &out_buf,
-        )
-        .context("qwen_rmsnorm_backward: read back grad_x")?
-    };
-    create_tensor_from_data(&out_data, &dims, DType::F32)
+    let command_pool = vk_device.transient_command_pool()?;
+    VulkanBuffer::read_back_with_command_pool(
+        device,
+        host_visible_mt,
+        queue,
+        *command_pool,
+        &out_buf,
+    )
+    .context("qwen_rmsnorm_backward: read back grad_x")
 }
 
 /// Matmul against the TRANSPOSE of a bf16-packed weight buffer.
