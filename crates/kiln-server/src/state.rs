@@ -1612,10 +1612,14 @@ impl AppState {
         // Detect VRAM once and reuse it for both auto-sizing and reporting so
         // startup doesn't repeat the same probe/logging path.
         let vram_info = kiln_core::vram::detect_vram();
-        let total_vram = detected_gpu_total_memory(&device, &vram_info);
-        let is_metal = is_metal_device(&device);
+        // Bridge the candle device to kt once so the helper functions
+        // below can each take `&kt::Device` directly instead of
+        // re-converting on every call (#1082).
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
+        let total_vram = detected_gpu_total_memory(&device_kt, &vram_info);
+        let is_metal = is_metal_device(&device_kt);
 
-        let post_load_used_vram_info = runtime_used_vram_for_device(&device);
+        let post_load_used_vram_info = runtime_used_vram_for_device(&device_kt);
         let post_load_used_vram = post_load_used_vram_info
             .map(|info| info.used_bytes)
             .unwrap_or(0);
@@ -1664,10 +1668,10 @@ impl AppState {
                 std::env::var("KILN_ALLOW_FP8_ON_METAL").as_deref(),
                 Ok("1") | Ok("true") | Ok("TRUE")
             );
-            // Route the Metal-variant check through kt-bridge so this
-            // call site stops naming the candle Metal variant directly
-            // (#1082).
-            if requested && is_metal_device(&device) && !metal_override {
+            // `is_metal_device` takes `&kt::Device` after the Phase 7+
+            // migration, so this site uses the bridged `device_kt` from
+            // above instead of calling kt-bridge again here. (#1082)
+            if requested && is_metal_device(&device_kt) && !metal_override {
                 tracing::warn!(
                     "FP8 cache disabled on Metal (CPU round-trip cost); \
                      set KILN_ALLOW_FP8_ON_METAL=1 to override"
@@ -1851,7 +1855,7 @@ impl AppState {
             0
         };
         let prefix_cache_state_bytes_per_entry =
-            linear_attention_state_bytes(&model_config, &device);
+            linear_attention_state_bytes(&model_config, &device_kt);
         let prefix_cache_max_entries = if prefix_cache_cfg.enabled {
             prefix_cache_cfg.max_entries.unwrap_or_else(|| {
                 default_prefix_cache_max_entries(total_vram, prefix_cache_state_bytes_per_entry)
@@ -1966,7 +1970,7 @@ impl AppState {
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
             inference_prewarm_complete: Arc::new(AtomicBool::new(!device_needs_inference_prewarm(
-                &device,
+                &device_kt,
             ))),
             checkpoint_interval: None,
             training_webhook_url: None,
@@ -2010,14 +2014,14 @@ impl AppState {
     }
 }
 
-fn linear_attention_state_bytes(config: &ModelConfig, device: &candle_core::Device) -> u64 {
+fn linear_attention_state_bytes(config: &ModelConfig, device: &kiln_tensor::Device) -> u64 {
     let num_linear_layers = config
         .num_layers
         .saturating_sub(config.num_full_attention_layers) as u64;
-    // Route the Metal-variant check through kt-bridge / is_metal_device
-    // so this site no longer names the candle Metal variant directly
-    // (#1082). The Metal recurrent path holds bf16/fp16 in 2 bytes/elem;
-    // every other (device, dtype) pair uses the 4-byte fallback.
+    // Metal recurrent path holds bf16/fp16 in 2 bytes/elem; every other
+    // (device, dtype) pair uses the 4-byte fallback. Migrated to take
+    // `&kt::Device` directly so this site no longer threads candle
+    // through the helper (#1082).
     let recurrent_dtype_bytes = if is_metal_device(device)
         && matches!(
             config.dtype,
@@ -2149,26 +2153,26 @@ fn metal_auto_max_kv_blocks(total_vram_bytes: u64) -> usize {
     }
 }
 
-fn is_metal_device(device: &candle_core::Device) -> bool {
-    // Route the Metal-variant check through kt-bridge so this helper
-    // stops naming the candle Metal variant directly. The kt-bridge
-    // `metal` feature is forwarded under `kiln-server/metal`, so the
-    // mapping returns `KtDevice::Metal(_)` only when the metal feature
-    // is enabled — preserving the previous cfg-gated behavior without
-    // a candle enum match in this file. (#1082)
-    kiln_kt_bridge::kt_device_from_candle(device).backend() == kiln_tensor::Backend::Metal
+fn is_metal_device(device: &kiln_tensor::Device) -> bool {
+    // Migrated to take `&kt::Device` directly so this helper no longer
+    // names the candle Metal variant or the kt-bridge converter. The
+    // kt-bridge `metal` feature is forwarded under `kiln-server/metal`,
+    // so callers in non-metal builds will never construct a
+    // `kt::Device::Metal(_)` and the cfg-gated behavior is preserved.
+    // (#1082)
+    device.backend() == kiln_tensor::Backend::Metal
 }
 
-fn device_needs_inference_prewarm(device: &candle_core::Device) -> bool {
+fn device_needs_inference_prewarm(device: &kiln_tensor::Device) -> bool {
     let is_metal = is_metal_device(device);
-    // Route the Cpu-carrier check through kt-bridge so this site no
-    // longer names a candle Device variant directly. The vulkan path
-    // carries a candle CPU device by convention (see
-    // `kiln-model::backend::mod::for_device`), which maps to
-    // `KtDevice::Cpu` / `Backend::Cpu`. (#1082)
+    // The vulkan path carries a `kt::Device::Cpu` by convention (see
+    // `kiln-model::backend::mod::for_device` and
+    // `select_device_with_options_kt` which overrides to Vulkan only when
+    // the feature is active). On vulkan builds we still need the
+    // `vulkan_is_available()` probe to distinguish "CPU because no GPU"
+    // from "CPU as Vulkan placeholder". (#1082)
     #[cfg(feature = "vulkan")]
-    let is_vulkan = kiln_kt_bridge::kt_device_from_candle(device).backend()
-        == kiln_tensor::Backend::Cpu
+    let is_vulkan = device.backend() == kiln_tensor::Backend::Cpu
         && kiln_model::backend::vulkan::vulkan_is_available();
     #[cfg(not(feature = "vulkan"))]
     let is_vulkan = {
@@ -2184,15 +2188,14 @@ fn device_needs_inference_prewarm(device: &candle_core::Device) -> bool {
 /// hw.memsize on Apple Silicon + env override).
 
 fn runtime_used_vram_for_device(
-    device: &candle_core::Device,
+    device: &kiln_tensor::Device,
 ) -> Option<kiln_core::vram::GpuMemoryUsedInfo> {
-    // Route the Cuda-variant check through kt-bridge so this site no
-    // longer names the candle Cuda variant directly. The cuda-only used
-    // VRAM probe is still gated on `feature = "cuda"`, matching the
-    // previous cfg-gated behavior. (#1082)
+    // Migrated to take `&kt::Device` directly. The cuda-only used VRAM
+    // probe is still gated on `feature = "cuda"`, matching the previous
+    // cfg-gated behavior. (#1082)
     #[cfg(feature = "cuda")]
     {
-        if kiln_kt_bridge::kt_device_from_candle(device).backend() == kiln_tensor::Backend::Cuda {
+        if device.backend() == kiln_tensor::Backend::Cuda {
             let info = kiln_core::vram::detect_used_vram();
             return (info.used_bytes > 0).then_some(info);
         }
@@ -2205,16 +2208,14 @@ fn runtime_used_vram_for_device(
 }
 
 fn detected_gpu_total_memory(
-    device: &candle_core::Device,
+    device: &kiln_tensor::Device,
     vram: &kiln_core::vram::GpuVramInfo,
 ) -> u64 {
-    // Route the Cuda/Metal dispatch through kt-bridge so this site no
-    // longer names the candle device variants directly. The cuda and
-    // metal arms remain feature-gated to preserve the previous
-    // cfg-gated behavior (the kt-bridge Cuda/Metal mapping itself is
-    // only meaningful when the corresponding candle backend is built
-    // in). (#1082)
-    let backend = kiln_kt_bridge::kt_device_from_candle(device).backend();
+    // Migrated to take `&kt::Device` directly. The cuda and metal arms
+    // remain feature-gated to preserve the previous cfg-gated behavior
+    // (a `kt::Device::Cuda` / `kt::Device::Metal` can only be
+    // constructed when the corresponding feature is built in). (#1082)
+    let backend = device.backend();
     #[cfg(feature = "cuda")]
     if backend == kiln_tensor::Backend::Cuda {
         return if vram.total_bytes > 0 {
