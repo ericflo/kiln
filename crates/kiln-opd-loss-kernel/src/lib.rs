@@ -77,9 +77,15 @@
 //!   backward. Now used only as the fallback path inside the kt-forward-op
 //!   shim ([`opd_top_k_reverse_kl_per_position_via_kt_forward_op`]) when
 //!   the kt envelope (`{K∈16,32} × {F32,BF16} × CUDA`) doesn't apply.
-//! - **Phase B** ([`opd_top_k_reverse_kl_phase_b`]) — `CustomOp1` whose
-//!   `bwd()` runs the manual analytic backward. Forward stores only the
-//!   scalar loss; the chunk intermediates are dropped on return.
+//! - **Phase B** (kt-shim
+//!   [`opd_top_k_reverse_kl_per_position_via_kt_forward_op`] and kt-tape
+//!   [`opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape`]) — both
+//!   run the kt composite forward and dispatch the fused CUDA backward
+//!   via the surviving FFI symbols `kiln_opd_topk_kl_bwd_{bf16,f32}`
+//!   declared in [`phase_b`]. The candle `CustomOp1` wrapper that
+//!   previously hosted this (`OpdLossCustomOp` / `opd_top_k_reverse_kl_phase_b`)
+//!   was deleted in (#1082, 2026-05-28); see
+//!   `docs/opd-loss-kernel-candle-removal-stop-2026-05-28.md`.
 //!
 //! # Numerical contract
 //!
@@ -94,11 +100,20 @@
 use anyhow::{Context, Result, anyhow};
 use candle_core::{D, DType, Device, Tensor};
 
+// `phase_b` retains only the fused-CUDA backward FFI declarations
+// (`kiln_opd_topk_kl_bwd_{bf16,f32}`) and the `cuda_kernel_supports`
+// envelope check. The candle `CustomOp1` wrapper `OpdLossCustomOp`, the
+// candle entry points `opd_top_k_reverse_kl_phase_b` and
+// `_per_position`, the fused-FWD FFI symbols, and the `PerPositionMetrics`
+// path were all removed in (#1082, 2026-05-28) — production now goes
+// through `opd_top_k_reverse_kl_per_position_via_kt_forward_op`
+// (`kt_forward_op.rs`) for candle-autograd integration or
+// `try_tape_opd_per_position_cuda` (`tape_forward.rs`) when the
+// `KILN_USE_TAPE_FORWARD` gate + a thread-local `Tape` scope are
+// active. Both call sites pre-check the K + dtype envelope via
+// [`phase_b::cuda_kernel_supports`] before dispatching the fused
+// backward.
 mod phase_b;
-
-pub use phase_b::{
-    opd_top_k_reverse_kl_phase_b, opd_top_k_reverse_kl_phase_b_per_position,
-};
 
 pub mod kt_api;
 pub use kt_api::{
@@ -398,10 +413,12 @@ pub(crate) fn log_softmax_last(x: &Tensor) -> Result<Tensor> {
     Ok((x - broadcast)?)
 }
 
-/// Re-exports used by parity tests and downstream call sites.
-pub use crate::phase_b::OpdLossCustomOp;
-
-pub use crate::phase_b::{compute_per_position_metrics, PerPositionMetrics};
+// (#1082, 2026-05-28) The candle `OpdLossCustomOp` re-export and the
+// `compute_per_position_metrics` / `PerPositionMetrics` re-exports were
+// removed alongside their `phase_b.rs` definitions. The kt-typed
+// metrics surface (`compute_per_position_metrics_kt` /
+// `PerPositionMetricsKt`) remains re-exported above for any future
+// caller; no live caller exists today.
 
 /// One position's worth of distribution-alignment diagnostics, computed
 /// over the **teacher's** K support (§3.8 of the grand plan).
