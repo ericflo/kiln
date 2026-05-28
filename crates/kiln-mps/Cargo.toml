@@ -17,21 +17,24 @@ build = "build.rs"
 
 [features]
 default = []
-# Builds the Metal probe binary. Pulls candle-core's metal feature
-# as the metal-rs vendor; build.rs links the Metal + MetalKit
-# frameworks. Same shape as kiln-blas's `probe` feature.
-probe = ["dep:candle-core"]
+# Builds the Metal probe binary. build.rs links the Metal + MetalKit
+# frameworks when this feature is on. Same shape as kiln-blas's
+# `probe` feature.
+#
+# #1082: this feature no longer depends on `candle-core`. The previous
+# rationale was "candle-core's metal feature is the metal-rs vendor";
+# no source file in this crate uses any candle type (zero `use
+# candle_core::*` imports), so candle-core was dead weight. When the
+# actual `mps_mlp_probe` binary lands it will pull `metal-rs` (or
+# `objc2-metal`) directly, matching the kiln-blas pattern of "add the
+# substrate driver crate directly when the probe is implemented".
+probe = []
 
 [dependencies]
 # Backend-agnostic types come from kiln-blas; we re-export the
 # matching shapes here so Metal users have one consistent import path.
 kiln-blas = { workspace = true }
 kiln-tensor = { workspace = true }
-
-# Candle is the metal-rs vendor under the `probe` feature; absent on
-# the default build so the backend-agnostic types compile on every
-# host.
-candle-core = { workspace = true, features = ["metal"], optional = true }
 
 half = "2"
 serde = { workspace = true }
