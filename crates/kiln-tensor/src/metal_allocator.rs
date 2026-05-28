@@ -30,7 +30,7 @@
 //!
 //! Internal residual at the substrate boundary: the 7 in-file
 //! substrate ops in `metal_storage.rs` still derive a candle
-//! `MetalDevice` per call via [`crate::primary_metal_device`] for
+//! `MetalDevice` per call via [`crate::primary_metal_companion`] for
 //! `kernels()` and `command_encoder()` access — those are the
 //! candle-cached MSL pipeline collection and command-buffer pool
 //! used by `candle_metal_kernels::call_*` FFI. The follow-up
@@ -58,7 +58,7 @@ pub struct MetalAllocator {
     /// `MetalStorage::zeros(candle_device, ...)` to
     /// `MetalStorage::zeros_kt(&metal_device_handle, ...)`. External
     /// callers needing a candle wrapper can derive one on demand via
-    /// [`crate::primary_metal_device`] using the stored
+    /// [`crate::primary_metal_companion`] using the stored
     /// `device_index`, or call `MetalStorage::candle_device()` on a
     /// produced storage (which itself derives via
     /// `primary_metal_device(device_index)` after the #1082 CP-1
@@ -87,7 +87,7 @@ impl MetalAllocator {
     /// candle import drop (#1082); the only callers were in-source
     /// `#[cfg(test)]` and have been migrated to this entry. External
     /// callers needing a candle wrapper can derive one on demand via
-    /// [`crate::primary_metal_device`].
+    /// [`crate::primary_metal_companion`].
     ///
     /// Mirror of [`crate::CudaAllocator::new_ctx`].
     pub fn new_ctx(metal_device_handle: MetalRawDevice, device_index: usize) -> Self {
@@ -151,7 +151,7 @@ impl MetalAllocator {
     /// Borrow the metal-rs `Device` companion handle — the canonical,
     /// candle-free device-handle accessor. Callers that need a candle
     /// `MetalDevice` wrapper can derive one on demand via
-    /// [`crate::primary_metal_device`] using
+    /// [`crate::primary_metal_companion`] using
     /// [`Self::device_index()`], or call `.candle_device()` on a
     /// produced `MetalStorage` (which after the #1082 CP-1 final lift
     /// also derives via `primary_metal_device(device_index)` since
