@@ -43,12 +43,12 @@ metal = ["candle-core/metal", "kiln-tensor/metal"]
 # candle base API and compile on every host without a CUDA toolchain.
 candle-core = { workspace = true }
 kiln-tensor = { workspace = true }
+# Phase 6a/CP-4 (#1082): the `tape_bridge` module owns the
+# candle⟷kt TensorId mapping that lets `kiln_autograd::Tape::backward`
+# emit gradients into a `candle_core::backprop::GradStore`. Pure
+# `kiln-autograd` cannot pull in candle, so the bridge lives here
+# (the only crate that already depends on both halves).
+kiln-autograd = { workspace = true }
 # Half-precision floats — needed for the per-dtype `as_cuda_slice<T>()`
 # dispatch in the candle-to-kt copying adapter (cuda feature only).
 half = "2"
-
-[dev-dependencies]
-# Used by tests/cuda_backward_parity.rs — verifies that kiln-autograd
-# BackwardOps produce correct gradients when forward inputs live on
-# CUDA. (#1082)
-kiln-autograd = { workspace = true }

@@ -47,6 +47,17 @@
 #[cfg(feature = "cuda")]
 pub mod forward_op;
 
+/// Phase 6a/CP-4 (#1082) — kt-tape → candle GradStore bridge.
+///
+/// Lets `kiln_autograd::Tape::backward` emit gradients into a
+/// `candle_core::backprop::GradStore`. See module docs for the
+/// "disjoint-walker" problem this bridges. Wired into the production
+/// `try_tape_{rms_norm,matmul,silu}_cuda` adapters in
+/// `kiln-model::tape_forward` via the registration helpers
+/// `register_input_mapping` / `register_output_mapping`.
+#[cfg(feature = "cuda")]
+pub mod tape_bridge;
+
 use kiln_tensor::{Device as KtDevice, DType as KtDType};
 #[cfg(feature = "cuda")]
 use kiln_tensor::{CudaStorage, StorageBackend, Tensor as KtTensor};
