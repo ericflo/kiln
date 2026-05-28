@@ -16,10 +16,10 @@ use anyhow::{Context, Result};
 // resolves through
 // `crate::cd_types`, the per-crate candle facade that holds the type
 // aliases (`Tensor` / `Var` / `CdDevice` / `DType` / `Shape` /
-// `GradStore` / `TensorId` / `D` / `CdResult` / `CpuStorage` /
-// `CudaStorage` / `Layout`), the `cd_bail!` macro, the safetensors I/O
-// shims (`safetensors_load_file` / `safetensors_save_file`), and the
-// generic constructor helpers (`tensor_new` / `tensor_from_vec`).
+// `GradStore` / `TensorId` / `D` / `CdResult`), the `cd_bail!` macro,
+// the safetensors I/O shims (`safetensors_load_file` /
+// `safetensors_save_file`), and the generic constructor helpers
+// (`tensor_new` / `tensor_from_vec`).
 //
 // Historical reductions:
 //   1. Dropped the cuda-gated `use {CudaStorage, backend::BackendStorage};`.
@@ -31,6 +31,12 @@ use anyhow::{Context, Result};
 //      file from ~590 direct candle references down to 1 — only the
 //      `CustomOp1` trait impl, which cannot be type-aliased on stable
 //      Rust without `trait_alias`.
+//   4. (#1082) Pruned `cd_types::{CpuStorage, CudaStorage, Layout}`:
+//      every production use of these types already imports the
+//      kt-native counterpart (`kiln_tensor::{CpuStorage, CudaStorage,
+//      Layout}`) directly, so the candle facade no longer needs to
+//      re-expose them. First pilot step in the
+//      `cd_types::* -> kiln_tensor::*` migration.
 //
 // The candle_core crate dep itself stays because:
 //   * `Var` is the canonical trainable parameter type used
@@ -387,12 +393,12 @@ fn is_cuda_device(device: &CdDevice) -> bool {
 //
 // The wildcard re-import below brings every `pub(crate)` item from
 // `cd_types` (type aliases like `Tensor` / `Var` / `CdDevice` / `DType`
-// / `Shape` / `GradStore` / `TensorId` / `D` / `CdResult` / `CpuStorage`
-// / `CudaStorage` / `Layout`; the constructor helpers `tensor_new` and
-// `tensor_from_vec`; and the safetensors shims) into scope so the ~16k
-// call sites in this file keep working unchanged. The macro is brought in
-// explicitly so the `cd_bail!(...)` ergonomic at the InjectTensorGradient
-// site keeps resolving.
+// / `Shape` / `GradStore` / `TensorId` / `D` / `CdResult`; the
+// constructor helpers `tensor_new` and `tensor_from_vec`; and the
+// safetensors shims) into scope so the ~16k call sites in this file
+// keep working unchanged. The macro is brought in explicitly so the
+// `cd_bail!(...)` ergonomic at the InjectTensorGradient site keeps
+// resolving.
 //
 // NOTE: `use crate::cd_types::*` is not a `use candle_*` import — it is
 // a wildcard re-export of items local to this crate, so the audit

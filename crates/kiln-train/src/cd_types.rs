@@ -36,14 +36,13 @@ pub(crate) type GradStore = candle_core::backprop::GradStore;
 pub(crate) type TensorId = candle_core::TensorId;
 pub(crate) type D = candle_core::D;
 pub(crate) type CdResult<T> = candle_core::Result<T>;
-pub(crate) type CpuStorage = candle_core::CpuStorage;
-// `CudaStorage` is only consumed inside `#[cfg(feature = "cuda")]`
-// `cuda_fwd` in trainer.rs, so the alias is dead code without the
-// cuda feature on. Suppress that warning rather than cfg-gating the
-// alias itself (cfg-gating leaks `cfg(feature = "cuda")` into trainer.rs).
-#[allow(dead_code)]
-pub(crate) type CudaStorage = candle_core::CudaStorage;
-pub(crate) type Layout = candle_core::Layout;
+// (#1082) Removed dead aliases `CpuStorage`, `CudaStorage`, `Layout`:
+// every production use of these types in `kiln-train` already imports
+// the kt-native counterpart directly (`kiln_tensor::{CpuStorage,
+// CudaStorage, Layout}`), so the cd_types facade no longer needs to
+// re-expose them. This is the first pilot step in the
+// `cd_types::* -> kiln_tensor::*` migration tracked in
+// `docs/kiln-train-candle-core-deps-still-required-2026-05-28.md`.
 // Note: candle's `CustomOp1` is a trait and cannot be type-aliased on
 // stable Rust without the `trait_alias` feature, so the lone `impl
 // candle_core::CustomOp1 for InjectTensorGradient` block in `trainer.rs`
