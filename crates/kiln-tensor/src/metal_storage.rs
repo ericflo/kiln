@@ -62,15 +62,36 @@ use crate::{DType, Device, Error, Result, StorageBackend};
 /// Metal-backed storage. Byte-typed; dtype carried alongside for dispatch.
 ///
 /// Holds an `Arc<metal::Buffer>` directly (anti-pattern 1). The
-/// candle `MetalDevice` is held for command-queue affinity and for
-/// the `allocate_zeros` / `new_buffer` accessors that the existing
-/// kernel paths in `kiln-model::backend::metal` already use.
+/// metal-rs `Device` handle is held for buffer-allocation and
+/// kernel-FFI affinity; the previous `candle_device: Arc<MetalDevice>`
+/// field was dropped (#1082 CP-1 final lift, mirror of CudaStorage
+/// commit 5c3cd353) in favor of this `metal_handle` so the storage's
+/// owned state is candle-free. The 7 internal substrate ops and any
+/// external callers needing a candle wrapper derive one on demand
+/// via [`primary_metal_device`] from `self.device()`.
 #[derive(Debug)]
 pub struct MetalStorage {
     device: Device,
     dtype: DType,
     buffer: Arc<MetalBuffer>,
-    candle_device: Arc<MetalDevice>,
+    /// Metal-rs raw `MTLDevice` handle. Replaces the previous
+    /// `candle_device: Arc<MetalDevice>` field as part of the #1082
+    /// CP-1 final lift — the candle wrapper, when needed by the
+    /// 7 internal substrate ops in this file (which still consume
+    /// `MetalDevice::command_encoder()` and `MetalDevice::kernels()`
+    /// to dispatch through `candle_metal_kernels::call_*`), is now
+    /// derived on each op via [`primary_metal_device(device_index)`].
+    ///
+    /// The eventual full-substrate lift retires the per-op
+    /// `primary_metal_device` derivation by giving `MetalStorage` its
+    /// own `Arc<Kernels>` + `CommandQueue` companions so the ops can
+    /// dispatch entirely through metal-rs / candle-metal-kernels
+    /// primitives without ever materializing a candle `MetalDevice`.
+    /// That follow-up is out of scope for this commit; the current
+    /// shape mirrors the CudaStorage CP-1 final lift exactly (which
+    /// also derives `candle_device()` on demand via
+    /// `primary_cuda_device(device_index)` — see cuda_storage.rs).
+    metal_handle: MetalRawDevice,
 }
 
 impl MetalStorage {
@@ -182,22 +203,29 @@ impl MetalStorage {
         unsafe {
             core::ptr::write_bytes(buffer.contents(), 0u8, alloc_len);
         }
-        // Derive the candle device wrapper for the back-compat field.
-        // This is the one residual candle dependency in this path; it
-        // goes away in the future `candle_device` field-removal step.
-        let candle_device = primary_metal_device(device_index)?;
+        // CP-1 final lift: the input `device` (metal-rs handle) flows
+        // straight into the storage's `metal_handle` field. No
+        // `primary_metal_device(device_index)` materialization on the
+        // allocation path any more.
         Ok(MetalStorage {
             device: Device::Metal(device_index),
             dtype,
             buffer: Arc::new(buffer),
-            candle_device,
+            metal_handle: device.clone(),
         })
     }
 
-    /// Wrap an existing `Arc<metal::Buffer>` allocated by the caller.
+    /// Wrap an existing `Arc<metal::Buffer>` allocated by the caller —
+    /// **candle-typed back-compat entry**.
     ///
-    /// Validates the buffer length against `dtype.size_in_bytes()`
-    /// for non-packed dtypes.
+    /// Takes a candle `Arc<MetalDevice>`; internally extracts the
+    /// metal-rs `MTLDevice` handle (a cheap NSObject clone) for the
+    /// storage's `metal_handle` field. Validates the buffer length
+    /// against `dtype.size_in_bytes()` for non-packed dtypes.
+    ///
+    /// Prefer the candle-free [`Self::from_buffer_kt`] entry in new
+    /// code. This constructor stays as a shim while remaining
+    /// external candle-typed call sites migrate.
     pub fn from_buffer(
         candle_device: Arc<MetalDevice>,
         device_index: usize,
@@ -219,7 +247,7 @@ impl MetalStorage {
             device: Device::Metal(device_index),
             dtype,
             buffer,
-            candle_device,
+            metal_handle: candle_device.metal_device().clone(),
         })
     }
 
@@ -260,22 +288,16 @@ impl MetalStorage {
                 )));
             }
         }
-        // metal_handle is the kt-side raw-device argument; today it is
-        // only used to confirm the caller has a metal-rs handle on hand
-        // (so the constructor surface is candle-free at the kt API
-        // boundary). The candle wrapper that backs the produced
-        // storage's internal `candle_device` field is derived via
-        // `primary_metal_device(device_index)`, mirroring how
-        // `zeros_kt` populates the same field. The residual candle
-        // hook retires when the CP-1 field flip lands (mirror of the
-        // CudaStorage 5c3cd353 final lift).
-        let _ = metal_handle;
-        let candle_device = primary_metal_device(device_index)?;
+        // CP-1 final lift: `metal_handle` flows straight into the
+        // storage's field — no `primary_metal_device(device_index)`
+        // materialization needed any more. Cheap NSObject clone via
+        // `MetalRawDevice::clone()` (it's a
+        // `Retained<ProtocolObject<dyn MTLDevice>>` under the hood).
         Ok(MetalStorage {
             device: Device::Metal(device_index),
             dtype,
             buffer,
-            candle_device,
+            metal_handle: metal_handle.clone(),
         })
     }
 
@@ -287,39 +309,59 @@ impl MetalStorage {
         &self.buffer
     }
 
-    /// Borrow the candle Metal device — same handle the existing
-    /// kernels in `kiln-model::backend::metal` consume.
-    pub fn candle_device(&self) -> &Arc<MetalDevice> {
-        &self.candle_device
+    /// Owned `Arc<MetalDevice>` for the candle wrapper around this
+    /// storage's metal-rs device — **derived back-compat shim**.
+    ///
+    /// After the #1082 CP-1 final lift the storage holds only a
+    /// metal-rs `MetalRawDevice` directly, not a candle
+    /// `Arc<MetalDevice>`. Callers that still want a candle wrapper
+    /// (e.g. the 7 internal substrate ops in this file, which feed
+    /// `candle_metal_kernels::call_*` through `.command_encoder()` /
+    /// `.kernels()`) receive a freshly-derived wrapper via
+    /// [`primary_metal_device`] using the storage's device ordinal.
+    ///
+    /// Returns owned (not `&Arc<MetalDevice>`) — mirror of
+    /// [`crate::CudaStorage::candle_device`]'s signature shift in
+    /// the CudaStorage CP-1 lift (commit 5c3cd353). Every existing
+    /// caller invoked `.candle_device().clone()`; the owned-return
+    /// shape is source-compatible with both `.clone()` of an owned
+    /// `Arc` and direct use as a borrow target.
+    ///
+    /// Perf note: this materializes a fresh candle `MetalDevice`
+    /// (new command queue, new `Kernels` cache, new buffer pools).
+    /// On Apple Silicon `MetalDevice::new(ordinal)` is moderately
+    /// expensive — it issues `newCommandQueue` and a few buffer
+    /// allocations. Hot ops calling this on every invocation will
+    /// see measurable overhead; the eventual full-substrate lift
+    /// moves the `Kernels` + `CommandQueue` companions onto
+    /// `MetalStorage` directly so the per-op call becomes a cheap
+    /// Arc clone. That lift is out of scope for this commit.
+    pub fn candle_device(&self) -> Result<Arc<MetalDevice>> {
+        primary_metal_device(self.device_index())
     }
 
     /// The underlying metal-rs `Device` this storage was allocated
     /// on — **candle-free passthrough**.
     ///
-    /// Returns an owned [`candle_metal_kernels::metal::Device`] (cheap
+    /// After the #1082 CP-1 final lift, this is a cheap clone of the
+    /// stored `MetalRawDevice` field (a
     /// `Retained<ProtocolObject<dyn MTLDevice>>` clone via NSObject
-    /// `retain`). The returned device wraps the SAME `MTLDevice`
-    /// protocol object that candle's `MetalDevice` holds internally —
-    /// candle's `MetalDevice::metal_device()` returns `&Device` from
-    /// the same `candle_metal_kernels::metal` crate that this re-export
-    /// uses, so the wire type is identical.
-    ///
-    /// This is the substrate-side accessor that unblocks the #1082
-    /// Phase 7 CP-2 migration of `MetalAllocator` (and other
-    /// downstream callers) to hold `metal-rs::Device` directly without
-    /// depending on candle's `MetalDevice` wrapper. The internal
-    /// storage field continues to hold the candle `Arc<MetalDevice>`
-    /// for now (so every existing kernel-crate FFI site reading
-    /// `self.candle_device.clone()` keeps working unchanged); the
-    /// field flip to a raw `Arc<MetalRawDevice>` is a follow-up step
-    /// that can land after all callers have migrated to read
-    /// `.metal_device_handle()` instead of `.candle_device()`.
+    /// `retain` — no candle wrapper involvement, no
+    /// `primary_metal_device` call).
     ///
     /// Mirror of [`crate::CudaStorage::context`] — same shape, same
-    /// rationale (the read-bridge step of the CP-1/CP-2 substrate lift
+    /// rationale (the read-bridge step of the CP-1 substrate lift
     /// documented in `docs/issue-1082-tier-4-5-roadmap-2026-05-27.md`).
     pub fn metal_device_handle(&self) -> MetalRawDevice {
-        self.candle_device.metal_device().clone()
+        self.metal_handle.clone()
+    }
+
+    /// The Metal device ordinal this storage is bound to.
+    pub fn device_index(&self) -> usize {
+        match self.device {
+            Device::Metal(i) => i,
+            _ => unreachable!("MetalStorage::device is always Device::Metal"),
+        }
     }
 
     /// Returns `true` iff this storage's buffer is in a UMA-compatible
@@ -456,7 +498,7 @@ pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
             Error::Msg("metal_softmax_last_axis: input must be Metal-backed".to_string())
         })?;
 
-    let candle_device_arc = kt_metal.candle_device().clone();
+    let candle_device_arc = kt_metal.candle_device()?;
     let device_index = match kt_metal.device() {
         Device::Metal(i) => i,
         _ => unreachable!("MetalStorage::device() returns Device::Metal"),
@@ -612,7 +654,7 @@ pub fn metal_rmsnorm_last_axis(
             Error::Msg("metal_rmsnorm_last_axis: weight must be Metal-backed".to_string())
         })?;
 
-    let candle_device_arc = kt_metal_x.candle_device().clone();
+    let candle_device_arc = kt_metal_x.candle_device()?;
     let device_index = match kt_metal_x.device() {
         Device::Metal(i) => i,
         _ => unreachable!("MetalStorage::device() returns Device::Metal"),
@@ -778,7 +820,7 @@ pub fn metal_layernorm_last_axis(
             Error::Msg("metal_layernorm_last_axis: bias must be Metal-backed".to_string())
         })?;
 
-    let candle_device_arc = kt_metal_x.candle_device().clone();
+    let candle_device_arc = kt_metal_x.candle_device()?;
     let device_index = match kt_metal_x.device() {
         Device::Metal(i) => i,
         _ => unreachable!("MetalStorage::device() returns Device::Metal"),
@@ -932,7 +974,7 @@ pub fn metal_index_select_dim0(
             Error::Msg("metal_index_select_dim0: indices must be Metal-backed".to_string())
         })?;
 
-    let candle_device_arc = kt_metal_in.candle_device().clone();
+    let candle_device_arc = kt_metal_in.candle_device()?;
     let device_index = match kt_metal_in.device() {
         Device::Metal(i) => i,
         _ => unreachable!("MetalStorage::device() returns Device::Metal"),
@@ -1114,7 +1156,7 @@ pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
         .downcast_ref::<MetalStorage>()
         .ok_or_else(|| Error::Msg("metal_cast: input must be Metal-backed".to_string()))?;
 
-    let candle_device_arc = kt_metal.candle_device().clone();
+    let candle_device_arc = kt_metal.candle_device()?;
     let device_index = match kt_metal.device() {
         Device::Metal(i) => i,
         _ => unreachable!("MetalStorage::device() returns Device::Metal"),
@@ -1261,7 +1303,7 @@ pub fn metal_elementwise_binary(
         .downcast_ref::<MetalStorage>()
         .ok_or_else(|| Error::Msg("metal_elementwise_binary: b must be Metal-backed".to_string()))?;
 
-    let candle_device_arc = kt_metal_a.candle_device().clone();
+    let candle_device_arc = kt_metal_a.candle_device()?;
     let device_index = match kt_metal_a.device() {
         Device::Metal(i) => i,
         _ => unreachable!("MetalStorage::device() returns Device::Metal"),
@@ -1438,7 +1480,7 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
             Error::Msg("metal_activation_unary: input must be Metal-backed".to_string())
         })?;
 
-    let candle_device_arc = kt_metal.candle_device().clone();
+    let candle_device_arc = kt_metal.candle_device()?;
     let device_index = match kt_metal.device() {
         Device::Metal(i) => i,
         _ => unreachable!("MetalStorage::device() returns Device::Metal"),
