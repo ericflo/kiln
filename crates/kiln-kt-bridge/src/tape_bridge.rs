@@ -289,10 +289,21 @@ pub fn with_io_mapping_scope<R>(f: impl FnOnce() -> R) -> R {
 /// runs `forward` (every `try_tape_*_cuda` adapter records onto the tape and,
 /// via Step-A kt-id reuse, threads its inputs to upstream outputs so the tape
 /// is CONNECTED), then seeds the tape at the returned loss (`dL/dL =
-/// ones_like(loss)`) and walks the connected graph. Returns a map
-/// `{ candle_input_id (raw) → kt grad }` built from the recorded input
-/// mappings, so the trainer can deposit each grad under the matching candle
-/// `TensorId`.
+/// ones_like(loss)`) and walks the connected graph. Returns:
+///
+/// * `T` — the caller's application-specific payload (e.g. the f64 loss value,
+///   metrics, etc.) — same role as the first tuple element of
+///   [`with_tape_scope_emit_to_grad_store`].
+/// * `CandleTensor` — the loss tensor itself. Returned alongside the grad map
+///   so the trainer can build a candle `GradStore` from it (e.g. via
+///   `loss.backward()` to get a near-empty store, then `insert_id` each tape
+///   grad under the matching candle `TensorId` — see the
+///   `kiln-cp4-trainer-flip-gradstore-wrinkle` note for the option (a) path
+///   around candle's private `GradStore::new()`).
+/// * `HashMap<usize, kiln_tensor::Tensor>` — map of
+///   `candle_input_id (raw) → kt grad` built from the recorded input
+///   mappings, so the trainer can deposit each grad under the matching candle
+///   `TensorId`.
 ///
 /// Unlike [`with_tape_scope_emit_to_grad_store`] (candle-authoritative: runs
 /// `loss.backward()` and seeds the tape per-output from candle's `GradStore`,
@@ -300,20 +311,31 @@ pub fn with_io_mapping_scope<R>(f: impl FnOnce() -> R) -> R {
 /// and NO per-output candle grad — only that the loss is itself a tape
 /// adapter output (e.g. the `cross_entropy` adapter recorded it).
 ///
-/// Errors if the returned loss was not produced by a tape adapter in this
-/// scope (i.e. the loss op is not yet tape-routed).
-pub fn with_tape_authoritative_scope<F>(
+/// # Contract
+///
+/// `forward` takes no arguments and must return `(T, CandleTensor)` where the
+/// candle tensor is the loss (must be a tape-adapter output in this scope).
+/// The payload `T` is plumbed through unchanged to the caller.
+///
+/// # Errors
+///
+/// * `forward()` errors. Propagated verbatim.
+/// * The returned loss was not produced by a tape adapter in this scope
+///   (i.e. the loss op is not yet tape-routed).
+/// * Tape walk errors.
+pub fn with_tape_authoritative_scope<T, F>(
     forward: F,
-) -> Result<HashMap<usize, kiln_tensor::Tensor>, BridgeError>
+) -> Result<(T, CandleTensor, HashMap<usize, kiln_tensor::Tensor>), BridgeError>
 where
-    F: FnOnce() -> Result<CandleTensor, BridgeError>,
+    F: FnOnce() -> Result<(T, CandleTensor), BridgeError>,
 {
     with_io_mapping_scope(|| {
         // Run forward under a thread-local tape; the mapping scope stays live
         // for the seed + extract below (with_io_mapping_scope closes it after
         // this closure returns).
-        let (loss_res, tape) = with_thread_local_tape(forward);
-        let loss = loss_res?;
+        let (forward_res, tape): (Result<(T, CandleTensor), BridgeError>, Tape) =
+            with_thread_local_tape(forward);
+        let (payload, loss) = forward_res?;
 
         // The loss must be a tape adapter output — its kt tensor is retained
         // in the mapping scope (via retain_output_for_chaining).
@@ -355,7 +377,7 @@ where
                 out.insert(candle_in_raw, g.clone());
             }
         }
-        Ok(out)
+        Ok((payload, loss, out))
     })
 }
 

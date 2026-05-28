@@ -2196,20 +2196,30 @@ fn tape_authoritative_scope_matmul_add_grad_parity() {
     .contiguous()
     .expect("c contig");
 
-    // Path B: tape-authoritative. "loss" = s = a@b + c (seed = ones).
+    // Path B: tape-authoritative. "loss" = s = a@b + c (seed = ones). The
+    // payload exercises the (T, loss) forward shape mirroring
+    // with_tape_scope_emit_to_grad_store — here we use a u32 marker so the
+    // refined signature is type-checked end-to-end. (#1082 CP-4 endgame.)
     let a1 = a.clone();
     let b1 = b.clone();
     let c1 = c.clone();
-    let grads = kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(move || {
-        let mm = kiln_model::tape_forward::try_tape_matmul_cuda(&a1, &b1)
-            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("matmul: {e}")))?
-            .ok_or_else(|| kiln_kt_bridge::BridgeError::new("matmul adapter returned None"))?;
-        let s = kiln_model::tape_forward::try_tape_add_cuda(&mm, &c1)
-            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("add: {e}")))?
-            .ok_or_else(|| kiln_kt_bridge::BridgeError::new("add adapter returned None"))?;
-        Ok(s)
-    })
-    .expect("tape-authoritative scope ok");
+    let (payload, loss_tensor, grads) =
+        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(move || {
+            let mm = kiln_model::tape_forward::try_tape_matmul_cuda(&a1, &b1)
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("matmul: {e}")))?
+                .ok_or_else(|| {
+                    kiln_kt_bridge::BridgeError::new("matmul adapter returned None")
+                })?;
+            let s = kiln_model::tape_forward::try_tape_add_cuda(&mm, &c1)
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("add: {e}")))?
+                .ok_or_else(|| kiln_kt_bridge::BridgeError::new("add adapter returned None"))?;
+            Ok((42u32, s))
+        })
+        .expect("tape-authoritative scope ok");
+
+    assert_eq!(payload, 42u32, "payload plumbed through unchanged");
+    assert_eq!(loss_tensor.shape().dims(), &[m, n], "loss tensor shape (a@b+c)");
+    assert!(loss_tensor.device().is_cuda(), "loss tensor stays on CUDA");
 
     // `a.clone()` shares a's candle TensorId, so the grad is keyed by a.id().
     let da_kt = grads
