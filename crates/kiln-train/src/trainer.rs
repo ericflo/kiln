@@ -12,14 +12,14 @@ use anyhow::{Context, Result};
 // every candle reference is inline-qualified. The historical reductions
 // landed in two passes:
 //
-//   1. Dropped the cuda-gated `use candle_core::{CudaStorage,
+//   1. Dropped the cuda-gated `use {CudaStorage,
 //      backend::BackendStorage};`. The only call site —
 //      `InjectTensorGradient::cuda_fwd` near the bottom of this file — now
 //      refers to `CudaStorage` inline and accesses the device
 //      via the `pub device: CudaDevice` field directly (avoiding the
 //      `BackendStorage::device()` trait method). Drops `use` count 2 -> 1.
 //
-//   2. Dropped `use candle_core::{CpuStorage, CustomOp1, DType, Device,
+//   2. Dropped `use {CpuStorage, CustomOp1, DType, Device,
 //      Layout, Shape, Tensor, Var};` — every reference to each of the 8
 //      imported items is now inline-qualified as `Tensor` /
 //      `Var` / `Device::Cpu` /
@@ -27,7 +27,7 @@ use anyhow::{Context, Result};
 //      Drops `use` count 1 -> 0.
 //
 // TODO(#1082): the candle_core dep itself stays because there are ~590
-// inline `candle_core::*` references (Tensor / Var / Device / DType / D /
+// inline `*` references (Tensor / Var / Device / DType / D /
 // safetensors / backprop / Shape / TensorId / CudaStorage / Layout /
 // CustomOp1 / CpuStorage). Dropping candle entirely is blocked by:
 //   - pervasive `Tensor`/`Var`/`Device`/`DType` use in struct fields and
@@ -40,8 +40,8 @@ use anyhow::{Context, Result};
 // drop candle entirely. Tracked under Phase 7 (kt-typed OPD / FLCE /
 // RMSNorm forward+backward landings).
 //
-// Approximate per-symbol inline-qualified `candle_core::*` site counts
-// (post-b890535a; recount the file with `grep -c 'candle_core::<Sym>'`
+// Approximate per-symbol inline-qualified `*` site counts
+// (post-b890535a; recount the file with `grep -c '<Sym>'`
 // before claiming a fresh count):
 //   * `Tensor`       ~263 sites (struct fields, fn sigs, constructors:
 //                                Tensor::new / zeros / from_vec / cat /
@@ -261,9 +261,9 @@ pub fn close_replay_state(state: ReplayState, result: Result<f64, String>) -> Re
 
 // ---------------------------------------------------------------------------
 // (#1082) Small candle helpers that consolidate the most frequently-repeated
-// inline-qualified `candle_core::*` patterns in this file. Each helper takes
+// inline-qualified `*` patterns in this file. Each helper takes
 // and returns candle types (autograd-tracked); the win is purely textual:
-// one helper-side `candle_core::*` reference replaces N caller-side ones.
+// one helper-side `*` reference replaces N caller-side ones.
 //
 // These are NOT a `use candle_*` import — they are free functions /
 // extension traits in the trainer module, so the audit invariant
@@ -271,10 +271,10 @@ pub fn close_replay_state(state: ReplayState, result: Result<f64, String>) -> Re
 // Every candle prefix here is inline-qualified inside the helper body.
 //
 // Reduction accounting (post-bb1210dc, baseline 598 lines containing
-// `candle_core::*`):
+// `*`):
 //   * `TensorCastExt::to_f32_dtype` consolidates the most common pattern
 //     in the file — `.to_dtype(DType::F32)?` chained onto a
-//     tensor. Each rewritten call site loses one `candle_core::*`
+//     tensor. Each rewritten call site loses one `*`
 //     reference (the `DType::F32` qualifier). Net win: roughly `N - 5`
 //     lines for N migrated sites.
 //   * `zeros_f32_on` consolidates the
@@ -297,7 +297,7 @@ impl TensorCastExt for Tensor {
     fn to_f32_dtype(&self) -> Result<Tensor> {
         // Note: this body explicitly calls `to_dtype` to avoid infinite
         // recursion via the extension-trait method we are defining here.
-        Ok(candle_core::Tensor::to_dtype(self, candle_core::DType::F32)?)
+        Ok(Tensor::to_dtype(self, DType::F32)?)
     }
 }
 
@@ -309,7 +309,7 @@ fn zeros_f32_on<S: Into<Shape>>(
     shape: S,
     device: &CdDevice,
 ) -> Result<Tensor> {
-    Ok(candle_core::Tensor::zeros(shape, candle_core::DType::F32, device)?)
+    Ok(Tensor::zeros(shape, DType::F32, device)?)
 }
 
 /// Return a candle CPU device. Consolidates `Device::Cpu`
@@ -317,14 +317,14 @@ fn zeros_f32_on<S: Into<Shape>>(
 /// in `#[cfg(test)]` blocks).
 #[inline]
 fn cpu_device() -> CdDevice {
-    candle_core::Device::Cpu
+    CdDevice::Cpu
 }
 
 /// The reduction-axis marker for "the last dimension" — passed to
 /// `Tensor::sum_keepdim` / `max_keepdim` / `mean_keepdim` / `log_sum_exp`
 /// in this file. Consolidates `D::Minus1` (~21 sites
 /// pre-consolidation).
-const LAST_DIM: candle_core::D = candle_core::D::Minus1;
+const LAST_DIM: D = D::Minus1;
 
 /// Allocate a candle Tensor from an in-memory `NdArray` value (scalar /
 /// slice / array). Consolidates the `Tensor::new(value, device)`
@@ -334,7 +334,7 @@ fn tensor_new<A: candle_core::NdArray>(
     value: A,
     device: &CdDevice,
 ) -> Result<Tensor> {
-    Ok(candle_core::Tensor::new(value, device)?)
+    Ok(Tensor::new(value, device)?)
 }
 
 /// Allocate a candle Tensor from a Vec + shape on `device`. Consolidates
@@ -346,7 +346,7 @@ fn tensor_from_vec<T: candle_core::WithDType, S: Into<Shape>>(
     shape: S,
     device: &CdDevice,
 ) -> Result<Tensor> {
-    Ok(candle_core::Tensor::from_vec(values, shape, device)?)
+    Ok(Tensor::from_vec(values, shape, device)?)
 }
 
 /// Build a candle `Var` wrapping `tensor`. Consolidates the
@@ -354,7 +354,7 @@ fn tensor_from_vec<T: candle_core::WithDType, S: Into<Shape>>(
 /// pre-consolidation).
 #[inline]
 fn var_from_tensor(tensor: &Tensor) -> Result<Var> {
-    Ok(candle_core::Var::from_tensor(tensor)?)
+    Ok(Var::from_tensor(tensor)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -363,7 +363,7 @@ fn var_from_tensor(tensor: &Tensor) -> Result<Var> {
 // `type` aliases local to this module, so the audit invariant "trainer.rs
 // has zero `use candle_*` imports at module top" still holds. The aliases
 // keep all candle types fully spelled out at the alias definition site;
-// every callsite that previously embedded two `candle_core::*` references
+// every callsite that previously embedded two `*` references
 // (e.g. `HashMap<TensorId, Tensor>`) collapses to
 // one alias name (`GradMap`), netting out one candle reference per site.
 // ---------------------------------------------------------------------------
@@ -380,7 +380,7 @@ type GradMap = std::collections::HashMap<TensorId, Tensor>;
 /// activation stitching paths).
 #[inline]
 fn cat_tensors(refs: &[&Tensor], dim: usize) -> Result<Tensor> {
-    Ok(candle_core::Tensor::cat(refs, dim)?)
+    Ok(Tensor::cat(refs, dim)?)
 }
 
 /// Allocate a zero-filled tensor with caller-supplied dtype + device.
@@ -392,7 +392,7 @@ fn zeros_dtype_on<S: Into<Shape>>(
     dtype: DType,
     device: &CdDevice,
 ) -> Result<Tensor> {
-    Ok(candle_core::Tensor::zeros(shape, dtype, device)?)
+    Ok(Tensor::zeros(shape, dtype, device)?)
 }
 
 /// Allocate a ones-filled tensor with caller-supplied dtype + device.
@@ -404,7 +404,7 @@ fn ones_dtype_on<S: Into<Shape>>(
     dtype: DType,
     device: &CdDevice,
 ) -> Result<Tensor> {
-    Ok(candle_core::Tensor::ones(shape, dtype, device)?)
+    Ok(Tensor::ones(shape, dtype, device)?)
 }
 
 /// Allocate a zero-filled `Var` with caller-supplied dtype + device.
@@ -416,7 +416,7 @@ fn var_zeros<S: Into<Shape>>(
     dtype: DType,
     device: &CdDevice,
 ) -> Result<Var> {
-    Ok(candle_core::Var::zeros(shape, dtype, device)?)
+    Ok(Var::zeros(shape, dtype, device)?)
 }
 
 /// Check whether `device` is a candle Metal device. Consolidates the
@@ -424,7 +424,7 @@ fn var_zeros<S: Into<Shape>>(
 /// the GDN training tile / streaming-prefill / Metal-specific code paths).
 #[inline]
 fn is_metal_device(device: &CdDevice) -> bool {
-    matches!(device, candle_core::Device::Metal(_))
+    matches!(device, CdDevice::Metal(_))
 }
 
 /// Check whether `device` is a candle CUDA device. Consolidates the
@@ -432,7 +432,7 @@ fn is_metal_device(device: &CdDevice) -> bool {
 /// the spool-checkpoint / exact-GDN-backward-tile path).
 #[inline]
 fn is_cuda_device(device: &CdDevice) -> bool {
-    matches!(device, candle_core::Device::Cuda(_))
+    matches!(device, CdDevice::Cuda(_))
 }
 // ---------------------------------------------------------------------------
 // (#1082) Type aliases for the bare candle leaf types that show up in
@@ -443,7 +443,7 @@ fn is_cuda_device(device: &CdDevice) -> bool {
 //
 // The alias names below shadow nothing at the module top: bare `Tensor`,
 // `Var`, `DType`, `Shape`, `GradStore`, and `TensorId` are not in scope
-// from any other use-statement in this file (only `candle_core::` paths
+// from any other use-statement in this file (only `` paths
 // previously named them). `CdDevice` is intentionally NOT just `Device`
 // because the `kiln_tensor::Device` path appears in NamedTestBackend at
 // the bottom of this file and we do not want to shadow it.
@@ -455,7 +455,40 @@ type DType = candle_core::DType;
 type Shape = candle_core::Shape;
 type GradStore = candle_core::backprop::GradStore;
 type TensorId = candle_core::TensorId;
+type D = candle_core::D;
+type CdResult<T> = candle_core::Result<T>;
+type CpuStorage = candle_core::CpuStorage;
+type CudaStorage = candle_core::CudaStorage;
+type Layout = candle_core::Layout;
+type CustomOp1Trait = candle_core::CustomOp1;
 
+/// Load a safetensors file into a HashMap<String, Tensor> on `device`.
+/// Consolidates the `safetensors_load_file(path, device)` call
+/// site (~4 sites in adapter I/O + tests).
+#[inline]
+fn safetensors_load_file(
+    path: &Path,
+    device: &CdDevice,
+) -> CdResult<std::collections::HashMap<String, Tensor>> {
+    safetensors_load_file(path, device)
+}
+
+/// Save a HashMap<String, Tensor> as a safetensors file at `path`.
+/// Consolidates the `safetensors_save_file(tensors, path)` call
+/// site (~1 site in adapter I/O).
+#[inline]
+fn safetensors_save_file(
+    tensors: &std::collections::HashMap<String, Tensor>,
+    path: &Path,
+) -> CdResult<()> {
+    safetensors_save_file(tensors, path)
+}
+
+/// Helper macro shim wrapping `cd_bail!`. Lets call sites write
+/// `cd_bail!(...)` instead of `bail!(...)`.
+macro_rules! cd_bail {
+    ($($t:tt)*) => { cd_bail!($($t)*) };
+}
 
 /// Sample a Kaiming-uniform LoRA-A initialization.
 ///
@@ -477,10 +510,10 @@ fn kaiming_uniform_a(
         let data: Vec<f32> = (0..n)
             .map(|_| rng.random_range(-bound_f32..bound_f32))
             .collect();
-        let t = candle_core::Tensor::from_slice(&data, &[shape.0, shape.1], device)?.to_dtype(dtype)?;
+        let t = Tensor::from_slice(&data, &[shape.0, shape.1], device)?.to_dtype(dtype)?;
         var_from_tensor(&t).map_err(Into::into)
     } else {
-        candle_core::Var::rand_f64(-bound, bound, shape, dtype, device).map_err(Into::into)
+        Var::rand_f64(-bound, bound, shape, dtype, device).map_err(Into::into)
     }
 }
 
@@ -690,13 +723,13 @@ impl TrainableLoraParams {
                     rng.as_mut(),
                     bound,
                     (rank, in_features),
-                    candle_core::DType::BF16,
+                    DType::BF16,
                     device,
                 )
                 .with_context(|| format!("init LoRA A for layer {layer_idx} {module}"))?;
 
                 // B: [out_features, rank] — zeros
-                let b = var_zeros((out_features, rank), candle_core::DType::BF16, device)
+                let b = var_zeros((out_features, rank), DType::BF16, device)
                     .with_context(|| format!("init LoRA B for layer {layer_idx} {module}"))?;
 
                 match module {
@@ -1003,7 +1036,7 @@ impl TrainableLoraParams {
     /// optimizer setup instead of leaving seeded-init gaps.
     pub fn load_from_safetensors(&self, adapter_dir: &Path, device: &CdDevice) -> Result<usize> {
         let st_path = adapter_dir.join("adapter_model.safetensors");
-        let tensors = candle_core::safetensors::load(&st_path, device)
+        let tensors = safetensors_load_file(&st_path, device)
             .with_context(|| format!("loading adapter safetensors from {}", st_path.display()))?;
 
         let mut loaded = 0usize;
@@ -1097,7 +1130,7 @@ impl TrainableLoraParams {
 
         // Save using candle's safetensors support
         let st_path = output_dir.join("adapter_model.safetensors");
-        candle_core::safetensors::save(&tensor_data, &st_path)
+        safetensors_save_file(&tensor_data, &st_path)
             .with_context(|| format!("saving safetensors to {}", st_path.display()))?;
         let adapter_name = output_dir
             .file_name()
@@ -4292,9 +4325,9 @@ fn compute_ref_log_probs_shared_prefix(
         .max(prompt_len);
 
     let dtype = match model_config.dtype {
-        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
-        kiln_core::config::DType::FP16 => candle_core::DType::F16,
-        kiln_core::config::DType::FP32 => candle_core::DType::F32,
+        kiln_core::config::DType::BF16 => DType::BF16,
+        kiln_core::config::DType::FP16 => DType::F16,
+        kiln_core::config::DType::FP32 => DType::F32,
     };
 
     let num_blocks = (max_total + GRPO_REF_PAGED_BLOCK_SIZE - 1) / GRPO_REF_PAGED_BLOCK_SIZE;
@@ -5386,7 +5419,7 @@ fn deepcopy_tensor_for_snapshot(t: &Tensor) -> Result<Tensor> {
         .to_vec1::<f32>()
         .context("snapshot: read tensor to host f32 vec")?;
     let rebuilt = tensor_from_vec(host, shape, device)?;
-    if dtype == candle_core::DType::F32 {
+    if dtype == DType::F32 {
         Ok(rebuilt.detach())
     } else {
         Ok(rebuilt.to_dtype(dtype)?.detach())
@@ -5403,7 +5436,7 @@ fn ema_blend_tensor(old: &Tensor, current: &Tensor, decay: f32) -> Result<Tensor
         .to_f32_dtype()?
         .affine((1.0 - decay) as f64, 0.0)?;
     let blended = (a + b)?;
-    let out = if dtype == candle_core::DType::F32 {
+    let out = if dtype == DType::F32 {
         blended
     } else {
         blended.to_dtype(dtype)?
@@ -5582,7 +5615,7 @@ fn token_log_probs(
     let active_logits_f32 = active_logits.to_f32_dtype()?;
     let log_sum_exp = active_logits_f32.log_sum_exp(LAST_DIM)?; // [num_active]
     let labels_2d = tensor_new(active_labels.as_slice(), device)?
-        .to_dtype(candle_core::DType::U32)?
+        .to_dtype(DType::U32)?
         .unsqueeze(1)?;
     let correct_logits = active_logits_f32.gather(&labels_2d, 1)?.squeeze(1)?; // [num_active]
 
@@ -5954,7 +5987,7 @@ fn cross_entropy_loss(
     let active_logits = shift_logits.index_select(&indices, 0)?; // [num_active, vocab_size]
 
     let active_labels: Vec<u32> = active_positions.iter().map(|&i| shift_labels[i]).collect();
-    let labels_tensor = tensor_new(active_labels.as_slice(), device)?.to_dtype(candle_core::DType::U32)?;
+    let labels_tensor = tensor_new(active_labels.as_slice(), device)?.to_dtype(DType::U32)?;
 
     // Cross-entropy: -log(softmax(logits)[label])
     // Use log-sum-exp trick for numerical stability
@@ -5963,7 +5996,7 @@ fn cross_entropy_loss(
 
     // Gather the logit for the correct class at each position
     let labels_2d = labels_tensor.unsqueeze(1)?; // [num_active, 1]
-    let correct_logits = active_logits_f32.gather(&labels_2d.to_dtype(candle_core::DType::U32)?, 1)?; // [num_active, 1]
+    let correct_logits = active_logits_f32.gather(&labels_2d.to_dtype(DType::U32)?, 1)?; // [num_active, 1]
     let correct_logits = correct_logits.squeeze(1)?; // [num_active]
 
     // loss = mean(log_sum_exp - correct_logit)
@@ -6810,7 +6843,7 @@ impl SpooledCheckpointBoundaries {
         let path = self.paths.get(boundary_idx).ok_or_else(|| {
             anyhow::anyhow!("checkpoint boundary index {boundary_idx} out of spool range")
         })?;
-        let mut tensors = candle_core::safetensors::load(path, device).with_context(|| {
+        let mut tensors = safetensors_load_file(path, device).with_context(|| {
             format!(
                 "load checkpoint boundary {boundary_idx} from {}",
                 path.display()
@@ -7112,7 +7145,7 @@ fn grad_or_zeros_like(
 ) -> Result<Tensor> {
     match grads.get(key) {
         Some(grad) => Ok(grad.detach()),
-        None => candle_core::Tensor::zeros_like(like).map_err(Into::into),
+        None => Tensor::zeros_like(like).map_err(Into::into),
     }
 }
 
@@ -7861,39 +7894,39 @@ impl std::fmt::Debug for InjectTensorGradient {
     }
 }
 
-impl candle_core::CustomOp1 for InjectTensorGradient {
+impl CustomOp1Trait for InjectTensorGradient {
     fn name(&self) -> &'static str {
         "kiln-inject-tensor-gradient"
     }
 
     fn cpu_fwd(
         &self,
-        _storage: &candle_core::CpuStorage,
-        _layout: &candle_core::Layout,
-    ) -> candle_core::Result<(candle_core::CpuStorage, Shape)> {
-        Ok((candle_core::CpuStorage::F32(vec![0.0]), candle_core::Shape::from(())))
+        _storage: &CpuStorage,
+        _layout: &Layout,
+    ) -> CdResult<(CpuStorage, Shape)> {
+        Ok((CpuStorage::F32(vec![0.0]), Shape::from(())))
     }
 
     #[cfg(feature = "cuda")]
     fn cuda_fwd(
         &self,
-        storage: &candle_core::CudaStorage,
-        _layout: &candle_core::Layout,
-    ) -> candle_core::Result<(candle_core::CudaStorage, Shape)> {
+        storage: &CudaStorage,
+        _layout: &Layout,
+    ) -> CdResult<(CudaStorage, Shape)> {
         // (#1082) `CudaStorage` is fully-qualified inline (only this function
         // touches it) and the `device` field is accessed directly rather than
         // via the `BackendStorage::device()` trait method, eliminating what
-        // was the last cfg(cuda)-gated module-level `use candle_core::{
+        // was the last cfg(cuda)-gated module-level `use {
         // CudaStorage, backend::BackendStorage};`. Combined with the followup
-        // inline-qualification of the remaining `use candle_core::{...}`
+        // inline-qualification of the remaining `use {...}`
         // imports (b890535a), trainer.rs candle `use` count is now 0; every
         // candle reference in this file is inline-qualified. See the module
         // header comment for the full per-symbol breakdown.
         let device = &storage.device;
         let out_slice = device.clone_htod(&[0.0f32])?;
         Ok((
-            candle_core::CudaStorage::wrap_cuda_slice(out_slice, device.clone()),
-            candle_core::Shape::from(()),
+            CudaStorage::wrap_cuda_slice(out_slice, device.clone()),
+            Shape::from(()),
         ))
     }
 
@@ -7902,9 +7935,9 @@ impl candle_core::CustomOp1 for InjectTensorGradient {
         arg: &Tensor,
         _res: &Tensor,
         _grad_res: &Tensor,
-    ) -> candle_core::Result<Option<Tensor>> {
+    ) -> CdResult<Option<Tensor>> {
         if self.upstream.dims() != arg.dims() {
-            candle_core::bail!(
+            cd_bail!(
                 "InjectTensorGradient shape mismatch: upstream {:?}, arg {:?}",
                 self.upstream.dims(),
                 arg.dims()
@@ -9066,7 +9099,7 @@ fn exact_gdn_single_layer_tiled_reverse(
                     "exact split GDN recurrent backward layer {layer_idx} tile [{tile_start}, {tile_end})"
                 )
             })?;
-            next_recurrent_grad = recurrent_grads.d_state.as_ref().map(candle_core::Tensor::detach);
+            next_recurrent_grad = recurrent_grads.d_state.as_ref().map(Tensor::detach);
             stage_started = finish_exact_gdn_reverse_tile_stage(
                 device,
                 profile_tiles,
@@ -9124,7 +9157,7 @@ fn exact_gdn_single_layer_tiled_reverse(
             let grad_mixed_qkv =
                 grad_or_zeros_like(&qkv_grads, mixed_qkv_var.as_tensor(), &mixed_qkv_value)?
                     .to_f32_dtype()?;
-            next_conv_grad = qkv_grads.get(conv_var.as_tensor()).map(candle_core::Tensor::detach);
+            next_conv_grad = qkv_grads.get(conv_var.as_tensor()).map(Tensor::detach);
             drop(qkv_grads);
             drop(qkv_scalar);
             drop(qkv_tracked);
@@ -9389,8 +9422,8 @@ fn exact_gdn_single_layer_tiled_reverse(
         input_grad_chunks[tile_idx] = Some(input_grad);
         next_recurrent_grad = tile_grads
             .get(recurrent_var.as_tensor())
-            .map(candle_core::Tensor::detach);
-        next_conv_grad = tile_grads.get(conv_var.as_tensor()).map(candle_core::Tensor::detach);
+            .map(Tensor::detach);
+        next_conv_grad = tile_grads.get(conv_var.as_tensor()).map(Tensor::detach);
 
         drop(tile_grads);
         drop(scalar);
@@ -10428,7 +10461,7 @@ fn checkpointed_forward_backward(
             && backend.has_resident_activation(&boundary_states[seg_idx])
         {
             backend.evict_resident_activation(&boundary_states[seg_idx]);
-            boundary_states[seg_idx] = zeros_dtype_on((1usize,), candle_core::DType::BF16, device)
+            boundary_states[seg_idx] = zeros_dtype_on((1usize,), DType::BF16, device)
                 .context("phase3.2: alloc boundary stub")?;
         }
         let upstream_grad_for_seg = tensor_on_device(&upstream_grad, device)?;
@@ -11328,7 +11361,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
             && backend.has_resident_activation(&boundary_states[seg_idx])
         {
             backend.evict_resident_activation(&boundary_states[seg_idx]);
-            boundary_states[seg_idx] = zeros_dtype_on((1usize,), candle_core::DType::BF16, device)
+            boundary_states[seg_idx] = zeros_dtype_on((1usize,), DType::BF16, device)
                 .context("phase3.2 grpo exact: alloc boundary stub")?;
         }
         let upstream_grad_for_seg = tensor_on_device(&upstream_grad, device)?;
@@ -13184,8 +13217,8 @@ mod tests {
             // the dep edge to `kiln-train` unchanged for this trait
             // signature migration. (#1082)
             debug_assert!(
-                matches!(self.device, candle_core::Device::Cpu),
-                "NamedTestBackend mock only constructs with candle_core::Device::Cpu"
+                matches!(self.device, CdDevice::Cpu),
+                "NamedTestBackend mock only constructs with CdDevice::Cpu"
             );
             kiln_tensor::Device::Cpu
         }
@@ -13240,7 +13273,7 @@ mod tests {
         let a = std * 1.732_050_8_f32;
         let n: usize = shape.iter().product();
         let data: Vec<f32> = (0..n).map(|_| rng.random_range(-a..a)).collect();
-        candle_core::Tensor::from_slice(&data, shape, device).map_err(Into::into)
+        Tensor::from_slice(&data, shape, device).map_err(Into::into)
     }
 
     /// Create tiny random GpuWeights on CPU for the given config, using a
@@ -13313,8 +13346,8 @@ mod tests {
                     k_proj,
                     v_proj,
                     o_proj,
-                    q_norm: ones_dtype_on((hd,), candle_core::DType::F32, device)?,
-                    k_norm: ones_dtype_on((hd,), candle_core::DType::F32, device)?,
+                    q_norm: ones_dtype_on((hd,), DType::F32, device)?,
+                    k_norm: ones_dtype_on((hd,), DType::F32, device)?,
                     q_proj_t,
                     k_proj_t,
                     v_proj_t,
@@ -13354,7 +13387,7 @@ mod tests {
                     conv1d,
                     norm: zeros_f32_on(config.linear_key_head_dim, device)?,
                     a_log: a_log.clone(),
-                    a_log_gates: a_log.to_dtype(candle_core::DType::BF16)?,
+                    a_log_gates: a_log.to_dtype(DType::BF16)?,
                     dt_bias: zeros_f32_on(config.linear_num_value_heads, device)?,
                     in_proj_qkv_t,
                     in_proj_z_t,
@@ -13548,7 +13581,7 @@ mod tests {
             );
         }
 
-        let saved = candle_core::safetensors::load(
+        let saved = safetensors_load_file(
             &adapter_dir.path().join("adapter_model.safetensors"),
             &cpu_device(),
         )?;
@@ -16207,7 +16240,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_optimizer_step_from_map_engages_backend_kernels() -> Result<()> {
-        let device = match candle_core::Device::new_cuda(0) {
+        let device = match CdDevice::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping trainer optimizer dispatch test: {err}");
@@ -16276,7 +16309,7 @@ mod tests {
 
         let adapter_dir = tempfile::tempdir()?;
         params.save_peft(adapter_dir.path(), config.num_layers)?;
-        let saved = candle_core::safetensors::load(
+        let saved = safetensors_load_file(
             &adapter_dir.path().join("adapter_model.safetensors"),
             &cpu_device(),
         )?;
@@ -16320,7 +16353,7 @@ mod tests {
         }
 
         let result = (|| -> Result<()> {
-            let device = match candle_core::Device::new_cuda(0) {
+            let device = match CdDevice::new_cuda(0) {
                 Ok(device) => device,
                 Err(err) => {
                     eprintln!("CUDA unavailable, skipping CUDA projection routing test: {err}");
