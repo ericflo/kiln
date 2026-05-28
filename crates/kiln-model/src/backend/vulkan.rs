@@ -3710,11 +3710,45 @@ impl BackendRuntime for VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-        let result = kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_prep(
-            vk_device, g, v, kkt, qkt, ks_entry, q_s,
-        )
-        .context("gdn_chunk_prep kernel failed")?;
-        Ok(Some(result))
+        let g_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(g)?.0;
+        let v_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(v)?.0;
+        let kkt_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(kkt)?.0;
+        let qkt_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(qkt)?.0;
+        let ks_entry_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(ks_entry)?.0;
+        let q_s_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(q_s)?.0;
+        let g_dims = g.dims();
+        let (batch, heads, chunk) = (g_dims[0], g_dims[1], g_dims[2]);
+        let dv = v.dims()[3];
+        let (a_strict_b, b_mask_b, v_prime_b, q_s_scaled_b, decay_last_col_b, p_last_b) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_prep_bytes(
+                vk_device,
+                &g_data, &v_data, &kkt_data, &qkt_data, &ks_entry_data, &q_s_data,
+                batch, heads, chunk, dv,
+            )
+            .context("gdn_chunk_prep kernel failed")?;
+        let cc_shape = [batch, heads, chunk, chunk];
+        let cv_shape = [batch, heads, chunk, dv];
+        let decay_shape = [batch, heads, chunk];
+        let p_last_shape = [batch, heads];
+        let a_strict_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &a_strict_b, &cc_shape, DType::BF16,
+        )?;
+        let b_mask_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &b_mask_b, &cc_shape, DType::BF16,
+        )?;
+        let v_prime_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &v_prime_b, &cv_shape, DType::BF16,
+        )?;
+        let q_s_scaled_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &q_s_scaled_b, &cv_shape, DType::BF16,
+        )?;
+        let decay_last_col_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &decay_last_col_b, &decay_shape, DType::BF16,
+        )?;
+        let p_last_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &p_last_b, &p_last_shape, DType::BF16,
+        )?;
+        Ok(Some((a_strict_t, b_mask_t, v_prime_t, q_s_scaled_t, decay_last_col_t, p_last_t)))
     }
 
     fn gdn_chunk_scan(

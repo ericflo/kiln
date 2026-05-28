@@ -9680,28 +9680,25 @@ pub fn dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options(
 /// Computes: a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last
 /// Input: g[B,H,C], v[B,H,C,dv], kkt[B,H,C,C], qkt[B,H,C,C],
 ///         ks_entry[B,H,C,dv], q_s[B,H,C,dv]
-pub fn dispatch_gdn_chunk_prep(
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_chunk_prep_bytes(
     vk_device: &VulkanDevice,
-    g: &Tensor,
-    v: &Tensor,
-    kkt: &Tensor,
-    qkt: &Tensor,
-    ks_entry: &Tensor,
-    q_s: &Tensor,
-) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)> {
+    g_data: &[u8],
+    v_data: &[u8],
+    kkt_data: &[u8],
+    qkt_data: &[u8],
+    ks_entry_data: &[u8],
+    q_s_data: &[u8],
+    batch: usize,
+    heads: usize,
+    chunk: usize,
+    dv: usize,
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let qfi = vk_device.queue_family_index();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
-
-    // Extract input data
-    let g_data = extract_tensor_bytes(g)?.0;
-    let v_data = extract_tensor_bytes(v)?.0;
-    let kkt_data = extract_tensor_bytes(kkt)?.0;
-    let qkt_data = extract_tensor_bytes(qkt)?.0;
-    let ks_entry_data = extract_tensor_bytes(ks_entry)?.0;
-    let q_s_data = extract_tensor_bytes(q_s)?.0;
 
     // Compile shader
     let glsl_path = concat!(
@@ -9709,12 +9706,6 @@ pub fn dispatch_gdn_chunk_prep(
         "/csrc/shaders/gdn_chunk_prep.comp"
     );
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
-
-    // Parse shapes
-    let dims_g = g.dims();
-    let (batch, heads, chunk) = (dims_g[0], dims_g[1], dims_g[2]);
-    let dims_v = v.dims();
-    let dv = dims_v[3];
 
     // Create input buffers + upload
     let g_buf = VulkanBuffer::create_device_local(device, device_local_mt, g_data.len() as u64)?;
@@ -9870,26 +9861,14 @@ pub fn dispatch_gdn_chunk_prep(
     drop(decay_last_col_buf);
     drop(p_last_buf);
 
-    let cc_shape = vec![batch, heads, chunk, chunk];
-    let cv_shape = vec![batch, heads, chunk, dv];
-    let decay_shape = vec![batch, heads, chunk];
-    let p_last_shape = vec![batch, heads];
-
-    let a_strict_tensor = create_tensor_from_data(&a_strict_data, &cc_shape, DType::BF16)?;
-    let b_mask_tensor = create_tensor_from_data(&b_mask_data, &cc_shape, DType::BF16)?;
-    let v_prime_tensor = create_tensor_from_data(&v_prime_data, &cv_shape, DType::BF16)?;
-    let q_s_scaled_tensor = create_tensor_from_data(&q_s_scaled_data, &cv_shape, DType::BF16)?;
-    let decay_last_col_tensor =
-        create_tensor_from_data(&decay_last_col_data, &decay_shape, DType::BF16)?;
-    let p_last_tensor = create_tensor_from_data(&p_last_data, &p_last_shape, DType::BF16)?;
-
+    let _ = (batch, heads, chunk, dv);
     Ok((
-        a_strict_tensor,
-        b_mask_tensor,
-        v_prime_tensor,
-        q_s_scaled_tensor,
-        decay_last_col_tensor,
-        p_last_tensor,
+        a_strict_data,
+        b_mask_data,
+        v_prime_data,
+        q_s_scaled_data,
+        decay_last_col_data,
+        p_last_data,
     ))
 }
 
