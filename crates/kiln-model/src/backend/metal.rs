@@ -5716,9 +5716,9 @@ kernel void kiln_paged_kv_write_token_major_batch_bf16(
 
 fn metal_shared_library(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::Library> {
+) -> Result<kiln_tensor::metal_types::Library> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::Library;
+    use kiln_tensor::metal_types::Library;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -5769,9 +5769,9 @@ fn metal_shared_library(
 
 fn metal_rms_norm_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -5798,9 +5798,9 @@ fn metal_rms_norm_pipeline(
 
 fn metal_rotary_qk_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -5827,9 +5827,9 @@ fn metal_rotary_qk_pipeline(
 
 fn metal_gdn_qk_norm_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -5856,9 +5856,9 @@ fn metal_gdn_qk_norm_pipeline(
 
 fn metal_gdn_qk_norm_gqa_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -5885,9 +5885,9 @@ fn metal_gdn_qk_norm_gqa_pipeline(
 
 fn metal_gdn_decode_qkv_conv_norm_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -5914,9 +5914,9 @@ fn metal_gdn_decode_qkv_conv_norm_pipeline(
 
 fn metal_lm_head_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -5943,9 +5943,9 @@ fn metal_lm_head_pipeline(
 
 fn metal_lm_head_argmax_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -5972,9 +5972,9 @@ fn metal_lm_head_argmax_pipeline(
 
 fn metal_lm_head_argmax_reduce_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6001,9 +6001,9 @@ fn metal_lm_head_argmax_reduce_pipeline(
 
 fn metal_lm_head_argmax_batch_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6030,9 +6030,9 @@ fn metal_lm_head_argmax_batch_pipeline(
 
 fn metal_lm_head_argmax_reduce_batch_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6059,9 +6059,9 @@ fn metal_lm_head_argmax_reduce_batch_pipeline(
 
 fn metal_mlp_gate_up_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6088,9 +6088,9 @@ fn metal_mlp_gate_up_pipeline(
 
 fn metal_mlp_gate_up_serial_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6117,9 +6117,9 @@ fn metal_mlp_gate_up_serial_pipeline(
 
 fn metal_mlp_silu_mul_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6146,9 +6146,9 @@ fn metal_mlp_silu_mul_pipeline(
 
 fn metal_attn_gate_sigmoid_mul_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6176,9 +6176,9 @@ fn metal_attn_gate_sigmoid_mul_pipeline(
 fn metal_transposed_coop_gemv_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
     tile: MetalTransposedCoopGemvTile,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6208,9 +6208,9 @@ fn metal_transposed_coop_gemv_pipeline(
 
 fn metal_transposed_coop_gemv_batch_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6237,9 +6237,9 @@ fn metal_transposed_coop_gemv_batch_pipeline(
 
 fn metal_transposed_coop_gemv_batch_row_triple_tile8_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6277,9 +6277,9 @@ fn metal_transposed_coop_gemv_batch_row_triple_tile8_pipeline(
 
 fn metal_transposed_coop_gemv_batch_row_quad_tile8_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6310,9 +6310,9 @@ fn metal_transposed_coop_gemv_batch_row_quad_tile8_pipeline(
 
 fn metal_fused_qkv_transposed_coop_gemv_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6339,9 +6339,9 @@ fn metal_fused_qkv_transposed_coop_gemv_pipeline(
 
 fn metal_lora_hidden_decode_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6368,9 +6368,9 @@ fn metal_lora_hidden_decode_pipeline(
 
 fn metal_lora_add_decode_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6397,9 +6397,9 @@ fn metal_lora_add_decode_pipeline(
 
 fn metal_gdn_in_proj_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6426,9 +6426,9 @@ fn metal_gdn_in_proj_pipeline(
 
 fn metal_paged_kv_head_major_read_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6455,9 +6455,9 @@ fn metal_paged_kv_head_major_read_pipeline(
 
 fn metal_paged_kv_head_major_read_append_token_major_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6487,9 +6487,9 @@ fn metal_paged_kv_head_major_read_append_token_major_pipeline(
 
 fn metal_paged_attn_decode_contiguous_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6516,9 +6516,9 @@ fn metal_paged_attn_decode_contiguous_pipeline(
 
 fn metal_paged_attn_decode_contiguous_batch_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6549,9 +6549,9 @@ fn metal_paged_attn_decode_contiguous_batch_pipeline(
 
 fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6585,9 +6585,9 @@ fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_pipeline(
 
 fn metal_paged_kv_write_token_major_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -6614,9 +6614,9 @@ fn metal_paged_kv_write_token_major_pipeline(
 
 fn metal_paged_kv_write_token_major_batch_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -10278,9 +10278,9 @@ kernel void kiln_gdn_decode_gates_recurrent_rmsnorm_bf16(
 
 fn metal_gdn_gates_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -10307,9 +10307,9 @@ fn metal_gdn_gates_pipeline(
 
 fn metal_gdn_gates_decay_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -10336,9 +10336,9 @@ fn metal_gdn_gates_decay_pipeline(
 
 fn metal_gdn_gates_decay_ab_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -10365,9 +10365,9 @@ fn metal_gdn_gates_decay_ab_pipeline(
 
 fn metal_gdn_decode_gates_recurrent_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -10394,9 +10394,9 @@ fn metal_gdn_decode_gates_recurrent_pipeline(
 
 fn metal_gdn_decode_gates_recurrent_rmsnorm_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -11134,9 +11134,9 @@ kernel void kiln_gated_rmsnorm_bf16(
 
 fn metal_gated_rms_norm_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -11828,9 +11828,9 @@ kernel void kiln_gdn_full_chunk_forward_bf16(
 
 fn metal_gdn_recurrent_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -11857,9 +11857,9 @@ fn metal_gdn_recurrent_pipeline(
 
 fn metal_gdn_recurrent_prefill_head_last_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -11886,9 +11886,9 @@ fn metal_gdn_recurrent_prefill_head_last_pipeline(
 
 fn metal_gdn_forward_substitution_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -11915,9 +11915,9 @@ fn metal_gdn_forward_substitution_pipeline(
 
 fn metal_gdn_forward_substitution_f32_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -11944,9 +11944,9 @@ fn metal_gdn_forward_substitution_f32_pipeline(
 
 fn metal_gdn_chunk_prep_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -11973,9 +11973,9 @@ fn metal_gdn_chunk_prep_pipeline(
 
 fn metal_gdn_recurrent_prefill_head_last_decay_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -12002,9 +12002,9 @@ fn metal_gdn_recurrent_prefill_head_last_decay_pipeline(
 
 fn metal_gdn_full_chunk_forward_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -13497,9 +13497,9 @@ kernel void kiln_causal_conv1d_update_bf16_f32_k4(
 
 fn metal_conv1d_prefill_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -13526,9 +13526,9 @@ fn metal_conv1d_prefill_pipeline(
 
 fn metal_gdn_prefill_qkv_conv_split_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -13555,9 +13555,9 @@ fn metal_gdn_prefill_qkv_conv_split_pipeline(
 
 fn metal_conv1d_update_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
-) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+) -> Result<kiln_tensor::metal_types::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
-    use candle_metal_kernels::metal::ComputePipeline;
+    use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
