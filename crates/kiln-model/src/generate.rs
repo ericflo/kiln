@@ -4,7 +4,7 @@
 //! a `ModelRunner` that accepts text prompts and produces text output.
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor};
+
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{
@@ -236,7 +236,7 @@ pub struct PagedPrefixRegistration {
 #[derive(Clone)]
 pub enum PagedPrefixNextToken {
     /// Full last-position logits. Supports both greedy and stochastic sampling.
-    Logits(Tensor),
+    Logits(candle_core::Tensor),
     /// Greedy token only. Usable only when the later request is also greedy.
     GreedyToken(TokenId),
 }
@@ -408,7 +408,7 @@ fn decode_buffer_max_batch() -> usize {
 }
 
 enum PrefillSampleSource {
-    Logits(Tensor),
+    Logits(candle_core::Tensor),
     GreedyToken(TokenId),
 }
 
@@ -543,7 +543,7 @@ impl DecodeBatcherConfig {
         config
     }
 
-    pub fn from_env_for_backend(device: &Device, backend_name: &str) -> Self {
+    pub fn from_env_for_backend(device: &candle_core::Device, backend_name: &str) -> Self {
         let mut config = Self::from_env();
         if std::env::var_os("KILN_DECODE_BATCH_MAX").is_none() {
             config.max_batch = default_decode_batcher_max_batch(device, backend_name);
@@ -558,11 +558,11 @@ impl DecodeBatcherConfig {
         config
     }
 
-    pub fn from_env_for_device(device: &Device) -> Self {
+    pub fn from_env_for_device(device: &candle_core::Device) -> Self {
         Self::from_env_for_backend(device, "")
     }
 
-    pub fn enabled_for_device(device: &Device) -> bool {
+    pub fn enabled_for_device(device: &candle_core::Device) -> bool {
         let _ = device;
         env_flag_enabled("KILN_DECODE_BATCHER", true)
     }
@@ -571,7 +571,7 @@ impl DecodeBatcherConfig {
     ///
     /// Same behaviour as the candle-typed entry but takes a
     /// `&kiln_tensor::Device` so callers that have migrated off candle's
-    /// `Device` enum don't have to bridge at every call site. Part of the
+    /// `candle_core::Device` enum don't have to bridge at every call site. Part of the
     /// staged migration in #1082.
     pub fn from_env_for_backend_kt(device: &kiln_tensor::Device, backend_name: &str) -> Self {
         let mut config = Self::from_env();
@@ -628,20 +628,20 @@ fn default_decode_batcher_wait_kt(
     }
 }
 
-fn default_decode_batcher_max_batch(device: &Device, backend_name: &str) -> usize {
-    if matches!(device, Device::Cuda(_)) || backend_name == "cuda" {
+fn default_decode_batcher_max_batch(device: &candle_core::Device, backend_name: &str) -> usize {
+    if matches!(device, candle_core::Device::Cuda(_)) || backend_name == "cuda" {
         1
     } else {
         DecodeBatcherConfig::default().max_batch
     }
 }
 
-fn default_decode_batcher_allow_mixed_seq_lens(device: &Device, backend_name: &str) -> bool {
-    matches!(device, Device::Metal(_)) || backend_name == "vulkan"
+fn default_decode_batcher_allow_mixed_seq_lens(device: &candle_core::Device, backend_name: &str) -> bool {
+    matches!(device, candle_core::Device::Metal(_)) || backend_name == "vulkan"
 }
 
-fn default_decode_batcher_wait(device: &Device, backend_name: &str) -> std::time::Duration {
-    if matches!(device, Device::Metal(_)) || backend_name == "metal" {
+fn default_decode_batcher_wait(device: &candle_core::Device, backend_name: &str) -> std::time::Duration {
+    if matches!(device, candle_core::Device::Metal(_)) || backend_name == "metal" {
         std::time::Duration::from_micros(100)
     } else if backend_name == "vulkan" {
         std::time::Duration::from_micros(5_000)
@@ -1138,7 +1138,7 @@ pub fn append_prefix_block_table(cached_blocks: &[u32], allocated_blocks: &[u32]
 /// doesn't apply.
 fn run_legacy_lm_head_sample_batch(
     backend: &dyn crate::backend::BackendRuntime,
-    hidden: &Tensor,
+    hidden: &candle_core::Tensor,
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
     params: &[SamplingParams],
@@ -1487,9 +1487,9 @@ impl ModelRunner {
     /// Create a new KV cache sized for this model.
     fn new_kv_cache(&self, max_seq_len: usize) -> Result<KvCache> {
         let dtype = match self.config.dtype {
-            kiln_core::config::DType::BF16 => DType::BF16,
-            kiln_core::config::DType::FP16 => DType::F16,
-            kiln_core::config::DType::FP32 => DType::F32,
+            kiln_core::config::DType::BF16 => candle_core::DType::BF16,
+            kiln_core::config::DType::FP16 => candle_core::DType::F16,
+            kiln_core::config::DType::FP32 => candle_core::DType::F32,
         };
         let device = self.weights.embed_tokens.device();
         KvCache::new(
@@ -3292,7 +3292,7 @@ impl ModelRunner {
             // per-row after every forward — the batched state post-scatter
             // and the per-row states post-scatter are byte-for-byte
             // equivalent). Taking the cached state directly skips the
-            // per-step 24-GDN-layer × 2-state-kind `Tensor::cat` workload
+            // per-step 24-GDN-layer × 2-state-kind `candle_core::Tensor::cat` workload
             // (~1.6 ms / step at bs=16). The cache is only consulted when
             // the caller supplied a `row_ids` fingerprint that survives the
             // batching-engine actor's `Vec::remove` shifts.
@@ -4525,9 +4525,9 @@ impl ModelRunner {
         let max_total = prompt_tokens.len() + params.max_tokens;
         let device = self.weights.embed_tokens.device();
         let dtype = match self.config.dtype {
-            kiln_core::config::DType::BF16 => DType::BF16,
-            kiln_core::config::DType::FP16 => DType::F16,
-            kiln_core::config::DType::FP32 => DType::F32,
+            kiln_core::config::DType::BF16 => candle_core::DType::BF16,
+            kiln_core::config::DType::FP16 => candle_core::DType::F16,
+            kiln_core::config::DType::FP32 => candle_core::DType::F32,
         };
 
         // Two independent paged caches:
@@ -4977,9 +4977,9 @@ impl ModelRunner {
         let max_total = prompt_tokens.len() + params.max_tokens;
         let device = self.weights.embed_tokens.device();
         let dtype = match self.config.dtype {
-            kiln_core::config::DType::BF16 => DType::BF16,
-            kiln_core::config::DType::FP16 => DType::F16,
-            kiln_core::config::DType::FP32 => DType::F32,
+            kiln_core::config::DType::BF16 => candle_core::DType::BF16,
+            kiln_core::config::DType::FP16 => candle_core::DType::F16,
+            kiln_core::config::DType::FP32 => candle_core::DType::F32,
         };
 
         let num_blocks = Self::blocks_needed(max_total, BLOCK_SIZE);
@@ -6581,7 +6581,7 @@ mod tests {
     /// fixture used. CPU-only paged-prefix-cache tests don't exercise GDN forward
     /// math, so 1×1 placeholder GDN tensors are sufficient — the registry only
     /// needs them to exist with the correct layer-kind tag if it's ever forced.
-    fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
+    fn tiny_weights(config: &ModelConfig, device: &candle_core::Device) -> GpuWeights {
         let h = config.hidden_size;
         let inter = config.intermediate_size;
         let vocab = config.vocab_size;
@@ -6589,22 +6589,22 @@ mod tests {
         let num_kv_heads = config.num_kv_heads;
         let head_dim = config.head_dim;
 
-        let embed = Tensor::randn(0.0_f32, 0.02, (vocab, h), device).unwrap();
+        let embed = candle_core::Tensor::randn(0.0_f32, 0.02, (vocab, h), device).unwrap();
         let embed_t = embed.t().unwrap().contiguous().unwrap();
-        let final_norm = Tensor::zeros((h,), candle_core::DType::F32, device).unwrap();
+        let final_norm = candle_core::Tensor::zeros((h,), candle_core::DType::F32, device).unwrap();
 
         let mut layers = Vec::with_capacity(config.num_layers);
         for layer_idx in 0..config.num_layers {
             let is_full = (layer_idx + 1) % config.full_attention_interval == 0;
             let attention = if is_full {
                 let q_proj =
-                    Tensor::randn(0.0_f32, 0.02, (num_heads * head_dim, h), device).unwrap();
+                    candle_core::Tensor::randn(0.0_f32, 0.02, (num_heads * head_dim, h), device).unwrap();
                 let k_proj =
-                    Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap();
+                    candle_core::Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap();
                 let v_proj =
-                    Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap();
+                    candle_core::Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap();
                 let o_proj =
-                    Tensor::randn(0.0_f32, 0.02, (h, num_heads * head_dim), device).unwrap();
+                    candle_core::Tensor::randn(0.0_f32, 0.02, (h, num_heads * head_dim), device).unwrap();
                 let q_proj_t = q_proj.t().unwrap().contiguous().unwrap();
                 let k_proj_t = k_proj.t().unwrap().contiguous().unwrap();
                 let v_proj_t = v_proj.t().unwrap().contiguous().unwrap();
@@ -6614,8 +6614,8 @@ mod tests {
                     k_proj,
                     v_proj,
                     o_proj,
-                    q_norm: Tensor::zeros((head_dim,), candle_core::DType::F32, device).unwrap(),
-                    k_norm: Tensor::zeros((head_dim,), candle_core::DType::F32, device).unwrap(),
+                    q_norm: candle_core::Tensor::zeros((head_dim,), candle_core::DType::F32, device).unwrap(),
+                    k_norm: candle_core::Tensor::zeros((head_dim,), candle_core::DType::F32, device).unwrap(),
                     q_proj_t,
                     k_proj_t,
                     v_proj_t,
@@ -6636,16 +6636,16 @@ mod tests {
                 let qk_dim = nk * dk;
                 let v_dim = nv * dv;
                 let qkv_dim = qk_dim * 2 + v_dim;
-                let in_proj_qkv = Tensor::randn(0.0_f32, 0.02, (qkv_dim, h), device).unwrap();
-                let in_proj_z = Tensor::randn(0.0_f32, 0.02, (v_dim, h), device).unwrap();
-                let in_proj_a = Tensor::randn(0.0_f32, 0.02, (nv, h), device).unwrap();
-                let in_proj_b = Tensor::randn(0.0_f32, 0.02, (nv, h), device).unwrap();
-                let out_proj = Tensor::randn(0.0_f32, 0.02, (h, v_dim), device).unwrap();
-                let conv1d = Tensor::randn(0.0_f32, 0.02, (qkv_dim, kernel), device).unwrap();
-                let norm = Tensor::ones((v_dim,), candle_core::DType::F32, device).unwrap();
-                let a_log = Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
-                let a_log_gates = Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
-                let dt_bias = Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
+                let in_proj_qkv = candle_core::Tensor::randn(0.0_f32, 0.02, (qkv_dim, h), device).unwrap();
+                let in_proj_z = candle_core::Tensor::randn(0.0_f32, 0.02, (v_dim, h), device).unwrap();
+                let in_proj_a = candle_core::Tensor::randn(0.0_f32, 0.02, (nv, h), device).unwrap();
+                let in_proj_b = candle_core::Tensor::randn(0.0_f32, 0.02, (nv, h), device).unwrap();
+                let out_proj = candle_core::Tensor::randn(0.0_f32, 0.02, (h, v_dim), device).unwrap();
+                let conv1d = candle_core::Tensor::randn(0.0_f32, 0.02, (qkv_dim, kernel), device).unwrap();
+                let norm = candle_core::Tensor::ones((v_dim,), candle_core::DType::F32, device).unwrap();
+                let a_log = candle_core::Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
+                let a_log_gates = candle_core::Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
+                let dt_bias = candle_core::Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
                 let in_proj_qkv_t = in_proj_qkv.t().unwrap().contiguous().unwrap();
                 let in_proj_z_t = in_proj_z.t().unwrap().contiguous().unwrap();
                 let in_proj_a_t = in_proj_a.t().unwrap().contiguous().unwrap();
@@ -6674,16 +6674,16 @@ mod tests {
                 )
             };
 
-            let gate_proj = Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap();
-            let up_proj = Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap();
-            let down_proj = Tensor::randn(0.0_f32, 0.02, (h, inter), device).unwrap();
+            let gate_proj = candle_core::Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap();
+            let up_proj = candle_core::Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap();
+            let down_proj = candle_core::Tensor::randn(0.0_f32, 0.02, (h, inter), device).unwrap();
             let gate_proj_t = gate_proj.t().unwrap().contiguous().unwrap();
             let up_proj_t = up_proj.t().unwrap().contiguous().unwrap();
             let down_proj_t = down_proj.t().unwrap().contiguous().unwrap();
 
             layers.push(crate::forward::GpuLayerWeights {
-                input_layernorm: Tensor::zeros((h,), candle_core::DType::F32, device).unwrap(),
-                post_attention_layernorm: Tensor::zeros((h,), candle_core::DType::F32, device)
+                input_layernorm: candle_core::Tensor::zeros((h,), candle_core::DType::F32, device).unwrap(),
+                post_attention_layernorm: candle_core::Tensor::zeros((h,), candle_core::DType::F32, device)
                     .unwrap(),
                 attention,
                 mlp: crate::forward::GpuFfnWeights {
@@ -6751,7 +6751,7 @@ mod tests {
 
     #[test]
     fn test_decode_batcher_default_mixed_seq_lens_backend_policy() {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
 
         assert!(!default_decode_batcher_allow_mixed_seq_lens(&device, "cpu"));
         assert!(!default_decode_batcher_allow_mixed_seq_lens(
@@ -6764,7 +6764,7 @@ mod tests {
 
     #[test]
     fn test_decode_batcher_default_max_batch_backend_policy() {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
 
         assert_eq!(default_decode_batcher_max_batch(&device, "cpu"), 8);
         assert_eq!(default_decode_batcher_max_batch(&device, "cuda"), 1);
@@ -6774,7 +6774,7 @@ mod tests {
 
     #[test]
     fn test_decode_batcher_default_wait_backend_policy() {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
 
         assert_eq!(
             default_decode_batcher_wait(&device, "cpu"),
@@ -6795,21 +6795,21 @@ mod tests {
     }
 
     #[cfg(feature = "metal")]
-    fn patterned_bf16(shape: &[usize], scale: f32, device: &Device) -> Result<Tensor> {
+    fn patterned_bf16(shape: &[usize], scale: f32, device: &candle_core::Device) -> Result<candle_core::Tensor> {
         let n: usize = shape.iter().product();
         let data: Vec<f32> = (0..n)
             .map(|i| (((i * 17 + 13) % 257) as f32 - 128.0) * scale)
             .collect();
-        Ok(Tensor::new(data, device)?
+        Ok(candle_core::Tensor::new(data, device)?
             .reshape(shape)?
-            .to_dtype(DType::BF16)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?)
     }
 
     #[cfg(feature = "metal")]
     fn qwen_shape_bf16_full_attention_weights(
         config: &ModelConfig,
-        device: &Device,
+        device: &candle_core::Device,
     ) -> Result<GpuWeights> {
         let hidden = config.hidden_size;
         let num_heads = config.num_attention_heads;
@@ -6825,8 +6825,8 @@ mod tests {
         let up_proj = patterned_bf16(&[config.intermediate_size, hidden], 0.00002, device)?;
         let down_proj = patterned_bf16(&[hidden, config.intermediate_size], 0.00003, device)?;
         let layer = crate::forward::GpuLayerWeights {
-            input_layernorm: Tensor::zeros(hidden, DType::BF16, device)?,
-            post_attention_layernorm: Tensor::zeros(hidden, DType::BF16, device)?,
+            input_layernorm: candle_core::Tensor::zeros(hidden, candle_core::DType::BF16, device)?,
+            post_attention_layernorm: candle_core::Tensor::zeros(hidden, candle_core::DType::BF16, device)?,
             attention: crate::forward::GpuAttentionWeights::Full(
                 crate::forward::GpuFullAttentionWeights {
                     q_proj_t: q_proj.t()?.contiguous()?,
@@ -6838,8 +6838,8 @@ mod tests {
                     k_proj,
                     v_proj,
                     o_proj,
-                    q_norm: Tensor::zeros(head_dim, DType::BF16, device)?,
-                    k_norm: Tensor::zeros(head_dim, DType::BF16, device)?,
+                    q_norm: candle_core::Tensor::zeros(head_dim, candle_core::DType::BF16, device)?,
+                    k_norm: candle_core::Tensor::zeros(head_dim, candle_core::DType::BF16, device)?,
                     q_proj_marlin: None,
                 },
             ),
@@ -6860,7 +6860,7 @@ mod tests {
             embed_tokens,
             embed_tokens_t,
             layers: vec![layer],
-            final_norm: Tensor::zeros(hidden, DType::BF16, device)?,
+            final_norm: candle_core::Tensor::zeros(hidden, candle_core::DType::BF16, device)?,
             rotary_inv_freq: crate::forward::compute_rotary_inv_freq(
                 config.rotary_dim(),
                 config.rope_theta,
@@ -6930,7 +6930,7 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            DType::BF16,
+            candle_core::DType::BF16,
             &device,
         )?;
         {
@@ -6957,7 +6957,7 @@ mod tests {
                 block_size,
                 config.num_kv_heads,
                 config.head_dim,
-                DType::BF16,
+                candle_core::DType::BF16,
                 &device,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
@@ -7052,7 +7052,7 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            DType::BF16,
+            candle_core::DType::BF16,
             &device,
         )?);
         {
@@ -7119,7 +7119,7 @@ mod tests {
                 block_size,
                 config.num_kv_heads,
                 config.head_dim,
-                DType::BF16,
+                candle_core::DType::BF16,
                 &device,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
@@ -7215,7 +7215,7 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            DType::BF16,
+            candle_core::DType::BF16,
             &device,
         )?);
         {
@@ -7291,7 +7291,7 @@ mod tests {
                 block_size,
                 config.num_kv_heads,
                 config.head_dim,
-                DType::BF16,
+                candle_core::DType::BF16,
                 &device,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
@@ -7331,7 +7331,7 @@ mod tests {
     #[test]
     fn test_generate_from_tokens_max_tokens() -> Result<()> {
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7358,7 +7358,7 @@ mod tests {
     #[test]
     fn test_generate_from_tokens_deterministic() -> Result<()> {
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
 
         // Create identical weights for two runs
         let weights1 = tiny_weights(&config, &device);
@@ -7390,7 +7390,7 @@ mod tests {
         // We do this by generating with the tiny random model and verifying
         // that the output is bounded and the finish reason is correct.
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7427,7 +7427,7 @@ mod tests {
     #[test]
     fn test_generate_from_tokens_with_temperature() -> Result<()> {
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7457,7 +7457,7 @@ mod tests {
     #[test]
     fn test_generate_speculative_max_tokens() -> Result<()> {
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7486,7 +7486,7 @@ mod tests {
     #[test]
     fn test_empty_prompt_errors() {
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7500,7 +7500,7 @@ mod tests {
     #[test]
     fn test_generate_paged_max_tokens() -> Result<()> {
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7548,7 +7548,7 @@ mod tests {
     #[test]
     fn test_generate_paged_shared_max_tokens() -> Result<()> {
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7591,7 +7591,7 @@ mod tests {
     #[test]
     fn test_paged_vs_contiguous_equivalence() -> Result<()> {
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7641,7 +7641,7 @@ mod tests {
     #[test]
     fn test_generate_streaming_paged() -> Result<()> {
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7688,7 +7688,7 @@ mod tests {
     #[test]
     fn test_generate_paged_shared_concurrent_requests_complete() -> Result<()> {
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7766,7 +7766,7 @@ mod tests {
     #[test]
     fn exact_prefix_cache_hit_skips_prefill_and_matches_tokens() -> Result<()> {
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7838,7 +7838,7 @@ mod tests {
     #[test]
     fn streaming_exact_prefix_cache_hit_uses_saved_first_token_source() -> Result<()> {
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7930,7 +7930,7 @@ mod tests {
     #[test]
     fn batched_exact_prefix_cache_hit_skips_prefill() -> Result<()> {
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -8021,7 +8021,7 @@ mod tests {
     #[test]
     fn test_paged_eos_detection() -> Result<()> {
         let config = tiny_config();
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
