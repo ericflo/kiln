@@ -4445,12 +4445,11 @@ pub fn dispatch_paged_attn_decode_batch_f32(
 /// (i.e., when `batch * max_seqlen > total_slots`), which is the typical
 /// shape for multi-batch decode at non-trivial context lengths.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn dispatch_paged_attn_decode_batch_paged_f32_bytes(
     vk_device: &VulkanDevice,
-    q_data: &[u8],
-    k_pool_data: &[u8],
-    v_pool_data: &[u8],
+    q_data_in: &[u8],
+    k_pool_data_in: &[u8],
+    v_pool_data_in: &[u8],
     batch: usize,
     num_heads: usize,
     head_dim: usize,
@@ -4462,36 +4461,6 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32_bytes(
     page_block_size: usize,
     softmax_scale: f32,
 ) -> Result<Vec<u8>> {
-    let q = build_cpu_f32_tensor_from_bytes(q_data, &[batch, 1, num_heads, head_dim])?;
-    let k_pool = build_cpu_f32_tensor_from_bytes(k_pool_data, &[total_slots, num_kv_heads, head_dim])?;
-    let v_pool = build_cpu_f32_tensor_from_bytes(v_pool_data, &[total_slots, num_kv_heads, head_dim])?;
-    let out = dispatch_paged_attn_decode_batch_paged_f32(
-        vk_device,
-        &q,
-        &k_pool,
-        &v_pool,
-        block_table_u32,
-        seq_lens,
-        batch,
-        max_blocks_per_seq,
-        page_block_size,
-        softmax_scale,
-    )?;
-    Ok(extract_tensor_bytes(&out)?.0)
-}
-
-pub fn dispatch_paged_attn_decode_batch_paged_f32(
-    vk_device: &VulkanDevice,
-    q: &Tensor,
-    k_pool: &Tensor,
-    v_pool: &Tensor,
-    block_table_u32: &[u32],
-    seq_lens: &[u32],
-    batch: usize,
-    max_blocks_per_seq: usize,
-    page_block_size: usize,
-    softmax_scale: f32,
-) -> Result<Tensor> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -4512,20 +4481,23 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32(
         block_table_u32.len(),
         batch * max_blocks_per_seq
     );
-
-    let (q_batch, q_len, num_heads, head_dim) = q.dims4()?;
-    let (total_slots, num_kv_heads, k_head_dim) = k_pool.dims3()?;
-    let v_dims = v_pool.dims3()?;
     anyhow::ensure!(
-        q_batch == batch && q_len == 1,
-        "paged_attn_decode_batch_paged: q shape {:?} mismatch (expected [{batch}, 1, *, *])",
-        q.dims()
+        q_data_in.len() == batch * 1 * num_heads * head_dim * 4,
+        "paged_attn_decode_batch_paged: q bytes {} mismatch expected {}",
+        q_data_in.len(),
+        batch * num_heads * head_dim * 4,
     );
     anyhow::ensure!(
-        k_head_dim == head_dim && v_dims == (total_slots, num_kv_heads, head_dim),
-        "paged_attn_decode_batch_paged: K/V shape mismatch k={:?} v={:?}",
-        k_pool.dims(),
-        v_pool.dims()
+        k_pool_data_in.len() == total_slots * num_kv_heads * head_dim * 4,
+        "paged_attn_decode_batch_paged: k_pool bytes {} mismatch expected {}",
+        k_pool_data_in.len(),
+        total_slots * num_kv_heads * head_dim * 4,
+    );
+    anyhow::ensure!(
+        v_pool_data_in.len() == total_slots * num_kv_heads * head_dim * 4,
+        "paged_attn_decode_batch_paged: v_pool bytes {} mismatch expected {}",
+        v_pool_data_in.len(),
+        total_slots * num_kv_heads * head_dim * 4,
     );
     anyhow::ensure!(
         num_heads % num_kv_heads == 0,
@@ -4538,9 +4510,9 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32(
         );
     }
 
-    let q_data = extract_tensor_bytes(q)?.0;
-    let k_data = extract_tensor_bytes(k_pool)?.0;
-    let v_data = extract_tensor_bytes(v_pool)?.0;
+    let q_data: Vec<u8> = q_data_in.to_vec();
+    let k_data: Vec<u8> = k_pool_data_in.to_vec();
+    let v_data: Vec<u8> = v_pool_data_in.to_vec();
     let bt_bytes: Vec<u8> = bytemuck::cast_slice(block_table_u32).to_vec();
     let seq_bytes: Vec<u8> = bytemuck::cast_slice(seq_lens).to_vec();
 
@@ -4655,7 +4627,8 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32(
         )
         .context("failed to read back paged_attn_decode_batch_paged output")?
     };
-    create_tensor_from_data(&out_data, &[batch, 1usize, num_heads, head_dim], DType::F32)
+    let _ = (batch, num_heads, head_dim);
+    Ok(out_data)
 }
 
 pub fn dispatch_mlp_gate_up_decode_cached_bytes(
