@@ -14844,12 +14844,12 @@ mod tests {
             0.00390625,
         )?;
         let reference = causal_attention_reference_head_major(&q, &k, &v, scale)?;
-        let sdpa = sdpa(&q, &k, &v, None, true, scale, 1.0)?;
+        let sdpa_out = sdpa(&q, &k, &v, None, true, scale, 1.0)?;
         device.synchronize()?;
 
-        assert!(tensor_all_finite(&sdpa)?);
-        let max = max_abs_diff(&reference, &sdpa)?;
-        let mean = mean_abs_diff(&reference, &sdpa)?;
+        assert!(tensor_all_finite(&sdpa_out)?);
+        let max = max_abs_diff(&reference, &sdpa_out)?;
+        let mean = mean_abs_diff(&reference, &sdpa_out)?;
         assert!(
             max < 2e-3,
             "Qwen-shaped Metal full SDPA max_abs_diff={max:e} exceeds tolerance"
@@ -14914,15 +14914,15 @@ mod tests {
                 causal_attention_reference_head_major(&q, &k, &v, scale).with_context(|| {
                     format!("Qwen-shaped causal reference failed for seq_len={seq_len}")
                 })?;
-            let sdpa = sdpa(&q, &k, &v, None, true, scale, 1.0)
+            let sdpa_out = sdpa(&q, &k, &v, None, true, scale, 1.0)
                 .with_context(|| format!("candle Metal full SDPA failed for seq_len={seq_len}"))?;
             device.synchronize()?;
 
-            let finite = tensor_all_finite(&sdpa)?;
+            let finite = tensor_all_finite(&sdpa_out)?;
             let (max, mean) = if finite {
                 (
-                    max_abs_diff(&reference, &sdpa)?,
-                    mean_abs_diff(&reference, &sdpa)?,
+                    max_abs_diff(&reference, &sdpa_out)?,
+                    mean_abs_diff(&reference, &sdpa_out)?,
                 )
             } else {
                 (f32::NAN, f32::NAN)
