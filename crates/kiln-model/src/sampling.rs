@@ -21,7 +21,6 @@
 
 use anyhow::{Context, Result};
 
-use candle_nn::sampling::gumbel_softmax;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
@@ -357,7 +356,7 @@ fn sample_from_adjusted_logits(
         && min_p_no_op
         && matches!(scaled.device(), candle_core::Device::Cuda(_) | candle_core::Device::Metal(_))
     {
-        let sampled = gumbel_softmax(&scaled, 1.0, 0)?;
+        let sampled = candle_nn::sampling::gumbel_softmax(&scaled, 1.0, 0)?;
         return Ok(sampled.to_scalar::<u32>()?);
     }
     if SP::top_p_disables_nucleus_filter(top_p)
@@ -483,7 +482,7 @@ pub fn sample_with_params(
         && (top_k == 0 || top_k as usize >= vocab_size)
         && matches!(scaled.device(), candle_core::Device::Cuda(_) | candle_core::Device::Metal(_))
     {
-        let sampled = gumbel_softmax(&scaled, 1.0, 0)?;
+        let sampled = candle_nn::sampling::gumbel_softmax(&scaled, 1.0, 0)?;
         return Ok(sampled.to_scalar::<u32>()?);
     }
 
