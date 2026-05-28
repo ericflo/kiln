@@ -96,9 +96,6 @@
 //! is currently the top-priority entry on this file's TODO list.
 
 use anyhow::{Context, Result};
-use candle_core::Device;
-#[cfg(feature = "cuda")]
-use candle_core::Tensor;
 #[cfg(feature = "cuda")]
 use std::collections::HashMap;
 use tracing;
@@ -261,48 +258,48 @@ struct CapturedDecodeGraph {
     /// Pre-allocated token-id buffer on GPU (u32, shape [1]).
     /// Updated before each replay so embedding lookup reads the current token
     /// from a graph-stable device pointer.
-    token_buffer: Tensor,
+    token_buffer: candle_core::Tensor,
     /// Pre-allocated position buffer on GPU (f32, shape [1]).
     /// Updated via cudaMemcpyHtoDAsync before each replay so RoPE sees
     /// the correct position while reading from the same device pointer.
-    position_buffer: Tensor,
+    position_buffer: candle_core::Tensor,
     /// Pre-allocated padded block table buffer on GPU (u32, shape [1, max_blocks_per_seq]).
     /// Updated before replay so paged attention reads current page metadata from
     /// a graph-stable pointer.
-    block_table_buffer: Option<Tensor>,
+    block_table_buffer: Option<candle_core::Tensor>,
     /// Pre-allocated actual K/V attention length buffer on GPU (i32, shape [1]).
-    seqused_k_buffer: Option<Tensor>,
+    seqused_k_buffer: Option<candle_core::Tensor>,
     /// Pre-allocated current KV write slot buffer on GPU (u32, shape [1]).
-    kv_slot_buffer: Option<Tensor>,
+    kv_slot_buffer: Option<candle_core::Tensor>,
     /// Pre-allocated RoPE cosine table on GPU (f32, shape [1, rotary_dim / 2]).
     /// Updated before replay so RoPE consumes graph-stable table pointers.
-    rotary_cos_buffer: Tensor,
+    rotary_cos_buffer: candle_core::Tensor,
     /// Pre-allocated RoPE sine table on GPU (f32, shape [1, rotary_dim / 2]).
-    rotary_sin_buffer: Tensor,
+    rotary_sin_buffer: candle_core::Tensor,
     /// Pre-allocated paged FlashAttention outputs, one per full-attention layer.
     /// The CUDA graph captures these destination pointers; replay must not
     /// write into capture-time temporary allocations that Candle can free.
-    _paged_decode_outputs: Vec<Tensor>,
+    _paged_decode_outputs: Vec<candle_core::Tensor>,
     /// Pre-allocated paged FlashAttention LSE scratch tensors, one per
     /// full-attention layer, for the same graph-stable destination reason.
-    _paged_decode_lse: Vec<Tensor>,
+    _paged_decode_lse: Vec<candle_core::Tensor>,
     /// Max K/V length baked into the captured kernel launch shape.
     max_seqlen_k: usize,
     /// Pre-allocated fused GDN decode recurrent outputs, one per linear layer.
     /// Their device pointers are captured by the graph and must stay alive for
     /// replay.
-    _gdn_decode_outputs: Vec<Tensor>,
+    _gdn_decode_outputs: Vec<candle_core::Tensor>,
     /// Pre-allocated lm-head matmul output buffer, shape `[1, 1, vocab]`.
     /// Installed via [`crate::forward::with_lm_head_output_buffer`] at
     /// capture time so the kt-typed lm_head matmul writes into a
     /// graph-stable device address instead of allocating a fresh
-    /// candle Tensor inside the capture window. Without this, the
+    /// candle candle_core::Tensor inside the capture window. Without this, the
     /// captured `slice_set` source pointer (the lm_head output)
     /// would dangle on replay → `CUDA_ERROR_ILLEGAL_ADDRESS`. The
     /// bs=1 path works in production by allocator-determinism luck
     /// — pinning it here is a defense-in-depth fix that matches the
     /// bs>1 structural fix (#1082 Phase 5).
-    _lm_head_output_buffer: Tensor,
+    _lm_head_output_buffer: candle_core::Tensor,
 }
 
 /// Captured graph + stable buffers for a batched (`bs > 1`) decode step.
@@ -320,30 +317,30 @@ struct CapturedBatchedDecodeGraph {
     /// Adapter generation when captured (invalidate on mismatch).
     adapter_gen: u64,
     /// `[batch]` u32 token-id buffer; updated before replay.
-    token_buffer: Tensor,
+    token_buffer: candle_core::Tensor,
     /// `[batch]` f32 per-row decode position; updated before replay.
-    position_buffer: Tensor,
+    position_buffer: candle_core::Tensor,
     /// `[batch, max_blocks_per_seq]` u32 padded block table.
-    block_table_buffer: Tensor,
+    block_table_buffer: candle_core::Tensor,
     /// `[batch]` i32 per-row K/V length.
-    seqused_k_buffer: Tensor,
+    seqused_k_buffer: candle_core::Tensor,
     /// `[batch]` u32 per-row current KV-write slot.
-    kv_slot_buffer: Tensor,
+    kv_slot_buffer: candle_core::Tensor,
     /// `[batch, rotary_dim / 2]` RoPE cos table; updated before replay.
-    rotary_cos_buffer: Tensor,
+    rotary_cos_buffer: candle_core::Tensor,
     /// `[batch, rotary_dim / 2]` RoPE sin table; updated before replay.
-    rotary_sin_buffer: Tensor,
+    rotary_sin_buffer: candle_core::Tensor,
     /// Per-full-attn-layer paged decode outputs, shape `[batch, 1, n_heads, head_dim]`.
-    _paged_decode_outputs: Vec<Tensor>,
+    _paged_decode_outputs: Vec<candle_core::Tensor>,
     /// Per-full-attn-layer LSE scratch, shape `[batch, n_heads, 1]`.
-    _paged_decode_lse: Vec<Tensor>,
+    _paged_decode_lse: Vec<candle_core::Tensor>,
     /// Per-GDN-layer fused recurrent outputs, shape `[batch, ...]`.
-    _gdn_decode_outputs: Vec<Tensor>,
+    _gdn_decode_outputs: Vec<candle_core::Tensor>,
     /// Pre-allocated lm-head matmul output buffer, shape `[batch, 1, vocab]`.
     /// See [`CapturedDecodeGraph::_lm_head_output_buffer`] for the
     /// rationale. This is the structural Phase 5 #1082 fix that
     /// unblocks `KILN_CUDA_GRAPHS_BATCHED=1` end-to-end.
-    _lm_head_output_buffer: Tensor,
+    _lm_head_output_buffer: candle_core::Tensor,
     /// Max K/V length baked into the captured kernel launch shape.
     max_seqlen_k: usize,
     // NOTE: the captured graph reads GDN recurrent/conv state via the
@@ -396,7 +393,7 @@ pub struct CudaGraphRunner {
 
 impl CudaGraphRunner {
     /// Create a new graph runner. Enabled only on CUDA devices with the `cuda` feature.
-    pub fn new(device: &Device, enabled: bool) -> Self {
+    pub fn new(device: &candle_core::Device, enabled: bool) -> Self {
         let actually_enabled = enabled && device.is_cuda();
         if actually_enabled {
             tracing::info!("CUDA graphs enabled for decode");
@@ -464,12 +461,12 @@ impl CudaGraphRunner {
         &mut self,
         batch_size: usize,
         config: &ModelConfig,
-        device: &Device,
+        device: &candle_core::Device,
     ) -> Result<Option<&mut crate::forward::LinearAttentionState>> {
         if !self.enabled {
             return Ok(None);
         }
-        if !matches!(device, Device::Cuda(_)) {
+        if !matches!(device, candle_core::Device::Cuda(_)) {
             return Ok(None);
         }
         anyhow::ensure!(
@@ -1097,12 +1094,12 @@ impl CudaGraphRunner {
     /// changing the device pointer. This is done outside the CUDA graph so
     /// replayed RoPE kernels read the correct position.
     #[cfg(feature = "cuda")]
-    fn update_token_buffer(token_buffer: &Tensor, token_id: u32) -> Result<()> {
+    fn update_token_buffer(token_buffer: &candle_core::Tensor, token_id: u32) -> Result<()> {
         Self::update_cuda_scalar(token_buffer, &[token_id], "token buffer")
     }
 
     #[cfg(feature = "cuda")]
-    fn update_position_buffer(position_buffer: &Tensor, position: usize) -> Result<()> {
+    fn update_position_buffer(position_buffer: &candle_core::Tensor, position: usize) -> Result<()> {
         let pos_f32 = [position as f32];
         Self::update_cuda_scalar(position_buffer, &pos_f32, "position buffer")
     }
@@ -1126,8 +1123,8 @@ impl CudaGraphRunner {
 
     #[cfg(feature = "cuda")]
     fn update_rotary_buffers(
-        rotary_cos_buffer: &Tensor,
-        rotary_sin_buffer: &Tensor,
+        rotary_cos_buffer: &candle_core::Tensor,
+        rotary_sin_buffer: &candle_core::Tensor,
         config: &ModelConfig,
         position: usize,
     ) -> Result<()> {
@@ -1139,9 +1136,9 @@ impl CudaGraphRunner {
 
     #[cfg(feature = "cuda")]
     fn update_paged_metadata_buffers(
-        block_table_buffer: &Tensor,
-        seqused_k_buffer: &Tensor,
-        kv_slot_buffer: &Tensor,
+        block_table_buffer: &candle_core::Tensor,
+        seqused_k_buffer: &candle_core::Tensor,
+        kv_slot_buffer: &candle_core::Tensor,
         block_table: &BlockTable,
         paged_cache: &PagedKvCache,
         seq_len: usize,
@@ -1165,7 +1162,7 @@ impl CudaGraphRunner {
     #[cfg(feature = "cuda")]
     #[allow(dead_code)]
     fn update_batched_token_buffer(
-        token_buffer: &Tensor,
+        token_buffer: &candle_core::Tensor,
         token_ids: &[u32],
     ) -> Result<()> {
         anyhow::ensure!(
@@ -1180,7 +1177,7 @@ impl CudaGraphRunner {
     #[cfg(feature = "cuda")]
     #[allow(dead_code)]
     fn update_batched_position_buffer(
-        position_buffer: &Tensor,
+        position_buffer: &candle_core::Tensor,
         start_positions: &[usize],
     ) -> Result<()> {
         anyhow::ensure!(
@@ -1201,9 +1198,9 @@ impl CudaGraphRunner {
     #[cfg(feature = "cuda")]
     #[allow(dead_code)]
     fn update_batched_paged_metadata_buffers(
-        block_table_buffer: &Tensor,
-        seqused_k_buffer: &Tensor,
-        kv_slot_buffer: &Tensor,
+        block_table_buffer: &candle_core::Tensor,
+        seqused_k_buffer: &candle_core::Tensor,
+        kv_slot_buffer: &candle_core::Tensor,
         block_tables: &[&BlockTable],
         paged_cache: &PagedKvCache,
         start_positions: &[usize],
@@ -1263,8 +1260,8 @@ impl CudaGraphRunner {
     #[cfg(feature = "cuda")]
     #[allow(dead_code)]
     fn update_batched_rotary_buffers(
-        rotary_cos_buffer: &Tensor,
-        rotary_sin_buffer: &Tensor,
+        rotary_cos_buffer: &candle_core::Tensor,
+        rotary_sin_buffer: &candle_core::Tensor,
         config: &ModelConfig,
         start_positions: &[usize],
     ) -> Result<()> {
@@ -1294,7 +1291,7 @@ impl CudaGraphRunner {
     }
 
     #[cfg(feature = "cuda")]
-    fn update_cuda_scalar<T>(tensor: &Tensor, value: &[T], label: &str) -> Result<()>
+    fn update_cuda_scalar<T>(tensor: &candle_core::Tensor, value: &[T], label: &str) -> Result<()>
     where
         T: candle_core::cuda_backend::cudarc::driver::DeviceRepr
             + candle_core::cuda_backend::CudaDType,
@@ -1350,7 +1347,7 @@ impl CudaGraphRunner {
 
         let device = weights.embed_tokens.device();
         let cuda_dev = match device {
-            Device::Cuda(d) => d,
+            candle_core::Device::Cuda(d) => d,
             _ => anyhow::bail!("CUDA graphs require a CUDA device"),
         };
         let stream = cuda_dev.cuda_stream();
@@ -1467,7 +1464,7 @@ impl CudaGraphRunner {
                 output_logits_for_capture
                     .slice_set(&logits, 0, 0)
                     .context("copy CUDA graph logits into stable output")?;
-                Ok::<Tensor, anyhow::Error>(output_logits_for_capture)
+                Ok::<candle_core::Tensor, anyhow::Error>(output_logits_for_capture)
             },
         );
 
@@ -1559,7 +1556,7 @@ impl CudaGraphRunner {
 
         let device = weights.embed_tokens.device();
         let cuda_dev = match device {
-            Device::Cuda(d) => d,
+            candle_core::Device::Cuda(d) => d,
             _ => anyhow::bail!("CUDA graphs require a CUDA device"),
         };
         let stream = cuda_dev.cuda_stream();
@@ -1597,9 +1594,9 @@ impl CudaGraphRunner {
         // OUTSIDE the capture window. Installed via
         // `crate::forward::with_lm_head_output_buffer` below so the
         // kt-typed lm_head matmul writes directly into a graph-stable
-        // candle Tensor (the buffer here). Without this, the captured
+        // candle candle_core::Tensor (the buffer here). Without this, the captured
         // `slice_set(&logits, …)` would record a memcpy whose source is
-        // a transient candle Tensor produced by
+        // a transient candle candle_core::Tensor produced by
         // `kt_tensor_to_candle_cuda_copy` — that source pointer is
         // freed at end-of-capture and dangling on replay, triggering
         // `CUDA_ERROR_ILLEGAL_ADDRESS` at
@@ -1655,7 +1652,7 @@ impl CudaGraphRunner {
             // the captured graph — same buffer-ownership rationale
             // as `_paged_decode_outputs`. (Historical context: with
             // the candle-typed path, the GDN decode kernel would
-            // `Tensor::zeros(...)` outputs INSIDE capture, those got
+            // `candle_core::Tensor::zeros(...)` outputs INSIDE capture, those got
             // freed by `AUTO_FREE_ON_LAUNCH`, and recorded pointers
             // went stale on replay — observed as
             // `CUDA_ERROR_ILLEGAL_ADDRESS` at bs>=16. The kt path
@@ -1795,13 +1792,13 @@ impl CudaGraphRunner {
     }
 
     #[cfg(feature = "cuda")]
-    fn new_token_buffer(device: &Device, token_id: u32) -> Result<Tensor> {
-        Tensor::new(&[token_id], device).context("create CUDA graph token buffer")
+    fn new_token_buffer(device: &candle_core::Device, token_id: u32) -> Result<candle_core::Tensor> {
+        candle_core::Tensor::new(&[token_id], device).context("create CUDA graph token buffer")
     }
 
     #[cfg(feature = "cuda")]
-    fn new_position_buffer(device: &Device, position: usize) -> Result<Tensor> {
-        Tensor::new(&[position as f32], device).context("create CUDA graph position buffer")
+    fn new_position_buffer(device: &candle_core::Device, position: usize) -> Result<candle_core::Tensor> {
+        candle_core::Tensor::new(&[position as f32], device).context("create CUDA graph position buffer")
     }
 
     /// Allocate a `[batch] u32` token-id buffer with the row 0…batch-1
@@ -1811,12 +1808,12 @@ impl CudaGraphRunner {
     /// before each replay.
     #[cfg(feature = "cuda")]
     #[allow(dead_code)]
-    fn new_batched_token_buffer(device: &Device, token_ids: &[u32]) -> Result<Tensor> {
+    fn new_batched_token_buffer(device: &candle_core::Device, token_ids: &[u32]) -> Result<candle_core::Tensor> {
         anyhow::ensure!(
             !token_ids.is_empty(),
             "new_batched_token_buffer requires a non-empty batch"
         );
-        Tensor::new(token_ids, device).context("create CUDA graph batched token buffer")
+        candle_core::Tensor::new(token_ids, device).context("create CUDA graph batched token buffer")
     }
 
     /// Allocate a `[batch] f32` per-row decode-position buffer pre-filled
@@ -1825,13 +1822,13 @@ impl CudaGraphRunner {
     /// read whatever the runner writes before each replay.
     #[cfg(feature = "cuda")]
     #[allow(dead_code)]
-    fn new_batched_position_buffer(device: &Device, start_positions: &[usize]) -> Result<Tensor> {
+    fn new_batched_position_buffer(device: &candle_core::Device, start_positions: &[usize]) -> Result<candle_core::Tensor> {
         anyhow::ensure!(
             !start_positions.is_empty(),
             "new_batched_position_buffer requires a non-empty batch"
         );
         let positions_f32: Vec<f32> = start_positions.iter().map(|&p| p as f32).collect();
-        Tensor::new(positions_f32.as_slice(), device)
+        candle_core::Tensor::new(positions_f32.as_slice(), device)
             .context("create CUDA graph batched position buffer")
     }
 
@@ -1862,17 +1859,17 @@ impl CudaGraphRunner {
         block_table: &BlockTable,
         paged_cache: &PagedKvCache,
         max_seqlen_k: usize,
-        device: &Device,
-    ) -> Result<Tensor> {
+        device: &candle_core::Device,
+    ) -> Result<candle_core::Tensor> {
         let padded = Self::padded_block_table(block_table, paged_cache, max_seqlen_k)?;
-        Tensor::new(padded.as_slice(), device)?
+        candle_core::Tensor::new(padded.as_slice(), device)?
             .reshape((1usize, padded.len()))
             .context("create CUDA graph block table buffer")
     }
 
     #[cfg(feature = "cuda")]
-    fn new_seqused_k_buffer(device: &Device, attention_len: usize) -> Result<Tensor> {
-        Tensor::new(&[attention_len as i32], device).context("create CUDA graph seqused_k buffer")
+    fn new_seqused_k_buffer(device: &candle_core::Device, attention_len: usize) -> Result<candle_core::Tensor> {
+        candle_core::Tensor::new(&[attention_len as i32], device).context("create CUDA graph seqused_k buffer")
     }
 
     #[cfg(feature = "cuda")]
@@ -1880,13 +1877,13 @@ impl CudaGraphRunner {
         block_table: &BlockTable,
         paged_cache: &PagedKvCache,
         seq_len: usize,
-        device: &Device,
-    ) -> Result<Tensor> {
+        device: &candle_core::Device,
+    ) -> Result<candle_core::Tensor> {
         let slot = block_table
             .slot_for(seq_len, paged_cache.block_size())
             .with_context(|| format!("no slot for decode position {seq_len}"))?
             as u32;
-        Tensor::new(&[slot], device).context("create CUDA graph KV slot buffer")
+        candle_core::Tensor::new(&[slot], device).context("create CUDA graph KV slot buffer")
     }
 
     /// Allocate a `[batch, max_blocks_per_seq]` u32 padded block-table
@@ -1899,8 +1896,8 @@ impl CudaGraphRunner {
         block_tables: &[&BlockTable],
         paged_cache: &PagedKvCache,
         max_seqlen_k: usize,
-        device: &Device,
-    ) -> Result<Tensor> {
+        device: &candle_core::Device,
+    ) -> Result<candle_core::Tensor> {
         anyhow::ensure!(
             !block_tables.is_empty(),
             "new_batched_block_table_buffer requires a non-empty batch"
@@ -1921,7 +1918,7 @@ impl CudaGraphRunner {
             flat.extend_from_slice(&padded);
         }
         let width = width.unwrap();
-        Tensor::new(flat.as_slice(), device)?
+        candle_core::Tensor::new(flat.as_slice(), device)?
             .reshape((block_tables.len(), width))
             .context("create CUDA graph batched block table buffer")
     }
@@ -1931,9 +1928,9 @@ impl CudaGraphRunner {
     #[cfg(feature = "cuda")]
     #[allow(dead_code)]
     fn new_batched_seqused_k_buffer(
-        device: &Device,
+        device: &candle_core::Device,
         start_positions: &[usize],
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         anyhow::ensure!(
             !start_positions.is_empty(),
             "new_batched_seqused_k_buffer requires a non-empty batch"
@@ -1942,7 +1939,7 @@ impl CudaGraphRunner {
             .iter()
             .map(|&p| i32::try_from(p + 1).context("seqused_k exceeds i32 range"))
             .collect::<Result<Vec<_>>>()?;
-        Tensor::new(seqused.as_slice(), device)
+        candle_core::Tensor::new(seqused.as_slice(), device)
             .context("create CUDA graph batched seqused_k buffer")
     }
 
@@ -1954,8 +1951,8 @@ impl CudaGraphRunner {
         block_tables: &[&BlockTable],
         paged_cache: &PagedKvCache,
         start_positions: &[usize],
-        device: &Device,
-    ) -> Result<Tensor> {
+        device: &candle_core::Device,
+    ) -> Result<candle_core::Tensor> {
         anyhow::ensure!(
             !block_tables.is_empty(),
             "new_batched_kv_slot_buffer requires a non-empty batch"
@@ -1972,18 +1969,18 @@ impl CudaGraphRunner {
                 as u32;
             slots.push(slot);
         }
-        Tensor::new(slots.as_slice(), device)
+        candle_core::Tensor::new(slots.as_slice(), device)
             .context("create CUDA graph batched KV slot buffer")
     }
 
     #[cfg(feature = "cuda")]
     fn new_rotary_cos_buffer(
         config: &ModelConfig,
-        device: &Device,
+        device: &candle_core::Device,
         position: usize,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         let (cos, _) = Self::rotary_table_values(config, position);
-        Tensor::new(cos.as_slice(), device)?
+        candle_core::Tensor::new(cos.as_slice(), device)?
             .reshape((1usize, cos.len()))
             .context("create CUDA graph rotary cos buffer")
     }
@@ -1991,11 +1988,11 @@ impl CudaGraphRunner {
     #[cfg(feature = "cuda")]
     fn new_rotary_sin_buffer(
         config: &ModelConfig,
-        device: &Device,
+        device: &candle_core::Device,
         position: usize,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         let (_, sin) = Self::rotary_table_values(config, position);
-        Tensor::new(sin.as_slice(), device)?
+        candle_core::Tensor::new(sin.as_slice(), device)?
             .reshape((1usize, sin.len()))
             .context("create CUDA graph rotary sin buffer")
     }
@@ -2003,10 +2000,10 @@ impl CudaGraphRunner {
     #[cfg(feature = "cuda")]
     fn new_output_logits(
         config: &ModelConfig,
-        device: &Device,
+        device: &candle_core::Device,
         dtype: candle_core::DType,
-    ) -> Result<Tensor> {
-        Tensor::zeros((1, 1, config.vocab_size), dtype, device)
+    ) -> Result<candle_core::Tensor> {
+        candle_core::Tensor::zeros((1, 1, config.vocab_size), dtype, device)
             .context("create CUDA graph output logits")
     }
 
@@ -2020,29 +2017,29 @@ impl CudaGraphRunner {
     #[cfg(feature = "cuda")]
     fn new_lm_head_output_buffer(
         config: &ModelConfig,
-        device: &Device,
+        device: &candle_core::Device,
         dtype: candle_core::DType,
         batch: usize,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         anyhow::ensure!(
             batch > 0,
             "lm-head output buffer requires batch > 0"
         );
-        Tensor::zeros((batch, 1, config.vocab_size), dtype, device)
+        candle_core::Tensor::zeros((batch, 1, config.vocab_size), dtype, device)
             .context("create CUDA graph lm-head output buffer")
     }
 
     #[cfg(feature = "cuda")]
     fn new_paged_decode_outputs(
         config: &ModelConfig,
-        device: &Device,
+        device: &candle_core::Device,
         dtype: candle_core::DType,
-    ) -> Result<(Vec<Tensor>, Vec<Tensor>)> {
+    ) -> Result<(Vec<candle_core::Tensor>, Vec<candle_core::Tensor>)> {
         let mut outputs = Vec::with_capacity(config.num_full_attention_layers);
         let mut lse = Vec::with_capacity(config.num_full_attention_layers);
         for _ in 0..config.num_full_attention_layers {
             outputs.push(
-                Tensor::zeros(
+                candle_core::Tensor::zeros(
                     (1, 1, config.num_attention_heads, config.head_dim),
                     dtype,
                     device,
@@ -2050,7 +2047,7 @@ impl CudaGraphRunner {
                 .context("create CUDA graph paged decode output")?,
             );
             lse.push(
-                Tensor::zeros(
+                candle_core::Tensor::zeros(
                     (1, config.num_attention_heads, 1),
                     candle_core::DType::F32,
                     device,
@@ -2076,12 +2073,12 @@ impl CudaGraphRunner {
     }
 
     #[cfg(feature = "cuda")]
-    fn new_gdn_decode_outputs(config: &ModelConfig, device: &Device) -> Result<Vec<Tensor>> {
+    fn new_gdn_decode_outputs(config: &ModelConfig, device: &candle_core::Device) -> Result<Vec<candle_core::Tensor>> {
         let num_linear_layers = config.num_layers - config.num_full_attention_layers;
         let mut outputs = Vec::with_capacity(num_linear_layers);
         for _ in 0..num_linear_layers {
             outputs.push(
-                Tensor::zeros(
+                candle_core::Tensor::zeros(
                     (
                         1,
                         1,
@@ -2105,12 +2102,12 @@ impl CudaGraphRunner {
     #[allow(dead_code)]
     fn new_batched_rotary_cos_buffer(
         config: &ModelConfig,
-        device: &Device,
+        device: &candle_core::Device,
         batch: usize,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         anyhow::ensure!(batch > 0, "rotary cos buffer requires batch > 0");
         let half = config.rotary_dim() / 2;
-        Tensor::zeros((batch, half), candle_core::DType::F32, device)
+        candle_core::Tensor::zeros((batch, half), candle_core::DType::F32, device)
             .context("create CUDA graph batched rotary cos buffer")
     }
 
@@ -2121,12 +2118,12 @@ impl CudaGraphRunner {
     #[allow(dead_code)]
     fn new_batched_rotary_sin_buffer(
         config: &ModelConfig,
-        device: &Device,
+        device: &candle_core::Device,
         batch: usize,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         anyhow::ensure!(batch > 0, "rotary sin buffer requires batch > 0");
         let half = config.rotary_dim() / 2;
-        Tensor::zeros((batch, half), candle_core::DType::F32, device)
+        candle_core::Tensor::zeros((batch, half), candle_core::DType::F32, device)
             .context("create CUDA graph batched rotary sin buffer")
     }
 
@@ -2139,12 +2136,12 @@ impl CudaGraphRunner {
     #[allow(dead_code)]
     fn new_batched_output_logits(
         config: &ModelConfig,
-        device: &Device,
+        device: &candle_core::Device,
         dtype: candle_core::DType,
         batch: usize,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         anyhow::ensure!(batch > 0, "batched output logits require batch > 0");
-        Tensor::zeros((batch, 1, config.vocab_size), dtype, device)
+        candle_core::Tensor::zeros((batch, 1, config.vocab_size), dtype, device)
             .context("create CUDA graph batched output logits")
     }
 
@@ -2155,16 +2152,16 @@ impl CudaGraphRunner {
     #[allow(dead_code)]
     fn new_batched_paged_decode_outputs(
         config: &ModelConfig,
-        device: &Device,
+        device: &candle_core::Device,
         dtype: candle_core::DType,
         batch: usize,
-    ) -> Result<(Vec<Tensor>, Vec<Tensor>)> {
+    ) -> Result<(Vec<candle_core::Tensor>, Vec<candle_core::Tensor>)> {
         anyhow::ensure!(batch > 0, "batched paged decode outputs require batch > 0");
         let mut outputs = Vec::with_capacity(config.num_full_attention_layers);
         let mut lse = Vec::with_capacity(config.num_full_attention_layers);
         for _ in 0..config.num_full_attention_layers {
             outputs.push(
-                Tensor::zeros(
+                candle_core::Tensor::zeros(
                     (batch, 1, config.num_attention_heads, config.head_dim),
                     dtype,
                     device,
@@ -2172,7 +2169,7 @@ impl CudaGraphRunner {
                 .context("create CUDA graph batched paged decode output")?,
             );
             lse.push(
-                Tensor::zeros(
+                candle_core::Tensor::zeros(
                     (batch, config.num_attention_heads, 1),
                     candle_core::DType::F32,
                     device,
@@ -2190,15 +2187,15 @@ impl CudaGraphRunner {
     #[allow(dead_code)]
     fn new_batched_gdn_decode_outputs(
         config: &ModelConfig,
-        device: &Device,
+        device: &candle_core::Device,
         batch: usize,
-    ) -> Result<Vec<Tensor>> {
+    ) -> Result<Vec<candle_core::Tensor>> {
         anyhow::ensure!(batch > 0, "batched GDN decode outputs require batch > 0");
         let num_linear_layers = config.num_layers - config.num_full_attention_layers;
         let mut outputs = Vec::with_capacity(num_linear_layers);
         for _ in 0..num_linear_layers {
             outputs.push(
-                Tensor::zeros(
+                candle_core::Tensor::zeros(
                     (
                         batch,
                         1,
@@ -2253,19 +2250,19 @@ mod tests {
 
     #[test]
     fn test_new_cpu_disables_graphs() {
-        let runner = CudaGraphRunner::new(&Device::Cpu, true);
+        let runner = CudaGraphRunner::new(&candle_core::Device::Cpu, true);
         assert!(!runner.is_enabled());
     }
 
     #[test]
     fn test_new_disabled() {
-        let runner = CudaGraphRunner::new(&Device::Cpu, false);
+        let runner = CudaGraphRunner::new(&candle_core::Device::Cpu, false);
         assert!(!runner.is_enabled());
     }
 
     #[test]
     fn test_invalidate_resets_state() {
-        let mut runner = CudaGraphRunner::new(&Device::Cpu, false);
+        let mut runner = CudaGraphRunner::new(&candle_core::Device::Cpu, false);
         runner.warmup_done = true;
         #[cfg(feature = "cuda")]
         {
@@ -2280,7 +2277,7 @@ mod tests {
 
     #[test]
     fn test_multiple_invalidations_increment_generation() {
-        let mut runner = CudaGraphRunner::new(&Device::Cpu, false);
+        let mut runner = CudaGraphRunner::new(&candle_core::Device::Cpu, false);
         runner.invalidate();
         runner.invalidate();
         runner.invalidate();
