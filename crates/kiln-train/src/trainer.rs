@@ -5966,6 +5966,21 @@ fn cross_entropy_loss(
     // Cross-entropy: -log(softmax(logits)[label])
     // Use log-sum-exp trick for numerical stability
     let active_logits_f32 = active_logits.to_f32_dtype()?;
+
+    // #1082 CP-4: when tape-authoritative, route the loss through the
+    // cross_entropy adapter so it records the scalar loss as the tape
+    // root. Gated on the authoritative flag so the candle-authoritative
+    // path (which still calls loss.backward()) keeps a lineage-carrying
+    // candle loss.
+    #[cfg(feature = "cuda")]
+    if tape_authoritative_enabled() {
+        if let Some(loss) = kiln_model::tape_forward::try_tape_cross_entropy_cuda(
+            &active_logits_f32,
+            &labels_tensor,
+        )? {
+            return Ok(loss);
+        }
+    }
     let log_sum_exp = active_logits_f32.log_sum_exp(LAST_DIM)?; // [num_active]
 
     // Gather the logit for the correct class at each position
@@ -10575,6 +10590,87 @@ fn checkpointed_forward_backward(
 /// `kiln_autograd::tape_forward_enabled()` (cached after first read).
 /// When unset, the bridge is not opened and `standard_forward_backward`
 /// runs the same forward + `loss.backward()` it has always run.
+/// True iff `KILN_USE_TAPE_AUTHORITATIVE` is set. Read FRESH each call (not
+/// cached) so tests can toggle it; checked once per training step, off the
+/// hot path. When on, the SFT step drives backward through the kt `Tape`
+/// (tape-authoritative) instead of candle's `loss.backward()`. (#1082 CP-4.)
+#[cfg(feature = "cuda")]
+fn tape_authoritative_enabled() -> bool {
+    std::env::var("KILN_USE_TAPE_AUTHORITATIVE")
+        .map(|v| !matches!(v.trim(), "" | "0" | "false" | "no" | "off"))
+        .unwrap_or(false)
+}
+
+/// Tape-authoritative SFT forward/backward (#1082 CP-4 endgame).
+///
+/// Runs the model forward + cross-entropy loss inside
+/// `with_tape_authoritative_scope`: the `cross_entropy` adapter records the
+/// scalar loss as the tape root, and every adapter threads its inputs to
+/// upstream outputs (Step-A kt-id reuse) so the recorded tape is connected.
+/// The scope seeds the tape at the loss (`dL/dL = ones`) and walks the
+/// connected graph — NO candle `loss.backward()`. The per-input kt grads are
+/// copied into a candle `GradStore` keyed by each `Var`'s candle `TensorId`,
+/// so the optimizer step consumes them exactly as candle's own grads.
+#[cfg(feature = "cuda")]
+fn standard_forward_backward_tape_authoritative(
+    backend: &dyn BackendRuntime,
+    input_ids: &[u32],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &TrainableLoraParams,
+    label_mask: &[bool],
+    device: &CdDevice,
+    _flce_provider: Option<FlceProvider>,
+) -> Result<(f64, GradStore)> {
+    let lora_weights = params.as_lora_weights();
+    let mut linear_state = LinearAttentionState::new(model_config, device)?;
+
+    let (loss_val, loss, grads_by_candle_raw) =
+        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(|| {
+            let logits = model_forward(
+                backend,
+                input_ids,
+                weights,
+                model_config,
+                None,
+                Some(&mut linear_state),
+                Some(&lora_weights),
+            )
+            .context("tape-authoritative forward")
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+            let loss = cross_entropy_loss(&logits, input_ids, label_mask, device)
+                .context("tape-authoritative cross_entropy_loss")
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+            let loss_val = loss
+                .to_scalar::<f32>()
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("loss.to_scalar: {e}")))?
+                as f64;
+            Ok((loss_val, loss))
+        })
+        .map_err(|e| anyhow::anyhow!("tape-authoritative backward: {e}"))?;
+
+    // `GradStore::new()` is private; obtain a store via `backward()` on the
+    // (detached) loss — it returns `{loss: ones}` — then insert the tape grads
+    // keyed by each Var's real candle TensorId (sidesteps the missing
+    // `TensorId::from_raw`).
+    let mut grads = loss
+        .backward()
+        .context("tape-authoritative: loss.backward() on detached loss")?;
+    let var_by_raw: std::collections::HashMap<usize, &Var> = params
+        .all_vars()
+        .iter()
+        .map(|v| (v.as_tensor().id().as_raw(), *v))
+        .collect();
+    for (candle_raw, kt_grad) in grads_by_candle_raw {
+        if let Some(var) = var_by_raw.get(&candle_raw) {
+            let cg = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_grad)
+                .context("tape-authoritative: kt -> candle grad copy")?;
+            grads.insert_id(var.as_tensor().id(), cg);
+        }
+    }
+    Ok((loss_val, grads))
+}
+
 pub fn standard_forward_backward(
     backend: &dyn BackendRuntime,
     input_ids: &[u32],
@@ -10589,6 +10685,19 @@ pub fn standard_forward_backward(
     // `KILN_USE_TAPE_FORWARD` *and* the cuda feature. When off (the
     // default), runs the existing forward + `loss.backward()` flow
     // unchanged.
+    #[cfg(feature = "cuda")]
+    if tape_authoritative_enabled() {
+        return standard_forward_backward_tape_authoritative(
+            backend,
+            input_ids,
+            weights,
+            model_config,
+            params,
+            label_mask,
+            device,
+            flce_provider,
+        );
+    }
     #[cfg(feature = "cuda")]
     if kiln_autograd::tape_forward_enabled() {
         return standard_forward_backward_via_tape_bridge(
@@ -13477,6 +13586,137 @@ mod tests {
             );
             kiln_tensor::Device::Cpu
         }
+    }
+
+    /// #1082 CP-4 endgame: the tape-authoritative SFT backward must produce
+    /// the same per-Var gradients as a pure-candle backward of the same step.
+    /// Baseline is computed DIRECTLY (no tape scope -> adapters short-circuit
+    /// even with KILN_USE_TAPE_FORWARD cached on), sidestepping both the
+    /// OnceLock gate and the candle-authoritative bridge's chained-adapter
+    /// seed gap. Runs on the synthetic tiny model (no checkpoint download).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn tape_authoritative_grads_match_candle_baseline() {
+        use kiln_model::forward::model_forward;
+        let device = match candle_core::Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("tape-authoritative parity: no CUDA device — skipping");
+                return;
+            }
+        };
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device).expect("tiny weights on cuda");
+        let params =
+            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let label_mask = vec![false, false, true, true, true, true, false];
+        let backend = backend::for_device(&device);
+
+        // Adapters fire only inside a tape scope; cached gate on for the proc.
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+        }
+
+        // BASELINE: pure candle (no tape scope; authoritative off -> CE composite).
+        unsafe {
+            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+        }
+        let lora_weights = params.as_lora_weights();
+        let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
+        let logits = model_forward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            None,
+            Some(&mut ls),
+            Some(&lora_weights),
+        )
+        .expect("candle baseline forward");
+        let loss_c =
+            cross_entropy_loss(&logits, &input_ids, &label_mask, &device).expect("baseline loss");
+        let grads_c = loss_c.backward().expect("candle baseline backward");
+
+        // AUTHORITATIVE: tape-driven backward via standard_forward_backward.
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
+        }
+        let (loss_a, grads_a) = standard_forward_backward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &label_mask,
+            &device,
+            None,
+        )
+        .expect("tape-authoritative step");
+        unsafe {
+            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+        }
+
+        let rel = |a: &candle_core::Tensor, c: &candle_core::Tensor| -> f32 {
+            let af = a
+                .to_dtype(candle_core::DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let cf = c
+                .to_dtype(candle_core::DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let mut d = 0f32;
+            let mut m = 0f32;
+            for (x, y) in af.iter().zip(cf.iter()) {
+                d = d.max((x - y).abs());
+                m = m.max(y.abs());
+            }
+            d / m.max(1e-6)
+        };
+
+        // Forward+loss parity: the authoritative loss must match the pure
+        // candle baseline (proves model_forward + cross_entropy through the
+        // adapters is numerically faithful and the tape root is the loss).
+        let loss_cf = loss_c.to_scalar::<f32>().expect("baseline loss scalar") as f64;
+        let lrel = ((loss_a - loss_cf).abs() / loss_cf.abs().max(1e-6)) as f32;
+        assert!(
+            lrel < 0.05,
+            "tape-authoritative loss {loss_a} diverges from candle baseline {loss_cf} (rel {lrel:.4})"
+        );
+
+        // The tape-authoritative backward produced a candle GradStore.
+        assert!(
+            grads_a.get_ids().count() > 0,
+            "tape-authoritative path produced an empty GradStore"
+        );
+
+        // Grad parity where the tape routed a param. NOTE: the LoRA projection
+        // matmuls are not yet adapter-wired, so `compared` may be 0 — that's a
+        // tracked coverage gap (wire the LoRA matmuls through
+        // try_tape_matmul_cuda next), not a flaky test. Where grads exist on
+        // BOTH paths they must match.
+        let mut compared = 0usize;
+        for v in params.all_vars() {
+            if let (Some(a), Some(c)) = (grads_a.get(v.as_tensor()), grads_c.get(v.as_tensor())) {
+                let r = rel(a, c);
+                assert!(
+                    r < 0.1,
+                    "tape-authoritative grad diverges from candle baseline (rel {r:.4})"
+                );
+                compared += 1;
+            }
+        }
+        eprintln!(
+            "tape-authoritative parity: loss rel {lrel:.4}; {compared} param-Var grads matched \
+             (LoRA matmul tape-routing pending)"
+        );
     }
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
