@@ -34,7 +34,6 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use candle_core::cuda_backend::CudaDevice;
 use cudarc::driver::CudaContext;
 use cudarc::driver::CudaSlice;
 use cudarc::driver::sys::CUdeviceptr;
@@ -423,35 +422,12 @@ impl StorageBackend for CudaStorage {
 /// holding a [`CudaStorage`]. Convenience constructor matching the CPU
 /// `cpu_zeros` helper.
 ///
-/// #1082: the back-compat candle-typed input is retained for external
-/// callers (notably `kiln-model::paged_kv_cache_kt`); internally this
-/// derives the cudarc `CudaContext` from the candle device and routes
-/// through [`CudaStorage::zeros_ctx`] — no candle-typed `CudaStorage::zeros`
-/// is involved.
-pub fn cuda_zeros(
-    candle_device: Arc<CudaDevice>,
-    device_index: usize,
-    dtype: DType,
-    n_elements: usize,
-) -> Result<crate::Storage> {
-    let ctx = candle_device.cuda_stream().context().clone();
-    let storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n_elements)?;
-    Ok(Arc::new(storage))
-}
-
-/// Candle-free parallel entry point for [`cuda_zeros`].
-///
-/// Allocates a zero-filled [`crate::Storage`] on the given CUDA device,
-/// taking only `device_index` — the candle `Arc<CudaDevice>` (still
-/// required by [`CudaStorage::zeros`]) is derived internally via
-/// [`primary_cuda_device`].
-///
-/// Same migration purpose as [`host_to_cuda_copy_ctx`]: call sites that
-/// previously held `.candle_device().clone()` just to forward into
-/// `cuda_zeros` should switch to this variant to retire the
-/// `.candle_device()` read from their substrate dependency surface.
-/// Once every site is migrated and the underlying field flips,
-/// `cuda_zeros_ctx` becomes a thin alias for the same body.
+/// **#1082 candle-removal**: this is now the only public `cuda_zeros*`
+/// entry. The previous candle-typed
+/// `cuda_zeros(Arc<CudaDevice>, usize, DType, usize)` wrapper was
+/// deleted in wave 13 of the #1082 sweep; its sole external caller
+/// (`kiln-kt-bridge::kt_tensor_from_candle_cuda_copy`) was migrated
+/// to this candle-free variant.
 ///
 /// Allocations route through [`CudaStorage::zeros_ctx`], which uses
 /// `ctx.default_stream().alloc_zeros::<u8>()` directly via cudarc —
@@ -2001,6 +1977,8 @@ pub fn cuda_scatter_add_dim0(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "cuda")]
+    use candle_core::cuda_backend::CudaDevice;
 
     fn cuda_test_enabled() -> bool {
         std::env::var("KILN_TENSOR_CUDA_TEST").ok().as_deref() == Some("1")

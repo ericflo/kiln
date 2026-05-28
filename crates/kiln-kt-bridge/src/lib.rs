@@ -487,7 +487,12 @@ pub fn kt_tensor_from_candle_cuda_copy(
 
     // Allocate the destination kt-Tensor's storage (zero-init; the
     // subsequent memcpy overwrites every byte).
-    let dst_storage = kiln_tensor::cuda_zeros(candle_device, device_index, kt_dtype, n_elems)
+    // #1082 wave 13: `cuda_zeros(Arc<CudaDevice>, ...)` was deleted in
+    // favor of the candle-free `cuda_zeros_ctx(device_index, ...)`. The
+    // local `candle_device` binding is still needed for the
+    // `stream`/`raw_stream` reads above; only the kt-side allocation
+    // moves to the candle-free entry.
+    let dst_storage = kiln_tensor::cuda_zeros_ctx(device_index, kt_dtype, n_elems)
         .map_err(|e| BridgeError::new(format!("kt-bridge copy: alloc dst: {e}")))?;
     let dst_cuda = dst_storage
         .as_any()
