@@ -3002,7 +3002,7 @@ mod tests {
         assert_eq!(saved_losses.len(), 2);
         assert!(adapter_dir.join("adapter_config.json").exists());
         let saved = crate::cd_types::safetensors_load_file(
-            adapter_dir.join("adapter_model.safetensors"),
+            &adapter_dir.join("adapter_model.safetensors"),
             &CdDevice::Cpu,
         )?;
         assert_eq!(saved.len(), 14);
@@ -3783,7 +3783,7 @@ mod tests {
         ));
         save_cuda_lora_adapter_dir(&layers, 2, 4.0, &out_dir)?;
         let loaded = crate::cd_types::safetensors_load_file(
-            out_dir.join("adapter_model.safetensors"),
+            &out_dir.join("adapter_model.safetensors"),
             &CdDevice::Cpu,
         )?;
         let in_proj_qkv_a = loaded
