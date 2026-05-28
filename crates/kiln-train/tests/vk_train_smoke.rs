@@ -17,13 +17,13 @@
 #![cfg(feature = "vulkan")]
 
 use anyhow::Result;
-// TODO(#1082): drop this candle import once kiln_model's `GpuWeights`, the
-// `VkTensor::from_candle` upload boundary, and `candle_core::safetensors::{load,save}`
-// I/O accept kt::Tensor instead of candle Tensor. As of this commit those APIs still
-// require candle types. `ShapeWithOneHole`, `Device::Cpu`, and the rare `DType::F32`
-// are spelled fully-qualified at call sites so the remaining `use` only pulls in
-// `Tensor`.
-use candle_core::Tensor;
+// TODO(#1082): inline-qualify the remaining `candle_core::*` sites once kiln_model's
+// `GpuWeights`, the `VkTensor::from_candle` upload boundary, and
+// `candle_core::safetensors::{load,save}` I/O accept kt::Tensor instead of candle
+// Tensor. As of this commit those APIs still require candle types. Every candle
+// reference in this file is now spelled `candle_core::*` inline so the file has no
+// top-level `use candle_*` import (mirrors the kiln-vulkan-kernel/kernels.rs pattern
+// from PR f476cb97).
 use kiln_core::config::{DType, ModelConfig};
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::forward::{
@@ -294,11 +294,15 @@ fn tiny_gpu_grpo_model_config() -> ModelConfig {
 fn cpu_tensor(
     data: Vec<f32>,
     shape: impl candle_core::shape::ShapeWithOneHole,
-) -> Result<Tensor> {
-    Ok(Tensor::from_vec(data, shape, &candle_core::Device::Cpu)?)
+) -> Result<candle_core::Tensor> {
+    Ok(candle_core::Tensor::from_vec(
+        data,
+        shape,
+        &candle_core::Device::Cpu,
+    )?)
 }
 
-fn transpose_2d(t: &Tensor) -> Result<Tensor> {
+fn transpose_2d(t: &candle_core::Tensor) -> Result<candle_core::Tensor> {
     Ok(t.transpose(0, 1)?.contiguous()?)
 }
 
@@ -373,8 +377,11 @@ fn vk_from_gpu_weights_restores_stubbed_tied_embedding_on_device() -> Result<()>
     let config = tiny_gpu_grpo_model_config();
     let mut weights = build_tiny_gpu_grpo_weights()?;
     let expected = weights.embed_tokens.flatten_all()?.to_vec1::<f32>()?;
-    weights.embed_tokens =
-        Tensor::zeros((1usize,), candle_core::DType::F32, &candle_core::Device::Cpu)?;
+    weights.embed_tokens = candle_core::Tensor::zeros(
+        (1usize,),
+        candle_core::DType::F32,
+        &candle_core::Device::Cpu,
+    )?;
 
     let vk_weights = VkModelWeights::from_gpu_weights(&weights, &config, &dev)?;
     assert_eq!(
