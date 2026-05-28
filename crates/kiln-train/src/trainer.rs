@@ -460,7 +460,9 @@ type CdResult<T> = candle_core::Result<T>;
 type CpuStorage = candle_core::CpuStorage;
 type CudaStorage = candle_core::CudaStorage;
 type Layout = candle_core::Layout;
-type CustomOp1Trait = candle_core::CustomOp1;
+// (Note: candle_core::CustomOp1 is a trait and cannot be type-aliased on
+// stable Rust without the `trait_alias` feature, so the impl below keeps
+// the full path.)
 
 /// Load a safetensors file into a HashMap<String, Tensor> on `device`.
 /// Consolidates the `safetensors_load_file(path, device)` call
@@ -484,10 +486,10 @@ fn safetensors_save_file(
     safetensors_save_file(tensors, path)
 }
 
-/// Helper macro shim wrapping `cd_bail!`. Lets call sites write
-/// `cd_bail!(...)` instead of `bail!(...)`.
+/// Helper macro shim wrapping candle's bail. Lets call sites write
+/// `cd_bail!(...)` instead of the full candle path.
 macro_rules! cd_bail {
-    ($($t:tt)*) => { cd_bail!($($t)*) };
+    ($($t:tt)*) => { candle_core::bail!($($t)*) };
 }
 
 /// Sample a Kaiming-uniform LoRA-A initialization.
@@ -7894,7 +7896,7 @@ impl std::fmt::Debug for InjectTensorGradient {
     }
 }
 
-impl CustomOp1Trait for InjectTensorGradient {
+impl candle_core::CustomOp1 for InjectTensorGradient {
     fn name(&self) -> &'static str {
         "kiln-inject-tensor-gradient"
     }
