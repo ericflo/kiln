@@ -1547,8 +1547,9 @@ pub fn try_kt_paged_kv_cache_new(
     dtype: DType,
     device: &Device,
 ) -> Result<Option<crate::paged_kv_cache_kt::PagedKvCacheKt>> {
-    use candle_core::backend::BackendDevice;
-    use candle_core::DeviceLocation;
+    // `BackendDevice` is imported at top level so `cuda_device_arc.location()`
+    // resolves without an inner `use`. `DeviceLocation` is inline-qualified
+    // below at the single use site. (#1082)
     use std::sync::Arc;
 
     if !cuda_use_kt_paged_kv_cache() {
@@ -1559,10 +1560,11 @@ pub fn try_kt_paged_kv_cache_new(
         Device::Cuda(d) => d,
         _ => return Ok(None),
     };
-    let cuda_device_arc: Arc<candle_core::cuda_backend::CudaDevice> =
-        Arc::new(cuda_dev_ref.clone());
+    // Type inferred as `Arc<CudaDevice>` — no need to spell out the
+    // full candle `cuda_backend::CudaDevice` path. (#1082)
+    let cuda_device_arc = Arc::new(cuda_dev_ref.clone());
     let device_index = match cuda_device_arc.location() {
-        DeviceLocation::Cuda { gpu_id } => gpu_id,
+        ::candle_core::DeviceLocation::Cuda { gpu_id } => gpu_id,
         other => anyhow::bail!(
             "try_kt_paged_kv_cache_new: expected Cuda location, got {other:?}"
         ),
