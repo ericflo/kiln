@@ -56,6 +56,7 @@
 
 #![cfg(feature = "cuda")]
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use candle_core::{DType, Device, Tensor};
@@ -789,4 +790,430 @@ fn tape_forward_swiglu_short_circuits_without_active_scope() {
         "no active tape scope must short-circuit to Ok(None) \
          so the caller falls through to the existing kt dispatch"
     );
+}
+
+// ======================================================================
+// Tape-BACKWARD parity (#1082 — CP-4 tape-backward parity).
+//
+// The forward parity tests above prove each tape-forward adapter records
+// exactly one node and produces a bit-exact forward value. This section
+// closes the deferred assertion called out in the module header
+// (lines 22-25): walking `Tape::backward` over that one recorded node
+// must produce the gradient the op's analytic backward defines.
+//
+// Mechanics shared by every test below:
+//
+//   1. Run the adapter inside `with_thread_local_tape` → `(result, tape)`.
+//   2. Read `out_id = tape.nodes()[0].output_id` and
+//      `input_ids = tape.nodes()[0].input_ids` (the kt-mirror ids of the
+//      op's output + inputs — the adapters return only a candle Tensor,
+//      so the kt output id must come from the tape node).
+//   3. Build a candle BF16 CUDA seed grad shaped like the output, borrow
+//      it zero-copy as a kt Tensor (the candle seed MUST outlive the
+//      backward call — the borrow is a view into its CUDA memory), and
+//      feed it as `seeds[out_id]`.
+//   4. `tape.backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))`
+//      walks the single node and returns a `GradStore` keyed on the kt
+//      input ids.
+//   5. Convert each kt input grad back to candle and compare against an
+//      analytic reference computed in F32 (the device backward casts up
+//      to F32, composes, casts the result back to BF16 once — so the
+//      reference is F32 and the comparison runs at a BF16-output
+//      tolerance).
+//
+// The saved-input kt tensors inside each BackwardOp are zero-copy borrows
+// of the original candle inputs, so those candle tensors (and the candle
+// seed grad) stay alive for the whole test body.
+// ======================================================================
+
+/// Sigmoid in F32, composed from candle core ops (no candle-nn dep):
+/// `σ(x) = 1 / (1 + exp(-x))`. `affine(1.0, 1.0)` computes `exp(-x) + 1`.
+fn candle_sigmoid_f32(x: &Tensor) -> Tensor {
+    let neg = x.neg().expect("neg");
+    let e = neg.exp().expect("exp");
+    let denom = e.affine(1.0, 1.0).expect("exp(-x) + 1");
+    denom.recip().expect("recip")
+}
+
+/// Build a BF16 contiguous CUDA seed gradient of the given shape.
+fn build_seed_grad(device: &Device, dims: &[usize], seed: u64, scale: f32) -> Tensor {
+    let n: usize = dims.iter().product();
+    let host = random_bf16_vec(n, seed, scale);
+    Tensor::from_vec(host, dims.to_vec(), &Device::Cpu)
+        .expect("seed cpu")
+        .to_device(device)
+        .expect("seed -> cuda")
+        .contiguous()
+        .expect("seed contiguous")
+}
+
+#[test]
+fn tape_backward_silu_matches_analytic_reference() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_backward silu: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    let rows = 32usize;
+    let cols = 1024usize;
+    let x = build_silu_input(&device, rows, cols);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    // Forward under the tape so a SiluBackward node is recorded.
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_silu_cuda(&x)
+    });
+    let _out = res
+        .expect("tape-forward try_tape_silu_cuda ok")
+        .expect("tape-forward returned Some(out)");
+    assert_eq!(tape.len(), 1, "silu must record exactly one node");
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(input_ids.len(), 1, "silu records one input (x)");
+
+    // Seed grad shaped like the output, borrowed zero-copy as kt.
+    let seed = build_seed_grad(&device, &[rows, cols], 0x511E_0000_0001, 0.25);
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("silu backward walk");
+
+    let dx_kt = grads.get(input_ids[0]).expect("dx grad present");
+    let dx = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(dx_kt).expect("dx kt -> candle");
+    assert_eq!(dx.shape().dims(), &[rows, cols], "dx shape");
+    assert_eq!(dx.dtype(), DType::BF16, "dx dtype matches input");
+    assert!(dx.device().is_cuda(), "dx stays on CUDA");
+
+    // Analytic reference: dx = dy · (σ + x·σ·(1-σ)), all in F32.
+    let xf = x.to_dtype(DType::F32).expect("x -> f32");
+    let dyf = seed.to_dtype(DType::F32).expect("dy -> f32");
+    let s = candle_sigmoid_f32(&xf);
+    let oms = s.affine(-1.0, 1.0).expect("1 - s");
+    let xs = (&xf * &s).expect("x*s");
+    let xs_oms = (&xs * &oms).expect("x*s*(1-s)");
+    let dsilu = (&s + &xs_oms).expect("σ + x·σ·(1-σ)");
+    let ref_dx = (&dyf * &dsilu).expect("dy*dsilu");
+
+    let diff = max_abs_diff(&dx, &ref_dx);
+    assert!(
+        diff < 3e-2,
+        "silu tape-backward grad diverges from analytic reference \
+         (max-abs-diff {diff} >= 3e-2 BF16 tol)"
+    );
+}
+
+#[test]
+fn tape_backward_swiglu_matches_analytic_reference() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_backward swiglu: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    let rows = 16usize;
+    let cols = 1024usize;
+    let (gate, up) = build_swiglu_inputs(&device, rows, cols);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_swiglu_cuda(&gate, &up)
+    });
+    let _out = res
+        .expect("tape-forward try_tape_swiglu_cuda ok")
+        .expect("tape-forward returned Some(out)");
+    assert_eq!(tape.len(), 1, "swiglu must record exactly one node");
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(input_ids.len(), 2, "swiglu records two inputs (gate, up)");
+
+    let seed = build_seed_grad(&device, &[rows, cols], 0x5716_0000_0002, 0.25);
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("swiglu backward walk");
+
+    // Input order is [gate, up]; MulSigmoidGateBackward returns
+    // [d_gate, d_up] in the same order.
+    let dgate_kt = grads.get(input_ids[0]).expect("d_gate present");
+    let dup_kt = grads.get(input_ids[1]).expect("d_up present");
+    let dgate = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(dgate_kt).expect("d_gate -> candle");
+    let dup = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(dup_kt).expect("d_up -> candle");
+    assert_eq!(dgate.shape().dims(), &[rows, cols], "d_gate shape");
+    assert_eq!(dup.shape().dims(), &[rows, cols], "d_up shape");
+    assert_eq!(dgate.dtype(), DType::BF16);
+    assert_eq!(dup.dtype(), DType::BF16);
+
+    // Analytic reference in F32:
+    //   σ      = sigmoid(gate)
+    //   d_gate = dy · up · (σ + gate·σ·(1-σ))
+    //   d_up   = dy · gate · σ
+    let gatef = gate.to_dtype(DType::F32).expect("gate -> f32");
+    let upf = up.to_dtype(DType::F32).expect("up -> f32");
+    let dyf = seed.to_dtype(DType::F32).expect("dy -> f32");
+    let s = candle_sigmoid_f32(&gatef);
+    let oms = s.affine(-1.0, 1.0).expect("1 - s");
+    let gs = (&gatef * &s).expect("gate*s");
+    let gs_oms = (&gs * &oms).expect("gate*s*(1-s)");
+    let dsilu = (&s + &gs_oms).expect("σ + gate·σ·(1-σ)");
+    let dy_up = (&dyf * &upf).expect("dy*up");
+    let ref_dgate = (&dy_up * &dsilu).expect("dy*up*dsilu");
+    let ref_dup = (&dyf * &gs).expect("dy*gate*s");
+
+    let diff_g = max_abs_diff(&dgate, &ref_dgate);
+    let diff_u = max_abs_diff(&dup, &ref_dup);
+    assert!(
+        diff_g < 3e-2,
+        "swiglu d_gate diverges from analytic reference (max-abs-diff {diff_g})"
+    );
+    assert!(
+        diff_u < 3e-2,
+        "swiglu d_up diverges from analytic reference (max-abs-diff {diff_u})"
+    );
+}
+
+#[test]
+fn tape_backward_matmul_matches_analytic_reference() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_backward matmul: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    let m = 16usize;
+    let k = 256usize;
+    let n = 64usize;
+    let (a, b) = build_matmul_inputs(&device, m, k, n);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_matmul_cuda(&a, &b)
+    });
+    let _out = res
+        .expect("tape-forward try_tape_matmul_cuda ok")
+        .expect("tape-forward returned Some(out)");
+    assert_eq!(tape.len(), 1, "matmul must record exactly one node");
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(input_ids.len(), 2, "matmul records two inputs (a, b)");
+
+    // Output is [M, N]; seed grad matches.
+    let seed = build_seed_grad(&device, &[m, n], 0x3A33_0000_0003, 0.25);
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+
+    let grads = tape
+        .backward_with_seeds(seeds, |x, y| kiln_tensor::ops::add(x, y))
+        .expect("matmul backward walk");
+
+    // Input order is [a, b]; MatmulBackward returns [d_a, d_b].
+    let da_kt = grads.get(input_ids[0]).expect("d_a present");
+    let db_kt = grads.get(input_ids[1]).expect("d_b present");
+    let da = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(da_kt).expect("d_a -> candle");
+    let db = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(db_kt).expect("d_b -> candle");
+    // Shape asserts pin the transpose orientation decisively.
+    assert_eq!(da.shape().dims(), &[m, k], "d_a shape [M, K]");
+    assert_eq!(db.shape().dims(), &[k, n], "d_b shape [K, N]");
+
+    // Analytic reference in F32: d_a = grad · bᵀ, d_b = aᵀ · grad.
+    let af = a.to_dtype(DType::F32).expect("a -> f32");
+    let bf = b.to_dtype(DType::F32).expect("b -> f32");
+    let gf = seed.to_dtype(DType::F32).expect("grad -> f32");
+    let bt = bf.t().expect("b.t").contiguous().expect("bᵀ contiguous");
+    let ref_da = gf.matmul(&bt).expect("grad @ bᵀ");
+    let at = af.t().expect("a.t").contiguous().expect("aᵀ contiguous");
+    let ref_db = at.matmul(&gf).expect("aᵀ @ grad");
+
+    let diff_a = max_abs_diff(&da, &ref_da);
+    let diff_b = max_abs_diff(&db, &ref_db);
+    assert!(
+        diff_a < 3e-2,
+        "matmul d_a diverges from grad·bᵀ reference (max-abs-diff {diff_a})"
+    );
+    assert!(
+        diff_b < 3e-2,
+        "matmul d_b diverges from aᵀ·grad reference (max-abs-diff {diff_b})"
+    );
+}
+
+#[test]
+fn tape_backward_embedding_scatter_add_conserves_mass() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_backward embedding: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    let vocab = 1024usize;
+    let hidden = 256usize;
+    let n_tokens = 32usize;
+    let (weights, token_ids) = build_embedding_inputs(&device, vocab, hidden, n_tokens);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_embedding_cuda(&weights, &token_ids)
+    });
+    let _out = res
+        .expect("tape-forward try_tape_embedding_cuda ok")
+        .expect("tape-forward returned Some(out)");
+    assert_eq!(tape.len(), 1, "embedding must record exactly one node");
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert!(!input_ids.is_empty(), "embedding records at least one input");
+
+    // Output is [N, H]; seed grad matches.
+    let seed = build_seed_grad(&device, &[n_tokens, hidden], 0xE9B0_0000_0004, 0.25);
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("embedding backward walk");
+
+    // input_ids[0] = weights → d_weights via scatter_add. The grad for
+    // token_ids (input_ids[1], when present) must be None — indices have
+    // no gradient.
+    let dw_kt = grads.get(input_ids[0]).expect("d_weights present");
+    let dw = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(dw_kt).expect("d_weights -> candle");
+    assert_eq!(dw.shape().dims(), &[vocab, hidden], "d_weights shape [V, H]");
+    assert_eq!(dw.dtype(), DType::BF16, "d_weights dtype matches weights");
+    assert!(dw.device().is_cuda(), "d_weights stays on CUDA");
+    if input_ids.len() > 1 {
+        assert!(
+            grads.get(input_ids[1]).is_none(),
+            "token-id indices must carry no gradient"
+        );
+    }
+
+    // Mass conservation: scatter_add distributes every grad-row element
+    // into exactly one weight row, so Σ(d_weights) == Σ(grad). This is a
+    // backend-agnostic invariant that catches a dropped/mis-routed
+    // scatter without needing to re-derive the per-row destinations.
+    let dw_sum = dw
+        .to_dtype(DType::F32)
+        .expect("d_weights -> f32")
+        .sum_all()
+        .expect("sum d_weights")
+        .to_scalar::<f32>()
+        .expect("d_weights scalar");
+    let seed_sum = seed
+        .to_dtype(DType::F32)
+        .expect("seed -> f32")
+        .sum_all()
+        .expect("sum seed")
+        .to_scalar::<f32>()
+        .expect("seed scalar");
+    assert!(
+        (dw_sum - seed_sum).abs() < 2e-1,
+        "embedding scatter_add violated mass conservation: \
+         Σ(d_weights) = {dw_sum}, Σ(grad) = {seed_sum}"
+    );
+}
+
+#[test]
+fn tape_backward_rms_norm_produces_input_grads() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_backward rms_norm: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    let rows = 16usize;
+    let hidden = 2560usize;
+    let eps = 1e-6f64;
+    let (x, w) = build_inputs(&device, rows, hidden);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::forward::rms_norm(&x, &w, eps)
+    });
+    let _out = res.expect("tape-forward rms_norm ok");
+    assert_eq!(tape.len(), 1, "rms_norm must record exactly one node");
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert!(!input_ids.is_empty(), "rms_norm records at least one input");
+
+    let seed = build_seed_grad(&device, &[rows, hidden], 0x12_0000_0005, 0.25);
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+
+    // CudaFusedRmsNormBackward is a CUDA-FFI-only op with no clean candle
+    // value reference (the forward fuses mean-square + rsqrt + affine in
+    // one kernel). This is a plumbing/smoke assertion: the backward walk
+    // must run and emit a grad for the activation input with the right
+    // shape/dtype/device. Value parity for the fused kernel is covered by
+    // the kernel crate's own parity tests.
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("rms_norm backward walk");
+
+    let dx_kt = grads.get(input_ids[0]).expect("dx grad present");
+    let dx = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(dx_kt).expect("dx kt -> candle");
+    assert_eq!(dx.shape().dims(), &[rows, hidden], "dx shape matches x");
+    assert_eq!(dx.dtype(), DType::BF16, "dx dtype matches x");
+    assert!(dx.device().is_cuda(), "dx stays on CUDA");
+
+    // If the fused backward also emits a weight grad, it must be
+    // hidden-shaped. (Don't require it — the op may fold the weight grad
+    // elsewhere; the activation grad is the load-bearing one here.)
+    if input_ids.len() > 1 {
+        if let Some(dw_kt) = grads.get(input_ids[1]) {
+            let dw = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(dw_kt).expect("dw -> candle");
+            assert_eq!(dw.shape().dims(), &[hidden], "weight grad shape [H]");
+        }
+    }
 }

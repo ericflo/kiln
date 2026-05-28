@@ -165,6 +165,13 @@ impl BackwardOp for SiluBackward {
     }
     fn apply(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
         validate_same(&self.x, grad_output, "SiluBackward")?;
+        if !self.x.device().is_cpu() {
+            // On-device (CUDA/Metal/Vulkan): compose the gradient in F32
+            // instead of bailing to CPU. The CP-4 tape backward walk
+            // runs on the same device as the forward activations, so a
+            // CPU-only backward would abort the whole walk.
+            return Ok(vec![Some(silu_backward_device(&self.x, grad_output)?)]);
+        }
         let x = load_f32(&self.x)?;
         let dy = load_f32(grad_output)?;
         let dx: Vec<f32> = x
@@ -181,6 +188,28 @@ impl BackwardOp for SiluBackward {
     fn requires_input(&self, _idx: usize) -> bool {
         true
     }
+}
+
+/// Device-generic SiLU backward via composed kiln-tensor ops.
+///
+/// `dx = dy · (σ + x·σ·(1-σ))`, σ = sigmoid(x). Inputs are cast to F32
+/// up front so the entire composition runs in F32 with a single
+/// downcast back to the input dtype at the end — matching the
+/// single-rounding numerical character of the CPU byte path while
+/// staying on-device. Used by the CUDA/Metal/Vulkan branch of
+/// [`SiluBackward::apply`].
+fn silu_backward_device(x: &Tensor, grad_output: &Tensor) -> Result<Tensor> {
+    use kiln_tensor::ops::{add, add_scalar, cast, mul, mul_scalar, sigmoid};
+    let dt = x.dtype();
+    let xf = cast(x, DType::F32)?;
+    let dyf = cast(grad_output, DType::F32)?;
+    let s = sigmoid(&xf)?;
+    let one_minus_s = add_scalar(&mul_scalar(&s, -1.0)?, 1.0)?; // 1 - s
+    let s_oms = mul(&s, &one_minus_s)?; // s·(1-s)
+    let x_s_oms = mul(&xf, &s_oms)?; // x·s·(1-s)
+    let deriv = add(&s, &x_s_oms)?; // σ + x·σ·(1-σ)
+    let dxf = mul(&dyf, &deriv)?; // dy · deriv
+    cast(&dxf, dt)
 }
 
 // ----------------------------------------------------------------------

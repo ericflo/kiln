@@ -70,6 +70,15 @@ impl BackwardOp for MulSigmoidGateBackward {
             bail!("MulSigmoidGateBackward: dtype mismatch among saved tensors and grad");
         }
 
+        if !self.gate.device().is_cpu() {
+            // On-device (CUDA/Metal/Vulkan): compose both gradients in F32
+            // instead of bailing to CPU. The CP-4 tape backward walk runs on
+            // the same device as the forward activations, so a CPU-only
+            // backward would abort the whole walk.
+            let (dg, du) = swiglu_backward_device(&self.gate, &self.up, grad_output)?;
+            return Ok(vec![Some(dg), Some(du)]);
+        }
+
         let gate = load_f32(&self.gate)?;
         let up = load_f32(&self.up)?;
         let dy = load_f32(grad_output)?;
@@ -90,6 +99,39 @@ impl BackwardOp for MulSigmoidGateBackward {
     fn requires_input(&self, _idx: usize) -> bool {
         true
     }
+}
+
+/// On-device SwiGLU gradient, composed from kt elementwise ops in F32.
+///
+/// Mirrors the CPU byte-path math but keeps the data on the GPU. All math
+/// runs in F32 (cast once up, once back down) so BF16/F16 inputs incur a
+/// single rounding on the way out — matching the single-rounding character
+/// of the CPU `load_f32`/`store_f32` reference path.
+///
+/// ```text
+/// d_gate = dy * up * (σ + gate·σ·(1-σ))
+/// d_up   = dy * gate · σ
+/// ```
+fn swiglu_backward_device(
+    gate: &Tensor,
+    up: &Tensor,
+    grad_output: &Tensor,
+) -> Result<(Tensor, Tensor)> {
+    use kiln_tensor::ops::{add, add_scalar, cast, mul, mul_scalar, sigmoid};
+    let dt = gate.dtype();
+    let gatef = cast(gate, DType::F32)?;
+    let upf = cast(up, DType::F32)?;
+    let dyf = cast(grad_output, DType::F32)?;
+    let s = sigmoid(&gatef)?;
+    let one_minus_s = add_scalar(&mul_scalar(&s, -1.0)?, 1.0)?; // 1 - s
+    let s_oms = mul(&s, &one_minus_s)?; // σ·(1-σ)
+    let gate_s_oms = mul(&gatef, &s_oms)?; // gate·σ·(1-σ)
+    let dsilu = add(&s, &gate_s_oms)?; // σ + gate·σ·(1-σ)
+    let dy_up = mul(&dyf, &upf)?; // dy·up
+    let d_gate_f = mul(&dy_up, &dsilu)?; // dy·up·dsilu
+    let silu_gate = mul(&gatef, &s)?; // gate·σ
+    let d_up_f = mul(&dyf, &silu_gate)?; // dy·gate·σ
+    Ok((cast(&d_gate_f, dt)?, cast(&d_up_f, dt)?))
 }
 
 // ----------------------------------------------------------------------
