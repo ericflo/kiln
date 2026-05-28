@@ -584,6 +584,391 @@ pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
 }
 
 // ----------------------------------------------------------------------
+// metal_sdpa_last_axis — Phase 7 Metal substrate op (#1082)
+// ----------------------------------------------------------------------
+
+/// Fused scaled-dot-product attention on the Metal backend — kt-native
+/// substrate op that mirrors [`candle_nn::ops::sdpa`] without going
+/// through the candle dispatch layer.
+///
+/// This is the substrate addition called out in Step 2 of
+/// `docs/metal-types-objc2-swap-plan-2026-05-28.md`. It is the **only**
+/// substrate gap left between `kiln-tensor` and the `metal_types`
+/// chokepoint flip — every other Phase 7 transition is a pure caller
+/// migration (Storage downcast, helper-signature swap, re-export
+/// renames).
+///
+/// # Inputs
+///
+/// - `q`: `(bs, qhead, seq, hidden)` — Metal-backed, contiguous
+/// - `k`: `(bs, kv_head, kv_seq, hidden)` — Metal-backed, contiguous
+/// - `v`: `(bs, kv_head, kv_seq, v_hidden)` — Metal-backed, contiguous
+/// - `scale`: applied before softmax (same as `candle_nn::ops::sdpa`'s
+///   `scale` parameter)
+/// - `causal`: enables MLX-style causal masking; the prefill path in
+///   `kiln-model::backend::metal` is always causal
+///
+/// # Output
+///
+/// Fresh contiguous `(bs, qhead, seq, v_hidden)` tensor.
+///
+/// # Implementation
+///
+/// Mirror of [`metal_softmax_last_axis`]: dispatches directly into the
+/// `candle_metal_kernels::call_sdpa_*` MSL kernel family — the same FFI
+/// entry points `candle_nn::ops::sdpa` uses internally. The wire-level
+/// kernel call is bit-exact; this op only adds the kt-typed signature.
+///
+/// The dispatcher selects between vector / vector-2pass / full kernels
+/// using the same q_seq + head_dim rules candle's `Sdpa::metal_fwd`
+/// applies:
+///
+/// - `q_seq <= 8`: vector kernel (with 2-pass split if `k_seq >= 1024`)
+/// - `q_seq > 8`: full attention kernel
+///
+/// `softcapping` is fixed at `1.0` (disabled) because every kiln call
+/// site under `kiln-model::backend::metal` passes `1.0`; if we ever need
+/// softcapping at the kt layer, add it as an explicit arg here rather
+/// than implicitly through the candle re-export.
+///
+/// `mask` is fixed at `None` because every kiln call site passes
+/// `None` (kiln implements causal masking via the `causal` flag, never
+/// via an external mask tensor). A future PR can add a mask arg if a
+/// non-causal call site appears.
+///
+/// # Requirements
+///
+/// - `q`, `k`, `v` must all be backed by [`MetalStorage`]
+/// - all three must share the same dtype: `F32`, `BF16`, or `F16`
+/// - `q.rank() == k.rank() == v.rank() == 4`
+/// - all three must be contiguous
+/// - `q.dim(3) == k.dim(3)` (matching embedding dim)
+/// - `k.dim(1) == v.dim(1)` (matching kv-head count)
+/// - `q.dim(1) % k.dim(1) == 0` (GQA factor)
+/// - `head_dim` (last dim of `q`) must be one of:
+///   32, 64, 72, 80, 96, 128, 256, 512
+/// - F32 + head_dim=512 is unsupported on the full kernel (32KB
+///   threadgroup-memory limit); use BF16/F16 there
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on any precondition failure or kernel dispatch
+/// error.
+pub fn metal_sdpa_last_axis(
+    q: &crate::Tensor,
+    k: &crate::Tensor,
+    v: &crate::Tensor,
+    scale: f32,
+    causal: bool,
+) -> Result<crate::Tensor> {
+    use candle_metal_kernels::metal::MTLResourceOptions;
+    use candle_metal_kernels::SdpaDType;
+
+    // ---- Validate kt-side preconditions ----
+    let dtype = q.dtype();
+    let (dtype_size, sdpa_dtype): (usize, SdpaDType) = match dtype {
+        DType::F32 => (4, SdpaDType::F32),
+        DType::BF16 => (2, SdpaDType::BF16),
+        DType::F16 => (2, SdpaDType::F16),
+        other => {
+            return Err(Error::Msg(format!(
+                "metal_sdpa_last_axis: unsupported dtype {other} (F32/BF16/F16 only)"
+            )));
+        }
+    };
+    if k.dtype() != dtype || v.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "metal_sdpa_last_axis: q/k/v dtypes must match (got q={}, k={}, v={})",
+            dtype,
+            k.dtype(),
+            v.dtype()
+        )));
+    }
+    if q.rank() != 4 || k.rank() != 4 || v.rank() != 4 {
+        return Err(Error::Msg(format!(
+            "metal_sdpa_last_axis: q/k/v must all be rank-4 (got q={}, k={}, v={})",
+            q.rank(),
+            k.rank(),
+            v.rank()
+        )));
+    }
+    if !q.is_contiguous() || !k.is_contiguous() || !v.is_contiguous() {
+        return Err(Error::Msg(
+            "metal_sdpa_last_axis: q/k/v must all be contiguous".to_string(),
+        ));
+    }
+
+    let q_dims = q.shape();
+    let k_dims = k.shape();
+    let v_dims = v.shape();
+
+    // q,k must have matching embedding dim (last dim).
+    if q_dims[3] != k_dims[3] {
+        return Err(Error::Msg(format!(
+            "metal_sdpa_last_axis: q and k last dims must match (got q={}, k={})",
+            q_dims[3], k_dims[3]
+        )));
+    }
+    // k,v must have matching kv-head count (dim 1).
+    if k_dims[1] != v_dims[1] {
+        return Err(Error::Msg(format!(
+            "metal_sdpa_last_axis: k and v head dims must match (got k={}, v={})",
+            k_dims[1], v_dims[1]
+        )));
+    }
+    // n_heads % n_kv_heads == 0.
+    if q_dims[1] % k_dims[1] != 0 {
+        return Err(Error::Msg(format!(
+            "metal_sdpa_last_axis: q n_heads ({}) must be a multiple of k n_kv_heads ({})",
+            q_dims[1], k_dims[1]
+        )));
+    }
+
+    let head_dim = q_dims[3];
+    let q_seq = q_dims[2];
+    let k_seq = k_dims[2];
+
+    let supported_head_dim = matches!(
+        head_dim,
+        32 | 64 | 72 | 80 | 96 | 128 | 256 | 512
+    );
+    if !supported_head_dim {
+        return Err(Error::Msg(format!(
+            "metal_sdpa_last_axis: head_dim {head_dim} not supported \
+             (expected one of 32, 64, 72, 80, 96, 128, 256, 512); \
+             q dims {:?}, k dims {:?}, v dims {:?}",
+            q_dims, k_dims, v_dims
+        )));
+    }
+
+    // F32 full attention at head_dim=512 exceeds 32KB Metal threadgroup memory.
+    let supports_sdpa_full_dtype = !(head_dim == 512 && dtype == DType::F32);
+    let supports_sdpa_full = q_seq > 8 && supports_sdpa_full_dtype;
+    let supports_sdpa_vector = q_seq <= 8 && q_seq <= k_seq;
+
+    if !supports_sdpa_full && !supports_sdpa_vector {
+        return Err(Error::Msg(format!(
+            "metal_sdpa_last_axis: q dims {:?}, k dims {:?}, v dims {:?} \
+             not supported by vector or full SDPA kernels",
+            q_dims, k_dims, v_dims
+        )));
+    }
+
+    // ---- Storage downcast ----
+    let q_metal = q
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_sdpa_last_axis: q must be Metal-backed".to_string())
+        })?;
+    let k_metal = k
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_sdpa_last_axis: k must be Metal-backed".to_string())
+        })?;
+    let v_metal = v
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_sdpa_last_axis: v must be Metal-backed".to_string())
+        })?;
+
+    // Device-affinity contract: companions resolved via
+    // `MetalStorage::companion()` route through the same Device::all()
+    // registry-ID lookup. We use q's companion for the kernel dispatch
+    // and assume k/v share affinity (precondition: same Metal device).
+    let companion = q_metal.companion()?;
+    let device_index = match q_metal.device() {
+        Device::Metal(i) => i,
+        _ => unreachable!("MetalStorage::device() returns Device::Metal"),
+    };
+
+    // ---- Allocate output buffer (bs, qhead, seq, v_hidden) ----
+    let out_shape: Vec<usize> = vec![q_dims[0], q_dims[1], q_dims[2], v_dims[3]];
+    let elem_count: usize = out_shape.iter().product();
+    let byte_len = elem_count * dtype_size;
+
+    let raw_device = companion.device();
+    let out_buffer = raw_device
+        .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
+        .map_err(|e| {
+            Error::Msg(format!(
+                "metal_sdpa_last_axis: new_buffer({byte_len}) failed: {e:?}"
+            ))
+        })?;
+    let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
+
+    // Output layout (contiguous), needed by call_sdpa_full for o_strides.
+    let out_layout = crate::Layout::contiguous(out_shape.clone());
+
+    let encoder = companion.command_encoder().map_err(|e| {
+        Error::Msg(format!(
+            "metal_sdpa_last_axis: command_encoder() failed: {e:?}"
+        ))
+    })?;
+
+    // ---- Dispatch ----
+    // Mirrors `Sdpa::metal_fwd` in candle-nn 0.10.2 ops.rs:1080-1226.
+    // The wire-level FFI is identical; the kt-typed signature is the
+    // only added piece (#1082).
+    if supports_sdpa_vector {
+        // Route to the 2-pass fused attention when k seqlen is large.
+        // (See MLX PR #1597.)
+        const TWO_PASS_K_THRESHOLD: usize = 1024;
+        if k_seq >= TWO_PASS_K_THRESHOLD {
+            let mut intermediate_shape = [
+                &out_shape[0..out_shape.len() - 2],
+                &[candle_metal_kernels::SDPA_2PASS_BLOCKS],
+                &[out_shape[out_shape.len() - 1]],
+            ]
+            .concat();
+            let intermediate_elem: usize = intermediate_shape.iter().product();
+            // The 2-pass intermediate is F32 (matches candle's
+            // `device.new_buffer(..., DType::F32, ...)` path); use 4 bytes
+            // per element here regardless of the q/k/v dtype.
+            let intermediate = raw_device
+                .new_buffer(
+                    (intermediate_elem * 4).max(1),
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .map_err(|e| {
+                    Error::Msg(format!(
+                        "metal_sdpa_last_axis: new_buffer(intermediate) failed: {e:?}"
+                    ))
+                })?;
+            let _ = intermediate_shape.pop().unwrap();
+            let sums_maxs_elem: usize = intermediate_shape.iter().product();
+            let sums = raw_device
+                .new_buffer(
+                    (sums_maxs_elem * 4).max(1),
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .map_err(|e| {
+                    Error::Msg(format!(
+                        "metal_sdpa_last_axis: new_buffer(sums) failed: {e:?}"
+                    ))
+                })?;
+            let maxs = raw_device
+                .new_buffer(
+                    (sums_maxs_elem * 4).max(1),
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .map_err(|e| {
+                    Error::Msg(format!(
+                        "metal_sdpa_last_axis: new_buffer(maxs) failed: {e:?}"
+                    ))
+                })?;
+
+            encoder.set_label("kt_metal_sdpa_vector_2pass");
+            candle_metal_kernels::call_sdpa_vector_2pass(
+                raw_device,
+                &encoder,
+                companion.kernels(),
+                q.layout().start_offset(),
+                q_dims,
+                q_metal.buffer().as_ref(),
+                k.layout().start_offset(),
+                k_dims,
+                k.layout().strides(),
+                k_metal.buffer().as_ref(),
+                v.layout().start_offset(),
+                v.layout().strides(),
+                v_metal.buffer().as_ref(),
+                out_buffer_arc.as_ref(),
+                &intermediate,
+                &sums,
+                &maxs,
+                scale,
+                1.0, // softcapping disabled
+                sdpa_dtype,
+            )
+            .map_err(|e| {
+                Error::Msg(format!(
+                    "metal_sdpa_last_axis: call_sdpa_vector_2pass failed: {e:?}"
+                ))
+            })?;
+        } else {
+            encoder.set_label("kt_metal_sdpa_vector");
+            candle_metal_kernels::call_sdpa_vector(
+                raw_device,
+                &encoder,
+                companion.kernels(),
+                q.layout().start_offset(),
+                q_dims,
+                q_metal.buffer().as_ref(),
+                k.layout().start_offset(),
+                k_dims,
+                k.layout().strides(),
+                k_metal.buffer().as_ref(),
+                v.layout().start_offset(),
+                v.layout().strides(),
+                v_metal.buffer().as_ref(),
+                out_buffer_arc.as_ref(),
+                scale,
+                1.0, // softcapping disabled
+                sdpa_dtype,
+            )
+            .map_err(|e| {
+                Error::Msg(format!(
+                    "metal_sdpa_last_axis: call_sdpa_vector failed: {e:?}"
+                ))
+            })?;
+        }
+    } else {
+        // supports_sdpa_full
+        encoder.set_label("kt_metal_sdpa_full");
+        candle_metal_kernels::call_sdpa_full(
+            raw_device,
+            &encoder,
+            companion.kernels(),
+            q.layout().start_offset(),
+            q_dims,
+            q.layout().strides(),
+            q_metal.buffer().as_ref(),
+            k.layout().start_offset(),
+            k_dims,
+            k.layout().strides(),
+            k_metal.buffer().as_ref(),
+            v.layout().start_offset(),
+            v_metal.buffer().as_ref(),
+            v.layout().strides(),
+            None, // mask_type
+            None, // mask_buffer
+            None, // m_strides
+            out_buffer_arc.as_ref(),
+            out_layout.strides(),
+            scale,
+            causal,
+            sdpa_dtype,
+        )
+        .map_err(|e| {
+            Error::Msg(format!(
+                "metal_sdpa_last_axis: call_sdpa_full failed: {e:?}"
+            ))
+        })?;
+    }
+    drop(encoder);
+
+    let out_storage = MetalStorage::from_buffer_kt(
+        raw_device,
+        device_index,
+        dtype,
+        out_buffer_arc,
+    )?;
+    let out_storage_arc: crate::Storage = Arc::new(out_storage);
+
+    crate::Tensor::from_parts(
+        out_storage_arc,
+        out_layout,
+        crate::TensorId::next(),
+    )
+}
+
+// ----------------------------------------------------------------------
 // metal_rmsnorm_last_axis — Phase 4 Metal substrate op (#1082)
 // ----------------------------------------------------------------------
 
