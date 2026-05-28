@@ -9903,34 +9903,29 @@ pub fn dispatch_gdn_chunk_prep(
 ///         ks_entry[B,H,C,dv], q_s[B,H,C,dv], beta[B,H,C], k_t[B,H,dk,C]
 /// State: [B,H,dk,dv] (in/out)
 /// Output: [B,H,C,dv]
-pub fn dispatch_gdn_full_chunk_forward(
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_full_chunk_forward_bytes(
     vk_device: &VulkanDevice,
-    g: &Tensor,
-    v: &Tensor,
-    kkt: &Tensor,
-    qkt: &Tensor,
-    ks_entry: &Tensor,
-    q_s: &Tensor,
-    beta: &Tensor,
-    k_t: &Tensor,
-    state: &Tensor,
-) -> Result<(Tensor, Tensor)> {
+    g_data: &[u8],
+    v_data: &[u8],
+    kkt_data: &[u8],
+    qkt_data: &[u8],
+    ks_entry_data: &[u8],
+    q_s_data: &[u8],
+    beta_data: &[u8],
+    k_t_data: &[u8],
+    state_data: &[u8],
+    batch: usize,
+    heads: usize,
+    chunk: usize,
+    dk: usize,
+    dv: usize,
+) -> Result<(Vec<u8>, Vec<u8>)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let qfi = vk_device.queue_family_index();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
-
-    // Extract input data
-    let g_data = extract_tensor_bytes(g)?.0;
-    let v_data = extract_tensor_bytes(v)?.0;
-    let kkt_data = extract_tensor_bytes(kkt)?.0;
-    let qkt_data = extract_tensor_bytes(qkt)?.0;
-    let ks_entry_data = extract_tensor_bytes(ks_entry)?.0;
-    let q_s_data = extract_tensor_bytes(q_s)?.0;
-    let beta_data = extract_tensor_bytes(beta)?.0;
-    let k_t_data = extract_tensor_bytes(k_t)?.0;
-    let state_data = extract_tensor_bytes(state)?.0;
 
     // Compile shader
     let glsl_path = concat!(
@@ -9938,14 +9933,6 @@ pub fn dispatch_gdn_full_chunk_forward(
         "/csrc/shaders/gdn_full_chunk_forward.comp"
     );
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
-
-    // Parse shapes
-    let dims_g = g.dims();
-    let (batch, heads, chunk) = (dims_g[0], dims_g[1], dims_g[2]);
-    let dims_v = v.dims();
-    let dv = dims_v[3];
-    let dims_kt = k_t.dims();
-    let dk = dims_kt[2];
     anyhow::ensure!(
         chunk == 64 && dv <= 128,
         "gdn_full_chunk_forward supports chunk=64 and dv<=128, got chunk={chunk} dv={dv}"
@@ -10052,10 +10039,8 @@ pub fn dispatch_gdn_full_chunk_forward(
     drop(state_buf);
     drop(out_buf);
 
-    let out_shape = vec![batch, heads, chunk, dv];
-    let out_tensor = create_tensor_from_data(&out_data, &out_shape, DType::BF16)?;
-    let state_tensor = create_tensor_from_data(&state_data, state.dims().as_ref(), DType::BF16)?;
-    Ok((out_tensor, state_tensor))
+    let _ = (batch, heads, chunk, dk, dv);
+    Ok((out_data, state_data))
 }
 
 // ---------------------------------------------------------------------------

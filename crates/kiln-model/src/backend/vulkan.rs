@@ -3773,10 +3773,37 @@ impl BackendRuntime for VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-        let (out, new_state) = kiln_vulkan_kernel::kernels::dispatch_gdn_full_chunk_forward(
-            vk_device, g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
-        )
-        .context("gdn_full_chunk_forward kernel failed")?;
+        let g_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(g)?.0;
+        let v_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(v)?.0;
+        let kkt_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(kkt)?.0;
+        let qkt_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(qkt)?.0;
+        let ks_entry_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(ks_entry)?.0;
+        let q_s_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(q_s)?.0;
+        let beta_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(beta)?.0;
+        let k_t_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(k_t)?.0;
+        let state_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(state)?.0;
+        let g_dims = g.dims();
+        let (batch, heads, chunk) = (g_dims[0], g_dims[1], g_dims[2]);
+        let dv = v.dims()[3];
+        let dk = k_t.dims()[2];
+        let state_dims = state.dims().as_ref().to_vec();
+        let (out_data, new_state_data) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_full_chunk_forward_bytes(
+                vk_device, &g_data, &v_data, &kkt_data, &qkt_data, &ks_entry_data,
+                &q_s_data, &beta_data, &k_t_data, &state_data,
+                batch, heads, chunk, dk, dv,
+            )
+            .context("gdn_full_chunk_forward kernel failed")?;
+        let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &out_data,
+            &[batch, heads, chunk, dv],
+            DType::BF16,
+        )?;
+        let new_state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &new_state_data,
+            &state_dims,
+            DType::BF16,
+        )?;
         *state = new_state;
         Ok(Some(out))
     }

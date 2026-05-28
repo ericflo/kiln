@@ -1653,10 +1653,33 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
     )
     .context("dispatch_gdn_chunk_scan")?;
 
-    let (got_out, got_state) = kiln_vulkan_kernel::kernels::dispatch_gdn_full_chunk_forward(
-        &vk, &g, &v, &kkt, &qkt, &ks_entry, &q_s, &beta, &k_t, &state,
-    )
-    .context("dispatch_gdn_full_chunk_forward")?;
+    let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g)?.0;
+    let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v)?.0;
+    let kkt_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&kkt)?.0;
+    let qkt_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&qkt)?.0;
+    let ks_entry_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&ks_entry)?.0;
+    let q_s_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q_s)?.0;
+    let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta)?.0;
+    let k_t_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k_t)?.0;
+    let state_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0;
+    let state_dims = state.dims().as_ref().to_vec();
+    let (got_out_bytes, got_state_bytes) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_full_chunk_forward_bytes(
+            &vk, &g_data_b, &v_data_b, &kkt_data_b, &qkt_data_b, &ks_entry_data_b,
+            &q_s_data_b, &beta_data_b, &k_t_data_b, &state_data_b,
+            batch, heads, chunk, dk, dv,
+        )
+        .context("dispatch_gdn_full_chunk_forward_bytes")?;
+    let got_out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &got_out_bytes,
+        &[batch, heads, chunk, dv],
+        candle_core::DType::BF16,
+    )?;
+    let got_state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &got_state_bytes,
+        &state_dims,
+        candle_core::DType::BF16,
+    )?;
 
     let p_last = tensor_data_f32(&p_last)?;
     let state_data = tensor_data_f32(&state)?;
