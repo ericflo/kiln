@@ -6567,25 +6567,22 @@ pub fn dispatch_causal_conv1d_prefill(
 /// This keeps the old tensor-weight entry point available as a rollback path,
 /// while avoiding one per-layer weight upload and folding the two uploads, two
 /// compute dispatches, and two readbacks into one command buffer/queue submit.
-pub fn dispatch_causal_conv1d_prefill_cached_weight(
+pub fn dispatch_causal_conv1d_prefill_cached_weight_bytes(
     vk_device: &VulkanDevice,
-    x: &Tensor,
+    x_data: &[u8],
     weight_buf: &VulkanBuffer,
-    conv_state: &Tensor,
+    state_data: &[u8],
+    batch: usize,
+    channels: usize,
+    seq_len: usize,
     kernel_size: usize,
-) -> Result<(Tensor, Tensor)> {
+) -> Result<(Vec<u8>, Vec<u8>)> {
     if kernel_size != 4 {
         anyhow::bail!("causal_conv1d: only kernel_size=4 supported");
     }
 
     let device = vk_device.device();
     let device_local_mt = vk_device.device_local_mem_type();
-
-    let x_data = extract_tensor_bytes(x)?.0;
-    let state_data = extract_tensor_bytes(conv_state)?.0;
-
-    let dims = x.dims();
-    let (batch, channels, seq_len) = (dims[0], dims[1], dims[2]);
 
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)?;
     let state_buf =
@@ -6648,10 +6645,7 @@ pub fn dispatch_causal_conv1d_prefill_cached_weight(
     let out_data = &readbacks[0];
     let state_data = &readbacks[1];
 
-    let out_shape = x.dims().as_ref().to_vec();
-    let out_tensor = create_tensor_from_data(out_data, &out_shape, DType::F32)?;
-    let state_tensor = create_tensor_from_data(state_data, conv_state.dims().as_ref(), DType::F32)?;
-    Ok((out_tensor, state_tensor))
+    Ok((out_data.clone(), state_data.clone()))
 }
 
 // ---------------------------------------------------------------------------

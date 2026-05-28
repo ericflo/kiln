@@ -3946,14 +3946,34 @@ impl BackendRuntime for VulkanBackend {
 
         let (out, new_state) = if self.conv1d_prefill_single_submit_enabled {
             let weight_buf = self.cached_f32_weight_buffer(weight)?;
-            kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill_cached_weight(
-                vk_device,
-                x,
-                &weight_buf,
-                conv_state,
-                kernel_size,
-            )
-            .context("causal_conv1d_prefill cached-weight single-submit kernel failed")?
+            let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(x)?.0;
+            let state_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(conv_state)?.0;
+            let x_dims = x.dims();
+            let (batch, channels, seq_len) = (x_dims[0], x_dims[1], x_dims[2]);
+            let conv_state_dims = conv_state.dims().as_ref().to_vec();
+            let (out_data, new_state_data) =
+                kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill_cached_weight_bytes(
+                    vk_device,
+                    &x_data,
+                    &weight_buf,
+                    &state_data,
+                    batch,
+                    channels,
+                    seq_len,
+                    kernel_size,
+                )
+                .context("causal_conv1d_prefill cached-weight single-submit kernel failed")?;
+            let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &out_data,
+                x_dims,
+                candle_core::DType::F32,
+            )?;
+            let new_state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &new_state_data,
+                &conv_state_dims,
+                candle_core::DType::F32,
+            )?;
+            (out, new_state)
         } else {
             kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill(
                 vk_device,

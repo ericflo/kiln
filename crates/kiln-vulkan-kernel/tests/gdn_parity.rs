@@ -243,17 +243,32 @@ fn causal_conv1d_prefill_matches_stateful_cpu_reference() -> Result<()> {
         )?;
 
         let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &weight)?;
-        let (got_cached_out, got_cached_state) =
-            kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill_cached_weight(
+        let x_data_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x)?.0;
+        let state_data_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0;
+        let (got_cached_out_bytes, got_cached_state_bytes) =
+            kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill_cached_weight_bytes(
                 &vk,
-                &x,
+                &x_data_bytes,
                 &weight_buf,
-                &state,
+                &state_data_bytes,
+                batch,
+                channels,
+                seq_len,
                 kernel_size,
             )
             .with_context(|| {
-                format!("dispatch_causal_conv1d_prefill_cached_weight seq_len={seq_len}")
+                format!("dispatch_causal_conv1d_prefill_cached_weight_bytes seq_len={seq_len}")
             })?;
+        let got_cached_out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &got_cached_out_bytes,
+            &[batch, channels, seq_len],
+            candle_core::DType::F32,
+        )?;
+        let got_cached_state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &got_cached_state_bytes,
+            &[batch, channels, kernel_size - 1],
+            candle_core::DType::F32,
+        )?;
         assert_close(
             &format!("causal conv1d cached prefill out seq_len={seq_len}"),
             &got_cached_out,
