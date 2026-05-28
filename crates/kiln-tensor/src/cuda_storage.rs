@@ -35,9 +35,9 @@ use std::any::Any;
 use std::sync::Arc;
 
 use candle_core::cuda_backend::CudaDevice;
-use candle_core::cuda_backend::cudarc::driver::CudaContext;
-use candle_core::cuda_backend::cudarc::driver::CudaSlice;
-use candle_core::cuda_backend::cudarc::driver::sys::CUdeviceptr;
+use cudarc::driver::CudaContext;
+use cudarc::driver::CudaSlice;
+use cudarc::driver::sys::CUdeviceptr;
 
 use crate::{DType, Device, Error, Result, StorageBackend};
 
@@ -308,7 +308,7 @@ impl CudaStorage {
     pub fn device_ptr_raw(&self) -> (CUdeviceptr, usize) {
         match &self.slice {
             SliceOwner::Owned(s) => {
-                use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+                use cudarc::driver::DevicePtr;
                 // Use a default-stream device_ptr just to extract the raw bits;
                 // the SyncOnDrop is dropped immediately, recording nothing.
                 let stream = self.ctx.default_stream();
@@ -842,7 +842,7 @@ unsafe extern "C" {
 /// - Rank must be ≤ 8 (matches the kernel's `MAX_RANK`).
 #[cfg(feature = "cuda")]
 pub fn cuda_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     if src.dtype().is_packed() {
@@ -960,7 +960,7 @@ pub fn cuda_index_select_dim0(
     src: &crate::Tensor,
     indices: &crate::Tensor,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     if src.dtype().is_packed() {
@@ -1109,7 +1109,7 @@ pub fn cuda_index_select_axis_n(
     axis: usize,
     indices: &crate::Tensor,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     if src.dtype().is_packed() {
@@ -1261,7 +1261,7 @@ pub fn cuda_elementwise_binary(
     b: &crate::Tensor,
     kind: i32,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     if a.shape() != b.shape() {
@@ -1391,7 +1391,7 @@ pub fn cuda_binary_minmax(
     b: &crate::Tensor,
     kind: i32,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     if a.shape() != b.shape() {
         return Err(crate::Error::Msg(format!(
@@ -1514,7 +1514,7 @@ pub fn cuda_binary_minmax(
 /// expression in F32).
 #[cfg(feature = "cuda")]
 pub fn cuda_lerp(a: &crate::Tensor, b: &crate::Tensor, weight: f32) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     if a.shape() != b.shape() {
         return Err(crate::Error::Msg(format!(
@@ -1634,7 +1634,7 @@ pub fn cuda_lerp(a: &crate::Tensor, b: &crate::Tensor, weight: f32) -> Result<cr
 /// be contiguous and on CUDA.
 #[cfg(feature = "cuda")]
 pub fn cuda_activation_unary(x: &crate::Tensor, kind: i32) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     let dtype = x.dtype();
@@ -1731,7 +1731,7 @@ pub fn cuda_activation_unary(x: &crate::Tensor, kind: i32) -> Result<crate::Tens
 /// with the target dtype.
 #[cfg(feature = "cuda")]
 pub fn cuda_cast(src: &crate::Tensor, target: crate::DType) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     let from = src.dtype();
@@ -1867,7 +1867,7 @@ pub fn cuda_scatter_add_dim0(
     indices: &crate::Tensor,
     updates: &crate::Tensor,
 ) -> Result<()> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     // ---- dtype + shape validation ----
@@ -2196,7 +2196,7 @@ mod tests {
 /// `csrc/softmax.cu`. F32/BF16/F16 supported.
 #[cfg(feature = "cuda")]
 pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     let dtype = x.dtype();
     let dtype_tag: i32 = match dtype {
@@ -2376,7 +2376,7 @@ pub fn cuda_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
 /// [`cuda_to_host_copy`]).
 #[cfg(feature = "cuda")]
 pub fn cuda_is_finite(src: &crate::Tensor) -> Result<bool> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use crate::DType;
 
     let dtype = src.dtype();
@@ -2612,7 +2612,7 @@ pub fn host_to_cuda_copy_ctx(
 /// `csrc/reduce_last_axis.cu`. F32/BF16/F16 supported.
 #[cfg(feature = "cuda")]
 pub fn cuda_sum_squared_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     let dtype = x.dtype();
     let dtype_tag: i32 = match dtype {
@@ -2711,7 +2711,7 @@ pub fn cuda_sum_squared_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
 /// F32/BF16/F16 supported.
 #[cfg(feature = "cuda")]
 pub fn cuda_l2norm_last_axis(x: &crate::Tensor, eps: f32) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     let dtype = x.dtype();
     let dtype_tag: i32 = match dtype {
@@ -2844,7 +2844,7 @@ pub fn cuda_rmsnorm_last_axis(
     weight: &crate::Tensor,
     eps: f32,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     let dtype = x.dtype();
     let dtype_tag: i32 = match dtype {
@@ -3000,7 +3000,7 @@ pub fn cuda_layernorm_last_axis(
     bias: &crate::Tensor,
     eps: f32,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     let dtype = x.dtype();
     let dtype_tag: i32 = match dtype {
@@ -3160,7 +3160,7 @@ pub fn cuda_masked_fill(
     mask: &crate::Tensor,
     fill_value: f32,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     if x.shape() != mask.shape() {
         return Err(crate::Error::Msg(format!(
@@ -3285,7 +3285,7 @@ pub fn cuda_masked_fill(
 /// `candle_core::Tensor::argmax` and kt's CPU `argmax_last_dim`.
 #[cfg(feature = "cuda")]
 pub fn cuda_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     let in_dtype = x.dtype();
     let dtype_tag: i32 = match in_dtype {
@@ -3401,7 +3401,7 @@ pub fn cuda_cross_entropy_loss(
     logits: &crate::Tensor,
     targets: &crate::Tensor,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     let dtype = logits.dtype();
     let dtype_tag: i32 = match dtype {
@@ -3620,7 +3620,7 @@ pub fn cuda_cross_entropy_loss(
 /// the cast (so the mean path passes `1.0 / n_cols` and gets bit-
 /// identical results to a separate divide kernel).
 fn cuda_reduce_last_axis_impl(x: &crate::Tensor, divisor: f32, label: &str) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     let dtype = x.dtype();
     let dtype_tag: i32 = match dtype {
@@ -3746,7 +3746,7 @@ fn cuda_reduce_arbitrary_axis_impl(
     divisor: f32,
     label: &str,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     let dtype = x.dtype();
     let dtype_tag: i32 = match dtype {
@@ -3909,7 +3909,7 @@ fn cuda_minmax_arbitrary_axis_impl(
     kind: i32,
     label: &str,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     let dtype = x.dtype();
     let dtype_tag: i32 = match dtype {
@@ -4041,7 +4041,7 @@ pub fn cuda_bool_reduce_axis(
     axis: usize,
     kind: u8, // 0 = ALL, 1 = ANY
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     let label = if kind == 0 {
         "cuda_all_axis"
@@ -4160,7 +4160,7 @@ pub fn cuda_bool_reduce_axis(
 /// - Packed dtypes are not supported.
 #[cfg(feature = "cuda")]
 pub fn cuda_concat(inputs: &[&crate::Tensor], axis: usize) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     if inputs.is_empty() {
@@ -4337,7 +4337,7 @@ pub fn cuda_rope(
     sin: &crate::Tensor,
     rotary_dim: usize,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     // Shape / dtype validation (mirrors ops/rope.rs::validate).
@@ -4560,7 +4560,7 @@ pub fn cuda_dropout(
     p: f32,
     seed: u64,
 ) -> Result<(crate::Tensor, crate::Tensor)> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     if !(0.0..1.0).contains(&p) {
         return Err(crate::Error::Msg(format!(
@@ -4689,7 +4689,7 @@ pub fn cuda_dropout(
 /// Wired by `ScalarOp::cuda_fwd` in `kiln-tensor/src/ops/scalar.rs` (#1082).
 #[cfg(feature = "cuda")]
 pub fn cuda_scalar_op(x: &crate::Tensor, kind: i32, c: f32) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     let dtype = x.dtype();
@@ -4798,7 +4798,7 @@ pub fn cuda_clamp_pow(
     a: f32,
     b: f32,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     let dtype = x.dtype();
@@ -4897,7 +4897,7 @@ pub fn cuda_compare(
     b: &crate::Tensor,
     kind: i32,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     if a.shape() != b.shape() {
@@ -5018,7 +5018,7 @@ pub fn cuda_where_select(
     t: &crate::Tensor,
     f: &crate::Tensor,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     if mask.shape() != t.shape() || t.shape() != f.shape() {
@@ -5152,7 +5152,7 @@ pub fn cuda_where_select(
 /// F32/BF16/F16. Returns a fresh `[n]` tensor. (#1082)
 #[cfg(feature = "cuda")]
 pub fn cuda_diagonal_extract(x: &crate::Tensor) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     if x.rank() != 2 {
@@ -5245,7 +5245,7 @@ pub fn cuda_diagonal_extract(x: &crate::Tensor) -> Result<crate::Tensor> {
 /// tensor with `v` placed on the main diagonal. F32/BF16/F16. (#1082)
 #[cfg(feature = "cuda")]
 pub fn cuda_diag_build(v: &crate::Tensor) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
     use std::any::Any as _;
 
     if v.rank() != 1 {
@@ -5363,7 +5363,7 @@ fn cuda_scan_axis_impl(
     kind: i32,
     label: &str,
 ) -> Result<crate::Tensor> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use cudarc::driver::DevicePtr;
 
     let dtype = x.dtype();
     let dtype_tag: i32 = match dtype {

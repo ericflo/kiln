@@ -1,56 +1,33 @@
 //! Runtime backend probes — "is CUDA/Metal usable on this host right now?"
 //!
-//! Phase-7 candle-removal callers (e.g. `kiln-server`'s startup banner
-//! and `device::select_device_with_options`) used to ask
-//! `candle_core::utils::cuda_is_available()` /
-//! `candle_core::utils::metal_is_available()` directly. Those two functions
-//! are simple "the cuda/metal feature is compiled in AND the driver is
-//! present" gates — they don't touch candle's Tensor surface at all, so
-//! they can be reflected behind a kt-tensor probe today without waiting
-//! for the rest of #1082.
+//! These are simple "the cuda/metal feature is compiled in" gates that
+//! don't touch candle's Tensor surface at all. Both bodies are
+//! candle-free as of #1082: identical semantics to candle's
+//! `cuda_is_available()` / `metal_is_available()` (which are themselves
+//! just `cfg!(feature = "...")` returns).
 //!
-//! Under `--features cuda` we delegate to `candle_core::utils::cuda_is_available()`
-//! (kiln-tensor already pulls candle-core in for storage), so the probe
-//! returns whatever candle decided was available. When the cuda feature
-//! is off the probe trivially returns `false`. Same shape for metal.
-//!
-//! Phase 7 (candle removal) replaces the bodies with a direct cudarc /
-//! objc2-metal probe; callers do not have to change.
+//! Callers (e.g. `kiln-server`'s startup banner and
+//! `device::select_device_with_options`) use these so we have a single
+//! seam — even though the bodies are trivial.
 
-/// `true` iff this build was compiled with `--features cuda` AND a CUDA
-/// device is currently visible to the driver.
+/// `true` iff this build was compiled with `--features cuda`.
 ///
-/// Equivalent to `candle_core::utils::cuda_is_available()`. Callers
-/// should prefer this over reaching into candle directly so we have a
-/// single seam to replace in Phase 7 of #1082.
+/// Equivalent to `candle_core::utils::cuda_is_available()` (which is
+/// itself just `cfg!(feature = "cuda")`). The fn is kept so callers
+/// route through `kiln_tensor` rather than naming candle directly.
 #[inline]
 pub fn cuda_is_available() -> bool {
-    #[cfg(feature = "cuda")]
-    {
-        candle_core::utils::cuda_is_available()
-    }
-    #[cfg(not(feature = "cuda"))]
-    {
-        false
-    }
+    cfg!(feature = "cuda")
 }
 
-/// `true` iff this build was compiled with `--features metal` AND a
-/// Metal device is currently visible to the driver.
+/// `true` iff this build was compiled with `--features metal`.
 ///
-/// Equivalent to `candle_core::utils::metal_is_available()`. Callers
-/// should prefer this over reaching into candle directly so we have a
-/// single seam to replace in Phase 7 of #1082.
+/// Equivalent to `candle_core::utils::metal_is_available()` (which is
+/// itself just `cfg!(feature = "metal")`). The fn is kept so callers
+/// route through `kiln_tensor` rather than naming candle directly.
 #[inline]
 pub fn metal_is_available() -> bool {
-    #[cfg(feature = "metal")]
-    {
-        candle_core::utils::metal_is_available()
-    }
-    #[cfg(not(feature = "metal"))]
-    {
-        false
-    }
+    cfg!(feature = "metal")
 }
 
 #[cfg(test)]
