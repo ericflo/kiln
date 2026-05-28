@@ -10629,15 +10629,37 @@ fn metal_gdn_gates_bf16(
             _ => anyhow::bail!("metal gdn_gates g output must be on Metal"),
         };
 
-        let a_buf = buffer_o(a_metal.buffer(), &a_layout, a.dtype());
-        let b_buf = buffer_o(b_metal.buffer(), &b_layout, b.dtype());
-        let al_buf =
-            buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
-        let dt_buf =
-            buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
-        let beta_buf =
-            buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
-        let g_buf = buffer_o(g_metal.buffer(), &g_layout, g.dtype());
+        // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
+        let a_buf = buffer_o_kt(
+            a_metal.buffer(),
+            &kt_layout_from_candle(a_layout),
+            kt_dtype_from_candle(a.dtype()),
+        );
+        let b_buf = buffer_o_kt(
+            b_metal.buffer(),
+            &kt_layout_from_candle(b_layout),
+            kt_dtype_from_candle(b.dtype()),
+        );
+        let al_buf = buffer_o_kt(
+            al_metal.buffer(),
+            &kt_layout_from_candle(al_layout),
+            kt_dtype_from_candle(a_log.dtype()),
+        );
+        let dt_buf = buffer_o_kt(
+            dt_metal.buffer(),
+            &kt_layout_from_candle(dt_layout),
+            kt_dtype_from_candle(dt_bias.dtype()),
+        );
+        let beta_buf = buffer_o_kt(
+            beta_metal.buffer(),
+            &kt_layout_from_candle(beta_layout),
+            kt_dtype_from_candle(beta.dtype()),
+        );
+        let g_buf = buffer_o_kt(
+            g_metal.buffer(),
+            &kt_layout_from_candle(g_layout),
+            kt_dtype_from_candle(g.dtype()),
+        );
 
         encoder.set_buffer(0, Some(a_buf.buffer), a_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(b_buf.buffer), b_buf.offset_in_bytes);
@@ -10756,18 +10778,36 @@ pub(crate) fn metal_gdn_gates_decay_bf16(
             _ => anyhow::bail!("metal gdn_gates decay output must be on Metal"),
         };
 
-        let a_buf = buffer_o(a_metal.buffer(), &a_layout, a.dtype());
-        let b_buf = buffer_o(b_metal.buffer(), &b_layout, b.dtype());
-        let al_buf =
-            buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
-        let dt_buf =
-            buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
-        let beta_buf =
-            buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
-        let decay_buf = buffer_o(
+        // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
+        let a_buf = buffer_o_kt(
+            a_metal.buffer(),
+            &kt_layout_from_candle(a_layout),
+            kt_dtype_from_candle(a.dtype()),
+        );
+        let b_buf = buffer_o_kt(
+            b_metal.buffer(),
+            &kt_layout_from_candle(b_layout),
+            kt_dtype_from_candle(b.dtype()),
+        );
+        let al_buf = buffer_o_kt(
+            al_metal.buffer(),
+            &kt_layout_from_candle(al_layout),
+            kt_dtype_from_candle(a_log.dtype()),
+        );
+        let dt_buf = buffer_o_kt(
+            dt_metal.buffer(),
+            &kt_layout_from_candle(dt_layout),
+            kt_dtype_from_candle(dt_bias.dtype()),
+        );
+        let beta_buf = buffer_o_kt(
+            beta_metal.buffer(),
+            &kt_layout_from_candle(beta_layout),
+            kt_dtype_from_candle(beta.dtype()),
+        );
+        let decay_buf = buffer_o_kt(
             decay_metal.buffer(),
-            &decay_layout,
-            decay.dtype(),
+            &kt_layout_from_candle(decay_layout),
+            kt_dtype_from_candle(decay.dtype()),
         );
 
         encoder.set_buffer(0, Some(a_buf.buffer), a_buf.offset_in_bytes);
@@ -10865,18 +10905,31 @@ pub(crate) fn metal_gdn_gates_decay_ab_bf16(
             _ => anyhow::bail!("metal gdn_gates decay A/B output must be on Metal"),
         };
 
-        let ab_buf =
-            buffer_o(ab_metal.buffer(), &ab_layout, ab.dtype());
-        let al_buf =
-            buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
-        let dt_buf =
-            buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
-        let beta_buf =
-            buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
-        let decay_buf = buffer_o(
+        // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
+        let ab_buf = buffer_o_kt(
+            ab_metal.buffer(),
+            &kt_layout_from_candle(ab_layout),
+            kt_dtype_from_candle(ab.dtype()),
+        );
+        let al_buf = buffer_o_kt(
+            al_metal.buffer(),
+            &kt_layout_from_candle(al_layout),
+            kt_dtype_from_candle(a_log.dtype()),
+        );
+        let dt_buf = buffer_o_kt(
+            dt_metal.buffer(),
+            &kt_layout_from_candle(dt_layout),
+            kt_dtype_from_candle(dt_bias.dtype()),
+        );
+        let beta_buf = buffer_o_kt(
+            beta_metal.buffer(),
+            &kt_layout_from_candle(beta_layout),
+            kt_dtype_from_candle(beta.dtype()),
+        );
+        let decay_buf = buffer_o_kt(
             decay_metal.buffer(),
-            &decay_layout,
-            decay.dtype(),
+            &kt_layout_from_candle(decay_layout),
+            kt_dtype_from_candle(decay.dtype()),
         );
 
         encoder.set_buffer(0, Some(ab_buf.buffer), ab_buf.offset_in_bytes);
