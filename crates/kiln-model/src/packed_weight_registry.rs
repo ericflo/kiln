@@ -9,7 +9,7 @@
 use anyhow::{Context, Result, bail, ensure};
 #[cfg(feature = "cuda")]
 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-use candle_core::{DType, Tensor};
+
 use std::collections::BTreeMap;
 
 use crate::forward::{GpuAttentionWeights, GpuWeights};
@@ -105,12 +105,12 @@ impl PackedWeightKey {
 #[derive(Clone, Debug)]
 pub enum PackedWeightStorage {
     Bf16 {
-        tensor: Tensor,
+        tensor: candle_core::Tensor,
         dims: Vec<usize>,
         transposed: bool,
     },
     F32 {
-        tensor: Tensor,
+        tensor: candle_core::Tensor,
         dims: Vec<usize>,
     },
     MarlinW4A16 {
@@ -128,7 +128,7 @@ impl PackedWeightStorage {
         }
     }
 
-    pub fn dtype(&self) -> Option<DType> {
+    pub fn dtype(&self) -> Option<candle_core::DType> {
         match self {
             Self::Bf16 { tensor, .. } | Self::F32 { tensor, .. } => Some(tensor.dtype()),
             Self::MarlinW4A16 { .. } => None,
@@ -158,7 +158,7 @@ impl PackedWeightStorage {
             Self::MarlinW4A16 { .. } => bail!("requested BF16 pointer from Marlin registry weight"),
         };
         ensure!(
-            tensor.dtype() == DType::BF16,
+            tensor.dtype() == candle_core::DType::BF16,
             "registry BF16 pointer requires BF16 tensor, got {:?}",
             tensor.dtype()
         );
@@ -370,7 +370,7 @@ impl GpuPackedWeightRegistry {
         &mut self,
         layer: RegistryLayer,
         projection: ProjectionKind,
-        tensor: &Tensor,
+        tensor: &candle_core::Tensor,
         transposed: bool,
     ) -> Result<()> {
         let key = PackedWeightKey::new(layer, projection)?;
@@ -388,7 +388,7 @@ impl GpuPackedWeightRegistry {
         &mut self,
         layer: RegistryLayer,
         projection: ProjectionKind,
-        bf16_t: &Tensor,
+        bf16_t: &candle_core::Tensor,
         marlin: Option<crate::marlin_proj::MarlinPackedProj>,
     ) -> Result<()> {
         let key = PackedWeightKey::new(layer, projection)?;
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn registry_rejects_duplicate_keys() {
         let device = Device::Cpu;
-        let tensor = Tensor::zeros((2, 2), DType::BF16, &device).unwrap();
+        let tensor = candle_core::Tensor::zeros((2, 2), candle_core::DType::BF16, &device).unwrap();
         let key =
             PackedWeightKey::new(RegistryLayer::Mlp { layer_idx: 0 }, ProjectionKind::MlpGate)
                 .unwrap();
@@ -468,7 +468,7 @@ mod tests {
     fn registry_returns_compile_checked_keys() {
         let device = Device::Cpu;
         let tensor =
-            Tensor::zeros((shapes::HIDDEN, shapes::MLP_HIDDEN), DType::BF16, &device).unwrap();
+            candle_core::Tensor::zeros((shapes::HIDDEN, shapes::MLP_HIDDEN), candle_core::DType::BF16, &device).unwrap();
         let key = PackedWeightKey::new(RegistryLayer::Mlp { layer_idx: 7 }, ProjectionKind::MlpUp)
             .unwrap();
         let mut registry = GpuPackedWeightRegistry::new();
