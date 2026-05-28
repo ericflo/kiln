@@ -1,7 +1,7 @@
 //! Vulkan backend: FlashAttention-2 and Gated DeltaNet fused kernels via Vulkan.
 //!
 //! candle-core 0.10.x has no native Vulkan device, so this backend manages
-//! its own `vk::Device`. Normal inference still exposes a candle `Device::Cpu`
+//! its own `vk::Device`. Normal inference still exposes a candle `candle_core::Device::Cpu`
 //! surface and may fall back to portable candle ops when a Vulkan backend method
 //! declines a call. Vulkan-native SFT/GRPO training use the separate `VkTensor`
 //! stack to keep weights, activations, loss, backward, and optimizer updates
@@ -10,7 +10,7 @@
 //! `Ok(None)` responses route the caller to the portable candle path.
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor, TensorId};
+
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -24,12 +24,12 @@ use crate::forward::{GpuAttentionWeights, GpuWeights};
 /// FlashAttention-2, Gated DeltaNet, and supporting operations.
 #[derive(Debug)]
 pub struct VulkanBackend {
-    /// Candle device the backend was constructed with — always `Device::Cpu`
+    /// Candle device the backend was constructed with — always `candle_core::Device::Cpu`
     /// today because candle-core has no native Vulkan device. Retained for
     /// the kernel trait methods that still consume `candle_core::Tensor`
     /// parameters (they live on this candle CPU device until kt-typed
     /// siblings land). (#1082)
-    device: Device,
+    device: candle_core::Device,
     /// `kiln_tensor::Device` form advertised by `BackendRuntime::device()`.
     /// `kt::Device::Vulkan(0)` when the Vulkan logical device is up;
     /// `kt::Device::Cpu` otherwise, matching the CPU-fallback advertised
@@ -77,7 +77,7 @@ pub struct VulkanBackend {
     /// `OnceLock<Option<...>>` so a backend that fails the pool
     /// feasibility check (Strix Halo near the 16 GiB UMA limit) caches
     /// the `None` and routes every subsequent call to the per-call
-    /// Tensor path without re-checking.
+    /// candle_core::Tensor path without re-checking.
     decode_resident_pool:
         OnceLock<Option<Arc<kiln_vulkan_kernel::DecodeResidentPool>>>,
     /// Lazily constructed Vulkan-resident paged KV cache. Mirrors the
@@ -94,15 +94,15 @@ pub struct VulkanBackend {
     /// decode steps only do per-token slot writes.
     seeded_full_attn_layers: Mutex<HashSet<usize>>,
     /// Per linear-attention layer recurrent state buffer (f32, persistent),
-    /// keyed by the candle Tensor's `TensorId`. Seeded from the Tensor on
+    /// keyed by the candle candle_core::Tensor's `candle_core::TensorId`. Seeded from the candle_core::Tensor on
     /// the first resident call that sees it.
     linear_attn_recurrent_state:
-        Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
-    /// Per linear-attention layer conv1d state buffer, keyed by TensorId.
+        Mutex<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    /// Per linear-attention layer conv1d state buffer, keyed by candle_core::TensorId.
     linear_attn_conv_state:
-        Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+        Mutex<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// Set of state TensorIds that have been seeded.
-    seeded_linear_attn_layers: Mutex<HashSet<TensorId>>,
+    seeded_linear_attn_layers: Mutex<HashSet<candle_core::TensorId>>,
     /// Last `start_pos` we saw on the Vulkan-resident decode path.
     /// Within a single request the resident decode runs once per
     /// token with monotonically incrementing `start_pos`; a jump
@@ -125,10 +125,10 @@ pub struct VulkanBackend {
     ///
     /// This field must drop before `vulkan_device`: `VulkanBuffer` owns raw
     /// memory that must be freed before the logical Vulkan device is destroyed.
-    weight_cache: Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    weight_cache: Mutex<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// Cached packed-bf16 device-local buffers for immutable CPU weights used
     /// by Vulkan transposed linear decode paths.
-    bf16_packed_weight_cache: Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    bf16_packed_weight_cache: Mutex<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// Vulkan device (owned, not from candle-core).
     ///
     /// `Arc` rather than `Box` so a `CustomOp1` impl that wants to dispatch
@@ -141,12 +141,12 @@ pub struct VulkanBackend {
 
 thread_local! {
     static RECURRENT_STATE_RESIDENT_SCOPE_DEPTH: Cell<usize> = const { Cell::new(0) };
-    static RECURRENT_STATE_RESIDENT_CACHE: RefCell<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> =
+    static RECURRENT_STATE_RESIDENT_CACHE: RefCell<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> =
         RefCell::new(HashMap::new());
 }
 
 /// General-purpose resident-activation registry keyed by candle
-/// `TensorId`. Process-global (not thread-local) so worker threads
+/// `candle_core::TensorId`. Process-global (not thread-local) so worker threads
 /// spawned by candle's internal parallelism, rayon, etc. see the
 /// same registry as the thread that registered. Phase 3.1 of the
 /// residency plan — the registry the `register_resident_activation`
@@ -162,11 +162,11 @@ thread_local! {
 /// scope-limited lifecycle without growing accidental coupling to
 /// non-recurrent activations.
 static RESIDENT_ACTIVATION_REGISTRY: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    std::sync::Mutex<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
 > = std::sync::OnceLock::new();
 
 fn resident_registry()
--> &'static std::sync::Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> {
+-> &'static std::sync::Mutex<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> {
     RESIDENT_ACTIVATION_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -176,7 +176,7 @@ fn resident_registry()
 /// it.
 fn with_resident_registry<F, R>(f: F) -> R
 where
-    F: FnOnce(&mut HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>) -> R,
+    F: FnOnce(&mut HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>) -> R,
 {
     let mut guard = resident_registry()
         .lock()
@@ -197,7 +197,7 @@ fn fused_gdn_resident_state_enabled() -> bool {
 
 /// When set, the multi-batch paged attention decode path walks the
 /// block_table inside the Vulkan shader instead of compacting K/V on the
-/// host with `Tensor::index_select`. Default: enabled. Disable via
+/// host with `candle_core::Tensor::index_select`. Default: enabled. Disable via
 /// `KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER=1` to fall back to the
 /// host-side gather path for parity comparisons.
 fn paged_decode_gpu_gather_enabled() -> bool {
@@ -251,7 +251,7 @@ fn exit_recurrent_state_resident_scope() {
 }
 
 impl VulkanBackend {
-    pub fn new(device: Device) -> Self {
+    pub fn new(device: candle_core::Device) -> Self {
         let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
         let gdn_prefill_in_proj_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_VULKAN_GDN_PREFILL_IN_PROJ").is_err();
@@ -314,7 +314,7 @@ impl VulkanBackend {
         // benchmarks. Keep it opt-in until it is tiled/tuned.
         let mlp_gate_up_enabled = std::env::var("KILN_ENABLE_VULKAN_MLP_GATE_UP").is_ok();
         let weight_prewarm_enabled = std::env::var("KILN_DISABLE_VULKAN_WEIGHT_PREWARM").is_err();
-        // Device-resident recurrent state is correct but regressed the live
+        // candle_core::Device-resident recurrent state is correct but regressed the live
         // Strix Halo batcher A/B in A129 because row/batch buffer copies cost
         // more than the saved readback/upload at the current batch shape.
         let recurrent_state_residency_enabled = gdn_enabled
@@ -324,7 +324,7 @@ impl VulkanBackend {
         // wants to route decode through the resident path. Pool feasibility
         // is checked later at first use; if the device can't fit the ring
         // (Strix Halo near memory limit) the call site falls back
-        // transparently to the per-call Tensor path and emits a one-time
+        // transparently to the per-call candle_core::Tensor path and emits a one-time
         // tracing::warn! — exactly the contract spelled out in gate (b)
         // of docs/vk_resident_decode_plan.md.
         let resident_decode_enabled =
@@ -429,7 +429,7 @@ impl VulkanBackend {
     /// Returns `None` (after a one-time `tracing::warn!`) when the
     /// device can't fit the minimum 3 slots — e.g. Strix Halo near
     /// its 16 GiB UMA limit. The `None` outcome is cached so the
-    /// per-call Tensor fallback does not re-probe on every decode
+    /// per-call candle_core::Tensor fallback does not re-probe on every decode
     /// step.
     pub fn decode_resident_pool(
         &self,
@@ -452,7 +452,7 @@ impl VulkanBackend {
                         tracing::warn!(
                             error = %e,
                             "Vulkan-resident decode pool construction errored; \
-                             falling back to per-call Tensor path"
+                             falling back to per-call candle_core::Tensor path"
                         );
                         None
                     }
@@ -580,13 +580,13 @@ impl VulkanBackend {
     }
 
     /// Get or allocate the persistent recurrent-state buffer for a
-    /// GDN linear-attention layer, keyed by the candle Tensor's
-    /// `TensorId`. Subsequent calls with the same Tensor return the
+    /// GDN linear-attention layer, keyed by the candle candle_core::Tensor's
+    /// `candle_core::TensorId`. Subsequent calls with the same candle_core::Tensor return the
     /// same buffer so the resident GDN block reads/writes state in
     /// place across decode steps.
     pub fn linear_attn_recurrent_state_buffer(
         &self,
-        key: TensorId,
+        key: candle_core::TensorId,
         bytes: u64,
     ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
         let dev = self
@@ -616,7 +616,7 @@ impl VulkanBackend {
     /// Get or allocate the persistent conv1d-state buffer.
     pub fn linear_attn_conv_state_buffer(
         &self,
-        key: TensorId,
+        key: candle_core::TensorId,
         bytes: u64,
     ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
         let dev = self
@@ -643,14 +643,14 @@ impl VulkanBackend {
         Ok(arc)
     }
 
-    pub fn linear_attn_layer_seeded(&self, key: TensorId) -> bool {
+    pub fn linear_attn_layer_seeded(&self, key: candle_core::TensorId) -> bool {
         match self.seeded_linear_attn_layers.lock() {
             Ok(g) => g.contains(&key),
             Err(_) => false,
         }
     }
 
-    pub fn mark_linear_attn_layer_seeded(&self, key: TensorId) {
+    pub fn mark_linear_attn_layer_seeded(&self, key: candle_core::TensorId) {
         if let Ok(mut g) = self.seeded_linear_attn_layers.lock() {
             g.insert(key);
         }
@@ -736,7 +736,7 @@ impl VulkanBackend {
 
     pub fn cached_f32_weight_buffer(
         &self,
-        weight: &Tensor,
+        weight: &candle_core::Tensor,
     ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
         let vk_device = self
             .vulkan_device
@@ -765,28 +765,28 @@ impl VulkanBackend {
         Ok(Arc::clone(cache.entry(key).or_insert(buffer)))
     }
 
-    fn use_bf16_packed_linear_weight(&self, weight: &Tensor) -> bool {
-        self.bf16_packed_linear_weights_enabled && weight.dtype() == DType::BF16
+    fn use_bf16_packed_linear_weight(&self, weight: &candle_core::Tensor) -> bool {
+        self.bf16_packed_linear_weights_enabled && weight.dtype() == candle_core::DType::BF16
     }
 
-    fn use_bf16_packed_gdn_in_proj_weights(&self, weights: &[&Tensor]) -> bool {
+    fn use_bf16_packed_gdn_in_proj_weights(&self, weights: &[&candle_core::Tensor]) -> bool {
         self.bf16_packed_gdn_in_proj_weights_enabled
-            && weights.iter().all(|weight| weight.dtype() == DType::BF16)
+            && weights.iter().all(|weight| weight.dtype() == candle_core::DType::BF16)
     }
 
-    fn use_bf16_packed_full_attn_qkv_weights(&self, weights: &[&Tensor]) -> bool {
+    fn use_bf16_packed_full_attn_qkv_weights(&self, weights: &[&candle_core::Tensor]) -> bool {
         self.bf16_packed_full_attn_qkv_weights_enabled
-            && weights.iter().all(|weight| weight.dtype() == DType::BF16)
+            && weights.iter().all(|weight| weight.dtype() == candle_core::DType::BF16)
     }
 
-    fn use_bf16_packed_mlp_decode_weights(&self, weights: &[&Tensor]) -> bool {
+    fn use_bf16_packed_mlp_decode_weights(&self, weights: &[&candle_core::Tensor]) -> bool {
         self.bf16_packed_mlp_decode_weights_enabled
-            && weights.iter().all(|weight| weight.dtype() == DType::BF16)
+            && weights.iter().all(|weight| weight.dtype() == candle_core::DType::BF16)
     }
 
     pub fn cached_bf16_packed_weight_buffer(
         &self,
-        weight: &Tensor,
+        weight: &candle_core::Tensor,
     ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
         let vk_device = self
             .vulkan_device
@@ -819,7 +819,7 @@ impl VulkanBackend {
     fn prewarm_f32_weight(
         &self,
         name: &str,
-        weight: &Tensor,
+        weight: &candle_core::Tensor,
         count: &mut usize,
         bytes: &mut usize,
     ) -> Result<()> {
@@ -833,7 +833,7 @@ impl VulkanBackend {
     fn prewarm_bf16_packed_weight(
         &self,
         name: &str,
-        weight: &Tensor,
+        weight: &candle_core::Tensor,
         count: &mut usize,
         bytes: &mut usize,
     ) -> Result<()> {
@@ -847,7 +847,7 @@ impl VulkanBackend {
     fn prewarm_linear_weight(
         &self,
         name: &str,
-        weight: &Tensor,
+        weight: &candle_core::Tensor,
         f32_count: &mut usize,
         f32_bytes: &mut usize,
         bf16_count: &mut usize,
@@ -863,13 +863,13 @@ impl VulkanBackend {
     fn prewarm_gdn_in_proj_weight(
         &self,
         name: &str,
-        weight: &Tensor,
+        weight: &candle_core::Tensor,
         f32_count: &mut usize,
         f32_bytes: &mut usize,
         bf16_count: &mut usize,
         bf16_bytes: &mut usize,
     ) -> Result<()> {
-        if self.bf16_packed_gdn_in_proj_weights_enabled && weight.dtype() == DType::BF16 {
+        if self.bf16_packed_gdn_in_proj_weights_enabled && weight.dtype() == candle_core::DType::BF16 {
             self.prewarm_bf16_packed_weight(name, weight, bf16_count, bf16_bytes)
         } else {
             self.prewarm_f32_weight(name, weight, f32_count, f32_bytes)
@@ -879,9 +879,9 @@ impl VulkanBackend {
     fn prewarm_full_attn_qkv_weights(
         &self,
         layer_idx: usize,
-        q_weight_t: &Tensor,
-        k_weight_t: &Tensor,
-        v_weight_t: &Tensor,
+        q_weight_t: &candle_core::Tensor,
+        k_weight_t: &candle_core::Tensor,
+        v_weight_t: &candle_core::Tensor,
         f32_count: &mut usize,
         f32_bytes: &mut usize,
         bf16_count: &mut usize,
@@ -917,9 +917,9 @@ impl VulkanBackend {
     fn prewarm_mlp_decode_weights(
         &self,
         layer_idx: usize,
-        gate_weight_t: &Tensor,
-        up_weight_t: &Tensor,
-        down_weight_t: &Tensor,
+        gate_weight_t: &candle_core::Tensor,
+        up_weight_t: &candle_core::Tensor,
+        down_weight_t: &candle_core::Tensor,
         f32_count: &mut usize,
         f32_bytes: &mut usize,
         bf16_count: &mut usize,
@@ -963,12 +963,12 @@ impl VulkanBackend {
     /// Dispatch FlashAttention-2 prefill kernel via Vulkan.
     fn flash_attn_prefill_vulkan(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         let vk_device = self
             .vulkan_device
             .as_ref()
@@ -987,20 +987,20 @@ impl VulkanBackend {
         // to compute) and matches what the candle CPU baseline did
         // implicitly via broadcast_matmul_cpu_compatible.
         let in_dtype = q.dtype();
-        let q_f32 = if in_dtype == DType::F32 {
+        let q_f32 = if in_dtype == candle_core::DType::F32 {
             q.clone()
         } else {
-            q.to_dtype(DType::F32)?
+            q.to_dtype(candle_core::DType::F32)?
         };
-        let k_f32 = if in_dtype == DType::F32 {
+        let k_f32 = if in_dtype == candle_core::DType::F32 {
             k.clone()
         } else {
-            k.to_dtype(DType::F32)?
+            k.to_dtype(candle_core::DType::F32)?
         };
-        let v_f32 = if in_dtype == DType::F32 {
+        let v_f32 = if in_dtype == candle_core::DType::F32 {
             v.clone()
         } else {
-            v.to_dtype(DType::F32)?
+            v.to_dtype(candle_core::DType::F32)?
         };
 
         let q_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q_f32)?.0;
@@ -1021,10 +1021,10 @@ impl VulkanBackend {
         let out_f32 = kiln_vulkan_kernel::kernels::create_tensor_from_data(
             &out_data,
             &[batch, seq_len, num_heads, head_dim],
-            DType::F32,
+            candle_core::DType::F32,
         )?;
 
-        let out = if in_dtype == DType::F32 {
+        let out = if in_dtype == candle_core::DType::F32 {
             out_f32
         } else {
             out_f32.to_dtype(in_dtype)?
@@ -1147,7 +1147,7 @@ impl BackendRuntime for VulkanBackend {
         }
     }
 
-    fn materialize_gdn_recurrent_resident_state(&self, state: &mut Tensor) -> Result<()> {
+    fn materialize_gdn_recurrent_resident_state(&self, state: &mut candle_core::Tensor) -> Result<()> {
         if !self.recurrent_state_residency_enabled {
             return Ok(());
         }
@@ -1178,7 +1178,7 @@ impl BackendRuntime for VulkanBackend {
         Ok(())
     }
 
-    fn evict_gdn_recurrent_resident_state(&self, state: &Tensor) {
+    fn evict_gdn_recurrent_resident_state(&self, state: &candle_core::Tensor) {
         if !self.recurrent_state_residency_enabled {
             return;
         }
@@ -1188,7 +1188,7 @@ impl BackendRuntime for VulkanBackend {
         });
     }
 
-    fn has_gdn_recurrent_resident_state(&self, state: &Tensor) -> bool {
+    fn has_gdn_recurrent_resident_state(&self, state: &candle_core::Tensor) -> bool {
         if !self.recurrent_state_residency_enabled {
             return false;
         }
@@ -1208,12 +1208,12 @@ impl BackendRuntime for VulkanBackend {
 
     /// Phase 3.1 hook: register a non-weight tensor as resident on the
     /// device. Uploads `tensor`'s bytes to a fresh `VulkanBuffer` and
-    /// records the buffer under the tensor's `TensorId`. The caller
+    /// records the buffer under the tensor's `candle_core::TensorId`. The caller
     /// owns lifecycle — Phase 3.2 will pair every register with a
     /// matching evict at the appropriate autograd boundary. Until then
     /// any caller using this hook must clean up explicitly to avoid
     /// leaking VRAM.
-    fn register_resident_activation(&self, tensor: &Tensor) -> Result<()> {
+    fn register_resident_activation(&self, tensor: &candle_core::Tensor) -> Result<()> {
         let Some(vk_device) = self.vulkan_device.as_ref() else {
             return Ok(());
         };
@@ -1235,7 +1235,7 @@ impl BackendRuntime for VulkanBackend {
         //
         // `resolve_resident_activation` knows about both encodings
         // and reconstructs Tensors appropriately.
-        let bytes = if tensor.dtype() == DType::BF16 {
+        let bytes = if tensor.dtype() == candle_core::DType::BF16 {
             kiln_vulkan_kernel::kernels::extract_tensor_packed_bf16_bytes_pub(tensor)?.0
         } else {
             kiln_vulkan_kernel::kernels::extract_tensor_bytes(tensor)?.0
@@ -1288,14 +1288,14 @@ impl BackendRuntime for VulkanBackend {
         Ok(())
     }
 
-    fn evict_resident_activation(&self, tensor: &Tensor) {
+    fn evict_resident_activation(&self, tensor: &candle_core::Tensor) {
         let id = tensor.id();
         with_resident_registry(|cache| {
             cache.remove(&id);
         });
     }
 
-    fn update_resident_activation(&self, tensor: &Tensor) -> Result<()> {
+    fn update_resident_activation(&self, tensor: &candle_core::Tensor) -> Result<()> {
         let Some(vk_device) = self.vulkan_device.as_ref() else {
             return Ok(());
         };
@@ -1307,7 +1307,7 @@ impl BackendRuntime for VulkanBackend {
             return Ok(());
         };
         // Same encoding choice as register_resident_activation.
-        let bytes = if tensor.dtype() == DType::BF16 {
+        let bytes = if tensor.dtype() == candle_core::DType::BF16 {
             kiln_vulkan_kernel::kernels::extract_tensor_packed_bf16_bytes_pub(tensor)?.0
         } else {
             kiln_vulkan_kernel::kernels::extract_tensor_bytes(tensor)?.0
@@ -1333,17 +1333,17 @@ impl BackendRuntime for VulkanBackend {
         Ok(())
     }
 
-    fn has_resident_activation(&self, tensor: &Tensor) -> bool {
+    fn has_resident_activation(&self, tensor: &candle_core::Tensor) -> bool {
         let id = tensor.id();
         with_resident_registry(|cache| cache.contains_key(&id))
     }
 
     fn resolve_resident_activation(
         &self,
-        tensor: &Tensor,
+        tensor: &candle_core::Tensor,
         shape: &[usize],
-        dtype: DType,
-    ) -> Result<Option<Tensor>> {
+        dtype: candle_core::DType,
+    ) -> Result<Option<candle_core::Tensor>> {
         let Some(vk_device) = self.vulkan_device.as_ref() else {
             return Ok(None);
         };
@@ -1366,7 +1366,7 @@ impl BackendRuntime for VulkanBackend {
         // (only enabled under the cuda feature), reconstruct BF16 by
         // bit-expanding each 16-bit lane into f32 (`bits << 16`) and
         // then casting back to BF16 via candle.
-        let resolved = if dtype == DType::BF16 {
+        let resolved = if dtype == candle_core::DType::BF16 {
             anyhow::ensure!(
                 bytes.len() % 2 == 0,
                 "resolve_resident_activation BF16: buffer byte count {} is not a multiple of 2",
@@ -1389,7 +1389,7 @@ impl BackendRuntime for VulkanBackend {
                 let bf16_bits = (hi << 8) | lo;
                 f32_data.push(f32::from_bits(bf16_bits << 16));
             }
-            Tensor::from_vec(f32_data, shape, &Device::Cpu)?.to_dtype(DType::BF16)?
+            candle_core::Tensor::from_vec(f32_data, shape, &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?
         } else {
             kiln_vulkan_kernel::kernels::create_tensor_from_data(&bytes, shape, dtype)
                 .context("resolve_resident_activation: create_tensor_from_data")?
@@ -1397,7 +1397,7 @@ impl BackendRuntime for VulkanBackend {
         Ok(Some(resolved))
     }
 
-    fn dispatch_sgd_step(&self, param: &Tensor, grad: &Tensor, lr: f32) -> Result<bool> {
+    fn dispatch_sgd_step(&self, param: &candle_core::Tensor, grad: &candle_core::Tensor, lr: f32) -> Result<bool> {
         let Some(vk_device) = self.vulkan_device.as_ref() else {
             return Ok(false);
         };
@@ -1439,13 +1439,13 @@ impl BackendRuntime for VulkanBackend {
             );
         });
         match param.dtype() {
-            DType::F32 => {
+            candle_core::DType::F32 => {
                 kiln_vulkan_kernel::kernels::dispatch_sgd_step_f32(
                     vk_device, &param_buf, &grad_buf, n_elements, lr,
                 )?;
                 Ok(true)
             }
-            DType::BF16 => {
+            candle_core::DType::BF16 => {
                 kiln_vulkan_kernel::kernels::dispatch_sgd_step_bf16(
                     vk_device, &param_buf, &grad_buf, n_elements, lr,
                 )?;
@@ -1457,10 +1457,10 @@ impl BackendRuntime for VulkanBackend {
 
     fn dispatch_adamw_step(
         &self,
-        param: &Tensor,
-        grad: &Tensor,
-        first_moment: &Tensor,
-        second_moment: &Tensor,
+        param: &candle_core::Tensor,
+        grad: &candle_core::Tensor,
+        first_moment: &candle_core::Tensor,
+        second_moment: &candle_core::Tensor,
         lr: f32,
         beta1: f32,
         beta2: f32,
@@ -1528,7 +1528,7 @@ impl BackendRuntime for VulkanBackend {
             );
         });
         match param.dtype() {
-            DType::F32 => {
+            candle_core::DType::F32 => {
                 kiln_vulkan_kernel::kernels::dispatch_adamw_step_f32(
                     vk_device,
                     &param_buf,
@@ -1545,7 +1545,7 @@ impl BackendRuntime for VulkanBackend {
                 )?;
                 Ok(true)
             }
-            DType::BF16 => {
+            candle_core::DType::BF16 => {
                 kiln_vulkan_kernel::kernels::dispatch_adamw_step_bf16(
                     vk_device,
                     &param_buf,
@@ -1568,11 +1568,11 @@ impl BackendRuntime for VulkanBackend {
 
     fn lora_delta_resident(
         &self,
-        x: &Tensor,
-        a: &Tensor,
-        b: &Tensor,
+        x: &candle_core::Tensor,
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
         scale: f32,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         let Some(vk_device) = self.vulkan_device.as_ref() else {
             return Ok(None);
         };
@@ -1580,7 +1580,7 @@ impl BackendRuntime for VulkanBackend {
             return Ok(None);
         }
         // Kernel constraint: weight buffer is bf16-packed.
-        if a.dtype() != DType::BF16 || b.dtype() != DType::BF16 {
+        if a.dtype() != candle_core::DType::BF16 || b.dtype() != candle_core::DType::BF16 {
             return Ok(None);
         }
         // Both A and B must be registry-resident.
@@ -1615,11 +1615,11 @@ impl BackendRuntime for VulkanBackend {
             return Ok(None);
         }
         // Construct the autograd-safe CustomOp3 wrapper. apply_op3
-        // builds a backprop link from the returned Tensor through x,
+        // builds a backprop link from the returned candle_core::Tensor through x,
         // a, and b — VulkanLoraOp::bwd computes analytic gradients
         // for all three. This lets the trainer's loss.backward()
         // produce real grad_A and grad_B instead of dropping them
-        // (which is what the prior leaf-Tensor return did).
+        // (which is what the prior leaf-candle_core::Tensor return did).
         let op = crate::backend::vulkan_lora_op::VulkanLoraOp {
             vk_device: Arc::clone(vk_device),
             a_buffer: Arc::clone(&a_buf),
@@ -1651,8 +1651,8 @@ impl BackendRuntime for VulkanBackend {
 
     fn assemble_gdn_recurrent_resident_batch_rows(
         &self,
-        rows: &[&Tensor],
-        batch: &Tensor,
+        rows: &[&candle_core::Tensor],
+        batch: &candle_core::Tensor,
     ) -> Result<bool> {
         if !self.recurrent_state_residency_enabled
             || !recurrent_state_resident_scope_active()
@@ -1673,7 +1673,7 @@ impl BackendRuntime for VulkanBackend {
             };
             if (row_batch, row_heads, row_dk, row_dv) != (1, heads, dk, dv)
                 || row.dtype() != batch.dtype()
-                || !matches!(row.device(), Device::Cpu)
+                || !matches!(row.device(), candle_core::Device::Cpu)
             {
                 return Ok(false);
             }
@@ -1705,8 +1705,8 @@ impl BackendRuntime for VulkanBackend {
 
     fn scatter_gdn_recurrent_resident_batch_rows(
         &self,
-        batch: &Tensor,
-        destinations: &mut [&mut Tensor],
+        batch: &candle_core::Tensor,
+        destinations: &mut [&mut candle_core::Tensor],
     ) -> Result<bool> {
         if !self.recurrent_state_residency_enabled
             || !recurrent_state_resident_scope_active()
@@ -1746,7 +1746,7 @@ impl BackendRuntime for VulkanBackend {
             let placeholder = batch.narrow(0, row_idx, 1)?.contiguous()?;
             if placeholder.dtype() != batch.dtype()
                 || placeholder.dims() != [1, heads, dk, dv]
-                || !matches!(placeholder.device(), Device::Cpu)
+                || !matches!(placeholder.device(), candle_core::Device::Cpu)
             {
                 return Ok(false);
             }
@@ -1795,13 +1795,13 @@ impl BackendRuntime for VulkanBackend {
 
     fn flash_attn_prefill(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<Tensor>> {
-        if q.dtype() != DType::BF16 || !self.has_vulkan() {
+    ) -> Result<Option<candle_core::Tensor>> {
+        if q.dtype() != candle_core::DType::BF16 || !self.has_vulkan() {
             return Ok(None);
         }
         self.flash_attn_prefill_vulkan(q, k, v, softmax_scale, causal)
@@ -1809,15 +1809,15 @@ impl BackendRuntime for VulkanBackend {
 
     fn flash_attn_paged_decode(
         &self,
-        _q: &Tensor,
-        _k_pool: &Tensor,
-        _v_pool: &Tensor,
-        _block_table: &Tensor,
+        _q: &candle_core::Tensor,
+        _k_pool: &candle_core::Tensor,
+        _v_pool: &candle_core::Tensor,
+        _block_table: &candle_core::Tensor,
         _total_seqlen_k: usize,
         _page_block_size: usize,
         _softmax_scale: f32,
         _causal: bool,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.has_vulkan() {
             return Ok(None);
         }
@@ -1827,32 +1827,32 @@ impl BackendRuntime for VulkanBackend {
 
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
         &self,
-        q: &Tensor,
-        k_pool: &Tensor,
-        v_pool: &Tensor,
-        block_table: &Tensor,
-        seqused_k: &Tensor,
+        q: &candle_core::Tensor,
+        k_pool: &candle_core::Tensor,
+        v_pool: &candle_core::Tensor,
+        block_table: &candle_core::Tensor,
+        seqused_k: &candle_core::Tensor,
         max_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.has_vulkan()
             || !self.paged_attn_decode_batch_enabled
-            || q.dtype() != DType::F32
-            || k_pool.dtype() != DType::F32
-            || v_pool.dtype() != DType::F32
+            || q.dtype() != candle_core::DType::F32
+            || k_pool.dtype() != candle_core::DType::F32
+            || v_pool.dtype() != candle_core::DType::F32
         {
             return Ok(None);
         }
         if !causal {
             return Ok(None);
         }
-        if !matches!(q.device(), Device::Cpu)
-            || !matches!(k_pool.device(), Device::Cpu)
-            || !matches!(v_pool.device(), Device::Cpu)
-            || !matches!(block_table.device(), Device::Cpu)
-            || !matches!(seqused_k.device(), Device::Cpu)
+        if !matches!(q.device(), candle_core::Device::Cpu)
+            || !matches!(k_pool.device(), candle_core::Device::Cpu)
+            || !matches!(v_pool.device(), candle_core::Device::Cpu)
+            || !matches!(block_table.device(), candle_core::Device::Cpu)
+            || !matches!(seqused_k.device(), candle_core::Device::Cpu)
         {
             return Ok(None);
         }
@@ -1889,11 +1889,11 @@ impl BackendRuntime for VulkanBackend {
 
         let block_data = block_table
             .flatten_all()?
-            .to_dtype(DType::U32)?
+            .to_dtype(candle_core::DType::U32)?
             .to_vec1::<u32>()?;
         let seq_i32 = seqused_k
             .flatten_all()?
-            .to_dtype(DType::I32)?
+            .to_dtype(candle_core::DType::I32)?
             .to_vec1::<i32>()?;
         let mut seq_lens = Vec::with_capacity(batch);
         for row in 0..batch {
@@ -1963,7 +1963,7 @@ impl BackendRuntime for VulkanBackend {
             let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
                 &out_data,
                 &[batch, 1, num_heads, head_dim],
-                DType::F32,
+                candle_core::DType::F32,
             )?;
             return Ok(Some(out));
         }
@@ -1989,7 +1989,7 @@ impl BackendRuntime for VulkanBackend {
             }
         }
         let gather =
-            Tensor::from_slice(gather_slots.as_slice(), batch * max_seqlen_k, q.device())?;
+            candle_core::Tensor::from_slice(gather_slots.as_slice(), batch * max_seqlen_k, q.device())?;
         let k_compact = k_pool
             .index_select(&gather, 0)?
             .reshape((batch, max_seqlen_k, num_kv_heads, head_dim))?
@@ -2019,27 +2019,27 @@ impl BackendRuntime for VulkanBackend {
         let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
             &out_data,
             &[batch, 1, num_heads, head_dim],
-            DType::F32,
+            candle_core::DType::F32,
         )?;
         Ok(Some(out))
     }
 
     fn gdn_in_proj_decode(
         &self,
-        x: &Tensor,
-        in_proj_qkv_t: &Tensor,
-        in_proj_z_t: &Tensor,
-        in_proj_a_t: &Tensor,
-        in_proj_b_t: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor, Tensor, Tensor)>> {
-        if !self.has_vulkan() || !self.gdn_enabled || x.dtype() != DType::F32 {
+        x: &candle_core::Tensor,
+        in_proj_qkv_t: &candle_core::Tensor,
+        in_proj_z_t: &candle_core::Tensor,
+        in_proj_a_t: &candle_core::Tensor,
+        in_proj_b_t: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
+        if !self.has_vulkan() || !self.gdn_enabled || x.dtype() != candle_core::DType::F32 {
             return Ok(None);
         }
-        if !matches!(x.device(), Device::Cpu)
-            || !matches!(in_proj_qkv_t.device(), Device::Cpu)
-            || !matches!(in_proj_z_t.device(), Device::Cpu)
-            || !matches!(in_proj_a_t.device(), Device::Cpu)
-            || !matches!(in_proj_b_t.device(), Device::Cpu)
+        if !matches!(x.device(), candle_core::Device::Cpu)
+            || !matches!(in_proj_qkv_t.device(), candle_core::Device::Cpu)
+            || !matches!(in_proj_z_t.device(), candle_core::Device::Cpu)
+            || !matches!(in_proj_a_t.device(), candle_core::Device::Cpu)
+            || !matches!(in_proj_b_t.device(), candle_core::Device::Cpu)
         {
             return Ok(None);
         }
@@ -2109,22 +2109,22 @@ impl BackendRuntime for VulkanBackend {
                 kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &qkv_b,
                     &[row_count, 1, qkv_dim],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?,
                 kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &z_b,
                     &[row_count, 1, z_dim],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?,
                 kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &a_b,
                     &[row_count, 1, a_dim],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?,
                 kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &b_b,
                     &[row_count, 1, b_dim],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?,
             )
         } else {
@@ -2153,22 +2153,22 @@ impl BackendRuntime for VulkanBackend {
                 kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &qkv_b,
                     &[row_count, 1, qkv_dim],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?,
                 kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &z_b,
                     &[row_count, 1, z_dim],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?,
                 kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &a_b,
                     &[row_count, 1, a_dim],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?,
                 kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &b_b,
                     &[row_count, 1, b_dim],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?,
             )
         };
@@ -2187,31 +2187,31 @@ impl BackendRuntime for VulkanBackend {
 
     fn gdn_decode_gates_recurrent_rmsnorm(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        a: &Tensor,
-        b: &Tensor,
-        a_log: &Tensor,
-        dt_bias: &Tensor,
-        state: &mut Tensor,
-        z: &Tensor,
-        weight: &Tensor,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
+        a_log: &candle_core::Tensor,
+        dt_bias: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
+        z: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
         eps: f64,
-    ) -> Result<Option<Tensor>> {
-        if !self.has_vulkan() || !self.gdn_enabled || q.dtype() != DType::F32 {
+    ) -> Result<Option<candle_core::Tensor>> {
+        if !self.has_vulkan() || !self.gdn_enabled || q.dtype() != candle_core::DType::F32 {
             return Ok(None);
         }
-        if !matches!(q.device(), Device::Cpu)
-            || !matches!(k.device(), Device::Cpu)
-            || !matches!(v.device(), Device::Cpu)
-            || !matches!(a.device(), Device::Cpu)
-            || !matches!(b.device(), Device::Cpu)
-            || !matches!(a_log.device(), Device::Cpu)
-            || !matches!(dt_bias.device(), Device::Cpu)
-            || !matches!(state.device(), Device::Cpu)
-            || !matches!(z.device(), Device::Cpu)
-            || !matches!(weight.device(), Device::Cpu)
+        if !matches!(q.device(), candle_core::Device::Cpu)
+            || !matches!(k.device(), candle_core::Device::Cpu)
+            || !matches!(v.device(), candle_core::Device::Cpu)
+            || !matches!(a.device(), candle_core::Device::Cpu)
+            || !matches!(b.device(), candle_core::Device::Cpu)
+            || !matches!(a_log.device(), candle_core::Device::Cpu)
+            || !matches!(dt_bias.device(), candle_core::Device::Cpu)
+            || !matches!(state.device(), candle_core::Device::Cpu)
+            || !matches!(z.device(), candle_core::Device::Cpu)
+            || !matches!(weight.device(), candle_core::Device::Cpu)
         {
             return Ok(None);
         }
@@ -2317,7 +2317,7 @@ impl BackendRuntime for VulkanBackend {
         let q_dtype = q.dtype();
         let state_dtype = state.dtype();
         let state_dims = state.dims().to_vec();
-        let input_tensors: [&Tensor; 10] = [q, k, v, a, b, a_log, dt_bias, state, z, weight];
+        let input_tensors: [&candle_core::Tensor; 10] = [q, k, v, a, b, a_log, dt_bias, state, z, weight];
         let mut input_data: Vec<Vec<u8>> = Vec::with_capacity(input_tensors.len());
         for tensor in &input_tensors {
             input_data.push(kiln_vulkan_kernel::kernels::extract_tensor_bytes(tensor)?.0);
@@ -2351,11 +2351,11 @@ impl BackendRuntime for VulkanBackend {
         Ok(Some(out))
     }
 
-    fn linear_decode(&self, x: &Tensor, weight_t: &Tensor) -> Result<Option<Tensor>> {
-        if !self.has_vulkan() || !self.linear_decode_enabled || x.dtype() != DType::F32 {
+    fn linear_decode(&self, x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<Option<candle_core::Tensor>> {
+        if !self.has_vulkan() || !self.linear_decode_enabled || x.dtype() != candle_core::DType::F32 {
             return Ok(None);
         }
-        if !matches!(x.device(), Device::Cpu) || !matches!(weight_t.device(), Device::Cpu) {
+        if !matches!(x.device(), candle_core::Device::Cpu) || !matches!(weight_t.device(), candle_core::Device::Cpu) {
             return Ok(None);
         }
 
@@ -2395,7 +2395,7 @@ impl BackendRuntime for VulkanBackend {
             kiln_vulkan_kernel::kernels::create_tensor_from_data(
                 &out_data,
                 &[row_count, 1, out_dim],
-                DType::F32,
+                candle_core::DType::F32,
             )?
         } else {
             let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
@@ -2413,7 +2413,7 @@ impl BackendRuntime for VulkanBackend {
             kiln_vulkan_kernel::kernels::create_tensor_from_data(
                 &out_data,
                 &[row_count, 1, out_dim],
-                DType::F32,
+                candle_core::DType::F32,
             )?
         };
         let out = if seq_len == 1 {
@@ -2424,7 +2424,7 @@ impl BackendRuntime for VulkanBackend {
         Ok(Some(out))
     }
 
-    fn linear_prefill_apply(&self, x: &Tensor, weight_t: &Tensor) -> Result<Option<Tensor>> {
+    fn linear_prefill_apply(&self, x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<Option<candle_core::Tensor>> {
         // Opt-in until end-to-end training parity has been validated on
         // production-sized payloads. The CustomOp1 itself is unit-test
         // covered (forward + backward parity) and per-tensor parity has
@@ -2451,7 +2451,7 @@ impl BackendRuntime for VulkanBackend {
         if !self.has_vulkan() || !self.linear_decode_enabled {
             return Ok(None);
         }
-        if !matches!(x.device(), Device::Cpu) || !matches!(weight_t.device(), Device::Cpu) {
+        if !matches!(x.device(), candle_core::Device::Cpu) || !matches!(weight_t.device(), candle_core::Device::Cpu) {
             return Ok(None);
         }
         let Ok((_batch, _seq_len, hidden_x)) = x.dims3() else {
@@ -2474,7 +2474,7 @@ impl BackendRuntime for VulkanBackend {
                 self.cached_bf16_packed_weight_buffer(weight_t)?,
                 crate::backend::vulkan_linear_op::WeightLayout::Bf16Packed,
             )
-        } else if weight_t.dtype() == DType::F32 {
+        } else if weight_t.dtype() == candle_core::DType::F32 {
             (
                 self.cached_f32_weight_buffer(weight_t)?,
                 crate::backend::vulkan_linear_op::WeightLayout::F32,
@@ -2517,20 +2517,20 @@ impl BackendRuntime for VulkanBackend {
 
     fn linear_prefill_apply_offset(
         &self,
-        x: &Tensor,
-        full_weight_t: &Tensor,
+        x: &candle_core::Tensor,
+        full_weight_t: &candle_core::Tensor,
         chunk_start: usize,
         chunk_len: usize,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.has_vulkan() || !self.linear_decode_enabled {
             return Ok(None);
         }
-        if !matches!(x.device(), Device::Cpu) || !matches!(full_weight_t.device(), Device::Cpu) {
+        if !matches!(x.device(), candle_core::Device::Cpu) || !matches!(full_weight_t.device(), candle_core::Device::Cpu) {
             return Ok(None);
         }
         // Only the bf16-packed kernel has an offset variant today; require
         // bf16 weights so the cached buffer matches the dispatch shader.
-        if full_weight_t.dtype() != DType::BF16 {
+        if full_weight_t.dtype() != candle_core::DType::BF16 {
             return Ok(None);
         }
         let Ok((_batch, _seq_len, hidden_x)) = x.dims3() else {
@@ -2552,10 +2552,10 @@ impl BackendRuntime for VulkanBackend {
             .clone();
         let weight_buffer = self.cached_bf16_packed_weight_buffer(full_weight_t)?;
         // Promote x to f32 for the kernel (kernel expects f32 input).
-        let x_f32 = if x.dtype() == DType::F32 {
+        let x_f32 = if x.dtype() == candle_core::DType::F32 {
             x.clone()
         } else {
-            x.to_dtype(DType::F32)?
+            x.to_dtype(candle_core::DType::F32)?
         };
         let dims = x_f32.shape().dims().to_vec();
         let row_count: usize = dims[..dims.len() - 1].iter().product();
@@ -2598,7 +2598,7 @@ impl BackendRuntime for VulkanBackend {
             kiln_vulkan_kernel::kernels::create_tensor_from_data(
                 &out_bytes,
                 &[row_count, 1, chunk_len],
-                DType::F32,
+                candle_core::DType::F32,
             )?
         } else {
             // One-shot trace so the operator can see when FLCE chunks
@@ -2629,7 +2629,7 @@ impl BackendRuntime for VulkanBackend {
             // outputs along the last axis. Same kernel/buffer per
             // sub-dispatch, just different `chunk_start` offsets and
             // smaller `chunk_len` per submit.
-            let mut sub_outputs: Vec<Tensor> = Vec::new();
+            let mut sub_outputs: Vec<candle_core::Tensor> = Vec::new();
             let mut sub_offset = 0usize;
             let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&dispatch_x)?.0;
             while sub_offset < chunk_len {
@@ -2655,12 +2655,12 @@ impl BackendRuntime for VulkanBackend {
                 let sub = kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &sub_bytes,
                     &[row_count, 1, cur_len],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?;
                 sub_outputs.push(sub);
                 sub_offset += cur_len;
             }
-            Tensor::cat(&sub_outputs, 2).context("offset sub-chunk concat")?
+            candle_core::Tensor::cat(&sub_outputs, 2).context("offset sub-chunk concat")?
         };
         // Output from kernel is `[row_count, 1, chunk_len]`. Restore the
         // caller's leading dims with chunk_len in the last position.
@@ -2674,11 +2674,11 @@ impl BackendRuntime for VulkanBackend {
         self.has_vulkan() && self.linear_decode_enabled
     }
 
-    fn linear_decode_argmax(&self, x: &Tensor, weight_t: &Tensor) -> Result<Option<u32>> {
-        if !self.has_vulkan() || !self.linear_decode_enabled || x.dtype() != DType::F32 {
+    fn linear_decode_argmax(&self, x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<Option<u32>> {
+        if !self.has_vulkan() || !self.linear_decode_enabled || x.dtype() != candle_core::DType::F32 {
             return Ok(None);
         }
-        if !matches!(x.device(), Device::Cpu) || !matches!(weight_t.device(), Device::Cpu) {
+        if !matches!(x.device(), candle_core::Device::Cpu) || !matches!(weight_t.device(), candle_core::Device::Cpu) {
             return Ok(None);
         }
 
@@ -2738,8 +2738,8 @@ impl BackendRuntime for VulkanBackend {
 
     fn linear_decode_sample(
         &self,
-        x: &Tensor,
-        weight_t: &Tensor,
+        x: &candle_core::Tensor,
+        weight_t: &candle_core::Tensor,
         history_indices: &[u32],
         history_counts: &[u32],
         repetition_penalty: f32,
@@ -2751,10 +2751,10 @@ impl BackendRuntime for VulkanBackend {
         min_p: f32,
         seed: u64,
     ) -> Result<Option<u32>> {
-        if !self.supports_linear_decode_sample(top_k) || x.dtype() != DType::F32 {
+        if !self.supports_linear_decode_sample(top_k) || x.dtype() != candle_core::DType::F32 {
             return Ok(None);
         }
-        if !matches!(x.device(), Device::Cpu) || !matches!(weight_t.device(), Device::Cpu) {
+        if !matches!(x.device(), candle_core::Device::Cpu) || !matches!(weight_t.device(), candle_core::Device::Cpu) {
             return Ok(None);
         }
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
@@ -2805,17 +2805,17 @@ impl BackendRuntime for VulkanBackend {
 
     fn linear_decode_argmax_batch(
         &self,
-        x: &Tensor,
-        weight_t: &Tensor,
+        x: &candle_core::Tensor,
+        weight_t: &candle_core::Tensor,
     ) -> Result<Option<Vec<u32>>> {
         if !self.has_vulkan()
             || !self.linear_decode_enabled
             || !self.linear_argmax_batch_enabled
-            || x.dtype() != DType::F32
+            || x.dtype() != candle_core::DType::F32
         {
             return Ok(None);
         }
-        if !matches!(x.device(), Device::Cpu) || !matches!(weight_t.device(), Device::Cpu) {
+        if !matches!(x.device(), candle_core::Device::Cpu) || !matches!(weight_t.device(), candle_core::Device::Cpu) {
             return Ok(None);
         }
 
@@ -2976,7 +2976,7 @@ impl BackendRuntime for VulkanBackend {
     /// whose BF16-packed bytes are already resident in
     /// [`Self::bf16_packed_weight_cache`]. Replace each with a
     /// 1-element BF16 stub and re-key the cache so subsequent
-    /// lookups against the new TensorId still find the same
+    /// lookups against the new candle_core::TensorId still find the same
     /// `Arc<VulkanBuffer>`.
     ///
     /// Saves ~6-7 GB peak RSS on Qwen3.5-4B training at T=918 — the
@@ -2997,7 +2997,7 @@ impl BackendRuntime for VulkanBackend {
     fn drop_uploaded_bf16_weights(
         &self,
         weights: &mut crate::forward::GpuWeights,
-        device: &Device,
+        device: &candle_core::Device,
     ) -> Result<usize> {
         if !self.has_vulkan() {
             return Ok(0);
@@ -3005,9 +3005,9 @@ impl BackendRuntime for VulkanBackend {
         // Broadcast-base for cheap shape-preserving stubs. Source has
         // 2 bytes of storage; broadcast_as(target_shape) creates views
         // with stride [0, 0] sharing the same Arc<Storage>. Each per-
-        // weight stub costs ~24 bytes of metadata (Layout + Tensor
+        // weight stub costs ~24 bytes of metadata (Layout + candle_core::Tensor
         // struct), not `hidden * out_dim * 2` bytes.
-        let broadcast_base = Tensor::zeros((1usize, 1usize), DType::BF16, device)
+        let broadcast_base = candle_core::Tensor::zeros((1usize, 1usize), candle_core::DType::BF16, device)
             .context("drop_uploaded_bf16_weights: create broadcast base")?;
         let mut cache = self
             .bf16_packed_weight_cache
@@ -3025,13 +3025,13 @@ impl BackendRuntime for VulkanBackend {
         //   bytes drop to ~zero).
         // - Re-keys the cache so subsequent
         //   `cached_bf16_packed_weight_buffer(weight_t)` lookups by the
-        //   new TensorId still find the original `Arc<VulkanBuffer>`.
+        //   new candle_core::TensorId still find the original `Arc<VulkanBuffer>`.
         fn replace(
-            t: &mut Tensor,
-            cache: &mut std::collections::HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>,
-            broadcast_base: &Tensor,
+            t: &mut candle_core::Tensor,
+            cache: &mut std::collections::HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>,
+            broadcast_base: &candle_core::Tensor,
         ) -> bool {
-            if t.dtype() != DType::BF16 {
+            if t.dtype() != candle_core::DType::BF16 {
                 return false;
             }
             let dims = t.dims();
@@ -3059,7 +3059,7 @@ impl BackendRuntime for VulkanBackend {
         // `embed_tokens_t.index_select(idx, 1)` which reads the
         // tensor's data (not just shape), so a 1-element stub would
         // make the embedding lookup return garbage. The other `*_proj_t`
-        // caches go through `cached_bf16_packed_weight_buffer` (TensorId
+        // caches go through `cached_bf16_packed_weight_buffer` (candle_core::TensorId
         // → Arc<VulkanBuffer>) so they only need shape/dtype metadata
         // on the candle side. Embedding savings (~750 MB) are small
         // next to the per-layer transposes (~5-6 GB across 32 layers).
@@ -3123,18 +3123,18 @@ impl BackendRuntime for VulkanBackend {
 
     fn full_attn_qkv_decode(
         &self,
-        x: &Tensor,
-        q_weight_t: &Tensor,
-        k_weight_t: &Tensor,
-        v_weight_t: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor, Tensor)>> {
-        if !self.has_vulkan() || !self.full_attn_qkv_enabled || x.dtype() != DType::F32 {
+        x: &candle_core::Tensor,
+        q_weight_t: &candle_core::Tensor,
+        k_weight_t: &candle_core::Tensor,
+        v_weight_t: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
+        if !self.has_vulkan() || !self.full_attn_qkv_enabled || x.dtype() != candle_core::DType::F32 {
             return Ok(None);
         }
-        if !matches!(x.device(), Device::Cpu)
-            || !matches!(q_weight_t.device(), Device::Cpu)
-            || !matches!(k_weight_t.device(), Device::Cpu)
-            || !matches!(v_weight_t.device(), Device::Cpu)
+        if !matches!(x.device(), candle_core::Device::Cpu)
+            || !matches!(q_weight_t.device(), candle_core::Device::Cpu)
+            || !matches!(k_weight_t.device(), candle_core::Device::Cpu)
+            || !matches!(v_weight_t.device(), candle_core::Device::Cpu)
         {
             return Ok(None);
         }
@@ -3189,17 +3189,17 @@ impl BackendRuntime for VulkanBackend {
             let q = kiln_vulkan_kernel::kernels::create_tensor_from_data(
                 &q_b,
                 &[1, 1, q_dim],
-                DType::F32,
+                candle_core::DType::F32,
             )?;
             let k = kiln_vulkan_kernel::kernels::create_tensor_from_data(
                 &k_b,
                 &[1, 1, k_dim],
-                DType::F32,
+                candle_core::DType::F32,
             )?;
             let v = kiln_vulkan_kernel::kernels::create_tensor_from_data(
                 &v_b,
                 &[1, 1, v_dim],
-                DType::F32,
+                candle_core::DType::F32,
             )?;
             (q, k, v)
         } else if bf16 {
@@ -3216,17 +3216,17 @@ impl BackendRuntime for VulkanBackend {
                 kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &q_b,
                     &[batch, 1, q_dim],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?,
                 kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &k_b,
                     &[batch, 1, k_dim],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?,
                 kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &v_b,
                     &[batch, 1, v_dim],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?,
             )
         } else {
@@ -3242,17 +3242,17 @@ impl BackendRuntime for VulkanBackend {
             let q = kiln_vulkan_kernel::kernels::create_tensor_from_data(
                 &q_b,
                 &[batch, 1, q_dim],
-                DType::F32,
+                candle_core::DType::F32,
             )?;
             let k = kiln_vulkan_kernel::kernels::create_tensor_from_data(
                 &k_b,
                 &[batch, 1, k_dim],
-                DType::F32,
+                candle_core::DType::F32,
             )?;
             let v = kiln_vulkan_kernel::kernels::create_tensor_from_data(
                 &v_b,
                 &[batch, 1, v_dim],
-                DType::F32,
+                candle_core::DType::F32,
             )?;
             (q, k, v)
         };
@@ -3261,16 +3261,16 @@ impl BackendRuntime for VulkanBackend {
 
     fn mlp_gate_up_decode(
         &self,
-        x: &Tensor,
-        gate_weight_t: &Tensor,
-        up_weight_t: &Tensor,
-    ) -> Result<Option<Tensor>> {
-        if !self.has_vulkan() || !self.mlp_gate_up_enabled || x.dtype() != DType::F32 {
+        x: &candle_core::Tensor,
+        gate_weight_t: &candle_core::Tensor,
+        up_weight_t: &candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
+        if !self.has_vulkan() || !self.mlp_gate_up_enabled || x.dtype() != candle_core::DType::F32 {
             return Ok(None);
         }
-        if !matches!(x.device(), Device::Cpu)
-            || !matches!(gate_weight_t.device(), Device::Cpu)
-            || !matches!(up_weight_t.device(), Device::Cpu)
+        if !matches!(x.device(), candle_core::Device::Cpu)
+            || !matches!(gate_weight_t.device(), candle_core::Device::Cpu)
+            || !matches!(up_weight_t.device(), candle_core::Device::Cpu)
         {
             return Ok(None);
         }
@@ -3314,7 +3314,7 @@ impl BackendRuntime for VulkanBackend {
         let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
             &out_data,
             &[row_count, 1, intermediate],
-            DType::F32,
+            candle_core::DType::F32,
         )?;
         let out = if seq_len == 1 {
             out
@@ -3326,18 +3326,18 @@ impl BackendRuntime for VulkanBackend {
 
     fn mlp_decode(
         &self,
-        x: &Tensor,
-        gate_weight_t: &Tensor,
-        up_weight_t: &Tensor,
-        down_weight_t: &Tensor,
-    ) -> Result<Option<Tensor>> {
-        if !self.has_vulkan() || !self.mlp_decode_enabled || x.dtype() != DType::F32 {
+        x: &candle_core::Tensor,
+        gate_weight_t: &candle_core::Tensor,
+        up_weight_t: &candle_core::Tensor,
+        down_weight_t: &candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
+        if !self.has_vulkan() || !self.mlp_decode_enabled || x.dtype() != candle_core::DType::F32 {
             return Ok(None);
         }
-        if !matches!(x.device(), Device::Cpu)
-            || !matches!(gate_weight_t.device(), Device::Cpu)
-            || !matches!(up_weight_t.device(), Device::Cpu)
-            || !matches!(down_weight_t.device(), Device::Cpu)
+        if !matches!(x.device(), candle_core::Device::Cpu)
+            || !matches!(gate_weight_t.device(), candle_core::Device::Cpu)
+            || !matches!(up_weight_t.device(), candle_core::Device::Cpu)
+            || !matches!(down_weight_t.device(), candle_core::Device::Cpu)
         {
             return Ok(None);
         }
@@ -3395,7 +3395,7 @@ impl BackendRuntime for VulkanBackend {
                 kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &out_data,
                     &[row_count, 1, out_dim],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?
             } else if use_bf16_mlp_weights {
                 let gate_buf = self.cached_bf16_packed_weight_buffer(gate_weight_t)?;
@@ -3417,7 +3417,7 @@ impl BackendRuntime for VulkanBackend {
                 kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &out_data,
                     &[row_count, 1, out_dim],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?
             } else {
                 let gate_buf = self.cached_f32_weight_buffer(gate_weight_t)?;
@@ -3439,7 +3439,7 @@ impl BackendRuntime for VulkanBackend {
                 kiln_vulkan_kernel::kernels::create_tensor_from_data(
                     &out_data,
                     &[row_count, 1, out_dim],
-                    DType::F32,
+                    candle_core::DType::F32,
                 )?
             };
         let out = if seq_len == 1 {
@@ -3452,14 +3452,14 @@ impl BackendRuntime for VulkanBackend {
 
     fn gdn_forward_substitution(
         &self,
-        a_strict: &Tensor,
-        v_prime: &Tensor,
-        beta: &Tensor,
-    ) -> Result<Option<Tensor>> {
+        a_strict: &candle_core::Tensor,
+        v_prime: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.has_vulkan() || !self.gdn_enabled {
             return Ok(None);
         }
-        if a_strict.dtype() != DType::BF16 {
+        if a_strict.dtype() != candle_core::DType::BF16 {
             return Ok(None);
         }
         let vk_device = self
@@ -3486,32 +3486,32 @@ impl BackendRuntime for VulkanBackend {
         let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
             &out_data,
             &[batch, heads, chunk, dv],
-            DType::F32,
+            candle_core::DType::F32,
         )?;
         Ok(Some(out))
     }
 
     fn gdn_recurrent_prefill_native_head_last(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        beta: &Tensor,
-        g: &Tensor,
-        state: &mut Tensor,
-    ) -> Result<Option<Tensor>> {
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+        g: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.has_vulkan()
             || !self.gdn_recurrent_unexpanded_qk_enabled
-            || !matches!(q.dtype(), DType::BF16 | DType::F32)
+            || !matches!(q.dtype(), candle_core::DType::BF16 | candle_core::DType::F32)
         {
             return Ok(None);
         }
-        if !matches!(q.device(), Device::Cpu)
-            || !matches!(k.device(), Device::Cpu)
-            || !matches!(v.device(), Device::Cpu)
-            || !matches!(beta.device(), Device::Cpu)
-            || !matches!(g.device(), Device::Cpu)
-            || !matches!(state.device(), Device::Cpu)
+        if !matches!(q.device(), candle_core::Device::Cpu)
+            || !matches!(k.device(), candle_core::Device::Cpu)
+            || !matches!(v.device(), candle_core::Device::Cpu)
+            || !matches!(beta.device(), candle_core::Device::Cpu)
+            || !matches!(g.device(), candle_core::Device::Cpu)
+            || !matches!(state.device(), candle_core::Device::Cpu)
         {
             return Ok(None);
         }
@@ -3649,27 +3649,27 @@ impl BackendRuntime for VulkanBackend {
 
     fn gdn_recurrent_qk_norm_prefill_native_head_last(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        beta: &Tensor,
-        g: &Tensor,
-        state: &mut Tensor,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+        g: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
         q_scale: f64,
         qk_eps: f64,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.has_vulkan()
             || !self.gdn_recurrent_qk_norm_unexpanded_enabled
-            || !matches!(q.dtype(), DType::F32 | DType::BF16)
+            || !matches!(q.dtype(), candle_core::DType::F32 | candle_core::DType::BF16)
         {
             return Ok(None);
         }
-        if !matches!(q.device(), Device::Cpu)
-            || !matches!(k.device(), Device::Cpu)
-            || !matches!(v.device(), Device::Cpu)
-            || !matches!(beta.device(), Device::Cpu)
-            || !matches!(g.device(), Device::Cpu)
-            || !matches!(state.device(), Device::Cpu)
+        if !matches!(q.device(), candle_core::Device::Cpu)
+            || !matches!(k.device(), candle_core::Device::Cpu)
+            || !matches!(v.device(), candle_core::Device::Cpu)
+            || !matches!(beta.device(), candle_core::Device::Cpu)
+            || !matches!(g.device(), candle_core::Device::Cpu)
+            || !matches!(state.device(), candle_core::Device::Cpu)
         {
             return Ok(None);
         }
@@ -3730,17 +3730,17 @@ impl BackendRuntime for VulkanBackend {
 
     fn gdn_recurrent_step(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        beta: &Tensor,
-        g: &Tensor,
-        state: &mut Tensor,
-    ) -> Result<Option<Tensor>> {
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+        g: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.has_vulkan() || !self.gdn_enabled {
             return Ok(None);
         }
-        if !matches!(q.dtype(), DType::BF16 | DType::F32) {
+        if !matches!(q.dtype(), candle_core::DType::BF16 | candle_core::DType::F32) {
             return Ok(None);
         }
         let vk_device = self
@@ -3834,17 +3834,17 @@ impl BackendRuntime for VulkanBackend {
 
     fn gdn_chunk_prep(
         &self,
-        g: &Tensor,
-        v: &Tensor,
-        kkt: &Tensor,
-        qkt: &Tensor,
-        ks_entry: &Tensor,
-        q_s: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)>> {
+        g: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        kkt: &candle_core::Tensor,
+        qkt: &candle_core::Tensor,
+        ks_entry: &candle_core::Tensor,
+        q_s: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
         if !self.has_vulkan() || !self.gdn_enabled {
             return Ok(None);
         }
-        if g.dtype() != DType::BF16 {
+        if g.dtype() != candle_core::DType::BF16 {
             return Ok(None);
         }
         let vk_device = self
@@ -3873,39 +3873,39 @@ impl BackendRuntime for VulkanBackend {
         let decay_shape = [batch, heads, chunk];
         let p_last_shape = [batch, heads];
         let a_strict_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
-            &a_strict_b, &cc_shape, DType::BF16,
+            &a_strict_b, &cc_shape, candle_core::DType::BF16,
         )?;
         let b_mask_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
-            &b_mask_b, &cc_shape, DType::BF16,
+            &b_mask_b, &cc_shape, candle_core::DType::BF16,
         )?;
         let v_prime_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
-            &v_prime_b, &cv_shape, DType::BF16,
+            &v_prime_b, &cv_shape, candle_core::DType::BF16,
         )?;
         let q_s_scaled_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
-            &q_s_scaled_b, &cv_shape, DType::BF16,
+            &q_s_scaled_b, &cv_shape, candle_core::DType::BF16,
         )?;
         let decay_last_col_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
-            &decay_last_col_b, &decay_shape, DType::BF16,
+            &decay_last_col_b, &decay_shape, candle_core::DType::BF16,
         )?;
         let p_last_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
-            &p_last_b, &p_last_shape, DType::BF16,
+            &p_last_b, &p_last_shape, candle_core::DType::BF16,
         )?;
         Ok(Some((a_strict_t, b_mask_t, v_prime_t, q_s_scaled_t, decay_last_col_t, p_last_t)))
     }
 
     fn gdn_chunk_scan(
         &self,
-        a_strict: &Tensor,
-        b_mask: &Tensor,
-        v_prime: &Tensor,
-        q_s_scaled: &Tensor,
-        beta: &Tensor,
-        decay_last_col: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor)>> {
+        a_strict: &candle_core::Tensor,
+        b_mask: &candle_core::Tensor,
+        v_prime: &candle_core::Tensor,
+        q_s_scaled: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+        decay_last_col: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
         if !self.has_vulkan() || !self.gdn_enabled {
             return Ok(None);
         }
-        if a_strict.dtype() != DType::BF16 {
+        if a_strict.dtype() != candle_core::DType::BF16 {
             return Ok(None);
         }
         let vk_device = self
@@ -3937,32 +3937,32 @@ impl BackendRuntime for VulkanBackend {
         let out_tensor = kiln_vulkan_kernel::kernels::create_tensor_from_data(
             &out_data,
             &[batch, heads, chunk, dv],
-            DType::BF16,
+            candle_core::DType::BF16,
         )?;
         let p_out_tensor = kiln_vulkan_kernel::kernels::create_tensor_from_data(
             &p_out_data,
             &[batch, heads, chunk, dv],
-            DType::BF16,
+            candle_core::DType::BF16,
         )?;
         Ok(Some((out_tensor, p_out_tensor)))
     }
 
     fn gdn_full_chunk_forward(
         &self,
-        g: &Tensor,
-        v: &Tensor,
-        kkt: &Tensor,
-        qkt: &Tensor,
-        ks_entry: &Tensor,
-        q_s: &Tensor,
-        beta: &Tensor,
-        k_t: &Tensor,
-        state: &mut Tensor,
-    ) -> Result<Option<Tensor>> {
+        g: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        kkt: &candle_core::Tensor,
+        qkt: &candle_core::Tensor,
+        ks_entry: &candle_core::Tensor,
+        q_s: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+        k_t: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.has_vulkan() || !self.gdn_enabled {
             return Ok(None);
         }
-        if g.dtype() != DType::BF16 {
+        if g.dtype() != candle_core::DType::BF16 {
             return Ok(None);
         }
         let vk_device = self
@@ -3994,12 +3994,12 @@ impl BackendRuntime for VulkanBackend {
         let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
             &out_data,
             &[batch, heads, chunk, dv],
-            DType::BF16,
+            candle_core::DType::BF16,
         )?;
         let new_state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
             &new_state_data,
             &state_dims,
-            DType::BF16,
+            candle_core::DType::BF16,
         )?;
         *state = new_state;
         Ok(Some(out))
@@ -4007,15 +4007,15 @@ impl BackendRuntime for VulkanBackend {
 
     fn gdn_gates(
         &self,
-        a: &Tensor,
-        b: &Tensor,
-        a_log: &Tensor,
-        dt_bias: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor)>> {
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
+        a_log: &candle_core::Tensor,
+        dt_bias: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
         if !self.has_vulkan() || !self.gdn_gates_enabled {
             return Ok(None);
         }
-        if !matches!(a.dtype(), DType::BF16 | DType::F32) {
+        if !matches!(a.dtype(), candle_core::DType::BF16 | candle_core::DType::F32) {
             return Ok(None);
         }
         let vk_device = self
@@ -4053,15 +4053,15 @@ impl BackendRuntime for VulkanBackend {
 
     fn gdn_gated_rms_norm(
         &self,
-        x: &Tensor,
-        z: &Tensor,
-        weight: &Tensor,
+        x: &candle_core::Tensor,
+        z: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
         eps: f64,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.has_vulkan() || !self.gdn_gated_rms_norm_enabled {
             return Ok(None);
         }
-        if !matches!(x.dtype(), DType::BF16 | DType::F32) {
+        if !matches!(x.dtype(), candle_core::DType::BF16 | candle_core::DType::F32) {
             return Ok(None);
         }
         let vk_device = self
@@ -4099,15 +4099,15 @@ impl BackendRuntime for VulkanBackend {
 
     fn causal_conv1d_update(
         &self,
-        x: &Tensor,
-        weight: &Tensor,
-        conv_state: &mut Tensor,
+        x: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
+        conv_state: &mut candle_core::Tensor,
         kernel_size: usize,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.has_vulkan() || !self.fused_conv1d_update_enabled {
             return Ok(None);
         }
-        if !matches!(x.dtype(), DType::BF16 | DType::F32) {
+        if !matches!(x.dtype(), candle_core::DType::BF16 | candle_core::DType::F32) {
             return Ok(None);
         }
         let vk_device = self
@@ -4140,11 +4140,11 @@ impl BackendRuntime for VulkanBackend {
             .context("causal_conv1d_update kernel failed")?;
         let out_shape: Vec<usize> = dims.to_vec();
         let out =
-            kiln_vulkan_kernel::kernels::create_tensor_from_data(&out_data, &out_shape, DType::F32)?;
+            kiln_vulkan_kernel::kernels::create_tensor_from_data(&out_data, &out_shape, candle_core::DType::F32)?;
         let new_state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
             &state_data_out,
             &conv_state_shape,
-            DType::F32,
+            candle_core::DType::F32,
         )?;
         *conv_state = new_state;
         Ok(Some(out))
@@ -4152,15 +4152,15 @@ impl BackendRuntime for VulkanBackend {
 
     fn causal_conv1d_prefill(
         &self,
-        x: &Tensor,
-        weight: &Tensor,
-        conv_state: &mut Tensor,
+        x: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
+        conv_state: &mut candle_core::Tensor,
         kernel_size: usize,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.has_vulkan() || !self.fused_conv1d_prefill_enabled {
             return Ok(None);
         }
-        if !matches!(x.dtype(), DType::BF16 | DType::F32) {
+        if !matches!(x.dtype(), candle_core::DType::BF16 | candle_core::DType::F32) {
             return Ok(None);
         }
         let vk_device = self
@@ -4289,7 +4289,7 @@ mod tests {
     /// the update path too.
     #[test]
     fn update_resident_activation_overwrites_buffer() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -4298,24 +4298,24 @@ mod tests {
         // path exercises. The update path's encoding choice depends
         // on dtype, so testing BF16 specifically (not just F32)
         // guards against regression in the dtype branch.
-        let initial = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &Device::Cpu)?
-            .to_dtype(DType::BF16)?;
+        let initial = candle_core::Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &candle_core::Device::Cpu)?
+            .to_dtype(candle_core::DType::BF16)?;
         backend.register_resident_activation(&initial)?;
         // Sanity: registered with initial values.
         let resolved = backend
-            .resolve_resident_activation(&initial, &[2, 2], DType::BF16)?
+            .resolve_resident_activation(&initial, &[2, 2], candle_core::DType::BF16)?
             .expect("must resolve right after register");
         let init_v: Vec<f32> = resolved
-            .to_dtype(DType::F32)?
+            .to_dtype(candle_core::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         assert_eq!(init_v, vec![1.0, 2.0, 3.0, 4.0]);
 
         // Mutate the tensor's storage out-of-band — analogous to what
         // candle Var::set does. Use to_dtype roundtrip + a fresh tensor
-        // since we can't mutate in place. The TensorId stays the same
+        // since we can't mutate in place. The candle_core::TensorId stays the same
         // because we update the same Var-equivalent reference.
-        // Workaround: create a NEW tensor with the same TensorId by
+        // Workaround: create a NEW tensor with the same candle_core::TensorId by
         // using `.copy()` semantics — actually candle doesn't expose
         // that. So instead simulate the post-SGD state by registering
         // a different tensor (with a different id) and verify the
@@ -4325,17 +4325,17 @@ mod tests {
         // Concretely: hand `update_resident_activation` a tensor whose
         // BYTES differ from what's in the buffer but whose .id() is
         // the original. We can do that via `Var::set`-like:
-        // use the original Tensor object (.id() unchanged) and
+        // use the original candle_core::Tensor object (.id() unchanged) and
         // overwrite its underlying storage by re-running update with
         // a tensor that has different DATA but the same shape. Since
         // update keys on tensor.id(), we have to use a Var to keep
         // the id stable across a content change.
         let v = candle_core::Var::from_tensor(&initial)?;
-        let new_data = Tensor::from_vec(vec![10.0f32, 20.0, 30.0, 40.0], (2, 2), &Device::Cpu)?
-            .to_dtype(DType::BF16)?;
+        let new_data = candle_core::Tensor::from_vec(vec![10.0f32, 20.0, 30.0, 40.0], (2, 2), &candle_core::Device::Cpu)?
+            .to_dtype(candle_core::DType::BF16)?;
         v.set(&new_data)?;
-        // v.as_tensor() now wraps the same TensorId as the original
-        // Var construction — but Var wraps a Tensor that has its own
+        // v.as_tensor() now wraps the same candle_core::TensorId as the original
+        // Var construction — but Var wraps a candle_core::Tensor that has its own
         // id, distinct from `initial`. So this test path actually
         // demonstrates that the update applies to whatever id we hand
         // it, not to the unchanged `initial`.
@@ -4345,25 +4345,25 @@ mod tests {
         // Build "newer" data (v already holds new_data; resolve and
         // confirm the registry sees IT, not initial).
         let resolved_v = backend
-            .resolve_resident_activation(v.as_tensor(), &[2, 2], DType::BF16)?
+            .resolve_resident_activation(v.as_tensor(), &[2, 2], candle_core::DType::BF16)?
             .expect("v must resolve after register");
         let v_init_v: Vec<f32> = resolved_v
-            .to_dtype(DType::F32)?
+            .to_dtype(candle_core::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         assert_eq!(v_init_v, vec![10.0, 20.0, 30.0, 40.0]);
 
         // Now mutate v further and call update.
         let newer_data =
-            Tensor::from_vec(vec![100.0f32, 200.0, 300.0, 400.0], (2, 2), &Device::Cpu)?
-                .to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_vec(vec![100.0f32, 200.0, 300.0, 400.0], (2, 2), &candle_core::Device::Cpu)?
+                .to_dtype(candle_core::DType::BF16)?;
         v.set(&newer_data)?;
         backend.update_resident_activation(v.as_tensor())?;
         let resolved_after = backend
-            .resolve_resident_activation(v.as_tensor(), &[2, 2], DType::BF16)?
+            .resolve_resident_activation(v.as_tensor(), &[2, 2], candle_core::DType::BF16)?
             .expect("v must resolve after update");
         let after_v: Vec<f32> = resolved_after
-            .to_dtype(DType::F32)?
+            .to_dtype(candle_core::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         assert_eq!(after_v, vec![100.0, 200.0, 300.0, 400.0]);
@@ -4383,7 +4383,7 @@ mod tests {
     /// the updated weights.
     #[test]
     fn lora_delta_resident_reflects_post_update_weights() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -4400,12 +4400,12 @@ mod tests {
             .collect();
 
         let x =
-            Tensor::from_vec(x_data, (1, 1, in_features), &Device::Cpu)?.to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_vec(x_data, (1, 1, in_features), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?;
         let a_var = candle_core::Var::from_tensor(
-            &Tensor::from_vec(a_init, (rank, in_features), &Device::Cpu)?.to_dtype(DType::BF16)?,
+            &candle_core::Tensor::from_vec(a_init, (rank, in_features), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?,
         )?;
         let b_var = candle_core::Var::from_tensor(
-            &Tensor::from_vec(b_init, (out_features, rank), &Device::Cpu)?.to_dtype(DType::BF16)?,
+            &candle_core::Tensor::from_vec(b_init, (out_features, rank), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?,
         )?;
 
         backend.register_resident_activation(a_var.as_tensor())?;
@@ -4423,7 +4423,7 @@ mod tests {
             .map(|i| 5.0 - (i as f32) * 0.05)
             .collect();
         let a_post_tensor =
-            Tensor::from_vec(a_post, (rank, in_features), &Device::Cpu)?.to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_vec(a_post, (rank, in_features), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?;
         a_var.set(&a_post_tensor)?;
         // Critical: keep the registry in sync.
         backend.update_resident_activation(a_var.as_tensor())?;
@@ -4437,11 +4437,11 @@ mod tests {
         // were a no-op or used the wrong encoding, delta_post would
         // equal delta_init.
         let init_v: Vec<f32> = delta_init
-            .to_dtype(DType::F32)?
+            .to_dtype(candle_core::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         let post_v: Vec<f32> = delta_post
-            .to_dtype(DType::F32)?
+            .to_dtype(candle_core::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         assert_eq!(init_v.len(), post_v.len());
@@ -4458,15 +4458,15 @@ mod tests {
 
         // Compare delta_post against a CPU reference computed with
         // the new A bytes — they should match to bf16 precision.
-        let a_post_round = a_var.as_tensor().to_dtype(DType::F32)?;
-        let b_round = b_var.as_tensor().to_dtype(DType::F32)?;
-        let x_f32 = x.to_dtype(DType::F32)?;
+        let a_post_round = a_var.as_tensor().to_dtype(candle_core::DType::F32)?;
+        let b_round = b_var.as_tensor().to_dtype(candle_core::DType::F32)?;
+        let x_f32 = x.to_dtype(candle_core::DType::F32)?;
         let hidden = x_f32.broadcast_matmul(&a_post_round.t()?)?;
         let cpu_delta_post = hidden
             .broadcast_matmul(&b_round.t()?)?
-            .to_dtype(DType::BF16)?;
+            .to_dtype(candle_core::DType::BF16)?;
         let cpu_post_v: Vec<f32> = cpu_delta_post
-            .to_dtype(DType::F32)?
+            .to_dtype(candle_core::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         for (i, (vk, cpu)) in post_v.iter().zip(cpu_post_v.iter()).enumerate() {
@@ -4489,12 +4489,12 @@ mod tests {
     /// registered LoRA Vars and unregistered legacy Vars).
     #[test]
     fn update_resident_activation_noop_when_not_registered() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let t = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?;
+        let t = candle_core::Tensor::from_vec(vec![1.0f32; 4], (4,), &candle_core::Device::Cpu)?;
         // Not registered — must not error.
         backend.update_resident_activation(&t)?;
         assert!(!backend.has_resident_activation(&t));
@@ -4507,17 +4507,17 @@ mod tests {
     /// TensorIds, but conceptually the same lifecycle).
     #[test]
     fn resident_activation_re_register_after_evict() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let t = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &Device::Cpu)?;
+        let t = candle_core::Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &candle_core::Device::Cpu)?;
         backend.register_resident_activation(&t)?;
         assert!(backend.has_resident_activation(&t));
         backend.evict_resident_activation(&t);
         assert!(!backend.has_resident_activation(&t));
-        // Re-register with the same TensorId — must succeed and
+        // Re-register with the same candle_core::TensorId — must succeed and
         // re-upload (the previous buffer was dropped at eviction).
         backend.register_resident_activation(&t)?;
         assert!(
@@ -4527,7 +4527,7 @@ mod tests {
         // Resolve to confirm the bytes round-tripped correctly the
         // second time too.
         let resolved = backend
-            .resolve_resident_activation(&t, &[2, 2], DType::F32)?
+            .resolve_resident_activation(&t, &[2, 2], candle_core::DType::F32)?
             .expect("must resolve after re-register");
         let data: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
         assert_eq!(data, vec![1.0, 2.0, 3.0, 4.0]);
@@ -4540,12 +4540,12 @@ mod tests {
     /// false and the caller falls through to its CPU path.
     #[test]
     fn register_resident_activation_handles_empty_tensor() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let empty: Tensor = Tensor::from_vec(Vec::<f32>::new(), (0,), &Device::Cpu)?;
+        let empty: candle_core::Tensor = candle_core::Tensor::from_vec(Vec::<f32>::new(), (0,), &candle_core::Device::Cpu)?;
         backend.register_resident_activation(&empty)?;
         assert!(
             !backend.has_resident_activation(&empty),
@@ -4554,26 +4554,26 @@ mod tests {
         Ok(())
     }
 
-    /// resolve_resident_activation must reconstruct a Tensor whose
+    /// resolve_resident_activation must reconstruct a candle_core::Tensor whose
     /// data matches the originally-registered tensor's bytes.
     /// Returns Ok(None) when the tensor isn't in the registry.
     #[test]
     fn resolve_resident_activation_round_trip() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
         let original_data = vec![1.5f32, -2.5, 3.25, -4.75];
-        let t = Tensor::from_vec(original_data.clone(), (2, 2), &Device::Cpu)?;
+        let t = candle_core::Tensor::from_vec(original_data.clone(), (2, 2), &candle_core::Device::Cpu)?;
 
         // Not registered yet → resolve returns None.
-        let unresolved = backend.resolve_resident_activation(&t, &[2, 2], DType::F32)?;
+        let unresolved = backend.resolve_resident_activation(&t, &[2, 2], candle_core::DType::F32)?;
         assert!(unresolved.is_none(), "unregistered tensor must not resolve");
 
         backend.register_resident_activation(&t)?;
         let resolved = backend
-            .resolve_resident_activation(&t, &[2, 2], DType::F32)?
+            .resolve_resident_activation(&t, &[2, 2], candle_core::DType::F32)?
             .expect("must resolve once registered");
         assert_eq!(resolved.dims(), &[2, 2]);
         let resolved_data: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
@@ -4583,7 +4583,7 @@ mod tests {
 
         backend.evict_resident_activation(&t);
         // After eviction → resolve returns None again.
-        let unresolved = backend.resolve_resident_activation(&t, &[2, 2], DType::F32)?;
+        let unresolved = backend.resolve_resident_activation(&t, &[2, 2], candle_core::DType::F32)?;
         assert!(unresolved.is_none());
         Ok(())
     }
@@ -4593,7 +4593,7 @@ mod tests {
     /// CPU reference to f32 precision.
     #[test]
     fn dispatch_sgd_step_resident_round_trip() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -4608,8 +4608,8 @@ mod tests {
             .map(|(&p, &g)| p - lr * g)
             .collect();
 
-        let param = Tensor::from_vec(param_data, (n,), &Device::Cpu)?;
-        let grad = Tensor::from_vec(grad_data, (n,), &Device::Cpu)?;
+        let param = candle_core::Tensor::from_vec(param_data, (n,), &candle_core::Device::Cpu)?;
+        let grad = candle_core::Tensor::from_vec(grad_data, (n,), &candle_core::Device::Cpu)?;
 
         // Both must be resident before dispatch_sgd_step succeeds.
         backend.register_resident_activation(&param)?;
@@ -4654,13 +4654,13 @@ mod tests {
     /// (resident? × resident?) combinations.
     #[test]
     fn dispatch_sgd_step_falls_back_when_not_resident() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let p = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?;
-        let g = Tensor::from_vec(vec![0.5f32; 4], (4,), &Device::Cpu)?;
+        let p = candle_core::Tensor::from_vec(vec![1.0f32; 4], (4,), &candle_core::Device::Cpu)?;
+        let g = candle_core::Tensor::from_vec(vec![0.5f32; 4], (4,), &candle_core::Device::Cpu)?;
         // Neither registered — fall back.
         assert!(!backend.dispatch_sgd_step(&p, &g, 0.01)?);
         // Only param registered — fall back (grad missing).
@@ -4679,13 +4679,13 @@ mod tests {
     /// surfacing immediately.
     #[test]
     fn dispatch_sgd_step_errors_on_shape_mismatch() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let p = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?;
-        let g = Tensor::from_vec(vec![0.5f32; 8], (8,), &Device::Cpu)?;
+        let p = candle_core::Tensor::from_vec(vec![1.0f32; 4], (4,), &candle_core::Device::Cpu)?;
+        let g = candle_core::Tensor::from_vec(vec![0.5f32; 8], (8,), &candle_core::Device::Cpu)?;
         backend.register_resident_activation(&p)?;
         backend.register_resident_activation(&g)?;
         let err = backend.dispatch_sgd_step(&p, &g, 0.01).unwrap_err();
@@ -4703,7 +4703,7 @@ mod tests {
     /// numerics tolerance when A and B are registered.
     #[test]
     fn lora_delta_resident_matches_cpu_reference() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -4721,12 +4721,12 @@ mod tests {
             .map(|i| (i as f32) * 0.03)
             .collect();
 
-        let x = Tensor::from_vec(x_data, (1, t, in_features), &Device::Cpu)?;
-        let a_f32 = Tensor::from_vec(a_data, (rank, in_features), &Device::Cpu)?;
-        let b_f32 = Tensor::from_vec(b_data, (out_features, rank), &Device::Cpu)?;
-        let a_bf16 = a_f32.to_dtype(DType::BF16)?;
-        let b_bf16 = b_f32.to_dtype(DType::BF16)?;
-        let x_bf16 = x.to_dtype(DType::BF16)?;
+        let x = candle_core::Tensor::from_vec(x_data, (1, t, in_features), &candle_core::Device::Cpu)?;
+        let a_f32 = candle_core::Tensor::from_vec(a_data, (rank, in_features), &candle_core::Device::Cpu)?;
+        let b_f32 = candle_core::Tensor::from_vec(b_data, (out_features, rank), &candle_core::Device::Cpu)?;
+        let a_bf16 = a_f32.to_dtype(candle_core::DType::BF16)?;
+        let b_bf16 = b_f32.to_dtype(candle_core::DType::BF16)?;
+        let x_bf16 = x.to_dtype(candle_core::DType::BF16)?;
 
         // CPU baseline (manual, F32) — `compute_lora_delta` casts to
         // x.dtype() which would be BF16 here, but candle CPU doesn't
@@ -4735,11 +4735,11 @@ mod tests {
         // same BF16-quantised A and B that the Vulkan path reads
         // from the registry (we round-trip through bf16 to match
         // the bytes the kernel sees).
-        let a_round = a_bf16.to_dtype(DType::F32)?;
-        let b_round = b_bf16.to_dtype(DType::F32)?;
+        let a_round = a_bf16.to_dtype(candle_core::DType::F32)?;
+        let b_round = b_bf16.to_dtype(candle_core::DType::F32)?;
         let hidden_cpu = x.broadcast_matmul(&a_round.t()?)?;
         let delta_cpu = hidden_cpu.broadcast_matmul(&b_round.t()?)?;
-        let cpu_delta = (delta_cpu * scale as f64)?.to_dtype(DType::BF16)?;
+        let cpu_delta = (delta_cpu * scale as f64)?.to_dtype(candle_core::DType::BF16)?;
 
         // Register A and B in the registry.
         backend.register_resident_activation(&a_bf16)?;
@@ -4754,11 +4754,11 @@ mod tests {
         assert_eq!(vk_delta.dtype(), cpu_delta.dtype());
         let cpu_v: Vec<f32> = cpu_delta
             .flatten_all()?
-            .to_dtype(DType::F32)?
+            .to_dtype(candle_core::DType::F32)?
             .to_vec1::<f32>()?;
         let vk_v: Vec<f32> = vk_delta
             .flatten_all()?
-            .to_dtype(DType::F32)?
+            .to_dtype(candle_core::DType::F32)?
             .to_vec1::<f32>()?;
         for (i, (c, v)) in cpu_v.iter().zip(vk_v.iter()).enumerate() {
             let abs = (c - v).abs();
@@ -4778,15 +4778,15 @@ mod tests {
     /// registered — caller falls back to candle CPU.
     #[test]
     fn lora_delta_resident_falls_back_when_not_resident() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
         let x =
-            Tensor::from_vec(vec![0.0f32; 16], (1, 2, 8), &Device::Cpu)?.to_dtype(DType::BF16)?;
-        let a = Tensor::from_vec(vec![0.0f32; 32], (4, 8), &Device::Cpu)?.to_dtype(DType::BF16)?;
-        let b = Tensor::from_vec(vec![0.0f32; 24], (6, 4), &Device::Cpu)?.to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_vec(vec![0.0f32; 16], (1, 2, 8), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?;
+        let a = candle_core::Tensor::from_vec(vec![0.0f32; 32], (4, 8), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?;
+        let b = candle_core::Tensor::from_vec(vec![0.0f32; 24], (6, 4), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?;
         // Neither registered — fall back.
         assert!(backend.lora_delta_resident(&x, &a, &b, 0.5)?.is_none());
         // Only A registered — fall back.
@@ -4807,7 +4807,7 @@ mod tests {
     /// without the candle CPU re-upload round-trip.
     #[test]
     fn dispatch_sgd_step_bf16_resident_round_trip() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -4823,10 +4823,10 @@ mod tests {
             .map(|(&p, &g)| p - lr * g)
             .collect();
 
-        let p_f32 = Tensor::from_vec(p_data, (n,), &Device::Cpu)?;
-        let g_f32 = Tensor::from_vec(g_data, (n,), &Device::Cpu)?;
-        let p_bf16 = p_f32.to_dtype(DType::BF16)?;
-        let g_bf16 = g_f32.to_dtype(DType::BF16)?;
+        let p_f32 = candle_core::Tensor::from_vec(p_data, (n,), &candle_core::Device::Cpu)?;
+        let g_f32 = candle_core::Tensor::from_vec(g_data, (n,), &candle_core::Device::Cpu)?;
+        let p_bf16 = p_f32.to_dtype(candle_core::DType::BF16)?;
+        let g_bf16 = g_f32.to_dtype(candle_core::DType::BF16)?;
 
         backend.register_resident_activation(&p_bf16)?;
         backend.register_resident_activation(&g_bf16)?;
@@ -4839,10 +4839,10 @@ mod tests {
 
         // Read the updated param buffer back via resolve.
         let resolved = backend
-            .resolve_resident_activation(&p_bf16, &[n], DType::BF16)?
+            .resolve_resident_activation(&p_bf16, &[n], candle_core::DType::BF16)?
             .expect("must resolve");
         let updated_v: Vec<f32> = resolved
-            .to_dtype(DType::F32)?
+            .to_dtype(candle_core::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         for (i, (got, want)) in updated_v.iter().zip(expected_f32.iter()).enumerate() {
@@ -4867,7 +4867,7 @@ mod tests {
     /// the bias-correction precompute path.
     #[test]
     fn dispatch_adamw_step_resident_round_trip_f32() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -4901,10 +4901,10 @@ mod tests {
             })
             .collect();
 
-        let param = Tensor::from_vec(p_data, (n,), &Device::Cpu)?;
-        let grad = Tensor::from_vec(g_data, (n,), &Device::Cpu)?;
-        let m = Tensor::from_vec(m_data, (n,), &Device::Cpu)?;
-        let v = Tensor::from_vec(v_data, (n,), &Device::Cpu)?;
+        let param = candle_core::Tensor::from_vec(p_data, (n,), &candle_core::Device::Cpu)?;
+        let grad = candle_core::Tensor::from_vec(g_data, (n,), &candle_core::Device::Cpu)?;
+        let m = candle_core::Tensor::from_vec(m_data, (n,), &candle_core::Device::Cpu)?;
+        let v = candle_core::Tensor::from_vec(v_data, (n,), &candle_core::Device::Cpu)?;
 
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
@@ -4929,7 +4929,7 @@ mod tests {
         );
 
         let resolved = backend
-            .resolve_resident_activation(&param, &[n], DType::F32)?
+            .resolve_resident_activation(&param, &[n], candle_core::DType::F32)?
             .expect("param must resolve after dispatch");
         let got: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
         for (i, (g, w)) in got.iter().zip(expected.iter()).enumerate() {
@@ -4950,7 +4950,7 @@ mod tests {
     /// in-place buffer updates don't carry across steps.
     #[test]
     fn dispatch_adamw_step_resident_round_trip_bf16_two_step() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -4985,14 +4985,14 @@ mod tests {
             }
         }
 
-        let p_f32 = Tensor::from_vec(p_data, (n,), &Device::Cpu)?;
-        let g_f32 = Tensor::from_vec(g_data, (n,), &Device::Cpu)?;
-        let m_f32 = Tensor::from_vec(vec![0.0f32; n], (n,), &Device::Cpu)?;
-        let v_f32 = Tensor::from_vec(vec![0.0f32; n], (n,), &Device::Cpu)?;
-        let p_bf16 = p_f32.to_dtype(DType::BF16)?;
-        let g_bf16 = g_f32.to_dtype(DType::BF16)?;
-        let m_bf16 = m_f32.to_dtype(DType::BF16)?;
-        let v_bf16 = v_f32.to_dtype(DType::BF16)?;
+        let p_f32 = candle_core::Tensor::from_vec(p_data, (n,), &candle_core::Device::Cpu)?;
+        let g_f32 = candle_core::Tensor::from_vec(g_data, (n,), &candle_core::Device::Cpu)?;
+        let m_f32 = candle_core::Tensor::from_vec(vec![0.0f32; n], (n,), &candle_core::Device::Cpu)?;
+        let v_f32 = candle_core::Tensor::from_vec(vec![0.0f32; n], (n,), &candle_core::Device::Cpu)?;
+        let p_bf16 = p_f32.to_dtype(candle_core::DType::BF16)?;
+        let g_bf16 = g_f32.to_dtype(candle_core::DType::BF16)?;
+        let m_bf16 = m_f32.to_dtype(candle_core::DType::BF16)?;
+        let v_bf16 = v_f32.to_dtype(candle_core::DType::BF16)?;
 
         backend.register_resident_activation(&p_bf16)?;
         backend.register_resident_activation(&g_bf16)?;
@@ -5016,10 +5016,10 @@ mod tests {
         }
 
         let resolved = backend
-            .resolve_resident_activation(&p_bf16, &[n], DType::BF16)?
+            .resolve_resident_activation(&p_bf16, &[n], candle_core::DType::BF16)?
             .expect("param must resolve");
         let got: Vec<f32> = resolved
-            .to_dtype(DType::F32)?
+            .to_dtype(candle_core::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         for (i, (g, w)) in got.iter().zip(ref_p.iter()).enumerate() {
@@ -5043,15 +5043,15 @@ mod tests {
     /// four operand buffers isn't resident.
     #[test]
     fn dispatch_adamw_step_falls_back_when_not_resident() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let p = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?;
-        let g = Tensor::from_vec(vec![0.5f32; 4], (4,), &Device::Cpu)?;
-        let m = Tensor::from_vec(vec![0.0f32; 4], (4,), &Device::Cpu)?;
-        let v = Tensor::from_vec(vec![0.0f32; 4], (4,), &Device::Cpu)?;
+        let p = candle_core::Tensor::from_vec(vec![1.0f32; 4], (4,), &candle_core::Device::Cpu)?;
+        let g = candle_core::Tensor::from_vec(vec![0.5f32; 4], (4,), &candle_core::Device::Cpu)?;
+        let m = candle_core::Tensor::from_vec(vec![0.0f32; 4], (4,), &candle_core::Device::Cpu)?;
+        let v = candle_core::Tensor::from_vec(vec![0.0f32; 4], (4,), &candle_core::Device::Cpu)?;
         // Nothing registered.
         let dispatched =
             backend.dispatch_adamw_step(&p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
@@ -5081,7 +5081,7 @@ mod tests {
     /// This is the contract the lazy-sync flow relies on.
     #[test]
     fn lazy_sync_keeps_candle_stale_until_explicit_sync() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -5097,8 +5097,8 @@ mod tests {
             .collect();
 
         let p_var =
-            candle_core::Var::from_tensor(&Tensor::from_vec(init.clone(), (n,), &Device::Cpu)?)?;
-        let g_tensor = Tensor::from_vec(grad, (n,), &Device::Cpu)?;
+            candle_core::Var::from_tensor(&candle_core::Tensor::from_vec(init.clone(), (n,), &candle_core::Device::Cpu)?)?;
+        let g_tensor = candle_core::Tensor::from_vec(grad, (n,), &candle_core::Device::Cpu)?;
 
         backend.register_resident_activation(p_var.as_tensor())?;
         backend.register_resident_activation(&g_tensor)?;
@@ -5116,7 +5116,7 @@ mod tests {
 
         // (2) Registry has post-step values.
         let resolved = backend
-            .resolve_resident_activation(p_var.as_tensor(), &[n], DType::F32)?
+            .resolve_resident_activation(p_var.as_tensor(), &[n], candle_core::DType::F32)?
             .expect("must resolve after on-device dispatch");
         let resolved_v: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
         for (i, (r, w)) in resolved_v.iter().zip(expected.iter()).enumerate() {
@@ -5146,13 +5146,13 @@ mod tests {
     /// an F32 master copy that we don't maintain.
     #[test]
     fn dispatch_sgd_step_falls_back_on_dtype_mismatch() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let p = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?.to_dtype(DType::BF16)?;
-        let g = Tensor::from_vec(vec![0.5f32; 4], (4,), &Device::Cpu)?; // F32
+        let p = candle_core::Tensor::from_vec(vec![1.0f32; 4], (4,), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?;
+        let g = candle_core::Tensor::from_vec(vec![0.5f32; 4], (4,), &candle_core::Device::Cpu)?; // F32
         backend.register_resident_activation(&p)?;
         backend.register_resident_activation(&g)?;
         let dispatched = backend.dispatch_sgd_step(&p, &g, 0.01)?;
@@ -5164,7 +5164,7 @@ mod tests {
 
     #[test]
     fn resident_activation_register_evict_round_trip() -> Result<()> {
-        let backend = VulkanBackend::new(Device::Cpu);
+        let backend = VulkanBackend::new(candle_core::Device::Cpu);
         // The capability bit is true regardless of whether a Vulkan
         // device exists in the test environment — it advertises the
         // backend's *intent* to handle these hooks non-trivially.
@@ -5181,7 +5181,7 @@ mod tests {
         // Small synthetic tensor — no specific shape required, the
         // hook just uploads `extract_tensor_bytes(tensor).0` and
         // keys on `tensor.id()`.
-        let t = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &Device::Cpu)?;
+        let t = candle_core::Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &candle_core::Device::Cpu)?;
         assert!(
             !backend.has_resident_activation(&t),
             "fresh tensor must not be registered"
