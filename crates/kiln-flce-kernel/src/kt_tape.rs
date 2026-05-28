@@ -300,7 +300,7 @@ pub fn fused_linear_cross_entropy_phase_b_via_kt_tape(
 
 // ---------------------------------------------------------------------------
 // Tests — envelope tests run host-only; the CUDA E2E tests gate on
-// the `cuda` cargo feature *and* `kiln_tensor::primary_cuda_device(0)`
+// the `cuda` cargo feature *and* `kiln_tensor::primary_cuda_context(0)`
 // at runtime so they skip cleanly when CUDA hardware is absent.
 // ---------------------------------------------------------------------------
 
@@ -344,14 +344,14 @@ mod tests {
     // -----------------------------------------------------------------
     // CUDA E2E tests — gated on the `cuda` cargo feature so non-CUDA
     // builds still compile this module. At runtime we additionally
-    // check `kiln_tensor::primary_cuda_device(0).is_ok()` so the
+    // check `kiln_tensor::primary_cuda_context(0).is_ok()` so the
     // tests skip cleanly on a CUDA-feature-enabled build that lacks
     // an actual GPU (CI matrix safety).
     // -----------------------------------------------------------------
 
     #[cfg(feature = "cuda")]
     fn cuda_available() -> bool {
-        kiln_tensor::primary_cuda_device(0).is_ok()
+        kiln_tensor::primary_cuda_context(0).is_ok()
     }
 
     #[cfg(feature = "cuda")]

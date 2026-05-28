@@ -14,7 +14,7 @@ use kiln_rmsnorm_kernel::fused_rmsnorm_kt;
 use kiln_tensor::Tensor;
 
 fn cuda_available() -> bool {
-    kiln_tensor::primary_cuda_device(0).is_ok()
+    kiln_tensor::primary_cuda_context(0).is_ok()
 }
 
 fn pattern(n: usize, seed: u64) -> Vec<f32> {

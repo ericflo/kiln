@@ -17,7 +17,7 @@ use kiln_gdn_kernel::{gdn_gated_rms_norm_bf16_kt, gdn_gated_rms_norm_supports_kt
 use kiln_tensor::{cuda_to_host_copy, CpuStorage, DType, Tensor};
 
 fn cuda_available() -> bool {
-    kiln_tensor::primary_cuda_device(0).is_ok()
+    kiln_tensor::primary_cuda_context(0).is_ok()
 }
 
 fn lcg_seed(state: &mut u64) -> f32 {

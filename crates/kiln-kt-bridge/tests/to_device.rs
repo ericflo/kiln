@@ -21,7 +21,7 @@ use std::sync::Arc;
 use kiln_tensor::{CpuStorage, Device as KtDevice, Tensor};
 
 fn try_cuda_available() -> bool {
-    kiln_tensor::primary_cuda_device(0).is_ok()
+    kiln_tensor::primary_cuda_context(0).is_ok()
 }
 
 fn cpu_f32_tensor(data: &[f32], shape: Vec<usize>) -> Tensor {

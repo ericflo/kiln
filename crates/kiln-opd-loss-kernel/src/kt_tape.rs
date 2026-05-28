@@ -422,7 +422,7 @@ mod tests {
         use half::bf16;
 
         fn cuda_available() -> bool {
-            kiln_tensor::primary_cuda_device(0).is_ok()
+            kiln_tensor::primary_cuda_context(0).is_ok()
         }
 
         /// Make a deterministic `[1, T, H]` F32 CUDA tensor.

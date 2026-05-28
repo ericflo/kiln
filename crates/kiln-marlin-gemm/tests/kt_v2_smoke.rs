@@ -15,7 +15,7 @@ use kiln_marlin_gemm::{marlin_w4a16_gemm_kt, pack};
 use kiln_tensor::{DType, Tensor};
 
 fn cuda_available() -> bool {
-    kiln_tensor::primary_cuda_device(0).is_ok()
+    kiln_tensor::primary_cuda_context(0).is_ok()
 }
 
 fn lcg(state: &mut u64) -> f32 {
