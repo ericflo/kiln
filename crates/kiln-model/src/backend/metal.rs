@@ -13892,12 +13892,29 @@ fn metal_causal_conv1d_prefill_bf16_f32_k4(
             _ => anyhow::bail!("metal conv1d prefill output must be on Metal"),
         };
 
-        let x_buf = buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let w_buf =
-            buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
-        let s_buf =
-            buffer_o(s_metal.buffer(), &s_layout, conv_state.dtype());
-        let o_buf = buffer_o(o_metal.buffer(), &o_layout, out.dtype());
+        // #1082 Step 4 conv1d-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let x_buf = buffer_o_kt(
+            x_metal.buffer(),
+            &kt_layout_from_candle(x_layout),
+            kt_dtype_from_candle(x.dtype()),
+        );
+        let w_buf = buffer_o_kt(
+            w_metal.buffer(),
+            &kt_layout_from_candle(w_layout),
+            kt_dtype_from_candle(weight.dtype()),
+        );
+        let s_buf = buffer_o_kt(
+            s_metal.buffer(),
+            &kt_layout_from_candle(s_layout),
+            kt_dtype_from_candle(conv_state.dtype()),
+        );
+        let o_buf = buffer_o_kt(
+            o_metal.buffer(),
+            &kt_layout_from_candle(o_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
@@ -13984,12 +14001,29 @@ fn metal_causal_conv1d_update_bf16_f32_k4(
             _ => anyhow::bail!("metal conv1d update output must be on Metal"),
         };
 
-        let x_buf = buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let w_buf =
-            buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
-        let s_buf =
-            buffer_o(s_metal.buffer(), &s_layout, conv_state.dtype());
-        let o_buf = buffer_o(o_metal.buffer(), &o_layout, out.dtype());
+        // #1082 Step 4 conv1d-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let x_buf = buffer_o_kt(
+            x_metal.buffer(),
+            &kt_layout_from_candle(x_layout),
+            kt_dtype_from_candle(x.dtype()),
+        );
+        let w_buf = buffer_o_kt(
+            w_metal.buffer(),
+            &kt_layout_from_candle(w_layout),
+            kt_dtype_from_candle(weight.dtype()),
+        );
+        let s_buf = buffer_o_kt(
+            s_metal.buffer(),
+            &kt_layout_from_candle(s_layout),
+            kt_dtype_from_candle(conv_state.dtype()),
+        );
+        let o_buf = buffer_o_kt(
+            o_metal.buffer(),
+            &kt_layout_from_candle(o_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
