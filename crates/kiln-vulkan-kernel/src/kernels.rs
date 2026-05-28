@@ -10421,35 +10421,16 @@ pub fn dispatch_sdpa_prefill_f32_bytes(
     softmax_scale: f32,
     causal: bool,
 ) -> Result<Vec<u8>> {
-    let q = build_cpu_f32_tensor_from_bytes(q_data, &[batch, seq_len, num_heads, head_dim])?;
-    let k = build_cpu_f32_tensor_from_bytes(k_data, &[batch, seq_len, num_heads, head_dim])?;
-    let v = build_cpu_f32_tensor_from_bytes(v_data, &[batch, seq_len, num_heads, head_dim])?;
-    let out = dispatch_sdpa_prefill_f32(vk_device, &q, &k, &v, softmax_scale, causal)?;
-    Ok(extract_tensor_bytes(&out)?.0)
-}
-
-pub fn dispatch_sdpa_prefill_f32(
-    vk_device: &VulkanDevice,
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    softmax_scale: f32,
-    causal: bool,
-) -> Result<Tensor> {
+    let expected_bytes = batch * seq_len * num_heads * head_dim * 4;
     anyhow::ensure!(
-        q.dtype() == DType::F32 && k.dtype() == DType::F32 && v.dtype() == DType::F32,
-        "sdpa_prefill_f32: q/k/v must all be F32, got {:?}/{:?}/{:?}",
-        q.dtype(),
-        k.dtype(),
-        v.dtype()
-    );
-    let (batch, seq_len, num_heads, head_dim) = q.dims4().context("sdpa_prefill_f32: q dims4")?;
-    anyhow::ensure!(
-        k.dims() == q.dims() && v.dims() == q.dims(),
-        "sdpa_prefill_f32: q/k/v must have identical shape, got {:?}/{:?}/{:?}",
-        q.dims(),
-        k.dims(),
-        v.dims()
+        q_data.len() == expected_bytes
+            && k_data.len() == expected_bytes
+            && v_data.len() == expected_bytes,
+        "sdpa_prefill_f32: q/k/v byte lengths ({}, {}, {}) do not match expected {}",
+        q_data.len(),
+        k_data.len(),
+        v_data.len(),
+        expected_bytes,
     );
     anyhow::ensure!(
         head_dim <= 128,
@@ -10488,16 +10469,16 @@ pub fn dispatch_sdpa_prefill_f32(
     // assignments in the shader.
     let workgroup_count = (seq_len as u32, num_heads as u32, batch as u32);
     let output_shape = vec![batch, seq_len, num_heads, head_dim];
-    dispatch_kernel(
+    dispatch_kernel_bytes(
         vk_device,
         &spirv,
         &push_constants,
         workgroup_count,
-        &[q, k, v],
+        &[q_data, k_data, v_data],
         &output_shape,
-        DType::F32,
+        4,
     )
-    .context("sdpa_prefill_f32: dispatch_kernel")
+    .context("sdpa_prefill_f32: dispatch_kernel_bytes")
 }
 
 /// Vulkan SGD parameter update step: `param -= lr * grad`, in-place
