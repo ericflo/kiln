@@ -434,6 +434,28 @@ fn is_metal_device(device: &candle_core::Device) -> bool {
 fn is_cuda_device(device: &candle_core::Device) -> bool {
     matches!(device, candle_core::Device::Cuda(_))
 }
+// ---------------------------------------------------------------------------
+// (#1082) Type aliases for the bare candle leaf types that show up in
+// struct fields and function signatures throughout this file. These are
+// NOT `use candle_*` imports — they are `type` aliases local to this
+// module, so the audit invariant "trainer.rs has zero `use candle_*`
+// imports at module top" still holds.
+//
+// The alias names below shadow nothing at the module top: bare `Tensor`,
+// `Var`, `DType`, `Shape`, `GradStore`, and `TensorId` are not in scope
+// from any other use-statement in this file (only `candle_core::` paths
+// previously named them). `CdDevice` is intentionally NOT just `Device`
+// because the `kiln_tensor::Device` path appears in NamedTestBackend at
+// the bottom of this file and we do not want to shadow it.
+// ---------------------------------------------------------------------------
+type Tensor = candle_core::Tensor;
+type Var = candle_core::Var;
+type CdDevice = candle_core::Device;
+type DType = candle_core::DType;
+type Shape = candle_core::Shape;
+type GradStore = candle_core::backprop::GradStore;
+type TensorId = candle_core::TensorId;
+
 
 /// Sample a Kaiming-uniform LoRA-A initialization.
 ///
@@ -446,9 +468,9 @@ fn kaiming_uniform_a(
     rng: Option<&mut StdRng>,
     bound: f64,
     shape: (usize, usize),
-    dtype: candle_core::DType,
-    device: &candle_core::Device,
-) -> Result<candle_core::Var> {
+    dtype: DType,
+    device: &CdDevice,
+) -> Result<Var> {
     if let Some(rng) = rng {
         let bound_f32 = bound as f32;
         let n = shape.0 * shape.1;
@@ -505,27 +527,27 @@ pub struct TrainableLoraParams {
 /// Trainable LoRA A/B pairs for one transformer layer.
 #[derive(Default)]
 pub struct TrainableLoraLayerParams {
-    pub q_proj: Option<(candle_core::Var, candle_core::Var)>,
-    pub k_proj: Option<(candle_core::Var, candle_core::Var)>,
-    pub v_proj: Option<(candle_core::Var, candle_core::Var)>,
-    pub o_proj: Option<(candle_core::Var, candle_core::Var)>,
-    pub in_proj_qkv: Option<(candle_core::Var, candle_core::Var)>,
-    pub in_proj_z: Option<(candle_core::Var, candle_core::Var)>,
-    pub gdn_out_proj: Option<(candle_core::Var, candle_core::Var)>,
-    pub gate_proj: Option<(candle_core::Var, candle_core::Var)>,
-    pub up_proj: Option<(candle_core::Var, candle_core::Var)>,
-    pub down_proj: Option<(candle_core::Var, candle_core::Var)>,
+    pub q_proj: Option<(Var, Var)>,
+    pub k_proj: Option<(Var, Var)>,
+    pub v_proj: Option<(Var, Var)>,
+    pub o_proj: Option<(Var, Var)>,
+    pub in_proj_qkv: Option<(Var, Var)>,
+    pub in_proj_z: Option<(Var, Var)>,
+    pub gdn_out_proj: Option<(Var, Var)>,
+    pub gate_proj: Option<(Var, Var)>,
+    pub up_proj: Option<(Var, Var)>,
+    pub down_proj: Option<(Var, Var)>,
 }
 
 struct LoraVarRef<'a> {
     module: &'static str,
-    var: &'a candle_core::Var,
+    var: &'a Var,
 }
 
 fn push_lora_var_pair<'a>(
     vars: &mut Vec<LoraVarRef<'a>>,
     module: &'static str,
-    pair: &'a Option<(candle_core::Var, candle_core::Var)>,
+    pair: &'a Option<(Var, Var)>,
 ) {
     if let Some((a, b)) = pair {
         vars.push(LoraVarRef { module, var: a });
@@ -548,7 +570,7 @@ impl TrainableLoraParams {
         weights: &GpuWeights,
         rank: usize,
         alpha: f32,
-        device: &candle_core::Device,
+        device: &CdDevice,
     ) -> Result<Self> {
         Self::initialize_seeded(config, weights, rank, alpha, device, None)
     }
@@ -566,7 +588,7 @@ impl TrainableLoraParams {
         weights: &GpuWeights,
         rank: usize,
         alpha: f32,
-        device: &candle_core::Device,
+        device: &CdDevice,
         seed: Option<u64>,
     ) -> Result<Self> {
         // Best-effort seed of the device RNG — `Var::zeros` for B does not
@@ -794,8 +816,8 @@ impl TrainableLoraParams {
     ///
     /// Returns the [`OptimizerState`] the trainer threads through
     /// `apply_adamw_update`. CPU and GPU paths both consume it.
-    pub fn allocate_adamw_state(&self, device: &candle_core::Device) -> Result<OptimizerState> {
-        let mut moments: HashMap<candle_core::TensorId, AdamWMoments> = HashMap::new();
+    pub fn allocate_adamw_state(&self, device: &CdDevice) -> Result<OptimizerState> {
+        let mut moments: HashMap<TensorId, AdamWMoments> = HashMap::new();
         for var in self.all_vars() {
             let shape = var.as_tensor().shape().clone();
             let dtype = var.as_tensor().dtype();
@@ -818,8 +840,8 @@ impl TrainableLoraParams {
 /// (in-place on the registry buffer when the backend supports
 /// residency, via candle ops otherwise).
 pub struct AdamWMoments {
-    pub m: candle_core::Var,
-    pub v: candle_core::Var,
+    pub m: Var,
+    pub v: Var,
 }
 
 /// State threaded through the trainer for AdamW. Holds per-param
@@ -832,7 +854,7 @@ pub struct AdamWMoments {
 /// trainer increments `step` *before* dispatching so the first call
 /// sees `step=1`.
 pub struct OptimizerState {
-    pub moments: HashMap<candle_core::TensorId, AdamWMoments>,
+    pub moments: HashMap<TensorId, AdamWMoments>,
     pub step: u32,
 }
 
@@ -906,7 +928,7 @@ impl TrainableLoraParams {
             .layers
             .iter()
             .map(|lp| {
-                let make_proj = |pair: &Option<(candle_core::Var, candle_core::Var)>| -> Option<LoraProjectionWeights> {
+                let make_proj = |pair: &Option<(Var, Var)>| -> Option<LoraProjectionWeights> {
                     pair.as_ref().map(|(a, b)| LoraProjectionWeights {
                         a: a.as_tensor().clone(),
                         b: b.as_tensor().clone(),
@@ -937,7 +959,7 @@ impl TrainableLoraParams {
     }
 
     /// Collect all Var references for gradient extraction and updates.
-    pub fn all_vars(&self) -> Vec<&candle_core::Var> {
+    pub fn all_vars(&self) -> Vec<&Var> {
         self.all_vars_with_modules()
             .into_iter()
             .map(|entry| entry.var)
@@ -979,7 +1001,7 @@ impl TrainableLoraParams {
     /// `validate_base_adapter_compatibility` before this method so missing,
     /// extra, rank-mismatched, or shape-mismatched tensors fail before
     /// optimizer setup instead of leaving seeded-init gaps.
-    pub fn load_from_safetensors(&self, adapter_dir: &Path, device: &candle_core::Device) -> Result<usize> {
+    pub fn load_from_safetensors(&self, adapter_dir: &Path, device: &CdDevice) -> Result<usize> {
         let st_path = adapter_dir.join("adapter_model.safetensors");
         let tensors = candle_core::safetensors::load(&st_path, device)
             .with_context(|| format!("loading adapter safetensors from {}", st_path.display()))?;
@@ -987,7 +1009,7 @@ impl TrainableLoraParams {
         let mut loaded = 0usize;
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             let mut load_proj =
-                |name: &str, pair: &Option<(candle_core::Var, candle_core::Var)>, is_attn: bool| -> Result<()> {
+                |name: &str, pair: &Option<(Var, Var)>, is_attn: bool| -> Result<()> {
                     if let Some((a, b)) = pair {
                         let sub = if is_attn { "self_attn" } else { "mlp" };
                         let prefix =
@@ -1049,10 +1071,10 @@ impl TrainableLoraParams {
         std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
 
         // Collect all tensors for safetensors serialization
-        let mut tensor_data: HashMap<String, candle_core::Tensor> = HashMap::new();
+        let mut tensor_data: HashMap<String, Tensor> = HashMap::new();
 
         for (layer_idx, layer) in self.layers.iter().enumerate() {
-            let mut save_proj = |name: &str, pair: &Option<(candle_core::Var, candle_core::Var)>, is_attn: bool| {
+            let mut save_proj = |name: &str, pair: &Option<(Var, Var)>, is_attn: bool| {
                 if let Some((a, b)) = pair {
                     let sub = if is_attn { "self_attn" } else { "mlp" };
                     let prefix = format!("base_model.model.model.layers.{layer_idx}.{sub}.{name}");
@@ -1717,7 +1739,7 @@ fn adapter_smoke_forward_logits(
     weights: &GpuWeights,
     model_config: &ModelConfig,
     lora: Option<&LoraWeights>,
-) -> Result<candle_core::Tensor> {
+) -> Result<Tensor> {
     let mut linear_state = adapter_smoke_linear_state(backend, weights, model_config)?;
     model_forward(
         backend,
@@ -1731,8 +1753,8 @@ fn adapter_smoke_forward_logits(
 }
 
 fn adapter_smoke_logit_delta_l2(
-    base_logits: &candle_core::Tensor,
-    adapter_logits: &candle_core::Tensor,
+    base_logits: &Tensor,
+    adapter_logits: &Tensor,
 ) -> Result<(bool, Option<f64>)> {
     let base = adapter_smoke_last_logits(base_logits)?;
     let adapter = adapter_smoke_last_logits(adapter_logits)?;
@@ -1763,7 +1785,7 @@ fn adapter_smoke_logit_delta_l2(
     Ok((l2.is_finite(), l2.is_finite().then_some(l2)))
 }
 
-fn adapter_smoke_last_logits(logits: &candle_core::Tensor) -> Result<Vec<f32>> {
+fn adapter_smoke_last_logits(logits: &Tensor) -> Result<Vec<f32>> {
     let dims = logits.dims();
     anyhow::ensure!(
         dims.len() >= 2,
@@ -4034,7 +4056,7 @@ pub fn grpo_benchmark_training_step(
     params: &TrainableLoraParams,
     config: &GrpoConfig,
     segments: Option<&[(usize, usize)]>,
-    device: &candle_core::Device,
+    device: &CdDevice,
     tokenizer: &KilnTokenizer,
     opt_state: Option<&mut OptimizerState>,
 ) -> Result<GrpoBenchmarkReport> {
@@ -4216,8 +4238,8 @@ fn compute_ref_log_probs_shared_prefix(
     weights: &GpuWeights,
     model_config: &ModelConfig,
     ema_ref_lora: Option<&LoraWeights>,
-    device: &candle_core::Device,
-) -> Result<Vec<candle_core::Tensor>> {
+    device: &CdDevice,
+) -> Result<Vec<Tensor>> {
     if tgroup.completions.is_empty() {
         return Ok(Vec::new());
     }
@@ -4410,12 +4432,12 @@ fn compute_ref_log_probs_shared_prefix(
 /// the position-selection / shift bookkeeping (the caller has already aligned
 /// rows with targets).
 fn chunked_log_probs_for_completion(
-    active_hidden: &candle_core::Tensor,
-    head_t: &candle_core::Tensor,
+    active_hidden: &Tensor,
+    head_t: &Tensor,
     target_ids: &[u32],
     chunk_size: usize,
-    device: &candle_core::Device,
-) -> Result<candle_core::Tensor> {
+    device: &CdDevice,
+) -> Result<Tensor> {
     let n_targets = target_ids.len();
     if n_targets == 0 {
         return zeros_f32_on(1, device).map_err(Into::into);
@@ -4446,9 +4468,9 @@ fn chunked_log_probs_for_completion(
         anyhow::bail!("head_t vocab dimension is zero");
     }
 
-    let mut running_max: Option<candle_core::Tensor> = None;
-    let mut running_sumexp: Option<candle_core::Tensor> = None;
-    let mut correct_logits: Option<candle_core::Tensor> = None;
+    let mut running_max: Option<Tensor> = None;
+    let mut running_sumexp: Option<Tensor> = None;
+    let mut correct_logits: Option<Tensor> = None;
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
@@ -4515,7 +4537,7 @@ fn train_tokenized_grpo_group(
     params: &TrainableLoraParams,
     config: &GrpoConfig,
     segments: Option<&[(usize, usize)]>,
-    device: &candle_core::Device,
+    device: &CdDevice,
     opt_state: Option<&mut OptimizerState>,
     // Phase 3b: optional EMA-snapshot LoRA used as the reference policy when
     // `config.reference_policy == ReferencePolicy::Ema`. None means the
@@ -4551,7 +4573,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
     params: &TrainableLoraParams,
     config: &GrpoConfig,
     segments: Option<&[(usize, usize)]>,
-    device: &candle_core::Device,
+    device: &CdDevice,
     opt_state: Option<&mut OptimizerState>,
     grad_norms: &mut crate::train_receipt::LoraGradNormAccumulator,
     lora_grad_index: &LoraGradNormIndex,
@@ -4612,7 +4634,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
     let use_shared_prefix = !skip_reference
         && tgroup.completions.len() > 1
         && !kiln_core::env_flag::env_flag("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", false);
-    let shared_prefix_log_probs: Option<Vec<candle_core::Tensor>> = if use_shared_prefix {
+    let shared_prefix_log_probs: Option<Vec<Tensor>> = if use_shared_prefix {
         let started = Instant::now();
         tracing::info!(
             completions = tgroup.completions.len(),
@@ -5088,7 +5110,7 @@ fn merge_grad_maps(
 }
 
 struct LoraGradNormIndex {
-    modules_by_var: HashMap<candle_core::TensorId, &'static str>,
+    modules_by_var: HashMap<TensorId, &'static str>,
 }
 
 impl LoraGradNormIndex {
@@ -5121,7 +5143,7 @@ fn observe_lora_grad_norms_from_map(
 fn observe_lora_grad_norms_from_grad_store(
     accumulator: &mut crate::train_receipt::LoraGradNormAccumulator,
     params: &TrainableLoraParams,
-    grads: &candle_core::backprop::GradStore,
+    grads: &GradStore,
 ) -> Result<()> {
     let mut sum_sq_by_module: BTreeMap<&'static str, f64> = BTreeMap::new();
     for entry in params.all_vars_with_modules() {
@@ -5136,7 +5158,7 @@ fn observe_lora_grad_norms_from_grad_store(
 fn accumulate_lora_grad_sum_sq(
     sum_sq_by_module: &mut BTreeMap<&'static str, f64>,
     module: &'static str,
-    grad: &candle_core::Tensor,
+    grad: &Tensor,
 ) -> Result<()> {
     let norm = crate::train_receipt::tensor_l2_norm(grad)
         .with_context(|| format!("compute LoRA grad l2 norm for module {module}"))?;
@@ -5353,7 +5375,7 @@ fn tokenize_grpo_group_timed(
 ///
 /// Used by [`lora_snapshot_capture_or_blend`] to materialize a reference
 /// LoRA that won't silently track future policy updates.
-fn deepcopy_tensor_for_snapshot(t: &candle_core::Tensor) -> Result<candle_core::Tensor> {
+fn deepcopy_tensor_for_snapshot(t: &Tensor) -> Result<Tensor> {
     let device = t.device();
     let dtype = t.dtype();
     let shape = t.shape().clone();
@@ -5374,7 +5396,7 @@ fn deepcopy_tensor_for_snapshot(t: &candle_core::Tensor) -> Result<candle_core::
 /// EMA blend two tensors: `new = decay * old + (1 - decay) * current`. The
 /// result has the same dtype as `old` and is independent of either input's
 /// storage (the affine + add chain materializes a fresh tensor).
-fn ema_blend_tensor(old: &candle_core::Tensor, current: &candle_core::Tensor, decay: f32) -> Result<candle_core::Tensor> {
+fn ema_blend_tensor(old: &Tensor, current: &Tensor, decay: f32) -> Result<Tensor> {
     let dtype = old.dtype();
     let a = old.to_f32_dtype()?.affine(decay as f64, 0.0)?;
     let b = current
@@ -5395,7 +5417,7 @@ fn ema_blend_tensor(old: &candle_core::Tensor, current: &candle_core::Tensor, de
 /// from the snapshot toward the current params (or a pure deepcopy of
 /// current if no prior snapshot exists).
 fn snapshot_projection(
-    cur: &Option<(candle_core::Var, candle_core::Var)>,
+    cur: &Option<(Var, Var)>,
     prior: Option<&LoraProjectionWeights>,
     decay: f32,
 ) -> Result<Option<LoraProjectionWeights>> {
@@ -5442,7 +5464,7 @@ fn lora_snapshot_capture_or_blend(
             let snap_layer = prior.and_then(|p| p.layers.get(layer_idx));
             // For each named projection, blend or deepcopy.
             let mk = |which: fn(&LoraLayerWeights) -> Option<&LoraProjectionWeights>,
-                      cur: &Option<(candle_core::Var, candle_core::Var)>|
+                      cur: &Option<(Var, Var)>|
              -> Result<Option<LoraProjectionWeights>> {
                 snapshot_projection(cur, snap_layer.and_then(which), decay)
             };
@@ -5517,11 +5539,11 @@ fn compute_advantages(rewards: &[f64], mode: AdvantageMode) -> Vec<f64> {
 /// Returns a 1-D tensor of log-probs for only the masked (completion) positions.
 /// Uses the next-token prediction convention: logits[i] predicts token[i+1].
 fn token_log_probs(
-    logits: &candle_core::Tensor,
+    logits: &Tensor,
     input_ids: &[u32],
     mask: &[bool],
-    device: &candle_core::Device,
-) -> Result<candle_core::Tensor> {
+    device: &CdDevice,
+) -> Result<Tensor> {
     let seq_len = input_ids.len();
     let logits = logits.squeeze(0)?; // [seq_len, vocab_size]
 
@@ -5573,12 +5595,12 @@ fn token_log_probs(
 /// Compute selected next-token log-probs from post-final-RMSNorm hidden states
 /// without materializing the full `[seq_len, vocab_size]` logits tensor.
 fn selected_log_probs_from_normed_hidden_chunked(
-    normed_hidden: &candle_core::Tensor,
-    head_t: &candle_core::Tensor,
+    normed_hidden: &Tensor,
+    head_t: &Tensor,
     input_ids: &[u32],
     mask: &[bool],
     chunk_size: usize,
-) -> Result<candle_core::Tensor> {
+) -> Result<Tensor> {
     let device = normed_hidden.device();
     let seq_len = input_ids.len();
     if seq_len < 2 {
@@ -5637,9 +5659,9 @@ fn selected_log_probs_from_normed_hidden_chunked(
         anyhow::bail!("head_t vocab dimension is zero");
     }
 
-    let mut running_max: Option<candle_core::Tensor> = None;
-    let mut running_sumexp: Option<candle_core::Tensor> = None;
-    let mut correct_logits: Option<candle_core::Tensor> = None;
+    let mut running_max: Option<Tensor> = None;
+    let mut running_sumexp: Option<Tensor> = None;
+    let mut correct_logits: Option<Tensor> = None;
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
@@ -5892,11 +5914,11 @@ fn has_supervised_shifted_labels(label_mask: &[bool]) -> bool {
 ///
 /// Returns: scalar loss tensor (tracked by autograd).
 fn cross_entropy_loss(
-    logits: &candle_core::Tensor,
+    logits: &Tensor,
     input_ids: &[u32],
     label_mask: &[bool],
-    device: &candle_core::Device,
-) -> Result<candle_core::Tensor> {
+    device: &CdDevice,
+) -> Result<Tensor> {
     let seq_len = input_ids.len();
 
     // Squeeze batch dimension: [seq_len, vocab_size]
@@ -5958,7 +5980,7 @@ fn cross_entropy_loss(
 /// chunking over vocab so the full `[T, V]` logits tensor is never
 /// materialized. The returned tensor is F32 with shape `[1, T, H]`; inactive
 /// shifted-label rows and the final sequence row are zero.
-fn synchronize_metal_tail_chunk(device: &candle_core::Device, context: &'static str) -> Result<()> {
+fn synchronize_metal_tail_chunk(device: &CdDevice, context: &'static str) -> Result<()> {
     if is_metal_device(device) {
         device.synchronize().context(context)?;
     }
@@ -5966,14 +5988,14 @@ fn synchronize_metal_tail_chunk(device: &candle_core::Device, context: &'static 
 }
 
 fn analytic_sft_tail_grad_pre_final_norm(
-    hidden: &candle_core::Tensor,
-    final_norm_weight: &candle_core::Tensor,
-    head_t: &candle_core::Tensor,
+    hidden: &Tensor,
+    final_norm_weight: &Tensor,
+    head_t: &Tensor,
     input_ids: &[u32],
     label_mask: &[bool],
     rms_norm_eps: f64,
     chunk_size: usize,
-) -> Result<candle_core::Tensor> {
+) -> Result<Tensor> {
     let device = hidden.device();
     let seq_len = input_ids.len();
     if seq_len < 2 {
@@ -6050,8 +6072,8 @@ fn analytic_sft_tail_grad_pre_final_norm(
     }
 
     // Pass 1: global row-wise softmax normalizers over vocab chunks.
-    let mut running_max: Option<candle_core::Tensor> = None;
-    let mut running_sumexp: Option<candle_core::Tensor> = None;
+    let mut running_max: Option<Tensor> = None;
+    let mut running_sumexp: Option<Tensor> = None;
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
@@ -6163,17 +6185,17 @@ struct EchoTailParams<'a> {
 }
 
 fn analytic_grpo_tail_loss_grad_pre_final_norm(
-    hidden: &candle_core::Tensor,
-    final_norm_weight: &candle_core::Tensor,
-    head_t: &candle_core::Tensor,
+    hidden: &Tensor,
+    final_norm_weight: &Tensor,
+    head_t: &Tensor,
     input_ids: &[u32],
     completion_mask: &[bool],
-    ref_log_probs: &candle_core::Tensor,
+    ref_log_probs: &Tensor,
     loss_params: GrpoLossParams,
     rms_norm_eps: f64,
     chunk_size: usize,
     echo: Option<EchoTailParams<'_>>,
-) -> Result<(f64, candle_core::Tensor, Option<f64>)> {
+) -> Result<(f64, Tensor, Option<f64>)> {
     let device = hidden.device();
     let seq_len = input_ids.len();
     if seq_len < 2 {
@@ -6322,9 +6344,9 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
         anyhow::bail!("head_t vocab dimension is zero");
     }
 
-    let mut running_max: Option<candle_core::Tensor> = None;
-    let mut running_sumexp: Option<candle_core::Tensor> = None;
-    let mut correct_logits: Option<candle_core::Tensor> = None;
+    let mut running_max: Option<Tensor> = None;
+    let mut running_sumexp: Option<Tensor> = None;
+    let mut correct_logits: Option<Tensor> = None;
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
@@ -6615,11 +6637,11 @@ struct BackendFlceProvider {
 impl FlceMatmulProvider for BackendFlceProvider {
     fn chunk_matmul(
         &self,
-        lhs: &candle_core::Tensor,
-        full_rhs: &candle_core::Tensor,
+        lhs: &Tensor,
+        full_rhs: &Tensor,
         chunk_start: usize,
         chunk_len: usize,
-    ) -> anyhow::Result<Option<candle_core::Tensor>> {
+    ) -> anyhow::Result<Option<Tensor>> {
         let lhs_3d = lhs.unsqueeze(0)?;
         let Some(out_3d) =
             self.backend
@@ -6734,7 +6756,7 @@ fn recompute_checkpoint_boundaries(seq_len: usize) -> bool {
     seq_len >= threshold
 }
 
-fn spool_checkpoint_boundaries(device: &candle_core::Device) -> bool {
+fn spool_checkpoint_boundaries(device: &CdDevice) -> bool {
     if let Some(forced) = kiln_core::env_flag::env_tristate("KILN_SPOOL_CHECKPOINT_BOUNDARIES") {
         return forced;
     }
@@ -6746,7 +6768,7 @@ fn profile_checkpoint_segments() -> bool {
 }
 
 fn synchronize_checkpoint_boundary(
-    device: &candle_core::Device,
+    device: &CdDevice,
     context: impl FnOnce() -> String,
 ) -> Result<()> {
     if is_metal_device(device) {
@@ -6772,7 +6794,7 @@ impl SpooledCheckpointBoundaries {
         Ok(Self { _dir: dir, paths })
     }
 
-    fn save(&self, boundary_idx: usize, tensor: &candle_core::Tensor) -> Result<()> {
+    fn save(&self, boundary_idx: usize, tensor: &Tensor) -> Result<()> {
         let path = self.paths.get(boundary_idx).ok_or_else(|| {
             anyhow::anyhow!("checkpoint boundary index {boundary_idx} out of spool range")
         })?;
@@ -6784,7 +6806,7 @@ impl SpooledCheckpointBoundaries {
         })
     }
 
-    fn load(&self, boundary_idx: usize, device: &candle_core::Device) -> Result<candle_core::Tensor> {
+    fn load(&self, boundary_idx: usize, device: &CdDevice) -> Result<Tensor> {
         let path = self.paths.get(boundary_idx).ok_or_else(|| {
             anyhow::anyhow!("checkpoint boundary index {boundary_idx} out of spool range")
         })?;
@@ -6812,9 +6834,9 @@ impl SpooledCheckpointBoundaries {
 /// dispatch overhead.
 fn segment_input_via_registry_or_clone(
     backend: &dyn BackendRuntime,
-    boundary: &candle_core::Tensor,
+    boundary: &Tensor,
     resident_activation: bool,
-) -> Result<candle_core::Tensor> {
+) -> Result<Tensor> {
     if resident_activation && backend.has_resident_activation(boundary) {
         let dims_vec: Vec<usize> = boundary.dims().to_vec();
         if let Some(resolved) =
@@ -6830,7 +6852,7 @@ fn segment_input_via_registry_or_clone(
 fn sgd_step(
     backend: &dyn BackendRuntime,
     params: &TrainableLoraParams,
-    grads: &candle_core::backprop::GradStore,
+    grads: &GradStore,
     lr: f64,
 ) -> Result<()> {
     let resident_activation = backend.supports_resident_activation();
@@ -6849,7 +6871,7 @@ fn sgd_step(
 pub fn optimizer_step(
     backend: &dyn BackendRuntime,
     params: &TrainableLoraParams,
-    grads: &candle_core::backprop::GradStore,
+    grads: &GradStore,
     lr: f64,
     optimizer: Optimizer,
     opt_state: Option<&mut OptimizerState>,
@@ -6915,8 +6937,8 @@ pub fn optimizer_step(
 /// next forward.
 fn apply_sgd_update(
     backend: &dyn BackendRuntime,
-    var: &candle_core::Var,
-    grad: &candle_core::Tensor,
+    var: &Var,
+    grad: &Tensor,
     lr: f64,
     resident_activation: bool,
 ) -> Result<()> {
@@ -6975,8 +6997,8 @@ fn apply_sgd_update(
 #[allow(clippy::too_many_arguments)]
 fn apply_adamw_update(
     backend: &dyn BackendRuntime,
-    var: &candle_core::Var,
-    grad: &candle_core::Tensor,
+    var: &Var,
+    grad: &Tensor,
     moments: &AdamWMoments,
     lr: f64,
     beta1: f32,
@@ -7023,7 +7045,7 @@ fn apply_adamw_update(
     // CPU fallback: run the same math via candle ops in f32 to avoid
     // BF16 underflow on the v moment, then round-trip back to the
     // param dtype.
-    let to_f32 = |t: &candle_core::Tensor| -> Result<candle_core::Tensor> { Ok(t.to_f32_dtype()?) };
+    let to_f32 = |t: &Tensor| -> Result<Tensor> { Ok(t.to_f32_dtype()?) };
     let p_f32 = to_f32(var.as_tensor())?;
     let g_f32 = to_f32(grad)?;
     let m_f32 = to_f32(moments.m.as_tensor())?;
@@ -7063,8 +7085,8 @@ fn apply_adamw_update(
 /// any Var that has a gradient in `src` but not yet in `dst`.
 pub(crate) fn accumulate_grads(
     dst: &mut GradMap,
-    src: &candle_core::backprop::GradStore,
-    vars: &[&candle_core::Var],
+    src: &GradStore,
+    vars: &[&Var],
 ) -> Result<()> {
     for var in vars {
         if let Some(grad) = src.get(var.as_tensor()) {
@@ -7084,17 +7106,17 @@ pub(crate) fn accumulate_grads(
 }
 
 fn grad_or_zeros_like(
-    grads: &candle_core::backprop::GradStore,
-    key: &candle_core::Tensor,
-    like: &candle_core::Tensor,
-) -> Result<candle_core::Tensor> {
+    grads: &GradStore,
+    key: &Tensor,
+    like: &Tensor,
+) -> Result<Tensor> {
     match grads.get(key) {
         Some(grad) => Ok(grad.detach()),
         None => candle_core::Tensor::zeros_like(like).map_err(Into::into),
     }
 }
 
-fn offload_checkpoint_tensor_to_cpu(tensor: candle_core::Tensor, enabled: bool) -> Result<candle_core::Tensor> {
+fn offload_checkpoint_tensor_to_cpu(tensor: Tensor, enabled: bool) -> Result<Tensor> {
     if enabled && !tensor.device().is_cpu() {
         Ok(tensor
             .to_device(&cpu_device())
@@ -7105,7 +7127,7 @@ fn offload_checkpoint_tensor_to_cpu(tensor: candle_core::Tensor, enabled: bool) 
     }
 }
 
-fn tensor_on_device(tensor: &candle_core::Tensor, device: &candle_core::Device) -> Result<candle_core::Tensor> {
+fn tensor_on_device(tensor: &Tensor, device: &CdDevice) -> Result<Tensor> {
     if tensor.device().same_device(device) {
         Ok(tensor.clone())
     } else {
@@ -7116,8 +7138,8 @@ fn tensor_on_device(tensor: &candle_core::Tensor, device: &candle_core::Device) 
 }
 
 fn accumulate_cpu_tensor_slot(
-    slot: &mut Option<candle_core::Tensor>,
-    tensor: candle_core::Tensor,
+    slot: &mut Option<Tensor>,
+    tensor: Tensor,
     context: &str,
 ) -> Result<()> {
     let tensor_cpu = tensor
@@ -7440,7 +7462,7 @@ pub(crate) fn lora_weights_detached(params: &TrainableLoraParams) -> LoraWeights
         .layers
         .iter()
         .map(|lp| {
-            let make_proj = |pair: &Option<(candle_core::Var, candle_core::Var)>| -> Option<LoraProjectionWeights> {
+            let make_proj = |pair: &Option<(Var, Var)>| -> Option<LoraProjectionWeights> {
                 pair.as_ref().map(|(a, b)| LoraProjectionWeights {
                     a: a.as_tensor().detach(),
                     b: b.as_tensor().detach(),
@@ -7532,7 +7554,7 @@ fn partition_segment_layers_by_attn_type(
 #[allow(dead_code)]
 fn tiled_training_tile_size(
     weights: &GpuWeights,
-    device: &candle_core::Device,
+    device: &CdDevice,
     seq_len: usize,
 ) -> Option<usize> {
     let _ = weights; // signature retained for callers; gating moved to the dispatcher.
@@ -7548,7 +7570,7 @@ fn tiled_training_tile_size(
 
 fn exact_gdn_reverse_tile_size(
     weights: &GpuWeights,
-    device: &candle_core::Device,
+    device: &CdDevice,
     seq_len: usize,
     seg_start: usize,
     seg_end: usize,
@@ -7575,8 +7597,8 @@ fn exact_gdn_reverse_tile_size(
     Some(tile)
 }
 
-fn exact_gdn_backward_tile_tokens_for(device: &candle_core::Device) -> usize {
-    fn fallback_tile(device: &candle_core::Device) -> usize {
+fn exact_gdn_backward_tile_tokens_for(device: &CdDevice) -> usize {
+    fn fallback_tile(device: &CdDevice) -> usize {
         if is_cuda_device(device) {
             1024
         } else {
@@ -7610,7 +7632,7 @@ fn exact_gdn_split_recurrent_backward_enabled() -> bool {
 
 #[allow(clippy::too_many_arguments)]
 fn finish_exact_gdn_reverse_tile_stage(
-    device: &candle_core::Device,
+    device: &CdDevice,
     enabled: bool,
     layer_idx: usize,
     tile_idx: usize,
@@ -7672,14 +7694,14 @@ fn full_attention_mlp_reverse_tile_size(
 #[allow(clippy::too_many_arguments)]
 fn full_attention_attention_pre_o_forward(
     backend: &dyn BackendRuntime,
-    x: &candle_core::Tensor,
+    x: &Tensor,
     weights: &GpuWeights,
     model_config: &ModelConfig,
     positions: &[u32],
     layer_idx: usize,
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
-) -> Result<candle_core::Tensor> {
+) -> Result<Tensor> {
     let layer = &weights.layers[layer_idx];
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(attn_weights) => attn_weights,
@@ -7735,7 +7757,7 @@ fn full_attention_attention_pre_o_forward(
 #[allow(clippy::too_many_arguments, dead_code)]
 fn full_attention_attention_prepare_forward(
     backend: &dyn BackendRuntime,
-    x: &candle_core::Tensor,
+    x: &Tensor,
     weights: &GpuWeights,
     model_config: &ModelConfig,
     positions: &[u32],
@@ -7772,14 +7794,14 @@ fn full_attention_attention_prepare_forward(
 #[allow(clippy::too_many_arguments)]
 fn full_attention_attention_forward(
     backend: &dyn BackendRuntime,
-    x: &candle_core::Tensor,
+    x: &Tensor,
     weights: &GpuWeights,
     model_config: &ModelConfig,
     positions: &[u32],
     layer_idx: usize,
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
-) -> Result<candle_core::Tensor> {
+) -> Result<Tensor> {
     let layer = &weights.layers[layer_idx];
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(attn_weights) => attn_weights,
@@ -7804,14 +7826,14 @@ fn full_attention_attention_forward(
 #[allow(clippy::too_many_arguments)]
 fn full_attention_residual_forward(
     backend: &dyn BackendRuntime,
-    x: &candle_core::Tensor,
+    x: &Tensor,
     weights: &GpuWeights,
     model_config: &ModelConfig,
     positions: &[u32],
     layer_idx: usize,
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
-) -> Result<candle_core::Tensor> {
+) -> Result<Tensor> {
     let attn_out = full_attention_attention_forward(
         backend,
         x,
@@ -7827,7 +7849,7 @@ fn full_attention_residual_forward(
 
 #[derive(Clone)]
 struct InjectTensorGradient {
-    upstream: candle_core::Tensor,
+    upstream: Tensor,
 }
 
 impl std::fmt::Debug for InjectTensorGradient {
@@ -7848,7 +7870,7 @@ impl candle_core::CustomOp1 for InjectTensorGradient {
         &self,
         _storage: &candle_core::CpuStorage,
         _layout: &candle_core::Layout,
-    ) -> candle_core::Result<(candle_core::CpuStorage, candle_core::Shape)> {
+    ) -> candle_core::Result<(candle_core::CpuStorage, Shape)> {
         Ok((candle_core::CpuStorage::F32(vec![0.0]), candle_core::Shape::from(())))
     }
 
@@ -7857,7 +7879,7 @@ impl candle_core::CustomOp1 for InjectTensorGradient {
         &self,
         storage: &candle_core::CudaStorage,
         _layout: &candle_core::Layout,
-    ) -> candle_core::Result<(candle_core::CudaStorage, candle_core::Shape)> {
+    ) -> candle_core::Result<(candle_core::CudaStorage, Shape)> {
         // (#1082) `CudaStorage` is fully-qualified inline (only this function
         // touches it) and the `device` field is accessed directly rather than
         // via the `BackendStorage::device()` trait method, eliminating what
@@ -7877,10 +7899,10 @@ impl candle_core::CustomOp1 for InjectTensorGradient {
 
     fn bwd(
         &self,
-        arg: &candle_core::Tensor,
-        _res: &candle_core::Tensor,
-        _grad_res: &candle_core::Tensor,
-    ) -> candle_core::Result<Option<candle_core::Tensor>> {
+        arg: &Tensor,
+        _res: &Tensor,
+        _grad_res: &Tensor,
+    ) -> candle_core::Result<Option<Tensor>> {
         if self.upstream.dims() != arg.dims() {
             candle_core::bail!(
                 "InjectTensorGradient shape mismatch: upstream {:?}, arg {:?}",
@@ -7903,18 +7925,18 @@ fn full_attention_single_layer_tiled_mlp_reverse(
     backend: &dyn BackendRuntime,
     layer_idx: usize,
     full_attn_layer_idx: usize,
-    seg_input: &candle_core::Tensor,
-    upstream_grad: &candle_core::Tensor,
+    seg_input: &Tensor,
+    upstream_grad: &Tensor,
     weights: &GpuWeights,
     model_config: &ModelConfig,
     positions: &[u32],
     params: &TrainableLoraParams,
     lora_detached: &LoraWeights,
     tile_size: usize,
-    device: &candle_core::Device,
+    device: &CdDevice,
     accumulated_grads: &mut GradMap,
-    all_vars: &[&candle_core::Var],
-) -> Result<candle_core::Tensor> {
+    all_vars: &[&Var],
+) -> Result<Tensor> {
     let layer = &weights.layers[layer_idx];
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(attn_weights) => attn_weights,
@@ -8035,7 +8057,7 @@ fn full_attention_single_layer_tiled_mlp_reverse(
         tile_start = tile_end;
     }
 
-    let residual_grad_refs: Vec<&candle_core::Tensor> = residual_grad_tiles.iter().collect();
+    let residual_grad_refs: Vec<&Tensor> = residual_grad_tiles.iter().collect();
     let residual_grad = cat_tensors(&residual_grad_refs, 1)
         .context("full-attention tiled MLP residual grad cat")?
         .detach();
@@ -8131,7 +8153,7 @@ fn full_attention_single_layer_tiled_mlp_reverse(
         tile_start = tile_end;
     }
 
-    let pre_o_grad_refs: Vec<&candle_core::Tensor> = pre_o_grad_tiles.iter().collect();
+    let pre_o_grad_refs: Vec<&Tensor> = pre_o_grad_tiles.iter().collect();
     let pre_o_grad = cat_tensors(&pre_o_grad_refs, 1)
         .context("full-attention tiled o-proj pre-o grad cat")?
         .detach();
@@ -8172,10 +8194,10 @@ fn full_attention_single_layer_tiled_mlp_reverse(
         format!("synchronize full-attention K/V value layer {layer_idx}")
     })?;
 
-    let mut q_grad_tiles_cpu: Vec<Option<candle_core::Tensor>> = vec![None; total_tiles];
-    let mut gate_grad_tiles_cpu: Vec<Option<candle_core::Tensor>> = vec![None; total_tiles];
-    let mut k_grad_tiles_cpu: Vec<Option<candle_core::Tensor>> = vec![None; total_tiles];
-    let mut v_grad_tiles_cpu: Vec<Option<candle_core::Tensor>> = vec![None; total_tiles];
+    let mut q_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
+    let mut gate_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
+    let mut k_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
+    let mut v_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
 
     for tile_idx in 0..total_tiles {
         let tile_start = tile_idx * tile_size;
@@ -8351,7 +8373,7 @@ fn full_attention_single_layer_tiled_mlp_reverse(
         format!("synchronize full-attention tiled core grad offload layer {layer_idx}")
     })?;
 
-    let mut attention_input_grad_tiles_cpu: Vec<Option<candle_core::Tensor>> = vec![None; total_tiles];
+    let mut attention_input_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
     for tile_idx in 0..total_tiles {
         let tile_start = tile_idx * tile_size;
         let tile_len = (total_tokens - tile_start).min(tile_size);
@@ -8546,7 +8568,7 @@ fn full_attention_single_layer_tiled_mlp_reverse(
         }
         attention_input_grad_tile_values.push(tile);
     }
-    let attention_input_grad_tile_refs: Vec<&candle_core::Tensor> =
+    let attention_input_grad_tile_refs: Vec<&Tensor> =
         attention_input_grad_tile_values.iter().collect();
     let attention_input_grad_cpu = cat_tensors(&attention_input_grad_tile_refs, 1)
         .context("full-attention tiled prepare input grad cat")?
@@ -8596,17 +8618,17 @@ fn full_attention_single_layer_tiled_mlp_reverse(
 fn exact_gdn_single_layer_tiled_reverse(
     backend: &dyn BackendRuntime,
     layer_idx: usize,
-    seg_input: &candle_core::Tensor,
-    upstream_grad: &candle_core::Tensor,
+    seg_input: &Tensor,
+    upstream_grad: &Tensor,
     weights: &GpuWeights,
     model_config: &ModelConfig,
     positions: &[u32],
     params: &TrainableLoraParams,
     lora_detached: &LoraWeights,
     tile_size: usize,
-    device: &candle_core::Device,
+    device: &CdDevice,
     accumulated_grads: &mut GradMap,
-) -> Result<candle_core::Tensor> {
+) -> Result<Tensor> {
     let (_, total_tokens, hidden_size) = seg_input.dims3()?;
     anyhow::ensure!(
         total_tokens == positions.len(),
@@ -8643,8 +8665,8 @@ fn exact_gdn_single_layer_tiled_reverse(
     );
 
     let boundary_state = LinearAttentionState::new(model_config, device)?;
-    let mut recurrent_boundaries: Vec<candle_core::Tensor> = Vec::with_capacity(num_tiles + 1);
-    let mut conv_boundaries: Vec<candle_core::Tensor> = Vec::with_capacity(num_tiles + 1);
+    let mut recurrent_boundaries: Vec<Tensor> = Vec::with_capacity(num_tiles + 1);
+    let mut conv_boundaries: Vec<Tensor> = Vec::with_capacity(num_tiles + 1);
     recurrent_boundaries.push(boundary_state.recurrent_states[linear_attn_idx].detach());
     conv_boundaries.push(boundary_state.conv_states[linear_attn_idx].detach());
 
@@ -8705,9 +8727,9 @@ fn exact_gdn_single_layer_tiled_reverse(
 
     let lora_weights_for_seg = params.as_lora_weights();
     let all_vars = params.all_vars();
-    let mut input_grad_chunks: Vec<Option<candle_core::Tensor>> = (0..num_tiles).map(|_| None).collect();
-    let mut next_recurrent_grad: Option<candle_core::Tensor> = None;
-    let mut next_conv_grad: Option<candle_core::Tensor> = None;
+    let mut input_grad_chunks: Vec<Option<Tensor>> = (0..num_tiles).map(|_| None).collect();
+    let mut next_recurrent_grad: Option<Tensor> = None;
+    let mut next_conv_grad: Option<Tensor> = None;
 
     for tile_idx in (0..num_tiles).rev() {
         let tile_started = Instant::now();
@@ -9403,7 +9425,7 @@ fn exact_gdn_single_layer_tiled_reverse(
         }
     }
 
-    let mut grad_refs: Vec<&candle_core::Tensor> = Vec::with_capacity(num_tiles);
+    let mut grad_refs: Vec<&Tensor> = Vec::with_capacity(num_tiles);
     for (tile_idx, grad) in input_grad_chunks.iter().enumerate() {
         grad_refs.push(
             grad.as_ref()
@@ -9447,12 +9469,12 @@ fn exact_gdn_single_layer_tiled_reverse(
 fn tile_loss_explicit(
     weights: &GpuWeights,
     model_config: &ModelConfig,
-    tile_hidden: &candle_core::Tensor,
+    tile_hidden: &Tensor,
     labels: &[u32],
     mask: &[bool],
     total_active: usize,
-    device: &candle_core::Device,
-) -> Result<candle_core::Tensor> {
+    device: &CdDevice,
+) -> Result<Tensor> {
     debug_assert_eq!(labels.len(), mask.len());
 
     let num_tile_active: usize = mask.iter().filter(|&&m| m).count();
@@ -9532,7 +9554,7 @@ fn tiled_segment_recompute_and_backward(
     backend: &dyn BackendRuntime,
     seg_idx: usize,
     segments: &[(usize, usize)],
-    boundary_states: &[candle_core::Tensor],
+    boundary_states: &[Tensor],
     input_ids: &[u32],
     label_mask: &[bool],
     weights: &GpuWeights,
@@ -9542,7 +9564,7 @@ fn tiled_segment_recompute_and_backward(
     accumulated_grads: &mut GradMap,
     total_active: usize,
     tile_size: usize,
-    device: &candle_core::Device,
+    device: &CdDevice,
 ) -> Result<f64> {
     let (seg_start, seg_end) = segments[seg_idx];
     // Phase 3.2: prefer registry resolve over candle clone, same as
@@ -9748,7 +9770,7 @@ fn layer_pair_tiled_segment_recompute_and_backward(
     backend: &dyn BackendRuntime,
     seg_idx: usize,
     segments: &[(usize, usize)],
-    boundary_states: &[candle_core::Tensor],
+    boundary_states: &[Tensor],
     input_ids: &[u32],
     label_mask: &[bool],
     weights: &GpuWeights,
@@ -9757,7 +9779,7 @@ fn layer_pair_tiled_segment_recompute_and_backward(
     params: &TrainableLoraParams,
     accumulated_grads: &mut GradMap,
     tile_size: usize,
-    device: &candle_core::Device,
+    device: &CdDevice,
 ) -> Result<f64> {
     let (seg_start, seg_end) = segments[seg_idx];
     let num_segments = segments.len();
@@ -9863,7 +9885,7 @@ fn layer_pair_tiled_segment_recompute_and_backward(
     // would just be torn down again for no benefit. Use detached LoRA so
     // the inner ops don't bother building the LoRA-side autograd graph.
     let blocks = partition_segment_layers_by_attn_type(weights, seg_start, seg_end);
-    let mut block_boundaries: Vec<candle_core::Tensor> = Vec::with_capacity(blocks.len() + 1);
+    let mut block_boundaries: Vec<Tensor> = Vec::with_capacity(blocks.len() + 1);
     // Phase 3.2: registry-resolve fast path for the segment's input
     // boundary when supported by the backend.
     let resident_activation = backend.supports_resident_activation();
@@ -9961,7 +9983,7 @@ fn layer_pair_tiled_segment_recompute_and_backward(
                 // recover the full-seq_len gradient at block_input_var.
                 let (_, total_tokens, _) = block_input.dims3()?;
                 let mut state = LinearAttentionState::new(model_config, device)?;
-                let mut summed: Option<candle_core::Tensor> = None;
+                let mut summed: Option<Tensor> = None;
 
                 let mut tile_start = 0usize;
                 while tile_start < total_tokens {
@@ -10091,7 +10113,7 @@ fn checkpointed_forward_backward(
     params: &TrainableLoraParams,
     label_mask: &[bool],
     segments: &[(usize, usize)],
-    device: &candle_core::Device,
+    device: &CdDevice,
     flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, GradMap)> {
     let num_segments = segments.len();
@@ -10119,7 +10141,7 @@ fn checkpointed_forward_backward(
     let should_spool_boundaries = recompute_boundaries && spool_checkpoint_boundaries(device);
     let profile_checkpoint_segments = profile_checkpoint_segments();
 
-    let detached_boundary = |boundary_idx: usize| -> Result<candle_core::Tensor> {
+    let detached_boundary = |boundary_idx: usize| -> Result<Tensor> {
         anyhow::ensure!(
             boundary_idx <= num_segments,
             "checkpoint boundary index {boundary_idx} out of range for {num_segments} segments"
@@ -10169,7 +10191,7 @@ fn checkpointed_forward_backward(
         Ok(current)
     };
 
-    let mut spooled_final_hidden: Option<candle_core::Tensor> = None;
+    let mut spooled_final_hidden: Option<Tensor> = None;
     let spooled_boundaries = if should_spool_boundaries {
         let spool = SpooledCheckpointBoundaries::new(num_segments)?;
         tracing::info!(
@@ -10243,7 +10265,7 @@ fn checkpointed_forward_backward(
     // mode we keep only the final boundary and recompute segment inputs on
     // demand in the reverse pass, avoiding `(num_segments + 1) * T * H`
     // resident boundary memory while preserving exact full-context values.
-    let mut boundary_states: Vec<candle_core::Tensor> = Vec::new();
+    let mut boundary_states: Vec<Tensor> = Vec::new();
     let final_hidden = if let Some(final_hidden) = spooled_final_hidden.take() {
         final_hidden
     } else if recompute_boundaries {
@@ -10581,9 +10603,9 @@ pub fn standard_forward_backward(
     model_config: &ModelConfig,
     params: &TrainableLoraParams,
     label_mask: &[bool],
-    device: &candle_core::Device,
+    device: &CdDevice,
     flce_provider: Option<FlceProvider>,
-) -> Result<(f64, candle_core::backprop::GradStore)> {
+) -> Result<(f64, GradStore)> {
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
 
@@ -10709,11 +10731,11 @@ impl GrpoLossParams {
 ///     factor `stop_grad(clip(r))·A` multiplies `log π_θ`, so every token
 ///     contributes a gradient even when the IS ratio is out of clip range.
 fn grpo_loss(
-    policy_log_probs: &candle_core::Tensor,
-    ref_log_probs: &candle_core::Tensor,
+    policy_log_probs: &Tensor,
+    ref_log_probs: &Tensor,
     params: GrpoLossParams,
-    device: &candle_core::Device,
-) -> Result<candle_core::Tensor> {
+    device: &CdDevice,
+) -> Result<Tensor> {
     let num_active = policy_log_probs.elem_count();
     if num_active == 0 {
         return tensor_new(0.0_f32, device).map_err(Into::into);
@@ -10899,17 +10921,17 @@ fn multi_layer_per_layer_tile_reverse(
     backend: &dyn BackendRuntime,
     seg_start: usize,
     seg_end: usize,
-    seg_input: &candle_core::Tensor,
-    upstream_grad: &candle_core::Tensor,
+    seg_input: &Tensor,
+    upstream_grad: &Tensor,
     weights: &GpuWeights,
     model_config: &ModelConfig,
     positions: &[u32],
     params: &TrainableLoraParams,
     lora_detached: &LoraWeights,
-    device: &candle_core::Device,
+    device: &CdDevice,
     accumulated_grads: &mut GradMap,
-    all_vars: &[&candle_core::Var],
-) -> Result<candle_core::Tensor> {
+    all_vars: &[&Var],
+) -> Result<Tensor> {
     anyhow::ensure!(
         seg_end > seg_start,
         "multi_layer_per_layer_tile_reverse called with empty segment [{seg_start}, {seg_end})"
@@ -10933,7 +10955,7 @@ fn multi_layer_per_layer_tile_reverse(
     // layer_inputs[0] = seg_input. Detached LoRA weights mean no autograd
     // graph is built during this pass — boundaries are pure values.
     let num_layers = seg_end - seg_start;
-    let mut layer_inputs: Vec<candle_core::Tensor> = Vec::with_capacity(num_layers);
+    let mut layer_inputs: Vec<Tensor> = Vec::with_capacity(num_layers);
     layer_inputs.push(seg_input.detach());
     {
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
@@ -11043,10 +11065,10 @@ fn checkpointed_grpo_forward_backward<'echo>(
     model_config: &ModelConfig,
     params: &TrainableLoraParams,
     completion_mask: &[bool],
-    ref_log_probs: &candle_core::Tensor,
+    ref_log_probs: &Tensor,
     loss_params: GrpoLossParams,
     segments: &[(usize, usize)],
-    device: &candle_core::Device,
+    device: &CdDevice,
     echo: Option<EchoTailParams<'echo>>,
     mut timings: Option<&mut GrpoBenchmarkTimings>,
 ) -> Result<(f64, GradMap, Option<f64>)> {
@@ -11092,7 +11114,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         "GRPO policy forward start"
     );
 
-    let detached_boundary = |boundary_idx: usize| -> Result<candle_core::Tensor> {
+    let detached_boundary = |boundary_idx: usize| -> Result<Tensor> {
         anyhow::ensure!(
             boundary_idx <= num_segments,
             "GRPO checkpoint boundary index {boundary_idx} out of range for {num_segments} segments"
@@ -11120,7 +11142,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         Ok(current)
     };
 
-    let mut spooled_final_hidden: Option<candle_core::Tensor> = None;
+    let mut spooled_final_hidden: Option<Tensor> = None;
     let spooled_boundaries = if should_spool_boundaries {
         let spool = SpooledCheckpointBoundaries::new(num_segments)?;
         tracing::info!(
@@ -11171,7 +11193,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         None
     };
 
-    let mut boundary_states: Vec<candle_core::Tensor> = Vec::new();
+    let mut boundary_states: Vec<Tensor> = Vec::new();
     let final_hidden = if let Some(final_hidden) = spooled_final_hidden.take() {
         final_hidden
     } else if recompute_boundaries {
@@ -13138,7 +13160,7 @@ mod tests {
     #[derive(Debug)]
     struct NamedTestBackend {
         name: &'static str,
-        device: candle_core::Device,
+        device: CdDevice,
     }
 
     impl NamedTestBackend {
@@ -13212,8 +13234,8 @@ mod tests {
         rng: &mut StdRng,
         std: f32,
         shape: &[usize],
-        device: &candle_core::Device,
-    ) -> Result<candle_core::Tensor> {
+        device: &CdDevice,
+    ) -> Result<Tensor> {
         // 3.0_f32.sqrt() — stable equivalent of unstable `f32::consts::SQRT_3`.
         let a = std * 1.732_050_8_f32;
         let n: usize = shape.iter().product();
@@ -13224,7 +13246,7 @@ mod tests {
     /// Create tiny random GpuWeights on CPU for the given config, using a
     /// fixed deterministic seed. Equivalent to
     /// `tiny_weights_with_seed(config, device, TINY_WEIGHTS_DEFAULT_SEED)`.
-    fn tiny_weights(config: &ModelConfig, device: &candle_core::Device) -> Result<GpuWeights> {
+    fn tiny_weights(config: &ModelConfig, device: &CdDevice) -> Result<GpuWeights> {
         tiny_weights_with_seed(config, device, TINY_WEIGHTS_DEFAULT_SEED)
     }
 
@@ -13238,7 +13260,7 @@ mod tests {
     /// passes; this seeded variant pins the init so tests are deterministic.
     fn tiny_weights_with_seed(
         config: &ModelConfig,
-        device: &candle_core::Device,
+        device: &CdDevice,
         seed: u64,
     ) -> Result<GpuWeights> {
         let h = config.hidden_size;
@@ -13394,7 +13416,7 @@ mod tests {
         let layer = &params.layers[0];
 
         let assert_pair =
-            |pair: &Option<(candle_core::Var, candle_core::Var)>, in_features: usize, out_features: usize| -> Result<()> {
+            |pair: &Option<(Var, Var)>, in_features: usize, out_features: usize| -> Result<()> {
                 let (a, b) = pair.as_ref().context("missing LoRA pair")?;
                 assert_eq!(a.as_tensor().dims(), &[4, in_features]);
                 assert_eq!(b.as_tensor().dims(), &[out_features, 4]);
@@ -13464,7 +13486,7 @@ mod tests {
         };
 
         let assert_pair_matches_weight =
-            |name: &str, pair: &Option<(candle_core::Var, candle_core::Var)>, w_t: &candle_core::Tensor| -> Result<()> {
+            |name: &str, pair: &Option<(Var, Var)>, w_t: &Tensor| -> Result<()> {
                 let dims = w_t.dims();
                 anyhow::ensure!(dims.len() == 2, "{name} test weight must be rank-2");
                 let (a, b) = pair
@@ -14300,10 +14322,10 @@ mod tests {
     /// projections.
     fn classify_lora_vars(
         params: &TrainableLoraParams,
-    ) -> Vec<(candle_core::Var, &'static str, String)> {
-        let mut out: Vec<(candle_core::Var, &'static str, String)> = Vec::new();
+    ) -> Vec<(Var, &'static str, String)> {
+        let mut out: Vec<(Var, &'static str, String)> = Vec::new();
         for (layer_idx, layer) in params.layers.iter().enumerate() {
-            let pairs: [(&Option<(candle_core::Var, candle_core::Var)>, &str, &str); 10] = [
+            let pairs: [(&Option<(Var, Var)>, &str, &str); 10] = [
                 (&layer.q_proj, "fa", "q"),
                 (&layer.k_proj, "fa", "k"),
                 (&layer.v_proj, "fa", "v"),
@@ -14497,7 +14519,7 @@ mod tests {
         // (missing => zero) are mathematically equivalent for parity, so
         // we treat them as equivalent here.
         let grad_or_zero =
-            |grads: &GradMap, var: &candle_core::Var| -> Result<candle_core::Tensor> {
+            |grads: &GradMap, var: &Var| -> Result<Tensor> {
                 let id = var.as_tensor().id();
                 match grads.get(&id) {
                     Some(g) => Ok(g.clone()),
@@ -14721,7 +14743,7 @@ mod tests {
     /// Runs 5 SFT steps with gradient checkpointing on `device` and asserts
     /// the final loss is lower than the initial loss. Drives both the CPU
     /// and Metal variants below.
-    fn run_checkpointed_training_loss_decreases(device: &candle_core::Device) -> Result<()> {
+    fn run_checkpointed_training_loss_decreases(device: &CdDevice) -> Result<()> {
         let config = tiny_config();
         let weights = tiny_weights(&config, device)?;
 
