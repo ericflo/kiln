@@ -2126,7 +2126,7 @@ mod tests {
 
     #[test]
     fn full_attn_qkv_bf16w_resident_matches_nonresident_b1() {
-        use crate::kernels::dispatch_full_attn_qkv_decode_cached_bf16_weights;
+        use crate::kernels::dispatch_full_attn_qkv_decode_cached_bf16_weights_bytes;
         let Some(dev) = try_device() else { return };
         let hidden = 96;
         let q_dim = 64;
@@ -2140,13 +2140,19 @@ mod tests {
         let k_buf = upload_tensor_bf16_packed_buffer(&dev, &k_w).unwrap();
         let v_buf = upload_tensor_bf16_packed_buffer(&dev, &v_w).unwrap();
 
-        let (q_t, k_t, v_t) = dispatch_full_attn_qkv_decode_cached_bf16_weights(
-            &dev, &x, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
+        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let (q_bytes, k_bytes, v_bytes) = dispatch_full_attn_qkv_decode_cached_bf16_weights_bytes(
+            &dev, &x_bytes, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
         )
         .unwrap();
-        let mut expected: Vec<f32> = q_t.flatten_all().unwrap().to_vec1().unwrap();
-        expected.extend(k_t.flatten_all().unwrap().to_vec1::<f32>().unwrap());
-        expected.extend(v_t.flatten_all().unwrap().to_vec1::<f32>().unwrap());
+        let bytes_to_f32 = |b: &[u8]| -> Vec<f32> {
+            b.chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
+        };
+        let mut expected: Vec<f32> = bytes_to_f32(&q_bytes);
+        expected.extend(bytes_to_f32(&k_bytes));
+        expected.extend(bytes_to_f32(&v_bytes));
 
         let x_buf = upload_x(&dev, &x);
         let qkv_out = alloc_out(&dev, ((q_dim + k_dim + v_dim) * 4) as u64);
