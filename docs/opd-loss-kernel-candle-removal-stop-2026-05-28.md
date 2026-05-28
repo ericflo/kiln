@@ -226,6 +226,78 @@ That's the same CP-4 substrate block that `rmsnorm-kt-tape-production-caller-sto
 records. Both kernels (rmsnorm + OPD) are waiting on the same
 training-loop refactor.
 
+## Post-wave-14 re-audit (2026-05-28, this PR)
+
+Wave-14 (commit `84549819`) deleted the dead `OpdLossCustomOp` +
+fused-FWD / metrics kernels (~1880 LOC). A resume task re-asked the
+same question this STOP records — *"with `OpdLossCustomOp` gone, can
+candle-core finally move to `[dev-dependencies]` (or drop)?"* — under
+the framing that the deletion might have removed the last production
+candle dependency. The re-audit at HEAD (after `73109cbe`,
+`94ce67da`) confirms the conclusion is unchanged:
+
+* Total candle refs in `crates/kiln-opd-loss-kernel/src/` after
+  wave-14: **27** (down from ~80+ pre-wave-14). All 27 surviving
+  refs are in **production** module bodies, not `#[cfg(test)]`:
+  * `src/lib.rs` — 2 refs. The candle Phase A reference path
+    (`opd_top_k_reverse_kl_phase_a_per_position` + helpers) is the
+    fallback inside `kt_forward_op.rs` when the kt envelope rejects
+    inputs. Still live in production.
+  * `src/kt_forward_op.rs` — 24 refs. The production caller in
+    `kiln-train::opd::opd_step_loss` (line 1280, 1293, 1877) calls
+    `opd_top_k_reverse_kl_per_position_via_kt_forward_op`, which
+    wraps `KtForwardOp1` (a candle `CustomOp1`) and moves candle
+    `Tensor`s across the kt bridge. All 24 refs are above line 474
+    (the `#[cfg(test)]` block start) — i.e. in the production module
+    body.
+  * `src/tape_forward.rs` — 2 refs. `try_tape_opd_per_position_cuda`
+    takes `&Tensor` and returns `Option<Tensor>` so the trainer's
+    candle-autograd loop can splice in the kt-tape result. Module is
+    `#![cfg(feature = "cuda")]` (CUDA-only) but still production
+    when `KILN_USE_TAPE_FORWARD=1` + a thread-local `Tape` scope is
+    active.
+  * `src/phase_b.rs` — 1 ref. Only a `use candle_core::DType;` for
+    the `cuda_kernel_supports` envelope helper. **Could** be ported
+    to `kiln_tensor::DType` independently, but that's a separate
+    micro-refactor and doesn't unblock the dep removal because the
+    other three files above all still take/return candle `Tensor`.
+  * Two doc-comment refs in `src/lib.rs` and `src/kt_api.rs` — just
+    text, not code.
+
+* `cargo check -p kiln-opd-loss-kernel` (CPU, default features)
+  passes locally at this HEAD. CUDA `cargo check -p
+  kiln-opd-loss-kernel --features cuda` could not be re-verified on
+  pod for this re-audit (`ce kiln-pod-acquire` returned HTTP 500
+  "no instances available" twice in a row from RunPod GraphQL —
+  capacity exhausted in the A6000 pool today). Since this is a
+  docs-only commit with no Cargo.toml or `.rs` changes, the pod
+  verification adds no signal beyond the local CPU check and the
+  CUDA build was already validated earlier in (#1082) post-wave-14
+  (commit `73109cbe`, the env-var test serialization fix, requires
+  the CUDA feature to compile and builds successfully under
+  `cargo check -p kiln-opd-loss-kernel --features cuda --tests` per
+  the wave-13 pod runs documented in
+  `docs/kt-tape-substrate-landed-in-kiln-train-2026-05-28.md`).
+
+* No new candle test-only refs were introduced by wave-14. There
+  is no surviving candle ref that would benefit from a
+  `[dev-dependencies]` move; every remaining ref is on a path the
+  default `cargo build` exercises.
+
+**Conclusion (unchanged from initial audit)**: candle-core stays
+in `[dependencies]`. The blocker is **CP-4** — training-loop
+refactor from `loss.backward()` to `Tape::backward(...)` — same
+substrate gate `rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`
+records. When CP-4 lands, `kt_forward_op.rs` + `tape_forward.rs` +
+the Phase A candle reference can all be deleted in one pass and the
+candle-core dep drops with them.
+
+The orthogonal cleanup #4 — porting the lone `use candle_core::DType;`
+in `phase_b.rs` to `kiln_tensor::DType` — is mentioned for
+completeness but explicitly out of scope for this STOP. It's a
+one-line change that doesn't unblock the dep removal and is better
+done atomically with the CP-4 flip.
+
 ## Cross-references
 
 * [`rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`](./rmsnorm-kt-tape-production-caller-stop-2026-05-28.md)
@@ -236,3 +308,6 @@ training-loop refactor.
   — Wave-13 substrate addendum.
 * Commit `e6b8c3a3` — Wave-13 `try_tape_opd_per_position_cuda`.
 * Commit `0c1be227` — `OpdLossCustomOp::bwd` kt-bridge migration.
+* Commit `84549819` — Wave-14 deletion of dead `OpdLossCustomOp` +
+  fused-FWD / metrics kernels (~1880 LOC).
+* Commit `c8c341b2` — initial wave-14 STOP doc.
