@@ -4,7 +4,6 @@
 //! `Ok(None)` responses route the caller to the portable candle path.
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor};
 use kiln_tensor_id::TensorId;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +20,7 @@ use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 /// underlying value is the candle id's raw counter widened from `usize`
 /// to `u64`; both ids share the same per-process uniqueness guarantee.
 #[inline]
-fn kt_id_from_candle(tensor: &Tensor) -> TensorId {
+fn kt_id_from_candle(tensor: &candle_core::Tensor) -> TensorId {
     TensorId::from_raw(tensor.id().as_raw() as u64)
 }
 
@@ -81,7 +80,7 @@ pub fn reset_gdn_full_chunk_forward_dispatch_counts() {
     CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
-fn any_tracks_op(tensors: &[&Tensor]) -> bool {
+fn any_tracks_op(tensors: &[&candle_core::Tensor]) -> bool {
     tensors.iter().any(|tensor| tensor.track_op())
 }
 
@@ -93,15 +92,15 @@ fn with_cuda_resident_ids<R>(f: impl FnOnce(&mut HashSet<TensorId>) -> R) -> R {
     f(&mut guard)
 }
 
-fn cuda_optimizer_tensors_supported_for_kt(tensors: &[&Tensor]) -> bool {
+fn cuda_optimizer_tensors_supported_for_kt(tensors: &[&candle_core::Tensor]) -> bool {
     let Some(first) = tensors.first() else {
         return false;
     };
-    matches!(first.device(), Device::Cuda(_))
-        && matches!(first.dtype(), DType::F32 | DType::BF16)
+    matches!(first.device(), candle_core::Device::Cuda(_))
+        && matches!(first.dtype(), candle_core::DType::F32 | candle_core::DType::BF16)
         && first.is_contiguous()
         && tensors.iter().all(|tensor| {
-            matches!(tensor.device(), Device::Cuda(_))
+            matches!(tensor.device(), candle_core::Device::Cuda(_))
                 && tensor.dtype() == first.dtype()
                 && tensor.shape().elem_count() == first.shape().elem_count()
                 && tensor.is_contiguous()
@@ -115,7 +114,7 @@ pub struct CudaBackend {
     /// parameters can pass through to candle without re-bridging. Phase 7
     /// of #1082 moved the `BackendRuntime::device()` accessor to return
     /// `kiln_tensor::Device` by value; the candle device is now internal.
-    device: Device,
+    device: candle_core::Device,
     /// `kiln_tensor::Device` form of `device`, cached at construction so
     /// the hot trait accessor does not bridge per call. (#1082)
     device_kt: kiln_tensor::Device,
@@ -188,7 +187,7 @@ pub struct CudaBackend {
 }
 
 impl CudaBackend {
-    pub fn new(device: Device) -> Self {
+    pub fn new(device: candle_core::Device) -> Self {
         debug_assert!(device.is_cuda(), "CudaBackend created on non-CUDA device");
         let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
         let gdn_gates_enabled =
@@ -276,31 +275,31 @@ impl BackendRuntime for CudaBackend {
         true
     }
 
-    fn register_resident_activation(&self, tensor: &Tensor) -> Result<()> {
+    fn register_resident_activation(&self, tensor: &candle_core::Tensor) -> Result<()> {
         with_cuda_resident_ids(|ids| {
             ids.insert(kt_id_from_candle(tensor));
         });
         Ok(())
     }
 
-    fn evict_resident_activation(&self, tensor: &Tensor) {
+    fn evict_resident_activation(&self, tensor: &candle_core::Tensor) {
         with_cuda_resident_ids(|ids| {
             ids.remove(&kt_id_from_candle(tensor));
         });
     }
 
-    fn update_resident_activation(&self, tensor: &Tensor) -> Result<()> {
+    fn update_resident_activation(&self, tensor: &candle_core::Tensor) -> Result<()> {
         with_cuda_resident_ids(|ids| {
             ids.insert(kt_id_from_candle(tensor));
         });
         Ok(())
     }
 
-    fn has_resident_activation(&self, tensor: &Tensor) -> bool {
+    fn has_resident_activation(&self, tensor: &candle_core::Tensor) -> bool {
         with_cuda_resident_ids(|ids| ids.contains(&kt_id_from_candle(tensor)))
     }
 
-    fn dispatch_sgd_step(&self, param: &Tensor, grad: &Tensor, lr: f32) -> Result<bool> {
+    fn dispatch_sgd_step(&self, param: &candle_core::Tensor, grad: &candle_core::Tensor, lr: f32) -> Result<bool> {
         if !self.has_resident_activation(param) || !self.has_resident_activation(grad) {
             return Ok(false);
         }
@@ -318,9 +317,9 @@ impl BackendRuntime for CudaBackend {
         // shim and this kt shell bottom out in the same FFI symbol.
         kiln_nvtx::range!(c"kiln/sgd_step_kt");
         match param.dtype() {
-            DType::F32 => kiln_rmsnorm_kernel::sgd_step_f32_kt(&param_kt, &grad_kt, lr)
+            candle_core::DType::F32 => kiln_rmsnorm_kernel::sgd_step_f32_kt(&param_kt, &grad_kt, lr)
                 .map_err(|e| anyhow::anyhow!("sgd_step kt: sgd_step_f32_kt: {e}"))?,
-            DType::BF16 => kiln_rmsnorm_kernel::sgd_step_bf16_kt(&param_kt, &grad_kt, lr)
+            candle_core::DType::BF16 => kiln_rmsnorm_kernel::sgd_step_bf16_kt(&param_kt, &grad_kt, lr)
                 .map_err(|e| anyhow::anyhow!("sgd_step kt: sgd_step_bf16_kt: {e}"))?,
             other => anyhow::bail!("sgd_step kt: unsupported dtype {other:?}"),
         }
@@ -341,10 +340,10 @@ impl BackendRuntime for CudaBackend {
     #[allow(clippy::too_many_arguments)]
     fn dispatch_adamw_step(
         &self,
-        param: &Tensor,
-        grad: &Tensor,
-        first_moment: &Tensor,
-        second_moment: &Tensor,
+        param: &candle_core::Tensor,
+        grad: &candle_core::Tensor,
+        first_moment: &candle_core::Tensor,
+        second_moment: &candle_core::Tensor,
         lr: f32,
         beta1: f32,
         beta2: f32,
@@ -384,7 +383,7 @@ impl BackendRuntime for CudaBackend {
         let bias_correction1 = (1.0f32 - beta1.powi(step as i32)).max(1e-20);
         let bias_correction2 = (1.0f32 - beta2.powi(step as i32)).max(1e-20);
         match param.dtype() {
-            DType::F32 => kiln_rmsnorm_kernel::adamw_step_f32_kt(
+            candle_core::DType::F32 => kiln_rmsnorm_kernel::adamw_step_f32_kt(
                 &param_kt,
                 &grad_kt,
                 &m1_kt,
@@ -398,7 +397,7 @@ impl BackendRuntime for CudaBackend {
                 bias_correction2,
             )
             .map_err(|e| anyhow::anyhow!("adamw_step kt: adamw_step_f32_kt: {e}"))?,
-            DType::BF16 => kiln_rmsnorm_kernel::adamw_step_bf16_kt(
+            candle_core::DType::BF16 => kiln_rmsnorm_kernel::adamw_step_bf16_kt(
                 &param_kt,
                 &grad_kt,
                 &m1_kt,
@@ -485,12 +484,12 @@ impl BackendRuntime for CudaBackend {
 
     fn flash_attn_prefill(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         // The vendored CUDA kernel hard-errors on non-BF16. Decline here so
         // the caller falls back to the portable path instead of bubbling a
         // hard error up for non-BF16 test configs.
@@ -498,7 +497,7 @@ impl BackendRuntime for CudaBackend {
             CUDA_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         }
-        if q.dtype() != DType::BF16 {
+        if q.dtype() != candle_core::DType::BF16 {
             return Ok(None);
         }
         // Phase 7 (#1082): kt-typed surface is now the only path.
@@ -527,16 +526,16 @@ impl BackendRuntime for CudaBackend {
 
     fn flash_attn_paged_decode(
         &self,
-        q: &Tensor,
-        k_pool: &Tensor,
-        v_pool: &Tensor,
-        block_table: &Tensor,
+        q: &candle_core::Tensor,
+        k_pool: &candle_core::Tensor,
+        v_pool: &candle_core::Tensor,
+        block_table: &candle_core::Tensor,
         total_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<Tensor>> {
-        if any_tracks_op(&[q, k_pool, v_pool, block_table]) || q.dtype() != DType::BF16 {
+    ) -> Result<Option<candle_core::Tensor>> {
+        if any_tracks_op(&[q, k_pool, v_pool, block_table]) || q.dtype() != candle_core::DType::BF16 {
             return Ok(None);
         }
         // Phase 7 (#1082): kt-only. Bit-exact with the candle path
@@ -568,17 +567,17 @@ impl BackendRuntime for CudaBackend {
 
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
         &self,
-        q: &Tensor,
-        k_pool: &Tensor,
-        v_pool: &Tensor,
-        block_table: &Tensor,
-        seqused_k: &Tensor,
+        q: &candle_core::Tensor,
+        k_pool: &candle_core::Tensor,
+        v_pool: &candle_core::Tensor,
+        block_table: &candle_core::Tensor,
+        seqused_k: &candle_core::Tensor,
         max_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<Tensor>> {
-        if any_tracks_op(&[q, k_pool, v_pool, block_table, seqused_k]) || q.dtype() != DType::BF16 {
+    ) -> Result<Option<candle_core::Tensor>> {
+        if any_tracks_op(&[q, k_pool, v_pool, block_table, seqused_k]) || q.dtype() != candle_core::DType::BF16 {
             return Ok(None);
         }
         // Phase 7 (#1082): kt-only. Bit-exact with the candle path
@@ -618,18 +617,18 @@ impl BackendRuntime for CudaBackend {
 
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
         &self,
-        q: &Tensor,
-        k_pool: &Tensor,
-        v_pool: &Tensor,
-        block_table: &Tensor,
-        seqused_k: &Tensor,
-        graph_outputs: Option<(&Tensor, &Tensor)>,
+        q: &candle_core::Tensor,
+        k_pool: &candle_core::Tensor,
+        v_pool: &candle_core::Tensor,
+        block_table: &candle_core::Tensor,
+        seqused_k: &candle_core::Tensor,
+        graph_outputs: Option<(&candle_core::Tensor, &candle_core::Tensor)>,
         max_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<Tensor>> {
-        if any_tracks_op(&[q, k_pool, v_pool, block_table, seqused_k]) || q.dtype() != DType::BF16 {
+    ) -> Result<Option<candle_core::Tensor>> {
+        if any_tracks_op(&[q, k_pool, v_pool, block_table, seqused_k]) || q.dtype() != candle_core::DType::BF16 {
             return Ok(None);
         }
         // Phase 7 opt-in (#1082): route through the kt-typed surface
@@ -725,11 +724,11 @@ impl BackendRuntime for CudaBackend {
 
     fn gdn_forward_substitution(
         &self,
-        a_strict: &Tensor,
-        v_prime: &Tensor,
-        beta: &Tensor,
-    ) -> Result<Option<Tensor>> {
-        if a_strict.dtype() != DType::BF16 {
+        a_strict: &candle_core::Tensor,
+        v_prime: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
+        if a_strict.dtype() != candle_core::DType::BF16 {
             return Ok(None);
         }
         // Phase 7 (#1082): kt-typed surface is now the only path,
@@ -755,14 +754,14 @@ impl BackendRuntime for CudaBackend {
 
     fn gdn_recurrent_step(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        beta: &Tensor,
-        g: &Tensor,
-        state: &mut Tensor,
-    ) -> Result<Option<Tensor>> {
-        if q.dtype() != DType::BF16 {
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+        g: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
+        if q.dtype() != candle_core::DType::BF16 {
             return Ok(None);
         }
         // Phase 7 (#1082): kt-typed surface is now the only path,
@@ -795,13 +794,13 @@ impl BackendRuntime for CudaBackend {
 
     fn gdn_chunk_prep(
         &self,
-        g: &Tensor,
-        v: &Tensor,
-        kkt: &Tensor,
-        qkt: &Tensor,
-        ks_entry: &Tensor,
-        q_s: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)>> {
+        g: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        kkt: &candle_core::Tensor,
+        qkt: &candle_core::Tensor,
+        ks_entry: &candle_core::Tensor,
+        q_s: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
         // Phase 7 (#1082): kt-typed surface is now the only path,
         // same closeout pattern as conv1d (2ebcfb08) and marlin
         // (0841c266). The kt-typed predicate (`_supports_kt`,
@@ -847,13 +846,13 @@ impl BackendRuntime for CudaBackend {
 
     fn gdn_chunk_scan(
         &self,
-        a_strict: &Tensor,
-        b_mask: &Tensor,
-        v_prime: &Tensor,
-        q_s_scaled: &Tensor,
-        beta: &Tensor,
-        decay_last_col: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor)>> {
+        a_strict: &candle_core::Tensor,
+        b_mask: &candle_core::Tensor,
+        v_prime: &candle_core::Tensor,
+        q_s_scaled: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+        decay_last_col: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
         // Phase 7 (#1082): kt-typed surface is now the only path,
         // same closeout pattern as conv1d (2ebcfb08) and marlin
         // (0841c266). The kt-typed predicate (`_supports_kt`,
@@ -892,16 +891,16 @@ impl BackendRuntime for CudaBackend {
 
     fn gdn_full_chunk_forward(
         &self,
-        g: &Tensor,
-        v: &Tensor,
-        kkt: &Tensor,
-        qkt: &Tensor,
-        ks_entry: &Tensor,
-        q_s: &Tensor,
-        beta: &Tensor,
-        k_t: &Tensor,
-        state: &mut Tensor,
-    ) -> Result<Option<Tensor>> {
+        g: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        kkt: &candle_core::Tensor,
+        qkt: &candle_core::Tensor,
+        ks_entry: &candle_core::Tensor,
+        q_s: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+        k_t: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         let dv_tile = kiln_gdn_kernel::GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE;
         // Phase 7 (#1082): kt-typed surface is now the only path
         // (single-block + multiblock), same closeout pattern as
@@ -976,18 +975,18 @@ impl BackendRuntime for CudaBackend {
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_gates_recurrent(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        a: &Tensor,
-        b: &Tensor,
-        a_log: &Tensor,
-        dt_bias: &Tensor,
-        state: &mut Tensor,
-        z: &Tensor,
-        weight: &Tensor,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
+        a_log: &candle_core::Tensor,
+        dt_bias: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
+        z: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
         eps: f64,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.gdn_decode_fused_enabled {
             return Ok(None);
         }
@@ -1000,16 +999,16 @@ impl BackendRuntime for CudaBackend {
         // Production decode for Qwen3.5-4B uses bf16 for q/k/v/a/b/
         // a_log/dt_bias/state/z and f32 for the rmsnorm weight; the
         // bf16_kt variant is the matching production hot path.
-        if !(q.dtype() == DType::BF16
-            && k.dtype() == DType::BF16
-            && v.dtype() == DType::BF16
-            && a.dtype() == DType::BF16
-            && b.dtype() == DType::BF16
-            && a_log.dtype() == DType::BF16
-            && dt_bias.dtype() == DType::BF16
-            && state.dtype() == DType::BF16
-            && z.dtype() == DType::BF16
-            && weight.dtype() == DType::F32)
+        if !(q.dtype() == candle_core::DType::BF16
+            && k.dtype() == candle_core::DType::BF16
+            && v.dtype() == candle_core::DType::BF16
+            && a.dtype() == candle_core::DType::BF16
+            && b.dtype() == candle_core::DType::BF16
+            && a_log.dtype() == candle_core::DType::BF16
+            && dt_bias.dtype() == candle_core::DType::BF16
+            && state.dtype() == candle_core::DType::BF16
+            && z.dtype() == candle_core::DType::BF16
+            && weight.dtype() == candle_core::DType::F32)
         {
             tracing::debug!(
                 q_shape = ?q.shape(), q_dtype = ?q.dtype(),
@@ -1029,22 +1028,22 @@ impl BackendRuntime for CudaBackend {
             // 1-D weight tensors (a_log, dt_bias) to BF16 if they
             // arrived as F32 from the safetensors loader; the
             // group-norm weight stays F32 (kernel contract).
-            let a_log_bf16 = if a_log.dtype() == DType::BF16 {
+            let a_log_bf16 = if a_log.dtype() == candle_core::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(DType::BF16)
+                Some(a_log.to_dtype(candle_core::DType::BF16)
                     .with_context(|| "gdn_decode_gates: cast a_log -> bf16")?)
             };
-            let dt_bias_bf16 = if dt_bias.dtype() == DType::BF16 {
+            let dt_bias_bf16 = if dt_bias.dtype() == candle_core::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(DType::BF16)
+                Some(dt_bias.to_dtype(candle_core::DType::BF16)
                     .with_context(|| "gdn_decode_gates: cast dt_bias -> bf16")?)
             };
-            let weight_f32 = if weight.dtype() == DType::F32 {
+            let weight_f32 = if weight.dtype() == candle_core::DType::F32 {
                 None
             } else {
-                Some(weight.to_dtype(DType::F32)
+                Some(weight.to_dtype(candle_core::DType::F32)
                     .with_context(|| "gdn_decode_gates: cast weight -> f32")?)
             };
             // Cast heavy tensors too. q/k/v often arrive F32 from
@@ -1058,26 +1057,26 @@ impl BackendRuntime for CudaBackend {
             // `state` is NOT cast — the kernel mutates it in place
             // and the caller's tensor would not see the writes
             // through a fresh allocation.
-            if state.dtype() != DType::BF16 {
+            if state.dtype() != candle_core::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == DType::BF16 { None } else {
-                Some(q.to_dtype(DType::BF16).with_context(|| "gdn_decode_gates: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == candle_core::DType::BF16 { None } else {
+                Some(q.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast q -> bf16")?)
             };
-            let k_bf16 = if k.dtype() == DType::BF16 { None } else {
-                Some(k.to_dtype(DType::BF16).with_context(|| "gdn_decode_gates: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == candle_core::DType::BF16 { None } else {
+                Some(k.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast k -> bf16")?)
             };
-            let v_bf16 = if v.dtype() == DType::BF16 { None } else {
-                Some(v.to_dtype(DType::BF16).with_context(|| "gdn_decode_gates: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == candle_core::DType::BF16 { None } else {
+                Some(v.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast v -> bf16")?)
             };
-            let a_bf16 = if a.dtype() == DType::BF16 { None } else {
-                Some(a.to_dtype(DType::BF16).with_context(|| "gdn_decode_gates: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == candle_core::DType::BF16 { None } else {
+                Some(a.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast a -> bf16")?)
             };
-            let b_bf16 = if b.dtype() == DType::BF16 { None } else {
-                Some(b.to_dtype(DType::BF16).with_context(|| "gdn_decode_gates: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == candle_core::DType::BF16 { None } else {
+                Some(b.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast b -> bf16")?)
             };
-            let z_bf16 = if z.dtype() == DType::BF16 { None } else {
-                Some(z.to_dtype(DType::BF16).with_context(|| "gdn_decode_gates: cast z -> bf16")?)
+            let z_bf16 = if z.dtype() == candle_core::DType::BF16 { None } else {
+                Some(z.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast z -> bf16")?)
             };
             return self.gdn_decode_gates_recurrent(
                 q_bf16.as_ref().unwrap_or(q),
@@ -1192,17 +1191,17 @@ impl BackendRuntime for CudaBackend {
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_qk_norm_gates_recurrent(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        a: &Tensor,
-        b: &Tensor,
-        a_log: &Tensor,
-        dt_bias: &Tensor,
-        state: &mut Tensor,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
+        a_log: &candle_core::Tensor,
+        dt_bias: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
         q_scale: f64,
         qk_eps: f64,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.gdn_decode_qk_norm_recurrent_enabled {
             return Ok(None);
         }
@@ -1215,14 +1214,14 @@ impl BackendRuntime for CudaBackend {
         // engages. Production decode for Qwen3.5-4B uses bf16 for all
         // 8 input tensors; the bf16_kt variant is the matching
         // production hot path.
-        if !(q.dtype() == DType::BF16
-            && k.dtype() == DType::BF16
-            && v.dtype() == DType::BF16
-            && a.dtype() == DType::BF16
-            && b.dtype() == DType::BF16
-            && a_log.dtype() == DType::BF16
-            && dt_bias.dtype() == DType::BF16
-            && state.dtype() == DType::BF16)
+        if !(q.dtype() == candle_core::DType::BF16
+            && k.dtype() == candle_core::DType::BF16
+            && v.dtype() == candle_core::DType::BF16
+            && a.dtype() == candle_core::DType::BF16
+            && b.dtype() == candle_core::DType::BF16
+            && a_log.dtype() == candle_core::DType::BF16
+            && dt_bias.dtype() == candle_core::DType::BF16
+            && state.dtype() == candle_core::DType::BF16)
         {
             tracing::debug!(
                 q_shape = ?q.shape(), q_dtype = ?q.dtype(),
@@ -1242,38 +1241,38 @@ impl BackendRuntime for CudaBackend {
             // 1-D weight tensors here and recurse. The cast is cheap
             // (num_heads elements) and one-shot per call — the cost
             // is dominated by the kernel launch.
-            let a_log_bf16 = if a_log.dtype() == DType::BF16 {
+            let a_log_bf16 = if a_log.dtype() == candle_core::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(DType::BF16)
+                Some(a_log.to_dtype(candle_core::DType::BF16)
                     .with_context(|| "gdn_decode_qk_norm: cast a_log -> bf16")?)
             };
-            let dt_bias_bf16 = if dt_bias.dtype() == DType::BF16 {
+            let dt_bias_bf16 = if dt_bias.dtype() == candle_core::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(DType::BF16)
+                Some(dt_bias.to_dtype(candle_core::DType::BF16)
                     .with_context(|| "gdn_decode_qk_norm: cast dt_bias -> bf16")?)
             };
             // Same heavy-tensor cast as gdn_decode_gates_recurrent
             // above — required because conv1d kernel emits F32
             // q/k/v.
-            if state.dtype() != DType::BF16 {
+            if state.dtype() != candle_core::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == DType::BF16 { None } else {
-                Some(q.to_dtype(DType::BF16).with_context(|| "gdn_decode_qk_norm: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == candle_core::DType::BF16 { None } else {
+                Some(q.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast q -> bf16")?)
             };
-            let k_bf16 = if k.dtype() == DType::BF16 { None } else {
-                Some(k.to_dtype(DType::BF16).with_context(|| "gdn_decode_qk_norm: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == candle_core::DType::BF16 { None } else {
+                Some(k.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast k -> bf16")?)
             };
-            let v_bf16 = if v.dtype() == DType::BF16 { None } else {
-                Some(v.to_dtype(DType::BF16).with_context(|| "gdn_decode_qk_norm: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == candle_core::DType::BF16 { None } else {
+                Some(v.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast v -> bf16")?)
             };
-            let a_bf16 = if a.dtype() == DType::BF16 { None } else {
-                Some(a.to_dtype(DType::BF16).with_context(|| "gdn_decode_qk_norm: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == candle_core::DType::BF16 { None } else {
+                Some(a.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast a -> bf16")?)
             };
-            let b_bf16 = if b.dtype() == DType::BF16 { None } else {
-                Some(b.to_dtype(DType::BF16).with_context(|| "gdn_decode_qk_norm: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == candle_core::DType::BF16 { None } else {
+                Some(b.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast b -> bf16")?)
             };
             return self.gdn_decode_qk_norm_gates_recurrent(
                 q_bf16.as_ref().unwrap_or(q),
@@ -1366,20 +1365,20 @@ impl BackendRuntime for CudaBackend {
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_qk_norm_gates_recurrent_rmsnorm(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        a: &Tensor,
-        b: &Tensor,
-        a_log: &Tensor,
-        dt_bias: &Tensor,
-        state: &mut Tensor,
-        z: &Tensor,
-        weight: &Tensor,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
+        a_log: &candle_core::Tensor,
+        dt_bias: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
+        z: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
         q_scale: f64,
         qk_eps: f64,
         rms_eps: f64,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.gdn_decode_qk_norm_recurrent_rmsnorm_enabled {
             return Ok(None);
         }
@@ -1392,16 +1391,16 @@ impl BackendRuntime for CudaBackend {
         // engages. Production decode for Qwen3.5-4B uses bf16 for all
         // 10 input tensors (with F32 weight); the bf16_kt variant is
         // the matching production hot path.
-        if !(q.dtype() == DType::BF16
-            && k.dtype() == DType::BF16
-            && v.dtype() == DType::BF16
-            && a.dtype() == DType::BF16
-            && b.dtype() == DType::BF16
-            && a_log.dtype() == DType::BF16
-            && dt_bias.dtype() == DType::BF16
-            && state.dtype() == DType::BF16
-            && z.dtype() == DType::BF16
-            && weight.dtype() == DType::F32)
+        if !(q.dtype() == candle_core::DType::BF16
+            && k.dtype() == candle_core::DType::BF16
+            && v.dtype() == candle_core::DType::BF16
+            && a.dtype() == candle_core::DType::BF16
+            && b.dtype() == candle_core::DType::BF16
+            && a_log.dtype() == candle_core::DType::BF16
+            && dt_bias.dtype() == candle_core::DType::BF16
+            && state.dtype() == candle_core::DType::BF16
+            && z.dtype() == candle_core::DType::BF16
+            && weight.dtype() == candle_core::DType::F32)
         {
             tracing::debug!(
                 q_shape = ?q.shape(), q_dtype = ?q.dtype(),
@@ -1422,46 +1421,46 @@ impl BackendRuntime for CudaBackend {
             // above. Heavier tensors (q/k/v/a/b/state/z) shouldn't
             // be non-bf16 on the production hot path; if they are,
             // decline.
-            let a_log_bf16 = if a_log.dtype() == DType::BF16 {
+            let a_log_bf16 = if a_log.dtype() == candle_core::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(DType::BF16)
+                Some(a_log.to_dtype(candle_core::DType::BF16)
                     .with_context(|| "gdn_decode_rmsnorm: cast a_log -> bf16")?)
             };
-            let dt_bias_bf16 = if dt_bias.dtype() == DType::BF16 {
+            let dt_bias_bf16 = if dt_bias.dtype() == candle_core::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(DType::BF16)
+                Some(dt_bias.to_dtype(candle_core::DType::BF16)
                     .with_context(|| "gdn_decode_rmsnorm: cast dt_bias -> bf16")?)
             };
-            let weight_f32 = if weight.dtype() == DType::F32 {
+            let weight_f32 = if weight.dtype() == candle_core::DType::F32 {
                 None
             } else {
-                Some(weight.to_dtype(DType::F32)
+                Some(weight.to_dtype(candle_core::DType::F32)
                     .with_context(|| "gdn_decode_rmsnorm: cast weight -> f32")?)
             };
             // Same heavy-tensor cast as the sibling functions
             // above — required because conv1d emits F32 q/k/v.
-            if state.dtype() != DType::BF16 {
+            if state.dtype() != candle_core::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == DType::BF16 { None } else {
-                Some(q.to_dtype(DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == candle_core::DType::BF16 { None } else {
+                Some(q.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast q -> bf16")?)
             };
-            let k_bf16 = if k.dtype() == DType::BF16 { None } else {
-                Some(k.to_dtype(DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == candle_core::DType::BF16 { None } else {
+                Some(k.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast k -> bf16")?)
             };
-            let v_bf16 = if v.dtype() == DType::BF16 { None } else {
-                Some(v.to_dtype(DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == candle_core::DType::BF16 { None } else {
+                Some(v.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast v -> bf16")?)
             };
-            let a_bf16 = if a.dtype() == DType::BF16 { None } else {
-                Some(a.to_dtype(DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == candle_core::DType::BF16 { None } else {
+                Some(a.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast a -> bf16")?)
             };
-            let b_bf16 = if b.dtype() == DType::BF16 { None } else {
-                Some(b.to_dtype(DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == candle_core::DType::BF16 { None } else {
+                Some(b.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast b -> bf16")?)
             };
-            let z_bf16 = if z.dtype() == DType::BF16 { None } else {
-                Some(z.to_dtype(DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast z -> bf16")?)
+            let z_bf16 = if z.dtype() == candle_core::DType::BF16 { None } else {
+                Some(z.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast z -> bf16")?)
             };
             return self.gdn_decode_qk_norm_gates_recurrent_rmsnorm(
                 q_bf16.as_ref().unwrap_or(q),
@@ -1576,11 +1575,11 @@ impl BackendRuntime for CudaBackend {
 
     fn gdn_gates(
         &self,
-        a: &Tensor,
-        b: &Tensor,
-        a_log: &Tensor,
-        dt_bias: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor)>> {
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
+        a_log: &candle_core::Tensor,
+        dt_bias: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
         let dims = a.dims();
         let is_t1_decode = dims.len() >= 2 && dims[dims.len() - 2] == 1;
         if !is_t1_decode && std::env::var("KILN_DISABLE_CUDA_GDN_PREFILL_GATES").is_ok() {
@@ -1601,10 +1600,10 @@ impl BackendRuntime for CudaBackend {
         // the only envelope on the production decode/prefill path for
         // Qwen3.5-4B GDN; the mixed-precision variants are reachable
         // only through paths not exercised in production.
-        if !(a.dtype() == DType::BF16
-            && b.dtype() == DType::BF16
-            && a_log.dtype() == DType::BF16
-            && dt_bias.dtype() == DType::BF16)
+        if !(a.dtype() == candle_core::DType::BF16
+            && b.dtype() == candle_core::DType::BF16
+            && a_log.dtype() == candle_core::DType::BF16
+            && dt_bias.dtype() == candle_core::DType::BF16)
         {
             return Ok(None);
         }
@@ -1660,12 +1659,12 @@ impl BackendRuntime for CudaBackend {
 
     fn lora_decode_add(
         &self,
-        base: &Tensor,
-        x: &Tensor,
-        a: &Tensor,
-        b: &Tensor,
+        base: &candle_core::Tensor,
+        x: &candle_core::Tensor,
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
         scale: f32,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.lora_decode_add_enabled
             || base.track_op()
             || x.track_op()
@@ -1701,9 +1700,9 @@ impl BackendRuntime for CudaBackend {
         Ok(Some(out))
     }
 
-    fn linear_prefill_apply(&self, x: &Tensor, weight_t: &Tensor) -> Result<Option<Tensor>> {
-        if !matches!(x.device(), Device::Cuda(_))
-            || !matches!(weight_t.device(), Device::Cuda(_))
+    fn linear_prefill_apply(&self, x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<Option<candle_core::Tensor>> {
+        if !matches!(x.device(), candle_core::Device::Cuda(_))
+            || !matches!(weight_t.device(), candle_core::Device::Cuda(_))
             || x.dims().is_empty()
             || weight_t.dims().len() != 2
             || *x.dims().last().unwrap() != weight_t.dims()[0]
@@ -1744,7 +1743,7 @@ impl BackendRuntime for CudaBackend {
             // to matmul_no_broadcast_copy). NVTX range from try_kt_matmul
             // brackets the call as kiln/matmul_kt in nsys.
             if crate::forward::cuda_use_kt_api_matmul()
-                && matches!(x2d.dtype(), DType::BF16 | DType::F16 | DType::F32)
+                && matches!(x2d.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32)
                 && x2d.dtype() == weight_t.dtype()
                 && x2d.is_contiguous()
                 && weight_t.is_contiguous()
@@ -1774,7 +1773,7 @@ impl BackendRuntime for CudaBackend {
             // scales as (B × K × N) which is typically larger by an order
             // of magnitude on Qwen3.5-4B GDN in-proj shapes. (#1082)
             if crate::forward::cuda_use_kt_api_matmul()
-                && matches!(x.dtype(), DType::BF16 | DType::F16 | DType::F32)
+                && matches!(x.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32)
                 && x.dtype() == weight_t.dtype()
                 && weight_t.is_contiguous()
             {
@@ -1799,13 +1798,13 @@ impl BackendRuntime for CudaBackend {
 
     fn linear_prefill_apply_offset(
         &self,
-        x: &Tensor,
-        full_weight_t: &Tensor,
+        x: &candle_core::Tensor,
+        full_weight_t: &candle_core::Tensor,
         chunk_start: usize,
         chunk_len: usize,
-    ) -> Result<Option<Tensor>> {
-        if !matches!(x.device(), Device::Cuda(_))
-            || !matches!(full_weight_t.device(), Device::Cuda(_))
+    ) -> Result<Option<candle_core::Tensor>> {
+        if !matches!(x.device(), candle_core::Device::Cuda(_))
+            || !matches!(full_weight_t.device(), candle_core::Device::Cuda(_))
             || full_weight_t.dims().len() != 2
             || chunk_len == 0
             || chunk_start >= full_weight_t.dims()[1]
@@ -1834,14 +1833,14 @@ impl BackendRuntime for CudaBackend {
 
     fn lora_delta_resident(
         &self,
-        x: &Tensor,
-        a: &Tensor,
-        b: &Tensor,
+        x: &candle_core::Tensor,
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
         scale: f32,
-    ) -> Result<Option<Tensor>> {
-        if !matches!(x.device(), Device::Cuda(_))
-            || !matches!(a.device(), Device::Cuda(_))
-            || !matches!(b.device(), Device::Cuda(_))
+    ) -> Result<Option<candle_core::Tensor>> {
+        if !matches!(x.device(), candle_core::Device::Cuda(_))
+            || !matches!(a.device(), candle_core::Device::Cuda(_))
+            || !matches!(b.device(), candle_core::Device::Cuda(_))
             || !self.has_resident_activation(a)
             || !self.has_resident_activation(b)
         {
@@ -1871,11 +1870,11 @@ impl BackendRuntime for CudaBackend {
 
     fn gdn_gated_rms_norm(
         &self,
-        x: &Tensor,
-        z: &Tensor,
-        weight: &Tensor,
+        x: &candle_core::Tensor,
+        z: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
         eps: f64,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.gdn_gated_rms_norm_enabled {
             return Ok(None);
         }
@@ -1886,9 +1885,9 @@ impl BackendRuntime for CudaBackend {
         // (which the kt path declines) return Ok(None) so the caller's
         // candle fallback engages. bf16 was the only envelope the
         // candle path could reach in production for Qwen3.5-4B GDN.
-        if !(x.dtype() == DType::BF16
-            && z.dtype() == DType::BF16
-            && weight.dtype() == DType::BF16)
+        if !(x.dtype() == candle_core::DType::BF16
+            && z.dtype() == candle_core::DType::BF16
+            && weight.dtype() == candle_core::DType::BF16)
         {
             return Ok(None);
         }
@@ -1934,11 +1933,11 @@ impl BackendRuntime for CudaBackend {
 
     fn causal_conv1d_update(
         &self,
-        x: &Tensor,
-        weight: &Tensor,
-        conv_state: &mut Tensor,
+        x: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
+        conv_state: &mut candle_core::Tensor,
         kernel_size: usize,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.fused_conv1d_enabled {
             return Ok(None);
         }
@@ -1969,11 +1968,11 @@ impl BackendRuntime for CudaBackend {
 
     fn causal_conv1d_prefill(
         &self,
-        x: &Tensor,
-        weight: &Tensor,
-        conv_state: &mut Tensor,
+        x: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
+        conv_state: &mut candle_core::Tensor,
         kernel_size: usize,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !self.fused_conv1d_enabled {
             return Ok(None);
         }
@@ -2005,7 +2004,7 @@ mod tests {
         // this module only exercise the candle-typed surface; the
         // device_kt field tracks it via the same bridge the production
         // constructor uses. (#1082)
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
         CudaBackend {
             device,
@@ -2026,7 +2025,7 @@ mod tests {
     #[test]
     fn cuda_resident_activation_registry_lifecycle() -> Result<()> {
         let backend = test_backend();
-        let tensor = Tensor::zeros((2, 3), DType::F32, &Device::Cpu)?;
+        let tensor = candle_core::Tensor::zeros((2, 3), candle_core::DType::F32, &candle_core::Device::Cpu)?;
 
         assert!(backend.supports_resident_activation());
         assert!(!backend.has_resident_activation(&tensor));
@@ -2046,10 +2045,10 @@ mod tests {
     #[test]
     fn cuda_optimizer_dispatch_declines_without_cuda_tensors() -> Result<()> {
         let backend = test_backend();
-        let param = Tensor::zeros((2, 3), DType::F32, &Device::Cpu)?;
-        let grad = Tensor::ones((2, 3), DType::F32, &Device::Cpu)?;
-        let m = Tensor::zeros((2, 3), DType::F32, &Device::Cpu)?;
-        let v = Tensor::zeros((2, 3), DType::F32, &Device::Cpu)?;
+        let param = candle_core::Tensor::zeros((2, 3), candle_core::DType::F32, &candle_core::Device::Cpu)?;
+        let grad = candle_core::Tensor::ones((2, 3), candle_core::DType::F32, &candle_core::Device::Cpu)?;
+        let m = candle_core::Tensor::zeros((2, 3), candle_core::DType::F32, &candle_core::Device::Cpu)?;
+        let v = candle_core::Tensor::zeros((2, 3), candle_core::DType::F32, &candle_core::Device::Cpu)?;
 
         assert!(
             !backend.dispatch_sgd_step(&param, &grad, 0.01)?,
@@ -2079,7 +2078,7 @@ mod tests {
 
     #[test]
     fn cuda_sgd_step_resident_round_trip_f32() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -2089,8 +2088,8 @@ mod tests {
             }
         };
         let backend = CudaBackend::new(device.clone());
-        let param = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?;
-        let grad = Tensor::from_slice(&[0.1f32, -0.2, 0.5, 1.0], (4,), &device)?;
+        let param = candle_core::Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?;
+        let grad = candle_core::Tensor::from_slice(&[0.1f32, -0.2, 0.5, 1.0], (4,), &device)?;
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
 
@@ -2108,7 +2107,7 @@ mod tests {
 
     #[test]
     fn cuda_adamw_step_resident_round_trip_f32() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -2118,10 +2117,10 @@ mod tests {
             }
         };
         let backend = CudaBackend::new(device.clone());
-        let param = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?;
-        let grad = Tensor::from_slice(&[0.5f32, -0.5, 0.25, -0.25], (4,), &device)?;
-        let m = Tensor::zeros((4,), DType::F32, &device)?;
-        let v = Tensor::zeros((4,), DType::F32, &device)?;
+        let param = candle_core::Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?;
+        let grad = candle_core::Tensor::from_slice(&[0.5f32, -0.5, 0.25, -0.25], (4,), &device)?;
+        let m = candle_core::Tensor::zeros((4,), candle_core::DType::F32, &device)?;
+        let v = candle_core::Tensor::zeros((4,), candle_core::DType::F32, &device)?;
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
         backend.register_resident_activation(&m)?;
@@ -2164,7 +2163,7 @@ mod tests {
 
     #[test]
     fn cuda_sgd_and_adamw_resident_round_trip_bf16() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -2176,13 +2175,13 @@ mod tests {
         let backend = CudaBackend::new(device.clone());
 
         let param =
-            Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?.to_dtype(DType::BF16)?;
-        let grad = Tensor::from_slice(&[0.25f32, -0.5, 0.5, -0.25], (4,), &device)?
-            .to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?.to_dtype(candle_core::DType::BF16)?;
+        let grad = candle_core::Tensor::from_slice(&[0.25f32, -0.5, 0.5, -0.25], (4,), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
         assert!(backend.dispatch_sgd_step(&param, &grad, 0.5)?);
-        let sgd_actual = param.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let sgd_actual = param.to_dtype(candle_core::DType::F32)?.to_vec1::<f32>()?;
         let sgd_expected = [0.875f32, -1.75, 0.25, 3.125];
         for (a, e) in sgd_actual.iter().zip(sgd_expected.iter()) {
             assert!(
@@ -2192,11 +2191,11 @@ mod tests {
         }
 
         let adam_param =
-            Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?.to_dtype(DType::BF16)?;
-        let adam_grad = Tensor::from_slice(&[0.5f32, -0.5, 0.25, -0.25], (4,), &device)?
-            .to_dtype(DType::BF16)?;
-        let m = Tensor::zeros((4,), DType::BF16, &device)?;
-        let v = Tensor::zeros((4,), DType::BF16, &device)?;
+            candle_core::Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?.to_dtype(candle_core::DType::BF16)?;
+        let adam_grad = candle_core::Tensor::from_slice(&[0.5f32, -0.5, 0.25, -0.25], (4,), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let m = candle_core::Tensor::zeros((4,), candle_core::DType::BF16, &device)?;
+        let v = candle_core::Tensor::zeros((4,), candle_core::DType::BF16, &device)?;
         backend.register_resident_activation(&adam_param)?;
         backend.register_resident_activation(&adam_grad)?;
         backend.register_resident_activation(&m)?;
@@ -2213,7 +2212,7 @@ mod tests {
             0.1,
             1,
         )?);
-        let adam_actual = adam_param.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let adam_actual = adam_param.to_dtype(candle_core::DType::F32)?.to_vec1::<f32>()?;
         let before = [1.0f32, -2.0, 0.5, 3.0];
         let grad_vals = [0.5f32, -0.5, 0.25, -0.25];
         for ((a, p0), g) in adam_actual.iter().zip(before.iter()).zip(grad_vals.iter()) {
@@ -2227,11 +2226,11 @@ mod tests {
     fn cuda_flash_attention_declines_tracked_training_tensors() -> Result<()> {
         let backend = test_backend();
 
-        let q_base = Tensor::zeros((1, 2, 1, 128), DType::BF16, &Device::Cpu)?;
+        let q_base = candle_core::Tensor::zeros((1, 2, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
         let q_var = candle_core::Var::from_tensor(&q_base)?;
         let q = q_var.as_tensor();
-        let k = Tensor::zeros((1, 2, 1, 128), DType::BF16, &Device::Cpu)?;
-        let v = Tensor::zeros((1, 2, 1, 128), DType::BF16, &Device::Cpu)?;
+        let k = candle_core::Tensor::zeros((1, 2, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
+        let v = candle_core::Tensor::zeros((1, 2, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
         assert!(
             q.track_op(),
             "test precondition: q must be autograd-tracked"
@@ -2241,13 +2240,13 @@ mod tests {
             "CUDA FlashAttention prefill must decline tracked tensors until it has a bwd hook"
         );
 
-        let q_decode_base = Tensor::zeros((1, 1, 1, 128), DType::BF16, &Device::Cpu)?;
+        let q_decode_base = candle_core::Tensor::zeros((1, 1, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
         let q_decode_var = candle_core::Var::from_tensor(&q_decode_base)?;
         let q_decode = q_decode_var.as_tensor();
-        let k_pool = Tensor::zeros((128, 1, 128), DType::BF16, &Device::Cpu)?;
-        let v_pool = Tensor::zeros((128, 1, 128), DType::BF16, &Device::Cpu)?;
-        let block_table = Tensor::zeros((1, 1), DType::U32, &Device::Cpu)?;
-        let seqused_k = Tensor::zeros((1,), DType::I32, &Device::Cpu)?;
+        let k_pool = candle_core::Tensor::zeros((128, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
+        let v_pool = candle_core::Tensor::zeros((128, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
+        let block_table = candle_core::Tensor::zeros((1, 1), candle_core::DType::U32, &candle_core::Device::Cpu)?;
+        let seqused_k = candle_core::Tensor::zeros((1,), candle_core::DType::I32, &candle_core::Device::Cpu)?;
 
         assert!(
             backend
@@ -2286,7 +2285,7 @@ mod tests {
 
     #[test]
     fn cuda_linear_prefill_apply_matches_candle_cuda_matmul() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -2297,8 +2296,8 @@ mod tests {
         };
         let backend = CudaBackend::new(device.clone());
 
-        let x = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], (2, 3), &device)?;
-        let w = Tensor::from_slice(
+        let x = candle_core::Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], (2, 3), &device)?;
+        let w = candle_core::Tensor::from_slice(
             &[
                 0.5f32, 1.0, -1.5, 2.0, -0.25, 0.75, 1.25, -0.5, 2.0, -1.0, 0.0, 0.5,
             ],
@@ -2316,7 +2315,7 @@ mod tests {
 
     #[test]
     fn cuda_linear_prefill_apply_offset_matches_candle_cuda_chunk() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -2327,8 +2326,8 @@ mod tests {
         };
         let backend = CudaBackend::new(device.clone());
 
-        let x = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], (2, 3), &device)?;
-        let w = Tensor::from_slice(
+        let x = candle_core::Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], (2, 3), &device)?;
+        let w = candle_core::Tensor::from_slice(
             &[
                 0.5f32, 1.0, -1.5, 2.0, 3.0, -0.25, 0.75, 1.25, -0.5, 0.25, 2.0, -1.0, 0.0, 0.5,
                 -2.0,
@@ -2348,7 +2347,7 @@ mod tests {
 
     #[test]
     fn cuda_registered_lora_delta_matches_candle_cuda_reference() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -2359,9 +2358,9 @@ mod tests {
         };
         let backend = CudaBackend::new(device.clone());
 
-        let x = Tensor::from_slice(&[0.5f32, -1.0, 2.0, 1.5, 0.25, -0.75], (2, 3), &device)?;
-        let a = Tensor::from_slice(&[0.25f32, -0.5, 1.0, 1.5, 0.0, -1.0], (2, 3), &device)?;
-        let b = Tensor::from_slice(
+        let x = candle_core::Tensor::from_slice(&[0.5f32, -1.0, 2.0, 1.5, 0.25, -0.75], (2, 3), &device)?;
+        let a = candle_core::Tensor::from_slice(&[0.25f32, -0.5, 1.0, 1.5, 0.0, -1.0], (2, 3), &device)?;
+        let b = candle_core::Tensor::from_slice(
             &[1.0f32, -0.25, 0.5, 0.75, -1.0, 0.25, 0.0, 1.5],
             (4, 2),
             &device,
