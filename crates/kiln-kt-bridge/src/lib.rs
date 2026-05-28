@@ -371,6 +371,52 @@ pub fn candle_device_from_kt(d: &KtDevice) -> Result<candle_core::Device, Bridge
     }
 }
 
+/// Construct a candle CUDA device with a graph-capturable stream + event
+/// tracking disabled.
+///
+/// kiln-server's device-selection path opens its CUDA device via
+/// `candle_core::Device::new_cuda_with_stream` so the resident
+/// `cudaStream_t` can be captured into a CUDA graph (the hot decode
+/// path). It then `unsafe { disable_event_tracking() }` on the inner
+/// `CudaDevice` to suppress candle's per-op cuEventRecord — otherwise
+/// the graph capture observes the events and bloats the captured
+/// instruction stream.
+///
+/// Both calls live in candle's API surface; kiln-server's `device.rs`
+/// used to name `candle_core::Device::new_cuda_with_stream` +
+/// `Device::Cuda(d) => unsafe { d.disable_event_tracking() }`
+/// inline, which kept `candle_core::*` symbols in that file's source.
+/// Move that two-step setup behind this bridge helper so callers can
+/// build the graph-ready candle CUDA device through a kt-typed
+/// surface and drop their direct `candle_core` imports.
+///
+/// `cuda`-feature-gated because `CudaDevice::disable_event_tracking`
+/// only exists in the real candle CUDA backend (the dummy stub omits
+/// it). Callers that need the candle CUDA device on a non-cuda build
+/// should use [`candle_device_from_kt`] with `KtDevice::Cuda(_)`
+/// instead (no graph capture). (#1082)
+#[cfg(feature = "cuda")]
+pub fn candle_cuda_device_with_stream_no_event_tracking(
+    ordinal: usize,
+) -> Result<candle_core::Device, BridgeError> {
+    let device = candle_core::Device::new_cuda_with_stream(ordinal).map_err(|e| {
+        BridgeError::new(format!(
+            "kt-bridge: candle_cuda_device_with_stream_no_event_tracking: \
+             new_cuda_with_stream({ordinal}): {e}"
+        ))
+    })?;
+    if let candle_core::Device::Cuda(cuda_device) = &device {
+        // SAFETY: `disable_event_tracking` mutates per-device CUDA
+        // bookkeeping. It is safe to call exactly once on a freshly
+        // constructed `CudaDevice` before any operations are issued
+        // against it. This helper is the canonical construction
+        // path for the graph-capturable stream, so the freshness
+        // invariant holds at every call site by construction.
+        unsafe { cuda_device.disable_event_tracking() };
+    }
+    Ok(device)
+}
+
 /// Phase 7 candle→kt adapter — **copying variant**.
 ///
 /// Copies the device data backing a candle CUDA `Tensor` into a freshly
