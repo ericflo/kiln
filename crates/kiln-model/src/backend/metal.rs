@@ -7,7 +7,6 @@
 //! this replaces the vendored CUDA FlashAttention-2 call on Apple Silicon.
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor};
 
 use super::BackendRuntime;
 
@@ -120,7 +119,7 @@ pub struct MetalBackend {
     /// device so trait methods that still consume `candle_core::Tensor`
     /// parameters continue to dispatch through candle without bridging.
     /// (#1082)
-    device: Device,
+    device: candle_core::Device,
     /// `kiln_tensor::Device` form of `device`, cached at construction so
     /// the `BackendRuntime::device()` accessor does not bridge per call.
     /// (#1082)
@@ -158,9 +157,9 @@ impl MetalKernelDisables {
 }
 
 impl MetalBackend {
-    pub fn new(device: Device) -> Self {
+    pub fn new(device: candle_core::Device) -> Self {
         debug_assert!(
-            matches!(device, Device::Metal(_)),
+            matches!(device, candle_core::Device::Metal(_)),
             "MetalBackend created on non-Metal device"
         );
         let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
@@ -175,8 +174,8 @@ impl MetalBackend {
 /// Compile Kiln's custom Metal library and compute pipelines ahead of the
 /// first forward pass. Candle kernels still compile lazily inside Candle, but
 /// this removes Kiln-owned pipeline setup from the first prewarm/request.
-pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
-    let Device::Metal(metal_device) = device else {
+pub fn precompile_custom_kernels(device: &candle_core::Device) -> Result<()> {
+    let candle_core::Device::Metal(metal_device) = device else {
         return Ok(());
     };
 
@@ -291,13 +290,13 @@ impl BackendRuntime for MetalBackend {
 
     fn flash_attn_paged_decode_contiguous(
         &self,
-        q: &Tensor,
-        k_pool: &Tensor,
-        v_pool: &Tensor,
+        q: &candle_core::Tensor,
+        k_pool: &candle_core::Tensor,
+        v_pool: &candle_core::Tensor,
         start_slot: usize,
         total_seqlen_k: usize,
         softmax_scale: f32,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !metal_paged_attn_decode_contiguous_supports(
             q,
             k_pool,
@@ -321,13 +320,13 @@ impl BackendRuntime for MetalBackend {
 
     fn flash_attn_paged_decode_contiguous_batch(
         &self,
-        q: &Tensor,
-        k_pool: &Tensor,
-        v_pool: &Tensor,
-        start_slots: &Tensor,
+        q: &candle_core::Tensor,
+        k_pool: &candle_core::Tensor,
+        v_pool: &candle_core::Tensor,
+        start_slots: &candle_core::Tensor,
         total_seqlen_k: usize,
         softmax_scale: f32,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !metal_paged_attn_decode_contiguous_batch_supports(
             q,
             k_pool,
@@ -351,16 +350,16 @@ impl BackendRuntime for MetalBackend {
 
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
         &self,
-        q: &Tensor,
-        k_pool: &Tensor,
-        v_pool: &Tensor,
-        block_table: &Tensor,
-        seqused_k: &Tensor,
+        q: &candle_core::Tensor,
+        k_pool: &candle_core::Tensor,
+        v_pool: &candle_core::Tensor,
+        block_table: &candle_core::Tensor,
+        seqused_k: &candle_core::Tensor,
         max_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if !causal
             || !metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
                 q,
@@ -442,19 +441,19 @@ impl BackendRuntime for MetalBackend {
 
     fn flash_attn_prefill(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if std::env::var(DISABLE_METAL_SDPA).is_ok() {
             return Ok(None);
         }
         // Decline (caller falls back to the portable path) when candle's SDPA
         // can't handle the shape/dtype. Cheaper than surfacing a kernel error
         // from inside the fused path.
-        if !matches!(q.dtype(), DType::BF16 | DType::F16 | DType::F32) {
+        if !matches!(q.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32) {
             return Ok(None);
         }
         let head_dim = q.dim(kiln_tensor::metal_types::D::Minus1)?;
@@ -481,16 +480,16 @@ impl BackendRuntime for MetalBackend {
 
     fn flash_attn_prefill_head_major(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if std::env::var(DISABLE_METAL_SDPA).is_ok() {
             return Ok(None);
         }
-        if !matches!(q.dtype(), DType::BF16 | DType::F16 | DType::F32) {
+        if !matches!(q.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32) {
             return Ok(None);
         }
         let head_dim = q.dim(kiln_tensor::metal_types::D::Minus1)?;
@@ -513,19 +512,19 @@ impl BackendRuntime for MetalBackend {
     /// naive-softmax+matmul fallback — same result, one fused kernel.
     fn flash_attn_paged_decode(
         &self,
-        q: &Tensor,
-        k_pool: &Tensor,
-        v_pool: &Tensor,
-        block_table: &Tensor,
+        q: &candle_core::Tensor,
+        k_pool: &candle_core::Tensor,
+        v_pool: &candle_core::Tensor,
+        block_table: &candle_core::Tensor,
         total_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         // Gate on everything SDPA can handle. Pool dtype matches q dtype by
         // construction (both come from the same forward config), so only q
         // needs checking.
-        if !matches!(q.dtype(), DType::BF16 | DType::F16 | DType::F32) {
+        if !matches!(q.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32) {
             return Ok(None);
         }
         let head_dim = q.dim(kiln_tensor::metal_types::D::Minus1)?;
@@ -588,11 +587,11 @@ impl BackendRuntime for MetalBackend {
 
     fn paged_kv_head_major_read(
         &self,
-        k_pool: &Tensor,
-        v_pool: &Tensor,
+        k_pool: &candle_core::Tensor,
+        v_pool: &candle_core::Tensor,
         start_slot: usize,
         seq_len: usize,
-    ) -> Result<Option<(Tensor, Tensor)>> {
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
         if !metal_paged_kv_head_major_read_supports(k_pool, v_pool, start_slot, seq_len) {
             return Ok(None);
         }
@@ -603,13 +602,13 @@ impl BackendRuntime for MetalBackend {
 
     fn paged_kv_head_major_read_append_token_major(
         &self,
-        k_pool: &Tensor,
-        v_pool: &Tensor,
+        k_pool: &candle_core::Tensor,
+        v_pool: &candle_core::Tensor,
         start_slot: usize,
         prefix_len: usize,
-        k_tail: &Tensor,
-        v_tail: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor)>> {
+        k_tail: &candle_core::Tensor,
+        v_tail: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
         if !metal_paged_kv_head_major_read_append_token_major_supports(
             k_pool, v_pool, start_slot, prefix_len, k_tail, v_tail,
         ) {
@@ -624,11 +623,11 @@ impl BackendRuntime for MetalBackend {
 
     fn causal_conv1d_prefill(
         &self,
-        x: &Tensor,
-        weight: &Tensor,
-        conv_state: &mut Tensor,
+        x: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
+        conv_state: &mut candle_core::Tensor,
         kernel_size: usize,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if self.disable.conv1d_prefill
             || !metal_conv1d_prefill_supports(x, weight, conv_state, kernel_size)
         {
@@ -641,11 +640,11 @@ impl BackendRuntime for MetalBackend {
 
     fn causal_conv1d_update(
         &self,
-        x: &Tensor,
-        weight: &Tensor,
-        conv_state: &mut Tensor,
+        x: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
+        conv_state: &mut candle_core::Tensor,
         kernel_size: usize,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if self.disable.conv1d_update
             || !metal_conv1d_update_supports(x, weight, conv_state, kernel_size)
         {
@@ -658,18 +657,18 @@ impl BackendRuntime for MetalBackend {
 
     fn gdn_forward_substitution(
         &self,
-        a_strict: &Tensor,
-        v_prime: &Tensor,
-        beta: &Tensor,
-    ) -> Result<Option<Tensor>> {
+        a_strict: &candle_core::Tensor,
+        v_prime: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         if self.disable.gdn_forward_substitution
             || !metal_gdn_forward_substitution_supports(a_strict, v_prime, beta)
         {
             return Ok(None);
         }
         let out = match a_strict.dtype() {
-            DType::BF16 => metal_gdn_forward_substitution_bf16(a_strict, v_prime, beta),
-            DType::F32 => metal_gdn_forward_substitution_f32(a_strict, v_prime, beta),
+            candle_core::DType::BF16 => metal_gdn_forward_substitution_bf16(a_strict, v_prime, beta),
+            candle_core::DType::F32 => metal_gdn_forward_substitution_f32(a_strict, v_prime, beta),
             other => anyhow::bail!("unsupported metal gdn_forward_substitution dtype {other:?}"),
         }
         .context("metal gdn_forward_substitution kernel failed")?;
@@ -678,13 +677,13 @@ impl BackendRuntime for MetalBackend {
 
     fn gdn_recurrent_step(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        beta: &Tensor,
-        g: &Tensor,
-        state: &mut Tensor,
-    ) -> Result<Option<Tensor>> {
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+        g: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         if self.disable.gdn_recurrent || !metal_gdn_recurrent_supports(q, k, v, beta, g, state) {
             return Ok(None);
         }
@@ -695,13 +694,13 @@ impl BackendRuntime for MetalBackend {
 
     fn gdn_chunk_prep(
         &self,
-        g: &Tensor,
-        v: &Tensor,
-        kkt: &Tensor,
-        qkt: &Tensor,
-        ks_entry: &Tensor,
-        q_s: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)>> {
+        g: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        kkt: &candle_core::Tensor,
+        qkt: &candle_core::Tensor,
+        ks_entry: &candle_core::Tensor,
+        q_s: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
         if self.disable.gdn_forward_substitution
             || !metal_gdn_chunk_prep_supports(g, v, kkt, qkt, ks_entry, q_s)
         {
@@ -714,16 +713,16 @@ impl BackendRuntime for MetalBackend {
 
     fn gdn_full_chunk_forward(
         &self,
-        g: &Tensor,
-        v: &Tensor,
-        kkt: &Tensor,
-        qkt: &Tensor,
-        ks_entry: &Tensor,
-        q_s: &Tensor,
-        beta: &Tensor,
-        k_t: &Tensor,
-        state: &mut Tensor,
-    ) -> Result<Option<Tensor>> {
+        g: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        kkt: &candle_core::Tensor,
+        qkt: &candle_core::Tensor,
+        ks_entry: &candle_core::Tensor,
+        q_s: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+        k_t: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         if self.disable.gdn_forward_substitution
             || !metal_gdn_full_chunk_forward_supports(
                 g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
@@ -740,16 +739,16 @@ impl BackendRuntime for MetalBackend {
     #[allow(clippy::too_many_arguments)]
     fn gdn_full_chunk_forward_head_last_into(
         &self,
-        g: &Tensor,
-        v: &Tensor,
-        kkt: &Tensor,
-        qkt: &Tensor,
-        ks_entry: &Tensor,
-        q_s: &Tensor,
-        beta: &Tensor,
-        k_t: &Tensor,
-        state: &mut Tensor,
-        out: &Tensor,
+        g: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        kkt: &candle_core::Tensor,
+        qkt: &candle_core::Tensor,
+        ks_entry: &candle_core::Tensor,
+        q_s: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+        k_t: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
+        out: &candle_core::Tensor,
         t_start: usize,
         seq_len: usize,
     ) -> Result<bool> {
@@ -769,13 +768,13 @@ impl BackendRuntime for MetalBackend {
 
     fn gdn_recurrent_prefill_head_last(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        beta: &Tensor,
-        g: &Tensor,
-        state: &mut Tensor,
-    ) -> Result<Option<Tensor>> {
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+        g: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         if self.disable.gdn_recurrent
             || !metal_gdn_recurrent_prefill_head_last_supports(q, k, v, beta, g, state)
         {
@@ -788,13 +787,13 @@ impl BackendRuntime for MetalBackend {
 
     fn gdn_recurrent_prefill_native_head_last(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        beta: &Tensor,
-        g: &Tensor,
-        state: &mut Tensor,
-    ) -> Result<Option<Tensor>> {
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+        g: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         if self.disable.gdn_recurrent
             || !metal_gdn_recurrent_prefill_native_head_last_supports(q, k, v, beta, g, state)
         {
@@ -807,12 +806,12 @@ impl BackendRuntime for MetalBackend {
 
     fn gdn_in_proj_decode(
         &self,
-        x: &Tensor,
-        in_proj_qkv_t: &Tensor,
-        in_proj_z_t: &Tensor,
-        in_proj_a_t: &Tensor,
-        in_proj_b_t: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor, Tensor, Tensor)>> {
+        x: &candle_core::Tensor,
+        in_proj_qkv_t: &candle_core::Tensor,
+        in_proj_z_t: &candle_core::Tensor,
+        in_proj_a_t: &candle_core::Tensor,
+        in_proj_b_t: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
         if self.disable.gdn_in_proj
             || !metal_gdn_in_proj_decode_supports(
                 x,
@@ -832,11 +831,11 @@ impl BackendRuntime for MetalBackend {
 
     fn gdn_gates(
         &self,
-        a: &Tensor,
-        b: &Tensor,
-        a_log: &Tensor,
-        dt_bias: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor)>> {
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
+        a_log: &candle_core::Tensor,
+        dt_bias: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
         if self.disable.gdn_gates || !metal_gdn_gates_supports(a, b, a_log, dt_bias) {
             return Ok(None);
         }
@@ -847,11 +846,11 @@ impl BackendRuntime for MetalBackend {
 
     fn gdn_gated_rms_norm(
         &self,
-        x: &Tensor,
-        z: &Tensor,
-        weight: &Tensor,
+        x: &candle_core::Tensor,
+        z: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
         eps: f64,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         if self.disable.gated_rms_norm || !metal_gated_rms_norm_supports(x, z, weight) {
             return Ok(None);
         }
@@ -1095,18 +1094,18 @@ fn env_truthy(var: &str) -> bool {
 }
 
 fn metal_conv1d_prefill_supports(
-    x: &Tensor,
-    weight: &Tensor,
-    conv_state: &Tensor,
+    x: &candle_core::Tensor,
+    weight: &candle_core::Tensor,
+    conv_state: &candle_core::Tensor,
     kernel_size: usize,
 ) -> bool {
     if kernel_size != 4 {
         return false;
     }
-    if !matches!(x.device(), Device::Metal(_)) {
+    if !matches!(x.device(), candle_core::Device::Metal(_)) {
         return false;
     }
-    if x.dtype() != DType::BF16 || weight.dtype() != DType::BF16 || conv_state.dtype() != DType::F32
+    if x.dtype() != candle_core::DType::BF16 || weight.dtype() != candle_core::DType::BF16 || conv_state.dtype() != candle_core::DType::F32
     {
         return false;
     }
@@ -1134,18 +1133,18 @@ fn metal_conv1d_prefill_supports(
 }
 
 fn metal_conv1d_update_supports(
-    x: &Tensor,
-    weight: &Tensor,
-    conv_state: &Tensor,
+    x: &candle_core::Tensor,
+    weight: &candle_core::Tensor,
+    conv_state: &candle_core::Tensor,
     kernel_size: usize,
 ) -> bool {
     if kernel_size != 4 {
         return false;
     }
-    if !matches!(x.device(), Device::Metal(_)) {
+    if !matches!(x.device(), candle_core::Device::Metal(_)) {
         return false;
     }
-    if x.dtype() != DType::BF16 || weight.dtype() != DType::BF16 || conv_state.dtype() != DType::F32
+    if x.dtype() != candle_core::DType::BF16 || weight.dtype() != candle_core::DType::BF16 || conv_state.dtype() != candle_core::DType::F32
     {
         return false;
     }
@@ -1172,18 +1171,18 @@ fn metal_conv1d_update_supports(
         .is_ok_and(|(b, c, k)| (b, c, k) == (batch, channels, kernel_size - 1))
 }
 
-fn metal_gdn_gates_supports(a: &Tensor, b: &Tensor, a_log: &Tensor, dt_bias: &Tensor) -> bool {
-    if !matches!(a.device(), Device::Metal(_))
-        || !matches!(b.device(), Device::Metal(_))
-        || !matches!(a_log.device(), Device::Metal(_))
-        || !matches!(dt_bias.device(), Device::Metal(_))
+fn metal_gdn_gates_supports(a: &candle_core::Tensor, b: &candle_core::Tensor, a_log: &candle_core::Tensor, dt_bias: &candle_core::Tensor) -> bool {
+    if !matches!(a.device(), candle_core::Device::Metal(_))
+        || !matches!(b.device(), candle_core::Device::Metal(_))
+        || !matches!(a_log.device(), candle_core::Device::Metal(_))
+        || !matches!(dt_bias.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
-    if a.dtype() != DType::BF16
-        || b.dtype() != DType::BF16
-        || a_log.dtype() != DType::F32
-        || dt_bias.dtype() != DType::BF16
+    if a.dtype() != candle_core::DType::BF16
+        || b.dtype() != candle_core::DType::BF16
+        || a_log.dtype() != candle_core::DType::F32
+        || dt_bias.dtype() != candle_core::DType::BF16
     {
         return false;
     }
@@ -1203,26 +1202,26 @@ fn metal_gdn_gates_supports(a: &Tensor, b: &Tensor, a_log: &Tensor, dt_bias: &Te
 }
 
 pub(crate) fn metal_gdn_gates_decay_supports(
-    a: &Tensor,
-    b: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
+    a: &candle_core::Tensor,
+    b: &candle_core::Tensor,
+    a_log: &candle_core::Tensor,
+    dt_bias: &candle_core::Tensor,
 ) -> bool {
     !metal_gdn_prefill_decay_recurrent_disabled() && metal_gdn_gates_supports(a, b, a_log, dt_bias)
 }
 
 pub(crate) fn metal_gdn_prefill_ab_in_proj_supports(
-    x: &Tensor,
-    in_proj_ab_t: &Tensor,
+    x: &candle_core::Tensor,
+    in_proj_ab_t: &candle_core::Tensor,
     nv: usize,
 ) -> bool {
     if metal_gdn_prefill_ab_in_proj_disabled() {
         return false;
     }
-    if x.dtype() != DType::BF16 || in_proj_ab_t.dtype() != DType::BF16 {
+    if x.dtype() != candle_core::DType::BF16 || in_proj_ab_t.dtype() != candle_core::DType::BF16 {
         return false;
     }
-    if !matches!(x.device(), Device::Metal(_)) || !matches!(in_proj_ab_t.device(), Device::Metal(_))
+    if !matches!(x.device(), candle_core::Device::Metal(_)) || !matches!(in_proj_ab_t.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
@@ -1239,20 +1238,20 @@ pub(crate) fn metal_gdn_prefill_ab_in_proj_supports(
 }
 
 pub(crate) fn metal_gdn_gates_decay_ab_supports(
-    ab: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
+    ab: &candle_core::Tensor,
+    a_log: &candle_core::Tensor,
+    dt_bias: &candle_core::Tensor,
     nv: usize,
 ) -> bool {
     if metal_gdn_prefill_ab_in_proj_disabled() || metal_gdn_prefill_decay_recurrent_disabled() {
         return false;
     }
-    if ab.dtype() != DType::BF16 || a_log.dtype() != DType::F32 || dt_bias.dtype() != DType::BF16 {
+    if ab.dtype() != candle_core::DType::BF16 || a_log.dtype() != candle_core::DType::F32 || dt_bias.dtype() != candle_core::DType::BF16 {
         return false;
     }
-    if !matches!(ab.device(), Device::Metal(_))
-        || !matches!(a_log.device(), Device::Metal(_))
-        || !matches!(dt_bias.device(), Device::Metal(_))
+    if !matches!(ab.device(), candle_core::Device::Metal(_))
+        || !matches!(a_log.device(), candle_core::Device::Metal(_))
+        || !matches!(dt_bias.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
@@ -1277,18 +1276,18 @@ pub(crate) fn metal_gdn_gates_decay_ab_supports(
 }
 
 fn metal_gdn_forward_substitution_supports(
-    a_strict: &Tensor,
-    v_prime: &Tensor,
-    beta: &Tensor,
+    a_strict: &candle_core::Tensor,
+    v_prime: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
 ) -> bool {
-    if !matches!(a_strict.device(), Device::Metal(_))
-        || !matches!(v_prime.device(), Device::Metal(_))
-        || !matches!(beta.device(), Device::Metal(_))
+    if !matches!(a_strict.device(), candle_core::Device::Metal(_))
+        || !matches!(v_prime.device(), candle_core::Device::Metal(_))
+        || !matches!(beta.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
     let dtype = a_strict.dtype();
-    if (dtype != DType::BF16 && dtype != DType::F32)
+    if (dtype != candle_core::DType::BF16 && dtype != candle_core::DType::F32)
         || v_prime.dtype() != dtype
         || beta.dtype() != dtype
     {
@@ -1314,28 +1313,28 @@ fn metal_gdn_forward_substitution_supports(
 }
 
 fn metal_gdn_chunk_prep_supports(
-    g: &Tensor,
-    v: &Tensor,
-    kkt: &Tensor,
-    qkt: &Tensor,
-    ks_entry: &Tensor,
-    q_s: &Tensor,
+    g: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    kkt: &candle_core::Tensor,
+    qkt: &candle_core::Tensor,
+    ks_entry: &candle_core::Tensor,
+    q_s: &candle_core::Tensor,
 ) -> bool {
-    if !matches!(g.device(), Device::Metal(_))
-        || !matches!(v.device(), Device::Metal(_))
-        || !matches!(kkt.device(), Device::Metal(_))
-        || !matches!(qkt.device(), Device::Metal(_))
-        || !matches!(ks_entry.device(), Device::Metal(_))
-        || !matches!(q_s.device(), Device::Metal(_))
+    if !matches!(g.device(), candle_core::Device::Metal(_))
+        || !matches!(v.device(), candle_core::Device::Metal(_))
+        || !matches!(kkt.device(), candle_core::Device::Metal(_))
+        || !matches!(qkt.device(), candle_core::Device::Metal(_))
+        || !matches!(ks_entry.device(), candle_core::Device::Metal(_))
+        || !matches!(q_s.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
-    if g.dtype() != DType::BF16
-        || v.dtype() != DType::BF16
-        || kkt.dtype() != DType::BF16
-        || qkt.dtype() != DType::BF16
-        || ks_entry.dtype() != DType::BF16
-        || q_s.dtype() != DType::BF16
+    if g.dtype() != candle_core::DType::BF16
+        || v.dtype() != candle_core::DType::BF16
+        || kkt.dtype() != candle_core::DType::BF16
+        || qkt.dtype() != candle_core::DType::BF16
+        || ks_entry.dtype() != candle_core::DType::BF16
+        || q_s.dtype() != candle_core::DType::BF16
     {
         return false;
     }
@@ -1378,24 +1377,24 @@ fn metal_gdn_chunk_prep_supports(
 }
 
 fn metal_gdn_full_chunk_forward_supports(
-    g: &Tensor,
-    v: &Tensor,
-    kkt: &Tensor,
-    qkt: &Tensor,
-    ks_entry: &Tensor,
-    q_s: &Tensor,
-    beta: &Tensor,
-    k_t: &Tensor,
-    state: &Tensor,
+    g: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    kkt: &candle_core::Tensor,
+    qkt: &candle_core::Tensor,
+    ks_entry: &candle_core::Tensor,
+    q_s: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+    k_t: &candle_core::Tensor,
+    state: &candle_core::Tensor,
 ) -> bool {
     if !metal_gdn_chunk_prep_supports(g, v, kkt, qkt, ks_entry, q_s)
-        || !matches!(beta.device(), Device::Metal(_))
-        || !matches!(k_t.device(), Device::Metal(_))
-        || !matches!(state.device(), Device::Metal(_))
+        || !matches!(beta.device(), candle_core::Device::Metal(_))
+        || !matches!(k_t.device(), candle_core::Device::Metal(_))
+        || !matches!(state.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
-    if beta.dtype() != DType::BF16 || k_t.dtype() != DType::BF16 || state.dtype() != DType::BF16 {
+    if beta.dtype() != candle_core::DType::BF16 || k_t.dtype() != candle_core::DType::BF16 || state.dtype() != candle_core::DType::BF16 {
         return false;
     }
     let Ok((batch, heads, chunk)) = g.dims3() else {
@@ -1425,10 +1424,10 @@ fn metal_gdn_full_chunk_forward_supports(
 }
 
 fn metal_gdn_full_chunk_forward_strided_inputs_support(
-    g: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    k_t: &Tensor,
+    g: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+    k_t: &candle_core::Tensor,
     heads: usize,
 ) -> bool {
     fn flat_batch_head_ok(stride: &[usize], heads: usize) -> bool {
@@ -1485,22 +1484,22 @@ fn metal_gdn_full_chunk_forward_strided_inputs_support(
 
 #[allow(clippy::too_many_arguments)]
 fn metal_gdn_full_chunk_forward_head_last_supports(
-    g: &Tensor,
-    v: &Tensor,
-    kkt: &Tensor,
-    qkt: &Tensor,
-    ks_entry: &Tensor,
-    q_s: &Tensor,
-    beta: &Tensor,
-    k_t: &Tensor,
-    state: &Tensor,
-    out: &Tensor,
+    g: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    kkt: &candle_core::Tensor,
+    qkt: &candle_core::Tensor,
+    ks_entry: &candle_core::Tensor,
+    q_s: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+    k_t: &candle_core::Tensor,
+    state: &candle_core::Tensor,
+    out: &candle_core::Tensor,
     t_start: usize,
     seq_len: usize,
 ) -> bool {
     if !metal_gdn_full_chunk_forward_supports(g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state)
-        || !matches!(out.device(), Device::Metal(_))
-        || out.dtype() != DType::BF16
+        || !matches!(out.device(), candle_core::Device::Metal(_))
+        || out.dtype() != candle_core::DType::BF16
         || !out.is_contiguous()
     {
         return false;
@@ -1520,28 +1519,28 @@ fn metal_gdn_full_chunk_forward_head_last_supports(
 }
 
 fn metal_gdn_recurrent_supports(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    g: &Tensor,
-    state: &Tensor,
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+    g: &candle_core::Tensor,
+    state: &candle_core::Tensor,
 ) -> bool {
-    if !matches!(q.device(), Device::Metal(_))
-        || !matches!(k.device(), Device::Metal(_))
-        || !matches!(v.device(), Device::Metal(_))
-        || !matches!(beta.device(), Device::Metal(_))
-        || !matches!(g.device(), Device::Metal(_))
-        || !matches!(state.device(), Device::Metal(_))
+    if !matches!(q.device(), candle_core::Device::Metal(_))
+        || !matches!(k.device(), candle_core::Device::Metal(_))
+        || !matches!(v.device(), candle_core::Device::Metal(_))
+        || !matches!(beta.device(), candle_core::Device::Metal(_))
+        || !matches!(g.device(), candle_core::Device::Metal(_))
+        || !matches!(state.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
-    if q.dtype() != DType::BF16
-        || k.dtype() != DType::BF16
-        || v.dtype() != DType::BF16
-        || beta.dtype() != DType::BF16
-        || g.dtype() != DType::BF16
-        || state.dtype() != DType::BF16
+    if q.dtype() != candle_core::DType::BF16
+        || k.dtype() != candle_core::DType::BF16
+        || v.dtype() != candle_core::DType::BF16
+        || beta.dtype() != candle_core::DType::BF16
+        || g.dtype() != candle_core::DType::BF16
+        || state.dtype() != candle_core::DType::BF16
     {
         return false;
     }
@@ -1575,28 +1574,28 @@ fn metal_gdn_recurrent_supports(
 const METAL_GDN_RECURRENT_PREFILL_MAX_SEQ_LEN: usize = 2048;
 
 fn metal_gdn_recurrent_prefill_head_last_supports(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    g: &Tensor,
-    state: &Tensor,
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+    g: &candle_core::Tensor,
+    state: &candle_core::Tensor,
 ) -> bool {
-    if !matches!(q.device(), Device::Metal(_))
-        || !matches!(k.device(), Device::Metal(_))
-        || !matches!(v.device(), Device::Metal(_))
-        || !matches!(beta.device(), Device::Metal(_))
-        || !matches!(g.device(), Device::Metal(_))
-        || !matches!(state.device(), Device::Metal(_))
+    if !matches!(q.device(), candle_core::Device::Metal(_))
+        || !matches!(k.device(), candle_core::Device::Metal(_))
+        || !matches!(v.device(), candle_core::Device::Metal(_))
+        || !matches!(beta.device(), candle_core::Device::Metal(_))
+        || !matches!(g.device(), candle_core::Device::Metal(_))
+        || !matches!(state.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
-    if q.dtype() != DType::BF16
-        || k.dtype() != DType::BF16
-        || v.dtype() != DType::BF16
-        || beta.dtype() != DType::BF16
-        || g.dtype() != DType::BF16
-        || state.dtype() != DType::BF16
+    if q.dtype() != candle_core::DType::BF16
+        || k.dtype() != candle_core::DType::BF16
+        || v.dtype() != candle_core::DType::BF16
+        || beta.dtype() != candle_core::DType::BF16
+        || g.dtype() != candle_core::DType::BF16
+        || state.dtype() != candle_core::DType::BF16
     {
         return false;
     }
@@ -1634,28 +1633,28 @@ fn metal_gdn_recurrent_prefill_head_last_supports(
 }
 
 fn metal_gdn_recurrent_prefill_native_head_last_supports(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    g: &Tensor,
-    state: &Tensor,
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+    g: &candle_core::Tensor,
+    state: &candle_core::Tensor,
 ) -> bool {
-    if !matches!(q.device(), Device::Metal(_))
-        || !matches!(k.device(), Device::Metal(_))
-        || !matches!(v.device(), Device::Metal(_))
-        || !matches!(beta.device(), Device::Metal(_))
-        || !matches!(g.device(), Device::Metal(_))
-        || !matches!(state.device(), Device::Metal(_))
+    if !matches!(q.device(), candle_core::Device::Metal(_))
+        || !matches!(k.device(), candle_core::Device::Metal(_))
+        || !matches!(v.device(), candle_core::Device::Metal(_))
+        || !matches!(beta.device(), candle_core::Device::Metal(_))
+        || !matches!(g.device(), candle_core::Device::Metal(_))
+        || !matches!(state.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
-    if q.dtype() != DType::BF16
-        || k.dtype() != DType::BF16
-        || v.dtype() != DType::BF16
-        || beta.dtype() != DType::BF16
-        || g.dtype() != DType::BF16
-        || state.dtype() != DType::BF16
+    if q.dtype() != candle_core::DType::BF16
+        || k.dtype() != candle_core::DType::BF16
+        || v.dtype() != candle_core::DType::BF16
+        || beta.dtype() != candle_core::DType::BF16
+        || g.dtype() != candle_core::DType::BF16
+        || state.dtype() != candle_core::DType::BF16
     {
         return false;
     }
@@ -1693,48 +1692,48 @@ fn metal_gdn_recurrent_prefill_native_head_last_supports(
 }
 
 pub(crate) fn metal_gdn_recurrent_prefill_native_head_last_decay_supports(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    decay: &Tensor,
-    state: &Tensor,
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+    decay: &candle_core::Tensor,
+    state: &candle_core::Tensor,
 ) -> bool {
     !metal_gdn_prefill_decay_recurrent_disabled()
         && metal_gdn_recurrent_prefill_native_head_last_supports(q, k, v, beta, decay, state)
 }
 
 pub(crate) fn metal_gdn_decode_gates_recurrent_supports(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    a: &Tensor,
-    b: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
-    state: &Tensor,
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    a: &candle_core::Tensor,
+    b: &candle_core::Tensor,
+    a_log: &candle_core::Tensor,
+    dt_bias: &candle_core::Tensor,
+    state: &candle_core::Tensor,
 ) -> bool {
-    if metal_gdn_decode_gates_recurrent_disabled() || !matches!(q.device(), Device::Metal(_)) {
+    if metal_gdn_decode_gates_recurrent_disabled() || !matches!(q.device(), candle_core::Device::Metal(_)) {
         return false;
     }
-    if !matches!(k.device(), Device::Metal(_))
-        || !matches!(v.device(), Device::Metal(_))
-        || !matches!(a.device(), Device::Metal(_))
-        || !matches!(b.device(), Device::Metal(_))
-        || !matches!(a_log.device(), Device::Metal(_))
-        || !matches!(dt_bias.device(), Device::Metal(_))
-        || !matches!(state.device(), Device::Metal(_))
+    if !matches!(k.device(), candle_core::Device::Metal(_))
+        || !matches!(v.device(), candle_core::Device::Metal(_))
+        || !matches!(a.device(), candle_core::Device::Metal(_))
+        || !matches!(b.device(), candle_core::Device::Metal(_))
+        || !matches!(a_log.device(), candle_core::Device::Metal(_))
+        || !matches!(dt_bias.device(), candle_core::Device::Metal(_))
+        || !matches!(state.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
-    if q.dtype() != DType::BF16
-        || k.dtype() != DType::BF16
-        || v.dtype() != DType::BF16
-        || a.dtype() != DType::BF16
-        || b.dtype() != DType::BF16
-        || a_log.dtype() != DType::F32
-        || dt_bias.dtype() != DType::BF16
-        || state.dtype() != DType::BF16
+    if q.dtype() != candle_core::DType::BF16
+        || k.dtype() != candle_core::DType::BF16
+        || v.dtype() != candle_core::DType::BF16
+        || a.dtype() != candle_core::DType::BF16
+        || b.dtype() != candle_core::DType::BF16
+        || a_log.dtype() != candle_core::DType::F32
+        || dt_bias.dtype() != candle_core::DType::BF16
+        || state.dtype() != candle_core::DType::BF16
     {
         return false;
     }
@@ -1781,16 +1780,16 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_supports(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_gdn_decode_gates_recurrent_rmsnorm_supports(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    a: &Tensor,
-    b: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
-    state: &Tensor,
-    z: &Tensor,
-    weight: &Tensor,
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    a: &candle_core::Tensor,
+    b: &candle_core::Tensor,
+    a_log: &candle_core::Tensor,
+    dt_bias: &candle_core::Tensor,
+    state: &candle_core::Tensor,
+    z: &candle_core::Tensor,
+    weight: &candle_core::Tensor,
 ) -> bool {
     if metal_gdn_decode_gates_recurrent_rmsnorm_disabled() {
         return false;
@@ -1801,14 +1800,14 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_rmsnorm_supports(
     metal_gated_rms_norm_supports(v, z, weight)
 }
 
-fn metal_gated_rms_norm_supports(x: &Tensor, z: &Tensor, weight: &Tensor) -> bool {
-    if !matches!(x.device(), Device::Metal(_))
-        || !matches!(z.device(), Device::Metal(_))
-        || !matches!(weight.device(), Device::Metal(_))
+fn metal_gated_rms_norm_supports(x: &candle_core::Tensor, z: &candle_core::Tensor, weight: &candle_core::Tensor) -> bool {
+    if !matches!(x.device(), candle_core::Device::Metal(_))
+        || !matches!(z.device(), candle_core::Device::Metal(_))
+        || !matches!(weight.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
-    if x.dtype() != DType::BF16 || z.dtype() != DType::BF16 || weight.dtype() != DType::F32 {
+    if x.dtype() != candle_core::DType::BF16 || z.dtype() != candle_core::DType::BF16 || weight.dtype() != candle_core::DType::F32 {
         return false;
     }
     let Ok((batch, seq_len, heads, hidden)) = x.dims4() else {
@@ -1823,14 +1822,14 @@ fn metal_gated_rms_norm_supports(x: &Tensor, z: &Tensor, weight: &Tensor) -> boo
     weight.dims() == &[hidden] && hidden <= 1024
 }
 
-pub(crate) fn metal_rms_norm_supports(x: &Tensor, weight: &Tensor) -> bool {
+pub(crate) fn metal_rms_norm_supports(x: &candle_core::Tensor, weight: &candle_core::Tensor) -> bool {
     if metal_rms_norm_disabled() {
         return false;
     }
-    if !matches!(x.device(), Device::Metal(_)) || !matches!(weight.device(), Device::Metal(_)) {
+    if !matches!(x.device(), candle_core::Device::Metal(_)) || !matches!(weight.device(), candle_core::Device::Metal(_)) {
         return false;
     }
-    if x.dtype() != DType::BF16 || weight.dtype() != DType::BF16 {
+    if x.dtype() != candle_core::DType::BF16 || weight.dtype() != candle_core::DType::BF16 {
         return false;
     }
     let Some(hidden) = x.dims().last().copied() else {
@@ -1839,14 +1838,14 @@ pub(crate) fn metal_rms_norm_supports(x: &Tensor, weight: &Tensor) -> bool {
     x.rank() >= 1 && weight.dims() == &[hidden] && hidden <= 8192
 }
 
-pub(crate) fn metal_gdn_qk_norm_supports(q: &Tensor, k: &Tensor) -> bool {
+pub(crate) fn metal_gdn_qk_norm_supports(q: &candle_core::Tensor, k: &candle_core::Tensor) -> bool {
     if metal_gdn_qk_norm_disabled() {
         return false;
     }
-    if !matches!(q.device(), Device::Metal(_)) || !matches!(k.device(), Device::Metal(_)) {
+    if !matches!(q.device(), candle_core::Device::Metal(_)) || !matches!(k.device(), candle_core::Device::Metal(_)) {
         return false;
     }
-    if q.dtype() != DType::F32 || k.dtype() != DType::F32 {
+    if q.dtype() != candle_core::DType::F32 || k.dtype() != candle_core::DType::F32 {
         return false;
     }
     let Some(hidden) = q.dims().last().copied() else {
@@ -1855,14 +1854,14 @@ pub(crate) fn metal_gdn_qk_norm_supports(q: &Tensor, k: &Tensor) -> bool {
     q.rank() >= 1 && q.dims() == k.dims() && hidden <= 8192
 }
 
-pub(crate) fn metal_gdn_qk_norm_gqa_supports(q: &Tensor, k: &Tensor, nv: usize) -> bool {
+pub(crate) fn metal_gdn_qk_norm_gqa_supports(q: &candle_core::Tensor, k: &candle_core::Tensor, nv: usize) -> bool {
     if metal_gdn_qk_norm_disabled() {
         return false;
     }
-    if !matches!(q.device(), Device::Metal(_)) || !matches!(k.device(), Device::Metal(_)) {
+    if !matches!(q.device(), candle_core::Device::Metal(_)) || !matches!(k.device(), candle_core::Device::Metal(_)) {
         return false;
     }
-    if q.dtype() != DType::F32 || k.dtype() != DType::F32 {
+    if q.dtype() != candle_core::DType::F32 || k.dtype() != candle_core::DType::F32 {
         return false;
     }
     let Ok((_, _, nk, hidden)) = q.dims4() else {
@@ -1878,9 +1877,9 @@ pub(crate) fn metal_gdn_qk_norm_gqa_supports(q: &Tensor, k: &Tensor, nv: usize) 
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_gdn_decode_qkv_conv_norm_supports(
-    mixed_qkv: &Tensor,
-    weight: &Tensor,
-    conv_state: &Tensor,
+    mixed_qkv: &candle_core::Tensor,
+    weight: &candle_core::Tensor,
+    conv_state: &candle_core::Tensor,
     kernel_size: usize,
     nk: usize,
     dk: usize,
@@ -1893,15 +1892,15 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_supports(
     if kernel_size != 4 || dk != 128 || dv != 128 {
         return false;
     }
-    if !matches!(mixed_qkv.device(), Device::Metal(_))
-        || !matches!(weight.device(), Device::Metal(_))
-        || !matches!(conv_state.device(), Device::Metal(_))
+    if !matches!(mixed_qkv.device(), candle_core::Device::Metal(_))
+        || !matches!(weight.device(), candle_core::Device::Metal(_))
+        || !matches!(conv_state.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
-    if mixed_qkv.dtype() != DType::BF16
-        || weight.dtype() != DType::BF16
-        || conv_state.dtype() != DType::F32
+    if mixed_qkv.dtype() != candle_core::DType::BF16
+        || weight.dtype() != candle_core::DType::BF16
+        || conv_state.dtype() != candle_core::DType::F32
     {
         return false;
     }
@@ -1946,24 +1945,24 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_supports(
 }
 
 pub(crate) fn metal_rotary_embedding_supports(
-    q: &Tensor,
-    k: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    cos: &candle_core::Tensor,
+    sin: &candle_core::Tensor,
     head_dim: usize,
     rotary_dim: usize,
 ) -> bool {
-    if !matches!(q.device(), Device::Metal(_))
-        || !matches!(k.device(), Device::Metal(_))
-        || !matches!(cos.device(), Device::Metal(_))
-        || !matches!(sin.device(), Device::Metal(_))
+    if !matches!(q.device(), candle_core::Device::Metal(_))
+        || !matches!(k.device(), candle_core::Device::Metal(_))
+        || !matches!(cos.device(), candle_core::Device::Metal(_))
+        || !matches!(sin.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
-    if q.dtype() != DType::BF16
-        || k.dtype() != DType::BF16
-        || cos.dtype() != DType::F32
-        || sin.dtype() != DType::F32
+    if q.dtype() != candle_core::DType::BF16
+        || k.dtype() != candle_core::DType::BF16
+        || cos.dtype() != candle_core::DType::F32
+        || sin.dtype() != candle_core::DType::F32
     {
         return false;
     }
@@ -2012,8 +2011,8 @@ pub(crate) fn metal_rotary_embedding_supports(
 }
 
 fn metal_rotary_table_batch_stride(
-    cos: &Tensor,
-    sin: &Tensor,
+    cos: &candle_core::Tensor,
+    sin: &candle_core::Tensor,
     batch: usize,
     seq_len: usize,
     half_rotary: usize,
@@ -6641,11 +6640,11 @@ fn metal_paged_kv_write_token_major_batch_pipeline(
     Ok(pipeline)
 }
 
-pub(crate) fn metal_lm_head_supports(x: &Tensor, weight_t: &Tensor) -> bool {
-    if !matches!(x.dtype(), DType::BF16) || !matches!(weight_t.dtype(), DType::BF16) {
+pub(crate) fn metal_lm_head_supports(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> bool {
+    if !matches!(x.dtype(), candle_core::DType::BF16) || !matches!(weight_t.dtype(), candle_core::DType::BF16) {
         return false;
     }
-    if !matches!(x.device(), Device::Metal(_)) || !matches!(weight_t.device(), Device::Metal(_)) {
+    if !matches!(x.device(), candle_core::Device::Metal(_)) || !matches!(weight_t.device(), candle_core::Device::Metal(_)) {
         return false;
     }
     if !x.is_contiguous() || !weight_t.is_contiguous() {
@@ -6664,7 +6663,7 @@ pub(crate) fn metal_lm_head_supports(x: &Tensor, weight_t: &Tensor) -> bool {
         && vocab <= u32::MAX as usize
 }
 
-pub(crate) fn metal_lm_head_argmax_supports(x: &Tensor, weight_t: &Tensor) -> bool {
+pub(crate) fn metal_lm_head_argmax_supports(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> bool {
     if metal_lm_head_argmax_disabled() {
         return false;
     }
@@ -6680,14 +6679,14 @@ pub(crate) fn metal_lm_head_argmax_supports(x: &Tensor, weight_t: &Tensor) -> bo
     num_groups > 0 && num_groups <= 1024
 }
 
-pub(crate) fn metal_lm_head_argmax_rows_supports(x: &Tensor, weight_t: &Tensor) -> bool {
+pub(crate) fn metal_lm_head_argmax_rows_supports(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> bool {
     if metal_lm_head_argmax_rows_disabled() {
         return false;
     }
-    if !matches!(x.dtype(), DType::BF16) || !matches!(weight_t.dtype(), DType::BF16) {
+    if !matches!(x.dtype(), candle_core::DType::BF16) || !matches!(weight_t.dtype(), candle_core::DType::BF16) {
         return false;
     }
-    if !matches!(x.device(), Device::Metal(_)) || !matches!(weight_t.device(), Device::Metal(_)) {
+    if !matches!(x.device(), candle_core::Device::Metal(_)) || !matches!(weight_t.device(), candle_core::Device::Metal(_)) {
         return false;
     }
     if !x.is_contiguous() || !weight_t.is_contiguous() {
@@ -6709,7 +6708,7 @@ pub(crate) fn metal_lm_head_argmax_rows_supports(x: &Tensor, weight_t: &Tensor) 
         && num_groups <= 1024
 }
 
-pub(crate) fn metal_lm_head_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor> {
+pub(crate) fn metal_lm_head_bf16(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_lm_head_supports(x, weight_t),
         "metal lm head supports only BF16 [1,1,H] x [H,V] on Metal"
@@ -6718,9 +6717,9 @@ pub(crate) fn metal_lm_head_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor
     let (_, vocab) = weight_t.dims2()?;
 
     // The kernel writes every vocab element.
-    let out = unsafe { Tensor::empty((1usize, 1usize, vocab), DType::BF16, x.device())? };
+    let out = unsafe { candle_core::Tensor::empty((1usize, 1usize, vocab), candle_core::DType::BF16, x.device())? };
 
-    let Device::Metal(device) = x.device() else {
+    let candle_core::Device::Metal(device) = x.device() else {
         anyhow::bail!("metal lm head requires Metal tensors");
     };
     let pipeline = metal_lm_head_pipeline(device)?;
@@ -6777,7 +6776,7 @@ pub(crate) fn metal_lm_head_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor
     Ok(out)
 }
 
-pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result<u32> {
+pub(crate) fn metal_lm_head_argmax_bf16(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<u32> {
     anyhow::ensure!(
         metal_lm_head_argmax_supports(x, weight_t),
         "metal lm head argmax supports only BF16 [1,1,H] x [H,V] on Metal with <= 262144 vocab"
@@ -6787,15 +6786,15 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result
 
     let chunk_width = 256usize;
     let num_groups = vocab.div_ceil(chunk_width);
-    let partial_scores = unsafe { Tensor::empty((num_groups,), DType::F32, x.device())? };
-    let partial_indices = unsafe { Tensor::empty((num_groups,), DType::F32, x.device())? };
+    let partial_scores = unsafe { candle_core::Tensor::empty((num_groups,), candle_core::DType::F32, x.device())? };
+    let partial_indices = unsafe { candle_core::Tensor::empty((num_groups,), candle_core::DType::F32, x.device())? };
     let final_index = if metal_lm_head_argmax_gpu_reduce_disabled() {
         None
     } else {
-        Some(unsafe { Tensor::empty((1usize,), DType::F32, x.device())? })
+        Some(unsafe { candle_core::Tensor::empty((1usize,), candle_core::DType::F32, x.device())? })
     };
 
-    let Device::Metal(device) = x.device() else {
+    let candle_core::Device::Metal(device) = x.device() else {
         anyhow::bail!("metal lm head argmax requires Metal tensors");
     };
     let pipeline = metal_lm_head_argmax_pipeline(device)?;
@@ -6813,7 +6812,7 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result
         let (w_storage, w_layout) = weight_t.storage_and_layout();
         let (ps_storage, ps_layout) = partial_scores.storage_and_layout();
         let (pi_storage, pi_layout) = partial_indices.storage_and_layout();
-        let final_storage_and_layout = final_index.as_ref().map(Tensor::storage_and_layout);
+        let final_storage_and_layout = final_index.as_ref().map(candle_core::Tensor::storage_and_layout);
 
         let x_metal = match &*x_storage {
             kiln_tensor::metal_types::Storage::Metal(s) => s,
@@ -6851,7 +6850,7 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result
             partial_indices.dtype(),
         );
         let final_buf = final_metal.map(|(storage, layout)| {
-            kiln_tensor::metal_types::buffer_o(storage.buffer(), layout, DType::F32)
+            kiln_tensor::metal_types::buffer_o(storage.buffer(), layout, candle_core::DType::F32)
         });
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
@@ -6933,7 +6932,7 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result
     Ok(best_idx)
 }
 
-pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Vec<u32>> {
+pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<Vec<u32>> {
     anyhow::ensure!(
         metal_lm_head_argmax_rows_supports(x, weight_t),
         "metal lm head row argmax supports only BF16 [B,1,H] x [H,V] on Metal with <= 262144 vocab"
@@ -6943,15 +6942,15 @@ pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &Tensor, weight_t: &Tensor) -> R
 
     let chunk_width = 256usize;
     let num_groups = vocab.div_ceil(chunk_width);
-    let partial_scores = unsafe { Tensor::empty((batch, num_groups), DType::F32, x.device())? };
-    let partial_indices = unsafe { Tensor::empty((batch, num_groups), DType::F32, x.device())? };
+    let partial_scores = unsafe { candle_core::Tensor::empty((batch, num_groups), candle_core::DType::F32, x.device())? };
+    let partial_indices = unsafe { candle_core::Tensor::empty((batch, num_groups), candle_core::DType::F32, x.device())? };
     let final_indices = if metal_lm_head_argmax_gpu_reduce_disabled() {
         None
     } else {
-        Some(unsafe { Tensor::empty((batch,), DType::F32, x.device())? })
+        Some(unsafe { candle_core::Tensor::empty((batch,), candle_core::DType::F32, x.device())? })
     };
 
-    let Device::Metal(device) = x.device() else {
+    let candle_core::Device::Metal(device) = x.device() else {
         anyhow::bail!("metal lm head row argmax requires Metal tensors");
     };
     let pipeline = metal_lm_head_argmax_batch_pipeline(device)?;
@@ -6969,7 +6968,7 @@ pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &Tensor, weight_t: &Tensor) -> R
         let (w_storage, w_layout) = weight_t.storage_and_layout();
         let (ps_storage, ps_layout) = partial_scores.storage_and_layout();
         let (pi_storage, pi_layout) = partial_indices.storage_and_layout();
-        let final_storage_and_layout = final_indices.as_ref().map(Tensor::storage_and_layout);
+        let final_storage_and_layout = final_indices.as_ref().map(candle_core::Tensor::storage_and_layout);
 
         let x_metal = match &*x_storage {
             kiln_tensor::metal_types::Storage::Metal(s) => s,
@@ -7007,7 +7006,7 @@ pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &Tensor, weight_t: &Tensor) -> R
             partial_indices.dtype(),
         );
         let final_buf = final_metal.map(|(storage, layout)| {
-            kiln_tensor::metal_types::buffer_o(storage.buffer(), layout, DType::F32)
+            kiln_tensor::metal_types::buffer_o(storage.buffer(), layout, candle_core::DType::F32)
         });
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
@@ -7094,13 +7093,13 @@ pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &Tensor, weight_t: &Tensor) -> R
     Ok(out)
 }
 
-pub(crate) fn metal_mlp_gate_up_supports(x: &Tensor, gate_t: &Tensor, up_t: &Tensor) -> bool {
-    if x.dtype() != DType::BF16 || gate_t.dtype() != DType::BF16 || up_t.dtype() != DType::BF16 {
+pub(crate) fn metal_mlp_gate_up_supports(x: &candle_core::Tensor, gate_t: &candle_core::Tensor, up_t: &candle_core::Tensor) -> bool {
+    if x.dtype() != candle_core::DType::BF16 || gate_t.dtype() != candle_core::DType::BF16 || up_t.dtype() != candle_core::DType::BF16 {
         return false;
     }
-    if !matches!(x.device(), Device::Metal(_))
-        || !matches!(gate_t.device(), Device::Metal(_))
-        || !matches!(up_t.device(), Device::Metal(_))
+    if !matches!(x.device(), candle_core::Device::Metal(_))
+        || !matches!(gate_t.device(), candle_core::Device::Metal(_))
+        || !matches!(up_t.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
@@ -7133,7 +7132,7 @@ pub(crate) fn metal_mlp_gate_up_supports(x: &Tensor, gate_t: &Tensor, up_t: &Ten
         && total <= u32::MAX as usize
 }
 
-pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor) -> Result<Tensor> {
+pub(crate) fn metal_mlp_gate_up_bf16(x: &candle_core::Tensor, gate_t: &candle_core::Tensor, up_t: &candle_core::Tensor) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_mlp_gate_up_supports(x, gate_t, up_t),
         "metal mlp gate/up supports only BF16 [B,1,H] x [H,I] on Metal"
@@ -7160,9 +7159,9 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
     let total = row_groups * intermediate.div_ceil(2);
 
     // The kernel writes every row/intermediate element.
-    let out = unsafe { Tensor::empty((batch, seq_len, intermediate), DType::BF16, x.device())? };
+    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, intermediate), candle_core::DType::BF16, x.device())? };
 
-    let Device::Metal(device) = x.device() else {
+    let candle_core::Device::Metal(device) = x.device() else {
         anyhow::bail!("metal mlp gate/up requires Metal tensors");
     };
     let encoder = device.command_encoder()?;
@@ -7263,14 +7262,14 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
     Ok(out)
 }
 
-pub(crate) fn metal_mlp_silu_mul_supports(gate: &Tensor, up: &Tensor) -> bool {
+pub(crate) fn metal_mlp_silu_mul_supports(gate: &candle_core::Tensor, up: &candle_core::Tensor) -> bool {
     if metal_mlp_silu_mul_disabled() {
         return false;
     }
-    if gate.dtype() != DType::BF16 || up.dtype() != DType::BF16 {
+    if gate.dtype() != candle_core::DType::BF16 || up.dtype() != candle_core::DType::BF16 {
         return false;
     }
-    if !matches!(gate.device(), Device::Metal(_)) || !matches!(up.device(), Device::Metal(_)) {
+    if !matches!(gate.device(), candle_core::Device::Metal(_)) || !matches!(up.device(), candle_core::Device::Metal(_)) {
         return false;
     }
     if !gate.is_contiguous() || !up.is_contiguous() || gate.shape() != up.shape() {
@@ -7279,7 +7278,7 @@ pub(crate) fn metal_mlp_silu_mul_supports(gate: &Tensor, up: &Tensor) -> bool {
     gate.elem_count() > 0 && gate.elem_count() <= u32::MAX as usize
 }
 
-pub(crate) fn metal_mlp_silu_mul_bf16(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+pub(crate) fn metal_mlp_silu_mul_bf16(gate: &candle_core::Tensor, up: &candle_core::Tensor) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_mlp_silu_mul_supports(gate, up),
         "metal mlp silu*mul supports only matching contiguous BF16 Metal tensors"
@@ -7287,9 +7286,9 @@ pub(crate) fn metal_mlp_silu_mul_bf16(gate: &Tensor, up: &Tensor) -> Result<Tens
     let total = gate.elem_count();
     let gate = gate.contiguous()?;
     let up = up.contiguous()?;
-    let out = unsafe { Tensor::empty(gate.dims(), DType::BF16, gate.device())? };
+    let out = unsafe { candle_core::Tensor::empty(gate.dims(), candle_core::DType::BF16, gate.device())? };
 
-    let Device::Metal(device) = gate.device() else {
+    let candle_core::Device::Metal(device) = gate.device() else {
         anyhow::bail!("metal mlp silu*mul requires Metal tensors");
     };
     let pipeline = metal_mlp_silu_mul_pipeline(device)?;
@@ -7345,14 +7344,14 @@ pub(crate) fn metal_mlp_silu_mul_bf16(gate: &Tensor, up: &Tensor) -> Result<Tens
     Ok(out)
 }
 
-pub(crate) fn metal_attn_gate_sigmoid_mul_supports(x: &Tensor, gate: &Tensor) -> bool {
+pub(crate) fn metal_attn_gate_sigmoid_mul_supports(x: &candle_core::Tensor, gate: &candle_core::Tensor) -> bool {
     if metal_attn_gate_fusion_disabled() {
         return false;
     }
-    if x.dtype() != DType::BF16 || gate.dtype() != DType::BF16 {
+    if x.dtype() != candle_core::DType::BF16 || gate.dtype() != candle_core::DType::BF16 {
         return false;
     }
-    if !matches!(x.device(), Device::Metal(_)) || !matches!(gate.device(), Device::Metal(_)) {
+    if !matches!(x.device(), candle_core::Device::Metal(_)) || !matches!(gate.device(), candle_core::Device::Metal(_)) {
         return false;
     }
     if !x.is_contiguous() || !gate.is_contiguous() {
@@ -7379,7 +7378,7 @@ pub(crate) fn metal_attn_gate_sigmoid_mul_supports(x: &Tensor, gate: &Tensor) ->
         && total <= u32::MAX as usize
 }
 
-pub(crate) fn metal_attn_gate_sigmoid_mul_bf16(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
+pub(crate) fn metal_attn_gate_sigmoid_mul_bf16(x: &candle_core::Tensor, gate: &candle_core::Tensor) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_attn_gate_sigmoid_mul_supports(x, gate),
         "metal attn gate sigmoid/mul supports only BF16 [B,1,H] tensors on Metal"
@@ -7388,9 +7387,9 @@ pub(crate) fn metal_attn_gate_sigmoid_mul_bf16(x: &Tensor, gate: &Tensor) -> Res
     let total = batch * seq_len * hidden;
 
     // The kernel writes every hidden element exactly once.
-    let out = unsafe { Tensor::empty((batch, seq_len, hidden), DType::BF16, x.device())? };
+    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, hidden), candle_core::DType::BF16, x.device())? };
 
-    let Device::Metal(device) = x.device() else {
+    let candle_core::Device::Metal(device) = x.device() else {
         anyhow::bail!("metal attn gate sigmoid/mul requires Metal tensors");
     };
     let pipeline = metal_attn_gate_sigmoid_mul_pipeline(device)?;
@@ -7445,14 +7444,14 @@ pub(crate) fn metal_attn_gate_sigmoid_mul_bf16(x: &Tensor, gate: &Tensor) -> Res
     Ok(out)
 }
 
-pub(crate) fn metal_transposed_coop_gemv_supports(x: &Tensor, weight_t: &Tensor) -> bool {
+pub(crate) fn metal_transposed_coop_gemv_supports(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> bool {
     if metal_transposed_coop_gemv_disabled() {
         return false;
     }
-    if x.dtype() != DType::BF16 || weight_t.dtype() != DType::BF16 {
+    if x.dtype() != candle_core::DType::BF16 || weight_t.dtype() != candle_core::DType::BF16 {
         return false;
     }
-    if !matches!(x.device(), Device::Metal(_)) || !matches!(weight_t.device(), Device::Metal(_)) {
+    if !matches!(x.device(), candle_core::Device::Metal(_)) || !matches!(weight_t.device(), candle_core::Device::Metal(_)) {
         return false;
     }
     if !x.is_contiguous() || !weight_t.is_contiguous() {
@@ -7475,16 +7474,16 @@ pub(crate) fn metal_transposed_coop_gemv_supports(x: &Tensor, weight_t: &Tensor)
 }
 
 pub(crate) fn metal_transposed_coop_gemv_decode_batch_supports(
-    x: &Tensor,
-    weight_t: &Tensor,
+    x: &candle_core::Tensor,
+    weight_t: &candle_core::Tensor,
 ) -> bool {
     if metal_transposed_coop_gemv_disabled() {
         return false;
     }
-    if x.dtype() != DType::BF16 || weight_t.dtype() != DType::BF16 {
+    if x.dtype() != candle_core::DType::BF16 || weight_t.dtype() != candle_core::DType::BF16 {
         return false;
     }
-    if !matches!(x.device(), Device::Metal(_)) || !matches!(weight_t.device(), Device::Metal(_)) {
+    if !matches!(x.device(), candle_core::Device::Metal(_)) || !matches!(weight_t.device(), candle_core::Device::Metal(_)) {
         return false;
     }
     if !x.is_contiguous() || !weight_t.is_contiguous() {
@@ -7511,7 +7510,7 @@ pub(crate) fn metal_transposed_coop_gemv_decode_batch_supports(
         && total <= u32::MAX as usize
 }
 
-pub(crate) fn metal_transposed_coop_gemv_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor> {
+pub(crate) fn metal_transposed_coop_gemv_bf16(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<candle_core::Tensor> {
     if metal_transposed_coop_gemv_decode_batch_supports(x, weight_t) {
         return metal_transposed_coop_gemv_batch_bf16(x, weight_t);
     }
@@ -7526,10 +7525,10 @@ pub(crate) fn metal_transposed_coop_gemv_bf16(x: &Tensor, weight_t: &Tensor) -> 
 }
 
 fn metal_transposed_coop_gemv_bf16_with_tile(
-    x: &Tensor,
-    weight_t: &Tensor,
+    x: &candle_core::Tensor,
+    weight_t: &candle_core::Tensor,
     tile: MetalTransposedCoopGemvTile,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_transposed_coop_gemv_supports(x, weight_t),
         "metal transposed coop GEMV supports only BF16 [1,1,K] x [K,N] on Metal"
@@ -7538,9 +7537,9 @@ fn metal_transposed_coop_gemv_bf16_with_tile(
     let (_, output_dim) = weight_t.dims2()?;
 
     // The kernel writes every output channel exactly once.
-    let out = unsafe { Tensor::empty((1usize, 1usize, output_dim), DType::BF16, x.device())? };
+    let out = unsafe { candle_core::Tensor::empty((1usize, 1usize, output_dim), candle_core::DType::BF16, x.device())? };
 
-    let Device::Metal(device) = x.device() else {
+    let candle_core::Device::Metal(device) = x.device() else {
         anyhow::bail!("metal transposed coop GEMV requires Metal tensors");
     };
     let pipeline = metal_transposed_coop_gemv_pipeline(device, tile)?;
@@ -7598,7 +7597,7 @@ fn metal_transposed_coop_gemv_bf16_with_tile(
     Ok(out)
 }
 
-fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor> {
+fn metal_transposed_coop_gemv_batch_bf16(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_transposed_coop_gemv_decode_batch_supports(x, weight_t),
         "metal batch transposed coop GEMV supports only BF16 [B,1,K] x [K,N] with B > 1 on Metal"
@@ -7627,9 +7626,9 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
     let row_groups = batch.div_ceil(row_group_size);
 
     // The kernel writes every batch/output channel exactly once.
-    let out = unsafe { Tensor::empty((batch, 1usize, output_dim), DType::BF16, x.device())? };
+    let out = unsafe { candle_core::Tensor::empty((batch, 1usize, output_dim), candle_core::DType::BF16, x.device())? };
 
-    let Device::Metal(device) = x.device() else {
+    let candle_core::Device::Metal(device) = x.device() else {
         anyhow::bail!("metal batch transposed coop GEMV requires Metal tensors");
     };
     let pipeline = if row_triple_tile8_enabled {
@@ -7716,10 +7715,10 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
 }
 
 pub(crate) fn metal_fused_qkv_transposed_coop_gemv_supports(
-    x: &Tensor,
-    q_t: &Tensor,
-    k_t: &Tensor,
-    v_t: &Tensor,
+    x: &candle_core::Tensor,
+    q_t: &candle_core::Tensor,
+    k_t: &candle_core::Tensor,
+    v_t: &candle_core::Tensor,
 ) -> bool {
     if metal_fused_qkv_proj_disabled() {
         return false;
@@ -7747,11 +7746,11 @@ pub(crate) fn metal_fused_qkv_transposed_coop_gemv_supports(
 }
 
 pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
-    x: &Tensor,
-    q_t: &Tensor,
-    k_t: &Tensor,
-    v_t: &Tensor,
-) -> Result<(Tensor, Tensor, Tensor)> {
+    x: &candle_core::Tensor,
+    q_t: &candle_core::Tensor,
+    k_t: &candle_core::Tensor,
+    v_t: &candle_core::Tensor,
+) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     anyhow::ensure!(
         metal_fused_qkv_transposed_coop_gemv_supports(x, q_t, k_t, v_t),
         "metal fused QKV projection supports only BF16 [1,1,K] x [K,Nq/Nk/Nv] on Metal"
@@ -7766,12 +7765,12 @@ pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
     // tile8 cooperative GEMV mapping. Back the three result views with one
     // allocation to avoid repeated small Metal buffer allocations in decode.
     let fused_out =
-        unsafe { Tensor::empty((1usize, 1usize, total_output_dim), DType::BF16, x.device())? };
+        unsafe { candle_core::Tensor::empty((1usize, 1usize, total_output_dim), candle_core::DType::BF16, x.device())? };
     let q_out = fused_out.narrow(2, 0, q_output_dim)?;
     let k_out = fused_out.narrow(2, q_output_dim, k_output_dim)?;
     let v_out = fused_out.narrow(2, q_output_dim + k_output_dim, v_output_dim)?;
 
-    let Device::Metal(device) = x.device() else {
+    let candle_core::Device::Metal(device) = x.device() else {
         anyhow::bail!("metal fused QKV projection requires Metal tensors");
     };
     let pipeline = metal_fused_qkv_transposed_coop_gemv_pipeline(device)?;
@@ -7877,25 +7876,25 @@ pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
 }
 
 pub(crate) fn metal_lora_add_decode_supports(
-    base: &Tensor,
-    x: &Tensor,
-    a: &Tensor,
-    b: &Tensor,
+    base: &candle_core::Tensor,
+    x: &candle_core::Tensor,
+    a: &candle_core::Tensor,
+    b: &candle_core::Tensor,
 ) -> bool {
     if metal_lora_delta_decode_disabled() {
         return false;
     }
-    if base.dtype() != DType::BF16
-        || x.dtype() != DType::BF16
-        || a.dtype() != DType::BF16
-        || b.dtype() != DType::BF16
+    if base.dtype() != candle_core::DType::BF16
+        || x.dtype() != candle_core::DType::BF16
+        || a.dtype() != candle_core::DType::BF16
+        || b.dtype() != candle_core::DType::BF16
     {
         return false;
     }
-    if !matches!(base.device(), Device::Metal(_))
-        || !matches!(x.device(), Device::Metal(_))
-        || !matches!(a.device(), Device::Metal(_))
-        || !matches!(b.device(), Device::Metal(_))
+    if !matches!(base.device(), candle_core::Device::Metal(_))
+        || !matches!(x.device(), candle_core::Device::Metal(_))
+        || !matches!(a.device(), candle_core::Device::Metal(_))
+        || !matches!(b.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
@@ -7943,12 +7942,12 @@ pub(crate) fn metal_lora_add_decode_supports(
 }
 
 pub(crate) fn metal_lora_add_decode_bf16(
-    base: &Tensor,
-    x: &Tensor,
-    a: &Tensor,
-    b: &Tensor,
+    base: &candle_core::Tensor,
+    x: &candle_core::Tensor,
+    a: &candle_core::Tensor,
+    b: &candle_core::Tensor,
     scale: f32,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_lora_add_decode_supports(base, x, a, b),
         "metal LoRA decode add supports only contiguous BF16 Metal base/x/A/B decode tensors"
@@ -7957,10 +7956,10 @@ pub(crate) fn metal_lora_add_decode_bf16(
     let (_, _, output_dim) = base.dims3()?;
     let (rank, _) = a.dims2()?;
 
-    let hidden = unsafe { Tensor::empty((batch, rank), DType::BF16, x.device())? };
-    let out = unsafe { Tensor::empty((batch, 1usize, output_dim), DType::BF16, base.device())? };
+    let hidden = unsafe { candle_core::Tensor::empty((batch, rank), candle_core::DType::BF16, x.device())? };
+    let out = unsafe { candle_core::Tensor::empty((batch, 1usize, output_dim), candle_core::DType::BF16, base.device())? };
 
-    let Device::Metal(device) = x.device() else {
+    let candle_core::Device::Metal(device) = x.device() else {
         anyhow::bail!("metal LoRA decode add requires Metal tensors");
     };
     let encoder = device.command_encoder()?;
@@ -8088,25 +8087,25 @@ pub(crate) fn metal_lora_add_decode_bf16(
 }
 
 fn metal_gdn_in_proj_decode_supports(
-    x: &Tensor,
-    qkv_t: &Tensor,
-    z_t: &Tensor,
-    a_t: &Tensor,
-    b_t: &Tensor,
+    x: &candle_core::Tensor,
+    qkv_t: &candle_core::Tensor,
+    z_t: &candle_core::Tensor,
+    a_t: &candle_core::Tensor,
+    b_t: &candle_core::Tensor,
 ) -> bool {
-    if x.dtype() != DType::BF16
-        || qkv_t.dtype() != DType::BF16
-        || z_t.dtype() != DType::BF16
-        || a_t.dtype() != DType::BF16
-        || b_t.dtype() != DType::BF16
+    if x.dtype() != candle_core::DType::BF16
+        || qkv_t.dtype() != candle_core::DType::BF16
+        || z_t.dtype() != candle_core::DType::BF16
+        || a_t.dtype() != candle_core::DType::BF16
+        || b_t.dtype() != candle_core::DType::BF16
     {
         return false;
     }
-    if !matches!(x.device(), Device::Metal(_))
-        || !matches!(qkv_t.device(), Device::Metal(_))
-        || !matches!(z_t.device(), Device::Metal(_))
-        || !matches!(a_t.device(), Device::Metal(_))
-        || !matches!(b_t.device(), Device::Metal(_))
+    if !matches!(x.device(), candle_core::Device::Metal(_))
+        || !matches!(qkv_t.device(), candle_core::Device::Metal(_))
+        || !matches!(z_t.device(), candle_core::Device::Metal(_))
+        || !matches!(a_t.device(), candle_core::Device::Metal(_))
+        || !matches!(b_t.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
@@ -8160,12 +8159,12 @@ fn metal_gdn_in_proj_decode_supports(
 }
 
 fn metal_gdn_in_proj_decode_bf16(
-    x: &Tensor,
-    qkv_t: &Tensor,
-    z_t: &Tensor,
-    a_t: &Tensor,
-    b_t: &Tensor,
-) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+    x: &candle_core::Tensor,
+    qkv_t: &candle_core::Tensor,
+    z_t: &candle_core::Tensor,
+    a_t: &candle_core::Tensor,
+    b_t: &candle_core::Tensor,
+) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     anyhow::ensure!(
         metal_gdn_in_proj_decode_supports(x, qkv_t, z_t, a_t, b_t),
         "metal gdn in-proj supports only BF16 [B,1,H] x [H,*] on Metal"
@@ -8194,7 +8193,7 @@ fn metal_gdn_in_proj_decode_bf16(
     // tensor remains contiguous for the following fused decode kernels.
     let (qkv_out, z_out, a_out, b_out) = if batch == 1 {
         let proj_out =
-            unsafe { Tensor::empty((1usize, 1usize, output_total), DType::BF16, x.device())? };
+            unsafe { candle_core::Tensor::empty((1usize, 1usize, output_total), candle_core::DType::BF16, x.device())? };
         (
             proj_out.narrow(2, 0, qkv_dim)?,
             proj_out.narrow(2, qkv_dim, z_dim)?,
@@ -8203,14 +8202,14 @@ fn metal_gdn_in_proj_decode_bf16(
         )
     } else {
         (
-            unsafe { Tensor::empty((batch, 1usize, qkv_dim), DType::BF16, x.device())? },
-            unsafe { Tensor::empty((batch, 1usize, z_dim), DType::BF16, x.device())? },
-            unsafe { Tensor::empty((batch, 1usize, nv), DType::BF16, x.device())? },
-            unsafe { Tensor::empty((batch, 1usize, nv), DType::BF16, x.device())? },
+            unsafe { candle_core::Tensor::empty((batch, 1usize, qkv_dim), candle_core::DType::BF16, x.device())? },
+            unsafe { candle_core::Tensor::empty((batch, 1usize, z_dim), candle_core::DType::BF16, x.device())? },
+            unsafe { candle_core::Tensor::empty((batch, 1usize, nv), candle_core::DType::BF16, x.device())? },
+            unsafe { candle_core::Tensor::empty((batch, 1usize, nv), candle_core::DType::BF16, x.device())? },
         )
     };
 
-    let Device::Metal(device) = x.device() else {
+    let candle_core::Device::Metal(device) = x.device() else {
         anyhow::bail!("metal gdn in-proj requires Metal tensors");
     };
     let pipeline = metal_gdn_in_proj_pipeline(device)?;
@@ -8352,13 +8351,13 @@ fn metal_gdn_in_proj_decode_bf16(
 }
 
 pub(crate) fn metal_rotary_embedding_bf16(
-    q: &Tensor,
-    k: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    cos: &candle_core::Tensor,
+    sin: &candle_core::Tensor,
     head_dim: usize,
     rotary_dim: usize,
-) -> Result<(Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
     anyhow::ensure!(
         metal_rotary_embedding_supports(q, k, cos, sin, head_dim, rotary_dim),
         "metal rotary qk unsupported shape"
@@ -8371,11 +8370,11 @@ pub(crate) fn metal_rotary_embedding_bf16(
     let q_shape = q.dims().to_vec();
     let k_shape = k.dims().to_vec();
     // SAFETY: the kernel dispatch writes every Q output element exactly once.
-    let q_out = unsafe { Tensor::empty(q_shape.as_slice(), DType::BF16, q.device())? };
+    let q_out = unsafe { candle_core::Tensor::empty(q_shape.as_slice(), candle_core::DType::BF16, q.device())? };
     // SAFETY: the kernel dispatch writes every K output element exactly once.
-    let k_out = unsafe { Tensor::empty(k_shape.as_slice(), DType::BF16, k.device())? };
+    let k_out = unsafe { candle_core::Tensor::empty(k_shape.as_slice(), candle_core::DType::BF16, k.device())? };
 
-    let Device::Metal(device) = q.device() else {
+    let candle_core::Device::Metal(device) = q.device() else {
         anyhow::bail!("metal rotary qk requires Metal tensors");
     };
     let pipeline = metal_rotary_qk_pipeline(device)?;
@@ -8473,15 +8472,15 @@ pub(crate) fn metal_rotary_embedding_bf16(
 }
 
 fn metal_paged_kv_head_major_read_supports(
-    k_pool: &Tensor,
-    v_pool: &Tensor,
+    k_pool: &candle_core::Tensor,
+    v_pool: &candle_core::Tensor,
     start_slot: usize,
     seq_len: usize,
 ) -> bool {
-    if seq_len == 0 || k_pool.dtype() != DType::BF16 || v_pool.dtype() != DType::BF16 {
+    if seq_len == 0 || k_pool.dtype() != candle_core::DType::BF16 || v_pool.dtype() != candle_core::DType::BF16 {
         return false;
     }
-    if !matches!(k_pool.device(), Device::Metal(_)) || !matches!(v_pool.device(), Device::Metal(_))
+    if !matches!(k_pool.device(), candle_core::Device::Metal(_)) || !matches!(v_pool.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
@@ -8511,11 +8510,11 @@ fn metal_paged_kv_head_major_read_supports(
 }
 
 fn metal_paged_kv_head_major_read_bf16(
-    k_pool: &Tensor,
-    v_pool: &Tensor,
+    k_pool: &candle_core::Tensor,
+    v_pool: &candle_core::Tensor,
     start_slot: usize,
     seq_len: usize,
-) -> Result<(Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
     anyhow::ensure!(
         metal_paged_kv_head_major_read_supports(k_pool, v_pool, start_slot, seq_len),
         "metal paged kv head-major read unsupported shape"
@@ -8523,11 +8522,11 @@ fn metal_paged_kv_head_major_read_bf16(
     let (_, heads, head_dim) = k_pool.dims3()?;
     let out_shape = (1usize, heads, seq_len, head_dim);
     // SAFETY: the kernel dispatch covers exactly every element in `out_shape`.
-    let k_out = unsafe { Tensor::empty(out_shape, DType::BF16, k_pool.device())? };
+    let k_out = unsafe { candle_core::Tensor::empty(out_shape, candle_core::DType::BF16, k_pool.device())? };
     // SAFETY: the kernel dispatch covers exactly every element in `out_shape`.
-    let v_out = unsafe { Tensor::empty(out_shape, DType::BF16, v_pool.device())? };
+    let v_out = unsafe { candle_core::Tensor::empty(out_shape, candle_core::DType::BF16, v_pool.device())? };
 
-    let Device::Metal(device) = k_pool.device() else {
+    let candle_core::Device::Metal(device) = k_pool.device() else {
         anyhow::bail!("metal paged kv read requires Metal tensors");
     };
     let pipeline = metal_paged_kv_head_major_read_pipeline(device)?;
@@ -8599,21 +8598,21 @@ fn metal_paged_kv_head_major_read_bf16(
 }
 
 fn metal_paged_attn_decode_contiguous_supports(
-    q: &Tensor,
-    k_pool: &Tensor,
-    v_pool: &Tensor,
+    q: &candle_core::Tensor,
+    k_pool: &candle_core::Tensor,
+    v_pool: &candle_core::Tensor,
     start_slot: usize,
     seq_len: usize,
 ) -> bool {
     if metal_paged_attn_decode_contiguous_disabled() {
         return false;
     }
-    if q.dtype() != DType::BF16 || k_pool.dtype() != DType::BF16 || v_pool.dtype() != DType::BF16 {
+    if q.dtype() != candle_core::DType::BF16 || k_pool.dtype() != candle_core::DType::BF16 || v_pool.dtype() != candle_core::DType::BF16 {
         return false;
     }
-    if !matches!(q.device(), Device::Metal(_))
-        || !matches!(k_pool.device(), Device::Metal(_))
-        || !matches!(v_pool.device(), Device::Metal(_))
+    if !matches!(q.device(), candle_core::Device::Metal(_))
+        || !matches!(k_pool.device(), candle_core::Device::Metal(_))
+        || !matches!(v_pool.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
@@ -8648,13 +8647,13 @@ fn metal_paged_attn_decode_contiguous_supports(
 }
 
 fn metal_paged_attn_decode_contiguous_bf16_d256(
-    q: &Tensor,
-    k_pool: &Tensor,
-    v_pool: &Tensor,
+    q: &candle_core::Tensor,
+    k_pool: &candle_core::Tensor,
+    v_pool: &candle_core::Tensor,
     start_slot: usize,
     seq_len: usize,
     softmax_scale: f32,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_paged_attn_decode_contiguous_supports(q, k_pool, v_pool, start_slot, seq_len),
         "metal contiguous paged decode attention unsupported shape"
@@ -8662,14 +8661,14 @@ fn metal_paged_attn_decode_contiguous_bf16_d256(
     let (_, q_heads, _, head_dim) = q.dims4()?;
     // SAFETY: the kernel writes one contiguous [1, 1, q_heads * head_dim] output.
     let out = unsafe {
-        Tensor::empty(
+        candle_core::Tensor::empty(
             (1usize, 1usize, q_heads * head_dim),
-            DType::BF16,
+            candle_core::DType::BF16,
             q.device(),
         )?
     };
 
-    let Device::Metal(device) = q.device() else {
+    let candle_core::Device::Metal(device) = q.device() else {
         anyhow::bail!("metal contiguous paged decode attention requires Metal tensors");
     };
     let pipeline = metal_paged_attn_decode_contiguous_pipeline(device)?;
@@ -8741,26 +8740,26 @@ fn metal_paged_attn_decode_contiguous_bf16_d256(
 
 #[allow(dead_code)]
 fn metal_paged_attn_decode_contiguous_batch_supports(
-    q: &Tensor,
-    k_pool: &Tensor,
-    v_pool: &Tensor,
-    start_slots: &Tensor,
+    q: &candle_core::Tensor,
+    k_pool: &candle_core::Tensor,
+    v_pool: &candle_core::Tensor,
+    start_slots: &candle_core::Tensor,
     seq_len: usize,
 ) -> bool {
     if metal_paged_attn_decode_contiguous_disabled() {
         return false;
     }
-    if q.dtype() != DType::BF16
-        || k_pool.dtype() != DType::BF16
-        || v_pool.dtype() != DType::BF16
-        || start_slots.dtype() != DType::U32
+    if q.dtype() != candle_core::DType::BF16
+        || k_pool.dtype() != candle_core::DType::BF16
+        || v_pool.dtype() != candle_core::DType::BF16
+        || start_slots.dtype() != candle_core::DType::U32
     {
         return false;
     }
-    if !matches!(q.device(), Device::Metal(_))
-        || !matches!(k_pool.device(), Device::Metal(_))
-        || !matches!(v_pool.device(), Device::Metal(_))
-        || !matches!(start_slots.device(), Device::Metal(_))
+    if !matches!(q.device(), candle_core::Device::Metal(_))
+        || !matches!(k_pool.device(), candle_core::Device::Metal(_))
+        || !matches!(v_pool.device(), candle_core::Device::Metal(_))
+        || !matches!(start_slots.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
@@ -8801,13 +8800,13 @@ fn metal_paged_attn_decode_contiguous_batch_supports(
 
 #[allow(dead_code)]
 fn metal_paged_attn_decode_contiguous_batch_bf16_d256(
-    q: &Tensor,
-    k_pool: &Tensor,
-    v_pool: &Tensor,
-    start_slots: &Tensor,
+    q: &candle_core::Tensor,
+    k_pool: &candle_core::Tensor,
+    v_pool: &candle_core::Tensor,
+    start_slots: &candle_core::Tensor,
     seq_len: usize,
     softmax_scale: f32,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_paged_attn_decode_contiguous_batch_supports(q, k_pool, v_pool, start_slots, seq_len),
         "metal contiguous paged batch decode attention unsupported shape"
@@ -8815,9 +8814,9 @@ fn metal_paged_attn_decode_contiguous_batch_bf16_d256(
     let (batch, q_heads, _, head_dim) = q.dims4()?;
     let (total_slots, _, _) = k_pool.dims3()?;
     let out =
-        unsafe { Tensor::empty((batch, 1usize, q_heads * head_dim), DType::BF16, q.device())? };
+        unsafe { candle_core::Tensor::empty((batch, 1usize, q_heads * head_dim), candle_core::DType::BF16, q.device())? };
 
-    let Device::Metal(device) = q.device() else {
+    let candle_core::Device::Metal(device) = q.device() else {
         anyhow::bail!("metal contiguous paged batch decode attention requires Metal tensors");
     };
     let pipeline = metal_paged_attn_decode_contiguous_batch_pipeline(device)?;
@@ -8902,30 +8901,30 @@ fn metal_paged_attn_decode_contiguous_batch_bf16_d256(
 
 #[allow(dead_code)]
 fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
-    q: &Tensor,
-    k_pool: &Tensor,
-    v_pool: &Tensor,
-    block_table: &Tensor,
-    seqused_k: &Tensor,
+    q: &candle_core::Tensor,
+    k_pool: &candle_core::Tensor,
+    v_pool: &candle_core::Tensor,
+    block_table: &candle_core::Tensor,
+    seqused_k: &candle_core::Tensor,
     max_seqlen_k: usize,
     page_block_size: usize,
 ) -> bool {
     if metal_paged_attn_decode_contiguous_disabled() {
         return false;
     }
-    if q.dtype() != DType::BF16
-        || k_pool.dtype() != DType::BF16
-        || v_pool.dtype() != DType::BF16
-        || block_table.dtype() != DType::U32
-        || seqused_k.dtype() != DType::I32
+    if q.dtype() != candle_core::DType::BF16
+        || k_pool.dtype() != candle_core::DType::BF16
+        || v_pool.dtype() != candle_core::DType::BF16
+        || block_table.dtype() != candle_core::DType::U32
+        || seqused_k.dtype() != candle_core::DType::I32
     {
         return false;
     }
-    if !matches!(q.device(), Device::Metal(_))
-        || !matches!(k_pool.device(), Device::Metal(_))
-        || !matches!(v_pool.device(), Device::Metal(_))
-        || !matches!(block_table.device(), Device::Metal(_))
-        || !matches!(seqused_k.device(), Device::Metal(_))
+    if !matches!(q.device(), candle_core::Device::Metal(_))
+        || !matches!(k_pool.device(), candle_core::Device::Metal(_))
+        || !matches!(v_pool.device(), candle_core::Device::Metal(_))
+        || !matches!(block_table.device(), candle_core::Device::Metal(_))
+        || !matches!(seqused_k.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
@@ -8975,15 +8974,15 @@ fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
 
 #[allow(dead_code)]
 fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
-    q: &Tensor,
-    k_pool: &Tensor,
-    v_pool: &Tensor,
-    block_table: &Tensor,
-    seqused_k: &Tensor,
+    q: &candle_core::Tensor,
+    k_pool: &candle_core::Tensor,
+    v_pool: &candle_core::Tensor,
+    block_table: &candle_core::Tensor,
+    seqused_k: &candle_core::Tensor,
     max_seqlen_k: usize,
     page_block_size: usize,
     softmax_scale: f32,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
             q,
@@ -9000,9 +8999,9 @@ fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
     let (total_slots, _, _) = k_pool.dims3()?;
     let (_, max_blocks_per_seq) = block_table.dims2()?;
     let out =
-        unsafe { Tensor::empty((batch, 1usize, q_heads, head_dim), DType::BF16, q.device())? };
+        unsafe { candle_core::Tensor::empty((batch, 1usize, q_heads, head_dim), candle_core::DType::BF16, q.device())? };
 
-    let Device::Metal(device) = q.device() else {
+    let candle_core::Device::Metal(device) = q.device() else {
         anyhow::bail!("metal dyn-seqlen paged batch decode attention requires Metal tensors");
     };
     let pipeline = metal_paged_attn_decode_contiguous_batch_dyn_seqlen_pipeline(device)?;
@@ -9101,12 +9100,12 @@ fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
 }
 
 fn metal_paged_kv_head_major_read_append_token_major_supports(
-    k_pool: &Tensor,
-    v_pool: &Tensor,
+    k_pool: &candle_core::Tensor,
+    v_pool: &candle_core::Tensor,
     start_slot: usize,
     prefix_len: usize,
-    k_tail: &Tensor,
-    v_tail: &Tensor,
+    k_tail: &candle_core::Tensor,
+    v_tail: &candle_core::Tensor,
 ) -> bool {
     if prefix_len == 0 {
         return false;
@@ -9114,10 +9113,10 @@ fn metal_paged_kv_head_major_read_append_token_major_supports(
     if !metal_paged_kv_head_major_read_supports(k_pool, v_pool, start_slot, prefix_len) {
         return false;
     }
-    if k_tail.dtype() != DType::BF16 || v_tail.dtype() != DType::BF16 {
+    if k_tail.dtype() != candle_core::DType::BF16 || v_tail.dtype() != candle_core::DType::BF16 {
         return false;
     }
-    if !matches!(k_tail.device(), Device::Metal(_)) || !matches!(v_tail.device(), Device::Metal(_))
+    if !matches!(k_tail.device(), candle_core::Device::Metal(_)) || !matches!(v_tail.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
@@ -9154,13 +9153,13 @@ fn metal_paged_kv_head_major_read_append_token_major_supports(
 }
 
 fn metal_paged_kv_head_major_read_append_token_major_bf16(
-    k_pool: &Tensor,
-    v_pool: &Tensor,
+    k_pool: &candle_core::Tensor,
+    v_pool: &candle_core::Tensor,
     start_slot: usize,
     prefix_len: usize,
-    k_tail: &Tensor,
-    v_tail: &Tensor,
-) -> Result<(Tensor, Tensor)> {
+    k_tail: &candle_core::Tensor,
+    v_tail: &candle_core::Tensor,
+) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
     anyhow::ensure!(
         metal_paged_kv_head_major_read_append_token_major_supports(
             k_pool, v_pool, start_slot, prefix_len, k_tail, v_tail,
@@ -9171,11 +9170,11 @@ fn metal_paged_kv_head_major_read_append_token_major_bf16(
     let total_len = prefix_len + tail_len;
     let out_shape = (1usize, heads, total_len, head_dim);
     // SAFETY: the kernel dispatch covers exactly every element in `out_shape`.
-    let k_out = unsafe { Tensor::empty(out_shape, DType::BF16, k_pool.device())? };
+    let k_out = unsafe { candle_core::Tensor::empty(out_shape, candle_core::DType::BF16, k_pool.device())? };
     // SAFETY: the kernel dispatch covers exactly every element in `out_shape`.
-    let v_out = unsafe { Tensor::empty(out_shape, DType::BF16, v_pool.device())? };
+    let v_out = unsafe { candle_core::Tensor::empty(out_shape, candle_core::DType::BF16, v_pool.device())? };
 
-    let Device::Metal(device) = k_pool.device() else {
+    let candle_core::Device::Metal(device) = k_pool.device() else {
         anyhow::bail!("metal paged kv read+append requires Metal tensors");
     };
     let pipeline = metal_paged_kv_head_major_read_append_token_major_pipeline(device)?;
@@ -9265,26 +9264,26 @@ fn metal_paged_kv_head_major_read_append_token_major_bf16(
 }
 
 pub(crate) fn metal_paged_kv_write_token_major_supports(
-    k_pool: &Tensor,
-    v_pool: &Tensor,
+    k_pool: &candle_core::Tensor,
+    v_pool: &candle_core::Tensor,
     slot: usize,
-    k: &Tensor,
-    v: &Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
 ) -> bool {
     if metal_paged_kv_write_token_major_disabled() {
         return false;
     }
-    if k_pool.dtype() != DType::BF16
-        || v_pool.dtype() != DType::BF16
-        || k.dtype() != DType::BF16
-        || v.dtype() != DType::BF16
+    if k_pool.dtype() != candle_core::DType::BF16
+        || v_pool.dtype() != candle_core::DType::BF16
+        || k.dtype() != candle_core::DType::BF16
+        || v.dtype() != candle_core::DType::BF16
     {
         return false;
     }
-    if !matches!(k_pool.device(), Device::Metal(_))
-        || !matches!(v_pool.device(), Device::Metal(_))
-        || !matches!(k.device(), Device::Metal(_))
-        || !matches!(v.device(), Device::Metal(_))
+    if !matches!(k_pool.device(), candle_core::Device::Metal(_))
+        || !matches!(v_pool.device(), candle_core::Device::Metal(_))
+        || !matches!(k.device(), candle_core::Device::Metal(_))
+        || !matches!(v.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
@@ -9325,18 +9324,18 @@ pub(crate) fn metal_paged_kv_write_token_major_supports(
 }
 
 pub(crate) fn metal_paged_kv_write_token_major_bf16(
-    k_pool: &Tensor,
-    v_pool: &Tensor,
+    k_pool: &candle_core::Tensor,
+    v_pool: &candle_core::Tensor,
     slot: usize,
-    k: &Tensor,
-    v: &Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
 ) -> Result<()> {
     anyhow::ensure!(
         metal_paged_kv_write_token_major_supports(k_pool, v_pool, slot, k, v),
         "metal paged kv token-major write unsupported shape"
     );
     let (_, heads, head_dim) = k_pool.dims3()?;
-    let Device::Metal(device) = k_pool.device() else {
+    let candle_core::Device::Metal(device) = k_pool.device() else {
         anyhow::bail!("metal paged kv write requires Metal tensors");
     };
     let pipeline = metal_paged_kv_write_token_major_pipeline(device)?;
@@ -9405,28 +9404,28 @@ pub(crate) fn metal_paged_kv_write_token_major_bf16(
 
 #[allow(dead_code)]
 pub(crate) fn metal_paged_kv_write_token_major_batch_supports(
-    k_pool: &Tensor,
-    v_pool: &Tensor,
-    slots: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
+    k_pool: &candle_core::Tensor,
+    v_pool: &candle_core::Tensor,
+    slots: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
 ) -> bool {
     if metal_paged_kv_write_token_major_disabled() {
         return false;
     }
-    if k_pool.dtype() != DType::BF16
-        || v_pool.dtype() != DType::BF16
-        || slots.dtype() != DType::U32
-        || k.dtype() != DType::BF16
-        || v.dtype() != DType::BF16
+    if k_pool.dtype() != candle_core::DType::BF16
+        || v_pool.dtype() != candle_core::DType::BF16
+        || slots.dtype() != candle_core::DType::U32
+        || k.dtype() != candle_core::DType::BF16
+        || v.dtype() != candle_core::DType::BF16
     {
         return false;
     }
-    if !matches!(k_pool.device(), Device::Metal(_))
-        || !matches!(v_pool.device(), Device::Metal(_))
-        || !matches!(slots.device(), Device::Metal(_))
-        || !matches!(k.device(), Device::Metal(_))
-        || !matches!(v.device(), Device::Metal(_))
+    if !matches!(k_pool.device(), candle_core::Device::Metal(_))
+        || !matches!(v_pool.device(), candle_core::Device::Metal(_))
+        || !matches!(slots.device(), candle_core::Device::Metal(_))
+        || !matches!(k.device(), candle_core::Device::Metal(_))
+        || !matches!(v.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
@@ -9478,11 +9477,11 @@ pub(crate) fn metal_paged_kv_write_token_major_batch_supports(
 
 #[allow(dead_code)]
 pub(crate) fn metal_paged_kv_write_token_major_batch_bf16(
-    k_pool: &Tensor,
-    v_pool: &Tensor,
-    slots: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
+    k_pool: &candle_core::Tensor,
+    v_pool: &candle_core::Tensor,
+    slots: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
 ) -> Result<()> {
     anyhow::ensure!(
         metal_paged_kv_write_token_major_batch_supports(k_pool, v_pool, slots, k, v),
@@ -9490,7 +9489,7 @@ pub(crate) fn metal_paged_kv_write_token_major_batch_bf16(
     );
     let (total_slots, heads, head_dim) = k_pool.dims3()?;
     let (batch, _, _, _) = k.dims4()?;
-    let Device::Metal(device) = k_pool.device() else {
+    let candle_core::Device::Metal(device) = k_pool.device() else {
         anyhow::bail!("metal paged kv batch write requires Metal tensors");
     };
     let pipeline = metal_paged_kv_write_token_major_batch_pipeline(device)?;
@@ -9567,7 +9566,7 @@ pub(crate) fn metal_paged_kv_write_token_major_batch_bf16(
     Ok(())
 }
 
-pub(crate) fn metal_rms_norm_bf16(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+pub(crate) fn metal_rms_norm_bf16(x: &candle_core::Tensor, weight: &candle_core::Tensor, eps: f32) -> Result<candle_core::Tensor> {
     let x_dims = x.dims().to_vec();
     let hidden = *x_dims
         .last()
@@ -9582,13 +9581,13 @@ pub(crate) fn metal_rms_norm_bf16(x: &Tensor, weight: &Tensor, eps: f32) -> Resu
     let x = x.contiguous()?;
     let weight = weight.contiguous()?;
     // The kernel writes every hidden element for every row.
-    let out = unsafe { Tensor::empty(x_dims.as_slice(), DType::BF16, x.device())? };
+    let out = unsafe { candle_core::Tensor::empty(x_dims.as_slice(), candle_core::DType::BF16, x.device())? };
 
     if rows == 0 {
         return Ok(out);
     }
 
-    let Device::Metal(device) = x.device() else {
+    let candle_core::Device::Metal(device) = x.device() else {
         anyhow::bail!("metal rmsnorm requires a Metal tensor");
     };
     let pipeline = metal_rms_norm_pipeline(device)?;
@@ -9650,11 +9649,11 @@ pub(crate) fn metal_rms_norm_bf16(x: &Tensor, weight: &Tensor, eps: f32) -> Resu
 }
 
 pub(crate) fn metal_gdn_qk_norm_f32_bf16(
-    q: &Tensor,
-    k: &Tensor,
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
     q_scale: f32,
     eps: f32,
-) -> Result<(Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
     let dims = q.dims().to_vec();
     let hidden = *dims
         .last()
@@ -9670,14 +9669,14 @@ pub(crate) fn metal_gdn_qk_norm_f32_bf16(
     let q = q.contiguous()?;
     let k = k.contiguous()?;
     // The kernel writes every Q/K element for every row.
-    let q_out = unsafe { Tensor::empty(dims.as_slice(), DType::BF16, q.device())? };
-    let k_out = unsafe { Tensor::empty(dims.as_slice(), DType::BF16, q.device())? };
+    let q_out = unsafe { candle_core::Tensor::empty(dims.as_slice(), candle_core::DType::BF16, q.device())? };
+    let k_out = unsafe { candle_core::Tensor::empty(dims.as_slice(), candle_core::DType::BF16, q.device())? };
 
     if rows == 0 {
         return Ok((q_out, k_out));
     }
 
-    let Device::Metal(device) = q.device() else {
+    let candle_core::Device::Metal(device) = q.device() else {
         anyhow::bail!("metal gdn qk norm requires Metal tensors");
     };
     let pipeline = metal_gdn_qk_norm_pipeline(device)?;
@@ -9747,12 +9746,12 @@ pub(crate) fn metal_gdn_qk_norm_f32_bf16(
 }
 
 pub(crate) fn metal_gdn_qk_norm_gqa_f32_bf16(
-    q: &Tensor,
-    k: &Tensor,
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
     nv: usize,
     q_scale: f32,
     eps: f32,
-) -> Result<(Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
     anyhow::ensure!(
         metal_gdn_qk_norm_gqa_supports(q, k, nv),
         "metal gdn qk norm gqa unsupported shape"
@@ -9771,14 +9770,14 @@ pub(crate) fn metal_gdn_qk_norm_gqa_f32_bf16(
     let q = q.contiguous()?;
     let k = k.contiguous()?;
     // Each source head writes all replicated value-head outputs.
-    let q_out = unsafe { Tensor::empty((batch, seq_len, nv, hidden), DType::BF16, q.device())? };
-    let k_out = unsafe { Tensor::empty((batch, seq_len, nv, hidden), DType::BF16, q.device())? };
+    let q_out = unsafe { candle_core::Tensor::empty((batch, seq_len, nv, hidden), candle_core::DType::BF16, q.device())? };
+    let k_out = unsafe { candle_core::Tensor::empty((batch, seq_len, nv, hidden), candle_core::DType::BF16, q.device())? };
 
     if rows == 0 {
         return Ok((q_out, k_out));
     }
 
-    let Device::Metal(device) = q.device() else {
+    let candle_core::Device::Metal(device) = q.device() else {
         anyhow::bail!("metal gdn qk norm gqa requires Metal tensors");
     };
     let pipeline = metal_gdn_qk_norm_gqa_pipeline(device)?;
@@ -9855,9 +9854,9 @@ pub(crate) fn metal_gdn_qk_norm_gqa_f32_bf16(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_gdn_decode_qkv_conv_norm_bf16(
-    mixed_qkv: &Tensor,
-    weight: &Tensor,
-    conv_state: &mut Tensor,
+    mixed_qkv: &candle_core::Tensor,
+    weight: &candle_core::Tensor,
+    conv_state: &mut candle_core::Tensor,
     kernel_size: usize,
     nk: usize,
     dk: usize,
@@ -9865,7 +9864,7 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_bf16(
     dv: usize,
     q_scale: f32,
     eps: f32,
-) -> Result<(Tensor, Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     anyhow::ensure!(
         metal_gdn_decode_qkv_conv_norm_supports(
             mixed_qkv,
@@ -9900,11 +9899,11 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_bf16(
 
     // The kernel writes every unexpanded Q/K and V element, and updates each
     // convolution state channel exactly once.
-    let q_out = unsafe { Tensor::empty((batch, 1usize, nk, dk), DType::BF16, mixed_qkv.device())? };
-    let k_out = unsafe { Tensor::empty((batch, 1usize, nk, dk), DType::BF16, mixed_qkv.device())? };
-    let v_out = unsafe { Tensor::empty((batch, 1usize, nv, dv), DType::BF16, mixed_qkv.device())? };
+    let q_out = unsafe { candle_core::Tensor::empty((batch, 1usize, nk, dk), candle_core::DType::BF16, mixed_qkv.device())? };
+    let k_out = unsafe { candle_core::Tensor::empty((batch, 1usize, nk, dk), candle_core::DType::BF16, mixed_qkv.device())? };
+    let v_out = unsafe { candle_core::Tensor::empty((batch, 1usize, nv, dv), candle_core::DType::BF16, mixed_qkv.device())? };
 
-    let Device::Metal(device) = mixed_qkv.device() else {
+    let candle_core::Device::Metal(device) = mixed_qkv.device() else {
         anyhow::bail!("metal gdn decode qkv conv/norm requires Metal tensors");
     };
     let pipeline = metal_gdn_decode_qkv_conv_norm_pipeline(device)?;
@@ -10426,11 +10425,11 @@ fn metal_gdn_decode_gates_recurrent_rmsnorm_pipeline(
 }
 
 fn metal_gdn_gates_bf16(
-    a: &Tensor,
-    b: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
-) -> Result<(Tensor, Tensor)> {
+    a: &candle_core::Tensor,
+    b: &candle_core::Tensor,
+    a_log: &candle_core::Tensor,
+    dt_bias: &candle_core::Tensor,
+) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
     let shape = a.dims().to_vec();
     let nv = *shape
         .last()
@@ -10447,10 +10446,10 @@ fn metal_gdn_gates_bf16(
     let a_log = a_log.contiguous()?;
     let dt_bias = dt_bias.contiguous()?;
     // The gates kernel writes every beta/g element.
-    let beta = unsafe { Tensor::empty(shape.clone(), DType::BF16, a.device())? };
-    let g = unsafe { Tensor::empty(shape, DType::BF16, a.device())? };
+    let beta = unsafe { candle_core::Tensor::empty(shape.clone(), candle_core::DType::BF16, a.device())? };
+    let g = unsafe { candle_core::Tensor::empty(shape, candle_core::DType::BF16, a.device())? };
 
-    let Device::Metal(device) = a.device() else {
+    let candle_core::Device::Metal(device) = a.device() else {
         anyhow::bail!("metal gdn_gates requires a Metal tensor");
     };
     let pipeline = metal_gdn_gates_pipeline(device)?;
@@ -10530,10 +10529,10 @@ fn metal_gdn_gates_bf16(
 }
 
 pub(crate) fn metal_gdn_prefill_ab_in_proj_bf16(
-    x: &Tensor,
-    in_proj_ab_t: &Tensor,
+    x: &candle_core::Tensor,
+    in_proj_ab_t: &candle_core::Tensor,
     nv: usize,
-) -> Result<(Tensor, Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     anyhow::ensure!(
         metal_gdn_prefill_ab_in_proj_supports(x, in_proj_ab_t, nv),
         "metal gdn prefill A/B in-proj unsupported shape"
@@ -10547,11 +10546,11 @@ pub(crate) fn metal_gdn_prefill_ab_in_proj_bf16(
 }
 
 pub(crate) fn metal_gdn_gates_decay_bf16(
-    a: &Tensor,
-    b: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
-) -> Result<(Tensor, Tensor)> {
+    a: &candle_core::Tensor,
+    b: &candle_core::Tensor,
+    a_log: &candle_core::Tensor,
+    dt_bias: &candle_core::Tensor,
+) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
     anyhow::ensure!(
         metal_gdn_gates_decay_supports(a, b, a_log, dt_bias),
         "metal gdn_gates decay unsupported shape"
@@ -10574,10 +10573,10 @@ pub(crate) fn metal_gdn_gates_decay_bf16(
     let b = b.contiguous()?;
     let a_log = a_log.contiguous()?;
     let dt_bias = dt_bias.contiguous()?;
-    let beta = unsafe { Tensor::empty(shape.clone(), DType::BF16, a.device())? };
-    let decay = unsafe { Tensor::empty(shape, DType::BF16, a.device())? };
+    let beta = unsafe { candle_core::Tensor::empty(shape.clone(), candle_core::DType::BF16, a.device())? };
+    let decay = unsafe { candle_core::Tensor::empty(shape, candle_core::DType::BF16, a.device())? };
 
-    let Device::Metal(device) = a.device() else {
+    let candle_core::Device::Metal(device) = a.device() else {
         anyhow::bail!("metal gdn_gates decay requires a Metal tensor");
     };
     let pipeline = metal_gdn_gates_decay_pipeline(device)?;
@@ -10661,11 +10660,11 @@ pub(crate) fn metal_gdn_gates_decay_bf16(
 }
 
 pub(crate) fn metal_gdn_gates_decay_ab_bf16(
-    ab: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
+    ab: &candle_core::Tensor,
+    a_log: &candle_core::Tensor,
+    dt_bias: &candle_core::Tensor,
     nv: usize,
-) -> Result<(Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
     anyhow::ensure!(
         metal_gdn_gates_decay_ab_supports(ab, a_log, dt_bias, nv),
         "metal gdn_gates decay A/B unsupported shape"
@@ -10688,10 +10687,10 @@ pub(crate) fn metal_gdn_gates_decay_ab_bf16(
     let a_log = a_log.contiguous()?;
     let dt_bias = dt_bias.contiguous()?;
     let shape = vec![batch, seq_len, nv];
-    let beta = unsafe { Tensor::empty(shape.clone(), DType::BF16, ab.device())? };
-    let decay = unsafe { Tensor::empty(shape, DType::BF16, ab.device())? };
+    let beta = unsafe { candle_core::Tensor::empty(shape.clone(), candle_core::DType::BF16, ab.device())? };
+    let decay = unsafe { candle_core::Tensor::empty(shape, candle_core::DType::BF16, ab.device())? };
 
-    let Device::Metal(device) = ab.device() else {
+    let candle_core::Device::Metal(device) = ab.device() else {
         anyhow::bail!("metal gdn_gates decay A/B requires a Metal tensor");
     };
     let pipeline = metal_gdn_gates_decay_ab_pipeline(device)?;
@@ -10770,15 +10769,15 @@ pub(crate) fn metal_gdn_gates_decay_ab_bf16(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_gdn_decode_gates_recurrent_bf16(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    a: &Tensor,
-    b: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
-    state: &mut Tensor,
-) -> Result<Tensor> {
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    a: &candle_core::Tensor,
+    b: &candle_core::Tensor,
+    a_log: &candle_core::Tensor,
+    dt_bias: &candle_core::Tensor,
+    state: &mut candle_core::Tensor,
+) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_gdn_decode_gates_recurrent_supports(q, k, v, a, b, a_log, dt_bias, state),
         "metal gdn decode gates+recurrent unsupported shape"
@@ -10802,9 +10801,9 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_bf16(
     let b = b.contiguous()?;
     let a_log = a_log.contiguous()?;
     let dt_bias = dt_bias.contiguous()?;
-    let out = unsafe { Tensor::empty((batch, seq_len, value_heads, dv), DType::BF16, q.device())? };
+    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, value_heads, dv), candle_core::DType::BF16, q.device())? };
 
-    let Device::Metal(device) = q.device() else {
+    let candle_core::Device::Metal(device) = q.device() else {
         anyhow::bail!("metal gdn decode gates+recurrent requires a Metal tensor");
     };
     let pipeline = metal_gdn_decode_gates_recurrent_pipeline(device)?;
@@ -10916,18 +10915,18 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_bf16(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    a: &Tensor,
-    b: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
-    state: &mut Tensor,
-    z: &Tensor,
-    weight: &Tensor,
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    a: &candle_core::Tensor,
+    b: &candle_core::Tensor,
+    a_log: &candle_core::Tensor,
+    dt_bias: &candle_core::Tensor,
+    state: &mut candle_core::Tensor,
+    z: &candle_core::Tensor,
+    weight: &candle_core::Tensor,
     eps: f32,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_gdn_decode_gates_recurrent_rmsnorm_supports(
             q, k, v, a, b, a_log, dt_bias, state, z, weight
@@ -10955,9 +10954,9 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
     let dt_bias = dt_bias.contiguous()?;
     let z = z.contiguous()?;
     let weight = weight.contiguous()?;
-    let out = unsafe { Tensor::empty((batch, seq_len, value_heads, dv), DType::BF16, q.device())? };
+    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, value_heads, dv), candle_core::DType::BF16, q.device())? };
 
-    let Device::Metal(device) = q.device() else {
+    let candle_core::Device::Metal(device) = q.device() else {
         anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm requires a Metal tensor");
     };
     let pipeline = metal_gdn_decode_gates_recurrent_rmsnorm_pipeline(device)?;
@@ -11161,7 +11160,7 @@ fn metal_gated_rms_norm_pipeline(
     Ok(pipeline)
 }
 
-fn metal_gated_rms_norm_bf16(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+fn metal_gated_rms_norm_bf16(x: &candle_core::Tensor, z: &candle_core::Tensor, weight: &candle_core::Tensor, eps: f32) -> Result<candle_core::Tensor> {
     let (batch, seq_len, heads, hidden) = x.dims4()?;
     let rows = batch
         .checked_mul(seq_len)
@@ -11177,13 +11176,13 @@ fn metal_gated_rms_norm_bf16(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) 
     let z = z.contiguous()?;
     let weight = weight.contiguous()?;
     // The kernel writes every hidden element for every row.
-    let out = unsafe { Tensor::empty((batch, seq_len, heads, hidden), DType::BF16, x.device())? };
+    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, heads, hidden), candle_core::DType::BF16, x.device())? };
 
     if rows == 0 {
         return Ok(out);
     }
 
-    let Device::Metal(device) = x.device() else {
+    let candle_core::Device::Metal(device) = x.device() else {
         anyhow::bail!("metal gated rmsnorm requires a Metal tensor");
     };
     let pipeline = metal_gated_rms_norm_pipeline(device)?;
@@ -12030,10 +12029,10 @@ fn metal_gdn_full_chunk_forward_pipeline(
 }
 
 fn metal_gdn_forward_substitution_bf16(
-    a_strict: &Tensor,
-    v_prime: &Tensor,
-    beta: &Tensor,
-) -> Result<Tensor> {
+    a_strict: &candle_core::Tensor,
+    v_prime: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+) -> Result<candle_core::Tensor> {
     let (batch, heads, chunk_size, _) = a_strict.dims4()?;
     let dv = v_prime.dim(3)?;
     let batch_heads = batch * heads;
@@ -12049,14 +12048,14 @@ fn metal_gdn_forward_substitution_bf16(
     let beta = beta.contiguous()?;
     // The kernel writes every chunk/value element.
     let out = unsafe {
-        Tensor::empty(
+        candle_core::Tensor::empty(
             (batch, heads, chunk_size, dv),
-            DType::BF16,
+            candle_core::DType::BF16,
             a_strict.device(),
         )?
     };
 
-    let Device::Metal(device) = a_strict.device() else {
+    let candle_core::Device::Metal(device) = a_strict.device() else {
         anyhow::bail!("metal gdn forward-substitution requires a Metal tensor");
     };
     let pipeline = metal_gdn_forward_substitution_pipeline(device)?;
@@ -12125,10 +12124,10 @@ fn metal_gdn_forward_substitution_bf16(
 }
 
 fn metal_gdn_forward_substitution_f32(
-    a_strict: &Tensor,
-    v_prime: &Tensor,
-    beta: &Tensor,
-) -> Result<Tensor> {
+    a_strict: &candle_core::Tensor,
+    v_prime: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+) -> Result<candle_core::Tensor> {
     let (batch, heads, chunk_size, _) = a_strict.dims4()?;
     let dv = v_prime.dim(3)?;
     let batch_heads = batch * heads;
@@ -12143,14 +12142,14 @@ fn metal_gdn_forward_substitution_f32(
     let v_prime = v_prime.contiguous()?;
     let beta = beta.contiguous()?;
     let out = unsafe {
-        Tensor::empty(
+        candle_core::Tensor::empty(
             (batch, heads, chunk_size, dv),
-            DType::F32,
+            candle_core::DType::F32,
             a_strict.device(),
         )?
     };
 
-    let Device::Metal(device) = a_strict.device() else {
+    let candle_core::Device::Metal(device) = a_strict.device() else {
         anyhow::bail!("metal gdn forward-substitution f32 requires a Metal tensor");
     };
     let pipeline = metal_gdn_forward_substitution_f32_pipeline(device)?;
@@ -12219,13 +12218,13 @@ fn metal_gdn_forward_substitution_f32(
 }
 
 fn metal_gdn_chunk_prep_bf16(
-    g: &Tensor,
-    v: &Tensor,
-    kkt: &Tensor,
-    qkt: &Tensor,
-    ks_entry: &Tensor,
-    q_s: &Tensor,
-) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)> {
+    g: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    kkt: &candle_core::Tensor,
+    qkt: &candle_core::Tensor,
+    ks_entry: &candle_core::Tensor,
+    q_s: &candle_core::Tensor,
+) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     let (batch, heads, chunk_size) = g.dims3()?;
     let dv = v.dim(3)?;
     let batch_heads = batch * heads;
@@ -12245,28 +12244,28 @@ fn metal_gdn_chunk_prep_bf16(
     let device_ref = g.device();
     // The prep kernel fills each temporary completely before any consumer sees it.
     let a_strict = unsafe {
-        Tensor::empty(
+        candle_core::Tensor::empty(
             (batch, heads, chunk_size, chunk_size),
-            DType::BF16,
+            candle_core::DType::BF16,
             device_ref,
         )?
     };
     let b_mask = unsafe {
-        Tensor::empty(
+        candle_core::Tensor::empty(
             (batch, heads, chunk_size, chunk_size),
-            DType::BF16,
+            candle_core::DType::BF16,
             device_ref,
         )?
     };
     let v_prime =
-        unsafe { Tensor::empty((batch, heads, chunk_size, dv), DType::BF16, device_ref)? };
+        unsafe { candle_core::Tensor::empty((batch, heads, chunk_size, dv), candle_core::DType::BF16, device_ref)? };
     let q_s_scaled =
-        unsafe { Tensor::empty((batch, heads, chunk_size, dv), DType::BF16, device_ref)? };
+        unsafe { candle_core::Tensor::empty((batch, heads, chunk_size, dv), candle_core::DType::BF16, device_ref)? };
     let decay_last_col =
-        unsafe { Tensor::empty((batch, heads, chunk_size), DType::BF16, device_ref)? };
-    let p_last = unsafe { Tensor::empty((batch, heads), DType::BF16, device_ref)? };
+        unsafe { candle_core::Tensor::empty((batch, heads, chunk_size), candle_core::DType::BF16, device_ref)? };
+    let p_last = unsafe { candle_core::Tensor::empty((batch, heads), candle_core::DType::BF16, device_ref)? };
 
-    let Device::Metal(device) = g.device() else {
+    let candle_core::Device::Metal(device) = g.device() else {
         anyhow::bail!("metal gdn chunk-prep requires a Metal tensor");
     };
     let pipeline = metal_gdn_chunk_prep_pipeline(device)?;
@@ -12410,16 +12409,16 @@ fn metal_gdn_chunk_prep_bf16(
 }
 
 fn metal_gdn_full_chunk_forward_bf16(
-    g: &Tensor,
-    v: &Tensor,
-    kkt: &Tensor,
-    qkt: &Tensor,
-    ks_entry: &Tensor,
-    q_s: &Tensor,
-    beta: &Tensor,
-    k_t: &Tensor,
-    state: &mut Tensor,
-) -> Result<Tensor> {
+    g: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    kkt: &candle_core::Tensor,
+    qkt: &candle_core::Tensor,
+    ks_entry: &candle_core::Tensor,
+    q_s: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+    k_t: &candle_core::Tensor,
+    state: &mut candle_core::Tensor,
+) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_gdn_full_chunk_forward_supports(g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state),
         "metal gdn full-chunk unsupported shape"
@@ -12442,9 +12441,9 @@ fn metal_gdn_full_chunk_forward_bf16(
     let beta = beta.contiguous()?;
     let k_t = k_t.contiguous()?;
     // The full-chunk kernel writes every output token/head/value element.
-    let out = unsafe { Tensor::empty((batch, heads, chunk_size, dv), DType::BF16, g.device())? };
+    let out = unsafe { candle_core::Tensor::empty((batch, heads, chunk_size, dv), candle_core::DType::BF16, g.device())? };
 
-    let Device::Metal(device) = g.device() else {
+    let candle_core::Device::Metal(device) = g.device() else {
         anyhow::bail!("metal gdn full-chunk requires a Metal tensor");
     };
     let pipeline = metal_gdn_full_chunk_forward_pipeline(device)?;
@@ -12595,16 +12594,16 @@ fn metal_gdn_full_chunk_forward_bf16(
 
 #[allow(clippy::too_many_arguments)]
 fn metal_gdn_full_chunk_forward_head_last_into_bf16(
-    g: &Tensor,
-    v: &Tensor,
-    kkt: &Tensor,
-    qkt: &Tensor,
-    ks_entry: &Tensor,
-    q_s: &Tensor,
-    beta: &Tensor,
-    k_t: &Tensor,
-    state: &mut Tensor,
-    out: &Tensor,
+    g: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    kkt: &candle_core::Tensor,
+    qkt: &candle_core::Tensor,
+    ks_entry: &candle_core::Tensor,
+    q_s: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+    k_t: &candle_core::Tensor,
+    state: &mut candle_core::Tensor,
+    out: &candle_core::Tensor,
     t_start: usize,
     seq_len: usize,
 ) -> Result<()> {
@@ -12633,7 +12632,7 @@ fn metal_gdn_full_chunk_forward_head_last_into_bf16(
     let ks_entry = ks_entry.contiguous()?;
     let q_s = q_s.contiguous()?;
 
-    let Device::Metal(device) = g.device() else {
+    let candle_core::Device::Metal(device) = g.device() else {
         anyhow::bail!("metal gdn full-chunk head-last requires a Metal tensor");
     };
     let pipeline = metal_gdn_full_chunk_forward_pipeline(device)?;
@@ -12783,13 +12782,13 @@ fn metal_gdn_full_chunk_forward_head_last_into_bf16(
 }
 
 fn metal_gdn_recurrent_bf16(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    g: &Tensor,
-    state: &mut Tensor,
-) -> Result<Tensor> {
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+    g: &candle_core::Tensor,
+    state: &mut candle_core::Tensor,
+) -> Result<candle_core::Tensor> {
     let (batch, heads, dk) = q.dims3()?;
     let dv = v.dim(2)?;
     let batch_heads = batch * heads;
@@ -12807,9 +12806,9 @@ fn metal_gdn_recurrent_bf16(
         *state = state.contiguous()?;
     }
     // The recurrent kernel writes every batch/head/value element.
-    let out = unsafe { Tensor::empty((batch, heads, dv), DType::BF16, q.device())? };
+    let out = unsafe { candle_core::Tensor::empty((batch, heads, dv), candle_core::DType::BF16, q.device())? };
 
-    let Device::Metal(device) = q.device() else {
+    let candle_core::Device::Metal(device) = q.device() else {
         anyhow::bail!("metal gdn recurrent requires a Metal tensor");
     };
     let pipeline = metal_gdn_recurrent_pipeline(device)?;
@@ -12901,13 +12900,13 @@ fn metal_gdn_recurrent_bf16(
 }
 
 fn metal_gdn_recurrent_prefill_head_last_bf16(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    g: &Tensor,
-    state: &mut Tensor,
-) -> Result<Tensor> {
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+    g: &candle_core::Tensor,
+    state: &mut candle_core::Tensor,
+) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_gdn_recurrent_prefill_head_last_supports(q, k, v, beta, g, state),
         "metal gdn recurrent prefill unsupported shape"
@@ -12936,9 +12935,9 @@ fn metal_gdn_recurrent_prefill_head_last_bf16(
     }
     // SAFETY: the kernel dispatch covers every (batch, token, value-head, dv)
     // output element exactly once via `gid=batch_head*dv+d` and the token loop.
-    let out = unsafe { Tensor::empty((batch, seq_len, value_heads, dv), DType::BF16, q.device())? };
+    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, value_heads, dv), candle_core::DType::BF16, q.device())? };
 
-    let Device::Metal(device) = q.device() else {
+    let candle_core::Device::Metal(device) = q.device() else {
         anyhow::bail!("metal gdn recurrent prefill requires a Metal tensor");
     };
     let pipeline = metal_gdn_recurrent_prefill_head_last_pipeline(device)?;
@@ -13038,13 +13037,13 @@ fn metal_gdn_recurrent_prefill_head_last_bf16(
 }
 
 fn metal_gdn_recurrent_prefill_native_head_last_bf16(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    g: &Tensor,
-    state: &mut Tensor,
-) -> Result<Tensor> {
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+    g: &candle_core::Tensor,
+    state: &mut candle_core::Tensor,
+) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_gdn_recurrent_prefill_native_head_last_supports(q, k, v, beta, g, state),
         "metal gdn recurrent native prefill unsupported shape"
@@ -13072,9 +13071,9 @@ fn metal_gdn_recurrent_prefill_native_head_last_bf16(
     }
     // SAFETY: the kernel dispatch covers every (batch, token, value-head, dv)
     // output element exactly once via `gid=batch_head*dv+d` and the token loop.
-    let out = unsafe { Tensor::empty((batch, seq_len, value_heads, dv), DType::BF16, q.device())? };
+    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, value_heads, dv), candle_core::DType::BF16, q.device())? };
 
-    let Device::Metal(device) = q.device() else {
+    let candle_core::Device::Metal(device) = q.device() else {
         anyhow::bail!("metal gdn recurrent native prefill requires a Metal tensor");
     };
     let pipeline = metal_gdn_recurrent_prefill_head_last_pipeline(device)?;
@@ -13174,13 +13173,13 @@ fn metal_gdn_recurrent_prefill_native_head_last_bf16(
 }
 
 pub(crate) fn metal_gdn_recurrent_prefill_native_head_last_decay_bf16(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    decay: &Tensor,
-    state: &mut Tensor,
-) -> Result<Tensor> {
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+    decay: &candle_core::Tensor,
+    state: &mut candle_core::Tensor,
+) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
         metal_gdn_recurrent_prefill_native_head_last_decay_supports(q, k, v, beta, decay, state),
         "metal gdn recurrent native prefill decay unsupported shape"
@@ -13206,9 +13205,9 @@ pub(crate) fn metal_gdn_recurrent_prefill_native_head_last_decay_bf16(
     if !state.is_contiguous() {
         *state = state.contiguous()?;
     }
-    let out = unsafe { Tensor::empty((batch, seq_len, value_heads, dv), DType::BF16, q.device())? };
+    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, value_heads, dv), candle_core::DType::BF16, q.device())? };
 
-    let Device::Metal(device) = q.device() else {
+    let candle_core::Device::Metal(device) = q.device() else {
         anyhow::bail!("metal gdn recurrent native prefill decay requires a Metal tensor");
     };
     let pipeline = metal_gdn_recurrent_prefill_head_last_decay_pipeline(device)?;
@@ -13584,9 +13583,9 @@ fn metal_conv1d_update_pipeline(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_gdn_prefill_qkv_conv_split_supports(
-    mixed_qkv: &Tensor,
-    weight: &Tensor,
-    conv_state: &Tensor,
+    mixed_qkv: &candle_core::Tensor,
+    weight: &candle_core::Tensor,
+    conv_state: &candle_core::Tensor,
     kernel_size: usize,
     nk: usize,
     dk: usize,
@@ -13596,15 +13595,15 @@ pub(crate) fn metal_gdn_prefill_qkv_conv_split_supports(
     if metal_gdn_prefill_qkv_conv_split_disabled() {
         return false;
     }
-    if mixed_qkv.dtype() != DType::BF16
-        || weight.dtype() != DType::BF16
-        || conv_state.dtype() != DType::F32
+    if mixed_qkv.dtype() != candle_core::DType::BF16
+        || weight.dtype() != candle_core::DType::BF16
+        || conv_state.dtype() != candle_core::DType::F32
     {
         return false;
     }
-    if !matches!(mixed_qkv.device(), Device::Metal(_))
-        || !matches!(weight.device(), Device::Metal(_))
-        || !matches!(conv_state.device(), Device::Metal(_))
+    if !matches!(mixed_qkv.device(), candle_core::Device::Metal(_))
+        || !matches!(weight.device(), candle_core::Device::Metal(_))
+        || !matches!(conv_state.device(), candle_core::Device::Metal(_))
     {
         return false;
     }
@@ -13641,15 +13640,15 @@ pub(crate) fn metal_gdn_prefill_qkv_conv_split_supports(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_gdn_prefill_qkv_conv_split_bf16_f32_k4(
-    mixed_qkv: &Tensor,
-    weight: &Tensor,
-    conv_state: &mut Tensor,
+    mixed_qkv: &candle_core::Tensor,
+    weight: &candle_core::Tensor,
+    conv_state: &mut candle_core::Tensor,
     kernel_size: usize,
     nk: usize,
     dk: usize,
     nv: usize,
     dv: usize,
-) -> Result<(Tensor, Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     anyhow::ensure!(
         metal_gdn_prefill_qkv_conv_split_supports(
             mixed_qkv,
@@ -13676,11 +13675,11 @@ pub(crate) fn metal_gdn_prefill_qkv_conv_split_bf16_f32_k4(
     if !conv_state.is_contiguous() {
         *conv_state = conv_state.contiguous()?;
     }
-    let q = unsafe { Tensor::empty((batch, seq_len, nk, dk), DType::F32, mixed_qkv.device())? };
-    let k = unsafe { Tensor::empty((batch, seq_len, nk, dk), DType::F32, mixed_qkv.device())? };
-    let v = unsafe { Tensor::empty((batch, seq_len, nv, dv), DType::BF16, mixed_qkv.device())? };
+    let q = unsafe { candle_core::Tensor::empty((batch, seq_len, nk, dk), candle_core::DType::F32, mixed_qkv.device())? };
+    let k = unsafe { candle_core::Tensor::empty((batch, seq_len, nk, dk), candle_core::DType::F32, mixed_qkv.device())? };
+    let v = unsafe { candle_core::Tensor::empty((batch, seq_len, nv, dv), candle_core::DType::BF16, mixed_qkv.device())? };
 
-    let Device::Metal(device) = mixed_qkv.device() else {
+    let candle_core::Device::Metal(device) = mixed_qkv.device() else {
         anyhow::bail!("metal gdn prefill qkv conv-split requires a Metal tensor");
     };
     let pipeline = metal_gdn_prefill_qkv_conv_split_pipeline(device)?;
@@ -13769,11 +13768,11 @@ pub(crate) fn metal_gdn_prefill_qkv_conv_split_bf16_f32_k4(
 }
 
 fn metal_causal_conv1d_prefill_bf16_f32_k4(
-    x: &Tensor,
-    weight: &Tensor,
-    conv_state: &mut Tensor,
+    x: &candle_core::Tensor,
+    weight: &candle_core::Tensor,
+    conv_state: &mut candle_core::Tensor,
     kernel_size: usize,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     anyhow::ensure!(kernel_size == 4, "metal conv1d prefill only supports K=4");
     let (batch, channels, seq_len) = x.dims3()?;
     anyhow::ensure!(seq_len > 1, "metal conv1d prefill requires seq_len > 1");
@@ -13789,9 +13788,9 @@ fn metal_causal_conv1d_prefill_bf16_f32_k4(
         *conv_state = conv_state.contiguous()?;
     }
     // The conv prefill kernel writes every batch/channel/time element.
-    let out = unsafe { Tensor::empty((batch, channels, seq_len), DType::F32, x.device())? };
+    let out = unsafe { candle_core::Tensor::empty((batch, channels, seq_len), candle_core::DType::F32, x.device())? };
 
-    let Device::Metal(device) = x.device() else {
+    let candle_core::Device::Metal(device) = x.device() else {
         anyhow::bail!("metal conv1d prefill requires a Metal tensor");
     };
     let pipeline = metal_conv1d_prefill_pipeline(device)?;
@@ -13861,11 +13860,11 @@ fn metal_causal_conv1d_prefill_bf16_f32_k4(
 }
 
 fn metal_causal_conv1d_update_bf16_f32_k4(
-    x: &Tensor,
-    weight: &Tensor,
-    conv_state: &mut Tensor,
+    x: &candle_core::Tensor,
+    weight: &candle_core::Tensor,
+    conv_state: &mut candle_core::Tensor,
     kernel_size: usize,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     anyhow::ensure!(kernel_size == 4, "metal conv1d update only supports K=4");
     let (batch, channels, seq_len) = x.dims3()?;
     anyhow::ensure!(seq_len == 1, "metal conv1d update requires seq_len == 1");
@@ -13881,9 +13880,9 @@ fn metal_causal_conv1d_update_bf16_f32_k4(
         *conv_state = conv_state.contiguous()?;
     }
     // The conv update kernel writes every batch/channel element.
-    let out = unsafe { Tensor::empty((batch, channels, 1usize), DType::F32, x.device())? };
+    let out = unsafe { candle_core::Tensor::empty((batch, channels, 1usize), candle_core::DType::F32, x.device())? };
 
-    let Device::Metal(device) = x.device() else {
+    let candle_core::Device::Metal(device) = x.device() else {
         anyhow::bail!("metal conv1d update requires a Metal tensor");
     };
     let pipeline = metal_conv1d_update_pipeline(device)?;
@@ -13952,8 +13951,8 @@ fn metal_causal_conv1d_update_bf16_f32_k4(
 /// GitHub's macos-14 runners, where the CI sandbox can produce an empty device
 /// list and candle 0.10.2's `swap_remove` panics instead of returning `Err`).
 #[doc(hidden)]
-pub fn try_new_metal() -> Option<Device> {
-    let result = std::panic::catch_unwind(|| Device::new_metal(0));
+pub fn try_new_metal() -> Option<candle_core::Device> {
+    let result = std::panic::catch_unwind(|| candle_core::Device::new_metal(0));
     match result {
         Ok(Ok(d)) => Some(d),
         Ok(Err(e)) => {
@@ -13990,32 +13989,32 @@ mod tests {
     }
 
     fn gdn_qk_norm_reference(
-        q: &Tensor,
-        k: &Tensor,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
         q_scale: f64,
         eps: f64,
-    ) -> Result<(Tensor, Tensor)> {
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
         let q_sum = q.sqr()?.sum_keepdim(D::Minus1)?;
         let q_norm = (q_sum + eps)?.sqrt()?;
-        let q_out = (q.broadcast_div(&q_norm)? * q_scale)?.to_dtype(DType::BF16)?;
+        let q_out = (q.broadcast_div(&q_norm)? * q_scale)?.to_dtype(candle_core::DType::BF16)?;
 
         let k_sum = k.sqr()?.sum_keepdim(D::Minus1)?;
         let k_norm = (k_sum + eps)?.sqrt()?;
-        let k_out = k.broadcast_div(&k_norm)?.to_dtype(DType::BF16)?;
+        let k_out = k.broadcast_div(&k_norm)?.to_dtype(candle_core::DType::BF16)?;
 
         Ok((q_out, k_out))
     }
 
-    fn max_abs_diff(a: &Tensor, b: &Tensor) -> Result<f32> {
-        Ok((a.to_dtype(DType::F32)? - b.to_dtype(DType::F32)?)?
+    fn max_abs_diff(a: &candle_core::Tensor, b: &candle_core::Tensor) -> Result<f32> {
+        Ok((a.to_dtype(candle_core::DType::F32)? - b.to_dtype(candle_core::DType::F32)?)?
             .abs()?
             .flatten_all()?
             .max(D::Minus1)?
             .to_scalar::<f32>()?)
     }
 
-    fn mean_abs_diff(a: &Tensor, b: &Tensor) -> Result<f32> {
-        Ok((a.to_dtype(DType::F32)? - b.to_dtype(DType::F32)?)?
+    fn mean_abs_diff(a: &candle_core::Tensor, b: &candle_core::Tensor) -> Result<f32> {
+        Ok((a.to_dtype(candle_core::DType::F32)? - b.to_dtype(candle_core::DType::F32)?)?
             .abs()?
             .flatten_all()?
             .mean(D::Minus1)?
@@ -14023,11 +14022,11 @@ mod tests {
     }
 
     fn gdn_forward_substitution_reference(
-        a_strict: &Tensor,
-        v_prime: &Tensor,
-        beta: &Tensor,
+        a_strict: &candle_core::Tensor,
+        v_prime: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
         chunk: usize,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         let beta_col = beta.unsqueeze(3)?;
         let mut rows = Vec::with_capacity(chunk);
         for t in 0..chunk {
@@ -14037,13 +14036,13 @@ mod tests {
                 vp_t.broadcast_mul(&beta_t)?
             } else {
                 let a_row = a_strict.narrow(2, t, 1)?.narrow(3, 0, t)?.contiguous()?;
-                let w_prev = Tensor::cat(&rows, 2)?;
+                let w_prev = candle_core::Tensor::cat(&rows, 2)?;
                 let sub = a_row.matmul(&w_prev)?;
                 (vp_t - sub)?.broadcast_mul(&beta_t)?
             };
             rows.push(w_t);
         }
-        Ok(Tensor::cat(&rows, 2)?)
+        Ok(candle_core::Tensor::cat(&rows, 2)?)
     }
 
     #[test]
@@ -14077,9 +14076,9 @@ mod tests {
             .map(|idx| 0.2 + ((idx % 7) as f32) * 0.03)
             .collect();
 
-        let a_strict = Tensor::from_slice(&a_data, (batch, heads, chunk, chunk), &device)?;
-        let v_prime = Tensor::from_slice(&vp_data, (batch, heads, chunk, dv), &device)?;
-        let beta = Tensor::from_slice(&beta_data, (batch, heads, chunk), &device)?;
+        let a_strict = candle_core::Tensor::from_slice(&a_data, (batch, heads, chunk, chunk), &device)?;
+        let v_prime = candle_core::Tensor::from_slice(&vp_data, (batch, heads, chunk, dv), &device)?;
+        let beta = candle_core::Tensor::from_slice(&beta_data, (batch, heads, chunk), &device)?;
         let actual = metal_gdn_forward_substitution_f32(&a_strict, &v_prime, &beta)?;
         let expected = gdn_forward_substitution_reference(&a_strict, &v_prime, &beta, chunk)?;
         let diff = max_abs_diff(&actual, &expected)?;
@@ -14087,8 +14086,8 @@ mod tests {
         Ok(())
     }
 
-    fn tensor_all_finite(t: &Tensor) -> Result<bool> {
-        let values = t.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+    fn tensor_all_finite(t: &candle_core::Tensor) -> Result<bool> {
+        let values = t.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
         Ok(values.iter().all(|value| value.is_finite()))
     }
 
@@ -14116,33 +14115,33 @@ mod tests {
     fn patterned_bf16_2d(
         rows: usize,
         cols: usize,
-        device: &Device,
+        device: &candle_core::Device,
         modulus: usize,
         scale: f32,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         let data: Vec<f32> = (0..(rows * cols))
             .map(|i| ((i % modulus) as f32 - (modulus / 2) as f32) * scale)
             .collect();
-        Ok(Tensor::from_slice(&data, (rows, cols), device)?
-            .to_dtype(DType::BF16)?
+        Ok(candle_core::Tensor::from_slice(&data, (rows, cols), device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?)
     }
 
-    fn patterned_bf16_x(hidden: usize, device: &Device) -> Result<Tensor> {
+    fn patterned_bf16_x(hidden: usize, device: &candle_core::Device) -> Result<candle_core::Tensor> {
         let data: Vec<f32> = (0..hidden)
             .map(|i| ((i % 31) as f32 - 15.0) * 0.001953125)
             .collect();
-        Ok(Tensor::from_slice(&data, (1usize, 1usize, hidden), device)?
-            .to_dtype(DType::BF16)?
+        Ok(candle_core::Tensor::from_slice(&data, (1usize, 1usize, hidden), device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?)
     }
 
-    fn patterned_bf16_decode_batch(batch: usize, hidden: usize, device: &Device) -> Result<Tensor> {
+    fn patterned_bf16_decode_batch(batch: usize, hidden: usize, device: &candle_core::Device) -> Result<candle_core::Tensor> {
         let data: Vec<f32> = (0..(batch * hidden))
             .map(|i| ((i % 31) as f32 - 15.0) * 0.001953125)
             .collect();
-        Ok(Tensor::from_slice(&data, (batch, 1usize, hidden), device)?
-            .to_dtype(DType::BF16)?
+        Ok(candle_core::Tensor::from_slice(&data, (batch, 1usize, hidden), device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?)
     }
 
@@ -14151,17 +14150,17 @@ mod tests {
         seq_len: usize,
         heads: usize,
         head_dim: usize,
-        device: &Device,
+        device: &candle_core::Device,
         modulus: usize,
         scale: f32,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         let elems = batch * seq_len * heads * head_dim;
         let data: Vec<f32> = (0..elems)
             .map(|i| ((i % modulus) as f32 - (modulus / 2) as f32) * scale)
             .collect();
         Ok(
-            Tensor::from_slice(&data, (batch, seq_len, heads, head_dim), device)?
-                .to_dtype(DType::BF16)?
+            candle_core::Tensor::from_slice(&data, (batch, seq_len, heads, head_dim), device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?,
         )
     }
@@ -14171,17 +14170,17 @@ mod tests {
         heads: usize,
         seq_len: usize,
         head_dim: usize,
-        device: &Device,
+        device: &candle_core::Device,
         modulus: usize,
         scale: f32,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         let elems = batch * heads * seq_len * head_dim;
         let data: Vec<f32> = (0..elems)
             .map(|i| ((i % modulus) as f32 - (modulus / 2) as f32) * scale)
             .collect();
         Ok(
-            Tensor::from_slice(&data, (batch, heads, seq_len, head_dim), device)?
-                .to_dtype(DType::BF16)?
+            candle_core::Tensor::from_slice(&data, (batch, heads, seq_len, head_dim), device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?,
         )
     }
@@ -14190,8 +14189,8 @@ mod tests {
         batch: usize,
         seq_len: usize,
         half_rotary: usize,
-        device: &Device,
-    ) -> Result<(Tensor, Tensor)> {
+        device: &candle_core::Device,
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
         let elems = batch * seq_len * half_rotary;
         let mut cos_data = Vec::with_capacity(elems);
         let mut sin_data = Vec::with_capacity(elems);
@@ -14205,12 +14204,12 @@ mod tests {
             }
         }
         Ok((
-            Tensor::from_slice(&cos_data, (batch, seq_len, half_rotary), device)?.contiguous()?,
-            Tensor::from_slice(&sin_data, (batch, seq_len, half_rotary), device)?.contiguous()?,
+            candle_core::Tensor::from_slice(&cos_data, (batch, seq_len, half_rotary), device)?.contiguous()?,
+            candle_core::Tensor::from_slice(&sin_data, (batch, seq_len, half_rotary), device)?.contiguous()?,
         ))
     }
 
-    fn mlp_gate_up_reference(x: &Tensor, gate_t: &Tensor, up_t: &Tensor) -> Result<Tensor> {
+    fn mlp_gate_up_reference(x: &candle_core::Tensor, gate_t: &candle_core::Tensor, up_t: &candle_core::Tensor) -> Result<candle_core::Tensor> {
         let gate = x.broadcast_matmul(gate_t)?;
         let gate_sig = (gate.neg()?.exp()? + 1.0)?.recip()?;
         let gate = (gate * gate_sig)?;
@@ -14218,18 +14217,18 @@ mod tests {
         Ok((gate * up)?)
     }
 
-    fn mlp_silu_mul_reference(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+    fn mlp_silu_mul_reference(gate: &candle_core::Tensor, up: &candle_core::Tensor) -> Result<candle_core::Tensor> {
         let gate_sig = (gate.neg()?.exp()? + 1.0)?.recip()?;
         let gate = (gate * gate_sig)?;
         Ok((gate * up)?)
     }
 
     fn causal_attention_reference_head_major(
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
         scale: f32,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         let (batch, num_heads, seq_len, head_dim) = q.dims4()?;
         let (k_batch, num_kv_heads, kv_len, k_head_dim) = k.dims4()?;
         anyhow::ensure!(batch == k_batch, "q/k batch mismatch");
@@ -14265,7 +14264,7 @@ mod tests {
         let mask: Vec<f32> = (0..seq_len)
             .flat_map(|i| (0..seq_len).map(move |j| if j <= i { 0.0 } else { f32::NEG_INFINITY }))
             .collect();
-        let mask = Tensor::from_slice(&mask, (1usize, 1usize, seq_len, seq_len), q.device())?
+        let mask = candle_core::Tensor::from_slice(&mask, (1usize, 1usize, seq_len, seq_len), q.device())?
             .to_dtype(scores.dtype())?;
         let scores = scores.broadcast_add(&mask)?;
         let max_val = scores.max_keepdim(D::Minus1)?;
@@ -14279,19 +14278,19 @@ mod tests {
             .context("causal attention reference contiguous")
     }
 
-    fn attn_gate_reference(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
+    fn attn_gate_reference(x: &candle_core::Tensor, gate: &candle_core::Tensor) -> Result<candle_core::Tensor> {
         let gate_sig = (gate.neg()?.exp()? + 1.0)?.recip()?;
         Ok((x * gate_sig)?)
     }
 
     fn paged_attn_decode_contiguous_rowwise(
-        q: &Tensor,
-        k_pool: &Tensor,
-        v_pool: &Tensor,
+        q: &candle_core::Tensor,
+        k_pool: &candle_core::Tensor,
+        v_pool: &candle_core::Tensor,
         start_slots: &[usize],
         seq_len: usize,
         scale: f32,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         let (batch, _, _, _) = q.dims4()?;
         anyhow::ensure!(
             start_slots.len() == batch,
@@ -14304,18 +14303,18 @@ mod tests {
                 &q_row, k_pool, v_pool, start_slot, seq_len, scale,
             )?);
         }
-        let row_refs: Vec<&Tensor> = rows.iter().collect();
-        Tensor::cat(&row_refs, 0).context("stack rowwise contiguous decode outputs")
+        let row_refs: Vec<&candle_core::Tensor> = rows.iter().collect();
+        candle_core::Tensor::cat(&row_refs, 0).context("stack rowwise contiguous decode outputs")
     }
 
     fn paged_attn_decode_contiguous_varlen_rowwise(
-        q: &Tensor,
-        k_pool: &Tensor,
-        v_pool: &Tensor,
+        q: &candle_core::Tensor,
+        k_pool: &candle_core::Tensor,
+        v_pool: &candle_core::Tensor,
         start_slots: &[usize],
         seq_lens: &[usize],
         scale: f32,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         let (batch, _, q_heads, head_dim) = q.dims4()?;
         anyhow::ensure!(
             start_slots.len() == batch && seq_lens.len() == batch,
@@ -14336,19 +14335,19 @@ mod tests {
                 .reshape((1usize, 1usize, q_heads, head_dim))?,
             );
         }
-        let row_refs: Vec<&Tensor> = rows.iter().collect();
-        Tensor::cat(&row_refs, 0).context("stack rowwise varlen contiguous decode outputs")
+        let row_refs: Vec<&candle_core::Tensor> = rows.iter().collect();
+        candle_core::Tensor::cat(&row_refs, 0).context("stack rowwise varlen contiguous decode outputs")
     }
 
     fn paged_attn_decode_dyn_seqlen_sdpa_rowwise(
-        q: &Tensor,
-        k_pool: &Tensor,
-        v_pool: &Tensor,
-        block_table: &Tensor,
+        q: &candle_core::Tensor,
+        k_pool: &candle_core::Tensor,
+        v_pool: &candle_core::Tensor,
+        block_table: &candle_core::Tensor,
         seq_lens: &[usize],
         page_block_size: usize,
         scale: f32,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         let (batch, _, _, _) = q.dims4()?;
         anyhow::ensure!(
             seq_lens.len() == batch,
@@ -14373,18 +14372,18 @@ mod tests {
                 .with_context(|| format!("row {idx} SDPA paged decode declined"))?;
             rows.push(out);
         }
-        let row_refs: Vec<&Tensor> = rows.iter().collect();
-        Tensor::cat(&row_refs, 0).context("stack rowwise dyn-seqlen decode outputs")
+        let row_refs: Vec<&candle_core::Tensor> = rows.iter().collect();
+        candle_core::Tensor::cat(&row_refs, 0).context("stack rowwise dyn-seqlen decode outputs")
     }
 
     fn rotary_qk_rowwise(
-        q: &Tensor,
-        k: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        cos: &candle_core::Tensor,
+        sin: &candle_core::Tensor,
         head_dim: usize,
         rotary_dim: usize,
-    ) -> Result<(Tensor, Tensor)> {
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
         let (batch, _, _, _) = q.dims4()?;
         anyhow::ensure!(
             cos.dims().len() == 3 && sin.dims().len() == 3,
@@ -14403,26 +14402,26 @@ mod tests {
             q_rows.push(q_rot);
             k_rows.push(k_rot);
         }
-        let q_refs: Vec<&Tensor> = q_rows.iter().collect();
-        let k_refs: Vec<&Tensor> = k_rows.iter().collect();
-        Ok((Tensor::cat(&q_refs, 0)?, Tensor::cat(&k_refs, 0)?))
+        let q_refs: Vec<&candle_core::Tensor> = q_rows.iter().collect();
+        let k_refs: Vec<&candle_core::Tensor> = k_rows.iter().collect();
+        Ok((candle_core::Tensor::cat(&q_refs, 0)?, candle_core::Tensor::cat(&k_refs, 0)?))
     }
 
     fn bench_metal_tensor_op<F>(
-        device: &Device,
+        device: &candle_core::Device,
         warmup: usize,
         iters: usize,
         mut op: F,
     ) -> Result<f64>
     where
-        F: FnMut() -> Result<Tensor>,
+        F: FnMut() -> Result<candle_core::Tensor>,
     {
         let mut last = None;
         for _ in 0..warmup {
             last = Some(op()?);
         }
         device.synchronize()?;
-        std::hint::black_box(last.as_ref().map(Tensor::dims));
+        std::hint::black_box(last.as_ref().map(candle_core::Tensor::dims));
         drop(last);
 
         let start = Instant::now();
@@ -14431,12 +14430,12 @@ mod tests {
             last = Some(op()?);
         }
         device.synchronize()?;
-        std::hint::black_box(last.as_ref().map(Tensor::dims));
+        std::hint::black_box(last.as_ref().map(candle_core::Tensor::dims));
         Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
     }
 
     fn bench_metal_unit_op<F>(
-        device: &Device,
+        device: &candle_core::Device,
         warmup: usize,
         iters: usize,
         mut op: F,
@@ -14458,13 +14457,13 @@ mod tests {
     }
 
     fn bench_metal_pair_op<F>(
-        device: &Device,
+        device: &candle_core::Device,
         warmup: usize,
         iters: usize,
         mut op: F,
     ) -> Result<f64>
     where
-        F: FnMut() -> Result<(Tensor, Tensor)>,
+        F: FnMut() -> Result<(candle_core::Tensor, candle_core::Tensor)>,
     {
         let mut last = None;
         for _ in 0..warmup {
@@ -14488,9 +14487,9 @@ mod tests {
         Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
     }
 
-    fn bench_metal_qkv_op<F>(device: &Device, warmup: usize, iters: usize, mut op: F) -> Result<f64>
+    fn bench_metal_qkv_op<F>(device: &candle_core::Device, warmup: usize, iters: usize, mut op: F) -> Result<f64>
     where
-        F: FnMut() -> Result<(Tensor, Tensor, Tensor)>,
+        F: FnMut() -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>,
     {
         let mut last = None;
         for _ in 0..warmup {
@@ -14515,13 +14514,13 @@ mod tests {
     }
 
     fn bench_metal_gdn_in_proj_op<F>(
-        device: &Device,
+        device: &candle_core::Device,
         warmup: usize,
         iters: usize,
         mut op: F,
     ) -> Result<f64>
     where
-        F: FnMut() -> Result<(Tensor, Tensor, Tensor, Tensor)>,
+        F: FnMut() -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>,
     {
         let mut last = None;
         for _ in 0..warmup {
@@ -14546,12 +14545,12 @@ mod tests {
     }
 
     fn gdn_in_proj_broadcast_reference(
-        x: &Tensor,
-        qkv_t: &Tensor,
-        z_t: &Tensor,
-        a_t: &Tensor,
-        b_t: &Tensor,
-    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+        x: &candle_core::Tensor,
+        qkv_t: &candle_core::Tensor,
+        z_t: &candle_core::Tensor,
+        a_t: &candle_core::Tensor,
+        b_t: &candle_core::Tensor,
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
         Ok((
             x.broadcast_matmul(qkv_t)?,
             x.broadcast_matmul(z_t)?,
@@ -14561,19 +14560,19 @@ mod tests {
     }
 
     fn gdn_in_proj_prefill_ab_combined_reference(
-        x: &Tensor,
-        a_b_t: &Tensor,
+        x: &candle_core::Tensor,
+        a_b_t: &candle_core::Tensor,
         nv: usize,
-    ) -> Result<(Tensor, Tensor)> {
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
         let (_ab, a, b) = metal_gdn_prefill_ab_in_proj_bf16(x, a_b_t, nv)?;
         Ok((a, b))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_qkv_conv_norm_split_reference(
-        mixed_qkv: &Tensor,
-        weight: &Tensor,
-        conv_state: &mut Tensor,
+        mixed_qkv: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
+        conv_state: &mut candle_core::Tensor,
         kernel_size: usize,
         nk: usize,
         dk: usize,
@@ -14581,7 +14580,7 @@ mod tests {
         dv: usize,
         q_scale: f64,
         eps: f64,
-    ) -> Result<(Tensor, Tensor, Tensor)> {
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
         let (batch, seq_len, _) = mixed_qkv.dims3()?;
         let qk_dim = nk * dk;
         let v_dim = nv * dv;
@@ -14601,15 +14600,15 @@ mod tests {
         let v = conv
             .narrow(2, 2 * qk_dim, v_dim)?
             .reshape((batch, seq_len, nv, dv))?
-            .to_dtype(DType::BF16)?;
+            .to_dtype(candle_core::DType::BF16)?;
         let (q, k) = gdn_qk_norm_reference(&q, &k, q_scale, eps)?;
         Ok((q, k, v))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_qkv_conv_norm_row_fused_reference(
-        mixed_qkv: &Tensor,
-        weight: &Tensor,
+        mixed_qkv: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
         state_data: &[f32],
         kernel_size: usize,
         nk: usize,
@@ -14618,7 +14617,7 @@ mod tests {
         dv: usize,
         q_scale: f32,
         eps: f32,
-    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
         let (batch, _, channels) = mixed_qkv.dims3()?;
         let state_width = kernel_size - 1;
         anyhow::ensure!(
@@ -14634,7 +14633,7 @@ mod tests {
             let row = mixed_qkv.narrow(0, b, 1)?.contiguous()?;
             let state_start = b * channels * state_width;
             let state_end = state_start + channels * state_width;
-            let mut state_row = Tensor::from_slice(
+            let mut state_row = candle_core::Tensor::from_slice(
                 &state_data[state_start..state_end],
                 (1usize, channels, state_width),
                 mixed_qkv.device(),
@@ -14658,39 +14657,39 @@ mod tests {
             state_rows.push(state_row);
         }
 
-        let q_refs: Vec<&Tensor> = q_rows.iter().collect();
-        let k_refs: Vec<&Tensor> = k_rows.iter().collect();
-        let v_refs: Vec<&Tensor> = v_rows.iter().collect();
-        let state_refs: Vec<&Tensor> = state_rows.iter().collect();
+        let q_refs: Vec<&candle_core::Tensor> = q_rows.iter().collect();
+        let k_refs: Vec<&candle_core::Tensor> = k_rows.iter().collect();
+        let v_refs: Vec<&candle_core::Tensor> = v_rows.iter().collect();
+        let state_refs: Vec<&candle_core::Tensor> = state_rows.iter().collect();
         Ok((
-            Tensor::cat(&q_refs, 0)?,
-            Tensor::cat(&k_refs, 0)?,
-            Tensor::cat(&v_refs, 0)?,
-            Tensor::cat(&state_refs, 0)?,
+            candle_core::Tensor::cat(&q_refs, 0)?,
+            candle_core::Tensor::cat(&k_refs, 0)?,
+            candle_core::Tensor::cat(&v_refs, 0)?,
+            candle_core::Tensor::cat(&state_refs, 0)?,
         ))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_gates_recurrent_rmsnorm_split_reference(
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        a: &Tensor,
-        b: &Tensor,
-        a_log: &Tensor,
-        dt_bias: &Tensor,
-        state: &mut Tensor,
-        z: &Tensor,
-        weight: &Tensor,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
+        a_log: &candle_core::Tensor,
+        dt_bias: &candle_core::Tensor,
+        state: &mut candle_core::Tensor,
+        z: &candle_core::Tensor,
+        weight: &candle_core::Tensor,
         eps: f32,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         let (beta, g) = metal_gdn_gates_bf16(a, b, a_log, dt_bias)?;
         let out = metal_gdn_recurrent_prefill_native_head_last_bf16(q, k, v, &beta, &g, state)?;
         metal_gated_rms_norm_bf16(&out, z, weight, eps)
     }
 
     fn bench_transposed_coop_projection_case(
-        device: &Device,
+        device: &candle_core::Device,
         name: &str,
         input_dim: usize,
         output_dim: usize,
@@ -14724,9 +14723,9 @@ mod tests {
         assert_eq!(tile4.dims(), &[1usize, 1usize, output_dim]);
         assert_eq!(tile8.dims(), &[1usize, 1usize, output_dim]);
         assert_eq!(tile16.dims(), &[1usize, 1usize, output_dim]);
-        assert_eq!(tile4.dtype(), DType::BF16);
-        assert_eq!(tile8.dtype(), DType::BF16);
-        assert_eq!(tile16.dtype(), DType::BF16);
+        assert_eq!(tile4.dtype(), candle_core::DType::BF16);
+        assert_eq!(tile8.dtype(), candle_core::DType::BF16);
+        assert_eq!(tile16.dtype(), candle_core::DType::BF16);
 
         let tile4_max = max_abs_diff(&reference, &tile4)?;
         let tile4_mean = mean_abs_diff(&reference, &tile4)?;
@@ -14810,7 +14809,7 @@ mod tests {
     }
 
     fn bench_transposed_coop_selected_projection_case(
-        device: &Device,
+        device: &candle_core::Device,
         name: &str,
         input_dim: usize,
         output_dim: usize,
@@ -14829,7 +14828,7 @@ mod tests {
 
         assert_eq!(reference.dims(), &[1usize, 1usize, output_dim]);
         assert_eq!(selected.dims(), &[1usize, 1usize, output_dim]);
-        assert_eq!(selected.dtype(), DType::BF16);
+        assert_eq!(selected.dtype(), candle_core::DType::BF16);
         let max = max_abs_diff(&reference, &selected)?;
         let mean = mean_abs_diff(&reference, &selected)?;
         assert!(
@@ -15137,11 +15136,11 @@ mod tests {
             let gate_data: Vec<f32> = (0..batch * hidden)
                 .map(|i| ((i % 37) as f32 - 18.0) * 0.0625)
                 .collect();
-            let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
-                .to_dtype(DType::BF16)?
+            let x = candle_core::Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
-            let gate = Tensor::from_slice(&gate_data, (batch, 1usize, hidden), &device)?
-                .to_dtype(DType::BF16)?
+            let gate = candle_core::Tensor::from_slice(&gate_data, (batch, 1usize, hidden), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
             device.synchronize()?;
             assert!(metal_attn_gate_sigmoid_mul_supports(&x, &gate));
@@ -15406,7 +15405,7 @@ mod tests {
     }
 
     fn bench_transposed_coop_decode_batch_shape_case(
-        device: &Device,
+        device: &candle_core::Device,
         label: &str,
         input_dim: usize,
         output_dim: usize,
@@ -15486,7 +15485,7 @@ mod tests {
         let iters = env_usize("KILN_METAL_LM_HEAD_BATCH_BENCH_ITERS", 3);
         let hidden = 2560usize;
         let vocab = env_usize("KILN_METAL_LM_HEAD_BATCH_BENCH_VOCAB", 248_320);
-        let weight_t = Tensor::zeros((hidden, vocab), DType::BF16, &device)?;
+        let weight_t = candle_core::Tensor::zeros((hidden, vocab), candle_core::DType::BF16, &device)?;
         device.synchronize()?;
 
         for batch in [2usize, 4, 8] {
@@ -15576,7 +15575,7 @@ mod tests {
             let iters = env_usize("KILN_METAL_LM_HEAD_ARGMAX_BATCH_BENCH_ITERS", 3);
             let hidden = 2560usize;
             let vocab = env_usize("KILN_METAL_LM_HEAD_ARGMAX_BATCH_BENCH_VOCAB", 248_320);
-            let weight_t = Tensor::zeros((hidden, vocab), DType::BF16, &device)?.contiguous()?;
+            let weight_t = candle_core::Tensor::zeros((hidden, vocab), candle_core::DType::BF16, &device)?.contiguous()?;
             device.synchronize()?;
 
             for batch in [2usize, 4, 8] {
@@ -15663,24 +15662,24 @@ mod tests {
             let slots_data: Vec<u32> = (0..batch)
                 .map(|idx| ((idx * 17 + 5) % total_slots) as u32)
                 .collect();
-            let k = Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?
-                .to_dtype(DType::BF16)?
+            let k = candle_core::Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
-            let v = Tensor::from_slice(&v_data, (batch, 1usize, heads, head_dim), &device)?
-                .to_dtype(DType::BF16)?
+            let v = candle_core::Tensor::from_slice(&v_data, (batch, 1usize, heads, head_dim), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
-            let slots = Tensor::from_slice(&slots_data, batch, &device)?.contiguous()?;
-            let k_rows: Vec<Tensor> = (0..batch)
+            let slots = candle_core::Tensor::from_slice(&slots_data, batch, &device)?.contiguous()?;
+            let k_rows: Vec<candle_core::Tensor> = (0..batch)
                 .map(|idx| k.narrow(0, idx, 1).and_then(|row| row.contiguous()))
                 .collect::<candle_core::Result<Vec<_>>>()?;
-            let v_rows: Vec<Tensor> = (0..batch)
+            let v_rows: Vec<candle_core::Tensor> = (0..batch)
                 .map(|idx| v.narrow(0, idx, 1).and_then(|row| row.contiguous()))
                 .collect::<candle_core::Result<Vec<_>>>()?;
             let rowwise_slots: Vec<usize> = slots_data.iter().map(|&slot| slot as usize).collect();
-            let k_pool_row = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
-            let v_pool_row = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
-            let k_pool_batch = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
-            let v_pool_batch = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+            let k_pool_row = candle_core::Tensor::zeros((total_slots, heads, head_dim), candle_core::DType::BF16, &device)?;
+            let v_pool_row = candle_core::Tensor::zeros((total_slots, heads, head_dim), candle_core::DType::BF16, &device)?;
+            let k_pool_batch = candle_core::Tensor::zeros((total_slots, heads, head_dim), candle_core::DType::BF16, &device)?;
+            let v_pool_batch = candle_core::Tensor::zeros((total_slots, heads, head_dim), candle_core::DType::BF16, &device)?;
             device.synchronize()?;
 
             assert!(metal_paged_kv_write_token_major_batch_supports(
@@ -15780,11 +15779,11 @@ mod tests {
         let v_data: Vec<f32> = (0..kv_elems)
             .map(|i| ((i % 127) as f32 - 63.0) * 0.0006)
             .collect();
-        let k_pool = Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let k_pool = candle_core::Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let v_pool = Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let v_pool = candle_core::Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
 
         for batch in [1usize, 2, 4, 8] {
@@ -15802,11 +15801,11 @@ mod tests {
                     "bench start slot out of range"
                 );
             }
-            let q = Tensor::from_slice(&q_data, (batch, q_heads, 1usize, head_dim), &device)?
-                .to_dtype(DType::BF16)?
+            let q = candle_core::Tensor::from_slice(&q_data, (batch, q_heads, 1usize, head_dim), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
             let start_slots =
-                Tensor::from_slice(&start_slots_data, batch, &device)?.contiguous()?;
+                candle_core::Tensor::from_slice(&start_slots_data, batch, &device)?.contiguous()?;
             device.synchronize()?;
 
             assert!(metal_paged_attn_decode_contiguous_batch_supports(
@@ -15927,19 +15926,19 @@ mod tests {
                 .map(|&len| i32::try_from(len).expect("seq_len fits i32"))
                 .collect();
 
-            let q = Tensor::from_slice(&q_data, (batch, 1usize, q_heads, head_dim), &device)?
-                .to_dtype(DType::BF16)?
+            let q = candle_core::Tensor::from_slice(&q_data, (batch, 1usize, q_heads, head_dim), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
-            let k_pool = Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
-                .to_dtype(DType::BF16)?
+            let k_pool = candle_core::Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
-            let v_pool = Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
-                .to_dtype(DType::BF16)?
+            let v_pool = candle_core::Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
             let block_table =
-                Tensor::from_slice(&block_table_data, (batch, max_blocks_per_seq), &device)?
+                candle_core::Tensor::from_slice(&block_table_data, (batch, max_blocks_per_seq), &device)?
                     .contiguous()?;
-            let seqused_k = Tensor::from_slice(&seqused_k, batch, &device)?.contiguous()?;
+            let seqused_k = candle_core::Tensor::from_slice(&seqused_k, batch, &device)?.contiguous()?;
             device.synchronize()?;
 
             assert!(
@@ -16049,7 +16048,7 @@ mod tests {
                 .map(|i| ((i % 43) as f32 - 21.0) * 0.0009765625)
                 .collect();
             let state_init =
-                Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+                candle_core::Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
                     .contiguous()?;
             device.synchronize()?;
             assert!(metal_gdn_decode_qkv_conv_norm_supports(
@@ -16076,7 +16075,7 @@ mod tests {
                 1e-6,
             )?;
             let mut state_fused =
-                Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+                candle_core::Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
                     .contiguous()?;
             let (q_fused, k_fused, v_fused) = metal_gdn_decode_qkv_conv_norm_bf16(
                 &mixed_qkv,
@@ -16106,7 +16105,7 @@ mod tests {
             );
 
             let mut split_state =
-                Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+                candle_core::Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
                     .contiguous()?;
             let split_us = bench_metal_qkv_op(&device, warmup, iters, || {
                 gdn_decode_qkv_conv_norm_split_reference(
@@ -16124,7 +16123,7 @@ mod tests {
                 .context("bench split GDN qkv conv/norm")
             })?;
             let mut fused_state =
-                Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+                candle_core::Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
                     .contiguous()?;
             let fused_us = bench_metal_qkv_op(&device, warmup, iters, || {
                 metal_gdn_decode_qkv_conv_norm_bf16(
@@ -16256,7 +16255,7 @@ mod tests {
         let z_t = patterned_bf16_2d(hidden, z_dim, &device, 43, 0.0009765625)?;
         let a_t = patterned_bf16_2d(hidden, nv, &device, 29, 0.00390625)?;
         let b_t = patterned_bf16_2d(hidden, nv, &device, 31, 0.00390625)?;
-        let a_b_t = Tensor::cat(&[&a_t, &b_t], D::Minus1)?.contiguous()?;
+        let a_b_t = candle_core::Tensor::cat(&[&a_t, &b_t], D::Minus1)?.contiguous()?;
         device.synchronize()?;
 
         for seq_len in [16usize, 64, 128] {
@@ -16348,11 +16347,11 @@ mod tests {
         let weight_data: Vec<f32> = (0..dv)
             .map(|idx| 0.9 + ((idx % 17) as f32) * 0.01)
             .collect();
-        let a_log = Tensor::from_slice(&a_log_data, value_heads, &device)?.contiguous()?;
-        let dt_bias = Tensor::from_slice(&dt_bias_data, value_heads, &device)?
-            .to_dtype(DType::BF16)?
+        let a_log = candle_core::Tensor::from_slice(&a_log_data, value_heads, &device)?.contiguous()?;
+        let dt_bias = candle_core::Tensor::from_slice(&dt_bias_data, value_heads, &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let weight = Tensor::from_slice(&weight_data, dv, &device)?.contiguous()?;
+        let weight = candle_core::Tensor::from_slice(&weight_data, dv, &device)?.contiguous()?;
         device.synchronize()?;
 
         for batch in [1usize, 2, 4, 8] {
@@ -16382,28 +16381,28 @@ mod tests {
                 .map(|idx| ((idx % 41) as f32 - 20.0) * 0.003)
                 .collect();
 
-            let q = Tensor::from_slice(&q_data, (batch, seq_len, q_heads, dk), &device)?
-                .to_dtype(DType::BF16)?
+            let q = candle_core::Tensor::from_slice(&q_data, (batch, seq_len, q_heads, dk), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
-            let k = Tensor::from_slice(&k_data, (batch, seq_len, q_heads, dk), &device)?
-                .to_dtype(DType::BF16)?
+            let k = candle_core::Tensor::from_slice(&k_data, (batch, seq_len, q_heads, dk), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
-            let v = Tensor::from_slice(&v_data, (batch, seq_len, value_heads, dv), &device)?
-                .to_dtype(DType::BF16)?
+            let v = candle_core::Tensor::from_slice(&v_data, (batch, seq_len, value_heads, dv), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
-            let a = Tensor::from_slice(&a_data, (batch, seq_len, value_heads), &device)?
-                .to_dtype(DType::BF16)?
+            let a = candle_core::Tensor::from_slice(&a_data, (batch, seq_len, value_heads), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
-            let b = Tensor::from_slice(&b_data, (batch, seq_len, value_heads), &device)?
-                .to_dtype(DType::BF16)?
+            let b = candle_core::Tensor::from_slice(&b_data, (batch, seq_len, value_heads), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
-            let z = Tensor::from_slice(&z_data, (batch, seq_len, value_heads, dv), &device)?
-                .to_dtype(DType::BF16)?
+            let z = candle_core::Tensor::from_slice(&z_data, (batch, seq_len, value_heads, dv), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
 
             let mut state_split =
-                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-                    .to_dtype(DType::BF16)?
+                candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(candle_core::DType::BF16)?
                     .contiguous()?;
             assert!(metal_gdn_decode_gates_recurrent_supports(
                 &q,
@@ -16442,8 +16441,8 @@ mod tests {
                 1e-6,
             )?;
             let mut state_fused =
-                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-                    .to_dtype(DType::BF16)?
+                candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(candle_core::DType::BF16)?
                     .contiguous()?;
             let out_fused = metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
                 &q,
@@ -16472,8 +16471,8 @@ mod tests {
             );
 
             let mut split_state =
-                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-                    .to_dtype(DType::BF16)?
+                candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(candle_core::DType::BF16)?
                     .contiguous()?;
             let split_us = bench_metal_tensor_op(&device, warmup, iters, || {
                 gdn_decode_gates_recurrent_rmsnorm_split_reference(
@@ -16492,8 +16491,8 @@ mod tests {
                 .context("bench split GDN gates+recurrent+rmsnorm")
             })?;
             let mut fused_state =
-                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-                    .to_dtype(DType::BF16)?
+                candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(candle_core::DType::BF16)?
                     .contiguous()?;
             let fused_us = bench_metal_tensor_op(&device, warmup, iters, || {
                 metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
@@ -16564,23 +16563,23 @@ mod tests {
                 .map(|idx| ((idx % 41) as f32 - 20.0) * 0.003)
                 .collect();
 
-            let q = Tensor::from_slice(&q_data, (batch, seq_len, q_heads, dk), &device)?
-                .to_dtype(DType::BF16)?;
-            let k = Tensor::from_slice(&k_data, (batch, seq_len, q_heads, dk), &device)?
-                .to_dtype(DType::BF16)?;
-            let v = Tensor::from_slice(&v_data, (batch, seq_len, value_heads, dv), &device)?
-                .to_dtype(DType::BF16)?;
-            let beta = Tensor::from_slice(&beta_data, (batch, seq_len, value_heads), &device)?
-                .to_dtype(DType::BF16)?;
-            let g = Tensor::from_slice(&g_data, (batch, seq_len, value_heads), &device)?
-                .to_dtype(DType::BF16)?;
-            let decay = g.to_dtype(DType::F32)?.exp()?.to_dtype(DType::BF16)?;
+            let q = candle_core::Tensor::from_slice(&q_data, (batch, seq_len, q_heads, dk), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
+            let k = candle_core::Tensor::from_slice(&k_data, (batch, seq_len, q_heads, dk), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
+            let v = candle_core::Tensor::from_slice(&v_data, (batch, seq_len, value_heads, dv), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
+            let beta = candle_core::Tensor::from_slice(&beta_data, (batch, seq_len, value_heads), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
+            let g = candle_core::Tensor::from_slice(&g_data, (batch, seq_len, value_heads), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
+            let decay = g.to_dtype(candle_core::DType::F32)?.exp()?.to_dtype(candle_core::DType::BF16)?;
             let mut state_current =
-                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-                    .to_dtype(DType::BF16)?;
+                candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(candle_core::DType::BF16)?;
             let mut state_decay =
-                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-                    .to_dtype(DType::BF16)?;
+                candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(candle_core::DType::BF16)?;
             device.synchronize()?;
 
             assert!(metal_gdn_recurrent_prefill_native_head_last_supports(
@@ -16630,8 +16629,8 @@ mod tests {
             );
 
             let mut state_current_bench =
-                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-                    .to_dtype(DType::BF16)?;
+                candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(candle_core::DType::BF16)?;
             let current_us = bench_metal_tensor_op(&device, warmup, iters, || {
                 metal_gdn_recurrent_prefill_native_head_last_bf16(
                     &q,
@@ -16644,8 +16643,8 @@ mod tests {
                 .context("bench current GDN recurrent prefill")
             })?;
             let mut state_decay_bench =
-                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-                    .to_dtype(DType::BF16)?;
+                candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(candle_core::DType::BF16)?;
             let decay_us = bench_metal_tensor_op(&device, warmup, iters, || {
                 metal_gdn_recurrent_prefill_native_head_last_decay_bf16(
                     &q,
@@ -16673,26 +16672,26 @@ mod tests {
     }
 
     fn gdn_chunk_prep_reference(
-        g: &Tensor,
-        v: &Tensor,
-        kkt: &Tensor,
-        qkt: &Tensor,
-        ks_entry: &Tensor,
-        q_s: &Tensor,
-    ) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)> {
+        g: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        kkt: &candle_core::Tensor,
+        qkt: &candle_core::Tensor,
+        ks_entry: &candle_core::Tensor,
+        q_s: &candle_core::Tensor,
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
         let chunk = g.dim(2)?;
-        let g_f32 = g.to_dtype(DType::F32)?;
+        let g_f32 = g.to_dtype(candle_core::DType::F32)?;
         let big_g = g_f32.cumsum(D::Minus1)?;
         let big_g_col = big_g.unsqueeze(3)?;
         let big_g_row = big_g.unsqueeze(2)?;
         let decay = big_g_col
             .broadcast_sub(&big_g_row)?
             .exp()?
-            .to_dtype(DType::BF16)?;
-        let p = big_g.exp()?.to_dtype(DType::BF16)?;
+            .to_dtype(candle_core::DType::BF16)?;
+        let p = big_g.exp()?.to_dtype(candle_core::DType::BF16)?;
         let p_col = p.unsqueeze(3)?;
 
-        let strict_mask = Tensor::from_slice(
+        let strict_mask = candle_core::Tensor::from_slice(
             &(0..(chunk * chunk))
                 .map(|idx| {
                     let t = idx / chunk;
@@ -16703,8 +16702,8 @@ mod tests {
             (chunk, chunk),
             g.device(),
         )?
-        .to_dtype(DType::BF16)?;
-        let causal_mask = Tensor::from_slice(
+        .to_dtype(candle_core::DType::BF16)?;
+        let causal_mask = candle_core::Tensor::from_slice(
             &(0..(chunk * chunk))
                 .map(|idx| {
                     let t = idx / chunk;
@@ -16715,7 +16714,7 @@ mod tests {
             (chunk, chunk),
             g.device(),
         )?
-        .to_dtype(DType::BF16)?;
+        .to_dtype(candle_core::DType::BF16)?;
 
         let v_prime = (v - ks_entry.broadcast_mul(&p_col)?)?;
         let a_strict = kkt
@@ -16728,8 +16727,8 @@ mod tests {
             .contiguous()?;
         let q_s_scaled = q_s.broadcast_mul(&p_col)?;
         let g_last = big_g.narrow(2, chunk - 1, 1)?;
-        let decay_last_col = g_last.broadcast_sub(&big_g)?.exp()?.to_dtype(DType::BF16)?;
-        let p_last = g_last.squeeze(2)?.exp()?.to_dtype(DType::BF16)?;
+        let decay_last_col = g_last.broadcast_sub(&big_g)?.exp()?.to_dtype(candle_core::DType::BF16)?;
+        let p_last = g_last.squeeze(2)?.exp()?.to_dtype(candle_core::DType::BF16)?;
 
         Ok((
             a_strict,
@@ -16756,17 +16755,17 @@ mod tests {
             .map(|i| ((i % 29) as f32 - 14.0) * 0.015625)
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
-            .to_dtype(DType::BF16)?;
+        let x = candle_core::Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
         let weight_t =
-            Tensor::from_slice(&weight_data, (hidden, vocab), &device)?.to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&weight_data, (hidden, vocab), &device)?.to_dtype(candle_core::DType::BF16)?;
 
         assert!(metal_lm_head_supports(&x, &weight_t));
         let reference = x.broadcast_matmul(&weight_t)?;
         let fused = metal_lm_head_bf16(&x, &weight_t)?;
 
         assert_eq!(fused.dims(), &[1usize, 1usize, vocab]);
-        assert_eq!(fused.dtype(), DType::BF16);
+        assert_eq!(fused.dtype(), candle_core::DType::BF16);
 
         let max = max_abs_diff(&reference, &fused)?;
         let mean = mean_abs_diff(&reference, &fused)?;
@@ -16807,10 +16806,10 @@ mod tests {
                 .map(|i| ((i % 31) as f32 - 15.0) * 0.01953125)
                 .collect();
 
-            let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
-                .to_dtype(DType::BF16)?;
-            let weight_t = Tensor::from_slice(&weight_data, (hidden, vocab), &device)?
-                .to_dtype(DType::BF16)?;
+            let x = candle_core::Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
+            let weight_t = candle_core::Tensor::from_slice(&weight_data, (hidden, vocab), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
 
             assert!(metal_lm_head_argmax_supports(&x, &weight_t));
             let logits = metal_lm_head_bf16(&x, &weight_t)?;
@@ -16863,11 +16862,11 @@ mod tests {
                 .map(|i| ((i % 31) as f32 - 15.0) * 0.01953125)
                 .collect();
 
-            let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
-                .to_dtype(DType::BF16)?
+            let x = candle_core::Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
-            let weight_t = Tensor::from_slice(&weight_data, (hidden, vocab), &device)?
-                .to_dtype(DType::BF16)?
+            let weight_t = candle_core::Tensor::from_slice(&weight_data, (hidden, vocab), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
 
             assert!(metal_lm_head_argmax_rows_supports(&x, &weight_t));
@@ -16915,12 +16914,12 @@ mod tests {
             .map(|i| ((i % 31) as f32 - 15.0) * 0.0078125)
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
-            .to_dtype(DType::BF16)?;
-        let gate_t = Tensor::from_slice(&gate_data, (hidden, intermediate), &device)?
-            .to_dtype(DType::BF16)?;
+        let x = candle_core::Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let gate_t = candle_core::Tensor::from_slice(&gate_data, (hidden, intermediate), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
         let up_t =
-            Tensor::from_slice(&up_data, (hidden, intermediate), &device)?.to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&up_data, (hidden, intermediate), &device)?.to_dtype(candle_core::DType::BF16)?;
 
         assert!(metal_mlp_gate_up_supports(&x, &gate_t, &up_t));
         let fused = metal_mlp_gate_up_bf16(&x, &gate_t, &up_t)?;
@@ -16932,7 +16931,7 @@ mod tests {
         let reference = (gate * up)?;
 
         assert_eq!(fused.dims(), &[1usize, 1usize, intermediate]);
-        assert_eq!(fused.dtype(), DType::BF16);
+        assert_eq!(fused.dtype(), candle_core::DType::BF16);
 
         let max = max_abs_diff(&reference, &fused)?;
         let mean = mean_abs_diff(&reference, &fused)?;
@@ -16967,7 +16966,7 @@ mod tests {
             let reference = mlp_gate_up_reference(&x, &gate_t, &up_t)?;
 
             assert_eq!(fused.dims(), &[batch, 1usize, intermediate]);
-            assert_eq!(fused.dtype(), DType::BF16);
+            assert_eq!(fused.dtype(), candle_core::DType::BF16);
 
             let max = max_abs_diff(&reference, &fused)?;
             let mean = mean_abs_diff(&reference, &fused)?;
@@ -17005,7 +17004,7 @@ mod tests {
         let reference = mlp_silu_mul_reference(&gate, &up)?;
 
         assert_eq!(fused.dims(), &[batch, seq_len, intermediate]);
-        assert_eq!(fused.dtype(), DType::BF16);
+        assert_eq!(fused.dtype(), candle_core::DType::BF16);
 
         let max = max_abs_diff(&reference, &fused)?;
         let mean = mean_abs_diff(&reference, &fused)?;
@@ -17036,11 +17035,11 @@ mod tests {
             .map(|i| ((i % 37) as f32 - 18.0) * 0.0625)
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
-            .to_dtype(DType::BF16)?
+        let x = candle_core::Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let gate = Tensor::from_slice(&gate_data, (batch, 1usize, hidden), &device)?
-            .to_dtype(DType::BF16)?
+        let gate = candle_core::Tensor::from_slice(&gate_data, (batch, 1usize, hidden), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
 
         assert!(metal_attn_gate_sigmoid_mul_supports(&x, &gate));
@@ -17049,7 +17048,7 @@ mod tests {
         let reference = attn_gate_reference(&x, &gate)?;
 
         assert_eq!(fused.dims(), &[batch, 1usize, hidden]);
-        assert_eq!(fused.dtype(), DType::BF16);
+        assert_eq!(fused.dtype(), candle_core::DType::BF16);
 
         let max = max_abs_diff(&reference, &fused)?;
         let mean = mean_abs_diff(&reference, &fused)?;
@@ -17080,11 +17079,11 @@ mod tests {
             .map(|i| ((i % 29) as f32 - 14.0) * 0.0078125)
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (1usize, 1usize, input_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let x = candle_core::Tensor::from_slice(&x_data, (1usize, 1usize, input_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let weight_t = Tensor::from_slice(&weight_data, (input_dim, output_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let weight_t = candle_core::Tensor::from_slice(&weight_data, (input_dim, output_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
 
         assert!(metal_transposed_coop_gemv_supports(&x, &weight_t));
@@ -17108,9 +17107,9 @@ mod tests {
         assert_eq!(tile4.dims(), &[1usize, 1usize, output_dim]);
         assert_eq!(tile8.dims(), &[1usize, 1usize, output_dim]);
         assert_eq!(tile16.dims(), &[1usize, 1usize, output_dim]);
-        assert_eq!(tile4.dtype(), DType::BF16);
-        assert_eq!(tile8.dtype(), DType::BF16);
-        assert_eq!(tile16.dtype(), DType::BF16);
+        assert_eq!(tile4.dtype(), candle_core::DType::BF16);
+        assert_eq!(tile8.dtype(), candle_core::DType::BF16);
+        assert_eq!(tile16.dtype(), candle_core::DType::BF16);
 
         let tile4_max = max_abs_diff(&reference, &tile4)?;
         let tile4_mean = mean_abs_diff(&reference, &tile4)?;
@@ -17171,7 +17170,7 @@ mod tests {
             let fused = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
 
             assert_eq!(fused.dims(), &[batch, 1usize, output_dim]);
-            assert_eq!(fused.dtype(), DType::BF16);
+            assert_eq!(fused.dtype(), candle_core::DType::BF16);
 
             let max = max_abs_diff(&reference, &fused)?;
             let mean = mean_abs_diff(&reference, &fused)?;
@@ -17207,29 +17206,29 @@ mod tests {
                 .collect()
         };
 
-        let x = Tensor::from_slice(&x_data, (1usize, 1usize, input_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let x = candle_core::Tensor::from_slice(&x_data, (1usize, 1usize, input_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let q_t = Tensor::from_slice(
+        let q_t = candle_core::Tensor::from_slice(
             &make_weight(q_output_dim, 29, 0.0078125),
             (input_dim, q_output_dim),
             &device,
         )?
-        .to_dtype(DType::BF16)?
+        .to_dtype(candle_core::DType::BF16)?
         .contiguous()?;
-        let k_t = Tensor::from_slice(
+        let k_t = candle_core::Tensor::from_slice(
             &make_weight(k_output_dim, 31, 0.0068359375),
             (input_dim, k_output_dim),
             &device,
         )?
-        .to_dtype(DType::BF16)?
+        .to_dtype(candle_core::DType::BF16)?
         .contiguous()?;
-        let v_t = Tensor::from_slice(
+        let v_t = candle_core::Tensor::from_slice(
             &make_weight(v_output_dim, 37, 0.005859375),
             (input_dim, v_output_dim),
             &device,
         )?
-        .to_dtype(DType::BF16)?
+        .to_dtype(candle_core::DType::BF16)?
         .contiguous()?;
 
         assert!(metal_fused_qkv_transposed_coop_gemv_supports(
@@ -17243,9 +17242,9 @@ mod tests {
         assert_eq!(q.dims(), &[1usize, 1usize, q_output_dim]);
         assert_eq!(k.dims(), &[1usize, 1usize, k_output_dim]);
         assert_eq!(v.dims(), &[1usize, 1usize, v_output_dim]);
-        assert_eq!(q.dtype(), DType::BF16);
-        assert_eq!(k.dtype(), DType::BF16);
-        assert_eq!(v.dtype(), DType::BF16);
+        assert_eq!(q.dtype(), candle_core::DType::BF16);
+        assert_eq!(k.dtype(), candle_core::DType::BF16);
+        assert_eq!(v.dtype(), candle_core::DType::BF16);
 
         let q_max = max_abs_diff(&q_reference, &q)?;
         let k_max = max_abs_diff(&k_reference, &k)?;
@@ -17266,12 +17265,12 @@ mod tests {
     }
 
     fn lora_add_reference(
-        base: &Tensor,
-        x: &Tensor,
-        a: &Tensor,
-        b: &Tensor,
+        base: &candle_core::Tensor,
+        x: &candle_core::Tensor,
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
         scale: f32,
-    ) -> Result<Tensor> {
+    ) -> Result<candle_core::Tensor> {
         let proj = LoraProjectionWeights {
             a: a.clone(),
             b: b.clone(),
@@ -17305,7 +17304,7 @@ mod tests {
                 let fused = metal_lora_add_decode_bf16(&base, &x, &a, &b, 0.75)?;
 
                 assert_eq!(fused.dims(), &[batch, 1usize, output_dim]);
-                assert_eq!(fused.dtype(), DType::BF16);
+                assert_eq!(fused.dtype(), candle_core::DType::BF16);
 
                 let max = max_abs_diff(&reference, &fused)?;
                 let mean = mean_abs_diff(&reference, &fused)?;
@@ -17362,7 +17361,7 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn bench_lora_decode_add_case(
-        device: &Device,
+        device: &candle_core::Device,
         label: &str,
         batch: usize,
         input_dim: usize,
@@ -17539,12 +17538,12 @@ mod tests {
             .collect();
 
         let x =
-            Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?.to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?.to_dtype(candle_core::DType::BF16)?;
         let qkv_t =
-            Tensor::from_slice(&qkv_data, (hidden, qkv_dim), &device)?.to_dtype(DType::BF16)?;
-        let z_t = Tensor::from_slice(&z_data, (hidden, z_dim), &device)?.to_dtype(DType::BF16)?;
-        let a_t = Tensor::from_slice(&a_data, (hidden, nv), &device)?.to_dtype(DType::BF16)?;
-        let b_t = Tensor::from_slice(&b_data, (hidden, nv), &device)?.to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&qkv_data, (hidden, qkv_dim), &device)?.to_dtype(candle_core::DType::BF16)?;
+        let z_t = candle_core::Tensor::from_slice(&z_data, (hidden, z_dim), &device)?.to_dtype(candle_core::DType::BF16)?;
+        let a_t = candle_core::Tensor::from_slice(&a_data, (hidden, nv), &device)?.to_dtype(candle_core::DType::BF16)?;
+        let b_t = candle_core::Tensor::from_slice(&b_data, (hidden, nv), &device)?.to_dtype(candle_core::DType::BF16)?;
 
         assert!(metal_gdn_in_proj_decode_supports(
             &x, &qkv_t, &z_t, &a_t, &b_t
@@ -17563,7 +17562,7 @@ mod tests {
             ("a", &a_fused, &a_ref),
             ("b", &b_fused, &b_ref),
         ] {
-            assert_eq!(got.dtype(), DType::BF16);
+            assert_eq!(got.dtype(), candle_core::DType::BF16);
             assert!(
                 got.is_contiguous(),
                 "GDN in-proj {name} output must stay contiguous"
@@ -17584,8 +17583,8 @@ mod tests {
         let x3_data: Vec<f32> = (0..(batch3 * hidden))
             .map(|i| ((i % 17) as f32 - 8.0) * 0.03125)
             .collect();
-        let x3 = Tensor::from_slice(&x3_data, (batch3, 1usize, hidden), &device)?
-            .to_dtype(DType::BF16)?;
+        let x3 = candle_core::Tensor::from_slice(&x3_data, (batch3, 1usize, hidden), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
         assert!(metal_gdn_in_proj_decode_supports(
             &x3, &qkv_t, &z_t, &a_t, &b_t
         ));
@@ -17601,7 +17600,7 @@ mod tests {
             ("a3", &a3_fused, &a3_ref),
             ("b3", &b3_fused, &b3_ref),
         ] {
-            assert_eq!(got.dtype(), DType::BF16);
+            assert_eq!(got.dtype(), candle_core::DType::BF16);
             assert!(
                 got.is_contiguous(),
                 "GDN in-proj {name} output must stay contiguous"
@@ -17622,8 +17621,8 @@ mod tests {
         let x8_data: Vec<f32> = (0..(batch8 * hidden))
             .map(|i| ((i % 17) as f32 - 8.0) * 0.03125)
             .collect();
-        let x8 = Tensor::from_slice(&x8_data, (batch8, 1usize, hidden), &device)?
-            .to_dtype(DType::BF16)?;
+        let x8 = candle_core::Tensor::from_slice(&x8_data, (batch8, 1usize, hidden), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
         assert!(metal_gdn_in_proj_decode_supports(
             &x8, &qkv_t, &z_t, &a_t, &b_t
         ));
@@ -17639,7 +17638,7 @@ mod tests {
             ("a8", &a8_fused, &a8_ref),
             ("b8", &b8_fused, &b8_ref),
         ] {
-            assert_eq!(got.dtype(), DType::BF16);
+            assert_eq!(got.dtype(), candle_core::DType::BF16);
             assert!(
                 got.is_contiguous(),
                 "GDN in-proj {name} output must stay contiguous"
@@ -17657,7 +17656,7 @@ mod tests {
         }
 
         let x_prefill =
-            Tensor::zeros((batch, 2usize, hidden), DType::BF16, &device)?.contiguous()?;
+            candle_core::Tensor::zeros((batch, 2usize, hidden), candle_core::DType::BF16, &device)?.contiguous()?;
         assert!(!metal_gdn_in_proj_decode_supports(
             &x_prefill, &qkv_t, &z_t, &a_t, &b_t
         ));
@@ -17691,14 +17690,14 @@ mod tests {
             .map(|i| ((i % 23) as f32 - 11.0) * 0.0078125)
             .collect();
 
-        let mixed_qkv = Tensor::from_slice(&mixed_data, (1usize, 1usize, channels), &device)?
-            .to_dtype(DType::BF16)?;
-        let weight = Tensor::from_slice(&weight_data, (channels, 1usize, kernel_size), &device)?
-            .to_dtype(DType::BF16)?;
+        let mixed_qkv = candle_core::Tensor::from_slice(&mixed_data, (1usize, 1usize, channels), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let weight = candle_core::Tensor::from_slice(&weight_data, (channels, 1usize, kernel_size), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
         let mut state_ref =
-            Tensor::from_slice(&state_data, (1usize, channels, kernel_size - 1), &device)?;
+            candle_core::Tensor::from_slice(&state_data, (1usize, channels, kernel_size - 1), &device)?;
         let mut state_fused =
-            Tensor::from_slice(&state_data, (1usize, channels, kernel_size - 1), &device)?;
+            candle_core::Tensor::from_slice(&state_data, (1usize, channels, kernel_size - 1), &device)?;
 
         assert!(metal_gdn_decode_qkv_conv_norm_supports(
             &mixed_qkv,
@@ -17727,7 +17726,7 @@ mod tests {
         let v_ref = conv_ref
             .narrow(2, 2 * qk_dim, v_dim)?
             .reshape((1usize, 1usize, nv, dv))?
-            .to_dtype(DType::BF16)?;
+            .to_dtype(candle_core::DType::BF16)?;
         let (q_ref, k_ref) = gdn_qk_norm_reference(&q_ref, &k_ref, scale as f64, 1e-6)?;
 
         let (q_fused, k_fused, v_fused) = metal_gdn_decode_qkv_conv_norm_bf16(
@@ -17746,9 +17745,9 @@ mod tests {
         assert_eq!(q_fused.dims(), &[1usize, 1usize, nk, dk]);
         assert_eq!(k_fused.dims(), &[1usize, 1usize, nk, dk]);
         assert_eq!(v_fused.dims(), &[1usize, 1usize, nv, dv]);
-        assert_eq!(q_fused.dtype(), DType::BF16);
-        assert_eq!(k_fused.dtype(), DType::BF16);
-        assert_eq!(v_fused.dtype(), DType::BF16);
+        assert_eq!(q_fused.dtype(), candle_core::DType::BF16);
+        assert_eq!(k_fused.dtype(), candle_core::DType::BF16);
+        assert_eq!(v_fused.dtype(), candle_core::DType::BF16);
 
         let q_max = max_abs_diff(&q_ref, &q_fused)?;
         let k_max = max_abs_diff(&k_ref, &k_fused)?;
@@ -17762,7 +17761,7 @@ mod tests {
             "fused conv state max_abs_diff={state_max:e}"
         );
 
-        let prefill_mixed = Tensor::zeros((1usize, 2usize, channels), DType::BF16, &device)?;
+        let prefill_mixed = candle_core::Tensor::zeros((1usize, 2usize, channels), candle_core::DType::BF16, &device)?;
         assert!(!metal_gdn_decode_qkv_conv_norm_supports(
             &prefill_mixed,
             &weight,
@@ -17804,14 +17803,14 @@ mod tests {
             .map(|i| ((i % 23) as f32 - 11.0) * 0.0078125)
             .collect();
 
-        let mixed_qkv = Tensor::from_slice(&mixed_data, (batch, 1usize, channels), &device)?
-            .to_dtype(DType::BF16)?
+        let mixed_qkv = candle_core::Tensor::from_slice(&mixed_data, (batch, 1usize, channels), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let weight = Tensor::from_slice(&weight_data, (channels, 1usize, kernel_size), &device)?
-            .to_dtype(DType::BF16)?
+        let weight = candle_core::Tensor::from_slice(&weight_data, (channels, 1usize, kernel_size), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
         let mut state_fused =
-            Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+            candle_core::Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
                 .contiguous()?;
 
         assert!(metal_gdn_decode_qkv_conv_norm_supports(
@@ -17853,9 +17852,9 @@ mod tests {
         assert_eq!(q_fused.dims(), &[batch, 1usize, nk, dk]);
         assert_eq!(k_fused.dims(), &[batch, 1usize, nk, dk]);
         assert_eq!(v_fused.dims(), &[batch, 1usize, nv, dv]);
-        assert_eq!(q_fused.dtype(), DType::BF16);
-        assert_eq!(k_fused.dtype(), DType::BF16);
-        assert_eq!(v_fused.dtype(), DType::BF16);
+        assert_eq!(q_fused.dtype(), candle_core::DType::BF16);
+        assert_eq!(k_fused.dtype(), candle_core::DType::BF16);
+        assert_eq!(v_fused.dtype(), candle_core::DType::BF16);
 
         let q_max = max_abs_diff(&q_ref, &q_fused)?;
         let k_max = max_abs_diff(&k_ref, &k_fused)?;
@@ -17907,14 +17906,14 @@ mod tests {
                 .map(|idx| ((idx % 31) as f32 - 15.0) * 0.004)
                 .collect();
 
-            let x = Tensor::from_slice(&x_data, (batch, seq_len, channels), &device)?
-                .to_dtype(DType::BF16)?
+            let x = candle_core::Tensor::from_slice(&x_data, (batch, seq_len, channels), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
-            let weight = Tensor::from_slice(&w_data, (channels, 1usize, kernel_size), &device)?
-                .to_dtype(DType::BF16)?
+            let weight = candle_core::Tensor::from_slice(&w_data, (channels, 1usize, kernel_size), &device)?
+                .to_dtype(candle_core::DType::BF16)?
                 .contiguous()?;
             let state_init =
-                Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?
+                candle_core::Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?
                     .contiguous()?;
 
             let x_ct = x.transpose(1, 2)?.contiguous()?;
@@ -17932,7 +17931,7 @@ mod tests {
             let v_ref = conv_ref
                 .narrow(2, 2 * qk_dim, v_dim)?
                 .reshape((batch, seq_len, nv, dv))?
-                .to_dtype(DType::BF16)?;
+                .to_dtype(candle_core::DType::BF16)?;
 
             let mut state_split = state_init.clone();
             assert!(metal_gdn_prefill_qkv_conv_split_supports(
@@ -17959,9 +17958,9 @@ mod tests {
             assert_eq!(q.dims(), &[batch, seq_len, nk, dk]);
             assert_eq!(k.dims(), &[batch, seq_len, nk, dk]);
             assert_eq!(v.dims(), &[batch, seq_len, nv, dv]);
-            assert_eq!(q.dtype(), DType::F32);
-            assert_eq!(k.dtype(), DType::F32);
-            assert_eq!(v.dtype(), DType::BF16);
+            assert_eq!(q.dtype(), candle_core::DType::F32);
+            assert_eq!(k.dtype(), candle_core::DType::F32);
+            assert_eq!(v.dtype(), candle_core::DType::BF16);
             let q_max = max_abs_diff(&q_ref, &q)?;
             let k_max = max_abs_diff(&k_ref, &k)?;
             let v_max = max_abs_diff(&v_ref, &v)?;
@@ -17999,10 +17998,10 @@ mod tests {
         let v_data: Vec<f32> = (0..elems)
             .map(|i| ((i % 89) as f32 - 44.0) * 0.03125)
             .collect();
-        let k_pool = Tensor::from_slice(&k_data, (total_slots, heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?;
-        let v_pool = Tensor::from_slice(&v_data, (total_slots, heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?;
+        let k_pool = candle_core::Tensor::from_slice(&k_data, (total_slots, heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let v_pool = candle_core::Tensor::from_slice(&v_data, (total_slots, heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
 
         assert!(metal_paged_kv_head_major_read_supports(
             &k_pool, &v_pool, start_slot, seq_len
@@ -18059,12 +18058,12 @@ mod tests {
             .map(|i| ((i % 127) as f32 - 63.0) * 0.0006)
             .collect();
 
-        let q = Tensor::from_slice(&q_data, (1usize, q_heads, 1usize, head_dim), &device)?
-            .to_dtype(DType::BF16)?;
-        let k_pool = Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?;
-        let v_pool = Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?;
+        let q = candle_core::Tensor::from_slice(&q_data, (1usize, q_heads, 1usize, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let k_pool = candle_core::Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let v_pool = candle_core::Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
 
         assert!(metal_paged_attn_decode_contiguous_supports(
             &q, &k_pool, &v_pool, start_slot, seq_len
@@ -18131,16 +18130,16 @@ mod tests {
             .map(|i| ((i % 127) as f32 - 63.0) * 0.0006)
             .collect();
 
-        let q = Tensor::from_slice(&q_data, (batch, q_heads, 1usize, head_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let q = candle_core::Tensor::from_slice(&q_data, (batch, q_heads, 1usize, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let k_pool = Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let k_pool = candle_core::Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let v_pool = Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let v_pool = candle_core::Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let start_slots = Tensor::from_slice(&start_slots_data, batch, &device)?.contiguous()?;
+        let start_slots = candle_core::Tensor::from_slice(&start_slots_data, batch, &device)?.contiguous()?;
 
         assert!(metal_paged_attn_decode_contiguous_batch_supports(
             &q,
@@ -18235,19 +18234,19 @@ mod tests {
             .map(|i| ((i % 127) as f32 - 63.0) * 0.0006)
             .collect();
 
-        let q = Tensor::from_slice(&q_data, (batch, 1usize, q_heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let q = candle_core::Tensor::from_slice(&q_data, (batch, 1usize, q_heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let k_pool = Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let k_pool = candle_core::Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let v_pool = Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let v_pool = candle_core::Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
         let block_table =
-            Tensor::from_slice(&block_table_data, (batch, max_blocks_per_seq), &device)?
+            candle_core::Tensor::from_slice(&block_table_data, (batch, max_blocks_per_seq), &device)?
                 .contiguous()?;
-        let seqused_k = Tensor::from_slice(&seqused_k, batch, &device)?.contiguous()?;
+        let seqused_k = candle_core::Tensor::from_slice(&seqused_k, batch, &device)?.contiguous()?;
 
         assert!(
             metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
@@ -18337,10 +18336,10 @@ mod tests {
         let v_data: Vec<f32> = (0..elems)
             .map(|i| ((i % 83) as f32 - 41.0) * 0.03125)
             .collect();
-        let k_pool = Tensor::from_slice(&k_data, (total_slots, heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?;
-        let v_pool = Tensor::from_slice(&v_data, (total_slots, heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?;
+        let k_pool = candle_core::Tensor::from_slice(&k_data, (total_slots, heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let v_pool = candle_core::Tensor::from_slice(&v_data, (total_slots, heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
 
         let tail_elems = tail_len * heads * head_dim;
         let k_tail_data: Vec<f32> = (0..tail_elems)
@@ -18350,11 +18349,11 @@ mod tests {
             .map(|i| ((i % 59) as f32 - 29.0) * 0.015625)
             .collect();
         let k_tail =
-            Tensor::from_slice(&k_tail_data, (1usize, tail_len, heads, head_dim), &device)?
-                .to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&k_tail_data, (1usize, tail_len, heads, head_dim), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
         let v_tail =
-            Tensor::from_slice(&v_tail_data, (1usize, tail_len, heads, head_dim), &device)?
-                .to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&v_tail_data, (1usize, tail_len, heads, head_dim), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
 
         assert!(metal_paged_kv_head_major_read_append_token_major_supports(
             &k_pool, &v_pool, start_slot, prefix_len, &k_tail, &v_tail
@@ -18375,8 +18374,8 @@ mod tests {
             .unsqueeze(0)?;
         let current_k = k_tail.transpose(1, 2)?.contiguous()?;
         let current_v = v_tail.transpose(1, 2)?.contiguous()?;
-        let k_ref = Tensor::cat(&[&prefix_k, &current_k], 2)?;
-        let v_ref = Tensor::cat(&[&prefix_v, &current_v], 2)?;
+        let k_ref = candle_core::Tensor::cat(&[&prefix_k, &current_k], 2)?;
+        let v_ref = candle_core::Tensor::cat(&[&prefix_v, &current_v], 2)?;
 
         assert_eq!(
             k_fast.dims(),
@@ -18415,12 +18414,12 @@ mod tests {
         let v_data: Vec<f32> = (0..elems)
             .map(|i| ((i % 31) as f32 - 15.0) * 0.03125)
             .collect();
-        let k = Tensor::from_slice(&k_data, (1usize, 1usize, heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?;
-        let v = Tensor::from_slice(&v_data, (1usize, 1usize, heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?;
-        let k_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
-        let v_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+        let k = candle_core::Tensor::from_slice(&k_data, (1usize, 1usize, heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let v = candle_core::Tensor::from_slice(&v_data, (1usize, 1usize, heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let k_pool = candle_core::Tensor::zeros((total_slots, heads, head_dim), candle_core::DType::BF16, &device)?;
+        let v_pool = candle_core::Tensor::zeros((total_slots, heads, head_dim), candle_core::DType::BF16, &device)?;
 
         assert!(metal_paged_kv_write_token_major_supports(
             &k_pool, &v_pool, slot, &k, &v
@@ -18462,15 +18461,15 @@ mod tests {
         let v_data: Vec<f32> = (0..elems)
             .map(|i| ((i % 31) as f32 - 15.0) * 0.03125)
             .collect();
-        let k = Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let k = candle_core::Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let v = Tensor::from_slice(&v_data, (batch, 1usize, heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let v = candle_core::Tensor::from_slice(&v_data, (batch, 1usize, heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let slots = Tensor::from_slice(&slots_data, batch, &device)?.contiguous()?;
-        let k_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
-        let v_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+        let slots = candle_core::Tensor::from_slice(&slots_data, batch, &device)?.contiguous()?;
+        let k_pool = candle_core::Tensor::zeros((total_slots, heads, head_dim), candle_core::DType::BF16, &device)?;
+        let v_pool = candle_core::Tensor::zeros((total_slots, heads, head_dim), candle_core::DType::BF16, &device)?;
 
         assert!(metal_paged_kv_write_token_major_batch_supports(
             &k_pool, &v_pool, &slots, &k, &v
@@ -18495,7 +18494,7 @@ mod tests {
             );
         }
 
-        let zero_ref = Tensor::zeros((1usize, heads, head_dim), DType::BF16, &device)?;
+        let zero_ref = candle_core::Tensor::zeros((1usize, heads, head_dim), candle_core::DType::BF16, &device)?;
         assert!(
             max_abs_diff(&k_pool.narrow(0, 0, 1)?, &zero_ref)? < 1e-6,
             "K batch write changed an untouched slot"
@@ -18509,23 +18508,23 @@ mod tests {
     }
 
     fn gdn_gates_reference(
-        a: &Tensor,
-        b: &Tensor,
-        a_log: &Tensor,
-        dt_bias: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
-        let beta = (b.neg()?.exp()? + 1.0)?.recip()?.to_dtype(DType::BF16)?;
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
+        a_log: &candle_core::Tensor,
+        dt_bias: &candle_core::Tensor,
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
+        let beta = (b.neg()?.exp()? + 1.0)?.recip()?.to_dtype(candle_core::DType::BF16)?;
         let a_biased = a
-            .to_dtype(DType::F32)?
-            .broadcast_add(&dt_bias.to_dtype(DType::F32)?)?;
-        let zeros = Tensor::zeros_like(&a_biased)?;
+            .to_dtype(candle_core::DType::F32)?
+            .broadcast_add(&dt_bias.to_dtype(candle_core::DType::F32)?)?;
+        let zeros = candle_core::Tensor::zeros_like(&a_biased)?;
         let relu_x = a_biased.maximum(&zeros)?;
         let relu_neg_x = a_biased.neg()?.maximum(&zeros)?;
         let neg_abs = (relu_x.clone() + relu_neg_x)?.neg()?;
         let log_term = (neg_abs.exp()? + 1.0)?.log()?;
         let sp = (relu_x + log_term)?;
-        let neg_decay = a_log.to_dtype(DType::F32)?.exp()?.neg()?;
-        let g = sp.broadcast_mul(&neg_decay)?.to_dtype(DType::BF16)?;
+        let neg_decay = a_log.to_dtype(candle_core::DType::F32)?.exp()?.neg()?;
+        let g = sp.broadcast_mul(&neg_decay)?.to_dtype(candle_core::DType::BF16)?;
         Ok((beta, g))
     }
 
@@ -18533,7 +18532,7 @@ mod tests {
         batch: usize,
         seq_len: usize,
         nv: usize,
-        device: &Device,
+        device: &candle_core::Device,
     ) -> Result<()> {
         let total = batch * seq_len * nv;
         let a_data: Vec<f32> = (0..total).map(|i| ((i % 17) as f32 - 8.0) * 0.25).collect();
@@ -18541,18 +18540,18 @@ mod tests {
         let a_log_data: Vec<f32> = (0..nv).map(|i| ((i % 11) as f32 - 5.0) * 0.075).collect();
         let dt_bias_data: Vec<f32> = (0..nv).map(|i| ((i % 13) as f32 - 6.0) * 0.08).collect();
 
-        let a = Tensor::from_slice(&a_data, (batch, seq_len, nv), device)?.to_dtype(DType::BF16)?;
-        let b = Tensor::from_slice(&b_data, (batch, seq_len, nv), device)?.to_dtype(DType::BF16)?;
-        let ab = Tensor::cat(&[&a, &b], D::Minus1)?.contiguous()?;
-        let a_log = Tensor::from_slice(&a_log_data, nv, device)?;
-        let dt_bias = Tensor::from_slice(&dt_bias_data, nv, device)?.to_dtype(DType::BF16)?;
+        let a = candle_core::Tensor::from_slice(&a_data, (batch, seq_len, nv), device)?.to_dtype(candle_core::DType::BF16)?;
+        let b = candle_core::Tensor::from_slice(&b_data, (batch, seq_len, nv), device)?.to_dtype(candle_core::DType::BF16)?;
+        let ab = candle_core::Tensor::cat(&[&a, &b], D::Minus1)?.contiguous()?;
+        let a_log = candle_core::Tensor::from_slice(&a_log_data, nv, device)?;
+        let dt_bias = candle_core::Tensor::from_slice(&dt_bias_data, nv, device)?.to_dtype(candle_core::DType::BF16)?;
 
         assert!(metal_gdn_gates_supports(&a, &b, &a_log, &dt_bias));
         assert!(metal_gdn_gates_decay_supports(&a, &b, &a_log, &dt_bias));
         assert!(metal_gdn_gates_decay_ab_supports(&ab, &a_log, &dt_bias, nv));
         let (beta_ref, g_ref) = gdn_gates_reference(&a, &b, &a_log, &dt_bias)?;
         let (beta_fused, g_fused) = metal_gdn_gates_bf16(&a, &b, &a_log, &dt_bias)?;
-        let decay_ref = g_ref.to_dtype(DType::F32)?.exp()?.to_dtype(DType::BF16)?;
+        let decay_ref = g_ref.to_dtype(candle_core::DType::F32)?.exp()?.to_dtype(candle_core::DType::BF16)?;
         let (beta_decay, decay_fused) = metal_gdn_gates_decay_bf16(&a, &b, &a_log, &dt_bias)?;
         let (beta_decay_ab, decay_ab) = metal_gdn_gates_decay_ab_bf16(&ab, &a_log, &dt_bias, nv)?;
 
@@ -18562,12 +18561,12 @@ mod tests {
         assert_eq!(decay_fused.dims(), &[batch, seq_len, nv]);
         assert_eq!(beta_decay_ab.dims(), &[batch, seq_len, nv]);
         assert_eq!(decay_ab.dims(), &[batch, seq_len, nv]);
-        assert_eq!(beta_fused.dtype(), DType::BF16);
-        assert_eq!(g_fused.dtype(), DType::BF16);
-        assert_eq!(beta_decay.dtype(), DType::BF16);
-        assert_eq!(decay_fused.dtype(), DType::BF16);
-        assert_eq!(beta_decay_ab.dtype(), DType::BF16);
-        assert_eq!(decay_ab.dtype(), DType::BF16);
+        assert_eq!(beta_fused.dtype(), candle_core::DType::BF16);
+        assert_eq!(g_fused.dtype(), candle_core::DType::BF16);
+        assert_eq!(beta_decay.dtype(), candle_core::DType::BF16);
+        assert_eq!(decay_fused.dtype(), candle_core::DType::BF16);
+        assert_eq!(beta_decay_ab.dtype(), candle_core::DType::BF16);
+        assert_eq!(decay_ab.dtype(), candle_core::DType::BF16);
 
         let beta_max = max_abs_diff(&beta_ref, &beta_fused)?;
         let beta_mean = mean_abs_diff(&beta_ref, &beta_fused)?;
@@ -18669,17 +18668,17 @@ mod tests {
             .collect();
 
         let g =
-            Tensor::from_slice(&g_data, (batch, heads, chunk), &device)?.to_dtype(DType::BF16)?;
-        let v = Tensor::from_slice(&v_data, (batch, heads, chunk, dv), &device)?
-            .to_dtype(DType::BF16)?;
-        let kkt = Tensor::from_slice(&kkt_data, (batch, heads, chunk, chunk), &device)?
-            .to_dtype(DType::BF16)?;
-        let qkt = Tensor::from_slice(&qkt_data, (batch, heads, chunk, chunk), &device)?
-            .to_dtype(DType::BF16)?;
-        let ks_entry = Tensor::from_slice(&ks_data, (batch, heads, chunk, dv), &device)?
-            .to_dtype(DType::BF16)?;
-        let q_s = Tensor::from_slice(&qs_data, (batch, heads, chunk, dv), &device)?
-            .to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&g_data, (batch, heads, chunk), &device)?.to_dtype(candle_core::DType::BF16)?;
+        let v = candle_core::Tensor::from_slice(&v_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let kkt = candle_core::Tensor::from_slice(&kkt_data, (batch, heads, chunk, chunk), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let qkt = candle_core::Tensor::from_slice(&qkt_data, (batch, heads, chunk, chunk), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let ks_entry = candle_core::Tensor::from_slice(&ks_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let q_s = candle_core::Tensor::from_slice(&qs_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
 
         assert!(metal_gdn_chunk_prep_supports(
             &g, &v, &kkt, &qkt, &ks_entry, &q_s
@@ -18760,30 +18759,30 @@ mod tests {
             .collect();
 
         let g =
-            Tensor::from_slice(&g_data, (batch, heads, chunk), &device)?.to_dtype(DType::BF16)?;
-        let v = Tensor::from_slice(&v_data, (batch, heads, chunk, dv), &device)?
-            .to_dtype(DType::BF16)?;
-        let kkt = Tensor::from_slice(&kkt_data, (batch, heads, chunk, chunk), &device)?
-            .to_dtype(DType::BF16)?;
-        let qkt = Tensor::from_slice(&qkt_data, (batch, heads, chunk, chunk), &device)?
-            .to_dtype(DType::BF16)?;
-        let ks_entry = Tensor::from_slice(&ks_data, (batch, heads, chunk, dv), &device)?
-            .to_dtype(DType::BF16)?;
-        let q_s = Tensor::from_slice(&qs_data, (batch, heads, chunk, dv), &device)?
-            .to_dtype(DType::BF16)?;
-        let beta = Tensor::from_slice(&beta_data, (batch, heads, chunk), &device)?
-            .to_dtype(DType::BF16)?;
-        let k_t = Tensor::from_slice(&kt_data, (batch, heads, dk, chunk), &device)?
-            .to_dtype(DType::BF16)?;
-        let state_entry = Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
-            .to_dtype(DType::BF16)?;
-        let mut state_fused = Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
-            .to_dtype(DType::BF16)?;
-        let mut state_head_last = Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
-            .to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&g_data, (batch, heads, chunk), &device)?.to_dtype(candle_core::DType::BF16)?;
+        let v = candle_core::Tensor::from_slice(&v_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let kkt = candle_core::Tensor::from_slice(&kkt_data, (batch, heads, chunk, chunk), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let qkt = candle_core::Tensor::from_slice(&qkt_data, (batch, heads, chunk, chunk), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let ks_entry = candle_core::Tensor::from_slice(&ks_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let q_s = candle_core::Tensor::from_slice(&qs_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let beta = candle_core::Tensor::from_slice(&beta_data, (batch, heads, chunk), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let k_t = candle_core::Tensor::from_slice(&kt_data, (batch, heads, dk, chunk), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let state_entry = candle_core::Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let mut state_fused = candle_core::Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let mut state_head_last = candle_core::Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
         let mut state_head_last_strided =
-            Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
-                .to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
 
         assert!(metal_gdn_full_chunk_forward_supports(
             &g,
@@ -18819,7 +18818,7 @@ mod tests {
         )?;
         let seq_len = chunk * 2;
         let t_start = chunk;
-        let out_head_last = Tensor::zeros((batch, seq_len, heads, dv), DType::BF16, &device)?;
+        let out_head_last = candle_core::Tensor::zeros((batch, seq_len, heads, dv), candle_core::DType::BF16, &device)?;
         assert!(metal_gdn_full_chunk_forward_head_last_supports(
             &g,
             &v,
@@ -18875,14 +18874,14 @@ mod tests {
                 }
             }
         }
-        let g_full = Tensor::from_slice(&g_full_data, (batch, heads, seq_len), &device)?
-            .to_dtype(DType::BF16)?;
-        let v_full = Tensor::from_slice(&v_full_data, (batch, heads, seq_len, dv), &device)?
-            .to_dtype(DType::BF16)?;
-        let beta_full = Tensor::from_slice(&beta_full_data, (batch, heads, seq_len), &device)?
-            .to_dtype(DType::BF16)?;
-        let k_full = Tensor::from_slice(&k_full_data, (batch, heads, seq_len, dk), &device)?
-            .to_dtype(DType::BF16)?;
+        let g_full = candle_core::Tensor::from_slice(&g_full_data, (batch, heads, seq_len), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let v_full = candle_core::Tensor::from_slice(&v_full_data, (batch, heads, seq_len, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let beta_full = candle_core::Tensor::from_slice(&beta_full_data, (batch, heads, seq_len), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let k_full = candle_core::Tensor::from_slice(&k_full_data, (batch, heads, seq_len, dk), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
         let g_view = g_full.narrow(2, t_start, chunk)?;
         let v_view = v_full.narrow(2, t_start, chunk)?;
         let beta_view = beta_full.narrow(2, t_start, chunk)?;
@@ -18892,7 +18891,7 @@ mod tests {
         assert!(!k_t_view.is_contiguous());
 
         let out_head_last_strided =
-            Tensor::zeros((batch, seq_len, heads, dv), DType::BF16, &device)?;
+            candle_core::Tensor::zeros((batch, seq_len, heads, dv), candle_core::DType::BF16, &device)?;
         assert!(metal_gdn_full_chunk_forward_head_last_supports(
             &g_view,
             &v_view,
@@ -19026,24 +19025,24 @@ mod tests {
             .map(|idx| ((idx % 41) as f32 - 20.0) * 0.003)
             .collect();
 
-        let q = Tensor::from_slice(&q_data, (batch, q_heads, seq_len, dk), &device)?
-            .to_dtype(DType::BF16)?;
-        let k = Tensor::from_slice(&k_data, (batch, q_heads, seq_len, dk), &device)?
-            .to_dtype(DType::BF16)?;
-        let v = Tensor::from_slice(&v_data, (batch, value_heads, seq_len, dv), &device)?
-            .to_dtype(DType::BF16)?;
-        let beta = Tensor::from_slice(&beta_data, (batch, value_heads, seq_len), &device)?
-            .to_dtype(DType::BF16)?;
-        let g = Tensor::from_slice(&g_data, (batch, value_heads, seq_len), &device)?
-            .to_dtype(DType::BF16)?;
-        let mut state_ref = Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-            .to_dtype(DType::BF16)?;
+        let q = candle_core::Tensor::from_slice(&q_data, (batch, q_heads, seq_len, dk), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let k = candle_core::Tensor::from_slice(&k_data, (batch, q_heads, seq_len, dk), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let v = candle_core::Tensor::from_slice(&v_data, (batch, value_heads, seq_len, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let beta = candle_core::Tensor::from_slice(&beta_data, (batch, value_heads, seq_len), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let g = candle_core::Tensor::from_slice(&g_data, (batch, value_heads, seq_len), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let mut state_ref = candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
         let mut state_fused =
-            Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-                .to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
         let mut state_native =
-            Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-                .to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
         let q_ref = q
             .unsqueeze(2)?
             .expand(&[batch, q_heads, gqa_ratio, seq_len, dk])?
@@ -19063,7 +19062,7 @@ mod tests {
             let v_t = v.narrow(2, t, 1)?.contiguous()?;
             let beta_t = beta.narrow(2, t, 1)?.contiguous()?;
             let g_t = g.narrow(2, t, 1)?.contiguous()?;
-            let p = g_t.to_dtype(DType::F32)?.exp()?.to_dtype(DType::BF16)?;
+            let p = g_t.to_dtype(candle_core::DType::F32)?.exp()?.to_dtype(candle_core::DType::BF16)?;
             let p_u = p.unsqueeze(3)?;
             let k_t_mat = k_t.transpose(2, 3)?.contiguous()?;
             let ks_entry = k_t.matmul(&state_ref)?;
@@ -19080,7 +19079,7 @@ mod tests {
             }
             out_chunks.push(out_t);
         }
-        let out_ref = Tensor::cat(&out_chunks, 2)?.transpose(1, 2)?.contiguous()?;
+        let out_ref = candle_core::Tensor::cat(&out_chunks, 2)?.transpose(1, 2)?.contiguous()?;
 
         assert!(metal_gdn_recurrent_prefill_head_last_supports(
             &q,
@@ -19162,8 +19161,8 @@ mod tests {
         let beta_native_one = beta_native.narrow(1, 0, 1)?.contiguous()?;
         let g_native_one = g_native.narrow(1, 0, 1)?.contiguous()?;
         let mut state_native_one =
-            Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-                .to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
         assert!(metal_gdn_recurrent_prefill_native_head_last_supports(
             &q_native_one,
             &k_native_one,
@@ -19244,30 +19243,30 @@ mod tests {
             .map(|idx| 0.9 + ((idx % 17) as f32) * 0.01)
             .collect();
 
-        let q = Tensor::from_slice(&q_data, (batch, seq_len, q_heads, dk), &device)?
-            .to_dtype(DType::BF16)?;
-        let k = Tensor::from_slice(&k_data, (batch, seq_len, q_heads, dk), &device)?
-            .to_dtype(DType::BF16)?;
-        let v = Tensor::from_slice(&v_data, (batch, seq_len, value_heads, dv), &device)?
-            .to_dtype(DType::BF16)?;
-        let a = Tensor::from_slice(&a_data, (batch, seq_len, value_heads), &device)?
-            .to_dtype(DType::BF16)?;
-        let b = Tensor::from_slice(&b_data, (batch, seq_len, value_heads), &device)?
-            .to_dtype(DType::BF16)?;
-        let a_log = Tensor::from_slice(&a_log_data, value_heads, &device)?;
+        let q = candle_core::Tensor::from_slice(&q_data, (batch, seq_len, q_heads, dk), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let k = candle_core::Tensor::from_slice(&k_data, (batch, seq_len, q_heads, dk), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let v = candle_core::Tensor::from_slice(&v_data, (batch, seq_len, value_heads, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let a = candle_core::Tensor::from_slice(&a_data, (batch, seq_len, value_heads), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let b = candle_core::Tensor::from_slice(&b_data, (batch, seq_len, value_heads), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let a_log = candle_core::Tensor::from_slice(&a_log_data, value_heads, &device)?;
         let dt_bias =
-            Tensor::from_slice(&dt_bias_data, value_heads, &device)?.to_dtype(DType::BF16)?;
-        let z = Tensor::from_slice(&z_data, (batch, seq_len, value_heads, dv), &device)?
-            .to_dtype(DType::BF16)?;
-        let weight = Tensor::from_slice(&weight_data, dv, &device)?;
-        let mut state_ref = Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-            .to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&dt_bias_data, value_heads, &device)?.to_dtype(candle_core::DType::BF16)?;
+        let z = candle_core::Tensor::from_slice(&z_data, (batch, seq_len, value_heads, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
+        let weight = candle_core::Tensor::from_slice(&weight_data, dv, &device)?;
+        let mut state_ref = candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+            .to_dtype(candle_core::DType::BF16)?;
         let mut state_fused =
-            Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-                .to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
         let mut state_fused_norm =
-            Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
-                .to_dtype(DType::BF16)?;
+            candle_core::Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                .to_dtype(candle_core::DType::BF16)?;
 
         let (beta, g) = gdn_gates_reference(&a, &b, &a_log, &dt_bias)?;
         let out_ref = metal_gdn_recurrent_prefill_native_head_last_bf16(
@@ -19369,7 +19368,7 @@ mod tests {
             "GDN decode gates+recurrent+rmsnorm state mean_abs_diff={norm_state_mean:e} exceeds tolerance"
         );
 
-        let q_prefill = Tensor::zeros((batch, 2usize, q_heads, dk), DType::BF16, &device)?;
+        let q_prefill = candle_core::Tensor::zeros((batch, 2usize, q_heads, dk), candle_core::DType::BF16, &device)?;
         assert!(!metal_gdn_decode_gates_recurrent_supports(
             &q_prefill,
             &k,
@@ -19397,8 +19396,8 @@ mod tests {
         let q_scale = 1.0 / (hidden as f64).sqrt();
         let eps = 1e-6;
 
-        let q = Tensor::randn(0.0f32, 0.5, (batch, seq_len, heads, hidden), &device)?;
-        let k = Tensor::randn(0.0f32, 0.5, (batch, seq_len, heads, hidden), &device)?;
+        let q = candle_core::Tensor::randn(0.0f32, 0.5, (batch, seq_len, heads, hidden), &device)?;
+        let k = candle_core::Tensor::randn(0.0f32, 0.5, (batch, seq_len, heads, hidden), &device)?;
         assert!(metal_gdn_qk_norm_supports(&q, &k));
 
         let (q_ref, k_ref) = gdn_qk_norm_reference(&q, &k, q_scale, eps)?;
@@ -19444,8 +19443,8 @@ mod tests {
         let q_scale = 1.0 / (hidden as f64).sqrt();
         let eps = 1e-6;
 
-        let q = Tensor::randn(0.0f32, 0.7, (batch, seq_len, heads, hidden), &device)?;
-        let k = Tensor::randn(0.0f32, 0.7, (batch, seq_len, heads, hidden), &device)?;
+        let q = candle_core::Tensor::randn(0.0f32, 0.7, (batch, seq_len, heads, hidden), &device)?;
+        let k = candle_core::Tensor::randn(0.0f32, 0.7, (batch, seq_len, heads, hidden), &device)?;
 
         let (q_ref, k_ref) = gdn_qk_norm_reference(&q, &k, q_scale, eps)?;
         let (q_fused, k_fused) = metal_gdn_qk_norm_f32_bf16(&q, &k, q_scale as f32, eps as f32)?;
@@ -19489,8 +19488,8 @@ mod tests {
         let q_scale = 1.0 / (hidden as f64).sqrt();
         let eps = 1e-6;
 
-        let q = Tensor::randn(0.0f32, 0.7, (batch, seq_len, nk, hidden), &device)?;
-        let k = Tensor::randn(0.0f32, 0.7, (batch, seq_len, nk, hidden), &device)?;
+        let q = candle_core::Tensor::randn(0.0f32, 0.7, (batch, seq_len, nk, hidden), &device)?;
+        let k = candle_core::Tensor::randn(0.0f32, 0.7, (batch, seq_len, nk, hidden), &device)?;
         assert!(metal_gdn_qk_norm_gqa_supports(&q, &k, nv));
 
         let q_expanded = q
@@ -19509,8 +19508,8 @@ mod tests {
 
         assert_eq!(q_fused.dims(), &[batch, seq_len, nv, hidden]);
         assert_eq!(k_fused.dims(), &[batch, seq_len, nv, hidden]);
-        assert_eq!(q_fused.dtype(), DType::BF16);
-        assert_eq!(k_fused.dtype(), DType::BF16);
+        assert_eq!(q_fused.dtype(), candle_core::DType::BF16);
+        assert_eq!(k_fused.dtype(), candle_core::DType::BF16);
 
         let q_diff = max_abs_diff(&q_ref, &q_fused)?;
         let k_diff = max_abs_diff(&k_ref, &k_fused)?;
@@ -19546,25 +19545,25 @@ mod tests {
         let q_scale = 1.0 / (hidden as f32).sqrt();
         let eps = 1e-6f32;
 
-        let ones = Tensor::ones((1usize, 1usize, 1usize, hidden), DType::F32, &device)?;
+        let ones = candle_core::Tensor::ones((1usize, 1usize, 1usize, hidden), candle_core::DType::F32, &device)?;
         let (q_ones, k_ones) = metal_gdn_qk_norm_f32_bf16(&ones, &ones, q_scale, eps)?;
-        let q_expected = Tensor::new(&[1.0f32 / hidden as f32], &device)?
-            .to_dtype(DType::BF16)?
+        let q_expected = candle_core::Tensor::new(&[1.0f32 / hidden as f32], &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .broadcast_as((1usize, 1usize, 1usize, hidden))?;
-        let k_expected = Tensor::new(&[1.0f32 / ((hidden as f32) + eps).sqrt()], &device)?
-            .to_dtype(DType::BF16)?
+        let k_expected = candle_core::Tensor::new(&[1.0f32 / ((hidden as f32) + eps).sqrt()], &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .broadcast_as((1usize, 1usize, 1usize, hidden))?;
         assert!(max_abs_diff(&q_ones, &q_expected)? < 1e-4);
         assert!(max_abs_diff(&k_ones, &k_expected)? < 1e-4);
 
-        let zeros = Tensor::zeros((1usize, 1usize, 1usize, hidden), DType::F32, &device)?;
+        let zeros = candle_core::Tensor::zeros((1usize, 1usize, 1usize, hidden), candle_core::DType::F32, &device)?;
         let (q_zero, k_zero) = metal_gdn_qk_norm_f32_bf16(&zeros, &zeros, q_scale, eps)?;
         assert_eq!(
-            q_zero.to_dtype(DType::F32)?.max_all()?.to_scalar::<f32>()?,
+            q_zero.to_dtype(candle_core::DType::F32)?.max_all()?.to_scalar::<f32>()?,
             0.0
         );
         assert_eq!(
-            k_zero.to_dtype(DType::F32)?.max_all()?.to_scalar::<f32>()?,
+            k_zero.to_dtype(candle_core::DType::F32)?.max_all()?.to_scalar::<f32>()?,
             0.0
         );
 
@@ -19593,7 +19592,7 @@ mod tests {
         // sequential blocks.
         let block_ids: [u32; 4] = [3, 7, 0, 5];
         let block_table =
-            Tensor::new(block_ids.as_slice(), &device)?.reshape((1usize, max_blocks_per_seq))?;
+            candle_core::Tensor::new(block_ids.as_slice(), &device)?.reshape((1usize, max_blocks_per_seq))?;
 
         // Fill the pool with distinctive per-slot values so the gather's
         // correctness is visible in the output. Each slot's values are
@@ -19605,11 +19604,11 @@ mod tests {
             .map(|i| (i as f32) * 0.0001 + 1.0)
             .collect();
         let k_pool =
-            Tensor::from_slice(&k_pool_data, (total_slots, num_kv_heads, head_dim), &device)?;
+            candle_core::Tensor::from_slice(&k_pool_data, (total_slots, num_kv_heads, head_dim), &device)?;
         let v_pool =
-            Tensor::from_slice(&v_pool_data, (total_slots, num_kv_heads, head_dim), &device)?;
+            candle_core::Tensor::from_slice(&v_pool_data, (total_slots, num_kv_heads, head_dim), &device)?;
 
-        let q = Tensor::randn(0.0f32, 0.02, (1, 1, num_heads, head_dim), &device)?;
+        let q = candle_core::Tensor::randn(0.0f32, 0.02, (1, 1, num_heads, head_dim), &device)?;
         let softmax_scale = 1.0 / (head_dim as f32).sqrt();
         let backend = MetalBackend::new(device.clone());
 
@@ -19667,10 +19666,10 @@ mod tests {
         };
         let head_dim = 4; // not in whitelist
         let total_slots = 16;
-        let k_pool = Tensor::zeros((total_slots, 1, head_dim), DType::F32, &device)?;
-        let v_pool = Tensor::zeros((total_slots, 1, head_dim), DType::F32, &device)?;
-        let block_table = Tensor::new(&[0u32, 0, 0, 0][..], &device)?.reshape((1usize, 4))?;
-        let q = Tensor::zeros((1, 1, 2, head_dim), DType::F32, &device)?;
+        let k_pool = candle_core::Tensor::zeros((total_slots, 1, head_dim), candle_core::DType::F32, &device)?;
+        let v_pool = candle_core::Tensor::zeros((total_slots, 1, head_dim), candle_core::DType::F32, &device)?;
+        let block_table = candle_core::Tensor::new(&[0u32, 0, 0, 0][..], &device)?.reshape((1usize, 4))?;
+        let q = candle_core::Tensor::zeros((1, 1, 2, head_dim), candle_core::DType::F32, &device)?;
 
         let backend = MetalBackend::new(device);
         let out =
