@@ -828,23 +828,53 @@ fn gdn_recurrent_step_native_head_last_resident_state_matches_readback_path() ->
         .context("native-head readback step 2")?;
     let expected_state2 = expected_state2.context("native-head readback state 2")?;
 
-    let (resident_out1, resident_state) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_resident_state(
-            &vk, &q1, &k1, &v1, &beta1, &g1, &state0, None,
-        )
-        .context("native-head resident step 1")?;
-    let (resident_out2, resident_state) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_resident_state(
-            &vk,
-            &q2,
-            &k2,
-            &v2,
-            &beta2,
-            &g2,
-            &state0,
-            Some(resident_state),
-        )
-        .context("native-head resident step 2")?;
+    let (resident_out1, resident_state) = {
+        let q_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q1)?.0;
+        let k_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k1)?.0;
+        let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v1)?.0;
+        let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta1)?.0;
+        let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g1)?.0;
+        let state_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state0)?.0;
+        let (b1, sl1, qh1, dk1) = q1.dims4()?;
+        let (_, _, h1, dv1) = v1.dims4()?;
+        let (out_b, st_buf) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
+                &vk,
+                &q_data_b, &k_data_b, &v_data_b, &beta_data_b, &g_data_b,
+                Some(state_data_b.as_slice()),
+                b1, sl1, qh1, h1, dk1, dv1,
+                None,
+            )
+            .context("native-head resident step 1")?;
+        let out_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &out_b, &[b1, h1, dv1], q1.dtype(),
+        )?
+        .unsqueeze(1)?;
+        (out_t, st_buf)
+    };
+    let (resident_out2, resident_state) = {
+        let q_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q2)?.0;
+        let k_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k2)?.0;
+        let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v2)?.0;
+        let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta2)?.0;
+        let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g2)?.0;
+        let (b2, sl2, qh2, dk2) = q2.dims4()?;
+        let (_, _, h2, dv2) = v2.dims4()?;
+        let (out_b, st_buf) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
+                &vk,
+                &q_data_b, &k_data_b, &v_data_b, &beta_data_b, &g_data_b,
+                None,
+                b2, sl2, qh2, h2, dk2, dv2,
+                Some(resident_state),
+            )
+            .context("native-head resident step 2")?;
+        let out_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &out_b, &[b2, h2, dv2], q2.dtype(),
+        )?
+        .unsqueeze(1)?;
+        (out_t, st_buf)
+    };
     let resident_state_data = kiln_vulkan_kernel::VulkanBuffer::read_back(
         vk.device(),
         vk.host_visible_mem_type(),

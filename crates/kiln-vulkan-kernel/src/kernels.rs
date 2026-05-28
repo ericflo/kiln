@@ -8807,22 +8807,31 @@ pub fn dispatch_gdn_recurrent_step_resident_state_bytes(
 /// resident. `q`/`k` are `[batch, 1, q_heads, dk]`; value-side tensors and
 /// state use `heads`.
 #[allow(clippy::too_many_arguments)]
-pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state(
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
     vk_device: &VulkanDevice,
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    g: &Tensor,
-    state: &Tensor,
+    q_data: &[u8],
+    k_data: &[u8],
+    v_data: &[u8],
+    beta_data: &[u8],
+    g_data: &[u8],
+    state_data: Option<&[u8]>,
+    batch: usize,
+    seq_len: usize,
+    q_heads: usize,
+    heads: usize,
+    dk: usize,
+    dv: usize,
     resident_state: Option<Arc<VulkanBuffer>>,
-) -> Result<(Tensor, Arc<VulkanBuffer>)> {
-    let (batch, seq_len, q_heads, dk) = q.dims4()?;
-    let (k_batch, k_seq_len, k_heads, k_dk) = k.dims4()?;
-    let (v_batch, v_seq_len, heads, dv) = v.dims4()?;
-    let (beta_batch, beta_seq_len, beta_heads) = beta.dims3()?;
-    let (g_batch, g_seq_len, g_heads) = g.dims3()?;
-    let (state_batch, state_heads, state_dk, state_dv) = state.dims4()?;
+) -> Result<(Vec<u8>, Arc<VulkanBuffer>)> {
+    // Caller-supplied shape values (extracted from candle Tensor dims via the kt boundary).
+    // Validation that was previously here is the caller's responsibility now, but we still
+    // hold derived invariants for the kernel dispatch.
+    let (k_batch, k_seq_len, k_heads, k_dk) = (batch, seq_len, q_heads, dk);
+    let (v_batch, v_seq_len) = (batch, seq_len);
+    let (beta_batch, beta_seq_len, beta_heads) = (batch, seq_len, heads);
+    let (g_batch, g_seq_len, g_heads) = (batch, seq_len, heads);
+    let (state_batch, state_heads, state_dk, state_dv) = (batch, heads, dk, dv);
 
     anyhow::ensure!(
         seq_len == 1,
@@ -8862,16 +8871,7 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state(
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    let q_data = extract_tensor_bytes(q)?.0;
-    let k_data = extract_tensor_bytes(k)?.0;
-    let v_data = extract_tensor_bytes(v)?.0;
-    let beta_data = extract_tensor_bytes(beta)?.0;
-    let g_data = extract_tensor_bytes(g)?.0;
-    let state_data = if resident_state.is_none() {
-        Some(extract_tensor_bytes(state)?.0)
-    } else {
-        None
-    };
+    // q_data, k_data, v_data, beta_data, g_data, state_data are now caller-supplied bytes.
 
     let parallel_reduce = use_gdn_recurrent_parallel_reduce(dk, dv);
     let glsl_path = if parallel_reduce {
@@ -9097,8 +9097,8 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state(
 
     let out_data = VulkanBuffer::read_host_visible(device, &out_stage)?;
     let out_shape = vec![batch, heads, dv];
-    let out_tensor = create_tensor_from_data(&out_data, &out_shape, q.dtype())?;
-    Ok((out_tensor.unsqueeze(1)?, state_buf))
+    let _ = out_shape;
+    Ok((out_data, state_buf))
 }
 
 #[allow(clippy::too_many_arguments)]

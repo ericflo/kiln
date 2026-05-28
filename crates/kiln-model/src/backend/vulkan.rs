@@ -3535,18 +3535,36 @@ impl BackendRuntime for VulkanBackend {
             let state_id = state.id();
             let resident_state =
                 RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().get(&state_id).cloned());
-            let (out, resident_state) =
-                kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_resident_state(
+            let q_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(q)?.0;
+            let k_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(k)?.0;
+            let v_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(v)?.0;
+            let beta_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(beta)?.0;
+            let g_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(g)?.0;
+            let state_data_owned = if resident_state.is_none() {
+                Some(kiln_vulkan_kernel::kernels::extract_tensor_bytes(state)?.0)
+            } else {
+                None
+            };
+            let (batch, seq_len, q_heads, dk) = q.dims4()?;
+            let (_, _, heads, dv) = v.dims4()?;
+            let q_dtype = q.dtype();
+            let (out_data, resident_state) =
+                kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
                     vk_device,
-                    q,
-                    k,
-                    v,
-                    beta,
-                    g,
-                    state,
+                    &q_data, &k_data, &v_data, &beta_data, &g_data,
+                    state_data_owned.as_deref(),
+                    batch, seq_len, q_heads, heads, dk, dv,
                     resident_state,
                 )
                 .context("gdn_recurrent_step native-head resident-state Vulkan kernel failed")?;
+            // `out_data` is the un-unsqueezed [batch, heads, dv] layout.
+            // Reconstruct the candle tensor and re-unsqueeze to match prior public shape.
+            let out_no_seq = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &out_data,
+                &[batch, heads, dv],
+                q_dtype,
+            )?;
+            let out = out_no_seq.unsqueeze(1)?;
             RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
                 cache.borrow_mut().insert(state_id, resident_state);
             });
