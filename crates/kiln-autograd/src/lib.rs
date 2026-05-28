@@ -50,6 +50,7 @@ mod backward_op;
 pub mod backwards;
 mod grad_store;
 mod tape;
+mod tape_scope;
 
 pub use anomaly::{anomaly_detection_enabled, anomaly_panic, ENV_DETECT_ANOMALY};
 pub use backward_op::{BackwardOp, BoxedBackwardOp};
@@ -87,3 +88,4 @@ pub use backwards::unsqueeze::UnsqueezeBackward;
 pub use backwards::where_select::WhereSelectBackward;
 pub use grad_store::GradStore;
 pub use tape::{Tape, TapeNode};
+pub use tape_scope::{tape_forward_enabled, with_active_tape, with_thread_local_tape};
