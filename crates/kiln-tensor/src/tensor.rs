@@ -126,15 +126,13 @@ impl Tensor {
     ///
     /// Internally:
     /// 1. Builds the CPU tensor via [`Self::from_slice`].
-    /// 2. Resolves the primary CUDA device for `device_index` via
-    ///    [`crate::primary_cuda_device`].
-    /// 3. Uploads via [`crate::host_to_cuda_copy`].
+    /// 2. Uploads via [`crate::host_to_cuda_copy_ctx`] (which derives
+    ///    the cudarc context internally — no candle_device touched).
     ///
-    /// Callers never need to import `candle_core::Device` —
-    /// this is the substrate-side helper (#1082) that lets
-    /// kernel-crate `tests/*.rs` and `#[cfg(test)]` parity scaffolds
-    /// allocate CUDA inputs candle-free, which is a prerequisite for
-    /// dropping `candle-core` from the kernel crates' `Cargo.toml`.
+    /// This is the substrate-side helper (#1082) that lets kernel-crate
+    /// `tests/*.rs` and `#[cfg(test)]` parity scaffolds allocate CUDA
+    /// inputs candle-free, a prerequisite for dropping `candle-core`
+    /// from the kernel crates' `Cargo.toml`.
     ///
     /// On non-CUDA builds this method is absent; tests that need it
     /// can use `#[cfg(feature = "cuda")]` to gate.
@@ -145,8 +143,7 @@ impl Tensor {
         device_index: usize,
     ) -> Result<Self> {
         let cpu = Self::from_slice(values, shape)?;
-        let cdev = crate::primary_cuda_device(device_index)?;
-        crate::host_to_cuda_copy(&cpu, cdev, device_index)
+        crate::host_to_cuda_copy_ctx(&cpu, device_index)
     }
 
     /// Build a zero-initialized CUDA tensor on the primary CUDA
@@ -154,7 +151,8 @@ impl Tensor {
     ///
     /// Companion to [`Self::cuda_from_slice`]. Useful for test
     /// scaffolds that need a CUDA destination buffer of a known shape
-    /// without having to mention `candle_core` types.
+    /// without having to mention `candle_core` types. Routes through
+    /// `cuda_zeros_ctx` (candle-free).
     #[cfg(feature = "cuda")]
     pub fn cuda_zeros_on(
         shape: impl Into<Vec<usize>>,
@@ -162,10 +160,8 @@ impl Tensor {
         device_index: usize,
     ) -> Result<Self> {
         let shape_vec: Vec<usize> = shape.into();
-        let cdev = crate::primary_cuda_device(device_index)?;
         let n_elements = shape_vec.iter().product::<usize>();
-        let storage =
-            crate::cuda_zeros(cdev, device_index, dtype, n_elements)?;
+        let storage = crate::cuda_zeros_ctx(device_index, dtype, n_elements)?;
         let layout = Layout::contiguous(shape_vec);
         Self::from_parts(storage, layout, TensorId::next())
     }
