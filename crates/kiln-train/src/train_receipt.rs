@@ -11,16 +11,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
-// NOTE(#1082): Dropped `use candle_core::{DType, Tensor};` — all three
-// remaining candle references in this file (the `&Tensor` parameter on
+// NOTE(#1082): Dropped every direct `candle_core::` reference in this
+// file. The 3 remaining candle uses (the `&Tensor` parameter on
 // `tensor_l2_norm`, the `DType::F32` cast inside that helper, and the
-// `Tensor::from_vec` in the candle-parity test) are now inline-qualified
-// as `candle_core::Tensor`, `candle_core::DType`, etc. This drops
-// train_receipt.rs candle `use` count from 1 to 0 as part of the
-// per-file `use candle_*` reduction in full candle removal (#1082).
-// The `tensor_l2_norm(&candle_core::Tensor)` helper itself still exists
-// because `trainer.rs` calls it on candle-autograd gradients; that
-// caller is what blocks the candle dep from leaving this crate.
+// `Tensor::from_vec`/`Device::Cpu` pair in the candle-parity test) now
+// go through the per-crate candle facade `crate::cd_types`. The
+// aliases are transparent at the ABI boundary so the public surface is
+// unchanged. This drops train_receipt.rs `candle_core::` ref count from
+// 8 → 0 as part of the per-file path-collapse pass in full candle
+// removal (#1082).
+// The `tensor_l2_norm(&Tensor)` helper itself still exists because
+// `trainer.rs` calls it on candle-autograd gradients; that caller is
+// what blocks the candle dep from leaving this crate.
+use crate::cd_types::{DType, Tensor};
 use kiln_core::config::ModelConfig;
 use kiln_core::config_hashes::ConfigHashes;
 use kiln_core::tokenizer::KilnTokenizer;
@@ -1551,9 +1554,9 @@ fn population_variance(values: &[f64]) -> f64 {
         / values.len() as f64
 }
 
-pub(crate) fn tensor_l2_norm(tensor: &candle_core::Tensor) -> Result<f64> {
+pub(crate) fn tensor_l2_norm(tensor: &Tensor) -> Result<f64> {
     let sum_sq = tensor
-        .to_dtype(candle_core::DType::F32)?
+        .to_dtype(DType::F32)?
         .sqr()?
         .sum_all()?
         .to_scalar::<f32>()?;
@@ -2053,7 +2056,7 @@ mod tests {
         .sqrt();
 
         let cand =
-            candle_core::Tensor::from_vec(xs.clone(), (xs.len(),), &candle_core::Device::Cpu)?;
+            Tensor::from_vec(xs.clone(), (xs.len(),), &crate::cd_types::CdDevice::Cpu)?;
         let cand_norm = tensor_l2_norm(&cand)?;
         assert!(
             (cand_norm - expected).abs() < 1e-5,
