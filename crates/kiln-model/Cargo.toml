@@ -75,7 +75,7 @@ legacy-candle-parity = []
 # (JIT-compiled MSL shaders cached in the MetalDevice) is pulled in
 # transitively via kiln-tensor/metal — kiln-model no longer references
 # its types directly (#1082 metal_types chokepoint).
-metal = ["candle-core/metal", "candle-nn/metal", "dep:objc2", "dep:objc2-metal", "kiln-tensor/metal"]
+metal = ["candle-core/metal", "dep:objc2", "dep:objc2-metal", "kiln-tensor/metal"]
 # Emit NVTX ranges around the hot paths in `forward.rs` so nsys can attribute
 # kernel time per call site. Off by default; pulls in kiln-nvtx's libnvToolsExt
 # link line. Pair with `--features cuda,nvtx`.
