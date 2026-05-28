@@ -6,6 +6,12 @@
 
 pub mod adapter_output;
 pub mod adapter_shape;
+// (#1082) Per-crate candle facade — every `candle_core::` path that
+// `trainer.rs` previously held inline (type aliases, generic constructor
+// helpers, safetensors I/O shims, `cd_bail!` macro) now lives in this
+// module. Keeps `trainer.rs` at one direct candle reference (the
+// `CustomOp1` trait impl, which cannot be type-aliased on stable Rust).
+pub(crate) mod cd_types;
 #[cfg(feature = "cuda")]
 pub mod cuda_train;
 pub mod diagnostics;

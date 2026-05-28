@@ -8,78 +8,38 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-// NOTE(#1082): trainer.rs has zero `use candle_*` imports at module top —
-// every candle reference is inline-qualified. The historical reductions
-// landed in two passes:
+// NOTE(#1082): trainer.rs has zero `use candle_*` imports at module top
+// and exactly one direct candle path remaining: the `impl
+// candle_core::CustomOp1 for InjectTensorGradient` block near the bottom
+// of this file. Every other candle reference resolves through
+// `crate::cd_types`, the per-crate candle facade that holds the type
+// aliases (`Tensor` / `Var` / `CdDevice` / `DType` / `Shape` /
+// `GradStore` / `TensorId` / `D` / `CdResult` / `CpuStorage` /
+// `CudaStorage` / `Layout`), the `cd_bail!` macro, the safetensors I/O
+// shims (`safetensors_load_file` / `safetensors_save_file`), and the
+// generic constructor helpers (`tensor_new` / `tensor_from_vec`).
 //
-//   1. Dropped the cuda-gated `use {CudaStorage,
-//      backend::BackendStorage};`. The only call site —
-//      `InjectTensorGradient::cuda_fwd` near the bottom of this file — now
-//      refers to `CudaStorage` inline and accesses the device
-//      via the `pub device: CudaDevice` field directly (avoiding the
-//      `BackendStorage::device()` trait method). Drops `use` count 2 -> 1.
+// Historical reductions:
+//   1. Dropped the cuda-gated `use {CudaStorage, backend::BackendStorage};`.
+//   2. Dropped `use {CpuStorage, CustomOp1, DType, Device, Layout, Shape,
+//      Tensor, Var};` — every reference is now inline-qualified or
+//      resolved through `cd_types`.
+//   3. Moved every candle path (type aliases, constructor helpers,
+//      safetensors I/O, `cd_bail!`) into `crate::cd_types`. Brought the
+//      file from ~590 direct candle references down to 1 — only the
+//      `CustomOp1` trait impl, which cannot be type-aliased on stable
+//      Rust without `trait_alias`.
 //
-//   2. Dropped `use {CpuStorage, CustomOp1, DType, Device,
-//      Layout, Shape, Tensor, Var};` — every reference to each of the 8
-//      imported items is now inline-qualified as `Tensor` /
-//      `Var` / `Device::Cpu` /
-//      `DType::F32` etc. throughout the ~16k-line file.
-//      Drops `use` count 1 -> 0.
-//
-// TODO(#1082): the candle_core dep itself stays because there are ~590
-// inline `*` references (Tensor / Var / Device / DType / D /
-// safetensors / backprop / Shape / TensorId / CudaStorage / Layout /
-// CustomOp1 / CpuStorage). Dropping candle entirely is blocked by:
-//   - pervasive `Tensor`/`Var`/`Device`/`DType` use in struct fields and
-//     fn sigs (LoraParams, AdamWMoments, OptimizerState, ~70+ fn sigs);
-//   - `safetensors::{save,load}` adapter I/O;
-//   - `Var` as the canonical trainable parameter type
-//     consumed by `loss.backward()` and produced by every per-segment
-//     forward.
-// Those need a coordinated kt-typed wrapper landing before this file can
-// drop candle entirely. Tracked under Phase 7 (kt-typed OPD / FLCE /
-// RMSNorm forward+backward landings).
-//
-// Approximate per-symbol inline-qualified `*` site counts
-// (post-b890535a; recount the file with `grep -c '<Sym>'`
-// before claiming a fresh count):
-//   * `Tensor`       ~263 sites (struct fields, fn sigs, constructors:
-//                                Tensor::new / zeros / from_vec / cat /
-//                                ones / detach / randn / from_slice /
-//                                zeros_like; generic params
-//                                Result<Tensor> / Option<Tensor> /
-//                                Vec<Tensor> / &Tensor / &[Tensor] /
-//                                Vec<&Tensor> / HashMap<String, Tensor>
-//                                / HashMap<TensorId, Tensor>)
-//   * `DType`        ~118 sites (DType::F32 / BF16 / F16 / U32 casts +
-//                                constructor dtype params)
-//   * `Device`       ~117 sites (Device::Cpu / Cuda(_) / Metal(_) /
-//                                new_cuda(0), `&Device` fn params)
-//   * `Var`           ~72 sites (LoraParams / AdamWMoments / SGD state
-//                                fields, Vec<&Var> in optimizer steps,
-//                                Var::from_tensor / zeros / set / rand_f)
-//   * `TensorId`      ~24 sites (HashMap<TensorId, ...> for gradient
-//                                + AdamW moment lookups)
-//   * `D`             ~21 sites (`D::Minus1` for reduce / argmax dims)
-//   * `safetensors`     6 sites (adapter I/O: `save` / `load`)
-//   * `backprop`        6 sites (custom backward via `backprop::*`)
-//   * `Shape`           4 sites (InjectTensorGradient + zeros constructor)
-//   * `CpuStorage`      3 sites (InjectTensorGradient::cpu_fwd return)
-//   * `CudaStorage`     3 sites (InjectTensorGradient::cuda_fwd, gated)
-//   * `Layout`          2 sites (InjectTensorGradient::cpu_fwd/cuda_fwd)
-//   * `CustomOp1`       1 site  (`impl CustomOp1 for InjectTensorGradient`)
-//
-// The candle dep itself stays because:
+// The candle_core crate dep itself stays because:
 //   * `Var` is the canonical trainable parameter type used
 //     throughout SFT/GRPO autograd
-//   * `Tensor` is the autograd-tracked tensor consumed
-//     by `loss.backward()` and produced by every per-segment forward
-//   * `backprop` provides the `GradStore` API used by every
-//     SGD / AdamW optimizer step in this file
-//   * `safetensors::{save, load}` is the adapter on-disk
-//     format
-//   * Migrating off candle autograd is the larger Phase 7 task tracked
-//     by the kt-typed OPD/FLCE/RMSNorm forward+backward landings.
+//   * `Tensor` is the autograd-tracked tensor consumed by `loss.backward()`
+//   * `backprop` provides the `GradStore` API
+//   * `safetensors::{save, load}` is the adapter on-disk format
+//   * `CustomOp1` is the trait used by `InjectTensorGradient`
+//
+// Migrating off candle autograd is the larger Phase 7 task tracked by
+// the kt-typed OPD/FLCE/RMSNorm forward+backward landings.
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
@@ -326,28 +286,10 @@ fn cpu_device() -> CdDevice {
 /// pre-consolidation).
 const LAST_DIM: D = D::Minus1;
 
-/// Allocate a candle Tensor from an in-memory `NdArray` value (scalar /
-/// slice / array). Consolidates the `Tensor::new(value, device)`
-/// constructor (~58 sites pre-consolidation).
-#[inline]
-fn tensor_new<A: candle_core::NdArray>(
-    value: A,
-    device: &CdDevice,
-) -> Result<Tensor> {
-    Ok(Tensor::new(value, device)?)
-}
-
-/// Allocate a candle Tensor from a Vec + shape on `device`. Consolidates
-/// the `Tensor::from_vec(values, shape, device)` constructor
-/// (~25 sites pre-consolidation).
-#[inline]
-fn tensor_from_vec<T: candle_core::WithDType, S: Into<Shape>>(
-    values: Vec<T>,
-    shape: S,
-    device: &CdDevice,
-) -> Result<Tensor> {
-    Ok(Tensor::from_vec(values, shape, device)?)
-}
+// `tensor_new` and `tensor_from_vec` (which require candle `NdArray`
+// and `WithDType` generic bounds) have moved to `crate::cd_types` so
+// this file holds zero direct candle paths for the generic constructor
+// helpers. (#1082)
 
 /// Build a candle `Var` wrapping `tensor`. Consolidates the
 /// `Var::from_tensor(tensor)` constructor (~34 sites
@@ -435,62 +377,28 @@ fn is_cuda_device(device: &CdDevice) -> bool {
     matches!(device, CdDevice::Cuda(_))
 }
 // ---------------------------------------------------------------------------
-// (#1082) Type aliases for the bare candle leaf types that show up in
-// struct fields and function signatures throughout this file. These are
-// NOT `use candle_*` imports — they are `type` aliases local to this
-// module, so the audit invariant "trainer.rs has zero `use candle_*`
-// imports at module top" still holds.
+// (#1082) The candle facade — type aliases, generic constructor helpers,
+// safetensors I/O shims, and the `cd_bail!` macro — has been extracted to
+// `crate::cd_types`. That keeps every direct candle path out of this
+// file (except the one `impl` block near the bottom for `CustomOp1`,
+// whose trait impl must live next to its struct).
 //
-// The alias names below shadow nothing at the module top: bare `Tensor`,
-// `Var`, `DType`, `Shape`, `GradStore`, and `TensorId` are not in scope
-// from any other use-statement in this file (only `` paths
-// previously named them). `CdDevice` is intentionally NOT just `Device`
-// because the `kiln_tensor::Device` path appears in NamedTestBackend at
-// the bottom of this file and we do not want to shadow it.
+// The wildcard re-import below brings every `pub(crate)` item from
+// `cd_types` (type aliases like `Tensor` / `Var` / `CdDevice` / `DType`
+// / `Shape` / `GradStore` / `TensorId` / `D` / `CdResult` / `CpuStorage`
+// / `CudaStorage` / `Layout`; the constructor helpers `tensor_new` and
+// `tensor_from_vec`; and the safetensors shims) into scope so the ~16k
+// call sites in this file keep working unchanged. The macro is brought in
+// explicitly so the `cd_bail!(...)` ergonomic at the InjectTensorGradient
+// site keeps resolving.
+//
+// NOTE: `use crate::cd_types::*` is not a `use candle_*` import — it is
+// a wildcard re-export of items local to this crate, so the audit
+// invariant "trainer.rs has zero `use candle_*` imports at module top"
+// still holds.
 // ---------------------------------------------------------------------------
-type Tensor = candle_core::Tensor;
-type Var = candle_core::Var;
-type CdDevice = candle_core::Device;
-type DType = candle_core::DType;
-type Shape = candle_core::Shape;
-type GradStore = candle_core::backprop::GradStore;
-type TensorId = candle_core::TensorId;
-type D = candle_core::D;
-type CdResult<T> = candle_core::Result<T>;
-type CpuStorage = candle_core::CpuStorage;
-type CudaStorage = candle_core::CudaStorage;
-type Layout = candle_core::Layout;
-// (Note: candle_core::CustomOp1 is a trait and cannot be type-aliased on
-// stable Rust without the `trait_alias` feature, so the impl below keeps
-// the full path.)
-
-/// Load a safetensors file into a HashMap<String, Tensor> on `device`.
-/// Consolidates the candle safetensors::load(path, device) call site
-/// (~4 sites in adapter I/O + tests).
-#[inline]
-fn safetensors_load_file(
-    path: &Path,
-    device: &CdDevice,
-) -> CdResult<std::collections::HashMap<String, Tensor>> {
-    candle_core::safetensors::load(path, device)
-}
-
-/// Save a HashMap<String, Tensor> as a safetensors file at `path`.
-/// Consolidates the candle safetensors::save(tensors, path) call site
-/// (~1 site in adapter I/O).
-#[inline]
-fn safetensors_save_file(
-    tensors: &std::collections::HashMap<String, Tensor>,
-    path: &Path,
-) -> CdResult<()> {
-    candle_core::safetensors::save(tensors, path)
-}
-
-/// Helper macro shim wrapping candle's bail. Lets call sites write
-/// `cd_bail!(...)` instead of the full candle path.
-macro_rules! cd_bail {
-    ($($t:tt)*) => { candle_core::bail!($($t)*) };
-}
+use crate::cd_types::*;
+use crate::cd_types::cd_bail;
 
 /// Sample a Kaiming-uniform LoRA-A initialization.
 ///
