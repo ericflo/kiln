@@ -7582,11 +7582,24 @@ fn metal_transposed_coop_gemv_bf16_with_tile(
             _ => anyhow::bail!("metal transposed coop GEMV out must be on Metal"),
         };
 
-        let x_buf = buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let w_buf =
-            buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
-        let out_buf =
-            buffer_o(out_metal.buffer(), &o_layout, out.dtype());
+        // #1082 Step 5 gemv/matmul-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let x_buf = buffer_o_kt(
+            x_metal.buffer(),
+            &kt_layout_from_candle(x_layout),
+            kt_dtype_from_candle(x.dtype()),
+        );
+        let w_buf = buffer_o_kt(
+            w_metal.buffer(),
+            &kt_layout_from_candle(w_layout),
+            kt_dtype_from_candle(weight_t.dtype()),
+        );
+        let out_buf = buffer_o_kt(
+            out_metal.buffer(),
+            &kt_layout_from_candle(o_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
@@ -7683,11 +7696,24 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &candle_core::Tensor, weight_t: &can
             _ => anyhow::bail!("metal batch transposed coop GEMV out must be on Metal"),
         };
 
-        let x_buf = buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let w_buf =
-            buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
-        let out_buf =
-            buffer_o(out_metal.buffer(), &o_layout, out.dtype());
+        // #1082 Step 5 gemv/matmul-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let x_buf = buffer_o_kt(
+            x_metal.buffer(),
+            &kt_layout_from_candle(x_layout),
+            kt_dtype_from_candle(x.dtype()),
+        );
+        let w_buf = buffer_o_kt(
+            w_metal.buffer(),
+            &kt_layout_from_candle(w_layout),
+            kt_dtype_from_candle(weight_t.dtype()),
+        );
+        let out_buf = buffer_o_kt(
+            out_metal.buffer(),
+            &kt_layout_from_candle(o_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
@@ -7833,24 +7859,43 @@ pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
             _ => anyhow::bail!("metal fused QKV projection v_out must be on Metal"),
         };
 
-        let x_buf = buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let q_buf = buffer_o(q_metal.buffer(), &q_layout, q_t.dtype());
-        let k_buf = buffer_o(k_metal.buffer(), &k_layout, k_t.dtype());
-        let v_buf = buffer_o(v_metal.buffer(), &v_layout, v_t.dtype());
-        let q_out_buf = buffer_o(
+        // #1082 Step 5 gemv/matmul-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let x_buf = buffer_o_kt(
+            x_metal.buffer(),
+            &kt_layout_from_candle(x_layout),
+            kt_dtype_from_candle(x.dtype()),
+        );
+        let q_buf = buffer_o_kt(
+            q_metal.buffer(),
+            &kt_layout_from_candle(q_layout),
+            kt_dtype_from_candle(q_t.dtype()),
+        );
+        let k_buf = buffer_o_kt(
+            k_metal.buffer(),
+            &kt_layout_from_candle(k_layout),
+            kt_dtype_from_candle(k_t.dtype()),
+        );
+        let v_buf = buffer_o_kt(
+            v_metal.buffer(),
+            &kt_layout_from_candle(v_layout),
+            kt_dtype_from_candle(v_t.dtype()),
+        );
+        let q_out_buf = buffer_o_kt(
             q_out_metal.buffer(),
-            &q_out_layout,
-            q_out.dtype(),
+            &kt_layout_from_candle(q_out_layout),
+            kt_dtype_from_candle(q_out.dtype()),
         );
-        let k_out_buf = buffer_o(
+        let k_out_buf = buffer_o_kt(
             k_out_metal.buffer(),
-            &k_out_layout,
-            k_out.dtype(),
+            &kt_layout_from_candle(k_out_layout),
+            kt_dtype_from_candle(k_out.dtype()),
         );
-        let v_out_buf = buffer_o(
+        let v_out_buf = buffer_o_kt(
             v_out_metal.buffer(),
-            &v_out_layout,
-            v_out.dtype(),
+            &kt_layout_from_candle(v_out_layout),
+            kt_dtype_from_candle(v_out.dtype()),
         );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
