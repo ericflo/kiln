@@ -1353,7 +1353,6 @@ mod tests {
         // uses to apply adapters during inference). This guards against
         // accidental format drift.
         use crate::lora_loader::LoraWeights;
-        use candle_core::Device;
 
         let dir = tempdir()?;
         let merged_dir = dir.path().join("merged");
@@ -1363,7 +1362,7 @@ mod tests {
         let merged = merge_linear(&[(&a1, 0.5), (&a2, 0.5)])?;
         merged.save(&merged_dir)?;
 
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let loaded = LoraWeights::load(&merged_dir, 1, &device)?;
         assert_eq!(loaded.rank, 2);
         assert!(loaded.layers[0].q_proj.is_some());
@@ -1683,7 +1682,6 @@ mod tests {
         // Concat output must remain loadable by the production
         // LoraWeights::load() pipeline at its new (higher) rank.
         use crate::lora_loader::LoraWeights;
-        use candle_core::Device;
 
         let dir = tempdir()?;
         let merged_dir = dir.path().join("merged");
@@ -1693,7 +1691,7 @@ mod tests {
         let merged = merge_concat(&[(&a1, 1.0), (&a2, 1.0)])?;
         merged.save(&merged_dir)?;
 
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let loaded = LoraWeights::load(&merged_dir, 1, &device)?;
         assert_eq!(loaded.rank, 4);
         assert!(loaded.layers[0].q_proj.is_some());
