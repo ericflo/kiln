@@ -17,7 +17,7 @@ use super::BackendRuntime;
 // substrate swaps (e.g. candle → objc2-metal) touch this single import
 // block instead of hundreds of scattered fully-qualified references.
 use kiln_tensor::metal_types::{
-    buffer_o, buffer_o_kt, sdpa, ComputePipeline, DeviceId, Library, MetalDevice, Storage,
+    buffer_o_kt, sdpa, ComputePipeline, DeviceId, Library, MetalDevice, Storage,
 };
 
 // Per-function pipeline-cache helpers reach for these std types; hoisted to
