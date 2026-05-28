@@ -7,6 +7,9 @@ them with the production materializer, and emits:
 - same-tool-eventually EvalSuite JSON;
 - root-action SFT rows for the fixed-window RLM controller;
 - ECHO-ready rollout groups that preserve action/observation alternation.
+
+OPD CE JSONL can still be emitted for archaeology with --emit-opd-ce, but the
+default Pi RLM path is large-teacher SFT plus optional ECHO, not OPD.
 """
 
 from __future__ import annotations
@@ -436,6 +439,248 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             f.write(json_dumps(row) + "\n")
 
 
+def row_action(row: dict[str, Any]) -> dict[str, Any]:
+    messages = row.get("messages") or []
+    if not messages:
+        return {}
+    last = messages[-1]
+    if not isinstance(last, dict):
+        return {}
+    try:
+        value = json.loads(str(last.get("content") or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def row_token_count(row: dict[str, Any], budget: TokenBudget) -> int:
+    total = 0
+    for msg in row.get("messages") or []:
+        if isinstance(msg, dict):
+            total += budget.count(str(msg.get("content") or ""))
+    return total
+
+
+def copy_row_with_meta(row: dict[str, Any], **metadata: Any) -> dict[str, Any]:
+    copied = dict(row)
+    copied["metadata"] = dict(row.get("metadata") or {}) | metadata
+    return copied
+
+
+def build_balanced_sft_curriculum(
+    rows: list[dict[str, Any]],
+    *,
+    budget: TokenBudget,
+    seed: int,
+    inspect_ratio_to_finish: float,
+    finish_repeat: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Build SFT curricula that do not let inspect rows swamp final actions."""
+
+    rng = random.Random(seed)
+    by_kind: dict[str, list[dict[str, Any]]] = {"finish": [], "spawn_agent": [], "inspect": [], "other": []}
+    for row in rows:
+        kind = str((row.get("metadata") or {}).get("action") or row_action(row).get("action") or "other")
+        by_kind.setdefault(kind, by_kind["other"]).append(row)
+
+    finish = list(by_kind.get("finish", []))
+    spawn = list(by_kind.get("spawn_agent", []))
+    inspect = list(by_kind.get("inspect", []))
+    other = list(by_kind.get("other", []))
+
+    inspect_cap = min(len(inspect), int(max(0, round(len(finish) * inspect_ratio_to_finish))))
+    rng.shuffle(inspect)
+    rng.shuffle(spawn)
+    rng.shuffle(other)
+
+    curriculum: list[dict[str, Any]] = []
+    for idx, row in enumerate(finish):
+        curriculum.append(copy_row_with_meta(row, curriculum="balanced", curriculum_role="finish", repeat_index=0))
+        for repeat_idx in range(1, max(1, finish_repeat)):
+            curriculum.append(
+                copy_row_with_meta(
+                    row,
+                    curriculum="balanced",
+                    curriculum_role="finish_repeat",
+                    repeat_index=repeat_idx,
+                )
+            )
+    for row in spawn:
+        curriculum.append(copy_row_with_meta(row, curriculum="balanced", curriculum_role="spawn"))
+    for row in inspect[:inspect_cap]:
+        curriculum.append(copy_row_with_meta(row, curriculum="balanced", curriculum_role="inspect"))
+    for row in other:
+        curriculum.append(copy_row_with_meta(row, curriculum="balanced", curriculum_role="other"))
+    rng.shuffle(curriculum)
+
+    final_weighted: list[dict[str, Any]] = []
+    for row in finish:
+        for repeat_idx in range(max(1, finish_repeat + 1)):
+            final_weighted.append(
+                copy_row_with_meta(
+                    row,
+                    curriculum="final_weighted",
+                    curriculum_role="finish",
+                    repeat_index=repeat_idx,
+                )
+            )
+    rng.shuffle(final_weighted)
+
+    stats = {
+        "raw": {kind: len(values) for kind, values in sorted(by_kind.items())},
+        "balanced_rows": len(curriculum),
+        "final_weighted_rows": len(final_weighted),
+        "inspect_cap": inspect_cap,
+        "finish_repeat": finish_repeat,
+        "token_rows": {
+            "balanced_max": max((row_token_count(row, budget) for row in curriculum), default=0),
+            "final_weighted_max": max((row_token_count(row, budget) for row in final_weighted), default=0),
+        },
+    }
+    return curriculum, final_weighted, stats
+
+
+def write_short_sft_variants(
+    out_dir: Path,
+    rows: list[dict[str, Any]],
+    *,
+    budget: TokenBudget,
+    counts: list[int],
+    prefix: str,
+) -> dict[str, str]:
+    paths: dict[str, str] = {}
+    ranked = sorted(rows, key=lambda row: (row_token_count(row, budget), str((row.get("metadata") or {}).get("turn_id"))))
+    for count in counts:
+        if count <= 0:
+            continue
+        subset = ranked[: min(count, len(ranked))]
+        path = out_dir / f"{prefix}.short{len(subset)}.jsonl"
+        write_jsonl(path, subset)
+        paths[f"{prefix}_short{len(subset)}"] = str(path)
+    return paths
+
+
+def write_stratified_sft_variants(
+    out_dir: Path,
+    rows: list[dict[str, Any]],
+    *,
+    budget: TokenBudget,
+    counts: list[int],
+    prefix: str,
+) -> dict[str, str]:
+    paths: dict[str, str] = {}
+    indexed: list[tuple[int, dict[str, Any]]] = list(enumerate(rows))
+    buckets: dict[str, list[tuple[int, dict[str, Any]]]] = {
+        "finish": [],
+        "spawn_agent": [],
+        "inspect": [],
+        "other": [],
+    }
+    for item in indexed:
+        _, row = item
+        kind = str((row.get("metadata") or {}).get("action") or row_action(row).get("action") or "other")
+        if kind not in buckets:
+            kind = "other"
+        buckets[kind].append(item)
+    for values in buckets.values():
+        values.sort(key=lambda item: (row_token_count(item[1], budget), item[0]))
+
+    ratios = {"finish": 0.55, "spawn_agent": 0.20, "inspect": 0.25}
+    for count in counts:
+        if count <= 0:
+            continue
+        target = min(count, len(rows))
+        selected_ids: set[int] = set()
+        selected: list[dict[str, Any]] = []
+        for kind, ratio in ratios.items():
+            want = min(len(buckets[kind]), int(round(target * ratio)))
+            for idx, row in buckets[kind][:want]:
+                if idx in selected_ids:
+                    continue
+                selected_ids.add(idx)
+                selected.append(row)
+        if len(selected) < target:
+            remainder = sorted(
+                (item for item in indexed if item[0] not in selected_ids),
+                key=lambda item: (row_token_count(item[1], budget), item[0]),
+            )
+            for idx, row in remainder[: target - len(selected)]:
+                selected_ids.add(idx)
+                selected.append(row)
+        selected.sort(key=lambda row: (str((row.get("metadata") or {}).get("turn_id")), str((row.get("metadata") or {}).get("action"))))
+        path = out_dir / f"{prefix}.stratified{len(selected)}.jsonl"
+        write_jsonl(path, selected)
+        paths[f"{prefix}_stratified{len(selected)}"] = str(path)
+    return paths
+
+
+def echo_group_to_opd_example(group: dict[str, Any]) -> dict[str, Any]:
+    rollouts = group.get("rollouts") or []
+    rollout = rollouts[0] if rollouts and isinstance(rollouts[0], dict) else {}
+    trajectory = rollout.get("trajectory") if isinstance(rollout, dict) else []
+    teacher_response = str(rollout.get("text") or "")
+    if not teacher_response and isinstance(trajectory, list):
+        teacher_response = TURN_BREAK.join(
+            str(seg.get("content") or "")
+            for seg in trajectory
+            if isinstance(seg, dict) and seg.get("kind") == "action"
+        )
+    return {
+        "id": str((group.get("metadata") or {}).get("turn_id") or (group.get("metadata") or {}).get("source_index") or ""),
+        "messages": group.get("messages") or [],
+        "teacher_response": teacher_response,
+        "trajectory": trajectory if isinstance(trajectory, list) else [],
+        "metadata": dict(group.get("metadata") or {})
+        | {
+            "source": "pi_rlm_trace_experiment",
+            "opd_objective": "cross_entropy",
+            "teacher": "production_trace_chosen_action",
+        },
+    }
+
+
+def build_opd_examples(echo_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    examples = [echo_group_to_opd_example(group) for group in echo_groups]
+    return [ex for ex in examples if ex.get("messages") and ex.get("teacher_response")]
+
+
+def opd_example_token_count(example: dict[str, Any], budget: TokenBudget) -> int:
+    total = sum(budget.count(str(msg.get("content") or "")) for msg in example.get("messages") or [] if isinstance(msg, dict))
+    for seg in example.get("trajectory") or []:
+        if isinstance(seg, dict):
+            total += budget.count(str(seg.get("content") or ""))
+    return total
+
+
+def write_short_opd_variants(
+    out_dir: Path,
+    examples: list[dict[str, Any]],
+    *,
+    budget: TokenBudget,
+    counts: list[int],
+) -> dict[str, str]:
+    paths: dict[str, str] = {}
+    ranked = sorted(examples, key=lambda ex: (opd_example_token_count(ex, budget), str(ex.get("id") or "")))
+    for count in counts:
+        if count <= 0:
+            continue
+        subset = ranked[: min(count, len(ranked))]
+        path = out_dir / f"train.opd.ce.short{len(subset)}.jsonl"
+        write_jsonl(path, subset)
+        paths[f"opd_ce_short{len(subset)}"] = str(path)
+    return paths
+
+
+def parse_short_counts(value: str) -> list[int]:
+    counts = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        counts.append(int(part))
+    return sorted(set(counts))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default=DEFAULT_DB, help="trajectory-trainer sqlite DB")
@@ -450,6 +695,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-action-tokens", type=int, default=OUTPUT_TOKENS)
     parser.add_argument("--allow-multiple-tool-calls", action="store_true")
     parser.add_argument("--recursive-fraction", type=float, default=0.35)
+    parser.add_argument("--inspect-ratio-to-finish", type=float, default=1.0)
+    parser.add_argument("--finish-repeat", type=int, default=1)
+    parser.add_argument(
+        "--short-counts",
+        default="4,8,16,32,64,128,256,512,1024",
+        help="comma-separated short curriculum sizes to emit",
+    )
+    parser.add_argument(
+        "--emit-opd-ce",
+        action="store_true",
+        help="also emit legacy off-policy OPD cross-entropy JSONL; disabled by default",
+    )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--tokenizer", help="Qwen3.5 tokenizer.json for exact SFT prompt clipping")
     parser.add_argument("--require-tokenizer", action="store_true")
@@ -464,6 +721,10 @@ def main() -> int:
         raise SystemExit("--train-count must be in 1..--total")
     if not (0.0 <= args.recursive_fraction <= 1.0):
         raise SystemExit("--recursive-fraction must be in [0, 1]")
+    if args.inspect_ratio_to_finish < 0.0:
+        raise SystemExit("--inspect-ratio-to-finish must be >= 0")
+    if args.finish_repeat < 1:
+        raise SystemExit("--finish-repeat must be >= 1")
 
     db_path = Path(args.db)
     materialize_path = Path(args.materialize)
@@ -503,13 +764,57 @@ def main() -> int:
         recursive_fraction=args.recursive_fraction,
         seed=args.seed + 1,
     )
+    curriculum_rows, final_weighted_rows, curriculum_stats = build_balanced_sft_curriculum(
+        sft_rows,
+        budget=budget,
+        seed=args.seed + 2,
+        inspect_ratio_to_finish=args.inspect_ratio_to_finish,
+        finish_repeat=args.finish_repeat,
+    )
+    opd_examples = build_opd_examples(echo_groups) if args.emit_opd_ce else []
+    short_counts = parse_short_counts(args.short_counts)
 
-    write_json(out_dir / "all.suite.json", suite_from_examples("pi-rlm-trace-200-all", examples, args.model))
-    write_json(out_dir / "train.suite.json", suite_from_examples("pi-rlm-trace-200-train", train, args.model))
-    write_json(out_dir / "eval.suite.json", suite_from_examples("pi-rlm-trace-200-eval", eval_examples, args.model))
+    suite_prefix = f"pi-rlm-trace-{len(examples)}"
+    write_json(out_dir / "all.suite.json", suite_from_examples(f"{suite_prefix}-all", examples, args.model))
+    write_json(out_dir / "train.suite.json", suite_from_examples(f"{suite_prefix}-train", train, args.model))
+    write_json(out_dir / "eval.suite.json", suite_from_examples(f"{suite_prefix}-eval", eval_examples, args.model))
     write_jsonl(out_dir / "all.prompt_chosen.jsonl", [ex["prompt_chosen"] for ex in examples])
     write_jsonl(out_dir / "train.sft.jsonl", sft_rows)
+    write_jsonl(out_dir / "train.sft.curriculum.jsonl", curriculum_rows)
+    write_jsonl(out_dir / "train.sft.final_weighted.jsonl", final_weighted_rows)
     write_jsonl(out_dir / "train.echo.jsonl", echo_groups)
+    if args.emit_opd_ce:
+        write_jsonl(out_dir / "train.opd.ce.jsonl", opd_examples)
+    short_artifacts: dict[str, str] = {}
+    short_artifacts.update(
+        write_short_sft_variants(
+            out_dir,
+            curriculum_rows,
+            budget=budget,
+            counts=short_counts,
+            prefix="train.sft.curriculum",
+        )
+    )
+    short_artifacts.update(
+        write_stratified_sft_variants(
+            out_dir,
+            curriculum_rows,
+            budget=budget,
+            counts=short_counts,
+            prefix="train.sft.curriculum",
+        )
+    )
+    short_artifacts.update(
+        write_short_sft_variants(
+            out_dir,
+            final_weighted_rows,
+            budget=budget,
+            counts=short_counts,
+            prefix="train.sft.final_weighted",
+        )
+    )
+    if args.emit_opd_ce:
+        short_artifacts.update(write_short_opd_variants(out_dir, opd_examples, budget=budget, counts=short_counts))
 
     tool_hist: dict[str, int] = {}
     for ex in examples:
@@ -524,7 +829,11 @@ def main() -> int:
         "train_examples": len(train),
         "eval_examples": len(eval_examples),
         "sft_rows": len(sft_rows),
+        "sft_curriculum_rows": len(curriculum_rows),
+        "sft_final_weighted_rows": len(final_weighted_rows),
         "echo_groups": len(echo_groups),
+        "opd_ce_examples": len(opd_examples),
+        "opd_ce_enabled": args.emit_opd_ce,
         "tokenizer_exact": budget.exact,
         "tokenizer": str(budget.tokenizer_path) if budget.tokenizer_path else None,
         "filters": {
@@ -532,24 +841,34 @@ def main() -> int:
             "max_input_tokens": args.max_input_tokens,
             "require_single_tool_call": not args.allow_multiple_tool_calls,
             "max_action_tokens": args.max_action_tokens,
+            "inspect_ratio_to_finish": args.inspect_ratio_to_finish,
+            "finish_repeat": args.finish_repeat,
         },
         "skips": skips,
         "scaffolds": scaffolds,
+        "curriculum": curriculum_stats,
         "target_tool_histogram": dict(sorted(tool_hist.items(), key=lambda item: (-item[1], item[0]))),
-        "artifacts": {
+        "artifacts": ({
             "all_suite": str(out_dir / "all.suite.json"),
             "train_suite": str(out_dir / "train.suite.json"),
             "eval_suite": str(out_dir / "eval.suite.json"),
             "prompt_chosen": str(out_dir / "all.prompt_chosen.jsonl"),
             "sft": str(out_dir / "train.sft.jsonl"),
+            "sft_curriculum": str(out_dir / "train.sft.curriculum.jsonl"),
+            "sft_final_weighted": str(out_dir / "train.sft.final_weighted.jsonl"),
             "echo": str(out_dir / "train.echo.jsonl"),
-        },
+        }
+        | ({"opd_ce": str(out_dir / "train.opd.ce.jsonl")} if args.emit_opd_ce else {}))
+        | short_artifacts,
     }
     write_json(out_dir / "manifest.json", manifest)
     print(
         "built pi RLM trace experiment: "
         f"{len(train)} train examples, {len(eval_examples)} eval examples, "
-        f"{len(sft_rows)} SFT rows, {len(echo_groups)} ECHO groups "
+        f"{len(sft_rows)} raw SFT rows, {len(curriculum_rows)} curriculum SFT rows, "
+        f"{len(echo_groups)} ECHO groups"
+        + (f", {len(opd_examples)} OPD CE examples" if args.emit_opd_ce else "")
+        + " "
         f"at {out_dir}",
         flush=True,
     )

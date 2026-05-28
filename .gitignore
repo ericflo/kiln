@@ -4,6 +4,9 @@
 *~
 .DS_Store
 .claude/
+.kiln/
+__pycache__/
+*.pyc
 
 Qwen3.5-4B/
 

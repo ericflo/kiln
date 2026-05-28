@@ -247,31 +247,65 @@ def parse_listen(value: str) -> tuple[str, int]:
 
 
 class UpstreamClient:
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 120.0):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: float = 120.0,
+        max_retries: int = 3,
+    ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        self.max_retries = max(0, max_retries)
 
-    def chat(self, payload: dict[str, Any]) -> dict[str, Any]:
+    @property
+    def is_openai(self) -> bool:
+        return "api.openai.com" in self.base_url
+
+    def normalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = dict(payload)
         body.setdefault("model", self.model)
+        if self.is_openai:
+            # These fields are Kiln-local conveniences. Newer OpenAI chat
+            # models reject unknown params and use max_completion_tokens.
+            body.pop("chat_template_kwargs", None)
+            body.pop("adapter", None)
+            if "max_tokens" in body and "max_completion_tokens" not in body:
+                body["max_completion_tokens"] = body.pop("max_tokens")
+        return body
+
+    def chat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        body = self.normalize_payload(payload)
         data = json.dumps(body).encode("utf-8")
-        req = request.Request(
-            f"{self.base_url}/chat/completions",
-            data=data,
-            headers={
-                "content-type": "application/json",
-                "authorization": f"Bearer {self.api_key}",
-            },
-            method="POST",
-        )
-        try:
-            with request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"upstream returned {exc.code}: {detail}") from exc
+        transient = {429, 500, 502, 503, 504}
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            req = request.Request(
+                f"{self.base_url}/chat/completions",
+                data=data,
+                headers={
+                    "content-type": "application/json",
+                    "authorization": f"Bearer {self.api_key}",
+                },
+                method="POST",
+            )
+            try:
+                with request.urlopen(req, timeout=self.timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                last_error = RuntimeError(f"upstream returned {exc.code}: {detail}")
+                if exc.code not in transient or attempt >= self.max_retries:
+                    raise last_error from exc
+            except error.URLError as exc:
+                last_error = RuntimeError(f"upstream connection failed: {exc}")
+                if attempt >= self.max_retries:
+                    raise last_error from exc
+            time.sleep(min(2.0 ** attempt, 20.0))
+        raise last_error or RuntimeError("upstream request failed")
 
     def first_text(self, payload: dict[str, Any]) -> str:
         resp = self.chat(payload)
@@ -543,6 +577,7 @@ class RlmController:
         max_depth: int,
         budget: TokenBudget,
         adapter: str | None = None,
+        allow_direct_fallback: bool = True,
     ):
         self.upstream = upstream
         self.state_dir = state_dir
@@ -550,6 +585,7 @@ class RlmController:
         self.max_depth = max_depth
         self.budget = budget
         self.adapter = adapter
+        self.allow_direct_fallback = allow_direct_fallback
 
     def apply_adapter(self, payload: dict[str, Any], source: dict[str, Any] | None = None) -> dict[str, Any]:
         if source is not None and "adapter" in source:
@@ -627,7 +663,10 @@ class RlmController:
             obs = env.observe(action, output)
             trace[-1]["observation"] = obs
             env.persist()
-        result = self.direct_fallback(payload, trace)
+        if self.allow_direct_fallback:
+            result = self.direct_fallback(payload, trace)
+        else:
+            result = RlmResult(content="", trace=trace, fallback_used=False)
         result.request_id = request_id
         result.depth = depth
         env.persist(result)
@@ -984,12 +1023,62 @@ def iter_state_payloads(state_dir: Path) -> list[tuple[Path, dict[str, Any]]]:
     return payloads
 
 
-def export_sft_jsonl(state_dir: Path, output: Path) -> int:
+def result_reward(result: dict[str, Any]) -> float | None:
+    reward = result.get("reward")
+    if isinstance(reward, (int, float)):
+        return float(reward)
+    evaluation = result.get("eval")
+    if isinstance(evaluation, dict):
+        reward = evaluation.get("reward")
+        if isinstance(reward, (int, float)):
+            return float(reward)
+    return None
+
+
+def state_payload_matches_export_filters(
+    payload: dict[str, Any],
+    *,
+    passed_only: bool = False,
+    nonfallback_only: bool = False,
+    min_reward: float | None = None,
+) -> bool:
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return False
+    if nonfallback_only and result.get("fallback_used"):
+        return False
+    if passed_only:
+        evaluation = result.get("eval")
+        if not isinstance(evaluation, dict) or evaluation.get("pass") is not True:
+            return False
+    if min_reward is not None:
+        reward = result_reward(result)
+        if reward is None or reward < min_reward:
+            return False
+    return True
+
+
+def export_sft_jsonl(
+    state_dir: Path,
+    output: Path,
+    *,
+    passed_only: bool = False,
+    nonfallback_only: bool = False,
+    min_reward: float | None = None,
+) -> int:
     count = 0
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as f:
         for path, payload in iter_state_payloads(state_dir):
+            if not state_payload_matches_export_filters(
+                payload,
+                passed_only=passed_only,
+                nonfallback_only=nonfallback_only,
+                min_reward=min_reward,
+            ):
+                continue
             result = payload.get("result") or {}
+            evaluation = result.get("eval") if isinstance(result.get("eval"), dict) else {}
             for entry in result.get("trace") or []:
                 if not isinstance(entry, dict) or not isinstance(entry.get("action"), dict):
                     continue
@@ -1010,6 +1099,10 @@ def export_sft_jsonl(state_dir: Path, output: Path) -> int:
                         "action_tokens": entry.get("action_tokens"),
                         "final_tool": final_tool_name(result),
                         "fallback_used": bool(result.get("fallback_used")),
+                        "eval_pass": evaluation.get("pass"),
+                        "eval_score": evaluation.get("score"),
+                        "eval_reward": result_reward(result),
+                        "teacher_model": evaluation.get("teacher_model"),
                     },
                 }
                 f.write(json_dumps(row) + "\n")
@@ -1017,11 +1110,26 @@ def export_sft_jsonl(state_dir: Path, output: Path) -> int:
     return count
 
 
-def export_echo_jsonl(state_dir: Path, output: Path, default_reward: float = 1.0) -> int:
+def export_echo_jsonl(
+    state_dir: Path,
+    output: Path,
+    default_reward: float = 1.0,
+    *,
+    passed_only: bool = False,
+    nonfallback_only: bool = False,
+    min_reward: float | None = None,
+) -> int:
     count = 0
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as f:
         for path, payload in iter_state_payloads(state_dir):
+            if not state_payload_matches_export_filters(
+                payload,
+                passed_only=passed_only,
+                nonfallback_only=nonfallback_only,
+                min_reward=min_reward,
+            ):
+                continue
             row = echo_group_from_payload(path, payload, default_reward)
             if row is None:
                 continue
@@ -1061,7 +1169,10 @@ def echo_group_from_payload(path: Path, payload: dict[str, Any], default_reward:
     if not trajectory:
         return None
 
-    reward = float(result.get("reward", 0.0 if result.get("fallback_used") else default_reward))
+    evaluation = result.get("eval") if isinstance(result.get("eval"), dict) else {}
+    reward = result_reward(result)
+    if reward is None:
+        reward = float(0.0 if result.get("fallback_used") else default_reward)
     return {
         "messages": prompt_messages,
         "rollouts": [
@@ -1080,6 +1191,10 @@ def echo_group_from_payload(path: Path, payload: dict[str, Any], default_reward:
             "trace_steps": len(trace),
             "final_tool": final_tool_name(result),
             "fallback_used": bool(result.get("fallback_used")),
+            "eval_pass": evaluation.get("pass"),
+            "eval_score": evaluation.get("score"),
+            "eval_reward": reward,
+            "teacher_model": evaluation.get("teacher_model"),
             "echo_ready": any(seg.get("kind") == "observation" for seg in trajectory),
         },
     }
@@ -1095,7 +1210,32 @@ def final_tool_name(result: dict[str, Any]) -> str | None:
     return None
 
 
-def run_eval_suite(controller: RlmController, suite_path: Path, output: Path | None, limit: int | None) -> dict[str, Any]:
+def annotate_state_result(state_dir: Path, request_id: str, evaluation: dict[str, Any]) -> None:
+    path = state_dir / f"{sanitize_id(request_id)}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return
+    result["eval"] = evaluation
+    if isinstance(evaluation.get("reward"), (int, float)):
+        result["reward"] = float(evaluation["reward"])
+    path.write_text(pretty_json(payload) + "\n", encoding="utf-8")
+
+
+def run_eval_suite(
+    controller: RlmController,
+    suite_path: Path,
+    output: Path | None,
+    limit: int | None,
+    *,
+    model_override: str | None = None,
+    pass_reward: float = 1.0,
+    fail_reward: float = 0.0,
+    annotate_state: bool = True,
+) -> dict[str, Any]:
     suite = json.loads(suite_path.read_text(encoding="utf-8"))
     examples = suite.get("examples") or []
     if limit is not None:
@@ -1113,7 +1253,7 @@ def run_eval_suite(controller: RlmController, suite_path: Path, output: Path | N
             rows.append({"id": example_id, "status": "skipped", "reason": "no target tool_call"})
             continue
         payload = {
-            "model": suite.get("model") or DEFAULT_MODEL,
+            "model": model_override or suite.get("model") or DEFAULT_MODEL,
             "messages": eval_messages(suite, example),
             "tools": example.get("tools") or suite.get("tools") or [],
             "metadata": {
@@ -1134,6 +1274,20 @@ def run_eval_suite(controller: RlmController, suite_path: Path, output: Path | N
             stats["failed"] += 1
         if result.fallback_used:
             stats["fallback_used"] += 1
+        reward = pass_reward if scored["pass"] else fail_reward
+        evaluation = {
+            "suite": suite.get("name") or suite_path.name,
+            "example_id": example_id,
+            "pass": scored["pass"],
+            "score": scored["score"],
+            "reason": scored["reason"],
+            "target": target,
+            "predicted": predicted,
+            "reward": reward,
+            "teacher_model": controller.upstream.model,
+        }
+        if annotate_state:
+            annotate_state_result(controller.state_dir, result.request_id, evaluation)
         rows.append(
             {
                 "id": example_id,
@@ -1141,6 +1295,7 @@ def run_eval_suite(controller: RlmController, suite_path: Path, output: Path | N
                 "pass": scored["pass"],
                 "score": scored["score"],
                 "reason": scored["reason"],
+                "reward": reward,
                 "target": target,
                 "predicted": predicted,
                 "trace_steps": len(result.trace),
@@ -1378,9 +1533,19 @@ def main() -> int:
         ),
     )
     parser.add_argument("--api-key", default="kiln", help="upstream API key")
+    parser.add_argument("--upstream-timeout", type=float, default=120.0, help="seconds to wait for each upstream chat request")
+    parser.add_argument("--upstream-retries", type=int, default=3, help="retries for transient upstream failures")
     parser.add_argument("--state-dir", default=DEFAULT_STATE_DIR, help="directory for external RLM state")
     parser.add_argument("--max-iters", type=int, default=8, help="max root RLM actions per Pi turn")
     parser.add_argument("--max-depth", type=int, default=2, help="max recursive child-agent depth")
+    parser.add_argument(
+        "--no-direct-fallback",
+        action="store_true",
+        help=(
+            "after max RLM actions, return an empty result instead of sending "
+            "the full Pi request directly upstream; useful for pure RLM evals"
+        ),
+    )
     parser.add_argument(
         "--tokenizer",
         help=(
@@ -1398,9 +1563,21 @@ def main() -> int:
     parser.add_argument("--eval-suite", help="run a same-tool-eventually EvalSuite JSON against the harness")
     parser.add_argument("--eval-output", help="write same-tool-eventually eval report JSON")
     parser.add_argument("--eval-limit", type=int, help="evaluate at most this many examples")
+    parser.add_argument("--eval-pass-reward", type=float, default=1.0, help="reward written onto passing eval traces")
+    parser.add_argument("--eval-fail-reward", type=float, default=0.0, help="reward written onto failing eval traces")
+    parser.add_argument("--eval-export-sft-jsonl", help="after eval, export teacher SFT rows from state")
+    parser.add_argument("--eval-export-echo-jsonl", help="after eval, export teacher ECHO rows from state")
+    parser.add_argument(
+        "--eval-export-all",
+        action="store_true",
+        help="include failed/fallback eval traces in eval exports; default keeps only passing non-fallback traces",
+    )
     parser.add_argument("--export-state-dir", help="state directory to export; defaults to --state-dir")
     parser.add_argument("--export-sft-jsonl", help="write fixed-window root-action SFT rows from harness state")
     parser.add_argument("--export-echo-jsonl", help="write agentic GRPO/ECHO rollout groups from harness state")
+    parser.add_argument("--export-passed-only", action="store_true", help="only export states annotated with passing eval results")
+    parser.add_argument("--export-nonfallback-only", action="store_true", help="skip exported states that used direct fallback")
+    parser.add_argument("--export-min-reward", type=float, help="only export states with result.reward >= this value")
     parser.add_argument(
         "--export-default-reward",
         type=float,
@@ -1419,13 +1596,22 @@ def main() -> int:
     if args.export_sft_jsonl or args.export_echo_jsonl:
         export_state_dir = Path(args.export_state_dir or args.state_dir)
         if args.export_sft_jsonl:
-            count = export_sft_jsonl(export_state_dir, Path(args.export_sft_jsonl))
+            count = export_sft_jsonl(
+                export_state_dir,
+                Path(args.export_sft_jsonl),
+                passed_only=args.export_passed_only,
+                nonfallback_only=args.export_nonfallback_only,
+                min_reward=args.export_min_reward,
+            )
             print(f"exported {count} SFT root-action row(s) from {export_state_dir}", flush=True)
         if args.export_echo_jsonl:
             count = export_echo_jsonl(
                 export_state_dir,
                 Path(args.export_echo_jsonl),
                 default_reward=args.export_default_reward,
+                passed_only=args.export_passed_only,
+                nonfallback_only=args.export_nonfallback_only,
+                min_reward=args.export_min_reward,
             )
             print(f"exported {count} ECHO rollout group(s) from {export_state_dir}", flush=True)
         return 0
@@ -1438,15 +1624,49 @@ def main() -> int:
             file=sys.stderr,
             flush=True,
         )
-    upstream = UpstreamClient(args.upstream, args.api_key, args.model)
-    controller = RlmController(upstream, Path(args.state_dir), args.max_iters, args.max_depth, budget, args.adapter)
+    upstream = UpstreamClient(
+        args.upstream,
+        args.api_key,
+        args.model,
+        timeout=args.upstream_timeout,
+        max_retries=args.upstream_retries,
+    )
+    controller = RlmController(
+        upstream,
+        Path(args.state_dir),
+        args.max_iters,
+        args.max_depth,
+        budget,
+        args.adapter,
+        allow_direct_fallback=not args.no_direct_fallback,
+    )
     if args.eval_suite:
         report = run_eval_suite(
             controller,
             Path(args.eval_suite),
             Path(args.eval_output) if args.eval_output else None,
             args.eval_limit,
+            model_override=args.model,
+            pass_reward=args.eval_pass_reward,
+            fail_reward=args.eval_fail_reward,
         )
+        if args.eval_export_sft_jsonl:
+            count = export_sft_jsonl(
+                Path(args.state_dir),
+                Path(args.eval_export_sft_jsonl),
+                passed_only=not args.eval_export_all,
+                nonfallback_only=not args.eval_export_all,
+            )
+            print(f"exported {count} eval SFT row(s) from {args.state_dir}", flush=True)
+        if args.eval_export_echo_jsonl:
+            count = export_echo_jsonl(
+                Path(args.state_dir),
+                Path(args.eval_export_echo_jsonl),
+                default_reward=args.eval_pass_reward,
+                passed_only=not args.eval_export_all,
+                nonfallback_only=not args.eval_export_all,
+            )
+            print(f"exported {count} eval ECHO group(s) from {args.state_dir}", flush=True)
         print(
             "same-tool-eventually: "
             f"{report['stats']['passed']}/{report['stats']['scored']} passed "
