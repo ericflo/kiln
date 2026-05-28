@@ -106,6 +106,59 @@ fn maybe_vulkan() -> Option<VulkanDevice> {
     VulkanDevice::new().ok()
 }
 
+/// Test-only candle wrapper for `dispatch_gdn_decode_gates_recurrent_rmsnorm_bytes`.
+/// Falls back to `state.clone()` for the no-readback path to match the
+/// pre-inversion `(Tensor, Tensor)` return shape used by the parity tests.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
+    vk: &VulkanDevice,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    state: &Tensor,
+    z: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+    skip_state_readback: bool,
+) -> Result<(Tensor, Tensor)> {
+    let (batch, _, nv, dk) = q.dims4()?;
+    let dv = v.dims4()?.3;
+    let q_dtype = q.dtype();
+    let state_dtype = state.dtype();
+    let state_dims = state.dims().to_vec();
+    let input_tensors: [&Tensor; 10] = [q, k, v, a, b, a_log, dt_bias, state, z, weight];
+    let mut input_data: Vec<Vec<u8>> = Vec::with_capacity(input_tensors.len());
+    for tensor in &input_tensors {
+        input_data.push(kiln_vulkan_kernel::kernels::extract_tensor_bytes(tensor)?.0);
+    }
+    let (out_data, new_state_data) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm_bytes(
+            vk,
+            &input_data,
+            batch,
+            nv,
+            dk,
+            dv,
+            eps,
+            skip_state_readback,
+        )?;
+    let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &out_data,
+        &[batch, 1, nv, dv],
+        q_dtype,
+    )?;
+    let new_state = if let Some(sd) = new_state_data {
+        kiln_vulkan_kernel::kernels::create_tensor_from_data(&sd, &state_dims, state_dtype)?
+    } else {
+        state.clone()
+    };
+    Ok((out, new_state))
+}
+
 /// Test-only candle wrapper for the bytes-only
 /// `dispatch_gdn_recurrent_step_with_options_bytes`. Keeps the candle-typed
 /// parity tests readable without re-exposing candle types in the kernel
@@ -1283,7 +1336,7 @@ fn gdn_decode_gates_recurrent_rmsnorm_matches_f32_cpu_reference() -> Result<()> 
     let weight = cpu_f32(vec![0.7, -1.1, 0.9], (dv,))?;
 
     let (got_out, got_state) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm(
+        dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
             &vk, &q, &k, &v, &a, &b, &a_log, &dt_bias, &state, &z, &weight, 1e-6, false,
         )
         .context("dispatch_gdn_decode_gates_recurrent_rmsnorm")?;
@@ -1349,7 +1402,7 @@ fn gdn_decode_gates_recurrent_rmsnorm_matches_f32_cpu_reference() -> Result<()> 
     }
 
     let (skip_out, skip_state) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm(
+        dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
             &vk, &q, &k, &v, &a, &b, &a_log, &dt_bias, &state, &z, &weight, 1e-6, true,
         )
         .context("dispatch_gdn_decode_gates_recurrent_rmsnorm skip state readback")?;
@@ -1614,12 +1667,12 @@ fn gdn_decode_gates_recurrent_rmsnorm_resident_state_matches_two_step_reference(
     let weight = cpu_f32(vec![0.7, -1.1, 0.9], (dv,))?;
 
     let (expected_out1, expected_state1) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm(
+        dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
             &vk, &q1, &k1, &v1, &a1, &b1, &a_log, &dt_bias, &state, &z1, &weight, 1e-6, false,
         )
         .context("dispatch_gdn_decode_gates_recurrent_rmsnorm reference step 1")?;
     let (expected_out2, _expected_state2) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm(
+        dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
             &vk,
             &q2,
             &k2,

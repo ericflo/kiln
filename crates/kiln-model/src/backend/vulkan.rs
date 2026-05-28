@@ -2296,25 +2296,41 @@ impl BackendRuntime for VulkanBackend {
             });
             return Ok(Some(out));
         }
-        let (out, new_state) =
-            kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm(
+        let (batch, _, nv, dk) = q.dims4()?;
+        let dv = v.dims4()?.3;
+        let q_dtype = q.dtype();
+        let state_dtype = state.dtype();
+        let state_dims = state.dims().to_vec();
+        let input_tensors: [&Tensor; 10] = [q, k, v, a, b, a_log, dt_bias, state, z, weight];
+        let mut input_data: Vec<Vec<u8>> = Vec::with_capacity(input_tensors.len());
+        for tensor in &input_tensors {
+            input_data.push(kiln_vulkan_kernel::kernels::extract_tensor_bytes(tensor)?.0);
+        }
+        let (out_data, new_state_data) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm_bytes(
                 vk_device,
-                q,
-                k,
-                v,
-                a,
-                b,
-                a_log,
-                dt_bias,
-                state,
-                z,
-                weight,
+                &input_data,
+                batch,
+                nv,
+                dk,
+                dv,
                 eps as f32,
                 skip_state_readback,
             )
             .context("gdn_decode_gates_recurrent_rmsnorm kernel failed")?;
+        let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &out_data,
+            &[batch, 1, nv, dv],
+            q_dtype,
+        )?;
         if !skip_state_readback {
-            *state = new_state;
+            if let Some(sd) = new_state_data {
+                *state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                    &sd,
+                    &state_dims,
+                    state_dtype,
+                )?;
+            }
         }
         Ok(Some(out))
     }

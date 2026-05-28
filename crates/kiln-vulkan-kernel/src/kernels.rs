@@ -5262,47 +5262,40 @@ fn dispatch_mlp_decode_cached_impl(
 }
 
 /// Dispatch fused single-token GDN gates + recurrent update + gated RMSNorm.
+/// Bytes-only fused GDN decode dispatch.
+///
+/// `input_data` must contain exactly 10 byte slices in the order
+/// `[q, k, v, a, b, a_log, dt_bias, state, z, weight]`. Output bytes have
+/// logical shape `[batch, 1, nv, dv]` in the caller-chosen recurrent dtype.
+/// The optional state bytes match the caller-known state shape and dtype;
+/// when `skip_state_readback` is true the state slot is `None` (the caller
+/// is responsible for keeping the input state buffer if it still wants to
+/// rebuild a tensor for it).
 #[allow(clippy::too_many_arguments)]
-pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm(
+pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_bytes(
     vk_device: &VulkanDevice,
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    a: &Tensor,
-    b: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
-    state: &Tensor,
-    z: &Tensor,
-    weight: &Tensor,
+    input_data: &[Vec<u8>],
+    batch: usize,
+    nv: usize,
+    dk: usize,
+    dv: usize,
     eps: f32,
     skip_state_readback: bool,
-) -> Result<(Tensor, Tensor)> {
-    let device = vk_device.device();
-    let queue = vk_device.queue();
-    let device_local_mt = vk_device.device_local_mem_type();
-    let host_visible_mt = vk_device.host_visible_mem_type();
-
-    let (batch, _, nv, dk) = q.dims4()?;
-    let (v_batch, _, v_nv, dv) = v.dims4()?;
+) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
     anyhow::ensure!(
-        v_batch == batch,
-        "gdn_decode fused: v batch {v_batch} != q batch {batch}"
-    );
-    anyhow::ensure!(
-        v_nv == nv,
-        "gdn_decode fused: v heads {v_nv} != q heads {nv}"
+        input_data.len() == 10,
+        "gdn_decode fused expects 10 input byte slices, got {}",
+        input_data.len()
     );
     anyhow::ensure!(
         dv <= 256,
         "gdn_decode fused: dv {dv} exceeds shader local capacity 256"
     );
 
-    let input_tensors = [q, k, v, a, b, a_log, dt_bias, state, z, weight];
-    let mut input_data = Vec::with_capacity(input_tensors.len());
-    for tensor in &input_tensors {
-        input_data.push(extract_tensor_bytes(tensor)?.0);
-    }
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
 
     let glsl_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -5312,23 +5305,16 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm(
     let push_constants: [u32; 5] = [nv as u32, dk as u32, dv as u32, eps.to_bits(), batch as u32];
 
     if gdn_decode_fused_single_submit_enabled() {
-        let (out_data, state_data) = dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit_bytes(
+        return dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit_bytes(
             vk_device,
-            &input_data,
+            input_data,
             &spirv,
             push_constants,
             batch,
             nv,
             dv,
             skip_state_readback,
-        )?;
-        let out = create_tensor_from_data(&out_data, &[batch, 1, nv, dv], q.dtype())?;
-        let new_state = if let Some(sd) = state_data {
-            create_tensor_from_data(&sd, state.dims(), state.dtype())?
-        } else {
-            state.clone()
-        };
-        return Ok((out, new_state));
+        );
     }
 
     let use_host_visible_state = gdn_decode_host_visible_state_enabled();
@@ -5401,13 +5387,7 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm(
         (out_data, state_data)
     };
 
-    let out = create_tensor_from_data(&out_data, &[batch, 1, nv, dv], q.dtype())?;
-    let new_state = if let Some(state_data) = state_data {
-        create_tensor_from_data(&state_data, state.dims().as_ref(), state.dtype())?
-    } else {
-        state.clone()
-    };
-    Ok((out, new_state))
+    Ok((out_data, state_data))
 }
 
 /// Dispatch fused GDN decode while keeping recurrent state device-resident.
