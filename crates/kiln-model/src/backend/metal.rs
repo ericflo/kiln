@@ -6693,11 +6693,24 @@ pub(crate) fn metal_lm_head_bf16(x: &candle_core::Tensor, weight_t: &candle_core
             _ => anyhow::bail!("metal lm head out must be on Metal"),
         };
 
-        let x_buf = buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let w_buf =
-            buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
-        let out_buf =
-            buffer_o(out_metal.buffer(), &o_layout, out.dtype());
+        // #1082 Step 4 lm_head-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let x_buf = buffer_o_kt(
+            x_metal.buffer(),
+            &kt_layout_from_candle(x_layout),
+            kt_dtype_from_candle(x.dtype()),
+        );
+        let w_buf = buffer_o_kt(
+            w_metal.buffer(),
+            &kt_layout_from_candle(w_layout),
+            kt_dtype_from_candle(weight_t.dtype()),
+        );
+        let out_buf = buffer_o_kt(
+            out_metal.buffer(),
+            &kt_layout_from_candle(o_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
@@ -6784,21 +6797,35 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &candle_core::Tensor, weight_t: &cand
             None => None,
         };
 
-        let x_buf = buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let w_buf =
-            buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
-        let ps_buf = buffer_o(
-            ps_metal.buffer(),
-            &ps_layout,
-            partial_scores.dtype(),
+        // #1082 Step 4 lm_head-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let x_buf = buffer_o_kt(
+            x_metal.buffer(),
+            &kt_layout_from_candle(x_layout),
+            kt_dtype_from_candle(x.dtype()),
         );
-        let pi_buf = buffer_o(
+        let w_buf = buffer_o_kt(
+            w_metal.buffer(),
+            &kt_layout_from_candle(w_layout),
+            kt_dtype_from_candle(weight_t.dtype()),
+        );
+        let ps_buf = buffer_o_kt(
+            ps_metal.buffer(),
+            &kt_layout_from_candle(ps_layout),
+            kt_dtype_from_candle(partial_scores.dtype()),
+        );
+        let pi_buf = buffer_o_kt(
             pi_metal.buffer(),
-            &pi_layout,
-            partial_indices.dtype(),
+            &kt_layout_from_candle(pi_layout),
+            kt_dtype_from_candle(partial_indices.dtype()),
         );
         let final_buf = final_metal.map(|(storage, layout)| {
-            buffer_o(storage.buffer(), layout, candle_core::DType::F32)
+            buffer_o_kt(
+                storage.buffer(),
+                &kt_layout_from_candle(layout),
+                kt_dtype_from_candle(candle_core::DType::F32),
+            )
         });
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
@@ -6940,21 +6967,35 @@ pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &candle_core::Tensor, weight_t: 
             None => None,
         };
 
-        let x_buf = buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let w_buf =
-            buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
-        let ps_buf = buffer_o(
-            ps_metal.buffer(),
-            &ps_layout,
-            partial_scores.dtype(),
+        // #1082 Step 4 lm_head-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let x_buf = buffer_o_kt(
+            x_metal.buffer(),
+            &kt_layout_from_candle(x_layout),
+            kt_dtype_from_candle(x.dtype()),
         );
-        let pi_buf = buffer_o(
+        let w_buf = buffer_o_kt(
+            w_metal.buffer(),
+            &kt_layout_from_candle(w_layout),
+            kt_dtype_from_candle(weight_t.dtype()),
+        );
+        let ps_buf = buffer_o_kt(
+            ps_metal.buffer(),
+            &kt_layout_from_candle(ps_layout),
+            kt_dtype_from_candle(partial_scores.dtype()),
+        );
+        let pi_buf = buffer_o_kt(
             pi_metal.buffer(),
-            &pi_layout,
-            partial_indices.dtype(),
+            &kt_layout_from_candle(pi_layout),
+            kt_dtype_from_candle(partial_indices.dtype()),
         );
         let final_buf = final_metal.map(|(storage, layout)| {
-            buffer_o(storage.buffer(), layout, candle_core::DType::F32)
+            buffer_o_kt(
+                storage.buffer(),
+                &kt_layout_from_candle(layout),
+                kt_dtype_from_candle(candle_core::DType::F32),
+            )
         });
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
