@@ -3668,43 +3668,6 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
     Ok(indices[..batch].to_vec())
 }
 
-/// Dispatch fused single-token full-attention Q/K/V projections.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_full_attn_qkv_decode_cached(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    q_weight_t: &VulkanBuffer,
-    k_weight_t: &VulkanBuffer,
-    v_weight_t: &VulkanBuffer,
-    hidden: usize,
-    q_dim: usize,
-    k_dim: usize,
-    v_dim: usize,
-) -> Result<(Tensor, Tensor, Tensor)> {
-    dispatch_full_attn_qkv_decode_cached_impl(
-        vk_device, x, q_weight_t, k_weight_t, v_weight_t, hidden, q_dim, k_dim, v_dim, false,
-    )
-}
-
-/// Dispatch fused single-token full-attention Q/K/V projections with packed
-/// BF16 immutable weights.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_full_attn_qkv_decode_cached_bf16_weights(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    q_weight_t: &VulkanBuffer,
-    k_weight_t: &VulkanBuffer,
-    v_weight_t: &VulkanBuffer,
-    hidden: usize,
-    q_dim: usize,
-    k_dim: usize,
-    v_dim: usize,
-) -> Result<(Tensor, Tensor, Tensor)> {
-    dispatch_full_attn_qkv_decode_cached_impl(
-        vk_device, x, q_weight_t, k_weight_t, v_weight_t, hidden, q_dim, k_dim, v_dim, true,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn dispatch_full_attn_qkv_decode_cached_impl(
     vk_device: &VulkanDevice,
