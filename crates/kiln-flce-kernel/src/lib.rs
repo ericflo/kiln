@@ -57,6 +57,13 @@ pub use kt_forward_op::{
     fused_linear_cross_entropy_phase_b_via_kt_forward_op, kt_forward_op_disabled,
 };
 
+/// Phase 6a/CP-4 (#1082): parallel kt-tape entry that drops the candle
+/// CustomOp1 wrapper in favour of recording onto a `kiln_autograd::Tape`
+/// directly. Same kt-typed forward and backward, same envelope. See
+/// `kt_tape.rs` for the pilot port rationale.
+mod kt_tape;
+pub use kt_tape::{fused_linear_cross_entropy_phase_b_via_kt_tape, CudaFlcePhaseBBackward};
+
 /// Optional matmul override hook for the FLCE chunked head pass.
 ///
 /// The default Phase B forward materializes the head as F32 (`head_t.to_dtype(F32)`,
