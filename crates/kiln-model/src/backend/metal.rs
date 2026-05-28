@@ -8673,14 +8673,29 @@ fn metal_paged_kv_head_major_read_bf16(
             _ => anyhow::bail!("metal paged kv read v_out must be on Metal"),
         };
 
-        let k_buf =
-            buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
-        let v_buf =
-            buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
-        let ko_buf =
-            buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
-        let vo_buf =
-            buffer_o(vo_metal.buffer(), &vo_layout, v_out.dtype());
+        // #1082 Step 4 paged_kv-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let k_buf = buffer_o_kt(
+            k_metal.buffer(),
+            &kt_layout_from_candle(k_layout),
+            kt_dtype_from_candle(k_pool.dtype()),
+        );
+        let v_buf = buffer_o_kt(
+            v_metal.buffer(),
+            &kt_layout_from_candle(v_layout),
+            kt_dtype_from_candle(v_pool.dtype()),
+        );
+        let ko_buf = buffer_o_kt(
+            ko_metal.buffer(),
+            &kt_layout_from_candle(ko_layout),
+            kt_dtype_from_candle(k_out.dtype()),
+        );
+        let vo_buf = buffer_o_kt(
+            vo_metal.buffer(),
+            &kt_layout_from_candle(vo_layout),
+            kt_dtype_from_candle(v_out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(k_buf.buffer), k_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(v_buf.buffer), v_buf.offset_in_bytes);
@@ -8815,13 +8830,29 @@ fn metal_paged_attn_decode_contiguous_bf16_d256(
             _ => anyhow::bail!("metal contiguous paged attention out must be on Metal"),
         };
 
-        let q_buf = buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf =
-            buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
-        let v_buf =
-            buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
-        let out_buf =
-            buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+        // #1082 Step 4 paged_kv-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let q_buf = buffer_o_kt(
+            q_metal.buffer(),
+            &kt_layout_from_candle(q_layout),
+            kt_dtype_from_candle(q.dtype()),
+        );
+        let k_buf = buffer_o_kt(
+            k_metal.buffer(),
+            &kt_layout_from_candle(k_layout),
+            kt_dtype_from_candle(k_pool.dtype()),
+        );
+        let v_buf = buffer_o_kt(
+            v_metal.buffer(),
+            &kt_layout_from_candle(v_layout),
+            kt_dtype_from_candle(v_pool.dtype()),
+        );
+        let out_buf = buffer_o_kt(
+            out_metal.buffer(),
+            &kt_layout_from_candle(out_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -8968,17 +8999,33 @@ fn metal_paged_attn_decode_contiguous_batch_bf16_d256(
             _ => anyhow::bail!("metal contiguous paged batch attention slots must be on Metal"),
         };
 
-        let q_buf = buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf =
-            buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
-        let v_buf =
-            buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
-        let out_buf =
-            buffer_o(out_metal.buffer(), &out_layout, out.dtype());
-        let slot_buf = buffer_o(
+        // #1082 Step 4 paged_kv-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let q_buf = buffer_o_kt(
+            q_metal.buffer(),
+            &kt_layout_from_candle(q_layout),
+            kt_dtype_from_candle(q.dtype()),
+        );
+        let k_buf = buffer_o_kt(
+            k_metal.buffer(),
+            &kt_layout_from_candle(k_layout),
+            kt_dtype_from_candle(k_pool.dtype()),
+        );
+        let v_buf = buffer_o_kt(
+            v_metal.buffer(),
+            &kt_layout_from_candle(v_layout),
+            kt_dtype_from_candle(v_pool.dtype()),
+        );
+        let out_buf = buffer_o_kt(
+            out_metal.buffer(),
+            &kt_layout_from_candle(out_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
+        let slot_buf = buffer_o_kt(
             slot_metal.buffer(),
-            &slot_layout,
-            start_slots.dtype(),
+            &kt_layout_from_candle(slot_layout),
+            kt_dtype_from_candle(start_slots.dtype()),
         );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
@@ -9158,22 +9205,38 @@ fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
             _ => anyhow::bail!("metal dyn-seqlen batch attention seqused_k must be on Metal"),
         };
 
-        let q_buf = buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf =
-            buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
-        let v_buf =
-            buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
-        let out_buf =
-            buffer_o(out_metal.buffer(), &out_layout, out.dtype());
-        let table_buf = buffer_o(
-            table_metal.buffer(),
-            &table_layout,
-            block_table.dtype(),
+        // #1082 Step 4 paged_kv-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let q_buf = buffer_o_kt(
+            q_metal.buffer(),
+            &kt_layout_from_candle(q_layout),
+            kt_dtype_from_candle(q.dtype()),
         );
-        let seq_buf = buffer_o(
+        let k_buf = buffer_o_kt(
+            k_metal.buffer(),
+            &kt_layout_from_candle(k_layout),
+            kt_dtype_from_candle(k_pool.dtype()),
+        );
+        let v_buf = buffer_o_kt(
+            v_metal.buffer(),
+            &kt_layout_from_candle(v_layout),
+            kt_dtype_from_candle(v_pool.dtype()),
+        );
+        let out_buf = buffer_o_kt(
+            out_metal.buffer(),
+            &kt_layout_from_candle(out_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
+        let table_buf = buffer_o_kt(
+            table_metal.buffer(),
+            &kt_layout_from_candle(table_layout),
+            kt_dtype_from_candle(block_table.dtype()),
+        );
+        let seq_buf = buffer_o_kt(
             seq_metal.buffer(),
-            &seq_layout,
-            seqused_k.dtype(),
+            &kt_layout_from_candle(seq_layout),
+            kt_dtype_from_candle(seqused_k.dtype()),
         );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
@@ -9331,18 +9394,39 @@ fn metal_paged_kv_head_major_read_append_token_major_bf16(
             _ => anyhow::bail!("metal paged kv read+append v_out must be on Metal"),
         };
 
-        let k_buf =
-            buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
-        let v_buf =
-            buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
-        let kt_buf =
-            buffer_o(kt_metal.buffer(), &kt_layout, k_tail.dtype());
-        let vt_buf =
-            buffer_o(vt_metal.buffer(), &vt_layout, v_tail.dtype());
-        let ko_buf =
-            buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
-        let vo_buf =
-            buffer_o(vo_metal.buffer(), &vo_layout, v_out.dtype());
+        // #1082 Step 4 paged_kv-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let k_buf = buffer_o_kt(
+            k_metal.buffer(),
+            &kt_layout_from_candle(k_layout),
+            kt_dtype_from_candle(k_pool.dtype()),
+        );
+        let v_buf = buffer_o_kt(
+            v_metal.buffer(),
+            &kt_layout_from_candle(v_layout),
+            kt_dtype_from_candle(v_pool.dtype()),
+        );
+        let kt_buf = buffer_o_kt(
+            kt_metal.buffer(),
+            &kt_layout_from_candle(kt_layout),
+            kt_dtype_from_candle(k_tail.dtype()),
+        );
+        let vt_buf = buffer_o_kt(
+            vt_metal.buffer(),
+            &kt_layout_from_candle(vt_layout),
+            kt_dtype_from_candle(v_tail.dtype()),
+        );
+        let ko_buf = buffer_o_kt(
+            ko_metal.buffer(),
+            &kt_layout_from_candle(ko_layout),
+            kt_dtype_from_candle(k_out.dtype()),
+        );
+        let vo_buf = buffer_o_kt(
+            vo_metal.buffer(),
+            &kt_layout_from_candle(vo_layout),
+            kt_dtype_from_candle(v_out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(k_buf.buffer), k_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(v_buf.buffer), v_buf.offset_in_bytes);
@@ -9482,12 +9566,29 @@ pub(crate) fn metal_paged_kv_write_token_major_bf16(
             _ => anyhow::bail!("metal paged kv write v pool must be on Metal"),
         };
 
-        let ks_buf = buffer_o(ks_metal.buffer(), &ks_layout, k.dtype());
-        let vs_buf = buffer_o(vs_metal.buffer(), &vs_layout, v.dtype());
-        let kp_buf =
-            buffer_o(kp_metal.buffer(), &kp_layout, k_pool.dtype());
-        let vp_buf =
-            buffer_o(vp_metal.buffer(), &vp_layout, v_pool.dtype());
+        // #1082 Step 4 paged_kv-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let ks_buf = buffer_o_kt(
+            ks_metal.buffer(),
+            &kt_layout_from_candle(ks_layout),
+            kt_dtype_from_candle(k.dtype()),
+        );
+        let vs_buf = buffer_o_kt(
+            vs_metal.buffer(),
+            &kt_layout_from_candle(vs_layout),
+            kt_dtype_from_candle(v.dtype()),
+        );
+        let kp_buf = buffer_o_kt(
+            kp_metal.buffer(),
+            &kt_layout_from_candle(kp_layout),
+            kt_dtype_from_candle(k_pool.dtype()),
+        );
+        let vp_buf = buffer_o_kt(
+            vp_metal.buffer(),
+            &kt_layout_from_candle(vp_layout),
+            kt_dtype_from_candle(v_pool.dtype()),
+        );
 
         encoder.set_buffer(0, Some(ks_buf.buffer), ks_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(vs_buf.buffer), vs_buf.offset_in_bytes);
@@ -9641,14 +9742,34 @@ pub(crate) fn metal_paged_kv_write_token_major_batch_bf16(
             _ => anyhow::bail!("metal paged kv batch write slots must be on Metal"),
         };
 
-        let ks_buf = buffer_o(ks_metal.buffer(), &ks_layout, k.dtype());
-        let vs_buf = buffer_o(vs_metal.buffer(), &vs_layout, v.dtype());
-        let kp_buf =
-            buffer_o(kp_metal.buffer(), &kp_layout, k_pool.dtype());
-        let vp_buf =
-            buffer_o(vp_metal.buffer(), &vp_layout, v_pool.dtype());
-        let slot_buf =
-            buffer_o(slot_metal.buffer(), &slot_layout, slots.dtype());
+        // #1082 Step 4 paged_kv-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let ks_buf = buffer_o_kt(
+            ks_metal.buffer(),
+            &kt_layout_from_candle(ks_layout),
+            kt_dtype_from_candle(k.dtype()),
+        );
+        let vs_buf = buffer_o_kt(
+            vs_metal.buffer(),
+            &kt_layout_from_candle(vs_layout),
+            kt_dtype_from_candle(v.dtype()),
+        );
+        let kp_buf = buffer_o_kt(
+            kp_metal.buffer(),
+            &kt_layout_from_candle(kp_layout),
+            kt_dtype_from_candle(k_pool.dtype()),
+        );
+        let vp_buf = buffer_o_kt(
+            vp_metal.buffer(),
+            &kt_layout_from_candle(vp_layout),
+            kt_dtype_from_candle(v_pool.dtype()),
+        );
+        let slot_buf = buffer_o_kt(
+            slot_metal.buffer(),
+            &kt_layout_from_candle(slot_layout),
+            kt_dtype_from_candle(slots.dtype()),
+        );
 
         encoder.set_buffer(0, Some(ks_buf.buffer), ks_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(vs_buf.buffer), vs_buf.offset_in_bytes);
