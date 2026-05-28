@@ -2750,35 +2750,6 @@ pub fn dispatch_linear_decode_argmax_cached_bf16_weights_bytes(
     )
 }
 
-// Tensor-typed wrappers kept temporarily for callers that haven't migrated yet (#1082).
-pub fn dispatch_linear_decode_argmax_cached(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    weight_t: &VulkanBuffer,
-    hidden: usize,
-    out_dim: usize,
-) -> Result<u32> {
-    let x_data = extract_tensor_bytes(x)?.0;
-    dispatch_linear_decode_argmax_cached_bytes(vk_device, &x_data, weight_t, hidden, out_dim)
-}
-
-pub fn dispatch_linear_decode_argmax_cached_bf16_weights(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    weight_t: &VulkanBuffer,
-    hidden: usize,
-    out_dim: usize,
-) -> Result<u32> {
-    let x_data = extract_tensor_bytes(x)?.0;
-    dispatch_linear_decode_argmax_cached_bf16_weights_bytes(
-        vk_device,
-        &x_data,
-        weight_t,
-        hidden,
-        out_dim,
-    )
-}
-
 fn dispatch_linear_decode_argmax_cached_impl_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
