@@ -2,39 +2,21 @@
 
 //! H2D + D2H round-trip — host_to_cuda_copy ∘ cuda_to_host_copy = identity.
 //!
-//! # TODO(#1082): candle-removal STOP — by design
+//! # #1082 candle-removal status
 //!
-//! This test cannot drop its `candle_core::{Device, Tensor}` imports
-//! today. It is testing kt-bridge surfaces that are candle-typed by
-//! definition:
-//!
-//! - `kiln_tensor::host_to_cuda_copy(&kt_tensor, Arc<CudaDevice>, usize)`
-//!   takes a `candle_core::CudaDevice` (`cuda_storage.rs:2442-2446`).
-//!   The test must build `CandleDevice::new_cuda(0)` to feed it.
-//! - The `host_to_cuda_copy_validates_input_device` test verifies the
-//!   CPU-source-required error path by constructing a CUDA-side
-//!   `CandleTensor::from_vec` and bridging it via
-//!   `kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow` — that
-//!   borrow helper exists specifically to bridge candle→kt and is
-//!   not removable until candle is.
-//!
-//! Until the substrate-level `Arc<CudaDevice>` dep on
-//! `host_to_cuda_copy` is broken (Tier 4-5 substrate work tracked
-//! in `docs/CANDLE_REMOVAL_PLAN.md` lines 579-585), the candle
-//! imports here stay.
-//!
-//! Precedent for STOP-doc-only commits in this sweep: 6d3fc88d
-//! (kiln-opd-loss-kernel), 9a95adc2 (kiln-flce-kernel), acd00bb4
-//! (kiln-rmsnorm-kernel phase10_microbench).
+//! As of wave 13 of the #1082 sweep, `kiln_tensor::host_to_cuda_copy`
+//! is fully candle-free — its signature is `(src, device_index)` and
+//! it derives the cudarc `CudaContext` internally via
+//! `primary_cuda_context`. The CPU-source validation test that used
+//! to need a candle-side `CandleTensor` to build a CUDA-resident kt
+//! tensor now constructs that tensor via `kiln_tensor`'s own CPU →
+//! CUDA path plus the existing kt → CUDA H2D, so no candle imports
+//! remain on this test file.
 
-use std::sync::Arc;
+use kiln_tensor::{cuda_to_host_copy, host_to_cuda_copy, primary_cuda_context, CpuStorage, Tensor};
 
-use candle_core::{Device as CandleDevice, Tensor as CandleTensor};
-
-use kiln_tensor::{cuda_to_host_copy, host_to_cuda_copy, CpuStorage, Tensor};
-
-fn try_cuda() -> Option<CandleDevice> {
-    CandleDevice::new_cuda(0).ok()
+fn cuda_available() -> bool {
+    primary_cuda_context(0).is_ok()
 }
 
 fn make_cpu_tensor_f32(data: &[f32], shape: Vec<usize>) -> Tensor {
@@ -43,20 +25,16 @@ fn make_cpu_tensor_f32(data: &[f32], shape: Vec<usize>) -> Tensor {
 
 #[test]
 fn host_to_cuda_to_host_round_trip_f32() {
-    let Some(dev) = try_cuda() else {
+    if !cuda_available() {
         eprintln!("CUDA not available; skipping");
         return;
-    };
-    let candle_cuda = match dev {
-        CandleDevice::Cuda(c) => Arc::new(c),
-        _ => unreachable!(),
-    };
+    }
 
     let data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.5 - 4.0).collect();
     let cpu_t = make_cpu_tensor_f32(&data, vec![3, 8]);
 
     // H2D: CPU kt-Tensor → CUDA kt-Tensor.
-    let cuda_t = host_to_cuda_copy(&cpu_t, Arc::clone(&candle_cuda), 0).expect("H2D");
+    let cuda_t = host_to_cuda_copy(&cpu_t, 0).expect("H2D");
     assert_eq!(cuda_t.shape(), &[3, 8]);
     assert!(matches!(cuda_t.device(), kiln_tensor::Device::Cuda(_)));
 
@@ -80,19 +58,19 @@ fn host_to_cuda_to_host_round_trip_f32() {
 
 #[test]
 fn host_to_cuda_copy_validates_input_device() {
-    let Some(dev) = try_cuda() else {
+    if !cuda_available() {
         eprintln!("CUDA not available; skipping");
         return;
-    };
-    let candle_cuda = match dev.clone() {
-        CandleDevice::Cuda(c) => Arc::new(c),
-        _ => unreachable!(),
-    };
+    }
 
-    // Build a CUDA-side tensor (not CPU). host_to_cuda_copy must error.
-    let cd = CandleTensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), &dev).unwrap();
-    let kt_cuda = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&cd).unwrap();
+    // Build a CUDA-side tensor (not CPU) via the kt H2D path itself,
+    // then feed it back into host_to_cuda_copy. The function must
+    // reject the non-CPU source.
+    let cpu_seed =
+        Tensor::from_slice(&[1.0f32, 2.0, 3.0], vec![3]).expect("cpu seed");
+    let kt_cuda = host_to_cuda_copy(&cpu_seed, 0).expect("seed H2D");
+    assert!(matches!(kt_cuda.device(), kiln_tensor::Device::Cuda(_)));
 
-    let result = host_to_cuda_copy(&kt_cuda, candle_cuda, 0);
+    let result = host_to_cuda_copy(&kt_cuda, 0);
     assert!(result.is_err(), "expected CPU-source-required error");
 }

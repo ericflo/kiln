@@ -368,41 +368,6 @@ impl CudaStorage {
     }
 }
 
-/// Construct the primary `Arc<CudaDevice>` for the given device index.
-///
-/// Internally calls `candle_core::Device::new_cuda(device_index)` and
-/// unwraps to `Arc<CudaDevice>`. Returns `Err` if the requested CUDA
-/// device isn't available.
-///
-/// **#1082 deprecated path — prefer [`primary_cuda_context`].**
-///
-/// As of the May 2026 candle-removal sweep, every kt-side caller of
-/// `primary_cuda_device` migrated to `primary_cuda_context`, and every
-/// external caller (kernel-crate test scaffolds + kt-bridge) was
-/// migrated or rewritten to construct its own candle `CudaDevice`
-/// when one is genuinely required. This function survives only as the
-/// internal helper for [`host_to_cuda_copy_ctx`], which still wraps
-/// the candle-typed [`host_to_cuda_copy`] entry. Once that entry's
-/// signature is migrated to take a cudarc `CudaContext` directly, this
-/// function gets deleted.
-///
-/// **Do not add new callers.** New CUDA-availability probes should
-/// call `primary_cuda_context(0).is_ok()`. New allocation paths should
-/// route through `cuda_zeros_ctx` / `host_to_cuda_copy_ctx` (or, for
-/// candle-free internal code, `primary_cuda_context` +
-/// `CudaContext::default_stream()` directly).
-#[cfg(feature = "cuda")]
-pub fn primary_cuda_device(device_index: usize) -> Result<Arc<CudaDevice>> {
-    match candle_core::Device::new_cuda(device_index)
-        .map_err(|e| Error::Msg(format!("primary_cuda_device({device_index}): {e}")))?
-    {
-        candle_core::Device::Cuda(d) => Ok(Arc::new(d)),
-        _ => Err(Error::Msg(format!(
-            "primary_cuda_device({device_index}): expected Cuda device"
-        ))),
-    }
-}
-
 /// Construct the primary `Arc<cudarc::driver::CudaContext>` for the
 /// given device index — **fully candle-free** accessor.
 ///
@@ -2041,15 +2006,23 @@ mod tests {
         std::env::var("KILN_TENSOR_CUDA_TEST").ok().as_deref() == Some("1")
     }
 
-    /// Acquire a primary CUDA device for tests — candle-free entry that
-    /// routes through `primary_cuda_device(0)` (the same helper external
-    /// kernel-crate tests use). Returns `None` if `KILN_TENSOR_CUDA_TEST`
-    /// is unset OR the host has no visible CUDA device.
+    /// Acquire a primary candle `CudaDevice` for tests that still
+    /// need to drive `dev.cuda_stream().context()` directly (the
+    /// `cuda_is_finite_integer_dtype_is_vacuously_true` test
+    /// allocates a `CudaStorage::zeros_ctx` against the candle
+    /// stream's context). New tests should call
+    /// `primary_cuda_context(0)` directly instead.
+    ///
+    /// Returns `None` if `KILN_TENSOR_CUDA_TEST` is unset OR the host
+    /// has no visible CUDA device.
     fn maybe_cuda_device() -> Option<Arc<CudaDevice>> {
         if !cuda_test_enabled() {
             return None;
         }
-        primary_cuda_device(0).ok()
+        match candle_core::Device::new_cuda(0).ok()? {
+            candle_core::Device::Cuda(d) => Some(Arc::new(d)),
+            _ => None,
+        }
     }
 
     #[test]
@@ -2098,9 +2071,9 @@ mod tests {
     // --- cuda_is_finite (#1082 Phase 9 substrate) -------------------
 
     /// Build a CUDA F32 tensor from a host slice via host_to_cuda_copy.
-    fn cuda_f32_from_slice(dev: Arc<CudaDevice>, values: &[f32]) -> crate::Tensor {
+    fn cuda_f32_from_slice(_dev: Arc<CudaDevice>, values: &[f32]) -> crate::Tensor {
         let cpu = crate::Tensor::from_slice(values, vec![values.len()]).unwrap();
-        crate::host_to_cuda_copy(&cpu, dev, 0).unwrap()
+        crate::host_to_cuda_copy(&cpu, 0).unwrap()
     }
 
     #[test]
@@ -2152,17 +2125,18 @@ mod tests {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
+        let _ = dev;
         // Build BF16 by casting an F32 with a NaN.
         let cpu_f32 =
             crate::Tensor::from_slice(&[1.0f32, f32::NAN, 2.0], vec![3]).unwrap();
-        let cuda_f32 = crate::host_to_cuda_copy(&cpu_f32, dev.clone(), 0).unwrap();
+        let cuda_f32 = crate::host_to_cuda_copy(&cpu_f32, 0).unwrap();
         let bf16 = crate::cuda_cast(&cuda_f32, DType::BF16).unwrap();
         assert_eq!(bf16.dtype(), DType::BF16);
         assert!(!super::cuda_is_finite(&bf16).unwrap());
 
         // Sanity: an all-finite BF16 tensor returns true.
         let cpu_ok = crate::Tensor::from_slice(&[1.0f32, 2.0, -0.5], vec![3]).unwrap();
-        let cuda_ok = crate::host_to_cuda_copy(&cpu_ok, dev, 0).unwrap();
+        let cuda_ok = crate::host_to_cuda_copy(&cpu_ok, 0).unwrap();
         let bf16_ok = crate::cuda_cast(&cuda_ok, DType::BF16).unwrap();
         assert!(super::cuda_is_finite(&bf16_ok).unwrap());
     }
@@ -2173,9 +2147,10 @@ mod tests {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
+        let _ = dev;
         let cpu_f32 =
             crate::Tensor::from_slice(&[1.0f32, f32::INFINITY, 2.0], vec![3]).unwrap();
-        let cuda_f32 = crate::host_to_cuda_copy(&cpu_f32, dev, 0).unwrap();
+        let cuda_f32 = crate::host_to_cuda_copy(&cpu_f32, 0).unwrap();
         let f16 = crate::cuda_cast(&cuda_f32, DType::F16).unwrap();
         assert_eq!(f16.dtype(), DType::F16);
         assert!(!super::cuda_is_finite(&f16).unwrap());
@@ -2210,12 +2185,13 @@ mod tests {
         };
         // 2x2 with one NaN at logical [1, 0]; transpose to make it
         // non-contiguous. cuda_is_finite contiguifies internally.
+        let _ = dev;
         let cpu_f32 = crate::Tensor::from_slice(
             &[1.0f32, 2.0, f32::NAN, 4.0],
             vec![2, 2],
         )
         .unwrap();
-        let cuda_f32 = crate::host_to_cuda_copy(&cpu_f32, dev, 0).unwrap();
+        let cuda_f32 = crate::host_to_cuda_copy(&cpu_f32, 0).unwrap();
         let tt = cuda_f32.transpose(0, 1).unwrap();
         assert!(!super::cuda_is_finite(&tt).unwrap());
     }
@@ -2520,10 +2496,18 @@ pub fn cuda_is_finite(src: &crate::Tensor) -> Result<bool> {
 /// Phase 1 substrate op — the sibling of [`cuda_to_host_copy`].
 /// Together they close the host↔device round-trip surface.
 ///
-/// `candle_device` and `device_index` together identify the
-/// destination CUDA device. The output layout is row-major
-/// contiguous (`start_offset = 0`); non-contiguous inputs are
-/// silently contiguified into the destination.
+/// `device_index` identifies the destination CUDA device. The
+/// output layout is row-major contiguous (`start_offset = 0`);
+/// non-contiguous inputs are silently contiguified into the
+/// destination.
+///
+/// **#1082 candle-removal**: this entry is fully candle-free. The
+/// destination `Arc<CudaContext>` is derived internally via
+/// [`primary_cuda_context`] — no candle `CudaDevice` is materialized
+/// anywhere along the path. The previous candle-typed
+/// `host_to_cuda_copy(src, Arc<CudaDevice>, usize)` signature was
+/// deleted as part of the wave 13 push to drop candle-core from
+/// `kiln-tensor`'s mandatory `[dependencies]`.
 ///
 /// Errors:
 /// - Source must be CPU storage.
@@ -2531,7 +2515,6 @@ pub fn cuda_is_finite(src: &crate::Tensor) -> Result<bool> {
 #[cfg(feature = "cuda")]
 pub fn host_to_cuda_copy(
     src: &crate::Tensor,
-    candle_device: Arc<CudaDevice>,
     device_index: usize,
 ) -> Result<crate::Tensor> {
     if src.dtype().is_packed() {
@@ -2540,7 +2523,7 @@ pub fn host_to_cuda_copy(
             src.dtype()
         )));
     }
-    let cpu_storage = src
+    let _cpu_storage = src
         .storage()
         .as_any()
         .downcast_ref::<crate::CpuStorage>()
@@ -2580,22 +2563,19 @@ pub fn host_to_cuda_copy(
         )));
     }
 
-    // Allocate the device buffer + issue H2D memcpy. We use
-    // candle's `clone_htod` which wraps cudarc's H2D for a slice;
-    // it returns a fresh CudaSlice<u8> ready to wrap.
-    //
-    // #1082: derive the cudarc CudaContext from the back-compat candle
-    // device input and route through [`CudaStorage::from_slice_ctx`]; the
-    // candle-typed `CudaStorage::from_slice` constructor is being deleted.
-    let ctx = candle_device.cuda_stream().context().clone();
-    let device_slice = {
-        let stream = candle_device.cuda_stream();
-        stream
-            .clone_htod(bytes)
-            .map_err(|e| {
-                crate::Error::Msg(format!("host_to_cuda_copy: clone_htod failed: {e:?}"))
-            })?
-    };
+    // Allocate the device buffer + issue H2D memcpy via the primary
+    // cudarc context's default stream. No candle device is involved
+    // anywhere along this path: `primary_cuda_context(device_index)`
+    // just calls `cudarc::driver::CudaContext::new(device_index)`,
+    // which is the same primary-context retain candle's
+    // `Device::new_cuda` performs under the hood.
+    let ctx = primary_cuda_context(device_index)?;
+    let stream = ctx.default_stream();
+    let device_slice = stream
+        .clone_htod(bytes)
+        .map_err(|e| {
+            crate::Error::Msg(format!("host_to_cuda_copy: clone_htod failed: {e:?}"))
+        })?;
     let cuda_storage =
         CudaStorage::from_slice_ctx(&ctx, device_index, dtype, device_slice)?;
 
@@ -2607,31 +2587,21 @@ pub fn host_to_cuda_copy(
     )
 }
 
-/// Host → CUDA copy — **candle-free entry point** parallel to
-/// [`host_to_cuda_copy`].
+/// Host → CUDA copy — back-compat alias for [`host_to_cuda_copy`].
 ///
-/// Same semantics as `host_to_cuda_copy`, but the caller only supplies
-/// `device_index`. The candle `Arc<CudaDevice>` is derived internally
-/// via [`primary_cuda_device`], which routes through candle's primary
-/// context retain (the same handle every other call site holds).
-///
-/// This is the migration path for the #1082 candle_device field-drop
-/// frontier. Call sites that previously held `.candle_device().clone()`
-/// just to forward it into `host_to_cuda_copy` should switch to this
-/// variant: it removes one `.candle_device()` read from each site, and
-/// once every site is migrated, the underlying field on `CudaStorage`
-/// becomes droppable.
-///
-/// When the field flip lands and `host_to_cuda_copy` itself stops
-/// taking `Arc<CudaDevice>`, this `_ctx` variant becomes a thin
-/// re-export of the same body.
+/// Historically this was the candle-free parallel to a candle-typed
+/// `host_to_cuda_copy(src, Arc<CudaDevice>, usize)`. With wave 13 of
+/// the #1082 sweep, the candle-typed entry was deleted and the
+/// canonical signature is now itself candle-free — so `host_to_cuda_copy_ctx`
+/// just forwards to `host_to_cuda_copy`. Existing callers continue
+/// to work unchanged; new code should call `host_to_cuda_copy`
+/// directly.
 #[cfg(feature = "cuda")]
 pub fn host_to_cuda_copy_ctx(
     src: &crate::Tensor,
     device_index: usize,
 ) -> Result<crate::Tensor> {
-    let candle_device = primary_cuda_device(device_index)?;
-    host_to_cuda_copy(src, candle_device, device_index)
+    host_to_cuda_copy(src, device_index)
 }
 
 /// CUDA per-row sum-of-squares reduction over the trailing axis

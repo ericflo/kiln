@@ -146,9 +146,9 @@ fn run_matmul_backward_parity(m: usize, n: usize, k: usize, tolerance: f32) {
     // 2. Mirror to CUDA. host_to_cuda_copy preserves contiguity +
     //    dtype, returning fresh CUDA-resident kt-Tensors with
     //    start_offset=0.
-    let a_cuda = host_to_cuda_copy(&a_cpu, Arc::clone(&cuda), 0).expect("a H2D");
-    let b_cuda = host_to_cuda_copy(&b_cpu, Arc::clone(&cuda), 0).expect("b H2D");
-    let dc_cuda = host_to_cuda_copy(&dc_cpu, Arc::clone(&cuda), 0).expect("dc H2D");
+    let a_cuda = host_to_cuda_copy(&a_cpu, 0).expect("a H2D");
+    let b_cuda = host_to_cuda_copy(&b_cpu, 0).expect("b H2D");
+    let dc_cuda = host_to_cuda_copy(&dc_cpu, 0).expect("dc H2D");
 
     // 3. CPU reference: build MatmulBackward with CPU-resident `a`/`b`,
     //    apply to the CPU `dc`. `MatmulBackward::apply` internally
@@ -233,7 +233,7 @@ fn cuda_add_backward_parity() {
     };
 
     let dc_cpu = Tensor::from_slice(&pattern(64, 51), vec![8, 8]).expect("dc CPU");
-    let dc_cuda = host_to_cuda_copy(&dc_cpu, Arc::clone(&cuda), 0).expect("dc H2D");
+    let dc_cuda = host_to_cuda_copy(&dc_cpu, 0).expect("dc H2D");
 
     // AddBackward is stateless — apply on CUDA grad should clone
     // it twice (one per input) and return both CUDA-resident.
@@ -273,9 +273,9 @@ fn cuda_mul_backward_parity() {
     let b_cpu = Tensor::from_slice(&pattern(n, 67), shape.clone()).expect("b CPU");
     let dc_cpu = Tensor::from_slice(&pattern(n, 71), shape.clone()).expect("dc CPU");
 
-    let a_cuda = host_to_cuda_copy(&a_cpu, Arc::clone(&cuda), 0).expect("a H2D");
-    let b_cuda = host_to_cuda_copy(&b_cpu, Arc::clone(&cuda), 0).expect("b H2D");
-    let dc_cuda = host_to_cuda_copy(&dc_cpu, Arc::clone(&cuda), 0).expect("dc H2D");
+    let a_cuda = host_to_cuda_copy(&a_cpu, 0).expect("a H2D");
+    let b_cuda = host_to_cuda_copy(&b_cpu, 0).expect("b H2D");
+    let dc_cuda = host_to_cuda_copy(&dc_cpu, 0).expect("dc H2D");
 
     // CPU reference. MulBackward::apply -> mul(dc, b), mul(dc, a)
     // both dispatch to CPU when inputs are CPU.
@@ -351,9 +351,9 @@ fn cuda_embedding_backward_parity_unique_rows() {
 
     // host_to_cuda_copy handles U32 and F32 alike.
     let token_ids_cuda =
-        host_to_cuda_copy(&token_ids_cpu, Arc::clone(&cuda), 0).expect("ids H2D");
+        host_to_cuda_copy(&token_ids_cpu, 0).expect("ids H2D");
     let grad_out_cuda =
-        host_to_cuda_copy(&grad_out_cpu, Arc::clone(&cuda), 0).expect("grad_out H2D");
+        host_to_cuda_copy(&grad_out_cpu, 0).expect("grad_out H2D");
 
     // CPU reference.
     let bwd_cpu = EmbeddingBackward {
@@ -416,9 +416,9 @@ fn cuda_embedding_backward_parity_with_collisions() {
     let grad_out_cpu = Tensor::from_slice(&grad_out_data, vec![4, hidden]).expect("grad_out CPU");
 
     let token_ids_cuda =
-        host_to_cuda_copy(&token_ids_cpu, Arc::clone(&cuda), 0).expect("ids H2D");
+        host_to_cuda_copy(&token_ids_cpu, 0).expect("ids H2D");
     let grad_out_cuda =
-        host_to_cuda_copy(&grad_out_cpu, Arc::clone(&cuda), 0).expect("grad_out H2D");
+        host_to_cuda_copy(&grad_out_cpu, 0).expect("grad_out H2D");
 
     let bwd_cpu = EmbeddingBackward {
         vocab_size,
@@ -493,9 +493,9 @@ fn cuda_matmul_backward_finite_difference_sanity() {
     let b_cpu = Tensor::from_slice(&b_data, vec![k, n]).expect("b CPU");
     let dc_ones = Tensor::from_slice(&vec![1.0f32; m * n], vec![m, n]).expect("dc CPU");
 
-    let a_cuda = host_to_cuda_copy(&a_cpu, Arc::clone(&cuda), 0).expect("a H2D");
-    let b_cuda = host_to_cuda_copy(&b_cpu, Arc::clone(&cuda), 0).expect("b H2D");
-    let dc_cuda = host_to_cuda_copy(&dc_ones, Arc::clone(&cuda), 0).expect("dc H2D");
+    let a_cuda = host_to_cuda_copy(&a_cpu, 0).expect("a H2D");
+    let b_cuda = host_to_cuda_copy(&b_cpu, 0).expect("b H2D");
+    let dc_cuda = host_to_cuda_copy(&dc_ones, 0).expect("dc H2D");
 
     let bwd = MatmulBackward {
         a: a_cuda.clone(),
@@ -598,8 +598,8 @@ fn cuda_softmax_backward_currently_errors_on_cuda_storage() {
     )
     .expect("y CPU");
     let dy_cpu = Tensor::from_slice(&vec![1.0f32; 8], vec![2, 4]).expect("dy CPU");
-    let y_cuda = host_to_cuda_copy(&y_cpu, Arc::clone(&cuda), 0).expect("y H2D");
-    let dy_cuda = host_to_cuda_copy(&dy_cpu, Arc::clone(&cuda), 0).expect("dy H2D");
+    let y_cuda = host_to_cuda_copy(&y_cpu, 0).expect("y H2D");
+    let dy_cuda = host_to_cuda_copy(&dy_cpu, 0).expect("dy H2D");
 
     // Today: SoftmaxLastDimBackward asserts CpuStorage. With a CUDA
     // saved-y, the very first `load_f32` call returns Err.
