@@ -4,7 +4,6 @@
 //! organizing them into per-layer structs for use during forward pass.
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -26,9 +25,9 @@ pub struct AdapterConfig {
 /// LoRA A/B weight pair for a single linear projection.
 pub struct LoraProjectionWeights {
     /// A matrix: [rank, in_features]
-    pub a: Tensor,
+    pub a: candle_core::Tensor,
     /// B matrix: [out_features, rank]
-    pub b: Tensor,
+    pub b: candle_core::Tensor,
 }
 
 /// LoRA weights for all targeted modules in one transformer layer.
@@ -158,7 +157,7 @@ impl LoraWeights {
     /// `base_model.model.model.layers.{i}.self_attn.{module}.lora_A.weight`
     /// `base_model.model.model.layers.{i}.self_attn.{module}.lora_B.weight`
     /// and similarly for MLP modules under `.mlp.{module}.`.
-    pub fn load(adapter_dir: &Path, num_layers: usize, device: &Device) -> Result<Self> {
+    pub fn load(adapter_dir: &Path, num_layers: usize, device: &candle_core::Device) -> Result<Self> {
         // Load adapter config
         let config_path = adapter_dir.join("adapter_config.json");
         let config_str = std::fs::read_to_string(&config_path)
@@ -279,19 +278,19 @@ fn parse_peft_key(key: &str) -> Option<ParsedKey> {
     })
 }
 
-/// Convert a safetensors tensor view to a candle Tensor.
+/// Convert a safetensors tensor view to a candle candle_core::Tensor.
 fn safetensor_to_candle(
     view: &safetensors::tensor::TensorView<'_>,
-    device: &Device,
-) -> Result<Tensor> {
+    device: &candle_core::Device,
+) -> Result<candle_core::Tensor> {
     let shape: Vec<usize> = view.shape().to_vec();
     let dtype = match view.dtype() {
-        safetensors::Dtype::F16 => DType::F16,
-        safetensors::Dtype::BF16 => DType::BF16,
-        safetensors::Dtype::F32 => DType::F32,
+        safetensors::Dtype::F16 => candle_core::DType::F16,
+        safetensors::Dtype::BF16 => candle_core::DType::BF16,
+        safetensors::Dtype::F32 => candle_core::DType::F32,
         other => anyhow::bail!("unsupported safetensors dtype: {:?}", other),
     };
-    let tensor = Tensor::from_raw_buffer(view.data(), dtype, &shape, device)
+    let tensor = candle_core::Tensor::from_raw_buffer(view.data(), dtype, &shape, device)
         .context("failed to create tensor from safetensors data")?;
     Ok(tensor)
 }
@@ -305,7 +304,7 @@ fn safetensor_to_candle(
 /// - `scale`: alpha / rank
 ///
 /// Returns: the LoRA delta tensor (same shape as base_output)
-pub fn compute_lora_delta(x: &Tensor, proj: &LoraProjectionWeights, scale: f32) -> Result<Tensor> {
+pub fn compute_lora_delta(x: &candle_core::Tensor, proj: &LoraProjectionWeights, scale: f32) -> Result<candle_core::Tensor> {
     // x: [..., in_features]
     // A: [rank, in_features] -> A^T: [in_features, rank]
     // B: [out_features, rank] -> B^T: [rank, out_features]
@@ -326,14 +325,14 @@ pub fn compute_lora_delta(x: &Tensor, proj: &LoraProjectionWeights, scale: f32) 
     Ok(delta)
 }
 
-fn cpu_needs_f32_matmul(lhs: &Tensor, rhs: &Tensor) -> bool {
-    matches!(lhs.device(), Device::Cpu) && (lhs.dtype() != DType::F32 || rhs.dtype() != DType::F32)
+fn cpu_needs_f32_matmul(lhs: &candle_core::Tensor, rhs: &candle_core::Tensor) -> bool {
+    matches!(lhs.device(), candle_core::Device::Cpu) && (lhs.dtype() != candle_core::DType::F32 || rhs.dtype() != candle_core::DType::F32)
 }
 
-fn broadcast_matmul_cpu_compatible(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+fn broadcast_matmul_cpu_compatible(lhs: &candle_core::Tensor, rhs: &candle_core::Tensor) -> Result<candle_core::Tensor> {
     if cpu_needs_f32_matmul(lhs, rhs) {
-        let lhs_f32 = lhs.to_dtype(DType::F32)?;
-        let rhs_f32 = rhs.to_dtype(DType::F32)?;
+        let lhs_f32 = lhs.to_dtype(candle_core::DType::F32)?;
+        let rhs_f32 = rhs.to_dtype(candle_core::DType::F32)?;
         Ok(lhs_f32.broadcast_matmul(&rhs_f32)?)
     } else {
         Ok(lhs.broadcast_matmul(rhs)?)
@@ -346,11 +345,11 @@ fn broadcast_matmul_cpu_compatible(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor>
 ///
 /// If no LoRA weights are provided for this projection, just returns `x @ W^T`.
 pub fn linear_with_lora(
-    x: &Tensor,
-    base_weight: &Tensor,
+    x: &candle_core::Tensor,
+    base_weight: &candle_core::Tensor,
     lora: Option<&LoraProjectionWeights>,
     scale: f32,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     let base_weight_t = base_weight.t()?;
     let base_output = broadcast_matmul_cpu_compatible(x, &base_weight_t)?;
     if let Some(proj) = lora {
@@ -377,16 +376,16 @@ pub fn linear_with_lora(
 /// the MTP inner transformer block is running, so every non-MTP call site
 /// takes the legacy bf16 broadcast_matmul path unchanged.
 pub fn linear_with_lora_t(
-    x: &Tensor,
-    base_weight_t: &Tensor,
+    x: &candle_core::Tensor,
+    base_weight_t: &candle_core::Tensor,
     lora: Option<&LoraProjectionWeights>,
     scale: f32,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     let cpu_f32_matmul = cpu_needs_f32_matmul(x, base_weight_t);
     let base_output = if crate::mtp_debug::is_mtp_fp32_head_armed() || cpu_f32_matmul {
         let in_dtype = x.dtype();
-        let x_f32 = x.to_dtype(DType::F32)?;
-        let w_f32 = base_weight_t.to_dtype(DType::F32)?;
+        let x_f32 = x.to_dtype(candle_core::DType::F32)?;
+        let w_f32 = base_weight_t.to_dtype(candle_core::DType::F32)?;
         let out = x_f32.broadcast_matmul(&w_f32)?;
         if cpu_f32_matmul {
             out
@@ -434,17 +433,17 @@ mod tests {
 
     #[test]
     fn test_compute_lora_delta_known_values() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
 
         // x: [1, 2, 4] (batch=1, seq_len=2, in_features=4)
-        let x = Tensor::new(&[[1.0_f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], &device)?
+        let x = candle_core::Tensor::new(&[[1.0_f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], &device)?
             .unsqueeze(0)?;
 
         // A: [2, 4] (rank=2, in_features=4) — identity-like
-        let a = Tensor::new(&[[1.0_f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], &device)?;
+        let a = candle_core::Tensor::new(&[[1.0_f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], &device)?;
 
         // B: [3, 2] (out_features=3, rank=2)
-        let b = Tensor::new(&[[1.0_f32, 0.0], [0.0, 1.0], [1.0, 1.0]], &device)?;
+        let b = candle_core::Tensor::new(&[[1.0_f32, 0.0], [0.0, 1.0], [1.0, 1.0]], &device)?;
 
         let proj = LoraProjectionWeights { a, b };
         let delta = compute_lora_delta(&x, &proj, 2.0)?;
@@ -464,17 +463,17 @@ mod tests {
 
     #[test]
     fn test_linear_with_lora_adds_delta() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
 
         // x: [1, 1, 4]
-        let x = Tensor::new(&[[1.0_f32, 2.0, 3.0, 4.0]], &device)?.unsqueeze(0)?;
+        let x = candle_core::Tensor::new(&[[1.0_f32, 2.0, 3.0, 4.0]], &device)?.unsqueeze(0)?;
 
         // W: [3, 4] — base weight
-        let w = Tensor::zeros((3, 4), DType::F32, &device)?;
+        let w = candle_core::Tensor::zeros((3, 4), candle_core::DType::F32, &device)?;
 
         // A: [2, 4], B: [3, 2]
-        let a = Tensor::new(&[[1.0_f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], &device)?;
-        let b = Tensor::new(&[[1.0_f32, 0.0], [0.0, 1.0], [0.5, 0.5]], &device)?;
+        let a = candle_core::Tensor::new(&[[1.0_f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], &device)?;
+        let b = candle_core::Tensor::new(&[[1.0_f32, 0.0], [0.0, 1.0], [0.5, 0.5]], &device)?;
 
         let proj = LoraProjectionWeights { a, b };
 
@@ -573,7 +572,7 @@ mod tests {
         std::fs::write(adapter_dir.join("adapter_model.safetensors"), &serialized)?;
 
         // Load
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let weights = LoraWeights::load(adapter_dir, 1, &device)?;
 
         assert_eq!(weights.rank, 4);
