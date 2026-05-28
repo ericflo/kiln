@@ -17,13 +17,25 @@
 
 use anyhow::Result;
 // TODO(#1082): inline-qualify the remaining `candle_core::*` sites once
-// `opd_top_k_reverse_kl_phase_b_per_position` (CUDA OPD kernel API) and
-// `VkTensor::from_candle` (Vulkan upload boundary) accept kt::Tensor instead of candle
-// Tensor. Both APIs still take candle types as of this commit. Every candle reference
-// in this file is spelled `candle_core::*` inline so the file has no top-level
-// `use candle_*` import (mirrors the kiln-vulkan-kernel/kernels.rs pattern from
-// PR f476cb97).
-use kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_per_position;
+// `opd_top_k_reverse_kl_per_position_via_kt_forward_op` (the production
+// OPD shim) and `VkTensor::from_candle` (Vulkan upload boundary) accept
+// kt::Tensor instead of candle Tensor. Both APIs still take candle types
+// as of this commit. Every candle reference in this file is spelled
+// `candle_core::*` inline so the file has no top-level `use candle_*`
+// import (mirrors the kiln-vulkan-kernel/kernels.rs pattern from PR
+// f476cb97).
+//
+// (#1082, 2026-05-28) The CUDA side of this parity test was migrated
+// off `opd_top_k_reverse_kl_phase_b_per_position`
+// (and the `OpdLossCustomOp` candle CustomOp1 it builds) onto the
+// production shim `opd_top_k_reverse_kl_per_position_via_kt_forward_op`
+// — same kt FFI symbols on the backward, same `(K ∈ {16, 32}, F32, CUDA)`
+// envelope as the §9.2 acceptance gate this test enforces. The
+// forward composite (`opd_top_k_reverse_kl_per_position_kt` underneath
+// the shim) is numerically equivalent to the fused `kiln_opd_topk_kl_fwd_*`
+// kernel up to f32 associativity; the cross-engine tolerance below
+// (`1e-4` abs / `1e-3` rel) accommodates that difference.
+use kiln_opd_loss_kernel::opd_top_k_reverse_kl_per_position_via_kt_forward_op;
 use kiln_vulkan_kernel::vk_ops::opd::vk_opd_top_k_reverse_kl_per_position;
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
 use kiln_vulkan_kernel::VulkanDevice;
@@ -110,7 +122,12 @@ fn run_cuda_per_position(
     let head_vh_t =
         candle_core::Tensor::from_vec(head_vh.to_vec(), (vocab_size, hidden_size), cuda)?;
     let head_t = head_vh_t.transpose(0, 1)?.contiguous()?; // [H, V]
-    let per_pos = opd_top_k_reverse_kl_phase_b_per_position(
+    // Routes through the production kt-shim: forward composite via
+    // `opd_top_k_reverse_kl_per_position_kt` on kt CUDA tensors, backward
+    // through the fused `kiln_opd_topk_kl_bwd_*` FFI symbols. This is the
+    // same code path the trainer runs in `opd_step_loss` and is the
+    // §9.2 grand-plan target we're proving cross-engine parity against.
+    let per_pos = opd_top_k_reverse_kl_per_position_via_kt_forward_op(
         &hidden_t,
         &head_t,
         idx,
@@ -118,7 +135,6 @@ fn run_cuda_per_position(
         label_mask,
         top_k,
         cuda,
-        4096,
     )?;
     let v: Vec<f32> = per_pos.to_dtype(candle_core::DType::F32)?.to_vec1()?;
     Ok(v)

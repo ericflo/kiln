@@ -1854,7 +1854,18 @@ pub fn opd_train_synthetic_validation(
     let mut first_loss: f32 = f32::NAN;
     let mut last_loss: f32 = f32::NAN;
     for step in 0..num_steps {
-        let loss = opd_top_k_reverse_kl_phase_b(
+        // (#1082, 2026-05-28) Migrated off
+        // `opd_top_k_reverse_kl_phase_b` (and the `OpdLossCustomOp`
+        // candle CustomOp1 it built) onto the production shim
+        // `opd_top_k_reverse_kl_per_position_via_kt_forward_op` +
+        // `mean_all`. `top_k = 8` is outside the kt-shim CUDA envelope
+        // (which gates on `K ∈ {16, 32}`), so this CPU test falls
+        // through to the candle Phase A reference path inside the shim
+        // — exactly the path the production trainer runs when its inputs
+        // are outside the kt envelope. The autograd contract is
+        // preserved either way because `via_kt_forward_op` returns an
+        // autograd descendant of `hidden`.
+        let per_position = opd_top_k_reverse_kl_per_position_via_kt_forward_op(
             hidden.as_tensor(),
             &head_t,
             &indices,
@@ -1862,9 +1873,11 @@ pub fn opd_train_synthetic_validation(
             &label_mask,
             top_k,
             &device,
-            16,
         )
         .with_context(|| format!("forward step {step}"))?;
+        let loss = per_position
+            .mean_all()
+            .with_context(|| format!("mean_all step {step}"))?;
         let lv = loss.to_scalar::<f32>()?;
         if step == 0 {
             first_loss = lv;
@@ -3127,9 +3140,6 @@ fn write_opd_train_receipt_best_effort(
         tracing::warn!(adapter = adapter_name, error = %err, "failed to write OPD train receipt");
     }
 }
-
-#[cfg(test)]
-use kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b;
 
 #[cfg(test)]
 mod tests {
