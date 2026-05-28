@@ -314,6 +314,35 @@ impl MetalStorage {
         primary_metal_device(self.device_index())
     }
 
+    /// Resolve (or lazily construct) the kt-native `MetalCompanion`
+    /// for this storage's device ordinal — **candle-core-free**.
+    ///
+    /// The companion bundles the three substrate primitives the 7
+    /// in-file Metal ops in this file (softmax, rmsnorm, layernorm,
+    /// index_select_dim0, cast, elementwise_binary, activation_unary)
+    /// need:
+    ///   - `&candle_metal_kernels::metal::Device` for `call_*`
+    ///   - `&candle_metal_kernels::Kernels` for MSL pipeline caching
+    ///   - `ComputeCommandEncoder` materialization
+    ///
+    /// All three live in `candle_metal_kernels` (the sibling crate of
+    /// `candle-core`); the companion's construction path
+    /// (`Device::all()` + `Kernels::new()` + `Commands::new(queue)`)
+    /// never touches `candle-core`. Parallel to
+    /// [`MetalStorage::candle_device`] but kt-native — the eventual
+    /// op-migration commit replaces every
+    /// `let candle_device_arc = kt_metal.candle_device()?;` with
+    /// `let companion = kt_metal.companion()?;` site-by-site, after
+    /// which the candle hook above retires.
+    ///
+    /// Cached process-wide in [`primary_metal_companion`]'s
+    /// `OnceLock<HashMap>` so repeated calls return the same
+    /// `Arc<MetalCompanion>` for a given ordinal (matching what
+    /// candle's `MetalDevice::new` cache does for the candle wrapper).
+    pub fn companion(&self) -> Result<Arc<crate::metal_types::MetalCompanion>> {
+        primary_metal_companion(self.device_index())
+    }
+
     /// The underlying metal-rs `Device` this storage was allocated
     /// on — **candle-free passthrough**.
     ///
@@ -405,6 +434,99 @@ pub fn primary_metal_device(device_index: usize) -> Result<Arc<MetalDevice>> {
             "primary_metal_device({device_index}): expected Metal device"
         ))),
     }
+}
+
+// ----------------------------------------------------------------------
+// primary_metal_companion — kt-native parallel to primary_metal_device
+// (#1082 Phase 7 — Wave 14 lift)
+// ----------------------------------------------------------------------
+//
+// Process-wide cache keyed on Metal device ordinal that materializes
+// one `MetalCompanion` per device on first access. Mirror of
+// [`primary_metal_device`] but **candle-core-free**: the companion's
+// `Device` / `Kernels` / `Commands` triple comes entirely from
+// `candle_metal_kernels` (a sibling crate of candle-core, which the
+// `metal` feature already pulls).
+//
+// Used by [`MetalStorage::companion`] as the per-call derivation hook
+// the 7 in-file substrate ops (softmax, rmsnorm, layernorm,
+// index_select_dim0, cast, elementwise_binary, activation_unary) will
+// migrate onto in a follow-up commit. Once those ops swap from
+// `kt_metal.candle_device()` -> `kt_metal.companion()`, the
+// `primary_metal_device` candle hook + `MetalStorage::candle_device()`
+// shim can both retire.
+//
+// # Why a cache?
+//
+// `Kernels::new()` is cheap (empty `RwLock<HashMap>`), but `Commands::new`
+// allocates a 5-entry `CommandBuffer` pool eagerly. Caching one
+// companion per device-ordinal matches what candle does internally
+// (its `MetalDevice` instances are also intended to be long-lived) and
+// keeps per-op cost down to a `HashMap::get` + `Arc::clone`.
+//
+// # Phase 7 follow-up
+//
+// Once the 7 ops migrate onto `companion()`, this `OnceLock<HashMap>`
+// cache is the single hot path for substrate access. The next step is
+// to flip `MetalAllocator` to hold an `Arc<MetalCompanion>` directly
+// (not a `MetalRawDevice`) and pass it through to each freshly-allocated
+// `MetalStorage` so the per-op lookup becomes a field read. That's a
+// follow-up commit; this one only adds the cache.
+
+use std::sync::OnceLock;
+
+static METAL_COMPANIONS: OnceLock<std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::metal_types::MetalCompanion>>>> = OnceLock::new();
+
+/// Resolve (or lazily construct) the process-wide kt-native
+/// `MetalCompanion` for the given Metal device ordinal.
+///
+/// Candle-core-free: under the hood this calls
+/// `candle_metal_kernels::metal::Device::all()` (the same enumeration
+/// candle's `MetalDevice::new` reaches for, but via the
+/// `candle-metal-kernels` re-export — not `candle-core`) and threads
+/// the resulting `Device` through `MetalCompanion::from_raw` to
+/// allocate the `Kernels` / `Commands` pair.
+///
+/// Mirror of [`primary_metal_device`] for the kt-native substrate.
+/// The two are intentionally parallel so the eventual op-migration PR
+/// can swap `let candle_device_arc = kt_metal.candle_device()?;` for
+/// `let companion = kt_metal.companion()?;` site-by-site without
+/// changing the surrounding control flow.
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] if no Metal device exists at `device_index`
+/// (i.e., `Device::all()` returns fewer than `device_index + 1`
+/// entries), or if companion construction fails (command-queue or
+/// `Commands` pool allocation).
+pub fn primary_metal_companion(
+    device_index: usize,
+) -> Result<Arc<crate::metal_types::MetalCompanion>> {
+    let map = METAL_COMPANIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut map = map.lock().map_err(|e| {
+        Error::Msg(format!(
+            "primary_metal_companion({device_index}): METAL_COMPANIONS lock poisoned: {e}"
+        ))
+    })?;
+    if let Some(existing) = map.get(&device_index) {
+        return Ok(existing.clone());
+    }
+    // Enumerate the candle_metal_kernels devices (the candle-core-free
+    // path). On Apple Silicon there's typically a single device at
+    // index 0 — `Device::all()` returns it (and `Device::system_default()`
+    // returns the same physical GPU). On multi-GPU Macs (Pro/Studio with
+    // M-Ultra) `Device::all()` exposes each GPU at its own ordinal.
+    let devices = candle_metal_kernels::metal::Device::all();
+    let device = devices.into_iter().nth(device_index).ok_or_else(|| {
+        Error::Msg(format!(
+            "primary_metal_companion({device_index}): no Metal device at this ordinal \
+             (Device::all() returned fewer than {} entries)",
+            device_index + 1
+        ))
+    })?;
+    let companion = Arc::new(crate::metal_types::MetalCompanion::from_raw(device)?);
+    map.insert(device_index, companion.clone());
+    Ok(companion)
 }
 
 
