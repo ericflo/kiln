@@ -86,7 +86,7 @@
 
 use anyhow::{Context, Result};
 use candle_core::Tensor;
-use kiln_autograd::Tape;
+use kiln_autograd::{MatmulBackward, SiluBackward, Tape};
 
 // Phase 6a/CP-4 (#1082): the thread-local-tape scope machinery
 // (`with_thread_local_tape`, `with_active_tape`, `tape_forward_enabled`)
@@ -160,9 +160,153 @@ pub fn try_tape_rms_norm_cuda(x: &Tensor, weight: &Tensor, eps: f32) -> Result<O
     Ok(Some(out))
 }
 
+/// Attempt to run matmul through the kt-typed op registry
+/// (`kiln_tensor::ops::matmul`) and record a `MatmulBackward` node on
+/// the active thread-local tape.
+///
+/// Returns:
+/// * `Ok(Some(out))` — the tape-forward path ran. The returned
+///   `Tensor` is a copy of the kt-typed output into a candle CUDA
+///   tensor; a `MatmulBackward { a, b }` node was recorded on the
+///   active thread-local tape.
+/// * `Ok(None)` — the gate was off, no thread-local tape is active,
+///   the kt-bridge borrow failed (layout / dtype / device mismatch),
+///   or the kt op-registry rejected the inputs. The caller must fall
+///   through to the existing dispatch.
+/// * `Err(...)` — an unexpected forward failure or a kt -> candle
+///   copy-back failure. Propagated so callers see the failure cleanly
+///   instead of silently masking it.
+///
+/// Follows the same envelope-tristate-then-record pattern as
+/// [`try_tape_rms_norm_cuda`]: borrow zero-copy via
+/// `kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow`, run the
+/// kt-native forward, record the backward node onto the active tape,
+/// and copy the kt output back into a candle CUDA tensor. The returned
+/// tensor has no candle `BackpropOp` lineage — backward must be driven
+/// via `Tape::backward`.
+///
+/// # CP-4 (#1082) context
+///
+/// This is the matmul half of the "copy-paste adapter for each
+/// primitive" plan documented in `deed13a8`. The forward is
+/// `kiln_tensor::ops::matmul` (kt op-registry dispatch — CUDA path
+/// today via `kiln_tensor::cuda_matmul`, future Vulkan/Metal/CPU
+/// paths as the op registry grows); the backward is
+/// `kiln_autograd::backwards::MatmulBackward` which produces
+/// `da = grad_y @ b^T` and `db = a^T @ grad_y`. Saving
+/// `a.clone()` + `b.clone()` is an `Arc` bump on the kt-tensor's
+/// storage handle (no allocation), so the lifetime of the saved
+/// tensors extends past the local borrow at zero compute cost.
+pub fn try_tape_matmul_cuda(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+
+    // kt borrow: zero-copy view of the candle CUDA tensors as kt
+    // tensors. Returns `Err` (which we treat as "skip") on layout /
+    // dtype / device mismatch.
+    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    // Record only when a tape scope is active. Outside a scope,
+    // `with_active_tape` returns `None` and we fall through to the
+    // existing dispatch — matching the rms_norm adapter's contract.
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_tensor::ops::matmul(&a_kt, &b_kt)
+            .map_err(|e| anyhow::anyhow!("kt matmul: {e}"))?;
+        tape.record(
+            &y,
+            &[&a_kt, &b_kt],
+            Box::new(MatmulBackward {
+                a: a_kt.clone(),
+                b: b_kt.clone(),
+            }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let out_kt = out_kt.context("tape_forward::try_tape_matmul_cuda: kt-tape forward failed")?;
+
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape_forward::try_tape_matmul_cuda: kt -> candle copy failed")?;
+
+    Ok(Some(out))
+}
+
+/// Attempt to run SiLU through the kt-typed op registry
+/// (`kiln_tensor::ops::silu`) and record a `SiluBackward` node on the
+/// active thread-local tape.
+///
+/// Returns:
+/// * `Ok(Some(out))` — the tape-forward path ran. The returned
+///   `Tensor` is a copy of the kt-typed output into a candle CUDA
+///   tensor; a `SiluBackward { x }` node was recorded on the active
+///   thread-local tape.
+/// * `Ok(None)` — the gate was off, no thread-local tape is active,
+///   the kt-bridge borrow failed, or the kt op-registry declined.
+///   The caller must fall through to the existing dispatch.
+/// * `Err(...)` — an unexpected forward failure or a kt -> candle
+///   copy-back failure. Propagated so callers see the failure cleanly
+///   instead of silently masking it.
+///
+/// Mirrors the [`try_tape_matmul_cuda`] adapter: zero-copy borrow,
+/// kt-native forward via the op registry (CUDA SiLU kernel today via
+/// `kiln_tensor::cuda_activation_unary`, kind tag 0), tape record,
+/// kt -> candle copy-back. The returned tensor has no candle
+/// `BackpropOp` lineage — backward is on the tape only.
+///
+/// # CP-4 (#1082) context
+///
+/// SiLU completes the matmul/silu/embedding adapter triplet sketched
+/// in `deed13a8`'s "Out of scope" section. The backward is
+/// `dx = grad_y * (sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x)))`
+/// (see `kiln_autograd::backwards::activation::SiluBackward`). Saving
+/// `x.clone()` is an `Arc` bump on the kt-tensor storage; the tape
+/// owns it through the backward call.
+pub fn try_tape_silu_cuda(x: &Tensor) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_tensor::ops::silu(&x_kt)
+            .map_err(|e| anyhow::anyhow!("kt silu: {e}"))?;
+        tape.record(
+            &y,
+            &[&x_kt],
+            Box::new(SiluBackward { x: x_kt.clone() }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let out_kt = out_kt.context("tape_forward::try_tape_silu_cuda: kt-tape forward failed")?;
+
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape_forward::try_tape_silu_cuda: kt -> candle copy failed")?;
+
+    Ok(Some(out))
+}
+
 // Tape-scope tests live in `kiln-autograd::tape_scope::tests` after
 // wave-13 (#1082) promoted the thread-local-tape machinery there. The
-// kt-tape adapter test (`try_tape_rms_norm_cuda` round-trip) lives in
-// the `kiln-model/tests/tape_forward_parity.rs` integration test
-// because it requires the `kiln_kt_bridge` + `kiln_rmsnorm_kernel`
-// cuda surface.
+// kt-tape adapter tests (`try_tape_{rms_norm,matmul,silu}_cuda`
+// round-trips) live in the `kiln-model/tests/tape_forward_parity.rs`
+// integration test because they require the `kiln_kt_bridge` +
+// `kiln_rmsnorm_kernel` cuda surface.
