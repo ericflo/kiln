@@ -211,14 +211,31 @@ fn causal_conv1d_prefill_matches_stateful_cpu_reference() -> Result<()> {
         let x = cpu_f32(x_data.clone(), (batch, channels, seq_len))?;
         let weight = cpu_f32(weight_data.clone(), (channels, 1, kernel_size))?;
         let state = cpu_f32(state_data.clone(), (batch, channels, kernel_size - 1))?;
-        let (got_out, got_state) = kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill(
-            &vk,
-            &x,
-            &weight,
-            &state,
-            kernel_size,
-        )
-        .with_context(|| format!("dispatch_causal_conv1d_prefill seq_len={seq_len}"))?;
+        let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x)?.0;
+        let weight_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&weight)?.0;
+        let state_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0;
+        let (got_out_bytes, got_state_bytes) =
+            kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill_bytes(
+                &vk,
+                &x_data,
+                &weight_data,
+                &state_data,
+                batch,
+                channels,
+                seq_len,
+                kernel_size,
+            )
+            .with_context(|| format!("dispatch_causal_conv1d_prefill_bytes seq_len={seq_len}"))?;
+        let got_out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &got_out_bytes,
+            &[batch, channels, seq_len],
+            candle_core::DType::F32,
+        )?;
+        let got_state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &got_state_bytes,
+            &[batch, channels, kernel_size - 1],
+            candle_core::DType::F32,
+        )?;
 
         let (exp_out, exp_state) = causal_conv1d_reference(
             &x_data,

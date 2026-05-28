@@ -6389,13 +6389,16 @@ fn dispatch_causal_conv1d_update_bytes_core(
 /// Two-dispatch approach to avoid data races on conv_state:
 /// 1. `causal_conv1d.comp` — computes output only (no state writes)
 /// 2. `causal_conv1d_state_advance.comp` — advances state per (b, c) pair
-pub fn dispatch_causal_conv1d_prefill(
+pub fn dispatch_causal_conv1d_prefill_bytes(
     vk_device: &VulkanDevice,
-    x: &Tensor,
-    weight: &Tensor,
-    conv_state: &Tensor,
+    x_data: &[u8],
+    weight_data: &[u8],
+    state_data: &[u8],
+    batch: usize,
+    channels: usize,
+    seq_len: usize,
     kernel_size: usize,
-) -> Result<(Tensor, Tensor)> {
+) -> Result<(Vec<u8>, Vec<u8>)> {
     if kernel_size != 4 {
         anyhow::bail!("causal_conv1d: only kernel_size=4 supported");
     }
@@ -6404,15 +6407,6 @@ pub fn dispatch_causal_conv1d_prefill(
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
-
-    // Extract input data
-    let x_data = extract_tensor_bytes(x)?.0;
-    let weight_data = extract_tensor_bytes(weight)?.0;
-    let state_data = extract_tensor_bytes(conv_state)?.0;
-
-    // Parse shape [B, C, T]
-    let dims = x.dims();
-    let (batch, channels, seq_len) = (dims[0], dims[1], dims[2]);
 
     // Create input buffers (uploads scheduled inside single-submit helper)
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)?;
@@ -6554,12 +6548,7 @@ pub fn dispatch_causal_conv1d_prefill(
     drop(state_buf);
     drop(out_buf);
 
-    // Create output tensors
-    let out_shape = x.dims().as_ref().to_vec();
-    let out_tensor = create_tensor_from_data(&out_data, &out_shape, DType::F32)?;
-    let state_tensor =
-        create_tensor_from_data(&state_data, conv_state.dims().as_ref(), DType::F32)?;
-    Ok((out_tensor, state_tensor))
+    Ok((out_data, state_data))
 }
 
 /// Dispatch causal_conv1d prefill with an immutable cached f32 weight buffer.
