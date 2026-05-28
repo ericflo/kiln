@@ -13507,19 +13507,42 @@ fn metal_gdn_recurrent_prefill_head_last_bf16(
             _ => anyhow::bail!("metal gdn recurrent prefill out must be on Metal"),
         };
 
-        let q_buf = buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let v_buf = buffer_o(v_metal.buffer(), &v_layout, v.dtype());
-        let beta_buf =
-            buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
-        let g_buf = buffer_o(g_metal.buffer(), &g_layout, g.dtype());
-        let state_buf = buffer_o(
-            state_metal.buffer(),
-            &state_layout,
-            state.dtype(),
+        // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
+        let q_buf = buffer_o_kt(
+            q_metal.buffer(),
+            &kt_layout_from_candle(q_layout),
+            kt_dtype_from_candle(q.dtype()),
         );
-        let out_buf =
-            buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+        let k_buf = buffer_o_kt(
+            k_metal.buffer(),
+            &kt_layout_from_candle(k_layout),
+            kt_dtype_from_candle(k.dtype()),
+        );
+        let v_buf = buffer_o_kt(
+            v_metal.buffer(),
+            &kt_layout_from_candle(v_layout),
+            kt_dtype_from_candle(v.dtype()),
+        );
+        let beta_buf = buffer_o_kt(
+            beta_metal.buffer(),
+            &kt_layout_from_candle(beta_layout),
+            kt_dtype_from_candle(beta.dtype()),
+        );
+        let g_buf = buffer_o_kt(
+            g_metal.buffer(),
+            &kt_layout_from_candle(g_layout),
+            kt_dtype_from_candle(g.dtype()),
+        );
+        let state_buf = buffer_o_kt(
+            state_metal.buffer(),
+            &kt_layout_from_candle(state_layout),
+            kt_dtype_from_candle(state.dtype()),
+        );
+        let out_buf = buffer_o_kt(
+            out_metal.buffer(),
+            &kt_layout_from_candle(out_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -13643,19 +13666,42 @@ fn metal_gdn_recurrent_prefill_native_head_last_bf16(
             _ => anyhow::bail!("metal gdn recurrent native prefill out must be on Metal"),
         };
 
-        let q_buf = buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let v_buf = buffer_o(v_metal.buffer(), &v_layout, v.dtype());
-        let beta_buf =
-            buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
-        let g_buf = buffer_o(g_metal.buffer(), &g_layout, g.dtype());
-        let state_buf = buffer_o(
-            state_metal.buffer(),
-            &state_layout,
-            state.dtype(),
+        // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
+        let q_buf = buffer_o_kt(
+            q_metal.buffer(),
+            &kt_layout_from_candle(q_layout),
+            kt_dtype_from_candle(q.dtype()),
         );
-        let out_buf =
-            buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+        let k_buf = buffer_o_kt(
+            k_metal.buffer(),
+            &kt_layout_from_candle(k_layout),
+            kt_dtype_from_candle(k.dtype()),
+        );
+        let v_buf = buffer_o_kt(
+            v_metal.buffer(),
+            &kt_layout_from_candle(v_layout),
+            kt_dtype_from_candle(v.dtype()),
+        );
+        let beta_buf = buffer_o_kt(
+            beta_metal.buffer(),
+            &kt_layout_from_candle(beta_layout),
+            kt_dtype_from_candle(beta.dtype()),
+        );
+        let g_buf = buffer_o_kt(
+            g_metal.buffer(),
+            &kt_layout_from_candle(g_layout),
+            kt_dtype_from_candle(g.dtype()),
+        );
+        let state_buf = buffer_o_kt(
+            state_metal.buffer(),
+            &kt_layout_from_candle(state_layout),
+            kt_dtype_from_candle(state.dtype()),
+        );
+        let out_buf = buffer_o_kt(
+            out_metal.buffer(),
+            &kt_layout_from_candle(out_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -13777,23 +13823,42 @@ pub(crate) fn metal_gdn_recurrent_prefill_native_head_last_decay_bf16(
             _ => anyhow::bail!("metal gdn recurrent native prefill decay out must be on Metal"),
         };
 
-        let q_buf = buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let v_buf = buffer_o(v_metal.buffer(), &v_layout, v.dtype());
-        let beta_buf =
-            buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
-        let decay_buf = buffer_o(
+        // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
+        let q_buf = buffer_o_kt(
+            q_metal.buffer(),
+            &kt_layout_from_candle(q_layout),
+            kt_dtype_from_candle(q.dtype()),
+        );
+        let k_buf = buffer_o_kt(
+            k_metal.buffer(),
+            &kt_layout_from_candle(k_layout),
+            kt_dtype_from_candle(k.dtype()),
+        );
+        let v_buf = buffer_o_kt(
+            v_metal.buffer(),
+            &kt_layout_from_candle(v_layout),
+            kt_dtype_from_candle(v.dtype()),
+        );
+        let beta_buf = buffer_o_kt(
+            beta_metal.buffer(),
+            &kt_layout_from_candle(beta_layout),
+            kt_dtype_from_candle(beta.dtype()),
+        );
+        let decay_buf = buffer_o_kt(
             decay_metal.buffer(),
-            &decay_layout,
-            decay.dtype(),
+            &kt_layout_from_candle(decay_layout),
+            kt_dtype_from_candle(decay.dtype()),
         );
-        let state_buf = buffer_o(
+        let state_buf = buffer_o_kt(
             state_metal.buffer(),
-            &state_layout,
-            state.dtype(),
+            &kt_layout_from_candle(state_layout),
+            kt_dtype_from_candle(state.dtype()),
         );
-        let out_buf =
-            buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+        let out_buf = buffer_o_kt(
+            out_metal.buffer(),
+            &kt_layout_from_candle(out_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
