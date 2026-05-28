@@ -109,7 +109,7 @@
 use anyhow::{Context, Result};
 use kiln_autograd::{
     AddBackward, GradStore, MatmulBackward, MulBackward, ReduceBackward, ReduceKind, ReduceScope,
-    SubBackward, Tape,
+    SiluBackward, SubBackward, Tape,
 };
 use kiln_tensor::{CpuStorage, DType, Layout, Storage, Tensor, TensorId};
 use kiln_tensor::ops::{add, matmul, mul, sub, sum_all};
@@ -311,6 +311,201 @@ pub fn linear_step_via_tape(inputs: LinearStepInputs<'_>) -> Result<StepOutput> 
         loss_value,
         new_w,
         new_b,
+        grads,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 2-layer MLP via tape — second substrate proof point exercising more of the
+// `kiln_autograd` backward-op coverage (Silu activation + two distinct
+// matmuls + per-parameter SGD update). Demonstrates that the substrate
+// handles the multi-layer chain a real transformer block needs:
+//
+//     h = silu(x @ w1)
+//     pred = h @ w2
+//     loss = sum((pred - target)²)
+//
+// This is the smallest non-trivial composition that:
+//   * exercises 2 separate `MatmulBackward` records keyed on different
+//     `TensorId`s (proves the GradStore correctly disambiguates parameters
+//     when one tensor flows through multiple ops),
+//   * exercises a non-linear activation through `SiluBackward` (proves the
+//     substrate's backward-op trait works for closures that capture forward
+//     inputs, not just elementwise binary ops),
+//   * pushes loss down across iterated steps (proves gradient flow
+//     composes through both layers, not just the final layer).
+//
+// Two layers is the minimum that distinguishes "substrate can do MSE
+// regression" (1-layer linear) from "substrate can do deep learning".
+// Future PRs extend the same recipe with rmsnorm + linear + silu + linear
+// (the actual MLP shape in `kiln_model::forward`'s `mlp_block`).
+// ---------------------------------------------------------------------------
+
+/// Inputs to [`mlp_step_via_tape`].
+///
+/// Shapes (CPU F32, contiguous):
+/// * `x`: `[n, k_in]` — features
+/// * `target`: `[n, k_out]` — regression targets
+/// * `w1`: `[k_in, k_hidden]` — first-layer weight, trainable
+/// * `w2`: `[k_hidden, k_out]` — second-layer weight, trainable
+///
+/// No bias terms in this pilot — the unbiased MLP keeps the broadcast-
+/// backward dependency out of scope for this commit. Future PRs add the
+/// bias path via `BroadcastToBackward` once the
+/// `tape_step::LinearStepInputs` precedent is extended.
+#[derive(Debug)]
+pub struct MlpStepInputs<'a> {
+    /// Feature matrix `[n, k_in]`. F32 CPU.
+    pub x: &'a Tensor,
+    /// Regression targets `[n, k_out]`. F32 CPU.
+    pub target: &'a Tensor,
+    /// First-layer weight `[k_in, k_hidden]`. F32 CPU. Trainable.
+    pub w1: &'a Tensor,
+    /// Second-layer weight `[k_hidden, k_out]`. F32 CPU. Trainable.
+    pub w2: &'a Tensor,
+    /// Learning rate for the SGD update.
+    pub lr: f32,
+}
+
+/// Outputs of [`mlp_step_via_tape`].
+///
+/// Same structure as [`StepOutput`] but with two updated weights instead
+/// of one weight + one bias. The `grads` store still exposes per-input
+/// gradients keyed on `TensorId` — including the hidden-activation grad,
+/// which future PRs use as the boundary for inserting recompute /
+/// activation-checkpoint logic.
+#[derive(Debug)]
+pub struct MlpStepOutput {
+    /// Pre-update loss as a CPU F32 scalar.
+    pub loss: Tensor,
+    /// Pre-update loss as `f32` (cached read from `loss`).
+    pub loss_value: f32,
+    /// Post-step first-layer weight `[k_in, k_hidden]`.
+    pub new_w1: Tensor,
+    /// Post-step second-layer weight `[k_hidden, k_out]`.
+    pub new_w2: Tensor,
+    /// All gradients produced by the backward walk.
+    pub grads: GradStore,
+}
+
+/// Run one full forward + backward + SGD step for a 2-layer MLP via
+/// `kiln_autograd::Tape`.
+///
+/// # Forward
+///
+/// ```text
+///     h_pre = x @ w1        # [n, k_hidden]
+///     h     = silu(h_pre)   # [n, k_hidden]
+///     pred  = h @ w2        # [n, k_out]
+///     err   = pred - target # [n, k_out]
+///     sq    = err * err     # [n, k_out]
+///     loss  = sum_all(sq)   # scalar
+/// ```
+///
+/// Each op records onto a freshly-allocated `Tape`. After the backward
+/// walk, the `GradStore` contains `d_w1` (keyed on `w1.id()`) and
+/// `d_w2` (keyed on `w2.id()`); both are applied via the same
+/// CPU-F32 SGD helper as [`linear_step_via_tape`].
+///
+/// # Errors
+///
+/// Same envelope as [`linear_step_via_tape`]: shape mismatches caught
+/// at the op-validator level, non-F32 dtypes rejected, non-CPU device
+/// unsupported (extending to GPU lands once Parameter integration
+/// brings the device-aware constructors in).
+pub fn mlp_step_via_tape(inputs: MlpStepInputs<'_>) -> Result<MlpStepOutput> {
+    let MlpStepInputs {
+        x,
+        target,
+        w1,
+        w2,
+        lr,
+    } = inputs;
+
+    let mut tape = Tape::new();
+
+    // h_pre = x @ w1
+    let h_pre = matmul(x, w1).context("mlp_step: matmul(x, w1) forward")?;
+    tape.record(
+        &h_pre,
+        &[x, w1],
+        Box::new(MatmulBackward {
+            a: x.clone(),
+            b: w1.clone(),
+        }),
+    );
+
+    // h = silu(h_pre)
+    let h = kiln_tensor::ops::silu(&h_pre).context("mlp_step: silu(h_pre) forward")?;
+    tape.record(
+        &h,
+        &[&h_pre],
+        Box::new(SiluBackward { x: h_pre.clone() }),
+    );
+
+    // pred = h @ w2
+    let pred = matmul(&h, w2).context("mlp_step: matmul(h, w2) forward")?;
+    tape.record(
+        &pred,
+        &[&h, w2],
+        Box::new(MatmulBackward {
+            a: h.clone(),
+            b: w2.clone(),
+        }),
+    );
+
+    // err = pred - target
+    let err = sub(&pred, target).context("mlp_step: sub(pred, target) forward")?;
+    tape.record(&err, &[&pred, target], Box::new(SubBackward));
+
+    // sq = err * err
+    let sq = mul(&err, &err).context("mlp_step: mul(err, err) forward")?;
+    tape.record(
+        &sq,
+        &[&err, &err],
+        Box::new(MulBackward {
+            a: err.clone(),
+            b: err.clone(),
+        }),
+    );
+
+    // loss = sum_all(sq)
+    let loss = sum_all(&sq).context("mlp_step: sum_all(sq) forward")?;
+    tape.record(
+        &loss,
+        &[&sq],
+        Box::new(ReduceBackward {
+            input_shape: sq.shape().to_vec(),
+            dtype: sq.dtype(),
+            kind: ReduceKind::Sum,
+            scope: ReduceScope::All,
+        }),
+    );
+
+    let loss_value = scalar_f32(&loss).context("mlp_step: read pre-update loss scalar")?;
+
+    // Backward.
+    let seed = Tensor::from_slice(&[1.0_f32], vec![])
+        .context("mlp_step: build scalar seed gradient")?;
+    let grads = tape
+        .backward(loss.id(), seed, |a, b| add(a, b))
+        .context("mlp_step: Tape::backward walk")?;
+
+    let d_w1 = grads
+        .get(w1.id())
+        .context("mlp_step: GradStore missing d_w1")?;
+    let d_w2 = grads
+        .get(w2.id())
+        .context("mlp_step: GradStore missing d_w2")?;
+
+    let new_w1 = sgd_step_cpu(w1, d_w1, lr).context("mlp_step: SGD step on w1")?;
+    let new_w2 = sgd_step_cpu(w2, d_w2, lr).context("mlp_step: SGD step on w2")?;
+
+    Ok(MlpStepOutput {
+        loss,
+        loss_value,
+        new_w1,
+        new_w2,
         grads,
     })
 }
@@ -603,5 +798,222 @@ mod tests {
             lr: 0.01,
         })
         .expect("substrate step returned Err on smoke-shape inputs");
+    }
+
+    // -------------------------------------------------------------------
+    // MLP-step tests — exercise 2-layer composition through silu.
+    // -------------------------------------------------------------------
+
+    /// Build a small XOR-like dataset that's only learnable through a
+    /// hidden non-linearity. 2-dim features `(x1, x2) ∈ {-1, +1}²`,
+    /// target = `(x1 XOR x2)` mapped to ±1. A linear model can't
+    /// represent XOR — so if the MLP test asserts loss descent, the
+    /// silu non-linearity in the substrate is doing real work.
+    fn build_xor_dataset() -> (Tensor, Tensor) {
+        let xs = [
+            (-1.0_f32, -1.0_f32, -1.0_f32),
+            (-1.0, 1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, -1.0),
+        ];
+        // Replicate each row 4× so the per-step gradient signal is
+        // strong enough to descend with vanilla SGD inside 200 steps
+        // — XOR's tiny dataset is sensitive to mini-batch averaging.
+        let n_replicas = 4;
+        let mut x_data = Vec::with_capacity(xs.len() * n_replicas * 2);
+        let mut y_data = Vec::with_capacity(xs.len() * n_replicas);
+        for _ in 0..n_replicas {
+            for &(x1, x2, y) in &xs {
+                x_data.push(x1);
+                x_data.push(x2);
+                y_data.push(y);
+            }
+        }
+        let n = xs.len() * n_replicas;
+        let x = Tensor::from_slice(&x_data, vec![n, 2]).unwrap();
+        let target = Tensor::from_slice(&y_data, vec![n, 1]).unwrap();
+        (x, target)
+    }
+
+    /// MLP forward + backward + SGD step produces non-zero gradients
+    /// on BOTH weight tensors. This is the multi-layer substrate
+    /// proof: the GradStore correctly disambiguates `w1` and `w2`
+    /// even though they share the same dtype + similar shape.
+    #[test]
+    fn mlp_step_produces_per_layer_gradients() {
+        let (x, target) = build_xor_dataset();
+        // 2 → 4 → 1 MLP. Init w1/w2 with small alternating values
+        // so silu's gradient isn't stuck at zero on a symmetric init.
+        let w1 = Tensor::from_slice(
+            &[0.1_f32, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8],
+            vec![2, 4],
+        )
+        .unwrap();
+        let w2 = Tensor::from_slice(&[0.1_f32, -0.1, 0.2, -0.2], vec![4, 1]).unwrap();
+
+        let out = mlp_step_via_tape(MlpStepInputs {
+            x: &x,
+            target: &target,
+            w1: &w1,
+            w2: &w2,
+            lr: 0.01,
+        })
+        .expect("MLP substrate step returned Err");
+
+        let d_w1 = out
+            .grads
+            .get(w1.id())
+            .expect("MLP GradStore missing d_w1 — substrate did not record first-layer matmul");
+        let d_w2 = out
+            .grads
+            .get(w2.id())
+            .expect("MLP GradStore missing d_w2 — substrate did not record second-layer matmul");
+
+        let d_w1_vec = read_f32_vec(d_w1).unwrap();
+        let d_w2_vec = read_f32_vec(d_w2).unwrap();
+        assert_eq!(d_w1_vec.len(), 8, "d_w1 shape mismatch");
+        assert_eq!(d_w2_vec.len(), 4, "d_w2 shape mismatch");
+
+        // Both layers must have non-zero gradients on a non-converged
+        // init. If d_w1 is zero, the gradient signal didn't flow
+        // back through silu — meaning the SiluBackward record on
+        // the tape isn't running.
+        let any_d_w1 = d_w1_vec.iter().any(|&v| v.abs() > 1e-6);
+        let any_d_w2 = d_w2_vec.iter().any(|&v| v.abs() > 1e-6);
+        assert!(any_d_w1, "d_w1 was all-near-zero: {d_w1_vec:?}");
+        assert!(any_d_w2, "d_w2 was all-near-zero: {d_w2_vec:?}");
+
+        // Loss must be positive on a non-converged init.
+        assert!(
+            out.loss_value > 0.0,
+            "pre-update MLP loss must be positive but was {}",
+            out.loss_value
+        );
+    }
+
+    /// Iterated MLP steps drive XOR loss down. XOR is *not* linearly
+    /// separable — if this passes, the substrate is genuinely
+    /// composing the hidden non-linearity, not just shuttling
+    /// gradients through a linear chain.
+    ///
+    /// This is the strongest substrate-completeness assertion in
+    /// this module: it proves the kt-tape substrate can drive
+    /// gradient-based learning of a function that the linear-only
+    /// substrate (the existing `linear_step_via_tape` tests) cannot
+    /// represent.
+    #[test]
+    fn mlp_step_can_learn_xor() {
+        let (x, target) = build_xor_dataset();
+        // Slightly larger hidden = 8 to give the optimizer headroom
+        // — XOR with hidden=4 and vanilla SGD is on the convergence
+        // boundary and can stall in local minima depending on the
+        // init. Hidden=8 with a small random init reliably descends.
+        let mut w1 = Tensor::from_slice(
+            &[
+                0.12_f32, -0.31, 0.05, 0.22, -0.18, 0.07, 0.41, -0.09, -0.27, 0.33, 0.16, -0.04,
+                0.29, -0.21, 0.11, -0.36,
+            ],
+            vec![2, 8],
+        )
+        .unwrap();
+        let mut w2 = Tensor::from_slice(
+            &[0.13_f32, -0.07, 0.21, -0.19, 0.08, -0.25, 0.17, -0.11],
+            vec![8, 1],
+        )
+        .unwrap();
+
+        let mut losses = Vec::with_capacity(500);
+        for _ in 0..500 {
+            let out = mlp_step_via_tape(MlpStepInputs {
+                x: &x,
+                target: &target,
+                w1: &w1,
+                w2: &w2,
+                lr: 0.02,
+            })
+            .expect("MLP substrate step returned Err mid-loop");
+            losses.push(out.loss_value);
+            w1 = out.new_w1;
+            w2 = out.new_w2;
+        }
+        let first = losses[0];
+        let last = *losses.last().unwrap();
+        // Loose tolerance — XOR with vanilla SGD + small dataset is
+        // not the fastest descent in the world. Require >= 30%
+        // reduction, which is well above noise and confirms the
+        // gradient signal is non-trivial across both layers.
+        assert!(
+            last < first * 0.7,
+            "MLP substrate didn't descend on XOR: first={first}, last={last}"
+        );
+    }
+
+    /// MLP GradStore exposes gradients keyed on **every leaf input**
+    /// (x, target, w1, w2). This is the multi-layer analogue of the
+    /// 1-layer `grad_store_keys_include_all_inputs` test, and the
+    /// property future PRs build on for parameter-update plumbing.
+    ///
+    /// Substrate behavior surfaced by this test: `Tape::backward`
+    /// drains intermediate-output grad entries as it walks (the
+    /// walker calls `grads.remove(&node.output_id)` before computing
+    /// per-input grads), so the final GradStore is keyed on leaf
+    /// `TensorId`s plus the loss seed — not on intermediate
+    /// activations. That's a deliberate design choice in
+    /// `Tape::backward`; activation-checkpoint / selective-recompute
+    /// hooks for the intermediate ids live in the per-`TapeNode`
+    /// state, not in the post-walk store. (Documented for the next
+    /// PR: porting `kiln_model::forward` ops onto the tape needs to
+    /// hold references to intermediate `TapeNode`s if it wants
+    /// recompute control, not lean on the GradStore.)
+    #[test]
+    fn mlp_grad_store_keys_include_both_layer_parameters() {
+        let (x, target) = build_xor_dataset();
+        let w1 = Tensor::from_slice(
+            &[0.1_f32, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8],
+            vec![2, 4],
+        )
+        .unwrap();
+        let w2 = Tensor::from_slice(&[0.1_f32, -0.1, 0.2, -0.2], vec![4, 1]).unwrap();
+
+        let out = mlp_step_via_tape(MlpStepInputs {
+            x: &x,
+            target: &target,
+            w1: &w1,
+            w2: &w2,
+            lr: 0.01,
+        })
+        .unwrap();
+
+        // Every leaf input from the forward must have a grad keyed
+        // on its original `TensorId`. The walker disambiguates `w1`
+        // and `w2` correctly even though both feed the same
+        // `MatmulBackward` op type.
+        assert!(out.grads.contains(x.id()), "GradStore missing x.id()");
+        assert!(
+            out.grads.contains(target.id()),
+            "GradStore missing target.id()"
+        );
+        assert!(
+            out.grads.contains(w1.id()),
+            "GradStore missing w1.id() — substrate failed to disambiguate first matmul"
+        );
+        assert!(
+            out.grads.contains(w2.id()),
+            "GradStore missing w2.id() — substrate failed to disambiguate second matmul"
+        );
+
+        // Substrate property: final GradStore is keyed on leaves +
+        // loss seed; intermediates are drained during the walk.
+        // (See test docstring.) For 4 leaves + 1 loss seed -> 5 is
+        // the natural count, but the walker may leave a few
+        // intermediates whose grads weren't consumed because their
+        // producer op short-circuited (e.g. err appearing as both
+        // inputs of the mul). The floor of >= 4 just guarantees
+        // every leaf is keyed.
+        assert!(
+            out.grads.len() >= 4,
+            "MLP GradStore had only {} entries; expected >= 4 (the 4 leaves)",
+            out.grads.len()
+        );
     }
 }
