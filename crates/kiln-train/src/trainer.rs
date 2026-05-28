@@ -10541,6 +10541,34 @@ fn checkpointed_forward_backward(
 }
 
 /// Run one training step WITHOUT gradient checkpointing (original behavior).
+///
+/// # CP-4 (#1082) `KILN_USE_TAPE_FORWARD` integration
+///
+/// When the `KILN_USE_TAPE_FORWARD` env var is set (and the build has
+/// the `cuda` feature), the forward pass + `loss.backward()` run inside
+/// `kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store`.
+/// The bridge:
+///
+/// * Opens a thread-local `kiln_autograd::Tape` scope so the
+///   `try_tape_{rms_norm,matmul,silu,embedding,swiglu}_cuda` adapters
+///   in `kiln-model::forward` record onto an actual tape (the adapters
+///   no-op when no scope is active).
+/// * Opens a `(candle_id ↔ kt_id)` IO-mapping scope so those adapters
+///   can register their input/output ID pairs as they record.
+/// * Runs `loss.backward()` on the candle side as usual, then walks
+///   the recorded tape with seeds taken from the candle `GradStore`
+///   and merges the per-kt-input grads back into the same store.
+///
+/// End-to-end: parameters that flow through one or more tape adapters
+/// get their `dL/dparam` populated in the same candle `GradStore`
+/// that this function returns. The optimizer step downstream sees the
+/// bridged grad transparently.
+///
+/// **Default (unset / `0` / `false` / `no` / empty) behaviour is
+/// unchanged.** The env var is read once via
+/// `kiln_autograd::tape_forward_enabled()` (cached after first read).
+/// When unset, the bridge is not opened and `standard_forward_backward`
+/// runs the same forward + `loss.backward()` it has always run.
 pub fn standard_forward_backward(
     backend: &dyn BackendRuntime,
     input_ids: &[u32],
@@ -10551,6 +10579,24 @@ pub fn standard_forward_backward(
     device: &CdDevice,
     flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, GradStore)> {
+    // CP-4 (#1082): opt-in tape-bridge path. Gated on
+    // `KILN_USE_TAPE_FORWARD` *and* the cuda feature. When off (the
+    // default), runs the existing forward + `loss.backward()` flow
+    // unchanged.
+    #[cfg(feature = "cuda")]
+    if kiln_autograd::tape_forward_enabled() {
+        return standard_forward_backward_via_tape_bridge(
+            backend,
+            input_ids,
+            weights,
+            model_config,
+            params,
+            label_mask,
+            device,
+            flce_provider,
+        );
+    }
+
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
 
@@ -10589,6 +10635,109 @@ pub fn standard_forward_backward(
     };
     let loss_val = loss.to_scalar::<f32>()? as f64;
     let grads = loss.backward().context("backward pass")?;
+
+    Ok((loss_val, grads))
+}
+
+/// CP-4 (#1082): `standard_forward_backward` body wrapped in a
+/// `kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store`
+/// scope. Identical semantics to the default path when no tape
+/// adapters fire (the bridge fast-paths an empty tape to a no-op);
+/// adds the kt-tape → candle-GradStore merge when one or more
+/// `try_tape_*_cuda` adapters in the forward record onto the active
+/// tape.
+///
+/// Returned `(loss_val, GradStore)` shape is the same as the default
+/// path. The optimizer step downstream is oblivious to which path
+/// produced the grads.
+///
+/// **Gated** on `feature = "cuda"` because the bridge's
+/// `with_tape_scope_emit_to_grad_store` lives behind
+/// `#[cfg(feature = "cuda")]` in `kiln-kt-bridge` (it needs the
+/// candle-CUDA borrow/copy helpers to convert kt tensors back to
+/// candle for the GradStore insert).
+#[cfg(feature = "cuda")]
+fn standard_forward_backward_via_tape_bridge(
+    backend: &dyn BackendRuntime,
+    input_ids: &[u32],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &TrainableLoraParams,
+    label_mask: &[bool],
+    device: &CdDevice,
+    flce_provider: Option<FlceProvider>,
+) -> Result<(f64, GradStore)> {
+    let lora_weights = params.as_lora_weights();
+    let mut linear_state = LinearAttentionState::new(model_config, device)?;
+
+    // The bridge wrapper's `forward` closure must return
+    // `Result<(payload, candle Tensor), BridgeError>`. We pack the
+    // loss-value scalar (`f64`) as the payload so the caller can
+    // recover it after the bridge has consumed the candle Tensor for
+    // backward. Errors out of the kt-train layer are `anyhow::Error`;
+    // we adapt at the boundary with `BridgeError::new(format!("{e}"))`.
+    let (loss_val, grads) =
+        kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store(|| {
+            let loss = if use_flce() {
+                let hidden = model_forward_no_head(
+                    backend,
+                    input_ids,
+                    weights,
+                    model_config,
+                    Some(&mut linear_state),
+                    Some(&lora_weights),
+                )
+                .context("training forward pass (FLCE)")
+                .map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!(
+                        "tape_bridge sft step: FLCE forward: {e:#}"
+                    ))
+                })?;
+                fused_linear_cross_entropy_dispatch_with_provider(
+                    &hidden,
+                    &weights.embed_tokens_t,
+                    input_ids,
+                    label_mask,
+                    device,
+                    DEFAULT_CHUNK_SIZE,
+                    flce_provider.clone(),
+                )
+                .context("fused linear cross-entropy")
+                .map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!(
+                        "tape_bridge sft step: fused linear CE: {e:#}"
+                    ))
+                })?
+            } else {
+                let logits = model_forward(
+                    backend,
+                    input_ids,
+                    weights,
+                    model_config,
+                    None,
+                    Some(&mut linear_state),
+                    Some(&lora_weights),
+                )
+                .context("training forward pass")
+                .map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!(
+                        "tape_bridge sft step: forward: {e:#}"
+                    ))
+                })?;
+                cross_entropy_loss(&logits, input_ids, label_mask, device).map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!(
+                        "tape_bridge sft step: cross_entropy_loss: {e:#}"
+                    ))
+                })?
+            };
+            let loss_val = loss.to_scalar::<f32>().map_err(|e| {
+                kiln_kt_bridge::BridgeError::new(format!(
+                    "tape_bridge sft step: loss.to_scalar: {e}"
+                ))
+            })? as f64;
+            Ok((loss_val, loss))
+        })
+        .map_err(|e| anyhow::anyhow!("tape_bridge backward: {e}"))?;
 
     Ok((loss_val, grads))
 }

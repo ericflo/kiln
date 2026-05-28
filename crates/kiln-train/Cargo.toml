@@ -19,6 +19,14 @@ kiln-autograd = { workspace = true }
 kiln-core = { workspace = true }
 kiln-eval = { workspace = true }
 kiln-flce-kernel = { workspace = true }
+# CP-4 (#1082): the `kiln_kt_bridge::tape_bridge` module owns the
+# `with_tape_scope_emit_to_grad_store` wrapper that merges
+# `kiln_autograd::Tape`-recorded backward grads into the candle
+# `GradStore` produced by `loss.backward()`. The wrapper is the
+# CUDA-only `kiln-kt-bridge/cuda` feature; the default CPU/Metal/Vulkan
+# build of `kiln-train` does not need the bridge (the wrapper is
+# called only behind `#[cfg(feature = "cuda")]` in `trainer.rs`).
+kiln-kt-bridge = { workspace = true }
 kiln-model = { workspace = true }
 kiln-opd-loss-kernel = { workspace = true }
 kiln-tensor = { workspace = true }
@@ -50,7 +58,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 tracing-subscriber = { workspace = true }
 
 [features]
-cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda", "kiln-opd-loss-kernel/cuda"]
+cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda", "kiln-opd-loss-kernel/cuda", "kiln-kt-bridge/cuda"]
 metal = ["kiln-model/metal"]
 vulkan = ["kiln-model/vulkan", "dep:kiln-vulkan-kernel", "dep:kiln-tensor-id"]
 

@@ -1845,7 +1845,6 @@ version = "0.2.19"
 dependencies = [
  "anyhow",
  "candle-core",
- "candle-nn",
  "kiln-autograd",
  "kiln-kt-bridge",
  "kiln-tensor",
@@ -2109,6 +2108,7 @@ dependencies = [
  "kiln-core",
  "kiln-eval",
  "kiln-flce-kernel",
+ "kiln-kt-bridge",
  "kiln-model",
  "kiln-opd-loss-kernel",
  "kiln-tensor",
