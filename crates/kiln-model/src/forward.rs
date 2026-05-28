@@ -7035,6 +7035,19 @@ impl GpuWeights {
 /// candle's `index_select` when any precondition fails.
 pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Tensor> {
     let index = Tensor::new(token_ids, embed_weights.device())?;
+    // Phase 6a/CP-4 (#1082) — experimental tape-forward path.
+    // When `KILN_USE_TAPE_FORWARD` is set AND a thread-local `Tape`
+    // is active (via `crate::tape_forward::with_thread_local_tape`),
+    // route the embedding lookup through the kt op-registry with an
+    // `EmbeddingBackward` recorded onto the tape. The forward output
+    // is the same kt index_select_dim0 kernel; the difference is
+    // that the backward node lives on `Tape` instead of leaving the
+    // result as a no-autograd candle Tensor. With the gate off (the
+    // default) this returns `Ok(None)` and we fall through.
+    #[cfg(feature = "cuda")]
+    if let Some(out) = crate::tape_forward::try_tape_embedding_cuda(embed_weights, &index)? {
+        return promote_cpu_activation(out);
+    }
     #[cfg(feature = "cuda")]
     if let Some(out) = try_kt_embedding_lookup(embed_weights, &index)? {
         return promote_cpu_activation(out);
@@ -7044,6 +7057,14 @@ pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Ten
 }
 
 fn embedding_lookup_with_index(index: &Tensor, embed_weights: &Tensor) -> Result<Tensor> {
+    // Phase 6a/CP-4 (#1082) — experimental tape-forward path. See the
+    // sibling branch in `embedding_lookup` for the production-safety
+    // rationale; this site mirrors it for the index-already-built
+    // call path used by the batched-decode and prefill loops.
+    #[cfg(feature = "cuda")]
+    if let Some(out) = crate::tape_forward::try_tape_embedding_cuda(embed_weights, index)? {
+        return promote_cpu_activation(out);
+    }
     #[cfg(feature = "cuda")]
     if let Some(out) = try_kt_embedding_lookup(embed_weights, index)? {
         return promote_cpu_activation(out);
