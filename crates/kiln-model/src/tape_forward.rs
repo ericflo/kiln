@@ -106,7 +106,8 @@
 use anyhow::{Context, Result};
 use candle_core::Tensor;
 use kiln_autograd::{
-    EmbeddingBackward, MatmulBackward, MulSigmoidGateBackward, SiluBackward, Tape,
+    EmbeddingBackward, MatmulBackward, MulSigmoidGateBackward, RopeSplitHalfBackward,
+    SiluBackward, Tape,
 };
 
 // Phase 6a/CP-4 (#1082): the thread-local-tape scope machinery
@@ -574,6 +575,102 @@ pub fn try_tape_swiglu_cuda(gate: &Tensor, up: &Tensor) -> Result<Option<Tensor>
     // when no bridge scope is active.
     kiln_kt_bridge::tape_bridge::register_input_mapping(gate_kt.id(), gate.id());
     kiln_kt_bridge::tape_bridge::register_input_mapping(up_kt.id(), up.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+
+    Ok(Some(out))
+}
+
+/// Attempt to run split-half (GPT-NeoX-style) RoPE — kiln's Qwen3.5-4B
+/// rotary convention — through the kt-typed op registry
+/// (`kiln_tensor::ops::rope_split_half`) and record a
+/// `RopeSplitHalfBackward` node on the active thread-local tape.
+///
+/// Returns:
+/// * `Ok(Some(out))` — the tape-forward path ran. The returned `Tensor`
+///   is a copy of the kt-typed output into a candle CUDA tensor; a
+///   `RopeSplitHalfBackward { rotary_dim, cos, sin }` node was recorded
+///   on the active thread-local tape.
+/// * `Ok(None)` — gate off / `x` is not rank-4 / no thread-local tape /
+///   kt-bridge borrow rejected the inputs. The caller falls through to
+///   the existing dispatch.
+/// * `Err(...)` — an unexpected forward or kt -> candle copy-back failure.
+///
+/// # Why split-half (not `kiln_tensor::ops::rope`)
+///
+/// `kiln_tensor::ops::rope` uses the *interleaved* (GPT-J) convention;
+/// kiln's production `apply_rope` uses *split-half* (GPT-NeoX). The two
+/// disagree for `rotary_dim >= 4`, so the adapter must route through
+/// `rope_split_half` to stay bit-faithful to the model. The backward is
+/// the same op with `sin` negated (a rotation's adjoint), computed on the
+/// grad's own device with no host round-trip.
+///
+/// # CP-4 (#1082) context
+///
+/// `x` is `[batch, seq, num_heads, head_dim]`; `cos`/`sin` are
+/// `[seq, rotary_dim/2]` schedules — non-differentiable, so only `x`
+/// receives an IO mapping (cf. the embedding adapter's `token_ids`).
+/// `cos`/`sin` are saved on the tape node on their native (CUDA) device.
+pub fn try_tape_rope_cuda(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+
+    // `rope_split_half`'s contract is rank-4 [batch, seq, num_heads,
+    // head_dim]; bail to the existing dispatch for anything else rather
+    // than recording a node that would fail at backward.
+    if x.rank() != 4 || rotary_dim == 0 || rotary_dim > head_dim {
+        return Ok(None);
+    }
+
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let cos_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(cos) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let sin_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(sin) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    // Record only when a tape scope is active. Outside a scope,
+    // `with_active_tape` returns `None` and we fall through to the
+    // existing dispatch — matching the other adapters' contract.
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_tensor::ops::rope_split_half(&x_kt, &cos_kt, &sin_kt, rotary_dim)
+            .map_err(|e| anyhow::anyhow!("kt rope_split_half: {e}"))?;
+        tape.record(
+            &y,
+            &[&x_kt],
+            Box::new(RopeSplitHalfBackward {
+                rotary_dim,
+                cos: cos_kt.clone(),
+                sin: sin_kt.clone(),
+            }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let out_kt = out_kt.context("tape_forward::try_tape_rope_cuda: kt-tape forward failed")?;
+
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape_forward::try_tape_rope_cuda: kt -> candle copy failed")?;
+
+    // CP-4 (#1082) tape_bridge: only `x` is differentiable; `cos`/`sin`
+    // are non-differentiable schedules (cf. embedding's `token_ids`), so
+    // they carry no input mapping.
+    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
 
     Ok(Some(out))

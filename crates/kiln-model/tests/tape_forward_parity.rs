@@ -1217,3 +1217,257 @@ fn tape_backward_rms_norm_produces_input_grads() {
         }
     }
 }
+
+
+// ----------------------------------------------------------------------
+// Split-half RoPE tape-forward parity (#1082 — CP-4 op #6).
+//
+// kiln's production `apply_rope` uses the split-half (GPT-NeoX) rotary
+// convention on rank-4 [batch, seq, num_heads, head_dim] activations with
+// [seq, rotary_dim/2] cos/sin schedules. The adapter routes this through
+// `kiln_tensor::ops::rope_split_half` (a device-agnostic composite) and
+// records a single `RopeSplitHalfBackward` node — whose backward is the
+// same op with sin negated (a rotation's adjoint), run on the grad's own
+// device with NO host round-trip.
+//
+// Forward is checked against an independent host f32 split-half reference;
+// backward against the analytic split-half adjoint. We use the realistic
+// Qwen3.5-4B partial-rotary geometry (head_dim 256, rotary_dim 64) plus a
+// full-rotary case (head_dim == rotary_dim).
+// ----------------------------------------------------------------------
+
+fn build_rope_split_half_inputs(
+    device: &Device,
+    batch: usize,
+    seq: usize,
+    heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> (Tensor, Tensor, Tensor) {
+    let half = rotary_dim / 2;
+    let x_host = random_bf16_vec(batch * seq * heads * head_dim, 0x0B0E_1234_5678_9ABC, 0.5);
+    let mut cos_host = Vec::with_capacity(seq * half);
+    let mut sin_host = Vec::with_capacity(seq * half);
+    for s in 0..seq {
+        for i in 0..half {
+            let theta = (s as f32) * (10000f32).powf(-2.0 * (i as f32) / (rotary_dim as f32));
+            cos_host.push(half::bf16::from_f32(theta.cos()));
+            sin_host.push(half::bf16::from_f32(theta.sin()));
+        }
+    }
+    let x = Tensor::from_vec(x_host, (batch, seq, heads, head_dim), &Device::Cpu)
+        .expect("x cpu")
+        .to_device(device)
+        .expect("x -> cuda")
+        .contiguous()
+        .expect("x contig");
+    let cos = Tensor::from_vec(cos_host, (seq, half), &Device::Cpu)
+        .expect("cos cpu")
+        .to_device(device)
+        .expect("cos -> cuda")
+        .contiguous()
+        .expect("cos contig");
+    let sin = Tensor::from_vec(sin_host, (seq, half), &Device::Cpu)
+        .expect("sin cpu")
+        .to_device(device)
+        .expect("sin -> cuda")
+        .contiguous()
+        .expect("sin contig");
+    (x, cos, sin)
+}
+
+fn host_f32(t: &Tensor) -> Vec<f32> {
+    t.to_dtype(DType::F32)
+        .expect("-> f32")
+        .flatten_all()
+        .expect("flat")
+        .to_vec1::<f32>()
+        .expect("vec")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ref_rope_split_half_fwd(
+    x: &[f32],
+    cos: &[f32],
+    sin: &[f32],
+    batch: usize,
+    seq: usize,
+    heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Vec<f32> {
+    let half = rotary_dim / 2;
+    let mut out = x.to_vec();
+    for b in 0..batch {
+        for s in 0..seq {
+            for h in 0..heads {
+                let row = (((b * seq) + s) * heads + h) * head_dim;
+                let sched = s * half;
+                for i in 0..half {
+                    let c = cos[sched + i];
+                    let sn = sin[sched + i];
+                    let x1 = x[row + i];
+                    let x2 = x[row + half + i];
+                    out[row + i] = x1 * c - x2 * sn;
+                    out[row + half + i] = x1 * sn + x2 * c;
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn tape_forward_rope_split_half_matches_f32_reference() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_forward rope_split_half: no CUDA device — skipping");
+            return;
+        }
+    };
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    for (batch, seq, heads, head_dim, rotary_dim) in
+        [(2usize, 8usize, 4usize, 256usize, 64usize), (1, 6, 2, 64, 64)]
+    {
+        let (x, cos, sin) =
+            build_rope_split_half_inputs(&device, batch, seq, heads, head_dim, rotary_dim);
+
+        let none_out =
+            kiln_model::tape_forward::try_tape_rope_cuda(&x, &cos, &sin, head_dim, rotary_dim)
+                .expect("baseline ok");
+        assert!(none_out.is_none(), "no-scope path must be Ok(None)");
+
+        let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+            kiln_model::tape_forward::try_tape_rope_cuda(&x, &cos, &sin, head_dim, rotary_dim)
+        });
+        let out = res
+            .expect("tape try_tape_rope_cuda ok")
+            .expect("tape returned Some(out)");
+        assert_eq!(tape.len(), 1, "rope must record exactly one node");
+        let node = &tape.nodes()[0];
+        assert_eq!(
+            node.input_ids.len(),
+            1,
+            "rope_split_half records a single differentiable input (x)"
+        );
+        assert_eq!(out.shape().dims(), &[batch, seq, heads, head_dim]);
+        assert_eq!(out.dtype(), DType::BF16);
+
+        let x_h = host_f32(&x);
+        let cos_h = host_f32(&cos);
+        let sin_h = host_f32(&sin);
+        let want = ref_rope_split_half_fwd(
+            &x_h, &cos_h, &sin_h, batch, seq, heads, head_dim, rotary_dim,
+        );
+        let want_t = Tensor::from_vec(want, (batch, seq, heads, head_dim), &Device::Cpu)
+            .expect("ref cpu")
+            .to_device(&device)
+            .expect("ref -> cuda");
+        let diff = max_abs_diff(&out, &want_t);
+        assert!(
+            diff < 3e-2,
+            "rope_split_half forward diverges from f32 reference (max-abs-diff {diff} >= 3e-2 \
+             BF16 tol; geometry b={batch} s={seq} h={heads} hd={head_dim} rot={rotary_dim})"
+        );
+    }
+}
+
+#[test]
+fn tape_forward_rope_split_half_short_circuits_without_scope() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => return,
+    };
+    let (x, cos, sin) = build_rope_split_half_inputs(&device, 1, 4, 2, 64, 64);
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+    let out =
+        kiln_model::tape_forward::try_tape_rope_cuda(&x, &cos, &sin, 64, 64).expect("call ok");
+    assert!(out.is_none(), "no active scope must short-circuit to Ok(None)");
+}
+
+#[test]
+fn tape_backward_rope_split_half_matches_analytic_adjoint() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_backward rope_split_half: no CUDA device — skipping");
+            return;
+        }
+    };
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    let (batch, seq, heads, head_dim, rotary_dim) = (2usize, 8usize, 4usize, 256usize, 64usize);
+    let half = rotary_dim / 2;
+    let (x, cos, sin) =
+        build_rope_split_half_inputs(&device, batch, seq, heads, head_dim, rotary_dim);
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_rope_cuda(&x, &cos, &sin, head_dim, rotary_dim)
+    });
+    let _out = res.expect("fwd ok").expect("Some(out)");
+    assert_eq!(tape.len(), 1);
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(input_ids.len(), 1);
+
+    let seed = build_seed_grad(&device, &[batch, seq, heads, head_dim], 0x4090_0000_0007, 0.25);
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("rope backward walk");
+
+    let dx_kt = grads.get(input_ids[0]).expect("dx present");
+    let dx = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(dx_kt).expect("dx -> candle");
+    assert_eq!(dx.shape().dims(), &[batch, seq, heads, head_dim]);
+    assert_eq!(dx.dtype(), DType::BF16);
+    assert!(dx.device().is_cuda());
+
+    // Analytic split-half adjoint (host f32):
+    //   dx[i]      =  dy[i]*cos + dy[half+i]*sin
+    //   dx[half+i] = -dy[i]*sin + dy[half+i]*cos
+    let dy_h = host_f32(&seed);
+    let cos_h = host_f32(&cos);
+    let sin_h = host_f32(&sin);
+    let mut want = dy_h.clone();
+    for b in 0..batch {
+        for s in 0..seq {
+            for h in 0..heads {
+                let row = (((b * seq) + s) * heads + h) * head_dim;
+                let sched = s * half;
+                for i in 0..half {
+                    let c = cos_h[sched + i];
+                    let sn = sin_h[sched + i];
+                    let dy0 = dy_h[row + i];
+                    let dy1 = dy_h[row + half + i];
+                    want[row + i] = dy0 * c + dy1 * sn;
+                    want[row + half + i] = -dy0 * sn + dy1 * c;
+                }
+            }
+        }
+    }
+    let want_t = Tensor::from_vec(want, (batch, seq, heads, head_dim), &Device::Cpu)
+        .expect("ref cpu")
+        .to_device(&device)
+        .expect("ref -> cuda");
+    let diff = max_abs_diff(&dx, &want_t);
+    assert!(
+        diff < 3e-2,
+        "rope_split_half backward diverges from analytic adjoint (max-abs-diff {diff} >= 3e-2)"
+    );
+}

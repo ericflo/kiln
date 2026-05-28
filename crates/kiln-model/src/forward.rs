@@ -8315,6 +8315,15 @@ fn apply_rope(
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     {
+        // CP-4 (#1082): route split-half RoPE through the kt Tape when
+        // KILN_USE_TAPE_FORWARD is set and a tape scope is active. No-ops
+        // (returns None) otherwise — the production fast-path below is
+        // untouched in the default configuration.
+        if let Some(out) =
+            crate::tape_forward::try_tape_rope_cuda(x, cos, sin, head_dim, rotary_dim)?
+        {
+            return Ok(out);
+        }
         if !cuda_fused_rotary_qk_disabled()
             && cuda_rotary_one_training_bf16_supported(x, cos, sin, head_dim, rotary_dim)
         {

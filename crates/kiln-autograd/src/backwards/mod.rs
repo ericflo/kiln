@@ -38,6 +38,7 @@ pub mod reduce;
 pub mod repeat;
 pub mod rmsnorm;
 pub mod rope;
+pub mod rope_split_half;
 pub mod stack;
 pub mod swiglu;
 pub mod trig;
