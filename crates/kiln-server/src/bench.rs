@@ -111,33 +111,33 @@ struct LatencyResult {
 }
 
 fn runtime_backend_for_bench(
-    device: &candle_core::Device,
+    device: &kiln_tensor::Device,
     weights: &GpuWeights,
 ) -> Result<std::sync::Arc<dyn kiln_model::BackendRuntime>> {
-    let backend = runtime_backend::for_device(device);
+    let backend = runtime_backend::for_device_kt(device);
     backend
         .prewarm_decode_weights(weights)
         .context("backend decode weight prewarm failed")?;
     Ok(backend)
 }
 
-/// Map the configured model dtype to the candle compute dtype used by the
+/// Map the configured model dtype to the kt compute dtype used by the
 /// KV cache / paged cache allocators below. Consolidates five identical
 /// inline match blocks that previously appeared throughout this file
 /// (issue #1082, candle removal).
-fn kiln_config_dtype_to_candle(dtype: kiln_core::config::DType) -> candle_core::DType {
+fn kiln_config_dtype_to_kt(dtype: kiln_core::config::DType) -> kiln_tensor::DType {
     match dtype {
-        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
-        kiln_core::config::DType::FP16 => candle_core::DType::F16,
-        kiln_core::config::DType::FP32 => candle_core::DType::F32,
+        kiln_core::config::DType::BF16 => kiln_tensor::DType::BF16,
+        kiln_core::config::DType::FP16 => kiln_tensor::DType::F16,
+        kiln_core::config::DType::FP32 => kiln_tensor::DType::F32,
     }
 }
 
-/// Returns true when the candle device is a Metal device. Routes through
-/// the kt-bridge so this file stops naming the candle Metal variant directly
-/// (issue #1082, candle removal).
-fn device_is_metal(device: &candle_core::Device) -> bool {
-    kiln_kt_bridge::kt_device_from_candle(device).backend() == kiln_tensor::Backend::Metal
+/// Returns true when the kt device is a Metal device. The bench code
+/// uses this to gate Metal-specific argmax paths without naming the
+/// candle Metal variant directly (issue #1082, candle removal).
+fn device_is_metal(device: &kiln_tensor::Device) -> bool {
+    device.backend() == kiln_tensor::Backend::Metal
 }
 
 struct BenchGdnRecurrentResidentStateScope<'a> {
@@ -727,23 +727,29 @@ fn bench_latency(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let actual_prompt_tokens = prompt_token_ids.len();
 
-    let device = weights.embed_tokens.device();
-    let dtype = kiln_config_dtype_to_candle(config.dtype);
+    let device_kt = weights.device_kt();
+    let dtype = kiln_config_dtype_to_kt(config.dtype);
 
     let max_total = actual_prompt_tokens + max_output_tokens;
-    let mut kv_cache = KvCache::new(
+    let mut kv_cache = KvCache::new_kt(
         config.num_full_attention_layers,
         config.num_kv_heads,
         config.head_dim,
         max_total,
         dtype,
-        device,
+        &device_kt,
     )?;
-    let backend = runtime_backend_for_bench(device, weights)?;
+    let backend = runtime_backend_for_bench(&device_kt, weights)?;
+    // `LinearAttentionState::new_with_batch_for_inference_backend` still
+    // takes a candle `&Device`. Bridge through the always-on kt-bridge
+    // helper so this site no longer names `candle_core::Device`
+    // (issue #1082, candle removal).
+    let candle_device_for_linear = kiln_kt_bridge::candle_device_from_kt(&device_kt)
+        .map_err(|e| anyhow::anyhow!("bench_latency: kt -> candle bridge: {e}"))?;
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
         config,
         1,
-        device,
+        &candle_device_for_linear,
         Some(backend.name()),
     )?;
 
@@ -878,20 +884,20 @@ fn bench_latency_paged(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let actual_prompt_tokens = prompt_token_ids.len();
 
-    let device = weights.embed_tokens.device();
-    let dtype = kiln_config_dtype_to_candle(config.dtype);
+    let device_kt = weights.device_kt();
+    let dtype = kiln_config_dtype_to_kt(config.dtype);
 
     let max_total = actual_prompt_tokens + max_output_tokens;
     let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
-    let paged_cache = PagedKvCache::new(
+    let paged_cache = PagedKvCache::new_kt(
         config.num_full_attention_layers,
         num_blocks,
         PAGED_BLOCK_SIZE,
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        device,
+        &device_kt,
     )?;
 
     // Phase 7 #1082: first end-to-end PagedKvCacheKt production wiring.
@@ -907,16 +913,28 @@ fn bench_latency_paged(
     // mirror only exercises the writer surface — that's enough to
     // validate constructor + writer end-to-end on a real production
     // workload (the latency bench).
+    //
+    // `try_kt_paged_kv_cache_new` still takes candle `Device`/`DType` at the
+    // boundary; bridge through the always-on kt-bridge helpers so this site
+    // no longer names `candle_core::*` directly (issue #1082, candle removal).
     #[cfg(feature = "cuda")]
-    let paged_cache_kt = kiln_model::forward::try_kt_paged_kv_cache_new(
-        config.num_full_attention_layers,
-        num_blocks,
-        PAGED_BLOCK_SIZE,
-        config.num_kv_heads,
-        config.head_dim,
-        dtype,
-        device,
-    )?;
+    let paged_cache_kt = {
+        let candle_dtype = kiln_kt_bridge::kt_dtype_to_candle(dtype).map_err(|e| {
+            anyhow::anyhow!("bench_latency_paged: kt -> candle dtype bridge: {e}")
+        })?;
+        let candle_device = kiln_kt_bridge::candle_device_from_kt(&device_kt).map_err(|e| {
+            anyhow::anyhow!("bench_latency_paged: kt -> candle device bridge: {e}")
+        })?;
+        kiln_model::forward::try_kt_paged_kv_cache_new(
+            config.num_full_attention_layers,
+            num_blocks,
+            PAGED_BLOCK_SIZE,
+            config.num_kv_heads,
+            config.head_dim,
+            candle_dtype,
+            &candle_device,
+        )?
+    };
     #[cfg(feature = "cuda")]
     if let Some(ref kt) = paged_cache_kt {
         eprintln!(
@@ -929,11 +947,17 @@ fn bench_latency_paged(
         );
     }
 
-    let backend = runtime_backend_for_bench(device, weights)?;
+    let backend = runtime_backend_for_bench(&device_kt, weights)?;
+    // `LinearAttentionState::new_with_batch_for_inference_backend` still
+    // takes a candle `&Device`. Bridge through the always-on kt-bridge
+    // helper so this site no longer names `candle_core::Device`
+    // (issue #1082, candle removal).
+    let candle_device_for_linear = kiln_kt_bridge::candle_device_from_kt(&device_kt)
+        .map_err(|e| anyhow::anyhow!("bench_latency_paged: kt -> candle bridge: {e}"))?;
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
         config,
         1,
-        device,
+        &candle_device_for_linear,
         Some(backend.name()),
     )?;
 
@@ -954,7 +978,8 @@ fn bench_latency_paged(
     // prompts use tiled streaming prefill by default; env overrides can force
     // either path.
     let prefill_start = Instant::now();
-    let streaming_prefill = streaming_prefill_enabled_for(device, actual_prompt_tokens);
+    let streaming_prefill =
+        streaming_prefill_enabled_for(&candle_device_for_linear, actual_prompt_tokens);
     let mut next_token = if streaming_prefill {
         let logits = model_forward_paged_streaming(
             &*backend,
@@ -969,7 +994,7 @@ fn bench_latency_paged(
         )
         .context("paged prefill forward pass (streaming) failed")?;
         greedy_sample(&logits)?
-    } else if device_is_metal(device) || backend.supports_linear_decode_argmax() {
+    } else if device_is_metal(&device_kt) || backend.supports_linear_decode_argmax() {
         model_forward_paged_last_token_greedy(
             &*backend,
             &prompt_token_ids,
@@ -1026,7 +1051,7 @@ fn bench_latency_paged(
         }
 
         let step_start = Instant::now();
-        next_token = if device_is_metal(device) || backend.supports_linear_decode_argmax() {
+        next_token = if device_is_metal(&device_kt) || backend.supports_linear_decode_argmax() {
             model_forward_paged_next_token_greedy(
                 &*backend,
                 next_token,
@@ -1499,8 +1524,8 @@ fn bench_latency_skiplayer(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let actual_prompt_tokens = prompt_token_ids.len();
 
-    let device = weights.embed_tokens.device();
-    let dtype = kiln_config_dtype_to_candle(config.dtype);
+    let device_kt = weights.device_kt();
+    let dtype = kiln_config_dtype_to_kt(config.dtype);
 
     // Skip-layer verifies `[last_token, draft_0, ..., draft_k-1]` in one
     // forward pass. Near the end of generation those speculative KV writes can
@@ -1508,19 +1533,25 @@ fn bench_latency_skiplayer(
     // or ignored, so reserve headroom for the verify window.
     let max_spec_window = num_speculative_tokens.min(max_output_tokens.max(1));
     let max_total = actual_prompt_tokens + max_output_tokens + max_spec_window + 1;
-    let mut kv_cache = KvCache::new(
+    let mut kv_cache = KvCache::new_kt(
         config.num_full_attention_layers,
         config.num_kv_heads,
         config.head_dim,
         max_total,
         dtype,
-        device,
+        &device_kt,
     )?;
-    let backend = runtime_backend_for_bench(device, weights)?;
+    let backend = runtime_backend_for_bench(&device_kt, weights)?;
+    // `LinearAttentionState::new_with_batch_for_inference_backend` still
+    // takes a candle `&Device`. Bridge through the always-on kt-bridge
+    // helper so this site no longer names `candle_core::Device`
+    // (issue #1082, candle removal).
+    let candle_device_for_linear = kiln_kt_bridge::candle_device_from_kt(&device_kt)
+        .map_err(|e| anyhow::anyhow!("bench_latency_skiplayer: kt -> candle bridge: {e}"))?;
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
         config,
         1,
-        device,
+        &candle_device_for_linear,
         Some(backend.name()),
     )?;
 
@@ -1707,8 +1738,8 @@ fn bench_latency_paged_skiplayer(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let actual_prompt_tokens = prompt_token_ids.len();
 
-    let device = weights.embed_tokens.device();
-    let dtype = kiln_config_dtype_to_candle(config.dtype);
+    let device_kt = weights.device_kt();
+    let dtype = kiln_config_dtype_to_kt(config.dtype);
 
     // Verification writes `[last_token, draft_0, ..., draft_k-1]` starting at
     // `base_pos`. Reserve headroom so late-generation verify windows do not
@@ -1718,20 +1749,27 @@ fn bench_latency_paged_skiplayer(
     let max_total = actual_prompt_tokens + max_output_tokens + max_spec_window + 1;
     let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
-    let paged_cache = PagedKvCache::new(
+    let paged_cache = PagedKvCache::new_kt(
         config.num_full_attention_layers,
         num_blocks,
         PAGED_BLOCK_SIZE,
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        device,
+        &device_kt,
     )?;
-    let backend = runtime_backend_for_bench(device, weights)?;
+    let backend = runtime_backend_for_bench(&device_kt, weights)?;
+    // `LinearAttentionState::new_with_batch_for_inference_backend` and
+    // `streaming_prefill_enabled_for` still take a candle `&Device`. Bridge
+    // through the always-on kt-bridge helper so this site no longer names
+    // `candle_core::Device` (issue #1082, candle removal).
+    let candle_device_for_linear = kiln_kt_bridge::candle_device_from_kt(&device_kt).map_err(
+        |e| anyhow::anyhow!("bench_latency_paged_skiplayer: kt -> candle bridge: {e}"),
+    )?;
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
         config,
         1,
-        device,
+        &candle_device_for_linear,
         Some(backend.name()),
     )?;
 
@@ -1748,7 +1786,7 @@ fn bench_latency_paged_skiplayer(
     );
 
     let prefill_start = Instant::now();
-    let logits = if streaming_prefill_enabled_for(device, actual_prompt_tokens) {
+    let logits = if streaming_prefill_enabled_for(&candle_device_for_linear, actual_prompt_tokens) {
         model_forward_paged_streaming(
             &*backend,
             &prompt_token_ids,
@@ -1979,37 +2017,43 @@ fn bench_latency_paged_mtp(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let actual_prompt_tokens = prompt_token_ids.len();
 
-    let device = weights.embed_tokens.device();
-    let dtype = kiln_config_dtype_to_candle(config.dtype);
+    let device_kt = weights.device_kt();
+    let dtype = kiln_config_dtype_to_kt(config.dtype);
 
     // Reserve enough blocks to cover prompt + 2*max_output_tokens (each MTP
     // step writes up to 2 base-cache slots: [last_token, draft_token]).
     let max_total_base = actual_prompt_tokens + 2 * max_output_tokens;
     let num_blocks = (max_total_base + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
-    let base_cache = PagedKvCache::new(
+    let base_cache = PagedKvCache::new_kt(
         config.num_full_attention_layers,
         num_blocks,
         PAGED_BLOCK_SIZE,
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        device,
+        &device_kt,
     )?;
-    let mtp_cache = PagedKvCache::new(
+    let mtp_cache = PagedKvCache::new_kt(
         1,
         num_blocks,
         PAGED_BLOCK_SIZE,
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        device,
+        &device_kt,
     )?;
-    let backend = runtime_backend_for_bench(device, weights)?;
+    let backend = runtime_backend_for_bench(&device_kt, weights)?;
+    // `LinearAttentionState::new_with_batch_for_inference_backend` and
+    // `streaming_prefill_enabled_for` still take a candle `&Device`. Bridge
+    // through the always-on kt-bridge helper so this site no longer names
+    // `candle_core::Device` (issue #1082, candle removal).
+    let candle_device_for_linear = kiln_kt_bridge::candle_device_from_kt(&device_kt)
+        .map_err(|e| anyhow::anyhow!("bench_latency_paged_mtp: kt -> candle bridge: {e}"))?;
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
         config,
         1,
-        device,
+        &candle_device_for_linear,
         Some(backend.name()),
     )?;
 
@@ -2031,7 +2075,7 @@ fn bench_latency_paged_mtp(
     // so we can seed h_prev for the first MTP draft step.
     let prefill_start = Instant::now();
     let (prefill_logits, mut h_prev) =
-        if streaming_prefill_enabled_for(device, actual_prompt_tokens) {
+        if streaming_prefill_enabled_for(&candle_device_for_linear, actual_prompt_tokens) {
             model_forward_paged_streaming_last_token_with_last_hidden(
                 &*backend,
                 &prompt_token_ids,
@@ -2067,7 +2111,14 @@ fn bench_latency_paged_mtp(
     // casts `raw_target_logits` to float32 before greedy). BF16 argmax can
     // flip top-1 under ties when two candidates share the same BF16 bucket.
     let mut last_token = if mtp_argmax_fp32_enabled() {
-        let prefill_last_fp32 = prefill_last.to_dtype(candle_core::DType::F32)?;
+        // Bridge `kt::DType::F32` -> candle's F32 so this site no longer
+        // names `candle_core::DType` directly (issue #1082, candle
+        // removal). The `prefill_last` tensor is still candle-typed
+        // because the upstream `model_forward_paged_last_token_with_last_hidden`
+        // hasn't been migrated yet.
+        let candle_f32 = kiln_kt_bridge::kt_dtype_to_candle(kiln_tensor::DType::F32)
+            .map_err(|e| anyhow::anyhow!("bench_latency_paged_mtp: kt -> candle f32: {e}"))?;
+        let prefill_last_fp32 = prefill_last.to_dtype(candle_f32)?;
         greedy_sample(&prefill_last_fp32)?
     } else {
         greedy_sample(&prefill_last)?
@@ -2638,16 +2689,22 @@ fn main() -> Result<()> {
     )
     .context("failed to load model weights")?;
 
-    let device = kiln_server::device::select_device()?;
-    let backend_name = runtime_backend::for_device(&device).name();
+    // Route through the kt-typed `select_device_kt` so this site no
+    // longer names `candle_core::Device`. The kt-typed
+    // `from_model_weights_kt` constructor and `for_device_kt` runtime
+    // backend selector accept the kt device directly (issue #1082,
+    // candle removal).
+    let device_kt = kiln_server::device::select_device_kt()?;
+    let backend_name = runtime_backend::for_device_kt(&device_kt).name();
     if backend_name == "cpu" {
         anyhow::bail!(
             "No accelerated backend available — benchmarks require CUDA, Metal, or Vulkan"
         );
     }
 
-    let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)
-        .context("failed to transfer weights to GPU")?;
+    let gpu_weights =
+        GpuWeights::from_model_weights_kt(&model_weights, &model_config, &device_kt)
+            .context("failed to transfer weights to GPU")?;
     drop(model_weights); // Free CPU memory
 
     let load_time = load_start.elapsed();
