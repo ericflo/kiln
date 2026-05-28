@@ -7,6 +7,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# CP-4 substrate dep — pulled in for `crate::tape_step`, the first
+# `kiln_autograd::Tape`-based training entry in this crate. The
+# production trainer in `crate::trainer` still drives candle's
+# `loss.backward()`; the kt-tape entry sits alongside it as the
+# substrate proof point that future PRs extend to cover the full
+# per-step graph. See `crates/kiln-train/src/tape_step.rs` module
+# docstring + `docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`
+# for the full CP-4 rationale. (#1082)
+kiln-autograd = { workspace = true }
 kiln-core = { workspace = true }
 kiln-eval = { workspace = true }
 kiln-flce-kernel = { workspace = true }
