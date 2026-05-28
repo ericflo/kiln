@@ -135,6 +135,14 @@ struct IoMappingScope {
     /// from the candle `GradStore` and seeds the tape with the
     /// corresponding `kt_output_id` entry.
     kt_to_candle_output: HashMap<u64, usize>,
+
+    /// `candle_output_id (raw) → kt output Tensor` for adapter outputs
+    /// that downstream adapters may consume. Lets a consumer reuse the
+    /// producer's kt output (threading the same kt `TensorId`
+    /// output→input) instead of a fresh borrow, keeping the recorded
+    /// kt `Tape` CONNECTED — the prerequisite for a tape-authoritative
+    /// walk over a chain of adapters. (#1082 CP-4 endgame, Step A.)
+    candle_output_kt: HashMap<usize, kiln_tensor::Tensor>,
 }
 
 thread_local! {
@@ -211,6 +219,67 @@ pub fn register_output_mapping(kt_id: KtTensorId, candle_id: CandleTensorId) {
              cannot share an output id."
         );
     });
+}
+
+/// Retain an adapter's kt OUTPUT tensor keyed by its candle output id so a
+/// downstream adapter that receives the SAME candle tensor as input can
+/// reuse this kt tensor (via [`kt_input_for_candle`]) instead of a fresh
+/// borrow. Reusing the producer's kt output threads the same kt `TensorId`
+/// from one op's output into the next op's input, which keeps the recorded
+/// kt `Tape` CONNECTED (consumer input id == producer output id) — the
+/// prerequisite for a tape-authoritative backward walk over a chain of
+/// adapters. No-op outside a bridge scope. (#1082 CP-4 endgame, Step A.)
+pub fn retain_output_for_chaining(kt_out: &kiln_tensor::Tensor, candle_id: CandleTensorId) {
+    BRIDGE_SCOPE.with(|cell| {
+        if let Some(scope) = cell.borrow_mut().as_mut() {
+            scope
+                .candle_output_kt
+                .insert(candle_id.as_raw(), kt_out.clone());
+        }
+    });
+}
+
+/// If `candle_id` was produced by a prior adapter's output in this scope
+/// (registered via [`retain_output_for_chaining`]), return that adapter's
+/// kt output tensor so the caller can reuse it as its own input — keeping
+/// the tape connected. Returns `None` outside a bridge scope or for a
+/// candle tensor not produced by an adapter (caller should fresh-borrow).
+/// (#1082 CP-4 endgame, Step A.)
+pub fn kt_input_for_candle(candle_id: CandleTensorId) -> Option<kiln_tensor::Tensor> {
+    BRIDGE_SCOPE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|scope| scope.candle_output_kt.get(&candle_id.as_raw()).cloned())
+    })
+}
+
+/// Open ONLY the IO-mapping scope (no tape, no candle `loss.backward()`)
+/// for the duration of `f`. The adapters' `register_*` / `retain_*` /
+/// [`kt_input_for_candle`] calls become live, but the caller drives the
+/// tape walk itself (the tape-authoritative path) — unlike
+/// [`with_tape_scope_emit_to_grad_store`], which runs candle backward and
+/// seeds the tape from candle's `GradStore`. Panics on a nested scope; the
+/// scope is cleared on return (including on panic). (#1082 CP-4 endgame.)
+pub fn with_io_mapping_scope<R>(f: impl FnOnce() -> R) -> R {
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            BRIDGE_SCOPE.with(|cell| {
+                *cell.borrow_mut() = None;
+            });
+        }
+    }
+    BRIDGE_SCOPE.with(|cell| {
+        let mut b = cell.borrow_mut();
+        assert!(
+            b.is_none(),
+            "tape_bridge: nested bridge scopes are not supported. A scope is \
+             already active on this thread."
+        );
+        *b = Some(IoMappingScope::default());
+    });
+    let _guard = Guard;
+    f()
 }
 
 /// True iff a bridge scope is active on the current thread.
