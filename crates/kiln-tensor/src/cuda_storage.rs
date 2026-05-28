@@ -383,9 +383,12 @@ impl CudaStorage {
 /// with [`Tensor::cuda_from_slice`] / [`cuda_zeros_on`], a kernel
 /// crate's test code can construct CUDA tensors candle-free.
 ///
-/// Phase 1 of #1082 replaces the underlying provenance: this signature
-/// becomes `Arc<cudarc::driver::CudaContext>` and callers don't need
-/// to change.
+/// **#1082 migration:** prefer [`primary_cuda_context`], which returns
+/// `Arc<cudarc::driver::CudaContext>` directly. This entry exists for
+/// the few callers that still need a candle `CudaDevice` (notably
+/// `kiln-kt-bridge::to_candle` while it still allocates candle
+/// Tensors). Once those callers are migrated or removed, this function
+/// goes away.
 #[cfg(feature = "cuda")]
 pub fn primary_cuda_device(device_index: usize) -> Result<Arc<CudaDevice>> {
     match candle_core::Device::new_cuda(device_index)
@@ -396,6 +399,36 @@ pub fn primary_cuda_device(device_index: usize) -> Result<Arc<CudaDevice>> {
             "primary_cuda_device({device_index}): expected Cuda device"
         ))),
     }
+}
+
+/// Construct the primary `Arc<cudarc::driver::CudaContext>` for the
+/// given device index — **fully candle-free** accessor.
+///
+/// Wraps `cudarc::driver::CudaContext::new(device_index)`. Returns
+/// `Err` if the requested CUDA device isn't available (no driver, no
+/// GPU at that ordinal, etc.).
+///
+/// This is the #1082 replacement for [`primary_cuda_device`]: where
+/// the old helper bounced through `candle_core::Device::new_cuda`
+/// (which itself just calls `CudaContext::new` under the hood),
+/// `primary_cuda_context` skips the candle round-trip entirely. The
+/// resulting `Arc<CudaContext>` is the same primary-context retain
+/// every kernel crate already uses via `device.cuda_stream().context()`.
+///
+/// **Use this for:**
+/// - `tests/*.rs` CUDA-availability probes:
+///   `primary_cuda_context(0).is_ok()` instead of
+///   `primary_cuda_device(0).is_ok()`.
+/// - Any candle-free call site that needs a `CudaContext` to drive
+///   `default_stream().alloc_*` or `memcpy_*` directly.
+///
+/// `primary_cuda_device` stays around only as long as
+/// `kiln-kt-bridge::to_candle` needs a candle `CudaDevice` for its
+/// `candle_core::Tensor::zeros` allocation.
+#[cfg(feature = "cuda")]
+pub fn primary_cuda_context(device_index: usize) -> Result<Arc<CudaContext>> {
+    CudaContext::new(device_index)
+        .map_err(|e| Error::Msg(format!("primary_cuda_context({device_index}): {e}")))
 }
 
 impl StorageBackend for CudaStorage {
