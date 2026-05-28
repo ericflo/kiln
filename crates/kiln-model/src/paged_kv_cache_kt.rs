@@ -47,7 +47,7 @@ use cudarc::driver::result as cudarc_result;
 
 use kiln_core::block::BlockTable;
 use kiln_tensor::{
-    cuda_fp8_dequantize_direct, cuda_fp8_quantize_direct, cuda_zeros, CudaStorage,
+    cuda_fp8_dequantize_direct, cuda_fp8_quantize_direct, cuda_zeros_ctx, CudaStorage,
     DType as KtDType, Layout, Tensor as KtTensor, TensorId,
 };
 
@@ -124,20 +124,14 @@ impl PagedKvCacheKt {
 
         let mut layers = Vec::with_capacity(num_full_attn_layers);
         for i in 0..num_full_attn_layers {
-            let k_storage = cuda_zeros(
-                candle_device.clone(),
-                device_index,
-                storage_dtype,
-                n_elements,
-            )
-            .with_context(|| format!("kt paged-kv: alloc k_pool layer {i}"))?;
-            let v_storage = cuda_zeros(
-                candle_device.clone(),
-                device_index,
-                storage_dtype,
-                n_elements,
-            )
-            .with_context(|| format!("kt paged-kv: alloc v_pool layer {i}"))?;
+            let _ = &candle_device; // (#1082) candle_device param retained on the public surface
+                                    // for back-compat — alloc now routes through cuda_zeros_ctx
+                                    // (candle-free) per a1f1c5bb. Migrating the public surface
+                                    // off `Arc<CudaDevice>` is a follow-on PR.
+            let k_storage = cuda_zeros_ctx(device_index, storage_dtype, n_elements)
+                .with_context(|| format!("kt paged-kv: alloc k_pool layer {i}"))?;
+            let v_storage = cuda_zeros_ctx(device_index, storage_dtype, n_elements)
+                .with_context(|| format!("kt paged-kv: alloc v_pool layer {i}"))?;
             let k = KtTensor::from_parts(
                 k_storage,
                 Layout::contiguous(shape.clone()),

@@ -2033,11 +2033,14 @@ mod tests {
 
     #[test]
     fn cuda_zeros_returns_arc_storage() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(_dev) = maybe_cuda_device() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
-        let s: crate::Storage = cuda_zeros(dev, 0, DType::F32, 4).unwrap();
+        // (#1082) `cuda_zeros(Arc<CudaDevice>, ...)` was deleted in
+        // a1f1c5bb; the test now exercises the candle-free
+        // `cuda_zeros_ctx` entry which is the surviving public API.
+        let s: crate::Storage = cuda_zeros_ctx(0, DType::F32, 4).unwrap();
         assert_eq!(s.dtype(), DType::F32);
         assert_eq!(s.byte_len(), 16);
         assert_eq!(s.device(), Device::Cuda(0));
