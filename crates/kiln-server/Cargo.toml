@@ -57,7 +57,6 @@ kiln-tensor = { workspace = true }
 # kiln-server's `cuda` to pull in the CUDA-specific helpers. (#1082)
 kiln-kt-bridge = { workspace = true }
 kiln-train = { workspace = true }
-candle-core = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
