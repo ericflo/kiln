@@ -175,6 +175,41 @@ pub fn buffer_o<'a>(
     }
 }
 
+/// kt-typed sibling of [`buffer_o`]: takes `kiln_tensor::Layout` +
+/// `kiln_tensor::DType` instead of the candle-typed pair, with an
+/// identical formula and identical return type.
+///
+/// This is the first half of the metal_types chokepoint flip
+/// (see `docs/metal-types-objc2-swap-plan-2026-05-28.md` Step 1).
+/// Caller-migration commits switch each `buffer_o(.., l: &Layout,
+/// dtype)` site to `buffer_o_kt(.., l_kt: &kiln_tensor::Layout,
+/// dtype_kt: kiln_tensor::DType)` one helper-family at a time
+/// (Step 4 of the swap plan, 232 candidate sites). Once every caller
+/// has flipped, the candle-typed `buffer_o` retires; once the buffer
+/// argument flips off `candle_metal_kernels::metal::Buffer` to
+/// `RawBuffer`, the chokepoint surface is candle-free.
+///
+/// The `buffer` argument still names
+/// `candle_metal_kernels::metal::Buffer` because that's the type the
+/// downstream `candle_metal_kernels::call_*` MSL kernels expect today.
+/// On Apple Silicon UMA, that Buffer wrapper holds the same
+/// `Retained<ProtocolObject<dyn MTLBuffer>>` that [`RawBuffer`]
+/// aliases — they're bit-identical and the swap is a renaming, not
+/// a re-allocation. The buffer-arg flip is Step 6 of the plan.
+///
+/// # (#1082)
+#[inline]
+pub fn buffer_o_kt<'a>(
+    buffer: &'a candle_metal_kernels::metal::Buffer,
+    l: &crate::Layout,
+    dtype: crate::DType,
+) -> BufferOffset<'a> {
+    BufferOffset {
+        buffer,
+        offset_in_bytes: l.start_offset() * dtype.size_in_bytes(),
+    }
+}
+
 // ----------------------------------------------------------------------
 // Native objc2-metal substrate (#1082 Phase 7 — partial lift)
 // ----------------------------------------------------------------------
