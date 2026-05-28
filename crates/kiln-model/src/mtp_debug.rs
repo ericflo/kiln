@@ -28,7 +28,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Tensor};
+
 
 static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 static SUBOP_CAPTURE_ARMED_THREADS: AtomicUsize = AtomicUsize::new(0);
@@ -350,10 +350,10 @@ pub fn reset_counter() {
 /// Extract the top-K `(token_id, logit)` pairs from a flattenable logits
 /// tensor. Accepts shapes `[V]`, `[1, V]`, or `[1, 1, V]` — anything that
 /// flattens to a 1-D vocab-sized vector.
-pub fn top_k_logits(logits: &Tensor, k: usize) -> Result<Vec<(u32, f32)>> {
+pub fn top_k_logits(logits: &candle_core::Tensor, k: usize) -> Result<Vec<(u32, f32)>> {
     let vals = logits
         .flatten_all()?
-        .to_dtype(DType::F32)?
+        .to_dtype(candle_core::DType::F32)?
         .to_vec1::<f32>()?;
     let mut idx: Vec<(u32, f32)> = vals
         .iter()
@@ -368,8 +368,8 @@ pub fn top_k_logits(logits: &Tensor, k: usize) -> Result<Vec<(u32, f32)>> {
 /// Compute the L2 norm of a tensor as a single f32. Diagnostic check on
 /// tensor magnitudes — useful for catching the "all zeros" or "explosion"
 /// failure modes that would silently kill draft accuracy.
-pub fn tensor_l2_norm(t: &Tensor) -> Result<f32> {
-    let v = t.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+pub fn tensor_l2_norm(t: &candle_core::Tensor) -> Result<f32> {
+    let v = t.flatten_all()?.to_dtype(candle_core::DType::F32)?.to_vec1::<f32>()?;
     Ok(v.iter().map(|x| x * x).sum::<f32>().sqrt())
 }
 
@@ -557,7 +557,7 @@ pub fn is_subop_capture_armed() -> bool {
 /// Unlike `write_mtp_dump`, this is best-effort: serialization errors
 /// are swallowed (returned via `Result` so callers using `?` get the
 /// usual propagation, but production callers wrap in `let _ = ...`).
-pub fn capture_subop(name: &str, t: &Tensor) -> Result<()> {
+pub fn capture_subop(name: &str, t: &candle_core::Tensor) -> Result<()> {
     if SUBOP_CAPTURE_ARMED_THREADS.load(Ordering::Acquire) == 0 {
         return Ok(());
     }
@@ -679,7 +679,7 @@ pub fn drain_h_main_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
 /// this thread. Cheap no-op (single TLS access + borrow) when the window
 /// is closed, which is the production case. The tensor is materialized to
 /// host F32 immediately so the GPU scratch is free to be reused.
-pub fn capture_h_main_tap(name: &str, t: &Tensor) -> Result<()> {
+pub fn capture_h_main_tap(name: &str, t: &candle_core::Tensor) -> Result<()> {
     let armed = H_MAIN_CAPTURE.with(|c| c.borrow().is_some());
     if !armed {
         return Ok(());
@@ -831,7 +831,7 @@ pub fn drain_b11_layer0_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
 /// is closed, which is the production case. The tensor is materialized to
 /// host F32 immediately so the GPU scratch is free to be reused — same
 /// pattern as [`capture_h_main_tap`].
-pub fn capture_b11_layer0_tap(name: &str, t: &Tensor) -> Result<()> {
+pub fn capture_b11_layer0_tap(name: &str, t: &candle_core::Tensor) -> Result<()> {
     let armed = B11_LAYER0_CAPTURE.with(|c| c.borrow().is_some());
     if !armed {
         return Ok(());
@@ -1094,7 +1094,7 @@ pub fn drain_c41_layer1_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
 
 /// Record one named C41 transformer-block-1 tap if a capture window is
 /// currently open on this thread.
-pub fn capture_c41_layer1_tap(name: &str, t: &Tensor) -> Result<()> {
+pub fn capture_c41_layer1_tap(name: &str, t: &candle_core::Tensor) -> Result<()> {
     let armed = C41_LAYER1_CAPTURE.with(|c| c.borrow().is_some());
     if !armed {
         return Ok(());
@@ -1135,7 +1135,7 @@ pub fn drain_c42_layer1_norm_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
 
 /// Record one named C42 layer-1 norm-boundary tap if a capture window is
 /// currently open on this thread.
-pub fn capture_c42_layer1_norm_tap(name: &str, t: &Tensor) -> Result<()> {
+pub fn capture_c42_layer1_norm_tap(name: &str, t: &candle_core::Tensor) -> Result<()> {
     let armed = C42_LAYER1_NORM_CAPTURE.with(|c| c.borrow().is_some());
     if !armed {
         return Ok(());
@@ -1176,7 +1176,7 @@ pub fn drain_c43_layer1_preweight_capture() -> Vec<(String, Vec<usize>, Vec<f32>
 
 /// Record one named C43 layer-1 pre-weight tap if a capture window is
 /// currently open on this thread.
-pub fn capture_c43_layer1_preweight_tap(name: &str, t: &Tensor) -> Result<()> {
+pub fn capture_c43_layer1_preweight_tap(name: &str, t: &candle_core::Tensor) -> Result<()> {
     let armed = C43_LAYER1_PREWEIGHT_CAPTURE.with(|c| c.borrow().is_some());
     if !armed {
         return Ok(());
@@ -1218,7 +1218,7 @@ pub fn drain_c44_layer1_f32_row_capture() -> Vec<(String, Vec<usize>, Vec<f32>)>
 
 /// Record one named C44 layer-1 row-level tap if a capture window is
 /// currently open on this thread.
-pub fn capture_c44_layer1_f32_row_tap(name: &str, t: &Tensor) -> Result<()> {
+pub fn capture_c44_layer1_f32_row_tap(name: &str, t: &candle_core::Tensor) -> Result<()> {
     let armed = C44_LAYER1_F32_ROW_CAPTURE.with(|c| c.borrow().is_some());
     if !armed {
         return Ok(());
@@ -1261,7 +1261,7 @@ pub fn drain_c45_layer1_row_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
 
 /// Record one named C45 layer-1 row-level normalization tap if a capture
 /// window is currently open on this thread.
-pub fn capture_c45_layer1_row_tap(name: &str, t: &Tensor) -> Result<()> {
+pub fn capture_c45_layer1_row_tap(name: &str, t: &candle_core::Tensor) -> Result<()> {
     let armed = C45_LAYER1_ROW_CAPTURE.with(|c| c.borrow().is_some());
     if !armed {
         return Ok(());
@@ -1303,7 +1303,7 @@ pub fn drain_c46_layer1_row_provenance_capture() -> Vec<(String, Vec<usize>, Vec
 
 /// Record one named C46 layer-1 row-side provenance tap if a capture window
 /// is currently open on this thread.
-pub fn capture_c46_layer1_row_provenance_tap(name: &str, t: &Tensor) -> Result<()> {
+pub fn capture_c46_layer1_row_provenance_tap(name: &str, t: &candle_core::Tensor) -> Result<()> {
     let armed = C46_LAYER1_ROW_PROVENANCE_CAPTURE.with(|c| c.borrow().is_some());
     if !armed {
         return Ok(());
@@ -1413,7 +1413,7 @@ pub fn drain_b12_gqa_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
 /// materialized to host F32 immediately so the GPU scratch is free to be
 /// reused — same pattern as [`capture_h_main_tap`] /
 /// [`capture_b11_layer0_tap`].
-pub fn capture_b12_gqa_tap(name: &str, t: &Tensor) -> Result<()> {
+pub fn capture_b12_gqa_tap(name: &str, t: &candle_core::Tensor) -> Result<()> {
     if B12_GQA_CAPTURE_ARMED_THREADS.load(Ordering::Acquire) == 0 {
         return Ok(());
     }
@@ -1445,7 +1445,7 @@ pub fn capture_b12_gqa_tap(name: &str, t: &Tensor) -> Result<()> {
 /// 1. `token_emb` — `embed_tokens(draft_token)` output, unsqueezed to [1,1,H]
 /// 2. `norm_emb` — `rms_norm(token_emb, pre_fc_norm_embedding)` (pre-fc norm on embed half)
 /// 3. `norm_h` — `rms_norm(h_prev, pre_fc_norm_hidden)` (pre-fc norm on hidden half)
-/// 4. `concat` — `Tensor::cat([norm_emb, norm_h], dim=2)` post-contiguous
+/// 4. `concat` — `candle_core::Tensor::cat([norm_emb, norm_h], dim=2)` post-contiguous
 /// 5. `fused` — `concat @ mtp.fc_t` (output of the fused-input linear)
 pub const C6_TAP_NAMES: &[&str] = &["token_emb", "norm_emb", "norm_h", "concat", "fused"];
 
@@ -1494,7 +1494,7 @@ pub fn drain_pre_rope_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
 /// is closed, which is the production case. The tensor is materialized to
 /// host F32 immediately so the GPU scratch is free to be reused — same
 /// pattern as [`capture_h_main_tap`] / [`capture_b11_layer0_tap`].
-pub fn capture_pre_rope_tap(name: &str, t: &Tensor) -> Result<()> {
+pub fn capture_pre_rope_tap(name: &str, t: &candle_core::Tensor) -> Result<()> {
     let armed = PRE_ROPE_CAPTURE.with(|c| c.borrow().is_some());
     if !armed {
         return Ok(());
@@ -1798,7 +1798,7 @@ pub fn disarm_mtp_fp32_head() {
 /// materialized to host F32 immediately so the GPU scratch is free to be
 /// reused — same pattern as [`capture_pre_rope_tap`] /
 /// [`capture_b11_layer0_tap`].
-pub fn capture_c7_sdpa_tap(name: &str, t: &Tensor) -> Result<()> {
+pub fn capture_c7_sdpa_tap(name: &str, t: &candle_core::Tensor) -> Result<()> {
     let armed = C7_SDPA_CAPTURE.with(|c| c.borrow().is_some());
     if !armed {
         return Ok(());
@@ -1882,7 +1882,7 @@ pub fn drain_c14_post_block_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
 /// closed, which is the production case. The tensor is materialized to host
 /// F32 immediately so the GPU scratch is free to be reused — same pattern as
 /// [`capture_pre_rope_tap`] / [`capture_c7_sdpa_tap`].
-pub fn capture_c14_post_block_tap(name: &str, t: &Tensor) -> Result<()> {
+pub fn capture_c14_post_block_tap(name: &str, t: &candle_core::Tensor) -> Result<()> {
     let armed = C14_POST_BLOCK_CAPTURE.with(|c| c.borrow().is_some());
     if !armed {
         return Ok(());
@@ -1900,9 +1900,9 @@ pub fn capture_c14_post_block_tap(name: &str, t: &Tensor) -> Result<()> {
 /// Convert a tensor to a contiguous host float32 `Vec<f32>` plus shape.
 /// Used by [`write_mtp_dump`] to serialize taps uniformly regardless of
 /// whether the source is BF16 on CUDA or F32 on CPU.
-fn tensor_to_f32_host(t: &Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
+fn tensor_to_f32_host(t: &candle_core::Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
     let shape = t.dims().to_vec();
-    let flat = t.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+    let flat = t.flatten_all()?.to_dtype(candle_core::DType::F32)?.to_vec1::<f32>()?;
     Ok((shape, flat))
 }
 
@@ -2003,7 +2003,7 @@ pub fn write_mtp_dump(
     base_pos: usize,
     swap_fc_norms: bool,
     boundary_layers: &[usize],
-    taps: &[(&str, &Tensor)],
+    taps: &[(&str, &candle_core::Tensor)],
     extra_subops: &[(String, Vec<usize>, Vec<f32>)],
     prompt_tokens: &[u32],
     replay_tokens: &[u32],
@@ -2429,7 +2429,7 @@ mod tests {
 
     #[test]
     fn top_k_picks_largest_in_descending_order() {
-        let t = Tensor::new(&[1.0_f32, 5.0, 3.0, 4.0, 2.0][..], &Device::Cpu).unwrap();
+        let t = candle_core::Tensor::new(&[1.0_f32, 5.0, 3.0, 4.0, 2.0][..], &Device::Cpu).unwrap();
         let top = top_k_logits(&t, 3).unwrap();
         assert_eq!(top.len(), 3);
         assert_eq!(top[0].0, 1); // logit 5.0
@@ -2439,7 +2439,7 @@ mod tests {
 
     #[test]
     fn l2_norm_matches_hand_calculation() {
-        let t = Tensor::new(&[3.0_f32, 4.0][..], &Device::Cpu).unwrap();
+        let t = candle_core::Tensor::new(&[3.0_f32, 4.0][..], &Device::Cpu).unwrap();
         let n = tensor_l2_norm(&t).unwrap();
         assert!((n - 5.0).abs() < 1e-5);
     }
@@ -2681,8 +2681,8 @@ mod tests {
 
     #[test]
     fn subop_capture_records_then_drains() {
-        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
-        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = candle_core::Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
         // Disarmed: capture is a silent no-op.
         capture_subop("post_q_proj", &a).unwrap();
         assert!(drain_subop_capture().is_empty());
@@ -2726,8 +2726,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_HIDDEN_STATES", "1");
         }
-        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
-        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = candle_core::Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
         // Disarmed: capture is a silent no-op.
         capture_h_main_tap("h_layer_0", &a).unwrap();
         assert!(drain_h_main_capture().is_empty());
@@ -2763,7 +2763,7 @@ mod tests {
         }
         arm_h_main_capture();
         assert!(!is_h_main_capture_armed());
-        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         capture_h_main_tap("h_layer_0", &a).unwrap();
         assert!(drain_h_main_capture().is_empty());
     }
@@ -2804,7 +2804,7 @@ mod tests {
     fn write_mtp_dump_emits_prompt_tokens_when_provided() {
         use safetensors::SafeTensors;
 
-        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_prompt.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let prompt = [7u32, 11, 13, 17, 19];
@@ -2941,8 +2941,8 @@ mod tests {
     fn write_and_reparse_mtp_dump_round_trips() {
         use safetensors::SafeTensors;
 
-        let a = Tensor::new(&[1.0_f32, 2.0, 3.0, 4.0][..], &Device::Cpu).unwrap();
-        let b = Tensor::new(&[0.5_f32, -0.25][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0, 4.0][..], &Device::Cpu).unwrap();
+        let b = candle_core::Tensor::new(&[0.5_f32, -0.25][..], &Device::Cpu).unwrap();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_round_trip.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         write_mtp_dump(
@@ -3026,8 +3026,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_B11_TAPS", "1");
         }
-        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
-        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = candle_core::Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
         // Disarmed: capture is a silent no-op.
         capture_b11_layer0_tap("tok_embed", &a).unwrap();
         assert!(drain_b11_layer0_capture().is_empty());
@@ -3070,7 +3070,7 @@ mod tests {
         arm_b11_layer0_capture();
         assert!(!is_b11_layer0_capture_armed());
         assert!(!should_capture_b11_tap_for_layer(0));
-        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         capture_b11_layer0_tap("tok_embed", &a).unwrap();
         assert!(drain_b11_layer0_capture().is_empty());
     }
@@ -3079,7 +3079,7 @@ mod tests {
     fn write_mtp_dump_emits_b11_taps_when_provided() {
         use safetensors::SafeTensors;
 
-        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let h = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_b11.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let b11 = vec![
@@ -3244,8 +3244,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C41_LAYER1_TAPS", "1");
         }
-        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
-        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = candle_core::Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
 
         capture_c41_layer1_tap("layer_1_post_input_norm", &a).unwrap();
         assert!(drain_c41_layer1_capture().is_empty());
@@ -3284,7 +3284,7 @@ mod tests {
         }
         arm_c41_layer1_capture();
         assert!(!is_c41_layer1_capture_armed());
-        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         capture_c41_layer1_tap("layer_1_post_input_norm", &a).unwrap();
         assert!(drain_c41_layer1_capture().is_empty());
     }
@@ -3295,8 +3295,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C42_LAYER1_NORM_TAPS", "1");
         }
-        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
-        let b = Tensor::new(&[10.0_f32][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = candle_core::Tensor::new(&[10.0_f32][..], &Device::Cpu).unwrap();
 
         capture_c42_layer1_norm_tap("layer_1_residual_input", &a).unwrap();
         assert!(drain_c42_layer1_norm_capture().is_empty());
@@ -3335,7 +3335,7 @@ mod tests {
         }
         arm_c42_layer1_norm_capture();
         assert!(!is_c42_layer1_norm_capture_armed());
-        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         capture_c42_layer1_norm_tap("layer_1_residual_input", &a).unwrap();
         assert!(drain_c42_layer1_norm_capture().is_empty());
     }
@@ -3346,8 +3346,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C43_LAYER1_PREWEIGHT_TAPS", "1");
         }
-        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
-        let b = Tensor::new(&[10.0_f32][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = candle_core::Tensor::new(&[10.0_f32][..], &Device::Cpu).unwrap();
 
         capture_c43_layer1_preweight_tap("layer_1_residual_input", &a).unwrap();
         assert!(drain_c43_layer1_preweight_capture().is_empty());
@@ -3386,7 +3386,7 @@ mod tests {
         }
         arm_c43_layer1_preweight_capture();
         assert!(!is_c43_layer1_preweight_capture_armed());
-        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         capture_c43_layer1_preweight_tap("layer_1_residual_input", &a).unwrap();
         assert!(drain_c43_layer1_preweight_capture().is_empty());
     }
@@ -3397,8 +3397,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C44_LAYER1_F32_ROW_TAPS", "1");
         }
-        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
-        let b = Tensor::new(&[10.0_f32][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = candle_core::Tensor::new(&[10.0_f32][..], &Device::Cpu).unwrap();
 
         capture_c44_layer1_f32_row_tap("layer_1_residual_input_f32_row", &a).unwrap();
         assert!(drain_c44_layer1_f32_row_capture().is_empty());
@@ -3438,7 +3438,7 @@ mod tests {
         }
         arm_c44_layer1_f32_row_capture();
         assert!(!is_c44_layer1_f32_row_capture_armed());
-        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         capture_c44_layer1_f32_row_tap("layer_1_residual_input_f32_row", &a).unwrap();
         assert!(drain_c44_layer1_f32_row_capture().is_empty());
     }
@@ -3449,8 +3449,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS", "1");
         }
-        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
-        let b = Tensor::new(&[10.0_f32][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = candle_core::Tensor::new(&[10.0_f32][..], &Device::Cpu).unwrap();
 
         capture_c45_layer1_row_tap("layer_1_input_norm_rms_inv_scalar", &a).unwrap();
         assert!(drain_c45_layer1_row_capture().is_empty());
@@ -3493,7 +3493,7 @@ mod tests {
         }
         arm_c45_layer1_row_capture();
         assert!(!is_c45_layer1_row_capture_armed());
-        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         capture_c45_layer1_row_tap("layer_1_input_norm_rms_inv_scalar", &a).unwrap();
         assert!(drain_c45_layer1_row_capture().is_empty());
     }
@@ -3504,8 +3504,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C46_ROW_PROVENANCE", "1");
         }
-        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
-        let b = Tensor::new(&[10.0_f32][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = candle_core::Tensor::new(&[10.0_f32][..], &Device::Cpu).unwrap();
 
         capture_c46_layer1_row_provenance_tap("layer_1_input_norm_selected_row_before_rmsnorm", &a)
             .unwrap();
@@ -3551,7 +3551,7 @@ mod tests {
         }
         arm_c46_layer1_row_provenance_capture();
         assert!(!is_c46_layer1_row_provenance_capture_armed());
-        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         capture_c46_layer1_row_provenance_tap("layer_1_input_norm_selected_row_before_rmsnorm", &a)
             .unwrap();
         assert!(drain_c46_layer1_row_provenance_capture().is_empty());
@@ -3564,8 +3564,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_B12_GQA_TAPS", "1");
         }
-        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
-        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = candle_core::Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
         // Disarmed: capture is a silent no-op.
         capture_b12_gqa_tap("post_input_norm", &a).unwrap();
         assert!(drain_b12_gqa_capture().is_empty());
@@ -3608,7 +3608,7 @@ mod tests {
         arm_b12_gqa_capture();
         assert!(!is_b12_gqa_capture_armed());
         assert!(!should_capture_b12_gqa_tap_for_layer(31));
-        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         capture_b12_gqa_tap("post_input_norm", &a).unwrap();
         assert!(drain_b12_gqa_capture().is_empty());
     }
@@ -3617,7 +3617,7 @@ mod tests {
     fn write_mtp_dump_emits_b12_taps_when_provided() {
         use safetensors::SafeTensors;
 
-        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let h = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_b12.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let b12 = vec![
@@ -3678,7 +3678,7 @@ mod tests {
     fn write_mtp_dump_emits_c41_taps_and_metadata_when_provided() {
         use safetensors::SafeTensors;
 
-        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let h = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c41.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let c41 = vec![
@@ -3744,7 +3744,7 @@ mod tests {
     fn write_mtp_dump_emits_c42_taps_and_metadata_when_provided() {
         use safetensors::SafeTensors;
 
-        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let h = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c42.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let c42 = vec![
@@ -3810,7 +3810,7 @@ mod tests {
     fn write_mtp_dump_emits_c43_taps_and_metadata_when_provided() {
         use safetensors::SafeTensors;
 
-        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let h = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c43.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let c43 = vec![
@@ -3878,7 +3878,7 @@ mod tests {
     fn write_mtp_dump_emits_c44_taps_and_metadata_when_provided() {
         use safetensors::SafeTensors;
 
-        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let h = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c44.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let c44 = vec![
@@ -3946,7 +3946,7 @@ mod tests {
     fn write_mtp_dump_emits_c45_taps_and_metadata_when_provided() {
         use safetensors::SafeTensors;
 
-        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let h = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c45.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let c45 = vec![
@@ -4014,7 +4014,7 @@ mod tests {
     fn write_mtp_dump_emits_c46_taps_and_metadata_when_provided() {
         use safetensors::SafeTensors;
 
-        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let h = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c46.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let c46 = vec![
@@ -4191,8 +4191,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_PRE_ROPE", "1");
         }
-        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
-        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = candle_core::Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
         // Disarmed: capture is a silent no-op.
         capture_pre_rope_tap("token_emb", &a).unwrap();
         assert!(drain_pre_rope_capture().is_empty());
@@ -4231,7 +4231,7 @@ mod tests {
         }
         arm_pre_rope_capture();
         assert!(!is_pre_rope_capture_armed());
-        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         capture_pre_rope_tap("token_emb", &a).unwrap();
         assert!(drain_pre_rope_capture().is_empty());
     }
@@ -4240,7 +4240,7 @@ mod tests {
     fn write_mtp_dump_emits_c6_taps_when_provided() {
         use safetensors::SafeTensors;
 
-        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let h = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c6.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let c6 = vec![
@@ -4321,8 +4321,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C7_SDPA", "1");
         }
-        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
-        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = candle_core::Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
         // Disarmed: capture is a silent no-op.
         capture_c7_sdpa_tap("pre_sdpa_q", &a).unwrap();
         assert!(drain_c7_sdpa_capture().is_empty());
@@ -4361,7 +4361,7 @@ mod tests {
         }
         arm_c7_sdpa_capture();
         assert!(!is_c7_sdpa_capture_armed());
-        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         capture_c7_sdpa_tap("pre_sdpa_q", &a).unwrap();
         assert!(drain_c7_sdpa_capture().is_empty());
     }
@@ -4370,7 +4370,7 @@ mod tests {
     fn write_mtp_dump_emits_c7_taps_when_provided() {
         use safetensors::SafeTensors;
 
-        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let h = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c7.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let c7 = vec![
@@ -4452,8 +4452,8 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C14_POST_BLOCK", "1");
         }
-        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
-        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = candle_core::Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
         // Disarmed: capture is a silent no-op.
         capture_c14_post_block_tap("post_block", &a).unwrap();
         assert!(drain_c14_post_block_capture().is_empty());
@@ -4493,7 +4493,7 @@ mod tests {
         }
         arm_c14_post_block_capture();
         assert!(!is_c14_post_block_capture_armed());
-        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let a = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         capture_c14_post_block_tap("post_block", &a).unwrap();
         assert!(drain_c14_post_block_capture().is_empty());
     }
@@ -4526,7 +4526,7 @@ mod tests {
     fn write_mtp_dump_emits_c14_taps_when_provided() {
         use safetensors::SafeTensors;
 
-        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let h = candle_core::Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c14.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let c14 = vec![
