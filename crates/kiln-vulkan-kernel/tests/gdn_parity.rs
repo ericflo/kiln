@@ -1,6 +1,47 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor, shape::ShapeWithOneHole};
-use kiln_vulkan_kernel::VulkanDevice;
+use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice};
+
+// Local test-only candle ↔ bytes/buffer helpers. These mirror the
+// behaviour of the historical `kernels::{extract_tensor_bytes,
+// create_tensor_from_data, upload_tensor_f32_buffer}` surface, which
+// went away with the `candle_bridge` module in #1082. The production
+// crate is now candle-free; these helpers stay scoped to this
+// integration test file so candle-core can remain a dev-dependency
+// only. (#1082)
+
+fn extract_tensor_bytes(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
+    let shape: Vec<usize> = tensor.shape().dims().to_vec();
+    let flat = tensor.flatten_all()?;
+    let f32_data = flat.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+    Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
+}
+
+fn create_tensor_from_data(data: &[u8], shape: &[usize], dtype: DType) -> Result<Tensor> {
+    let f32_data: &[f32] = bytemuck::cast_slice(data);
+    let tensor =
+        Tensor::from_vec(f32_data.to_vec(), f32_data.len(), &Device::Cpu)?.reshape(shape)?;
+    if dtype == DType::BF16 {
+        Ok(tensor.to_dtype(DType::BF16)?)
+    } else {
+        Ok(tensor)
+    }
+}
+
+fn upload_tensor_f32_buffer(vk_device: &VulkanDevice, tensor: &Tensor) -> Result<VulkanBuffer> {
+    let tensor_f32;
+    let tensor = if tensor.dtype() == DType::F32 {
+        tensor
+    } else {
+        tensor_f32 = tensor.to_dtype(DType::F32)?;
+        &tensor_f32
+    };
+    let (data, _) = extract_tensor_bytes(tensor)?;
+    let f32_slice: &[f32] = bytemuck::cast_slice(&data);
+    Ok(kiln_vulkan_kernel::kernels::upload_f32_buffer_from_slice(
+        vk_device, f32_slice,
+    )?)
+}
 
 fn cpu_bf16(data: Vec<f32>, shape: impl ShapeWithOneHole) -> Result<Tensor> {
     Ok(Tensor::from_vec(data, shape, &Device::Cpu)?.to_dtype(DType::BF16)?)
@@ -127,17 +168,17 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_tensor(
     let (batch, _, nv, dk) = q.dims4()?;
     let dv = v.dims4()?.3;
     let q_dtype = q.dtype();
-    let q_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(q)?.0;
-    let k_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(k)?.0;
-    let v_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(v)?.0;
-    let a_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(a)?.0;
-    let b_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(b)?.0;
-    let a_log_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(a_log)?.0;
-    let dt_bias_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(dt_bias)?.0;
-    let z_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(z)?.0;
-    let weight_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(weight)?.0;
+    let q_b = extract_tensor_bytes(q)?.0;
+    let k_b = extract_tensor_bytes(k)?.0;
+    let v_b = extract_tensor_bytes(v)?.0;
+    let a_b = extract_tensor_bytes(a)?.0;
+    let b_b = extract_tensor_bytes(b)?.0;
+    let a_log_b = extract_tensor_bytes(a_log)?.0;
+    let dt_bias_b = extract_tensor_bytes(dt_bias)?.0;
+    let z_b = extract_tensor_bytes(z)?.0;
+    let weight_b = extract_tensor_bytes(weight)?.0;
     let state_b = if resident_state.is_none() {
-        Some(kiln_vulkan_kernel::kernels::extract_tensor_bytes(state)?.0)
+        Some(extract_tensor_bytes(state)?.0)
     } else {
         None
     };
@@ -151,7 +192,7 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_tensor(
             eps,
             resident_state,
         )?;
-    let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let out = create_tensor_from_data(
         &out_data,
         &[batch, 1, nv, dv],
         q_dtype,
@@ -186,7 +227,7 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
     let input_tensors: [&Tensor; 10] = [q, k, v, a, b, a_log, dt_bias, state, z, weight];
     let mut input_data: Vec<Vec<u8>> = Vec::with_capacity(input_tensors.len());
     for tensor in &input_tensors {
-        input_data.push(kiln_vulkan_kernel::kernels::extract_tensor_bytes(tensor)?.0);
+        input_data.push(extract_tensor_bytes(tensor)?.0);
     }
     let (out_data, new_state_data) =
         kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm_bytes(
@@ -199,13 +240,13 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_tensor(
             eps,
             skip_state_readback,
         )?;
-    let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let out = create_tensor_from_data(
         &out_data,
         &[batch, 1, nv, dv],
         q_dtype,
     )?;
     let new_state = if let Some(sd) = new_state_data {
-        kiln_vulkan_kernel::kernels::create_tensor_from_data(&sd, &state_dims, state_dtype)?
+        create_tensor_from_data(&sd, &state_dims, state_dtype)?
     } else {
         state.clone()
     };
@@ -232,12 +273,12 @@ fn dispatch_gdn_recurrent_step_with_options_tensor(
     let q_dtype = q.dtype();
     let state_dtype = state.dtype();
     let state_dims = state.dims().to_vec();
-    let q_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(q)?.0;
-    let k_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(k)?.0;
-    let v_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(v)?.0;
-    let beta_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(beta)?.0;
-    let g_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(g)?.0;
-    let state_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(state)?.0;
+    let q_data = extract_tensor_bytes(q)?.0;
+    let k_data = extract_tensor_bytes(k)?.0;
+    let v_data = extract_tensor_bytes(v)?.0;
+    let beta_data = extract_tensor_bytes(beta)?.0;
+    let g_data = extract_tensor_bytes(g)?.0;
+    let state_data = extract_tensor_bytes(state)?.0;
     let (out_data, new_state_data) =
         kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options_bytes(
             vk,
@@ -253,7 +294,7 @@ fn dispatch_gdn_recurrent_step_with_options_tensor(
             dv,
             skip_state_readback,
         )?;
-    let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let out = create_tensor_from_data(
         &out_data,
         &[batch, heads, dv],
         q_dtype,
@@ -261,7 +302,7 @@ fn dispatch_gdn_recurrent_step_with_options_tensor(
     let new_state = new_state_data
         .as_ref()
         .map(|sd| {
-            kiln_vulkan_kernel::kernels::create_tensor_from_data(sd, &state_dims, state_dtype)
+            create_tensor_from_data(sd, &state_dims, state_dtype)
         })
         .transpose()?;
     Ok((out, new_state))
@@ -286,12 +327,12 @@ fn dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
     let q_dtype = q.dtype();
     let state_dtype = state.dtype();
     let state_dims = state.dims().to_vec();
-    let q_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(q)?.0;
-    let k_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(k)?.0;
-    let v_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(v)?.0;
-    let beta_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(beta)?.0;
-    let g_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(g)?.0;
-    let state_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(state)?.0;
+    let q_data = extract_tensor_bytes(q)?.0;
+    let k_data = extract_tensor_bytes(k)?.0;
+    let v_data = extract_tensor_bytes(v)?.0;
+    let beta_data = extract_tensor_bytes(beta)?.0;
+    let g_data = extract_tensor_bytes(g)?.0;
+    let state_data = extract_tensor_bytes(state)?.0;
     let (out_data, new_state_data) =
         kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options_bytes(
             vk,
@@ -308,7 +349,7 @@ fn dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
             dv,
             skip_state_readback,
         )?;
-    let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let out = create_tensor_from_data(
         &out_data,
         &[batch, heads, dv],
         q_dtype,
@@ -317,7 +358,7 @@ fn dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
     let new_state = new_state_data
         .as_ref()
         .map(|sd| {
-            kiln_vulkan_kernel::kernels::create_tensor_from_data(sd, &state_dims, state_dtype)
+            create_tensor_from_data(sd, &state_dims, state_dtype)
         })
         .transpose()?;
     Ok((out, new_state))
@@ -343,8 +384,8 @@ fn linear_decode_matches_cpu_reference() -> Result<()> {
             .collect(),
         (hidden, out_dim),
     )?;
-    let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &weight)?;
-    let x_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x)?.0;
+    let weight_buf = upload_tensor_f32_buffer(&vk, &weight)?;
+    let x_bytes = extract_tensor_bytes(&x)?.0;
     let got_bytes = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bytes(
         &vk,
         &x_bytes,
@@ -355,7 +396,7 @@ fn linear_decode_matches_cpu_reference() -> Result<()> {
         false,
     )
     .context("dispatch_linear_decode_cached_bytes")?;
-    let got = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let got = create_tensor_from_data(
         &got_bytes,
         &[1, 1, out_dim],
         candle_core::DType::F32,
@@ -384,8 +425,8 @@ fn linear_decode_batched_matches_cpu_reference() -> Result<()> {
             .collect(),
         (hidden, out_dim),
     )?;
-    let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &weight)?;
-    let x_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x)?.0;
+    let weight_buf = upload_tensor_f32_buffer(&vk, &weight)?;
+    let x_bytes = extract_tensor_bytes(&x)?.0;
     let got_bytes = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bytes(
         &vk,
         &x_bytes,
@@ -396,7 +437,7 @@ fn linear_decode_batched_matches_cpu_reference() -> Result<()> {
         false,
     )
     .context("dispatch_linear_decode_cached_bytes batched")?;
-    let got = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let got = create_tensor_from_data(
         &got_bytes,
         &[batch, 1, out_dim],
         candle_core::DType::F32,
@@ -428,9 +469,9 @@ fn causal_conv1d_prefill_matches_stateful_cpu_reference() -> Result<()> {
         let x = cpu_f32(x_data.clone(), (batch, channels, seq_len))?;
         let weight = cpu_f32(weight_data.clone(), (channels, 1, kernel_size))?;
         let state = cpu_f32(state_data.clone(), (batch, channels, kernel_size - 1))?;
-        let x_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x)?.0;
-        let weight_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&weight)?.0;
-        let state_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0;
+        let x_bytes = extract_tensor_bytes(&x)?.0;
+        let weight_bytes = extract_tensor_bytes(&weight)?.0;
+        let state_bytes = extract_tensor_bytes(&state)?.0;
         let (got_out_bytes, got_state_bytes) =
             kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill_bytes(
                 &vk,
@@ -443,12 +484,12 @@ fn causal_conv1d_prefill_matches_stateful_cpu_reference() -> Result<()> {
                 kernel_size,
             )
             .with_context(|| format!("dispatch_causal_conv1d_prefill_bytes seq_len={seq_len}"))?;
-        let got_out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        let got_out = create_tensor_from_data(
             &got_out_bytes,
             &[batch, channels, seq_len],
             candle_core::DType::F32,
         )?;
-        let got_state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        let got_state = create_tensor_from_data(
             &got_state_bytes,
             &[batch, channels, kernel_size - 1],
             candle_core::DType::F32,
@@ -476,9 +517,9 @@ fn causal_conv1d_prefill_matches_stateful_cpu_reference() -> Result<()> {
             1e-5,
         )?;
 
-        let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &weight)?;
-        let x_data_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x)?.0;
-        let state_data_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0;
+        let weight_buf = upload_tensor_f32_buffer(&vk, &weight)?;
+        let x_data_bytes = extract_tensor_bytes(&x)?.0;
+        let state_data_bytes = extract_tensor_bytes(&state)?.0;
         let (got_cached_out_bytes, got_cached_state_bytes) =
             kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill_cached_weight_bytes(
                 &vk,
@@ -493,12 +534,12 @@ fn causal_conv1d_prefill_matches_stateful_cpu_reference() -> Result<()> {
             .with_context(|| {
                 format!("dispatch_causal_conv1d_prefill_cached_weight_bytes seq_len={seq_len}")
             })?;
-        let got_cached_out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        let got_cached_out = create_tensor_from_data(
             &got_cached_out_bytes,
             &[batch, channels, seq_len],
             candle_core::DType::F32,
         )?;
-        let got_cached_state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        let got_cached_state = create_tensor_from_data(
             &got_cached_state_bytes,
             &[batch, channels, kernel_size - 1],
             candle_core::DType::F32,
@@ -938,12 +979,12 @@ fn gdn_recurrent_qk_norm_native_head_last_matches_split_path() -> Result<()> {
         )
         .context("native-head split qk_norm recurrent")?;
 
-    let q_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q)?.0;
-    let k_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k)?.0;
-    let v_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v)?.0;
-    let beta_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta)?.0;
-    let g_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g)?.0;
-    let state_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0;
+    let q_data = extract_tensor_bytes(&q)?.0;
+    let k_data = extract_tensor_bytes(&k)?.0;
+    let v_data = extract_tensor_bytes(&v)?.0;
+    let beta_data = extract_tensor_bytes(&beta)?.0;
+    let g_data = extract_tensor_bytes(&g)?.0;
+    let state_data = extract_tensor_bytes(&state)?.0;
     let (got_out_bytes, got_state_bytes) =
         kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options_bytes(
             &vk,
@@ -961,7 +1002,7 @@ fn gdn_recurrent_qk_norm_native_head_last_matches_split_path() -> Result<()> {
             false,
         )
         .context("native-head fused qk_norm recurrent")?;
-    let got_out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let got_out = create_tensor_from_data(
         &got_out_bytes,
         &[batch, heads, dv],
         state.dtype(),
@@ -970,7 +1011,7 @@ fn gdn_recurrent_qk_norm_native_head_last_matches_split_path() -> Result<()> {
     let got_state = got_state_bytes
         .as_ref()
         .map(|sd| {
-            kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            create_tensor_from_data(
                 sd,
                 state.dims(),
                 state.dtype(),
@@ -1081,12 +1122,12 @@ fn gdn_recurrent_step_native_head_last_resident_state_matches_readback_path() ->
     let expected_state2 = expected_state2.context("native-head readback state 2")?;
 
     let (resident_out1, resident_state) = {
-        let q_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q1)?.0;
-        let k_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k1)?.0;
-        let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v1)?.0;
-        let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta1)?.0;
-        let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g1)?.0;
-        let state_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state0)?.0;
+        let q_data_b = extract_tensor_bytes(&q1)?.0;
+        let k_data_b = extract_tensor_bytes(&k1)?.0;
+        let v_data_b = extract_tensor_bytes(&v1)?.0;
+        let beta_data_b = extract_tensor_bytes(&beta1)?.0;
+        let g_data_b = extract_tensor_bytes(&g1)?.0;
+        let state_data_b = extract_tensor_bytes(&state0)?.0;
         let (b1, sl1, qh1, dk1) = q1.dims4()?;
         let (_, _, h1, dv1) = v1.dims4()?;
         let (out_b, st_buf) =
@@ -1098,18 +1139,18 @@ fn gdn_recurrent_step_native_head_last_resident_state_matches_readback_path() ->
                 None,
             )
             .context("native-head resident step 1")?;
-        let out_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        let out_t = create_tensor_from_data(
             &out_b, &[b1, h1, dv1], q1.dtype(),
         )?
         .unsqueeze(1)?;
         (out_t, st_buf)
     };
     let (resident_out2, resident_state) = {
-        let q_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q2)?.0;
-        let k_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k2)?.0;
-        let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v2)?.0;
-        let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta2)?.0;
-        let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g2)?.0;
+        let q_data_b = extract_tensor_bytes(&q2)?.0;
+        let k_data_b = extract_tensor_bytes(&k2)?.0;
+        let v_data_b = extract_tensor_bytes(&v2)?.0;
+        let beta_data_b = extract_tensor_bytes(&beta2)?.0;
+        let g_data_b = extract_tensor_bytes(&g2)?.0;
         let (b2, sl2, qh2, dk2) = q2.dims4()?;
         let (_, _, h2, dv2) = v2.dims4()?;
         let (out_b, st_buf) =
@@ -1121,7 +1162,7 @@ fn gdn_recurrent_step_native_head_last_resident_state_matches_readback_path() ->
                 Some(resident_state),
             )
             .context("native-head resident step 2")?;
-        let out_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        let out_t = create_tensor_from_data(
             &out_b, &[b2, h2, dv2], q2.dtype(),
         )?
         .unsqueeze(1)?;
@@ -1135,7 +1176,7 @@ fn gdn_recurrent_step_native_head_last_resident_state_matches_readback_path() ->
         &resident_state,
     )
     .context("read back resident native-head state")?;
-    let resident_state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let resident_state = create_tensor_from_data(
         &resident_state_data,
         state0.dims(),
         state0.dtype(),
@@ -1268,13 +1309,13 @@ fn gdn_recurrent_resident_state_matches_two_step_reference() -> Result<()> {
 
     let (got_out1, resident_state) =
         {
-            let q_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q1)?.0;
-            let k_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k1)?.0;
-            let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v1)?.0;
-            let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta1)?.0;
-            let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g1)?.0;
+            let q_data_b = extract_tensor_bytes(&q1)?.0;
+            let k_data_b = extract_tensor_bytes(&k1)?.0;
+            let v_data_b = extract_tensor_bytes(&v1)?.0;
+            let beta_data_b = extract_tensor_bytes(&beta1)?.0;
+            let g_data_b = extract_tensor_bytes(&g1)?.0;
             let state_data_b =
-                Some(kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0);
+                Some(extract_tensor_bytes(&state)?.0);
             let q_dims_b = q1.dims();
             let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
             let dv_b = v1.dims()[2];
@@ -1288,18 +1329,18 @@ fn gdn_recurrent_resident_state_matches_two_step_reference() -> Result<()> {
                     None,
                 )
                 .context("dispatch_gdn_recurrent_step_resident_state step 1")?;
-            let out_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            let out_t = create_tensor_from_data(
                 &out_bytes, &[b_b, h_b, dv_b], q_dtype_b,
             )?;
             (out_t, resident_buf)
         };
     let (got_out2, _resident_state) =
         {
-            let q_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q2)?.0;
-            let k_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k2)?.0;
-            let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v2)?.0;
-            let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta2)?.0;
-            let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g2)?.0;
+            let q_data_b = extract_tensor_bytes(&q2)?.0;
+            let k_data_b = extract_tensor_bytes(&k2)?.0;
+            let v_data_b = extract_tensor_bytes(&v2)?.0;
+            let beta_data_b = extract_tensor_bytes(&beta2)?.0;
+            let g_data_b = extract_tensor_bytes(&g2)?.0;
             let q_dims_b = q2.dims();
             let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
             let dv_b = v2.dims()[2];
@@ -1313,7 +1354,7 @@ fn gdn_recurrent_resident_state_matches_two_step_reference() -> Result<()> {
                     Some(resident_state),
                 )
                 .context("dispatch_gdn_recurrent_step_resident_state step 2")?;
-            let out_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            let out_t = create_tensor_from_data(
                 &out_bytes, &[b_b, h_b, dv_b], q_dtype_b,
             )?;
             (out_t, resident_buf)
@@ -1587,13 +1628,13 @@ fn gdn_recurrent_resident_state_parallel_reduce_matches_two_step_reference() -> 
 
     let (got_out1, resident_state) =
         {
-            let q_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q1)?.0;
-            let k_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k1)?.0;
-            let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v1)?.0;
-            let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta1)?.0;
-            let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g1)?.0;
+            let q_data_b = extract_tensor_bytes(&q1)?.0;
+            let k_data_b = extract_tensor_bytes(&k1)?.0;
+            let v_data_b = extract_tensor_bytes(&v1)?.0;
+            let beta_data_b = extract_tensor_bytes(&beta1)?.0;
+            let g_data_b = extract_tensor_bytes(&g1)?.0;
             let state_data_b =
-                Some(kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0);
+                Some(extract_tensor_bytes(&state)?.0);
             let q_dims_b = q1.dims();
             let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
             let dv_b = v1.dims()[2];
@@ -1607,18 +1648,18 @@ fn gdn_recurrent_resident_state_parallel_reduce_matches_two_step_reference() -> 
                     None,
                 )
                 .context("dispatch_gdn_recurrent_step_resident_state parallel step 1")?;
-            let out_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            let out_t = create_tensor_from_data(
                 &out_bytes, &[b_b, h_b, dv_b], q_dtype_b,
             )?;
             (out_t, resident_buf)
         };
     let (got_out2, _resident_state) =
         {
-            let q_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q2)?.0;
-            let k_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k2)?.0;
-            let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v2)?.0;
-            let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta2)?.0;
-            let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g2)?.0;
+            let q_data_b = extract_tensor_bytes(&q2)?.0;
+            let k_data_b = extract_tensor_bytes(&k2)?.0;
+            let v_data_b = extract_tensor_bytes(&v2)?.0;
+            let beta_data_b = extract_tensor_bytes(&beta2)?.0;
+            let g_data_b = extract_tensor_bytes(&g2)?.0;
             let q_dims_b = q2.dims();
             let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
             let dv_b = v2.dims()[2];
@@ -1632,7 +1673,7 @@ fn gdn_recurrent_resident_state_parallel_reduce_matches_two_step_reference() -> 
                     Some(resident_state),
                 )
                 .context("dispatch_gdn_recurrent_step_resident_state parallel step 2")?;
-            let out_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            let out_t = create_tensor_from_data(
                 &out_bytes, &[b_b, h_b, dv_b], q_dtype_b,
             )?;
             (out_t, resident_buf)
@@ -1821,12 +1862,12 @@ fn gdn_chunk_prep_and_scan_match_cpu_reference() -> Result<()> {
     )?;
     let beta = cpu_bf16(vec![0.25, 0.55, 0.38, 0.7], (batch, heads, chunk))?;
 
-    let g_data_p = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g)?.0;
-    let v_data_p = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v)?.0;
-    let kkt_data_p = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&kkt)?.0;
-    let qkt_data_p = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&qkt)?.0;
-    let ks_entry_data_p = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&ks_entry)?.0;
-    let q_s_data_p = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q_s)?.0;
+    let g_data_p = extract_tensor_bytes(&g)?.0;
+    let v_data_p = extract_tensor_bytes(&v)?.0;
+    let kkt_data_p = extract_tensor_bytes(&kkt)?.0;
+    let qkt_data_p = extract_tensor_bytes(&qkt)?.0;
+    let ks_entry_data_p = extract_tensor_bytes(&ks_entry)?.0;
+    let q_s_data_p = extract_tensor_bytes(&q_s)?.0;
     let g_dims_p = g.dims();
     let (b_p, h_p, c_p) = (g_dims_p[0], g_dims_p[1], g_dims_p[2]);
     let dv_p = v.dims()[3];
@@ -1841,22 +1882,22 @@ fn gdn_chunk_prep_and_scan_match_cpu_reference() -> Result<()> {
     let cv_shape_p = [b_p, h_p, c_p, dv_p];
     let decay_shape_p = [b_p, h_p, c_p];
     let p_last_shape_p = [b_p, h_p];
-    let a_strict = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let a_strict = create_tensor_from_data(
         &a_strict_bytes, &cc_shape_p, candle_core::DType::BF16,
     )?;
-    let b_mask = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let b_mask = create_tensor_from_data(
         &b_mask_bytes, &cc_shape_p, candle_core::DType::BF16,
     )?;
-    let v_prime = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let v_prime = create_tensor_from_data(
         &v_prime_bytes, &cv_shape_p, candle_core::DType::BF16,
     )?;
-    let q_s_scaled = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let q_s_scaled = create_tensor_from_data(
         &q_s_scaled_bytes, &cv_shape_p, candle_core::DType::BF16,
     )?;
-    let decay_last_col = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let decay_last_col = create_tensor_from_data(
         &decay_last_col_bytes, &decay_shape_p, candle_core::DType::BF16,
     )?;
-    let p_last = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let p_last = create_tensor_from_data(
         &p_last_bytes, &p_last_shape_p, candle_core::DType::BF16,
     )?;
 
@@ -1910,12 +1951,12 @@ fn gdn_chunk_prep_and_scan_match_cpu_reference() -> Result<()> {
     assert_close("prep decay_last_col", &decay_last_col, &exp_decay, 1e-2)?;
     assert_close("prep p_last", &p_last, &exp_plast, 1e-2)?;
 
-    let a_strict_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&a_strict)?.0;
-    let b_mask_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&b_mask)?.0;
-    let v_prime_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v_prime)?.0;
-    let q_s_scaled_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q_s_scaled)?.0;
-    let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta)?.0;
-    let decay_last_col_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&decay_last_col)?.0;
+    let a_strict_data = extract_tensor_bytes(&a_strict)?.0;
+    let b_mask_data = extract_tensor_bytes(&b_mask)?.0;
+    let v_prime_data = extract_tensor_bytes(&v_prime)?.0;
+    let q_s_scaled_data = extract_tensor_bytes(&q_s_scaled)?.0;
+    let beta_data_b = extract_tensor_bytes(&beta)?.0;
+    let decay_last_col_data = extract_tensor_bytes(&decay_last_col)?.0;
     let v_prime_dims = v_prime.dims();
     let (vp_b, vp_h, vp_c, vp_dv) =
         (v_prime_dims[0], v_prime_dims[1], v_prime_dims[2], v_prime_dims[3]);
@@ -1931,12 +1972,12 @@ fn gdn_chunk_prep_and_scan_match_cpu_reference() -> Result<()> {
             vp_b, vp_h, vp_c, vp_dv,
         )
         .context("dispatch_gdn_chunk_scan_bytes")?;
-    let got_out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let got_out = create_tensor_from_data(
         &got_out_bytes_a,
         &[vp_b, vp_h, vp_c, vp_dv],
         candle_core::DType::BF16,
     )?;
-    let got_w_weighted = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let got_w_weighted = create_tensor_from_data(
         &got_w_weighted_bytes,
         &[vp_b, vp_h, vp_c, vp_dv],
         candle_core::DType::BF16,
@@ -2043,12 +2084,12 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
         (batch, heads, dk, dv),
     )?;
 
-    let g_data_p = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g)?.0;
-    let v_data_p = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v)?.0;
-    let kkt_data_p = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&kkt)?.0;
-    let qkt_data_p = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&qkt)?.0;
-    let ks_entry_data_p = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&ks_entry)?.0;
-    let q_s_data_p = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q_s)?.0;
+    let g_data_p = extract_tensor_bytes(&g)?.0;
+    let v_data_p = extract_tensor_bytes(&v)?.0;
+    let kkt_data_p = extract_tensor_bytes(&kkt)?.0;
+    let qkt_data_p = extract_tensor_bytes(&qkt)?.0;
+    let ks_entry_data_p = extract_tensor_bytes(&ks_entry)?.0;
+    let q_s_data_p = extract_tensor_bytes(&q_s)?.0;
     let g_dims_p = g.dims();
     let (b_p, h_p, c_p) = (g_dims_p[0], g_dims_p[1], g_dims_p[2]);
     let dv_p = v.dims()[3];
@@ -2063,30 +2104,30 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
     let cv_shape_p = [b_p, h_p, c_p, dv_p];
     let decay_shape_p = [b_p, h_p, c_p];
     let p_last_shape_p = [b_p, h_p];
-    let a_strict = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let a_strict = create_tensor_from_data(
         &a_strict_bytes, &cc_shape_p, candle_core::DType::BF16,
     )?;
-    let b_mask = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let b_mask = create_tensor_from_data(
         &b_mask_bytes, &cc_shape_p, candle_core::DType::BF16,
     )?;
-    let v_prime = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let v_prime = create_tensor_from_data(
         &v_prime_bytes, &cv_shape_p, candle_core::DType::BF16,
     )?;
-    let q_s_scaled = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let q_s_scaled = create_tensor_from_data(
         &q_s_scaled_bytes, &cv_shape_p, candle_core::DType::BF16,
     )?;
-    let decay_last_col = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let decay_last_col = create_tensor_from_data(
         &decay_last_col_bytes, &decay_shape_p, candle_core::DType::BF16,
     )?;
-    let p_last = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let p_last = create_tensor_from_data(
         &p_last_bytes, &p_last_shape_p, candle_core::DType::BF16,
     )?;
-    let a_strict_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&a_strict)?.0;
-    let b_mask_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&b_mask)?.0;
-    let v_prime_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v_prime)?.0;
-    let q_s_scaled_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q_s_scaled)?.0;
-    let beta_data_bb = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta)?.0;
-    let decay_last_col_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&decay_last_col)?.0;
+    let a_strict_data_b = extract_tensor_bytes(&a_strict)?.0;
+    let b_mask_data_b = extract_tensor_bytes(&b_mask)?.0;
+    let v_prime_data_b = extract_tensor_bytes(&v_prime)?.0;
+    let q_s_scaled_data_b = extract_tensor_bytes(&q_s_scaled)?.0;
+    let beta_data_bb = extract_tensor_bytes(&beta)?.0;
+    let decay_last_col_data_b = extract_tensor_bytes(&decay_last_col)?.0;
     let v_prime_dims_b = v_prime.dims();
     let (vp_b2, vp_h2, vp_c2, vp_dv2) = (
         v_prime_dims_b[0], v_prime_dims_b[1], v_prime_dims_b[2], v_prime_dims_b[3],
@@ -2103,26 +2144,26 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
             vp_b2, vp_h2, vp_c2, vp_dv2,
         )
         .context("dispatch_gdn_chunk_scan_bytes")?;
-    let expected_out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let expected_out = create_tensor_from_data(
         &expected_out_bytes,
         &[vp_b2, vp_h2, vp_c2, vp_dv2],
         candle_core::DType::BF16,
     )?;
-    let w_weighted = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let w_weighted = create_tensor_from_data(
         &w_weighted_bytes,
         &[vp_b2, vp_h2, vp_c2, vp_dv2],
         candle_core::DType::BF16,
     )?;
 
-    let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g)?.0;
-    let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v)?.0;
-    let kkt_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&kkt)?.0;
-    let qkt_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&qkt)?.0;
-    let ks_entry_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&ks_entry)?.0;
-    let q_s_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q_s)?.0;
-    let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta)?.0;
-    let k_t_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k_t)?.0;
-    let state_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0;
+    let g_data_b = extract_tensor_bytes(&g)?.0;
+    let v_data_b = extract_tensor_bytes(&v)?.0;
+    let kkt_data_b = extract_tensor_bytes(&kkt)?.0;
+    let qkt_data_b = extract_tensor_bytes(&qkt)?.0;
+    let ks_entry_data_b = extract_tensor_bytes(&ks_entry)?.0;
+    let q_s_data_b = extract_tensor_bytes(&q_s)?.0;
+    let beta_data_b = extract_tensor_bytes(&beta)?.0;
+    let k_t_data_b = extract_tensor_bytes(&k_t)?.0;
+    let state_data_b = extract_tensor_bytes(&state)?.0;
     let state_dims = state.dims().as_ref().to_vec();
     let (got_out_bytes, got_state_bytes) =
         kiln_vulkan_kernel::kernels::dispatch_gdn_full_chunk_forward_bytes(
@@ -2131,12 +2172,12 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
             batch, heads, chunk, dk, dv,
         )
         .context("dispatch_gdn_full_chunk_forward_bytes")?;
-    let got_out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let got_out = create_tensor_from_data(
         &got_out_bytes,
         &[batch, heads, chunk, dv],
         candle_core::DType::BF16,
     )?;
-    let got_state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let got_state = create_tensor_from_data(
         &got_state_bytes,
         &state_dims,
         candle_core::DType::BF16,

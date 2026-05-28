@@ -857,46 +857,48 @@ fn make_memory_barrier(
 }
 
 // ===========================================================================
-// Candle ↔ Vulkan tensor bridge
+// Candle-free buffer uploads
 // ===========================================================================
 //
-// The 6 candle pub fns this file used to expose
-// (`extract_tensor_bytes`, `extract_tensor_packed_bf16_bytes_pub`,
-// `create_tensor_from_data`, `buffer_to_tensor`,
-// `upload_tensor_f32_buffer`, `upload_tensor_bf16_packed_buffer`)
-// plus the private helpers
-// (`extract_tensor_packed_bf16_bytes`,
-// `build_cpu_f32_tensor_from_bytes`,
-// `build_cpu_bf16_tensor_from_bytes`,
-// `upload_bytes_to_device_buffer`)
-// have moved to `crate::candle_bridge`.
-//
-// `kernels.rs` is candle-free at the public-surface level — every
-// `pub fn` declared below this point either operates on raw `&[u8]` /
-// shape metadata or is a candle-free counterpart (e.g.
-// `upload_f32_buffer_from_slice`). The candle staging that the
-// `*_bytes` dispatch shims still need is reached through
-// `crate::candle_bridge::*` rather than redefined here.
-//
-// Public path back-compat: `kernels::extract_tensor_bytes` etc. still
-// resolve, because of the `pub use` re-export below. When the upstream
-// migration to candle-free APIs completes (#1082), the re-export and
-// the `candle_bridge` module both delete; this file already needs no
-// further changes at that point.
-// (#1082)
-pub use crate::candle_bridge::{
-    buffer_to_tensor, create_tensor_from_data, extract_tensor_bytes,
-    extract_tensor_packed_bf16_bytes_pub, upload_tensor_bf16_packed_buffer,
-    upload_tensor_f32_buffer,
-};
+// The candle ↔ Vulkan bridge module (`crate::candle_bridge`) is gone as
+// of the final stage of #1082. Its byte-level core,
+// `upload_bytes_to_device_buffer`, lives below as a file-private helper
+// shared by the public `upload_*_buffer_from_slice` entry points. (#1082)
 
-use crate::candle_bridge::upload_bytes_to_device_buffer;
+/// Upload raw bytes as immutable weights into a device-local Vulkan
+/// buffer using a transient command pool. Shared core for the
+/// candle-free `upload_*_buffer_from_slice` helpers below. (#1082)
+fn upload_bytes_to_device_buffer(
+    vk_device: &VulkanDevice,
+    bytes: &[u8],
+    create_ctx: &'static str,
+    upload_ctx: &'static str,
+) -> Result<VulkanBuffer> {
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    let buffer = VulkanBuffer::create_device_local(device, device_local_mt, bytes.len() as u64)
+        .context(create_ctx)?;
+    {
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::upload_data_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &buffer,
+            bytes,
+        )
+        .context(upload_ctx)?;
+    }
+    Ok(buffer)
+}
 
 /// Upload an f32 slice as a contiguous immutable weight buffer.
-/// Candle-free counterpart to
-/// [`crate::candle_bridge::upload_tensor_f32_buffer`]: callers with
-/// host-side f32 data can skip the candle Tensor staging step
-/// entirely. (#1082)
+/// Candle-free entry point; callers with host-side f32 data skip the
+/// candle Tensor staging step entirely. (#1082)
 pub fn upload_f32_buffer_from_slice(
     vk_device: &VulkanDevice,
     data: &[f32],
@@ -911,9 +913,8 @@ pub fn upload_f32_buffer_from_slice(
 
 /// Upload a bf16 slice as packed immutable weights into a Vulkan
 /// buffer. Two bf16 lanes are packed per u32 word (`(hi << 16) | lo`)
-/// to match the `*_bf16w.comp` shader variants. Candle-free
-/// counterpart to
-/// [`crate::candle_bridge::upload_tensor_bf16_packed_buffer`]. (#1082)
+/// to match the `*_bf16w.comp` shader variants. Candle-free entry
+/// point. (#1082)
 pub fn upload_bf16_packed_buffer_from_slice(
     vk_device: &VulkanDevice,
     data: &[bf16],

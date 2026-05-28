@@ -1825,13 +1825,75 @@ pub fn dispatch_paged_kv_write_slot_resident(
 mod tests {
     use super::*;
     use crate::kernels::{
-        create_tensor_from_data, dispatch_linear_decode_cached_bytes,
-        dispatch_qwen_rmsnorm_forward_bytes, extract_tensor_bytes, upload_tensor_bf16_packed_buffer,
-        upload_tensor_f32_buffer,
+        dispatch_linear_decode_cached_bytes, dispatch_qwen_rmsnorm_forward_bytes,
     };
-    use candle_core::{Device, Tensor};
+    use candle_core::{DType, Device, Tensor};
     use half::bf16;
     use std::sync::Arc;
+
+    // Test-only candle ↔ bytes/buffer helpers. These mirror the legacy
+    // `kernels::{extract_tensor_bytes, create_tensor_from_data,
+    // upload_tensor_f32_buffer, upload_tensor_bf16_packed_buffer}`
+    // surface that this mod historically reached through the deleted
+    // `crate::candle_bridge` module. The production code paths no longer
+    // need candle, so these helpers stay scoped to the test module and
+    // candle-core stays a dev-dependency only. (#1082)
+
+    fn extract_tensor_bytes(tensor: &Tensor) -> anyhow::Result<(Vec<u8>, Vec<usize>)> {
+        let shape: Vec<usize> = tensor.shape().dims().to_vec();
+        let flat = tensor.flatten_all()?;
+        let f32_data = flat.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
+    }
+
+    fn create_tensor_from_data(
+        data: &[u8],
+        shape: &[usize],
+        dtype: DType,
+    ) -> anyhow::Result<Tensor> {
+        let f32_data: &[f32] = bytemuck::cast_slice(data);
+        let tensor = Tensor::from_vec(f32_data.to_vec(), f32_data.len(), &Device::Cpu)?
+            .reshape(shape)?;
+        if dtype == DType::BF16 {
+            Ok(tensor.to_dtype(DType::BF16)?)
+        } else {
+            Ok(tensor)
+        }
+    }
+
+    fn upload_tensor_f32_buffer(
+        vk_device: &VulkanDevice,
+        tensor: &Tensor,
+    ) -> anyhow::Result<VulkanBuffer> {
+        let tensor_f32;
+        let tensor = if tensor.dtype() == DType::F32 {
+            tensor
+        } else {
+            tensor_f32 = tensor.to_dtype(DType::F32)?;
+            &tensor_f32
+        };
+        let (data, _) = extract_tensor_bytes(tensor)?;
+        Ok(crate::kernels::upload_f32_buffer_from_slice(
+            vk_device,
+            bytemuck::cast_slice(&data),
+        )?)
+    }
+
+    fn upload_tensor_bf16_packed_buffer(
+        vk_device: &VulkanDevice,
+        tensor: &Tensor,
+    ) -> anyhow::Result<VulkanBuffer> {
+        anyhow::ensure!(
+            tensor.dtype() == DType::BF16,
+            "packed bf16 upload requires BF16 tensor, got {:?}",
+            tensor.dtype()
+        );
+        let flat = tensor.flatten_all()?;
+        let bf16_data = flat.to_vec1::<bf16>()?;
+        Ok(crate::kernels::upload_bf16_packed_buffer_from_slice(
+            vk_device, &bf16_data,
+        )?)
+    }
 
     fn try_device() -> Option<Arc<VulkanDevice>> {
         VulkanDevice::new().ok().map(Arc::new)
@@ -1908,7 +1970,7 @@ mod tests {
         )
         .unwrap();
         let baseline = create_tensor_from_data(
-            &baseline_bytes, &[batch, 1, out_dim], candle_core::DType::F32,
+            &baseline_bytes, &[batch, 1, out_dim], DType::F32,
         )
         .unwrap();
         let baseline = baseline
@@ -1947,7 +2009,7 @@ mod tests {
         )
         .unwrap();
         let baseline = create_tensor_from_data(
-            &baseline_bytes, &[batch, 1, out_dim], candle_core::DType::F32,
+            &baseline_bytes, &[batch, 1, out_dim], DType::F32,
         )
         .unwrap();
         let baseline = baseline
@@ -1993,7 +2055,7 @@ mod tests {
         let baseline = create_tensor_from_data(
             &baseline_bytes,
             &[batch, 1, out_dim],
-            candle_core::DType::F32,
+            DType::F32,
         )
         .unwrap()
         .flatten_all()
@@ -2627,10 +2689,7 @@ mod tests {
 
     #[test]
     fn gdn_recurrent_step_resident_matches_nonresident() {
-        use crate::kernels::{
-            create_tensor_from_data, dispatch_gdn_recurrent_step_with_options_bytes,
-            extract_tensor_bytes,
-        };
+        use crate::kernels::dispatch_gdn_recurrent_step_with_options_bytes;
         let Some(dev) = try_device() else { return };
         let batch = 2;
         let heads = 4;

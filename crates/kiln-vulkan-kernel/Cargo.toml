@@ -8,7 +8,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-candle-core = { workspace = true }
 kiln-tensor-id = { workspace = true }
 anyhow = { workspace = true }
 half = "2"
@@ -19,6 +18,11 @@ libc = "0.2"
 libloading = "0.9"
 
 [dev-dependencies]
+# candle-core is dev-only after #1082: the production crate is
+# candle-free, but a handful of in-tree `#[cfg(test)]` blocks and
+# `tests/*.rs` parity tests still build CPU candle tensors as the
+# numerical reference.
+candle-core = { workspace = true }
 # Phase 0.9 probe writes a JSON report. Dev-only so production builds
 # don't pick it up.
 serde_json = { workspace = true }

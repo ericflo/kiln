@@ -3,17 +3,18 @@
 //! Provides Vulkan device management, buffer allocation, and kernel dispatch
 //! functions for FlashAttention-2, Gated DeltaNet, and supporting operations.
 //!
-//! candle-core has no native Vulkan device, so this crate manages its own
-//! Vulkan device and copies tensor data through the CPU path at kernel boundaries.
+//! As of #1082 this crate is candle-free at runtime: every public entry
+//! point operates on raw `&[u8]` / `&[f32]` / `&[half::bf16]` plus shape
+//! metadata. The candle-core dev-dependency is only used by in-tree
+//! parity tests that build CPU candle tensors as a numerical reference.
 //!
 //! The `vk_tensor` and `vk_autograd` modules host the vk-native training
 //! stack: a GPU-resident `VkTensor` type and its own eager autograd tape,
 //! used in training to keep every forward intermediate and gradient on the
-//! device instead of materializing them as candle CPU storage.
+//! device instead of round-tripping through host storage.
 
 pub mod buffer;
 pub mod buffer_pool;
-pub mod candle_bridge;
 pub mod cmd_batch;
 pub mod decode_resident_pool;
 pub mod device;
