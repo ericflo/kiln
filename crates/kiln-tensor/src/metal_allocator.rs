@@ -10,37 +10,33 @@
 //! compile path (which links `metal` against `candle-core` but has no
 //! Metal device) doesn't spuriously fail.
 //!
-//! # Phase 7 candle-removal — partial UNBLOCK (allocation path candle-free)
+//! # Phase 7 candle-removal — CP-1 complete (allocator AND storage)
 //!
-//! The allocation path is now candle-free at this allocator's
-//! surface. Both `warm()` and `alloc()` route through
-//! [`MetalStorage::zeros_kt`] — the candle-free metal-rs entry — and
-//! the previously-held `candle_device: Arc<MetalDevice>` field has
-//! been dropped. `MetalAllocator` now carries only the metal-rs
-//! `metal_device_handle: MetalRawDevice` companion on the device-
-//! handle side.
+//! Both the allocator surface and the storage's owned state are now
+//! candle-free at the field level. `MetalAllocator::warm()` /
+//! `alloc()` route through [`MetalStorage::zeros_kt`] — the candle-
+//! free metal-rs entry — and the produced `MetalStorage` itself
+//! holds only a `metal_handle: MetalRawDevice` (no candle wrapper in
+//! its field state any more, dropped in the CP-1 final lift commit).
 //!
-//! **Mirror of the CudaAllocator chain** (commits 03b8a34c add
-//! companion, e2bddd72 swap allocation to `zeros_ctx`, 6155e2e6
-//! drop `candle_device` field, fcc9bac7 drop back-compat
-//! constructors). The Metal side now mirrors all four shapes —
-//! `metal_device_handle` companion already lived here from the
-//! additive step, the allocation swap + field drop both land in this
-//! commit, and the back-compat constructor drop follows in a sibling
-//! commit.
+//! **Mirror of the CudaAllocator + CudaStorage CP-1 chain** (commits
+//! 03b8a34c add allocator companion, e2bddd72 swap allocation to
+//! `zeros_ctx`, 6155e2e6 drop `CudaAllocator::candle_device` field,
+//! fcc9bac7 drop CudaAllocator back-compat constructors, then on the
+//! storage side b39f5712 add `context()` accessor, db916383 migrate
+//! ops to `.context()`, 5c3cd353 drop `CudaStorage::candle_device`
+//! field, 876e17da delete candle-typed back-compat constructors).
+//! The Metal side now mirrors all of these shapes.
 //!
-//! **CP-1 on the allocator side is now structurally complete.** The
-//! produced `MetalStorage` still carries a candle `MetalDevice` for
-//! kernel-crate FFI (every `(*candle_device_arc).clone()` site in
-//! `kiln-model::backend::metal` feeds `candle_metal_kernels::*` by
-//! value). The storage-side field drop (CP-2) is gated on migrating
-//! those ~232 FFI sites to a raw `MTLDevice` + `MTLCommandQueue`
-//! surface — that is the next, much larger refactor and stays out
-//! of scope here. The internal residual at the substrate boundary
-//! is now confined to [`crate::primary_metal_device`] inside
-//! `MetalStorage::zeros_kt`, which derives an `Arc<MetalDevice>`
-//! to populate the storage's back-compat field; that helper retires
-//! when the storage-side field is dropped.
+//! Internal residual at the substrate boundary: the 7 in-file
+//! substrate ops in `metal_storage.rs` still derive a candle
+//! `MetalDevice` per call via [`crate::primary_metal_device`] for
+//! `kernels()` and `command_encoder()` access — those are the
+//! candle-cached MSL pipeline collection and command-buffer pool
+//! used by `candle_metal_kernels::call_*` FFI. The follow-up
+//! substrate lift moves an `Arc<Kernels>` + `CommandQueue` companion
+//! onto `MetalStorage` so the per-op call becomes a cheap field
+//! clone; that lift is out of scope for the CP-1 commits.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,10 +59,11 @@ pub struct MetalAllocator {
     /// `MetalStorage::zeros_kt(&metal_device_handle, ...)`. External
     /// callers needing a candle wrapper can derive one on demand via
     /// [`crate::primary_metal_device`] using the stored
-    /// `device_index`, or read it from the produced
-    /// `MetalStorage.candle_device()` (which is still load-bearing
-    /// for the kernel-crate FFI sites that consume `MetalDevice` by
-    /// value — see `metal_storage.rs` field doc).
+    /// `device_index`, or call `MetalStorage::candle_device()` on a
+    /// produced storage (which itself derives via
+    /// `primary_metal_device(device_index)` after the #1082 CP-1
+    /// final lift — MetalStorage no longer holds a candle wrapper in
+    /// its field state either).
     ///
     /// Mirror of [`crate::CudaAllocator::context`] (commit
     /// 03b8a34c added the companion; commit 6155e2e6 dropped the
@@ -122,11 +119,12 @@ impl MetalAllocator {
         let bytes_per = dtype.packed_buffer_bytes(n_elements);
         let slot = self.cache.entry((dtype, n_elements)).or_default();
         for _ in 0..count {
-            // Route through the candle-free zeros_kt entry — the
-            // resulting MetalStorage still carries a candle MetalDevice
-            // internally (derived via primary_metal_device for the
-            // back-compat field), but this allocator no longer touches
-            // the candle wrapper directly.
+            // Route through the candle-free zeros_kt entry — after the
+            // CP-1 final lift the resulting MetalStorage stores only a
+            // metal-rs MetalRawDevice in its field state (the candle
+            // wrapper, if needed downstream, is derived on demand via
+            // `MetalStorage::candle_device()` -> `primary_metal_device`).
+            // This allocator never touches the candle wrapper.
             let metal = MetalStorage::zeros_kt(
                 &self.metal_device_handle,
                 self.device_index,
@@ -154,8 +152,10 @@ impl MetalAllocator {
     /// candle-free device-handle accessor. Callers that need a candle
     /// `MetalDevice` wrapper can derive one on demand via
     /// [`crate::primary_metal_device`] using
-    /// [`Self::device_index()`], or read it from a produced
-    /// `MetalStorage.candle_device()`.
+    /// [`Self::device_index()`], or call `.candle_device()` on a
+    /// produced `MetalStorage` (which after the #1082 CP-1 final lift
+    /// also derives via `primary_metal_device(device_index)` since
+    /// the storage no longer holds a candle wrapper in its field).
     pub fn metal_device_handle(&self) -> &MetalRawDevice {
         &self.metal_device_handle
     }

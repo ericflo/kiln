@@ -1,11 +1,13 @@
 //! Metal storage impl behind the `metal` feature flag.
 //!
 //! Wraps `Arc<metal::Buffer>` (the actual buffer) + dtype +
-//! `Arc<candle_core::metal_backend::MetalDevice>` for command-queue
-//! affinity. The `metal` crate (Apple's MTLBuffer binding) is reached
-//! through candle's re-export; Phase 7 of #1082 (candle removal)
-//! replaces `MetalDevice` with a direct `MTLDevice` + command-queue
-//! handle pair.
+//! `MetalRawDevice` (the metal-rs `Retained<ProtocolObject<dyn
+//! MTLDevice>>` handle, reached through `candle_metal_kernels::metal`)
+//! for kernel-FFI affinity. After the #1082 CP-1 final lift the
+//! storage no longer holds a candle `MetalDevice` wrapper in its
+//! field state — that wrapper, when needed downstream, is derived
+//! on demand via [`primary_metal_device`] (`MetalStorage::candle_device()`
+//! exposes the derived back-compat shim).
 //!
 //! # Anti-pattern 1 compliance
 //!
@@ -15,9 +17,10 @@
 //! > `metal::Buffer` directly.
 //!
 //! `MetalStorage` does not hold a `candle_core::Tensor`. The buffer is
-//! `Arc<metal::Buffer>` we own (allocated via candle's
-//! `MetalDevice::allocate_zeros` — the same allocator path used by
-//! candle internally; the `Arc<Buffer>` is then fully ours).
+//! `Arc<metal::Buffer>` we own — allocated via metal-rs's
+//! `MTLDevice::newBufferWithLength:options:` directly through
+//! [`Self::zeros_kt`] (the candle-free allocation path). The `Arc<Buffer>`
+//! is fully ours.
 //!
 //! # Apple Silicon UMA invariant
 //!
@@ -49,11 +52,15 @@ use candle_core::metal_backend::MetalDevice;
 // layernorm, index_select_dim0, cast, elementwise_binary,
 // activation_unary) now call directly into `candle_metal_kernels::call_*`
 // MSL kernel entry points (no `CandleTensor` / `CandleMetalStorage` /
-// `candle_nn` bridge). The only residual candle hook is the
-// `MetalDevice` wrapper held in `MetalStorage`, which exposes
-// `metal_device()`, `kernels()`, and `command_encoder()` — those
-// accessors are thin metal-rs passthroughs (Phase 7 substrate lift
-// retires the wrapper itself).
+// `candle_nn` bridge). After the #1082 CP-1 final lift the storage's
+// owned state no longer references a candle `MetalDevice`; each op
+// derives one via `primary_metal_device(device_index)` to access
+// candle's MSL pipeline cache + command-buffer pool. The `MetalDevice`
+// import below is retained only as the return-type for the derived
+// `MetalStorage::candle_device()` back-compat shim. The follow-up
+// substrate lift moves `Arc<Kernels>` + `CommandQueue` companions
+// onto `MetalStorage` directly so the per-op `primary_metal_device`
+// derivation can retire.
 use candle_metal_kernels::metal::Buffer as MetalBuffer;
 use candle_metal_kernels::metal::Device as MetalRawDevice;
 
@@ -109,32 +116,32 @@ impl MetalStorage {
     /// ordinal of `device`'s owning system device. Stored as the
     /// [`Device::Metal`] variant.
     ///
-    /// # Why the storage's `candle_device` field is still populated
+    /// # Post-CP-1: storage is candle-free at the field level
     ///
-    /// The internal `candle_device: Arc<MetalDevice>` field is still
-    /// load-bearing for downstream callers: every kernel-crate FFI
-    /// site in `kiln-model::backend::metal` clones it as
-    /// `(*candle_device_arc).clone()` to plumb a `MetalDevice` by
-    /// value into `candle_metal_kernels::*` calls, and the candle
-    /// `MetalDevice` wrapper caches compute pipelines + holds the
-    /// shared command-queue that production code re-uses. Until every
-    /// caller migrates to a raw-metal-rs FFI surface (`MTLDevice` +
-    /// `MTLCommandQueue` directly), this constructor derives the
-    /// candle wrapper from [`primary_metal_device`] (which calls
-    /// `candle_core::Device::new_metal(device_index)`) so the
-    /// resulting `MetalStorage` is drop-in-compatible with every
-    /// existing downstream call site.
+    /// After the #1082 CP-1 final lift, `MetalStorage` no longer holds
+    /// a candle `Arc<MetalDevice>` in its field state — the input
+    /// `device` (metal-rs handle) flows directly into the storage's
+    /// `metal_handle: MetalRawDevice` field via a cheap NSObject
+    /// `retain` clone. The candle wrapper, when needed downstream by
+    /// the 7 internal substrate ops in this file (which still consume
+    /// `MetalDevice::kernels()` + `MetalDevice::command_encoder()` to
+    /// dispatch through `candle_metal_kernels::call_*`), is derived
+    /// on demand via [`primary_metal_device`] inside
+    /// `Self::candle_device()`. This mirrors the CudaStorage CP-1 final
+    /// lift exactly (where `candle_device()` is also a derived
+    /// back-compat shim — see cuda_storage.rs `candle_device()`).
     ///
     /// # Device-affinity contract
     ///
     /// Both `device` (the metal-rs handle the caller passes) and the
     /// candle `MetalDevice` returned by `primary_metal_device(device_index)`
-    /// wrap the same `MTLDevice` protocol object for the given
-    /// ordinal — candle's `MetalDevice::new` (via `Device::all()`)
-    /// resolves the same registry-ID-indexed physical GPU that
-    /// metal-rs's `Device::system_default()` / `Device::all()` returns.
-    /// The new buffer is therefore addressable by every kernel-crate
-    /// FFI that consumes `candle_device.metal_device()`.
+    /// (when the back-compat shim is invoked) wrap the same `MTLDevice`
+    /// protocol object for the given ordinal — candle's
+    /// `MetalDevice::new` (via `Device::all()`) resolves the same
+    /// registry-ID-indexed physical GPU that metal-rs's
+    /// `Device::system_default()` / `Device::all()` returns. The new
+    /// buffer is therefore addressable by every kernel-crate FFI that
+    /// consumes a derived `candle_device().metal_device()`.
     ///
     /// # UMA + zero-init safety
     ///
@@ -151,20 +158,26 @@ impl MetalStorage {
     ///
     /// # Future direction
     ///
-    /// Once every kernel-crate FFI site migrates to a raw-metal-rs
-    /// `MTLDevice` + `MTLCommandQueue` surface (out of scope here),
-    /// the storage's `candle_device` field can be dropped entirely
-    /// and this constructor stops needing to call
-    /// [`primary_metal_device`]. The candle-typed `Self::zeros`
-    /// back-compat constructor was deleted (#1082, commit 71a3b677)
-    /// after the last in-file caller migrated to this entry; this
-    /// constructor is now the sole allocation path on `MetalStorage`.
-    /// See the order-of-operations doc in `metal_allocator.rs` lines
-    /// 56-78.
+    /// CP-1 lift complete (this commit): the `candle_device` field has
+    /// been dropped and this constructor no longer calls
+    /// [`primary_metal_device`] on the allocation path. The candle-
+    /// typed `Self::zeros` back-compat constructor was deleted (#1082,
+    /// commit 71a3b677) earlier in the lift chain; this constructor is
+    /// the sole allocation path on `MetalStorage`. See the
+    /// order-of-operations doc in `metal_allocator.rs` for the
+    /// CudaAllocator/CudaStorage mirror history.
+    ///
+    /// Remaining substrate work (out of scope here): the 7 in-file
+    /// substrate ops still derive a candle wrapper per-call via
+    /// `Self::candle_device()` for `kernels()` + `command_encoder()`
+    /// access. The follow-up substrate lift moves an `Arc<Kernels>` +
+    /// `CommandQueue` companion onto `MetalStorage` so the ops can
+    /// dispatch directly through `candle_metal_kernels::call_*` without
+    /// materializing a candle `MetalDevice` at all.
     ///
     /// Mirror of [`crate::CudaStorage::zeros_ctx`] (commit d3caf46b) —
     /// same shape, same rationale (the parallel-constructor step of
-    /// the CP-1/CP-2 substrate lift documented in
+    /// the CP-1 substrate lift documented in
     /// `docs/issue-1082-tier-4-5-roadmap-2026-05-27.md`).
     pub fn zeros_kt(
         device: &MetalRawDevice,
@@ -366,19 +379,22 @@ impl StorageBackend for MetalStorage {
 /// Metal backend.
 ///
 /// Calls `candle_core::Device::new_metal(device_index)` and unwraps to
-/// `Arc<MetalDevice>`. Used by [`MetalStorage::zeros_kt`] to populate
-/// the back-compat `candle_device` field on storage allocated via the
-/// candle-free metal-rs path; also exposed publicly so downstream test
-/// code can construct Metal tensors candle-free at the construction
-/// boundary.
+/// `Arc<MetalDevice>`. Used by [`MetalStorage::candle_device`] as the
+/// per-call derivation hook for the back-compat shim (and by the 7
+/// in-file substrate ops indirectly through that shim, to reach
+/// `kernels()` + `command_encoder()` for `candle_metal_kernels::call_*`
+/// dispatch). Also exposed publicly so downstream test code can
+/// construct Metal tensors candle-free at the construction boundary.
 ///
 /// # Phase 7 (#1082) note
 ///
-/// Once every kernel-crate FFI site migrates to a raw-metal-rs
-/// `MTLDevice` + `MTLCommandQueue` surface, the storage-side
-/// `candle_device` field disappears and this helper retires. Until
-/// then it stays as the single residual candle hook in the
-/// substrate's allocation path.
+/// After the CP-1 final lift, the storage-side `candle_device` field
+/// is gone; this helper is now the candle-derivation hook for the
+/// `Self::candle_device()` accessor (mirror of how
+/// `primary_cuda_device` backs `CudaStorage::candle_device()` post-
+/// CP-1). The eventual full-substrate lift moves `Arc<Kernels>` +
+/// `CommandQueue` companions onto `MetalStorage` directly so the
+/// per-op derivation can retire entirely.
 #[allow(dead_code)]
 pub fn primary_metal_device(device_index: usize) -> Result<Arc<MetalDevice>> {
     match candle_core::Device::new_metal(device_index)
