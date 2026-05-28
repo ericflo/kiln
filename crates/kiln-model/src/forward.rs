@@ -5,28 +5,25 @@
 //! `Tensor` objects and are composed into the full transformer forward pass.
 
 use anyhow::{Context, Result};
+// (#1082) Consolidate forward.rs candle imports into 4 lines:
+// - Unconditional types used everywhere (D, DType, Device, Tensor, BackendDevice).
+// - cuda|vulkan-shared types/macros (CpuStorage, Layout, Shape, Storage, BackpropOp,
+//   bail, Error, Result-as-CandleResult — these back the CustomOp* impls and the
+//   kt-bridge fallback paths in both features).
+// - cuda-only types (CudaStorage, CustomOp2, CustomOp3, BackendStorage).
+// - vulkan-only type (CustomOp1, used by the autograd-safe Vulkan RMSNorm op).
+// `Result` would clash with `anyhow::Result` at top level so the candle one is
+// aliased to `CandleResult`.
 use candle_core::backend::BackendDevice;
-#[cfg(feature = "cuda")]
-use candle_core::backend::BackendStorage;
-#[cfg(any(feature = "cuda", feature = "vulkan"))]
-use candle_core::op::BackpropOp;
-#[cfg(feature = "cuda")]
-use candle_core::{CpuStorage, CudaStorage, CustomOp2, CustomOp3, Layout, Shape, Storage};
 use candle_core::{D, DType, Device, Tensor};
-// (#1082) Consolidate the most-frequent error/result + bail! callsites
-// in this file (~67 `Error::Msg`, ~32 `bail!`, ~22 `Result<...>`)
-// behind short names. `Result` would conflict with `anyhow::Result`, so
-// the candle one is aliased to `CandleResult`. `Error` and `bail` have
-// no conflicting top-level imports here. All three are only used inside
-// `#[cfg(any(feature = "cuda", feature = "vulkan"))]` paths (CustomOp*
-// impls, kt-bridge fallbacks), so the imports are gated to those
-// features to avoid `unused_imports` warnings on the default build.
 #[cfg(any(feature = "cuda", feature = "vulkan"))]
-use candle_core::bail;
-#[cfg(any(feature = "cuda", feature = "vulkan"))]
-use candle_core::Error;
-#[cfg(any(feature = "cuda", feature = "vulkan"))]
-use candle_core::Result as CandleResult;
+use candle_core::{
+    bail, op::BackpropOp, CpuStorage, Error, Layout, Result as CandleResult, Shape, Storage,
+};
+#[cfg(feature = "cuda")]
+use candle_core::{backend::BackendStorage, CudaStorage, CustomOp2, CustomOp3};
+#[cfg(feature = "vulkan")]
+use candle_core::CustomOp1;
 use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 
@@ -7363,7 +7360,8 @@ fn vulkan_device_handle() -> Option<std::sync::Arc<kiln_vulkan_kernel::VulkanDev
 /// autograd.
 #[cfg(feature = "vulkan")]
 fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Option<Tensor>> {
-    use candle_core::{CpuStorage, CustomOp1, Layout, Shape, Storage};
+    // `CpuStorage`, `CustomOp1`, `Layout`, `Shape`, `Storage` are all imported at
+    // top level under the matching feature gates — no inner `use` needed. (#1082)
 
     let Some(vk_device) = vulkan_device_handle() else {
         return Ok(None);
