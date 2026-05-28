@@ -8141,64 +8141,61 @@ pub fn dispatch_gdn_forward_substitution_bytes(
     chunk: usize,
     dv: usize,
 ) -> Result<Vec<u8>> {
-    let a_strict = build_cpu_bf16_tensor_from_bytes(a_strict_bf16, &[batch, heads, chunk, chunk])?;
-    let v_prime = build_cpu_bf16_tensor_from_bytes(v_prime_bf16, &[batch, heads, chunk, dv])?;
-    let beta = build_cpu_bf16_tensor_from_bytes(beta_bf16, &[batch, heads, chunk])?;
-    let out = dispatch_gdn_forward_substitution(vk_device, &a_strict, &v_prime, &beta)?;
-    Ok(extract_tensor_bytes(&out)?.0)
-}
-
-pub fn dispatch_gdn_forward_substitution(
-    vk_device: &VulkanDevice,
-    a_strict: &Tensor,
-    v_prime: &Tensor,
-    beta: &Tensor,
-) -> Result<Tensor> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let qfi = vk_device.queue_family_index();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    // Extract input data
-    let a_strict_data = extract_tensor_bytes(a_strict)?.0;
-    let v_prime_data = extract_tensor_bytes(v_prime)?.0;
-    let beta_data = extract_tensor_bytes(beta)?.0;
+    anyhow::ensure!(
+        a_strict_bf16.len() == batch * heads * chunk * chunk * 2,
+        "gdn_forward_substitution: a_strict bytes {} mismatch expected {}",
+        a_strict_bf16.len(),
+        batch * heads * chunk * chunk * 2,
+    );
+    anyhow::ensure!(
+        v_prime_bf16.len() == batch * heads * chunk * dv * 2,
+        "gdn_forward_substitution: v_prime bytes {} mismatch expected {}",
+        v_prime_bf16.len(),
+        batch * heads * chunk * dv * 2,
+    );
+    anyhow::ensure!(
+        beta_bf16.len() == batch * heads * chunk * 2,
+        "gdn_forward_substitution: beta bytes {} mismatch expected {}",
+        beta_bf16.len(),
+        batch * heads * chunk * 2,
+    );
 
     // Compile shader
     let glsl_path = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/solve_tri.comp");
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
 
-    // Parse output shape [B, H, C, dv]
-    let dims = v_prime.dims();
-    let (batch, heads, chunk, dv) = (dims[0], dims[1], dims[2], dims[3]);
-
     // Create input buffers + upload
     let a_strict_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, a_strict_data.len() as u64)?;
+        VulkanBuffer::create_device_local(device, device_local_mt, a_strict_bf16.len() as u64)?;
     VulkanBuffer::upload_data(
         device,
         host_visible_mt,
         queue,
         qfi,
         &a_strict_buf,
-        &a_strict_data,
+        a_strict_bf16,
     )?;
 
     let v_prime_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, v_prime_data.len() as u64)?;
+        VulkanBuffer::create_device_local(device, device_local_mt, v_prime_bf16.len() as u64)?;
     VulkanBuffer::upload_data(
         device,
         host_visible_mt,
         queue,
         qfi,
         &v_prime_buf,
-        &v_prime_data,
+        v_prime_bf16,
     )?;
 
     let beta_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, beta_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &beta_buf, &beta_data)?;
+        VulkanBuffer::create_device_local(device, device_local_mt, beta_bf16.len() as u64)?;
+    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &beta_buf, beta_bf16)?;
 
     // Create output buffer (f32)
     let out_size = (batch * heads * chunk * dv * 4) as u64;
@@ -8239,9 +8236,7 @@ pub fn dispatch_gdn_forward_substitution(
     drop(beta_buf);
     drop(out_buf);
 
-    let out_shape = vec![batch, heads, chunk, dv];
-    create_tensor_from_data(&out_data, &out_shape, DType::BF16)
-        .context("failed to create gdn_forward_substitution output tensor")
+    Ok(out_data)
 }
 
 // ---------------------------------------------------------------------------
