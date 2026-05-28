@@ -446,13 +446,43 @@ fn cuda_via_kt_forward_op(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize tests that mutate `KILN_DISABLE_FLCE_KT_FORWARD_OP`
+    // so they don't race against each other. Cargo runs tests in
+    // threads within a single process; without a lock,
+    // `kill_switch_on` can set the env to "1" in the middle of
+    // `kill_switch_default_off`'s `set_var("0")` +
+    // `assert!(!kt_forward_op_disabled())` sequence, causing a flaky
+    // failure. The same pattern fix was applied to
+    // `kiln-opd-loss-kernel` in commit `73109cbe`; this commit
+    // applies the same shape to `kiln-flce-kernel` after observing
+    // the flake on CI run 26574406306, commit `e82c3017` (#1082).
+    //
+    // Poison recovery is built in via `clear_poison()` since the
+    // only shared state is the env itself, which each test re-
+    // establishes from a known starting condition before asserting.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poisoned| {
+            // A previous test panicked while holding the lock.
+            // Clear the poison and proceed — each test below re-
+            // establishes its own starting env state before
+            // asserting.
+            ENV_LOCK.clear_poison();
+            poisoned.into_inner()
+        })
+    }
 
     #[test]
     fn kill_switch_default_off() {
+        let _guard = env_lock();
         let prior = std::env::var("KILN_DISABLE_FLCE_KT_FORWARD_OP").ok();
         // SAFETY: `kt_forward_op_disabled()` reads the env on each
         // call (no caching), so the toggle is reversible per-test.
-        // Other tests in this binary don't read the same var.
+        // The ENV_LOCK guard above ensures no other test in this
+        // binary is concurrently mutating the same var.
         unsafe {
             std::env::remove_var("KILN_DISABLE_FLCE_KT_FORWARD_OP");
         }
@@ -477,6 +507,7 @@ mod tests {
 
     #[test]
     fn kill_switch_on() {
+        let _guard = env_lock();
         let prior = std::env::var("KILN_DISABLE_FLCE_KT_FORWARD_OP").ok();
         for v in ["1", "true", "yes", "TRUE", "Yes"] {
             unsafe {
