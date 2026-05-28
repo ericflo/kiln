@@ -28,7 +28,7 @@ Last refresh: `014d1b52` (post wave-15 + opd-loss retry from wave-16).
 | kiln-scheduler | No | — |
 | kiln-server | dev-only ✅ | — |
 | kiln-tensor | **Yes** | metal_types re-exports `candle_metal_kernels::*` ([`metal-cargo-toml-candle-drop-stop-2026-05-28.md`](./metal-cargo-toml-candle-drop-stop-2026-05-28.md)) |
-| kiln-train | **Yes** (candle-nn ✅ dev-deps now) | One production ref: `impl candle_core::CustomOp1 for InjectTensorGradient` in trainer.rs. CP-4 caller flip 🛑 **blocked on substrate** — see [`inject-grad-flip-blocked-2026-05-28.md`](./inject-grad-flip-blocked-2026-05-28.md) |
+| kiln-train | **Yes** (candle-nn ✅ dev-deps now) | InjectTensorGradient flip ✅ (Option-2 substrate landed, 6 sites flipped, struct + impl deleted in `a86e9b12`, 3/3 parity tests pass). Remaining: `crate::cd_types` facade still holds production `pub(crate) type Tensor = candle_core::Tensor;` aliases. See [`kiln-train-candle-core-deps-still-required-2026-05-28.md`](./kiln-train-candle-core-deps-still-required-2026-05-28.md) for the cd_types migration path. |
 | kiln-vulkan-kernel | dev-only ✅ | — |
 
 **Production candle-core deps remaining: 7 crates.** (kiln-train was 8th
@@ -70,23 +70,7 @@ candle-free replacement for `kiln-train::trainer::InjectTensorGradient`:
 What's left for CP-4 closeout (`docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`):
 
 1. ✅ Wrap `trainer::sft_train` step root in `with_tape_scope_emit_to_grad_store` — **landed in `675e0dea`** (gated on `KILN_USE_TAPE_FORWARD=1`).
-2. 🛑 **BLOCKED on substrate** — see [`docs/inject-grad-flip-blocked-2026-05-28.md`](./inject-grad-flip-blocked-2026-05-28.md).
-   - There are **six** call sites, not two: `trainer.rs:8068, 8220, 8366,
-     8376, 8446, 8454` (all inside
-     `full_attention_single_layer_tiled_mlp_reverse`).
-   - Substrate `9b2eda8e` is bit-equivalent to the candle path **only
-     when arg IS a Var** (parity test exercises arg=Var; production
-     sites pass arg=intermediate). The shim's `bwd` returns
-     `zeros_like(arg)`; candle's backward walks those zeros through
-     upstream candle ops to the actual leaf Vars BEFORE the bridge's
-     post-hoc `insert_or_add_by_raw` runs. The walk result is wrong
-     for every production query (`grads.get(pre_o_tile_var)`,
-     `grads.get(seg_input_var)`, etc.).
-   - Unblocking path (recommended): move the candle `CustomOp1` impl
-     from `kiln-train::trainer::InjectTensorGradient` to
-     `kiln-kt-bridge::tape_bridge` (Option 2 in the STOP doc), keeping
-     the bwd contract intact and adding kt-tape recording as a side
-     channel.
+2. ✅ **6 InjectTensorGradient sites flipped + struct deleted** (Option-2 substrate landed across e2f8723c → a86e9b12; 3/3 parity tests pass on A6000 — incl. `inject_grad_propagation_through_intermediate`, the production pattern that the Option-0 substrate couldn't handle).
 3. ⏳ Delete `InjectTensorGradient` from trainer.rs once no callers remain.
 4. ⏳ Repeat for the GRPO loop (`trainer.rs:13586`).
 
