@@ -720,11 +720,46 @@ fn gdn_recurrent_qk_norm_native_head_last_matches_split_path() -> Result<()> {
             &vk, &q_norm, &k_norm, &v, &beta, &g, &state, false,
         )
         .context("native-head split qk_norm recurrent")?;
-    let (got_out, got_state) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options(
-            &vk, &q, &k, &v, &beta, &g, &state, false,
+
+    let q_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q)?.0;
+    let k_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k)?.0;
+    let v_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v)?.0;
+    let beta_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta)?.0;
+    let g_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g)?.0;
+    let state_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0;
+    let (got_out_bytes, got_state_bytes) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options_bytes(
+            &vk,
+            &q_data,
+            &k_data,
+            &v_data,
+            &beta_data,
+            &g_data,
+            &state_data,
+            batch,
+            q_heads,
+            heads,
+            dk,
+            dv,
+            false,
         )
         .context("native-head fused qk_norm recurrent")?;
+    let got_out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &got_out_bytes,
+        &[batch, heads, dv],
+        state.dtype(),
+    )?
+    .unsqueeze(1)?;
+    let got_state = got_state_bytes
+        .as_ref()
+        .map(|sd| {
+            kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                sd,
+                state.dims(),
+                state.dtype(),
+            )
+        })
+        .transpose()?;
 
     assert_close(
         "native-head qk-norm recurrent out",

@@ -9563,48 +9563,27 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_with_options(
 
 /// Dispatch a single-token recurrent step with unexpanded raw GQA Q/K heads,
 /// folding the split path's Q/K L2 normalization into the recurrent shader.
+///
+/// Bytes-only variant of the former candle-typed entry point. Callers must
+/// supply the input byte slices and shape parameters directly. Output bytes
+/// are laid out as `[batch, heads, dv]` rows in the kernel's native dtype
+/// (`state_dtype`, which is also the dtype of the optional returned state).
 #[allow(clippy::too_many_arguments)]
-pub fn dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options(
+pub fn dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options_bytes(
     vk_device: &VulkanDevice,
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    g: &Tensor,
-    state: &Tensor,
+    q_data: &[u8],
+    k_data: &[u8],
+    v_data: &[u8],
+    beta_data: &[u8],
+    g_data: &[u8],
+    state_data: &[u8],
+    batch: usize,
+    q_heads: usize,
+    heads: usize,
+    dk: usize,
+    dv: usize,
     skip_state_readback: bool,
-) -> Result<(Tensor, Option<Tensor>)> {
-    let (batch, seq_len, q_heads, dk) = q.dims4()?;
-    let (k_batch, k_seq_len, k_heads, k_dk) = k.dims4()?;
-    let (v_batch, v_seq_len, heads, dv) = v.dims4()?;
-    let (beta_batch, beta_seq_len, beta_heads) = beta.dims3()?;
-    let (g_batch, g_seq_len, g_heads) = g.dims3()?;
-    let (state_batch, state_heads, state_dk, state_dv) = state.dims4()?;
-
-    anyhow::ensure!(
-        seq_len == 1,
-        "native-head qk-norm recurrent expects seq_len=1"
-    );
-    anyhow::ensure!(
-        (k_batch, k_seq_len, k_heads, k_dk) == (batch, seq_len, q_heads, dk),
-        "native-head qk-norm recurrent k shape mismatch"
-    );
-    anyhow::ensure!(
-        (v_batch, v_seq_len) == (batch, seq_len),
-        "native-head qk-norm recurrent v batch/seq mismatch"
-    );
-    anyhow::ensure!(
-        (beta_batch, beta_seq_len, beta_heads) == (batch, seq_len, heads),
-        "native-head qk-norm recurrent beta shape mismatch"
-    );
-    anyhow::ensure!(
-        (g_batch, g_seq_len, g_heads) == (batch, seq_len, heads),
-        "native-head qk-norm recurrent g shape mismatch"
-    );
-    anyhow::ensure!(
-        (state_batch, state_heads, state_dk, state_dv) == (batch, heads, dk, dv),
-        "native-head qk-norm recurrent state shape mismatch"
-    );
+) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
     anyhow::ensure!(
         q_heads > 0,
         "native-head qk-norm recurrent q_heads must be positive"
@@ -9618,26 +9597,19 @@ pub fn dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options(
         "native-head qk-norm recurrent supports dk/dv <= 256, got dk={dk} dv={dv}"
     );
 
-    let q_data = extract_tensor_bytes(q)?.0;
-    let k_data = extract_tensor_bytes(k)?.0;
-    let v_data = extract_tensor_bytes(v)?.0;
-    let beta_data = extract_tensor_bytes(beta)?.0;
-    let g_data = extract_tensor_bytes(g)?.0;
-    let state_data = extract_tensor_bytes(state)?.0;
-
     let glsl_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/gdn_recurrent_qk_norm_step.comp"
     );
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
-    let (out_data, state_data_out) = dispatch_gdn_recurrent_step_single_submit_bytes(
+    dispatch_gdn_recurrent_step_single_submit_bytes(
         vk_device,
-        &q_data,
-        &k_data,
-        &v_data,
-        &beta_data,
-        &g_data,
-        &state_data,
+        q_data,
+        k_data,
+        v_data,
+        beta_data,
+        g_data,
+        state_data,
         &spirv,
         batch,
         heads,
@@ -9648,14 +9620,7 @@ pub fn dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options(
         skip_state_readback,
         false,
         Some((batch as u32, heads as u32, 1)),
-    )?;
-    let out_shape = vec![batch, heads, dv];
-    let out = create_tensor_from_data(&out_data, &out_shape, state.dtype())?;
-    let state_tensor = state_data_out
-        .as_ref()
-        .map(|sd| create_tensor_from_data(sd, state.dims(), state.dtype()))
-        .transpose()?;
-    Ok((out.unsqueeze(1)?, state_tensor))
+    )
 }
 
 // ---------------------------------------------------------------------------
