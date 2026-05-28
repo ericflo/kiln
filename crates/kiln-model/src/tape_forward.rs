@@ -106,8 +106,8 @@
 use anyhow::{Context, Result};
 use candle_core::Tensor;
 use kiln_autograd::{
-    AddBackward, EmbeddingBackward, MatmulBackward, MulSigmoidGateBackward,
-    RopeSplitHalfBackward, SiluBackward, Tape,
+    AddBackward, CrossEntropyKtBackward, EmbeddingBackward, MatmulBackward,
+    MulSigmoidGateBackward, RopeSplitHalfBackward, SiluBackward, Tape,
 };
 
 // Phase 6a/CP-4 (#1082): the thread-local-tape scope machinery
@@ -736,6 +736,98 @@ pub fn try_tape_add_cuda(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
     // CP-4 (#1082) tape_bridge: both inputs are differentiable.
     kiln_kt_bridge::tape_bridge::register_input_mapping(a_kt.id(), a.id());
     kiln_kt_bridge::tape_bridge::register_input_mapping(b_kt.id(), b.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+
+    Ok(Some(out))
+}
+
+/// Attempt to run the softmax + NLL cross-entropy LOSS through the
+/// kt-typed op registry (`kiln_tensor::ops::cross_entropy`) and record a
+/// device-agnostic `CrossEntropyKtBackward` node on the active tape.
+///
+/// Returns:
+/// * `Ok(Some(loss))` — the tape-forward path ran. The returned scalar
+///   `Tensor` is a copy of the kt-typed loss into a candle CUDA tensor;
+///   a `CrossEntropyKtBackward { logits, targets }` node was recorded.
+/// * `Ok(None)` — gate off / non-canonical shapes / no thread-local tape
+///   / kt-bridge borrow rejected the inputs. The caller falls through to
+///   the existing candle loss composite.
+/// * `Err(...)` — an unexpected forward or kt -> candle copy-back failure.
+///
+/// # CP-4 (#1082) context — the loss closes forward coverage
+///
+/// With the prior seven adapters (`rms_norm`, `matmul`, `silu`,
+/// `embedding`, `swiglu`, `rope`, `add`), the full training forward path
+/// — embedding → blocks → final norm → lm_head matmul — can record onto
+/// the kt Tape. `cross_entropy` is the terminal op: once it records, the
+/// whole forward→loss is tape-covered and `Tape::backward` can be seeded
+/// from the scalar loss.
+///
+/// The recorded backward is `CrossEntropyKtBackward` (device-agnostic:
+/// `d_logits = (softmax(logits) - one_hot(targets)) * g / batch`, with the
+/// `[batch, vocab]` activations never leaving the device — only the scalar
+/// grad multiplier touches the host). `targets` are class indices
+/// (non-differentiable), so only `logits` is IO-mapped.
+///
+/// # Not wired into the production loss (yet)
+///
+/// Unlike the other adapters, this is NOT called from the trainer's
+/// `cross_entropy_loss`. cross_entropy is the backward ROOT, and the
+/// current `tape_bridge` keeps candle's `loss.backward()` authoritative
+/// (the tape walk merges into candle's `GradStore`). Tape-routing the
+/// loss would detach it from candle's graph and stop candle backward
+/// from starting. Production wiring waits for the tape-authoritative
+/// bridge (the CP-4 endgame). This adapter + its parity tests prove the
+/// substrate handles the loss op so that flip is unblocked.
+pub fn try_tape_cross_entropy_cuda(
+    logits: &Tensor,
+    targets: &Tensor,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+
+    // kt cross_entropy's contract: logits [batch, vocab], targets
+    // [batch]. Defer any other shape to the caller's candle composite.
+    if logits.rank() != 2 || targets.rank() != 1 {
+        return Ok(None);
+    }
+
+    let logits_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(logits) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let targets_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(targets) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_tensor::ops::cross_entropy(&logits_kt, &targets_kt)
+            .map_err(|e| anyhow::anyhow!("kt cross_entropy: {e}"))?;
+        tape.record(
+            &y,
+            &[&logits_kt, &targets_kt],
+            Box::new(CrossEntropyKtBackward {
+                logits: logits_kt.clone(),
+                targets: targets_kt.clone(),
+            }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let out_kt =
+        out_kt.context("tape_forward::try_tape_cross_entropy_cuda: kt-tape forward failed")?;
+
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape_forward::try_tape_cross_entropy_cuda: kt -> candle copy failed")?;
+
+    // CP-4 (#1082) tape_bridge: only `logits` is differentiable;
+    // `targets` are non-differentiable class indices.
+    kiln_kt_bridge::tape_bridge::register_input_mapping(logits_kt.id(), logits.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
 
     Ok(Some(out))

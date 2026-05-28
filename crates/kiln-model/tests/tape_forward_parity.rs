@@ -1609,3 +1609,208 @@ fn tape_backward_add_routes_grad_to_both_inputs() {
         assert!(diff == 0.0, "add backward must pass grad through unchanged (diff {diff})");
     }
 }
+
+
+// ----------------------------------------------------------------------
+// Cross-entropy (loss) tape-forward parity (#1082 — CP-4 op #8).
+//
+// cross_entropy is the terminal LOSS op: `loss = mean_b(logsumexp(logits[b])
+// - logits[b, target[b]])`. The adapter routes it through
+// `kiln_tensor::ops::cross_entropy` and records the DEVICE-AGNOSTIC
+// `CrossEntropyKtBackward` (d_logits = (softmax(logits) - one_hot(targets))
+// * g / batch; targets non-differentiable). Forward is checked against a
+// host f32 mean-NLL reference; backward against the analytic
+// shift-by-one-hot gradient.
+//
+// NOTE: deliberately NOT wired into the production loss — see
+// `try_tape_cross_entropy_cuda` docs (the loss is the backward root and
+// the current bridge keeps candle backward authoritative). These tests
+// validate the substrate so the eventual tape-authoritative flip is
+// unblocked.
+// ----------------------------------------------------------------------
+
+fn build_ce_inputs(device: &Device, batch: usize, vocab: usize) -> (Tensor, Tensor) {
+    let mut state = 0x0CE5_1234_5678_9ABCu64;
+    let mut logit_host = Vec::with_capacity(batch * vocab);
+    for _ in 0..batch * vocab {
+        logit_host.push(lcg(&mut state) * 3.0);
+    }
+    let logits = Tensor::from_vec(logit_host, (batch, vocab), &Device::Cpu)
+        .expect("logits cpu")
+        .to_device(device)
+        .expect("logits -> cuda")
+        .contiguous()
+        .expect("logits contig");
+    let tgt_host: Vec<u32> = (0..batch).map(|b| ((b * 7 + 3) % vocab) as u32).collect();
+    let targets = Tensor::from_vec(tgt_host, batch, &Device::Cpu)
+        .expect("targets cpu")
+        .to_device(device)
+        .expect("targets -> cuda")
+        .contiguous()
+        .expect("targets contig");
+    (logits, targets)
+}
+
+fn ce_reference_loss(logits: &[f32], targets: &[u32], batch: usize, vocab: usize) -> f32 {
+    let mut total = 0.0f32;
+    for b in 0..batch {
+        let row = &logits[b * vocab..(b + 1) * vocab];
+        let m = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let lse = m + row.iter().map(|&x| (x - m).exp()).sum::<f32>().ln();
+        total += lse - row[targets[b] as usize];
+    }
+    total / (batch as f32)
+}
+
+fn ce_host_f32(t: &Tensor) -> Vec<f32> {
+    t.to_dtype(DType::F32)
+        .expect("-> f32")
+        .flatten_all()
+        .expect("flat")
+        .to_vec1::<f32>()
+        .expect("vec")
+}
+
+#[test]
+fn tape_forward_cross_entropy_matches_reference() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_forward cross_entropy: no CUDA device — skipping");
+            return;
+        }
+    };
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    let (batch, vocab) = (16usize, 128usize);
+    let (logits, targets) = build_ce_inputs(&device, batch, vocab);
+
+    let none_out =
+        kiln_model::tape_forward::try_tape_cross_entropy_cuda(&logits, &targets).expect("baseline ok");
+    assert!(none_out.is_none(), "no-scope path must be Ok(None)");
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_cross_entropy_cuda(&logits, &targets)
+    });
+    let out = res.expect("tape ok").expect("Some(loss)");
+    assert_eq!(tape.len(), 1, "cross_entropy must record exactly one node");
+    assert_eq!(
+        tape.nodes()[0].input_ids.len(),
+        2,
+        "cross_entropy records two inputs (logits, targets)"
+    );
+
+    let logit_h = ce_host_f32(&logits);
+    let tgt_h: Vec<u32> = targets
+        .to_dtype(DType::U32)
+        .expect("u32")
+        .flatten_all()
+        .expect("flat")
+        .to_vec1::<u32>()
+        .expect("vec");
+    let want = ce_reference_loss(&logit_h, &tgt_h, batch, vocab);
+    let got = ce_host_f32(&out);
+    assert_eq!(got.len(), 1, "loss is a scalar");
+    assert!(
+        (got[0] - want).abs() < 1e-2,
+        "cross_entropy loss diverges from f32 reference (got {}, want {want})",
+        got[0]
+    );
+}
+
+#[test]
+fn tape_forward_cross_entropy_short_circuits_without_scope() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => return,
+    };
+    let (logits, targets) = build_ce_inputs(&device, 8, 64);
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+    let out = kiln_model::tape_forward::try_tape_cross_entropy_cuda(&logits, &targets)
+        .expect("call ok");
+    assert!(out.is_none(), "no active scope must short-circuit to Ok(None)");
+}
+
+#[test]
+fn tape_backward_cross_entropy_matches_analytic_gradient() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_backward cross_entropy: no CUDA device — skipping");
+            return;
+        }
+    };
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    let (batch, vocab) = (16usize, 128usize);
+    let (logits, targets) = build_ce_inputs(&device, batch, vocab);
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_cross_entropy_cuda(&logits, &targets)
+    });
+    let out = res.expect("fwd ok").expect("Some(loss)");
+    assert_eq!(tape.len(), 1);
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(input_ids.len(), 2);
+
+    // Scalar upstream grad = 1.0, shaped like the loss output, copied
+    // (owned) to mirror the real tape_bridge seed path.
+    let seed = Tensor::ones(out.shape(), DType::F32, &device).expect("ones seed");
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&seed).expect("seed kt copy");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("cross_entropy backward walk");
+
+    let dlogits_kt = grads.get(input_ids[0]).expect("d_logits present");
+    let dlogits = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(dlogits_kt).expect("d -> candle");
+    assert_eq!(dlogits.shape().dims(), &[batch, vocab], "d_logits shape");
+    assert!(
+        grads.get(input_ids[1]).is_none(),
+        "targets are non-differentiable — must have no recorded grad"
+    );
+
+    // Analytic: d_logits[b,v] = (softmax(logits[b])[v] - 1_{v==target[b]}) / batch.
+    let logit_h = ce_host_f32(&logits);
+    let tgt_h: Vec<u32> = targets
+        .to_dtype(DType::U32)
+        .expect("u32")
+        .flatten_all()
+        .expect("flat")
+        .to_vec1::<u32>()
+        .expect("vec");
+    let mut want = vec![0f32; batch * vocab];
+    for b in 0..batch {
+        let row = &logit_h[b * vocab..(b + 1) * vocab];
+        let m = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let denom: f32 = row.iter().map(|&x| (x - m).exp()).sum();
+        for v in 0..vocab {
+            let sm = (row[v] - m).exp() / denom;
+            let onehot = if v == tgt_h[b] as usize { 1.0 } else { 0.0 };
+            want[b * vocab + v] = (sm - onehot) / (batch as f32);
+        }
+    }
+    let want_t = Tensor::from_vec(want, (batch, vocab), &Device::Cpu)
+        .expect("ref cpu")
+        .to_device(&device)
+        .expect("ref -> cuda");
+    let diff = max_abs_diff(&dlogits, &want_t);
+    assert!(
+        diff < 1e-3,
+        "cross_entropy backward diverges from analytic gradient (max-abs-diff {diff})"
+    );
+}
