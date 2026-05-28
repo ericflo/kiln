@@ -9,7 +9,6 @@
 //! back to the compute dtype on read.
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor};
 
 use crate::fp8;
 
@@ -23,7 +22,7 @@ pub struct KvCache {
     /// Per full-attention layer: (k_cache, v_cache) tensors.
     /// When `fp8` is false: dtype matches `compute_dtype`.
     /// When `fp8` is true: dtype is U8 (FP8 E4M3 bit patterns).
-    layers: Vec<(Tensor, Tensor)>,
+    layers: Vec<(candle_core::Tensor, candle_core::Tensor)>,
     /// Current sequence length (number of cached positions).
     seq_len: usize,
     /// Maximum sequence length the cache can hold.
@@ -34,7 +33,7 @@ pub struct KvCache {
     /// Only used when `fp8` is true. Updated on each write.
     fp8_scales: Vec<(f32, f32)>,
     /// The original compute dtype (e.g. BF16) for dequantization.
-    compute_dtype: DType,
+    compute_dtype: candle_core::DType,
 }
 
 impl KvCache {
@@ -51,8 +50,8 @@ impl KvCache {
         num_kv_heads: usize,
         head_dim: usize,
         max_seq_len: usize,
-        dtype: DType,
-        device: &Device,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
     ) -> Result<Self> {
         Self::new_with_fp8(
             num_full_attn_layers,
@@ -76,9 +75,9 @@ impl KvCache {
     /// without importing `candle_core::DType` + `candle_core::Device`
     /// at the call site.
     ///
-    /// Errors when the kt Device has no candle equivalent on this
+    /// Errors when the kt candle_core::Device has no candle equivalent on this
     /// build (e.g. `Vulkan(_)`; the kiln-server Vulkan path uses a
-    /// CPU candle device by convention) or when the kt DType cannot
+    /// CPU candle device by convention) or when the kt candle_core::DType cannot
     /// be represented in candle (e.g. `F8E4M3` — use
     /// [`Self::new_with_fp8_kt`] with the dequant dtype + `fp8=true`).
     ///
@@ -151,21 +150,21 @@ impl KvCache {
         num_kv_heads: usize,
         head_dim: usize,
         max_seq_len: usize,
-        dtype: DType,
-        device: &Device,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
         fp8: bool,
     ) -> Result<Self> {
         let dtype = cpu_compatible_compute_dtype(dtype, device);
-        let storage_dtype = if fp8 { DType::U8 } else { dtype };
+        let storage_dtype = if fp8 { candle_core::DType::U8 } else { dtype };
         let mut layers = Vec::with_capacity(num_full_attn_layers);
         for i in 0..num_full_attn_layers {
-            let k = Tensor::zeros(
+            let k = candle_core::Tensor::zeros(
                 (1, num_kv_heads, max_seq_len, head_dim),
                 storage_dtype,
                 device,
             )
             .with_context(|| format!("allocating k_cache for full-attn layer {i}"))?;
-            let v = Tensor::zeros(
+            let v = candle_core::Tensor::zeros(
                 (1, num_kv_heads, max_seq_len, head_dim),
                 storage_dtype,
                 device,
@@ -223,9 +222,9 @@ impl KvCache {
     pub fn update(
         &mut self,
         layer_idx: usize,
-        new_k: &Tensor,
-        new_v: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
+        new_k: &candle_core::Tensor,
+        new_v: &candle_core::Tensor,
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
         let new_len = new_k.dim(2)?;
         let end = self.seq_len + new_len;
         anyhow::ensure!(
@@ -247,10 +246,10 @@ impl KvCache {
     fn update_native(
         &mut self,
         layer_idx: usize,
-        new_k: &Tensor,
-        new_v: &Tensor,
+        new_k: &candle_core::Tensor,
+        new_v: &candle_core::Tensor,
         end: usize,
-    ) -> Result<(Tensor, Tensor)> {
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
         let (k_cache, v_cache) = &mut self.layers[layer_idx];
 
         k_cache.slice_set(new_k, 2, self.seq_len)?;
@@ -270,10 +269,10 @@ impl KvCache {
     fn update_fp8(
         &mut self,
         layer_idx: usize,
-        new_k: &Tensor,
-        new_v: &Tensor,
+        new_k: &candle_core::Tensor,
+        new_v: &candle_core::Tensor,
         end: usize,
-    ) -> Result<(Tensor, Tensor)> {
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
         let device = new_k.device().clone();
         let (k_cache, v_cache) = &mut self.layers[layer_idx];
 
@@ -299,8 +298,8 @@ impl KvCache {
             let new_k_typed = new_k.to_dtype(self.compute_dtype)?;
             let new_v_typed = new_v.to_dtype(self.compute_dtype)?;
 
-            let full_k = Tensor::cat(&[&existing_k, &new_k_typed], 2)?;
-            let full_v = Tensor::cat(&[&existing_v, &new_v_typed], 2)?;
+            let full_k = candle_core::Tensor::cat(&[&existing_k, &new_k_typed], 2)?;
+            let full_v = candle_core::Tensor::cat(&[&existing_v, &new_v_typed], 2)?;
 
             let (k_q, k_scale) = fp8::quantize_to_fp8(&full_k)?;
             let (v_q, v_scale) = fp8::quantize_to_fp8(&full_v)?;
@@ -335,9 +334,9 @@ impl KvCache {
     }
 }
 
-fn cpu_compatible_compute_dtype(dtype: DType, device: &Device) -> DType {
-    if matches!(device, Device::Cpu) && dtype != DType::F32 {
-        DType::F32
+fn cpu_compatible_compute_dtype(dtype: candle_core::DType, device: &candle_core::Device) -> candle_core::DType {
+    if matches!(device, candle_core::Device::Cpu) && dtype != candle_core::DType::F32 {
+        candle_core::DType::F32
     } else {
         dtype
     }
@@ -369,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_kv_cache_update_and_advance() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         // Migrated to `new_kt` (#1082).
         let mut cache = KvCache::new_kt(
             1,
@@ -381,8 +380,8 @@ mod tests {
         )?;
 
         // Simulate prefill with 3 tokens
-        let k = Tensor::ones((1, 2, 3, 4), DType::F32, &device)?;
-        let v = Tensor::ones((1, 2, 3, 4), DType::F32, &device)?;
+        let k = candle_core::Tensor::ones((1, 2, 3, 4), candle_core::DType::F32, &device)?;
+        let v = candle_core::Tensor::ones((1, 2, 3, 4), candle_core::DType::F32, &device)?;
         let (full_k, full_v) = cache.update(0, &k, &v)?;
         assert_eq!(full_k.dims(), &[1, 2, 3, 4]);
         assert_eq!(full_v.dims(), &[1, 2, 3, 4]);
@@ -390,8 +389,8 @@ mod tests {
         assert_eq!(cache.seq_len(), 3);
 
         // Simulate decode with 1 token
-        let k2 = Tensor::ones((1, 2, 1, 4), DType::F32, &device)?;
-        let v2 = Tensor::ones((1, 2, 1, 4), DType::F32, &device)?;
+        let k2 = candle_core::Tensor::ones((1, 2, 1, 4), candle_core::DType::F32, &device)?;
+        let v2 = candle_core::Tensor::ones((1, 2, 1, 4), candle_core::DType::F32, &device)?;
         let (full_k, full_v) = cache.update(0, &k2, &v2)?;
         assert_eq!(full_k.dims(), &[1, 2, 4, 4]); // 3 + 1 = 4
         assert_eq!(full_v.dims(), &[1, 2, 4, 4]);
@@ -403,7 +402,7 @@ mod tests {
 
     #[test]
     fn test_kv_cache_overflow() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         // Migrated to `new_kt` (#1082).
         let mut cache = KvCache::new_kt(
             1,
@@ -414,14 +413,14 @@ mod tests {
             &kiln_tensor::Device::Cpu,
         )?;
 
-        let k = Tensor::ones((1, 1, 3, 4), DType::F32, &device)?;
-        let v = Tensor::ones((1, 1, 3, 4), DType::F32, &device)?;
+        let k = candle_core::Tensor::ones((1, 1, 3, 4), candle_core::DType::F32, &device)?;
+        let v = candle_core::Tensor::ones((1, 1, 3, 4), candle_core::DType::F32, &device)?;
         cache.update(0, &k, &v)?;
         cache.advance(3);
 
         // This should overflow: 3 + 2 > 4
-        let k2 = Tensor::ones((1, 1, 2, 4), DType::F32, &device)?;
-        let v2 = Tensor::ones((1, 1, 2, 4), DType::F32, &device)?;
+        let k2 = candle_core::Tensor::ones((1, 1, 2, 4), candle_core::DType::F32, &device)?;
+        let v2 = candle_core::Tensor::ones((1, 1, 2, 4), candle_core::DType::F32, &device)?;
         let result = cache.update(0, &k2, &v2);
         assert!(result.is_err());
 
@@ -430,7 +429,7 @@ mod tests {
 
     #[test]
     fn test_kv_cache_reset() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         // Migrated to `new_kt` (#1082).
         let mut cache = KvCache::new_kt(
             1,
@@ -441,8 +440,8 @@ mod tests {
             &kiln_tensor::Device::Cpu,
         )?;
 
-        let k = Tensor::ones((1, 1, 5, 4), DType::F32, &device)?;
-        let v = Tensor::ones((1, 1, 5, 4), DType::F32, &device)?;
+        let k = candle_core::Tensor::ones((1, 1, 5, 4), candle_core::DType::F32, &device)?;
+        let v = candle_core::Tensor::ones((1, 1, 5, 4), candle_core::DType::F32, &device)?;
         cache.update(0, &k, &v)?;
         cache.advance(5);
         assert_eq!(cache.seq_len(), 5);
@@ -455,7 +454,7 @@ mod tests {
 
     #[test]
     fn test_kv_cache_content_preserved() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         // Migrated to `new_kt` (#1082).
         let mut cache = KvCache::new_kt(
             1,
@@ -467,14 +466,14 @@ mod tests {
         )?;
 
         // Write known values for first 2 positions
-        let k1 = Tensor::new(&[[[[1.0_f32, 2.0], [3.0, 4.0]]]], &device)?; // [1,1,2,2]
-        let v1 = Tensor::new(&[[[[5.0_f32, 6.0], [7.0, 8.0]]]], &device)?;
+        let k1 = candle_core::Tensor::new(&[[[[1.0_f32, 2.0], [3.0, 4.0]]]], &device)?; // [1,1,2,2]
+        let v1 = candle_core::Tensor::new(&[[[[5.0_f32, 6.0], [7.0, 8.0]]]], &device)?;
         cache.update(0, &k1, &v1)?;
         cache.advance(2);
 
         // Write 1 more position
-        let k2 = Tensor::new(&[[[[9.0_f32, 10.0]]]], &device)?; // [1,1,1,2]
-        let v2 = Tensor::new(&[[[[11.0_f32, 12.0]]]], &device)?;
+        let k2 = candle_core::Tensor::new(&[[[[9.0_f32, 10.0]]]], &device)?; // [1,1,1,2]
+        let v2 = candle_core::Tensor::new(&[[[[11.0_f32, 12.0]]]], &device)?;
         let (full_k, full_v) = cache.update(0, &k2, &v2)?;
         cache.advance(1);
 
@@ -491,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_kv_cache_fp8_new() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         // Migrated to `new_with_fp8_kt` (#1082).
         let cache = KvCache::new_with_fp8_kt(
             2,
@@ -505,14 +504,14 @@ mod tests {
         assert_eq!(cache.seq_len(), 0);
         assert!(cache.is_fp8());
         // Storage should be U8
-        assert_eq!(cache.layers[0].0.dtype(), DType::U8);
-        assert_eq!(cache.layers[0].1.dtype(), DType::U8);
+        assert_eq!(cache.layers[0].0.dtype(), candle_core::DType::U8);
+        assert_eq!(cache.layers[0].1.dtype(), candle_core::DType::U8);
         Ok(())
     }
 
     #[test]
     fn test_kv_cache_fp8_update_and_advance() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         // Migrated to `new_with_fp8_kt` (#1082).
         let mut cache = KvCache::new_with_fp8_kt(
             1,
@@ -524,17 +523,17 @@ mod tests {
             true,
         )?;
 
-        let k = Tensor::ones((1, 2, 3, 4), DType::F32, &device)?;
-        let v = Tensor::ones((1, 2, 3, 4), DType::F32, &device)?;
+        let k = candle_core::Tensor::ones((1, 2, 3, 4), candle_core::DType::F32, &device)?;
+        let v = candle_core::Tensor::ones((1, 2, 3, 4), candle_core::DType::F32, &device)?;
         let (full_k, full_v) = cache.update(0, &k, &v)?;
         assert_eq!(full_k.dims(), &[1, 2, 3, 4]);
         assert_eq!(full_v.dims(), &[1, 2, 3, 4]);
         // Output should be in compute dtype (F32)
-        assert_eq!(full_k.dtype(), DType::F32);
+        assert_eq!(full_k.dtype(), candle_core::DType::F32);
         cache.advance(3);
 
-        let k2 = Tensor::ones((1, 2, 1, 4), DType::F32, &device)?;
-        let v2 = Tensor::ones((1, 2, 1, 4), DType::F32, &device)?;
+        let k2 = candle_core::Tensor::ones((1, 2, 1, 4), candle_core::DType::F32, &device)?;
+        let v2 = candle_core::Tensor::ones((1, 2, 1, 4), candle_core::DType::F32, &device)?;
         let (full_k, full_v) = cache.update(0, &k2, &v2)?;
         assert_eq!(full_k.dims(), &[1, 2, 4, 4]);
         assert_eq!(full_v.dims(), &[1, 2, 4, 4]);
@@ -546,7 +545,7 @@ mod tests {
 
     #[test]
     fn test_kv_cache_fp8_approximate_values() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         // Migrated to `new_with_fp8_kt` (#1082).
         let mut cache = KvCache::new_with_fp8_kt(
             1,
@@ -558,13 +557,13 @@ mod tests {
             true,
         )?;
 
-        let k1 = Tensor::new(&[[[[1.0_f32, 2.0], [3.0, 4.0]]]], &device)?;
-        let v1 = Tensor::new(&[[[[5.0_f32, 6.0], [7.0, 8.0]]]], &device)?;
+        let k1 = candle_core::Tensor::new(&[[[[1.0_f32, 2.0], [3.0, 4.0]]]], &device)?;
+        let v1 = candle_core::Tensor::new(&[[[[5.0_f32, 6.0], [7.0, 8.0]]]], &device)?;
         cache.update(0, &k1, &v1)?;
         cache.advance(2);
 
-        let k2 = Tensor::new(&[[[[9.0_f32, 10.0]]]], &device)?;
-        let v2 = Tensor::new(&[[[[11.0_f32, 12.0]]]], &device)?;
+        let k2 = candle_core::Tensor::new(&[[[[9.0_f32, 10.0]]]], &device)?;
+        let v2 = candle_core::Tensor::new(&[[[[11.0_f32, 12.0]]]], &device)?;
         let (full_k, full_v) = cache.update(0, &k2, &v2)?;
         cache.advance(1);
 
@@ -594,7 +593,7 @@ mod tests {
 
     #[test]
     fn test_kv_cache_fp8_memory_savings() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         // FP8 cache stores U8 (1 byte), native stores F32 (4 bytes) or BF16 (2 bytes)
         // Migrated to `_kt` constructors (#1082).
         let fp8_cache = KvCache::new_with_fp8_kt(
@@ -621,15 +620,15 @@ mod tests {
         assert_eq!(fp8_elem, native_elem, "Same number of elements");
 
         // But FP8 uses 1 byte per element vs 4 bytes for F32
-        assert_eq!(fp8_cache.layers[0].0.dtype(), DType::U8);
-        assert_eq!(native_cache.layers[0].0.dtype(), DType::F32);
+        assert_eq!(fp8_cache.layers[0].0.dtype(), candle_core::DType::U8);
+        assert_eq!(native_cache.layers[0].0.dtype(), candle_core::DType::F32);
 
         Ok(())
     }
 
     #[test]
     fn test_kv_cache_fp8_reset() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         // Migrated to `new_with_fp8_kt` (#1082).
         let mut cache = KvCache::new_with_fp8_kt(
             1,
@@ -641,8 +640,8 @@ mod tests {
             true,
         )?;
 
-        let k = Tensor::ones((1, 1, 5, 4), DType::F32, &device)?;
-        let v = Tensor::ones((1, 1, 5, 4), DType::F32, &device)?;
+        let k = candle_core::Tensor::ones((1, 1, 5, 4), candle_core::DType::F32, &device)?;
+        let v = candle_core::Tensor::ones((1, 1, 5, 4), candle_core::DType::F32, &device)?;
         cache.update(0, &k, &v)?;
         cache.advance(5);
         assert_eq!(cache.seq_len(), 5);
