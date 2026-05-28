@@ -415,3 +415,74 @@ At that point the three `kt_forward_op.rs` modules become dead code
 and can be deleted in a single PR. The `try_tape_*_cuda` adapters
 become the unconditional path (the env gate + scope check fall away
 once the substrate is the only training path).
+
+---
+
+## Update — 2026-05-28 (post CP-4 bridge landing)
+
+The "what unblocks the deletion" section above gave 3 steps that
+assumed the deletion path was `loss.backward()` → `Tape::backward`
+**replacement**. A different (cheaper) substrate landed instead: the
+`tape_bridge::with_tape_scope_emit_to_grad_store` wrapper
+(`bf248d4d` + `82512751`).
+
+### What the bridge does
+
+Inside a bridge scope, **both** walkers run:
+
+1. The candle `loss.backward()` walks its own BackpropOp graph as
+   usual, populating a `candle_core::backprop::GradStore` keyed on
+   candle TensorIds.
+2. The `try_tape_*_cuda` adapters that fired during forward have
+   each registered `(kt_id ↔ candle_id)` IO mappings.
+3. After candle's walk completes, the bridge walks the recorded
+   `kiln_autograd::Tape` with seeds derived from candle's GradStore
+   (using the registered output mappings to find the right
+   candle-side seed for each tape output).
+4. The bridge merges the per-kt-input gradients back into the same
+   candle GradStore, keyed on the registered candle TensorId.
+
+Result: callers that previously got their gradient through the candle
+walker continue to. Callers downstream of a tape-routed primitive
+get their gradient through the kt-tape walker (the bridge surfaces it
+on the matching candle TensorId in the same GradStore).
+
+### Revised unblock sequence (replaces the 3 steps above)
+
+1. ✅ **Open `with_tape_scope_emit_to_grad_store` around each
+   training step in `kiln-train::trainer`.** Landed in `675e0dea`
+   (SFT non-checkpointed path). The GRPO loop and the gradient-
+   checkpointed SFT path are pending.
+2. ⏳ **Convert `KILN_USE_TAPE_FORWARD=1` from env-only to a
+   train-config field** so production training runs can opt in
+   without env plumbing.
+3. ⏳ **Per-call-site flip each `fused_rmsnorm_via_kt_forward_op` ↔
+   `try_tape_rms_norm_cuda`** so the bridge becomes the only path
+   that records on the tape (rather than both adapters racing on a
+   subset of sites).
+4. ⏳ **Once `KILN_USE_TAPE_FORWARD=1` is the default training
+   path,** delete `crates/kiln-rmsnorm-kernel/src/kt_forward_op.rs`
+   (and its FLCE + OPD siblings) in a single PR. The
+   `try_tape_*_cuda` adapters become the unconditional path; the
+   env gate + scope check fall away.
+
+### Why `loss.backward()` stays
+
+The bridge's design keeps `loss.backward()` intact because every
+kt-typed adapter's return value is still a **candle Tensor** (built
+via `kt_tensor_to_candle_cuda_copy`). Downstream candle ops that
+consume this Tensor build a normal candle BackpropOp graph and need
+the candle walker to run. Replacing `loss.backward()` outright would
+require porting every downstream op (cross_entropy, sum, mean, etc.)
+off candle simultaneously — the bridge avoids that big-bang refactor
+by composing the two walkers instead.
+
+### Net status
+
+The Wave-13 "STOP" remains correct **for the deletion path it
+describes** (a clean replacement of `loss.backward()` with
+`Tape::backward`). The bridge path lands earlier; the deletion
+moment is when every kernel-crate `kt_forward_op.rs` has its
+`try_tape_*_cuda` sibling AND production training has flipped to
+the bridge by default. See `docs/candle-removal-status-2026-05-28-pm.md`
+for the current per-crate state.
