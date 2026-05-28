@@ -64,32 +64,6 @@ pub struct MetalStorage {
 }
 
 impl MetalStorage {
-    /// Allocate `n_elements` worth of bytes for `dtype` on
-    /// `candle_device`. Zero-initialized via candle's blit-encoder
-    /// fill (the same path used by `MetalDevice::allocate_zeros`).
-    ///
-    /// `device_index` is the Metal device index (always 0 on Apple
-    /// Silicon today; Multi-GPU Macs would use 1+).
-    pub fn zeros(
-        candle_device: Arc<MetalDevice>,
-        device_index: usize,
-        dtype: DType,
-        n_elements: usize,
-    ) -> Result<Self> {
-        let byte_len = dtype.packed_buffer_bytes(n_elements);
-        let buffer = candle_device.allocate_zeros(byte_len).map_err(|e| {
-            Error::Msg(format!(
-                "MetalStorage::zeros: allocate_zeros({byte_len}) failed: {e:?}"
-            ))
-        })?;
-        Ok(MetalStorage {
-            device: Device::Metal(device_index),
-            dtype,
-            buffer,
-            candle_device,
-        })
-    }
-
     /// Allocate `n_elements` worth of bytes for `dtype` on the metal-rs
     /// `device`, **candle-free** in the allocation path.
     ///
