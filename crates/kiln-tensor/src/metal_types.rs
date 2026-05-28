@@ -252,3 +252,177 @@ pub type RawDevice =
 /// `primary_metal_device` shim retires once this lands).
 pub type RawCommandQueue =
     objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandQueue>>;
+
+// ----------------------------------------------------------------------
+// MetalCompanion — kt-native substrate for the 7 in-file substrate ops
+// (#1082 Phase 7 — Wave 14 lift)
+// ----------------------------------------------------------------------
+//
+// `MetalCompanion` collects the substrate primitives the 7 internal
+// substrate ops in `metal_storage.rs` currently reach for through a
+// derived candle `MetalDevice` wrapper:
+//   - `.metal_device()`   -> the `&Device` for `candle_metal_kernels::call_*`
+//   - `.kernels()`        -> the `&Kernels` MSL pipeline-state cache
+//   - `.command_encoder()` -> a `ComputeCommandEncoder` from a pool
+//
+// All three primitives live in `candle_metal_kernels` itself (not
+// `candle-core`) — `Kernels::new()`, `Commands::new(command_queue)`,
+// and the Device's `new_command_queue()` are candle-core-free
+// constructors. Holding them on a kt-native struct lets the 7 ops
+// dispatch through `candle_metal_kernels::call_*` without ever
+// materializing a candle `MetalDevice` per call (the
+// `primary_metal_device` shim and its `candle_core::Device::new_metal`
+// call site retire once the ops migrate).
+//
+// # Wave-14 status
+//
+// This commit adds the type only — no callers yet. The 7 substrate ops
+// still derive a candle `MetalDevice` per call via the existing
+// `MetalStorage::candle_device()` back-compat shim. A follow-up commit
+// adds the `MetalStorage::companion()` accessor + a per-device-index
+// `OnceLock<HashMap>` cache (parallel to `primary_metal_device`); a
+// subsequent commit migrates the ops + drops the candle-core hook from
+// `metal_storage.rs`.
+//
+// # Why this is the right substrate
+//
+// `candle_metal_kernels::call_*` consumes:
+//   - `device: &Device` — the candle-metal-kernels Device wrapper
+//   - `ep: impl EncoderProvider` — satisfied by `&ComputeCommandEncoder`
+//   - `kernels: &Kernels` — pipeline cache
+//
+// Every primitive on the right is in `candle_metal_kernels`, not
+// `candle-core`. `MetalCompanion` simply holds owned/`Arc`-ed copies
+// of each so the ops can read `&Device` / `&Kernels` / construct a
+// fresh `ComputeCommandEncoder` per call without going through candle.
+//
+// The eventual Cargo.toml `candle-core` drop is blocked by the
+// `MetalDevice` / `DeviceId` / `Storage` / `sdpa` re-exports above
+// (consumed at ~48 callsites in `kiln-model::backend::metal`), not by
+// the in-file ops — those become candle-free as soon as `MetalCompanion`
+// + accessor land.
+
+/// Kt-native substrate for the 7 in-file Metal substrate ops in
+/// `metal_storage.rs`. Holds the candle-core-free primitives every
+/// `candle_metal_kernels::call_*` invocation needs:
+///   - A `candle_metal_kernels::metal::Device` for the `&Device` parameter
+///   - An `Arc<candle_metal_kernels::Kernels>` MSL pipeline cache
+///   - An `Arc<RwLock<candle_metal_kernels::metal::Commands>>` command-
+///     buffer pool for `ComputeCommandEncoder` materialization
+///
+/// Constructed via [`MetalCompanion::from_raw`] from a
+/// `candle_metal_kernels::metal::Device` (which is itself just a
+/// thin wrapper around `Retained<ProtocolObject<dyn MTLDevice>>` —
+/// candle-core is not involved at any step). Mirror in spirit of
+/// candle's `MetalDevice` struct (`vendor/candle-core/src/metal_backend/device.rs`)
+/// but stripped of every non-substrate field (buffer pools, random
+/// seed, DeviceId — none of which the 7 ops touch).
+///
+/// # Why fields are `Arc`-shared
+///
+/// `Kernels` and `Commands` are designed for cross-thread shared use
+/// (candle wraps them in `Arc` for the same reason). `Device` is
+/// internally `Retained<ProtocolObject<...>>` — cheap to clone via
+/// NSObject `retain` — so it's held by value.
+///
+/// # Phase 7 follow-up
+///
+/// When `kiln-mps` lands its kt-native MSL kernel cache, this companion
+/// flips its `kernels: Arc<Kernels>` field from
+/// `candle_metal_kernels::Kernels` to a kt-native equivalent without
+/// touching any caller. Same for `commands` if a kt-native command-
+/// buffer pool replaces candle's.
+#[derive(Clone)]
+pub struct MetalCompanion {
+    device: candle_metal_kernels::metal::Device,
+    kernels: std::sync::Arc<candle_metal_kernels::Kernels>,
+    commands: std::sync::Arc<std::sync::RwLock<candle_metal_kernels::metal::Commands>>,
+}
+
+impl std::fmt::Debug for MetalCompanion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetalCompanion")
+            .field("device", &"<MTLDevice>")
+            .field("kernels", &"<Kernels cache>")
+            .field("commands", &"<Commands pool>")
+            .finish()
+    }
+}
+
+impl MetalCompanion {
+    /// Build a fresh companion from a raw `candle_metal_kernels` Device
+    /// handle. Allocates a new `Kernels` cache, a new `MTLCommandQueue`,
+    /// and a new `Commands` pool — all candle-core-free.
+    ///
+    /// Same shape as candle's `MetalDevice::new` (the `Device::all()` /
+    /// `Device::system_default()` + `Kernels::new()` +
+    /// `Commands::new(command_queue)` triple) but without the surrounding
+    /// buffer-map / seed-buffer / DeviceId machinery the 7 ops never use.
+    ///
+    /// Returns `Err` if the command-queue or `Commands` pool fails to
+    /// build — both forward the underlying `MetalKernelError` as a
+    /// `kiln_tensor::Error::Msg`.
+    pub fn from_raw(device: candle_metal_kernels::metal::Device) -> crate::Result<Self> {
+        use candle_metal_kernels::metal::Commands;
+        use candle_metal_kernels::Kernels;
+        let command_queue = device.new_command_queue().map_err(|e| {
+            crate::Error::Msg(format!(
+                "MetalCompanion::from_raw: new_command_queue failed: {e:?}"
+            ))
+        })?;
+        let commands = Commands::new(command_queue).map_err(|e| {
+            crate::Error::Msg(format!(
+                "MetalCompanion::from_raw: Commands::new failed: {e:?}"
+            ))
+        })?;
+        Ok(MetalCompanion {
+            device,
+            kernels: std::sync::Arc::new(Kernels::new()),
+            commands: std::sync::Arc::new(std::sync::RwLock::new(commands)),
+        })
+    }
+
+    /// Borrow the underlying `candle_metal_kernels` Device — the
+    /// `&Device` parameter every `call_*` MSL kernel entry consumes.
+    pub fn device(&self) -> &candle_metal_kernels::metal::Device {
+        &self.device
+    }
+
+    /// Borrow the MSL pipeline cache — the `&Kernels` parameter every
+    /// `call_*` MSL kernel entry consumes.
+    pub fn kernels(&self) -> &candle_metal_kernels::Kernels {
+        &self.kernels
+    }
+
+    /// Materialize a fresh `ComputeCommandEncoder` from the underlying
+    /// `Commands` pool. Mirror of candle's
+    /// `MetalDevice::command_encoder()` — same `Commands::command_encoder`
+    /// call underneath, just reached through the kt-native companion
+    /// rather than the candle wrapper.
+    ///
+    /// The returned encoder ends encoding on drop (the
+    /// `candle_metal_kernels::metal::ComputeCommandEncoder` `Drop` impl
+    /// calls `end_encoding()`), so callers don't need to manage it
+    /// manually.
+    pub fn command_encoder(
+        &self,
+    ) -> crate::Result<candle_metal_kernels::metal::ComputeCommandEncoder> {
+        let commands = self.commands.write().map_err(|e| {
+            crate::Error::Msg(format!(
+                "MetalCompanion::command_encoder: commands.write() poisoned: {e}"
+            ))
+        })?;
+        let (_flush, encoder) = commands.command_encoder().map_err(|e| {
+            crate::Error::Msg(format!(
+                "MetalCompanion::command_encoder: Commands::command_encoder failed: {e:?}"
+            ))
+        })?;
+        // The `flush` bool from candle's pool signals when the pool
+        // should sweep buffer maps. We don't keep buffer maps on the
+        // companion — sweeping is candle's concern, not kt-tensor's —
+        // so we discard it. (The 7 ops never touched candle's buffer-map
+        // sweep either; they only used `command_encoder()` for its
+        // encoder return value.)
+        Ok(encoder)
+    }
+}
