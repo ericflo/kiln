@@ -424,35 +424,15 @@ pub fn mlp_step_via_tape(inputs: MlpStepInputs<'_>) -> Result<MlpStepOutput> {
 
     let mut tape = Tape::new();
 
-    // h_pre = x @ w1
-    let h_pre = matmul(x, w1).context("mlp_step: matmul(x, w1) forward")?;
-    tape.record(
-        &h_pre,
-        &[x, w1],
-        Box::new(MatmulBackward {
-            a: x.clone(),
-            b: w1.clone(),
-        }),
-    );
+    // h_pre = x @ w1 — recorded via the standalone matmul primitive.
+    let h_pre = matmul_via_tape(x, w1, &mut tape).context("mlp_step: matmul(x, w1) forward")?;
 
-    // h = silu(h_pre)
-    let h = kiln_tensor::ops::silu(&h_pre).context("mlp_step: silu(h_pre) forward")?;
-    tape.record(
-        &h,
-        &[&h_pre],
-        Box::new(SiluBackward { x: h_pre.clone() }),
-    );
+    // h = silu(h_pre) — recorded via the standalone silu primitive.
+    let h = silu_via_tape(&h_pre, &mut tape).context("mlp_step: silu(h_pre) forward")?;
 
-    // pred = h @ w2
-    let pred = matmul(&h, w2).context("mlp_step: matmul(h, w2) forward")?;
-    tape.record(
-        &pred,
-        &[&h, w2],
-        Box::new(MatmulBackward {
-            a: h.clone(),
-            b: w2.clone(),
-        }),
-    );
+    // pred = h @ w2 — recorded via the standalone matmul primitive.
+    let pred =
+        matmul_via_tape(&h, w2, &mut tape).context("mlp_step: matmul(h, w2) forward")?;
 
     // err = pred - target
     let err = sub(&pred, target).context("mlp_step: sub(pred, target) forward")?;
