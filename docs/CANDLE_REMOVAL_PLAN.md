@@ -249,6 +249,7 @@ deletion (gated on CP-4); `kiln-kt-bridge` deletion (Tier 4 end);
 **STOP-doc references:** see
 [`kiln-server-candle-removal-stop-2026-05-27.md`](./kiln-server-candle-removal-stop-2026-05-27.md),
 [`lora-bwd-kt-migration-stop-2026-05-27.md`](./lora-bwd-kt-migration-stop-2026-05-27.md),
+[`rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`](./rmsnorm-kt-tape-production-caller-stop-2026-05-28.md),
 [`issue-1082-tier-4-5-roadmap-2026-05-27.md`](./issue-1082-tier-4-5-roadmap-2026-05-27.md),
 and in-source STOPs on `kiln-tensor::cuda_storage` (line 16047451),
 `kiln-tensor::cuda_allocator`, `kiln-tensor::metal_allocator`,

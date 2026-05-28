@@ -7169,6 +7169,17 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
                 // `kiln-rmsnorm-kernel/src/kt_forward_op.rs` for the
                 // design rationale. Mirrors the OPD migration template
                 // in commit `f214f168`.
+                //
+                // NOTE(#1082, 2026-05-28): Phase 6a/CP-4 added a parallel
+                // `fused_rmsnorm_via_kt_tape` entry (`895162ca`) that
+                // records the backward onto `kiln_autograd::Tape` instead
+                // of wrapping it in a candle `CustomOp2`. The flip from
+                // this call site to that entry is gated on CP-4 substrate
+                // work in `kiln-train` (porting `loss.backward()` →
+                // `Tape::backward`). See
+                // `docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`
+                // for the audit explaining why a per-call-site flip is
+                // not progress until CP-4 lands.
                 return kiln_rmsnorm_kernel::fused_rmsnorm_via_kt_forward_op(x, weight, eps as f32)
                     .context("fused_rmsnorm_via_kt_forward_op shim failed");
             }

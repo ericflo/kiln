@@ -234,6 +234,18 @@ fn cast_partial_hidden_f32_to_bf16(
 /// The forward and the backward share `(x, weight)` by `Arc` — kt
 /// `Tensor` is already `Clone` over `Arc<dyn Storage>` so the saved
 /// state is a refcount bump, not a host copy.
+///
+/// # Production caller status (2026-05-28)
+///
+/// The production caller in `kiln_model::forward::rms_norm`
+/// (`crates/kiln-model/src/forward.rs:7172`) still routes through
+/// [`crate::fused_rmsnorm_via_kt_forward_op`], not this entry. The
+/// flip is gated on CP-4 substrate work in `kiln-train` (porting
+/// `loss.backward()` / `candle_core::backprop::GradStore` onto
+/// `kiln_autograd::Var` / `Tape::backward`). See
+/// `docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md` for
+/// the full audit and the architectural reason a per-call-site flip
+/// is not progress until CP-4 lands.
 pub fn fused_rmsnorm_via_kt_tape(
     x: &KtTensor,
     weight: &KtTensor,
