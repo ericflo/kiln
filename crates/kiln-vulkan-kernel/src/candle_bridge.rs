@@ -95,10 +95,17 @@ pub fn create_tensor_from_data(data: &[u8], shape: &[usize], dtype: DType) -> Re
     }
 }
 
-/// Build a CPU F32 candle Tensor from raw f32 bytes plus shape. Used
-/// internally by the `*_bytes` dispatch shims so callers can stay
-/// candle-free even when the underlying impl still needs a Tensor.
-/// (#1082)
+/// Build a CPU F32 candle Tensor from raw f32 bytes plus shape.
+///
+/// Historically used internally by the `*_bytes` dispatch shims so
+/// callers could stay candle-free even when the underlying `_impl`
+/// still needed a `Tensor`. After PRs 9be4971b, a8167473, 2fc8e347,
+/// and the gdn_in_proj inversion, all `_impl` dispatchers in `kernels.rs`
+/// take `&[u8]` directly, so this staging helper currently has no
+/// callers. Kept (with a dead-code allow) alongside the BF16 sibling
+/// so future `_bytes` shims that re-introduce a candle staging step
+/// have a drop-in helper without churning the bridge surface. (#1082)
+#[allow(dead_code)]
 pub(crate) fn build_cpu_f32_tensor_from_bytes(
     data: &[u8],
     shape: &[usize],

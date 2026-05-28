@@ -890,7 +890,7 @@ pub use crate::candle_bridge::{
     upload_tensor_f32_buffer,
 };
 
-use crate::candle_bridge::{build_cpu_f32_tensor_from_bytes, upload_bytes_to_device_buffer};
+use crate::candle_bridge::upload_bytes_to_device_buffer;
 
 /// Upload an f32 slice as a contiguous immutable weight buffer.
 /// Candle-free counterpart to
@@ -952,10 +952,10 @@ pub fn dispatch_gdn_in_proj_decode_cached_bytes(
     a_dim: usize,
     b_dim: usize,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
-    let x = build_cpu_f32_tensor_from_bytes(x_data, &[batch, 1, hidden])?;
-    let (qkv, z, a, b) = dispatch_gdn_in_proj_decode_cached_impl(
+    let out_data = dispatch_gdn_in_proj_decode_cached_impl(
         vk_device,
-        &x,
+        x_data,
+        batch,
         qkv_weight_t,
         z_weight_t,
         a_weight_t,
@@ -967,12 +967,7 @@ pub fn dispatch_gdn_in_proj_decode_cached_bytes(
         b_dim,
         false,
     )?;
-    Ok((
-        extract_tensor_bytes(&qkv)?.0,
-        extract_tensor_bytes(&z)?.0,
-        extract_tensor_bytes(&a)?.0,
-        extract_tensor_bytes(&b)?.0,
-    ))
+    split_gdn_in_proj_bytes(&out_data, batch, qkv_dim, z_dim, a_dim, b_dim)
 }
 
 /// Candle-free bf16-packed weights variant of [`dispatch_gdn_in_proj_decode_cached`].
@@ -996,10 +991,10 @@ pub fn dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
     a_dim: usize,
     b_dim: usize,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
-    let x = build_cpu_f32_tensor_from_bytes(x_data, &[batch, 1, hidden])?;
-    let (qkv, z, a, b) = dispatch_gdn_in_proj_decode_cached_impl(
+    let out_data = dispatch_gdn_in_proj_decode_cached_impl(
         vk_device,
-        &x,
+        x_data,
+        batch,
         qkv_weight_t,
         z_weight_t,
         a_weight_t,
@@ -1011,17 +1006,13 @@ pub fn dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
         b_dim,
         true,
     )?;
-    Ok((
-        extract_tensor_bytes(&qkv)?.0,
-        extract_tensor_bytes(&z)?.0,
-        extract_tensor_bytes(&a)?.0,
-        extract_tensor_bytes(&b)?.0,
-    ))
+    split_gdn_in_proj_bytes(&out_data, batch, qkv_dim, z_dim, a_dim, b_dim)
 }
 
 fn dispatch_gdn_in_proj_decode_cached_impl(
     vk_device: &VulkanDevice,
-    x: &candle_core::Tensor,
+    x_data: &[u8],
+    batch: usize,
     qkv_weight_t: &VulkanBuffer,
     z_weight_t: &VulkanBuffer,
     a_weight_t: &VulkanBuffer,
@@ -1032,19 +1023,11 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
     a_dim: usize,
     b_dim: usize,
     packed_bf16_weights: bool,
-) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
+) -> Result<Vec<u8>> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
-
-    let x_dims = x.dims();
-    anyhow::ensure!(
-        x_dims.len() == 3 && x_dims[1] == 1 && x_dims[2] == hidden,
-        "gdn_in_proj_decode: x shape {:?} does not match [batch, 1, {hidden}]",
-        x_dims
-    );
-    let batch = x_dims[0];
     let profile_stages = profile_vulkan_gdn_in_proj_kernel_stages_enabled();
     let total_start = profile_stages.then(Instant::now);
     let total_out = qkv_dim + z_dim + a_dim + b_dim;
@@ -1064,22 +1047,6 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
         total_out
     };
     let single_submit = gdn_in_proj_single_submit_enabled();
-    let stage_start = profile_stages.then(Instant::now);
-    let x_data = extract_tensor_bytes(x)?.0;
-    finish_vulkan_gdn_in_proj_kernel_stage_profile(
-        "extract_x",
-        batch,
-        hidden,
-        qkv_dim,
-        z_dim,
-        a_dim,
-        b_dim,
-        packed_bf16_weights,
-        pair_qkv_z,
-        row_group_size,
-        single_submit,
-        stage_start,
-    );
     anyhow::ensure!(
         x_data.len() == batch * hidden * 4,
         "gdn_in_proj_decode: x buffer has {} bytes, expected {}",
@@ -1318,22 +1285,6 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
         out_data
     };
 
-    let stage_start = profile_stages.then(Instant::now);
-    let out = create_gdn_in_proj_tensors_from_data(&out_data, batch, qkv_dim, z_dim, a_dim, b_dim);
-    finish_vulkan_gdn_in_proj_kernel_stage_profile(
-        "create_tensors",
-        batch,
-        hidden,
-        qkv_dim,
-        z_dim,
-        a_dim,
-        b_dim,
-        packed_bf16_weights,
-        pair_qkv_z,
-        row_group_size,
-        single_submit,
-        stage_start,
-    );
     finish_vulkan_gdn_in_proj_kernel_stage_profile(
         "total",
         batch,
@@ -1348,7 +1299,8 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
         single_submit,
         total_start,
     );
-    out
+    let _ = (qkv_dim, z_dim, a_dim, b_dim); // shape metadata consumed at the `_bytes` shim boundary
+    Ok(out_data)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1374,7 +1326,7 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
     spirv: &[u8],
     push_constants: &[u32],
     x_data: &[u8],
-) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
+) -> Result<Vec<u8>> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -1604,22 +1556,6 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
         true,
         stage_start,
     );
-    let stage_start = profile_stages.then(Instant::now);
-    let out = create_gdn_in_proj_tensors_from_data(&out_data, batch, qkv_dim, z_dim, a_dim, b_dim);
-    finish_vulkan_gdn_in_proj_kernel_stage_profile(
-        "create_tensors",
-        batch,
-        hidden,
-        qkv_dim,
-        z_dim,
-        a_dim,
-        b_dim,
-        packed_bf16_weights,
-        pair_qkv_z,
-        row_group_size,
-        true,
-        stage_start,
-    );
     finish_vulkan_gdn_in_proj_kernel_stage_profile(
         "total",
         batch,
@@ -1634,34 +1570,42 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
         true,
         total_start,
     );
-    out
+    Ok(out_data)
 }
 
-fn create_gdn_in_proj_tensors_from_data(
+/// Split the contiguous gdn_in_proj output bytes into per-dim byte
+/// slices for the `_bytes` shim callers. The shader writes the dims in
+/// SoA order: all qkv batches first, then all z, then all a, then all
+/// b. So the split is purely contiguous — `qkv = out[..batch*qkv_dim*4]`,
+/// etc. Replaces the older candle-Tensor split helper. (#1082)
+fn split_gdn_in_proj_bytes(
     out_data: &[u8],
     batch: usize,
     qkv_dim: usize,
     z_dim: usize,
     a_dim: usize,
     b_dim: usize,
-) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let qkv_bytes = batch * qkv_dim * 4;
+    let z_bytes = batch * z_dim * 4;
+    let a_bytes = batch * a_dim * 4;
+    let b_bytes = batch * b_dim * 4;
+    let total = qkv_bytes + z_bytes + a_bytes + b_bytes;
+    anyhow::ensure!(
+        out_data.len() >= total,
+        "gdn_in_proj_decode output slice exceeds readback buffer"
+    );
     let mut offset = 0usize;
-    let mut take = |len: usize, shape: &[usize]| -> Result<candle_core::Tensor> {
-        let byte_len = batch * len * 4;
-        let end = offset + byte_len;
-        anyhow::ensure!(
-            end <= out_data.len(),
-            "gdn_in_proj_decode output slice exceeds readback buffer"
-        );
-        let tensor = create_tensor_from_data(&out_data[offset..end], shape, candle_core::DType::F32)?;
+    let mut take = |len: usize| -> Vec<u8> {
+        let end = offset + len;
+        let slice = out_data[offset..end].to_vec();
         offset = end;
-        Ok(tensor)
+        slice
     };
-
-    let qkv = take(qkv_dim, &[batch, 1, qkv_dim])?;
-    let z = take(z_dim, &[batch, 1, z_dim])?;
-    let a = take(a_dim, &[batch, 1, a_dim])?;
-    let b = take(b_dim, &[batch, 1, b_dim])?;
+    let qkv = take(qkv_bytes);
+    let z = take(z_bytes);
+    let a = take(a_bytes);
+    let b = take(b_bytes);
     Ok((qkv, z, a, b))
 }
 
