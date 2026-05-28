@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor};
+
 
 use kiln_core::block::BlockTable;
 
@@ -36,7 +36,7 @@ pub struct PagedKvCache {
     /// Each pool has shape `[total_slots, num_kv_heads, head_dim]`
     /// where `total_slots = num_blocks * block_size`.
     /// When `fp8` is true, dtype is U8. Otherwise matches `compute_dtype`.
-    layers: Vec<(Tensor, Tensor)>,
+    layers: Vec<(candle_core::Tensor, candle_core::Tensor)>,
     block_size: usize,
     num_blocks: usize,
     /// Whether FP8 quantization is enabled.
@@ -46,7 +46,7 @@ pub struct PagedKvCache {
     #[allow(dead_code)]
     fp8_scales: Vec<(f32, f32)>,
     /// The original compute dtype for dequantization.
-    compute_dtype: DType,
+    compute_dtype: candle_core::DType,
 }
 
 #[derive(Clone, Copy)]
@@ -63,8 +63,8 @@ impl PagedKvCache {
         block_size: usize,
         num_kv_heads: usize,
         head_dim: usize,
-        dtype: DType,
-        device: &Device,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
     ) -> Result<Self> {
         Self::new_with_fp8(
             num_full_attn_layers,
@@ -87,9 +87,9 @@ impl PagedKvCache {
     /// typing applies only to the public surface so kiln-server can
     /// call this without importing `candle_core` at the call site.
     ///
-    /// Errors when the kt Device has no candle equivalent on this
+    /// Errors when the kt candle_core::Device has no candle equivalent on this
     /// build (e.g. `Vulkan(_)`; kiln-server's Vulkan path uses a CPU
-    /// candle device by convention) or when the kt DType cannot be
+    /// candle device by convention) or when the kt candle_core::DType cannot be
     /// represented in candle (e.g. `F8E4M3` — use [`Self::new_with_fp8`]
     /// with the dequant dtype + `fp8=true`).
     ///
@@ -98,7 +98,7 @@ impl PagedKvCache {
     /// pools end-to-end and is the right migration target once
     /// kiln-model's full-attention writers/readers migrate; this
     /// constructor is the minimum-effort wrapper that unblocks
-    /// kiln-server's `use candle_core::DType;` / candle Device import
+    /// kiln-server's `use candle_core::DType;` / candle candle_core::Device import
     /// today (per the STOP doc on the kiln-server candle removal).
     ///
     /// Always-on (no cuda feature gate): only uses
@@ -141,8 +141,8 @@ impl PagedKvCache {
         block_size: usize,
         num_kv_heads: usize,
         head_dim: usize,
-        dtype: DType,
-        device: &Device,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
     ) -> Result<Self> {
         Self::new_uninit_with_fp8(
             num_full_attn_layers,
@@ -197,8 +197,8 @@ impl PagedKvCache {
         block_size: usize,
         num_kv_heads: usize,
         head_dim: usize,
-        dtype: DType,
-        device: &Device,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
         fp8: bool,
     ) -> Result<Self> {
         Self::new_impl(
@@ -265,8 +265,8 @@ impl PagedKvCache {
         block_size: usize,
         num_kv_heads: usize,
         head_dim: usize,
-        dtype: DType,
-        device: &Device,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
         fp8: bool,
     ) -> Result<Self> {
         Self::new_impl(
@@ -325,13 +325,13 @@ impl PagedKvCache {
         block_size: usize,
         num_kv_heads: usize,
         head_dim: usize,
-        dtype: DType,
-        device: &Device,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
         fp8: bool,
         pool_init: PoolInit,
     ) -> Result<Self> {
         let dtype = cpu_compatible_compute_dtype(dtype, device);
-        let storage_dtype = if fp8 { DType::U8 } else { dtype };
+        let storage_dtype = if fp8 { candle_core::DType::U8 } else { dtype };
         let total_slots = num_blocks * block_size;
         let mut layers = Vec::with_capacity(num_full_attn_layers);
         for i in 0..num_full_attn_layers {
@@ -363,7 +363,7 @@ impl PagedKvCache {
     ///
     /// # Safety contract
     ///
-    /// This method takes `&self` (interior mutability via candle's Tensor
+    /// This method takes `&self` (interior mutability via candle's candle_core::Tensor
     /// storage). Concurrent callers must guarantee that the physical blocks
     /// referenced by their `block_table`s are disjoint — `BlockManager`
     /// already enforces this invariant for all live requests. Two writers
@@ -375,8 +375,8 @@ impl PagedKvCache {
         layer_idx: usize,
         block_table: &BlockTable,
         start_pos: usize,
-        k: &Tensor,
-        v: &Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
     ) -> Result<()> {
         if self.fp8 {
             self.write_fp8(layer_idx, block_table, start_pos, k, v)
@@ -397,11 +397,11 @@ impl PagedKvCache {
     pub fn write_token_major_native_graph_slot(
         &self,
         layer_idx: usize,
-        k: &Tensor,
-        v: &Tensor,
-        slot: &Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        slot: &candle_core::Tensor,
     ) -> Result<bool> {
-        if self.fp8 || k.dtype() != DType::BF16 || v.dtype() != DType::BF16 {
+        if self.fp8 || k.dtype() != candle_core::DType::BF16 || v.dtype() != candle_core::DType::BF16 {
             return Ok(false);
         }
         if k.dim(1)? != 1 {
@@ -456,11 +456,11 @@ impl PagedKvCache {
     pub fn write_token_major_native_batch_graph_slot(
         &self,
         layer_idx: usize,
-        k: &Tensor,
-        v: &Tensor,
-        slots: &Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        slots: &candle_core::Tensor,
     ) -> Result<bool> {
-        if self.fp8 || k.dtype() != DType::BF16 || v.dtype() != DType::BF16 {
+        if self.fp8 || k.dtype() != candle_core::DType::BF16 || v.dtype() != candle_core::DType::BF16 {
             return Ok(false);
         }
         // Expect [batch, 1, num_kv_heads, head_dim].
@@ -471,7 +471,7 @@ impl PagedKvCache {
         if v.dims() != k.dims() {
             return Ok(false);
         }
-        if slots.dtype() != DType::U32 || slots.dims() != [batch] {
+        if slots.dtype() != candle_core::DType::U32 || slots.dims() != [batch] {
             return Ok(false);
         }
         let (k_pool, v_pool) = &self.layers[layer_idx];
@@ -515,8 +515,8 @@ impl PagedKvCache {
         layer_idx: usize,
         block_table: &BlockTable,
         start_pos: usize,
-        k: &Tensor,
-        v: &Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
     ) -> Result<bool> {
         if self.fp8 {
             return Ok(false);
@@ -534,14 +534,14 @@ impl PagedKvCache {
             #[cfg(feature = "cuda")]
             {
                 if !cuda_paged_kv_write_token_major_disabled()
-                    && k.dtype() == DType::BF16
-                    && v.dtype() == DType::BF16
-                    && k_pool.dtype() == DType::BF16
-                    && v_pool.dtype() == DType::BF16
-                    && matches!(k_pool.device(), Device::Cuda(_))
-                    && matches!(v_pool.device(), Device::Cuda(_))
-                    && matches!(k.device(), Device::Cuda(_))
-                    && matches!(v.device(), Device::Cuda(_))
+                    && k.dtype() == candle_core::DType::BF16
+                    && v.dtype() == candle_core::DType::BF16
+                    && k_pool.dtype() == candle_core::DType::BF16
+                    && v_pool.dtype() == candle_core::DType::BF16
+                    && matches!(k_pool.device(), candle_core::Device::Cuda(_))
+                    && matches!(v_pool.device(), candle_core::Device::Cuda(_))
+                    && matches!(k.device(), candle_core::Device::Cuda(_))
+                    && matches!(v.device(), candle_core::Device::Cuda(_))
                 {
                     // Phase 7 (#1082): kt-only. Bottoms out in the same
                     // `kiln_paged_kv_write_token_major_bf16` FFI symbol as
@@ -622,8 +622,8 @@ impl PagedKvCache {
         layer_idx: usize,
         block_tables: &[&BlockTable],
         start_positions: &[usize],
-        k: &Tensor,
-        v: &Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
     ) -> Result<bool> {
         if self.fp8 {
             return Ok(false);
@@ -666,7 +666,7 @@ impl PagedKvCache {
         #[cfg(feature = "metal")]
         if slots_fit_u32 {
             let slots =
-                Tensor::from_slice(slots_data.as_slice(), batch, k.device())?.contiguous()?;
+                candle_core::Tensor::from_slice(slots_data.as_slice(), batch, k.device())?.contiguous()?;
             let (k_pool, v_pool) = &self.layers[layer_idx];
             if crate::backend::metal::metal_paged_kv_write_token_major_batch_supports(
                 k_pool, v_pool, &slots, k, v,
@@ -698,8 +698,8 @@ impl PagedKvCache {
         layer_idx: usize,
         block_table: &BlockTable,
         start_pos: usize,
-        k: &Tensor,
-        v: &Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
     ) -> Result<()> {
         let new_len = k.dim(2)?;
         let (k_pool, v_pool) = &self.layers[layer_idx];
@@ -747,8 +747,8 @@ impl PagedKvCache {
         layer_idx: usize,
         block_table: &BlockTable,
         start_pos: usize,
-        k: &Tensor,
-        v: &Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
     ) -> Result<()> {
         let new_len = k.dim(2)?;
 
@@ -811,7 +811,7 @@ impl PagedKvCache {
         layer_idx: usize,
         block_table: &BlockTable,
         seq_len: usize,
-    ) -> Result<(Tensor, Tensor)> {
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
         let (k_pool, v_pool) = &self.layers[layer_idx];
 
         let device = k_pool.device();
@@ -833,7 +833,7 @@ impl PagedKvCache {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            let indices = Tensor::new(&slot_indices[..], device)?;
+            let indices = candle_core::Tensor::new(&slot_indices[..], device)?;
 
             // Gather: [seq_len, num_kv_heads, head_dim]
             (
@@ -916,7 +916,7 @@ impl PagedKvCache {
     /// that index into the pool directly via a precomputed block_table tensor.
     /// For FP8 caches the returned tensors are still U8-encoded — callers must
     /// either dequantize first or use a kernel that supports FP8 inputs.
-    pub fn pool_tensors(&self, layer_idx: usize) -> Option<(&Tensor, &Tensor)> {
+    pub fn pool_tensors(&self, layer_idx: usize) -> Option<(&candle_core::Tensor, &candle_core::Tensor)> {
         self.layers.get(layer_idx).map(|(k, v)| (k, v))
     }
 }
@@ -930,7 +930,7 @@ impl PagedKvCache {
 /// block IDs are disjoint across all live `KvWriteSlot`s, so two writers
 /// modify disjoint physical rows of the shared `(k_pool, v_pool)` tensors.
 ///
-/// Since candle's `Tensor` uses interior mutability (`Arc<RwLock<...>>`
+/// Since candle's `candle_core::Tensor` uses interior mutability (`Arc<RwLock<...>>`
 /// storage), `&PagedKvCache` is sufficient to mutate slot rows. Holding an
 /// `Arc<PagedKvCache>` through this wrapper avoids the previous design where
 /// every prefill forward pass serialized on a global `Mutex<PagedKvCache>`.
@@ -957,8 +957,8 @@ impl KvWriteSlot {
         layer_idx: usize,
         block_table: &BlockTable,
         start_pos: usize,
-        k: &Tensor,
-        v: &Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
     ) -> Result<()> {
         self.cache.write(layer_idx, block_table, start_pos, k, v)
     }
@@ -971,9 +971,9 @@ impl std::ops::Deref for KvWriteSlot {
     }
 }
 
-fn cpu_compatible_compute_dtype(dtype: DType, device: &Device) -> DType {
-    if matches!(device, Device::Cpu) && dtype != DType::F32 {
-        DType::F32
+fn cpu_compatible_compute_dtype(dtype: candle_core::DType, device: &candle_core::Device) -> candle_core::DType {
+    if matches!(device, candle_core::Device::Cpu) && dtype != candle_core::DType::F32 {
+        candle_core::DType::F32
     } else {
         dtype
     }
@@ -981,18 +981,18 @@ fn cpu_compatible_compute_dtype(dtype: DType, device: &Device) -> DType {
 
 fn allocate_pool_tensor(
     shape: (usize, usize, usize),
-    dtype: DType,
-    device: &Device,
+    dtype: candle_core::DType,
+    device: &candle_core::Device,
     pool_init: PoolInit,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     match pool_init {
-        PoolInit::Zeroed => Ok(Tensor::zeros(shape, dtype, device)?),
+        PoolInit::Zeroed => Ok(candle_core::Tensor::zeros(shape, dtype, device)?),
         PoolInit::Uninitialized => {
             // SAFETY: `new_uninit*` constructors are reserved for generation
             // paths where the BlockTable active window only covers slots after
             // `write` has populated them. Existing zeroed constructors remain
             // available for callers that may inspect unwritten capacity.
-            Ok(unsafe { Tensor::empty(shape, dtype, device)? })
+            Ok(unsafe { candle_core::Tensor::empty(shape, dtype, device)? })
         }
     }
 }
@@ -1065,14 +1065,14 @@ mod tests {
     fn assert_cache_pools_equal(actual: &PagedKvCache, expected: &PagedKvCache) -> Result<()> {
         let (actual_k, actual_v) = actual.pool_tensors(0).context("actual pool tensors")?;
         let (expected_k, expected_v) = expected.pool_tensors(0).context("expected pool tensors")?;
-        let actual_k = actual_k.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let actual_k = actual_k.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
         let expected_k = expected_k
-            .to_dtype(DType::F32)?
+            .to_dtype(candle_core::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
-        let actual_v = actual_v.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let actual_v = actual_v.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
         let expected_v = expected_v
-            .to_dtype(DType::F32)?
+            .to_dtype(candle_core::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
 
@@ -1157,7 +1157,7 @@ mod tests {
 
     #[test]
     fn test_write_then_read_roundtrip() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let num_kv_heads = 2;
         let head_dim = 4;
         let block_size = 4;
@@ -1181,7 +1181,7 @@ mod tests {
 
         // Write 3 tokens at position 0
         // Shape: [1, num_kv_heads=2, new_len=3, head_dim=4]
-        let k = Tensor::new(
+        let k = candle_core::Tensor::new(
             &[[
                 [
                     [1.0_f32, 2.0, 3.0, 4.0],
@@ -1196,7 +1196,7 @@ mod tests {
             ]],
             &device,
         )?;
-        let v = Tensor::new(
+        let v = candle_core::Tensor::new(
             &[[
                 [
                     [101.0_f32, 102.0, 103.0, 104.0],
@@ -1233,7 +1233,7 @@ mod tests {
 
     #[test]
     fn test_write_token_major_native_then_read_roundtrip() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let mut cache = PagedKvCache::new_kt(
             1,
             4,
@@ -1249,7 +1249,7 @@ mod tests {
         bt.push(2);
 
         // Shape: [1, new_len=3, num_kv_heads=2, head_dim=3].
-        let k = Tensor::new(
+        let k = candle_core::Tensor::new(
             &[[
                 [[1.0_f32, 2.0, 3.0], [4.0, 5.0, 6.0]],
                 [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
@@ -1278,7 +1278,7 @@ mod tests {
 
     #[test]
     fn test_write_token_major_native_batch_then_read_roundtrip() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let batch = 3usize;
         let heads = 2usize;
         let head_dim = 3usize;
@@ -1304,7 +1304,7 @@ mod tests {
         let k_data: Vec<f32> = (0..batch * heads * head_dim)
             .map(|idx| idx as f32 + 1.0)
             .collect();
-        let k = Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?;
+        let k = candle_core::Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?;
         let v = (k.clone() + 100.0)?;
 
         assert!(cache.write_token_major_native_batch(
@@ -1366,11 +1366,11 @@ mod tests {
         let k_data: Vec<f32> = (0..batch * heads * head_dim)
             .map(|idx| ((idx % 17) as f32 - 8.0) * 0.03125)
             .collect();
-        let k = Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let k = candle_core::Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let v = (k.to_dtype(DType::F32)? + 100.0)?
-            .to_dtype(DType::BF16)?
+        let v = (k.to_dtype(candle_core::DType::F32)? + 100.0)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
 
         assert!(cache.write_token_major_native_batch(
@@ -1385,12 +1385,12 @@ mod tests {
             let (k_out, v_out) = cache.read(0, block_table, 1)?;
             let k_expected = k.narrow(0, idx, 1)?.transpose(1, 2)?.contiguous()?;
             let v_expected = v.narrow(0, idx, 1)?.transpose(1, 2)?.contiguous()?;
-            let k_max = (k_out.to_dtype(DType::F32)? - k_expected.to_dtype(DType::F32)?)?
+            let k_max = (k_out.to_dtype(candle_core::DType::F32)? - k_expected.to_dtype(candle_core::DType::F32)?)?
                 .abs()?
                 .flatten_all()?
                 .max(0)?
                 .to_scalar::<f32>()?;
-            let v_max = (v_out.to_dtype(DType::F32)? - v_expected.to_dtype(DType::F32)?)?
+            let v_max = (v_out.to_dtype(candle_core::DType::F32)? - v_expected.to_dtype(candle_core::DType::F32)?)?
                 .abs()?
                 .flatten_all()?
                 .max(0)?
@@ -1406,7 +1406,7 @@ mod tests {
 
     #[test]
     fn test_uninit_write_then_read_roundtrip() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let mut cache = PagedKvCache::new_uninit_kt(
             1,
             4,
@@ -1421,7 +1421,7 @@ mod tests {
         bt.push(2);
         bt.push(0);
 
-        let k = Tensor::new(
+        let k = candle_core::Tensor::new(
             &[[[
                 [1.0_f32, 2.0],
                 [3.0, 4.0],
@@ -1431,7 +1431,7 @@ mod tests {
             ]]],
             &device,
         )?;
-        let v = Tensor::new(
+        let v = candle_core::Tensor::new(
             &[[[
                 [11.0_f32, 12.0],
                 [13.0, 14.0],
@@ -1459,7 +1459,7 @@ mod tests {
 
     #[test]
     fn test_multi_sequence_isolation() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let num_kv_heads = 1;
         let head_dim = 2;
         let block_size = 4;
@@ -1487,13 +1487,13 @@ mod tests {
         bt_b.push(3);
 
         // Write 5 tokens for sequence A (values = 1.0)
-        let k_a = Tensor::ones((1, 1, 5, 2), DType::F32, &device)?;
-        let v_a = Tensor::ones((1, 1, 5, 2), DType::F32, &device)?;
+        let k_a = candle_core::Tensor::ones((1, 1, 5, 2), candle_core::DType::F32, &device)?;
+        let v_a = candle_core::Tensor::ones((1, 1, 5, 2), candle_core::DType::F32, &device)?;
         cache.write(0, &bt_a, 0, &k_a, &v_a)?;
 
         // Write 5 tokens for sequence B (values = 2.0)
-        let k_b = (Tensor::ones((1, 1, 5, 2), DType::F32, &device)? * 2.0)?;
-        let v_b = (Tensor::ones((1, 1, 5, 2), DType::F32, &device)? * 2.0)?;
+        let k_b = (candle_core::Tensor::ones((1, 1, 5, 2), candle_core::DType::F32, &device)? * 2.0)?;
+        let v_b = (candle_core::Tensor::ones((1, 1, 5, 2), candle_core::DType::F32, &device)? * 2.0)?;
         cache.write(0, &bt_b, 0, &k_b, &v_b)?;
 
         // Read back sequence A — should be all 1.0
@@ -1519,7 +1519,7 @@ mod tests {
 
     #[test]
     fn test_partial_block_handling() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let num_kv_heads = 1;
         let head_dim = 2;
         let block_size = 4;
@@ -1540,8 +1540,8 @@ mod tests {
         bt.push(0); // block 0: slots 0-3
 
         // Write only 2 tokens (partial block of size 4)
-        let k = Tensor::new(&[[[[1.0_f32, 2.0], [3.0, 4.0]]]], &device)?; // [1,1,2,2]
-        let v = Tensor::new(&[[[[5.0_f32, 6.0], [7.0, 8.0]]]], &device)?;
+        let k = candle_core::Tensor::new(&[[[[1.0_f32, 2.0], [3.0, 4.0]]]], &device)?; // [1,1,2,2]
+        let v = candle_core::Tensor::new(&[[[[5.0_f32, 6.0], [7.0, 8.0]]]], &device)?;
         cache.write(0, &bt, 0, &k, &v)?;
 
         // Read back 2 positions from partial block
@@ -1558,7 +1558,7 @@ mod tests {
 
     #[test]
     fn test_incremental_write() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let num_kv_heads = 1;
         let head_dim = 2;
         let block_size = 4;
@@ -1580,13 +1580,13 @@ mod tests {
         bt.push(1);
 
         // Write first 3 tokens (prefill)
-        let k1 = Tensor::new(&[[[[1.0_f32, 2.0], [3.0, 4.0], [5.0, 6.0]]]], &device)?;
-        let v1 = Tensor::new(&[[[[10.0_f32, 20.0], [30.0, 40.0], [50.0, 60.0]]]], &device)?;
+        let k1 = candle_core::Tensor::new(&[[[[1.0_f32, 2.0], [3.0, 4.0], [5.0, 6.0]]]], &device)?;
+        let v1 = candle_core::Tensor::new(&[[[[10.0_f32, 20.0], [30.0, 40.0], [50.0, 60.0]]]], &device)?;
         cache.write(0, &bt, 0, &k1, &v1)?;
 
         // Write 1 more token (decode step at position 3)
-        let k2 = Tensor::new(&[[[[7.0_f32, 8.0]]]], &device)?;
-        let v2 = Tensor::new(&[[[[70.0_f32, 80.0]]]], &device)?;
+        let k2 = candle_core::Tensor::new(&[[[[7.0_f32, 8.0]]]], &device)?;
+        let v2 = candle_core::Tensor::new(&[[[[70.0_f32, 80.0]]]], &device)?;
         cache.write(0, &bt, 3, &k2, &v2)?;
 
         // Read all 4 positions
@@ -1603,7 +1603,7 @@ mod tests {
 
     #[test]
     fn test_single_token_write_preserves_multihead_layout() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let mut cache = PagedKvCache::new_kt(
             1,
             2,
@@ -1616,8 +1616,8 @@ mod tests {
         let mut bt = BlockTable::new();
         bt.push(1);
 
-        let k = Tensor::new(&[[[[1.0_f32, 2.0, 3.0]], [[4.0_f32, 5.0, 6.0]]]], &device)?;
-        let v = Tensor::new(
+        let k = candle_core::Tensor::new(&[[[[1.0_f32, 2.0, 3.0]], [[4.0_f32, 5.0, 6.0]]]], &device)?;
+        let v = candle_core::Tensor::new(
             &[[[[11.0_f32, 12.0, 13.0]], [[14.0_f32, 15.0, 16.0]]]],
             &device,
         )?;
@@ -1636,7 +1636,7 @@ mod tests {
 
     #[test]
     fn test_paged_vs_contiguous_equivalence() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let num_kv_heads = 2;
         let head_dim = 4;
         let max_seq_len = 16;
@@ -1669,8 +1669,8 @@ mod tests {
         }
 
         // Prefill: write 5 tokens
-        let k_prefill = Tensor::randn(0.0_f32, 1.0, (1, num_kv_heads, 5, head_dim), &device)?;
-        let v_prefill = Tensor::randn(0.0_f32, 1.0, (1, num_kv_heads, 5, head_dim), &device)?;
+        let k_prefill = candle_core::Tensor::randn(0.0_f32, 1.0, (1, num_kv_heads, 5, head_dim), &device)?;
+        let v_prefill = candle_core::Tensor::randn(0.0_f32, 1.0, (1, num_kv_heads, 5, head_dim), &device)?;
 
         // Contiguous cache
         let (c_k, c_v) = contiguous.update(0, &k_prefill, &v_prefill)?;
@@ -1701,8 +1701,8 @@ mod tests {
         }
 
         // Decode: write 1 more token
-        let k_decode = Tensor::randn(0.0_f32, 1.0, (1, num_kv_heads, 1, head_dim), &device)?;
-        let v_decode = Tensor::randn(0.0_f32, 1.0, (1, num_kv_heads, 1, head_dim), &device)?;
+        let k_decode = candle_core::Tensor::randn(0.0_f32, 1.0, (1, num_kv_heads, 1, head_dim), &device)?;
+        let v_decode = candle_core::Tensor::randn(0.0_f32, 1.0, (1, num_kv_heads, 1, head_dim), &device)?;
 
         let (c_k, c_v) = contiguous.update(0, &k_decode, &v_decode)?;
         contiguous.advance(1);
@@ -1733,7 +1733,7 @@ mod tests {
 
     #[test]
     fn test_multiple_layers() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let mut cache = PagedKvCache::new_kt(
             3,
             2,
@@ -1751,8 +1751,8 @@ mod tests {
         // Write different values to each layer
         for layer in 0..3 {
             let val = (layer + 1) as f32;
-            let k = Tensor::new(&[[[[val, val * 10.0]]]], &device)?;
-            let v = Tensor::new(&[[[[val * 100.0, val * 1000.0]]]], &device)?;
+            let k = candle_core::Tensor::new(&[[[[val, val * 10.0]]]], &device)?;
+            let v = candle_core::Tensor::new(&[[[[val * 100.0, val * 1000.0]]]], &device)?;
             cache.write(layer, &bt, 0, &k, &v)?;
         }
 
@@ -1777,7 +1777,7 @@ mod tests {
 
     #[test]
     fn test_fp8_paged_write_read_roundtrip() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let num_kv_heads = 2;
         let head_dim = 4;
         let block_size = 4;
@@ -1800,7 +1800,7 @@ mod tests {
         bt.push(1);
         bt.push(3);
 
-        let k = Tensor::new(
+        let k = candle_core::Tensor::new(
             &[[
                 [
                     [1.0_f32, 2.0, 3.0, 4.0],
@@ -1815,7 +1815,7 @@ mod tests {
             ]],
             &device,
         )?;
-        let v = Tensor::new(
+        let v = candle_core::Tensor::new(
             &[[
                 [
                     [101.0_f32, 102.0, 103.0, 104.0],
@@ -1835,7 +1835,7 @@ mod tests {
         let (k_out, v_out) = cache.read(0, &bt, 3)?;
 
         assert_eq!(k_out.dims(), &[1, 2, 3, 4]);
-        assert_eq!(k_out.dtype(), DType::F32);
+        assert_eq!(k_out.dtype(), candle_core::DType::F32);
 
         // Check approximate values (FP8 has limited precision)
         let k_orig = k.flatten_all()?.to_vec1::<f32>()?;
@@ -1853,7 +1853,7 @@ mod tests {
 
     #[test]
     fn test_fp8_single_token_write_roundtrip() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let mut cache = PagedKvCache::new_with_fp8_kt(
             1,
             2,
@@ -1867,8 +1867,8 @@ mod tests {
         let mut bt = BlockTable::new();
         bt.push(0);
 
-        let k = Tensor::new(&[[[[1.0_f32, 2.0, 3.0]], [[4.0_f32, 5.0, 6.0]]]], &device)?;
-        let v = Tensor::new(
+        let k = candle_core::Tensor::new(&[[[[1.0_f32, 2.0, 3.0]], [[4.0_f32, 5.0, 6.0]]]], &device)?;
+        let v = candle_core::Tensor::new(
             &[[[[11.0_f32, 12.0, 13.0]], [[14.0_f32, 15.0, 16.0]]]],
             &device,
         )?;
@@ -1894,7 +1894,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_write_token_major_native_cuda_kt_host_slot_matches_slice_set() -> Result<()> {
-        let Ok(device) = Device::new_cuda(0) else {
+        let Ok(device) = candle_core::Device::new_cuda(0) else {
             eprintln!(
                 "CUDA unavailable, skipping test_write_token_major_native_cuda_kt_host_slot_matches_slice_set"
             );
@@ -1928,11 +1928,11 @@ mod tests {
 
         let elems = heads * head_dim;
         let k_data: Vec<f32> = (0..elems).map(|i| (i as f32 - 7.0) * 0.03125).collect();
-        let k = Tensor::from_slice(&k_data, (1usize, 1usize, heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let k = candle_core::Tensor::from_slice(&k_data, (1usize, 1usize, heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let v = (k.to_dtype(DType::F32)? + 25.0)?
-            .to_dtype(DType::BF16)?
+        let v = (k.to_dtype(candle_core::DType::F32)? + 25.0)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
 
         assert!(cache.write_token_major_native(0, &bt, 0, &k, &v)?);
@@ -1947,7 +1947,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_write_token_major_native_graph_slot_cuda_kt_matches_slice_set() -> Result<()> {
-        let Ok(device) = Device::new_cuda(0) else {
+        let Ok(device) = candle_core::Device::new_cuda(0) else {
             eprintln!(
                 "CUDA unavailable, skipping test_write_token_major_native_graph_slot_cuda_kt_matches_slice_set"
             );
@@ -1979,13 +1979,13 @@ mod tests {
 
         let elems = heads * head_dim;
         let k_data: Vec<f32> = (0..elems).map(|i| (i as f32 + 1.0) * 0.015625).collect();
-        let k = Tensor::from_slice(&k_data, (1usize, 1usize, heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let k = candle_core::Tensor::from_slice(&k_data, (1usize, 1usize, heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let v = (k.to_dtype(DType::F32)? - 11.0)?
-            .to_dtype(DType::BF16)?
+        let v = (k.to_dtype(candle_core::DType::F32)? - 11.0)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let slot_t = Tensor::from_slice(&[slot as u32], 1usize, &device)?.contiguous()?;
+        let slot_t = candle_core::Tensor::from_slice(&[slot as u32], 1usize, &device)?.contiguous()?;
 
         assert!(cache.write_token_major_native_graph_slot(0, &k, &v, &slot_t)?);
         let (ref_k_pool, ref_v_pool) = ref_cache.pool_tensors(0).context("ref pool tensors")?;
@@ -2004,7 +2004,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_write_token_major_native_batch_graph_slot_matches_per_row() -> Result<()> {
-        let Ok(device) = Device::new_cuda(0) else {
+        let Ok(device) = candle_core::Device::new_cuda(0) else {
             eprintln!(
                 "CUDA unavailable, skipping test_write_token_major_native_batch_graph_slot_matches_per_row"
             );
@@ -2034,13 +2034,13 @@ mod tests {
         let k_data: Vec<f32> = (0..elems)
             .map(|i| ((i as f32) - (elems as f32) / 2.0) * 0.015625)
             .collect();
-        let k = Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?
-            .to_dtype(DType::BF16)?
+        let k = candle_core::Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let v = (k.to_dtype(DType::F32)? + 50.0)?
-            .to_dtype(DType::BF16)?
+        let v = (k.to_dtype(candle_core::DType::F32)? + 50.0)?
+            .to_dtype(candle_core::DType::BF16)?
             .contiguous()?;
-        let slots_t = Tensor::from_slice(slots.as_slice(), batch, &device)?.contiguous()?;
+        let slots_t = candle_core::Tensor::from_slice(slots.as_slice(), batch, &device)?.contiguous()?;
 
         // Fused-slot writer.
         let ok = cache.write_token_major_native_batch_graph_slot(0, &k, &v, &slots_t)?;
@@ -2073,7 +2073,7 @@ mod tests {
 
     #[test]
     fn test_fp8_paged_memory_savings() -> Result<()> {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let fp8_cache = PagedKvCache::new_with_fp8_kt(
             1,
             256,
@@ -2094,8 +2094,8 @@ mod tests {
             &kiln_tensor::Device::Cpu,
         )?;
 
-        assert_eq!(fp8_cache.layers[0].0.dtype(), DType::U8);
-        assert_eq!(native_cache.layers[0].0.dtype(), DType::F32);
+        assert_eq!(fp8_cache.layers[0].0.dtype(), candle_core::DType::U8);
+        assert_eq!(native_cache.layers[0].0.dtype(), candle_core::DType::F32);
 
         // FP8 uses 1 byte per element vs 4 bytes for F32
         let fp8_bytes = fp8_cache.layers[0].0.elem_count(); // * 1 byte
