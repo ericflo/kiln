@@ -41,6 +41,19 @@ use std::any::Any;
 use std::sync::Arc;
 
 use candle_core::metal_backend::MetalDevice;
+// Per-op candle types shared by the seven `metal_*` substrate ops in
+// this file (softmax, rmsnorm, layernorm, index_select_dim0, cast,
+// elementwise_binary, activation_unary). Each op previously carried
+// its own `use candle_core::{...}` block — seven copies of the same
+// five symbols. Consolidating them at module scope drops six
+// duplicate `use` statements from the file (#1082 candle import
+// reduction); the underlying candle dependency does not change
+// (Phase 7 substrate lift is what replaces the inner candle ops
+// themselves, not these symbol bindings).
+use candle_core::{
+    op::BackpropOp, DType as CandleDType, MetalStorage as CandleMetalStorage,
+    Storage as CandleStorage, Tensor as CandleTensor,
+};
 // `candle_metal_kernels` is its own crate — candle-core does NOT
 // re-export it under `metal_backend`. Depend on it directly under the
 // `metal` feature so this path resolves.
@@ -368,8 +381,6 @@ pub fn primary_metal_device(device_index: usize) -> Result<Arc<MetalDevice>> {
 /// MSL kernel. The public signature (`metal_softmax_last_axis(&Tensor)
 /// -> Result<Tensor>`) does not change.
 pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
-    use candle_core::{op::BackpropOp, DType as CandleDType, MetalStorage as CandleMetalStorage, Storage as CandleStorage, Tensor as CandleTensor};
-
     // ---- Validate kt-side preconditions ----
     let dtype = x.dtype();
     let candle_dtype = match dtype {
@@ -551,11 +562,6 @@ pub fn metal_rmsnorm_last_axis(
     weight: &crate::Tensor,
     eps: f32,
 ) -> Result<crate::Tensor> {
-    use candle_core::{
-        op::BackpropOp, DType as CandleDType, MetalStorage as CandleMetalStorage,
-        Storage as CandleStorage, Tensor as CandleTensor,
-    };
-
     let dtype = x.dtype();
     let candle_dtype = match dtype {
         DType::F32 => CandleDType::F32,
@@ -721,11 +727,6 @@ pub fn metal_layernorm_last_axis(
     bias: &crate::Tensor,
     eps: f32,
 ) -> Result<crate::Tensor> {
-    use candle_core::{
-        op::BackpropOp, DType as CandleDType, MetalStorage as CandleMetalStorage,
-        Storage as CandleStorage, Tensor as CandleTensor,
-    };
-
     let dtype = x.dtype();
     let candle_dtype = match dtype {
         DType::F32 => CandleDType::F32,
@@ -920,11 +921,6 @@ pub fn metal_index_select_dim0(
     input: &crate::Tensor,
     indices: &crate::Tensor,
 ) -> Result<crate::Tensor> {
-    use candle_core::{
-        op::BackpropOp, DType as CandleDType, MetalStorage as CandleMetalStorage,
-        Storage as CandleStorage, Tensor as CandleTensor,
-    };
-
     let dtype = input.dtype();
     let candle_input_dtype = match dtype {
         DType::F32 => CandleDType::F32,
@@ -1080,11 +1076,6 @@ pub fn metal_index_select_dim0(
 /// Returns [`Error::Msg`] on unsupported dtype pair, non-contiguous
 /// layout, non-Metal storage, or candle kernel error.
 pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
-    use candle_core::{
-        op::BackpropOp, DType as CandleDType, MetalStorage as CandleMetalStorage,
-        Storage as CandleStorage, Tensor as CandleTensor,
-    };
-
     let from = x.dtype();
     let dtype_to_candle = |d: DType| -> Result<CandleDType> {
         match d {
@@ -1215,11 +1206,6 @@ pub fn metal_elementwise_binary(
     b: &crate::Tensor,
     kind_tag: i32,
 ) -> Result<crate::Tensor> {
-    use candle_core::{
-        op::BackpropOp, DType as CandleDType, MetalStorage as CandleMetalStorage,
-        Storage as CandleStorage, Tensor as CandleTensor,
-    };
-
     if !matches!(kind_tag, 0 | 1 | 2 | 3) {
         return Err(Error::Msg(format!(
             "metal_elementwise_binary: kind_tag {kind_tag} not supported \
@@ -1394,11 +1380,6 @@ pub fn metal_elementwise_binary(
 /// Returns [`Error::Msg`] on unsupported kind, dtype, non-contiguous
 /// layout, non-Metal storage, or candle kernel error.
 pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate::Tensor> {
-    use candle_core::{
-        op::BackpropOp, DType as CandleDType, MetalStorage as CandleMetalStorage,
-        Storage as CandleStorage, Tensor as CandleTensor,
-    };
-
     if !matches!(
         kind_tag,
         0 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 12 | 13 | 14 | 22 | 23 | 24 | 25 | 26
