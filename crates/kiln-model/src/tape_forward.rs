@@ -60,27 +60,46 @@
 //! With `KILN_USE_TAPE_FORWARD=1`:
 //!
 //! * The forward path *can* be made to drive a `Tape`. The tape-
-//!   recorded `RmsNormBackward` node is visible to a subsequent
-//!   `Tape::backward` walk.
+//!   recorded backward node is visible to a subsequent `Tape::backward`
+//!   walk.
 //! * The output tensor is bit-exact with the kt-forward-op shim
-//!   (same `kiln_fused_rmsnorm` FFI call underneath; only the
-//!   backward-graph machinery differs).
-//! * No candle autograd lineage is attached. Callers downstream of
-//!   the tape-routed `rms_norm` cannot drive backward through
-//!   `loss.backward()` for that op — they must use `Tape::backward`.
-//!   This is exactly the trade-off CP-4 is meant to expose: the two
-//!   autograd worlds are mutually-incompatible until CP-4's substrate
-//!   ports the *entire* training step onto the tape.
+//!   (same kernel FFI call underneath; only the backward-graph
+//!   machinery differs).
+//! * Inside a `kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store`
+//!   scope (see `kiln-train::trainer::standard_forward_backward_via_tape_bridge`,
+//!   landed `675e0dea`), every adapter registers `(kt_id ↔ candle_id)`
+//!   IO mappings via `register_input_mapping` / `register_output_mapping`.
+//!   The bridge runs `loss.backward()` candle-side as usual, then walks
+//!   the recorded tape with seeds derived from candle's `GradStore`, and
+//!   merges the per-kt-input grads back into the same store keyed on the
+//!   matched candle TensorIds. Result: callers downstream of the tape-
+//!   routed primitives DO see correct grads in candle's `GradStore` even
+//!   though the candle walker alone wouldn't traverse the tape op.
 //!
-//! # Out of scope
+//! # Current adapter coverage
 //!
-//! * Wiring tape-routing for matmul, silu, embedding, etc. Each is a
-//!   separate per-site flip following this same pattern. The next
-//!   PR extends `try_tape_*` to one more primitive at a time.
-//! * Plumbing tape gradients back into the optimiser. That's the
-//!   `kiln-optim` integration concern; the substrate proof here is
-//!   "forward routes through Tape::record without crashing or
-//!   changing numerics."
+//! `try_tape_*_cuda` adapters land for every primitive whose
+//! corresponding `kiln_autograd::backwards::*Backward` exists and whose
+//! kt-side fused kernel ships a `*_via_kt_tape` entry:
+//!
+//! * `try_tape_rms_norm_cuda` — `RmsNormBackward` (CP-4 baseline)
+//! * `try_tape_matmul_cuda` — `MatmulBackward`
+//! * `try_tape_silu_cuda` — `SiluBackward`
+//! * `try_tape_embedding_cuda` — `EmbeddingBackward`
+//! * `try_tape_swiglu_cuda` — `MulSigmoidGateBackward` (MLP gate path,
+//!   ~18% of decode per Phase 6 NVTX profiling)
+//!
+//! All 5 register IO mappings into the bridge when a scope is active
+//! (commits `57f7b678` for rms_norm/matmul/silu, `cf138c9c` for swiglu).
+//!
+//! # Out of scope (still)
+//!
+//! * Tape-routing for softmax / log_softmax / cross-entropy (the loss
+//!   primitive — would close the kt-tape coverage end-to-end into the
+//!   loss). Substrate primitives in `kiln_autograd::backwards::cross_entropy`
+//!   exist; the adapter is straightforward but distinct from this PR.
+//! * Tape-routing for rotary / layernorm / fused-attn — non-trivial
+//!   substrate decisions about which kernels carry their own backward.
 
 #![cfg(feature = "cuda")]
 
