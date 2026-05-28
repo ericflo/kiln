@@ -57,3 +57,50 @@ pub use candle_metal_kernels::metal::ComputePipeline;
 /// `Retained<ProtocolObject<dyn MTLLibrary>>` when the kernel crates
 /// retire the candle bridge.
 pub use candle_metal_kernels::metal::Library;
+
+/// `BufferOffset` — `{ buffer: &Buffer, offset_in_bytes: usize }`
+/// pair consumed by every `candle_metal_kernels::call_*` MSL kernel
+/// entry point as a positional argument.
+///
+/// Re-exported from `candle_metal_kernels::utils::BufferOffset` today;
+/// when the kernel crates retire the candle bridge, this flips to a
+/// kt-native struct holding `(Retained<ProtocolObject<dyn MTLBuffer>>,
+/// usize)` without touching the ~232 call sites in
+/// `kiln-model::backend::metal` that construct one.
+pub use candle_metal_kernels::utils::BufferOffset;
+
+/// Build a `BufferOffset` from a candle `Buffer` + `Layout` + `DType`.
+///
+/// This is a mirror of `candle_core::metal_backend::buffer_o` — same
+/// formula, same wire types, but reachable through the `kiln_tensor`
+/// path so that callers in `kiln-model::backend::metal` no longer
+/// name `candle_core::metal_backend::*` in their bodies.
+///
+/// The formula is the candle-bundled one (`l.start_offset() *
+/// dtype.size_in_bytes()`); inlining it here gives the same byte
+/// offset that `candle_metal_kernels::call_*` kernels expect.
+///
+/// # Phase 7 follow-up
+///
+/// When the kernel crates retire the candle bridge, this helper
+/// gains a kt-native overload that takes a `kiln_tensor::Layout` +
+/// `kiln_tensor::DType` directly; the candle-typed signature stays
+/// as the legacy entry point until every caller migrates.
+///
+/// # Why we re-implement rather than re-export
+///
+/// `candle_core::metal_backend::buffer_o` lives behind candle-core's
+/// `metal` feature; re-exporting it through `pub use` would lock the
+/// chokepoint to candle-core's API surface forever. Re-implementing
+/// the trivial formula here keeps the chokepoint free to evolve.
+#[inline]
+pub fn buffer_o<'a>(
+    buffer: &'a candle_metal_kernels::metal::Buffer,
+    l: &candle_core::Layout,
+    dtype: candle_core::DType,
+) -> BufferOffset<'a> {
+    BufferOffset {
+        buffer,
+        offset_in_bytes: l.start_offset() * dtype.size_in_bytes(),
+    }
+}

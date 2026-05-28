@@ -6746,11 +6746,11 @@ pub(crate) fn metal_lm_head_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor
             _ => anyhow::bail!("metal lm head out must be on Metal"),
         };
 
-        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let x_buf = kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
         let w_buf =
-            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
+            kiln_tensor::metal_types::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &o_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &o_layout, out.dtype());
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
@@ -6837,21 +6837,21 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result
             None => None,
         };
 
-        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let x_buf = kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
         let w_buf =
-            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
-        let ps_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
+        let ps_buf = kiln_tensor::metal_types::buffer_o(
             ps_metal.buffer(),
             &ps_layout,
             partial_scores.dtype(),
         );
-        let pi_buf = candle_core::metal_backend::buffer_o(
+        let pi_buf = kiln_tensor::metal_types::buffer_o(
             pi_metal.buffer(),
             &pi_layout,
             partial_indices.dtype(),
         );
         let final_buf = final_metal.map(|(storage, layout)| {
-            candle_core::metal_backend::buffer_o(storage.buffer(), layout, DType::F32)
+            kiln_tensor::metal_types::buffer_o(storage.buffer(), layout, DType::F32)
         });
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
@@ -6993,21 +6993,21 @@ pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &Tensor, weight_t: &Tensor) -> R
             None => None,
         };
 
-        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let x_buf = kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
         let w_buf =
-            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
-        let ps_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
+        let ps_buf = kiln_tensor::metal_types::buffer_o(
             ps_metal.buffer(),
             &ps_layout,
             partial_scores.dtype(),
         );
-        let pi_buf = candle_core::metal_backend::buffer_o(
+        let pi_buf = kiln_tensor::metal_types::buffer_o(
             pi_metal.buffer(),
             &pi_layout,
             partial_indices.dtype(),
         );
         let final_buf = final_metal.map(|(storage, layout)| {
-            candle_core::metal_backend::buffer_o(storage.buffer(), layout, DType::F32)
+            kiln_tensor::metal_types::buffer_o(storage.buffer(), layout, DType::F32)
         });
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
@@ -7190,13 +7190,13 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
             _ => anyhow::bail!("metal mlp gate/up out must be on Metal"),
         };
 
-        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let x_buf = kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
         let gate_buf =
-            candle_core::metal_backend::buffer_o(gate_metal.buffer(), &gate_layout, gate_t.dtype());
+            kiln_tensor::metal_types::buffer_o(gate_metal.buffer(), &gate_layout, gate_t.dtype());
         let up_buf =
-            candle_core::metal_backend::buffer_o(up_metal.buffer(), &up_layout, up_t.dtype());
+            kiln_tensor::metal_types::buffer_o(up_metal.buffer(), &up_layout, up_t.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(gate_buf.buffer), gate_buf.offset_in_bytes);
@@ -7316,11 +7316,11 @@ pub(crate) fn metal_mlp_silu_mul_bf16(gate: &Tensor, up: &Tensor) -> Result<Tens
         };
 
         let gate_buf =
-            candle_core::metal_backend::buffer_o(gate_metal.buffer(), &gate_layout, gate.dtype());
+            kiln_tensor::metal_types::buffer_o(gate_metal.buffer(), &gate_layout, gate.dtype());
         let up_buf =
-            candle_core::metal_backend::buffer_o(up_metal.buffer(), &up_layout, up.dtype());
+            kiln_tensor::metal_types::buffer_o(up_metal.buffer(), &up_layout, up.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(gate_buf.buffer), gate_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(up_buf.buffer), up_buf.offset_in_bytes);
@@ -7416,11 +7416,11 @@ pub(crate) fn metal_attn_gate_sigmoid_mul_bf16(x: &Tensor, gate: &Tensor) -> Res
             _ => anyhow::bail!("metal attn gate sigmoid/mul out must be on Metal"),
         };
 
-        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let x_buf = kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
         let gate_buf =
-            candle_core::metal_backend::buffer_o(gate_metal.buffer(), &gate_layout, gate.dtype());
+            kiln_tensor::metal_types::buffer_o(gate_metal.buffer(), &gate_layout, gate.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(gate_buf.buffer), gate_buf.offset_in_bytes);
@@ -7566,11 +7566,11 @@ fn metal_transposed_coop_gemv_bf16_with_tile(
             _ => anyhow::bail!("metal transposed coop GEMV out must be on Metal"),
         };
 
-        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let x_buf = kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
         let w_buf =
-            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
+            kiln_tensor::metal_types::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &o_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &o_layout, out.dtype());
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
@@ -7667,11 +7667,11 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
             _ => anyhow::bail!("metal batch transposed coop GEMV out must be on Metal"),
         };
 
-        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let x_buf = kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
         let w_buf =
-            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
+            kiln_tensor::metal_types::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &o_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &o_layout, out.dtype());
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
@@ -7817,21 +7817,21 @@ pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
             _ => anyhow::bail!("metal fused QKV projection v_out must be on Metal"),
         };
 
-        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q_t.dtype());
-        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k_t.dtype());
-        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_t.dtype());
-        let q_out_buf = candle_core::metal_backend::buffer_o(
+        let x_buf = kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let q_buf = kiln_tensor::metal_types::buffer_o(q_metal.buffer(), &q_layout, q_t.dtype());
+        let k_buf = kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k_t.dtype());
+        let v_buf = kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v_t.dtype());
+        let q_out_buf = kiln_tensor::metal_types::buffer_o(
             q_out_metal.buffer(),
             &q_out_layout,
             q_out.dtype(),
         );
-        let k_out_buf = candle_core::metal_backend::buffer_o(
+        let k_out_buf = kiln_tensor::metal_types::buffer_o(
             k_out_metal.buffer(),
             &k_out_layout,
             k_out.dtype(),
         );
-        let v_out_buf = candle_core::metal_backend::buffer_o(
+        let v_out_buf = kiln_tensor::metal_types::buffer_o(
             v_out_metal.buffer(),
             &v_out_layout,
             v_out.dtype(),
@@ -7987,9 +7987,9 @@ pub(crate) fn metal_lora_add_decode_bf16(
             _ => anyhow::bail!("metal LoRA hidden output must be on Metal"),
         };
 
-        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let a_buf = candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a.dtype());
-        let hidden_buf = candle_core::metal_backend::buffer_o(
+        let x_buf = kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let a_buf = kiln_tensor::metal_types::buffer_o(a_metal.buffer(), &a_layout, a.dtype());
+        let hidden_buf = kiln_tensor::metal_types::buffer_o(
             hidden_metal.buffer(),
             &hidden_layout,
             hidden.dtype(),
@@ -8046,16 +8046,16 @@ pub(crate) fn metal_lora_add_decode_bf16(
             _ => anyhow::bail!("metal LoRA add output must be on Metal"),
         };
 
-        let hidden_buf = candle_core::metal_backend::buffer_o(
+        let hidden_buf = kiln_tensor::metal_types::buffer_o(
             hidden_metal.buffer(),
             &hidden_layout,
             hidden.dtype(),
         );
-        let b_buf = candle_core::metal_backend::buffer_o(b_metal.buffer(), &b_layout, b.dtype());
+        let b_buf = kiln_tensor::metal_types::buffer_o(b_metal.buffer(), &b_layout, b.dtype());
         let base_buf =
-            candle_core::metal_backend::buffer_o(base_metal.buffer(), &base_layout, base.dtype());
+            kiln_tensor::metal_types::buffer_o(base_metal.buffer(), &base_layout, base.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(hidden_buf.buffer), hidden_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(b_buf.buffer), b_buf.offset_in_bytes);
@@ -8266,23 +8266,23 @@ fn metal_gdn_in_proj_decode_bf16(
             _ => anyhow::bail!("metal gdn in-proj b_out must be on Metal"),
         };
 
-        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let x_buf = kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
         let qkv_buf =
-            candle_core::metal_backend::buffer_o(qkv_metal.buffer(), &qkv_layout, qkv_t.dtype());
-        let z_buf = candle_core::metal_backend::buffer_o(z_metal.buffer(), &z_layout, z_t.dtype());
-        let a_buf = candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a_t.dtype());
-        let b_buf = candle_core::metal_backend::buffer_o(b_metal.buffer(), &b_layout, b_t.dtype());
-        let qkv_o_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(qkv_metal.buffer(), &qkv_layout, qkv_t.dtype());
+        let z_buf = kiln_tensor::metal_types::buffer_o(z_metal.buffer(), &z_layout, z_t.dtype());
+        let a_buf = kiln_tensor::metal_types::buffer_o(a_metal.buffer(), &a_layout, a_t.dtype());
+        let b_buf = kiln_tensor::metal_types::buffer_o(b_metal.buffer(), &b_layout, b_t.dtype());
+        let qkv_o_buf = kiln_tensor::metal_types::buffer_o(
             qkv_o_metal.buffer(),
             &qkv_o_layout,
             qkv_out.dtype(),
         );
         let z_o_buf =
-            candle_core::metal_backend::buffer_o(z_o_metal.buffer(), &z_o_layout, z_out.dtype());
+            kiln_tensor::metal_types::buffer_o(z_o_metal.buffer(), &z_o_layout, z_out.dtype());
         let a_o_buf =
-            candle_core::metal_backend::buffer_o(a_o_metal.buffer(), &a_o_layout, a_out.dtype());
+            kiln_tensor::metal_types::buffer_o(a_o_metal.buffer(), &a_o_layout, a_out.dtype());
         let b_o_buf =
-            candle_core::metal_backend::buffer_o(b_o_metal.buffer(), &b_o_layout, b_out.dtype());
+            kiln_tensor::metal_types::buffer_o(b_o_metal.buffer(), &b_o_layout, b_out.dtype());
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(qkv_buf.buffer), qkv_buf.offset_in_bytes);
@@ -8416,16 +8416,16 @@ pub(crate) fn metal_rotary_embedding_bf16(
             _ => anyhow::bail!("metal rotary k_out must be on Metal"),
         };
 
-        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let q_buf = kiln_tensor::metal_types::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
         let cos_buf =
-            candle_core::metal_backend::buffer_o(cos_metal.buffer(), &c_layout, cos.dtype());
+            kiln_tensor::metal_types::buffer_o(cos_metal.buffer(), &c_layout, cos.dtype());
         let sin_buf =
-            candle_core::metal_backend::buffer_o(sin_metal.buffer(), &s_layout, sin.dtype());
+            kiln_tensor::metal_types::buffer_o(sin_metal.buffer(), &s_layout, sin.dtype());
         let q_out_buf =
-            candle_core::metal_backend::buffer_o(q_out_metal.buffer(), &qo_layout, q_out.dtype());
+            kiln_tensor::metal_types::buffer_o(q_out_metal.buffer(), &qo_layout, q_out.dtype());
         let k_out_buf =
-            candle_core::metal_backend::buffer_o(k_out_metal.buffer(), &ko_layout, k_out.dtype());
+            kiln_tensor::metal_types::buffer_o(k_out_metal.buffer(), &ko_layout, k_out.dtype());
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -8559,13 +8559,13 @@ fn metal_paged_kv_head_major_read_bf16(
         };
 
         let k_buf =
-            candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
+            kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
         let v_buf =
-            candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
+            kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
         let ko_buf =
-            candle_core::metal_backend::buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
+            kiln_tensor::metal_types::buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
         let vo_buf =
-            candle_core::metal_backend::buffer_o(vo_metal.buffer(), &vo_layout, v_out.dtype());
+            kiln_tensor::metal_types::buffer_o(vo_metal.buffer(), &vo_layout, v_out.dtype());
 
         encoder.set_buffer(0, Some(k_buf.buffer), k_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(v_buf.buffer), v_buf.offset_in_bytes);
@@ -8700,13 +8700,13 @@ fn metal_paged_attn_decode_contiguous_bf16_d256(
             _ => anyhow::bail!("metal contiguous paged attention out must be on Metal"),
         };
 
-        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let q_buf = kiln_tensor::metal_types::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
         let k_buf =
-            candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
+            kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
         let v_buf =
-            candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
+            kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -8853,14 +8853,14 @@ fn metal_paged_attn_decode_contiguous_batch_bf16_d256(
             _ => anyhow::bail!("metal contiguous paged batch attention slots must be on Metal"),
         };
 
-        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let q_buf = kiln_tensor::metal_types::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
         let k_buf =
-            candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
+            kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
         let v_buf =
-            candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
+            kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
-        let slot_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+        let slot_buf = kiln_tensor::metal_types::buffer_o(
             slot_metal.buffer(),
             &slot_layout,
             start_slots.dtype(),
@@ -9043,19 +9043,19 @@ fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
             _ => anyhow::bail!("metal dyn-seqlen batch attention seqused_k must be on Metal"),
         };
 
-        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let q_buf = kiln_tensor::metal_types::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
         let k_buf =
-            candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
+            kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
         let v_buf =
-            candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
+            kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
-        let table_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+        let table_buf = kiln_tensor::metal_types::buffer_o(
             table_metal.buffer(),
             &table_layout,
             block_table.dtype(),
         );
-        let seq_buf = candle_core::metal_backend::buffer_o(
+        let seq_buf = kiln_tensor::metal_types::buffer_o(
             seq_metal.buffer(),
             &seq_layout,
             seqused_k.dtype(),
@@ -9217,17 +9217,17 @@ fn metal_paged_kv_head_major_read_append_token_major_bf16(
         };
 
         let k_buf =
-            candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
+            kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
         let v_buf =
-            candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
+            kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
         let kt_buf =
-            candle_core::metal_backend::buffer_o(kt_metal.buffer(), &kt_layout, k_tail.dtype());
+            kiln_tensor::metal_types::buffer_o(kt_metal.buffer(), &kt_layout, k_tail.dtype());
         let vt_buf =
-            candle_core::metal_backend::buffer_o(vt_metal.buffer(), &vt_layout, v_tail.dtype());
+            kiln_tensor::metal_types::buffer_o(vt_metal.buffer(), &vt_layout, v_tail.dtype());
         let ko_buf =
-            candle_core::metal_backend::buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
+            kiln_tensor::metal_types::buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
         let vo_buf =
-            candle_core::metal_backend::buffer_o(vo_metal.buffer(), &vo_layout, v_out.dtype());
+            kiln_tensor::metal_types::buffer_o(vo_metal.buffer(), &vo_layout, v_out.dtype());
 
         encoder.set_buffer(0, Some(k_buf.buffer), k_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(v_buf.buffer), v_buf.offset_in_bytes);
@@ -9367,12 +9367,12 @@ pub(crate) fn metal_paged_kv_write_token_major_bf16(
             _ => anyhow::bail!("metal paged kv write v pool must be on Metal"),
         };
 
-        let ks_buf = candle_core::metal_backend::buffer_o(ks_metal.buffer(), &ks_layout, k.dtype());
-        let vs_buf = candle_core::metal_backend::buffer_o(vs_metal.buffer(), &vs_layout, v.dtype());
+        let ks_buf = kiln_tensor::metal_types::buffer_o(ks_metal.buffer(), &ks_layout, k.dtype());
+        let vs_buf = kiln_tensor::metal_types::buffer_o(vs_metal.buffer(), &vs_layout, v.dtype());
         let kp_buf =
-            candle_core::metal_backend::buffer_o(kp_metal.buffer(), &kp_layout, k_pool.dtype());
+            kiln_tensor::metal_types::buffer_o(kp_metal.buffer(), &kp_layout, k_pool.dtype());
         let vp_buf =
-            candle_core::metal_backend::buffer_o(vp_metal.buffer(), &vp_layout, v_pool.dtype());
+            kiln_tensor::metal_types::buffer_o(vp_metal.buffer(), &vp_layout, v_pool.dtype());
 
         encoder.set_buffer(0, Some(ks_buf.buffer), ks_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(vs_buf.buffer), vs_buf.offset_in_bytes);
@@ -9526,14 +9526,14 @@ pub(crate) fn metal_paged_kv_write_token_major_batch_bf16(
             _ => anyhow::bail!("metal paged kv batch write slots must be on Metal"),
         };
 
-        let ks_buf = candle_core::metal_backend::buffer_o(ks_metal.buffer(), &ks_layout, k.dtype());
-        let vs_buf = candle_core::metal_backend::buffer_o(vs_metal.buffer(), &vs_layout, v.dtype());
+        let ks_buf = kiln_tensor::metal_types::buffer_o(ks_metal.buffer(), &ks_layout, k.dtype());
+        let vs_buf = kiln_tensor::metal_types::buffer_o(vs_metal.buffer(), &vs_layout, v.dtype());
         let kp_buf =
-            candle_core::metal_backend::buffer_o(kp_metal.buffer(), &kp_layout, k_pool.dtype());
+            kiln_tensor::metal_types::buffer_o(kp_metal.buffer(), &kp_layout, k_pool.dtype());
         let vp_buf =
-            candle_core::metal_backend::buffer_o(vp_metal.buffer(), &vp_layout, v_pool.dtype());
+            kiln_tensor::metal_types::buffer_o(vp_metal.buffer(), &vp_layout, v_pool.dtype());
         let slot_buf =
-            candle_core::metal_backend::buffer_o(slot_metal.buffer(), &slot_layout, slots.dtype());
+            kiln_tensor::metal_types::buffer_o(slot_metal.buffer(), &slot_layout, slots.dtype());
 
         encoder.set_buffer(0, Some(ks_buf.buffer), ks_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(vs_buf.buffer), vs_buf.offset_in_bytes);
@@ -9614,11 +9614,11 @@ pub(crate) fn metal_rms_norm_bf16(x: &Tensor, weight: &Tensor, eps: f32) -> Resu
             _ => anyhow::bail!("metal rmsnorm out must be on Metal"),
         };
 
-        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let x_buf = kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
         let w_buf =
-            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
+            kiln_tensor::metal_types::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &o_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &o_layout, out.dtype());
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
@@ -9708,12 +9708,12 @@ pub(crate) fn metal_gdn_qk_norm_f32_bf16(
             _ => anyhow::bail!("metal gdn qk norm k_out must be on Metal"),
         };
 
-        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let q_buf = kiln_tensor::metal_types::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
         let qo_buf =
-            candle_core::metal_backend::buffer_o(qo_metal.buffer(), &qo_layout, q_out.dtype());
+            kiln_tensor::metal_types::buffer_o(qo_metal.buffer(), &qo_layout, q_out.dtype());
         let ko_buf =
-            candle_core::metal_backend::buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
+            kiln_tensor::metal_types::buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -9809,12 +9809,12 @@ pub(crate) fn metal_gdn_qk_norm_gqa_f32_bf16(
             _ => anyhow::bail!("metal gdn qk norm gqa k_out must be on Metal"),
         };
 
-        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let q_buf = kiln_tensor::metal_types::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
         let qo_buf =
-            candle_core::metal_backend::buffer_o(qo_metal.buffer(), &qo_layout, q_out.dtype());
+            kiln_tensor::metal_types::buffer_o(qo_metal.buffer(), &qo_layout, q_out.dtype());
         let ko_buf =
-            candle_core::metal_backend::buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
+            kiln_tensor::metal_types::buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -9946,17 +9946,17 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_bf16(
         };
 
         let x_buf =
-            candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, mixed_qkv.dtype());
+            kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, mixed_qkv.dtype());
         let w_buf =
-            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
+            kiln_tensor::metal_types::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
         let s_buf =
-            candle_core::metal_backend::buffer_o(s_metal.buffer(), &s_layout, conv_state.dtype());
+            kiln_tensor::metal_types::buffer_o(s_metal.buffer(), &s_layout, conv_state.dtype());
         let qo_buf =
-            candle_core::metal_backend::buffer_o(qo_metal.buffer(), &qo_layout, q_out.dtype());
+            kiln_tensor::metal_types::buffer_o(qo_metal.buffer(), &qo_layout, q_out.dtype());
         let ko_buf =
-            candle_core::metal_backend::buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
+            kiln_tensor::metal_types::buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
         let vo_buf =
-            candle_core::metal_backend::buffer_o(vo_metal.buffer(), &vo_layout, v_out.dtype());
+            kiln_tensor::metal_types::buffer_o(vo_metal.buffer(), &vo_layout, v_out.dtype());
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
@@ -10491,15 +10491,15 @@ fn metal_gdn_gates_bf16(
             _ => anyhow::bail!("metal gdn_gates g output must be on Metal"),
         };
 
-        let a_buf = candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a.dtype());
-        let b_buf = candle_core::metal_backend::buffer_o(b_metal.buffer(), &b_layout, b.dtype());
+        let a_buf = kiln_tensor::metal_types::buffer_o(a_metal.buffer(), &a_layout, a.dtype());
+        let b_buf = kiln_tensor::metal_types::buffer_o(b_metal.buffer(), &b_layout, b.dtype());
         let al_buf =
-            candle_core::metal_backend::buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
+            kiln_tensor::metal_types::buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
         let dt_buf =
-            candle_core::metal_backend::buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
+            kiln_tensor::metal_types::buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
         let beta_buf =
-            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
-        let g_buf = candle_core::metal_backend::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
+            kiln_tensor::metal_types::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let g_buf = kiln_tensor::metal_types::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
 
         encoder.set_buffer(0, Some(a_buf.buffer), a_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(b_buf.buffer), b_buf.offset_in_bytes);
@@ -10618,15 +10618,15 @@ pub(crate) fn metal_gdn_gates_decay_bf16(
             _ => anyhow::bail!("metal gdn_gates decay output must be on Metal"),
         };
 
-        let a_buf = candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a.dtype());
-        let b_buf = candle_core::metal_backend::buffer_o(b_metal.buffer(), &b_layout, b.dtype());
+        let a_buf = kiln_tensor::metal_types::buffer_o(a_metal.buffer(), &a_layout, a.dtype());
+        let b_buf = kiln_tensor::metal_types::buffer_o(b_metal.buffer(), &b_layout, b.dtype());
         let al_buf =
-            candle_core::metal_backend::buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
+            kiln_tensor::metal_types::buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
         let dt_buf =
-            candle_core::metal_backend::buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
+            kiln_tensor::metal_types::buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
         let beta_buf =
-            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
-        let decay_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let decay_buf = kiln_tensor::metal_types::buffer_o(
             decay_metal.buffer(),
             &decay_layout,
             decay.dtype(),
@@ -10728,14 +10728,14 @@ pub(crate) fn metal_gdn_gates_decay_ab_bf16(
         };
 
         let ab_buf =
-            candle_core::metal_backend::buffer_o(ab_metal.buffer(), &ab_layout, ab.dtype());
+            kiln_tensor::metal_types::buffer_o(ab_metal.buffer(), &ab_layout, ab.dtype());
         let al_buf =
-            candle_core::metal_backend::buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
+            kiln_tensor::metal_types::buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
         let dt_buf =
-            candle_core::metal_backend::buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
+            kiln_tensor::metal_types::buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
         let beta_buf =
-            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
-        let decay_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let decay_buf = kiln_tensor::metal_types::buffer_o(
             decay_metal.buffer(),
             &decay_layout,
             decay.dtype(),
@@ -10860,22 +10860,22 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_bf16(
             _ => anyhow::bail!("metal gdn decode gates+recurrent out must be on Metal"),
         };
 
-        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
-        let a_buf = candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a.dtype());
-        let b_buf = candle_core::metal_backend::buffer_o(b_metal.buffer(), &b_layout, b.dtype());
+        let q_buf = kiln_tensor::metal_types::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let v_buf = kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let a_buf = kiln_tensor::metal_types::buffer_o(a_metal.buffer(), &a_layout, a.dtype());
+        let b_buf = kiln_tensor::metal_types::buffer_o(b_metal.buffer(), &b_layout, b.dtype());
         let al_buf =
-            candle_core::metal_backend::buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
+            kiln_tensor::metal_types::buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
         let dt_buf =
-            candle_core::metal_backend::buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
-        let state_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
+        let state_buf = kiln_tensor::metal_types::buffer_o(
             state_metal.buffer(),
             &state_layout,
             state.dtype(),
         );
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -11023,25 +11023,25 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
             _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm out must be on Metal"),
         };
 
-        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
-        let a_buf = candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a.dtype());
-        let b_buf = candle_core::metal_backend::buffer_o(b_metal.buffer(), &b_layout, b.dtype());
+        let q_buf = kiln_tensor::metal_types::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let v_buf = kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let a_buf = kiln_tensor::metal_types::buffer_o(a_metal.buffer(), &a_layout, a.dtype());
+        let b_buf = kiln_tensor::metal_types::buffer_o(b_metal.buffer(), &b_layout, b.dtype());
         let al_buf =
-            candle_core::metal_backend::buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
+            kiln_tensor::metal_types::buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
         let dt_buf =
-            candle_core::metal_backend::buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
-        let state_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
+        let state_buf = kiln_tensor::metal_types::buffer_o(
             state_metal.buffer(),
             &state_layout,
             state.dtype(),
         );
-        let z_buf = candle_core::metal_backend::buffer_o(z_metal.buffer(), &z_layout, z.dtype());
+        let z_buf = kiln_tensor::metal_types::buffer_o(z_metal.buffer(), &z_layout, z.dtype());
         let w_buf =
-            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
+            kiln_tensor::metal_types::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -11214,12 +11214,12 @@ fn metal_gated_rms_norm_bf16(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) 
             _ => anyhow::bail!("metal gated rmsnorm out must be on Metal"),
         };
 
-        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let z_buf = candle_core::metal_backend::buffer_o(z_metal.buffer(), &z_layout, z.dtype());
+        let x_buf = kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let z_buf = kiln_tensor::metal_types::buffer_o(z_metal.buffer(), &z_layout, z.dtype());
         let w_buf =
-            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
+            kiln_tensor::metal_types::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &o_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &o_layout, out.dtype());
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(z_buf.buffer), z_buf.offset_in_bytes);
@@ -12088,13 +12088,13 @@ fn metal_gdn_forward_substitution_bf16(
         };
 
         let a_buf =
-            candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a_strict.dtype());
+            kiln_tensor::metal_types::buffer_o(a_metal.buffer(), &a_layout, a_strict.dtype());
         let v_buf =
-            candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_prime.dtype());
+            kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v_prime.dtype());
         let beta_buf =
-            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+            kiln_tensor::metal_types::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(a_buf.buffer), a_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(v_buf.buffer), v_buf.offset_in_bytes);
@@ -12182,13 +12182,13 @@ fn metal_gdn_forward_substitution_f32(
         };
 
         let a_buf =
-            candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a_strict.dtype());
+            kiln_tensor::metal_types::buffer_o(a_metal.buffer(), &a_layout, a_strict.dtype());
         let v_buf =
-            candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_prime.dtype());
+            kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v_prime.dtype());
         let beta_buf =
-            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+            kiln_tensor::metal_types::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(a_buf.buffer), a_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(v_buf.buffer), v_buf.offset_in_bytes);
@@ -12337,34 +12337,34 @@ fn metal_gdn_chunk_prep_bf16(
             _ => anyhow::bail!("metal gdn chunk-prep p_last must be on Metal"),
         };
 
-        let g_buf = candle_core::metal_backend::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
-        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let g_buf = kiln_tensor::metal_types::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
+        let v_buf = kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
         let kkt_buf =
-            candle_core::metal_backend::buffer_o(kkt_metal.buffer(), &kkt_layout, kkt.dtype());
+            kiln_tensor::metal_types::buffer_o(kkt_metal.buffer(), &kkt_layout, kkt.dtype());
         let qkt_buf =
-            candle_core::metal_backend::buffer_o(qkt_metal.buffer(), &qkt_layout, qkt.dtype());
+            kiln_tensor::metal_types::buffer_o(qkt_metal.buffer(), &qkt_layout, qkt.dtype());
         let ks_buf =
-            candle_core::metal_backend::buffer_o(ks_metal.buffer(), &ks_layout, ks_entry.dtype());
+            kiln_tensor::metal_types::buffer_o(ks_metal.buffer(), &ks_layout, ks_entry.dtype());
         let qs_buf =
-            candle_core::metal_backend::buffer_o(qs_metal.buffer(), &qs_layout, q_s.dtype());
+            kiln_tensor::metal_types::buffer_o(qs_metal.buffer(), &qs_layout, q_s.dtype());
         let a_buf =
-            candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a_strict.dtype());
+            kiln_tensor::metal_types::buffer_o(a_metal.buffer(), &a_layout, a_strict.dtype());
         let b_buf =
-            candle_core::metal_backend::buffer_o(b_metal.buffer(), &b_layout, b_mask.dtype());
+            kiln_tensor::metal_types::buffer_o(b_metal.buffer(), &b_layout, b_mask.dtype());
         let vp_buf =
-            candle_core::metal_backend::buffer_o(vp_metal.buffer(), &vp_layout, v_prime.dtype());
-        let qss_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(vp_metal.buffer(), &vp_layout, v_prime.dtype());
+        let qss_buf = kiln_tensor::metal_types::buffer_o(
             qss_metal.buffer(),
             &qss_layout,
             q_s_scaled.dtype(),
         );
-        let dl_buf = candle_core::metal_backend::buffer_o(
+        let dl_buf = kiln_tensor::metal_types::buffer_o(
             dl_metal.buffer(),
             &dl_layout,
             decay_last_col.dtype(),
         );
         let pl_buf =
-            candle_core::metal_backend::buffer_o(pl_metal.buffer(), &pl_layout, p_last.dtype());
+            kiln_tensor::metal_types::buffer_o(pl_metal.buffer(), &pl_layout, p_last.dtype());
 
         encoder.set_buffer(0, Some(g_buf.buffer), g_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(v_buf.buffer), v_buf.offset_in_bytes);
@@ -12505,27 +12505,27 @@ fn metal_gdn_full_chunk_forward_bf16(
             _ => anyhow::bail!("metal gdn full-chunk out must be on Metal"),
         };
 
-        let g_buf = candle_core::metal_backend::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
-        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let g_buf = kiln_tensor::metal_types::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
+        let v_buf = kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
         let kkt_buf =
-            candle_core::metal_backend::buffer_o(kkt_metal.buffer(), &kkt_layout, kkt.dtype());
+            kiln_tensor::metal_types::buffer_o(kkt_metal.buffer(), &kkt_layout, kkt.dtype());
         let qkt_buf =
-            candle_core::metal_backend::buffer_o(qkt_metal.buffer(), &qkt_layout, qkt.dtype());
+            kiln_tensor::metal_types::buffer_o(qkt_metal.buffer(), &qkt_layout, qkt.dtype());
         let ks_buf =
-            candle_core::metal_backend::buffer_o(ks_metal.buffer(), &ks_layout, ks_entry.dtype());
+            kiln_tensor::metal_types::buffer_o(ks_metal.buffer(), &ks_layout, ks_entry.dtype());
         let qs_buf =
-            candle_core::metal_backend::buffer_o(qs_metal.buffer(), &qs_layout, q_s.dtype());
+            kiln_tensor::metal_types::buffer_o(qs_metal.buffer(), &qs_layout, q_s.dtype());
         let beta_buf =
-            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+            kiln_tensor::metal_types::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
         let kt_buf =
-            candle_core::metal_backend::buffer_o(kt_metal.buffer(), &kt_layout, k_t.dtype());
-        let state_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(kt_metal.buffer(), &kt_layout, k_t.dtype());
+        let state_buf = kiln_tensor::metal_types::buffer_o(
             state_metal.buffer(),
             &state_layout,
             state.dtype(),
         );
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(g_buf.buffer), g_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(v_buf.buffer), v_buf.offset_in_bytes);
@@ -12694,27 +12694,27 @@ fn metal_gdn_full_chunk_forward_head_last_into_bf16(
             _ => anyhow::bail!("metal gdn full-chunk head-last out must be on Metal"),
         };
 
-        let g_buf = candle_core::metal_backend::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
-        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let g_buf = kiln_tensor::metal_types::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
+        let v_buf = kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
         let kkt_buf =
-            candle_core::metal_backend::buffer_o(kkt_metal.buffer(), &kkt_layout, kkt.dtype());
+            kiln_tensor::metal_types::buffer_o(kkt_metal.buffer(), &kkt_layout, kkt.dtype());
         let qkt_buf =
-            candle_core::metal_backend::buffer_o(qkt_metal.buffer(), &qkt_layout, qkt.dtype());
+            kiln_tensor::metal_types::buffer_o(qkt_metal.buffer(), &qkt_layout, qkt.dtype());
         let ks_buf =
-            candle_core::metal_backend::buffer_o(ks_metal.buffer(), &ks_layout, ks_entry.dtype());
+            kiln_tensor::metal_types::buffer_o(ks_metal.buffer(), &ks_layout, ks_entry.dtype());
         let qs_buf =
-            candle_core::metal_backend::buffer_o(qs_metal.buffer(), &qs_layout, q_s.dtype());
+            kiln_tensor::metal_types::buffer_o(qs_metal.buffer(), &qs_layout, q_s.dtype());
         let beta_buf =
-            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+            kiln_tensor::metal_types::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
         let kt_buf =
-            candle_core::metal_backend::buffer_o(kt_metal.buffer(), &kt_layout, k_t.dtype());
-        let state_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(kt_metal.buffer(), &kt_layout, k_t.dtype());
+        let state_buf = kiln_tensor::metal_types::buffer_o(
             state_metal.buffer(),
             &state_layout,
             state.dtype(),
         );
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(g_buf.buffer), g_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(v_buf.buffer), v_buf.offset_in_bytes);
@@ -12855,19 +12855,19 @@ fn metal_gdn_recurrent_bf16(
             _ => anyhow::bail!("metal gdn recurrent out must be on Metal"),
         };
 
-        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let q_buf = kiln_tensor::metal_types::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let v_buf = kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
         let beta_buf =
-            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
-        let g_buf = candle_core::metal_backend::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
-        let state_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let g_buf = kiln_tensor::metal_types::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
+        let state_buf = kiln_tensor::metal_types::buffer_o(
             state_metal.buffer(),
             &state_layout,
             state.dtype(),
         );
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -12984,19 +12984,19 @@ fn metal_gdn_recurrent_prefill_head_last_bf16(
             _ => anyhow::bail!("metal gdn recurrent prefill out must be on Metal"),
         };
 
-        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let q_buf = kiln_tensor::metal_types::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let v_buf = kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
         let beta_buf =
-            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
-        let g_buf = candle_core::metal_backend::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
-        let state_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let g_buf = kiln_tensor::metal_types::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
+        let state_buf = kiln_tensor::metal_types::buffer_o(
             state_metal.buffer(),
             &state_layout,
             state.dtype(),
         );
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -13120,19 +13120,19 @@ fn metal_gdn_recurrent_prefill_native_head_last_bf16(
             _ => anyhow::bail!("metal gdn recurrent native prefill out must be on Metal"),
         };
 
-        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let q_buf = kiln_tensor::metal_types::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let v_buf = kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
         let beta_buf =
-            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
-        let g_buf = candle_core::metal_backend::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
-        let state_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let g_buf = kiln_tensor::metal_types::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
+        let state_buf = kiln_tensor::metal_types::buffer_o(
             state_metal.buffer(),
             &state_layout,
             state.dtype(),
         );
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -13254,23 +13254,23 @@ pub(crate) fn metal_gdn_recurrent_prefill_native_head_last_decay_bf16(
             _ => anyhow::bail!("metal gdn recurrent native prefill decay out must be on Metal"),
         };
 
-        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let q_buf = kiln_tensor::metal_types::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let v_buf = kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
         let beta_buf =
-            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
-        let decay_buf = candle_core::metal_backend::buffer_o(
+            kiln_tensor::metal_types::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let decay_buf = kiln_tensor::metal_types::buffer_o(
             decay_metal.buffer(),
             &decay_layout,
             decay.dtype(),
         );
-        let state_buf = candle_core::metal_backend::buffer_o(
+        let state_buf = kiln_tensor::metal_types::buffer_o(
             state_metal.buffer(),
             &state_layout,
             state.dtype(),
         );
         let out_buf =
-            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -13722,14 +13722,14 @@ pub(crate) fn metal_gdn_prefill_qkv_conv_split_bf16_f32_k4(
         };
 
         let x_buf =
-            candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, mixed_qkv.dtype());
+            kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, mixed_qkv.dtype());
         let w_buf =
-            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
+            kiln_tensor::metal_types::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
         let s_buf =
-            candle_core::metal_backend::buffer_o(s_metal.buffer(), &s_layout, conv_state.dtype());
-        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+            kiln_tensor::metal_types::buffer_o(s_metal.buffer(), &s_layout, conv_state.dtype());
+        let q_buf = kiln_tensor::metal_types::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = kiln_tensor::metal_types::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let v_buf = kiln_tensor::metal_types::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
@@ -13822,12 +13822,12 @@ fn metal_causal_conv1d_prefill_bf16_f32_k4(
             _ => anyhow::bail!("metal conv1d prefill output must be on Metal"),
         };
 
-        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let x_buf = kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
         let w_buf =
-            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
+            kiln_tensor::metal_types::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
         let s_buf =
-            candle_core::metal_backend::buffer_o(s_metal.buffer(), &s_layout, conv_state.dtype());
-        let o_buf = candle_core::metal_backend::buffer_o(o_metal.buffer(), &o_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(s_metal.buffer(), &s_layout, conv_state.dtype());
+        let o_buf = kiln_tensor::metal_types::buffer_o(o_metal.buffer(), &o_layout, out.dtype());
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
@@ -13914,12 +13914,12 @@ fn metal_causal_conv1d_update_bf16_f32_k4(
             _ => anyhow::bail!("metal conv1d update output must be on Metal"),
         };
 
-        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let x_buf = kiln_tensor::metal_types::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
         let w_buf =
-            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
+            kiln_tensor::metal_types::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
         let s_buf =
-            candle_core::metal_backend::buffer_o(s_metal.buffer(), &s_layout, conv_state.dtype());
-        let o_buf = candle_core::metal_backend::buffer_o(o_metal.buffer(), &o_layout, out.dtype());
+            kiln_tensor::metal_types::buffer_o(s_metal.buffer(), &s_layout, conv_state.dtype());
+        let o_buf = kiln_tensor::metal_types::buffer_o(o_metal.buffer(), &o_layout, out.dtype());
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
