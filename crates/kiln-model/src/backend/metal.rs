@@ -1,18 +1,19 @@
 //! Metal backend: candle's fused SDPA for the attention hot path, portable
 //! fallback for GDN and paged-decode.
 //!
-//! candle-metal ships `kiln_tensor::metal_types::sdpa` — an MLX-style fused
-//! scaled-dot-product attention kernel with native GQA, BF16, and head dims
-//! {32, 64, 72, 80, 96, 128, 256, 512}. For typical transformer head sizes
-//! this replaces the vendored CUDA FlashAttention-2 call on Apple Silicon.
+//! The chokepoint-routed `sdpa` symbol (imported at module level from the
+//! kt-side re-export) is an MLX-style fused scaled-dot-product attention
+//! kernel with native GQA, BF16, and head dims {32, 64, 72, 80, 96, 128,
+//! 256, 512}. For typical transformer head sizes this replaces the vendored
+//! CUDA FlashAttention-2 call on Apple Silicon.
 
 use anyhow::{Context, Result};
 
 use super::BackendRuntime;
 
 // Phase 7 #1082: module-level imports for the kt-metal chokepoint types,
-// hoisted from ~92 per-function `use` statements so that the metal_types
-// chokepoint surface in this file is centralized at one location. Future
+// hoisted from ~92 per-function `use` statements so that the chokepoint
+// surface in this file is centralized at a single import location. Future
 // substrate swaps (e.g. candle → objc2-metal) touch this single import
 // block instead of hundreds of scattered fully-qualified references.
 use kiln_tensor::metal_types::{
@@ -472,7 +473,8 @@ impl BackendRuntime for MetalBackend {
             return Ok(None);
         }
         // Last-axis index via kt-native `rank()` arithmetic so this site no
-        // longer names `kiln_tensor::metal_types::D::Minus1` (#1082 chokepoint).
+        // longer names a `candle_core::D::Minus1`-style selector through the
+        // chokepoint module (#1082 chokepoint cleanup).
         // `q` here is always at least rank 3 (batch, seq, hidden); the
         // subtraction matches the previous `D::Minus1` semantics.
         let head_dim = q.dim(q.rank() - 1)?;
@@ -13809,8 +13811,8 @@ mod tests {
     use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
     // Tests operate on `candle_core::Tensor` directly (they exercise candle-metal
     // interop), so the negative-axis selector imports straight from candle. The
-    // production code path no longer depends on `kiln_tensor::metal_types::D`
-    // (#1082 chokepoint reduction).
+    // production code path no longer depends on the kt-side `D` chokepoint
+    // re-export (#1082 chokepoint reduction).
     use candle_core::D;
     use std::time::Instant;
 

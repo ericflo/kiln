@@ -388,6 +388,43 @@ impl MetalCompanion {
         &self.device
     }
 
+    /// Stable per-device identifier suitable for `HashMap` cache keys in
+    /// per-function MSL pipeline / library caches. Returns the
+    /// `MTLDevice::registryID()` value of the underlying device — a
+    /// 64-bit unsigned that is unique across Metal devices visible to
+    /// the system and stable across the device's lifetime.
+    ///
+    /// # Why this exists
+    ///
+    /// Step 1 in the substrate-readiness checklist of
+    /// `docs/metal-cargo-toml-candle-drop-stop-2026-05-28.md`. The
+    /// existing `kiln-model::backend::metal` per-function
+    /// `OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>>` caches key
+    /// off candle's `DeviceId(usize)` newtype. Once those helper
+    /// signatures migrate from `&MetalDevice` to `&MetalCompanion`, the
+    /// cache key shape becomes `HashMap<u64, ComputePipeline>` (or
+    /// `HashMap<usize, _>` after a trivial cast), with `device_id()`
+    /// supplying the key value at every `cache.get(&...)` /
+    /// `cache.insert(..., _)` site.
+    ///
+    /// The `registryID` value is what candle's own `DeviceId` was
+    /// originally a wrapper around (see `candle-core` 0.10's
+    /// `metal_backend::device::DeviceId(usize)` — internally a
+    /// monotonically incrementing counter, semantically identical to a
+    /// stable device handle).
+    ///
+    /// # Phase 7 follow-up
+    ///
+    /// When the kernel-helper signatures migrate off `&MetalDevice` and
+    /// onto `&MetalCompanion`, every `device.id()` call site swaps to
+    /// `companion.device_id()`. The HashMap key type changes from the
+    /// candle `DeviceId` to `u64`, dropping the
+    /// `kiln_tensor::metal_types::DeviceId` chokepoint re-export from
+    /// the import line in `kiln-model::backend::metal`.
+    pub fn device_id(&self) -> u64 {
+        self.device.registry_id()
+    }
+
     /// Borrow the MSL pipeline cache — the `&Kernels` parameter every
     /// `call_*` MSL kernel entry consumes.
     pub fn kernels(&self) -> &candle_metal_kernels::Kernels {
