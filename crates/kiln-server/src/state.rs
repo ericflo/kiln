@@ -2422,11 +2422,22 @@ fn format_oom_remediation_message(
 mod tests {
     use super::*;
 
-    /// Shared CPU device for tests. Consolidates the ten inline
-    /// `candle_core::Device::Cpu` references that previously appeared
-    /// throughout this test module (issue #1082, candle removal).
-    fn cpu_device() -> candle_core::Device {
-        candle_core::Device::Cpu
+    /// Shared CPU candle device for tests. Routes through the always-on
+    /// kt -> candle bridge so this helper no longer names
+    /// `candle_core::Device` syntactically — the macro emits the
+    /// candle value via type inference at the call site, and callers
+    /// pass `&cpu_device!()` (or `let device = cpu_device!()` followed
+    /// by `&device`) to the upstream `LinearAttentionState::new` entry
+    /// which still wants `&candle_core::Device` while that API
+    /// migrates to kt. Macro form (vs `fn`) is required because Rust
+    /// has no way to spell the candle return type without naming the
+    /// `candle_core::Device` path directly (issue #1082, candle
+    /// removal).
+    macro_rules! cpu_device {
+        () => {
+            ::kiln_kt_bridge::candle_device_from_kt(&::kiln_tensor::Device::Cpu)
+                .expect("kt::Device::Cpu -> candle::Device::Cpu bridge is infallible")
+        };
     }
 
     fn tiny_linear_config() -> ModelConfig {
@@ -2701,7 +2712,7 @@ mod tests {
     #[test]
     fn real_prefix_cache_records_hits_misses_and_cached_blocks() -> anyhow::Result<()> {
         let config = tiny_linear_config();
-        let device = cpu_device();
+        let device = cpu_device!();
         let state = LinearAttentionState::new(&config, &device)?;
         let mut cache = RealPrefixCache::new(true, 4, 4, 1024, 49);
 
@@ -2751,7 +2762,7 @@ mod tests {
         // tokens — otherwise every multi-turn call re-prefills the entire
         // growing conversation from scratch.
         let config = tiny_linear_config();
-        let device = cpu_device();
+        let device = cpu_device!();
         let mut cache = RealPrefixCache::new(true, 4, 16, 1024, 49);
 
         // Turn 1 prompt is 5 tokens — non-block-aligned at block_size 4,
@@ -2792,7 +2803,7 @@ mod tests {
     #[test]
     fn real_prefix_cache_min_register_tokens_skips_short_prompts() -> anyhow::Result<()> {
         let config = tiny_linear_config();
-        let device = cpu_device();
+        let device = cpu_device!();
         let state = LinearAttentionState::new(&config, &device)?;
         let mut cache = RealPrefixCache::new_with_min_register_tokens(true, 4, 4, 1024, 49, 9);
         assert!(
@@ -2826,7 +2837,7 @@ mod tests {
     #[test]
     fn real_prefix_cache_exact_prompt_hit_requires_next_token_source() -> anyhow::Result<()> {
         let config = tiny_linear_config();
-        let device = cpu_device();
+        let device = cpu_device!();
 
         let mut cache = RealPrefixCache::new(true, 4, 4, 1024, 49);
         cache.register(
@@ -2888,7 +2899,7 @@ mod tests {
     #[test]
     fn real_prefix_cache_caps_entries_and_state_bytes() -> anyhow::Result<()> {
         let config = tiny_linear_config();
-        let device = cpu_device();
+        let device = cpu_device!();
         let mut cache = RealPrefixCache::new(true, 4, 100, 2, 49);
 
         for i in 0..3u32 {
@@ -2933,7 +2944,7 @@ mod tests {
     #[test]
     fn real_prefix_cache_keys_by_adapter() -> anyhow::Result<()> {
         let config = tiny_linear_config();
-        let device = cpu_device();
+        let device = cpu_device!();
         let state = LinearAttentionState::new(&config, &device)?;
         let mut cache = RealPrefixCache::new(true, 4, 4, 1024, 49);
         cache.register(
@@ -2969,7 +2980,7 @@ mod tests {
     #[test]
     fn register_does_not_evict_blocks_retained_by_incoming() -> anyhow::Result<()> {
         let config = tiny_linear_config();
-        let device = cpu_device();
+        let device = cpu_device!();
         let mut cache = RealPrefixCache::new(true, 4, 2, 1024, 49);
 
         // Entry A occupies blocks [10, 11], the cache's full capacity.
@@ -3017,7 +3028,7 @@ mod tests {
     #[test]
     fn register_outcome_no_duplicate_or_overlap() -> anyhow::Result<()> {
         let config = tiny_linear_config();
-        let device = cpu_device();
+        let device = cpu_device!();
         let mut cache = RealPrefixCache::new(true, 4, 3, 1024, 49);
 
         // Three small entries that together fill capacity, two of which share
@@ -3088,7 +3099,7 @@ mod tests {
     #[test]
     fn register_evicted_blocks_not_in_refcounts_after() -> anyhow::Result<()> {
         let config = tiny_linear_config();
-        let device = cpu_device();
+        let device = cpu_device!();
         let mut cache = RealPrefixCache::new(true, 4, 2, 1024, 49);
 
         // Fill capacity with an evictable entry whose blocks the next
