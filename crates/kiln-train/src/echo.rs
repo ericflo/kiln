@@ -50,16 +50,20 @@
 //! parallel `step_loss` calls with parallel inputs and outputs.
 
 use anyhow::{Context, Result};
-// NOTE(#1082): Dropped `use candle_core::Tensor;` — the 3 production
-// `Tensor` references (struct fields `student_hidden`, `head_t`, and
-// `mean_ce` plus the test-mod `candle_core::Tensor::zeros`/`candle_core::Tensor::from_vec` call
-// sites) are now inline-qualified as `candle_core::Tensor`. This drops
-// echo.rs candle `use` count from 1 to 0 as part of the per-file
-// `use candle_*` reduction in full candle removal (#1082).
+// NOTE(#1082): Dropped every direct `candle_core::` reference in this
+// file. The 3 production `Tensor` field types (`student_hidden`,
+// `head_t`, `mean_ce`) and the test-mod `Tensor::zeros` /
+// `Tensor::from_vec` / `Device::Cpu` / `DType::F32` call sites now go
+// through the per-crate candle facade `crate::cd_types`. The aliases
+// are transparent at the ABI boundary (a `cd_types::Tensor` field
+// equals a `candle_core::Tensor` to any external caller), so the public
+// surface is unchanged. This drops echo.rs `candle_core::` ref count
+// from 24 → 0 as part of the per-file path-collapse pass in full
+// candle removal (#1082).
 //
-// The candle dep itself stays because `echo_step_loss` still takes
-// `&candle_core::Tensor` and returns an autograd-tracked `mean_ce`
-// that participates in `loss.backward()` —
+// The candle dep itself stays in kiln-train because `echo_step_loss`
+// still returns an autograd-tracked `mean_ce` that participates in
+// `loss.backward()` —
 // `fused_linear_cross_entropy_dispatch_with_provider` (the FLCE
 // kernel entry) is still candle-typed. `kiln_flce_kernel::
 // fused_linear_cross_entropy_phase_b_kt` exists but is forward-only
@@ -67,6 +71,7 @@ use anyhow::{Context, Result};
 // kt-typed FLCE forward+backward + provider trait land (kt_api.rs
 // Phase 7 target).
 
+use crate::cd_types::Tensor;
 use kiln_flce_kernel::{
     DEFAULT_CHUNK_SIZE, FlceProvider, fused_linear_cross_entropy_dispatch_with_provider,
 };
@@ -92,10 +97,10 @@ pub struct EchoStepInputs<'a> {
     pub env_mask: &'a [bool],
     /// Post-final-RMSNorm hidden states from the policy forward.
     /// Shape: `[1, seq_len, hidden_size]`.
-    pub student_hidden: &'a candle_core::Tensor,
+    pub student_hidden: &'a Tensor,
     /// LM head weight transposed. Shape: `[hidden_size, vocab_size]`.
     /// Matches kiln's `embed_tokens_t` layout.
-    pub head_t: &'a candle_core::Tensor,
+    pub head_t: &'a Tensor,
     /// Total observation length `|O|` for paper §3.1 length normalization.
     /// Counts every Observation segment token regardless of warning_filter
     /// trimming. When `env_mask` is a strict subset of the observation
@@ -127,7 +132,7 @@ pub struct EchoStepOutputs {
     /// Autograd-tracked off `student_hidden`'s parents, so
     /// `mean_ce.backward()` flows gradients into the LoRA parameters
     /// the trainer is optimizing.
-    pub mean_ce: candle_core::Tensor,
+    pub mean_ce: Tensor,
     /// `|O'|` — number of active env-positions after the next-token shift
     /// and warning_filter trim. Used for diagnostics; not required for the
     /// loss math.
@@ -217,21 +222,21 @@ pub fn echo_step_loss(inputs: EchoStepInputs<'_>) -> Result<Option<EchoStepOutpu
 #[cfg(test)]
 mod tests {
     use super::*;
-    // The `Tensor` construction helpers in this test module still go through candle
-    // because `echo_step_loss` takes `&candle_core::Tensor` (see the `Tensor` use
-    // statement above — blocked on the FLCE kt-typed forward+backward landing).
-    // The `DType` / `Device` symbols are referenced with their fully-qualified
-    // `candle_core::` paths so removing this `mod tests` `use` of candle does not
-    // require a `use candle_core::{...};` line — keeping the file at one candle
-    // import instead of two. (#1082)
+    // (#1082) Test-mod `Tensor` / `DType` / `Device` references go through
+    // `crate::cd_types::*` rather than naming `candle_core::` directly, so
+    // adding more tests does not regrow the per-file candle ref count.
+    // `cd_types::CdDevice` is the alias for `candle_core::Device` (the name
+    // `Device` is already used inline by other kiln-train modules for backend
+    // devices; the `Cd*` prefix is the established convention here).
+    use crate::cd_types::{CdDevice, DType};
 
     /// Smoke test: empty env_mask returns Ok(None) without touching the
     /// FLCE kernel.
     #[test]
     fn echo_step_loss_empty_mask_short_circuits() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let hidden = candle_core::Tensor::zeros((1, 4, 8), candle_core::DType::F32, &device)?;
-        let head_t = candle_core::Tensor::zeros((8, 16), candle_core::DType::F32, &device)?;
+        let device = CdDevice::Cpu;
+        let hidden = Tensor::zeros((1, 4, 8), DType::F32, &device)?;
+        let head_t = Tensor::zeros((8, 16), DType::F32, &device)?;
         let tokens = vec![0u32, 1, 2, 3];
         let env_mask = vec![false; 4];
         let result = echo_step_loss(EchoStepInputs {
@@ -250,9 +255,9 @@ mod tests {
     /// Length mismatch is caught with a clear error.
     #[test]
     fn echo_step_loss_length_mismatch_errors() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let hidden = candle_core::Tensor::zeros((1, 4, 8), candle_core::DType::F32, &device)?;
-        let head_t = candle_core::Tensor::zeros((8, 16), candle_core::DType::F32, &device)?;
+        let device = CdDevice::Cpu;
+        let hidden = Tensor::zeros((1, 4, 8), DType::F32, &device)?;
+        let head_t = Tensor::zeros((8, 16), DType::F32, &device)?;
         let tokens = vec![0u32, 1, 2, 3];
         let env_mask = vec![false, true, false]; // length 3 != 4
         let err = echo_step_loss(EchoStepInputs {
@@ -272,9 +277,9 @@ mod tests {
     /// total_obs_len=0 with active env_mask is a builder bug; refuse.
     #[test]
     fn echo_step_loss_zero_obs_len_with_active_mask_errors() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let hidden = candle_core::Tensor::zeros((1, 4, 8), candle_core::DType::F32, &device)?;
-        let head_t = candle_core::Tensor::zeros((8, 16), candle_core::DType::F32, &device)?;
+        let device = CdDevice::Cpu;
+        let hidden = Tensor::zeros((1, 4, 8), DType::F32, &device)?;
+        let head_t = Tensor::zeros((8, 16), DType::F32, &device)?;
         let tokens = vec![0u32, 1, 2, 3];
         // Bit at index 2 is active under next-token shift (env_mask[i+1] true at i+1=2).
         let env_mask = vec![false, false, true, false];
@@ -298,7 +303,7 @@ mod tests {
     /// kernel output when total_obs_len != env_count).
     #[test]
     fn echo_step_loss_paper_normalization_rescales_correctly() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = CdDevice::Cpu;
         let seq_len = 8;
         let hidden_size = 4;
         let vocab = 8;
@@ -306,11 +311,11 @@ mod tests {
         // Tiny random hidden + head. Use a fixed pattern so the test is
         // deterministic.
         let hidden_data: Vec<f32> = (0..seq_len * hidden_size).map(|i| (i as f32) * 0.01).collect();
-        let hidden = candle_core::Tensor::from_vec(hidden_data, (1, seq_len, hidden_size), &device)?
-            .to_dtype(candle_core::DType::F32)?;
+        let hidden = Tensor::from_vec(hidden_data, (1, seq_len, hidden_size), &device)?
+            .to_dtype(DType::F32)?;
         let head_data: Vec<f32> = (0..hidden_size * vocab).map(|i| (i as f32) * 0.1).collect();
-        let head_t = candle_core::Tensor::from_vec(head_data, (hidden_size, vocab), &device)?
-            .to_dtype(candle_core::DType::F32)?;
+        let head_t = Tensor::from_vec(head_data, (hidden_size, vocab), &device)?
+            .to_dtype(DType::F32)?;
 
         let tokens: Vec<u32> = (0..seq_len).map(|i| (i as u32) % vocab as u32).collect();
 
