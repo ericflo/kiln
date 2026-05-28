@@ -5681,10 +5681,8 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit(
+fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit_bytes(
     vk_device: &VulkanDevice,
-    q: &Tensor,
-    state: &Tensor,
     input_data: &[Vec<u8>],
     spirv: &[u8],
     push_constants: [u32; 5],
@@ -5692,7 +5690,7 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit(
     nv: usize,
     dv: usize,
     skip_state_readback: bool,
-) -> Result<(Tensor, Tensor)> {
+) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -8399,10 +8397,8 @@ pub fn dispatch_gdn_recurrent_step_with_options(
     );
 
     if single_submit {
-        return dispatch_gdn_recurrent_step_single_submit(
+        let (out_data, state_data_out) = dispatch_gdn_recurrent_step_single_submit_bytes(
             vk_device,
-            q,
-            state,
             &q_data,
             &k_data,
             &v_data,
@@ -8418,9 +8414,15 @@ pub fn dispatch_gdn_recurrent_step_with_options(
             parallel_reduce,
             skip_state_readback,
             profile_kernel_stages,
-            q.dtype(),
             None,
-        );
+        )?;
+        let out_shape = vec![batch, heads, dv];
+        let out_tensor = create_tensor_from_data(&out_data, &out_shape, q.dtype())?;
+        let state_tensor = state_data_out
+            .as_ref()
+            .map(|sd| create_tensor_from_data(sd, state.dims(), state.dtype()))
+            .transpose()?;
+        return Ok((out_tensor, state_tensor));
     }
 
     // Create input buffers + upload.
@@ -9102,10 +9104,8 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn dispatch_gdn_recurrent_step_single_submit(
+fn dispatch_gdn_recurrent_step_single_submit_bytes(
     vk_device: &VulkanDevice,
-    _q: &Tensor,
-    state: &Tensor,
     q_data: &[u8],
     k_data: &[u8],
     v_data: &[u8],
@@ -9121,9 +9121,8 @@ fn dispatch_gdn_recurrent_step_single_submit(
     parallel_reduce: bool,
     skip_state_readback: bool,
     profile_kernel_stages: bool,
-    output_dtype: DType,
     dispatch_counts_override: Option<(u32, u32, u32)>,
-) -> Result<(Tensor, Option<Tensor>)> {
+) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -9444,12 +9443,6 @@ fn dispatch_gdn_recurrent_step_single_submit(
     );
 
     let stage_profile = profile_kernel_stages.then(Instant::now);
-    let out_shape = vec![batch, heads, dv];
-    let out_tensor = create_tensor_from_data(&out_data, &out_shape, output_dtype)?;
-    let state_tensor = state_data
-        .as_ref()
-        .map(|state_data| create_tensor_from_data(state_data, state.dims().as_ref(), state.dtype()))
-        .transpose()?;
     finish_vulkan_gdn_recurrent_kernel_stage_profile(
         "create_tensors",
         batch,
@@ -9461,7 +9454,7 @@ fn dispatch_gdn_recurrent_step_single_submit(
         skip_state_readback,
         stage_profile,
     );
-    Ok((out_tensor, state_tensor))
+    Ok((out_data, state_data))
 }
 
 /// Dispatch a single-token recurrent step with unexpanded GQA Q/K heads.
@@ -9540,10 +9533,8 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_with_options(
     };
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
 
-    let (out, state) = dispatch_gdn_recurrent_step_single_submit(
+    let (out_data, state_data_out) = dispatch_gdn_recurrent_step_single_submit_bytes(
         vk_device,
-        q,
-        state,
         &q_data,
         &k_data,
         &v_data,
@@ -9559,10 +9550,15 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_with_options(
         parallel_reduce,
         skip_state_readback,
         false,
-        q.dtype(),
         None,
     )?;
-    Ok((out.unsqueeze(1)?, state))
+    let out_shape = vec![batch, heads, dv];
+    let out = create_tensor_from_data(&out_data, &out_shape, q.dtype())?;
+    let state_tensor = state_data_out
+        .as_ref()
+        .map(|sd| create_tensor_from_data(sd, state.dims(), state.dtype()))
+        .transpose()?;
+    Ok((out.unsqueeze(1)?, state_tensor))
 }
 
 /// Dispatch a single-token recurrent step with unexpanded raw GQA Q/K heads,
@@ -9634,10 +9630,8 @@ pub fn dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options(
         "/csrc/shaders/gdn_recurrent_qk_norm_step.comp"
     );
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
-    let (out, state) = dispatch_gdn_recurrent_step_single_submit(
+    let (out_data, state_data_out) = dispatch_gdn_recurrent_step_single_submit_bytes(
         vk_device,
-        q,
-        state,
         &q_data,
         &k_data,
         &v_data,
@@ -9653,10 +9647,15 @@ pub fn dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options(
         false,
         skip_state_readback,
         false,
-        state.dtype(),
         Some((batch as u32, heads as u32, 1)),
     )?;
-    Ok((out.unsqueeze(1)?, state))
+    let out_shape = vec![batch, heads, dv];
+    let out = create_tensor_from_data(&out_data, &out_shape, state.dtype())?;
+    let state_tensor = state_data_out
+        .as_ref()
+        .map(|sd| create_tensor_from_data(sd, state.dims(), state.dtype()))
+        .transpose()?;
+    Ok((out.unsqueeze(1)?, state_tensor))
 }
 
 // ---------------------------------------------------------------------------
