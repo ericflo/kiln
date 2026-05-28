@@ -1814,3 +1814,131 @@ fn tape_backward_cross_entropy_matches_analytic_gradient() {
         "cross_entropy backward diverges from analytic gradient (max-abs-diff {diff})"
     );
 }
+
+
+// ----------------------------------------------------------------------
+// Connected multi-op tape backward-walk parity (#1082 — CP-4 op #9).
+//
+// The per-op `tape_backward_*` tests verify ONE `BackwardOp` in isolation
+// (seed at its output, one node). This test proves the kt `Tape` walks a
+// CONNECTED CHAIN of ops correctly when seeded at the final output — the
+// tape-authoritative behavior the CP-4 endgame needs (see the #1082
+// "tape-bridge can't seed detached adapter outputs" finding).
+//
+// We build `mm = a @ b ; s = mm + c` DIRECTLY on a `Tape`, so the
+// AddBackward node's first input id IS the MatmulBackward node's output id
+// (`s`'s `mm` input is literally `mm`, not a fresh re-borrow). That
+// connectivity is exactly what adapter-borrowed chains lack today (each
+// adapter re-borrows the shared candle intermediate into a fresh kt id).
+//
+// Seeded at `s` with an arbitrary upstream grad `g`, the walk must yield
+// the analytic chain rule:
+//   d_c = g ; d_mm = g ; d_a = g @ b^T ; d_b = a^T @ g
+// compared against candle's own matmul/transpose within a BF16-relative
+// band. This pins the connected tape-authoritative walk that the bridge
+// integration will build on.
+// ----------------------------------------------------------------------
+
+#[test]
+fn tape_connected_chain_backward_walk_parity() {
+    use kiln_autograd::{AddBackward, MatmulBackward, Tape};
+
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape connected chain: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    let (m, k, n) = (16usize, 32usize, 16usize);
+    let (a, b) = build_matmul_inputs(&device, m, k, n); // [m,k], [k,n] BF16 CUDA
+    let c = Tensor::from_vec(
+        random_bf16_vec(m * n, 0x0C0C_2468_ACE0_1357, 0.25),
+        (m, n),
+        &Device::Cpu,
+    )
+    .expect("c cpu")
+    .to_device(&device)
+    .expect("c -> cuda")
+    .contiguous()
+    .expect("c contig");
+
+    // Borrow candle inputs as kt (zero-copy CUDA views).
+    let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a).expect("a kt");
+    let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b).expect("b kt");
+    let c_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&c).expect("c kt");
+
+    // Build the CONNECTED chain directly on a Tape.
+    let mut tape = Tape::new();
+    let mm_kt = kiln_tensor::ops::matmul(&a_kt, &b_kt).expect("kt matmul");
+    tape.record(
+        &mm_kt,
+        &[&a_kt, &b_kt],
+        Box::new(MatmulBackward {
+            a: a_kt.clone(),
+            b: b_kt.clone(),
+        }),
+    );
+    let s_kt = kiln_tensor::ops::add(&mm_kt, &c_kt).expect("kt add");
+    tape.record(&s_kt, &[&mm_kt, &c_kt], Box::new(AddBackward));
+
+    assert_eq!(tape.len(), 2, "chain records exactly two nodes");
+    // CONNECTIVITY: the add node's first input id is the matmul node's
+    // output id — the nodes are linked, so the walk can propagate
+    // d_loss/d_mm from AddBackward into MatmulBackward.
+    let mm_out_id = tape.nodes()[0].output_id;
+    let add_in0_id = tape.nodes()[1].input_ids[0];
+    assert_eq!(
+        add_in0_id, mm_out_id,
+        "connected chain: add's mm-input id must equal matmul's output id"
+    );
+
+    // Seed an arbitrary upstream grad at `s` (owned copy — AddBackward
+    // passes it through unchanged to mm and c, so a borrowed seed would
+    // surface as Borrowed storage).
+    let seed = build_seed_grad(&device, &[m, n], 0x0C0C_1111_2222_3333, 0.25);
+    let seed_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&seed).expect("seed kt copy");
+    let mut seeds = std::collections::HashMap::new();
+    seeds.insert(s_kt.id(), seed_kt);
+
+    let grads = tape
+        .backward_with_seeds(seeds, |x, y| kiln_tensor::ops::add(x, y))
+        .expect("connected chain backward walk");
+
+    let to_candle = |id| {
+        let g = grads.get(id).expect("grad present");
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(g).expect("grad -> candle")
+    };
+    let da = to_candle(a_kt.id());
+    let db = to_candle(b_kt.id());
+    let dc = to_candle(c_kt.id());
+    assert_eq!(da.shape().dims(), &[m, k], "d_a shape");
+    assert_eq!(db.shape().dims(), &[k, n], "d_b shape");
+    assert_eq!(dc.shape().dims(), &[m, n], "d_c shape");
+
+    // Analytic chain rule via candle: d_a = g @ b^T, d_b = a^T @ g, d_c = g.
+    let da_ref = seed.matmul(&b.t().expect("b^T")).expect("g @ b^T");
+    let db_ref = a.t().expect("a^T").matmul(&seed).expect("a^T @ g");
+    let dc_ref = seed.clone();
+
+    let rel = |got: &Tensor, want: &Tensor| -> f32 {
+        let d = max_abs_diff(got, want);
+        let vals = want
+            .to_dtype(DType::F32)
+            .expect("f32")
+            .flatten_all()
+            .expect("flat")
+            .to_vec1::<f32>()
+            .expect("vec");
+        let mag = vals.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
+        d / mag.max(1e-6)
+    };
+    let (ra, rb, rc) = (rel(&da, &da_ref), rel(&db, &db_ref), rel(&dc, &dc_ref));
+    assert!(
+        ra < 0.08 && rb < 0.08 && rc < 0.02,
+        "connected tape walk diverges from candle chain rule \
+         (rel d_a {ra:.4}, d_b {rb:.4}, d_c {rc:.4})"
+    );
+}
