@@ -26,7 +26,7 @@
 #![cfg(feature = "vulkan")]
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Tensor};
+
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -123,7 +123,7 @@ pub fn drain_resident_decode_timing() {
 /// Run one full-attention decode block on the Vulkan-resident path.
 ///
 /// Returns `Ok(Some(output_tensor))` on success — the post-MLP residual,
-/// shape `[1, 1, hidden_size]`, `DType::F32`, on the same candle device
+/// shape `[1, 1, hidden_size]`, `candle_core::DType::F32`, on the same candle device
 /// as `x`.
 ///
 /// Returns `Ok(None)` when the input does not match the supported
@@ -138,7 +138,7 @@ pub fn drain_resident_decode_timing() {
 #[allow(clippy::too_many_arguments)]
 pub fn transformer_block_paged_decode_full_attn_resident_b1(
     backend: &VulkanBackend,
-    x: &Tensor,
+    x: &candle_core::Tensor,
     layer: &GpuLayerWeights,
     config: &ModelConfig,
     start_pos: usize,
@@ -146,9 +146,9 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     full_attn_layer_idx: usize,
     paged_cache: &PagedKvCache,
     vk_kv_cache: &VkPagedKvCache,
-    rope_cos: &Tensor,
-    rope_sin: &Tensor,
-) -> Result<Option<Tensor>> {
+    rope_cos: &candle_core::Tensor,
+    rope_sin: &candle_core::Tensor,
+) -> Result<Option<candle_core::Tensor>> {
     // --- supported-config gate ---------------------------------------
     let dims = x.dims();
     if dims.len() != 3 || dims[0] != 1 || dims[1] != 1 {
@@ -256,10 +256,10 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
 
     // --- upload x ----------------------------------------------------
     let upload_t0 = fa_t0.map(|_| Instant::now());
-    let x_f32 = if x.dtype() == DType::F32 {
+    let x_f32 = if x.dtype() == candle_core::DType::F32 {
         x.flatten_all()?
     } else {
-        x.to_dtype(DType::F32)?.flatten_all()?
+        x.to_dtype(candle_core::DType::F32)?.flatten_all()?
     };
     let x_data: Vec<f32> = x_f32.to_vec1()?;
     let x_bytes: Vec<u8> = f32_slice_to_bytes(&x_data);
@@ -482,7 +482,7 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
         FA_SUBMIT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
-    // --- read back final_out as a candle Tensor on the input's device
+    // --- read back final_out as a candle candle_core::Tensor on the input's device
     let readback_t0 = fa_t0.map(|_| Instant::now());
     let out_bytes = VulkanBuffer::read_back(
         vk_device.device(),
@@ -494,7 +494,7 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     .context("read back final_out")?;
     let out_f32: Vec<f32> = bytes_to_f32_vec(&out_bytes);
     let out_tensor =
-        Tensor::from_vec(out_f32, (1usize, 1usize, hidden), x.device())?.to_dtype(x.dtype())?;
+        candle_core::Tensor::from_vec(out_f32, (1usize, 1usize, hidden), x.device())?.to_dtype(x.dtype())?;
     if let Some(t) = readback_t0 {
         FA_READBACK_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -580,12 +580,12 @@ fn upload_u32_slice(vk_device: &VulkanDevice, data: &[u32]) -> Result<VulkanBuff
 #[allow(clippy::too_many_arguments)]
 pub fn transformer_block_paged_decode_gdn_resident_b1(
     backend: &VulkanBackend,
-    x: &Tensor,
+    x: &candle_core::Tensor,
     layer: &GpuLayerWeights,
     config: &ModelConfig,
-    recurrent_state_t: &Tensor,
-    conv_state_t: &Tensor,
-) -> Result<Option<Tensor>> {
+    recurrent_state_t: &candle_core::Tensor,
+    conv_state_t: &candle_core::Tensor,
+) -> Result<Option<candle_core::Tensor>> {
     let state_key = recurrent_state_t.id();
     let dims = x.dims();
     if dims.len() != 3 || dims[0] != 1 || dims[1] != 1 {
@@ -684,10 +684,10 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
 
     // --- upload x ------------------------------------------------
     let upload_t0 = fb_t0.map(|_| Instant::now());
-    let x_f32 = if x.dtype() == DType::F32 {
+    let x_f32 = if x.dtype() == candle_core::DType::F32 {
         x.flatten_all()?
     } else {
-        x.to_dtype(DType::F32)?.flatten_all()?
+        x.to_dtype(candle_core::DType::F32)?.flatten_all()?
     };
     let x_data: Vec<f32> = x_f32.to_vec1()?;
     VulkanBuffer::upload_data(
@@ -916,7 +916,7 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
     )
     .context("read back GDN full-block final_out")?;
     let out_f32 = bytes_to_f32_vec(&out_bytes);
-    let out_tensor = Tensor::from_vec(out_f32, (1usize, 1usize, hidden), x.device())?
+    let out_tensor = candle_core::Tensor::from_vec(out_f32, (1usize, 1usize, hidden), x.device())?
         .to_dtype(x.dtype())?;
     if let Some(t) = readback_t0 {
         GDNFB_READBACK_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -938,12 +938,12 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
 #[allow(clippy::too_many_arguments)]
 pub fn gated_deltanet_forward_decode_resident_b1(
     backend: &VulkanBackend,
-    x_normed: &Tensor,
+    x_normed: &candle_core::Tensor,
     weights: &crate::forward::GpuLinearAttentionWeights,
     config: &ModelConfig,
-    recurrent_state_t: &Tensor,
-    conv_state_t: &Tensor,
-) -> Result<Option<Tensor>> {
+    recurrent_state_t: &candle_core::Tensor,
+    conv_state_t: &candle_core::Tensor,
+) -> Result<Option<candle_core::Tensor>> {
     let state_key = recurrent_state_t.id();
     // --- supported-config gate -----------------------------------
     let dims = x_normed.dims();
@@ -1025,10 +1025,10 @@ pub fn gated_deltanet_forward_decode_resident_b1(
 
     // --- upload x -----------------------------------------------
     let gdn_upload_t0 = gdn_t0.map(|_| Instant::now());
-    let x_f32 = if x_normed.dtype() == DType::F32 {
+    let x_f32 = if x_normed.dtype() == candle_core::DType::F32 {
         x_normed.flatten_all()?
     } else {
-        x_normed.to_dtype(DType::F32)?.flatten_all()?
+        x_normed.to_dtype(candle_core::DType::F32)?.flatten_all()?
     };
     let x_data: Vec<f32> = x_f32.to_vec1()?;
     VulkanBuffer::upload_data(
@@ -1203,7 +1203,7 @@ pub fn gated_deltanet_forward_decode_resident_b1(
     )
     .context("read back GDN out_buf")?;
     let out_f32 = bytes_to_f32_vec(&out_bytes);
-    let out_tensor = Tensor::from_vec(out_f32, (1usize, 1usize, hidden), x_normed.device())?
+    let out_tensor = candle_core::Tensor::from_vec(out_f32, (1usize, 1usize, hidden), x_normed.device())?
         .to_dtype(x_normed.dtype())?;
     if let Some(t) = gdn_readback_t0 {
         GDN_READBACK_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -1218,12 +1218,12 @@ pub fn gated_deltanet_forward_decode_resident_b1(
 fn seed_recurrent_state(
     vk_device: &VulkanDevice,
     buf: &VulkanBuffer,
-    state_t: &Tensor,
+    state_t: &candle_core::Tensor,
 ) -> Result<()> {
-    let flat = if state_t.dtype() == DType::F32 {
+    let flat = if state_t.dtype() == candle_core::DType::F32 {
         state_t.flatten_all()?
     } else {
-        state_t.to_dtype(DType::F32)?.flatten_all()?
+        state_t.to_dtype(candle_core::DType::F32)?.flatten_all()?
     };
     let data: Vec<f32> = flat.to_vec1()?;
     let bytes = f32_slice_to_bytes(&data);
@@ -1238,16 +1238,16 @@ fn seed_recurrent_state(
     .context("seed recurrent state")
 }
 
-fn seed_conv_state(vk_device: &VulkanDevice, buf: &VulkanBuffer, state_t: &Tensor) -> Result<()> {
-    let flat = if state_t.dtype() == DType::F32 {
+fn seed_conv_state(vk_device: &VulkanDevice, buf: &VulkanBuffer, state_t: &candle_core::Tensor) -> Result<()> {
+    let flat = if state_t.dtype() == candle_core::DType::F32 {
         state_t.flatten_all()?
     } else {
-        state_t.to_dtype(DType::F32)?.flatten_all()?
+        state_t.to_dtype(candle_core::DType::F32)?.flatten_all()?
     };
     let data: Vec<f32> = flat.to_vec1()?;
     let bytes = f32_slice_to_bytes(&data);
     // The legacy conv_state may be smaller than the allocated buffer (we
-    // sized off qkv_dim × (kernel_size - 1), the candle Tensor matches).
+    // sized off qkv_dim × (kernel_size - 1), the candle candle_core::Tensor matches).
     VulkanBuffer::upload_data(
         vk_device.device(),
         vk_device.host_visible_mem_type(),
@@ -1293,15 +1293,15 @@ pub fn seed_vk_kv_cache_layer_blocks_from_legacy(
         let slot_start = bid * block_size;
         let k_block = k_tensor.narrow(0, slot_start, block_size)?.contiguous()?;
         let v_block = v_tensor.narrow(0, slot_start, block_size)?.contiguous()?;
-        let k_block_f32 = if k_block.dtype() == DType::F32 {
+        let k_block_f32 = if k_block.dtype() == candle_core::DType::F32 {
             k_block.flatten_all()?
         } else {
-            k_block.to_dtype(DType::F32)?.flatten_all()?
+            k_block.to_dtype(candle_core::DType::F32)?.flatten_all()?
         };
-        let v_block_f32 = if v_block.dtype() == DType::F32 {
+        let v_block_f32 = if v_block.dtype() == candle_core::DType::F32 {
             v_block.flatten_all()?
         } else {
-            v_block.to_dtype(DType::F32)?.flatten_all()?
+            v_block.to_dtype(candle_core::DType::F32)?.flatten_all()?
         };
         let k_data: Vec<f32> = k_block_f32.to_vec1()?;
         let v_data: Vec<f32> = v_block_f32.to_vec1()?;
@@ -1324,15 +1324,15 @@ pub fn seed_vk_kv_cache_layer_from_legacy(
     let (k_tensor, v_tensor) = paged_cache
         .pool_tensors(layer_idx)
         .ok_or_else(|| anyhow::anyhow!("legacy paged_cache layer {layer_idx} out of range"))?;
-    let k_flat = if k_tensor.dtype() == DType::F32 {
+    let k_flat = if k_tensor.dtype() == candle_core::DType::F32 {
         k_tensor.flatten_all()?
     } else {
-        k_tensor.to_dtype(DType::F32)?.flatten_all()?
+        k_tensor.to_dtype(candle_core::DType::F32)?.flatten_all()?
     };
-    let v_flat = if v_tensor.dtype() == DType::F32 {
+    let v_flat = if v_tensor.dtype() == candle_core::DType::F32 {
         v_tensor.flatten_all()?
     } else {
-        v_tensor.to_dtype(DType::F32)?.flatten_all()?
+        v_tensor.to_dtype(candle_core::DType::F32)?.flatten_all()?
     };
     let k_data: Vec<f32> = k_flat.to_vec1()?;
     let v_data: Vec<f32> = v_flat.to_vec1()?;
@@ -1345,7 +1345,7 @@ pub fn seed_vk_kv_cache_layer_from_legacy(
 // Cross-layer chained record helpers + native orchestrator.
 //
 // The per-layer block helpers above each create a `CommandBatch`,
-// submit, wait, and Tensor-bridge their input and output. That's one
+// submit, wait, and candle_core::Tensor-bridge their input and output. That's one
 // submit + one upload + one readback PER LAYER → 32 submits and 32
 // CPU round-trips per decode token. The microbench
 // `full_token_resident_paged` shows 32 layers in ONE CommandBatch +
@@ -1687,8 +1687,8 @@ pub fn record_gdn_block_into(
     x_out_buf: &VulkanBuffer,
     layer: &GpuLayerWeights,
     config: &ModelConfig,
-    recurrent_state_t: &Tensor,
-    conv_state_t: &Tensor,
+    recurrent_state_t: &candle_core::Tensor,
+    conv_state_t: &candle_core::Tensor,
 ) -> Result<bool> {
     let lin_weights = match &layer.attention {
         crate::forward::GpuAttentionWeights::Linear(w) => w,
