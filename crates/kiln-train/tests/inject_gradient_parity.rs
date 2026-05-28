@@ -271,6 +271,185 @@ fn inject_gradient_kt_matches_candle_custom_op1() {
     );
 }
 
+/// Drive the candle baseline path with `arg` as an intermediate
+/// (`input_var * weight`). Returns the GradStore so callers can look
+/// up `dL/d(input_var)`.
+fn run_candle_baseline_intermediate(
+    input_var: &Var,
+    weight: &Tensor,
+    upstream: &Tensor,
+) -> GradStore {
+    let arg = input_var
+        .as_tensor()
+        .broadcast_mul(weight)
+        .expect("input_var * weight");
+    let injected = arg
+        .apply_op1(InjectTensorGradientRef {
+            upstream: upstream.clone(),
+        })
+        .expect("apply_op1");
+    injected.backward().expect("candle backward (intermediate)")
+}
+
+/// Drive the kt-tape bridge path with `arg` as an intermediate.
+fn run_kt_tape_intermediate(
+    input_var: &Var,
+    weight: &Tensor,
+    upstream: &Tensor,
+) -> GradStore {
+    let input_t: Tensor = input_var.as_tensor().clone();
+    let weight_clone: Tensor = weight.clone();
+    let upstream_clone: Tensor = upstream.clone();
+    let ((), grads) = kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store(move || {
+        let arg = input_t
+            .broadcast_mul(&weight_clone)
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("input * weight: {e}")))?;
+        let injected =
+            kiln_kt_bridge::tape_bridge::inject_gradient_kt(&arg, &upstream_clone).map_err(
+                |e| kiln_kt_bridge::BridgeError::new(format!("inject_gradient_kt: {e}")),
+            )?;
+        Ok(((), injected))
+    })
+    .expect("with_tape_scope_emit_to_grad_store");
+    grads
+}
+
+/// Parity test for the production call-site pattern: `arg` is an
+/// intermediate of further candle ops above the `Var` whose gradient
+/// the trainer later reads. Specifically: `arg = input_var.broadcast_mul(weight)`
+/// — analogous to `out_proj_tile = pre_o_tile_var @ out_proj_weight` in
+/// `trainer.rs:8068`, where the trainer reads
+/// `grads.get(pre_o_tile_var)` (i.e. the grad of the upstream Var, not
+/// of `arg` itself).
+///
+/// Under Option 2, both candle-only and kt-tape paths must propagate
+/// the injected upstream through the multiplication's backward
+/// (`d arg / d input_var = weight`), producing
+/// `grads[input_var] = upstream * weight` (with the bf16 ↔ f32
+/// dtype dance both routes apply identically).
+///
+/// This test would have failed under the previous Option 0 substrate
+/// (`9b2eda8e`): that variant returned zeros from the shim's `bwd`,
+/// so candle's backward walk fed zeros to the multiplication's
+/// backward, yielding `grads[input_var] = 0`. The post-hoc
+/// `insert_or_add_by_raw` would later overwrite `grads[arg.id()]` with
+/// the upstream — but the upstream walk had already populated
+/// `grads[input_var]` with zeros.
+#[test]
+fn inject_grad_propagation_through_intermediate() {
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("inject_gradient parity (intermediate): no CUDA device — skipping");
+            return;
+        }
+    };
+
+    let shape = [4usize, 16];
+    let n: usize = shape.iter().product();
+
+    // Helper that produces (Var, weight, upstream) with byte-identical
+    // inputs across calls (LCG seeds are reset per call).
+    let build = || {
+        let input_host = random_bf16_vec(n, 0x0123_4567_89ab_cdef, 0.5);
+        let input_t = Tensor::from_vec(input_host, &shape[..], &Device::Cpu)
+            .expect("input cpu")
+            .to_device(&device)
+            .expect("input -> device")
+            .contiguous()
+            .expect("input contig");
+        let input_var = Var::from_tensor(&input_t).expect("Var::from_tensor(input)");
+
+        let weight_host = random_bf16_vec(n, 0xfedc_ba98_7654_3210, 0.25);
+        let weight = Tensor::from_vec(weight_host, &shape[..], &Device::Cpu)
+            .expect("weight cpu")
+            .to_device(&device)
+            .expect("weight -> device")
+            .contiguous()
+            .expect("weight contig");
+
+        let mut state: u64 = 0xc0ff_eed1_d00d_face;
+        let upstream_host: Vec<f32> = (0..n).map(|_| lcg(&mut state)).collect();
+        let upstream = Tensor::from_vec(upstream_host, &shape[..], &Device::Cpu)
+            .expect("upstream cpu")
+            .to_device(&device)
+            .expect("upstream -> device")
+            .contiguous()
+            .expect("upstream contig");
+
+        (input_var, weight, upstream)
+    };
+
+    // -------- Path A: candle baseline.
+    let (input_var_a, weight_a, upstream_a) = build();
+    let grads_a = run_candle_baseline_intermediate(&input_var_a, &weight_a, &upstream_a);
+    let grad_a = grads_a
+        .get(input_var_a.as_tensor())
+        .expect("candle baseline must produce grad for input_var")
+        .clone();
+    assert_eq!(grad_a.dims(), &shape);
+    assert_eq!(
+        grad_a.dtype(),
+        DType::BF16,
+        "input_var grad dtype must match input_var dtype"
+    );
+
+    // -------- Path B: kt-tape bridge.
+    let (input_var_b, weight_b, upstream_b) = build();
+    let grads_b = run_kt_tape_intermediate(&input_var_b, &weight_b, &upstream_b);
+    let grad_b = grads_b
+        .get(input_var_b.as_tensor())
+        .expect("kt-tape bridge must produce grad for input_var")
+        .clone();
+    assert_eq!(grad_b.dims(), &shape);
+    assert_eq!(grad_b.dtype(), DType::BF16);
+
+    // -------- Bit-equivalence.
+    //
+    // Both paths call `injected.backward()` after constructing the
+    // same `arg = input_var * weight` candle graph. The shim's bwd
+    // returns `upstream` (matched to arg.dtype = BF16). Candle then
+    // walks through `mul`'s backward, which produces
+    // `grad[input_var] = upstream_bf16 * weight_bf16` on both sides.
+    // The two paths share every intermediate; max-abs-diff must be 0.
+    let diff = max_abs_diff(&grad_a, &grad_b);
+    assert_eq!(
+        diff, 0.0,
+        "kt-tape inject_gradient_kt must propagate through upstream ops \
+         identically to candle baseline (max-abs-diff was {diff}). \
+         Nonzero diff indicates the shim's bwd is not feeding the \
+         multiplication's backward correctly — i.e. a regression of the \
+         bug Option 2 was designed to fix."
+    );
+
+    // -------- Non-trivial-value sanity check.
+    //
+    // The whole point of `arg = input_var * weight` is to exercise a
+    // propagation step. If both paths happened to produce zero grads
+    // (e.g. because of a regression that reverted Option 2 to
+    // zero-emitting bwd), max-abs-diff would still be 0 and the test
+    // above would pass vacuously. Assert that at least one element of
+    // the grad is non-zero so a zero-emitting regression is caught.
+    let max_abs_a = grad_a
+        .to_dtype(DType::F32)
+        .expect("grad_a -> f32")
+        .abs()
+        .expect("grad_a abs")
+        .flatten_all()
+        .expect("grad_a flat")
+        .to_vec1::<f32>()
+        .expect("grad_a vec")
+        .into_iter()
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_abs_a > 0.0,
+        "candle baseline grad must be non-trivially non-zero — \
+         if both paths produce zero grads the parity check passes \
+         vacuously and a zero-emitting regression would slip through. \
+         Got max-abs grad = {max_abs_a}"
+    );
+}
+
 #[test]
 fn inject_gradient_kt_skip_dtype_cast_when_matched() {
     // Exercise the "upstream already matches arg dtype" branch in both
