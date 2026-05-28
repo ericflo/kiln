@@ -309,3 +309,33 @@ are now stacked behind the same training-loop refactor.
   `fused_linear_cross_entropy_phase_b_via_kt_forward_op`.
 * Commit `ab2da23f` — `FlceCustomOp::bwd()` kt-bridge backward
   migration.
+
+---
+
+## Update — 2026-05-28 (post CP-4 bridge landing)
+
+The CP-4 substrate's first end-to-end production wiring landed in
+`675e0dea` (SFT `standard_forward_backward` wrapped in
+`kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store`).
+Same architectural pattern applies to flce as to rmsnorm and
+opd-loss — see the
+[`rmsnorm-kt-tape-production-caller-stop`](./rmsnorm-kt-tape-production-caller-stop-2026-05-28.md)
+post-CP-4 update for the 4-step bridge walk.
+
+For flce specifically:
+- `try_tape_flce_phase_b_cuda` (Wave-13) becomes the recording path
+  inside a bridge scope when `KILN_USE_TAPE_FORWARD=1` is set in
+  an SFT training step. The adapter registers IO mappings so the
+  bridge routes the flce gradient back into candle's GradStore.
+- The `KtForwardOp1`-based shim (`kt_forward_op.rs`) is the default
+  path when the env gate is unset.
+
+The candle-core Cargo dep **still cannot drop** because the shim
+and Phase-A reference path both name candle types in their public
+surface. The deletion moment shifts to **when production training
+defaults to `KILN_USE_TAPE_FORWARD=1`** and `try_tape_flce_phase_b_cuda`
+becomes the unconditional path; at that moment `kt_forward_op.rs`
+and the candle-typed Phase-A fallback become dead code.
+
+See [`candle-removal-status-2026-05-28-pm.md`](./candle-removal-status-2026-05-28-pm.md)
+for the current per-crate state.
