@@ -3410,7 +3410,7 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
 #[allow(clippy::too_many_arguments)]
 fn dispatch_full_attn_qkv_decode_cached_impl(
     vk_device: &VulkanDevice,
-    x: &candle_core::Tensor,
+    x_data: &[u8],
     q_weight_t: &VulkanBuffer,
     k_weight_t: &VulkanBuffer,
     v_weight_t: &VulkanBuffer,
@@ -3419,13 +3419,12 @@ fn dispatch_full_attn_qkv_decode_cached_impl(
     k_dim: usize,
     v_dim: usize,
     bf16_weights: bool,
-) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
+) -> Result<Vec<u8>> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    let x_data = extract_tensor_bytes(x)?.0;
     anyhow::ensure!(
         x_data.len() == hidden * 4,
         "full_attn_qkv_decode: x buffer has {} bytes, expected {}",
@@ -3465,7 +3464,7 @@ fn dispatch_full_attn_qkv_decode_cached_impl(
             total_out,
             &spirv,
             &push_constants,
-            &x_data,
+            x_data,
         );
     }
 
@@ -3479,7 +3478,7 @@ fn dispatch_full_attn_qkv_decode_cached_impl(
             queue,
             *command_pool,
             &x_buf,
-            &x_data,
+            x_data,
         )
         .context("failed to upload full_attn_qkv_decode x buffer")?;
     }
@@ -3516,7 +3515,7 @@ fn dispatch_full_attn_qkv_decode_cached_impl(
         .context("failed to read back full_attn_qkv_decode output")?
     };
 
-    create_full_attn_qkv_tensors_from_data(&out_data, q_dim, k_dim, v_dim)
+    Ok(out_data)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3532,7 +3531,7 @@ fn dispatch_full_attn_qkv_decode_cached_single_submit(
     spirv: &[u8],
     push_constants: &[u32],
     x_data: &[u8],
-) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
+) -> Result<Vec<u8>> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -3675,31 +3674,34 @@ fn dispatch_full_attn_qkv_decode_cached_single_submit(
     }
 
     let out_data = VulkanBuffer::read_host_visible(device, &out_stage)?;
-    create_full_attn_qkv_tensors_from_data(&out_data, q_dim, k_dim, v_dim)
+    let _ = (q_dim, k_dim, v_dim); // shape metadata consumed at the `_bytes` shim boundary
+    Ok(out_data)
 }
 
-fn create_full_attn_qkv_tensors_from_data(
+/// Split the contiguous full-attention QKV decode output
+/// `[1, 1, q_dim + k_dim + v_dim]` f32 bytes into three per-dim
+/// `Vec<u8>` slices for the `_bytes` shim callers. Replaces the older
+/// candle-Tensor split helper as part of the kernels.rs candle-free
+/// migration. (#1082)
+fn split_full_attn_qkv_bytes(
     out_data: &[u8],
     q_dim: usize,
     k_dim: usize,
     v_dim: usize,
-) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
-    let mut offset = 0usize;
-    let mut take = |len: usize, shape: &[usize]| -> Result<candle_core::Tensor> {
-        let byte_len = len * 4;
-        let end = offset + byte_len;
-        anyhow::ensure!(
-            end <= out_data.len(),
-            "full_attn_qkv_decode output slice exceeds readback buffer"
-        );
-        let tensor = create_tensor_from_data(&out_data[offset..end], shape, candle_core::DType::F32)?;
-        offset = end;
-        Ok(tensor)
-    };
-    let q = take(q_dim, &[1, 1, q_dim])?;
-    let k = take(k_dim, &[1, 1, k_dim])?;
-    let v = take(v_dim, &[1, 1, v_dim])?;
-    Ok((q, k, v))
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let total_bytes = (q_dim + k_dim + v_dim) * 4;
+    anyhow::ensure!(
+        out_data.len() >= total_bytes,
+        "full_attn_qkv_decode output slice exceeds readback buffer"
+    );
+    let q_end = q_dim * 4;
+    let k_end = q_end + k_dim * 4;
+    let v_end = k_end + v_dim * 4;
+    Ok((
+        out_data[..q_end].to_vec(),
+        out_data[q_end..k_end].to_vec(),
+        out_data[k_end..v_end].to_vec(),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3714,15 +3716,10 @@ pub fn dispatch_full_attn_qkv_decode_cached_bytes(
     k_dim: usize,
     v_dim: usize,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    let x = build_cpu_f32_tensor_from_bytes(x_data, &[1, 1, hidden])?;
-    let (q, k, v) = dispatch_full_attn_qkv_decode_cached_impl(
-        vk_device, &x, q_weight_t, k_weight_t, v_weight_t, hidden, q_dim, k_dim, v_dim, false,
+    let out_data = dispatch_full_attn_qkv_decode_cached_impl(
+        vk_device, x_data, q_weight_t, k_weight_t, v_weight_t, hidden, q_dim, k_dim, v_dim, false,
     )?;
-    Ok((
-        extract_tensor_bytes(&q)?.0,
-        extract_tensor_bytes(&k)?.0,
-        extract_tensor_bytes(&v)?.0,
-    ))
+    split_full_attn_qkv_bytes(&out_data, q_dim, k_dim, v_dim)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3737,15 +3734,10 @@ pub fn dispatch_full_attn_qkv_decode_cached_bf16_weights_bytes(
     k_dim: usize,
     v_dim: usize,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    let x = build_cpu_f32_tensor_from_bytes(x_data, &[1, 1, hidden])?;
-    let (q, k, v) = dispatch_full_attn_qkv_decode_cached_impl(
-        vk_device, &x, q_weight_t, k_weight_t, v_weight_t, hidden, q_dim, k_dim, v_dim, true,
+    let out_data = dispatch_full_attn_qkv_decode_cached_impl(
+        vk_device, x_data, q_weight_t, k_weight_t, v_weight_t, hidden, q_dim, k_dim, v_dim, true,
     )?;
-    Ok((
-        extract_tensor_bytes(&q)?.0,
-        extract_tensor_bytes(&k)?.0,
-        extract_tensor_bytes(&v)?.0,
-    ))
+    split_full_attn_qkv_bytes(&out_data, q_dim, k_dim, v_dim)
 }
 
 #[allow(clippy::too_many_arguments)]
