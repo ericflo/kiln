@@ -4033,38 +4033,6 @@ pub fn dispatch_full_attn_qkv_decode_cached_batched_bytes(
     ))
 }
 
-/// Batched variant of [`dispatch_full_attn_qkv_decode_cached`] — fused single-token
-/// Q/K/V projections across an arbitrary leading batch dim. `x` must be
-/// `[batch, 1, hidden]`; outputs are `[batch, 1, q_dim]`, `[batch, 1, k_dim]`,
-/// `[batch, 1, v_dim]`.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_full_attn_qkv_decode_cached_batched(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    q_weight_t: &VulkanBuffer,
-    k_weight_t: &VulkanBuffer,
-    v_weight_t: &VulkanBuffer,
-    batch: usize,
-    hidden: usize,
-    q_dim: usize,
-    k_dim: usize,
-    v_dim: usize,
-) -> Result<(Tensor, Tensor, Tensor)> {
-    dispatch_full_attn_qkv_decode_cached_batched_impl(
-        vk_device,
-        x,
-        q_weight_t,
-        k_weight_t,
-        v_weight_t,
-        batch,
-        hidden,
-        q_dim,
-        k_dim,
-        v_dim,
-        false,
-    )
-}
-
 pub fn dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
