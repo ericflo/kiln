@@ -1471,3 +1471,141 @@ fn tape_backward_rope_split_half_matches_analytic_adjoint() {
         "rope_split_half backward diverges from analytic adjoint (max-abs-diff {diff} >= 3e-2)"
     );
 }
+
+
+// ----------------------------------------------------------------------
+// Residual `add` tape-forward parity (#1082 — CP-4 op #7).
+//
+// `c = a + b` is the transformer residual primitive. The adapter routes
+// it through `kiln_tensor::ops::add` and records a field-less
+// `AddBackward` (da = dc, db = dc). Both inputs are differentiable.
+// Forward is checked against a host f32 reference; backward asserts the
+// upstream grad reaches both inputs unchanged.
+// ----------------------------------------------------------------------
+
+fn build_add_inputs(device: &Device, rows: usize, cols: usize) -> (Tensor, Tensor) {
+    let a_host = random_bf16_vec(rows * cols, 0x0ADD_1111_2222_3333, 0.5);
+    let b_host = random_bf16_vec(rows * cols, 0x0ADD_4444_5555_6666, 0.5);
+    let a = Tensor::from_vec(a_host, (rows, cols), &Device::Cpu)
+        .expect("a cpu")
+        .to_device(device)
+        .expect("a -> cuda")
+        .contiguous()
+        .expect("a contig");
+    let b = Tensor::from_vec(b_host, (rows, cols), &Device::Cpu)
+        .expect("b cpu")
+        .to_device(device)
+        .expect("b -> cuda")
+        .contiguous()
+        .expect("b contig");
+    (a, b)
+}
+
+#[test]
+fn tape_forward_add_matches_reference() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_forward add: no CUDA device — skipping");
+            return;
+        }
+    };
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    let (rows, cols) = (32usize, 2560usize);
+    let (a, b) = build_add_inputs(&device, rows, cols);
+
+    let none_out = kiln_model::tape_forward::try_tape_add_cuda(&a, &b).expect("baseline ok");
+    assert!(none_out.is_none(), "no-scope path must be Ok(None)");
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_add_cuda(&a, &b)
+    });
+    let out = res.expect("tape ok").expect("Some(out)");
+    assert_eq!(tape.len(), 1, "add must record exactly one node");
+    assert_eq!(tape.nodes()[0].input_ids.len(), 2, "add records two inputs (a, b)");
+    assert_eq!(out.shape().dims(), &[rows, cols]);
+    assert_eq!(out.dtype(), DType::BF16);
+
+    // Forward vs host f32 reference (BF16-rounded sum).
+    let af = a.to_dtype(DType::F32).expect("af").flatten_all().expect("f").to_vec1::<f32>().expect("v");
+    let bf = b.to_dtype(DType::F32).expect("bf").flatten_all().expect("f").to_vec1::<f32>().expect("v");
+    let want: Vec<f32> = af.iter().zip(bf.iter()).map(|(x, y)| x + y).collect();
+    let want_t = Tensor::from_vec(want, (rows, cols), &Device::Cpu)
+        .expect("ref cpu")
+        .to_device(&device)
+        .expect("ref -> cuda");
+    let diff = max_abs_diff(&out, &want_t);
+    assert!(diff < 3e-2, "add forward diverges from f32 reference (max-abs-diff {diff})");
+}
+
+#[test]
+fn tape_forward_add_short_circuits_without_scope() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => return,
+    };
+    let (a, b) = build_add_inputs(&device, 8, 64);
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+    let out = kiln_model::tape_forward::try_tape_add_cuda(&a, &b).expect("call ok");
+    assert!(out.is_none(), "no active scope must short-circuit to Ok(None)");
+}
+
+#[test]
+fn tape_backward_add_routes_grad_to_both_inputs() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_backward add: no CUDA device — skipping");
+            return;
+        }
+    };
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    let (rows, cols) = (32usize, 2560usize);
+    let (a, b) = build_add_inputs(&device, rows, cols);
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_add_cuda(&a, &b)
+    });
+    let _out = res.expect("fwd ok").expect("Some(out)");
+    assert_eq!(tape.len(), 1);
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(input_ids.len(), 2);
+
+    let seed = build_seed_grad(&device, &[rows, cols], 0x0ADD_7777_8888_9999, 0.25);
+    // Seed via COPY (owned) — mirrors how the real `tape_bridge` seeds from
+    // candle's GradStore. `AddBackward` passes the upstream grad through
+    // unchanged (da = db = dc), so a borrowed seed would surface as a
+    // Borrowed-storage grad (which can't be `slice()`d); the bridge always
+    // copies, producing owned grads.
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&seed).expect("seed kt copy");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+
+    let grads = tape
+        .backward_with_seeds(seeds, |x, y| kiln_tensor::ops::add(x, y))
+        .expect("add backward walk");
+
+    // da = dc and db = dc: both inputs receive the upstream grad unchanged.
+    for id in &input_ids {
+        let g_kt = grads.get(*id).expect("grad present for add input");
+        let g = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(g_kt).expect("g -> candle");
+        assert_eq!(g.shape().dims(), &[rows, cols]);
+        assert_eq!(g.dtype(), DType::BF16);
+        let diff = max_abs_diff(&g, &seed);
+        assert!(diff == 0.0, "add backward must pass grad through unchanged (diff {diff})");
+    }
+}

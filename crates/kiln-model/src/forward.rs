@@ -8300,6 +8300,21 @@ fn rotary_embedding_from_tables(
     Ok((rotated_q, rotated_k))
 }
 
+/// Residual add `a + b` (same shape) — the #1082 migration target for
+/// `kiln/residual`. Under `KILN_USE_TAPE_FORWARD` + an active tape scope
+/// this routes through `kiln_tensor::ops::add` and records an
+/// `AddBackward` node (CP-4 shadow-tape adapter #7); otherwise it is the
+/// plain candle add, bit-identical to the prior `(a + b)?` expression.
+fn residual_add(a: Tensor, b: Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        if let Some(out) = crate::tape_forward::try_tape_add_cuda(&a, &b)? {
+            return Ok(out);
+        }
+    }
+    Ok((a + b)?)
+}
+
 /// Apply the rotation to a single tensor, supporting partial rotary embeddings.
 /// `x`: [batch, seq_len, num_heads, head_dim]
 /// `cos`, `sin`: [seq_len, half_rotary]
@@ -21082,7 +21097,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                 })?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual_batch_decode");
-                    (hidden + attn_out)?
+                    residual_add(hidden, attn_out)?
                 };
                 let normed_post = {
                     kiln_nvtx::range!(c"kiln/norm/pre_mlp_batch_decode");
@@ -21102,7 +21117,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                 )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual_batch_decode");
-                    (hidden + ffn_out)?
+                    residual_add(hidden, ffn_out)?
                 };
                 linear_attn_idx += 1;
             }
@@ -21284,7 +21299,7 @@ pub fn model_forward(
                 .with_context(|| format!("gated deltanet layer {i} (linear attention)"))?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
-                    (hidden + attn_out)?
+                    residual_add(hidden, attn_out)?
                 };
                 // Post-attention RMSNorm + FFN
                 let normed_post = {
@@ -21302,7 +21317,7 @@ pub fn model_forward(
                 };
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
-                    (hidden + ffn_out)?
+                    residual_add(hidden, ffn_out)?
                 };
                 linear_attn_idx += 1;
             }
@@ -21483,7 +21498,7 @@ pub fn model_forward_segment(
                 };
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
-                    (hidden + attn_out)?
+                    residual_add(hidden, attn_out)?
                 };
                 let normed_post = {
                     kiln_nvtx::range!(c"kiln/norm/pre_mlp");
@@ -21496,7 +21511,7 @@ pub fn model_forward_segment(
                 let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
-                    (hidden + ffn_out)?
+                    residual_add(hidden, ffn_out)?
                 };
                 linear_attn_idx += 1;
             }
@@ -22963,7 +22978,7 @@ pub fn model_forward_paged_batched_decode_hidden(
 
                 hidden = {
                     kiln_nvtx::range!(c"kiln/batched_decode/residual/attn");
-                    (hidden + attn_out)?
+                    residual_add(hidden, attn_out)?
                 };
                 let normed_post = {
                     kiln_nvtx::range!(c"kiln/batched_decode/norm/pre_mlp");
@@ -22983,7 +22998,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                 )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/batched_decode/residual/mlp");
-                    (hidden + ffn_out)?
+                    residual_add(hidden, ffn_out)?
                 };
                 linear_attn_idx += 1;
             }
@@ -24099,7 +24114,7 @@ fn model_forward_paged_inner(
                 .with_context(|| format!("gated deltanet layer {i} (linear attention, paged)"))?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
-                    (hidden + attn_out)?
+                    residual_add(hidden, attn_out)?
                 };
                 if capture_c41_taps {
                     crate::mtp_debug::capture_c41_layer1_tap(
@@ -24125,7 +24140,7 @@ fn model_forward_paged_inner(
                 )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
-                    (hidden + ffn_out)?
+                    residual_add(hidden, ffn_out)?
                 };
                 if capture_c41_taps {
                     crate::mtp_debug::capture_c41_layer1_tap("layer_1_output", &hidden)?;

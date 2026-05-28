@@ -106,8 +106,8 @@
 use anyhow::{Context, Result};
 use candle_core::Tensor;
 use kiln_autograd::{
-    EmbeddingBackward, MatmulBackward, MulSigmoidGateBackward, RopeSplitHalfBackward,
-    SiluBackward, Tape,
+    AddBackward, EmbeddingBackward, MatmulBackward, MulSigmoidGateBackward,
+    RopeSplitHalfBackward, SiluBackward, Tape,
 };
 
 // Phase 6a/CP-4 (#1082): the thread-local-tape scope machinery
@@ -671,6 +671,71 @@ pub fn try_tape_rope_cuda(
     // are non-differentiable schedules (cf. embedding's `token_ids`), so
     // they carry no input mapping.
     kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+
+    Ok(Some(out))
+}
+
+/// Attempt to run an elementwise residual add through the kt-typed op
+/// registry (`kiln_tensor::ops::add`) and record an `AddBackward` node
+/// on the active thread-local tape.
+///
+/// Returns:
+/// * `Ok(Some(out))` — the tape-forward path ran. The returned `Tensor`
+///   is a copy of the kt-typed output into a candle CUDA tensor; an
+///   `AddBackward` node was recorded on the active thread-local tape.
+/// * `Ok(None)` — gate off / shape mismatch (caller may broadcast) / no
+///   thread-local tape / kt-bridge borrow rejected the inputs. The caller
+///   falls through to the existing candle add.
+/// * `Err(...)` — an unexpected forward or kt -> candle copy-back failure.
+///
+/// # CP-4 (#1082) context
+///
+/// `add` is the residual-connection primitive (`kiln/residual`):
+/// `c = a + b`, so `da = dc` and `db = dc` — `AddBackward` is field-less
+/// and routes the upstream grad to both inputs. Both `a` and `b` are
+/// differentiable and receive IO mappings. `kiln_tensor::ops::add` is a
+/// same-shape op (no broadcast), so the adapter short-circuits to
+/// `Ok(None)` on a shape mismatch and lets the caller's candle add (which
+/// may broadcast) handle it.
+pub fn try_tape_add_cuda(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+
+    // `kiln_tensor::ops::add` requires identical shapes; defer any
+    // broadcasting add to the caller's candle path.
+    if a.dims() != b.dims() {
+        return Ok(None);
+    }
+
+    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_tensor::ops::add(&a_kt, &b_kt)
+            .map_err(|e| anyhow::anyhow!("kt add: {e}"))?;
+        tape.record(&y, &[&a_kt, &b_kt], Box::new(AddBackward));
+        Ok(y)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let out_kt = out_kt.context("tape_forward::try_tape_add_cuda: kt-tape forward failed")?;
+
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape_forward::try_tape_add_cuda: kt -> candle copy failed")?;
+
+    // CP-4 (#1082) tape_bridge: both inputs are differentiable.
+    kiln_kt_bridge::tape_bridge::register_input_mapping(a_kt.id(), a.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(b_kt.id(), b.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
 
     Ok(Some(out))
