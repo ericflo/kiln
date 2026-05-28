@@ -329,11 +329,14 @@ impl MetalStorage {
     /// `candle-core`); the companion's construction path
     /// (`Device::all()` + `Kernels::new()` + `Commands::new(queue)`)
     /// never touches `candle-core`. Parallel to
-    /// [`MetalStorage::candle_device`] but kt-native — the eventual
-    /// op-migration commit replaces every
+    /// [`MetalStorage::candle_device`] but kt-native — the in-file
+    /// op-migration commit replaced every
     /// `let candle_device_arc = kt_metal.candle_device()?;` with
-    /// `let companion = kt_metal.companion()?;` site-by-site, after
-    /// which the candle hook above retires.
+    /// `let companion = kt_metal.companion()?;` site-by-site (7 ops:
+    /// softmax, rmsnorm, layernorm, index_select_dim0, cast,
+    /// elementwise_binary, activation_unary). After the follow-up
+    /// commit retires the candle hook above, `companion()` is the
+    /// canonical (and only) substrate accessor on `MetalStorage`.
     ///
     /// Cached process-wide in [`primary_metal_companion`]'s
     /// `OnceLock<HashMap>` so repeated calls return the same
@@ -489,7 +492,8 @@ static METAL_COMPANIONS: OnceLock<std::sync::Mutex<std::collections::HashMap<usi
 ///
 /// Mirror of [`primary_metal_device`] for the kt-native substrate.
 /// The two are intentionally parallel so the eventual op-migration PR
-/// can swap `let candle_device_arc = kt_metal.candle_device()?;` for
+/// is parallel to it so the op-migration commit could swap
+/// `let candle_device_arc = kt_metal.candle_device()?;` for
 /// `let companion = kt_metal.companion()?;` site-by-site without
 /// changing the surrounding control flow.
 ///
@@ -597,7 +601,7 @@ pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
             Error::Msg("metal_softmax_last_axis: input must be Metal-backed".to_string())
         })?;
 
-    let candle_device_arc = kt_metal.candle_device()?;
+    let companion = kt_metal.companion()?;
     let device_index = match kt_metal.device() {
         Device::Metal(i) => i,
         _ => unreachable!("MetalStorage::device() returns Device::Metal"),
@@ -609,7 +613,7 @@ pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
 
     // Allocate output buffer directly through metal-rs (no candle).
     let byte_len = element_count * dtype_size;
-    let raw_device = candle_device_arc.metal_device();
+    let raw_device = companion.device();
     let out_buffer = raw_device
         .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .map_err(|e| {
@@ -619,7 +623,7 @@ pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
-    let encoder = candle_device_arc.command_encoder().map_err(|e| {
+    let encoder = companion.command_encoder().map_err(|e| {
         Error::Msg(format!(
             "metal_softmax_last_axis: command_encoder() failed: {e:?}"
         ))
@@ -632,7 +636,7 @@ pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     candle_metal_kernels::call_last_softmax(
         raw_device,
         &encoder,
-        candle_device_arc.kernels(),
+        companion.kernels(),
         kernel_name,
         element_count,
         last_dim,
@@ -753,7 +757,7 @@ pub fn metal_rmsnorm_last_axis(
             Error::Msg("metal_rmsnorm_last_axis: weight must be Metal-backed".to_string())
         })?;
 
-    let candle_device_arc = kt_metal_x.candle_device()?;
+    let companion = kt_metal_x.companion()?;
     let device_index = match kt_metal_x.device() {
         Device::Metal(i) => i,
         _ => unreachable!("MetalStorage::device() returns Device::Metal"),
@@ -764,7 +768,7 @@ pub fn metal_rmsnorm_last_axis(
 
     // Allocate output buffer directly through metal-rs (no candle).
     let byte_len = element_count_x * dtype_size;
-    let raw_device = candle_device_arc.metal_device();
+    let raw_device = companion.device();
     let out_buffer = raw_device
         .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .map_err(|e| {
@@ -774,7 +778,7 @@ pub fn metal_rmsnorm_last_axis(
         })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
-    let encoder = candle_device_arc.command_encoder().map_err(|e| {
+    let encoder = companion.command_encoder().map_err(|e| {
         Error::Msg(format!(
             "metal_rmsnorm_last_axis: command_encoder() failed: {e:?}"
         ))
@@ -787,7 +791,7 @@ pub fn metal_rmsnorm_last_axis(
     candle_metal_kernels::call_rms_norm(
         raw_device,
         &encoder,
-        candle_device_arc.kernels(),
+        companion.kernels(),
         kernel_name,
         element_count_x,
         hidden,
@@ -919,7 +923,7 @@ pub fn metal_layernorm_last_axis(
             Error::Msg("metal_layernorm_last_axis: bias must be Metal-backed".to_string())
         })?;
 
-    let candle_device_arc = kt_metal_x.candle_device()?;
+    let companion = kt_metal_x.companion()?;
     let device_index = match kt_metal_x.device() {
         Device::Metal(i) => i,
         _ => unreachable!("MetalStorage::device() returns Device::Metal"),
@@ -930,7 +934,7 @@ pub fn metal_layernorm_last_axis(
 
     // Allocate output buffer directly through metal-rs (no candle).
     let byte_len = element_count_x * dtype_size;
-    let raw_device = candle_device_arc.metal_device();
+    let raw_device = companion.device();
     let out_buffer = raw_device
         .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .map_err(|e| {
@@ -940,7 +944,7 @@ pub fn metal_layernorm_last_axis(
         })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
-    let encoder = candle_device_arc.command_encoder().map_err(|e| {
+    let encoder = companion.command_encoder().map_err(|e| {
         Error::Msg(format!(
             "metal_layernorm_last_axis: command_encoder() failed: {e:?}"
         ))
@@ -953,7 +957,7 @@ pub fn metal_layernorm_last_axis(
     candle_metal_kernels::call_layer_norm(
         raw_device,
         &encoder,
-        candle_device_arc.kernels(),
+        companion.kernels(),
         kernel_name,
         element_count_x,
         hidden,
@@ -1073,7 +1077,7 @@ pub fn metal_index_select_dim0(
             Error::Msg("metal_index_select_dim0: indices must be Metal-backed".to_string())
         })?;
 
-    let candle_device_arc = kt_metal_in.candle_device()?;
+    let companion = kt_metal_in.companion()?;
     let device_index = match kt_metal_in.device() {
         Device::Metal(i) => i,
         _ => unreachable!("MetalStorage::device() returns Device::Metal"),
@@ -1109,7 +1113,7 @@ pub fn metal_index_select_dim0(
 
     // Allocate output buffer directly through metal-rs (no candle).
     let byte_len = out_element_count * dtype_size;
-    let raw_device = candle_device_arc.metal_device();
+    let raw_device = companion.device();
     let out_buffer = raw_device
         .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .map_err(|e| {
@@ -1119,7 +1123,7 @@ pub fn metal_index_select_dim0(
         })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
-    let encoder = candle_device_arc.command_encoder().map_err(|e| {
+    let encoder = companion.command_encoder().map_err(|e| {
         Error::Msg(format!(
             "metal_index_select_dim0: command_encoder() failed: {e:?}"
         ))
@@ -1145,7 +1149,7 @@ pub fn metal_index_select_dim0(
     candle_metal_kernels::call_index_select(
         raw_device,
         &encoder,
-        candle_device_arc.kernels(),
+        companion.kernels(),
         kernel_name,
         in_shape.as_slice(),
         ids_element_count,
@@ -1255,7 +1259,7 @@ pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
         .downcast_ref::<MetalStorage>()
         .ok_or_else(|| Error::Msg("metal_cast: input must be Metal-backed".to_string()))?;
 
-    let candle_device_arc = kt_metal.candle_device()?;
+    let companion = kt_metal.companion()?;
     let device_index = match kt_metal.device() {
         Device::Metal(i) => i,
         _ => unreachable!("MetalStorage::device() returns Device::Metal"),
@@ -1265,7 +1269,7 @@ pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
 
     // Allocate output buffer directly through metal-rs (no candle).
     let byte_len = element_count * to_dtype_size;
-    let raw_device = candle_device_arc.metal_device();
+    let raw_device = companion.device();
     let out_buffer = raw_device
         .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .map_err(|e| {
@@ -1275,7 +1279,7 @@ pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
         })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
-    let encoder = candle_device_arc
+    let encoder = companion
         .command_encoder()
         .map_err(|e| Error::Msg(format!("metal_cast: command_encoder() failed: {e:?}")))?;
     encoder.set_label("kt_metal_cast");
@@ -1288,7 +1292,7 @@ pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
     candle_metal_kernels::call_cast_contiguous(
         raw_device,
         &encoder,
-        candle_device_arc.kernels(),
+        companion.kernels(),
         kernel_name,
         from_dtype_size,
         element_count,
@@ -1402,7 +1406,7 @@ pub fn metal_elementwise_binary(
         .downcast_ref::<MetalStorage>()
         .ok_or_else(|| Error::Msg("metal_elementwise_binary: b must be Metal-backed".to_string()))?;
 
-    let candle_device_arc = kt_metal_a.candle_device()?;
+    let companion = kt_metal_a.companion()?;
     let device_index = match kt_metal_a.device() {
         Device::Metal(i) => i,
         _ => unreachable!("MetalStorage::device() returns Device::Metal"),
@@ -1434,7 +1438,7 @@ pub fn metal_elementwise_binary(
 
     // Allocate output buffer directly through metal-rs (no candle).
     let byte_len = element_count * dtype_size;
-    let raw_device = candle_device_arc.metal_device();
+    let raw_device = companion.device();
     let out_buffer = raw_device
         .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .map_err(|e| {
@@ -1444,7 +1448,7 @@ pub fn metal_elementwise_binary(
         })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
-    let encoder = candle_device_arc.command_encoder().map_err(|e| {
+    let encoder = companion.command_encoder().map_err(|e| {
         Error::Msg(format!(
             "metal_elementwise_binary: command_encoder() failed: {e:?}"
         ))
@@ -1463,7 +1467,7 @@ pub fn metal_elementwise_binary(
     candle_metal_kernels::call_binary_contiguous(
         raw_device,
         &encoder,
-        candle_device_arc.kernels(),
+        companion.kernels(),
         kernel_name.as_str(),
         dtype_size,
         element_count,
@@ -1579,7 +1583,7 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
             Error::Msg("metal_activation_unary: input must be Metal-backed".to_string())
         })?;
 
-    let candle_device_arc = kt_metal.candle_device()?;
+    let companion = kt_metal.companion()?;
     let device_index = match kt_metal.device() {
         Device::Metal(i) => i,
         _ => unreachable!("MetalStorage::device() returns Device::Metal"),
@@ -1649,7 +1653,7 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
     // substrate (`MetalStorage::zeros_kt`). The kernel runs on GPU and
     // writes results; CPU side can still read via UMA if needed.
     let byte_len = element_count * dtype_size;
-    let raw_device = candle_device_arc.metal_device();
+    let raw_device = companion.device();
     let out_buffer = raw_device
         .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .map_err(|e| {
@@ -1662,7 +1666,7 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
     // Get a compute encoder from the candle MetalDevice. The device
     // wrapper is held purely for command-queue affinity here; the
     // encoder talks straight to metal-rs underneath.
-    let encoder = candle_device_arc.command_encoder().map_err(|e| {
+    let encoder = companion.command_encoder().map_err(|e| {
         Error::Msg(format!(
             "metal_activation_unary: command_encoder() failed: {e:?}"
         ))
@@ -1677,7 +1681,7 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
     candle_metal_kernels::call_unary_contiguous(
         raw_device,
         &encoder,
-        candle_device_arc.kernels(),
+        companion.kernels(),
         kernel,
         dtype_size,
         element_count,
