@@ -495,12 +495,11 @@ pub fn cuda_zeros_ctx(
     dtype: DType,
     n_elements: usize,
 ) -> Result<crate::Storage> {
-    // Derive the cudarc CudaContext for the given ordinal. We bounce
-    // through primary_cuda_device for now since that's the established
-    // accessor; once the field-drop happens, this can route directly
-    // through cudarc::driver::CudaContext::new(device_index).
-    let candle_device = primary_cuda_device(device_index)?;
-    let ctx = candle_device.cuda_stream().context().clone();
+    // Derive the cudarc CudaContext for the given ordinal directly —
+    // primary_cuda_context(device_index) just calls
+    // CudaContext::new(device_index), which is exactly the primary-
+    // context retain candle_core::Device::new_cuda used to perform.
+    let ctx = primary_cuda_context(device_index)?;
     let storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n_elements)?;
     Ok(Arc::new(storage))
 }

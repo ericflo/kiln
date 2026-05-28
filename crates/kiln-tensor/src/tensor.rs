@@ -226,10 +226,12 @@ impl Tensor {
                 // Stage on the host first, then H2D into a freshly
                 // allocated CUDA buffer. Identical to the body of
                 // `cuda_from_slice` but spelled out to keep both
-                // constructors callable in isolation.
+                // constructors callable in isolation. Routes through
+                // the candle-free `host_to_cuda_copy_ctx` (#1082) so
+                // this constructor no longer materializes a candle
+                // `Arc<CudaDevice>` just to forward it.
                 let cpu = Self::from_vec(values, shape)?;
-                let cdev = crate::primary_cuda_device(i)?;
-                crate::host_to_cuda_copy(&cpu, cdev, i)
+                crate::host_to_cuda_copy_ctx(&cpu, i)
             }
             #[cfg(not(feature = "cuda"))]
             Device::Cuda(_) => Err(Error::Msg(
