@@ -100,7 +100,7 @@ use std::collections::HashMap;
 use candle_core::backprop::GradStore as CandleGradStore;
 use candle_core::Tensor as CandleTensor;
 use candle_core::TensorId as CandleTensorId;
-use kiln_autograd::{tape_scope, Tape};
+use kiln_autograd::{with_thread_local_tape, Tape};
 use kiln_tensor::TensorId as KtTensorId;
 
 use crate::BridgeError;
@@ -313,7 +313,7 @@ where
     // panics on nested scopes (same contract as our bridge scope), so
     // a nested bridge call panics either way.
     let (forward_result, tape): (Result<(T, CandleTensor), BridgeError>, Tape) =
-        tape_scope::with_thread_local_tape(forward);
+        with_thread_local_tape(forward);
 
     let (payload, loss) = forward_result?;
 
