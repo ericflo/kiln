@@ -332,3 +332,86 @@ named in `CANDLE_REMOVAL_PLAN.md` line 341.
 * Related STOP doc precedent:
   [`lora-bwd-kt-migration-stop-2026-05-27.md`](./lora-bwd-kt-migration-stop-2026-05-27.md)
   (same "two patterns don't mix" shape)
+
+## Addendum (Wave-13 / 2026-05-28) — extending the substrate hook to OPD and FLCE
+
+After this STOP landed, two wave-12 commits extended the substrate
+groundwork:
+
+* `deed13a8` — `kiln-model: add experimental KILN_USE_TAPE_FORWARD
+  env-gated tape pipeline (#1082)` — added the thread-local-tape
+  scope (`with_thread_local_tape` / `with_active_tape` / the
+  `KILN_USE_TAPE_FORWARD` env tristate) and the candle-typed
+  `try_tape_rms_norm_cuda` adapter wired into
+  `kiln-model::forward::rms_norm`.
+* `54159a76` — `kiln-model: add tape_forward parity test for
+  KILN_USE_TAPE_FORWARD path (#1082)` — bit-exact parity test
+  between the tape-routed forward and the kt-shim forward.
+
+Wave-13 (this section's date) extends the same opt-in pattern to OPD
+and FLCE so the substrate hook is in place across all three Phase-6a
+kernels:
+
+* `b2702ce0` — `kiln-autograd: promote thread-local Tape scope
+  (with_thread_local_tape / with_active_tape) into kiln-autograd
+  (#1082)`. Moves the thread-local-tape machinery out of `kiln-model`
+  so the OPD and FLCE kernel crates (and their `kiln-train` callers)
+  can route through the same handle without taking a `kiln-model`
+  dependency. `kiln-model::tape_forward` re-exports the symbols for
+  back-compat.
+* `79d4873c` — `kiln-model: refactor tape_forward to re-export
+  kiln-autograd::tape_scope (#1082)`. Companion to the previous; the
+  rmsnorm adapter `try_tape_rms_norm_cuda` stays in `kiln-model`
+  because it depends on `kiln-rmsnorm-kernel` and `kiln-kt-bridge`.
+* `e6b8c3a3` — `kiln-opd-loss-kernel + kiln-train: add
+  try_tape_opd_per_position_cuda adapter; wire opd_step_loss to
+  short-circuit when tape scope open (#1082)`. Mirror of the rmsnorm
+  adapter for the OPD production caller at
+  `kiln-train::opd::opd_step_loss`.
+* `20173dbb` — `kiln-flce-kernel: add try_tape_flce_phase_b_cuda
+  adapter; wire dispatch to short-circuit when tape scope open
+  (#1082)`. Mirror for the FLCE production caller at
+  `fused_linear_cross_entropy_dispatch_with_provider`. The
+  `provider.is_none()` guard preserves the Vulkan FLCE escape hatch.
+
+### What Wave-13 does and does not do
+
+Wave-13 ships the substrate hook for OPD and FLCE: the opt-in
+`KILN_USE_TAPE_FORWARD` env var + a thread-local `Tape` scope around
+the training step is now sufficient to route any of {rmsnorm, OPD,
+FLCE} through the kt-tape pilot. The production callers
+short-circuit through the tape adapter when both gates are open and
+fall through to the existing kt-forward-op shims otherwise.
+
+Wave-13 does **not** delete any of:
+
+* `crates/kiln-rmsnorm-kernel/src/kt_forward_op.rs`
+* `crates/kiln-opd-loss-kernel/src/kt_forward_op.rs`
+* `crates/kiln-flce-kernel/src/kt_forward_op.rs`
+
+The architectural reason (this STOP's main body) has not changed:
+the candle-autograd training loop (`loss.backward()` over
+`candle_core::backprop::GradStore`) cannot consume nodes recorded on
+a `kiln_autograd::Tape`. With `KILN_USE_TAPE_FORWARD` unset (the
+default), every adapter returns `Ok(None)` and the kt-shim path is
+exactly the one that ran before Wave-13. The shim CANNOT be deleted
+until `kiln-train` ports its `loss.backward()` callers onto
+`Tape::backward` (CP-4 substrate). Until then, the shim is the only
+path that drives gradients through candle's autograd graph correctly.
+
+### What unblocks the deletion
+
+The same Option A from the main body: `kiln_autograd::Var` substrate
++ `kiln-train::trainer` port off `loss.backward()`. With Wave-13 in
+place, the CP-4 work no longer has to thread `&mut Tape` through 20+
+candle-typed forward functions in `kiln-model::forward`. It needs to:
+
+1. Open a `with_thread_local_tape` scope around each training step
+   in `kiln-train::trainer`.
+2. Set `KILN_USE_TAPE_FORWARD=1` in the training-step config.
+3. Replace `loss.backward()` with `tape.backward(loss_id, ...)`.
+
+At that point the three `kt_forward_op.rs` modules become dead code
+and can be deleted in a single PR. The `try_tape_*_cuda` adapters
+become the unconditional path (the env gate + scope check fall away
+once the substrate is the only training path).
