@@ -32,7 +32,119 @@
 
 use std::sync::Arc;
 
+use anyhow::{Context, Result as AnyResult};
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice, kernels};
+
+/// File-private candle⇔bytes helpers — migrated inline from
+/// `kiln_vulkan_kernel::kernels::{extract_tensor_bytes,
+/// create_tensor_from_data, buffer_to_tensor, upload_tensor_bf16_packed_buffer}`
+/// as part of issue #1082 (drop candle from kiln-vulkan-kernel).
+///
+/// Mirrors the public bridge implementations exactly so this file can
+/// perform candle ↔ raw-bytes conversions without routing through the
+/// kiln-vulkan-kernel candle bridge surface. (#1082)
+#[inline]
+fn tensor_to_f32_bytes(tensor: &candle_core::Tensor) -> AnyResult<Vec<u8>> {
+    let flat = tensor
+        .flatten_all()
+        .context("failed to flatten tensor")?;
+    let f32_data = flat
+        .to_dtype(candle_core::DType::F32)?
+        .to_vec1::<f32>()
+        .context("failed to extract f32 data")?;
+    Ok(bytemuck::cast_slice(&f32_data).to_vec())
+}
+
+#[inline]
+fn tensor_from_f32_bytes(
+    data: &[u8],
+    shape: &[usize],
+    dtype: candle_core::DType,
+) -> AnyResult<candle_core::Tensor> {
+    let f32_data: &[f32] = bytemuck::cast_slice(data);
+    let tensor = candle_core::Tensor::from_vec(
+        f32_data.to_vec(),
+        f32_data.len(),
+        &candle_core::Device::Cpu,
+    )?
+    .reshape(shape)?;
+    if dtype == candle_core::DType::BF16 {
+        Ok(tensor.to_dtype(candle_core::DType::BF16)?)
+    } else {
+        Ok(tensor)
+    }
+}
+
+/// Inlined replacement for `kernels::buffer_to_tensor`. Reads back the
+/// VulkanBuffer via its host-visible memory and reconstructs the
+/// candle tensor — BF16 buffers are stored as packed bf16 (two lanes
+/// per u32, `(hi << 16) | lo`); F32 buffers are stored as raw f32
+/// bytes. (#1082)
+#[inline]
+fn buffer_to_tensor_inline(
+    vk_device: &VulkanDevice,
+    buffer: &VulkanBuffer,
+    shape: &[usize],
+    dtype: candle_core::DType,
+) -> AnyResult<candle_core::Tensor> {
+    let bytes = VulkanBuffer::read_back(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        buffer,
+    )
+    .context("buffer_to_tensor_inline: VulkanBuffer::read_back")?;
+    if dtype == candle_core::DType::BF16 {
+        anyhow::ensure!(
+            bytes.len() % 2 == 0,
+            "buffer_to_tensor_inline BF16: buffer byte count {} is not a multiple of 2",
+            bytes.len()
+        );
+        let elem_count: usize = shape.iter().product();
+        let stored = bytes.len() / 2;
+        anyhow::ensure!(
+            stored >= elem_count,
+            "buffer_to_tensor_inline BF16: buffer holds {} bf16 elements, expected at least {} \
+             for shape {:?}",
+            stored,
+            elem_count,
+            shape,
+        );
+        let mut f32_data = Vec::with_capacity(elem_count);
+        for i in 0..elem_count {
+            let lo = bytes[i * 2] as u32;
+            let hi = bytes[i * 2 + 1] as u32;
+            let bf16_bits = (hi << 8) | lo;
+            f32_data.push(f32::from_bits(bf16_bits << 16));
+        }
+        Ok(candle_core::Tensor::from_vec(f32_data, shape, &candle_core::Device::Cpu)?
+            .to_dtype(candle_core::DType::BF16)?)
+    } else {
+        tensor_from_f32_bytes(&bytes, shape, dtype)
+    }
+}
+
+/// Inlined replacement for `kernels::upload_tensor_bf16_packed_buffer`.
+/// Extracts the tensor's bf16 values then uploads via the candle-free
+/// `kernels::upload_bf16_packed_buffer_from_slice`. (#1082)
+#[inline]
+fn upload_tensor_bf16_packed_buffer_inline(
+    vk_device: &VulkanDevice,
+    tensor: &candle_core::Tensor,
+) -> AnyResult<VulkanBuffer> {
+    anyhow::ensure!(
+        tensor.dtype() == candle_core::DType::BF16,
+        "packed bf16 upload requires BF16 tensor, got {:?}",
+        tensor.dtype()
+    );
+    let bf16_data: Vec<half::bf16> = tensor
+        .flatten_all()
+        .context("failed to flatten bf16 tensor for upload")?
+        .to_vec1::<half::bf16>()
+        .context("failed to extract bf16 data for upload")?;
+    kernels::upload_bf16_packed_buffer_from_slice(vk_device, &bf16_data)
+}
 
 /// Op state for [`VulkanLoraOp`]. Captures the device handle plus the
 /// two registry-resident weight buffers (A and B) so `cpu_fwd` can
@@ -146,9 +258,8 @@ impl candle_core::CustomOp3 for VulkanLoraOp {
             .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp reshape x: {e:?}")))?
             .contiguous()
             .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp x contiguous: {e:?}")))?;
-        let x_2d_bytes = kernels::extract_tensor_bytes(&x_2d)
-            .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp extract x bytes: {e:?}")))?
-            .0;
+        let x_2d_bytes = tensor_to_f32_bytes(&x_2d)
+            .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp extract x bytes: {e:?}")))?;
 
         // hidden = x @ A.T. Transposed kernel against the A buffer
         // (treated as [n_dim=rank, k_dim=in_features]). The `_bytes`
@@ -184,7 +295,7 @@ impl candle_core::CustomOp3 for VulkanLoraOp {
         // Materialize the final f32 result back into a candle candle_core::Tensor so
         // the rest of the op (scale, dtype cast, storage extraction)
         // can keep using candle ops unchanged.
-        let delta_unscaled = kernels::create_tensor_from_data(
+        let delta_unscaled = tensor_from_f32_bytes(
             &delta_bytes,
             out_dims.as_slice(),
             candle_core::DType::F32,
@@ -238,7 +349,7 @@ impl candle_core::CustomOp3 for VulkanLoraOp {
         } else {
             x.to_dtype(candle_core::DType::F32)?
         };
-        let a_f32 = kernels::buffer_to_tensor(
+        let a_f32 = buffer_to_tensor_inline(
             self.vk_device.as_ref(),
             self.a_buffer.as_ref(),
             &[self.rank, self.in_features],
@@ -248,7 +359,7 @@ impl candle_core::CustomOp3 for VulkanLoraOp {
             candle_core::Error::Msg(format!("VulkanLoraOp::bwd buffer_to_tensor A: {e:?}"))
         })?
         .to_dtype(candle_core::DType::F32)?;
-        let b_f32 = kernels::buffer_to_tensor(
+        let b_f32 = buffer_to_tensor_inline(
             self.vk_device.as_ref(),
             self.b_buffer.as_ref(),
             &[self.out_features, self.rank],
@@ -337,11 +448,11 @@ mod tests {
             .to_dtype(candle_core::DType::BF16)?;
 
         // Vulkan path — upload A and B as registry-resident.
-        let a_buf = Arc::new(kernels::upload_tensor_bf16_packed_buffer(
+        let a_buf = Arc::new(upload_tensor_bf16_packed_buffer_inline(
             vk_device.as_ref(),
             &a,
         )?);
-        let b_buf = Arc::new(kernels::upload_tensor_bf16_packed_buffer(
+        let b_buf = Arc::new(upload_tensor_bf16_packed_buffer_inline(
             vk_device.as_ref(),
             &b,
         )?);
@@ -415,11 +526,11 @@ mod tests {
 
         // ---- Vulkan path: construct VulkanLoraOp + apply_op3,
         // backward, extract grads.
-        let a_buf = Arc::new(kernels::upload_tensor_bf16_packed_buffer(
+        let a_buf = Arc::new(upload_tensor_bf16_packed_buffer_inline(
             vk_device.as_ref(),
             a_var.as_tensor(),
         )?);
-        let b_buf = Arc::new(kernels::upload_tensor_bf16_packed_buffer(
+        let b_buf = Arc::new(upload_tensor_bf16_packed_buffer_inline(
             vk_device.as_ref(),
             b_var.as_tensor(),
         )?);

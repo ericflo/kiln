@@ -206,15 +206,26 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     let k_norm_buf = backend.cached_f32_weight_buffer(&attn.k_norm)?;
 
     // --- rope cos/sin upload (per-step, single position) -------------
-    // Inlined the former `upload_tensor_f32` wrapper: call the
-    // candle-shim crate-level helper directly so the only candle-typed
-    // upload surface in this file is the single decode-input bridge
-    // point at function entry (not a hop through a local one-liner
-    // wrapper). (#1082)
+    // Inlined replacement for `kernels::upload_tensor_f32_buffer`:
+    // extract f32 values from the candle tensors directly and call the
+    // candle-free `kernels::upload_f32_buffer_from_slice` upload path.
+    // Removes another candle-typed surface from the bridge. (#1082)
+    let rope_cos_data: Vec<f32> = rope_cos
+        .flatten_all()
+        .context("flatten rope_cos for upload")?
+        .to_dtype(candle_core::DType::F32)?
+        .to_vec1::<f32>()
+        .context("extract rope_cos f32 data")?;
     let rope_cos_buf =
-        kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(vk_device, rope_cos)?;
+        kiln_vulkan_kernel::kernels::upload_f32_buffer_from_slice(vk_device, &rope_cos_data)?;
+    let rope_sin_data: Vec<f32> = rope_sin
+        .flatten_all()
+        .context("flatten rope_sin for upload")?
+        .to_dtype(candle_core::DType::F32)?
+        .to_vec1::<f32>()
+        .context("extract rope_sin f32 data")?;
     let rope_sin_buf =
-        kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(vk_device, rope_sin)?;
+        kiln_vulkan_kernel::kernels::upload_f32_buffer_from_slice(vk_device, &rope_sin_data)?;
 
     // --- activation buffer acquisition (pooled, persistent across
     //     resident decode calls on the same backend) -----------------
