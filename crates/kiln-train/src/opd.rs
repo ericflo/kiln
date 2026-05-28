@@ -79,7 +79,12 @@ use anyhow::{Context, Result, anyhow};
 // underlying KL+SFT composition still uses candle autograd. Drop the
 // candle dep once the entire OPD loss path migrates to kt-typed
 // autograd via `KtForwardOp1` / `KtForwardOp2` (kt_api.rs Phase 7).
-use crate::cd_types::{CdDevice, DType, Tensor, TensorId, Var};
+use crate::cd_types::{DType, Tensor, TensorId, Var};
+// (#1082) `CdDevice` is only referenced from test-mode helpers
+// (`opd_train_synthetic_validation`, `mod tests`); gating the import
+// keeps the non-test build free of dead-code warnings.
+#[cfg(test)]
+use crate::cd_types::CdDevice;
 use serde::{Deserialize, Serialize};
 
 use crate::logit_source::{LogitSource, LogprobBatch};
