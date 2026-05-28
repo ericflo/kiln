@@ -8556,36 +8556,25 @@ pub fn dispatch_gdn_recurrent_step_with_options(
 /// returns it. Later calls can pass that buffer back and avoid the full state
 /// upload/readback pair; only the small recurrent output is copied to the CPU.
 #[allow(clippy::too_many_arguments)]
-pub fn dispatch_gdn_recurrent_step_resident_state(
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_recurrent_step_resident_state_bytes(
     vk_device: &VulkanDevice,
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    g: &Tensor,
-    state: &Tensor,
+    q_data: &[u8],
+    k_data: &[u8],
+    v_data: &[u8],
+    beta_data: &[u8],
+    g_data: &[u8],
+    state_data: Option<&[u8]>,
+    batch: usize,
+    heads: usize,
+    dk: usize,
+    dv: usize,
     resident_state: Option<Arc<VulkanBuffer>>,
-) -> Result<(Tensor, Arc<VulkanBuffer>)> {
+) -> Result<(Vec<u8>, Arc<VulkanBuffer>)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
-
-    let q_data = extract_tensor_bytes(q)?.0;
-    let k_data = extract_tensor_bytes(k)?.0;
-    let v_data = extract_tensor_bytes(v)?.0;
-    let beta_data = extract_tensor_bytes(beta)?.0;
-    let g_data = extract_tensor_bytes(g)?.0;
-    let state_data = if resident_state.is_none() {
-        Some(extract_tensor_bytes(state)?.0)
-    } else {
-        None
-    };
-
-    let dims = q.dims();
-    let (batch, heads, dk) = (dims[0], dims[1], dims[2]);
-    let dims_v = v.dims();
-    let dv = dims_v[2];
 
     let parallel_reduce = use_gdn_recurrent_parallel_reduce(dk, dv);
     let glsl_path = if parallel_reduce {
@@ -8810,9 +8799,8 @@ pub fn dispatch_gdn_recurrent_step_resident_state(
     }
 
     let out_data = VulkanBuffer::read_host_visible(device, &out_stage)?;
-    let out_shape = vec![batch, heads, dv];
-    let out_tensor = create_tensor_from_data(&out_data, &out_shape, q.dtype())?;
-    Ok((out_tensor, state_buf))
+    let _ = (batch, heads, dv);
+    Ok((out_data, state_buf))
 }
 
 /// Dispatch a native-head single-token recurrent step while keeping `state`

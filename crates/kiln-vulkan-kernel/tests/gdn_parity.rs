@@ -985,22 +985,58 @@ fn gdn_recurrent_resident_state_matches_two_step_reference() -> Result<()> {
     };
 
     let (got_out1, resident_state) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state(
-            &vk, &q1, &k1, &v1, &beta1, &g1, &state, None,
-        )
-        .context("dispatch_gdn_recurrent_step_resident_state step 1")?;
+        {
+            let q_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q1)?.0;
+            let k_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k1)?.0;
+            let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v1)?.0;
+            let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta1)?.0;
+            let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g1)?.0;
+            let state_data_b = if None.is_none() {
+                Some(kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0)
+            } else { None };
+            let q_dims_b = q1.dims();
+            let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
+            let dv_b = v1.dims()[2];
+            let q_dtype_b = q1.dtype();
+            let (out_bytes, resident_buf) =
+                kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state_bytes(
+                    &vk,
+                    &q_data_b, &k_data_b, &v_data_b, &beta_data_b, &g_data_b,
+                    state_data_b.as_deref(),
+                    b_b, h_b, dk_b, dv_b,
+                    None,
+                )
+                .context("dispatch_gdn_recurrent_step_resident_state step 1")?;
+            let out_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &out_bytes, &[b_b, h_b, dv_b], q_dtype_b,
+            )?;
+            (out_t, resident_buf)
+        };
     let (got_out2, _resident_state) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state(
-            &vk,
-            &q2,
-            &k2,
-            &v2,
-            &beta2,
-            &g2,
-            &state,
-            Some(resident_state),
-        )
-        .context("dispatch_gdn_recurrent_step_resident_state step 2")?;
+        {
+            let q_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q2)?.0;
+            let k_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k2)?.0;
+            let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v2)?.0;
+            let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta2)?.0;
+            let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g2)?.0;
+            let q_dims_b = q2.dims();
+            let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
+            let dv_b = v2.dims()[2];
+            let q_dtype_b = q2.dtype();
+            let (out_bytes, resident_buf) =
+                kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state_bytes(
+                    &vk,
+                    &q_data_b, &k_data_b, &v_data_b, &beta_data_b, &g_data_b,
+                    None,
+                    b_b, h_b, dk_b, dv_b,
+                    Some(resident_state),
+                )
+                .context("dispatch_gdn_recurrent_step_resident_state step 2")?;
+            let out_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &out_bytes, &[b_b, h_b, dv_b], q_dtype_b,
+            )?;
+            (out_t, resident_buf)
+        };
 
     assert_close(
         "resident recurrent out step 1",
@@ -1269,22 +1305,58 @@ fn gdn_recurrent_resident_state_parallel_reduce_matches_two_step_reference() -> 
     };
 
     let (got_out1, resident_state) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state(
-            &vk, &q1, &k1, &v1, &beta1, &g1, &state, None,
-        )
-        .context("dispatch_gdn_recurrent_step_resident_state parallel step 1")?;
+        {
+            let q_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q1)?.0;
+            let k_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k1)?.0;
+            let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v1)?.0;
+            let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta1)?.0;
+            let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g1)?.0;
+            let state_data_b = if None.is_none() {
+                Some(kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0)
+            } else { None };
+            let q_dims_b = q1.dims();
+            let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
+            let dv_b = v1.dims()[2];
+            let q_dtype_b = q1.dtype();
+            let (out_bytes, resident_buf) =
+                kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state_bytes(
+                    &vk,
+                    &q_data_b, &k_data_b, &v_data_b, &beta_data_b, &g_data_b,
+                    state_data_b.as_deref(),
+                    b_b, h_b, dk_b, dv_b,
+                    None,
+                )
+                .context("dispatch_gdn_recurrent_step_resident_state parallel step 1")?;
+            let out_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &out_bytes, &[b_b, h_b, dv_b], q_dtype_b,
+            )?;
+            (out_t, resident_buf)
+        };
     let (got_out2, _resident_state) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state(
-            &vk,
-            &q2,
-            &k2,
-            &v2,
-            &beta2,
-            &g2,
-            &state,
-            Some(resident_state),
-        )
-        .context("dispatch_gdn_recurrent_step_resident_state parallel step 2")?;
+        {
+            let q_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q2)?.0;
+            let k_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&k2)?.0;
+            let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v2)?.0;
+            let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta2)?.0;
+            let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g2)?.0;
+            let q_dims_b = q2.dims();
+            let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
+            let dv_b = v2.dims()[2];
+            let q_dtype_b = q2.dtype();
+            let (out_bytes, resident_buf) =
+                kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state_bytes(
+                    &vk,
+                    &q_data_b, &k_data_b, &v_data_b, &beta_data_b, &g_data_b,
+                    None,
+                    b_b, h_b, dk_b, dv_b,
+                    Some(resident_state),
+                )
+                .context("dispatch_gdn_recurrent_step_resident_state parallel step 2")?;
+            let out_t = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &out_bytes, &[b_b, h_b, dv_b], q_dtype_b,
+            )?;
+            (out_t, resident_buf)
+        };
 
     assert_close(
         "resident parallel recurrent out step 1",
