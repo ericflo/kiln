@@ -5312,10 +5312,8 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm(
     let push_constants: [u32; 5] = [nv as u32, dk as u32, dv as u32, eps.to_bits(), batch as u32];
 
     if gdn_decode_fused_single_submit_enabled() {
-        return dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit(
+        let (out_data, state_data) = dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit_bytes(
             vk_device,
-            q,
-            state,
             &input_data,
             &spirv,
             push_constants,
@@ -5323,7 +5321,14 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm(
             nv,
             dv,
             skip_state_readback,
-        );
+        )?;
+        let out = create_tensor_from_data(&out_data, &[batch, 1, nv, dv], q.dtype())?;
+        let new_state = if let Some(sd) = state_data {
+            create_tensor_from_data(&sd, state.dims(), state.dtype())?
+        } else {
+            state.clone()
+        };
+        return Ok((out, new_state));
     }
 
     let use_host_visible_state = gdn_decode_host_visible_state_enabled();
@@ -5892,13 +5897,8 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit_bytes(
     .transpose()
     .context("failed to read back gdn_decode fused state")?;
 
-    let out = create_tensor_from_data(&out_data, &[batch, 1, nv, dv], q.dtype())?;
-    let new_state = if let Some(state_data) = state_data {
-        create_tensor_from_data(&state_data, state.dims().as_ref(), state.dtype())?
-    } else {
-        state.clone()
-    };
-    Ok((out, new_state))
+    let _ = (batch, nv, dv);
+    Ok((out_data, state_data))
 }
 
 // ---------------------------------------------------------------------------
