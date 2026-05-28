@@ -2,7 +2,6 @@ use crate::buffer::VulkanBuffer;
 use crate::device::VulkanDevice;
 use anyhow::{Context, Result};
 use ash::vk;
-use candle_core::{DType, Device, Tensor};
 use half::bf16;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -1022,7 +1021,7 @@ pub fn dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
 
 fn dispatch_gdn_in_proj_decode_cached_impl(
     vk_device: &VulkanDevice,
-    x: &Tensor,
+    x: &candle_core::Tensor,
     qkv_weight_t: &VulkanBuffer,
     z_weight_t: &VulkanBuffer,
     a_weight_t: &VulkanBuffer,
@@ -1033,7 +1032,7 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
     a_dim: usize,
     b_dim: usize,
     packed_bf16_weights: bool,
-) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -1375,7 +1374,7 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
     spirv: &[u8],
     push_constants: &[u32],
     x_data: &[u8],
-) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -1645,16 +1644,16 @@ fn create_gdn_in_proj_tensors_from_data(
     z_dim: usize,
     a_dim: usize,
     b_dim: usize,
-) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     let mut offset = 0usize;
-    let mut take = |len: usize, shape: &[usize]| -> Result<Tensor> {
+    let mut take = |len: usize, shape: &[usize]| -> Result<candle_core::Tensor> {
         let byte_len = batch * len * 4;
         let end = offset + byte_len;
         anyhow::ensure!(
             end <= out_data.len(),
             "gdn_in_proj_decode output slice exceeds readback buffer"
         );
-        let tensor = create_tensor_from_data(&out_data[offset..end], shape, DType::F32)?;
+        let tensor = create_tensor_from_data(&out_data[offset..end], shape, candle_core::DType::F32)?;
         offset = end;
         Ok(tensor)
     };
@@ -3411,7 +3410,7 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
 #[allow(clippy::too_many_arguments)]
 fn dispatch_full_attn_qkv_decode_cached_impl(
     vk_device: &VulkanDevice,
-    x: &Tensor,
+    x: &candle_core::Tensor,
     q_weight_t: &VulkanBuffer,
     k_weight_t: &VulkanBuffer,
     v_weight_t: &VulkanBuffer,
@@ -3420,7 +3419,7 @@ fn dispatch_full_attn_qkv_decode_cached_impl(
     k_dim: usize,
     v_dim: usize,
     bf16_weights: bool,
-) -> Result<(Tensor, Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -3533,7 +3532,7 @@ fn dispatch_full_attn_qkv_decode_cached_single_submit(
     spirv: &[u8],
     push_constants: &[u32],
     x_data: &[u8],
-) -> Result<(Tensor, Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -3684,16 +3683,16 @@ fn create_full_attn_qkv_tensors_from_data(
     q_dim: usize,
     k_dim: usize,
     v_dim: usize,
-) -> Result<(Tensor, Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     let mut offset = 0usize;
-    let mut take = |len: usize, shape: &[usize]| -> Result<Tensor> {
+    let mut take = |len: usize, shape: &[usize]| -> Result<candle_core::Tensor> {
         let byte_len = len * 4;
         let end = offset + byte_len;
         anyhow::ensure!(
             end <= out_data.len(),
             "full_attn_qkv_decode output slice exceeds readback buffer"
         );
-        let tensor = create_tensor_from_data(&out_data[offset..end], shape, DType::F32)?;
+        let tensor = create_tensor_from_data(&out_data[offset..end], shape, candle_core::DType::F32)?;
         offset = end;
         Ok(tensor)
     };
@@ -3808,7 +3807,7 @@ pub fn dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
 #[allow(clippy::too_many_arguments)]
 fn dispatch_full_attn_qkv_decode_cached_batched_impl(
     vk_device: &VulkanDevice,
-    x: &Tensor,
+    x: &candle_core::Tensor,
     q_weight_t: &VulkanBuffer,
     k_weight_t: &VulkanBuffer,
     v_weight_t: &VulkanBuffer,
@@ -3818,7 +3817,7 @@ fn dispatch_full_attn_qkv_decode_cached_batched_impl(
     k_dim: usize,
     v_dim: usize,
     bf16_weights: bool,
-) -> Result<(Tensor, Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -3960,7 +3959,7 @@ fn split_batched_qkv_output(
     q_dim: usize,
     k_dim: usize,
     v_dim: usize,
-) -> Result<(Tensor, Tensor, Tensor)> {
+) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     let total_out = q_dim + k_dim + v_dim;
     let expected_bytes = batch
         .checked_mul(total_out)
@@ -3984,9 +3983,9 @@ fn split_batched_qkv_output(
         v_buf.extend_from_slice(&out_f32[base + q_dim + k_dim..base + total_out]);
     }
 
-    let q = Tensor::from_vec(q_buf, batch * q_dim, &Device::Cpu)?.reshape((batch, 1, q_dim))?;
-    let k = Tensor::from_vec(k_buf, batch * k_dim, &Device::Cpu)?.reshape((batch, 1, k_dim))?;
-    let v = Tensor::from_vec(v_buf, batch * v_dim, &Device::Cpu)?.reshape((batch, 1, v_dim))?;
+    let q = candle_core::Tensor::from_vec(q_buf, batch * q_dim, &candle_core::Device::Cpu)?.reshape((batch, 1, q_dim))?;
+    let k = candle_core::Tensor::from_vec(k_buf, batch * k_dim, &candle_core::Device::Cpu)?.reshape((batch, 1, k_dim))?;
+    let v = candle_core::Tensor::from_vec(v_buf, batch * v_dim, &candle_core::Device::Cpu)?.reshape((batch, 1, v_dim))?;
     Ok((q, k, v))
 }
 
@@ -4583,7 +4582,7 @@ pub fn dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes(
 #[allow(clippy::too_many_arguments)]
 fn dispatch_mlp_decode_cached_impl(
     vk_device: &VulkanDevice,
-    x: &Tensor,
+    x: &candle_core::Tensor,
     gate_weight_t: &VulkanBuffer,
     up_weight_t: &VulkanBuffer,
     down_weight_t: &VulkanBuffer,
@@ -4592,7 +4591,7 @@ fn dispatch_mlp_decode_cached_impl(
     out_dim: usize,
     gate_up_bf16_weights: bool,
     down_bf16_weights: bool,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -5053,7 +5052,7 @@ fn dispatch_mlp_decode_cached_impl(
         out_data
     };
     let stage_start = profile_stages.then(Instant::now);
-    let out = create_tensor_from_data(&out_data, &[batch, 1, out_dim], DType::F32);
+    let out = create_tensor_from_data(&out_data, &[batch, 1, out_dim], candle_core::DType::F32);
     finish_vulkan_mlp_kernel_stage_profile(
         "create_tensor",
         batch,
