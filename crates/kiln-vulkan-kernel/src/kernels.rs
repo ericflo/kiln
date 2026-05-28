@@ -5392,59 +5392,45 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_bytes(
 
 /// Dispatch fused GDN decode while keeping recurrent state device-resident.
 ///
-/// The first call uploads `state` into a device-local buffer. Later calls pass
-/// the returned buffer back and avoid the full recurrent-state readback/upload
-/// pair; only the small normalized output is copied to the CPU.
+/// The first call uploads `state_data` into a device-local buffer (callers
+/// pass `state_data = Some(bytes)` on the cold path). Later calls pass the
+/// returned buffer back via `resident_state` and set `state_data = None`,
+/// avoiding the full recurrent-state readback/upload pair; only the small
+/// normalized output is copied to the CPU. Output bytes have logical shape
+/// `[batch, 1, nv, dv]` in the caller-chosen recurrent dtype.
 #[allow(clippy::too_many_arguments)]
-pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
+pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_bytes(
     vk_device: &VulkanDevice,
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    a: &Tensor,
-    b: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
-    state: &Tensor,
-    z: &Tensor,
-    weight: &Tensor,
+    q_data: &[u8],
+    k_data: &[u8],
+    v_data: &[u8],
+    a_data: &[u8],
+    b_data: &[u8],
+    a_log_data: &[u8],
+    dt_bias_data: &[u8],
+    state_data: Option<&[u8]>,
+    z_data: &[u8],
+    weight_data: &[u8],
+    batch: usize,
+    nv: usize,
+    dk: usize,
+    dv: usize,
     eps: f32,
     resident_state: Option<Arc<VulkanBuffer>>,
-) -> Result<(Tensor, Arc<VulkanBuffer>)> {
-    let device = vk_device.device();
-    let queue = vk_device.queue();
-    let device_local_mt = vk_device.device_local_mem_type();
-    let host_visible_mt = vk_device.host_visible_mem_type();
-
-    let (batch, _, nv, dk) = q.dims4()?;
-    let (v_batch, _, v_nv, dv) = v.dims4()?;
-    anyhow::ensure!(
-        v_batch == batch,
-        "gdn_decode fused resident: v batch {v_batch} != q batch {batch}"
-    );
-    anyhow::ensure!(
-        v_nv == nv,
-        "gdn_decode fused resident: v heads {v_nv} != q heads {nv}"
-    );
+) -> Result<(Vec<u8>, Arc<VulkanBuffer>)> {
     anyhow::ensure!(
         dv <= 256,
         "gdn_decode fused resident: dv {dv} exceeds shader local capacity 256"
     );
+    anyhow::ensure!(
+        resident_state.is_some() || state_data.is_some(),
+        "gdn_decode fused resident: either resident_state or state_data must be Some"
+    );
 
-    let q_data = extract_tensor_bytes(q)?.0;
-    let k_data = extract_tensor_bytes(k)?.0;
-    let v_data = extract_tensor_bytes(v)?.0;
-    let a_data = extract_tensor_bytes(a)?.0;
-    let b_data = extract_tensor_bytes(b)?.0;
-    let a_log_data = extract_tensor_bytes(a_log)?.0;
-    let dt_bias_data = extract_tensor_bytes(dt_bias)?.0;
-    let state_data = if resident_state.is_none() {
-        Some(extract_tensor_bytes(state)?.0)
-    } else {
-        None
-    };
-    let z_data = extract_tensor_bytes(z)?.0;
-    let weight_data = extract_tensor_bytes(weight)?.0;
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
 
     let glsl_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -5462,22 +5448,20 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
         Ok((device_buf, staging))
     };
 
-    let (q_buf, q_stage) = make_device_and_staging(&q_data)?;
-    let (k_buf, k_stage) = make_device_and_staging(&k_data)?;
-    let (v_buf, v_stage) = make_device_and_staging(&v_data)?;
-    let (a_buf, a_stage) = make_device_and_staging(&a_data)?;
-    let (b_buf, b_stage) = make_device_and_staging(&b_data)?;
-    let (a_log_buf, a_log_stage) = make_device_and_staging(&a_log_data)?;
-    let (dt_bias_buf, dt_bias_stage) = make_device_and_staging(&dt_bias_data)?;
-    let (z_buf, z_stage) = make_device_and_staging(&z_data)?;
-    let (weight_buf, weight_stage) = make_device_and_staging(&weight_data)?;
+    let (q_buf, q_stage) = make_device_and_staging(q_data)?;
+    let (k_buf, k_stage) = make_device_and_staging(k_data)?;
+    let (v_buf, v_stage) = make_device_and_staging(v_data)?;
+    let (a_buf, a_stage) = make_device_and_staging(a_data)?;
+    let (b_buf, b_stage) = make_device_and_staging(b_data)?;
+    let (a_log_buf, a_log_stage) = make_device_and_staging(a_log_data)?;
+    let (dt_bias_buf, dt_bias_stage) = make_device_and_staging(dt_bias_data)?;
+    let (z_buf, z_stage) = make_device_and_staging(z_data)?;
+    let (weight_buf, weight_stage) = make_device_and_staging(weight_data)?;
 
     let state_buf = match resident_state {
         Some(buffer) => buffer,
         None => {
-            let data = state_data
-                .as_ref()
-                .expect("state data exists when resident state is absent");
+            let data = state_data.expect("state data exists when resident state is absent");
             Arc::new(VulkanBuffer::create_device_local(
                 device,
                 device_local_mt,
@@ -5485,7 +5469,7 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
             )?)
         }
     };
-    let state_stage = if let Some(data) = &state_data {
+    let state_stage = if let Some(data) = state_data {
         let staging =
             VulkanBuffer::create_host_visible(device, host_visible_mt, data.len() as u64)?;
         VulkanBuffer::write_host_visible(device, &staging, data)?;
@@ -5580,7 +5564,7 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
                 &[vk::BufferCopy::default().size(size)],
             );
         }
-        if let (Some(state_stage), Some(state_data)) = (&state_stage, &state_data) {
+        if let (Some(state_stage), Some(state_data)) = (&state_stage, state_data) {
             device.cmd_copy_buffer(
                 cmd,
                 state_stage.handle(),
@@ -5661,8 +5645,8 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
 
     let out_data = VulkanBuffer::read_host_visible(device, &out_stage)
         .context("failed to read back gdn_decode fused resident output")?;
-    let out = create_tensor_from_data(&out_data, &[batch, 1, nv, dv], q.dtype())?;
-    Ok((out, state_buf))
+    let _ = (batch, nv, dv);
+    Ok((out_data, state_buf))
 }
 
 #[allow(clippy::too_many_arguments)]

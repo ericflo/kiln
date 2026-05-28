@@ -2274,23 +2274,39 @@ impl BackendRuntime for VulkanBackend {
             let state_id = state.id();
             let resident_state =
                 RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().get(&state_id).cloned());
-            let (out, resident_state) =
-                kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
+            let (batch_d, _, nv, dk) = q.dims4()?;
+            let dv = v.dims4()?.3;
+            let q_dtype = q.dtype();
+            let q_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(q)?.0;
+            let k_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(k)?.0;
+            let v_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(v)?.0;
+            let a_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(a)?.0;
+            let b_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(b)?.0;
+            let a_log_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(a_log)?.0;
+            let dt_bias_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(dt_bias)?.0;
+            let z_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(z)?.0;
+            let weight_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(weight)?.0;
+            let state_b = if resident_state.is_none() {
+                Some(kiln_vulkan_kernel::kernels::extract_tensor_bytes(state)?.0)
+            } else {
+                None
+            };
+            let (out_data, resident_state) =
+                kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_bytes(
                     vk_device,
-                    q,
-                    k,
-                    v,
-                    a,
-                    b,
-                    a_log,
-                    dt_bias,
-                    state,
-                    z,
-                    weight,
+                    &q_b, &k_b, &v_b, &a_b, &b_b, &a_log_b, &dt_bias_b,
+                    state_b.as_deref(),
+                    &z_b, &weight_b,
+                    batch_d, nv, dk, dv,
                     eps as f32,
                     resident_state,
                 )
                 .context("gdn_decode_gates_recurrent_rmsnorm resident-state kernel failed")?;
+            let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &out_data,
+                &[batch_d, 1, nv, dv],
+                q_dtype,
+            )?;
             RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
                 cache.borrow_mut().insert(state_id, resident_state);
             });

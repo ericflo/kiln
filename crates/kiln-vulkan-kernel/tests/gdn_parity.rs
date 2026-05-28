@@ -106,6 +106,59 @@ fn maybe_vulkan() -> Option<VulkanDevice> {
     VulkanDevice::new().ok()
 }
 
+/// Test-only candle wrapper for
+/// `dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_bytes`.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_tensor(
+    vk: &VulkanDevice,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    state: &Tensor,
+    z: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+    resident_state: Option<std::sync::Arc<kiln_vulkan_kernel::VulkanBuffer>>,
+) -> Result<(Tensor, std::sync::Arc<kiln_vulkan_kernel::VulkanBuffer>)> {
+    let (batch, _, nv, dk) = q.dims4()?;
+    let dv = v.dims4()?.3;
+    let q_dtype = q.dtype();
+    let q_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(q)?.0;
+    let k_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(k)?.0;
+    let v_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(v)?.0;
+    let a_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(a)?.0;
+    let b_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(b)?.0;
+    let a_log_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(a_log)?.0;
+    let dt_bias_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(dt_bias)?.0;
+    let z_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(z)?.0;
+    let weight_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(weight)?.0;
+    let state_b = if resident_state.is_none() {
+        Some(kiln_vulkan_kernel::kernels::extract_tensor_bytes(state)?.0)
+    } else {
+        None
+    };
+    let (out_data, resident_state) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_bytes(
+            vk,
+            &q_b, &k_b, &v_b, &a_b, &b_b, &a_log_b, &dt_bias_b,
+            state_b.as_deref(),
+            &z_b, &weight_b,
+            batch, nv, dk, dv,
+            eps,
+            resident_state,
+        )?;
+    let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &out_data,
+        &[batch, 1, nv, dv],
+        q_dtype,
+    )?;
+    Ok((out, resident_state))
+}
+
 /// Test-only candle wrapper for `dispatch_gdn_decode_gates_recurrent_rmsnorm_bytes`.
 /// Falls back to `state.clone()` for the no-readback path to match the
 /// pre-inversion `(Tensor, Tensor)` return shape used by the parity tests.
@@ -1690,12 +1743,12 @@ fn gdn_decode_gates_recurrent_rmsnorm_resident_state_matches_two_step_reference(
         .context("dispatch_gdn_decode_gates_recurrent_rmsnorm reference step 2")?;
 
     let (got_out1, resident_state) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
+        dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_tensor(
             &vk, &q1, &k1, &v1, &a1, &b1, &a_log, &dt_bias, &state, &z1, &weight, 1e-6, None,
         )
         .context("dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state step 1")?;
     let (got_out2, _resident_state) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
+        dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state_tensor(
             &vk,
             &q2,
             &k2,
