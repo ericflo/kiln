@@ -223,6 +223,62 @@ impl MetalStorage {
         })
     }
 
+    /// Wrap an existing `Arc<metal::Buffer>` allocated by the caller —
+    /// **candle-free** entry point.
+    ///
+    /// Takes a metal-rs `MetalRawDevice` instead of a candle
+    /// `Arc<MetalDevice>`. The candle wrapper, when needed downstream
+    /// (e.g. for `command_encoder()` / `kernels()` access in the 7
+    /// internal substrate ops in this file), is derived internally via
+    /// [`primary_metal_device`] from the supplied `device_index`.
+    ///
+    /// Validates the buffer length against `dtype.size_in_bytes()`
+    /// for non-packed dtypes — same contract as [`Self::from_buffer`].
+    ///
+    /// Mirror of [`crate::CudaStorage::from_slice_ctx`] (the candle-
+    /// free constructor entry the CudaStorage CP-1 lift chain converged
+    /// onto in commits 5c3cd353 + 876e17da). On the Metal side this
+    /// constructor is the path the 7 internal ops in this file migrate
+    /// to so the candle `Arc<MetalDevice>` parameter is removed from
+    /// the kt-side constructor surface; the candle wrapper continues
+    /// to back the produced storage's internal field for kernel-crate
+    /// FFI affinity until the CP-1 final field flip lands.
+    pub fn from_buffer_kt(
+        metal_handle: &MetalRawDevice,
+        device_index: usize,
+        dtype: DType,
+        buffer: Arc<MetalBuffer>,
+    ) -> Result<Self> {
+        let len = buffer.length() as usize;
+        if !dtype.is_packed() {
+            let per = dtype.size_in_bytes();
+            if per > 0 && !len.is_multiple_of(per) {
+                return Err(Error::Msg(format!(
+                    "MetalStorage::from_buffer_kt: buffer len {len} is not a multiple of \
+                     size_in_bytes({:?}) = {per}",
+                    dtype
+                )));
+            }
+        }
+        // metal_handle is the kt-side raw-device argument; today it is
+        // only used to confirm the caller has a metal-rs handle on hand
+        // (so the constructor surface is candle-free at the kt API
+        // boundary). The candle wrapper that backs the produced
+        // storage's internal `candle_device` field is derived via
+        // `primary_metal_device(device_index)`, mirroring how
+        // `zeros_kt` populates the same field. The residual candle
+        // hook retires when the CP-1 field flip lands (mirror of the
+        // CudaStorage 5c3cd353 final lift).
+        let _ = metal_handle;
+        let candle_device = primary_metal_device(device_index)?;
+        Ok(MetalStorage {
+            device: Device::Metal(device_index),
+            dtype,
+            buffer,
+            candle_device,
+        })
+    }
+
     /// Borrow the underlying buffer. The existing kernel-crate FFI
     /// sites in `kiln-model::backend::metal` plug in via this
     /// accessor (mirrors `candle_core::metal_backend::buffer_o` 232
@@ -450,8 +506,8 @@ pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     })?;
     drop(encoder);
 
-    let out_storage = MetalStorage::from_buffer(
-        candle_device_arc,
+    let out_storage = MetalStorage::from_buffer_kt(
+        raw_device,
         device_index,
         dtype,
         out_buffer_arc,
@@ -609,7 +665,7 @@ pub fn metal_rmsnorm_last_axis(
     drop(encoder);
 
     let out_storage =
-        MetalStorage::from_buffer(candle_device_arc, device_index, dtype, out_buffer_arc)?;
+        MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
     let out_storage_arc: crate::Storage = Arc::new(out_storage);
 
     crate::Tensor::from_parts(
@@ -777,7 +833,7 @@ pub fn metal_layernorm_last_axis(
     drop(encoder);
 
     let out_storage =
-        MetalStorage::from_buffer(candle_device_arc, device_index, dtype, out_buffer_arc)?;
+        MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
     let out_storage_arc: crate::Storage = Arc::new(out_storage);
 
     crate::Tensor::from_parts(
@@ -968,7 +1024,7 @@ pub fn metal_index_select_dim0(
     drop(encoder);
 
     let out_storage =
-        MetalStorage::from_buffer(candle_device_arc, device_index, dtype, out_buffer_arc)?;
+        MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
     let out_storage_arc: crate::Storage = Arc::new(out_storage);
 
     crate::Tensor::from_parts(
@@ -1105,7 +1161,7 @@ pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
     })?;
     drop(encoder);
 
-    let out_storage = MetalStorage::from_buffer(candle_device_arc, device_index, to, out_buffer_arc)?;
+    let out_storage = MetalStorage::from_buffer_kt(raw_device, device_index, to, out_buffer_arc)?;
     let out_storage_arc: crate::Storage = Arc::new(out_storage);
 
     crate::Tensor::from_parts(
@@ -1282,7 +1338,7 @@ pub fn metal_elementwise_binary(
     drop(encoder);
 
     let out_storage =
-        MetalStorage::from_buffer(candle_device_arc, device_index, dtype, out_buffer_arc)?;
+        MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
     let out_storage_arc: crate::Storage = Arc::new(out_storage);
 
     crate::Tensor::from_parts(
@@ -1495,7 +1551,7 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
     drop(encoder);
 
     let out_storage =
-        MetalStorage::from_buffer(candle_device_arc, device_index, dtype, out_buffer_arc)?;
+        MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
     let out_storage_arc: crate::Storage = Arc::new(out_storage);
 
     crate::Tensor::from_parts(
@@ -1565,22 +1621,16 @@ mod tests {
         // cache), so `raw_len` here equals 17 — the unaligned-len
         // branch of the test below is the one that fires.
         //
-        // `MetalStorage::from_buffer` still requires `Arc<MetalDevice>`
-        // (the back-compat field is load-bearing for downstream
-        // kernel-crate FFI sites that consume `.candle_device()`); we
-        // derive that wrapper via the public `primary_metal_device`
-        // helper rather than reaching for `candle_core::Device::new_metal`
-        // directly. The helper is documented as the substrate's single
-        // residual candle hook — the same hook `MetalStorage::zeros_kt`
-        // already calls internally, so this test does not add to the
-        // candle surface.
-        let candle_dev = primary_metal_device(0).unwrap();
+        // Uses the candle-free `from_buffer_kt` entry — the path the
+        // 7 internal substrate ops migrated to. The constructor still
+        // materializes a candle MetalDevice for its back-compat field
+        // via `primary_metal_device` until the CP-1 field flip lands.
         let small = dev
             .new_buffer(17, MTLResourceOptions::StorageModeShared)
             .unwrap();
         let raw_len = small.length() as usize;
         let small_arc = Arc::new(small);
-        let result = MetalStorage::from_buffer(candle_dev, 0, DType::F32, small_arc);
+        let result = MetalStorage::from_buffer_kt(&dev, 0, DType::F32, small_arc);
         if raw_len.is_multiple_of(4) {
             // metal-rs rounded up (host-specific behavior); validation passes.
             assert!(result.is_ok());
