@@ -9,9 +9,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 // NOTE(#1082): trainer.rs has zero `use candle_*` imports at module top
-// and exactly one direct candle path remaining: the `impl
-// candle_core::CustomOp1 for InjectTensorGradient` block near the bottom
-// of this file. Every other candle reference resolves through
+// and exactly one direct candle path remaining: the `impl candle CustomOp1
+// for InjectTensorGradient` block near the bottom of this file (the trait
+// path is fully spelled out there because traits cannot be type-aliased
+// on stable Rust without `trait_alias`). Every other candle reference
+// resolves through
 // `crate::cd_types`, the per-crate candle facade that holds the type
 // aliases (`Tensor` / `Var` / `CdDevice` / `DType` / `Shape` /
 // `GradStore` / `TensorId` / `D` / `CdResult` / `CpuStorage` /
