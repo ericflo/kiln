@@ -13,6 +13,20 @@ use candle_core::op::BackpropOp;
 #[cfg(feature = "cuda")]
 use candle_core::{CpuStorage, CudaStorage, CustomOp2, CustomOp3, Layout, Shape, Storage};
 use candle_core::{D, DType, Device, Tensor};
+// (#1082) Consolidate the most-frequent error/result + bail! callsites
+// in this file (~67 `Error::Msg`, ~32 `bail!`, ~22 `Result<...>`)
+// behind short names. `Result` would conflict with `anyhow::Result`, so
+// the candle one is aliased to `CandleResult`. `Error` and `bail` have
+// no conflicting top-level imports here. All three are only used inside
+// `#[cfg(any(feature = "cuda", feature = "vulkan"))]` paths (CustomOp*
+// impls, kt-bridge fallbacks), so the imports are gated to those
+// features to avoid `unused_imports` warnings on the default build.
+#[cfg(any(feature = "cuda", feature = "vulkan"))]
+use candle_core::bail;
+#[cfg(any(feature = "cuda", feature = "vulkan"))]
+use candle_core::Error;
+#[cfg(any(feature = "cuda", feature = "vulkan"))]
+use candle_core::Result as CandleResult;
 use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 
@@ -2501,7 +2515,7 @@ fn cuda_lora_training_linear_disabled() -> bool {
 }
 
 #[cfg(feature = "cuda")]
-fn to_dtype_if_needed(t: &Tensor, dtype: DType) -> candle_core::Result<Tensor> {
+fn to_dtype_if_needed(t: &Tensor, dtype: DType) -> CandleResult<Tensor> {
     if t.dtype() == dtype {
         return Ok(t.clone());
     }
@@ -2518,7 +2532,7 @@ fn to_dtype_if_needed(t: &Tensor, dtype: DType) -> candle_core::Result<Tensor> {
     #[cfg(feature = "cuda")]
     {
         match try_kt_to_dtype(t, dtype)
-            .map_err(|e| candle_core::Error::Msg(format!("try_kt_to_dtype: {e}")))?
+            .map_err(|e| Error::Msg(format!("try_kt_to_dtype: {e}")))?
         {
             Some(out) => return Ok(out),
             None => {}
@@ -2814,7 +2828,7 @@ impl CustomOp3 for CudaLoraAddF32 {
         l_hidden: &Layout,
         s_b: &CpuStorage,
         l_b: &Layout,
-    ) -> candle_core::Result<(CpuStorage, Shape)> {
+    ) -> CandleResult<(CpuStorage, Shape)> {
         if !l_base.is_contiguous()
             || !l_hidden.is_contiguous()
             || !l_b.is_contiguous()
@@ -2822,7 +2836,7 @@ impl CustomOp3 for CudaLoraAddF32 {
             || l_hidden.start_offset() != 0
             || l_b.start_offset() != 0
         {
-            candle_core::bail!("CudaLoraAddF32 CPU fallback requires compact contiguous inputs");
+            bail!("CudaLoraAddF32 CPU fallback requires compact contiguous inputs");
         }
         let base = Tensor::from_storage(
             Storage::Cpu(s_base.clone()),
@@ -2848,7 +2862,7 @@ impl CustomOp3 for CudaLoraAddF32 {
         let storage = storage.try_clone(layout)?;
         match storage {
             Storage::Cpu(storage) => Ok((storage, Shape::from(l_base.dims().to_vec()))),
-            _ => candle_core::bail!("CudaLoraAddF32 CPU fallback produced non-CPU storage"),
+            _ => bail!("CudaLoraAddF32 CPU fallback produced non-CPU storage"),
         }
     }
 
@@ -2860,9 +2874,9 @@ impl CustomOp3 for CudaLoraAddF32 {
         l_hidden: &Layout,
         s_b: &CudaStorage,
         l_b: &Layout,
-    ) -> candle_core::Result<(CudaStorage, Shape)> {
+    ) -> CandleResult<(CudaStorage, Shape)> {
         if !l_base.is_contiguous() || !l_hidden.is_contiguous() || !l_b.is_contiguous() {
-            candle_core::bail!("CudaLoraAddF32 CUDA path requires contiguous inputs");
+            bail!("CudaLoraAddF32 CUDA path requires contiguous inputs");
         }
         let out_storage = s_base.try_clone(l_base)?;
         let out_shape = Shape::from(l_base.dims().to_vec());
@@ -2876,7 +2890,7 @@ impl CustomOp3 for CudaLoraAddF32 {
             l_b,
             self.scale,
         )
-        .map_err(|e| candle_core::Error::Msg(format!("CudaLoraAddF32 CUDA add: {e:?}")))?;
+        .map_err(|e| Error::Msg(format!("CudaLoraAddF32 CUDA add: {e:?}")))?;
         Ok((out_storage, out_shape))
     }
 
@@ -2887,7 +2901,7 @@ impl CustomOp3 for CudaLoraAddF32 {
         b: &Tensor,
         _res: &Tensor,
         grad_y: &Tensor,
-    ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+    ) -> CandleResult<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
         let grad_base = grad_y.clone();
         let grad_y_f32 = to_dtype_if_needed(grad_y, DType::F32)?;
         let grad_delta = (grad_y_f32 * self.scale as f64)?;
@@ -2914,7 +2928,7 @@ struct CudaLoraLinearBf16 {
 
 #[cfg(feature = "cuda")]
 impl CudaLoraLinearBf16 {
-    fn forward_tensor(&self, x: &Tensor, a: &Tensor, b: &Tensor) -> candle_core::Result<Tensor> {
+    fn forward_tensor(&self, x: &Tensor, a: &Tensor, b: &Tensor) -> CandleResult<Tensor> {
         let base = x.matmul(&self.weight_t)?;
         let a_t = a.t()?.contiguous()?;
         let hidden = x.matmul(&a_t)?.to_dtype(DType::F32)?.contiguous()?;
@@ -2936,7 +2950,7 @@ impl CustomOp3 for CudaLoraLinearBf16 {
         l_a: &Layout,
         s_b: &CpuStorage,
         l_b: &Layout,
-    ) -> candle_core::Result<(CpuStorage, Shape)> {
+    ) -> CandleResult<(CpuStorage, Shape)> {
         if !l_x.is_contiguous()
             || !l_a.is_contiguous()
             || !l_b.is_contiguous()
@@ -2944,7 +2958,7 @@ impl CustomOp3 for CudaLoraLinearBf16 {
             || l_a.start_offset() != 0
             || l_b.start_offset() != 0
         {
-            candle_core::bail!(
+            bail!(
                 "CudaLoraLinearBf16 CPU fallback requires compact contiguous inputs"
             );
         }
@@ -2971,7 +2985,7 @@ impl CustomOp3 for CudaLoraLinearBf16 {
         let storage = storage.try_clone(layout)?;
         match storage {
             Storage::Cpu(storage) => Ok((storage, Shape::from(out.dims().to_vec()))),
-            _ => candle_core::bail!("CudaLoraLinearBf16 CPU fallback produced non-CPU storage"),
+            _ => bail!("CudaLoraLinearBf16 CPU fallback produced non-CPU storage"),
         }
     }
 
@@ -2983,15 +2997,15 @@ impl CustomOp3 for CudaLoraLinearBf16 {
         l_a: &Layout,
         s_b: &CudaStorage,
         l_b: &Layout,
-    ) -> candle_core::Result<(CudaStorage, Shape)> {
+    ) -> CandleResult<(CudaStorage, Shape)> {
         if !l_x.is_contiguous() || !l_a.is_contiguous() || !l_b.is_contiguous() {
-            candle_core::bail!("CudaLoraLinearBf16 CUDA path requires contiguous inputs");
+            bail!("CudaLoraLinearBf16 CUDA path requires contiguous inputs");
         }
         let x_dims = l_x.dims();
         let a_dims = l_a.dims();
         let b_dims = l_b.dims();
         if x_dims.len() != 2 || a_dims.len() != 2 || b_dims.len() != 2 {
-            candle_core::bail!(
+            bail!(
                 "CudaLoraLinearBf16 CUDA path expects rank-2 inputs, got x={x_dims:?} a={a_dims:?} b={b_dims:?}"
             );
         }
@@ -2999,16 +3013,16 @@ impl CustomOp3 for CudaLoraLinearBf16 {
         let (rank, a_in) = (a_dims[0], a_dims[1]);
         let (out_dim, b_rank) = (b_dims[0], b_dims[1]);
         if a_in != in_features || b_rank != rank {
-            candle_core::bail!(
+            bail!(
                 "CudaLoraLinearBf16 CUDA shape mismatch x={x_dims:?} a={a_dims:?} b={b_dims:?}"
             );
         }
         let (weight_storage, weight_layout) = self.weight_t.storage_and_layout();
         let Storage::Cuda(weight_storage) = &*weight_storage else {
-            candle_core::bail!("CudaLoraLinearBf16 CUDA path requires CUDA weight storage");
+            bail!("CudaLoraLinearBf16 CUDA path requires CUDA weight storage");
         };
         if weight_layout.dims() != [in_features, out_dim] {
-            candle_core::bail!(
+            bail!(
                 "CudaLoraLinearBf16 CUDA weight shape mismatch weight={:?} x={x_dims:?} b={b_dims:?}",
                 weight_layout.dims()
             );
@@ -3039,7 +3053,7 @@ impl CustomOp3 for CudaLoraLinearBf16 {
             l_b,
             self.scale,
         )
-        .map_err(|e| candle_core::Error::Msg(format!("CudaLoraLinearBf16 CUDA add: {e:?}")))?;
+        .map_err(|e| Error::Msg(format!("CudaLoraLinearBf16 CUDA add: {e:?}")))?;
         Ok((out_storage, out_shape))
     }
 
@@ -3050,7 +3064,7 @@ impl CustomOp3 for CudaLoraLinearBf16 {
         b: &Tensor,
         _res: &Tensor,
         grad_y: &Tensor,
-    ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+    ) -> CandleResult<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
         let rows = grad_y.dim(0)?;
         let tile_rows = cuda_lora_bwd_tile_rows().min(rows.max(1));
         let weight_t_t = self.weight_t.t()?;
@@ -3061,7 +3075,7 @@ impl CustomOp3 for CudaLoraLinearBf16 {
         let x_in = x.dim(1)?;
         let grad_x_shape = Shape::from(vec![rows, x_in]);
         let Device::Cuda(cuda_device) = x.device() else {
-            candle_core::bail!("CudaLoraLinearBf16 backward requires CUDA input");
+            bail!("CudaLoraLinearBf16 backward requires CUDA input");
         };
         let mut grad_x_storage = unsafe { cuda_device.alloc_uninit(&grad_x_shape, DType::BF16)? };
         let mut grad_a_acc: Option<Tensor> = None;
@@ -3088,7 +3102,7 @@ impl CustomOp3 for CudaLoraLinearBf16 {
                 #[cfg(feature = "cuda")]
                 {
                     if let Some(out) = try_kt_mul_scalar(&grad_hidden_pre, self.scale as f64)
-                        .map_err(|e| candle_core::Error::Msg(format!(
+                        .map_err(|e| Error::Msg(format!(
                             "CudaLoraLinearBf16 backward: try_kt_mul_scalar: {e}"
                         )))?
                     {
@@ -3106,7 +3120,7 @@ impl CustomOp3 for CudaLoraLinearBf16 {
             let grad_x_tile = (grad_x_base + grad_x_lora)?;
             let (grad_x_tile_storage, grad_x_tile_layout) = grad_x_tile.storage_and_layout();
             let Storage::Cuda(grad_x_tile_storage) = &*grad_x_tile_storage else {
-                candle_core::bail!("CudaLoraLinearBf16 backward produced non-CUDA grad_x tile");
+                bail!("CudaLoraLinearBf16 backward produced non-CUDA grad_x tile");
             };
             grad_x_tile_storage.copy2d(
                 &mut grad_x_storage,
@@ -3129,7 +3143,7 @@ impl CustomOp3 for CudaLoraLinearBf16 {
                 #[cfg(feature = "cuda")]
                 {
                     if let Some(out) = try_kt_mul_scalar(&grad_b_tile_pre, self.scale as f64)
-                        .map_err(|e| candle_core::Error::Msg(format!(
+                        .map_err(|e| Error::Msg(format!(
                             "CudaLoraLinearBf16 backward: try_kt_mul_scalar: {e}"
                         )))?
                     {
@@ -3162,10 +3176,10 @@ impl CustomOp3 for CudaLoraLinearBf16 {
             false,
         );
         let Some(grad_a_acc) = grad_a_acc else {
-            candle_core::bail!("CudaLoraLinearBf16 backward produced no A gradient tiles");
+            bail!("CudaLoraLinearBf16 backward produced no A gradient tiles");
         };
         let Some(grad_b_acc) = grad_b_acc else {
-            candle_core::bail!("CudaLoraLinearBf16 backward produced no B gradient tiles");
+            bail!("CudaLoraLinearBf16 backward produced no B gradient tiles");
         };
         let grad_a = grad_a_acc.to_dtype(a.dtype())?;
         let grad_b = grad_b_acc.to_dtype(b.dtype())?;
@@ -3187,7 +3201,7 @@ impl CustomOp3 for CudaLoraAddBf16 {
         l_hidden: &Layout,
         s_b: &CpuStorage,
         l_b: &Layout,
-    ) -> candle_core::Result<(CpuStorage, Shape)> {
+    ) -> CandleResult<(CpuStorage, Shape)> {
         if !l_base.is_contiguous()
             || !l_hidden.is_contiguous()
             || !l_b.is_contiguous()
@@ -3195,7 +3209,7 @@ impl CustomOp3 for CudaLoraAddBf16 {
             || l_hidden.start_offset() != 0
             || l_b.start_offset() != 0
         {
-            candle_core::bail!("CudaLoraAddBf16 CPU fallback requires compact contiguous inputs");
+            bail!("CudaLoraAddBf16 CPU fallback requires compact contiguous inputs");
         }
         let base = Tensor::from_storage(
             Storage::Cpu(s_base.clone()),
@@ -3224,7 +3238,7 @@ impl CustomOp3 for CudaLoraAddBf16 {
         let storage = storage.try_clone(layout)?;
         match storage {
             Storage::Cpu(storage) => Ok((storage, Shape::from(l_base.dims().to_vec()))),
-            _ => candle_core::bail!("CudaLoraAddBf16 CPU fallback produced non-CPU storage"),
+            _ => bail!("CudaLoraAddBf16 CPU fallback produced non-CPU storage"),
         }
     }
 
@@ -3236,9 +3250,9 @@ impl CustomOp3 for CudaLoraAddBf16 {
         l_hidden: &Layout,
         s_b: &CudaStorage,
         l_b: &Layout,
-    ) -> candle_core::Result<(CudaStorage, Shape)> {
+    ) -> CandleResult<(CudaStorage, Shape)> {
         if !l_base.is_contiguous() || !l_hidden.is_contiguous() || !l_b.is_contiguous() {
-            candle_core::bail!("CudaLoraAddBf16 CUDA path requires contiguous inputs");
+            bail!("CudaLoraAddBf16 CUDA path requires contiguous inputs");
         }
         let out_storage = s_base.try_clone(l_base)?;
         let out_shape = Shape::from(l_base.dims().to_vec());
@@ -3254,7 +3268,7 @@ impl CustomOp3 for CudaLoraAddBf16 {
             l_b,
             self.scale,
         )
-        .map_err(|e| candle_core::Error::Msg(format!("CudaLoraAddBf16 CUDA add: {e:?}")))?;
+        .map_err(|e| Error::Msg(format!("CudaLoraAddBf16 CUDA add: {e:?}")))?;
         Ok((out_storage, out_shape))
     }
 
@@ -3265,7 +3279,7 @@ impl CustomOp3 for CudaLoraAddBf16 {
         b: &Tensor,
         _res: &Tensor,
         grad_y: &Tensor,
-    ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+    ) -> CandleResult<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
         let grad_base = to_dtype_if_needed(grad_y, DType::BF16)?;
         let rows = grad_y.dim(0)?;
         let tile_rows = cuda_lora_bwd_tile_rows().min(rows.max(1));
@@ -3291,7 +3305,7 @@ impl CustomOp3 for CudaLoraAddBf16 {
                 #[cfg(feature = "cuda")]
                 {
                     if let Some(out) = try_kt_mul_scalar(&grad_hidden_tile_pre, self.scale as f64)
-                        .map_err(|e| candle_core::Error::Msg(format!(
+                        .map_err(|e| Error::Msg(format!(
                             "CudaLoraAddBf16 backward: try_kt_mul_scalar: {e}"
                         )))?
                     {
@@ -3310,7 +3324,7 @@ impl CustomOp3 for CudaLoraAddBf16 {
                 #[cfg(feature = "cuda")]
                 {
                     if let Some(out) = try_kt_mul_scalar(&grad_b_tile_pre, self.scale as f64)
-                        .map_err(|e| candle_core::Error::Msg(format!(
+                        .map_err(|e| Error::Msg(format!(
                             "CudaLoraAddBf16 backward: try_kt_mul_scalar: {e}"
                         )))?
                     {
@@ -3345,7 +3359,7 @@ impl CustomOp3 for CudaLoraAddBf16 {
                 let pieces: Vec<&Tensor> =
                     grad_hidden_refs.iter().map(|t| &**t).collect();
                 if let Some(out) = try_kt_cat_dim0(&pieces)
-                    .map_err(|e| candle_core::Error::Msg(format!(
+                    .map_err(|e| Error::Msg(format!(
                         "CudaLoraAddBf16 backward: try_kt_cat_dim0: {e}"
                     )))?
                 {
@@ -3360,7 +3374,7 @@ impl CustomOp3 for CudaLoraAddBf16 {
             }
         };
         let Some(grad_b_acc) = grad_b_acc else {
-            candle_core::bail!("CudaLoraAddBf16 backward produced no B gradient tiles");
+            bail!("CudaLoraAddBf16 backward produced no B gradient tiles");
         };
         let grad_b = grad_b_acc.to_dtype(b.dtype())?;
         Ok((Some(grad_base), Some(grad_hidden), Some(grad_b)))
@@ -3515,8 +3529,8 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
         _l_x: &Layout,
         _s_gate: &CpuStorage,
         _l_gate: &Layout,
-    ) -> candle_core::Result<(CpuStorage, Shape)> {
-        candle_core::bail!("CudaSigmoidMulTrainingBf16 requires CUDA inputs");
+    ) -> CandleResult<(CpuStorage, Shape)> {
+        bail!("CudaSigmoidMulTrainingBf16 requires CUDA inputs");
     }
 
     fn cuda_fwd(
@@ -3525,13 +3539,13 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
         l_x: &Layout,
         s_gate: &CudaStorage,
         l_gate: &Layout,
-    ) -> candle_core::Result<(CudaStorage, Shape)> {
+    ) -> CandleResult<(CudaStorage, Shape)> {
         if !l_x.is_contiguous()
             || !l_gate.is_contiguous()
             || l_x.start_offset() != 0
             || l_gate.start_offset() != 0
         {
-            candle_core::bail!(
+            bail!(
                 "CudaSigmoidMulTrainingBf16 CUDA path requires compact contiguous inputs"
             );
         }
@@ -3547,7 +3561,7 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
             l_gate,
         )
         .map_err(|e| {
-            candle_core::Error::Msg(format!("CudaSigmoidMulTrainingBf16 CUDA fwd: {e:?}"))
+            Error::Msg(format!("CudaSigmoidMulTrainingBf16 CUDA fwd: {e:?}"))
         })?;
         Ok((out_storage, out_shape))
     }
@@ -3558,10 +3572,10 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
         gate: &Tensor,
         _res: &Tensor,
         grad_y: &Tensor,
-    ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>)> {
+    ) -> CandleResult<(Option<Tensor>, Option<Tensor>)> {
         let dims = x.dims();
         if dims != gate.dims() || dims != grad_y.dims() {
-            candle_core::bail!(
+            bail!(
                 "CudaSigmoidMulTrainingBf16 backward shape mismatch x={:?} gate={:?} grad={:?}",
                 dims,
                 gate.dims(),
@@ -3569,7 +3583,7 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
             );
         }
         let Some(&width) = dims.last() else {
-            candle_core::bail!("CudaSigmoidMulTrainingBf16 backward requires non-scalar input");
+            bail!("CudaSigmoidMulTrainingBf16 backward requires non-scalar input");
         };
         let rows = x.elem_count() / width.max(1);
         if rows == 0 {
@@ -3579,7 +3593,7 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
             ));
         }
         let Device::Cuda(cuda_device) = x.device() else {
-            candle_core::bail!("CudaSigmoidMulTrainingBf16 backward requires CUDA input");
+            bail!("CudaSigmoidMulTrainingBf16 backward requires CUDA input");
         };
         x.device().synchronize()?;
 
@@ -3588,10 +3602,10 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
         let grad_y_2d = grad_y.reshape((rows, width))?;
         let out_shape = Shape::from(vec![rows, width]);
         let mut grad_x_storage = unsafe { cuda_device.alloc_uninit(&out_shape, x.dtype()) }
-            .map_err(|e| candle_core::Error::Msg(format!("sigmoid-mul bwd grad_x alloc: {e:?}")))?;
+            .map_err(|e| Error::Msg(format!("sigmoid-mul bwd grad_x alloc: {e:?}")))?;
         let mut grad_gate_storage = unsafe { cuda_device.alloc_uninit(&out_shape, gate.dtype()) }
             .map_err(|e| {
-            candle_core::Error::Msg(format!("sigmoid-mul bwd grad_gate alloc: {e:?}"))
+            Error::Msg(format!("sigmoid-mul bwd grad_gate alloc: {e:?}"))
         })?;
         let tile_rows = cuda_lora_bwd_tile_rows().min(rows.max(1));
 
@@ -3619,7 +3633,7 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
                 #[cfg(feature = "cuda")]
                 {
                     if let Some(out) = try_kt_neg(&gate_tile).map_err(|e| {
-                        candle_core::Error::Msg(format!(
+                        Error::Msg(format!(
                             "CudaSigmoidMulTrainingBf16 backward: try_kt_neg: {e}"
                         ))
                     })? {
@@ -3643,7 +3657,7 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
                 #[cfg(feature = "cuda")]
                 {
                     if let Some(out) = try_kt_exp(&neg_gate)
-                        .map_err(|e| candle_core::Error::Msg(format!(
+                        .map_err(|e| Error::Msg(format!(
                             "CudaSigmoidMulTrainingBf16 backward: try_kt_exp: {e}"
                         )))?
                     {
@@ -3661,7 +3675,7 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
                 #[cfg(feature = "cuda")]
                 {
                     if let Some(out) = try_kt_add_scalar(&neg_exp, 1.0)
-                        .map_err(|e| candle_core::Error::Msg(format!(
+                        .map_err(|e| Error::Msg(format!(
                             "CudaSigmoidMulTrainingBf16 backward: try_kt_add_scalar: {e}"
                         )))?
                     {
@@ -3687,7 +3701,7 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
                 #[cfg(feature = "cuda")]
                 {
                     if let Some(out) = try_kt_recip(&one_plus_neg_exp)
-                        .map_err(|e| candle_core::Error::Msg(format!(
+                        .map_err(|e| Error::Msg(format!(
                             "CudaSigmoidMulTrainingBf16 backward: try_kt_recip: {e}"
                         )))?
                     {
@@ -3704,7 +3718,7 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
             let grad_x_tile = (grad_y_tile.clone() * sigmoid_gate.clone())?;
             let (grad_x_tile_storage, grad_x_tile_layout) = grad_x_tile.storage_and_layout();
             let Storage::Cuda(grad_x_tile_storage) = &*grad_x_tile_storage else {
-                candle_core::bail!(
+                bail!(
                     "CudaSigmoidMulTrainingBf16 backward produced non-CUDA grad_x tile"
                 );
             };
@@ -3740,14 +3754,14 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
                 #[cfg(feature = "cuda")]
                 {
                     if let Some(out) = try_kt_scalar_minus_tensor(&sigmoid_f32, 1.0).map_err(
-                        |e| candle_core::Error::Msg(format!(
+                        |e| Error::Msg(format!(
                             "CudaSigmoidMulTrainingBf16 backward: try_kt_scalar_minus_tensor: {e}"
                         )),
                     )? {
                         out
                     } else {
                         let neg_sigmoid = if let Some(out) = try_kt_neg(&sigmoid_f32).map_err(|e| {
-                            candle_core::Error::Msg(format!(
+                            Error::Msg(format!(
                                 "CudaSigmoidMulTrainingBf16 backward: try_kt_neg: {e}"
                             ))
                         })? {
@@ -3756,7 +3770,7 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
                             sigmoid_f32.neg()?
                         };
                         if let Some(out) = try_kt_add_scalar(&neg_sigmoid, 1.0)
-                            .map_err(|e| candle_core::Error::Msg(format!(
+                            .map_err(|e| Error::Msg(format!(
                                 "CudaSigmoidMulTrainingBf16 backward: try_kt_add_scalar: {e}"
                             )))?
                         {
@@ -3779,7 +3793,7 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
             let (grad_gate_tile_storage, grad_gate_tile_layout) =
                 grad_gate_tile.storage_and_layout();
             let Storage::Cuda(grad_gate_tile_storage) = &*grad_gate_tile_storage else {
-                candle_core::bail!(
+                bail!(
                     "CudaSigmoidMulTrainingBf16 backward produced non-CUDA grad_gate tile"
                 );
             };
@@ -4346,8 +4360,8 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
         _l_k: &Layout,
         _s_v: &CpuStorage,
         _l_v: &Layout,
-    ) -> candle_core::Result<(CpuStorage, Shape)> {
-        candle_core::bail!("CudaFlashAttentionTrainingBf16 requires CUDA inputs");
+    ) -> CandleResult<(CpuStorage, Shape)> {
+        bail!("CudaFlashAttentionTrainingBf16 requires CUDA inputs");
     }
 
     fn cuda_fwd(
@@ -4358,7 +4372,7 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
         l_k: &Layout,
         s_v: &CudaStorage,
         l_v: &Layout,
-    ) -> candle_core::Result<(CudaStorage, Shape)> {
+    ) -> CandleResult<(CudaStorage, Shape)> {
         if !l_q.is_contiguous()
             || !l_k.is_contiguous()
             || !l_v.is_contiguous()
@@ -4366,7 +4380,7 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
             || l_k.start_offset() != 0
             || l_v.start_offset() != 0
         {
-            candle_core::bail!(
+            bail!(
                 "CudaFlashAttentionTrainingBf16 CUDA path requires compact contiguous inputs"
             );
         }
@@ -4393,11 +4407,11 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
         // because CustomOp3 still returns candle storage.
         kiln_nvtx::range!(c"kiln/flash_attn_fwd_kt");
         let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_fwd q: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_fwd q: {e}")))?;
         let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_fwd k: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_fwd k: {e}")))?;
         let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_fwd v: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_fwd v: {e}")))?;
         let (out_kt, _softmax_lse_kt) = kiln_flash_attn::flash_attn_fwd_kt(
             &q_kt,
             &k_kt,
@@ -4406,16 +4420,16 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
             self.causal,
         )
         .map_err(|e| {
-            candle_core::Error::Msg(format!("CudaFlashAttentionTrainingBf16 CUDA fwd kt: {e:?}"))
+            Error::Msg(format!("CudaFlashAttentionTrainingBf16 CUDA fwd kt: {e:?}"))
         })?;
         let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_fwd out: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_fwd out: {e}")))?;
         let out_shape = Shape::from(out.dims().to_vec());
         let (storage, layout) = out.storage_and_layout();
         let storage = storage.try_clone(layout)?;
         match storage {
             Storage::Cuda(storage) => Ok((storage, out_shape)),
-            _ => candle_core::bail!("CudaFlashAttentionTrainingBf16 produced non-CUDA storage"),
+            _ => bail!("CudaFlashAttentionTrainingBf16 produced non-CUDA storage"),
         }
     }
 
@@ -4426,17 +4440,17 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
         v: &Tensor,
         res: &Tensor,
         grad_y: &Tensor,
-    ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+    ) -> CandleResult<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
         // Phase 7 (#1082): kt-only recompute shell. We only need
         // softmax_lse for backward; the recomputed output can drop after
         // the kt call returns.
         kiln_nvtx::range!(c"kiln/flash_attn_fwd_recompute_kt");
         let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_fwd_recompute q: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_fwd_recompute q: {e}")))?;
         let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_fwd_recompute k: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_fwd_recompute k: {e}")))?;
         let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_fwd_recompute v: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_fwd_recompute v: {e}")))?;
         let (_recomputed_out_kt, softmax_lse_kt) = kiln_flash_attn::flash_attn_fwd_kt(
             &q_kt,
             &k_kt,
@@ -4445,13 +4459,13 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
             self.causal,
         )
         .map_err(|e| {
-            candle_core::Error::Msg(format!(
+            Error::Msg(format!(
                 "CudaFlashAttentionTrainingBf16 bwd recompute kt: {e:?}"
             ))
         })?;
         let softmax_lse = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&softmax_lse_kt)
             .map_err(|e| {
-                candle_core::Error::Msg(format!("kt-adapter: fa_fwd_recompute lse: {e}"))
+                Error::Msg(format!("kt-adapter: fa_fwd_recompute lse: {e}"))
             })?;
         let dout = if grad_y.dtype() == DType::BF16 {
             grad_y.clone()
@@ -4466,7 +4480,7 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
             // through to candle's `.to_dtype()` when the gate is off
             // or the preconditions fail (e.g. non-contiguous grad_y).
             match try_kt_to_dtype(grad_y, DType::BF16)
-                .map_err(|e| candle_core::Error::Msg(format!("try_kt_to_dtype: {e}")))?
+                .map_err(|e| Error::Msg(format!("try_kt_to_dtype: {e}")))?
             {
                 Some(out) => out,
                 None => grad_y.to_dtype(DType::BF16)?,
@@ -4480,24 +4494,24 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
         let (b, seqlen_k, heads_kv, head_dim) = k.dims4()?;
         let (_bq, _seqlen_q, heads_q, head_dim_q) = q.dims4()?;
         if heads_kv == 0 || head_dim_q != head_dim || heads_q % heads_kv != 0 {
-            candle_core::bail!(
+            bail!(
                 "CudaFlashAttentionTrainingBf16 bwd kt: invalid GQA shape q={:?} k={:?}",
                 q.dims(),
                 k.dims()
             );
         }
         let dout_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dout)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd dout: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_bwd dout: {e}")))?;
         let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd q: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_bwd q: {e}")))?;
         let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd k: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_bwd k: {e}")))?;
         let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd v: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_bwd v: {e}")))?;
         let res_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(res)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd res: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_bwd res: {e}")))?;
         let lse_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&softmax_lse)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd lse: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_bwd lse: {e}")))?;
         let (dq_kt, dk_kt, dv_kt) = kiln_flash_attn::flash_attn_bwd_kt(
             &dout_kt,
             &q_kt,
@@ -4509,14 +4523,14 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
             self.causal,
         )
         .map_err(|e| {
-            candle_core::Error::Msg(format!("CudaFlashAttentionTrainingBf16 bwd kt: {e:?}"))
+            Error::Msg(format!("CudaFlashAttentionTrainingBf16 bwd kt: {e:?}"))
         })?;
         let dq = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&dq_kt)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd dq: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_bwd dq: {e}")))?;
         let dk_expanded = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&dk_kt)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd dk: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_bwd dk: {e}")))?;
         let dv_expanded = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&dv_kt)
-            .map_err(|e| candle_core::Error::Msg(format!("kt-adapter: fa_bwd dv: {e}")))?;
+            .map_err(|e| Error::Msg(format!("kt-adapter: fa_bwd dv: {e}")))?;
         let (dk, dv) = if heads_kv != heads_q {
             let groups = heads_q / heads_kv;
             let dk = dk_expanded
@@ -7377,7 +7391,7 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
             &self,
             s_x: &CpuStorage,
             l_x: &Layout,
-        ) -> candle_core::Result<(CpuStorage, Shape)> {
+        ) -> CandleResult<(CpuStorage, Shape)> {
             let storage = Storage::Cpu(s_x.clone());
             let x_tensor = Tensor::from_storage(
                 storage,
@@ -7394,20 +7408,20 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
                 self.weight.clone()
             } else {
                 self.weight.to_dtype(DType::F32).map_err(|e| {
-                    candle_core::Error::Msg(format!("rmsnorm fwd weight→f32: {e:?}"))
+                    Error::Msg(format!("rmsnorm fwd weight→f32: {e:?}"))
                 })?
             };
             let x_dims = x_f32.shape().dims().to_vec();
             let hidden = *x_dims.last().ok_or_else(|| {
-                candle_core::Error::Msg("rmsnorm fwd: x has no dims".to_string())
+                Error::Msg("rmsnorm fwd: x has no dims".to_string())
             })?;
             let rows: usize = x_dims[..x_dims.len() - 1].iter().product();
             let x_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x_f32)
-                .map_err(|e| candle_core::Error::Msg(format!("rmsnorm fwd extract x: {e:?}")))?
+                .map_err(|e| Error::Msg(format!("rmsnorm fwd extract x: {e:?}")))?
                 .0;
             let w_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&w_f32)
                 .map_err(|e| {
-                    candle_core::Error::Msg(format!("rmsnorm fwd extract weight: {e:?}"))
+                    Error::Msg(format!("rmsnorm fwd extract weight: {e:?}"))
                 })?
                 .0;
             let out_bytes = kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward_bytes(
@@ -7418,31 +7432,31 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
                 hidden,
                 self.eps,
             )
-            .map_err(|e| candle_core::Error::Msg(format!("rmsnorm fwd dispatch: {e:?}")))?;
+            .map_err(|e| Error::Msg(format!("rmsnorm fwd dispatch: {e:?}")))?;
             let out_f32 = kiln_vulkan_kernel::kernels::create_tensor_from_data(
                 &out_bytes,
                 &x_dims,
                 DType::F32,
             )
-            .map_err(|e| candle_core::Error::Msg(format!("rmsnorm fwd rebuild: {e:?}")))?;
+            .map_err(|e| Error::Msg(format!("rmsnorm fwd rebuild: {e:?}")))?;
             let out = if out_f32.dtype() == self.out_dtype {
                 out_f32
             } else {
                 out_f32
                     .to_dtype(self.out_dtype)
-                    .map_err(|e| candle_core::Error::Msg(format!("rmsnorm fwd cast: {e:?}")))?
+                    .map_err(|e| Error::Msg(format!("rmsnorm fwd cast: {e:?}")))?
             };
             let storage = out
                 .storage_and_layout()
                 .0
                 .try_clone(out.layout())
                 .map_err(|e| {
-                    candle_core::Error::Msg(format!("rmsnorm fwd storage clone: {e:?}"))
+                    Error::Msg(format!("rmsnorm fwd storage clone: {e:?}"))
                 })?;
             let cpu_storage = match storage {
                 Storage::Cpu(s) => s,
                 _ => {
-                    return Err(candle_core::Error::Msg(
+                    return Err(Error::Msg(
                         "rmsnorm fwd: expected CPU storage from kernel result".into(),
                     ));
                 }
@@ -7454,7 +7468,7 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
             x: &Tensor,
             _y: &Tensor,
             grad_y: &Tensor,
-        ) -> candle_core::Result<Option<Tensor>> {
+        ) -> CandleResult<Option<Tensor>> {
             // Route the backward through the candle-free
             // `dispatch_qwen_rmsnorm_backward_bytes` entry point. We
             // still pull bytes out of candle tensors at the boundary
@@ -7483,21 +7497,21 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
             // up front and pass them as explicit kernel args.
             let dims = x_f32.shape().dims().to_vec();
             if dims.is_empty() {
-                return Err(candle_core::Error::Msg(
+                return Err(Error::Msg(
                     "rmsnorm bwd: x has no dims".into(),
                 ));
             }
             let hidden = *dims.last().unwrap();
             let rows: usize = dims[..dims.len() - 1].iter().product();
             if w_f32.dims() != [hidden] {
-                return Err(candle_core::Error::Msg(format!(
+                return Err(Error::Msg(format!(
                     "rmsnorm bwd: weight shape {:?} does not match hidden {}",
                     w_f32.dims(),
                     hidden
                 )));
             }
             if grad_y_f32.dims() != dims.as_slice() {
-                return Err(candle_core::Error::Msg(format!(
+                return Err(Error::Msg(format!(
                     "rmsnorm bwd: grad_y dims {:?} != x dims {:?}",
                     grad_y_f32.dims(),
                     dims
@@ -7505,17 +7519,17 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
             }
             let x_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x_f32)
                 .map_err(|e| {
-                    candle_core::Error::Msg(format!("rmsnorm bwd extract x bytes: {e:?}"))
+                    Error::Msg(format!("rmsnorm bwd extract x bytes: {e:?}"))
                 })?
                 .0;
             let w_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&w_f32)
                 .map_err(|e| {
-                    candle_core::Error::Msg(format!("rmsnorm bwd extract w bytes: {e:?}"))
+                    Error::Msg(format!("rmsnorm bwd extract w bytes: {e:?}"))
                 })?
                 .0;
             let grad_y_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&grad_y_f32)
                 .map_err(|e| {
-                    candle_core::Error::Msg(format!(
+                    Error::Msg(format!(
                         "rmsnorm bwd extract grad_y bytes: {e:?}"
                     ))
                 })?
@@ -7529,21 +7543,21 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
                 hidden,
                 self.eps,
             )
-            .map_err(|e| candle_core::Error::Msg(format!("rmsnorm bwd dispatch: {e:?}")))?;
+            .map_err(|e| Error::Msg(format!("rmsnorm bwd dispatch: {e:?}")))?;
             let dx_f32 = kiln_vulkan_kernel::kernels::create_tensor_from_data(
                 &dx_bytes,
                 dims.as_slice(),
                 DType::F32,
             )
             .map_err(|e| {
-                candle_core::Error::Msg(format!("rmsnorm bwd build dx tensor: {e:?}"))
+                Error::Msg(format!("rmsnorm bwd build dx tensor: {e:?}"))
             })?;
             let dx = if self.out_dtype == DType::F32 {
                 dx_f32
             } else {
                 dx_f32
                     .to_dtype(self.out_dtype)
-                    .map_err(|e| candle_core::Error::Msg(format!("rmsnorm bwd cast: {e:?}")))?
+                    .map_err(|e| Error::Msg(format!("rmsnorm bwd cast: {e:?}")))?
             };
             Ok(Some(dx))
         }
@@ -9969,23 +9983,23 @@ fn fused_rotary_one_backward_via_kt_bridge(
     cos: &Tensor,
     sin: &Tensor,
     rotary_dim: usize,
-) -> std::result::Result<Tensor, candle_core::Error> {
+) -> CandleResult<Tensor> {
     let grad_y_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(grad_y).map_err(|e| {
-        candle_core::Error::Msg(format!("kt-bridge rotary_one bwd: borrow grad_y failed: {e}"))
+        Error::Msg(format!("kt-bridge rotary_one bwd: borrow grad_y failed: {e}"))
     })?;
     let cos_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(cos).map_err(|e| {
-        candle_core::Error::Msg(format!("kt-bridge rotary_one bwd: borrow cos failed: {e}"))
+        Error::Msg(format!("kt-bridge rotary_one bwd: borrow cos failed: {e}"))
     })?;
     let sin_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(sin).map_err(|e| {
-        candle_core::Error::Msg(format!("kt-bridge rotary_one bwd: borrow sin failed: {e}"))
+        Error::Msg(format!("kt-bridge rotary_one bwd: borrow sin failed: {e}"))
     })?;
     let grad_x_kt =
         kiln_rmsnorm_kernel::fused_rotary_one_bwd_kt(&grad_y_kt, &cos_kt, &sin_kt, rotary_dim)
             .map_err(|e| {
-                candle_core::Error::Msg(format!("kt-bridge rotary_one bwd: kt call failed: {e}"))
+                Error::Msg(format!("kt-bridge rotary_one bwd: kt call failed: {e}"))
             })?;
     kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&grad_x_kt).map_err(|e| {
-        candle_core::Error::Msg(format!("kt-bridge rotary_one bwd: copy-back grad_x failed: {e}"))
+        Error::Msg(format!("kt-bridge rotary_one bwd: copy-back grad_x failed: {e}"))
     })
 }
 
@@ -10010,7 +10024,7 @@ impl CustomOp3 for CudaRotaryOneBf16 {
         l_cos: &Layout,
         s_sin: &CpuStorage,
         l_sin: &Layout,
-    ) -> candle_core::Result<(CpuStorage, Shape)> {
+    ) -> CandleResult<(CpuStorage, Shape)> {
         if !l_x.is_contiguous()
             || !l_cos.is_contiguous()
             || !l_sin.is_contiguous()
@@ -10018,7 +10032,7 @@ impl CustomOp3 for CudaRotaryOneBf16 {
             || l_cos.start_offset() != 0
             || l_sin.start_offset() != 0
         {
-            candle_core::bail!("CudaRotaryOneBf16 CPU fallback requires compact contiguous inputs");
+            bail!("CudaRotaryOneBf16 CPU fallback requires compact contiguous inputs");
         }
         let x = Tensor::from_storage(
             Storage::Cpu(s_x.clone()),
@@ -10039,13 +10053,13 @@ impl CustomOp3 for CudaRotaryOneBf16 {
             false,
         );
         let out = apply_rope(&x, &cos, &sin, self.head_dim, self.rotary_dim).map_err(|e| {
-            candle_core::Error::Msg(format!("CudaRotaryOneBf16 CPU fallback: {e:?}"))
+            Error::Msg(format!("CudaRotaryOneBf16 CPU fallback: {e:?}"))
         })?;
         let (storage, layout) = out.storage_and_layout();
         let storage = storage.try_clone(layout)?;
         match storage {
             Storage::Cpu(storage) => Ok((storage, Shape::from(l_x.dims().to_vec()))),
-            _ => candle_core::bail!("CudaRotaryOneBf16 CPU fallback produced non-CPU storage"),
+            _ => bail!("CudaRotaryOneBf16 CPU fallback produced non-CPU storage"),
         }
     }
 
@@ -10057,9 +10071,9 @@ impl CustomOp3 for CudaRotaryOneBf16 {
         l_cos: &Layout,
         s_sin: &CudaStorage,
         l_sin: &Layout,
-    ) -> candle_core::Result<(CudaStorage, Shape)> {
+    ) -> CandleResult<(CudaStorage, Shape)> {
         if !l_x.is_contiguous() || !l_cos.is_contiguous() || !l_sin.is_contiguous() {
-            candle_core::bail!("CudaRotaryOneBf16 CUDA path requires contiguous inputs");
+            bail!("CudaRotaryOneBf16 CUDA path requires contiguous inputs");
         }
         let out_storage = s_x.try_clone(l_x)?;
         let out_shape = Shape::from(l_x.dims().to_vec());
@@ -10076,7 +10090,7 @@ impl CustomOp3 for CudaRotaryOneBf16 {
             self.head_dim,
             self.rotary_dim,
         )
-        .map_err(|e| candle_core::Error::Msg(format!("CudaRotaryOneBf16 CUDA fwd: {e:?}")))?;
+        .map_err(|e| Error::Msg(format!("CudaRotaryOneBf16 CUDA fwd: {e:?}")))?;
         Ok((out_storage, out_shape))
     }
 
@@ -10087,7 +10101,7 @@ impl CustomOp3 for CudaRotaryOneBf16 {
         sin: &Tensor,
         _res: &Tensor,
         grad_y: &Tensor,
-    ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+    ) -> CandleResult<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
         if kiln_rmsnorm_kernel::supports_rotary_one_bwd_bf16(
             grad_y,
             cos,
@@ -10122,11 +10136,11 @@ impl CustomOp3 for CudaRotaryOneBf16 {
                 self.head_dim,
                 self.rotary_dim,
             )
-            .map_err(|e| candle_core::Error::Msg(format!("CudaRotaryOneBf16 CUDA bwd: {e:?}")))?;
+            .map_err(|e| Error::Msg(format!("CudaRotaryOneBf16 CUDA bwd: {e:?}")))?;
             return Ok((Some(grad_x), None, None));
         }
         let grad_x = rotary_one_backward(grad_y, cos, sin, self.head_dim, self.rotary_dim)
-            .map_err(|e| candle_core::Error::Msg(format!("CudaRotaryOneBf16 bwd: {e:?}")))?;
+            .map_err(|e| Error::Msg(format!("CudaRotaryOneBf16 bwd: {e:?}")))?;
         Ok((Some(grad_x), None, None))
     }
 }
