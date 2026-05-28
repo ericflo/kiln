@@ -378,58 +378,11 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
     Ok(())
 }
 
-/// Dispatch a Vulkan compute kernel.
-///
-/// Manages the full lifecycle: create buffers, upload inputs, dispatch, read back output.
-///
-/// Candle-shim convenience wrapper around [`dispatch_kernel_bytes`]. The
-/// bytes-based core is the canonical entry point for #1082 callers that
-/// want to dispatch a SPIR-V kernel without dragging candle into scope;
-/// this wrapper keeps the historical `&[&Tensor]` signature alive for
-/// kernels.rs's internal candle-bridge code paths. (#1082)
-pub fn dispatch_kernel(
-    vk_device: &VulkanDevice,
-    spirv: &[u8],
-    push_constants: &[u32],
-    workgroup_count: (u32, u32, u32),
-    input_tensors: &[&Tensor],
-    output_shape: &[usize],
-    output_dtype: DType,
-) -> Result<Tensor> {
-    // --- Extract input data (flatten to f32) ---
-    let mut input_data: Vec<Vec<u8>> = Vec::with_capacity(input_tensors.len());
-    for tensor in input_tensors {
-        let (data, _) = extract_tensor_bytes(tensor)?;
-        input_data.push(data);
-    }
-    let input_refs: Vec<&[u8]> = input_data.iter().map(|v| v.as_slice()).collect();
-
-    let elem_size = match output_dtype {
-        DType::F32 => 4usize,
-        DType::BF16 | DType::F16 => 2,
-        DType::F64 => 8,
-        _ => 4,
-    };
-    let output_data = dispatch_kernel_bytes(
-        vk_device,
-        spirv,
-        push_constants,
-        workgroup_count,
-        &input_refs,
-        output_shape,
-        elem_size,
-    )?;
-
-    // --- Create output tensor ---
-    create_tensor_from_data(&output_data, output_shape, output_dtype)
-        .context("failed to create output tensor")
-}
-
 /// Candle-free Vulkan compute dispatch — takes raw input byte slices and
-/// returns the output buffer as raw bytes. Same lifecycle (create
-/// buffers, upload, dispatch, read back) as [`dispatch_kernel`] but no
-/// candle types in the signature, so examples and downstream crates can
-/// dispatch a kernel without a candle dependency. (#1082)
+/// returns the output buffer as raw bytes. Manages the full lifecycle:
+/// create buffers, upload inputs, dispatch, read back output. This is
+/// the canonical SPIR-V dispatch entry point for #1082 callers that
+/// want no candle types in scope. (#1082)
 ///
 /// `output_elem_size` is the per-element byte size of the output buffer
 /// (4 for f32, 2 for bf16/f16, 8 for f64).
