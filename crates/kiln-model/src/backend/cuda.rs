@@ -1762,6 +1762,35 @@ impl BackendRuntime for CudaBackend {
             out_shape.push(out_n);
             out2d.reshape(out_shape)?
         } else {
+            // Non-contiguous x fallback. Candle's broadcast_matmul handles
+            // this by materializing a broadcasted-RHS copy internally, which
+            // is the path the comment above explicitly calls out as bad
+            // (78 % GPU time at bs=4 due to the per-step RHS copy). When
+            // the kt-API matmul gate is on and dtypes line up, force x
+            // contiguous and route through cublasLt — same 2D kt path as
+            // the is_contiguous() branch above, just paying one extra
+            // dtod for the x.contiguous() up front. That copy is bounded
+            // by (B × T × K), whereas broadcast_matmul's implicit copy
+            // scales as (B × K × N) which is typically larger by an order
+            // of magnitude on Qwen3.5-4B GDN in-proj shapes. (#1082)
+            if crate::forward::cuda_use_kt_api_matmul()
+                && matches!(x.dtype(), DType::BF16 | DType::F16 | DType::F32)
+                && x.dtype() == weight_t.dtype()
+                && weight_t.is_contiguous()
+            {
+                let x_c = x
+                    .contiguous()
+                    .context("linear_prefill_apply non-contig x: contiguous failed")?;
+                let x2d = x_c.reshape((lead, k))?;
+                if x2d.is_contiguous() {
+                    if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
+                        let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
+                        out_shape.push(out_n);
+                        CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+                        return Ok(Some(kt_out2d.reshape(out_shape)?));
+                    }
+                }
+            }
             x.broadcast_matmul(weight_t)?
         };
         CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
