@@ -300,7 +300,6 @@ impl candle_core::CustomOp3 for VulkanLoraOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
 
     /// Synthetic forward parity test: x.apply_op3(VulkanLoraOp{...})
     /// must match `(x @ A.T @ B.T) * scale` to bf16 precision.
@@ -311,7 +310,7 @@ mod tests {
             return Ok(());
         };
         let vk_device = Arc::new(vk_device);
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let t = 4usize;
         let in_features = 8usize;
         let rank = 4usize;
@@ -386,7 +385,7 @@ mod tests {
             return Ok(());
         };
         let vk_device = Arc::new(vk_device);
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let t = 5usize;
         let in_features = 8usize;
         let rank = 4usize;

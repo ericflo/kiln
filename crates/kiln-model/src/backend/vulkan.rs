@@ -4275,7 +4275,6 @@ pub fn precompile_custom_kernels() -> Result<()> {
 mod tests {
     use super::*;
     use crate::backend::BackendRuntime;
-    use candle_core::Device;
 
     /// Round-trip test for the Phase 3.1 hooks. Registers a fresh
     /// activation, asserts `has_resident_activation` flips true,

@@ -227,8 +227,7 @@ fn logits_to_probs(logits: &candle_core::Tensor, temperature: f32) -> Result<Vec
 /// failure so the caller falls through to the candle host path.
 #[cfg(feature = "cuda")]
 fn try_kt_logits_to_probs(logits: &candle_core::Tensor, temperature: f32) -> Result<Option<Vec<f32>>> {
-    use candle_core::Device as CandleDevice;
-    if !matches!(logits.device(), CandleDevice::Cuda(_)) {
+    if !matches!(logits.device(), candle_core::Device::Cuda(_)) {
         return Ok(None);
     }
     if !matches!(logits.dtype(), candle_core::DType::F32 | candle_core::DType::BF16 | candle_core::DType::F16) {

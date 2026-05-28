@@ -785,7 +785,6 @@ mod tests {
     use super::*;
     #[cfg(feature = "metal")]
     use crate::backend::metal::try_new_metal;
-    use candle_core::Device;
 
     #[test]
     fn test_greedy_sample_1d() -> Result<()> {

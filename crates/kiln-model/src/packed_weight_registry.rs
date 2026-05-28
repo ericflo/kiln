@@ -412,7 +412,6 @@ impl GpuPackedWeightRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
 
     #[test]
     fn validates_layer_kind_against_qwen35_pattern() {
@@ -449,7 +448,7 @@ mod tests {
 
     #[test]
     fn registry_rejects_duplicate_keys() {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let tensor = candle_core::Tensor::zeros((2, 2), candle_core::DType::BF16, &device).unwrap();
         let key =
             PackedWeightKey::new(RegistryLayer::Mlp { layer_idx: 0 }, ProjectionKind::MlpGate)
@@ -466,7 +465,7 @@ mod tests {
 
     #[test]
     fn registry_returns_compile_checked_keys() {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let tensor =
             candle_core::Tensor::zeros((shapes::HIDDEN, shapes::MLP_HIDDEN), candle_core::DType::BF16, &device).unwrap();
         let key = PackedWeightKey::new(RegistryLayer::Mlp { layer_idx: 7 }, ProjectionKind::MlpUp)
