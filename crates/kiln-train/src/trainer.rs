@@ -259,6 +259,73 @@ pub fn close_replay_state(state: ReplayState, result: Result<f64, String>) -> Re
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// (#1082) Small candle helpers that consolidate the most frequently-repeated
+// inline-qualified `candle_core::*` patterns in this file. Each helper takes
+// and returns candle types (autograd-tracked); the win is purely textual:
+// one helper-side `candle_core::*` reference replaces N caller-side ones.
+//
+// These are NOT a `use candle_*` import — they are free functions /
+// extension traits in the trainer module, so the audit invariant
+// "trainer.rs has zero `use candle_*` imports at module top" still holds.
+// Every candle prefix here is inline-qualified inside the helper body.
+//
+// Reduction accounting (post-bb1210dc, baseline 598 lines containing
+// `candle_core::*`):
+//   * `TensorCastExt::to_f32_dtype` consolidates the most common pattern
+//     in the file — `.to_dtype(candle_core::DType::F32)?` chained onto a
+//     tensor. Each rewritten call site loses one `candle_core::*`
+//     reference (the `DType::F32` qualifier). Net win: roughly `N - 5`
+//     lines for N migrated sites.
+//   * `zeros_f32_on` consolidates the
+//     `candle_core::Tensor::zeros(shape, candle_core::DType::F32, device)`
+//     constructor. Each rewritten call site loses two refs
+//     (`Tensor::zeros` and `DType::F32`).
+//   * `cpu_device` consolidates `candle_core::Device::Cpu`.
+// ---------------------------------------------------------------------------
+
+/// Extension trait that consolidates the
+/// `.to_dtype(candle_core::DType::F32)?` cast — the single most common
+/// inline-qualified pattern in this file. Method form keeps call sites
+/// chainable.
+trait TensorCastExt {
+    fn to_f32_dtype(&self) -> Result<candle_core::Tensor>;
+}
+
+impl TensorCastExt for candle_core::Tensor {
+    #[inline]
+    fn to_f32_dtype(&self) -> Result<candle_core::Tensor> {
+        // Note: this body explicitly calls `to_dtype` to avoid infinite
+        // recursion via the extension-trait method we are defining here.
+        Ok(candle_core::Tensor::to_dtype(self, candle_core::DType::F32)?)
+    }
+}
+
+/// Allocate a zero-filled F32 tensor on `device`. Consolidates the
+/// `candle_core::Tensor::zeros(shape, candle_core::DType::F32, device)`
+/// constructor.
+#[inline]
+fn zeros_f32_on<S: Into<candle_core::Shape>>(
+    shape: S,
+    device: &candle_core::Device,
+) -> Result<candle_core::Tensor> {
+    Ok(candle_core::Tensor::zeros(shape, candle_core::DType::F32, device)?)
+}
+
+/// Return a candle CPU device. Consolidates `candle_core::Device::Cpu`
+/// (~70 sites pre-consolidation, mostly `let device = candle_core::Device::Cpu;`
+/// in `#[cfg(test)]` blocks).
+#[inline]
+fn cpu_device() -> candle_core::Device {
+    candle_core::Device::Cpu
+}
+
+/// The reduction-axis marker for "the last dimension" — passed to
+/// `Tensor::sum_keepdim` / `max_keepdim` / `mean_keepdim` / `log_sum_exp`
+/// in this file. Consolidates `candle_core::D::Minus1` (~21 sites
+/// pre-consolidation).
+const LAST_DIM: candle_core::D = candle_core::D::Minus1;
+
 /// Sample a Kaiming-uniform LoRA-A initialization.
 ///
 /// When `rng` is `Some`, the values are drawn from the supplied RNG so the
@@ -1603,7 +1670,7 @@ fn adapter_smoke_last_logits(logits: &candle_core::Tensor) -> Result<Vec<f32>> {
         .narrow(seq_dim, seq_len - 1, 1)?
         .squeeze(seq_dim)?
         .flatten_all()?
-        .to_dtype(candle_core::DType::F32)?
+        .to_f32_dtype()?
         .to_vec1::<f32>()?)
 }
 
@@ -4157,7 +4224,7 @@ fn compute_ref_log_probs_shared_prefix(
         if comp_len == 0 {
             // No completion tokens — placeholder zero tensor matches the legacy
             // path's behaviour for empty active completions.
-            ref_log_probs_per_comp.push(candle_core::Tensor::zeros(1, candle_core::DType::F32, device)?.detach());
+            ref_log_probs_per_comp.push(zeros_f32_on(1, device)?.detach());
             continue;
         }
 
@@ -4242,7 +4309,7 @@ fn chunked_log_probs_for_completion(
 ) -> Result<candle_core::Tensor> {
     let n_targets = target_ids.len();
     if n_targets == 0 {
-        return candle_core::Tensor::zeros(1, candle_core::DType::F32, device).map_err(Into::into);
+        return zeros_f32_on(1, device).map_err(Into::into);
     }
     if chunk_size == 0 {
         anyhow::bail!("chunked_log_probs_for_completion chunk_size must be > 0");
@@ -4263,8 +4330,8 @@ fn chunked_log_probs_for_completion(
         );
     }
 
-    let hidden_2d = active_hidden.squeeze(0)?.to_dtype(candle_core::DType::F32)?;
-    let head_t_f32 = head_t.to_dtype(candle_core::DType::F32)?;
+    let hidden_2d = active_hidden.squeeze(0)?.to_f32_dtype()?;
+    let head_t_f32 = head_t.to_f32_dtype()?;
     let vocab_size = head_t_f32.dim(1)?;
     if vocab_size == 0 {
         anyhow::bail!("head_t vocab dimension is zero");
@@ -4280,12 +4347,12 @@ fn chunked_log_probs_for_completion(
         {
             let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
             let logits_chunk = hidden_2d.matmul(&head_chunk)?;
-            let chunk_max = logits_chunk.max_keepdim(candle_core::D::Minus1)?;
+            let chunk_max = logits_chunk.max_keepdim(LAST_DIM)?;
             let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
                 (None, None) => {
                     let shifted =
                         (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
-                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(LAST_DIM)?;
                     (chunk_max.detach(), chunk_sumexp.detach())
                 }
                 (Some(prev_max), Some(prev_sumexp)) => {
@@ -4293,7 +4360,7 @@ fn chunked_log_probs_for_completion(
                     let prev_scale = (prev_max - &new_max)?.exp()?;
                     let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
                     let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
-                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(LAST_DIM)?;
                     let new_sumexp = (scaled_prev + chunk_sumexp)?;
                     (new_max.detach(), new_sumexp.detach())
                 }
@@ -4312,7 +4379,7 @@ fn chunked_log_probs_for_completion(
                 }
             }
             let one_hot = candle_core::Tensor::from_vec(one_hot_data, (n_targets, chunk_len), device)?;
-            let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(candle_core::D::Minus1)?;
+            let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(LAST_DIM)?;
             correct_logits = Some(match correct_logits.as_ref() {
                 Some(prev) => (prev + chunk_correct)?.detach(),
                 None => chunk_correct.detach(),
@@ -4500,7 +4567,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
             // to 1.0 inside grpo_loss / analytic tail via
             // GrpoLossParams::reinforce. The placeholder zero tensor is
             // never inspected by the math when reinforce = true.
-            candle_core::Tensor::zeros(num_active, candle_core::DType::F32, device)?.detach()
+            zeros_f32_on(num_active, device)?.detach()
         } else if let Some(shared) = shared_prefix_log_probs.as_ref() {
             // The shared-prefix output is one log-prob per completion-span
             // position (predicting input_ids[prompt_len + i] for
@@ -4529,7 +4596,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
             } else if active_indices.is_empty() {
                 // Defensive: shouldn't happen (num_active > 0 was checked
                 // above), but handle it cleanly.
-                candle_core::Tensor::zeros(num_active, candle_core::DType::F32, device)?.detach()
+                zeros_f32_on(num_active, device)?.detach()
             } else {
                 let indices = candle_core::Tensor::new(active_indices.as_slice(), device)?;
                 span.index_select(&indices, 0)?.detach()
@@ -5182,9 +5249,9 @@ fn deepcopy_tensor_for_snapshot(t: &candle_core::Tensor) -> Result<candle_core::
     let dtype = t.dtype();
     let shape = t.shape().clone();
     let host: Vec<f32> = t
-        .to_dtype(candle_core::DType::F32)?
+        .to_f32_dtype()?
         .flatten_all()?
-        .to_device(&candle_core::Device::Cpu)?
+        .to_device(&cpu_device())?
         .to_vec1::<f32>()
         .context("snapshot: read tensor to host f32 vec")?;
     let rebuilt = candle_core::Tensor::from_vec(host, shape, device)?;
@@ -5200,9 +5267,9 @@ fn deepcopy_tensor_for_snapshot(t: &candle_core::Tensor) -> Result<candle_core::
 /// storage (the affine + add chain materializes a fresh tensor).
 fn ema_blend_tensor(old: &candle_core::Tensor, current: &candle_core::Tensor, decay: f32) -> Result<candle_core::Tensor> {
     let dtype = old.dtype();
-    let a = old.to_dtype(candle_core::DType::F32)?.affine(decay as f64, 0.0)?;
+    let a = old.to_f32_dtype()?.affine(decay as f64, 0.0)?;
     let b = current
-        .to_dtype(candle_core::DType::F32)?
+        .to_f32_dtype()?
         .affine((1.0 - decay) as f64, 0.0)?;
     let blended = (a + b)?;
     let out = if dtype == candle_core::DType::F32 {
@@ -5364,7 +5431,7 @@ fn token_log_probs(
 
     if active_positions.is_empty() {
         // Return a zero tensor if no completion tokens
-        return candle_core::Tensor::zeros(1, candle_core::DType::F32, device).map_err(Into::into);
+        return zeros_f32_on(1, device).map_err(Into::into);
     }
 
     // Gather active logits
@@ -5381,8 +5448,8 @@ fn token_log_probs(
     let active_labels: Vec<u32> = active_positions.iter().map(|&i| shift_labels[i]).collect();
 
     // log_softmax then gather
-    let active_logits_f32 = active_logits.to_dtype(candle_core::DType::F32)?;
-    let log_sum_exp = active_logits_f32.log_sum_exp(candle_core::D::Minus1)?; // [num_active]
+    let active_logits_f32 = active_logits.to_f32_dtype()?;
+    let log_sum_exp = active_logits_f32.log_sum_exp(LAST_DIM)?; // [num_active]
     let labels_2d = candle_core::Tensor::new(active_labels.as_slice(), device)?
         .to_dtype(candle_core::DType::U32)?
         .unsqueeze(1)?;
@@ -5440,7 +5507,7 @@ fn selected_log_probs_from_normed_hidden_chunked(
         .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
         .collect();
     if active_positions.is_empty() {
-        return candle_core::Tensor::zeros(1, candle_core::DType::F32, device).map_err(Into::into);
+        return zeros_f32_on(1, device).map_err(Into::into);
     }
     let active_labels: Vec<u32> = active_positions
         .iter()
@@ -5453,9 +5520,9 @@ fn selected_log_probs_from_normed_hidden_chunked(
     let active_indices = candle_core::Tensor::new(active_positions.as_slice(), device)?;
     let active_hidden = shift_hidden
         .index_select(&active_indices, 0)?
-        .to_dtype(candle_core::DType::F32)?;
+        .to_f32_dtype()?;
 
-    let head_t_f32 = head_t.to_dtype(candle_core::DType::F32)?;
+    let head_t_f32 = head_t.to_f32_dtype()?;
     let vocab_size = head_t_f32.dim(1)?;
     if vocab_size == 0 {
         anyhow::bail!("head_t vocab dimension is zero");
@@ -5471,12 +5538,12 @@ fn selected_log_probs_from_normed_hidden_chunked(
         {
             let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
             let logits_chunk = active_hidden.matmul(&head_chunk)?;
-            let chunk_max = logits_chunk.max_keepdim(candle_core::D::Minus1)?;
+            let chunk_max = logits_chunk.max_keepdim(LAST_DIM)?;
             let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
                 (None, None) => {
                     let shifted =
                         (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
-                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(LAST_DIM)?;
                     (chunk_max.detach(), chunk_sumexp.detach())
                 }
                 (Some(prev_max), Some(prev_sumexp)) => {
@@ -5484,7 +5551,7 @@ fn selected_log_probs_from_normed_hidden_chunked(
                     let prev_scale = (prev_max - &new_max)?.exp()?;
                     let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
                     let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
-                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(LAST_DIM)?;
                     let new_sumexp = (scaled_prev + chunk_sumexp)?;
                     (new_max.detach(), new_sumexp.detach())
                 }
@@ -5503,7 +5570,7 @@ fn selected_log_probs_from_normed_hidden_chunked(
                 }
             }
             let one_hot = candle_core::Tensor::from_vec(one_hot_data, (num_active, chunk_len), device)?;
-            let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(candle_core::D::Minus1)?;
+            let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(LAST_DIM)?;
             correct_logits = Some(match correct_logits.as_ref() {
                 Some(prev) => (prev + chunk_correct)?.detach(),
                 None => chunk_correct.detach(),
@@ -5760,8 +5827,8 @@ fn cross_entropy_loss(
 
     // Cross-entropy: -log(softmax(logits)[label])
     // Use log-sum-exp trick for numerical stability
-    let active_logits_f32 = active_logits.to_dtype(candle_core::DType::F32)?;
-    let log_sum_exp = active_logits_f32.log_sum_exp(candle_core::D::Minus1)?; // [num_active]
+    let active_logits_f32 = active_logits.to_f32_dtype()?;
+    let log_sum_exp = active_logits_f32.log_sum_exp(LAST_DIM)?; // [num_active]
 
     // Gather the logit for the correct class at each position
     let labels_2d = labels_tensor.unsqueeze(1)?; // [num_active, 1]
@@ -5843,7 +5910,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
         .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
         .collect();
     if active_positions.is_empty() {
-        return Ok(candle_core::Tensor::zeros(hidden.shape(), candle_core::DType::F32, device)?);
+        return Ok(zeros_f32_on(hidden.shape(), device)?);
     }
 
     let active_labels: Vec<u32> = active_positions
@@ -5857,17 +5924,17 @@ fn analytic_sft_tail_grad_pre_final_norm(
     let active_indices = candle_core::Tensor::new(active_positions.as_slice(), device)?;
     let active_hidden = shift_hidden
         .index_select(&active_indices, 0)?
-        .to_dtype(candle_core::DType::F32)?;
+        .to_f32_dtype()?;
 
-    let variance = active_hidden.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    let variance = active_hidden.sqr()?.mean_keepdim(LAST_DIM)?;
     let rms_inv = (variance + rms_norm_eps)?.sqrt()?.recip()?;
-    let norm_weight = final_norm_weight.to_dtype(candle_core::DType::F32)?;
+    let norm_weight = final_norm_weight.to_f32_dtype()?;
     let norm_weight_plus_one = (norm_weight.ones_like()? + norm_weight)?;
     let active_normed = active_hidden
         .broadcast_mul(&rms_inv)?
         .broadcast_mul(&norm_weight_plus_one)?;
 
-    let head_t_f32 = head_t.to_dtype(candle_core::DType::F32)?;
+    let head_t_f32 = head_t.to_f32_dtype()?;
     let vocab_size = head_t_f32.dim(1)?;
     if vocab_size == 0 {
         anyhow::bail!("head_t vocab dimension is zero");
@@ -5882,12 +5949,12 @@ fn analytic_sft_tail_grad_pre_final_norm(
         {
             let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
             let logits_chunk = active_normed.matmul(&head_chunk)?;
-            let chunk_max = logits_chunk.max_keepdim(candle_core::D::Minus1)?;
+            let chunk_max = logits_chunk.max_keepdim(LAST_DIM)?;
             let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
                 (None, None) => {
                     let shifted =
                         (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
-                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(LAST_DIM)?;
                     (chunk_max.detach(), chunk_sumexp.detach())
                 }
                 (Some(prev_max), Some(prev_sumexp)) => {
@@ -5895,7 +5962,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
                     let prev_scale = (prev_max - &new_max)?.exp()?;
                     let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
                     let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
-                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(LAST_DIM)?;
                     let new_sumexp = (scaled_prev + chunk_sumexp)?;
                     (new_max.detach(), new_sumexp.detach())
                 }
@@ -5912,7 +5979,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
 
     // Pass 2: accumulate d(loss)/d(post-final-norm hidden) by vocab chunk.
     let inv_n = 1.0f64 / num_active as f64;
-    let mut grad_normed = candle_core::Tensor::zeros((num_active, hidden_size), candle_core::DType::F32, device)?;
+    let mut grad_normed = zeros_f32_on((num_active, hidden_size), device)?;
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
@@ -5947,14 +6014,14 @@ fn analytic_sft_tail_grad_pre_final_norm(
 
     // Backprop through Qwen3.5 RMSNorm: y = x * inv_rms * (1 + w).
     let u = grad_normed.broadcast_mul(&norm_weight_plus_one)?;
-    let dot = (&u * &active_hidden)?.sum_keepdim(candle_core::D::Minus1)?;
+    let dot = (&u * &active_hidden)?.sum_keepdim(LAST_DIM)?;
     let rms_inv_sq = rms_inv.sqr()?;
     let rms_inv_cubed = rms_inv_sq.broadcast_mul(&rms_inv)?;
     let correction_scale = rms_inv_cubed.affine(1.0f64 / hidden_size as f64, 0.0)?;
     let correction = active_hidden.broadcast_mul(&dot.broadcast_mul(&correction_scale)?)?;
     let grad_active_hidden = (u.broadcast_mul(&rms_inv)? - correction)?.detach();
 
-    let mut grad_hidden_2d = candle_core::Tensor::zeros((seq_len, hidden_size), candle_core::DType::F32, device)?;
+    let mut grad_hidden_2d = zeros_f32_on((seq_len, hidden_size), device)?;
     grad_hidden_2d = grad_hidden_2d.index_add(&active_indices, &grad_active_hidden, 0)?;
     Ok(grad_hidden_2d.unsqueeze(0)?)
 }
@@ -6114,8 +6181,8 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
     // term, not for the ECHO env-CE term (which is a cross-entropy against
     // observed tokens, not a divergence against a reference policy).
     let ref_values = ref_log_probs
-        .to_dtype(candle_core::DType::F32)?
-        .to_device(&candle_core::Device::Cpu)?
+        .to_f32_dtype()?
+        .to_device(&cpu_device())?
         .to_vec1::<f32>()
         .context("read GRPO reference log-probs")?;
     anyhow::ensure!(
@@ -6130,17 +6197,17 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
     let active_indices = candle_core::Tensor::new(active_positions.as_slice(), device)?;
     let active_hidden = shift_hidden
         .index_select(&active_indices, 0)?
-        .to_dtype(candle_core::DType::F32)?;
+        .to_f32_dtype()?;
 
-    let variance = active_hidden.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    let variance = active_hidden.sqr()?.mean_keepdim(LAST_DIM)?;
     let rms_inv = (variance + rms_norm_eps)?.sqrt()?.recip()?;
-    let norm_weight = final_norm_weight.to_dtype(candle_core::DType::F32)?;
+    let norm_weight = final_norm_weight.to_f32_dtype()?;
     let norm_weight_plus_one = (norm_weight.ones_like()? + norm_weight)?;
     let active_normed = active_hidden
         .broadcast_mul(&rms_inv)?
         .broadcast_mul(&norm_weight_plus_one)?;
 
-    let head_t_f32 = head_t.to_dtype(candle_core::DType::F32)?;
+    let head_t_f32 = head_t.to_f32_dtype()?;
     let vocab_size = head_t_f32.dim(1)?;
     if vocab_size == 0 {
         anyhow::bail!("head_t vocab dimension is zero");
@@ -6156,12 +6223,12 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
         {
             let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
             let logits_chunk = active_normed.matmul(&head_chunk)?;
-            let chunk_max = logits_chunk.max_keepdim(candle_core::D::Minus1)?;
+            let chunk_max = logits_chunk.max_keepdim(LAST_DIM)?;
             let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
                 (None, None) => {
                     let shifted =
                         (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
-                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(LAST_DIM)?;
                     (chunk_max.detach(), chunk_sumexp.detach())
                 }
                 (Some(prev_max), Some(prev_sumexp)) => {
@@ -6169,7 +6236,7 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
                     let prev_scale = (prev_max - &new_max)?.exp()?;
                     let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
                     let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
-                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(LAST_DIM)?;
                     let new_sumexp = (scaled_prev + chunk_sumexp)?;
                     (new_max.detach(), new_sumexp.detach())
                 }
@@ -6188,7 +6255,7 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
                 }
             }
             let one_hot = candle_core::Tensor::from_vec(one_hot_data, (num_active, chunk_len), device)?;
-            let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(candle_core::D::Minus1)?;
+            let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(LAST_DIM)?;
             correct_logits = Some(match correct_logits.as_ref() {
                 Some(prev) => (prev + chunk_correct)?.detach(),
                 None => chunk_correct.detach(),
@@ -6203,7 +6270,7 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
     let log_sum_exp = (running_max.clone() + running_sumexp.log()?)?;
     let policy_log_probs = (correct_logits - log_sum_exp)?.squeeze(1)?.detach();
     let policy_values = policy_log_probs
-        .to_device(&candle_core::Device::Cpu)?
+        .to_device(&cpu_device())?
         .to_vec1::<f32>()
         .context("read GRPO policy log-probs")?;
 
@@ -6358,7 +6425,7 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
     let loss_val = loss_sum * normalizer + env_loss;
     let grad_coeffs = candle_core::Tensor::from_vec(grad_coeffs, (num_active, 1), device)?;
 
-    let mut grad_normed = candle_core::Tensor::zeros((num_active, hidden_size), candle_core::DType::F32, device)?;
+    let mut grad_normed = zeros_f32_on((num_active, hidden_size), device)?;
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
@@ -6391,14 +6458,14 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
     }
 
     let u = grad_normed.broadcast_mul(&norm_weight_plus_one)?;
-    let dot = (&u * &active_hidden)?.sum_keepdim(candle_core::D::Minus1)?;
+    let dot = (&u * &active_hidden)?.sum_keepdim(LAST_DIM)?;
     let rms_inv_sq = rms_inv.sqr()?;
     let rms_inv_cubed = rms_inv_sq.broadcast_mul(&rms_inv)?;
     let correction_scale = rms_inv_cubed.affine(1.0f64 / hidden_size as f64, 0.0)?;
     let correction = active_hidden.broadcast_mul(&dot.broadcast_mul(&correction_scale)?)?;
     let grad_active_hidden = (u.broadcast_mul(&rms_inv)? - correction)?.detach();
 
-    let mut grad_hidden_2d = candle_core::Tensor::zeros((seq_len, hidden_size), candle_core::DType::F32, device)?;
+    let mut grad_hidden_2d = zeros_f32_on((seq_len, hidden_size), device)?;
     grad_hidden_2d = grad_hidden_2d.index_add(&active_indices, &grad_active_hidden, 0)?;
     Ok((loss_val, grad_hidden_2d.unsqueeze(0)?, echo_env_ce))
 }
@@ -6847,7 +6914,7 @@ fn apply_adamw_update(
     // CPU fallback: run the same math via candle ops in f32 to avoid
     // BF16 underflow on the v moment, then round-trip back to the
     // param dtype.
-    let to_f32 = |t: &candle_core::Tensor| -> Result<candle_core::Tensor> { Ok(t.to_dtype(candle_core::DType::F32)?) };
+    let to_f32 = |t: &candle_core::Tensor| -> Result<candle_core::Tensor> { Ok(t.to_f32_dtype()?) };
     let p_f32 = to_f32(var.as_tensor())?;
     let g_f32 = to_f32(grad)?;
     let m_f32 = to_f32(moments.m.as_tensor())?;
@@ -6894,7 +6961,7 @@ pub(crate) fn accumulate_grads(
         if let Some(grad) = src.get(var.as_tensor()) {
             let id = var.as_tensor().id();
             let grad = grad
-                .to_device(&candle_core::Device::Cpu)
+                .to_device(&cpu_device())
                 .context("offload accumulated gradient to CPU")?
                 .detach();
             if let Some(existing) = dst.get(&id) {
@@ -6921,7 +6988,7 @@ fn grad_or_zeros_like(
 fn offload_checkpoint_tensor_to_cpu(tensor: candle_core::Tensor, enabled: bool) -> Result<candle_core::Tensor> {
     if enabled && !tensor.device().is_cpu() {
         Ok(tensor
-            .to_device(&candle_core::Device::Cpu)
+            .to_device(&cpu_device())
             .context("offload checkpoint tensor to CPU")?
             .detach())
     } else {
@@ -6945,7 +7012,7 @@ fn accumulate_cpu_tensor_slot(
     context: &str,
 ) -> Result<()> {
     let tensor_cpu = tensor
-        .to_device(&candle_core::Device::Cpu)
+        .to_device(&cpu_device())
         .with_context(|| format!("{context} CPU offload"))?
         .detach();
     *slot = Some(match slot.take() {
@@ -7822,8 +7889,8 @@ fn full_attention_single_layer_tiled_mlp_reverse(
         let tile_output = (residual_tile_var.as_tensor() + ffn_out).with_context(|| {
             format!("full-attention MLP residual add tile [{tile_start}, {tile_end})")
         })?;
-        let tile_output_f32 = tile_output.to_dtype(candle_core::DType::F32)?;
-        let upstream_tile_f32 = upstream_tile.to_dtype(candle_core::DType::F32)?;
+        let tile_output_f32 = tile_output.to_f32_dtype()?;
+        let upstream_tile_f32 = upstream_tile.to_f32_dtype()?;
         let injected = (&tile_output_f32 * &upstream_tile_f32)?
             .sum_all()
             .with_context(|| {
@@ -7866,7 +7933,7 @@ fn full_attention_single_layer_tiled_mlp_reverse(
     drop(residual_grad_tiles);
     drop(attn_residual_value);
     let residual_grad_cpu = residual_grad
-        .to_device(&candle_core::Device::Cpu)
+        .to_device(&cpu_device())
         .context("full-attention tiled MLP residual grad CPU offload")?
         .detach();
     drop(residual_grad);
@@ -7962,7 +8029,7 @@ fn full_attention_single_layer_tiled_mlp_reverse(
     drop(pre_o_grad_tiles);
     drop(pre_o_value);
     let pre_o_grad_cpu = pre_o_grad
-        .to_device(&candle_core::Device::Cpu)
+        .to_device(&cpu_device())
         .context("full-attention tiled o-proj pre-o grad CPU offload")?
         .detach();
     drop(pre_o_grad);
@@ -8109,13 +8176,13 @@ fn full_attention_single_layer_tiled_mlp_reverse(
         let k_grad_prefix_cpu = grads
             .get(k_var.as_tensor())
             .ok_or_else(|| anyhow::anyhow!("full-attention core did not produce k grad prefix"))?
-            .to_device(&candle_core::Device::Cpu)
+            .to_device(&cpu_device())
             .context("full-attention k grad prefix CPU offload")?
             .detach();
         let v_grad_prefix_cpu = grads
             .get(v_var.as_tensor())
             .ok_or_else(|| anyhow::anyhow!("full-attention core did not produce v grad prefix"))?
-            .to_device(&candle_core::Device::Cpu)
+            .to_device(&cpu_device())
             .context("full-attention v grad prefix CPU offload")?
             .detach();
         for source_idx in 0..=tile_idx {
@@ -8358,7 +8425,7 @@ fn full_attention_single_layer_tiled_mlp_reverse(
             None => candle_core::Tensor::zeros(
                 (1usize, tile_len, seg_input.dim(2)?),
                 seg_input.dtype(),
-                &candle_core::Device::Cpu,
+                &cpu_device(),
             )
             .with_context(|| format!("alloc zero full-attention input grad tile {tile_idx}"))?,
         };
@@ -8557,7 +8624,7 @@ fn exact_gdn_single_layer_tiled_reverse(
         let tile_grad_out = upstream_grad
             .narrow(1, tile_start, tile_len)
             .with_context(|| format!("GDN tiled reverse upstream tile {tile_idx}"))?;
-        let tile_grad_out_f32 = tile_grad_out.to_dtype(candle_core::DType::F32)?;
+        let tile_grad_out_f32 = tile_grad_out.to_f32_dtype()?;
         stage_started = finish_exact_gdn_reverse_tile_stage(
             device,
             profile_tiles,
@@ -8637,7 +8704,7 @@ fn exact_gdn_single_layer_tiled_reverse(
                     "exact tiled GDN reverse MLP down layer {layer_idx} tile [{tile_start}, {tile_end})"
                 )
             })?;
-        let down_out_f32 = down_out.to_dtype(candle_core::DType::F32)?;
+        let down_out_f32 = down_out.to_f32_dtype()?;
         let down_scalar = (&down_out_f32 * &tile_grad_out_f32)?
             .sum_all()
             .with_context(|| format!("exact tiled GDN MLP down injection tile {tile_idx}"))?;
@@ -8677,8 +8744,8 @@ fn exact_gdn_single_layer_tiled_reverse(
                         "exact tiled GDN reverse MLP gate/up layer {layer_idx} tile [{tile_start}, {tile_end})"
                     )
                 })?;
-        let gated_tracked_f32 = gated_tracked.to_dtype(candle_core::DType::F32)?;
-        let grad_gated_f32 = grad_gated.to_dtype(candle_core::DType::F32)?;
+        let gated_tracked_f32 = gated_tracked.to_f32_dtype()?;
+        let grad_gated_f32 = grad_gated.to_f32_dtype()?;
         let gate_scalar = (&gated_tracked_f32 * &grad_gated_f32)?
             .sum_all()
             .with_context(|| format!("exact tiled GDN MLP gate/up injection tile {tile_idx}"))?;
@@ -8688,11 +8755,11 @@ fn exact_gdn_single_layer_tiled_reverse(
         accumulate_grads(accumulated_grads, &gate_grads, &all_vars)?;
         let grad_after_mlp = match gate_grads.get(after_attn_var.as_tensor()) {
             Some(grad) => grad.detach(),
-            None => candle_core::Tensor::zeros((1, tile_len, hidden_size), candle_core::DType::F32, device).with_context(
+            None => zeros_f32_on((1, tile_len, hidden_size), device).with_context(
                 || format!("alloc zero GDN tiled MLP after-attn grad tile {tile_idx}"),
             )?,
         }
-        .to_dtype(candle_core::DType::F32)?;
+        .to_f32_dtype()?;
         let upstream_after_attn = (&tile_grad_out_f32 + &grad_after_mlp)?.detach();
         stage_started = finish_exact_gdn_reverse_tile_stage(
             device,
@@ -8767,7 +8834,7 @@ fn exact_gdn_single_layer_tiled_reverse(
             )?
             .detach();
 
-            let upstream_after_attn_f32 = upstream_after_attn.to_dtype(candle_core::DType::F32)?;
+            let upstream_after_attn_f32 = upstream_after_attn.to_f32_dtype()?;
             let gated_norm_var = candle_core::Var::from_tensor(&gated_norm_value)?;
             let attn_out = gdn_out_proj_from_gated_norm(
                 backend,
@@ -8780,7 +8847,7 @@ fn exact_gdn_single_layer_tiled_reverse(
                     "exact split GDN out-proj layer {layer_idx} tile [{tile_start}, {tile_end})"
                 )
             })?;
-            let out_scalar = (&attn_out.to_dtype(candle_core::DType::F32)? * &upstream_after_attn_f32)?
+            let out_scalar = (&attn_out.to_f32_dtype()? * &upstream_after_attn_f32)?
                 .sum_all()
                 .with_context(|| format!("exact split GDN out-proj injection tile {tile_idx}"))?;
             let out_grads = out_scalar
@@ -8789,7 +8856,7 @@ fn exact_gdn_single_layer_tiled_reverse(
             accumulate_grads(accumulated_grads, &out_grads, &all_vars)?;
             let grad_gated_norm =
                 grad_or_zeros_like(&out_grads, gated_norm_var.as_tensor(), &gated_norm_value)?
-                    .to_dtype(candle_core::DType::F32)?;
+                    .to_f32_dtype()?;
             drop(out_grads);
             drop(out_scalar);
             drop(attn_out);
@@ -8820,7 +8887,7 @@ fn exact_gdn_single_layer_tiled_reverse(
                     "exact split GDN gated-norm layer {layer_idx} tile [{tile_start}, {tile_end})"
                 )
             })?;
-            let gated_norm_scalar = (&gated_norm.to_dtype(candle_core::DType::F32)? * &grad_gated_norm)?
+            let gated_norm_scalar = (&gated_norm.to_f32_dtype()? * &grad_gated_norm)?
                 .sum_all()
                 .with_context(|| format!("exact split GDN gated-norm injection tile {tile_idx}"))?;
             let gated_norm_grads = gated_norm_scalar
@@ -8831,9 +8898,9 @@ fn exact_gdn_single_layer_tiled_reverse(
                 recurrent_var.as_tensor(),
                 &recurrent_value,
             )?
-            .to_dtype(candle_core::DType::F32)?;
+            .to_f32_dtype()?;
             let grad_z = grad_or_zeros_like(&gated_norm_grads, z_var.as_tensor(), &z_value)?
-                .to_dtype(candle_core::DType::F32)?;
+                .to_f32_dtype()?;
             drop(gated_norm_grads);
             drop(gated_norm_scalar);
             drop(gated_norm);
@@ -8896,25 +8963,25 @@ fn exact_gdn_single_layer_tiled_reverse(
                     "exact split GDN qkv/conv layer {layer_idx} tile [{tile_start}, {tile_end})"
                 )
             })?;
-            let mut qkv_scalar = (&qkv_tracked.q.to_dtype(candle_core::DType::F32)? * &recurrent_grads.dq)?
+            let mut qkv_scalar = (&qkv_tracked.q.to_f32_dtype()? * &recurrent_grads.dq)?
                 .sum_all()
                 .with_context(|| format!("exact split GDN q grad injection tile {tile_idx}"))?;
             qkv_scalar = (qkv_scalar
-                + (&qkv_tracked.k.to_dtype(candle_core::DType::F32)? * &recurrent_grads.dk)?
+                + (&qkv_tracked.k.to_f32_dtype()? * &recurrent_grads.dk)?
                     .sum_all()
                     .with_context(|| {
                         format!("exact split GDN k grad injection tile {tile_idx}")
                     })?)?;
             qkv_scalar = (qkv_scalar
-                + (&qkv_tracked.v.to_dtype(candle_core::DType::F32)? * &recurrent_grads.dv)?
+                + (&qkv_tracked.v.to_f32_dtype()? * &recurrent_grads.dv)?
                     .sum_all()
                     .with_context(|| {
                         format!("exact split GDN v grad injection tile {tile_idx}")
                     })?)?;
             if let Some(grad) = next_conv_grad.as_ref() {
                 qkv_scalar = (qkv_scalar
-                    + (&tracked_conv_state.to_dtype(candle_core::DType::F32)?
-                        * &grad.to_dtype(candle_core::DType::F32)?)?
+                    + (&tracked_conv_state.to_f32_dtype()?
+                        * &grad.to_f32_dtype()?)?
                         .sum_all()
                         .with_context(|| {
                             format!("exact split GDN conv-state injection tile {tile_idx}")
@@ -8925,7 +8992,7 @@ fn exact_gdn_single_layer_tiled_reverse(
                 .with_context(|| format!("exact split GDN qkv/conv backward tile {tile_idx}"))?;
             let grad_mixed_qkv =
                 grad_or_zeros_like(&qkv_grads, mixed_qkv_var.as_tensor(), &mixed_qkv_value)?
-                    .to_dtype(candle_core::DType::F32)?;
+                    .to_f32_dtype()?;
             next_conv_grad = qkv_grads.get(conv_var.as_tensor()).map(candle_core::Tensor::detach);
             drop(qkv_grads);
             drop(qkv_scalar);
@@ -8953,11 +9020,11 @@ fn exact_gdn_single_layer_tiled_reverse(
                 linear_weights,
                 tile_input.dtype(),
             )?;
-            let mut gates_scalar = (&beta_tracked.to_dtype(candle_core::DType::F32)? * &recurrent_grads.dbeta)?
+            let mut gates_scalar = (&beta_tracked.to_f32_dtype()? * &recurrent_grads.dbeta)?
                 .sum_all()
                 .with_context(|| format!("exact split GDN beta grad injection tile {tile_idx}"))?;
             gates_scalar = (gates_scalar
-                + (&g_tracked.to_dtype(candle_core::DType::F32)? * &recurrent_grads.dg)?
+                + (&g_tracked.to_f32_dtype()? * &recurrent_grads.dg)?
                     .sum_all()
                     .with_context(|| {
                         format!("exact split GDN decay grad injection tile {tile_idx}")
@@ -8966,9 +9033,9 @@ fn exact_gdn_single_layer_tiled_reverse(
                 .backward()
                 .with_context(|| format!("exact split GDN gates backward tile {tile_idx}"))?;
             let grad_a = grad_or_zeros_like(&gates_grads, a_var.as_tensor(), &a_value)?
-                .to_dtype(candle_core::DType::F32)?;
+                .to_f32_dtype()?;
             let grad_b = grad_or_zeros_like(&gates_grads, b_var.as_tensor(), &b_value)?
-                .to_dtype(candle_core::DType::F32)?;
+                .to_f32_dtype()?;
             drop(gates_grads);
             drop(gates_scalar);
             drop(g_tracked);
@@ -8997,26 +9064,26 @@ fn exact_gdn_single_layer_tiled_reverse(
             .with_context(|| {
                 format!("exact split GDN in-proj layer {layer_idx} tile [{tile_start}, {tile_end})")
             })?;
-            let mut proj_scalar = (&parts_tracked.mixed_qkv.to_dtype(candle_core::DType::F32)?
+            let mut proj_scalar = (&parts_tracked.mixed_qkv.to_f32_dtype()?
                 * &grad_mixed_qkv)?
                 .sum_all()
                 .with_context(|| {
                     format!("exact split GDN mixed-qkv grad injection tile {tile_idx}")
                 })?;
             proj_scalar = (proj_scalar
-                + (&parts_tracked.z.to_dtype(candle_core::DType::F32)? * &grad_z)?
+                + (&parts_tracked.z.to_f32_dtype()? * &grad_z)?
                     .sum_all()
                     .with_context(|| {
                         format!("exact split GDN z grad injection tile {tile_idx}")
                     })?)?;
             proj_scalar = (proj_scalar
-                + (&parts_tracked.a.to_dtype(candle_core::DType::F32)? * &grad_a)?
+                + (&parts_tracked.a.to_f32_dtype()? * &grad_a)?
                     .sum_all()
                     .with_context(|| {
                         format!("exact split GDN a grad injection tile {tile_idx}")
                     })?)?;
             proj_scalar = (proj_scalar
-                + (&parts_tracked.b.to_dtype(candle_core::DType::F32)? * &grad_b)?
+                + (&parts_tracked.b.to_f32_dtype()? * &grad_b)?
                     .sum_all()
                     .with_context(|| {
                         format!("exact split GDN b grad injection tile {tile_idx}")
@@ -9027,7 +9094,7 @@ fn exact_gdn_single_layer_tiled_reverse(
             accumulate_grads(accumulated_grads, &proj_grads, &all_vars)?;
             let grad_normed =
                 grad_or_zeros_like(&proj_grads, normed_var.as_tensor(), &normed_value)?
-                    .to_dtype(candle_core::DType::F32)?;
+                    .to_f32_dtype()?;
             drop(proj_grads);
             drop(proj_scalar);
             drop(parts_tracked);
@@ -9055,7 +9122,7 @@ fn exact_gdn_single_layer_tiled_reverse(
                     "exact split GDN input norm layer {layer_idx} tile [{tile_start}, {tile_end})"
                 )
             })?;
-            let norm_scalar = (&normed_tracked.to_dtype(candle_core::DType::F32)? * &grad_normed)?
+            let norm_scalar = (&normed_tracked.to_f32_dtype()? * &grad_normed)?
                 .sum_all()
                 .with_context(|| format!("exact split GDN input norm injection tile {tile_idx}"))?;
             let norm_grads = norm_scalar
@@ -9063,9 +9130,9 @@ fn exact_gdn_single_layer_tiled_reverse(
                 .with_context(|| format!("exact split GDN input norm backward tile {tile_idx}"))?;
             let grad_attention_input = match norm_grads.get(tile_input_var.as_tensor()) {
                 Some(grad) => grad.detach(),
-                None => candle_core::Tensor::zeros((1, tile_len, hidden_size), candle_core::DType::F32, device)?,
+                None => zeros_f32_on((1, tile_len, hidden_size), device)?,
             }
-            .to_dtype(candle_core::DType::F32)?;
+            .to_f32_dtype()?;
             let input_grad = (&upstream_after_attn_f32 + &grad_attention_input)?.detach();
             input_grad_chunks[tile_idx] = Some(input_grad);
             drop(norm_grads);
@@ -9143,24 +9210,24 @@ fn exact_gdn_single_layer_tiled_reverse(
             stage_started,
         )?;
 
-        let after_attn_f32 = after_attn.to_dtype(candle_core::DType::F32)?;
-        let upstream_after_attn_f32 = upstream_after_attn.to_dtype(candle_core::DType::F32)?;
+        let after_attn_f32 = after_attn.to_f32_dtype()?;
+        let upstream_after_attn_f32 = upstream_after_attn.to_f32_dtype()?;
         let mut scalar = (&after_attn_f32 * &upstream_after_attn_f32)?
             .sum_all()
             .with_context(|| format!("exact tiled GDN output injection tile {tile_idx}"))?;
 
         if let Some(grad) = next_recurrent_grad.as_ref() {
             let exit_state_f32 =
-                tile_state.recurrent_states[linear_attn_idx].to_dtype(candle_core::DType::F32)?;
-            let grad_f32 = grad.to_dtype(candle_core::DType::F32)?;
+                tile_state.recurrent_states[linear_attn_idx].to_f32_dtype()?;
+            let grad_f32 = grad.to_f32_dtype()?;
             let state_scalar = (&exit_state_f32 * &grad_f32)?.sum_all().with_context(|| {
                 format!("exact tiled GDN recurrent-state injection tile {tile_idx}")
             })?;
             scalar = (scalar + state_scalar)?;
         }
         if let Some(grad) = next_conv_grad.as_ref() {
-            let exit_state_f32 = tile_state.conv_states[linear_attn_idx].to_dtype(candle_core::DType::F32)?;
-            let grad_f32 = grad.to_dtype(candle_core::DType::F32)?;
+            let exit_state_f32 = tile_state.conv_states[linear_attn_idx].to_f32_dtype()?;
+            let grad_f32 = grad.to_f32_dtype()?;
             let state_scalar = (&exit_state_f32 * &grad_f32)?
                 .sum_all()
                 .with_context(|| format!("exact tiled GDN conv-state injection tile {tile_idx}"))?;
@@ -10340,8 +10407,8 @@ fn checkpointed_forward_backward(
             Some(&lora_weights_for_seg),
         )?;
 
-        let seg_output_f32 = seg_output.to_dtype(candle_core::DType::F32)?;
-        let upstream_f32 = upstream_grad_for_seg.to_dtype(candle_core::DType::F32)?;
+        let seg_output_f32 = seg_output.to_f32_dtype()?;
+        let upstream_f32 = upstream_grad_for_seg.to_f32_dtype()?;
         let injected = (&seg_output_f32 * &upstream_f32)?
             .sum_all()
             .with_context(|| format!("checkpointed gradient injection for segment {seg_idx}"))?;
@@ -10574,7 +10641,7 @@ fn grpo_loss(
 
     // Per-token KL term selected by KlEstimator (shared across IS levels).
     let kl_penalty_raw = match params.kl_estimator {
-        KlEstimator::None => candle_core::Tensor::zeros(ratio.shape(), candle_core::DType::F32, device)?,
+        KlEstimator::None => zeros_f32_on(ratio.shape(), device)?,
         KlEstimator::K1 => log_ratio.affine(params.kl_coeff, 0.0)?,
         KlEstimator::K3 => {
             let neg_log_ratio = log_ratio.neg()?;
@@ -10588,7 +10655,7 @@ fn grpo_loss(
             // CPU-side quantile from policy_log_probs.
             let plp_host: Vec<f32> = policy_log_probs
                 .flatten_all()?
-                .to_device(&candle_core::Device::Cpu)?
+                .to_device(&cpu_device())?
                 .to_vec1::<f32>()?;
             let mut neg = plp_host.iter().map(|p| -(*p as f64)).collect::<Vec<_>>();
             neg.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -10598,7 +10665,7 @@ fn grpo_loss(
                 .iter()
                 .map(|p| if -(*p as f64) >= thr { 1.0 } else { 0.0 })
                 .collect();
-            let mask = candle_core::Tensor::from_vec(mask_host, ratio.shape(), device)?.to_dtype(candle_core::DType::F32)?;
+            let mask = candle_core::Tensor::from_vec(mask_host, ratio.shape(), device)?.to_f32_dtype()?;
             (&kl_penalty_raw * &mask)?
         } else {
             kl_penalty_raw
@@ -10611,10 +10678,10 @@ fn grpo_loss(
         IsLevel::Token => {
             // Per-token surrogate: -min(r·A, clip(r)·A).
             let lo = candle_core::Tensor::new(lo_val, device)?
-                .to_dtype(candle_core::DType::F32)?
+                .to_f32_dtype()?
                 .broadcast_as(&ratio_shape)?;
             let hi = candle_core::Tensor::new(hi_val, device)?
-                .to_dtype(candle_core::DType::F32)?
+                .to_f32_dtype()?
                 .broadcast_as(&ratio_shape)?;
             let clipped_ratio = ratio.clamp(&lo, &hi)?;
             let adv_tensor =
@@ -10659,10 +10726,10 @@ fn grpo_loss(
             // *clipped* ratio with stop-gradient. The total loss contribution
             // is `-stop_grad(clip(r)) · A · log π_θ` per token.
             let lo = candle_core::Tensor::new(lo_val, device)?
-                .to_dtype(candle_core::DType::F32)?
+                .to_f32_dtype()?
                 .broadcast_as(&ratio_shape)?;
             let hi = candle_core::Tensor::new(hi_val, device)?
-                .to_dtype(candle_core::DType::F32)?
+                .to_f32_dtype()?
                 .broadcast_as(&ratio_shape)?;
             let clipped_ratio = ratio.clamp(&lo, &hi)?.detach();
             let adv_tensor =
@@ -11296,8 +11363,8 @@ fn checkpointed_grpo_forward_backward<'echo>(
             Some(&lora_weights_for_seg),
         )?;
 
-        let seg_output_f32 = seg_output.to_dtype(candle_core::DType::F32)?;
-        let upstream_f32 = upstream_grad_for_seg.to_dtype(candle_core::DType::F32)?;
+        let seg_output_f32 = seg_output.to_f32_dtype()?;
+        let upstream_f32 = upstream_grad_for_seg.to_f32_dtype()?;
         let injected = (&seg_output_f32 * &upstream_f32)?
             .sum_all()
             .with_context(|| {
@@ -11968,7 +12035,7 @@ mod tests {
 
     #[test]
     fn grpo_loss_k1_matches_legacy_mean_form_at_per_sample_normalizer() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let policy = candle_core::Tensor::new(&[-1.1_f32, -0.9, -1.4], &device)?;
         let reference = candle_core::Tensor::new(&[-1.0_f32, -1.0, -1.2], &device)?;
         let advantage = 0.5_f64;
@@ -12010,7 +12077,7 @@ mod tests {
 
     #[test]
     fn grpo_loss_none_kl_drops_penalty_term() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let policy = candle_core::Tensor::new(&[-1.1_f32, -0.9, -1.4], &device)?;
         let reference = candle_core::Tensor::new(&[-1.0_f32, -1.0, -1.2], &device)?;
         let advantage = 0.5_f64;
@@ -12052,7 +12119,7 @@ mod tests {
         // K3 = exp(-log_ratio) - 1 + log_ratio ≥ 0 always. Combined with a
         // very small advantage and a moderate kl_coeff, the total per-token
         // loss should be ≥ 0 for any non-trivial log_ratio.
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let policy = candle_core::Tensor::new(&[-0.6_f32, -1.3, -0.4], &device)?;
         let reference = candle_core::Tensor::new(&[-1.0_f32, -1.0, -1.0], &device)?;
         let params = GrpoLossParams {
@@ -12083,7 +12150,7 @@ mod tests {
         // a *positive* advantage and ratio > 1: clip_high decides where the
         // ceiling kicks in, so a wider clip_high yields a less-pessimistic
         // min and therefore *smaller* loss.
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let policy = candle_core::Tensor::new(&[-0.7_f32, -0.6, -0.5], &device)?;
         let reference = candle_core::Tensor::new(&[-1.0_f32, -1.0, -1.0], &device)?;
         let make = |hi: f64| GrpoLossParams {
@@ -12112,7 +12179,7 @@ mod tests {
         // The same per-token loss summed and scaled by 1/N (per-sample) vs
         // 1/(2N) (e.g. a TokenLevel group of two equal-size completions)
         // should yield a factor-of-two difference in the scalar.
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let policy = candle_core::Tensor::new(&[-1.1_f32, -0.9, -1.4], &device)?;
         let reference = candle_core::Tensor::new(&[-1.0_f32, -1.0, -1.2], &device)?;
         let base = GrpoLossParams {
@@ -12150,7 +12217,7 @@ mod tests {
         // Reference is the same for all → log_ratio matches policy_log_prob
         // up to a constant offset. Choosing all same-sign log_ratios makes
         // the math easy to verify.
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let policy = candle_core::Tensor::new(&[-0.05_f32, -3.0, -2.5, -0.10], &device)?;
         let reference = candle_core::Tensor::new(&[0.0_f32, 0.0, 0.0, 0.0], &device)?; // log_ratio = policy
         let base = GrpoLossParams {
@@ -12199,7 +12266,7 @@ mod tests {
 
     #[test]
     fn entropy_aware_kl_zero_quantile_matches_full_kl() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let policy = candle_core::Tensor::new(&[-0.5_f32, -2.0, -1.4], &device)?;
         let reference = candle_core::Tensor::new(&[-1.0_f32, -1.0, -1.0], &device)?;
         let base = GrpoLossParams {
@@ -12239,7 +12306,7 @@ mod tests {
 
     #[test]
     fn deepcopy_tensor_for_snapshot_is_independent_of_source() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         // Vars are how the trainer stores LoRA; mutate the Var afterward and
         // confirm the snapshot doesn't see the mutation.
         let src = candle_core::Var::from_tensor(&candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0], &device)?)?;
@@ -12252,7 +12319,7 @@ mod tests {
 
     #[test]
     fn ema_blend_tensor_matches_manual_formula() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let old = candle_core::Tensor::new(&[1.0_f32, 2.0, 4.0], &device)?;
         let current = candle_core::Tensor::new(&[2.0_f32, 4.0, 8.0], &device)?;
         let decay = 0.25_f32;
@@ -12268,7 +12335,7 @@ mod tests {
 
     #[test]
     fn ema_blend_with_decay_one_returns_old() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let old = candle_core::Tensor::new(&[3.0_f32, 5.0], &device)?;
         let current = candle_core::Tensor::new(&[7.0_f32, 11.0], &device)?;
         let blended = ema_blend_tensor(&old, &current, 1.0)?;
@@ -12280,7 +12347,7 @@ mod tests {
 
     #[test]
     fn ema_blend_with_decay_zero_returns_current() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let old = candle_core::Tensor::new(&[3.0_f32, 5.0], &device)?;
         let current = candle_core::Tensor::new(&[7.0_f32, 11.0], &device)?;
         let blended = ema_blend_tensor(&old, &current, 0.0)?;
@@ -12295,7 +12362,7 @@ mod tests {
         // Build a minimal TrainableLoraParams with one layer carrying a single
         // q_proj. Snapshot it. Mutate the Vars in place. Verify the snapshot
         // still holds the original values.
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let a_var = candle_core::Var::from_tensor(&candle_core::Tensor::new(&[[0.5_f32, 0.25]], &device)?)?;
         let b_var = candle_core::Var::from_tensor(&candle_core::Tensor::new(&[[1.0_f32], [2.0]], &device)?)?;
         let layer = TrainableLoraLayerParams {
@@ -12325,7 +12392,7 @@ mod tests {
 
     #[test]
     fn lora_snapshot_blend_with_prior_applies_decay() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let a_var = candle_core::Var::from_tensor(&candle_core::Tensor::new(&[[1.0_f32]], &device)?)?;
         let b_var = candle_core::Var::from_tensor(&candle_core::Tensor::new(&[[1.0_f32]], &device)?)?;
         let layer = TrainableLoraLayerParams {
@@ -12360,7 +12427,7 @@ mod tests {
 
     #[test]
     fn grpo_loss_sequence_level_matches_manual_gspo_value() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let policy = candle_core::Tensor::new(&[-0.7_f32, -0.9, -1.1, -1.3], &device)?;
         let reference = candle_core::Tensor::new(&[-1.0_f32, -1.0, -1.0, -1.0], &device)?;
         let advantage = 0.4_f64;
@@ -12414,7 +12481,7 @@ mod tests {
         // so the loss (with kl_coeff=0) equals
         //   sum_t -clip(r_t) * A * log_pi_t  /  num_active
         // Manual check against grpo_loss.
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let policy = candle_core::Tensor::new(&[-0.6_f32, -1.4, -0.5, -1.0], &device)?;
         let reference = candle_core::Tensor::new(&[-1.0_f32, -1.0, -1.0, -1.0], &device)?;
         let advantage = 0.5_f64;
@@ -12455,7 +12522,7 @@ mod tests {
     fn grpo_loss_reinforce_short_circuits_to_neg_advantage_per_token() -> Result<()> {
         // ReferencePolicy::None forces reinforce=true. The loss reduces to
         // `-advantage` per token, summed and scaled by loss_normalizer.
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let policy = candle_core::Tensor::new(&[-0.5_f32, -1.1, -0.8], &device)?;
         let reference = candle_core::Tensor::new(&[0.0_f32, 0.0, 0.0], &device)?;
         let advantage = 0.3_f64;
@@ -12501,7 +12568,7 @@ mod tests {
         // Smoke-check the analytic tail's IS-level branches against grpo_loss
         // for matching parameters. We use a small synthetic hidden state and
         // a tiny vocab to keep the test cheap.
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let seq_len = 5usize;
         let hidden_size = 4usize;
         let vocab = 6usize;
@@ -12563,7 +12630,7 @@ mod tests {
         // REINFORCE mode: loss should equal `-advantage * num_active *
         // (1/num_active)` = `-advantage`. Smoke-check via the analytic
         // tail's loss value.
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let seq_len = 4usize;
         let hidden_size = 3usize;
         let vocab = 5usize;
@@ -12630,12 +12697,12 @@ mod tests {
             std::env::set_var("KILN_STREAMING_TILE_TOKENS", "256");
             std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "128");
         }
-        assert_eq!(super::exact_gdn_backward_tile_tokens_for(&candle_core::Device::Cpu), 128);
+        assert_eq!(super::exact_gdn_backward_tile_tokens_for(&cpu_device()), 128);
 
         unsafe {
             std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "130");
         }
-        assert_eq!(super::exact_gdn_backward_tile_tokens_for(&candle_core::Device::Cpu), 256);
+        assert_eq!(super::exact_gdn_backward_tile_tokens_for(&cpu_device()), 256);
 
         restore_env("KILN_STREAMING_TILE_TOKENS", prior_streaming_tile);
         restore_env("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", prior_backward_tile);
@@ -12713,7 +12780,7 @@ mod tests {
             return Ok(());
         };
 
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let num_active = 3usize;
         let hidden_dim = 5usize;
         let vocab = 11usize;
@@ -12739,14 +12806,14 @@ mod tests {
         let hidden = hidden_var.as_tensor();
         let weight = candle_core::Tensor::from_vec(weight_data.clone(), (vocab, hidden_dim), &device)?;
         let active_logits = hidden.matmul(&weight.transpose(0, 1)?)?;
-        let zero_row = candle_core::Tensor::zeros((1usize, vocab), candle_core::DType::F32, &device)?;
+        let zero_row = zeros_f32_on((1usize, vocab), &device)?;
         let row0 = active_logits.narrow(0, 0, 1)?;
         let row1 = active_logits.narrow(0, 1, 1)?;
         let row2 = active_logits.narrow(0, 2, 1)?;
         let logits = candle_core::Tensor::cat(&[&zero_row, &row0, &row1, &row2, &zero_row], 0)?.unsqueeze(0)?;
         let trainer_log_probs = token_log_probs(&logits, &input_ids, &completion_mask, &device)?;
         let ref_log_probs_t =
-            candle_core::Tensor::new(ref_log_probs.as_slice(), &device)?.to_dtype(candle_core::DType::F32)?;
+            candle_core::Tensor::new(ref_log_probs.as_slice(), &device)?.to_f32_dtype()?;
         let trainer_loss = grpo_loss(
             &trainer_log_probs,
             &ref_log_probs_t,
@@ -12845,7 +12912,7 @@ mod tests {
 
     #[test]
     fn chunked_selected_log_probs_match_full_logits() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let normed_hidden = candle_core::Tensor::from_vec(
             vec![
                 0.10f32, -0.20, 0.30, 0.40, 0.50, -0.60, -0.70, 0.80, 0.90, 1.00, -1.10, 1.20,
@@ -12877,7 +12944,7 @@ mod tests {
         let max_diff = (&full - &chunked)?
             .abs()?
             .max_all()?
-            .to_dtype(candle_core::DType::F32)?
+            .to_f32_dtype()?
             .to_scalar::<f32>()?;
         assert!(
             max_diff < 1e-6,
@@ -12969,7 +13036,7 @@ mod tests {
         fn runtime(name: &'static str) -> std::sync::Arc<dyn BackendRuntime> {
             std::sync::Arc::new(Self {
                 name,
-                device: candle_core::Device::Cpu,
+                device: cpu_device(),
             })
         }
     }
@@ -13072,12 +13139,12 @@ mod tests {
 
         let embed_tokens = randn_like_seeded(&mut rng, 0.02, &[vocab, h], device)?;
         let embed_tokens_t = embed_tokens.t()?.contiguous()?;
-        let final_norm = candle_core::Tensor::zeros(h, candle_core::DType::F32, device)?; // (1+w)*x, so zeros = identity
+        let final_norm = zeros_f32_on(h, device)?; // (1+w)*x, so zeros = identity
 
         let mut layers = Vec::new();
         for layer_idx in 0..config.num_layers {
-            let input_layernorm = candle_core::Tensor::zeros(h, candle_core::DType::F32, device)?;
-            let post_attention_layernorm = candle_core::Tensor::zeros(h, candle_core::DType::F32, device)?;
+            let input_layernorm = zeros_f32_on(h, device)?;
+            let post_attention_layernorm = zeros_f32_on(h, device)?;
 
             let gate_proj = randn_like_seeded(&mut rng, 0.02, &[inter, h], device)?;
             let up_proj = randn_like_seeded(&mut rng, 0.02, &[inter, h], device)?;
@@ -13154,10 +13221,10 @@ mod tests {
                     in_proj_a,
                     in_proj_b,
                     conv1d,
-                    norm: candle_core::Tensor::zeros(config.linear_key_head_dim, candle_core::DType::F32, device)?,
+                    norm: zeros_f32_on(config.linear_key_head_dim, device)?,
                     a_log: a_log.clone(),
                     a_log_gates: a_log.to_dtype(candle_core::DType::BF16)?,
-                    dt_bias: candle_core::Tensor::zeros(config.linear_num_value_heads, candle_core::DType::F32, device)?,
+                    dt_bias: zeros_f32_on(config.linear_num_value_heads, device)?,
                     in_proj_qkv_t,
                     in_proj_z_t,
                     in_proj_a_t,
@@ -13194,7 +13261,7 @@ mod tests {
 
     #[test]
     fn test_lora_initialize_uses_transposed_projection_shapes() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let mut config = tiny_config();
         config.hidden_size = 48;
         config.intermediate_size = 80;
@@ -13208,7 +13275,7 @@ mod tests {
         let kiln_model::forward::GpuAttentionWeights::Full(full) = &mut layer.attention else {
             unreachable!("test config should create a full-attention layer");
         };
-        let stub = candle_core::Tensor::zeros((1usize,), candle_core::DType::F32, &device)?;
+        let stub = zeros_f32_on((1usize,), &device)?;
         full.q_proj = stub.clone();
         full.k_proj = stub.clone();
         full.v_proj = stub.clone();
@@ -13265,7 +13332,7 @@ mod tests {
 
     #[test]
     fn test_grpo_trainable_lora_params_include_exact_gdn_targets() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
         let params = TrainableLoraParams::initialize_seeded(
@@ -13352,7 +13419,7 @@ mod tests {
 
         let saved = candle_core::safetensors::load(
             &adapter_dir.path().join("adapter_model.safetensors"),
-            &candle_core::Device::Cpu,
+            &cpu_device(),
         )?;
         for module in ["in_proj_qkv", "in_proj_z", "out_proj"] {
             let key = format!(
@@ -13366,7 +13433,7 @@ mod tests {
 
     #[test]
     fn test_cross_entropy_loss_basic() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
 
         // 3 tokens, vocab size 4
         // logits: [1, 3, 4]
@@ -13400,7 +13467,7 @@ mod tests {
 
     #[test]
     fn test_analytic_sft_tail_grad_pre_final_norm_parity() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let seq_len = 5usize;
         let hidden_size = 4usize;
         let vocab_size = 7usize;
@@ -13494,7 +13561,7 @@ mod tests {
 
     #[test]
     fn test_segmented_forward_matches_full() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
 
@@ -13556,7 +13623,7 @@ mod tests {
 
     #[test]
     fn test_checkpointed_loss_matches_standard() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
 
@@ -13627,7 +13694,7 @@ mod tests {
         }
 
         let result = (|| -> Result<()> {
-            let device = candle_core::Device::Cpu;
+            let device = cpu_device();
             let config = tiny_config();
             let weights = tiny_weights(&config, &device)?;
             let backend = backend::for_device(&device);
@@ -13694,7 +13761,7 @@ mod tests {
                         let diff = (a - b)?
                             .abs()?
                             .max_all()?
-                            .to_dtype(candle_core::DType::F32)?
+                            .to_f32_dtype()?
                             .to_scalar::<f32>()?;
                         assert!(
                             diff < 1e-3,
@@ -13729,7 +13796,7 @@ mod tests {
 
     #[test]
     fn test_checkpointed_grpo_reverse_gradients_match_standard_cpu() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
         let backend = backend::for_device(&device);
@@ -13823,7 +13890,7 @@ mod tests {
                     let diff = (a - b)?
                         .abs()?
                         .max_all()?
-                        .to_dtype(candle_core::DType::F32)?
+                        .to_f32_dtype()?
                         .to_scalar::<f32>()?;
                     assert!(
                         diff < 1e-3,
@@ -13862,7 +13929,7 @@ mod tests {
         }
 
         let result = (|| -> Result<()> {
-            let device = candle_core::Device::Cpu;
+            let device = cpu_device();
             let config = tiny_config();
             let weights = tiny_weights(&config, &device)?;
             let backend = backend::for_device(&device);
@@ -13931,7 +13998,7 @@ mod tests {
                         let diff = (a - b)?
                             .abs()?
                             .max_all()?
-                            .to_dtype(candle_core::DType::F32)?
+                            .to_f32_dtype()?
                             .to_scalar::<f32>()?;
                         assert!(
                             diff < 1e-3,
@@ -13985,7 +14052,7 @@ mod tests {
         // baseline into a tiled run (or vice versa). See ENV_LOCK.
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
 
         // GDN-only mini-config: setting `full_attention_interval` strictly
         // greater than `num_layers` makes `is_full_attention_layer(i)` false
@@ -14093,7 +14160,7 @@ mod tests {
                     let diff = (g_m - g_t)?
                         .abs()?
                         .max_all()?
-                        .to_dtype(candle_core::DType::F32)?
+                        .to_f32_dtype()?
                         .to_scalar::<f32>()?;
                     // BF16 LoRA Var storage: 7-bit mantissa, ~1e-3 absolute noise.
                     assert!(
@@ -14195,7 +14262,7 @@ mod tests {
         // baseline into a tiled run (or vice versa). See ENV_LOCK.
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
 
         // Hybrid mini-config: full_attention_interval = 2 makes layers 1
         // and 3 full-attention; layers 0 and 2 are GDN. With num_layers =
@@ -14339,7 +14406,7 @@ mod tests {
             let diff = (&g_s - &g_p)?
                 .abs()?
                 .max_all()?
-                .to_dtype(candle_core::DType::F32)?
+                .to_f32_dtype()?
                 .to_scalar::<f32>()?;
             // BF16 LoRA Var storage: ~1e-3 absolute noise across kinds.
             let tol: f32 = match *kind {
@@ -14380,7 +14447,7 @@ mod tests {
 
     #[test]
     fn test_partition_segment_layers_by_attn_type() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let mut config = tiny_config();
         // full_attention_interval = 2 -> layers 1, 3 are FA, 0, 2 are GDN.
         config.full_attention_interval = 2;
@@ -14432,7 +14499,7 @@ mod tests {
         // inside `kiln-flce-kernel`: those validate the kernel in isolation,
         // this validates the wiring end-to-end through the real transformer
         // stack so enabling `KILN_USE_FLCE` for SFT is a no-op on the loss.
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
 
@@ -14493,7 +14560,7 @@ mod tests {
 
     #[test]
     fn test_checkpointed_gradients_nonzero() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
 
@@ -14524,7 +14591,7 @@ mod tests {
                 let grad_norm = grad
                     .sqr()?
                     .sum_all()?
-                    .to_dtype(candle_core::DType::F32)?
+                    .to_f32_dtype()?
                     .to_scalar::<f32>()?
                     .sqrt();
                 if grad_norm > 0.0 {
@@ -14607,7 +14674,7 @@ mod tests {
 
     #[test]
     fn test_checkpointed_training_loss_decreases() -> Result<()> {
-        run_checkpointed_training_loss_decreases(&candle_core::Device::Cpu)
+        run_checkpointed_training_loss_decreases(&cpu_device())
     }
 
     /// ECHO end-to-end smoke: build a tiny model, construct a GrpoGroup with
@@ -14619,7 +14686,7 @@ mod tests {
     /// pi-doctest replay is the integration gate (Phase 0/1 validation).
     #[test]
     fn test_echo_end_to_end_grpo_with_trajectory_rollouts() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
         let backend = backend::for_device(&device);
@@ -14808,7 +14875,7 @@ mod tests {
     /// this pins the trainer wiring.
     #[test]
     fn test_echo_no_policy_loss_verifier_free_e2e() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
         let backend = backend::for_device(&device);
@@ -14978,7 +15045,7 @@ mod tests {
         (|| -> Result<()> {
             use crate::ScoredRollout;
 
-            let device = candle_core::Device::Cpu;
+            let device = cpu_device();
             let model_config = tiny_config();
             let weights = tiny_weights(&model_config, &device)?;
             let tokenizer = make_echo_smoke_tokenizer()?;
@@ -15223,7 +15290,7 @@ mod tests {
     /// the GRPO term; this test pins the GRPO+ECHO total.
     #[test]
     fn test_echo_checkpointed_matches_uncheckpointed_loss() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
         let backend = backend::for_device(&device);
@@ -15353,7 +15420,7 @@ mod tests {
     /// landed in the analytic tail.
     #[test]
     fn test_echo_checkpointed_analytic_tail_contributes() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
         let final_norm_weight = weights.final_norm.clone();
@@ -15375,7 +15442,7 @@ mod tests {
             (1, input_ids.len(), config.hidden_size),
             &device,
         )?
-        .to_dtype(candle_core::DType::F32)?;
+        .to_f32_dtype()?;
 
         // ref_log_probs at action positions (3 entries).
         let ref_log_probs = candle_core::Tensor::from_vec(vec![-2.0f32, -1.5, -2.5], 3, &device)?;
@@ -15470,7 +15537,7 @@ mod tests {
     /// runs the same path but via the higher-level train_tokenized_grpo_group.
     #[test]
     fn test_echo_checkpointed_forward_backward_threads_echo_params() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
         let backend = backend::for_device(&device);
@@ -15633,7 +15700,7 @@ mod tests {
         // env vars mid-call. See ENV_LOCK.
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
 
@@ -15816,7 +15883,7 @@ mod tests {
     /// Vulkan dispatch), exercising the fallback math.
     #[test]
     fn adamw_cpu_fallback_updates_params_and_moments() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
         let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
@@ -15837,7 +15904,7 @@ mod tests {
         for var in params.all_vars() {
             before.push(
                 var.as_tensor()
-                    .to_dtype(candle_core::DType::F32)?
+                    .to_f32_dtype()?
                     .flatten_all()?
                     .to_vec1::<f32>()?,
             );
@@ -15867,7 +15934,7 @@ mod tests {
         for (i, var) in params.all_vars().iter().enumerate() {
             let after = var
                 .as_tensor()
-                .to_dtype(candle_core::DType::F32)?
+                .to_f32_dtype()?
                 .flatten_all()?
                 .to_vec1::<f32>()?;
             assert_eq!(after.len(), before[i].len());
@@ -15889,14 +15956,14 @@ mod tests {
             let m_sum = moments
                 .m
                 .as_tensor()
-                .to_dtype(candle_core::DType::F32)?
+                .to_f32_dtype()?
                 .abs()?
                 .sum_all()?
                 .to_scalar::<f32>()?;
             let v_sum = moments
                 .v
                 .as_tensor()
-                .to_dtype(candle_core::DType::F32)?
+                .to_f32_dtype()?
                 .abs()?
                 .sum_all()?
                 .to_scalar::<f32>()?;
@@ -15917,7 +15984,7 @@ mod tests {
     /// covered by the Vulkan backend's resident-activation tests.
     #[test]
     fn sync_to_candle_is_noop_on_cpu_backend() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
         let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
@@ -15942,7 +16009,7 @@ mod tests {
     /// missing bias correction.
     #[test]
     fn adamw_first_step_matches_unbiased_reference() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
         let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
@@ -15962,7 +16029,7 @@ mod tests {
         }
 
         let before = first_var
-            .to_dtype(candle_core::DType::F32)?
+            .to_f32_dtype()?
             .flatten_all()?
             .to_vec1::<f32>()?;
 
@@ -15982,7 +16049,7 @@ mod tests {
 
         let after = params.all_vars()[0]
             .as_tensor()
-            .to_dtype(candle_core::DType::F32)?
+            .to_f32_dtype()?
             .flatten_all()?
             .to_vec1::<f32>()?;
 
@@ -16080,13 +16147,13 @@ mod tests {
         params.save_peft(adapter_dir.path(), config.num_layers)?;
         let saved = candle_core::safetensors::load(
             &adapter_dir.path().join("adapter_model.safetensors"),
-            &candle_core::Device::Cpu,
+            &cpu_device(),
         )?;
         let saved_key = "base_model.model.model.layers.0.mlp.gate_proj.lora_A.weight";
         let saved_a = saved
             .get(saved_key)
             .ok_or_else(|| anyhow::anyhow!("saved adapter missing {saved_key}"))?
-            .to_dtype(candle_core::DType::F32)?
+            .to_f32_dtype()?
             .flatten_all()?
             .to_vec1::<f32>()?;
         let current_a = params.layers[0]
@@ -16095,7 +16162,7 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("missing layer 0 gate_proj LoRA params"))?
             .0
             .as_tensor()
-            .to_dtype(candle_core::DType::F32)?
+            .to_f32_dtype()?
             .flatten_all()?
             .to_vec1::<f32>()?;
         assert_eq!(saved_a.len(), current_a.len());
@@ -16223,7 +16290,7 @@ mod tests {
     fn build_perf_regression_cpu_fixture()
     -> Result<(ModelConfig, GpuWeights, KilnTokenizer, Vec<crate::SftExample>)> {
         let config = tiny_config();
-        let weights = tiny_weights(&config, &candle_core::Device::Cpu)?;
+        let weights = tiny_weights(&config, &cpu_device())?;
         let tokenizer = minimal_training_tokenizer(
             "{% for message in messages %}{{ message.content }}{% endfor %}",
         );
