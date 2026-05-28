@@ -474,22 +474,54 @@ fn cuda_via_kt_forward_op(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize tests that mutate `KILN_DISABLE_OPD_KT_FORWARD_OP` so
+    // they don't race against each other. Cargo runs tests in threads
+    // within a single process; without a lock, `kill_switch_on` can
+    // set the env to "1" in the middle of `kill_switch_default_off`'s
+    // sequence of `set_var` + `assert!(!kt_forward_op_disabled())`
+    // calls, causing a flaky failure (observed on macOS CI run
+    // 26572612427, commit 449fb6b1, #1082). The mutex is held for the
+    // entire test body — including the prior-value capture and the
+    // restore — so the env var is logically owned by exactly one
+    // test at a time.
+    //
+    // We use `parking_lot`-style poison handling (i.e. `.unwrap()` on
+    // a poisoned lock would normally propagate the panic from the
+    // previous test, but here we want to clear poison so a panic in
+    // one test doesn't cascade-fail the next): we explicitly recover
+    // from poisoning since the only shared state is the env var
+    // itself, which both tests fully restore at the end of their
+    // happy paths. If a prior test panicked mid-mutation, the env
+    // may still hold a stale value, but each test re-establishes its
+    // own starting condition (remove_var / set_var) before asserting.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poisoned| {
+            // A previous test panicked while holding the lock. Clear
+            // the poison and proceed — each test below re-establishes
+            // its own starting env state before asserting.
+            ENV_LOCK.clear_poison();
+            poisoned.into_inner()
+        })
+    }
 
     #[test]
     fn kill_switch_default_off() {
+        let _guard = env_lock();
         // Sanity: the default env should not trigger the kill switch.
         // (The harness may have set KILN_DISABLE_OPD_KT_FORWARD_OP=0,
         // which also reads as off.)
         // SAFETY: we don't set the env here — just check that an
         // unset (or "0") env yields false.
         let prior = std::env::var("KILN_DISABLE_OPD_KT_FORWARD_OP").ok();
-        // SAFETY: env modification is intra-test; this test runs in
-        // its own process under `cargo test`. We restore the prior
-        // value at the end.
-        // Cargo runs tests in threads — but this test only reads
-        // the env when the kill-switch reader is invoked, and the
-        // function is short. Other tests in this binary don't read
-        // the same var.
+        // SAFETY: env modification is intra-test and serialized via
+        // `ENV_LOCK` against the other test in this module that
+        // mutates the same var. The lock is held for the entire test
+        // body (including the restore), so no concurrent reader in
+        // this binary observes a partially-updated env.
         unsafe {
             std::env::remove_var("KILN_DISABLE_OPD_KT_FORWARD_OP");
         }
@@ -514,6 +546,7 @@ mod tests {
 
     #[test]
     fn kill_switch_on() {
+        let _guard = env_lock();
         let prior = std::env::var("KILN_DISABLE_OPD_KT_FORWARD_OP").ok();
         for v in ["1", "true", "yes", "TRUE", "Yes"] {
             unsafe {
