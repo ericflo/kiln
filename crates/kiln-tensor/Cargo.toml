@@ -55,16 +55,13 @@ candle-core = { workspace = true, optional = true }
 cudarc = { workspace = true, optional = true }
 
 # Optional — only under `metal`. `metal_storage.rs` references
-# `candle_metal_kernels::metal::Buffer` / `MTLStorageMode` directly;
-# candle-core does NOT re-export the `candle_metal_kernels` crate, so
-# we have to depend on it explicitly (matches kiln-model's pin).
+# `candle_metal_kernels::metal::Buffer` / `MTLStorageMode` directly,
+# and the 7 `metal_*` substrate ops dispatch directly into the
+# `candle_metal_kernels::call_*` MSL kernel entry points (no
+# `candle_nn` / `CandleTensor` bridge). candle-core does NOT re-export
+# the `candle_metal_kernels` crate, so we depend on it explicitly
+# (matches kiln-model's pin).
 candle-metal-kernels = { version = "0.10", optional = true }
-
-# Optional — pulled in under `metal` only. The Phase 4 `metal_softmax_last_axis`
-# substrate op dispatches through `candle_nn::ops::softmax_last_dim`, which
-# invokes candle's Metal softmax kernel. Phase 7 candle removal replaces this
-# inner call with a direct `candle_metal_kernels` or vendored MSL kernel.
-candle-nn = { workspace = true, optional = true }
 
 
 # Optional — pulled in under the `cuda` feature only. Provides the
@@ -87,7 +84,7 @@ default = []
 # the SINGLE candle hook in kiln-tensor; Phase 7 replaces it.
 cuda = ["dep:candle-core", "candle-core?/cuda", "dep:cudarc", "dep:kiln-blas"]
 # Reserved for Phase 1.7. Same pattern as `cuda`.
-metal = ["dep:candle-core", "candle-core?/metal", "dep:candle-metal-kernels", "dep:candle-nn", "candle-nn?/metal"]
+metal = ["dep:candle-core", "candle-core?/metal", "dep:candle-metal-kernels"]
 # Phase 1.8 — Vulkan storage. Does NOT go through candle: lifts
 # kiln-vulkan-kernel's already-candle-free VulkanBuffer + VulkanDevice.
 # This is a permanent dependency (Phase 7 does not change it).
