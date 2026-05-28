@@ -114,6 +114,15 @@ pub use kt_forward_op::{
     kt_forward_op_disabled, opd_top_k_reverse_kl_per_position_via_kt_forward_op,
 };
 
+/// Wave-13 (#1082): candle-typed kt-tape adapter for the production
+/// caller in `kiln-train::opd::opd_step_loss`. Mirrors the rmsnorm
+/// sibling `kiln-model::tape_forward::try_tape_rms_norm_cuda` — same
+/// `KILN_USE_TAPE_FORWARD` env gate + thread-local-tape contract.
+#[cfg(feature = "cuda")]
+mod tape_forward;
+#[cfg(feature = "cuda")]
+pub use tape_forward::try_tape_opd_per_position_cuda;
+
 /// Phase 6a/CP-4 (#1082): parallel kt-tape entry that drops the candle
 /// CustomOp1 wrapper in favour of recording onto a `kiln_autograd::Tape`
 /// directly. Same FFI symbols on the backward, same envelope. See

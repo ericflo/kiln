@@ -1244,15 +1244,54 @@ pub fn opd_step_loss(inputs: OpdStepInputs<'_>) -> Result<OpdStepOutputs> {
     // autograd descendant of `student_hidden`'s LoRA-Var parents, so
     // `mean_kl.backward()` flows gradients into the LoRA parameters
     // the trainer is optimizing.
-    let per_position_kl = opd_top_k_reverse_kl_per_position_via_kt_forward_op(
-        student_hidden,
-        head_t,
-        &teacher_topk_indices,
-        &teacher_topk_logprobs,
-        &label_mask,
-        resolved_top_k,
-        &device,
-    )?;
+    //
+    // Wave-13 (#1082): when `KILN_USE_TAPE_FORWARD=1` AND a thread-
+    // local `kiln_autograd::Tape` scope is active, route through
+    // `try_tape_opd_per_position_cuda` instead. The forward result is
+    // bit-exact with the kt-shim (same FFI symbols underneath); the
+    // backward node is recorded on the tape for `Tape::backward`. With
+    // either gate off (the default) `try_tape_opd_per_position_cuda`
+    // returns `Ok(None)` and we fall through to the existing kt-shim.
+    // The kt-shim's candle-autograd chain is preserved when the tape
+    // path short-circuits — which is the correct path for any caller
+    // still driving gradients via `loss.backward()`.
+    let per_position_kl = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(out) = kiln_opd_loss_kernel::try_tape_opd_per_position_cuda(
+                student_hidden,
+                head_t,
+                &teacher_topk_indices,
+                &teacher_topk_logprobs,
+                &label_mask,
+                resolved_top_k,
+            )? {
+                out
+            } else {
+                opd_top_k_reverse_kl_per_position_via_kt_forward_op(
+                    student_hidden,
+                    head_t,
+                    &teacher_topk_indices,
+                    &teacher_topk_logprobs,
+                    &label_mask,
+                    resolved_top_k,
+                    &device,
+                )?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            opd_top_k_reverse_kl_per_position_via_kt_forward_op(
+                student_hidden,
+                head_t,
+                &teacher_topk_indices,
+                &teacher_topk_logprobs,
+                &label_mask,
+                resolved_top_k,
+                &device,
+            )?
+        }
+    };
     let mean_kl = per_position_kl.mean_all().context("mean per-position KL")?;
 
     Ok(OpdStepOutputs {
