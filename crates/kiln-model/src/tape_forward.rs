@@ -456,6 +456,20 @@ pub fn try_tape_embedding_cuda(
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .context("tape_forward::try_tape_embedding_cuda: kt -> candle copy failed")?;
 
+    // CP-4 (#1082) tape_bridge: register the (kt_id ↔ candle_id) IO
+    // mappings so a surrounding `with_tape_scope_emit_to_grad_store` can
+    // transmute the tape-recorded `EmbeddingBackward` weight gradient into
+    // a candle-typed gradient in the candle GradStore. Without these, the
+    // embedding-table gradient (which is tied to `lm_head` in Qwen3.5 and
+    // therefore trainable) never reaches the optimizer — the bug the DoD
+    // "tied-weight grad accumulation parity" item guards against. No-ops
+    // cleanly when no bridge scope is active.
+    //
+    // `token_ids` is intentionally NOT mapped: integer gather indices carry
+    // no gradient, and `EmbeddingBackward` returns `None` for that input.
+    kiln_kt_bridge::tape_bridge::register_input_mapping(w_kt.id(), weights.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+
     Ok(Some(out))
 }
 
