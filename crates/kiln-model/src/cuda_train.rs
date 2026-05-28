@@ -7,7 +7,7 @@
 //! accepting CPU tensors by accident.
 
 use anyhow::{Context, Result, ensure};
-use candle_core::{D, DType, Device, Tensor, TensorId};
+
 use kiln_core::config::ModelConfig;
 use kiln_core::env_flag::env_flag;
 use std::collections::{HashMap, HashSet};
@@ -35,25 +35,25 @@ pub trait CudaBackwardOp: Send + Sync + std::fmt::Debug {
 
 #[derive(Debug, Clone)]
 pub struct CudaTrainTensor {
-    tensor: Tensor,
+    tensor: candle_core::Tensor,
     requires_grad: bool,
-    param_id: Option<TensorId>,
+    param_id: Option<candle_core::TensorId>,
     op_id: u64,
     grad_fn: Option<Arc<dyn CudaBackwardOp>>,
 }
 
 impl CudaTrainTensor {
-    pub fn new(tensor: Tensor) -> Result<Self> {
+    pub fn new(tensor: candle_core::Tensor) -> Result<Self> {
         Self::leaf(tensor, false, None)
     }
 
-    pub fn parameter(tensor: Tensor, param_id: TensorId) -> Result<Self> {
+    pub fn parameter(tensor: candle_core::Tensor, param_id: candle_core::TensorId) -> Result<Self> {
         Self::leaf(tensor, true, Some(param_id))
     }
 
-    fn leaf(tensor: Tensor, requires_grad: bool, param_id: Option<TensorId>) -> Result<Self> {
+    fn leaf(tensor: candle_core::Tensor, requires_grad: bool, param_id: Option<candle_core::TensorId>) -> Result<Self> {
         ensure!(
-            matches!(tensor.device(), Device::Cuda(_)),
+            matches!(tensor.device(), candle_core::Device::Cuda(_)),
             "CudaTrainTensor requires a CUDA tensor, got {:?}",
             tensor.device()
         );
@@ -66,9 +66,9 @@ impl CudaTrainTensor {
         })
     }
 
-    pub fn from_op(tensor: Tensor, grad_fn: Option<Arc<dyn CudaBackwardOp>>) -> Result<Self> {
+    pub fn from_op(tensor: candle_core::Tensor, grad_fn: Option<Arc<dyn CudaBackwardOp>>) -> Result<Self> {
         ensure!(
-            matches!(tensor.device(), Device::Cuda(_)),
+            matches!(tensor.device(), candle_core::Device::Cuda(_)),
             "CudaTrainTensor::from_op requires a CUDA tensor, got {:?}",
             tensor.device()
         );
@@ -82,13 +82,13 @@ impl CudaTrainTensor {
         })
     }
 
-    pub fn zeros_like(reference: &Tensor) -> Result<Self> {
+    pub fn zeros_like(reference: &candle_core::Tensor) -> Result<Self> {
         ensure!(
-            matches!(reference.device(), Device::Cuda(_)),
+            matches!(reference.device(), candle_core::Device::Cuda(_)),
             "CudaTrainTensor::zeros_like requires a CUDA tensor, got {:?}",
             reference.device()
         );
-        let tensor = Tensor::zeros(
+        let tensor = candle_core::Tensor::zeros(
             reference.shape().clone(),
             reference.dtype(),
             reference.device(),
@@ -107,11 +107,11 @@ impl CudaTrainTensor {
         }
     }
 
-    pub fn as_tensor(&self) -> &Tensor {
+    pub fn as_tensor(&self) -> &candle_core::Tensor {
         &self.tensor
     }
 
-    pub fn dtype(&self) -> DType {
+    pub fn dtype(&self) -> candle_core::DType {
         self.tensor.dtype()
     }
 
@@ -127,7 +127,7 @@ impl CudaTrainTensor {
         self.requires_grad
     }
 
-    pub fn param_id(&self) -> Option<TensorId> {
+    pub fn param_id(&self) -> Option<candle_core::TensorId> {
         self.param_id
     }
 
@@ -164,9 +164,9 @@ impl CudaTrainTensor {
             "cuda_train sgd_step kt: unsupported optimizer tensor envelope"
         );
         match self.tensor.dtype() {
-            DType::F32 => kiln_rmsnorm_kernel::sgd_step_f32_kt(&param_kt, &grad_kt, lr)
+            candle_core::DType::F32 => kiln_rmsnorm_kernel::sgd_step_f32_kt(&param_kt, &grad_kt, lr)
                 .map_err(|e| anyhow::anyhow!("cuda_train sgd_step_f32_kt: {e}")),
-            DType::BF16 => kiln_rmsnorm_kernel::sgd_step_bf16_kt(&param_kt, &grad_kt, lr)
+            candle_core::DType::BF16 => kiln_rmsnorm_kernel::sgd_step_bf16_kt(&param_kt, &grad_kt, lr)
                 .map_err(|e| anyhow::anyhow!("cuda_train sgd_step_bf16_kt: {e}")),
             other => anyhow::bail!("cuda_train sgd_step kt: unsupported dtype {other:?}"),
         }
@@ -227,7 +227,7 @@ impl CudaTrainTensor {
             "cuda_train adamw_step kt: unsupported optimizer tensor envelope"
         );
         match self.tensor.dtype() {
-            DType::F32 => kiln_rmsnorm_kernel::adamw_step_f32_kt(
+            candle_core::DType::F32 => kiln_rmsnorm_kernel::adamw_step_f32_kt(
                 &param_kt,
                 &grad_kt,
                 &m1_kt,
@@ -241,7 +241,7 @@ impl CudaTrainTensor {
                 bias_correction2,
             )
             .map_err(|e| anyhow::anyhow!("cuda_train adamw_step_f32_kt: {e}")),
-            DType::BF16 => kiln_rmsnorm_kernel::adamw_step_bf16_kt(
+            candle_core::DType::BF16 => kiln_rmsnorm_kernel::adamw_step_bf16_kt(
                 &param_kt,
                 &grad_kt,
                 &m1_kt,
@@ -262,16 +262,16 @@ impl CudaTrainTensor {
     pub fn to_vec_f32(&self) -> Result<Vec<f32>> {
         Ok(self
             .tensor
-            .to_dtype(DType::F32)?
+            .to_dtype(candle_core::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?)
     }
 }
 
-/// Per-parameter gradient store keyed by candle `TensorId`.
+/// Per-parameter gradient store keyed by candle `candle_core::TensorId`.
 #[derive(Debug, Default)]
 pub struct CudaGradStore {
-    grads: HashMap<TensorId, CudaTrainTensor>,
+    grads: HashMap<candle_core::TensorId, CudaTrainTensor>,
 }
 
 impl CudaGradStore {
@@ -281,23 +281,23 @@ impl CudaGradStore {
         }
     }
 
-    pub fn insert(&mut self, id: TensorId, t: CudaTrainTensor) {
+    pub fn insert(&mut self, id: candle_core::TensorId, t: CudaTrainTensor) {
         self.grads.insert(id, t);
     }
 
-    pub fn get(&self, id: TensorId) -> Option<&CudaTrainTensor> {
+    pub fn get(&self, id: candle_core::TensorId) -> Option<&CudaTrainTensor> {
         self.grads.get(&id)
     }
 
-    pub fn remove(&mut self, id: TensorId) -> Option<CudaTrainTensor> {
+    pub fn remove(&mut self, id: candle_core::TensorId) -> Option<CudaTrainTensor> {
         self.grads.remove(&id)
     }
 
-    pub fn into_inner(self) -> HashMap<TensorId, CudaTrainTensor> {
+    pub fn into_inner(self) -> HashMap<candle_core::TensorId, CudaTrainTensor> {
         self.grads
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&TensorId, &CudaTrainTensor)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&candle_core::TensorId, &CudaTrainTensor)> {
         self.grads.iter()
     }
 
@@ -312,15 +312,15 @@ impl CudaGradStore {
 
 #[derive(Debug)]
 pub struct CudaTrainArena {
-    device: Device,
+    device: candle_core::Device,
     allocations: Vec<CudaTrainTensor>,
     allocated_bytes: usize,
 }
 
 impl CudaTrainArena {
-    pub fn new(device: &Device) -> Result<Self> {
+    pub fn new(device: &candle_core::Device) -> Result<Self> {
         ensure!(
-            matches!(device, Device::Cuda(_)),
+            matches!(device, candle_core::Device::Cuda(_)),
             "CudaTrainArena requires a CUDA device, got {device:?}"
         );
         Ok(Self {
@@ -330,16 +330,16 @@ impl CudaTrainArena {
         })
     }
 
-    pub fn zeros(&mut self, dims: &[usize], dtype: DType) -> Result<CudaTrainTensor> {
+    pub fn zeros(&mut self, dims: &[usize], dtype: candle_core::DType) -> Result<CudaTrainTensor> {
         let tensor =
-            Tensor::zeros(dims.to_vec(), dtype, &self.device).context("CudaTrainArena::zeros")?;
+            candle_core::Tensor::zeros(dims.to_vec(), dtype, &self.device).context("CudaTrainArena::zeros")?;
         let train_tensor = CudaTrainTensor::new(tensor)?;
         self.track(train_tensor)
     }
 
     pub fn track(&mut self, tensor: CudaTrainTensor) -> Result<CudaTrainTensor> {
         ensure!(
-            matches!(tensor.as_tensor().device(), Device::Cuda(_)),
+            matches!(tensor.as_tensor().device(), candle_core::Device::Cuda(_)),
             "CudaTrainArena can only track CUDA tensors, got {:?}",
             tensor.as_tensor().device()
         );
@@ -368,10 +368,10 @@ impl CudaTrainArena {
 fn approx_tensor_bytes(tensor: &CudaTrainTensor) -> Result<usize> {
     let elems: usize = tensor.dims().iter().product();
     let elem_bytes = match tensor.dtype() {
-        DType::U8 => 1,
-        DType::U32 | DType::F32 => 4,
-        DType::I64 | DType::F64 => 8,
-        DType::BF16 | DType::F16 => 2,
+        candle_core::DType::U8 => 1,
+        candle_core::DType::U32 | candle_core::DType::F32 => 4,
+        candle_core::DType::I64 | candle_core::DType::F64 => 8,
+        candle_core::DType::BF16 | candle_core::DType::F16 => 2,
         other => anyhow::bail!("CudaTrainArena does not support byte accounting for {other:?}"),
     };
     elems
@@ -393,7 +393,7 @@ pub fn cuda_backward(loss: &CudaTrainTensor) -> Result<CudaGradStore> {
     collect_topo(loss, &mut visited, &mut order, &mut leaves);
 
     let mut grads: HashMap<u64, CudaTrainTensor> = HashMap::new();
-    let seed = Tensor::ones(
+    let seed = candle_core::Tensor::ones(
         loss.as_tensor().shape().clone(),
         loss.dtype(),
         loss.as_tensor().device(),
@@ -517,7 +517,7 @@ impl CudaAdamWState {
 pub fn cuda_adamw_step_from_store(
     params: &[CudaTrainTensor],
     grads: &CudaGradStore,
-    states: &mut HashMap<TensorId, CudaAdamWState>,
+    states: &mut HashMap<candle_core::TensorId, CudaAdamWState>,
     cfg: CudaAdamWConfig,
 ) -> Result<usize> {
     let mut updated = 0usize;
@@ -832,7 +832,7 @@ pub fn cuda_scale(input: &CudaTrainTensor, scale: f32) -> Result<CudaTrainTensor
 
 pub fn cuda_causal_mask(input: &CudaTrainTensor, kv_offset: usize) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32,
         "cuda_causal_mask: expected F32 input, got {:?}",
         input.dtype()
     );
@@ -853,7 +853,7 @@ pub fn cuda_causal_mask(input: &CudaTrainTensor, kv_offset: usize) -> Result<Cud
             (0..kv_len).map(move |kv_idx| if kv_idx < max_kv { 0.0 } else { -1.0e30 })
         })
         .collect();
-    let mask = Tensor::new(mask, input.as_tensor().device())
+    let mask = candle_core::Tensor::new(mask, input.as_tensor().device())
         .context("cuda_causal_mask: build mask tensor")?
         .reshape((1usize, q_len, kv_len))
         .context("cuda_causal_mask: reshape mask")?;
@@ -877,7 +877,7 @@ pub fn cuda_rmsnorm(
     eps: f32,
 ) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32 && weight.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32 && weight.dtype() == candle_core::DType::F32,
         "cuda_rmsnorm: expected F32 input and weight, got input={:?} weight={:?}",
         input.dtype(),
         weight.dtype()
@@ -911,7 +911,7 @@ pub fn cuda_rmsnorm(
     {
         Some(out) => out,
         None => sq
-            .mean_keepdim(D::Minus1)
+            .mean_keepdim(candle_core::D::Minus1)
             .context("cuda_rmsnorm: row variance")?,
     };
     // Phase 7 (#1082): route the `(variance + eps).sqrt().recip()` chain
@@ -972,9 +972,9 @@ fn cuda_rope_apply(
     sin: &CudaTrainTensor,
     rotary_dim: usize,
     inverse: bool,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     ensure!(
-        input.dtype() == DType::F32 && cos.dtype() == DType::F32 && sin.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32 && cos.dtype() == candle_core::DType::F32 && sin.dtype() == candle_core::DType::F32,
         "cuda_rope: expected F32 input/cos/sin, got input={:?} cos={:?} sin={:?}",
         input.dtype(),
         cos.dtype(),
@@ -1005,23 +1005,23 @@ fn cuda_rope_apply(
 
     let x_rot = input
         .as_tensor()
-        .narrow(D::Minus1, 0, rotary_dim)
+        .narrow(candle_core::D::Minus1, 0, rotary_dim)
         .context("cuda_rope: narrow rotary dims")?;
     let x_pass = if rotary_dim < head_dim {
         Some(
             input
                 .as_tensor()
-                .narrow(D::Minus1, rotary_dim, head_dim - rotary_dim)
+                .narrow(candle_core::D::Minus1, rotary_dim, head_dim - rotary_dim)
                 .context("cuda_rope: narrow passthrough dims")?,
         )
     } else {
         None
     };
     let x1 = x_rot
-        .narrow(D::Minus1, 0, half)
+        .narrow(candle_core::D::Minus1, 0, half)
         .context("cuda_rope: narrow first half")?;
     let x2 = x_rot
-        .narrow(D::Minus1, half, half)
+        .narrow(candle_core::D::Minus1, half, half)
         .context("cuda_rope: narrow second half")?;
     let cos = cos
         .as_tensor()
@@ -1060,23 +1060,23 @@ fn cuda_rope_apply(
     // candle composite still runs.
     match x_pass {
         Some(pass) => {
-            let pieces: [&Tensor; 3] = [&r1, &r2, &pass];
+            let pieces: [&candle_core::Tensor; 3] = [&r1, &r2, &pass];
             if let Some(out) = crate::forward::try_kt_concat_last_dim(&pieces)
                 .context("cuda_rope: try_kt_concat_last_dim")?
             {
                 Ok(out)
             } else {
-                Tensor::cat(&pieces, D::Minus1).context("cuda_rope: cat output")
+                candle_core::Tensor::cat(&pieces, candle_core::D::Minus1).context("cuda_rope: cat output")
             }
         }
         None => {
-            let pieces: [&Tensor; 2] = [&r1, &r2];
+            let pieces: [&candle_core::Tensor; 2] = [&r1, &r2];
             if let Some(out) = crate::forward::try_kt_concat_last_dim(&pieces)
                 .context("cuda_rope: try_kt_concat_last_dim")?
             {
                 Ok(out)
             } else {
-                Tensor::cat(&pieces, D::Minus1).context("cuda_rope: cat output")
+                candle_core::Tensor::cat(&pieces, candle_core::D::Minus1).context("cuda_rope: cat output")
             }
         }
     }
@@ -1102,7 +1102,7 @@ pub fn cuda_rope(
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
-pub fn cuda_to_dtype(input: &CudaTrainTensor, dtype: DType) -> Result<CudaTrainTensor> {
+pub fn cuda_to_dtype(input: &CudaTrainTensor, dtype: candle_core::DType) -> Result<CudaTrainTensor> {
     let out = input
         .as_tensor()
         .to_dtype(dtype)
@@ -1269,7 +1269,7 @@ pub fn cuda_matmul_f32_bf16w(
         rhs.dims()
     );
     ensure!(
-        lhs.dtype() == DType::F32 && rhs.dtype() == DType::BF16,
+        lhs.dtype() == candle_core::DType::F32 && rhs.dtype() == candle_core::DType::BF16,
         "cuda_matmul_f32_bf16w: expected F32 lhs and BF16 rhs, got {:?}/{:?}",
         lhs.dtype(),
         rhs.dtype()
@@ -1288,8 +1288,8 @@ pub fn cuda_matmul_f32_bf16w(
 
 pub fn cuda_frozen_matmul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     match (lhs.dtype(), rhs.dtype()) {
-        (DType::F32, DType::F32) => cuda_matmul(lhs, rhs),
-        (DType::F32, DType::BF16) => cuda_matmul_f32_bf16w(lhs, rhs),
+        (candle_core::DType::F32, candle_core::DType::F32) => cuda_matmul(lhs, rhs),
+        (candle_core::DType::F32, candle_core::DType::BF16) => cuda_matmul_f32_bf16w(lhs, rhs),
         _ => anyhow::bail!(
             "cuda_frozen_matmul: unsupported lhs/rhs dtypes {:?}/{:?}",
             lhs.dtype(),
@@ -1335,7 +1335,7 @@ pub fn cuda_lora_linear_fused(
         b.dims()
     );
     ensure!(
-        input.dtype() == DType::F32 && a.dtype() == DType::F32 && b.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32 && a.dtype() == candle_core::DType::F32 && b.dtype() == candle_core::DType::F32,
         "cuda_lora_linear_fused: expected F32 input/A/B, got {:?}/{:?}/{:?}",
         input.dtype(),
         a.dtype(),
@@ -1343,11 +1343,11 @@ pub fn cuda_lora_linear_fused(
     );
 
     let base_out = match (input.dtype(), base_weight.dtype()) {
-        (DType::F32, DType::F32) => input
+        (candle_core::DType::F32, candle_core::DType::F32) => input
             .as_tensor()
             .matmul(base_weight.as_tensor())
             .context("cuda_lora_linear_fused: base F32 matmul")?,
-        (DType::F32, DType::BF16) => {
+        (candle_core::DType::F32, candle_core::DType::BF16) => {
             kiln_rmsnorm_kernel::matmul_f32_bf16w(input.as_tensor(), base_weight.as_tensor())
                 .context("cuda_lora_linear_fused: base BF16-weight matmul")?
         }
@@ -1518,7 +1518,7 @@ pub struct CudaLinearAttentionState {
 impl CudaLinearAttentionState {
     /// Create fresh zero-initialized state for `num_gdn_layers` GDN layers.
     pub fn zeros(
-        device: &Device,
+        device: &candle_core::Device,
         num_gdn_layers: usize,
         batch: usize,
         heads_v: usize,
@@ -1528,7 +1528,7 @@ impl CudaLinearAttentionState {
         kernel_size: usize,
     ) -> Result<Self> {
         ensure!(
-            matches!(device, Device::Cuda(_)),
+            matches!(device, candle_core::Device::Cuda(_)),
             "CudaLinearAttentionState requires a CUDA device, got {:?}",
             device
         );
@@ -1538,15 +1538,15 @@ impl CudaLinearAttentionState {
         let mut layers = Vec::with_capacity(num_gdn_layers);
         for _ in 0..num_gdn_layers {
             layers.push(CudaGdnLayerState {
-                recurrent_state: CudaTrainTensor::new(Tensor::zeros(
+                recurrent_state: CudaTrainTensor::new(candle_core::Tensor::zeros(
                     (batch, heads_v, head_dim_k, head_dim_v),
-                    DType::F32,
+                    candle_core::DType::F32,
                     device,
                 )?)?,
                 recurrent_n_elements: recurrent_n,
-                conv_state: CudaTrainTensor::new(Tensor::zeros(
+                conv_state: CudaTrainTensor::new(candle_core::Tensor::zeros(
                     (batch, conv_channels, state_len),
-                    DType::F32,
+                    candle_core::DType::F32,
                     device,
                 )?)?,
                 conv_n_elements: conv_n,
@@ -1565,28 +1565,28 @@ pub fn cuda_count_gdn_layers(weights: &CudaModelWeights) -> usize {
         .count()
 }
 
-fn cuda_frozen_f32_tensor(tensor: &Tensor, name: &str) -> Result<CudaTrainTensor> {
+fn cuda_frozen_f32_tensor(tensor: &candle_core::Tensor, name: &str) -> Result<CudaTrainTensor> {
     ensure!(
-        matches!(tensor.device(), Device::Cuda(_)),
+        matches!(tensor.device(), candle_core::Device::Cuda(_)),
         "CUDA native model import requires CUDA tensor for {name}, got {:?}",
         tensor.device()
     );
     let tensor = tensor
-        .to_dtype(DType::F32)
+        .to_dtype(candle_core::DType::F32)
         .with_context(|| format!("convert CUDA native model weight {name} to f32"))?
         .contiguous()
         .with_context(|| format!("make CUDA native model weight {name} contiguous"))?;
     CudaTrainTensor::new(tensor).with_context(|| format!("wrap CUDA native model weight {name}"))
 }
 
-fn cuda_frozen_typed_tensor(tensor: &Tensor, name: &str) -> Result<CudaTrainTensor> {
+fn cuda_frozen_typed_tensor(tensor: &candle_core::Tensor, name: &str) -> Result<CudaTrainTensor> {
     ensure!(
-        matches!(tensor.device(), Device::Cuda(_)),
+        matches!(tensor.device(), candle_core::Device::Cuda(_)),
         "CUDA native model import requires CUDA tensor for {name}, got {:?}",
         tensor.device()
     );
     ensure!(
-        matches!(tensor.dtype(), DType::F32 | DType::BF16),
+        matches!(tensor.dtype(), candle_core::DType::F32 | candle_core::DType::BF16),
         "CUDA native typed import supports only F32/BF16 for {name}, got {:?}",
         tensor.dtype()
     );
@@ -1681,9 +1681,9 @@ impl CudaModelWeights {
         }
         let rotary_inv_freq = weights
             .rotary_inv_freq
-            .to_dtype(DType::F32)
+            .to_dtype(candle_core::DType::F32)
             .context("convert CUDA native model rotary_inv_freq to f32")?
-            .to_device(&Device::Cpu)
+            .to_device(&candle_core::Device::Cpu)
             .context("read CUDA native model rotary_inv_freq to CPU")?
             .flatten_all()
             .context("flatten CUDA native model rotary_inv_freq")?
@@ -1922,7 +1922,7 @@ pub fn cuda_batched_matmul(
 
 pub fn cuda_softmax_last_dim(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32,
         "cuda_softmax_last_dim: expected F32 input, got {:?}",
         input.dtype()
     );
@@ -1939,7 +1939,7 @@ pub fn cuda_softmax_last_dim(input: &CudaTrainTensor) -> Result<CudaTrainTensor>
     {
         Some(out) => out,
         None => x_ref
-            .max_keepdim(D::Minus1)
+            .max_keepdim(candle_core::D::Minus1)
             .context("cuda_softmax_last_dim: max_keepdim")?,
     };
     let shifted = x_ref
@@ -1964,7 +1964,7 @@ pub fn cuda_softmax_last_dim(input: &CudaTrainTensor) -> Result<CudaTrainTensor>
     {
         Some(out) => out,
         None => exp_shifted
-            .sum_keepdim(D::Minus1)
+            .sum_keepdim(candle_core::D::Minus1)
             .context("cuda_softmax_last_dim: sum_keepdim")?,
     };
     let out = exp_shifted
@@ -1988,7 +1988,7 @@ pub fn cuda_shifted_cross_entropy_loss(
     label_mask: &[bool],
 ) -> Result<CudaTrainTensor> {
     ensure!(
-        logits.dtype() == DType::F32,
+        logits.dtype() == candle_core::DType::F32,
         "cuda_shifted_cross_entropy_loss: expected F32 logits, got {:?}",
         logits.dtype()
     );
@@ -2042,16 +2042,16 @@ pub fn cuda_shifted_cross_entropy_loss(
         .narrow(0, 0, seq_len - 1)
         .context("cuda_shifted_cross_entropy_loss: shift logits")?;
     let active_indices: Vec<u32> = active_positions.iter().map(|&idx| idx as u32).collect();
-    let indices = Tensor::new(active_indices.as_slice(), logits.as_tensor().device())
+    let indices = candle_core::Tensor::new(active_indices.as_slice(), logits.as_tensor().device())
         .context("cuda_shifted_cross_entropy_loss: active indices")?;
     let active_logits = shift_logits
         .index_select(&indices, 0)
         .context("cuda_shifted_cross_entropy_loss: active logits")?;
     let log_sum_exp = active_logits
-        .log_sum_exp(D::Minus1)
+        .log_sum_exp(candle_core::D::Minus1)
         .context("cuda_shifted_cross_entropy_loss: log_sum_exp")?;
     let labels_u32: Vec<u32> = active_labels.iter().map(|&label| label as u32).collect();
-    let labels = Tensor::new(labels_u32.as_slice(), logits.as_tensor().device())
+    let labels = candle_core::Tensor::new(labels_u32.as_slice(), logits.as_tensor().device())
         .context("cuda_shifted_cross_entropy_loss: labels")?
         .unsqueeze(1)
         .context("cuda_shifted_cross_entropy_loss: labels unsqueeze")?;
@@ -2079,13 +2079,13 @@ pub fn cuda_shifted_cross_entropy_loss(
 }
 
 fn cuda_f32_hidden_head_matmul(
-    lhs: &Tensor,
-    rhs: &Tensor,
+    lhs: &candle_core::Tensor,
+    rhs: &candle_core::Tensor,
     context: &'static str,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     match (lhs.dtype(), rhs.dtype()) {
-        (DType::F32, DType::F32) => lhs.matmul(rhs).context(context),
-        (DType::F32, DType::BF16) => {
+        (candle_core::DType::F32, candle_core::DType::F32) => lhs.matmul(rhs).context(context),
+        (candle_core::DType::F32, candle_core::DType::BF16) => {
             kiln_rmsnorm_kernel::matmul_f32_bf16w(lhs, rhs).context(context)
         }
         _ => anyhow::bail!(
@@ -2104,7 +2104,7 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
     chunk_size: usize,
 ) -> Result<CudaTrainTensor> {
     ensure!(
-        hidden.dtype() == DType::F32 && matches!(lm_head_weight.dtype(), DType::F32 | DType::BF16),
+        hidden.dtype() == candle_core::DType::F32 && matches!(lm_head_weight.dtype(), candle_core::DType::F32 | candle_core::DType::BF16),
         "cuda_shifted_linear_cross_entropy_loss expects F32 hidden and F32/BF16 head, got {:?}/{:?}",
         hidden.dtype(),
         lm_head_weight.dtype()
@@ -2175,14 +2175,14 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
         .narrow(0, 0, seq_len - 1)
         .context("cuda_shifted_linear_cross_entropy_loss: shift hidden")?;
     let active_indices_u32: Vec<u32> = active_positions.iter().map(|&idx| idx as u32).collect();
-    let active_indices = Tensor::new(active_indices_u32.as_slice(), device)
+    let active_indices = candle_core::Tensor::new(active_indices_u32.as_slice(), device)
         .context("cuda_shifted_linear_cross_entropy_loss: active indices")?;
     let active_hidden = shift_hidden
         .index_select(&active_indices, 0)
         .context("cuda_shifted_linear_cross_entropy_loss: active hidden")?;
 
-    let mut running_max: Option<Tensor> = None;
-    let mut running_sumexp: Option<Tensor> = None;
+    let mut running_max: Option<candle_core::Tensor> = None;
+    let mut running_sumexp: Option<candle_core::Tensor> = None;
     let mut chunk_start = 0usize;
     while chunk_start < vocab {
         let chunk_len = chunk_size.min(vocab - chunk_start);
@@ -2198,7 +2198,7 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
             "cuda_shifted_linear_cross_entropy_loss: logits chunk",
         )?;
         let chunk_max = logits_chunk
-            .max_keepdim(D::Minus1)
+            .max_keepdim(candle_core::D::Minus1)
             .context("cuda_shifted_linear_cross_entropy_loss: chunk max")?;
         let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
             (None, None) => {
@@ -2225,7 +2225,7 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
                 {
                     Some(out) => out,
                     None => chunk_exp
-                        .sum_keepdim(D::Minus1)
+                        .sum_keepdim(candle_core::D::Minus1)
                         .context("cuda_shifted_linear_cross_entropy_loss: initial sum")?,
                 };
                 (chunk_max.detach(), chunk_sumexp.detach())
@@ -2289,7 +2289,7 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
                 {
                     Some(out) => out,
                     None => chunk_exp
-                        .sum_keepdim(D::Minus1)
+                        .sum_keepdim(candle_core::D::Minus1)
                         .context("cuda_shifted_linear_cross_entropy_loss: chunk sum")?,
                 };
                 let new_sumexp = (scaled_prev + chunk_sumexp)
@@ -2327,8 +2327,8 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
             .context("cuda_shifted_linear_cross_entropy_loss: correct squeeze")?,
         );
     }
-    let correct_refs: Vec<&Tensor> = correct.iter().collect();
-    let correct_logits = Tensor::cat(&correct_refs, 0)
+    let correct_refs: Vec<&candle_core::Tensor> = correct.iter().collect();
+    let correct_logits = candle_core::Tensor::cat(&correct_refs, 0)
         .context("cuda_shifted_linear_cross_entropy_loss: cat correct logits")?;
     // Phase 7 (#1082): route `running_sumexp.log()` through `try_kt_log`
     // (single-kernel `cuda_activation_unary` with kind tag 6). Falls
@@ -2386,7 +2386,7 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
 
 pub fn cuda_sigmoid(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32,
         "cuda_sigmoid: expected F32 input, got {:?}",
         input.dtype()
     );
@@ -2431,7 +2431,7 @@ pub fn cuda_sigmoid(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
 
 pub fn cuda_exp(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32,
         "cuda_exp: expected F32 input, got {:?}",
         input.dtype()
     );
@@ -2457,11 +2457,11 @@ pub fn cuda_exp(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
 
 pub fn cuda_softplus(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32,
         "cuda_softplus: expected F32 input, got {:?}",
         input.dtype()
     );
-    let zeros = Tensor::zeros(input.dims(), DType::F32, input.as_tensor().device())
+    let zeros = candle_core::Tensor::zeros(input.dims(), candle_core::DType::F32, input.as_tensor().device())
         .context("cuda_softplus: zeros")?;
     let relu_x = input
         .as_tensor()
@@ -2523,7 +2523,7 @@ pub fn cuda_softplus(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
 
 pub fn cuda_silu(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32,
         "cuda_silu: expected F32 input, got {:?}",
         input.dtype()
     );
@@ -2571,7 +2571,7 @@ pub fn cuda_silu(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
 
 pub fn cuda_silu_inplace(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32,
         "cuda_silu_inplace: expected F32 input, got {:?}",
         input.dtype()
     );
@@ -2585,9 +2585,9 @@ pub fn cuda_silu_inplace(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
         anyhow::bail!("cuda_silu_inplace kt: input must be contiguous");
     }
     let sigmoid = unsafe {
-        Tensor::empty(
+        candle_core::Tensor::empty(
             input_tensor.shape().clone(),
-            DType::F32,
+            candle_core::DType::F32,
             input_tensor.device(),
         )
     }
@@ -2619,7 +2619,7 @@ pub fn cuda_silu_inplace(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
 
 pub fn cuda_repeat_kv_heads(input: &CudaTrainTensor, groups: usize) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32,
         "cuda_repeat_kv_heads: expected F32 input, got {:?}",
         input.dtype()
     );
@@ -2646,8 +2646,8 @@ pub fn cuda_repeat_kv_heads(input: &CudaTrainTensor, groups: usize) -> Result<Cu
             repeated.push(slice.clone());
         }
     }
-    let refs: Vec<&Tensor> = repeated.iter().collect();
-    let out = Tensor::cat(&refs, 0).context("cuda_repeat_kv_heads: cat repeated heads")?;
+    let refs: Vec<&candle_core::Tensor> = repeated.iter().collect();
+    let out = candle_core::Tensor::cat(&refs, 0).context("cuda_repeat_kv_heads: cat repeated heads")?;
     let needs_grad =
         input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
     let grad_fn = needs_grad.then(|| {
@@ -2666,7 +2666,7 @@ pub fn cuda_narrow_last_dim(
     len: usize,
 ) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32,
         "cuda_narrow_last_dim: expected F32 input, got {:?}",
         input.dtype()
     );
@@ -2682,7 +2682,7 @@ pub fn cuda_narrow_last_dim(
     );
     let out = input
         .as_tensor()
-        .narrow(D::Minus1, start, len)
+        .narrow(candle_core::D::Minus1, start, len)
         .context("cuda_narrow_last_dim: candle CUDA narrow")?
         .contiguous()
         .context("cuda_narrow_last_dim: contiguous output")?;
@@ -2705,7 +2705,7 @@ pub fn cuda_narrow_rows(
     len: usize,
 ) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32,
         "cuda_narrow_rows: expected F32 input, got {:?}",
         input.dtype()
     );
@@ -2768,8 +2768,8 @@ pub fn cuda_cat_rows(parts: &[CudaTrainTensor]) -> Result<CudaTrainTensor> {
             dtype
         );
     }
-    let refs: Vec<&Tensor> = parts.iter().map(|part| part.as_tensor()).collect();
-    let out = Tensor::cat(&refs, 0).context("cuda_cat_rows: cat rows")?;
+    let refs: Vec<&candle_core::Tensor> = parts.iter().map(|part| part.as_tensor()).collect();
+    let out = candle_core::Tensor::cat(&refs, 0).context("cuda_cat_rows: cat rows")?;
     let needs_grad = parts
         .iter()
         .any(|part| part.requires_grad() || part.grad_fn().is_some() || part.param_id().is_some());
@@ -2788,7 +2788,7 @@ pub fn cuda_causal_depthwise_conv1d_prefill_zero_state(
     weight: &CudaTrainTensor,
 ) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32 && weight.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32 && weight.dtype() == candle_core::DType::F32,
         "cuda_causal_depthwise_conv1d_prefill_zero_state: expected F32 input/weight, got {:?}/{:?}",
         input.dtype(),
         weight.dtype()
@@ -2828,15 +2828,15 @@ pub fn cuda_causal_depthwise_conv1d_prefill_zero_state(
     }
 
     let weight_2d = cuda_reshape(weight, &[channels, kernel])?;
-    let prefix = CudaTrainTensor::new(Tensor::zeros(
+    let prefix = CudaTrainTensor::new(candle_core::Tensor::zeros(
         (kernel.saturating_sub(1), channels),
-        DType::F32,
+        candle_core::DType::F32,
         input.as_tensor().device(),
     )?)?;
     let padded = cuda_cat_rows(&[prefix, input.clone()])?;
-    let mut output = CudaTrainTensor::new(Tensor::zeros(
+    let mut output = CudaTrainTensor::new(candle_core::Tensor::zeros(
         (rows, channels),
-        DType::F32,
+        candle_core::DType::F32,
         input.as_tensor().device(),
     )?)?;
     for j in 0..kernel {
@@ -2855,9 +2855,9 @@ pub fn cuda_causal_depthwise_conv1d_prefill_with_state(
     conv_state: &CudaTrainTensor,
 ) -> Result<(CudaTrainTensor, CudaTrainTensor)> {
     ensure!(
-        input.dtype() == DType::F32
-            && weight.dtype() == DType::F32
-            && conv_state.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32
+            && weight.dtype() == candle_core::DType::F32
+            && conv_state.dtype() == candle_core::DType::F32,
         "cuda_causal_depthwise_conv1d_prefill_with_state: expected F32 input/weight/state, got {:?}/{:?}/{:?}",
         input.dtype(),
         weight.dtype(),
@@ -2938,9 +2938,9 @@ pub fn cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad(
     conv_state: &CudaTrainTensor,
 ) -> Result<(CudaTrainTensor, CudaTrainTensor)> {
     ensure!(
-        input.dtype() == DType::F32
-            && weight.dtype() == DType::F32
-            && conv_state.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32
+            && weight.dtype() == candle_core::DType::F32
+            && conv_state.dtype() == candle_core::DType::F32,
         "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: expected F32 input/weight/state, got {:?}/{:?}/{:?}",
         input.dtype(),
         weight.dtype(),
@@ -3031,7 +3031,7 @@ pub fn cuda_causal_depthwise_conv1d_next_state_zero_state(
     kernel_size: usize,
 ) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32,
         "cuda_causal_depthwise_conv1d_next_state_zero_state: expected F32 input, got {:?}",
         input.dtype()
     );
@@ -3050,9 +3050,9 @@ pub fn cuda_causal_depthwise_conv1d_next_state_zero_state(
     if rows >= state_rows {
         return cuda_narrow_rows(input, rows - state_rows, state_rows);
     }
-    let prefix = CudaTrainTensor::new(Tensor::zeros(
+    let prefix = CudaTrainTensor::new(candle_core::Tensor::zeros(
         (state_rows - rows, channels),
-        DType::F32,
+        candle_core::DType::F32,
         input.as_tensor().device(),
     )?)?;
     cuda_cat_rows(&[prefix, input.clone()])
@@ -3082,12 +3082,12 @@ pub fn cuda_gdn_single_token_recurrence(
     state: &CudaTrainTensor,
 ) -> Result<CudaGdnSingleTokenOutput> {
     ensure!(
-        q.dtype() == DType::F32
-            && k.dtype() == DType::F32
-            && v.dtype() == DType::F32
-            && beta.dtype() == DType::F32
-            && g.dtype() == DType::F32
-            && state.dtype() == DType::F32,
+        q.dtype() == candle_core::DType::F32
+            && k.dtype() == candle_core::DType::F32
+            && v.dtype() == candle_core::DType::F32
+            && beta.dtype() == candle_core::DType::F32
+            && g.dtype() == candle_core::DType::F32
+            && state.dtype() == candle_core::DType::F32,
         "cuda_gdn_single_token_recurrence: expected F32 tensors"
     );
     ensure!(
@@ -3153,12 +3153,12 @@ pub fn cuda_gdn_single_head_sequence_recurrence(
     state: &CudaTrainTensor,
 ) -> Result<CudaGdnSingleHeadSequenceOutput> {
     ensure!(
-        q.dtype() == DType::F32
-            && k.dtype() == DType::F32
-            && v.dtype() == DType::F32
-            && beta.dtype() == DType::F32
-            && g.dtype() == DType::F32
-            && state.dtype() == DType::F32,
+        q.dtype() == candle_core::DType::F32
+            && k.dtype() == candle_core::DType::F32
+            && v.dtype() == candle_core::DType::F32
+            && beta.dtype() == candle_core::DType::F32
+            && g.dtype() == candle_core::DType::F32
+            && state.dtype() == candle_core::DType::F32,
         "cuda_gdn_single_head_sequence_recurrence: expected F32 tensors"
     );
     ensure!(
@@ -3229,12 +3229,12 @@ pub fn cuda_gdn_multi_head_sequence_recurrence(
         "cuda_gdn_multi_head_sequence_recurrence: heads must be > 0"
     );
     ensure!(
-        q.dtype() == DType::F32
-            && k.dtype() == DType::F32
-            && v.dtype() == DType::F32
-            && beta.dtype() == DType::F32
-            && g.dtype() == DType::F32
-            && state.dtype() == DType::F32,
+        q.dtype() == candle_core::DType::F32
+            && k.dtype() == candle_core::DType::F32
+            && v.dtype() == candle_core::DType::F32
+            && beta.dtype() == candle_core::DType::F32
+            && g.dtype() == candle_core::DType::F32
+            && state.dtype() == candle_core::DType::F32,
         "cuda_gdn_multi_head_sequence_recurrence: expected F32 tensors"
     );
     ensure!(
@@ -3305,7 +3305,7 @@ pub fn cuda_index_select_rows(
     indices: &[usize],
 ) -> Result<CudaTrainTensor> {
     ensure!(
-        matches!(input.dtype(), DType::F32 | DType::BF16),
+        matches!(input.dtype(), candle_core::DType::F32 | candle_core::DType::BF16),
         "cuda_index_select_rows: expected F32/BF16 input, got {:?}",
         input.dtype()
     );
@@ -3337,8 +3337,8 @@ pub fn cuda_index_select_rows(
                 .with_context(|| format!("cuda_index_select_rows: contiguous row {idx}"))?,
         );
     }
-    let refs: Vec<&Tensor> = selected.iter().collect();
-    let out = Tensor::cat(&refs, 0).context("cuda_index_select_rows: cat selected rows")?;
+    let refs: Vec<&candle_core::Tensor> = selected.iter().collect();
+    let out = candle_core::Tensor::cat(&refs, 0).context("cuda_index_select_rows: cat selected rows")?;
     let needs_grad =
         input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
     let grad_fn = needs_grad.then(|| {
@@ -3366,7 +3366,7 @@ pub fn cuda_embedding_lookup(
 
 pub fn cuda_permute_rh_to_hr(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32,
         "cuda_permute_rh_to_hr: expected F32 input, got {:?}",
         input.dtype()
     );
@@ -3393,7 +3393,7 @@ pub fn cuda_permute_rh_to_hr(input: &CudaTrainTensor) -> Result<CudaTrainTensor>
 
 pub fn cuda_permute_hr_to_rh(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32,
+        input.dtype() == candle_core::DType::F32,
         "cuda_permute_hr_to_rh: expected F32 input, got {:?}",
         input.dtype()
     );
@@ -3425,7 +3425,7 @@ pub fn cuda_sdpa_unmasked(
     scale: f32,
 ) -> Result<CudaTrainTensor> {
     ensure!(
-        q.dtype() == DType::F32 && k.dtype() == DType::F32 && v.dtype() == DType::F32,
+        q.dtype() == candle_core::DType::F32 && k.dtype() == candle_core::DType::F32 && v.dtype() == candle_core::DType::F32,
         "cuda_sdpa_unmasked: expected F32 inputs, got q={:?} k={:?} v={:?}",
         q.dtype(),
         k.dtype(),
@@ -3508,21 +3508,21 @@ pub fn cuda_flash_attn_prefill_causal_f32(
         return Ok(None);
     }
     ensure!(
-        q.dtype() == DType::F32 && k.dtype() == DType::F32 && v.dtype() == DType::F32,
+        q.dtype() == candle_core::DType::F32 && k.dtype() == candle_core::DType::F32 && v.dtype() == candle_core::DType::F32,
         "cuda_flash_attn_prefill_causal_f32: expected F32 inputs, got q={:?} k={:?} v={:?}",
         q.dtype(),
         k.dtype(),
         v.dtype()
     );
 
-    let q_bf16 = cuda_to_dtype(q, DType::BF16)?;
-    let k_bf16 = cuda_to_dtype(k, DType::BF16)?;
-    let v_bf16 = cuda_to_dtype(v, DType::BF16)?;
+    let q_bf16 = cuda_to_dtype(q, candle_core::DType::BF16)?;
+    let k_bf16 = cuda_to_dtype(k, candle_core::DType::BF16)?;
+    let v_bf16 = cuda_to_dtype(v, candle_core::DType::BF16)?;
     let Some(out_bf16) = cuda_flash_attn_prefill_causal_bf16(&q_bf16, &k_bf16, &v_bf16, scale)?
     else {
         return Ok(None);
     };
-    Ok(Some(cuda_to_dtype(&out_bf16, DType::F32)?))
+    Ok(Some(cuda_to_dtype(&out_bf16, candle_core::DType::F32)?))
 }
 
 pub fn cuda_flash_attn_prefill_causal_bf16(
@@ -3535,7 +3535,7 @@ pub fn cuda_flash_attn_prefill_causal_bf16(
         return Ok(None);
     }
     ensure!(
-        q.dtype() == DType::BF16 && k.dtype() == DType::BF16 && v.dtype() == DType::BF16,
+        q.dtype() == candle_core::DType::BF16 && k.dtype() == candle_core::DType::BF16 && v.dtype() == candle_core::DType::BF16,
         "cuda_flash_attn_prefill_causal_bf16: expected BF16 inputs, got q={:?} k={:?} v={:?}",
         q.dtype(),
         k.dtype(),
@@ -3618,7 +3618,7 @@ pub fn cuda_sdpa_prefill_causal(
     scale: f32,
 ) -> Result<CudaTrainTensor> {
     ensure!(
-        q.dtype() == DType::F32 && k.dtype() == DType::F32 && v.dtype() == DType::F32,
+        q.dtype() == candle_core::DType::F32 && k.dtype() == candle_core::DType::F32 && v.dtype() == candle_core::DType::F32,
         "cuda_sdpa_prefill_causal: expected F32 inputs, got q={:?} k={:?} v={:?}",
         q.dtype(),
         k.dtype(),
@@ -3677,11 +3677,11 @@ pub fn cuda_sdpa_prefill_causal(
 #[derive(Debug)]
 struct FlashAttnPrefillCausalBackward {
     inputs: Vec<CudaTrainTensor>,
-    q: Tensor,
-    k: Tensor,
-    v: Tensor,
-    out: Tensor,
-    softmax_lse: Tensor,
+    q: candle_core::Tensor,
+    k: candle_core::Tensor,
+    v: candle_core::Tensor,
+    out: candle_core::Tensor,
+    softmax_lse: candle_core::Tensor,
     scale: f32,
     rows: usize,
     heads_q: usize,
@@ -3713,7 +3713,7 @@ impl CudaBackwardOp for FlashAttnPrefillCausalBackward {
 
         let dout = grad_out
             .as_tensor()
-            .to_dtype(DType::BF16)
+            .to_dtype(candle_core::DType::BF16)
             .context("cuda_flash_attn_prefill_causal_bf16 backward: cast dout")?
             .reshape((1usize, self.rows, self.heads_q, self.head_dim))
             .context("cuda_flash_attn_prefill_causal_bf16 backward: reshape dout")?
@@ -3981,7 +3981,7 @@ impl CudaBackwardOp for MulLastDimBroadcastBackward {
             .context("cuda_mul_last_dim_broadcast backward: input grad")?;
         let scalar_grad = (grad_out.as_tensor() * input.as_tensor())
             .context("cuda_mul_last_dim_broadcast backward: weighted grad")?
-            .sum_keepdim(D::Minus1)
+            .sum_keepdim(candle_core::D::Minus1)
             .context("cuda_mul_last_dim_broadcast backward: reduce last dim")?;
         Ok(vec![
             Some(CudaTrainTensor::new(input_grad)?),
@@ -4121,7 +4121,7 @@ impl CudaBackwardOp for RmsNormBackward {
             .context("cuda_rmsnorm backward: grad * weight")?;
         let dot = (&u * input.as_tensor())
             .context("cuda_rmsnorm backward: u * input")?
-            .sum_keepdim(D::Minus1)
+            .sum_keepdim(candle_core::D::Minus1)
             .context("cuda_rmsnorm backward: row dot")?;
         let sq = input
             .as_tensor()
@@ -4136,7 +4136,7 @@ impl CudaBackwardOp for RmsNormBackward {
         {
             Some(out) => out,
             None => sq
-                .mean_keepdim(D::Minus1)
+                .mean_keepdim(candle_core::D::Minus1)
                 .context("cuda_rmsnorm backward: row variance")?,
         };
         // Phase 7 (#1082): fuse the `.sqrt().recip()` chain via
@@ -4405,7 +4405,7 @@ impl CudaBackwardOp for IndexSelectRowsBackward {
 
         let mut rows = Vec::with_capacity(self.input_rows);
         for input_row in 0..self.input_rows {
-            let mut accum = Tensor::zeros(
+            let mut accum = candle_core::Tensor::zeros(
                 vec![1usize, self.dim],
                 grad_out.dtype(),
                 grad_out.as_tensor().device(),
@@ -4430,8 +4430,8 @@ impl CudaBackwardOp for IndexSelectRowsBackward {
             }
             rows.push(accum);
         }
-        let refs: Vec<&Tensor> = rows.iter().collect();
-        let grad = Tensor::cat(&refs, 0).context("cuda_index_select_rows backward: cat rows")?;
+        let refs: Vec<&candle_core::Tensor> = rows.iter().collect();
+        let grad = candle_core::Tensor::cat(&refs, 0).context("cuda_index_select_rows backward: cat rows")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
@@ -4473,7 +4473,7 @@ impl CudaBackwardOp for NarrowLastDimBackward {
             let mut shape = self.input_dims.clone();
             *shape.last_mut().expect("checked non-empty shape") = self.start;
             chunks.push(
-                Tensor::zeros(shape, grad_out.dtype(), grad_out.as_tensor().device())
+                candle_core::Tensor::zeros(shape, grad_out.dtype(), grad_out.as_tensor().device())
                     .context("cuda_narrow_last_dim backward: prefix zeros")?,
             );
         }
@@ -4483,12 +4483,12 @@ impl CudaBackwardOp for NarrowLastDimBackward {
             let mut shape = self.input_dims.clone();
             *shape.last_mut().expect("checked non-empty shape") = suffix;
             chunks.push(
-                Tensor::zeros(shape, grad_out.dtype(), grad_out.as_tensor().device())
+                candle_core::Tensor::zeros(shape, grad_out.dtype(), grad_out.as_tensor().device())
                     .context("cuda_narrow_last_dim backward: suffix zeros")?,
             );
         }
-        let refs: Vec<&Tensor> = chunks.iter().collect();
-        let grad = Tensor::cat(&refs, D::Minus1)
+        let refs: Vec<&candle_core::Tensor> = chunks.iter().collect();
+        let grad = candle_core::Tensor::cat(&refs, candle_core::D::Minus1)
             .context("cuda_narrow_last_dim backward: cat padded grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
@@ -4539,7 +4539,7 @@ impl CudaBackwardOp for NarrowRowsBackward {
         let mut chunks = Vec::new();
         if self.start > 0 {
             chunks.push(
-                Tensor::zeros(
+                candle_core::Tensor::zeros(
                     (self.start, dim),
                     grad_out.dtype(),
                     grad_out.as_tensor().device(),
@@ -4551,7 +4551,7 @@ impl CudaBackwardOp for NarrowRowsBackward {
         let suffix = rows - self.start - self.len;
         if suffix > 0 {
             chunks.push(
-                Tensor::zeros(
+                candle_core::Tensor::zeros(
                     (suffix, dim),
                     grad_out.dtype(),
                     grad_out.as_tensor().device(),
@@ -4559,8 +4559,8 @@ impl CudaBackwardOp for NarrowRowsBackward {
                 .context("cuda_narrow_rows backward: suffix zeros")?,
             );
         }
-        let refs: Vec<&Tensor> = chunks.iter().collect();
-        let grad = Tensor::cat(&refs, 0).context("cuda_narrow_rows backward: cat padded grad")?;
+        let refs: Vec<&candle_core::Tensor> = chunks.iter().collect();
+        let grad = candle_core::Tensor::cat(&refs, 0).context("cuda_narrow_rows backward: cat padded grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
@@ -4648,7 +4648,7 @@ impl CudaBackwardOp for RepeatKvHeadsBackward {
 
         let mut head_grads = Vec::with_capacity(self.heads_kv);
         for head in 0..self.heads_kv {
-            let mut accum: Option<Tensor> = None;
+            let mut accum: Option<candle_core::Tensor> = None;
             for group in 0..self.groups {
                 let slot = head * self.groups + group;
                 let slice = grad_out
@@ -4670,8 +4670,8 @@ impl CudaBackwardOp for RepeatKvHeadsBackward {
             }
             head_grads.push(accum.context("cuda_repeat_kv_heads backward: empty group")?);
         }
-        let refs: Vec<&Tensor> = head_grads.iter().collect();
-        let grad = Tensor::cat(&refs, 0).context("cuda_repeat_kv_heads backward: cat heads")?;
+        let refs: Vec<&candle_core::Tensor> = head_grads.iter().collect();
+        let grad = candle_core::Tensor::cat(&refs, 0).context("cuda_repeat_kv_heads backward: cat heads")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
@@ -4899,7 +4899,7 @@ impl CudaBackwardOp for SoftmaxLastDimBackward {
         let weighted = (self.output.as_tensor() * grad_out.as_tensor())
             .context("cuda_softmax_last_dim backward: y * grad_out")?;
         let row_dot = weighted
-            .sum_keepdim(D::Minus1)
+            .sum_keepdim(candle_core::D::Minus1)
             .context("cuda_softmax_last_dim backward: row dot")?;
         let centered = grad_out
             .as_tensor()
@@ -4974,13 +4974,13 @@ impl CudaBackwardOp for ShiftedCrossEntropyBackward {
             .narrow(0, 0, seq_len - 1)
             .context("cuda_shifted_cross_entropy_loss backward: shift logits")?;
         let active_indices_u32: Vec<u32> = active_positions.iter().map(|&idx| idx as u32).collect();
-        let active_indices = Tensor::new(active_indices_u32.as_slice(), device)
+        let active_indices = candle_core::Tensor::new(active_indices_u32.as_slice(), device)
             .context("cuda_shifted_cross_entropy_loss backward: active indices")?;
         let active_logits = shift_logits
             .index_select(&active_indices, 0)
             .context("cuda_shifted_cross_entropy_loss backward: active logits")?;
         let max_val = active_logits
-            .max_keepdim(D::Minus1)
+            .max_keepdim(candle_core::D::Minus1)
             .context("cuda_shifted_cross_entropy_loss backward: max")?;
         let shifted = active_logits
             .broadcast_sub(&max_val)
@@ -4997,22 +4997,22 @@ impl CudaBackwardOp for ShiftedCrossEntropyBackward {
         {
             Some(out) => out,
             None => exp_shifted
-                .sum_keepdim(D::Minus1)
+                .sum_keepdim(candle_core::D::Minus1)
                 .context("cuda_shifted_cross_entropy_loss backward: sum")?,
         };
         let mut grad_active = exp_shifted
             .broadcast_div(&sum_exp)
             .context("cuda_shifted_cross_entropy_loss backward: softmax")?;
 
-        let one = Tensor::new(&[1.0f32], device)
+        let one = candle_core::Tensor::new(&[1.0f32], device)
             .context("cuda_shifted_cross_entropy_loss backward: one")?
             .reshape((1usize, 1usize))
             .context("cuda_shifted_cross_entropy_loss backward: one reshape")?;
         let mut rows = Vec::with_capacity(active_labels.len());
         for (row, &label) in active_labels.iter().enumerate() {
-            let label_index = Tensor::new(&[label as u32], device)
+            let label_index = candle_core::Tensor::new(&[label as u32], device)
                 .context("cuda_shifted_cross_entropy_loss backward: label index")?;
-            let one_hot = Tensor::zeros((1usize, vocab), DType::F32, device)
+            let one_hot = candle_core::Tensor::zeros((1usize, vocab), candle_core::DType::F32, device)
                 .context("cuda_shifted_cross_entropy_loss backward: one-hot zeros")?
                 .index_add(&label_index, &one, 1)
                 .context("cuda_shifted_cross_entropy_loss backward: one-hot scatter")?;
@@ -5024,8 +5024,8 @@ impl CudaBackwardOp for ShiftedCrossEntropyBackward {
                     .context("cuda_shifted_cross_entropy_loss backward: row grad")?,
             );
         }
-        let row_refs: Vec<&Tensor> = rows.iter().collect();
-        grad_active = Tensor::cat(&row_refs, 0)
+        let row_refs: Vec<&candle_core::Tensor> = rows.iter().collect();
+        grad_active = candle_core::Tensor::cat(&row_refs, 0)
             .context("cuda_shifted_cross_entropy_loss backward: cat active grads")?;
         let inv_active = 1.0f64 / active_positions.len() as f64;
         grad_active = grad_active
@@ -5034,13 +5034,13 @@ impl CudaBackwardOp for ShiftedCrossEntropyBackward {
             .broadcast_mul(grad_out.as_tensor())
             .context("cuda_shifted_cross_entropy_loss backward: scale by upstream")?;
 
-        let grad_shift = Tensor::zeros((seq_len - 1, vocab), DType::F32, device)
+        let grad_shift = candle_core::Tensor::zeros((seq_len - 1, vocab), candle_core::DType::F32, device)
             .context("cuda_shifted_cross_entropy_loss backward: zero shifted grad")?
             .index_add(&active_indices, &grad_active, 0)
             .context("cuda_shifted_cross_entropy_loss backward: scatter active grads")?;
-        let final_zero = Tensor::zeros((1usize, vocab), DType::F32, device)
+        let final_zero = candle_core::Tensor::zeros((1usize, vocab), candle_core::DType::F32, device)
             .context("cuda_shifted_cross_entropy_loss backward: final row")?;
-        let grad = Tensor::cat(&[&grad_shift, &final_zero], 0)
+        let grad = candle_core::Tensor::cat(&[&grad_shift, &final_zero], 0)
             .context("cuda_shifted_cross_entropy_loss backward: cat final grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
@@ -5123,14 +5123,14 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
             .narrow(0, 0, seq_len - 1)
             .context("cuda_shifted_linear_cross_entropy_loss backward: shift hidden")?;
         let active_indices_u32: Vec<u32> = active_positions.iter().map(|&idx| idx as u32).collect();
-        let active_indices = Tensor::new(active_indices_u32.as_slice(), device)
+        let active_indices = candle_core::Tensor::new(active_indices_u32.as_slice(), device)
             .context("cuda_shifted_linear_cross_entropy_loss backward: active indices")?;
         let active_hidden = shift_hidden
             .index_select(&active_indices, 0)
             .context("cuda_shifted_linear_cross_entropy_loss backward: active hidden")?;
 
-        let mut running_max: Option<Tensor> = None;
-        let mut running_sumexp: Option<Tensor> = None;
+        let mut running_max: Option<candle_core::Tensor> = None;
+        let mut running_sumexp: Option<candle_core::Tensor> = None;
         let mut chunk_start = 0usize;
         while chunk_start < vocab {
             let chunk_len = self.chunk_size.min(vocab - chunk_start);
@@ -5148,7 +5148,7 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                 "cuda_shifted_linear_cross_entropy_loss backward: logits chunk",
             )?;
             let chunk_max = logits_chunk
-                .max_keepdim(D::Minus1)
+                .max_keepdim(candle_core::D::Minus1)
                 .context("cuda_shifted_linear_cross_entropy_loss backward: chunk max")?;
             let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
                 (None, None) => {
@@ -5169,7 +5169,7 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                     {
                         Some(out) => out,
                         None => chunk_exp
-                            .sum_keepdim(D::Minus1)
+                            .sum_keepdim(candle_core::D::Minus1)
                             .context("cuda_shifted_linear_cross_entropy_loss backward: initial sum")?,
                     };
                     (chunk_max.detach(), chunk_sumexp.detach())
@@ -5224,7 +5224,7 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                     {
                         Some(out) => out,
                         None => chunk_exp_b
-                            .sum_keepdim(D::Minus1)
+                            .sum_keepdim(candle_core::D::Minus1)
                             .context("cuda_shifted_linear_cross_entropy_loss backward: chunk sum")?,
                     };
                     let new_sumexp = (scaled_prev + chunk_sumexp)
@@ -5243,7 +5243,7 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
             .context("cuda_shifted_linear_cross_entropy_loss backward: empty vocab")?;
 
         let mut grad_active_hidden =
-            Tensor::zeros((active_positions.len(), hidden_size), DType::F32, device)
+            candle_core::Tensor::zeros((active_positions.len(), hidden_size), candle_core::DType::F32, device)
                 .context("cuda_shifted_linear_cross_entropy_loss backward: zero active grad")?;
         let mut chunk_start = 0usize;
         while chunk_start < vocab {
@@ -5310,17 +5310,17 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                     "cuda_shifted_linear_cross_entropy_loss backward: contiguous correct head",
                 )?;
             correct_heads.push(match correct_head.dtype() {
-                DType::F32 => correct_head,
-                DType::BF16 => correct_head
-                    .to_dtype(DType::F32)
+                candle_core::DType::F32 => correct_head,
+                candle_core::DType::BF16 => correct_head
+                    .to_dtype(candle_core::DType::F32)
                     .context("cuda_shifted_linear_cross_entropy_loss backward: correct head f32")?,
                 dtype => anyhow::bail!(
                     "cuda_shifted_linear_cross_entropy_loss backward: unsupported correct head dtype {dtype:?}"
                 ),
             });
         }
-        let correct_refs: Vec<&Tensor> = correct_heads.iter().collect();
-        let correct_head_rows = Tensor::cat(&correct_refs, 0)
+        let correct_refs: Vec<&candle_core::Tensor> = correct_heads.iter().collect();
+        let correct_head_rows = candle_core::Tensor::cat(&correct_refs, 0)
             .context("cuda_shifted_linear_cross_entropy_loss backward: cat correct heads")?;
         grad_active_hidden = (grad_active_hidden - correct_head_rows)
             .context("cuda_shifted_linear_cross_entropy_loss backward: subtract correct heads")?;
@@ -5331,7 +5331,7 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
             .broadcast_mul(grad_out.as_tensor())
             .context("cuda_shifted_linear_cross_entropy_loss backward: scale upstream")?;
 
-        let grad_hidden = Tensor::zeros((seq_len, hidden_size), DType::F32, device)
+        let grad_hidden = candle_core::Tensor::zeros((seq_len, hidden_size), candle_core::DType::F32, device)
             .context("cuda_shifted_linear_cross_entropy_loss backward: zero hidden grad")?
             .index_add(&active_indices, &grad_active_hidden, 0)
             .context("cuda_shifted_linear_cross_entropy_loss backward: scatter hidden grad")?;
@@ -5581,7 +5581,7 @@ impl CudaBackwardOp for FusedLoraLinearBackward {
             .context("cuda_lora_linear_fused backward: grad_out contiguous")?;
 
         let base_input_grad = match self.base_weight.dtype() {
-            DType::F32 => {
+            candle_core::DType::F32 => {
                 let weight_t = self
                     .base_weight
                     .as_tensor()
@@ -5592,7 +5592,7 @@ impl CudaBackwardOp for FusedLoraLinearBackward {
                 grad.matmul(&weight_t)
                     .context("cuda_lora_linear_fused backward: base input grad")?
             }
-            DType::BF16 => {
+            candle_core::DType::BF16 => {
                 kiln_rmsnorm_kernel::matmul_f32_bf16w_bwd_lhs(&grad, self.base_weight.as_tensor())
                     .context("cuda_lora_linear_fused backward: BF16 base input grad")?
             }
@@ -5791,7 +5791,7 @@ mod tests {
 
     #[test]
     fn cuda_model_weights_from_gpu_weights_imports_full_attention_layer() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda model weight import smoke: {err}");
@@ -5799,27 +5799,27 @@ mod tests {
             }
         };
         let config = tiny_cuda_model_config();
-        let embed_tokens = Tensor::from_vec(
+        let embed_tokens = candle_core::Tensor::from_vec(
             vec![0.1f32, -0.2, 0.3, 0.4, 0.5, -0.6, 0.7, 0.8],
             (4usize, 2usize),
             &device,
         )?;
         let embed_tokens_t = embed_tokens.t()?.contiguous()?;
-        let q_proj = Tensor::from_vec(vec![0.2f32, -0.3, 0.4, 0.1], (2usize, 2usize), &device)?;
-        let k_proj = Tensor::from_vec(vec![0.1f32, 0.6, 0.8, -0.2], (2usize, 2usize), &device)?;
-        let v_proj = Tensor::from_vec(vec![0.7f32, -0.2, -0.5, 0.6], (2usize, 2usize), &device)?;
-        let o_proj = Tensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize), &device)?;
+        let q_proj = candle_core::Tensor::from_vec(vec![0.2f32, -0.3, 0.4, 0.1], (2usize, 2usize), &device)?;
+        let k_proj = candle_core::Tensor::from_vec(vec![0.1f32, 0.6, 0.8, -0.2], (2usize, 2usize), &device)?;
+        let v_proj = candle_core::Tensor::from_vec(vec![0.7f32, -0.2, -0.5, 0.6], (2usize, 2usize), &device)?;
+        let o_proj = candle_core::Tensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize), &device)?;
         let gate_proj =
-            Tensor::from_vec(vec![0.25f32, -0.15, 0.35, 0.05], (2usize, 2usize), &device)?;
-        let up_proj = Tensor::from_vec(vec![0.45f32, 0.2, -0.1, 0.55], (2usize, 2usize), &device)?;
+            candle_core::Tensor::from_vec(vec![0.25f32, -0.15, 0.35, 0.05], (2usize, 2usize), &device)?;
+        let up_proj = candle_core::Tensor::from_vec(vec![0.45f32, 0.2, -0.1, 0.55], (2usize, 2usize), &device)?;
         let down_proj =
-            Tensor::from_vec(vec![0.6f32, -0.25, 0.15, 0.5], (2usize, 2usize), &device)?;
+            candle_core::Tensor::from_vec(vec![0.6f32, -0.25, 0.15, 0.5], (2usize, 2usize), &device)?;
         let weights = GpuWeights {
             embed_tokens,
             embed_tokens_t,
             layers: vec![GpuLayerWeights {
-                input_layernorm: Tensor::zeros((2usize,), DType::F32, &device)?,
-                post_attention_layernorm: Tensor::zeros((2usize,), DType::F32, &device)?,
+                input_layernorm: candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?,
+                post_attention_layernorm: candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?,
                 attention: GpuAttentionWeights::Full(GpuFullAttentionWeights {
                     q_proj_t: q_proj.t()?.contiguous()?,
                     k_proj_t: k_proj.t()?.contiguous()?,
@@ -5829,8 +5829,8 @@ mod tests {
                     k_proj,
                     v_proj,
                     o_proj,
-                    q_norm: Tensor::zeros((2usize,), DType::F32, &device)?,
-                    k_norm: Tensor::zeros((2usize,), DType::F32, &device)?,
+                    q_norm: candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?,
+                    k_norm: candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?,
                     qkv_proj_t: None,
                     q_proj_marlin: None,
                 }),
@@ -5847,8 +5847,8 @@ mod tests {
                     down_proj_marlin: None,
                 },
             }],
-            final_norm: Tensor::zeros((2usize,), DType::F32, &device)?,
-            rotary_inv_freq: Tensor::from_vec(vec![1.0f32], (1usize,), &device)?,
+            final_norm: candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?,
+            rotary_inv_freq: candle_core::Tensor::from_vec(vec![1.0f32], (1usize,), &device)?,
             mtp: None,
         };
 
@@ -5866,7 +5866,7 @@ mod tests {
         assert_eq!(layer.heads_q, 1);
         assert!(!layer.q_weight.requires_grad());
 
-        let input = CudaTrainTensor::new(Tensor::from_vec(
+        let input = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.1f32, 0.2, -0.3, 0.4],
             (2usize, 2usize),
             &device,
@@ -5878,7 +5878,7 @@ mod tests {
 
     #[test]
     fn cuda_linear_attention_state_zeros_allocates_layer_state() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda GDN state smoke: {err}");
@@ -5907,7 +5907,7 @@ mod tests {
 
     #[test]
     fn cuda_train_tensor_rejects_cpu_tensor() -> Result<()> {
-        let cpu = Tensor::zeros((2usize,), DType::F32, &Device::Cpu)?;
+        let cpu = candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &candle_core::Device::Cpu)?;
         let err = CudaTrainTensor::new(cpu).unwrap_err();
         assert!(err.to_string().contains("requires a CUDA tensor"));
         Ok(())
@@ -5922,7 +5922,7 @@ mod tests {
 
     #[test]
     fn cuda_train_tensor_sgd_and_adamw_update_in_place() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_train_tensor smoke: {err}");
@@ -5930,8 +5930,8 @@ mod tests {
             }
         };
 
-        let param = CudaTrainTensor::new(Tensor::new(vec![1.0f32, -2.0], &device)?)?;
-        let grad = CudaTrainTensor::new(Tensor::new(vec![0.25f32, -0.5], &device)?)?;
+        let param = CudaTrainTensor::new(candle_core::Tensor::new(vec![1.0f32, -2.0], &device)?)?;
+        let grad = CudaTrainTensor::new(candle_core::Tensor::new(vec![0.25f32, -0.5], &device)?)?;
         param.sgd_step_inplace(&grad, 0.5)?;
         let actual = param.to_vec_f32()?;
         assert!((actual[0] - 0.875).abs() < 1e-6);
@@ -5956,7 +5956,7 @@ mod tests {
 
     #[test]
     fn cuda_train_tensor_tracks_parameter_metadata_and_detach() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_train_tensor metadata smoke: {err}");
@@ -5964,7 +5964,7 @@ mod tests {
             }
         };
 
-        let tensor = Tensor::new(vec![1.0f32], &device)?;
+        let tensor = candle_core::Tensor::new(vec![1.0f32], &device)?;
         let param_id = tensor.id();
         let param = CudaTrainTensor::parameter(tensor, param_id)?;
         assert!(param.requires_grad());
@@ -5980,7 +5980,7 @@ mod tests {
 
     #[test]
     fn cuda_add_last_dim_bias_backward_reduces_leading_dims() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda add-bias smoke: {err}");
@@ -5988,14 +5988,14 @@ mod tests {
             }
         };
 
-        let input_tensor = Tensor::from_vec(
+        let input_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
             (2usize, 3usize),
             &device,
         )?;
         let input_id = input_tensor.id();
         let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
-        let bias_tensor = Tensor::from_vec(vec![0.5f32, -0.25, 1.5], (3usize,), &device)?;
+        let bias_tensor = candle_core::Tensor::from_vec(vec![0.5f32, -0.25, 1.5], (3usize,), &device)?;
         let bias_id = bias_tensor.id();
         let bias = CudaTrainTensor::parameter(bias_tensor, bias_id)?;
 
@@ -6022,7 +6022,7 @@ mod tests {
 
     #[test]
     fn cuda_mul_last_dim_weight_backward_reduces_leading_dims() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda mul-weight smoke: {err}");
@@ -6030,14 +6030,14 @@ mod tests {
             }
         };
 
-        let input_tensor = Tensor::from_vec(
+        let input_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, -1.0, 0.5],
             (2usize, 3usize),
             &device,
         )?;
         let input_id = input_tensor.id();
         let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
-        let weight_tensor = Tensor::from_vec(vec![0.5f32, -2.0, 3.0], (3usize,), &device)?;
+        let weight_tensor = candle_core::Tensor::from_vec(vec![0.5f32, -2.0, 3.0], (3usize,), &device)?;
         let weight_id = weight_tensor.id();
         let weight = CudaTrainTensor::parameter(weight_tensor, weight_id)?;
 
@@ -6064,7 +6064,7 @@ mod tests {
 
     #[test]
     fn cuda_train_arena_tracks_allocations_and_clear() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_train_arena smoke: {err}");
@@ -6073,12 +6073,12 @@ mod tests {
         };
 
         let mut arena = CudaTrainArena::new(&device)?;
-        let a = arena.zeros(&[2, 3], DType::F32)?;
+        let a = arena.zeros(&[2, 3], candle_core::DType::F32)?;
         assert_eq!(a.dims(), &[2, 3]);
         assert_eq!(arena.allocation_count(), 1);
         assert_eq!(arena.allocated_bytes(), 24);
 
-        let b = arena.zeros(&[4], DType::BF16)?;
+        let b = arena.zeros(&[4], candle_core::DType::BF16)?;
         assert_eq!(b.dims(), &[4]);
         assert_eq!(arena.allocation_count(), 2);
         assert_eq!(arena.allocated_bytes(), 32);
@@ -6111,7 +6111,7 @@ mod tests {
 
     #[test]
     fn cuda_backward_collects_parameter_gradients() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_backward smoke: {err}");
@@ -6119,12 +6119,12 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::new(vec![2.0f32, -3.0], &device)?;
+        let param_tensor = candle_core::Tensor::new(vec![2.0f32, -3.0], &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
-        let grad = CudaTrainTensor::new(Tensor::new(vec![0.5f32, -1.25], &device)?)?;
+        let grad = CudaTrainTensor::new(candle_core::Tensor::new(vec![0.5f32, -1.25], &device)?)?;
         let loss = CudaTrainTensor::from_op(
-            Tensor::new(vec![1.0f32], &device)?,
+            candle_core::Tensor::new(vec![1.0f32], &device)?,
             Some(Arc::new(FixedGradOp {
                 inputs: vec![param.clone()],
                 grads: vec![grad],
@@ -6142,7 +6142,7 @@ mod tests {
 
     #[test]
     fn cuda_backward_accumulates_duplicate_parameter_grads() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_backward accumulation smoke: {err}");
@@ -6150,13 +6150,13 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::new(vec![2.0f32], &device)?;
+        let param_tensor = candle_core::Tensor::new(vec![2.0f32], &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
-        let grad_a = CudaTrainTensor::new(Tensor::new(vec![0.5f32], &device)?)?;
-        let grad_b = CudaTrainTensor::new(Tensor::new(vec![1.25f32], &device)?)?;
+        let grad_a = CudaTrainTensor::new(candle_core::Tensor::new(vec![0.5f32], &device)?)?;
+        let grad_b = CudaTrainTensor::new(candle_core::Tensor::new(vec![1.25f32], &device)?)?;
         let loss = CudaTrainTensor::from_op(
-            Tensor::new(vec![1.0f32], &device)?,
+            candle_core::Tensor::new(vec![1.0f32], &device)?,
             Some(Arc::new(FixedGradOp {
                 inputs: vec![param.clone(), param],
                 grads: vec![grad_a, grad_b],
@@ -6173,7 +6173,7 @@ mod tests {
 
     #[test]
     fn cuda_add_backward_routes_to_both_parameters() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_add backward smoke: {err}");
@@ -6181,8 +6181,8 @@ mod tests {
             }
         };
 
-        let lhs_tensor = Tensor::new(vec![2.0f32], &device)?;
-        let rhs_tensor = Tensor::new(vec![3.0f32], &device)?;
+        let lhs_tensor = candle_core::Tensor::new(vec![2.0f32], &device)?;
+        let rhs_tensor = candle_core::Tensor::new(vec![3.0f32], &device)?;
         let lhs_id = lhs_tensor.id();
         let rhs_id = rhs_tensor.id();
         let lhs = CudaTrainTensor::parameter(lhs_tensor, lhs_id)?;
@@ -6204,7 +6204,7 @@ mod tests {
 
     #[test]
     fn cuda_add_backward_accumulates_shared_parameter() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_add shared-param smoke: {err}");
@@ -6212,7 +6212,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::new(vec![2.0f32], &device)?;
+        let param_tensor = candle_core::Tensor::new(vec![2.0f32], &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let loss = cuda_add(&param, &param)?;
@@ -6228,7 +6228,7 @@ mod tests {
 
     #[test]
     fn cuda_sub_backward_negates_rhs_grad() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_sub backward smoke: {err}");
@@ -6236,8 +6236,8 @@ mod tests {
             }
         };
 
-        let lhs_tensor = Tensor::new(vec![5.0f32, 7.0], &device)?;
-        let rhs_tensor = Tensor::new(vec![2.0f32, 11.0], &device)?;
+        let lhs_tensor = candle_core::Tensor::new(vec![5.0f32, 7.0], &device)?;
+        let rhs_tensor = candle_core::Tensor::new(vec![2.0f32, 11.0], &device)?;
         let lhs_id = lhs_tensor.id();
         let rhs_id = rhs_tensor.id();
         let lhs = CudaTrainTensor::parameter(lhs_tensor, lhs_id)?;
@@ -6261,7 +6261,7 @@ mod tests {
 
     #[test]
     fn cuda_mul_backward_uses_saved_inputs() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_mul backward smoke: {err}");
@@ -6269,8 +6269,8 @@ mod tests {
             }
         };
 
-        let lhs_tensor = Tensor::new(vec![2.0f32], &device)?;
-        let rhs_tensor = Tensor::new(vec![3.0f32], &device)?;
+        let lhs_tensor = candle_core::Tensor::new(vec![2.0f32], &device)?;
+        let rhs_tensor = candle_core::Tensor::new(vec![3.0f32], &device)?;
         let lhs_id = lhs_tensor.id();
         let rhs_id = rhs_tensor.id();
         let lhs = CudaTrainTensor::parameter(lhs_tensor, lhs_id)?;
@@ -6292,7 +6292,7 @@ mod tests {
 
     #[test]
     fn cuda_mul_backward_accumulates_shared_parameter() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_mul shared-param smoke: {err}");
@@ -6300,7 +6300,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::new(vec![4.0f32], &device)?;
+        let param_tensor = candle_core::Tensor::new(vec![4.0f32], &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let loss = cuda_mul(&param, &param)?;
@@ -6316,7 +6316,7 @@ mod tests {
 
     #[test]
     fn cuda_mul_last_dim_broadcast_backward_reduces_last_dim() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_mul_last_dim_broadcast smoke: {err}");
@@ -6324,12 +6324,12 @@ mod tests {
             }
         };
 
-        let input_tensor = Tensor::from_vec(
+        let input_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
             (2usize, 3usize),
             &device,
         )?;
-        let scalar_tensor = Tensor::from_vec(vec![10.0f32, 20.0], (2usize, 1usize), &device)?;
+        let scalar_tensor = candle_core::Tensor::from_vec(vec![10.0f32, 20.0], (2usize, 1usize), &device)?;
         let input_id = input_tensor.id();
         let scalar_id = scalar_tensor.id();
         let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
@@ -6356,7 +6356,7 @@ mod tests {
 
     #[test]
     fn cuda_div_backward_uses_quotient_rule() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_div backward smoke: {err}");
@@ -6364,8 +6364,8 @@ mod tests {
             }
         };
 
-        let lhs_tensor = Tensor::new(vec![6.0f32, 8.0], &device)?;
-        let rhs_tensor = Tensor::new(vec![2.0f32, 4.0], &device)?;
+        let lhs_tensor = candle_core::Tensor::new(vec![6.0f32, 8.0], &device)?;
+        let rhs_tensor = candle_core::Tensor::new(vec![2.0f32, 4.0], &device)?;
         let lhs_id = lhs_tensor.id();
         let rhs_id = rhs_tensor.id();
         let lhs = CudaTrainTensor::parameter(lhs_tensor, lhs_id)?;
@@ -6389,7 +6389,7 @@ mod tests {
 
     #[test]
     fn cuda_scale_backward_scales_grad() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_scale backward smoke: {err}");
@@ -6397,7 +6397,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::new(vec![1.0f32, -3.0], &device)?;
+        let param_tensor = candle_core::Tensor::new(vec![1.0f32, -3.0], &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let scaled = cuda_scale(&param, 2.5)?;
@@ -6415,7 +6415,7 @@ mod tests {
 
     #[test]
     fn cuda_causal_mask_applies_future_token_bias() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_causal_mask smoke: {err}");
@@ -6423,7 +6423,7 @@ mod tests {
             }
         };
 
-        let scores_tensor = Tensor::from_vec(
+        let scores_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
             (1usize, 3usize, 3usize),
             &device,
@@ -6454,7 +6454,7 @@ mod tests {
 
     #[test]
     fn cuda_rmsnorm_backward_matches_analytic_dx() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_rmsnorm backward smoke: {err}");
@@ -6463,8 +6463,8 @@ mod tests {
         };
 
         let input_tensor =
-            Tensor::from_vec(vec![3.0f32, 4.0, 1.0, -2.0], (2usize, 2usize), &device)?;
-        let weight_tensor = Tensor::from_vec(vec![0.0f32, 0.5], (2usize,), &device)?;
+            candle_core::Tensor::from_vec(vec![3.0f32, 4.0, 1.0, -2.0], (2usize, 2usize), &device)?;
+        let weight_tensor = candle_core::Tensor::from_vec(vec![0.0f32, 0.5], (2usize,), &device)?;
         let input_id = input_tensor.id();
         let weight_id = weight_tensor.id();
         let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
@@ -6499,7 +6499,7 @@ mod tests {
 
     #[test]
     fn cuda_rope_backward_applies_inverse_rotation() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_rope backward smoke: {err}");
@@ -6507,19 +6507,19 @@ mod tests {
             }
         };
 
-        let input_tensor = Tensor::from_vec(
+        let input_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 9.0, 10.0, 3.0, 4.0, 11.0, 12.0],
             (2usize, 1usize, 4usize),
             &device,
         )?;
         let input_id = input_tensor.id();
         let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
-        let cos = CudaTrainTensor::new(Tensor::from_vec(
+        let cos = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![1.0f32, 0.0],
             (2usize, 1usize),
             &device,
         )?)?;
-        let sin = CudaTrainTensor::new(Tensor::from_vec(
+        let sin = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.0f32, 1.0],
             (2usize, 1usize),
             &device,
@@ -6542,7 +6542,7 @@ mod tests {
 
     #[test]
     fn cuda_to_dtype_backward_passthrough_restores_input_dtype() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_to_dtype backward smoke: {err}");
@@ -6550,26 +6550,26 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::new(vec![1.0f32, 2.0], &device)?;
+        let param_tensor = candle_core::Tensor::new(vec![1.0f32, 2.0], &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
-        let bf16 = cuda_to_dtype(&param, DType::BF16)?;
-        let f32_again = cuda_to_dtype(&bf16, DType::F32)?;
+        let bf16 = cuda_to_dtype(&param, candle_core::DType::BF16)?;
+        let f32_again = cuda_to_dtype(&bf16, candle_core::DType::F32)?;
         let loss = cuda_sum_all(&f32_again)?;
 
-        assert_eq!(bf16.dtype(), DType::BF16);
-        assert_eq!(f32_again.dtype(), DType::F32);
+        assert_eq!(bf16.dtype(), candle_core::DType::BF16);
+        assert_eq!(f32_again.dtype(), candle_core::DType::F32);
         assert_eq!(loss.to_vec_f32()?, vec![3.0]);
         let grads = cuda_backward(&loss)?;
         let grad = grads.get(param_id).expect("param grad");
-        assert_eq!(grad.dtype(), DType::F32);
+        assert_eq!(grad.dtype(), candle_core::DType::F32);
         assert_eq!(grad.to_vec_f32()?, vec![1.0, 1.0]);
         Ok(())
     }
 
     #[test]
     fn cuda_sum_all_backward_broadcasts_scalar_grad() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_sum_all backward smoke: {err}");
@@ -6577,7 +6577,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::new(vec![1.0f32, 2.0, 3.0], &device)?;
+        let param_tensor = candle_core::Tensor::new(vec![1.0f32, 2.0, 3.0], &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let loss = cuda_sum_all(&param)?;
@@ -6593,7 +6593,7 @@ mod tests {
 
     #[test]
     fn cuda_mean_all_backward_scales_scalar_grad() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_mean_all backward smoke: {err}");
@@ -6601,7 +6601,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::new(vec![2.0f32, 4.0, 6.0, 8.0], &device)?;
+        let param_tensor = candle_core::Tensor::new(vec![2.0f32, 4.0, 6.0, 8.0], &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let loss = cuda_mean_all(&param)?;
@@ -6617,7 +6617,7 @@ mod tests {
 
     #[test]
     fn cuda_reshape_backward_restores_input_shape() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_reshape backward smoke: {err}");
@@ -6625,7 +6625,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::from_vec(
+        let param_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
             (2usize, 3usize),
             &device,
@@ -6633,7 +6633,7 @@ mod tests {
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let reshaped = cuda_reshape(&param, &[3, 2])?;
-        let weights = CudaTrainTensor::new(Tensor::from_vec(
+        let weights = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0],
             (3usize, 2usize),
             &device,
@@ -6653,7 +6653,7 @@ mod tests {
 
     #[test]
     fn cuda_transpose2d_backward_transposes_grad() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_transpose2d backward smoke: {err}");
@@ -6661,7 +6661,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::from_vec(
+        let param_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
             (2usize, 3usize),
             &device,
@@ -6669,7 +6669,7 @@ mod tests {
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let transposed = cuda_transpose2d(&param)?;
-        let weights = CudaTrainTensor::new(Tensor::from_vec(
+        let weights = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0],
             (3usize, 2usize),
             &device,
@@ -6690,7 +6690,7 @@ mod tests {
 
     #[test]
     fn cuda_transpose_last_two_backward_transposes_batched_grad() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -6700,7 +6700,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::from_vec(
+        let param_tensor = candle_core::Tensor::from_vec(
             vec![
                 1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, -1.0, 1.0, 2.0, 3.0, -2.0, 4.0,
             ],
@@ -6710,7 +6710,7 @@ mod tests {
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let transposed = cuda_transpose_last_two(&param)?;
-        let weights = CudaTrainTensor::new(Tensor::from_vec(
+        let weights = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![
                 1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 1.0, 5.0, 2.0, 6.0, 3.0,
             ],
@@ -6738,7 +6738,7 @@ mod tests {
 
     #[test]
     fn cuda_sum_of_square_graph_matches_expected_grad() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_sum square graph smoke: {err}");
@@ -6746,7 +6746,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::new(vec![1.0f32, 2.0, 3.0], &device)?;
+        let param_tensor = candle_core::Tensor::new(vec![1.0f32, 2.0, 3.0], &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let squared = cuda_mul(&param, &param)?;
@@ -6763,7 +6763,7 @@ mod tests {
 
     #[test]
     fn cuda_matmul_sum_backward_matches_expected_grads() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_matmul backward smoke: {err}");
@@ -6771,12 +6771,12 @@ mod tests {
             }
         };
 
-        let lhs_tensor = Tensor::from_vec(
+        let lhs_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
             (2usize, 3usize),
             &device,
         )?;
-        let rhs_tensor = Tensor::from_vec(
+        let rhs_tensor = candle_core::Tensor::from_vec(
             vec![5.0f32, 6.0, 7.0, 8.0, 9.0, 10.0],
             (3usize, 2usize),
             &device,
@@ -6804,7 +6804,7 @@ mod tests {
 
     #[test]
     fn cuda_matmul_f32_bf16w_backward_matches_expected_lhs_grad() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_matmul_f32_bf16w smoke: {err}");
@@ -6812,17 +6812,17 @@ mod tests {
             }
         };
 
-        let lhs_tensor = Tensor::from_vec(
+        let lhs_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
             (2usize, 3usize),
             &device,
         )?;
-        let weight_tensor = Tensor::from_vec(
+        let weight_tensor = candle_core::Tensor::from_vec(
             vec![5.0f32, 6.0, 7.0, 8.0, 9.0, 10.0],
             (3usize, 2usize),
             &device,
         )?
-        .to_dtype(DType::BF16)?;
+        .to_dtype(candle_core::DType::BF16)?;
         let lhs_id = lhs_tensor.id();
         let lhs = CudaTrainTensor::parameter(lhs_tensor, lhs_id)?;
         let weight = CudaTrainTensor::new(weight_tensor)?;
@@ -6846,7 +6846,7 @@ mod tests {
 
     #[test]
     fn cuda_batched_matmul_sum_backward_matches_expected_grads() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_batched_matmul backward smoke: {err}");
@@ -6854,14 +6854,14 @@ mod tests {
             }
         };
 
-        let lhs_tensor = Tensor::from_vec(
+        let lhs_tensor = candle_core::Tensor::from_vec(
             vec![
                 1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, -1.0, 1.0, 2.0, 3.0, -2.0, 4.0,
             ],
             (2usize, 2usize, 3usize),
             &device,
         )?;
-        let rhs_tensor = Tensor::from_vec(
+        let rhs_tensor = candle_core::Tensor::from_vec(
             vec![
                 1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 1.0, 5.0, 2.0, 6.0, 3.0,
             ],
@@ -6897,7 +6897,7 @@ mod tests {
 
     #[test]
     fn cuda_softmax_last_dim_backward_matches_cpu_reference() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_softmax_last_dim backward smoke: {err}");
@@ -6906,7 +6906,7 @@ mod tests {
         };
 
         let data = vec![0.0f32, 1.0, 2.0, -1.0, 0.5, 3.0];
-        let param_tensor = Tensor::from_vec(data.clone(), (2usize, 3usize), &device)?;
+        let param_tensor = candle_core::Tensor::from_vec(data.clone(), (2usize, 3usize), &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let probs = cuda_softmax_last_dim(&param)?;
@@ -6949,7 +6949,7 @@ mod tests {
 
     #[test]
     fn cuda_shifted_cross_entropy_loss_matches_cpu_reference() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -6964,7 +6964,7 @@ mod tests {
             -0.5, 0.25, 1.25, -0.25, //
             0.1, 0.2, 0.3, 0.4,
         ];
-        let logits_tensor = Tensor::from_vec(logits_data.clone(), (3usize, 4usize), &device)?;
+        let logits_tensor = candle_core::Tensor::from_vec(logits_data.clone(), (3usize, 4usize), &device)?;
         let logits_id = logits_tensor.id();
         let logits = CudaTrainTensor::parameter(logits_tensor, logits_id)?;
         let input_ids = vec![0usize, 3, 2];
@@ -7012,7 +7012,7 @@ mod tests {
 
     #[test]
     fn cuda_shifted_linear_cross_entropy_loss_matches_full_logits_reference() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -7031,10 +7031,10 @@ mod tests {
             0.5f32, -0.2, 0.3, 0.9, //
             -0.1, 0.4, 0.8, -0.6,
         ];
-        let hidden_tensor = Tensor::from_vec(hidden_data.clone(), (3usize, 2usize), &device)?;
+        let hidden_tensor = candle_core::Tensor::from_vec(hidden_data.clone(), (3usize, 2usize), &device)?;
         let hidden_id = hidden_tensor.id();
         let hidden = CudaTrainTensor::parameter(hidden_tensor, hidden_id)?;
-        let head = CudaTrainTensor::new(Tensor::from_vec(
+        let head = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             head_data.clone(),
             (2usize, 4usize),
             &device,
@@ -7090,7 +7090,7 @@ mod tests {
 
     #[test]
     fn cuda_sigmoid_backward_matches_cpu_reference() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_sigmoid backward smoke: {err}");
@@ -7099,7 +7099,7 @@ mod tests {
         };
 
         let data = vec![-2.0f32, 0.0, 2.0];
-        let param_tensor = Tensor::new(data.clone(), &device)?;
+        let param_tensor = candle_core::Tensor::new(data.clone(), &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let sigmoid = cuda_sigmoid(&param)?;
@@ -7136,7 +7136,7 @@ mod tests {
 
     #[test]
     fn cuda_exp_and_softplus_backward_match_cpu_reference() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda exp/softplus smoke: {err}");
@@ -7145,7 +7145,7 @@ mod tests {
         };
 
         let data = vec![-1.0f32, 0.0, 1.5];
-        let exp_tensor = Tensor::new(data.clone(), &device)?;
+        let exp_tensor = candle_core::Tensor::new(data.clone(), &device)?;
         let exp_id = exp_tensor.id();
         let exp_param = CudaTrainTensor::parameter(exp_tensor, exp_id)?;
         let exp_out = cuda_exp(&exp_param)?;
@@ -7178,7 +7178,7 @@ mod tests {
             );
         }
 
-        let softplus_tensor = Tensor::new(data.clone(), &device)?;
+        let softplus_tensor = candle_core::Tensor::new(data.clone(), &device)?;
         let softplus_id = softplus_tensor.id();
         let softplus_param = CudaTrainTensor::parameter(softplus_tensor, softplus_id)?;
         let softplus_out = cuda_softplus(&softplus_param)?;
@@ -7217,7 +7217,7 @@ mod tests {
 
     #[test]
     fn cuda_lora_linear_fused_forward_matches_cpu_reference() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_lora_linear_fused smoke: {err}");
@@ -7237,18 +7237,18 @@ mod tests {
         let a_data = vec![0.3f32, -0.1, 0.2, -0.4, 0.7, 0.5];
         let b_data = vec![0.6f32, -0.2, -0.3, 0.4, 0.8, 0.1, -0.5, 0.9];
 
-        let input = CudaTrainTensor::new(Tensor::from_vec(
+        let input = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             input_data.clone(),
             (rows, in_dim),
             &device,
         )?)?;
-        let base_weight = CudaTrainTensor::new(Tensor::from_vec(
+        let base_weight = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             base_data.clone(),
             (in_dim, out_dim),
             &device,
         )?)?;
-        let a = CudaTrainTensor::new(Tensor::from_vec(a_data.clone(), (rank, in_dim), &device)?)?;
-        let b = CudaTrainTensor::new(Tensor::from_vec(b_data.clone(), (out_dim, rank), &device)?)?;
+        let a = CudaTrainTensor::new(candle_core::Tensor::from_vec(a_data.clone(), (rank, in_dim), &device)?)?;
+        let b = CudaTrainTensor::new(candle_core::Tensor::from_vec(b_data.clone(), (out_dim, rank), &device)?)?;
 
         let actual = cuda_lora_linear_fused(&input, &base_weight, &a, &b, scale)?.to_vec_f32()?;
 
@@ -7284,7 +7284,7 @@ mod tests {
 
     #[test]
     fn cuda_silu_backward_matches_cpu_reference() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_silu backward smoke: {err}");
@@ -7293,7 +7293,7 @@ mod tests {
         };
 
         let data = vec![-1.0f32, 0.0, 2.0];
-        let param_tensor = Tensor::new(data.clone(), &device)?;
+        let param_tensor = candle_core::Tensor::new(data.clone(), &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let silu = cuda_silu(&param)?;
@@ -7330,7 +7330,7 @@ mod tests {
 
     #[test]
     fn cuda_silu_inplace_backward_matches_cpu_reference() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_silu_inplace backward smoke: {err}");
@@ -7339,7 +7339,7 @@ mod tests {
         };
 
         let data = vec![-1.0f32, 0.0, 2.0];
-        let param_tensor = Tensor::new(data.clone(), &device)?;
+        let param_tensor = candle_core::Tensor::new(data.clone(), &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let silu = cuda_silu_inplace(&param)?;
@@ -7376,7 +7376,7 @@ mod tests {
 
     #[test]
     fn cuda_swiglu_mlp_backward_reaches_input_and_weights() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_swiglu_mlp backward smoke: {err}");
@@ -7385,12 +7385,12 @@ mod tests {
         };
 
         let input_tensor =
-            Tensor::from_vec(vec![0.5f32, -1.0, 1.5, 0.25], (2usize, 2usize), &device)?;
+            candle_core::Tensor::from_vec(vec![0.5f32, -1.0, 1.5, 0.25], (2usize, 2usize), &device)?;
         let gate_tensor =
-            Tensor::from_vec(vec![0.2f32, -0.3, 0.4, 0.1], (2usize, 2usize), &device)?;
-        let up_tensor = Tensor::from_vec(vec![0.7f32, -0.2, -0.5, 0.6], (2usize, 2usize), &device)?;
+            candle_core::Tensor::from_vec(vec![0.2f32, -0.3, 0.4, 0.1], (2usize, 2usize), &device)?;
+        let up_tensor = candle_core::Tensor::from_vec(vec![0.7f32, -0.2, -0.5, 0.6], (2usize, 2usize), &device)?;
         let down_tensor =
-            Tensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize), &device)?;
+            candle_core::Tensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize), &device)?;
         let input_id = input_tensor.id();
         let gate_id = gate_tensor.id();
         let up_id = up_tensor.id();
@@ -7431,7 +7431,7 @@ mod tests {
 
     #[test]
     fn cuda_full_attention_layer_backward_reaches_core_weights() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -7442,31 +7442,31 @@ mod tests {
         };
 
         let input_tensor =
-            Tensor::from_vec(vec![0.5f32, -1.0, 1.5, 0.25], (2usize, 2usize), &device)?;
-        let input_norm_tensor = Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
-        let q_tensor = Tensor::from_vec(
+            candle_core::Tensor::from_vec(vec![0.5f32, -1.0, 1.5, 0.25], (2usize, 2usize), &device)?;
+        let input_norm_tensor = candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
+        let q_tensor = candle_core::Tensor::from_vec(
             vec![0.2f32, -0.3, 0.05, 0.4, 0.4, 0.1, -0.2, 0.3],
             (2usize, 4usize),
             &device,
         )?;
-        let k_tensor = Tensor::from_vec(vec![0.1f32, 0.6, 0.8, -0.2], (2usize, 2usize), &device)?;
-        let v_tensor = Tensor::from_vec(vec![0.7f32, -0.2, -0.5, 0.6], (2usize, 2usize), &device)?;
-        let q_norm_tensor = Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
-        let k_norm_tensor = Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
-        let o_tensor = Tensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize), &device)?;
-        let post_norm_tensor = Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
+        let k_tensor = candle_core::Tensor::from_vec(vec![0.1f32, 0.6, 0.8, -0.2], (2usize, 2usize), &device)?;
+        let v_tensor = candle_core::Tensor::from_vec(vec![0.7f32, -0.2, -0.5, 0.6], (2usize, 2usize), &device)?;
+        let q_norm_tensor = candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
+        let k_norm_tensor = candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
+        let o_tensor = candle_core::Tensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize), &device)?;
+        let post_norm_tensor = candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
         let gate_tensor =
-            Tensor::from_vec(vec![0.25f32, -0.15, 0.35, 0.05], (2usize, 2usize), &device)?;
+            candle_core::Tensor::from_vec(vec![0.25f32, -0.15, 0.35, 0.05], (2usize, 2usize), &device)?;
         let up_tensor =
-            Tensor::from_vec(vec![0.45f32, 0.2, -0.1, 0.55], (2usize, 2usize), &device)?;
+            candle_core::Tensor::from_vec(vec![0.45f32, 0.2, -0.1, 0.55], (2usize, 2usize), &device)?;
         let down_tensor =
-            Tensor::from_vec(vec![0.6f32, -0.25, 0.15, 0.5], (2usize, 2usize), &device)?;
-        let cos = CudaTrainTensor::new(Tensor::from_vec(
+            candle_core::Tensor::from_vec(vec![0.6f32, -0.25, 0.15, 0.5], (2usize, 2usize), &device)?;
+        let cos = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![1.0f32, 0.0],
             (2usize, 1usize),
             &device,
         )?)?;
-        let sin = CudaTrainTensor::new(Tensor::from_vec(
+        let sin = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![0.0f32, 1.0],
             (2usize, 1usize),
             &device,
@@ -7555,7 +7555,7 @@ mod tests {
 
     #[test]
     fn cuda_repeat_kv_heads_backward_sums_repeated_groups() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_repeat_kv_heads backward smoke: {err}");
@@ -7563,7 +7563,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::from_vec(
+        let param_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0],
             (2usize, 1usize, 2usize),
             &device,
@@ -7571,7 +7571,7 @@ mod tests {
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let repeated = cuda_repeat_kv_heads(&param, 2)?;
-        let weights = CudaTrainTensor::new(Tensor::from_vec(
+        let weights = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![10.0f32, 1.0, 20.0, 2.0, 30.0, 3.0, 40.0, 4.0],
             (4usize, 1usize, 2usize),
             &device,
@@ -7595,7 +7595,7 @@ mod tests {
 
     #[test]
     fn cuda_narrow_last_dim_backward_pads_zero_gradients() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_narrow_last_dim backward smoke: {err}");
@@ -7603,7 +7603,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::from_vec(
+        let param_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             (2usize, 4usize),
             &device,
@@ -7611,7 +7611,7 @@ mod tests {
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let narrowed = cuda_narrow_last_dim(&param, 1, 2)?;
-        let weights = CudaTrainTensor::new(Tensor::from_vec(
+        let weights = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![10.0f32, 20.0, 30.0, 40.0],
             (2usize, 2usize),
             &device,
@@ -7632,7 +7632,7 @@ mod tests {
 
     #[test]
     fn cuda_narrow_rows_backward_pads_zero_gradients() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_narrow_rows backward smoke: {err}");
@@ -7640,7 +7640,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::from_vec(
+        let param_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             (4usize, 2usize),
             &device,
@@ -7648,7 +7648,7 @@ mod tests {
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let narrowed = cuda_narrow_rows(&param, 1, 2)?;
-        let weights = CudaTrainTensor::new(Tensor::from_vec(
+        let weights = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![10.0f32, 20.0, 30.0, 40.0],
             (2usize, 2usize),
             &device,
@@ -7669,7 +7669,7 @@ mod tests {
 
     #[test]
     fn cuda_cat_rows_backward_splits_gradients() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_cat_rows backward smoke: {err}");
@@ -7678,15 +7678,15 @@ mod tests {
         };
 
         let first_tensor =
-            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2usize, 2usize), &device)?;
+            candle_core::Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2usize, 2usize), &device)?;
         let first_id = first_tensor.id();
         let first = CudaTrainTensor::parameter(first_tensor, first_id)?;
         let second_tensor =
-            Tensor::from_vec(vec![5.0f32, 6.0, 7.0, 8.0], (2usize, 2usize), &device)?;
+            candle_core::Tensor::from_vec(vec![5.0f32, 6.0, 7.0, 8.0], (2usize, 2usize), &device)?;
         let second_id = second_tensor.id();
         let second = CudaTrainTensor::parameter(second_tensor, second_id)?;
         let cat = cuda_cat_rows(&[first, second])?;
-        let weights = CudaTrainTensor::new(Tensor::from_vec(
+        let weights = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0],
             (4usize, 2usize),
             &device,
@@ -7720,7 +7720,7 @@ mod tests {
 
     #[test]
     fn cuda_causal_depthwise_conv1d_prefill_zero_state_matches_reference() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda conv1d prefill smoke: {err}");
@@ -7728,14 +7728,14 @@ mod tests {
             }
         };
 
-        let input_tensor = Tensor::from_vec(
+        let input_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
             (3usize, 2usize),
             &device,
         )?;
         let input_id = input_tensor.id();
         let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
-        let weight_tensor = Tensor::from_vec(
+        let weight_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 10.0, 100.0, 2.0, 20.0, 200.0],
             (2usize, 3usize),
             &device,
@@ -7770,7 +7770,7 @@ mod tests {
 
     #[test]
     fn cuda_causal_depthwise_conv1d_next_state_zero_state_tracks_tail() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda conv1d state smoke: {err}");
@@ -7778,7 +7778,7 @@ mod tests {
             }
         };
 
-        let input_tensor = Tensor::from_vec(
+        let input_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
             (3usize, 2usize),
             &device,
@@ -7789,7 +7789,7 @@ mod tests {
         assert_eq!(state.dims(), &[2, 2]);
         assert_eq!(state.to_vec_f32()?, vec![3.0, 4.0, 5.0, 6.0]);
 
-        let short_tensor = Tensor::from_vec(vec![7.0f32, 8.0], (1usize, 2usize), &device)?;
+        let short_tensor = candle_core::Tensor::from_vec(vec![7.0f32, 8.0], (1usize, 2usize), &device)?;
         let short = CudaTrainTensor::new(short_tensor)?;
         let short_state = cuda_causal_depthwise_conv1d_next_state_zero_state(&short, 4)?;
         assert_eq!(short_state.dims(), &[3, 2]);
@@ -7812,7 +7812,7 @@ mod tests {
 
     #[test]
     fn cuda_causal_depthwise_conv1d_prefill_with_state_threads_state() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda conv1d stateful smoke: {err}");
@@ -7821,10 +7821,10 @@ mod tests {
         };
 
         let input_tensor =
-            Tensor::from_vec(vec![3.0f32, 4.0, 5.0, 6.0], (2usize, 2usize), &device)?;
+            candle_core::Tensor::from_vec(vec![3.0f32, 4.0, 5.0, 6.0], (2usize, 2usize), &device)?;
         let input_id = input_tensor.id();
         let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
-        let weight_tensor = Tensor::from_vec(
+        let weight_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 10.0, 100.0, 2.0, 20.0, 200.0],
             (2usize, 3usize),
             &device,
@@ -7832,7 +7832,7 @@ mod tests {
         let weight_id = weight_tensor.id();
         let weight = CudaTrainTensor::parameter(weight_tensor, weight_id)?;
         let state_tensor =
-            Tensor::from_vec(vec![0.5f32, 1.0, 1.5, 2.0], (2usize, 2usize), &device)?;
+            candle_core::Tensor::from_vec(vec![0.5f32, 1.0, 1.5, 2.0], (2usize, 2usize), &device)?;
         let state_id = state_tensor.id();
         let state = CudaTrainTensor::parameter(state_tensor, state_id)?;
 
@@ -7871,7 +7871,7 @@ mod tests {
 
     #[test]
     fn cuda_gdn_single_token_recurrence_matches_reference() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda GDN single-token smoke: {err}");
@@ -7879,12 +7879,12 @@ mod tests {
             }
         };
 
-        let q_tensor = Tensor::from_vec(vec![0.5f32, -1.0], (1usize, 2usize), &device)?;
-        let k_tensor = Tensor::from_vec(vec![1.5f32, 0.25], (1usize, 2usize), &device)?;
-        let v_tensor = Tensor::from_vec(vec![0.1f32, -0.2, 0.3], (1usize, 3usize), &device)?;
-        let beta_tensor = Tensor::from_vec(vec![0.4f32], (1usize, 1usize), &device)?;
-        let g_tensor = Tensor::from_vec(vec![0.0f32], (1usize, 1usize), &device)?;
-        let state_tensor = Tensor::from_vec(
+        let q_tensor = candle_core::Tensor::from_vec(vec![0.5f32, -1.0], (1usize, 2usize), &device)?;
+        let k_tensor = candle_core::Tensor::from_vec(vec![1.5f32, 0.25], (1usize, 2usize), &device)?;
+        let v_tensor = candle_core::Tensor::from_vec(vec![0.1f32, -0.2, 0.3], (1usize, 3usize), &device)?;
+        let beta_tensor = candle_core::Tensor::from_vec(vec![0.4f32], (1usize, 1usize), &device)?;
+        let g_tensor = candle_core::Tensor::from_vec(vec![0.0f32], (1usize, 1usize), &device)?;
+        let state_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
             (2usize, 3usize),
             &device,
@@ -7948,7 +7948,7 @@ mod tests {
 
     #[test]
     fn cuda_gdn_single_head_sequence_recurrence_threads_state() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda GDN sequence smoke: {err}");
@@ -7956,16 +7956,16 @@ mod tests {
             }
         };
 
-        let q_tensor = Tensor::from_vec(vec![0.5f32, -1.0, 0.25, 0.75], (2usize, 2usize), &device)?;
-        let k_tensor = Tensor::from_vec(vec![1.5f32, 0.25, -0.5, 1.0], (2usize, 2usize), &device)?;
-        let v_tensor = Tensor::from_vec(
+        let q_tensor = candle_core::Tensor::from_vec(vec![0.5f32, -1.0, 0.25, 0.75], (2usize, 2usize), &device)?;
+        let k_tensor = candle_core::Tensor::from_vec(vec![1.5f32, 0.25, -0.5, 1.0], (2usize, 2usize), &device)?;
+        let v_tensor = candle_core::Tensor::from_vec(
             vec![0.1f32, -0.2, 0.3, 0.4, 0.2, -0.1],
             (2usize, 3usize),
             &device,
         )?;
-        let beta_tensor = Tensor::from_vec(vec![0.4f32, 0.6], (2usize, 1usize), &device)?;
-        let g_tensor = Tensor::from_vec(vec![0.0f32, 0.0], (2usize, 1usize), &device)?;
-        let state_tensor = Tensor::from_vec(
+        let beta_tensor = candle_core::Tensor::from_vec(vec![0.4f32, 0.6], (2usize, 1usize), &device)?;
+        let g_tensor = candle_core::Tensor::from_vec(vec![0.0f32, 0.0], (2usize, 1usize), &device)?;
+        let state_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
             (2usize, 3usize),
             &device,
@@ -8029,7 +8029,7 @@ mod tests {
 
     #[test]
     fn cuda_gdn_multi_head_sequence_recurrence_threads_head_blocks() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda GDN multi-head smoke: {err}");
@@ -8037,17 +8037,17 @@ mod tests {
             }
         };
 
-        let q_tensor = Tensor::from_vec(
+        let q_tensor = candle_core::Tensor::from_vec(
             vec![0.5f32, -1.0, 0.25, 0.75, 1.0, 0.0, 0.0, 1.0],
             (4usize, 2usize),
             &device,
         )?;
-        let k_tensor = Tensor::from_vec(
+        let k_tensor = candle_core::Tensor::from_vec(
             vec![1.5f32, 0.25, -0.5, 1.0, 0.5, 0.5, 1.0, -0.5],
             (4usize, 2usize),
             &device,
         )?;
-        let v_tensor = Tensor::from_vec(
+        let v_tensor = candle_core::Tensor::from_vec(
             vec![
                 0.1f32, -0.2, 0.3, 0.4, 0.2, -0.1, 0.2, 0.4, -0.2, -0.3, 0.1, 0.5,
             ],
@@ -8055,9 +8055,9 @@ mod tests {
             &device,
         )?;
         let beta_tensor =
-            Tensor::from_vec(vec![0.4f32, 0.6, 0.5, 0.25], (4usize, 1usize), &device)?;
-        let g_tensor = Tensor::from_vec(vec![0.0f32, 0.0, 0.0, 0.0], (4usize, 1usize), &device)?;
-        let state_tensor = Tensor::from_vec(
+            candle_core::Tensor::from_vec(vec![0.4f32, 0.6, 0.5, 0.25], (4usize, 1usize), &device)?;
+        let g_tensor = candle_core::Tensor::from_vec(vec![0.0f32, 0.0, 0.0, 0.0], (4usize, 1usize), &device)?;
+        let state_tensor = candle_core::Tensor::from_vec(
             vec![
                 1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 0.5, -0.5, 1.0, 1.5, 0.25, -1.0,
             ],
@@ -8139,7 +8139,7 @@ mod tests {
 
     #[test]
     fn cuda_index_select_rows_backward_scatter_adds_duplicate_indices() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -8149,7 +8149,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::from_vec(
+        let param_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
             (3usize, 2usize),
             &device,
@@ -8157,7 +8157,7 @@ mod tests {
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let selected = cuda_index_select_rows(&param, &[2, 0, 2])?;
-        let weights = CudaTrainTensor::new(Tensor::from_vec(
+        let weights = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![10.0f32, 1.0, 20.0, 2.0, 30.0, 3.0],
             (3usize, 2usize),
             &device,
@@ -8178,7 +8178,7 @@ mod tests {
 
     #[test]
     fn cuda_embedding_lookup_backward_scatter_adds_token_grads() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_embedding_lookup backward smoke: {err}");
@@ -8186,7 +8186,7 @@ mod tests {
             }
         };
 
-        let table_tensor = Tensor::from_vec(
+        let table_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             (4usize, 2usize),
             &device,
@@ -8194,7 +8194,7 @@ mod tests {
         let table_id = table_tensor.id();
         let table = CudaTrainTensor::parameter(table_tensor, table_id)?;
         let embedded = cuda_embedding_lookup(&table, &[2, 0, 2])?;
-        let weights = CudaTrainTensor::new(Tensor::from_vec(
+        let weights = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![10.0f32, 1.0, 20.0, 2.0, 30.0, 3.0],
             (3usize, 2usize),
             &device,
@@ -8215,7 +8215,7 @@ mod tests {
 
     #[test]
     fn cuda_permute_rh_to_hr_backward_inverts_permute() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_permute_rh_to_hr backward smoke: {err}");
@@ -8223,7 +8223,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::from_vec(
+        let param_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
             (2usize, 3usize, 1usize),
             &device,
@@ -8231,7 +8231,7 @@ mod tests {
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let permuted = cuda_permute_rh_to_hr(&param)?;
-        let weights = CudaTrainTensor::new(Tensor::from_vec(
+        let weights = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![10.0f32, 1.0, 20.0, 2.0, 30.0, 3.0],
             (3usize, 2usize, 1usize),
             &device,
@@ -8252,7 +8252,7 @@ mod tests {
 
     #[test]
     fn cuda_permute_hr_to_rh_backward_inverts_permute() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_permute_hr_to_rh backward smoke: {err}");
@@ -8260,7 +8260,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::from_vec(
+        let param_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
             (2usize, 3usize, 1usize),
             &device,
@@ -8268,7 +8268,7 @@ mod tests {
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let permuted = cuda_permute_hr_to_rh(&param)?;
-        let weights = CudaTrainTensor::new(Tensor::from_vec(
+        let weights = CudaTrainTensor::new(candle_core::Tensor::from_vec(
             vec![10.0f32, 1.0, 20.0, 2.0, 30.0, 3.0],
             (3usize, 2usize, 1usize),
             &device,
@@ -8289,7 +8289,7 @@ mod tests {
 
     #[test]
     fn cuda_sdpa_unmasked_backward_reaches_qkv() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_sdpa_unmasked backward smoke: {err}");
@@ -8297,17 +8297,17 @@ mod tests {
             }
         };
 
-        let q_tensor = Tensor::from_vec(
+        let q_tensor = candle_core::Tensor::from_vec(
             vec![0.2f32, -0.1, 0.4, 0.3, 0.0, 0.5, -0.3, 0.7],
             (2usize, 2usize, 2usize),
             &device,
         )?;
-        let k_tensor = Tensor::from_vec(
+        let k_tensor = candle_core::Tensor::from_vec(
             vec![0.1f32, 0.6, 0.8, -0.2],
             (2usize, 1usize, 2usize),
             &device,
         )?;
-        let v_tensor = Tensor::from_vec(
+        let v_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, -0.5, 0.25, 0.75],
             (2usize, 1usize, 2usize),
             &device,
@@ -8350,7 +8350,7 @@ mod tests {
 
     #[test]
     fn cuda_sdpa_prefill_causal_masks_future_keys_and_reaches_qkv() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -8360,17 +8360,17 @@ mod tests {
             }
         };
 
-        let q_tensor = Tensor::from_vec(
+        let q_tensor = candle_core::Tensor::from_vec(
             vec![0.2f32, -0.1, 0.4, 0.3, 0.0, 0.5, -0.3, 0.7],
             (2usize, 2usize, 2usize),
             &device,
         )?;
-        let k_tensor = Tensor::from_vec(
+        let k_tensor = candle_core::Tensor::from_vec(
             vec![0.1f32, 0.6, 0.8, -0.2],
             (2usize, 1usize, 2usize),
             &device,
         )?;
-        let v_tensor = Tensor::from_vec(
+        let v_tensor = candle_core::Tensor::from_vec(
             vec![1.0f32, -0.5, 0.25, 0.75],
             (2usize, 1usize, 2usize),
             &device,
@@ -8414,7 +8414,7 @@ mod tests {
 
     #[test]
     fn cuda_flash_attn_prefill_causal_matches_composed_sdpa_and_reaches_qkv() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda_flash_attn_prefill_causal smoke: {err}");
@@ -8426,9 +8426,9 @@ mod tests {
         let heads_q = 4usize;
         let heads_kv = 2usize;
         let head_dim = 128usize;
-        let q_tensor = Tensor::randn(0f32, 0.125f32, (rows, heads_q, head_dim), &device)?;
-        let k_tensor = Tensor::randn(0f32, 0.125f32, (rows, heads_kv, head_dim), &device)?;
-        let v_tensor = Tensor::randn(0f32, 0.125f32, (rows, heads_kv, head_dim), &device)?;
+        let q_tensor = candle_core::Tensor::randn(0f32, 0.125f32, (rows, heads_q, head_dim), &device)?;
+        let k_tensor = candle_core::Tensor::randn(0f32, 0.125f32, (rows, heads_kv, head_dim), &device)?;
+        let v_tensor = candle_core::Tensor::randn(0f32, 0.125f32, (rows, heads_kv, head_dim), &device)?;
 
         let q_id = q_tensor.id();
         let k_id = k_tensor.id();
@@ -8442,16 +8442,16 @@ mod tests {
             .context("FlashAttention path unexpectedly declined supported shape")?;
 
         let q_ref =
-            CudaTrainTensor::new(q.as_tensor().to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
+            CudaTrainTensor::new(q.as_tensor().to_dtype(candle_core::DType::BF16)?.to_dtype(candle_core::DType::F32)?)?;
         let k_ref =
-            CudaTrainTensor::new(k.as_tensor().to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
+            CudaTrainTensor::new(k.as_tensor().to_dtype(candle_core::DType::BF16)?.to_dtype(candle_core::DType::F32)?)?;
         let v_ref =
-            CudaTrainTensor::new(v.as_tensor().to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
+            CudaTrainTensor::new(v.as_tensor().to_dtype(candle_core::DType::BF16)?.to_dtype(candle_core::DType::F32)?)?;
         let reference = cuda_sdpa_prefill_causal(&q_ref, &k_ref, &v_ref, scale)?;
         let reference = reference
             .as_tensor()
-            .to_dtype(DType::BF16)?
-            .to_dtype(DType::F32)?;
+            .to_dtype(candle_core::DType::BF16)?
+            .to_dtype(candle_core::DType::F32)?;
 
         assert_eq!(fast.dims(), &[rows, heads_q, head_dim]);
         let fast_values = fast.to_vec_f32()?;
@@ -8489,7 +8489,7 @@ mod tests {
 
     #[test]
     fn cuda_native_sgd_step_decreases_sum_square_loss() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda native SGD smoke: {err}");
@@ -8497,7 +8497,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::new(vec![2.0f32, -4.0], &device)?;
+        let param_tensor = candle_core::Tensor::new(vec![2.0f32, -4.0], &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
 
@@ -8524,7 +8524,7 @@ mod tests {
 
     #[test]
     fn cuda_native_adamw_step_decreases_sum_square_loss() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!("CUDA unavailable, skipping cuda native AdamW smoke: {err}");
@@ -8532,7 +8532,7 @@ mod tests {
             }
         };
 
-        let param_tensor = Tensor::new(vec![2.0f32, -4.0], &device)?;
+        let param_tensor = candle_core::Tensor::new(vec![2.0f32, -4.0], &device)?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let mut states = HashMap::new();
