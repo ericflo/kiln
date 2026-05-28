@@ -20,7 +20,6 @@
 //! without seeing any kt types.
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor};
 
 /// Maximum representable value in E4M3FN format.
 const E4M3_MAX: f32 = 448.0;
@@ -37,16 +36,16 @@ const E4M3_MAX: f32 = 448.0;
 /// CUDA tensors take the on-device `kiln_tensor::cuda_fp8_quantize_direct` path
 /// via kt bridge so the buffer never bounces through host memory. CPU tensors
 /// take the legacy host path.
-pub fn quantize_to_fp8_direct(tensor: &Tensor) -> Result<Tensor> {
+pub fn quantize_to_fp8_direct(tensor: &candle_core::Tensor) -> Result<candle_core::Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(out) = try_kt_quantize_to_fp8_direct(tensor)? {
         return Ok(out);
     }
-    let tensor_f32 = tensor.to_dtype(DType::F32)?;
+    let tensor_f32 = tensor.to_dtype(candle_core::DType::F32)?;
     let data = tensor_f32.flatten_all()?.to_vec1::<f32>()?;
     let fp8_bytes: Vec<u8> = data.iter().map(|&v| f32_to_e4m3(v)).collect();
     let shape = tensor.shape().clone();
-    let quantized = Tensor::from_vec(fp8_bytes, shape, tensor.device())?;
+    let quantized = candle_core::Tensor::from_vec(fp8_bytes, shape, tensor.device())?;
     Ok(quantized)
 }
 
@@ -54,11 +53,11 @@ pub fn quantize_to_fp8_direct(tensor: &Tensor) -> Result<Tensor> {
 /// `kiln_tensor::cuda_fp8_quantize_direct`. Returns `Ok(None)` on any
 /// precondition failure so the caller falls through to the host path.
 #[cfg(feature = "cuda")]
-fn try_kt_quantize_to_fp8_direct(t: &Tensor) -> Result<Option<Tensor>> {
-    if !matches!(t.device(), Device::Cuda(_)) || !t.is_contiguous() {
+fn try_kt_quantize_to_fp8_direct(t: &candle_core::Tensor) -> Result<Option<candle_core::Tensor>> {
+    if !matches!(t.device(), candle_core::Device::Cuda(_)) || !t.is_contiguous() {
         return Ok(None);
     }
-    if !matches!(t.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+    if !matches!(t.dtype(), candle_core::DType::F32 | candle_core::DType::BF16 | candle_core::DType::F16) {
         return Ok(None);
     }
     let kt_in = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t) {
@@ -81,10 +80,10 @@ fn try_kt_quantize_to_fp8_direct(t: &Tensor) -> Result<Option<Tensor>> {
 /// path via kt bridge. CPU tensors fall through to the legacy host path
 /// in [`dequantize_from_fp8`].
 pub fn dequantize_from_fp8_direct(
-    quantized: &Tensor,
-    target_dtype: DType,
-    device: &Device,
-) -> Result<Tensor> {
+    quantized: &candle_core::Tensor,
+    target_dtype: candle_core::DType,
+    device: &candle_core::Device,
+) -> Result<candle_core::Tensor> {
     dequantize_from_fp8(quantized, 1.0, target_dtype, device)
 }
 
@@ -96,13 +95,13 @@ pub fn dequantize_from_fp8_direct(
 ///
 /// CUDA tensors take the on-device `kiln_tensor::cuda_fp8_quantize` path
 /// via kt bridge. CPU tensors take the legacy host path.
-pub fn quantize_to_fp8(tensor: &Tensor) -> Result<(Tensor, f32)> {
+pub fn quantize_to_fp8(tensor: &candle_core::Tensor) -> Result<(candle_core::Tensor, f32)> {
     #[cfg(feature = "cuda")]
     if let Some(pair) = try_kt_quantize_to_fp8(tensor)? {
         return Ok(pair);
     }
     // Compute absmax scale
-    let tensor_f32 = tensor.to_dtype(DType::F32)?;
+    let tensor_f32 = tensor.to_dtype(candle_core::DType::F32)?;
     let abs_max = tensor_f32.abs()?.max(0)?.max(0)?;
     // Flatten remaining dims to get scalar
     let abs_max_val: f32 = abs_max.flatten_all()?.max(0)?.to_scalar::<f32>()?;
@@ -122,7 +121,7 @@ pub fn quantize_to_fp8(tensor: &Tensor) -> Result<(Tensor, f32)> {
     let fp8_bytes: Vec<u8> = data.iter().map(|&v| f32_to_e4m3(v)).collect();
 
     let shape = tensor.shape().clone();
-    let quantized = Tensor::from_vec(fp8_bytes, shape, tensor.device())?;
+    let quantized = candle_core::Tensor::from_vec(fp8_bytes, shape, tensor.device())?;
 
     Ok((quantized, scale))
 }
@@ -132,11 +131,11 @@ pub fn quantize_to_fp8(tensor: &Tensor) -> Result<(Tensor, f32)> {
 /// `Ok(None)` on any precondition failure so the caller falls through to
 /// the host path.
 #[cfg(feature = "cuda")]
-fn try_kt_quantize_to_fp8(t: &Tensor) -> Result<Option<(Tensor, f32)>> {
-    if !matches!(t.device(), Device::Cuda(_)) || !t.is_contiguous() {
+fn try_kt_quantize_to_fp8(t: &candle_core::Tensor) -> Result<Option<(candle_core::Tensor, f32)>> {
+    if !matches!(t.device(), candle_core::Device::Cuda(_)) || !t.is_contiguous() {
         return Ok(None);
     }
-    if !matches!(t.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+    if !matches!(t.dtype(), candle_core::DType::F32 | candle_core::DType::BF16 | candle_core::DType::F16) {
         return Ok(None);
     }
     let kt_in = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t) {
@@ -157,11 +156,11 @@ fn try_kt_quantize_to_fp8(t: &Tensor) -> Result<Option<(Tensor, f32)>> {
 /// CUDA inputs take the on-device `kiln_tensor::cuda_fp8_dequantize` path
 /// via kt bridge. CPU inputs take the legacy host path.
 pub fn dequantize_from_fp8(
-    quantized: &Tensor,
+    quantized: &candle_core::Tensor,
     scale: f32,
-    target_dtype: DType,
-    device: &Device,
-) -> Result<Tensor> {
+    target_dtype: candle_core::DType,
+    device: &candle_core::Device,
+) -> Result<candle_core::Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(out) = try_kt_dequantize_from_fp8(quantized, scale, target_dtype, device)? {
         return Ok(out);
@@ -170,7 +169,7 @@ pub fn dequantize_from_fp8(
     let f32_vals: Vec<f32> = data.iter().map(|&b| e4m3_to_f32(b) * scale).collect();
 
     let shape = quantized.shape().clone();
-    let result = Tensor::from_vec(f32_vals, shape, device)?;
+    let result = candle_core::Tensor::from_vec(f32_vals, shape, device)?;
     result
         .to_dtype(target_dtype)
         .context("dequantize dtype conversion")
@@ -183,24 +182,24 @@ pub fn dequantize_from_fp8(
 /// failure so the caller falls through to the host path.
 #[cfg(feature = "cuda")]
 fn try_kt_dequantize_from_fp8(
-    quantized: &Tensor,
+    quantized: &candle_core::Tensor,
     scale: f32,
-    target_dtype: DType,
-    device: &Device,
-) -> Result<Option<Tensor>> {
-    if !matches!(quantized.device(), Device::Cuda(_)) || !quantized.is_contiguous() {
+    target_dtype: candle_core::DType,
+    device: &candle_core::Device,
+) -> Result<Option<candle_core::Tensor>> {
+    if !matches!(quantized.device(), candle_core::Device::Cuda(_)) || !quantized.is_contiguous() {
         return Ok(None);
     }
-    if quantized.dtype() != DType::U8 {
+    if quantized.dtype() != candle_core::DType::U8 {
         return Ok(None);
     }
     // Only handle dequant onto the same CUDA device as the input. Any
     // cross-device case falls back to the host path which already supports
-    // the general case via `Tensor::from_vec(.., device)`.
-    if !matches!(device, Device::Cuda(_)) || !quantized.device().same_device(device) {
+    // the general case via `candle_core::Tensor::from_vec(.., device)`.
+    if !matches!(device, candle_core::Device::Cuda(_)) || !quantized.device().same_device(device) {
         return Ok(None);
     }
-    if !matches!(target_dtype, DType::F32 | DType::BF16 | DType::F16) {
+    if !matches!(target_dtype, candle_core::DType::F32 | candle_core::DType::BF16 | candle_core::DType::F16) {
         return Ok(None);
     }
     let kt_dtype = match kiln_kt_bridge::candle_dtype_to_kt(target_dtype) {
@@ -350,17 +349,17 @@ mod tests {
 
     #[test]
     fn test_quantize_dequantize_tensor() -> Result<()> {
-        let device = Device::Cpu;
-        let original = Tensor::new(
+        let device = candle_core::Device::Cpu;
+        let original = candle_core::Tensor::new(
             &[[1.0_f32, -2.0, 3.0, -4.0], [0.5, -0.5, 0.1, -0.1]],
             &device,
         )?;
 
         let (quantized, scale) = quantize_to_fp8(&original)?;
-        assert_eq!(quantized.dtype(), DType::U8);
+        assert_eq!(quantized.dtype(), candle_core::DType::U8);
         assert_eq!(quantized.dims(), original.dims());
 
-        let dequantized = dequantize_from_fp8(&quantized, scale, DType::F32, &device)?;
+        let dequantized = dequantize_from_fp8(&quantized, scale, candle_core::DType::F32, &device)?;
         assert_eq!(dequantized.dims(), original.dims());
 
         // Check approximate roundtrip accuracy (FP8 has limited precision)
@@ -380,8 +379,8 @@ mod tests {
 
     #[test]
     fn test_quantize_preserves_shape() -> Result<()> {
-        let device = Device::Cpu;
-        let tensor = Tensor::randn(0.0_f32, 1.0, (2, 4, 8, 16), &device)?;
+        let device = candle_core::Device::Cpu;
+        let tensor = candle_core::Tensor::randn(0.0_f32, 1.0, (2, 4, 8, 16), &device)?;
         let (quantized, _scale) = quantize_to_fp8(&tensor)?;
         assert_eq!(quantized.dims(), tensor.dims());
         Ok(())
@@ -389,10 +388,10 @@ mod tests {
 
     #[test]
     fn test_quantize_zeros() -> Result<()> {
-        let device = Device::Cpu;
-        let tensor = Tensor::zeros((2, 4), DType::F32, &device)?;
+        let device = candle_core::Device::Cpu;
+        let tensor = candle_core::Tensor::zeros((2, 4), candle_core::DType::F32, &device)?;
         let (quantized, scale) = quantize_to_fp8(&tensor)?;
-        let dequantized = dequantize_from_fp8(&quantized, scale, DType::F32, &device)?;
+        let dequantized = dequantize_from_fp8(&quantized, scale, candle_core::DType::F32, &device)?;
         let vals = dequantized.flatten_all()?.to_vec1::<f32>()?;
         assert!(vals.iter().all(|&v| v.abs() < 1e-6));
         Ok(())
@@ -403,11 +402,11 @@ mod tests {
         // BF16 KV cache: 2 bytes per element
         // FP8 KV cache: 1 byte per element + negligible scale overhead
         // This test verifies the U8 storage is indeed half the size
-        let device = Device::Cpu;
-        let bf16_tensor = Tensor::zeros((1024, 4, 256), DType::BF16, &device)?;
+        let device = candle_core::Device::Cpu;
+        let bf16_tensor = candle_core::Tensor::zeros((1024, 4, 256), candle_core::DType::BF16, &device)?;
         let bf16_bytes = bf16_tensor.elem_count() * 2; // 2 bytes per BF16
 
-        let f32_tensor = bf16_tensor.to_dtype(DType::F32)?;
+        let f32_tensor = bf16_tensor.to_dtype(candle_core::DType::F32)?;
         let (fp8_tensor, _) = quantize_to_fp8(&f32_tensor)?;
         let fp8_bytes = fp8_tensor.elem_count() * 1; // 1 byte per U8
 
