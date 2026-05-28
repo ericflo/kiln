@@ -100,7 +100,9 @@ use std::collections::HashMap;
 use candle_core::backprop::GradStore as CandleGradStore;
 use candle_core::Tensor as CandleTensor;
 use candle_core::TensorId as CandleTensorId;
-use kiln_autograd::{with_thread_local_tape, Tape};
+use kiln_autograd::{
+    with_active_tape, with_thread_local_tape, InjectGradientBackward, Tape,
+};
 use kiln_tensor::TensorId as KtTensorId;
 
 use crate::BridgeError;
@@ -498,6 +500,269 @@ fn insert_or_add_by_raw(
              accumulate into it."
         )))
     }
+}
+
+/// Tiny candle `CustomOp1` shim used by [`inject_gradient_kt`] to keep
+/// `arg` in candle's backward graph. Forward returns a scalar F32 zero
+/// (same placeholder shape as the trainer's `InjectTensorGradient`).
+/// Backward returns `zeros_like(arg)` so candle's `loss.backward()`
+/// allocates a `GradStore` slot for `arg.id()` (initialised to zero).
+///
+/// The kt-tape adapter then accumulates the real per-input gradient
+/// into that slot via `insert_or_add_by_raw`. Final accumulated value:
+/// `0 + upstream = upstream`, bit-equivalent to the candle CustomOp1
+/// path's direct `Some(upstream)` return.
+///
+/// This shim does **not** belong to the public bridge API — it's an
+/// internal scaffold the adapter uses to satisfy candle's "slot must
+/// exist before accumulate" precondition. The CP-4 endgame replaces
+/// this with a direct kt-tape grad emission once candle is no longer
+/// in the picture for the trainer step.
+#[derive(Clone, Debug)]
+struct InjectGradientCandleShim;
+
+impl candle_core::CustomOp1 for InjectGradientCandleShim {
+    fn name(&self) -> &'static str {
+        "kiln-inject-gradient-candle-shim"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _storage: &candle_core::CpuStorage,
+        _layout: &candle_core::Layout,
+    ) -> candle_core::Result<(candle_core::CpuStorage, candle_core::Shape)> {
+        Ok((
+            candle_core::CpuStorage::F32(vec![0.0]),
+            candle_core::Shape::from(()),
+        ))
+    }
+
+    fn cuda_fwd(
+        &self,
+        storage: &candle_core::CudaStorage,
+        _layout: &candle_core::Layout,
+    ) -> candle_core::Result<(candle_core::CudaStorage, candle_core::Shape)> {
+        use candle_core::backend::BackendStorage;
+        let device = storage.device();
+        let out_slice = device.clone_htod(&[0.0f32])?;
+        Ok((
+            candle_core::CudaStorage::wrap_cuda_slice(out_slice, device.clone()),
+            candle_core::Shape::from(()),
+        ))
+    }
+
+    fn bwd(
+        &self,
+        arg: &candle_core::Tensor,
+        _res: &candle_core::Tensor,
+        _grad_res: &candle_core::Tensor,
+    ) -> candle_core::Result<Option<candle_core::Tensor>> {
+        // Emit zeros_like(arg). This is the bare minimum candle needs
+        // to allocate a GradStore slot for arg; the kt-tape bridge
+        // fills in the real value via insert_or_add_by_raw.
+        let z = candle_core::Tensor::zeros(arg.dims(), arg.dtype(), arg.device())?;
+        Ok(Some(z))
+    }
+}
+
+/// Adapter for the kt-tape replacement of
+/// `kiln-train::trainer::InjectTensorGradient` (#1082, CP-4).
+///
+/// # What this does
+///
+/// The candle path (still live in `trainer.rs`):
+///
+/// ```ignore
+/// let injected = arg.apply_op1(InjectTensorGradient { upstream })?;
+/// let grads = injected.backward()?;
+/// // grads.get(arg) == upstream (after to_device + to_dtype)
+/// ```
+///
+/// This function builds the kt-tape equivalent:
+///
+/// 1. Borrows the candle `arg` zero-copy as a kt tensor.
+/// 2. Copies the candle `upstream` to a kt tensor on `arg`'s device,
+///    promoting/demoting dtype to match `arg` exactly as candle's
+///    `InjectTensorGradient::bwd` does via `to_device` + `to_dtype`.
+/// 3. Records an [`InjectGradientBackward`] node on the active tape
+///    with the borrowed `arg_kt` as its sole input. The recorded node's
+///    output id is a fresh `KtTensorId`.
+/// 4. Registers `(arg_kt.id ↔ arg.id())` as an input mapping and
+///    `(out_kt.id ↔ out.id())` as an output mapping with the active
+///    bridge scope, so a surrounding
+///    `with_tape_scope_emit_to_grad_store` will route the bridge's
+///    candle-derived seed into the tape walker and surface the
+///    resulting per-input grad in the candle `GradStore` keyed on
+///    `arg.id()`.
+/// 5. Returns a freshly-allocated candle scalar-zero Tensor that
+///    mirrors `InjectTensorGradient::cuda_fwd`'s placeholder output
+///    (shape `()`, dtype `F32`, on `arg`'s device). Callers run
+///    `injected.backward()` on it; outside a bridge scope no kt-grad
+///    is emitted (the tape recording happens but its backward never
+///    runs).
+///
+/// # Errors
+///
+/// * `arg` is not on CUDA, not contiguous, or has a dtype that doesn't
+///   round-trip through `candle_dtype_to_kt`.
+/// * `upstream`'s shape doesn't match `arg`'s shape.
+/// * The kt allocations or memcpys fail.
+/// * No active tape (caller didn't open a `with_thread_local_tape` or
+///   `with_tape_scope_emit_to_grad_store`). This is the
+///   precondition-violation branch; the caller MUST open one of those
+///   scopes before calling this adapter. We surface a typed
+///   `BridgeError` rather than silently falling through to a no-op
+///   because the kt-side replacement of `InjectTensorGradient` has no
+///   meaningful "off" mode — failing to record means the gradient is
+///   silently dropped.
+///
+/// # Substrate-only
+///
+/// This adapter exists for the parity test substrate (#1082 CP-4
+/// step 2). The trainer.rs `InjectTensorGradient` call sites do NOT
+/// flip onto this adapter yet — that's a separate PR that audits the
+/// `arg.detach()` discipline, the candle⟷kt dtype promotion paths,
+/// and the BridgeError ⟷ anyhow::Error boundaries at every site.
+pub fn inject_gradient_kt(
+    arg: &CandleTensor,
+    upstream: &CandleTensor,
+) -> Result<CandleTensor, BridgeError> {
+    use crate::{
+        candle_cuda_device_with_stream_no_event_tracking, kt_tensor_from_candle_cuda_borrow,
+        kt_tensor_from_candle_cuda_copy,
+    };
+
+    if arg.dims() != upstream.dims() {
+        return Err(BridgeError::new(format!(
+            "tape_bridge::inject_gradient_kt: arg shape {:?} != upstream shape {:?}",
+            arg.dims(),
+            upstream.dims()
+        )));
+    }
+
+    // Borrow arg zero-copy as kt. This validates contiguity + CUDA +
+    // dtype roundtrip. Any layout/dtype/device mismatch surfaces as
+    // a typed BridgeError instead of degrading silently.
+    let arg_kt = kt_tensor_from_candle_cuda_borrow(arg)?;
+
+    // Convert upstream to a kt-typed grad matching arg's device and
+    // dtype. The candle CustomOp1's `bwd` does:
+    //   let upstream = self.upstream.to_device(arg.device())?;
+    //   if upstream.dtype() != arg.dtype() { upstream.to_dtype(arg.dtype())? }
+    // We mirror that on the candle side first (so the dtype/device
+    // adjustments compose cleanly with candle's existing converters),
+    // then copy into a fresh kt tensor.
+    let candle_arg_device = arg.device().clone();
+    let candle_arg_dtype = arg.dtype();
+    let upstream_on_dev = upstream
+        .to_device(&candle_arg_device)
+        .map_err(|e| BridgeError::new(format!(
+            "tape_bridge::inject_gradient_kt: upstream.to_device(arg.device()): {e}"
+        )))?;
+    let upstream_typed = if upstream_on_dev.dtype() == candle_arg_dtype {
+        upstream_on_dev
+    } else {
+        upstream_on_dev.to_dtype(candle_arg_dtype).map_err(|e| {
+            BridgeError::new(format!(
+                "tape_bridge::inject_gradient_kt: upstream.to_dtype(arg.dtype()): {e}"
+            ))
+        })?
+    };
+    // contiguous() is a no-op on already-contig tensors; it materializes
+    // any narrow/transpose layout the caller might pass in (the q/gate
+    // tiled paths slice upstream out of a `narrow(1, tile_start, ...)`,
+    // which is non-trailing-axis and therefore not necessarily contig).
+    let upstream_typed_c = upstream_typed.contiguous().map_err(|e| {
+        BridgeError::new(format!(
+            "tape_bridge::inject_gradient_kt: upstream.contiguous(): {e}"
+        ))
+    })?;
+    let injected_kt = kt_tensor_from_candle_cuda_copy(&upstream_typed_c)?;
+
+    // Build the BackwardOp. `new_validated` cross-checks shape + dtype
+    // between arg_kt and injected_kt — same contract as the candle
+    // CustomOp1's bwd shape guard, but enforced at record time.
+    let backward_op = InjectGradientBackward::new_validated(&arg_kt, injected_kt)
+        .map_err(|e| BridgeError::new(format!(
+            "tape_bridge::inject_gradient_kt: InjectGradientBackward::new_validated: {e}"
+        )))?;
+
+    // Allocate the kt-side placeholder output: scalar zero F32 on the
+    // same device as arg. Matches the candle CustomOp1's
+    // `cuda_fwd`/`cpu_fwd` shape (Shape::from(())) and value (0.0f32).
+    // Mirror the kt-side allocator used by the rmsnorm/matmul/silu
+    // tape adapters so the kt-side output tensor has a fresh
+    // `KtTensorId` and lives on the same CUDA device as arg_kt.
+    let arg_kt_storage = arg_kt
+        .storage()
+        .as_any()
+        .downcast_ref::<kiln_tensor::CudaStorage>()
+        .ok_or_else(|| {
+            BridgeError::new("tape_bridge::inject_gradient_kt: arg_kt storage must be Cuda")
+        })?;
+    let out_kt =
+        crate::alloc_cuda_tensor(arg_kt_storage, kiln_tensor::DType::F32, vec![])?;
+
+    // Record the backward on the active tape.
+    let record_result = with_active_tape(|tape: &mut Tape| {
+        tape.record(&out_kt, &[&arg_kt], Box::new(backward_op));
+    });
+    if record_result.is_none() {
+        // No active tape. The kt-side replacement has no meaningful
+        // off-path — surface a typed error. Callers must wrap the
+        // call in `with_thread_local_tape` or
+        // `with_tape_scope_emit_to_grad_store` first.
+        return Err(BridgeError::new(
+            "tape_bridge::inject_gradient_kt: no active tape on this thread. \
+             Wrap the call in `with_thread_local_tape(...)` or \
+             `with_tape_scope_emit_to_grad_store(...)`.",
+        ));
+    }
+
+    // Build the candle-side placeholder output via a candle CustomOp1
+    // that takes `arg` as its single input and returns a scalar zero.
+    // The CustomOp1's `bwd` returns `zeros_like(arg)` so candle's
+    // `loss.backward()` walks from the scalar leaf back to `arg.id()`
+    // and ALLOCATES a slot in the GradStore (initialised to zero).
+    //
+    // Why we need the slot: the bridge's `insert_or_add_by_raw` uses
+    // GradStore::get_ids() to find the slot before accumulating the
+    // kt-tape's emitted grad — candle has no `TensorId::from_raw`
+    // accessor, so an absent slot means we cannot deposit the grad.
+    //
+    // The CustomOp1 contributes a candle-side zero, the kt-tape
+    // contributes the real grad, and `insert_or_add_by_raw` accumulates
+    // them. Final: `zero + upstream = upstream`, bit-equivalent to
+    // `InjectTensorGradient::bwd` which directly returns `upstream`.
+    //
+    // The candle device construction above clones `arg.device()`
+    // verbatim; we don't need the graph-capturable stream helper here
+    // because this placeholder isn't part of the hot decode CUDA
+    // graph. Reference the helper so callers can grep for it as the
+    // pattern they would use if they ever needed graph-capturable
+    // scalars on this path.
+    let _ = candle_cuda_device_with_stream_no_event_tracking;
+    let candle_out = arg.apply_op1(InjectGradientCandleShim).map_err(|e| {
+        BridgeError::new(format!(
+            "tape_bridge::inject_gradient_kt: arg.apply_op1(shim): {e}"
+        ))
+    })?;
+
+    // Register IO mappings so the bridge scope can route grads:
+    //   - kt_out_id ↔ candle_out_id: when the candle GradStore has a
+    //     grad for our scalar placeholder, feed it as the seed for
+    //     the InjectGradient tape node. The seed value is ignored by
+    //     `InjectGradientBackward::apply`, but the mapping is still
+    //     required so the bridge knows this kt id corresponds to a
+    //     candle leaf-with-grad.
+    //   - kt_arg_id ↔ candle_arg_id: after the tape walk emits the
+    //     kt-side grad for arg_kt, the bridge inserts it into the
+    //     candle GradStore under arg.id() (or accumulates if a candle
+    //     grad already exists).
+    crate::tape_bridge::register_input_mapping(arg_kt.id(), arg.id());
+    crate::tape_bridge::register_output_mapping(out_kt.id(), candle_out.id());
+
+    Ok(candle_out)
 }
 
 #[cfg(test)]

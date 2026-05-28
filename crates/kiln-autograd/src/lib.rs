@@ -73,6 +73,7 @@ pub use backwards::elementwise::{AddBackward, DivBackward, MulBackward, SubBackw
 pub use backwards::embedding::EmbeddingBackward;
 pub use backwards::gather::GatherBackward;
 pub use backwards::index_ops::{CastBackward, IndexSelectBackward, ScatterAddBackward};
+pub use backwards::inject_gradient::InjectGradientBackward;
 pub use backwards::l2norm::L2NormBackward;
 pub use backwards::layernorm::LayerNormBackward;
 pub use backwards::mask::MaskedFillBackward;

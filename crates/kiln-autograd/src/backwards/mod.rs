@@ -22,6 +22,7 @@ pub mod embedding;
 pub mod gather;
 pub mod hyperbolic;
 pub mod index_ops;
+pub mod inject_gradient;
 pub mod l2norm;
 pub mod layernorm;
 pub mod leaky_activations;
