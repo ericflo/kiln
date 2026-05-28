@@ -311,3 +311,41 @@ done atomically with the CP-4 flip.
 * Commit `84549819` — Wave-14 deletion of dead `OpdLossCustomOp` +
   fused-FWD / metrics kernels (~1880 LOC).
 * Commit `c8c341b2` — initial wave-14 STOP doc.
+
+---
+
+## Update — 2026-05-28 (post CP-4 bridge landing)
+
+The CP-4 substrate's first end-to-end production wiring landed in
+`675e0dea` (SFT `standard_forward_backward` wrapped in
+`kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store`).
+The bridge keeps `loss.backward()` intact and merges kt-tape
+gradients into candle's GradStore via registered
+`(kt_id ↔ candle_id)` IO mappings — see the
+[`rmsnorm-kt-tape-production-caller-stop`](./rmsnorm-kt-tape-production-caller-stop-2026-05-28.md)
+"Update — 2026-05-28 (post CP-4 bridge landing)" section for the
+4-step bridge walk.
+
+The opd-loss kernel benefits identically:
+
+- The opd-loss kt-tape adapter `try_tape_opd_per_position_cuda`
+  (`e6b8c3a3`) becomes the recording path when
+  `KILN_USE_TAPE_FORWARD=1` is set inside an SFT step. It registers
+  IO mappings so the bridge can route the opd-loss gradient back
+  into the candle GradStore on the matching candle TensorId.
+- The `KtForwardOp1`-based shim (`kt_forward_op.rs`) is the default
+  path when the env gate is unset.
+- The kt-tape adapter still no-ops outside a bridge scope (returns
+  `Ok(None)` and falls through to the shim), so callers that build
+  a candle-only graph continue to work.
+
+The candle-core Cargo dep **still cannot drop** because the shim
+(`kt_forward_op.rs`) and Phase-A reference path (`lib.rs`) both name
+candle types in their public surface — same blocker as in the main
+body. The deletion moment moves to **when production training
+defaults to `KILN_USE_TAPE_FORWARD=1`** and the kt-tape adapter
+becomes the unconditional path. At that point both `kt_forward_op.rs`
+and the candle-typed Phase-A fallback become dead code.
+
+See [`candle-removal-status-2026-05-28-pm.md`](./candle-removal-status-2026-05-28-pm.md)
+for the current per-crate state.
