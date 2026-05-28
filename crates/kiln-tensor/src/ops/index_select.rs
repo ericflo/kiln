@@ -473,7 +473,7 @@ mod tests {
     #[test]
     fn cuda_index_select_axis_parity_f32() {
         // Skip if no CUDA device available at runtime.
-        if crate::primary_cuda_device(0).is_err() {
+        if crate::primary_cuda_context(0).is_err() {
             return;
         }
 
@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn cuda_index_select_axis_n_multi_d_indices() {
         // Skip if no CUDA device available at runtime.
-        if crate::primary_cuda_device(0).is_err() {
+        if crate::primary_cuda_context(0).is_err() {
             return;
         }
 
@@ -591,7 +591,7 @@ mod tests {
     fn cuda_index_select_axis_parity_bf16() {
         use half::bf16;
         // Skip if no CUDA device available at runtime.
-        if crate::primary_cuda_device(0).is_err() {
+        if crate::primary_cuda_context(0).is_err() {
             return;
         }
 

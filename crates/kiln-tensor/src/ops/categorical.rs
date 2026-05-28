@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn cuda_multinomial_parity() {
         // Skip if no CUDA device available at runtime.
-        if crate::primary_cuda_device(0).is_err() {
+        if crate::primary_cuda_context(0).is_err() {
             return;
         }
 

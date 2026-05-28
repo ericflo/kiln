@@ -549,7 +549,7 @@ mod tests {
     #[test]
     fn cuda_loss_parity_full_table() {
         // Skip if no CUDA device available at runtime.
-        if crate::primary_cuda_device(0).is_err() {
+        if crate::primary_cuda_context(0).is_err() {
             return;
         }
 
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn cuda_loss_mixed_devices_errors() {
         // Skip if no CUDA device available at runtime.
-        if crate::primary_cuda_device(0).is_err() {
+        if crate::primary_cuda_context(0).is_err() {
             return;
         }
 

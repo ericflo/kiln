@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn cuda_cosine_sim_parity() {
         // Skip if no CUDA device available at runtime.
-        if crate::primary_cuda_device(0).is_err() {
+        if crate::primary_cuda_context(0).is_err() {
             return;
         }
 
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn cuda_cosine_sim_mixed_devices_errors() {
         // Skip if no CUDA device available at runtime.
-        if crate::primary_cuda_device(0).is_err() {
+        if crate::primary_cuda_context(0).is_err() {
             return;
         }
 

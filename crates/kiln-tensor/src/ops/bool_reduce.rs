@@ -209,7 +209,7 @@ mod tests {
     fn cuda_bool_reduce_parity() {
         // Skip if no CUDA device available at runtime (cfg-feature gate
         // only confirms the build was compiled with --features cuda).
-        if crate::primary_cuda_device(0).is_err() {
+        if crate::primary_cuda_context(0).is_err() {
             return;
         }
 
