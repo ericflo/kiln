@@ -216,61 +216,22 @@ impl MetalStorage {
     }
 
     /// Wrap an existing `Arc<metal::Buffer>` allocated by the caller —
-    /// **candle-typed back-compat entry**.
-    ///
-    /// Takes a candle `Arc<MetalDevice>`; internally extracts the
-    /// metal-rs `MTLDevice` handle (a cheap NSObject clone) for the
-    /// storage's `metal_handle` field. Validates the buffer length
-    /// against `dtype.size_in_bytes()` for non-packed dtypes.
-    ///
-    /// Prefer the candle-free [`Self::from_buffer_kt`] entry in new
-    /// code. This constructor stays as a shim while remaining
-    /// external candle-typed call sites migrate.
-    pub fn from_buffer(
-        candle_device: Arc<MetalDevice>,
-        device_index: usize,
-        dtype: DType,
-        buffer: Arc<MetalBuffer>,
-    ) -> Result<Self> {
-        let len = buffer.length() as usize;
-        if !dtype.is_packed() {
-            let per = dtype.size_in_bytes();
-            if per > 0 && !len.is_multiple_of(per) {
-                return Err(Error::Msg(format!(
-                    "MetalStorage::from_buffer: buffer len {len} is not a multiple of \
-                     size_in_bytes({:?}) = {per}",
-                    dtype
-                )));
-            }
-        }
-        Ok(MetalStorage {
-            device: Device::Metal(device_index),
-            dtype,
-            buffer,
-            metal_handle: candle_device.metal_device().clone(),
-        })
-    }
-
-    /// Wrap an existing `Arc<metal::Buffer>` allocated by the caller —
     /// **candle-free** entry point.
     ///
-    /// Takes a metal-rs `MetalRawDevice` instead of a candle
-    /// `Arc<MetalDevice>`. The candle wrapper, when needed downstream
-    /// (e.g. for `command_encoder()` / `kernels()` access in the 7
-    /// internal substrate ops in this file), is derived internally via
-    /// [`primary_metal_device`] from the supplied `device_index`.
-    ///
+    /// Takes a metal-rs `MetalRawDevice` handle that flows straight
+    /// into the storage's `metal_handle` field (cheap NSObject clone).
     /// Validates the buffer length against `dtype.size_in_bytes()`
-    /// for non-packed dtypes — same contract as [`Self::from_buffer`].
+    /// for non-packed dtypes.
     ///
     /// Mirror of [`crate::CudaStorage::from_slice_ctx`] (the candle-
     /// free constructor entry the CudaStorage CP-1 lift chain converged
-    /// onto in commits 5c3cd353 + 876e17da). On the Metal side this
-    /// constructor is the path the 7 internal ops in this file migrate
-    /// to so the candle `Arc<MetalDevice>` parameter is removed from
-    /// the kt-side constructor surface; the candle wrapper continues
-    /// to back the produced storage's internal field for kernel-crate
-    /// FFI affinity until the CP-1 final field flip lands.
+    /// onto in commits 5c3cd353 + 876e17da). The candle-typed
+    /// `from_buffer(Arc<MetalDevice>, ...)` back-compat constructor
+    /// was deleted (#1082) after the in-file ops + test migration to
+    /// this entry; this constructor is now the sole `from_buffer*`
+    /// path on `MetalStorage`. Mirrors the CudaStorage 876e17da cleanup
+    /// (which deleted `CudaStorage::{zeros, from_slice, from_borrowed}`
+    /// after their candle-free counterparts took over).
     pub fn from_buffer_kt(
         metal_handle: &MetalRawDevice,
         device_index: usize,
