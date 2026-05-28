@@ -7287,6 +7287,42 @@ fn vulkan_rmsnorm_forward_inference_enabled() -> bool {
     })
 }
 
+/// File-private candle⇔bytes helpers — migrated inline from
+/// `kiln_vulkan_kernel::kernels::{extract_tensor_bytes, create_tensor_from_data}`
+/// as part of issue #1082 (drop candle from kiln-vulkan-kernel).
+///
+/// Mirror the public bridge implementations exactly so the vulkan-feature
+/// rmsnorm paths in this file can perform candle ↔ raw-bytes conversions
+/// without routing through the kiln-vulkan-kernel candle bridge surface. (#1082)
+#[cfg(feature = "vulkan")]
+#[inline]
+fn vk_tensor_to_f32_bytes_with_shape(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
+    let shape: Vec<usize> = tensor.shape().dims().to_vec();
+    let flat = tensor.flatten_all().context("failed to flatten tensor")?;
+    let f32_data = flat
+        .to_dtype(DType::F32)?
+        .to_vec1::<f32>()
+        .context("failed to extract f32 data")?;
+    Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
+}
+
+#[cfg(feature = "vulkan")]
+#[inline]
+fn vk_tensor_from_f32_bytes(
+    data: &[u8],
+    shape: &[usize],
+    dtype: DType,
+) -> Result<Tensor> {
+    let f32_data: &[f32] = bytemuck::cast_slice(data);
+    let tensor = Tensor::from_vec(f32_data.to_vec(), f32_data.len(), &Device::Cpu)?
+        .reshape(shape)?;
+    if dtype == DType::BF16 {
+        Ok(tensor.to_dtype(DType::BF16)?)
+    } else {
+        Ok(tensor)
+    }
+}
+
 /// Inference-only Vulkan RMSNorm dispatch. Promotes inputs to F32,
 /// dispatches the kernel, casts result back to the input dtype.
 /// Returns `Ok(None)` when preconditions don't fit (caller falls back).
@@ -7311,8 +7347,8 @@ fn try_vulkan_rmsnorm_forward(x: &Tensor, weight: &Tensor, eps: f32) -> Result<O
         .last()
         .ok_or_else(|| anyhow::anyhow!("rmsnorm: x has no dims"))?;
     let rows: usize = x_dims[..x_dims.len() - 1].iter().product();
-    let x_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x_f32)?.0;
-    let w_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&w_f32)?.0;
+    let x_bytes = vk_tensor_to_f32_bytes_with_shape(&x_f32)?.0;
+    let w_bytes = vk_tensor_to_f32_bytes_with_shape(&w_f32)?.0;
     let out_bytes = kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward_bytes(
         vk_device.as_ref(),
         &x_bytes,
@@ -7321,7 +7357,7 @@ fn try_vulkan_rmsnorm_forward(x: &Tensor, weight: &Tensor, eps: f32) -> Result<O
         hidden,
         eps,
     )?;
-    let out_f32 = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+    let out_f32 = vk_tensor_from_f32_bytes(
         &out_bytes,
         &x_dims,
         DType::F32,
@@ -7415,10 +7451,10 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
                 Error::Msg("rmsnorm fwd: x has no dims".to_string())
             })?;
             let rows: usize = x_dims[..x_dims.len() - 1].iter().product();
-            let x_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x_f32)
+            let x_bytes = vk_tensor_to_f32_bytes_with_shape(&x_f32)
                 .map_err(|e| Error::Msg(format!("rmsnorm fwd extract x: {e:?}")))?
                 .0;
-            let w_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&w_f32)
+            let w_bytes = vk_tensor_to_f32_bytes_with_shape(&w_f32)
                 .map_err(|e| {
                     Error::Msg(format!("rmsnorm fwd extract weight: {e:?}"))
                 })?
@@ -7432,7 +7468,7 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
                 self.eps,
             )
             .map_err(|e| Error::Msg(format!("rmsnorm fwd dispatch: {e:?}")))?;
-            let out_f32 = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            let out_f32 = vk_tensor_from_f32_bytes(
                 &out_bytes,
                 &x_dims,
                 DType::F32,
@@ -7516,17 +7552,17 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
                     dims
                 )));
             }
-            let x_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x_f32)
+            let x_bytes = vk_tensor_to_f32_bytes_with_shape(&x_f32)
                 .map_err(|e| {
                     Error::Msg(format!("rmsnorm bwd extract x bytes: {e:?}"))
                 })?
                 .0;
-            let w_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&w_f32)
+            let w_bytes = vk_tensor_to_f32_bytes_with_shape(&w_f32)
                 .map_err(|e| {
                     Error::Msg(format!("rmsnorm bwd extract w bytes: {e:?}"))
                 })?
                 .0;
-            let grad_y_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&grad_y_f32)
+            let grad_y_bytes = vk_tensor_to_f32_bytes_with_shape(&grad_y_f32)
                 .map_err(|e| {
                     Error::Msg(format!(
                         "rmsnorm bwd extract grad_y bytes: {e:?}"
@@ -7543,7 +7579,7 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
                 self.eps,
             )
             .map_err(|e| Error::Msg(format!("rmsnorm bwd dispatch: {e:?}")))?;
-            let dx_f32 = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            let dx_f32 = vk_tensor_from_f32_bytes(
                 &dx_bytes,
                 dims.as_slice(),
                 DType::F32,
