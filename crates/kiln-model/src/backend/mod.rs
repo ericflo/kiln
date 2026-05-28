@@ -8,7 +8,7 @@
 //! forward pass dispatch those ops without threading `#[cfg(feature = "cuda")]`
 //! gates through every call site.
 //!
-//! **`Option<Tensor>` return**: `Ok(None)` means "this backend declines this
+//! **`Option<candle_core::Tensor>` return**: `Ok(None)` means "this backend declines this
 //! call — fall back to the portable candle path". Matches the existing
 //! `try_flash_attn_paged_decode` precondition-miss contract and extends it
 //! to all kernel ops.
@@ -18,14 +18,14 @@
 //! anyway. Intended to be constant-return for each concrete backend.
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Process-global flag set when Vulkan is the active backend.
 ///
-/// candle-core has no `Device::Vulkan`, so call sites in `forward.rs` and
-/// `trainer.rs` see `Device::Cpu` even when the real compute lives on a
+/// candle-core has no `candle_core::Device::Vulkan`, so call sites in `forward.rs` and
+/// `trainer.rs` see `candle_core::Device::Cpu` even when the real compute lives on a
 /// `vk::Device`. They use this flag to choose Vulkan-aware behavior
 /// (e.g., always dropping the per-projection candle CPU originals after
 /// upload, since on Vulkan they would double the system-RAM footprint
@@ -123,7 +123,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// discriminant + a `usize` index). Phase 7 of #1082 migrated the
     /// return type off `&candle_core::Device` so backend selection no
     /// longer threads candle types through every trait method. Backends
-    /// that still need a candle `Device` internally (e.g. for the kernel
+    /// that still need a candle `candle_core::Device` internally (e.g. for the kernel
     /// trait methods that take `candle_core::Tensor` parameters) keep a
     /// candle device cached alongside the kt one and bridge as needed.
     fn device(&self) -> kiln_tensor::Device;
@@ -180,7 +180,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     ///
     /// Callers in `model_forward_paged_last_token*` use this predicate to
     /// route into the resident decode path. Returning false routes to
-    /// today's Tensor-shaped path unchanged.
+    /// today's candle_core::Tensor-shaped path unchanged.
     fn supports_resident_decode(&self) -> bool {
         false
     }
@@ -205,13 +205,13 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// num_heads * head_dim]`.
     fn flash_attn_paged_decode_contiguous(
         &self,
-        _q: &Tensor,
-        _k_pool: &Tensor,
-        _v_pool: &Tensor,
+        _q: &candle_core::Tensor,
+        _k_pool: &candle_core::Tensor,
+        _v_pool: &candle_core::Tensor,
         _start_slot: usize,
         _total_seqlen_k: usize,
         _softmax_scale: f32,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -223,13 +223,13 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Returns `[batch, 1, num_heads * head_dim]`.
     fn flash_attn_paged_decode_contiguous_batch(
         &self,
-        _q: &Tensor,
-        _k_pool: &Tensor,
-        _v_pool: &Tensor,
-        _start_slots: &Tensor,
+        _q: &candle_core::Tensor,
+        _k_pool: &candle_core::Tensor,
+        _v_pool: &candle_core::Tensor,
+        _start_slots: &candle_core::Tensor,
         _total_seqlen_k: usize,
         _softmax_scale: f32,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -237,10 +237,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// `flash_attn_paged_decode_contiguous_batch` kernel.
     ///
     /// Callers can use this to short-circuit before allocating the
-    /// `start_slots` device tensor (the `Tensor::from_slice` build in
+    /// `start_slots` device tensor (the `candle_core::Tensor::from_slice` build in
     /// `gqa_attention_paged_decode_contiguous_batch::try_strict`) on
     /// backends that will decline the trait call anyway. Important
-    /// under CUDA graph capture: the `Tensor::from_slice` would emit a
+    /// under CUDA graph capture: the `candle_core::Tensor::from_slice` would emit a
     /// captured `cudaMemcpyHtoDAsync` that targets storage which is
     /// freed at end of capture, leaving a recycled-VA write hazard on
     /// every replay even though no kernel reads from it (suspect 6 in
@@ -266,16 +266,16 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// per-row attention length. Returns `[batch, 1, num_heads, head_dim]`.
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
         &self,
-        _q: &Tensor,
-        _k_pool: &Tensor,
-        _v_pool: &Tensor,
-        _block_table: &Tensor,
-        _seqused_k: &Tensor,
+        _q: &candle_core::Tensor,
+        _k_pool: &candle_core::Tensor,
+        _v_pool: &candle_core::Tensor,
+        _block_table: &candle_core::Tensor,
+        _seqused_k: &candle_core::Tensor,
         _max_seqlen_k: usize,
         _page_block_size: usize,
         _softmax_scale: f32,
         _causal: bool,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -283,11 +283,11 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// [`Self::flash_attn_paged_decode_contiguous_batch_dyn_seqlen`] that
     /// accepts caller-owned `(out, softmax_lse)` device tensors so the
     /// captured graph reads/writes its paged-decode scratch from stable
-    /// runner-owned storage instead of from transient `Tensor::zeros`
+    /// runner-owned storage instead of from transient `candle_core::Tensor::zeros`
     /// allocations inside the kernel wrapper.
     ///
     /// `graph_outputs = Some((out, softmax_lse))` skips the per-call
-    /// `Tensor::zeros` inside the captured region; the runner pre-allocates
+    /// `candle_core::Tensor::zeros` inside the captured region; the runner pre-allocates
     /// these tensors and re-uses them across replays (see
     /// `BatchedPagedDecodeGraphInputs::{attn_out, softmax_lse}`).
     /// `graph_outputs = None` matches the non-graph behavior of
@@ -303,17 +303,17 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     #[allow(clippy::too_many_arguments)]
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
         &self,
-        q: &Tensor,
-        k_pool: &Tensor,
-        v_pool: &Tensor,
-        block_table: &Tensor,
-        seqused_k: &Tensor,
-        _graph_outputs: Option<(&Tensor, &Tensor)>,
+        q: &candle_core::Tensor,
+        k_pool: &candle_core::Tensor,
+        v_pool: &candle_core::Tensor,
+        block_table: &candle_core::Tensor,
+        seqused_k: &candle_core::Tensor,
+        _graph_outputs: Option<(&candle_core::Tensor, &candle_core::Tensor)>,
         max_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         self.flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
             q,
             k_pool,
@@ -349,13 +349,13 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
 
     fn exit_gdn_recurrent_resident_state_scope(&self) {}
 
-    fn materialize_gdn_recurrent_resident_state(&self, _state: &mut Tensor) -> Result<()> {
+    fn materialize_gdn_recurrent_resident_state(&self, _state: &mut candle_core::Tensor) -> Result<()> {
         Ok(())
     }
 
-    fn evict_gdn_recurrent_resident_state(&self, _state: &Tensor) {}
+    fn evict_gdn_recurrent_resident_state(&self, _state: &candle_core::Tensor) {}
 
-    fn has_gdn_recurrent_resident_state(&self, _state: &Tensor) -> bool {
+    fn has_gdn_recurrent_resident_state(&self, _state: &candle_core::Tensor) -> bool {
         false
     }
 
@@ -382,7 +382,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Phase 3.2 lands, `checkpointed_forward_backward` calls this for
     /// each segment-output tensor so the recompute pass can read the
     /// boundary back from device memory instead of the candle CPU mirror.
-    fn register_resident_activation(&self, _tensor: &Tensor) -> Result<()> {
+    fn register_resident_activation(&self, _tensor: &candle_core::Tensor) -> Result<()> {
         Ok(())
     }
 
@@ -390,7 +390,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// registry. Caller invokes this when the autograd pass no longer
     /// needs the tensor (e.g. after a segment's backward completes).
     /// No-op default.
-    fn evict_resident_activation(&self, _tensor: &Tensor) {}
+    fn evict_resident_activation(&self, _tensor: &candle_core::Tensor) {}
 
     /// Re-upload the tensor's current bytes into its registry buffer
     /// (if registered). Caller invokes this when the candle CPU
@@ -401,7 +401,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     ///
     /// No-op default; backends without a registry have nothing to
     /// keep in sync.
-    fn update_resident_activation(&self, _tensor: &Tensor) -> Result<()> {
+    fn update_resident_activation(&self, _tensor: &candle_core::Tensor) -> Result<()> {
         Ok(())
     }
 
@@ -410,12 +410,12 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// resident fast path and the legacy CPU-roundtrip path. False by
     /// default so callers without registry support continue to use the
     /// legacy path.
-    fn has_resident_activation(&self, _tensor: &Tensor) -> bool {
+    fn has_resident_activation(&self, _tensor: &candle_core::Tensor) -> bool {
         false
     }
 
     /// Read a previously-registered activation back from device into
-    /// a fresh CPU `Tensor` with the given shape and dtype. Returns
+    /// a fresh CPU `candle_core::Tensor` with the given shape and dtype. Returns
     /// `Ok(None)` when the activation isn't resident — caller should
     /// then use whatever CPU-side storage they retained originally.
     ///
@@ -427,10 +427,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// registry support fall through to the legacy code path.
     fn resolve_resident_activation(
         &self,
-        _tensor: &Tensor,
+        _tensor: &candle_core::Tensor,
         _shape: &[usize],
-        _dtype: DType,
-    ) -> Result<Option<Tensor>> {
+        _dtype: candle_core::DType,
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -444,7 +444,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// activations first (Phase 3.1 hooks). The default implementation
     /// is a no-op returning false; the Vulkan backend's impl will land
     /// alongside Phase 4.1's resident `TrainableLoraParams`.
-    fn dispatch_sgd_step(&self, _param: &Tensor, _grad: &Tensor, _lr: f32) -> Result<bool> {
+    fn dispatch_sgd_step(&self, _param: &candle_core::Tensor, _grad: &candle_core::Tensor, _lr: f32) -> Result<bool> {
         Ok(false)
     }
 
@@ -463,10 +463,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     #[allow(clippy::too_many_arguments)]
     fn dispatch_adamw_step(
         &self,
-        _param: &Tensor,
-        _grad: &Tensor,
-        _first_moment: &Tensor,
-        _second_moment: &Tensor,
+        _param: &candle_core::Tensor,
+        _grad: &candle_core::Tensor,
+        _first_moment: &candle_core::Tensor,
+        _second_moment: &candle_core::Tensor,
         _lr: f32,
         _beta1: f32,
         _beta2: f32,
@@ -493,26 +493,26 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// buffers in place without a sync-back to candle storage.
     fn lora_delta_resident(
         &self,
-        _x: &Tensor,
-        _a: &Tensor,
-        _b: &Tensor,
+        _x: &candle_core::Tensor,
+        _a: &candle_core::Tensor,
+        _b: &candle_core::Tensor,
         _scale: f32,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
     fn assemble_gdn_recurrent_resident_batch_rows(
         &self,
-        _rows: &[&Tensor],
-        _batch: &Tensor,
+        _rows: &[&candle_core::Tensor],
+        _batch: &candle_core::Tensor,
     ) -> Result<bool> {
         Ok(false)
     }
 
     fn scatter_gdn_recurrent_resident_batch_rows(
         &self,
-        _batch: &Tensor,
-        _destinations: &mut [&mut Tensor],
+        _batch: &candle_core::Tensor,
+        _destinations: &mut [&mut candle_core::Tensor],
     ) -> Result<bool> {
         Ok(false)
     }
@@ -560,12 +560,12 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// `[batch, seq_len, num_heads, head_dim]` bf16.
     fn flash_attn_prefill(
         &self,
-        _q: &Tensor,
-        _k: &Tensor,
-        _v: &Tensor,
+        _q: &candle_core::Tensor,
+        _k: &candle_core::Tensor,
+        _v: &candle_core::Tensor,
         _softmax_scale: f32,
         _causal: bool,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -577,12 +577,12 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// `[batch, num_heads, seq_len, head_dim]` bf16.
     fn flash_attn_prefill_head_major(
         &self,
-        _q: &Tensor,
-        _k: &Tensor,
-        _v: &Tensor,
+        _q: &candle_core::Tensor,
+        _k: &candle_core::Tensor,
+        _v: &candle_core::Tensor,
         _softmax_scale: f32,
         _causal: bool,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -598,15 +598,15 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     #[allow(clippy::too_many_arguments)]
     fn flash_attn_paged_decode(
         &self,
-        _q: &Tensor,
-        _k_pool: &Tensor,
-        _v_pool: &Tensor,
-        _block_table: &Tensor,
+        _q: &candle_core::Tensor,
+        _k_pool: &candle_core::Tensor,
+        _v_pool: &candle_core::Tensor,
+        _block_table: &candle_core::Tensor,
         _total_seqlen_k: usize,
         _page_block_size: usize,
         _softmax_scale: f32,
         _causal: bool,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -618,11 +618,11 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// head-major SDPA.
     fn paged_kv_head_major_read(
         &self,
-        _k_pool: &Tensor,
-        _v_pool: &Tensor,
+        _k_pool: &candle_core::Tensor,
+        _v_pool: &candle_core::Tensor,
         _start_slot: usize,
         _seq_len: usize,
-    ) -> Result<Option<(Tensor, Tensor)>> {
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
         Ok(None)
     }
 
@@ -635,13 +635,13 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Returns `[1, num_kv_heads, prefix_len + tail_len, head_dim]` tensors.
     fn paged_kv_head_major_read_append_token_major(
         &self,
-        _k_pool: &Tensor,
-        _v_pool: &Tensor,
+        _k_pool: &candle_core::Tensor,
+        _v_pool: &candle_core::Tensor,
         _start_slot: usize,
         _prefix_len: usize,
-        _k_tail: &Tensor,
-        _v_tail: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor)>> {
+        _k_tail: &candle_core::Tensor,
+        _v_tail: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
         Ok(None)
     }
 
@@ -657,10 +657,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// they do not handle.
     fn gdn_forward_substitution(
         &self,
-        _a_strict: &Tensor,
-        _v_prime: &Tensor,
-        _beta: &Tensor,
-    ) -> Result<Option<Tensor>> {
+        _a_strict: &candle_core::Tensor,
+        _v_prime: &candle_core::Tensor,
+        _beta: &candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -671,13 +671,13 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// mutated in place. Returns `out: [B, H, dv]` bf16.
     fn gdn_recurrent_step(
         &self,
-        _q: &Tensor,
-        _k: &Tensor,
-        _v: &Tensor,
-        _beta: &Tensor,
-        _g: &Tensor,
-        _state: &mut Tensor,
-    ) -> Result<Option<Tensor>> {
+        _q: &candle_core::Tensor,
+        _k: &candle_core::Tensor,
+        _v: &candle_core::Tensor,
+        _beta: &candle_core::Tensor,
+        _g: &candle_core::Tensor,
+        _state: &mut candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -704,56 +704,56 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// envelope; callers fall back to the candle-op path.
     fn gdn_chunk_prep(
         &self,
-        _g: &Tensor,
-        _v: &Tensor,
-        _kkt: &Tensor,
-        _qkt: &Tensor,
-        _ks_entry: &Tensor,
-        _q_s: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)>> {
+        _g: &candle_core::Tensor,
+        _v: &candle_core::Tensor,
+        _kkt: &candle_core::Tensor,
+        _qkt: &candle_core::Tensor,
+        _ks_entry: &candle_core::Tensor,
+        _q_s: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
         Ok(None)
     }
 
     fn gdn_chunk_scan(
         &self,
-        _a_strict: &Tensor,
-        _b_mask: &Tensor,
-        _v_prime: &Tensor,
-        _q_s_scaled: &Tensor,
-        _beta: &Tensor,
-        _decay_last_col: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor)>> {
+        _a_strict: &candle_core::Tensor,
+        _b_mask: &candle_core::Tensor,
+        _v_prime: &candle_core::Tensor,
+        _q_s_scaled: &candle_core::Tensor,
+        _beta: &candle_core::Tensor,
+        _decay_last_col: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
         Ok(None)
     }
 
     fn gdn_full_chunk_forward(
         &self,
-        _g: &Tensor,
-        _v: &Tensor,
-        _kkt: &Tensor,
-        _qkt: &Tensor,
-        _ks_entry: &Tensor,
-        _q_s: &Tensor,
-        _beta: &Tensor,
-        _k_t: &Tensor,
-        _state: &mut Tensor,
-    ) -> Result<Option<Tensor>> {
+        _g: &candle_core::Tensor,
+        _v: &candle_core::Tensor,
+        _kkt: &candle_core::Tensor,
+        _qkt: &candle_core::Tensor,
+        _ks_entry: &candle_core::Tensor,
+        _q_s: &candle_core::Tensor,
+        _beta: &candle_core::Tensor,
+        _k_t: &candle_core::Tensor,
+        _state: &mut candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn gdn_full_chunk_forward_head_last_into(
         &self,
-        _g: &Tensor,
-        _v: &Tensor,
-        _kkt: &Tensor,
-        _qkt: &Tensor,
-        _ks_entry: &Tensor,
-        _q_s: &Tensor,
-        _beta: &Tensor,
-        _k_t: &Tensor,
-        _state: &mut Tensor,
-        _out: &Tensor,
+        _g: &candle_core::Tensor,
+        _v: &candle_core::Tensor,
+        _kkt: &candle_core::Tensor,
+        _qkt: &candle_core::Tensor,
+        _ks_entry: &candle_core::Tensor,
+        _q_s: &candle_core::Tensor,
+        _beta: &candle_core::Tensor,
+        _k_t: &candle_core::Tensor,
+        _state: &mut candle_core::Tensor,
+        _out: &candle_core::Tensor,
         _t_start: usize,
         _seq_len: usize,
     ) -> Result<bool> {
@@ -762,40 +762,40 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
 
     fn gdn_recurrent_prefill_head_last(
         &self,
-        _q: &Tensor,
-        _k: &Tensor,
-        _v: &Tensor,
-        _beta: &Tensor,
-        _g: &Tensor,
-        _state: &mut Tensor,
-    ) -> Result<Option<Tensor>> {
+        _q: &candle_core::Tensor,
+        _k: &candle_core::Tensor,
+        _v: &candle_core::Tensor,
+        _beta: &candle_core::Tensor,
+        _g: &candle_core::Tensor,
+        _state: &mut candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
     fn gdn_recurrent_prefill_native_head_last(
         &self,
-        _q: &Tensor,
-        _k: &Tensor,
-        _v: &Tensor,
-        _beta: &Tensor,
-        _g: &Tensor,
-        _state: &mut Tensor,
-    ) -> Result<Option<Tensor>> {
+        _q: &candle_core::Tensor,
+        _k: &candle_core::Tensor,
+        _v: &candle_core::Tensor,
+        _beta: &candle_core::Tensor,
+        _g: &candle_core::Tensor,
+        _state: &mut candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn gdn_recurrent_qk_norm_prefill_native_head_last(
         &self,
-        _q: &Tensor,
-        _k: &Tensor,
-        _v: &Tensor,
-        _beta: &Tensor,
-        _g: &Tensor,
-        _state: &mut Tensor,
+        _q: &candle_core::Tensor,
+        _k: &candle_core::Tensor,
+        _v: &candle_core::Tensor,
+        _beta: &candle_core::Tensor,
+        _g: &candle_core::Tensor,
+        _state: &mut candle_core::Tensor,
         _q_scale: f64,
         _qk_eps: f64,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -808,18 +808,18 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_gates_recurrent(
         &self,
-        _q: &Tensor,
-        _k: &Tensor,
-        _v: &Tensor,
-        _a: &Tensor,
-        _b: &Tensor,
-        _a_log: &Tensor,
-        _dt_bias: &Tensor,
-        _state: &mut Tensor,
-        _z: &Tensor,
-        _weight: &Tensor,
+        _q: &candle_core::Tensor,
+        _k: &candle_core::Tensor,
+        _v: &candle_core::Tensor,
+        _a: &candle_core::Tensor,
+        _b: &candle_core::Tensor,
+        _a_log: &candle_core::Tensor,
+        _dt_bias: &candle_core::Tensor,
+        _state: &mut candle_core::Tensor,
+        _z: &candle_core::Tensor,
+        _weight: &candle_core::Tensor,
         _eps: f64,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -833,17 +833,17 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_qk_norm_gates_recurrent(
         &self,
-        _q: &Tensor,
-        _k: &Tensor,
-        _v: &Tensor,
-        _a: &Tensor,
-        _b: &Tensor,
-        _a_log: &Tensor,
-        _dt_bias: &Tensor,
-        _state: &mut Tensor,
+        _q: &candle_core::Tensor,
+        _k: &candle_core::Tensor,
+        _v: &candle_core::Tensor,
+        _a: &candle_core::Tensor,
+        _b: &candle_core::Tensor,
+        _a_log: &candle_core::Tensor,
+        _dt_bias: &candle_core::Tensor,
+        _state: &mut candle_core::Tensor,
         _q_scale: f64,
         _qk_eps: f64,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -856,20 +856,20 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_qk_norm_gates_recurrent_rmsnorm(
         &self,
-        _q: &Tensor,
-        _k: &Tensor,
-        _v: &Tensor,
-        _a: &Tensor,
-        _b: &Tensor,
-        _a_log: &Tensor,
-        _dt_bias: &Tensor,
-        _state: &mut Tensor,
-        _z: &Tensor,
-        _weight: &Tensor,
+        _q: &candle_core::Tensor,
+        _k: &candle_core::Tensor,
+        _v: &candle_core::Tensor,
+        _a: &candle_core::Tensor,
+        _b: &candle_core::Tensor,
+        _a_log: &candle_core::Tensor,
+        _dt_bias: &candle_core::Tensor,
+        _state: &mut candle_core::Tensor,
+        _z: &candle_core::Tensor,
+        _weight: &candle_core::Tensor,
         _q_scale: f64,
         _qk_eps: f64,
         _rms_eps: f64,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -880,18 +880,18 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_gates_recurrent_rmsnorm(
         &self,
-        _q: &Tensor,
-        _k: &Tensor,
-        _v: &Tensor,
-        _a: &Tensor,
-        _b: &Tensor,
-        _a_log: &Tensor,
-        _dt_bias: &Tensor,
-        _state: &mut Tensor,
-        _z: &Tensor,
-        _weight: &Tensor,
+        _q: &candle_core::Tensor,
+        _k: &candle_core::Tensor,
+        _v: &candle_core::Tensor,
+        _a: &candle_core::Tensor,
+        _b: &candle_core::Tensor,
+        _a_log: &candle_core::Tensor,
+        _dt_bias: &candle_core::Tensor,
+        _state: &mut candle_core::Tensor,
+        _z: &candle_core::Tensor,
+        _weight: &candle_core::Tensor,
         _eps: f64,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -904,12 +904,12 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     #[allow(clippy::too_many_arguments)]
     fn gdn_in_proj_decode(
         &self,
-        _x: &Tensor,
-        _in_proj_qkv_t: &Tensor,
-        _in_proj_z_t: &Tensor,
-        _in_proj_a_t: &Tensor,
-        _in_proj_b_t: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor, Tensor, Tensor)>> {
+        _x: &candle_core::Tensor,
+        _in_proj_qkv_t: &candle_core::Tensor,
+        _in_proj_z_t: &candle_core::Tensor,
+        _in_proj_a_t: &candle_core::Tensor,
+        _in_proj_b_t: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
         Ok(None)
     }
 
@@ -919,7 +919,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// and the output shape is `[batch, seq_len, out_dim]`. Backends should
     /// return `Ok(None)` for unsupported shapes, dtypes, LoRA paths, or debug
     /// modes.
-    fn linear_decode(&self, _x: &Tensor, _weight_t: &Tensor) -> Result<Option<Tensor>> {
+    fn linear_decode(&self, _x: &candle_core::Tensor, _weight_t: &candle_core::Tensor) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -930,7 +930,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Implementations typically wrap the dispatch in a `CustomOp1` with a
     /// proper `bwd` impl. Backends without an autograd-safe path return
     /// `Ok(None)` so the caller falls back to the candle CPU matmul.
-    fn linear_prefill_apply(&self, _x: &Tensor, _weight_t: &Tensor) -> Result<Option<Tensor>> {
+    fn linear_prefill_apply(&self, _x: &candle_core::Tensor, _weight_t: &candle_core::Tensor) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -947,11 +947,11 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// is consumed inside the FLCE CustomOp1's `cpu_fwd`.
     fn linear_prefill_apply_offset(
         &self,
-        _x: &Tensor,
-        _full_weight_t: &Tensor,
+        _x: &candle_core::Tensor,
+        _full_weight_t: &candle_core::Tensor,
         _chunk_start: usize,
         _chunk_len: usize,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -963,7 +963,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     ///
     /// Used by greedy LM-head decode when logits do not need to be materialized
     /// on the host. `x` is `[1, 1, hidden]`, `weight_t` is `[hidden, out_dim]`.
-    fn linear_decode_argmax(&self, _x: &Tensor, _weight_t: &Tensor) -> Result<Option<u32>> {
+    fn linear_decode_argmax(&self, _x: &candle_core::Tensor, _weight_t: &candle_core::Tensor) -> Result<Option<u32>> {
         Ok(None)
     }
 
@@ -993,8 +993,8 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     #[allow(clippy::too_many_arguments)]
     fn linear_decode_sample(
         &self,
-        _x: &Tensor,
-        _weight_t: &Tensor,
+        _x: &candle_core::Tensor,
+        _weight_t: &candle_core::Tensor,
         _history_indices: &[u32],
         _history_counts: &[u32],
         _repetition_penalty: f32,
@@ -1016,8 +1016,8 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// `[hidden, out_dim]`, and the result contains one token id per batch row.
     fn linear_decode_argmax_batch(
         &self,
-        _x: &Tensor,
-        _weight_t: &Tensor,
+        _x: &candle_core::Tensor,
+        _weight_t: &candle_core::Tensor,
     ) -> Result<Option<Vec<u32>>> {
         Ok(None)
     }
@@ -1030,12 +1030,12 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Candle path.
     fn lora_decode_add(
         &self,
-        _base: &Tensor,
-        _x: &Tensor,
-        _a: &Tensor,
-        _b: &Tensor,
+        _base: &candle_core::Tensor,
+        _x: &candle_core::Tensor,
+        _a: &candle_core::Tensor,
+        _b: &candle_core::Tensor,
         _scale: f32,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -1068,7 +1068,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     fn drop_uploaded_bf16_weights(
         &self,
         _weights: &mut crate::forward::GpuWeights,
-        _device: &Device,
+        _device: &candle_core::Device,
     ) -> Result<usize> {
         Ok(0)
     }
@@ -1080,11 +1080,11 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// `[1, 1, k_dim]`, and `[1, 1, v_dim]`.
     fn full_attn_qkv_decode(
         &self,
-        _x: &Tensor,
-        _q_weight_t: &Tensor,
-        _k_weight_t: &Tensor,
-        _v_weight_t: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor, Tensor)>> {
+        _x: &candle_core::Tensor,
+        _q_weight_t: &candle_core::Tensor,
+        _k_weight_t: &candle_core::Tensor,
+        _v_weight_t: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
         Ok(None)
     }
 
@@ -1094,10 +1094,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Returns `[1, 1, intermediate]` containing `silu(x @ gate_t) * (x @ up_t)`.
     fn mlp_gate_up_decode(
         &self,
-        _x: &Tensor,
-        _gate_weight_t: &Tensor,
-        _up_weight_t: &Tensor,
-    ) -> Result<Option<Tensor>> {
+        _x: &candle_core::Tensor,
+        _gate_weight_t: &candle_core::Tensor,
+        _up_weight_t: &candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -1107,11 +1107,11 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// `[hidden, intermediate]`; `down_weight_t` is `[intermediate, out_dim]`.
     fn mlp_decode(
         &self,
-        _x: &Tensor,
-        _gate_weight_t: &Tensor,
-        _up_weight_t: &Tensor,
-        _down_weight_t: &Tensor,
-    ) -> Result<Option<Tensor>> {
+        _x: &candle_core::Tensor,
+        _gate_weight_t: &candle_core::Tensor,
+        _up_weight_t: &candle_core::Tensor,
+        _down_weight_t: &candle_core::Tensor,
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -1149,11 +1149,11 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// NOT apply `silu` again — it is fused into the kernel epilogue.
     fn causal_conv1d_update(
         &self,
-        _x: &Tensor,
-        _weight: &Tensor,
-        _conv_state: &mut Tensor,
+        _x: &candle_core::Tensor,
+        _weight: &candle_core::Tensor,
+        _conv_state: &mut candle_core::Tensor,
         _kernel_size: usize,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -1168,11 +1168,11 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// apply `silu` again.
     fn causal_conv1d_prefill(
         &self,
-        _x: &Tensor,
-        _weight: &Tensor,
-        _conv_state: &mut Tensor,
+        _x: &candle_core::Tensor,
+        _weight: &candle_core::Tensor,
+        _conv_state: &mut candle_core::Tensor,
         _kernel_size: usize,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 
@@ -1185,11 +1185,11 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// the backend declines (wrong dtype, envelope violation, disabled).
     fn gdn_gates(
         &self,
-        _a: &Tensor,
-        _b: &Tensor,
-        _a_log: &Tensor,
-        _dt_bias: &Tensor,
-    ) -> Result<Option<(Tensor, Tensor)>> {
+        _a: &candle_core::Tensor,
+        _b: &candle_core::Tensor,
+        _a_log: &candle_core::Tensor,
+        _dt_bias: &candle_core::Tensor,
+    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
         Ok(None)
     }
 
@@ -1202,11 +1202,11 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// dtype after reshaping, matching the portable fallback.
     fn gdn_gated_rms_norm(
         &self,
-        _x: &Tensor,
-        _z: &Tensor,
-        _weight: &Tensor,
+        _x: &candle_core::Tensor,
+        _z: &candle_core::Tensor,
+        _weight: &candle_core::Tensor,
         _eps: f64,
-    ) -> Result<Option<Tensor>> {
+    ) -> Result<Option<candle_core::Tensor>> {
         Ok(None)
     }
 }
@@ -1221,14 +1221,14 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
 /// Vulkan devices are detected at runtime — candle-core has no native Vulkan
 /// device, so we always pass a CPU device to `VulkanBackend` and let it
 /// manage its own `vk::Device` internally.
-pub fn for_device(device: &Device) -> Arc<dyn BackendRuntime> {
+pub fn for_device(device: &candle_core::Device) -> Arc<dyn BackendRuntime> {
     match device {
         #[cfg(feature = "cuda")]
-        Device::Cuda(_) => Arc::new(cuda::CudaBackend::new(device.clone())),
+        candle_core::Device::Cuda(_) => Arc::new(cuda::CudaBackend::new(device.clone())),
         #[cfg(feature = "metal")]
-        Device::Metal(_) => Arc::new(metal::MetalBackend::new(device.clone())),
+        candle_core::Device::Metal(_) => Arc::new(metal::MetalBackend::new(device.clone())),
         _ => {
-            // Vulkan: candle-core has no Device::Vulkan, so we detect at runtime
+            // Vulkan: candle-core has no candle_core::Device::Vulkan, so we detect at runtime
             #[cfg(feature = "vulkan")]
             {
                 if vulkan::vulkan_is_available() {
@@ -1251,7 +1251,7 @@ pub fn for_device(device: &Device) -> Arc<dyn BackendRuntime> {
 ///
 /// `kt::Device::Vulkan(_)` maps to a candle `Cpu` device so the runtime
 /// Vulkan detection in [`for_device`] still fires (candle has no native
-/// `Device::Vulkan`; the existing CPU-device-with-Vulkan-active sentinel
+/// `candle_core::Device::Vulkan`; the existing CPU-device-with-Vulkan-active sentinel
 /// pattern is preserved).
 ///
 /// `kt::Device::Cuda(_)` and `kt::Device::Metal(_)` only resolve when the
@@ -1264,22 +1264,22 @@ pub fn for_device(device: &Device) -> Arc<dyn BackendRuntime> {
 ///
 /// This is always-on (no cuda feature gate): it only uses
 /// `kiln_kt_bridge::candle_device_from_kt`, which is a pure
-/// `candle <-> kt` Device enum mapping with no CUDA toolchain
+/// `candle <-> kt` candle_core::Device enum mapping with no CUDA toolchain
 /// dependency — multi-backend builds (Metal, Vulkan, CPU) of
 /// kiln-server can call this entry without `--features cuda`. (#1082)
 pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
     // Vulkan goes through the candle-CPU sentinel path so the runtime
     // detection inside `for_device` runs unchanged.
     if matches!(device, kiln_tensor::Device::Vulkan(_)) {
-        return for_device(&Device::Cpu);
+        return for_device(&candle_core::Device::Cpu);
     }
     match kiln_kt_bridge::candle_device_from_kt(device) {
         Ok(cd) => for_device(&cd),
         Err(_) => {
-            // Unmappable kt Device (e.g. Metal without the candle metal
+            // Unmappable kt candle_core::Device (e.g. Metal without the candle metal
             // feature). Fall back to the candle CPU path; that matches
             // `for_device`'s default arm and keeps the function total.
-            for_device(&Device::Cpu)
+            for_device(&candle_core::Device::Cpu)
         }
     }
 }
@@ -1303,11 +1303,11 @@ mod tests {
         // every non-Vulkan backend continues to route through the
         // unchanged `model_forward_paged_last_token*` path — the
         // contract pinned by gate (c) of docs/vk_resident_decode_plan.md.
-        let cpu = cpu::CpuBackend::new(Device::Cpu);
+        let cpu = cpu::CpuBackend::new(candle_core::Device::Cpu);
         assert!(
             !cpu.supports_resident_decode(),
             "CPU backend must decline resident decode so non-Vulkan call sites \
-             continue to use the existing per-call Tensor path"
+             continue to use the existing per-call candle_core::Tensor path"
         );
     }
 
@@ -1316,7 +1316,7 @@ mod tests {
     fn cuda_backend_declines_resident_decode() {
         // CUDA already keeps activations resident through candle's CUDA
         // device — the resident-decode plan does not apply.
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(d) => d,
             Err(_) => return, // No CUDA at test time — skip.
         };
@@ -1333,7 +1333,7 @@ mod tests {
         // #1082 Phase 7: BackendRuntime::device() returns kt::Device by
         // value. The CUDA backend must round-trip the cuda(i) device
         // identity through the kt enum without losing the index.
-        let device = match Device::new_cuda(0) {
+        let device = match candle_core::Device::new_cuda(0) {
             Ok(d) => d,
             Err(_) => return,
         };
@@ -1346,7 +1346,7 @@ mod tests {
         // Mirrors the CUDA assertion above for the always-available CPU
         // path. Confirms the trait surface stayed kt-typed even on the
         // portable fallback. (#1082)
-        let cpu = cpu::CpuBackend::new(Device::Cpu);
+        let cpu = cpu::CpuBackend::new(candle_core::Device::Cpu);
         assert_eq!(cpu.device(), kiln_tensor::Device::Cpu);
     }
 
@@ -1361,7 +1361,7 @@ mod tests {
         if !vulkan::vulkan_is_available() {
             return;
         }
-        let backend = vulkan::VulkanBackend::new(Device::Cpu);
+        let backend = vulkan::VulkanBackend::new(candle_core::Device::Cpu);
         let pool = backend.decode_resident_pool(2560, 9216, 64);
         assert!(
             pool.is_some(),
@@ -1387,7 +1387,7 @@ mod tests {
         if !vulkan::vulkan_is_available() {
             return;
         }
-        let backend = vulkan::VulkanBackend::new(Device::Cpu);
+        let backend = vulkan::VulkanBackend::new(candle_core::Device::Cpu);
         assert!(
             backend.supports_resident_decode(),
             "Vulkan backend must support resident decode by default when the \
