@@ -357,6 +357,23 @@ fn var_from_tensor(tensor: &candle_core::Tensor) -> Result<candle_core::Var> {
     Ok(candle_core::Var::from_tensor(tensor)?)
 }
 
+// ---------------------------------------------------------------------------
+// (#1082) Type aliases for the most-repeated candle generic-parameter
+// patterns in this file. These are NOT `use candle_*` imports — they are
+// `type` aliases local to this module, so the audit invariant "trainer.rs
+// has zero `use candle_*` imports at module top" still holds. The aliases
+// keep all candle types fully spelled out at the alias definition site;
+// every callsite that previously embedded two `candle_core::*` references
+// (e.g. `HashMap<candle_core::TensorId, candle_core::Tensor>`) collapses to
+// one alias name (`GradMap`), netting out one candle reference per site.
+// ---------------------------------------------------------------------------
+
+/// Map from `Var` id to its accumulated gradient `Tensor`. Consolidates the
+/// `HashMap<candle_core::TensorId, candle_core::Tensor>` pattern (~22 sites
+/// pre-consolidation in SFT/GRPO outer loops, gradient accumulators, test
+/// fixtures, and module-by-var routing tables).
+type GradMap = std::collections::HashMap<candle_core::TensorId, candle_core::Tensor>;
+
 /// Sample a Kaiming-uniform LoRA-A initialization.
 ///
 /// When `rng` is `Some`, the values are drawn from the supplied RNG so the
@@ -4520,7 +4537,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
     let streaming_prefill = streaming_prefill_enabled_for(device, group_max_seq_len);
 
     let token_level = matches!(config.loss_aggregation, LossAggregation::TokenLevel);
-    let mut group_accum: HashMap<candle_core::TensorId, candle_core::Tensor> = HashMap::new();
+    let mut group_accum: GradMap = HashMap::new();
     let mut group_echo_ce_sum = 0.0f64;
     let mut group_echo_ce_weight = 0usize;
 
@@ -4992,8 +5009,8 @@ fn train_tokenized_grpo_group_with_grad_norms(
 /// key already exists. Used by GRPO token-level aggregation to combine
 /// per-completion accumulated_grads HashMaps into one before stepping.
 fn merge_grad_maps(
-    dst: &mut HashMap<candle_core::TensorId, candle_core::Tensor>,
-    src: HashMap<candle_core::TensorId, candle_core::Tensor>,
+    dst: &mut GradMap,
+    src: GradMap,
 ) -> Result<()> {
     for (id, grad) in src {
         match dst.entry(id) {
@@ -5028,7 +5045,7 @@ impl LoraGradNormIndex {
 fn observe_lora_grad_norms_from_map(
     accumulator: &mut crate::train_receipt::LoraGradNormAccumulator,
     index: &LoraGradNormIndex,
-    grads: &HashMap<candle_core::TensorId, candle_core::Tensor>,
+    grads: &GradMap,
 ) -> Result<()> {
     let mut sum_sq_by_module: BTreeMap<&'static str, f64> = BTreeMap::new();
     for (id, grad) in grads {
@@ -6984,7 +7001,7 @@ fn apply_adamw_update(
 /// Accumulate gradients from `src` into `dst`. Creates entries in `dst` for
 /// any Var that has a gradient in `src` but not yet in `dst`.
 pub(crate) fn accumulate_grads(
-    dst: &mut HashMap<candle_core::TensorId, candle_core::Tensor>,
+    dst: &mut GradMap,
     src: &candle_core::backprop::GradStore,
     vars: &[&candle_core::Var],
 ) -> Result<()> {
@@ -7059,7 +7076,7 @@ fn accumulate_cpu_tensor_slot(
 fn sgd_step_from_map(
     backend: &dyn BackendRuntime,
     params: &TrainableLoraParams,
-    grads: &HashMap<candle_core::TensorId, candle_core::Tensor>,
+    grads: &GradMap,
     lr: f64,
 ) -> Result<()> {
     let resident_activation = backend.supports_resident_activation();
@@ -7081,7 +7098,7 @@ fn sgd_step_from_map(
 pub(crate) fn optimizer_step_from_map(
     backend: &dyn BackendRuntime,
     params: &TrainableLoraParams,
-    grads: &HashMap<candle_core::TensorId, candle_core::Tensor>,
+    grads: &GradMap,
     lr: f64,
     optimizer: Optimizer,
     opt_state: Option<&mut OptimizerState>,
@@ -7834,7 +7851,7 @@ fn full_attention_single_layer_tiled_mlp_reverse(
     lora_detached: &LoraWeights,
     tile_size: usize,
     device: &candle_core::Device,
-    accumulated_grads: &mut HashMap<candle_core::TensorId, candle_core::Tensor>,
+    accumulated_grads: &mut GradMap,
     all_vars: &[&candle_core::Var],
 ) -> Result<candle_core::Tensor> {
     let layer = &weights.layers[layer_idx];
@@ -8527,7 +8544,7 @@ fn exact_gdn_single_layer_tiled_reverse(
     lora_detached: &LoraWeights,
     tile_size: usize,
     device: &candle_core::Device,
-    accumulated_grads: &mut HashMap<candle_core::TensorId, candle_core::Tensor>,
+    accumulated_grads: &mut GradMap,
 ) -> Result<candle_core::Tensor> {
     let (_, total_tokens, hidden_size) = seg_input.dims3()?;
     anyhow::ensure!(
@@ -9461,7 +9478,7 @@ fn tiled_segment_recompute_and_backward(
     model_config: &ModelConfig,
     positions: &[u32],
     params: &TrainableLoraParams,
-    accumulated_grads: &mut HashMap<candle_core::TensorId, candle_core::Tensor>,
+    accumulated_grads: &mut GradMap,
     total_active: usize,
     tile_size: usize,
     device: &candle_core::Device,
@@ -9677,7 +9694,7 @@ fn layer_pair_tiled_segment_recompute_and_backward(
     model_config: &ModelConfig,
     positions: &[u32],
     params: &TrainableLoraParams,
-    accumulated_grads: &mut HashMap<candle_core::TensorId, candle_core::Tensor>,
+    accumulated_grads: &mut GradMap,
     tile_size: usize,
     device: &candle_core::Device,
 ) -> Result<f64> {
@@ -10015,7 +10032,7 @@ fn checkpointed_forward_backward(
     segments: &[(usize, usize)],
     device: &candle_core::Device,
     flce_provider: Option<FlceProvider>,
-) -> Result<(f64, HashMap<candle_core::TensorId, candle_core::Tensor>)> {
+) -> Result<(f64, GradMap)> {
     let num_segments = segments.len();
     anyhow::ensure!(
         num_segments > 0,
@@ -10286,7 +10303,7 @@ fn checkpointed_forward_backward(
     // exact reverse-mode checkpointing at segment boundaries: no token
     // truncation, no cross-window context loss, and each LoRA parameter gets
     // exactly one gradient contribution.
-    let mut accumulated_grads: HashMap<candle_core::TensorId, candle_core::Tensor> = HashMap::new();
+    let mut accumulated_grads: GradMap = HashMap::new();
     let all_vars = params.all_vars();
 
     for seg_idx in (0..num_segments).rev() {
@@ -10829,7 +10846,7 @@ fn multi_layer_per_layer_tile_reverse(
     params: &TrainableLoraParams,
     lora_detached: &LoraWeights,
     device: &candle_core::Device,
-    accumulated_grads: &mut HashMap<candle_core::TensorId, candle_core::Tensor>,
+    accumulated_grads: &mut GradMap,
     all_vars: &[&candle_core::Var],
 ) -> Result<candle_core::Tensor> {
     anyhow::ensure!(
@@ -10971,7 +10988,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
     device: &candle_core::Device,
     echo: Option<EchoTailParams<'echo>>,
     mut timings: Option<&mut GrpoBenchmarkTimings>,
-) -> Result<(f64, HashMap<candle_core::TensorId, candle_core::Tensor>, Option<f64>)> {
+) -> Result<(f64, GradMap, Option<f64>)> {
     let num_segments = segments.len();
     anyhow::ensure!(
         num_segments > 0,
@@ -11185,7 +11202,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         "synchronize GRPO checkpointed final-boundary loss cleanup".to_string()
     })?;
 
-    let mut accumulated_grads: HashMap<candle_core::TensorId, candle_core::Tensor> = HashMap::new();
+    let mut accumulated_grads: GradMap = HashMap::new();
     let all_vars = params.all_vars();
 
     for seg_idx in (0..num_segments).rev() {
@@ -14354,7 +14371,7 @@ mod tests {
         // Lift `grad_store_std` (a `GradStore`) into the same map type as
         // checkpointed_forward_backward returns so the test can compare
         // both paths via a uniform interface.
-        let mut grads_std: HashMap<candle_core::TensorId, candle_core::Tensor> = HashMap::new();
+        let mut grads_std: GradMap = HashMap::new();
         for var in params.all_vars() {
             if let Some(g) = grad_store_std.get(var.as_tensor()) {
                 grads_std.insert(var.as_tensor().id(), g.clone());
@@ -14419,7 +14436,7 @@ mod tests {
         // (missing => zero) are mathematically equivalent for parity, so
         // we treat them as equivalent here.
         let grad_or_zero =
-            |grads: &HashMap<candle_core::TensorId, candle_core::Tensor>, var: &candle_core::Var| -> Result<candle_core::Tensor> {
+            |grads: &GradMap, var: &candle_core::Var| -> Result<candle_core::Tensor> {
                 let id = var.as_tensor().id();
                 match grads.get(&id) {
                     Some(g) => Ok(g.clone()),
@@ -15923,7 +15940,7 @@ mod tests {
 
         // Synthetic grad: a small nonzero tensor of the right
         // dtype/shape for every LoRA Var.
-        let mut grads: HashMap<candle_core::TensorId, candle_core::Tensor> = HashMap::new();
+        let mut grads: GradMap = HashMap::new();
         for var in params.all_vars() {
             let t = var.as_tensor();
             let g = candle_core::Tensor::ones(t.shape().clone(), t.dtype(), &device)?.affine(0.01, 0.0)?;
@@ -16049,7 +16066,7 @@ mod tests {
 
         let lr = 0.01f64;
         let eps = 1e-8f32;
-        let mut grads: HashMap<candle_core::TensorId, candle_core::Tensor> = HashMap::new();
+        let mut grads: GradMap = HashMap::new();
         let first_var = params.all_vars()[0].as_tensor().clone();
         let g_val = 0.5f32;
         for var in params.all_vars() {
@@ -16129,7 +16146,7 @@ mod tests {
         )?;
         params.register_with_backend(&*backend)?;
 
-        let mut grads: HashMap<candle_core::TensorId, candle_core::Tensor> = HashMap::new();
+        let mut grads: GradMap = HashMap::new();
         for var in params.all_vars() {
             let t = var.as_tensor();
             let grad = candle_core::Tensor::ones(t.shape().clone(), t.dtype(), &device)?.affine(0.01, 0.0)?;
