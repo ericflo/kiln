@@ -502,109 +502,15 @@ fn insert_or_add_by_raw(
     }
 }
 
-/// Candle `CustomOp1` used by [`inject_gradient_kt`] to inject a
-/// precomputed gradient into candle's backward walk for `arg`. Forward
-/// returns a scalar F32 zero (same placeholder shape as the trainer's
-/// historical `InjectTensorGradient`). Backward returns the held
-/// `upstream` tensor (with `to_device + to_dtype` matched to `arg`),
-/// exactly mirroring the contract of the in-trainer
-/// `InjectTensorGradient::bwd`.
-///
-/// # Why this is Option-2 substrate
-///
-/// The previous substrate variant (commit `9b2eda8e`) returned
-/// `zeros_like(arg)` from `bwd` and relied on the bridge's post-hoc
-/// `insert_or_add_by_raw` to overwrite `grads[arg.id()]` with the
-/// upstream value AFTER `loss.backward()` returned. That works when
-/// `arg` IS the queried `Var` (the parity test's `arg_var.as_tensor()`
-/// case) but produces wrong upstream-`Var` grads when `arg` is an
-/// intermediate of further candle ops: candle's backward walk consumes
-/// `grads[arg.id()]` DURING the walk, before the post-hoc update fires,
-/// so all upstream `Var`s end up with grads derived from zeros.
-///
-/// Option 2 closes that gap by returning the upstream tensor directly
-/// from `bwd`. The kt-tape recording (see [`inject_gradient_kt`]) is
-/// preserved as a side channel for migration tracking / future
-/// `kiln-kt-bridge`-only execution but no longer drives the GradStore
-/// population — candle's own walk now produces correct grads for any
-/// downstream `Var`.
-///
-/// See [`docs/inject-grad-flip-blocked-2026-05-28.md`] for the original
-/// substrate-design diagnosis and the Option-1 vs Option-2 tradeoff.
-#[derive(Clone)]
-struct InjectGradientCandleShim {
-    /// The precomputed gradient to emit as `arg`'s grad during
-    /// candle's backward walk. Lives here so `bwd` doesn't have to
-    /// reach into a thread-local / lookup table.
-    upstream: candle_core::Tensor,
-}
-
-impl std::fmt::Debug for InjectGradientCandleShim {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InjectGradientCandleShim")
-            .field("upstream_dtype", &self.upstream.dtype())
-            .field("upstream_dims", &self.upstream.dims())
-            .finish()
-    }
-}
-
-impl candle_core::CustomOp1 for InjectGradientCandleShim {
-    fn name(&self) -> &'static str {
-        "kiln-inject-gradient-candle-shim"
-    }
-
-    fn cpu_fwd(
-        &self,
-        _storage: &candle_core::CpuStorage,
-        _layout: &candle_core::Layout,
-    ) -> candle_core::Result<(candle_core::CpuStorage, candle_core::Shape)> {
-        Ok((
-            candle_core::CpuStorage::F32(vec![0.0]),
-            candle_core::Shape::from(()),
-        ))
-    }
-
-    fn cuda_fwd(
-        &self,
-        storage: &candle_core::CudaStorage,
-        _layout: &candle_core::Layout,
-    ) -> candle_core::Result<(candle_core::CudaStorage, candle_core::Shape)> {
-        use candle_core::backend::BackendStorage;
-        let device = storage.device();
-        let out_slice = device.clone_htod(&[0.0f32])?;
-        Ok((
-            candle_core::CudaStorage::wrap_cuda_slice(out_slice, device.clone()),
-            candle_core::Shape::from(()),
-        ))
-    }
-
-    fn bwd(
-        &self,
-        arg: &candle_core::Tensor,
-        _res: &candle_core::Tensor,
-        _grad_res: &candle_core::Tensor,
-    ) -> candle_core::Result<Option<candle_core::Tensor>> {
-        // Mirror `InjectTensorGradient::bwd` byte-for-byte. Shape guard
-        // first (cross-checked at record time by
-        // `InjectGradientBackward::new_validated`, but we keep it here
-        // too so the candle path surfaces a typed error if a future
-        // refactor hands us a mismatched arg).
-        if self.upstream.dims() != arg.dims() {
-            candle_core::bail!(
-                "InjectGradientCandleShim shape mismatch: upstream {:?}, arg {:?}",
-                self.upstream.dims(),
-                arg.dims()
-            );
-        }
-        let upstream = self.upstream.to_device(arg.device())?;
-        let grad = if upstream.dtype() == arg.dtype() {
-            upstream
-        } else {
-            upstream.to_dtype(arg.dtype())?
-        };
-        Ok(Some(grad))
-    }
-}
+// `InjectGradientCandleShim` was hoisted to `crate::inject_grad_shim`
+// (non-cuda-gated) so the `kiln-train::trainer` `InjectTensorGradient`
+// call-site flip can land on every feature combination — the shim
+// itself is pure candle (no cuda crate refs), and the trainer.rs
+// callers aren't cuda-gated. See `crate::inject_grad_shim` for the
+// canonical impl + the `inject_gradient_via_shim` candle-only entry
+// point. The cuda-only `inject_gradient_kt` below adds a kt-tape
+// side channel on top of that. (#1082)
+use crate::inject_grad_shim::InjectGradientCandleShim;
 
 /// Adapter for the kt-tape replacement of
 /// `kiln-train::trainer::InjectTensorGradient` (#1082, CP-4).

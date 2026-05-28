@@ -47,6 +47,15 @@
 #[cfg(feature = "cuda")]
 pub mod forward_op;
 
+/// Non-cuda-gated `CustomOp1` shim for gradient injection
+/// (`InjectGradientCandleShim` + `inject_gradient_via_shim`).
+/// Hosted here rather than in `tape_bridge` so the
+/// `kiln-train::trainer` `InjectTensorGradient::apply_op1` flip can
+/// land on every feature (the shim is pure candle — no cuda crate
+/// refs). The CUDA-only `tape_bridge::inject_gradient_kt` is a thin
+/// wrapper that adds a kt-tape side channel. (#1082 CP-4 step 2-3)
+pub mod inject_grad_shim;
+
 /// Phase 6a/CP-4 (#1082) — kt-tape → candle GradStore bridge.
 ///
 /// Lets `kiln_autograd::Tape::backward` emit gradients into a
