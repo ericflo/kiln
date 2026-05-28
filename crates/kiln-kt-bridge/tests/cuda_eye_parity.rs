@@ -30,7 +30,7 @@ fn cuda_eye_f32_matches_cpu() {
 
     let n = 8;
     let eye_cuda =
-        ops::eye_on_device(n, kiln_tensor::DType::F32, kiln_tensor::Device::Cuda(0), cuda.clone())
+        ops::eye_on_device(n, kiln_tensor::DType::F32, kiln_tensor::Device::Cuda(0))
             .expect("eye_on_device f32");
     assert_eq!(eye_cuda.shape(), &[n, n]);
     assert_eq!(eye_cuda.dtype(), kiln_tensor::DType::F32);
@@ -62,7 +62,7 @@ fn cuda_eye_bf16_matches_cpu() {
 
     let n = 4;
     let eye_cuda =
-        ops::eye_on_device(n, kiln_tensor::DType::BF16, kiln_tensor::Device::Cuda(0), cuda.clone())
+        ops::eye_on_device(n, kiln_tensor::DType::BF16, kiln_tensor::Device::Cuda(0))
             .expect("eye_on_device bf16");
     assert_eq!(eye_cuda.dtype(), kiln_tensor::DType::BF16);
 
@@ -89,12 +89,12 @@ fn cuda_eye_dispatches_to_cpu_when_requested() {
     // CPU path of eye_on_device returns the same as the host-only `eye`.
     let host = ops::eye(3, kiln_tensor::DType::F32).unwrap();
     // Even without CUDA available, the CPU branch should work.
-    let Some((dev, cuda)) = try_cuda() else {
+    let Some((dev, _cuda)) = try_cuda() else {
         eprintln!("CUDA not available; skipping");
         return;
     };
     let on_cpu =
-        ops::eye_on_device(3, kiln_tensor::DType::F32, kiln_tensor::Device::Cpu, cuda.clone())
+        ops::eye_on_device(3, kiln_tensor::DType::F32, kiln_tensor::Device::Cpu)
             .expect("eye_on_device cpu");
     assert_eq!(on_cpu.shape(), host.shape());
     assert_eq!(on_cpu.device(), kiln_tensor::Device::Cpu);

@@ -2002,20 +2002,20 @@ pub fn cuda_scatter_add_dim0(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device as CandleDevice;
 
     fn cuda_test_enabled() -> bool {
         std::env::var("KILN_TENSOR_CUDA_TEST").ok().as_deref() == Some("1")
     }
 
+    /// Acquire a primary CUDA device for tests — candle-free entry that
+    /// routes through `primary_cuda_device(0)` (the same helper external
+    /// kernel-crate tests use). Returns `None` if `KILN_TENSOR_CUDA_TEST`
+    /// is unset OR the host has no visible CUDA device.
     fn maybe_cuda_device() -> Option<Arc<CudaDevice>> {
         if !cuda_test_enabled() {
             return None;
         }
-        match CandleDevice::new_cuda(0).ok()? {
-            CandleDevice::Cuda(d) => Some(Arc::new(d)),
-            _ => None,
-        }
+        primary_cuda_device(0).ok()
     }
 
     #[test]

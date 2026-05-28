@@ -47,21 +47,22 @@ pub fn eye(n: usize, dtype: DType) -> Result<Tensor> {
 /// Build an identity matrix on the requested device.
 ///
 /// For CPU, this is identical to [`eye`]. For CUDA, the matrix is
-/// built on the host first then copied via `host_to_cuda_copy`
+/// built on the host first then copied via `host_to_cuda_copy_ctx`
 /// (a single cudaMemcpy — simpler than a `cuda_zeros` + diagonal
 /// kernel, and the cost is dominated by the H→D transfer anyway).
-/// (#1082)
+/// **Candle-free as of #1082** — caller no longer passes an
+/// `Arc<CudaDevice>`; the cudarc `CudaContext` is derived internally
+/// via `primary_cuda_device` inside `host_to_cuda_copy_ctx`.
 #[cfg(feature = "cuda")]
 pub fn eye_on_device(
     n: usize,
     dtype: DType,
     device: crate::Device,
-    candle_device: std::sync::Arc<candle_core::cuda_backend::CudaDevice>,
 ) -> Result<Tensor> {
     let host = eye(n, dtype)?;
     match device {
         crate::Device::Cpu => Ok(host),
-        crate::Device::Cuda(i) => crate::host_to_cuda_copy(&host, candle_device, i),
+        crate::Device::Cuda(i) => crate::host_to_cuda_copy_ctx(&host, i),
         other => bail!("eye_on_device: unsupported device {other}"),
     }
 }
