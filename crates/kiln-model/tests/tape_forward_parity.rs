@@ -2060,3 +2060,97 @@ fn tape_bridge_connected_adapter_chain_walk_parity() {
          chain rule (rel d_a {ra:.4}, d_b {rb:.4}, d_c {rc:.4})"
     );
 }
+
+
+// ----------------------------------------------------------------------
+// Connected 3-op ADAPTER chain (matmul -> silu -> add) (#1082 CP-4 endgame).
+//
+// Extends `tape_bridge_connected_adapter_chain_walk_parity` to a THREE-node
+// chain through silu, exercising the Step-1 input wiring of the silu adapter
+// (its `x` now reuses an upstream adapter's retained kt output). Asserts the
+// recorded tape is fully connected (each consumer's input id == the prior
+// producer's output id) and that a tape-authoritative walk (seed at the
+// output, no candle backward) runs and yields correctly-shaped input grads.
+// Per-op grad VALUES are covered by the per-op backward tests; this pins the
+// CONNECTIVITY of a longer real-adapter chain.
+// ----------------------------------------------------------------------
+
+#[test]
+fn tape_bridge_connected_three_op_adapter_chain() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("connected 3-op chain: no CUDA device — skipping");
+            return;
+        }
+    };
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    let (m, k, n) = (16usize, 32usize, 16usize);
+    let (a, b) = build_matmul_inputs(&device, m, k, n);
+    let c = Tensor::from_vec(
+        random_bf16_vec(m * n, 0x3000_2468_ACE0_1357, 0.25),
+        (m, n),
+        &Device::Cpu,
+    )
+    .expect("c cpu")
+    .to_device(&device)
+    .expect("c -> cuda")
+    .contiguous()
+    .expect("c contig");
+
+    let a1 = a.clone();
+    let b1 = b.clone();
+    let c1 = c.clone();
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_kt_bridge::tape_bridge::with_io_mapping_scope(|| -> anyhow::Result<Tensor> {
+            let mm = kiln_model::tape_forward::try_tape_matmul_cuda(&a1, &b1)?
+                .ok_or_else(|| anyhow::anyhow!("matmul adapter returned None"))?;
+            // silu's x reuses the matmul output (Step-1 wiring) -> connected.
+            let sl = kiln_model::tape_forward::try_tape_silu_cuda(&mm)?
+                .ok_or_else(|| anyhow::anyhow!("silu adapter returned None"))?;
+            // add's first input reuses the silu output -> connected.
+            let s = kiln_model::tape_forward::try_tape_add_cuda(&sl, &c1)?
+                .ok_or_else(|| anyhow::anyhow!("add adapter returned None"))?;
+            Ok(s)
+        })
+    });
+    let _s = res.expect("connected 3-op forward ok");
+
+    assert_eq!(tape.len(), 3, "chain records three nodes (matmul, silu, add)");
+    // Full connectivity: silu consumes matmul's output, add consumes silu's.
+    assert_eq!(
+        tape.nodes()[1].input_ids[0],
+        tape.nodes()[0].output_id,
+        "silu's input id must equal matmul's output id"
+    );
+    assert_eq!(
+        tape.nodes()[2].input_ids[0],
+        tape.nodes()[1].output_id,
+        "add's first input id must equal silu's output id"
+    );
+
+    // Tape-authoritative walk: seed at the add output, walk the whole chain.
+    let s_id = tape.nodes()[2].output_id;
+    let a_id = tape.nodes()[0].input_ids[0];
+    let seed = build_seed_grad(&device, &[m, n], 0x3000_1111_2222_3333, 0.25);
+    let seed_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&seed).expect("seed kt copy");
+    let mut seeds = std::collections::HashMap::new();
+    seeds.insert(s_id, seed_kt);
+
+    let grads = tape
+        .backward_with_seeds(seeds, |x, y| kiln_tensor::ops::add(x, y))
+        .expect("connected 3-op chain backward walk");
+
+    let da = grads.get(a_id).expect("d_a present");
+    let da_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(da).expect("d_a -> candle");
+    assert_eq!(
+        da_c.shape().dims(),
+        &[m, k],
+        "d_a flows back through silu + matmul to the matmul input a"
+    );
+    assert!(da_c.device().is_cuda(), "d_a stays on CUDA");
+}

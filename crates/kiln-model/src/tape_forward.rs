@@ -163,9 +163,9 @@ pub fn try_tape_rms_norm_cuda(x: &Tensor, weight: &Tensor, eps: f32) -> Result<O
     // kt borrow: zero-copy view of the candle CUDA tensors as kt
     // tensors. Returns `Err` (which we treat as "skip") on layout /
     // dtype / device mismatch.
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    let x_kt = match tape_kt_input(x) {
+        Some(t) => t,
+        None => return Ok(None),
     };
     let w_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight) {
         Ok(t) => t,
@@ -332,9 +332,9 @@ pub fn try_tape_silu_cuda(x: &Tensor) -> Result<Option<Tensor>> {
         return Ok(None);
     }
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    let x_kt = match tape_kt_input(x) {
+        Some(t) => t,
+        None => return Ok(None),
     };
 
     let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
@@ -550,13 +550,13 @@ pub fn try_tape_swiglu_cuda(gate: &Tensor, up: &Tensor) -> Result<Option<Tensor>
     // kt borrow: zero-copy view of the candle CUDA tensors as kt
     // tensors. Returns `Err` (which we treat as "skip") on layout /
     // dtype / device mismatch.
-    let gate_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(gate) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    let gate_kt = match tape_kt_input(gate) {
+        Some(t) => t,
+        None => return Ok(None),
     };
-    let up_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(up) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    let up_kt = match tape_kt_input(up) {
+        Some(t) => t,
+        None => return Ok(None),
     };
 
     // Record only when a tape scope is active. Outside a scope,
@@ -646,9 +646,9 @@ pub fn try_tape_rope_cuda(
         return Ok(None);
     }
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    let x_kt = match tape_kt_input(x) {
+        Some(t) => t,
+        None => return Ok(None),
     };
     let cos_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(cos) {
         Ok(t) => t,
@@ -813,9 +813,9 @@ pub fn try_tape_cross_entropy_cuda(
         return Ok(None);
     }
 
-    let logits_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(logits) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    let logits_kt = match tape_kt_input(logits) {
+        Some(t) => t,
+        None => return Ok(None),
     };
     let targets_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(targets) {
         Ok(t) => t,
