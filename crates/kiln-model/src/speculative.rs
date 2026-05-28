@@ -16,12 +16,12 @@
 //! `kiln_tensor::cuda_scalar_op` + `cuda_softmax_last_axis`, then a single
 //! D2H copy of the resulting probabilities. The candle host-side path is
 //! preserved as a fallback for CPU tensors and any kt-bridge precondition
-//! failure. The candle Tensor surface is preserved so the rest of the
+//! failure. The candle candle_core::Tensor surface is preserved so the rest of the
 //! MTP / speculative call graph (logits returned by `model_forward_*`)
 //! remains candle-typed.
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Tensor};
+
 use rand::RngExt;
 use rand::rngs::StdRng;
 
@@ -60,9 +60,9 @@ pub fn mtp_argmax_fp32_enabled() -> bool {
 /// cheap (tensor refcount bump, no data copy) and keeps the caller's borrow
 /// of the original tensor intact for downstream uses (e.g. C1 attribution
 /// top-k extraction, MTP debug logging).
-fn argmax_input(logits: &Tensor) -> Result<Tensor> {
+fn argmax_input(logits: &candle_core::Tensor) -> Result<candle_core::Tensor> {
     if mtp_argmax_fp32_enabled() {
-        Ok(logits.to_dtype(DType::F32)?)
+        Ok(logits.to_dtype(candle_core::DType::F32)?)
     } else {
         Ok(logits.clone())
     }
@@ -130,7 +130,7 @@ fn draft_forward_hidden(
     config: &ModelConfig,
     draft_layers: usize,
     linear_state: &mut LinearAttentionState,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     // Embed tokens
     let (hidden, positions) = model_forward_embed(token_ids, weights)?;
 
@@ -157,7 +157,7 @@ fn draft_forward(
     config: &ModelConfig,
     draft_layers: usize,
     linear_state: &mut LinearAttentionState,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     let hidden = draft_forward_hidden(
         backend,
         token_ids,
@@ -179,7 +179,7 @@ fn draft_forward(
 /// candle host-side path below is preserved for CPU tensors and any
 /// bridge-precondition failure (non-contiguous last-position slice,
 /// unsupported dtype, etc.).
-fn logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Vec<f32>> {
+fn logits_to_probs(logits: &candle_core::Tensor, temperature: f32) -> Result<Vec<f32>> {
     #[cfg(feature = "cuda")]
     if let Some(probs) = try_kt_logits_to_probs(logits, temperature)? {
         return Ok(probs);
@@ -197,7 +197,7 @@ fn logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Vec<f32>> {
         logits.clone()
     };
 
-    let flat = last_logits.flatten_all()?.to_dtype(DType::F32)?;
+    let flat = last_logits.flatten_all()?.to_dtype(candle_core::DType::F32)?;
     let mut vals = flat.to_vec1::<f32>()?;
 
     // Apply temperature
@@ -226,12 +226,12 @@ fn logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Vec<f32>> {
 /// resulting F32 probabilities. Returns `Ok(None)` on any precondition
 /// failure so the caller falls through to the candle host path.
 #[cfg(feature = "cuda")]
-fn try_kt_logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Option<Vec<f32>>> {
+fn try_kt_logits_to_probs(logits: &candle_core::Tensor, temperature: f32) -> Result<Option<Vec<f32>>> {
     use candle_core::Device as CandleDevice;
     if !matches!(logits.device(), CandleDevice::Cuda(_)) {
         return Ok(None);
     }
-    if !matches!(logits.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+    if !matches!(logits.dtype(), candle_core::DType::F32 | candle_core::DType::BF16 | candle_core::DType::F16) {
         return Ok(None);
     }
     let dims = logits.dims();
@@ -247,8 +247,8 @@ fn try_kt_logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Option<Ve
     // Always run the softmax in F32 — `kt::cuda_softmax_last_axis` supports
     // BF16/F16, but the rejection-sample consumer takes a `Vec<f32>` so
     // promoting up front is cheaper than promoting on D2H.
-    let flat_f32 = if flat.dtype() != DType::F32 {
-        flat.to_dtype(DType::F32)?
+    let flat_f32 = if flat.dtype() != candle_core::DType::F32 {
+        flat.to_dtype(candle_core::DType::F32)?
     } else {
         flat
     };
@@ -776,7 +776,7 @@ pub struct MtpSpeculativeStepResult {
     /// verify pass, which predicts the bonus. On REJECT this is the hidden
     /// after replaying only `last_token`, so the next draft starts from exact
     /// base-model GDN state.
-    pub new_h_prev: Tensor,
+    pub new_h_prev: candle_core::Tensor,
     /// How many KV-cache slots the BASE model consumed this step
     /// (`= accepted_tokens.len()` when no EOS cut the step short, and
     /// matches `accepted_tokens.len()` either way: ACCEPT emits 2, REJECT
@@ -825,7 +825,7 @@ pub struct MtpSpeculativeStepResult {
 pub fn speculative_mtp_decode_step(
     backend: &dyn BackendRuntime,
     last_token: TokenId,
-    h_prev: &Tensor,
+    h_prev: &candle_core::Tensor,
     weights: &GpuWeights,
     config: &ModelConfig,
     base_cache: &PagedKvCache,
@@ -1129,7 +1129,7 @@ mod tests {
     #[test]
     fn test_logits_to_probs_sums_to_one() {
         let device = candle_core::Device::Cpu;
-        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 0.5], &device).unwrap();
+        let logits = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0, 0.5], &device).unwrap();
         let probs = logits_to_probs(&logits, 1.0).unwrap();
 
         let sum: f32 = probs.iter().sum();
@@ -1147,7 +1147,7 @@ mod tests {
     #[test]
     fn test_logits_to_probs_temperature_effect() {
         let device = candle_core::Device::Cpu;
-        let logits = Tensor::new(&[1.0_f32, 5.0, 1.0], &device).unwrap();
+        let logits = candle_core::Tensor::new(&[1.0_f32, 5.0, 1.0], &device).unwrap();
 
         // Low temperature should make distribution more peaked
         let probs_low = logits_to_probs(&logits, 0.1).unwrap();
@@ -1166,7 +1166,7 @@ mod tests {
     fn test_logits_to_probs_2d() {
         let device = candle_core::Device::Cpu;
         // [seq_len=2, vocab_size=3]
-        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &device)
+        let logits = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &device)
             .unwrap()
             .reshape((2, 3))
             .unwrap();
