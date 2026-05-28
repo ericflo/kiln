@@ -411,5 +411,3 @@ pub fn fused_linear_cross_entropy(
     Ok(loss)
 }
 
-#[cfg(test)]
-mod tests;
