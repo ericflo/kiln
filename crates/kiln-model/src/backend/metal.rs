@@ -17,7 +17,7 @@ use super::BackendRuntime;
 // substrate swaps (e.g. candle → objc2-metal) touch this single import
 // block instead of hundreds of scattered fully-qualified references.
 use kiln_tensor::metal_types::{
-    buffer_o, sdpa, ComputePipeline, DeviceId, Library, MetalDevice, Storage,
+    buffer_o, buffer_o_kt, sdpa, ComputePipeline, DeviceId, Library, MetalDevice, Storage,
 };
 
 // Per-function pipeline-cache helpers reach for these std types; hoisted to
@@ -25,6 +25,51 @@ use kiln_tensor::metal_types::{
 // import boilerplate (#1082 cleanup).
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+
+// Phase 7 #1082 — small bridges from candle Layout / DType to their kt
+// siblings, used by per-call-site migrations to `buffer_o_kt`. Defined
+// locally (not in `kiln-tensor::metal_types`) so each helper-family
+// migration can land without touching the chokepoint module. The Layout
+// bridge clones the shape/stride vectors (typically rank 2-4); the cost
+// is negligible relative to a Metal encoder dispatch and stays well
+// below 100ns per call. Returns a kt Layout that round-trips
+// `start_offset()` exactly, which is what `buffer_o_kt` reads.
+#[inline]
+fn kt_layout_from_candle(l: &candle_core::Layout) -> kiln_tensor::Layout {
+    // `from_parts` only fails when shape.len() != strides.len(), which
+    // is structurally impossible coming from a candle Layout (both come
+    // from the same Shape). The unwrap is therefore total.
+    kiln_tensor::Layout::from_parts(
+        l.dims().to_vec(),
+        l.stride().to_vec(),
+        l.start_offset(),
+    )
+    .expect("candle Layout shape.len() == stride.len() by construction")
+}
+
+#[inline]
+fn kt_dtype_from_candle(d: candle_core::DType) -> kiln_tensor::DType {
+    // Covers every dtype currently named in `kiln-model::backend::metal`.
+    // Extend as new candle dtypes appear in BF16-quantized or paged-KV
+    // code paths.
+    match d {
+        candle_core::DType::F32 => kiln_tensor::DType::F32,
+        candle_core::DType::BF16 => kiln_tensor::DType::BF16,
+        candle_core::DType::F16 => kiln_tensor::DType::F16,
+        candle_core::DType::U32 => kiln_tensor::DType::U32,
+        candle_core::DType::U8 => kiln_tensor::DType::U8,
+        candle_core::DType::I64 => kiln_tensor::DType::I64,
+        // candle's I32 maps to kt's U32 (same 4-byte storage layout) —
+        // mirrors the convention in `kiln_kt_bridge::candle_dtype_to_kt`.
+        candle_core::DType::I32 => kiln_tensor::DType::U32,
+        // F64 has no kt counterpart yet; metal.rs never names it, so
+        // hitting this arm signals a previously-unseen path. Fail loudly.
+        other => panic!(
+            "kt_dtype_from_candle: candle dtype {:?} has no kiln_tensor::DType equivalent",
+            other
+        ),
+    }
+}
 
 const DISABLE_METAL_SDPA: &str = "KILN_DISABLE_METAL_SDPA";
 const DISABLE_METAL_SDPA_FULL: &str = "KILN_DISABLE_METAL_SDPA_FULL";
@@ -8318,16 +8363,39 @@ pub(crate) fn metal_rotary_embedding_bf16(
             _ => anyhow::bail!("metal rotary k_out must be on Metal"),
         };
 
-        let q_buf = buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let cos_buf =
-            buffer_o(cos_metal.buffer(), &c_layout, cos.dtype());
-        let sin_buf =
-            buffer_o(sin_metal.buffer(), &s_layout, sin.dtype());
-        let q_out_buf =
-            buffer_o(q_out_metal.buffer(), &qo_layout, q_out.dtype());
-        let k_out_buf =
-            buffer_o(k_out_metal.buffer(), &ko_layout, k_out.dtype());
+        // #1082 Step 4 embedding-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let q_buf = buffer_o_kt(
+            q_metal.buffer(),
+            &kt_layout_from_candle(q_layout),
+            kt_dtype_from_candle(q.dtype()),
+        );
+        let k_buf = buffer_o_kt(
+            k_metal.buffer(),
+            &kt_layout_from_candle(k_layout),
+            kt_dtype_from_candle(k.dtype()),
+        );
+        let cos_buf = buffer_o_kt(
+            cos_metal.buffer(),
+            &kt_layout_from_candle(c_layout),
+            kt_dtype_from_candle(cos.dtype()),
+        );
+        let sin_buf = buffer_o_kt(
+            sin_metal.buffer(),
+            &kt_layout_from_candle(s_layout),
+            kt_dtype_from_candle(sin.dtype()),
+        );
+        let q_out_buf = buffer_o_kt(
+            q_out_metal.buffer(),
+            &kt_layout_from_candle(qo_layout),
+            kt_dtype_from_candle(q_out.dtype()),
+        );
+        let k_out_buf = buffer_o_kt(
+            k_out_metal.buffer(),
+            &kt_layout_from_candle(ko_layout),
+            kt_dtype_from_candle(k_out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
