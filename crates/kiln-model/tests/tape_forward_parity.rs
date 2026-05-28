@@ -488,3 +488,160 @@ fn tape_forward_silu_short_circuits_without_active_scope() {
         "no active tape scope must short-circuit to Ok(None)"
     );
 }
+
+// ----------------------------------------------------------------------
+// Embedding tape-forward parity (#1082 — Phase 6a/CP-4 wave 12 extension).
+//
+// Same pattern as the matmul / silu parity tests: build BF16
+// contiguous CUDA weights of shape [V, H] and U32 token-ids of shape
+// [N], compare baseline (`kiln_tensor::ops::embedding` direct) against
+// the tape-forward path (`try_tape_embedding_cuda` -> `ops::embedding`
+// -> `cuda_index_select_dim0` underneath + `EmbeddingBackward`
+// recorded on the tape). Both paths share the same kt
+// `cuda_index_select_dim0` kernel so the outputs must be bit-exact.
+// The difference is purely backward-graph machinery — the tape path
+// additionally records an `EmbeddingBackward` node visible to a
+// subsequent `Tape::backward` walk.
+// ----------------------------------------------------------------------
+
+fn build_embedding_inputs(
+    device: &Device,
+    vocab: usize,
+    hidden: usize,
+    n_tokens: usize,
+) -> (Tensor, Tensor) {
+    // BF16 contiguous CUDA weights of shape [V, H] and U32
+    // contiguous indices of shape [N] in [0, V).
+    let w_host = random_bf16_vec(vocab * hidden, 0xE001_1A2B_3C4D_5E6F, 0.5);
+    let weights = Tensor::from_vec(w_host, (vocab, hidden), &Device::Cpu)
+        .expect("weights cpu")
+        .to_device(device)
+        .expect("weights -> cuda")
+        .contiguous()
+        .expect("weights contiguous");
+    // Deterministic LCG-derived ids in [0, vocab).
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let ids_host: Vec<u32> = (0..n_tokens)
+        .map(|_| {
+            // simple xorshift step before % vocab so we don't
+            // collide too predictably.
+            let _ = lcg(&mut state);
+            ((state >> 17) as u32) % (vocab as u32)
+        })
+        .collect();
+    let token_ids = Tensor::from_vec(ids_host, n_tokens, &Device::Cpu)
+        .expect("ids cpu")
+        .to_device(device)
+        .expect("ids -> cuda")
+        .contiguous()
+        .expect("ids contiguous");
+    (weights, token_ids)
+}
+
+#[test]
+fn tape_forward_embedding_bit_exact_parity_with_baseline() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_forward embedding parity: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    // Modest sizes inside the kt cuda_index_select_dim0 envelope.
+    let vocab = 1024usize;
+    let hidden = 256usize;
+    let n_tokens = 32usize;
+    let (weights, token_ids) = build_embedding_inputs(&device, vocab, hidden, n_tokens);
+
+    // SAFETY: see RMSNorm test above — ENV_LOCK serialises mutators,
+    // value is stable "1" across the binary.
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    // Path A — baseline. The adapter short-circuits on no-active-scope.
+    let baseline = kiln_model::tape_forward::try_tape_embedding_cuda(&weights, &token_ids)
+        .expect("baseline try_tape_embedding_cuda call ok");
+    assert!(
+        baseline.is_none(),
+        "baseline path (no tape scope) must short-circuit to Ok(None) \
+         so the caller falls through; got Some(...) which means the \
+         adapter recorded onto a tape that does not exist"
+    );
+
+    // Baseline forward via the kt op-registry directly (matches what
+    // `try_tape_embedding_cuda` calls when a scope is open).
+    let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&weights)
+        .expect("weights kt borrow");
+    let ids_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&token_ids)
+        .expect("ids kt borrow");
+    let baseline_kt = kiln_tensor::ops::embedding(&w_kt, &ids_kt)
+        .expect("kt embedding baseline");
+    let baseline_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&baseline_kt)
+        .expect("baseline kt -> candle");
+
+    // Path B — tape-forward inside an active scope.
+    let (tape_result, tape) =
+        kiln_model::tape_forward::with_thread_local_tape(|| {
+            kiln_model::tape_forward::try_tape_embedding_cuda(&weights, &token_ids)
+        });
+    let tape_out = tape_result
+        .expect("tape-forward try_tape_embedding_cuda ok")
+        .expect("tape-forward returned Some(out)");
+
+    let diff = max_abs_diff(&baseline_out, &tape_out);
+    assert_eq!(
+        diff, 0.0,
+        "embedding tape-forward path must be bit-exact with the baseline \
+         (max-abs-diff was {diff}). Both paths share the same kt \
+         cuda_index_select_dim0 kernel so any nonzero diff is a wiring bug."
+    );
+
+    assert_eq!(
+        tape.len(),
+        1,
+        "tape-forward embedding must record exactly one tape node \
+         (got {}). Empty tape means try_tape_embedding_cuda fell through; \
+         >1 node means an over-record bug.",
+        tape.len()
+    );
+
+    assert_eq!(
+        tape_out.shape().dims(),
+        baseline_out.shape().dims(),
+        "tape-forward embedding output shape diverges from baseline"
+    );
+    assert_eq!(
+        tape_out.dtype(),
+        baseline_out.dtype(),
+        "tape-forward embedding output dtype diverges from baseline"
+    );
+}
+
+#[test]
+fn tape_forward_embedding_short_circuits_without_active_scope() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_forward embedding short-circuit: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    let (weights, token_ids) = build_embedding_inputs(&device, 64, 32, 8);
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+    let out = kiln_model::tape_forward::try_tape_embedding_cuda(&weights, &token_ids)
+        .expect("try_tape_embedding_cuda call ok");
+    assert!(
+        out.is_none(),
+        "no active tape scope must short-circuit to Ok(None) \
+         so the caller falls through to the existing kt dispatch"
+    );
+}
