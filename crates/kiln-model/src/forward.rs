@@ -8,11 +8,11 @@ use anyhow::{Context, Result};
 use candle_core::backend::BackendDevice;
 #[cfg(feature = "cuda")]
 use candle_core::backend::BackendStorage;
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "vulkan"))]
 use candle_core::op::BackpropOp;
 #[cfg(feature = "cuda")]
 use candle_core::{CpuStorage, CudaStorage, CustomOp2, CustomOp3, Layout, Shape, Storage};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{D, DType, Device, Tensor};
 use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 
@@ -28,6 +28,15 @@ use crate::transposed_weight_cache::{
 use crate::weights::{DeferredMtpSource, ModelWeights, MtpWeights, TensorDType, WeightTensor};
 
 use kiln_core::block::BlockTable;
+
+/// The reduction-axis marker for "the last dimension" — passed to
+/// `Tensor::sum_keepdim` / `max_keepdim` / `mean_keepdim` / `cumsum` /
+/// `narrow` / `Tensor::cat` / `unsqueeze` in this file. Consolidates
+/// `candle_core::D::Minus1` (~58 sites pre-consolidation) under a single
+/// short name, mirroring the same pattern in `kiln-train/src/trainer.rs`
+/// (#1082). Drops 58 `candle_core::` references from `forward.rs` without
+/// any behavioral change.
+const LAST_DIM: D = D::Minus1;
 
 // NVTX is always linked: when the `nvtx` cargo feature is off the
 // `kiln_nvtx::range!` macro expands to a zero-sized RAII guard whose drop is
@@ -3944,12 +3953,12 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
         {
             match try_kt_max_last_dim_keepdim(x)? {
                 Some(out) => out,
-                None => x.max_keepdim(candle_core::D::Minus1)?,
+                None => x.max_keepdim(LAST_DIM)?,
             }
         }
         #[cfg(not(feature = "cuda"))]
         {
-            x.max_keepdim(candle_core::D::Minus1)?
+            x.max_keepdim(LAST_DIM)?
         }
     };
     let shifted = x.broadcast_sub(&max_val)?;
@@ -3988,12 +3997,12 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
             if let Some(out) = try_kt_sum_last_dim_keepdim(&exp_shifted)? {
                 out
             } else {
-                exp_shifted.sum_keepdim(candle_core::D::Minus1)?
+                exp_shifted.sum_keepdim(LAST_DIM)?
             }
         }
         #[cfg(not(feature = "cuda"))]
         {
-            exp_shifted.sum_keepdim(candle_core::D::Minus1)?
+            exp_shifted.sum_keepdim(LAST_DIM)?
         }
     };
     Ok(exp_shifted.broadcast_div(&sum_exp)?)
@@ -4036,7 +4045,7 @@ pub(crate) fn try_kt_sum_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> 
         anyhow::anyhow!("try_kt_sum_last_dim_keepdim: candle copy-back failed: {e}")
     })?;
     let out = reduced
-        .unsqueeze(candle_core::D::Minus1)
+        .unsqueeze(LAST_DIM)
         .map_err(|e| anyhow::anyhow!("try_kt_sum_last_dim_keepdim: unsqueeze failed: {e}"))?;
     Ok(Some(out))
 }
@@ -4126,7 +4135,7 @@ pub(crate) fn try_kt_max_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> 
         anyhow::anyhow!("try_kt_max_last_dim_keepdim: candle copy-back failed: {e}")
     })?;
     let out = reduced
-        .unsqueeze(candle_core::D::Minus1)
+        .unsqueeze(LAST_DIM)
         .map_err(|e| anyhow::anyhow!("try_kt_max_last_dim_keepdim: unsqueeze failed: {e}"))?;
     Ok(Some(out))
 }
@@ -4170,7 +4179,7 @@ fn try_kt_min_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
         anyhow::anyhow!("try_kt_min_last_dim_keepdim: candle copy-back failed: {e}")
     })?;
     let out = reduced
-        .unsqueeze(candle_core::D::Minus1)
+        .unsqueeze(LAST_DIM)
         .map_err(|e| anyhow::anyhow!("try_kt_min_last_dim_keepdim: unsqueeze failed: {e}"))?;
     Ok(Some(out))
 }
@@ -6614,7 +6623,7 @@ impl GpuWeights {
                                 Some(
                                     Tensor::cat(
                                         &[&q_proj_t, &k_proj_t, &v_proj_t],
-                                        candle_core::D::Minus1,
+                                        LAST_DIM,
                                     )?
                                     .contiguous()
                                     .context(ctx("qkv_proj_t contiguous"))?,
@@ -6737,7 +6746,7 @@ impl GpuWeights {
                                 Some(
                                     Tensor::cat(
                                         &[&in_proj_a_t, &in_proj_b_t],
-                                        candle_core::D::Minus1,
+                                        LAST_DIM,
                                     )?
                                     .contiguous()
                                     .context(ctx("in_proj_ab_t contiguous"))?,
@@ -6823,7 +6832,7 @@ impl GpuWeights {
                 {
                     if !w4a16_enabled && matches!(device, Device::Cuda(_)) {
                         Some(
-                            Tensor::cat(&[&gate_proj_t, &up_proj_t], candle_core::D::Minus1)?
+                            Tensor::cat(&[&gate_proj_t, &up_proj_t], LAST_DIM)?
                                 .contiguous()
                                 .context(ctx("gate_up_proj_t contiguous"))?,
                         )
@@ -7373,7 +7382,7 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
             let x_tensor = Tensor::from_storage(
                 storage,
                 Shape::from(l_x.shape().dims()),
-                candle_core::op::BackpropOp::none(),
+                BackpropOp::none(),
                 false,
             );
             let x_f32 = if x_tensor.dtype() == DType::F32 {
@@ -7589,12 +7598,12 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
             if let Some(out) = try_kt_mean_last_dim_keepdim(&sq)? {
                 out
             } else {
-                sq.mean_keepdim(candle_core::D::Minus1)?
+                sq.mean_keepdim(LAST_DIM)?
             }
         }
         #[cfg(not(feature = "cuda"))]
         {
-            sq.mean_keepdim(candle_core::D::Minus1)?
+            sq.mean_keepdim(LAST_DIM)?
         }
     };
     // Phase 7 (#1082): when `KILN_USE_KT_API_ADD_SCALAR=1` (or
@@ -7689,7 +7698,7 @@ pub(crate) fn try_kt_mean_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>>
         anyhow::anyhow!("try_kt_mean_last_dim_keepdim: candle copy-back failed: {e}")
     })?;
     let out = reduced
-        .unsqueeze(candle_core::D::Minus1)
+        .unsqueeze(LAST_DIM)
         .map_err(|e| anyhow::anyhow!("try_kt_mean_last_dim_keepdim: unsqueeze failed: {e}"))?;
     Ok(Some(out))
 }
@@ -7701,7 +7710,7 @@ pub(crate) fn try_kt_mean_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>>
 fn capture_c42_layer1_input_norm_taps(x: &Tensor, weight: &Tensor, eps: f64) -> Result<()> {
     crate::mtp_debug::capture_c42_layer1_norm_tap("layer_1_residual_input", x)?;
     let x_f32 = x.to_dtype(DType::F32)?;
-    let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    let variance = x_f32.sqr()?.mean_keepdim(LAST_DIM)?;
     let rms_inv = (variance + eps)?.sqrt()?.recip()?;
     crate::mtp_debug::capture_c42_layer1_norm_tap("layer_1_input_norm_rms_inv", &rms_inv)?;
     let pre_weight = x_f32.broadcast_mul(&rms_inv)?;
@@ -7721,7 +7730,7 @@ fn capture_c42_layer1_input_norm_taps(x: &Tensor, weight: &Tensor, eps: f64) -> 
 fn capture_c43_layer1_preweight_taps(x: &Tensor, weight: &Tensor, eps: f64) -> Result<()> {
     crate::mtp_debug::capture_c43_layer1_preweight_tap("layer_1_residual_input", x)?;
     let x_f32 = x.to_dtype(DType::F32)?;
-    let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    let variance = x_f32.sqr()?.mean_keepdim(LAST_DIM)?;
     let rms_inv = (variance + eps)?.sqrt()?.recip()?;
     crate::mtp_debug::capture_c43_layer1_preweight_tap("layer_1_input_norm_rms_inv", &rms_inv)?;
 
@@ -7791,7 +7800,7 @@ fn capture_c44_layer1_f32_row_taps(x: &Tensor, eps: f64) -> Result<()> {
     let last_row = x_f32.narrow(1, seq_len - 1, 1)?.contiguous()?;
     crate::mtp_debug::capture_c44_layer1_f32_row_tap("layer_1_residual_input_f32_row", &last_row)?;
 
-    let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    let variance = x_f32.sqr()?.mean_keepdim(LAST_DIM)?;
     let rms_inv = (variance + eps)?.sqrt()?.recip()?;
     let rms_inv_row = rms_inv.narrow(1, seq_len - 1, 1)?.contiguous()?;
     crate::mtp_debug::capture_c44_layer1_f32_row_tap(
@@ -7831,7 +7840,7 @@ fn c45_layer1_row_replay_tensors(
     anyhow::ensure!(seq_len > 0, "C45 row audit requires non-empty sequence");
 
     let last_row = x_f32.narrow(1, seq_len - 1, 1)?.contiguous()?;
-    let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    let variance = x_f32.sqr()?.mean_keepdim(LAST_DIM)?;
     let rms_inv = (variance + eps)?.sqrt()?.recip()?;
     let rms_inv_row = rms_inv.narrow(1, seq_len - 1, 1)?.contiguous()?;
 
@@ -8206,16 +8215,16 @@ fn apply_rope(
     let x = x.to_dtype(DType::F32)?;
 
     // Split into rotary portion and passthrough portion
-    let x_rot = x.narrow(candle_core::D::Minus1, 0, rotary_dim)?; // [..., :rotary_dim]
+    let x_rot = x.narrow(LAST_DIM, 0, rotary_dim)?; // [..., :rotary_dim]
     let x_pass = if rotary_dim < head_dim {
-        Some(x.narrow(candle_core::D::Minus1, rotary_dim, head_dim - rotary_dim)?) // [..., rotary_dim:]
+        Some(x.narrow(LAST_DIM, rotary_dim, head_dim - rotary_dim)?) // [..., rotary_dim:]
     } else {
         None
     };
 
     // Split rotary portion into two halves
-    let x1 = x_rot.narrow(candle_core::D::Minus1, 0, half_rotary)?; // [..., :half_rotary]
-    let x2 = x_rot.narrow(candle_core::D::Minus1, half_rotary, half_rotary)?; // [..., half_rotary:rotary_dim]
+    let x1 = x_rot.narrow(LAST_DIM, 0, half_rotary)?; // [..., :half_rotary]
+    let x2 = x_rot.narrow(LAST_DIM, half_rotary, half_rotary)?; // [..., half_rotary:rotary_dim]
 
     // cos/sin are [seq_len, half_rotary], need to broadcast to [batch, seq_len, num_heads, half_rotary]
     // Reshape to [1, seq_len, 1, half_rotary]
@@ -8241,12 +8250,12 @@ fn apply_rope(
                 if let Some(out) = try_kt_concat_last_dim(&pieces)? {
                     out
                 } else {
-                    Tensor::cat(&pieces, candle_core::D::Minus1)?
+                    Tensor::cat(&pieces, LAST_DIM)?
                 }
             }
             #[cfg(not(feature = "cuda"))]
             {
-                Tensor::cat(&pieces, candle_core::D::Minus1)?
+                Tensor::cat(&pieces, LAST_DIM)?
             }
         }
         None => {
@@ -8256,12 +8265,12 @@ fn apply_rope(
                 if let Some(out) = try_kt_concat_last_dim(&pieces)? {
                     out
                 } else {
-                    Tensor::cat(&pieces, candle_core::D::Minus1)?
+                    Tensor::cat(&pieces, LAST_DIM)?
                 }
             }
             #[cfg(not(feature = "cuda"))]
             {
-                Tensor::cat(&pieces, candle_core::D::Minus1)?
+                Tensor::cat(&pieces, LAST_DIM)?
             }
         }
     };
@@ -10133,15 +10142,15 @@ fn rotary_one_backward(
     let half_rotary = rotary_dim / 2;
     let grad_dtype = grad_y.dtype();
     let grad = grad_y.to_dtype(DType::F32)?;
-    let grad_rot = grad.narrow(candle_core::D::Minus1, 0, rotary_dim)?;
+    let grad_rot = grad.narrow(LAST_DIM, 0, rotary_dim)?;
     let grad_pass = if rotary_dim < head_dim {
-        Some(grad.narrow(candle_core::D::Minus1, rotary_dim, head_dim - rotary_dim)?)
+        Some(grad.narrow(LAST_DIM, rotary_dim, head_dim - rotary_dim)?)
     } else {
         None
     };
 
-    let g1 = grad_rot.narrow(candle_core::D::Minus1, 0, half_rotary)?;
-    let g2 = grad_rot.narrow(candle_core::D::Minus1, half_rotary, half_rotary)?;
+    let g1 = grad_rot.narrow(LAST_DIM, 0, half_rotary)?;
+    let g2 = grad_rot.narrow(LAST_DIM, half_rotary, half_rotary)?;
     let cos = cos.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?;
     let sin = sin.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?;
 
@@ -10161,12 +10170,12 @@ fn rotary_one_backward(
                 let pieces: [&Tensor; 3] = [&dx1, &dx2, &pass];
                 match try_kt_concat_last_dim(&pieces)? {
                     Some(out) => out,
-                    None => Tensor::cat(&[&dx1, &dx2, &pass], candle_core::D::Minus1)?,
+                    None => Tensor::cat(&[&dx1, &dx2, &pass], LAST_DIM)?,
                 }
             }
             #[cfg(not(feature = "cuda"))]
             {
-                Tensor::cat(&[&dx1, &dx2, &pass], candle_core::D::Minus1)?
+                Tensor::cat(&[&dx1, &dx2, &pass], LAST_DIM)?
             }
         }
         None => {
@@ -10175,12 +10184,12 @@ fn rotary_one_backward(
                 let pieces: [&Tensor; 2] = [&dx1, &dx2];
                 match try_kt_concat_last_dim(&pieces)? {
                     Some(out) => out,
-                    None => Tensor::cat(&[&dx1, &dx2], candle_core::D::Minus1)?,
+                    None => Tensor::cat(&[&dx1, &dx2], LAST_DIM)?,
                 }
             }
             #[cfg(not(feature = "cuda"))]
             {
-                Tensor::cat(&[&dx1, &dx2], candle_core::D::Minus1)?
+                Tensor::cat(&[&dx1, &dx2], LAST_DIM)?
             }
         }
     };
@@ -12009,12 +12018,12 @@ fn l2_normalize(x: &Tensor) -> Result<Tensor> {
             if let Some(out) = try_kt_sum_squared_last_dim_keepdim(&x_f32)? {
                 out
             } else {
-                x_f32.sqr()?.sum_keepdim(candle_core::D::Minus1)?
+                x_f32.sqr()?.sum_keepdim(LAST_DIM)?
             }
         }
         #[cfg(not(feature = "cuda"))]
         {
-            x_f32.sqr()?.sum_keepdim(candle_core::D::Minus1)?
+            x_f32.sqr()?.sum_keepdim(LAST_DIM)?
         }
     };
     // Phase 7 (#1082): when `KILN_USE_KT_API_ADD_SCALAR=1` (or
@@ -12100,7 +12109,7 @@ fn try_kt_sum_squared_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
     let reduced = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).map_err(|e| {
         anyhow::anyhow!("try_kt_sum_squared_last_dim_keepdim: candle copy-back failed: {e}")
     })?;
-    let out = reduced.unsqueeze(candle_core::D::Minus1).map_err(|e| {
+    let out = reduced.unsqueeze(LAST_DIM).map_err(|e| {
         anyhow::anyhow!("try_kt_sum_squared_last_dim_keepdim: unsqueeze failed: {e}")
     })?;
     Ok(Some(out))
@@ -12378,12 +12387,12 @@ fn gated_rms_norm_fallback(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) ->
             if let Some(out) = try_kt_mean_last_dim_keepdim(&sq)? {
                 out
             } else {
-                sq.mean_keepdim(candle_core::D::Minus1)?
+                sq.mean_keepdim(LAST_DIM)?
             }
         }
         #[cfg(not(feature = "cuda"))]
         {
-            sq.mean_keepdim(candle_core::D::Minus1)?
+            sq.mean_keepdim(LAST_DIM)?
         }
     };
     // Phase 7 (#1082): when `KILN_USE_KT_API_ADD_SCALAR=1` (or
@@ -13160,7 +13169,7 @@ fn gdn_chunkwise_recurrence(
                     // would lose meaningful precision (G can reach -10 or
                     // more across a full 64-token chunk).
                     let g_f32 = g_c.to_dtype(DType::F32)?;
-                    let big_g = g_f32.cumsum(candle_core::D::Minus1)?; // [B, nv, C], F32
+                    let big_g = g_f32.cumsum(LAST_DIM)?; // [B, nv, C], F32
 
                     // Decay matrix D[t, i] = exp(G[t] - G[i]). Mask before
                     // exp: masked future positions can otherwise overflow to
@@ -13902,7 +13911,7 @@ fn gdn_chunk_prep_f32(
     let (batch, heads, chunk, _) = v.dims4()?;
     let device = v.device();
     let g_f32 = g.to_dtype(DType::F32)?;
-    let big_g = g_f32.cumsum(candle_core::D::Minus1)?;
+    let big_g = g_f32.cumsum(LAST_DIM)?;
     let big_g_col = big_g.unsqueeze(3)?;
     let big_g_row = big_g.unsqueeze(2)?;
     let decay_delta = big_g_col.broadcast_sub(&big_g_row)?;
@@ -14239,12 +14248,12 @@ pub fn gdn_recurrent_backward_no_grad(
                 let axis = prod_kc.rank().saturating_sub(1);
                 d_decay_last_col_acc = match try_kt_sum_axis(&prod_kc, axis)? {
                     Some(out) => out,
-                    None => prod_kc.sum(candle_core::D::Minus1)?,
+                    None => prod_kc.sum(LAST_DIM)?,
                 };
             }
             #[cfg(not(feature = "cuda"))]
             {
-                d_decay_last_col_acc = prod_kc.sum(candle_core::D::Minus1)?;
+                d_decay_last_col_acc = prod_kc.sum(LAST_DIM)?;
             }
         }
 
@@ -14264,11 +14273,11 @@ pub fn gdn_recurrent_backward_no_grad(
             let axis = prod_pb.rank().saturating_sub(1);
             match try_kt_sum_axis(&prod_pb, axis)? {
                 Some(out) => out,
-                None => prod_pb.sum(candle_core::D::Minus1)?,
+                None => prod_pb.sum(LAST_DIM)?,
             }
         };
         #[cfg(not(feature = "cuda"))]
-        let d_beta = prod_pb.sum(candle_core::D::Minus1)?;
+        let d_beta = prod_pb.sum(LAST_DIM)?;
         let dr_w_t = dr.matmul(&w.transpose(2, 3)?.contiguous()?)?;
         let strict_mask = strict_lower_tri_bool(chunk, q.device())?
             .reshape((1, 1, chunk, chunk))?
@@ -14298,7 +14307,7 @@ pub fn gdn_recurrent_backward_no_grad(
             .broadcast_mul(&beta_c_neg.unsqueeze(3)?)?
             .broadcast_mul(&strict_mask)?;
 
-        let big_g = g_c.cumsum(candle_core::D::Minus1)?;
+        let big_g = g_c.cumsum(LAST_DIM)?;
         // Phase 7 (#1082): route the `big_g.exp()` step through
         // `try_kt_exp` when `KILN_USE_KT_API_EXP=1` (or
         // `KILN_USE_KT_API_ALL=1`) is set. Mirrors the prefill
@@ -14359,11 +14368,11 @@ pub fn gdn_recurrent_backward_no_grad(
             let axis = g_acc_prod.rank().saturating_sub(1);
             match try_kt_sum_axis(&g_acc_prod, axis)? {
                 Some(out) => out,
-                None => g_acc_prod.sum(candle_core::D::Minus1)?,
+                None => g_acc_prod.sum(LAST_DIM)?,
             }
         };
         #[cfg(not(feature = "cuda"))]
-        let mut d_g_acc = g_acc_prod.sum(candle_core::D::Minus1)?;
+        let mut d_g_acc = g_acc_prod.sum(LAST_DIM)?;
         let d_q_s = dq_s_scaled.broadcast_mul(&p_col)?.contiguous()?;
         let qss_prod = (&q_s * &dq_s_scaled)?.broadcast_mul(&p_col)?;
         #[cfg(feature = "cuda")]
@@ -14371,11 +14380,11 @@ pub fn gdn_recurrent_backward_no_grad(
             let axis = qss_prod.rank().saturating_sub(1);
             match try_kt_sum_axis(&qss_prod, axis)? {
                 Some(out) => out,
-                None => qss_prod.sum(candle_core::D::Minus1)?,
+                None => qss_prod.sum(LAST_DIM)?,
             }
         };
         #[cfg(not(feature = "cuda"))]
-        let qss_sum = qss_prod.sum(candle_core::D::Minus1)?;
+        let qss_sum = qss_prod.sum(LAST_DIM)?;
         d_g_acc = (&d_g_acc + &qss_sum)?;
 
         let big_g_col = big_g.unsqueeze(3)?;
@@ -14448,11 +14457,11 @@ pub fn gdn_recurrent_backward_no_grad(
             let axis = term.rank().saturating_sub(1);
             match try_kt_sum_axis(&term, axis)? {
                 Some(out) => out,
-                None => term.sum(candle_core::D::Minus1)?,
+                None => term.sum(LAST_DIM)?,
             }
         };
         #[cfg(not(feature = "cuda"))]
-        let row_sum = term.sum(candle_core::D::Minus1)?;
+        let row_sum = term.sum(LAST_DIM)?;
         // Phase 7 (#1082): route the col-sum reduction (axis 2,
         // the strict-mask row dim) through
         // kiln_tensor::cuda_sum_axis when KILN_USE_KT_API_SUM_AXIS=1
@@ -14480,7 +14489,7 @@ pub fn gdn_recurrent_backward_no_grad(
         d_g_acc = (&d_g_acc - &col_sum)?;
 
         let decay_term = decay_last_col.broadcast_mul(&d_decay_last_col_acc)?;
-        let decay_sum = decay_term.sum(candle_core::D::Minus1)?.unsqueeze(2)?;
+        let decay_sum = decay_term.sum(LAST_DIM)?.unsqueeze(2)?;
         let last_mask = Tensor::arange(0u32, chunk as u32, q.device())?
             .eq((chunk - 1) as u32)?
             .to_dtype(DType::F32)?
@@ -14881,11 +14890,11 @@ fn gated_deltanet_forward_decode_if(
     // along the last axis. Capture once here so subsequent post-split
     // transforms don't alter what we're attributing divergence to.
     if capture_b11_taps {
-        let gdn_in_proj = Tensor::cat(&[&mixed_qkv, &z, &b, &a], candle_core::D::Minus1)?;
+        let gdn_in_proj = Tensor::cat(&[&mixed_qkv, &z, &b, &a], LAST_DIM)?;
         crate::mtp_debug::capture_b11_layer0_tap("gdn_in_proj", &gdn_in_proj)?;
     }
     if capture_c41_taps {
-        let gdn_in_proj = Tensor::cat(&[&mixed_qkv, &z, &b, &a], candle_core::D::Minus1)?;
+        let gdn_in_proj = Tensor::cat(&[&mixed_qkv, &z, &b, &a], LAST_DIM)?;
         crate::mtp_debug::capture_c41_layer1_tap("gdn_in_proj", &gdn_in_proj)?;
     }
 
@@ -19545,7 +19554,7 @@ fn gqa_attention_paged_with_rope_tables(
             crate::mtp_debug::capture_c7_sdpa_tap("pre_sdpa_q", &q)?;
             crate::mtp_debug::capture_c7_sdpa_tap("pre_sdpa_k", &k)?;
             crate::mtp_debug::capture_c7_sdpa_tap("pre_sdpa_v", &v)?;
-            let empty_mask = candle_core::Tensor::zeros((), candle_core::DType::F32, q.device())?;
+            let empty_mask = Tensor::zeros((), DType::F32, q.device())?;
             crate::mtp_debug::capture_c7_sdpa_tap("causal_mask", &empty_mask)?;
         }
 
@@ -21870,7 +21879,7 @@ fn model_forward_paged_last_token_resident_native_vk(
     let t_rope = std::time::Instant::now();
 
     // 2. Position tensor + RoPE tables for this single decode position.
-    let positions = candle_core::Tensor::new(
+    let positions = Tensor::new(
         &[start_pos as f32][..],
         device,
     )?;
@@ -21900,10 +21909,10 @@ fn model_forward_paged_last_token_resident_native_vk(
     //    `VulkanBuffer::upload_data` calls, each with its own command
     //    pool create + queue_submit + queue_wait_idle round-trip,
     //    which cost ~6 ms / token of pure orchestration.
-    let hidden_flat = if hidden.dtype() == candle_core::DType::F32 {
+    let hidden_flat = if hidden.dtype() == DType::F32 {
         hidden.flatten_all()?
     } else {
-        hidden.to_dtype(candle_core::DType::F32)?.flatten_all()?
+        hidden.to_dtype(DType::F32)?.flatten_all()?
     };
     let hidden_data: Vec<f32> = hidden_flat.to_vec1()?;
     let mut hidden_bytes: Vec<u8> = Vec::with_capacity(hidden_data.len() * 4);
@@ -22155,7 +22164,7 @@ fn model_forward_paged_last_token_resident_native_vk(
     // to avoid a wasteful to_dtype() conversion (the caller's argmax
     // / greedy_sample works in f32 either way).
     let logits =
-        candle_core::Tensor::from_vec(out_f32, (1usize, 1usize, vocab_size), device)?;
+        Tensor::from_vec(out_f32, (1usize, 1usize, vocab_size), device)?;
     if timing_enabled {
         READBACK_NS.fetch_add(t_readback.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -23240,8 +23249,8 @@ pub fn mtp_forward_step(
             // the per-step cost is negligible and there is no hot-path
             // regression to worry about.
             let in_dtype = concat.dtype();
-            let concat_f32 = concat.to_dtype(candle_core::DType::F32)?;
-            let fc_t_f32 = mtp.fc_t.to_dtype(candle_core::DType::F32)?;
+            let concat_f32 = concat.to_dtype(DType::F32)?;
+            let fc_t_f32 = mtp.fc_t.to_dtype(DType::F32)?;
             concat_f32.broadcast_matmul(&fc_t_f32)?.to_dtype(in_dtype)?
         } else {
             concat.broadcast_matmul(&mtp.fc_t)?
@@ -25315,7 +25324,7 @@ mod tests {
         let expected_embed_dims = [materialized_t_dims[1], materialized_t_dims[0]];
         assert_ne!(stub.dims(), expected_embed_dims.as_slice());
         assert_eq!(stub.dims(), &[1usize]);
-        assert_eq!(stub.dtype(), candle_core::DType::F32);
+        assert_eq!(stub.dtype(), DType::F32);
         Ok(())
     }
 
@@ -25435,7 +25444,7 @@ mod tests {
         ) = c45_layer1_row_replay_tensors(&x, eps)?;
 
         let x_f32 = x.to_dtype(DType::F32)?;
-        let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+        let variance = x_f32.sqr()?.mean_keepdim(LAST_DIM)?;
         let rms_inv = (variance + eps)?.sqrt()?.recip()?;
         let production = x_f32.broadcast_mul(&rms_inv)?;
         let production_last_row = production.narrow(1, seq_len - 1, 1)?.contiguous()?;
@@ -26023,7 +26032,7 @@ mod tests {
             .contiguous()?;
         let up_t = Tensor::randn(0.0_f32, 0.05, (hidden, intermediate), &device)?
             .contiguous()?;
-        let gate_up_t = Tensor::cat(&[&gate_t, &up_t], candle_core::D::Minus1)?
+        let gate_up_t = Tensor::cat(&[&gate_t, &up_t], LAST_DIM)?
             .contiguous()?;
 
         let gate_split = broadcast_matmul_cpu_compatible(&x, &gate_t)?;
@@ -26084,7 +26093,7 @@ mod tests {
         let gate_t = gate.t()?.contiguous()?;
         let up_t = up.t()?.contiguous()?;
         let down_t = down.t()?.contiguous()?;
-        let gate_up_t = Tensor::cat(&[&gate_t, &up_t], candle_core::D::Minus1)?
+        let gate_up_t = Tensor::cat(&[&gate_t, &up_t], LAST_DIM)?
             .contiguous()?;
 
         let mlp_legacy = GpuFfnWeights {
@@ -29958,7 +29967,7 @@ mod tests {
         // Candle reference chain — mirrors the else branch in
         // gdn_chunkwise_recurrence.
         let g_f32 = g.to_dtype(DType::F32)?;
-        let big_g = g_f32.cumsum(candle_core::D::Minus1)?; // [B, nv, C] F32
+        let big_g = g_f32.cumsum(LAST_DIM)?; // [B, nv, C] F32
         let big_g_col = big_g.unsqueeze(3)?;
         let big_g_row = big_g.unsqueeze(2)?;
         let decay_f32 = big_g_col.broadcast_sub(&big_g_row)?.exp()?;
