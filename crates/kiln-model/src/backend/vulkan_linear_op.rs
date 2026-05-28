@@ -139,6 +139,89 @@ pub enum WeightLayout {
     Bf16Packed,
 }
 
+/// File-private candle⇔bytes helpers — migrated inline from
+/// `kiln_vulkan_kernel::kernels::{extract_tensor_bytes,`
+/// `create_tensor_from_data, upload_tensor_f32_buffer,`
+/// `upload_tensor_bf16_packed_buffer}`
+/// as part of issue #1082 (drop candle from kiln-vulkan-kernel).
+///
+/// Mirrors the public bridge implementations exactly. Local copies
+/// let `vulkan_linear_op.rs` perform candle ↔ raw-bytes conversions
+/// without going through the kiln-vulkan-kernel candle bridge surface,
+/// so that bridge can eventually be deleted. (#1082)
+#[inline]
+fn tensor_to_f32_bytes_with_shape(
+    tensor: &candle_core::Tensor,
+) -> Result<(Vec<u8>, Vec<usize>)> {
+    let shape: Vec<usize> = tensor.shape().dims().to_vec();
+    let flat = tensor
+        .flatten_all()
+        .context("failed to flatten tensor")?;
+    let f32_data = flat
+        .to_dtype(candle_core::DType::F32)?
+        .to_vec1::<f32>()
+        .context("failed to extract f32 data")?;
+    Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
+}
+
+#[inline]
+fn tensor_from_f32_bytes(
+    data: &[u8],
+    shape: &[usize],
+    dtype: candle_core::DType,
+) -> Result<candle_core::Tensor> {
+    let f32_data: &[f32] = bytemuck::cast_slice(data);
+    let tensor = candle_core::Tensor::from_vec(
+        f32_data.to_vec(),
+        f32_data.len(),
+        &candle_core::Device::Cpu,
+    )?
+    .reshape(shape)?;
+    if dtype == candle_core::DType::BF16 {
+        Ok(tensor.to_dtype(candle_core::DType::BF16)?)
+    } else {
+        Ok(tensor)
+    }
+}
+
+/// Inlined replacement for `kernels::upload_tensor_f32_buffer`: extract the
+/// tensor's f32 values then upload via the candle-free
+/// `kernels::upload_f32_buffer_from_slice`. (#1082)
+#[inline]
+fn upload_tensor_f32_buffer_inline(
+    vk_device: &VulkanDevice,
+    tensor: &candle_core::Tensor,
+) -> Result<VulkanBuffer> {
+    let f32_data: Vec<f32> = tensor
+        .flatten_all()
+        .context("failed to flatten tensor for f32 upload")?
+        .to_dtype(candle_core::DType::F32)?
+        .to_vec1::<f32>()
+        .context("failed to extract f32 data for upload")?;
+    kernels::upload_f32_buffer_from_slice(vk_device, &f32_data)
+}
+
+/// Inlined replacement for `kernels::upload_tensor_bf16_packed_buffer`:
+/// extract the tensor's bf16 values then upload via the candle-free
+/// `kernels::upload_bf16_packed_buffer_from_slice`. (#1082)
+#[inline]
+fn upload_tensor_bf16_packed_buffer_inline(
+    vk_device: &VulkanDevice,
+    tensor: &candle_core::Tensor,
+) -> Result<VulkanBuffer> {
+    anyhow::ensure!(
+        tensor.dtype() == candle_core::DType::BF16,
+        "packed bf16 upload requires BF16 tensor, got {:?}",
+        tensor.dtype()
+    );
+    let bf16_data: Vec<half::bf16> = tensor
+        .flatten_all()
+        .context("failed to flatten bf16 tensor for upload")?
+        .to_vec1::<half::bf16>()
+        .context("failed to extract bf16 data for upload")?;
+    kernels::upload_bf16_packed_buffer_from_slice(vk_device, &bf16_data)
+}
+
 /// Op state for [`VulkanLinearOp`]. Captures everything needed to
 /// dispatch the matmul without holding a `&self` reference to a
 /// `VulkanBackend` (which would not satisfy `'static`).
@@ -264,7 +347,7 @@ impl candle_core::CustomOp1 for VulkanLinearOp {
             // and assembles the final `[row_count, 1, out_dim]` output by
             // copying each chunk's row stride into place rather than
             // going through `candle_core::Tensor::cat`. (#1082)
-            let dispatch_x_bytes = kernels::extract_tensor_bytes(&dispatch_x)
+            let dispatch_x_bytes = tensor_to_f32_bytes_with_shape(&dispatch_x)
                 .map_err(|e| {
                     candle_core::Error::Msg(format!(
                         "VulkanLinearOp chunked extract x bytes: {e:?}"
@@ -306,7 +389,7 @@ impl candle_core::CustomOp1 for VulkanLinearOp {
                 }
                 chunk_start += chunk_len;
             }
-            kernels::create_tensor_from_data(
+            tensor_from_f32_bytes(
                 &out_bytes,
                 &[row_count, 1, self.out_dim],
                 candle_core::DType::F32,
@@ -317,7 +400,7 @@ impl candle_core::CustomOp1 for VulkanLinearOp {
                 ))
             })?
         } else {
-            let x_data = kernels::extract_tensor_bytes(&dispatch_x)
+            let x_data = tensor_to_f32_bytes_with_shape(&dispatch_x)
                 .map_err(|e| {
                     candle_core::Error::Msg(format!(
                         "VulkanLinearOp extract x bytes: {e:?}"
@@ -337,7 +420,7 @@ impl candle_core::CustomOp1 for VulkanLinearOp {
             .map_err(|e| {
                 candle_core::Error::Msg(format!("VulkanLinearOp dispatch: {e:?}"))
             })?;
-            kernels::create_tensor_from_data(
+            tensor_from_f32_bytes(
                 &out_bytes,
                 &[row_count, 1, self.out_dim],
                 candle_core::DType::F32,
@@ -426,7 +509,7 @@ impl candle_core::CustomOp1 for VulkanLinearOp {
             // and single-shot transposed dispatches go through the
             // candle-free `_bytes` entry, so the per-chunk loop never
             // wraps / unwraps a `candle_core::Tensor`. (#1082)
-            let dispatch_x_bytes = kernels::extract_tensor_bytes(&dispatch_x)
+            let dispatch_x_bytes = tensor_to_f32_bytes_with_shape(&dispatch_x)
                 .map_err(|e| {
                     candle_core::Error::Msg(format!("bwd extract grad_y bytes: {e:?}"))
                 })?
@@ -499,7 +582,7 @@ impl candle_core::CustomOp1 for VulkanLinearOp {
             // Rebuild the candle candle_core::Tensor with the caller's leading dims.
             let mut out_dims: Vec<usize> = dims[..dims.len() - 1].to_vec();
             out_dims.push(self.hidden);
-            let dx_f32 = kernels::create_tensor_from_data(
+            let dx_f32 = tensor_from_f32_bytes(
                 &dx_bytes,
                 out_dims.as_slice(),
                 candle_core::DType::F32,
@@ -611,7 +694,7 @@ pub fn dispatch_forward_only(
             .reshape((row_count, 1usize, hidden))
             .context("dispatch_forward_only: reshape x")?
     };
-    let x_data = kernels::extract_tensor_bytes(&dispatch_x)
+    let x_data = tensor_to_f32_bytes_with_shape(&dispatch_x)
         .context("dispatch_forward_only: extract x bytes")?
         .0;
     let packed_bf16_weights = matches!(weight_layout, WeightLayout::Bf16Packed);
@@ -625,7 +708,7 @@ pub fn dispatch_forward_only(
         packed_bf16_weights,
     )
     .context("dispatch_forward_only: kernel dispatch")?;
-    let out = kernels::create_tensor_from_data(&out_bytes, &[row_count, 1, out_dim], candle_core::DType::F32)
+    let out = tensor_from_f32_bytes(&out_bytes, &[row_count, 1, out_dim], candle_core::DType::F32)
         .context("dispatch_forward_only: build out tensor")?;
     let mut out_dims = dims;
     *out_dims.last_mut().unwrap() = out_dim;
@@ -638,7 +721,6 @@ mod tests {
     use super::*;
     use kiln_vulkan_kernel::{
         VulkanDevice,
-        kernels::{upload_tensor_bf16_packed_buffer, upload_tensor_f32_buffer},
     };
 
     /// Synthetic parity test: a small `[T, H] @ [H, D]` matmul on
@@ -671,7 +753,7 @@ mod tests {
         let baseline = x.broadcast_matmul(&weight_t)?;
 
         // Vulkan path.
-        let weight_buffer = Arc::new(upload_tensor_f32_buffer(vk_device.as_ref(), &weight_t)?);
+        let weight_buffer = Arc::new(upload_tensor_f32_buffer_inline(vk_device.as_ref(), &weight_t)?);
         let vulkan_out = dispatch_forward_only(
             vk_device.as_ref(),
             &x,
@@ -727,7 +809,7 @@ mod tests {
             .to_dtype(candle_core::DType::F32)?
             .broadcast_matmul(&weight_t_bf16.to_dtype(candle_core::DType::F32)?)?;
 
-        let weight_buffer = Arc::new(upload_tensor_bf16_packed_buffer(
+        let weight_buffer = Arc::new(upload_tensor_bf16_packed_buffer_inline(
             vk_device.as_ref(),
             &weight_t_bf16,
         )?);
@@ -799,7 +881,7 @@ mod tests {
         // Vulkan path: same x (fresh Var so the new graph stands alone).
         let x_var2 =
             candle_core::Var::from_tensor(&candle_core::Tensor::from_vec(x_data, (1, t, hidden), &device)?)?;
-        let weight_buffer = Arc::new(upload_tensor_f32_buffer(vk_device.as_ref(), &weight_t)?);
+        let weight_buffer = Arc::new(upload_tensor_f32_buffer_inline(vk_device.as_ref(), &weight_t)?);
         let op = build_op(
             vk_device.clone(),
             weight_buffer,
@@ -851,9 +933,8 @@ mod tests {
     #[test]
     fn vulkan_linear_offset_parity() -> Result<()> {
         use kiln_vulkan_kernel::kernels::{
-            create_tensor_from_data, dispatch_linear_decode_cached_bf16_weights_offset_bytes,
-            extract_tensor_bytes,
-        };
+            dispatch_linear_decode_cached_bf16_weights_offset_bytes,
+            };
 
         let Ok(vk_device) = VulkanDevice::new() else {
             eprintln!("no Vulkan device, skipping");
@@ -876,11 +957,11 @@ mod tests {
         let weight_full_bf16 = weight_full.to_dtype(candle_core::DType::BF16)?;
 
         // Upload the full bf16-packed buffer once.
-        let weight_buffer = upload_tensor_bf16_packed_buffer(&vk_device, &weight_full_bf16)?;
+        let weight_buffer = upload_tensor_bf16_packed_buffer_inline(&vk_device, &weight_full_bf16)?;
 
         // Chunk slice via the offset variant. The kernel returns
         // [batch_rows, 1, out_dim]; reshape to match the reference.
-        let x_bytes = extract_tensor_bytes(&x)?.0;
+        let x_bytes = tensor_to_f32_bytes_with_shape(&x)?.0;
         let chunk_bytes = dispatch_linear_decode_cached_bf16_weights_offset_bytes(
             &vk_device,
             &x_bytes,
@@ -892,7 +973,7 @@ mod tests {
             full_out_dim,
         )?;
         let chunk_out_raw =
-            create_tensor_from_data(&chunk_bytes, &[t, 1, chunk_len], candle_core::DType::F32)?;
+            tensor_from_f32_bytes(&chunk_bytes, &[t, 1, chunk_len], candle_core::DType::F32)?;
         let chunk_out = chunk_out_raw.reshape((1, t, chunk_len))?;
 
         // Reference: do the matmul against the same slice on CPU.
@@ -923,9 +1004,8 @@ mod tests {
     #[test]
     fn vulkan_linear_transposed_parity() -> Result<()> {
         use kiln_vulkan_kernel::kernels::{
-            create_tensor_from_data, dispatch_linear_decode_cached_bf16_weights_transposed_bytes,
-            extract_tensor_bytes,
-        };
+            dispatch_linear_decode_cached_bf16_weights_transposed_bytes,
+            };
 
         let Ok(vk_device) = VulkanDevice::new() else {
             eprintln!("no Vulkan device, skipping");
@@ -944,7 +1024,7 @@ mod tests {
             .collect();
         let weight_full = candle_core::Tensor::from_vec(w_data.clone(), (forward_k, forward_n), &device)?;
         let weight_full_bf16 = weight_full.to_dtype(candle_core::DType::BF16)?;
-        let weight_buffer = upload_tensor_bf16_packed_buffer(&vk_device, &weight_full_bf16)?;
+        let weight_buffer = upload_tensor_bf16_packed_buffer_inline(&vk_device, &weight_full_bf16)?;
 
         // x has shape [batch, k_dim] = [batch, forward_n].
         let x_data: Vec<f32> = (0..batch * forward_n).map(|i| (i as f32) * 0.05).collect();
@@ -952,7 +1032,7 @@ mod tests {
 
         // Vulkan: out = x @ W.T  (W.T shape [forward_n, forward_k] →
         // out shape [batch, forward_k]).
-        let x_bytes = extract_tensor_bytes(&x)?.0;
+        let x_bytes = tensor_to_f32_bytes_with_shape(&x)?.0;
         let out_bytes = dispatch_linear_decode_cached_bf16_weights_transposed_bytes(
             &vk_device,
             &x_bytes,
@@ -961,7 +1041,7 @@ mod tests {
             forward_n, // k_dim (inner sum)
             forward_k, // n_dim (output dim)
         )?;
-        let out_raw = create_tensor_from_data(&out_bytes, &[batch, 1, forward_k], candle_core::DType::F32)?;
+        let out_raw = tensor_from_f32_bytes(&out_bytes, &[batch, 1, forward_k], candle_core::DType::F32)?;
         let out = out_raw.reshape((batch, forward_k))?;
 
         // Reference: candle CPU broadcast_matmul of x (f32) @ W.T (f32).
@@ -992,8 +1072,7 @@ mod tests {
     #[test]
     fn vulkan_qwen_rmsnorm_forward_parity() -> Result<()> {
         use kiln_vulkan_kernel::kernels::{
-            create_tensor_from_data, dispatch_qwen_rmsnorm_forward_bytes, extract_tensor_bytes,
-        };
+            dispatch_qwen_rmsnorm_forward_bytes, };
 
         let Ok(vk_device) = VulkanDevice::new() else {
             eprintln!("no Vulkan device, skipping");
@@ -1014,11 +1093,11 @@ mod tests {
         let weight = candle_core::Tensor::from_vec(w_data, (hidden,), &device)?;
 
         // Vulkan path.
-        let x_bytes = extract_tensor_bytes(&x)?.0;
-        let weight_bytes = extract_tensor_bytes(&weight)?.0;
+        let x_bytes = tensor_to_f32_bytes_with_shape(&x)?.0;
+        let weight_bytes = tensor_to_f32_bytes_with_shape(&weight)?.0;
         let out_bytes =
             dispatch_qwen_rmsnorm_forward_bytes(&vk_device, &x_bytes, &weight_bytes, rows, hidden, eps)?;
-        let vulkan_out = create_tensor_from_data(&out_bytes, &[rows, hidden], candle_core::DType::F32)?;
+        let vulkan_out = tensor_from_f32_bytes(&out_bytes, &[rows, hidden], candle_core::DType::F32)?;
 
         // CPU baseline mirroring rms_norm_fallback.
         let variance = x.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
@@ -1046,8 +1125,7 @@ mod tests {
     #[test]
     fn vulkan_qwen_rmsnorm_backward_parity() -> Result<()> {
         use kiln_vulkan_kernel::kernels::{
-            create_tensor_from_data, dispatch_qwen_rmsnorm_backward_bytes, extract_tensor_bytes,
-        };
+            dispatch_qwen_rmsnorm_backward_bytes, };
 
         let Ok(vk_device) = VulkanDevice::new() else {
             eprintln!("no Vulkan device, skipping");
@@ -1072,9 +1150,9 @@ mod tests {
         let grad_y = candle_core::Tensor::from_vec(grad_y_data, (rows, hidden), &device)?;
 
         // Vulkan path.
-        let x_bytes = extract_tensor_bytes(&x)?.0;
-        let weight_bytes = extract_tensor_bytes(&weight)?.0;
-        let grad_y_bytes = extract_tensor_bytes(&grad_y)?.0;
+        let x_bytes = tensor_to_f32_bytes_with_shape(&x)?.0;
+        let weight_bytes = tensor_to_f32_bytes_with_shape(&weight)?.0;
+        let grad_y_bytes = tensor_to_f32_bytes_with_shape(&grad_y)?.0;
         let grad_x_bytes = dispatch_qwen_rmsnorm_backward_bytes(
             &vk_device,
             &x_bytes,
@@ -1084,7 +1162,7 @@ mod tests {
             hidden,
             eps,
         )?;
-        let vulkan_grad_x = create_tensor_from_data(&grad_x_bytes, &[rows, hidden], candle_core::DType::F32)?;
+        let vulkan_grad_x = tensor_from_f32_bytes(&grad_x_bytes, &[rows, hidden], candle_core::DType::F32)?;
 
         // Candle autograd reference: build forward as a candle graph
         // over a Var, compute loss = sum(y * grad_y), backward, read
@@ -1129,7 +1207,7 @@ mod tests {
         let device = candle_core::Device::Cpu;
         let weight_t = candle_core::Tensor::from_vec(vec![0.0f32; 4], (2, 2), &device).expect("build weight");
         let weight_buffer =
-            Arc::new(upload_tensor_f32_buffer(vk_device.as_ref(), &weight_t).expect("upload"));
+            Arc::new(upload_tensor_f32_buffer_inline(vk_device.as_ref(), &weight_t).expect("upload"));
         let op = build_op(
             vk_device,
             weight_buffer,
@@ -1279,7 +1357,7 @@ mod tests {
         let weight_t_bf16 = weight_t_f32.to_dtype(candle_core::DType::BF16)?;
         let baseline = x.broadcast_matmul(&weight_t_bf16.to_dtype(candle_core::DType::F32)?)?;
 
-        let weight_buffer = Arc::new(upload_tensor_bf16_packed_buffer(
+        let weight_buffer = Arc::new(upload_tensor_bf16_packed_buffer_inline(
             vk_device.as_ref(),
             &weight_t_bf16,
         )?);
@@ -1307,7 +1385,7 @@ mod tests {
         let mut chunks: Vec<candle_core::Tensor> = Vec::new();
         let chunk_size = 4usize;
         let mut start = 0usize;
-        let dispatch_x_bytes = kernels::extract_tensor_bytes(&dispatch_x)?.0;
+        let dispatch_x_bytes = tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
         while start < out_dim {
             let len = (out_dim - start).min(chunk_size);
             let chunk_bytes =
@@ -1322,7 +1400,7 @@ mod tests {
                     out_dim,
                 )?;
             let chunk =
-                kernels::create_tensor_from_data(&chunk_bytes, &[t, 1, len], candle_core::DType::F32)?;
+                tensor_from_f32_bytes(&chunk_bytes, &[t, 1, len], candle_core::DType::F32)?;
             chunks.push(chunk);
             start += len;
         }
