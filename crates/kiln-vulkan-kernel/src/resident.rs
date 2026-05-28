@@ -2627,7 +2627,7 @@ mod tests {
 
     #[test]
     fn gdn_recurrent_step_resident_matches_nonresident() {
-        use crate::kernels::dispatch_gdn_recurrent_step;
+        use crate::kernels::dispatch_gdn_recurrent_step_with_options;
         let Some(dev) = try_device() else { return };
         let batch = 2;
         let heads = 4;
@@ -2670,8 +2670,9 @@ mod tests {
         )
         .unwrap();
 
-        let (out_t, _new_state_t) =
-            dispatch_gdn_recurrent_step(&dev, &q, &k, &v, &beta, &g, &state).unwrap();
+        let (out_t, new_state_opt) =
+            dispatch_gdn_recurrent_step_with_options(&dev, &q, &k, &v, &beta, &g, &state, false).unwrap();
+        let _new_state_t = new_state_opt.expect("state present when skip_state_readback=false");
         let expected = out_t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
 
         let q_buf = upload_tensor_f32_buffer(&dev, &q).unwrap();

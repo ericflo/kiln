@@ -8157,28 +8157,6 @@ pub fn dispatch_gdn_forward_substitution_bytes(
 
 // ---------------------------------------------------------------------------
 // GDN recurrent step kernel
-// ---------------------------------------------------------------------------
-
-/// Dispatch GDN recurrent step kernel.
-///
-/// Recurrent state update for GDN.
-/// Q: [B,H,dk], K: [B,H,dk], V: [B,H,dv], beta: [B,H], g: [B,H]
-/// State: [B,H,dk,dv] (in/out), Output: [B,H,dv]
-pub fn dispatch_gdn_recurrent_step(
-    vk_device: &VulkanDevice,
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    g: &Tensor,
-    state: &Tensor,
-) -> Result<(Tensor, Tensor)> {
-    let (out, state) =
-        dispatch_gdn_recurrent_step_with_options(vk_device, q, k, v, beta, g, state, false)?;
-    let state = state.context("gdn recurrent state was unexpectedly skipped")?;
-    Ok((out, state))
-}
-
 pub fn copy_gdn_recurrent_state_rows_to_batch(
     vk_device: &VulkanDevice,
     rows: &[Arc<VulkanBuffer>],

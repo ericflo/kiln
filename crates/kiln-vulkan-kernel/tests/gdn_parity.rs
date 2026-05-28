@@ -305,10 +305,13 @@ fn gdn_recurrent_step_matches_cpu_reference() -> Result<()> {
         (batch, heads, dk, dv),
     )?;
 
-    let (got_out, got_state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
-        &vk, &q, &k, &v, &beta, &g, &state,
-    )
-    .context("dispatch_gdn_recurrent_step")?;
+    let (got_out, got_state) = {
+        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+            &vk, &q, &k, &v, &beta, &g, &state, false,
+        )
+        .context("dispatch_gdn_recurrent_step")?;
+        (out, state.context("dispatch_gdn_recurrent_step")?)
+    };
 
     let qd = tensor_data_f32(&q)?;
     let kd = tensor_data_f32(&k)?;
@@ -371,10 +374,13 @@ fn gdn_recurrent_step_matches_f32_cpu_reference() -> Result<()> {
         (batch, heads, dk, dv),
     )?;
 
-    let (got_out, got_state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
-        &vk, &q, &k, &v, &beta, &g, &state,
-    )
-    .context("dispatch_gdn_recurrent_step f32")?;
+    let (got_out, got_state) = {
+        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+            &vk, &q, &k, &v, &beta, &g, &state, false,
+        )
+        .context("dispatch_gdn_recurrent_step f32")?;
+        (out, state.context("dispatch_gdn_recurrent_step f32")?)
+    };
 
     let qd = tensor_data_f32(&q)?;
     let kd = tensor_data_f32(&k)?;
@@ -460,10 +466,13 @@ fn gdn_recurrent_step_parallel_reduce_matches_f32_cpu_reference() -> Result<()> 
         (batch, heads, dk, dv),
     )?;
 
-    let (got_out, got_state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
-        &vk, &q, &k, &v, &beta, &g, &state,
-    )
-    .context("dispatch_gdn_recurrent_step parallel reduce f32")?;
+    let (got_out, got_state) = {
+        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+            &vk, &q, &k, &v, &beta, &g, &state, false,
+        )
+        .context("dispatch_gdn_recurrent_step parallel reduce f32")?;
+        (out, state.context("dispatch_gdn_recurrent_step parallel reduce f32")?)
+    };
 
     let qd = tensor_data_f32(&q)?;
     let kd = tensor_data_f32(&k)?;
@@ -576,16 +585,19 @@ fn gdn_recurrent_step_native_head_last_matches_expanded_reference() -> Result<()
     let beta_expanded = beta.squeeze(1)?.contiguous()?;
     let g_expanded = g.squeeze(1)?.contiguous()?;
 
-    let (expected_out, expected_state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
-        &vk,
+    let (expected_out, expected_state) = {
+        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+            &vk,
         &q_expanded,
         &k_expanded,
         &v_expanded,
         &beta_expanded,
         &g_expanded,
-        &state,
-    )
-    .context("dispatch_gdn_recurrent_step expanded reference")?;
+        &state, false,
+        )
+        .context("dispatch_gdn_recurrent_step expanded reference")?;
+        (out, state.context("dispatch_gdn_recurrent_step expanded reference")?)
+    };
     let (got_out, got_state) =
         kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options(
             &vk, &q, &k, &v, &beta, &g, &state, false,
@@ -871,10 +883,13 @@ fn gdn_recurrent_step_can_skip_state_readback() -> Result<()> {
         (batch, heads, dk, dv),
     )?;
 
-    let (expected_out, _expected_state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
-        &vk, &q, &k, &v, &beta, &g, &state,
-    )
-    .context("dispatch_gdn_recurrent_step reference")?;
+    let (expected_out, _expected_state) = {
+        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+            &vk, &q, &k, &v, &beta, &g, &state, false,
+        )
+        .context("dispatch_gdn_recurrent_step reference")?;
+        (out, state.context("dispatch_gdn_recurrent_step reference")?)
+    };
     let (got_out, got_state) =
         kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
             &vk, &q, &k, &v, &beta, &g, &state, true,
@@ -915,21 +930,27 @@ fn gdn_recurrent_resident_state_matches_two_step_reference() -> Result<()> {
     )?;
 
     let (expected_out1, expected_state1) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
-            &vk, &q1, &k1, &v1, &beta1, &g1, &state,
+        {
+        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+                &vk, &q1, &k1, &v1, &beta1, &g1, &state, false,
         )
         .context("dispatch_gdn_recurrent_step reference step 1")?;
+        (out, state.context("dispatch_gdn_recurrent_step reference step 1")?)
+    };
     let (expected_out2, _expected_state2) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
-            &vk,
+        {
+        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+                &vk,
             &q2,
             &k2,
             &v2,
             &beta2,
             &g2,
-            &expected_state1,
+            &expected_state1, false,
         )
         .context("dispatch_gdn_recurrent_step reference step 2")?;
+        (out, state.context("dispatch_gdn_recurrent_step reference step 2")?)
+    };
 
     let (got_out1, resident_state) =
         kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state(
@@ -1193,21 +1214,27 @@ fn gdn_recurrent_resident_state_parallel_reduce_matches_two_step_reference() -> 
     )?;
 
     let (expected_out1, expected_state1) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
-            &vk, &q1, &k1, &v1, &beta1, &g1, &state,
+        {
+        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+                &vk, &q1, &k1, &v1, &beta1, &g1, &state, false,
         )
         .context("dispatch_gdn_recurrent_step parallel reference step 1")?;
+        (out, state.context("dispatch_gdn_recurrent_step parallel reference step 1")?)
+    };
     let (expected_out2, _expected_state2) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
-            &vk,
+        {
+        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+                &vk,
             &q2,
             &k2,
             &v2,
             &beta2,
             &g2,
-            &expected_state1,
+            &expected_state1, false,
         )
         .context("dispatch_gdn_recurrent_step parallel reference step 2")?;
+        (out, state.context("dispatch_gdn_recurrent_step parallel reference step 2")?)
+    };
 
     let (got_out1, resident_state) =
         kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state(
