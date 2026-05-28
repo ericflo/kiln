@@ -3582,20 +3582,6 @@ fn mock_prompt_logprobs(
     out
 }
 
-// TODO(#1082): blocked by candle-typed prompt-logprobs path. `model_forward`,
-// `LinearAttentionState`, and the surrounding tensor math (log_sum_exp,
-// broadcast_as, to_dtype) all still surface candle Tensor today.
-// `model_forward_kt` exists but is CUDA-only, while `real_prompt_logprobs`
-// must also serve CPU/Metal/Vulkan. Migrate once the kt-typed forward path
-// covers non-CUDA backends.
-fn log_softmax_last_dim(x: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
-    let lse = x
-        .log_sum_exp(candle_core::D::Minus1)?
-        .unsqueeze(candle_core::D::Minus1)?;
-    let broadcast = lse.broadcast_as(x.shape())?;
-    Ok((x - broadcast)?)
-}
-
 async fn real_prompt_logprobs(
     state: &AppState,
     runner: &std::sync::Arc<std::sync::RwLock<ModelRunner>>,
@@ -3609,10 +3595,18 @@ async fn real_prompt_logprobs(
     let handle = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Vec<f32>>> {
         let _gpu_guard = gpu_lock.read().unwrap();
         let runner_guard = runner.read().unwrap();
-        let device = runner_guard.weights.embed_tokens.device().clone();
-        let backend = kiln_model::backend::for_device(&device);
-        let mut linear_state =
-            kiln_model::forward::LinearAttentionState::new(&runner_guard.config, &device)?;
+        // Route through `device_kt()` so this site doesn't name
+        // `candle_core::Device`; bridge back at the call site below
+        // because the public `model_forward` + `LinearAttentionState::new`
+        // entries still take a candle `&Device` (issue #1082).
+        let device_kt = runner_guard.weights.device_kt();
+        let backend = kiln_model::backend::for_device_kt(&device_kt);
+        let device_candle = kiln_kt_bridge::candle_device_from_kt(&device_kt)
+            .map_err(|e| anyhow::anyhow!("real_prompt_logprobs: kt -> candle device: {e}"))?;
+        let mut linear_state = kiln_model::forward::LinearAttentionState::new(
+            &runner_guard.config,
+            &device_candle,
+        )?;
         let logits = kiln_model::forward::model_forward(
             &*backend,
             &prompt_tokens_owned,
@@ -3623,11 +3617,36 @@ async fn real_prompt_logprobs(
             runner_guard.active_lora(),
         )
         .context("prompt-logprobs forward pass")?;
-        let log_probs = log_softmax_last_dim(&logits).context("prompt-logprobs log_softmax")?;
+        // Inline `log_softmax_last_dim` so this file stops naming
+        // `candle_core::Tensor` / `candle_core::Result` in a typed fn
+        // signature — the candle Tensor type is now only ever inferred
+        // from `model_forward`'s return value. Uses `usize` last-dim
+        // index (candle's `Tensor::log_sum_exp`/`unsqueeze` accept
+        // `impl Dim`/`impl Dims` and `usize: Dim`) so the call site
+        // also stops naming `candle_core::D::Minus1` (issue #1082,
+        // candle removal). The kt-typed `model_forward_kt` exists but
+        // is CUDA-only; `real_prompt_logprobs` must also serve
+        // CPU/Metal/Vulkan, so we keep the candle math path until the
+        // kt forward covers non-CUDA backends.
+        let last_dim = logits.dims().len().saturating_sub(1);
+        let lse = logits
+            .log_sum_exp(last_dim)
+            .context("prompt-logprobs log_sum_exp")?
+            .unsqueeze(last_dim)
+            .context("prompt-logprobs unsqueeze")?;
+        let broadcast = lse
+            .broadcast_as(logits.shape())
+            .context("prompt-logprobs broadcast_as")?;
+        let log_probs = (&logits - broadcast).context("prompt-logprobs log_softmax sub")?;
+        // Bridge `kt::DType::F32` -> candle's `DType::F32` so this site
+        // doesn't name `candle_core::DType` directly. Bridge is pure
+        // enum mapping (always-on, no CUDA toolchain dep). (#1082)
+        let candle_f32 = kiln_kt_bridge::kt_dtype_to_candle(kiln_tensor::DType::F32)
+            .map_err(|e| anyhow::anyhow!("real_prompt_logprobs: kt -> candle f32: {e}"))?;
         let log_probs_2d = log_probs
             .squeeze(0)
             .context("prompt-logprobs squeeze batch dim")?
-            .to_dtype(candle_core::DType::F32)
+            .to_dtype(candle_f32)
             .context("prompt-logprobs to_dtype f32")?;
         log_probs_2d
             .to_vec2::<f32>()
