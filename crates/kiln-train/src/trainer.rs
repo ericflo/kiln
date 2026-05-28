@@ -289,12 +289,12 @@ pub fn close_replay_state(state: ReplayState, result: Result<f64, String>) -> Re
 /// inline-qualified pattern in this file. Method form keeps call sites
 /// chainable.
 trait TensorCastExt {
-    fn to_f32_dtype(&self) -> Result<candle_core::Tensor>;
+    fn to_f32_dtype(&self) -> Result<Tensor>;
 }
 
-impl TensorCastExt for candle_core::Tensor {
+impl TensorCastExt for Tensor {
     #[inline]
-    fn to_f32_dtype(&self) -> Result<candle_core::Tensor> {
+    fn to_f32_dtype(&self) -> Result<Tensor> {
         // Note: this body explicitly calls `to_dtype` to avoid infinite
         // recursion via the extension-trait method we are defining here.
         Ok(candle_core::Tensor::to_dtype(self, candle_core::DType::F32)?)
@@ -305,10 +305,10 @@ impl TensorCastExt for candle_core::Tensor {
 /// `Tensor::zeros(shape, DType::F32, device)`
 /// constructor.
 #[inline]
-fn zeros_f32_on<S: Into<candle_core::Shape>>(
+fn zeros_f32_on<S: Into<Shape>>(
     shape: S,
-    device: &candle_core::Device,
-) -> Result<candle_core::Tensor> {
+    device: &CdDevice,
+) -> Result<Tensor> {
     Ok(candle_core::Tensor::zeros(shape, candle_core::DType::F32, device)?)
 }
 
@@ -316,7 +316,7 @@ fn zeros_f32_on<S: Into<candle_core::Shape>>(
 /// (~70 sites pre-consolidation, mostly `let device = Device::Cpu;`
 /// in `#[cfg(test)]` blocks).
 #[inline]
-fn cpu_device() -> candle_core::Device {
+fn cpu_device() -> CdDevice {
     candle_core::Device::Cpu
 }
 
@@ -332,8 +332,8 @@ const LAST_DIM: candle_core::D = candle_core::D::Minus1;
 #[inline]
 fn tensor_new<A: candle_core::NdArray>(
     value: A,
-    device: &candle_core::Device,
-) -> Result<candle_core::Tensor> {
+    device: &CdDevice,
+) -> Result<Tensor> {
     Ok(candle_core::Tensor::new(value, device)?)
 }
 
@@ -341,11 +341,11 @@ fn tensor_new<A: candle_core::NdArray>(
 /// the `Tensor::from_vec(values, shape, device)` constructor
 /// (~25 sites pre-consolidation).
 #[inline]
-fn tensor_from_vec<T: candle_core::WithDType, S: Into<candle_core::Shape>>(
+fn tensor_from_vec<T: candle_core::WithDType, S: Into<Shape>>(
     values: Vec<T>,
     shape: S,
-    device: &candle_core::Device,
-) -> Result<candle_core::Tensor> {
+    device: &CdDevice,
+) -> Result<Tensor> {
     Ok(candle_core::Tensor::from_vec(values, shape, device)?)
 }
 
@@ -353,7 +353,7 @@ fn tensor_from_vec<T: candle_core::WithDType, S: Into<candle_core::Shape>>(
 /// `Var::from_tensor(tensor)` constructor (~34 sites
 /// pre-consolidation).
 #[inline]
-fn var_from_tensor(tensor: &candle_core::Tensor) -> Result<candle_core::Var> {
+fn var_from_tensor(tensor: &Tensor) -> Result<Var> {
     Ok(candle_core::Var::from_tensor(tensor)?)
 }
 
@@ -372,14 +372,14 @@ fn var_from_tensor(tensor: &candle_core::Tensor) -> Result<candle_core::Var> {
 /// `HashMap<TensorId, Tensor>` pattern (~22 sites
 /// pre-consolidation in SFT/GRPO outer loops, gradient accumulators, test
 /// fixtures, and module-by-var routing tables).
-type GradMap = std::collections::HashMap<candle_core::TensorId, candle_core::Tensor>;
+type GradMap = std::collections::HashMap<TensorId, Tensor>;
 
 
 /// Concatenate a slice of `&Tensor` refs along `dim`. Consolidates the
 /// Tensor::cat call site (~7 sites in the segment-level gradient +
 /// activation stitching paths).
 #[inline]
-fn cat_tensors(refs: &[&candle_core::Tensor], dim: usize) -> Result<candle_core::Tensor> {
+fn cat_tensors(refs: &[&Tensor], dim: usize) -> Result<Tensor> {
     Ok(candle_core::Tensor::cat(refs, dim)?)
 }
 
@@ -387,11 +387,11 @@ fn cat_tensors(refs: &[&candle_core::Tensor], dim: usize) -> Result<candle_core:
 /// Consolidates the Tensor::zeros constructor (~8 sites in segment / tile /
 /// boundary-state init paths where the dtype is not statically F32).
 #[inline]
-fn zeros_dtype_on<S: Into<candle_core::Shape>>(
+fn zeros_dtype_on<S: Into<Shape>>(
     shape: S,
-    dtype: candle_core::DType,
-    device: &candle_core::Device,
-) -> Result<candle_core::Tensor> {
+    dtype: DType,
+    device: &CdDevice,
+) -> Result<Tensor> {
     Ok(candle_core::Tensor::zeros(shape, dtype, device)?)
 }
 
@@ -399,11 +399,11 @@ fn zeros_dtype_on<S: Into<candle_core::Shape>>(
 /// Consolidates the Tensor::ones constructor (~5 sites in q_norm/k_norm
 /// init + gradient-test fixtures).
 #[inline]
-fn ones_dtype_on<S: Into<candle_core::Shape>>(
+fn ones_dtype_on<S: Into<Shape>>(
     shape: S,
-    dtype: candle_core::DType,
-    device: &candle_core::Device,
-) -> Result<candle_core::Tensor> {
+    dtype: DType,
+    device: &CdDevice,
+) -> Result<Tensor> {
     Ok(candle_core::Tensor::ones(shape, dtype, device)?)
 }
 
@@ -411,11 +411,11 @@ fn ones_dtype_on<S: Into<candle_core::Shape>>(
 /// Consolidates the Var::zeros constructor (~3 sites in LoRA B-matrix init
 /// + AdamW first/second-moment state alloc).
 #[inline]
-fn var_zeros<S: Into<candle_core::Shape>>(
+fn var_zeros<S: Into<Shape>>(
     shape: S,
-    dtype: candle_core::DType,
-    device: &candle_core::Device,
-) -> Result<candle_core::Var> {
+    dtype: DType,
+    device: &CdDevice,
+) -> Result<Var> {
     Ok(candle_core::Var::zeros(shape, dtype, device)?)
 }
 
@@ -423,7 +423,7 @@ fn var_zeros<S: Into<candle_core::Shape>>(
 /// `matches!(device, Device::Metal(_))` pattern (~6 sites in
 /// the GDN training tile / streaming-prefill / Metal-specific code paths).
 #[inline]
-fn is_metal_device(device: &candle_core::Device) -> bool {
+fn is_metal_device(device: &CdDevice) -> bool {
     matches!(device, candle_core::Device::Metal(_))
 }
 
@@ -431,7 +431,7 @@ fn is_metal_device(device: &candle_core::Device) -> bool {
 /// `matches!(device, Device::Cuda(_))` pattern (~2 sites in
 /// the spool-checkpoint / exact-GDN-backward-tile path).
 #[inline]
-fn is_cuda_device(device: &candle_core::Device) -> bool {
+fn is_cuda_device(device: &CdDevice) -> bool {
     matches!(device, candle_core::Device::Cuda(_))
 }
 // ---------------------------------------------------------------------------
