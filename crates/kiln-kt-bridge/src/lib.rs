@@ -614,11 +614,14 @@ pub fn kt_tensor_to_candle_cuda_copy(
     let src_byte_off = t.layout().start_offset() * bytes_per_elem;
 
     // #1082: derive a candle CudaDevice for the destination candle
-    // Tensor::zeros allocation from the kt source's device index. This
-    // retires the .candle_device() read on the kt side. The function as
-    // a whole still allocates a candle Tensor, so a candle CudaDevice
-    // wrapper is required somewhere — we derive it candle-free via
-    // primary_cuda_device, the same helper kt itself uses.
+    // Tensor::zeros allocation from the kt source's device index.
+    //
+    // This bridge function actually produces a candle Tensor, so a
+    // candle CudaDevice wrapper is required for the Tensor::zeros call
+    // below. Construct it directly via candle_core::Device::new_cuda
+    // (the same call kiln_tensor::primary_cuda_device used to make)
+    // so the kt side stops exporting a candle-typed accessor purely
+    // for this bridge's benefit.
     let device_index = match src_cuda.device() {
         kiln_tensor::Device::Cuda(i) => i,
         other => {
@@ -627,8 +630,19 @@ pub fn kt_tensor_to_candle_cuda_copy(
             )));
         }
     };
-    let candle_device_arc = kiln_tensor::primary_cuda_device(device_index)
-        .map_err(|e| BridgeError::new(format!("kt-bridge to_candle: primary_cuda_device({device_index}): {e}")))?;
+    let candle_device = candle_core::Device::new_cuda(device_index).map_err(|e| {
+        BridgeError::new(format!(
+            "kt-bridge to_candle: candle_core::Device::new_cuda({device_index}): {e}"
+        ))
+    })?;
+    let candle_device_arc = match &candle_device {
+        CDevice::Cuda(d) => std::sync::Arc::new(d.clone()),
+        other => {
+            return Err(BridgeError::new(format!(
+                "kt-bridge to_candle: expected Cuda candle device, got {other:?}"
+            )));
+        }
+    };
     match candle_device_arc.location() {
         DeviceLocation::Cuda { .. } => {}
         other => {
@@ -637,7 +651,6 @@ pub fn kt_tensor_to_candle_cuda_copy(
             )));
         }
     }
-    let candle_device = CDevice::Cuda((*candle_device_arc).clone());
 
     // Allocate the destination candle Tensor (zeros; we overwrite via
     // dtod memcpy). `Tensor::zeros` returns a candle Tensor with its
