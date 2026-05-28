@@ -7159,6 +7159,26 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
         let kernel_disabled = std::env::var("KILN_DISABLE_RMSNORM_KERNEL").is_ok();
         let bwd_disabled = std::env::var("KILN_DISABLE_RMSNORM_BACKWARD").is_ok();
         if !kernel_disabled && !bwd_disabled {
+            // Phase 6a/CP-4 (#1082) — experimental tape-forward path.
+            // When `KILN_USE_TAPE_FORWARD` is set AND a thread-local
+            // `Tape` is active (via
+            // `crate::tape_forward::with_thread_local_tape`), route
+            // RMSNorm through `fused_rmsnorm_via_kt_tape`. The forward
+            // result is bit-exact with the kt-forward-op shim (same
+            // FFI symbol underneath); the difference is that the
+            // backward node is recorded on the tape instead of wrapped
+            // in a candle CustomOp2. With the gate off (the default)
+            // this returns `Ok(None)` and we fall through to the
+            // existing dispatch.
+            //
+            // Production-safe: opt-in via two conditions
+            // (env var + active tape scope). The default forward path
+            // is unchanged. See `crate::tape_forward` module docs.
+            if let Some(out) =
+                crate::tape_forward::try_tape_rms_norm_cuda(x, weight, eps as f32)?
+            {
+                return Ok(out);
+            }
             if !x.track_op() && !weight.track_op() {
                 if let (Some(x_kt), Some(w_kt)) =
                     (try_borrow_kt_cuda(x), try_borrow_kt_cuda(weight))
