@@ -49,6 +49,86 @@ pub(crate) type CdResult<T> = candle_core::Result<T>;
 // keeps the full path inline.
 
 // ---------------------------------------------------------------------------
+// (#1082) `TensorId` migration substrate — second pilot in the
+// `cd_types::* -> kiln_tensor::*` migration that began with the
+// `CpuStorage` / `CudaStorage` / `Layout` pruning above.
+//
+// The kt-native `kiln_tensor_id::TensorId` (wraps `u64`) is the migration
+// target for the legacy `TensorId = candle_core::TensorId` alias (wraps
+// `usize`). Both types are value-equal, API-compatible identity
+// wrappers; the kt side is already in production use in `vk_train.rs`
+// (LoRA / boundary-leaf parameter ids) and `tape_step.rs` (kt-tape
+// gradient store keys), and the candle side is what `Tensor::id()`
+// currently returns inside `trainer.rs` / `cuda_train.rs` / `opd.rs`
+// (~30 call sites collectively).
+//
+// **This PR is substrate-only.** The legacy `TensorId` alias above is
+// intentionally unchanged so the existing ~30 `cd_types::TensorId` call
+// sites in `trainer.rs` / `cuda_train.rs` / `opd.rs` keep compiling.
+// Future PRs migrate individual call sites by inserting
+// `cd_tensor_id_to_kt(tensor.id())` at the candle-graph boundary; once
+// every site is flipped, the candle alias is deleted and `KtTensorId`
+// is renamed back to `TensorId`.
+//
+// Migration sketch for a future call site:
+//
+// ```rust,ignore
+// // Before:
+// use crate::cd_types::{Tensor, TensorId};
+// let mut moments: HashMap<TensorId, AdamWMoments> = HashMap::new();
+// moments.insert(var.as_tensor().id(), AdamWMoments::default());
+//
+// // After:
+// use crate::cd_types::{Tensor, KtTensorId, cd_tensor_id_to_kt};
+// let mut moments: HashMap<KtTensorId, AdamWMoments> = HashMap::new();
+// moments.insert(
+//     cd_tensor_id_to_kt(var.as_tensor().id()),
+//     AdamWMoments::default(),
+// );
+// ```
+// ---------------------------------------------------------------------------
+
+/// kt-native `TensorId` alias — the migration target for the legacy
+/// [`TensorId`] alias above.
+///
+/// Identical to `kiln_tensor::TensorId` (`kiln-tensor` re-exports
+/// `kiln_tensor_id::TensorId` from its leaf module). Carried in
+/// `cd_types` so call sites stay rooted in the facade module while the
+/// migration is in flight; once the legacy [`TensorId`] alias is
+/// deleted, this alias gets renamed back to `TensorId`.
+pub(crate) type KtTensorId = kiln_tensor_id::TensorId;
+
+/// Bridge a candle `Tensor::id()` return value into the kt-native
+/// `kiln_tensor_id::TensorId` space.
+///
+/// The two id types are stable, opaque, value-equal identity wrappers
+/// (candle wraps `usize`, kt wraps `u64`). A `usize -> u64` widening is
+/// safe on every target kiln supports (64-bit hosts; CUDA / Metal /
+/// Vulkan / CPU all assume 64-bit pointers).
+///
+/// Used at the candle-graph boundary in the `TensorId` migration: any
+/// `HashMap<TensorId, _>` keyed on `tensor.id()` can switch to
+/// `HashMap<KtTensorId, _>` by routing the key through this helper.
+///
+/// The conversion preserves equality: two candle `TensorId` values
+/// compare equal iff their bridged `KtTensorId` values compare equal
+/// (each candle id maps to exactly one kt id under `from_raw(... as
+/// u64)`, and a `usize -> u64` widening is injective on 64-bit hosts).
+/// Cross-space collisions with ids minted via `KtTensorId::next()`
+/// elsewhere in the process are not relevant here — the bridged value
+/// is only ever compared against other bridged values inside the same
+/// `HashMap<KtTensorId, _>` instance that a migrated call site owns.
+#[inline]
+pub(crate) fn cd_tensor_id_to_kt(id: TensorId) -> KtTensorId {
+    // `candle_core::TensorId::as_raw()` returns the raw `usize`; the
+    // `as u64` cast is the only conversion needed (all kiln targets
+    // are 64-bit). `KtTensorId::from_raw` is a `const fn` round-trip
+    // helper documented as appropriate for serialization / id
+    // bridging (see `kiln-tensor-id/src/lib.rs` `from_raw` doc).
+    KtTensorId::from_raw(id.as_raw() as u64)
+}
+
+// ---------------------------------------------------------------------------
 // Generic constructor helpers (moved from trainer.rs, formerly lines 333
 // and 344). These keep `candle_core::NdArray` / `candle_core::WithDType`
 // bounds confined to this file.
@@ -116,3 +196,61 @@ macro_rules! cd_bail {
     ($($t:tt)*) => { ::candle_core::bail!($($t)*) };
 }
 pub(crate) use cd_bail;
+
+// ---------------------------------------------------------------------------
+// (#1082) Tests for the `cd_tensor_id_to_kt` migration substrate.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `cd_tensor_id_to_kt` preserves equality: any two candle ids that
+    /// compare equal map to two kt ids that also compare equal, and
+    /// any two distinct candle ids map to two distinct kt ids. This is
+    /// the substrate guarantee callers rely on when swapping
+    /// `HashMap<TensorId, _>` for `HashMap<KtTensorId, _>`.
+    #[test]
+    fn cd_tensor_id_to_kt_preserves_equality() {
+        // candle's `TensorId::new()` is private (`fn new` in
+        // `vendor/candle-core/src/tensor.rs:14`); the only way to mint
+        // one in a test is to create a tensor and pull `tensor.id()`.
+        // Doing that requires a device + dtype, which would drag CPU
+        // device construction into a leaf-module test. Instead, we
+        // exercise the conversion via candle Tensors that we know
+        // share / don't share an id (Tensor::clone preserves the
+        // TensorId, Tensor::new mints a fresh one — see
+        // `vendor/candle-core/src/tensor.rs:175,2080`).
+        use candle_core::{Device, Tensor as CdTensor};
+        let device = Device::Cpu;
+        let a = CdTensor::new(&[1.0_f32, 2.0, 3.0], &device).unwrap();
+        let a_clone = a.clone(); // Arc-clone: id is preserved.
+        let b = CdTensor::new(&[4.0_f32, 5.0, 6.0], &device).unwrap();
+
+        // Aliasing pair: candle equal -> kt equal.
+        assert_eq!(a.id(), a_clone.id());
+        assert_eq!(cd_tensor_id_to_kt(a.id()), cd_tensor_id_to_kt(a_clone.id()));
+
+        // Distinct pair: candle distinct -> kt distinct.
+        assert_ne!(a.id(), b.id());
+        assert_ne!(cd_tensor_id_to_kt(a.id()), cd_tensor_id_to_kt(b.id()));
+    }
+
+    /// Bridged ids are stable under repeated conversion: calling
+    /// `cd_tensor_id_to_kt` twice on the same candle id yields the
+    /// same kt id (i.e. the helper is pure / deterministic, not
+    /// minting fresh ids on each call).
+    #[test]
+    fn cd_tensor_id_to_kt_is_deterministic() {
+        use candle_core::{Device, Tensor as CdTensor};
+        let device = Device::Cpu;
+        let t = CdTensor::new(&[1.0_f32], &device).unwrap();
+        let id = t.id();
+        let kt_a = cd_tensor_id_to_kt(id);
+        let kt_b = cd_tensor_id_to_kt(id);
+        assert_eq!(kt_a, kt_b);
+        // And the raw payload matches the documented `usize -> u64`
+        // widening contract.
+        assert_eq!(kt_a.as_raw(), id.as_raw() as u64);
+    }
+}

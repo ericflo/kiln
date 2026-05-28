@@ -30,10 +30,21 @@ kiln-kt-bridge = { workspace = true }
 kiln-model = { workspace = true }
 kiln-opd-loss-kernel = { workspace = true }
 kiln-tensor = { workspace = true }
-# Leaf crate that defines the kt-native `TensorId` used by
-# `vk_train.rs` for LoRA / boundary-leaf parameter ids. Feature-gated
-# under `vulkan` since only the vulkan path needs it today. (#1082)
-kiln-tensor-id = { workspace = true, optional = true }
+# Leaf crate that defines the kt-native `TensorId` (wraps `u64`).
+# Pulled in unconditionally (no longer `optional = true` /
+# `vulkan`-gated) so the `cd_types::KtTensorId` alias + the
+# `cd_tensor_id_to_kt` conversion shim are available to every build
+# profile. This is the substrate PR for the
+# `cd_types::TensorId (= candle_core::TensorId)` →
+# `kiln_tensor_id::TensorId` migration tracked in
+# `docs/kiln-train-candle-core-deps-still-required-2026-05-28.md`. The
+# crate is dependency-free (see `crates/kiln-tensor-id/Cargo.toml`), so
+# pulling it into the default build adds no transitive cost.
+# `vk_train.rs` continues to import the symbol from
+# `kiln_tensor_id::TensorId` directly under the `vulkan` feature, which
+# now resolves through this unconditional dep instead of a feature
+# enable. (#1082)
+kiln-tensor-id = { workspace = true }
 candle-core = { workspace = true }
 # `candle-nn` is dev-only now: the last production caller
 # (`build_local_teacher_fixture` log_softmax) was inlined in commit
@@ -60,7 +71,7 @@ tracing-subscriber = { workspace = true }
 [features]
 cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda", "kiln-opd-loss-kernel/cuda", "kiln-kt-bridge/cuda"]
 metal = ["kiln-model/metal"]
-vulkan = ["kiln-model/vulkan", "dep:kiln-vulkan-kernel", "dep:kiln-tensor-id"]
+vulkan = ["kiln-model/vulkan", "dep:kiln-vulkan-kernel"]
 
 [dependencies.kiln-vulkan-kernel]
 workspace = true
