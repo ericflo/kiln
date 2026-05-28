@@ -70,6 +70,18 @@ cudarc = { workspace = true, optional = true }
 # (matches kiln-model's pin).
 candle-metal-kernels = { version = "0.10", optional = true }
 
+# Optional — only under `metal`. Direct objc2-metal protocol-object
+# types for the #1082 Phase 7 substrate lift in `metal_types.rs`. The
+# version pin matches candle-metal-kernels 0.10.2's own objc2-metal
+# pin (`0.3.2`) so the `Retained<ProtocolObject<dyn MTL*>>` types unify
+# across the two crates — when the chokepoint flips a re-export from
+# `candle_metal_kernels::metal::*` to a raw `objc2_metal::*` protocol
+# object, callers can pass the native type straight back into
+# `candle_metal_kernels::call_*` without a conversion shim because the
+# underlying Retained handle is bit-identical.
+objc2 = { version = "0.6", optional = true }
+objc2-metal = { version = "0.3", optional = true }
+
 
 # Optional — pulled in under the `cuda` feature only. Provides the
 # Phase 2.x `CublasLtMatmulHandle` that `MatmulOp::cuda_fwd` and
@@ -91,7 +103,13 @@ default = []
 # the SINGLE candle hook in kiln-tensor; Phase 7 replaces it.
 cuda = ["dep:candle-core", "candle-core?/cuda", "dep:cudarc", "dep:kiln-blas"]
 # Reserved for Phase 1.7. Same pattern as `cuda`.
-metal = ["dep:candle-core", "candle-core?/metal", "dep:candle-metal-kernels", "dep:candle-nn", "candle-nn?/metal"]
+#
+# `objc2` + `objc2-metal` add the direct Metal protocol-object substrate
+# in `metal_types.rs` (#1082 Phase 7 lift) — they sit alongside the
+# candle re-exports so the chokepoint can gradually move callers off the
+# candle-typed paths onto raw `Retained<ProtocolObject<dyn MTL*>>`
+# without breaking existing call sites in `kiln-model::backend::metal`.
+metal = ["dep:candle-core", "candle-core?/metal", "dep:candle-metal-kernels", "dep:candle-nn", "candle-nn?/metal", "dep:objc2", "dep:objc2-metal"]
 # Phase 1.8 — Vulkan storage. Does NOT go through candle: lifts
 # kiln-vulkan-kernel's already-candle-free VulkanBuffer + VulkanDevice.
 # This is a permanent dependency (Phase 7 does not change it).

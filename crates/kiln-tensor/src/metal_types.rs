@@ -43,6 +43,23 @@
 //! the existing 92 sites to `kiln_tensor::metal_types::*` is the
 //! enabling step — until those imports are all centralized here, the
 //! substrate swap must touch every helper individually.
+//!
+//! # Native objc2-metal substrate (#1082 Phase 7 lift, partial)
+//!
+//! The `Raw*` aliases below expose the direct `objc2_metal::MTL*`
+//! protocol-object handles that sit underneath every
+//! `candle_metal_kernels::metal::*` wrapper. They are the substrate
+//! the chokepoint will eventually flip its existing aliases to point at
+//! — adding them now (parallel to the candle re-exports) lets future
+//! call-site migrations land on a kt-native objc2-metal path without
+//! re-introducing a candle string anywhere on the import line. The
+//! `Retained<ProtocolObject<dyn MTL*>>` shape is the same one
+//! `candle_metal_kernels::metal::{ComputePipeline, Library, Buffer,
+//! Device}` hold internally (via `.raw` fields backed by the same
+//! `objc2-metal 0.3` crate), so passing a `Raw*` to `candle_metal_kernels::call_*`
+//! works as soon as the candle wrapper exposes `From<Raw*>` conversions
+//! (already in place for `Device` and `Buffer`; pipeline/library wrap
+//! the same Retained internally).
 
 #![cfg(feature = "metal")]
 
@@ -157,3 +174,81 @@ pub fn buffer_o<'a>(
         offset_in_bytes: l.start_offset() * dtype.size_in_bytes(),
     }
 }
+
+// ----------------------------------------------------------------------
+// Native objc2-metal substrate (#1082 Phase 7 — partial lift)
+// ----------------------------------------------------------------------
+//
+// Every `candle_metal_kernels::metal::*` wrapper above ultimately holds
+// a `Retained<ProtocolObject<dyn MTL*>>` from the `objc2-metal 0.3`
+// crate. The `Raw*` aliases below expose those handles directly —
+// they are the substrate the existing chokepoint aliases (`ComputePipeline`,
+// `Library`, `MetalDevice`, etc.) will eventually flip to point at, once
+// the kernel-crate FFI sites in `kiln-model::backend::metal` migrate off
+// the candle wrapper signatures (`device.command_buffer()`,
+// `device.kernels()`, `pipeline.set_compute_pipeline_state(...)`).
+//
+// Adding them here in parallel with the candle re-exports above does not
+// break any existing call site — the candle aliases stay live — and gives
+// future migration commits a kt-native objc2-metal path to land on
+// without re-introducing a `candle_metal_kernels::metal::*` string
+// anywhere on the import line. The eventual chokepoint flip replaces
+// `pub use candle_metal_kernels::metal::ComputePipeline` with
+// `pub type ComputePipeline = RawComputePipelineState`, etc.
+//
+// # Why the objc2-metal version is pinned to candle's
+//
+// `candle-metal-kernels 0.10.2` depends on `objc2-metal = "0.3.2"`.
+// kiln-tensor's `metal` feature pulls the same `objc2-metal = "0.3"`,
+// so cargo unifies on one version and the `Retained<ProtocolObject<dyn
+// MTL*>>` types these aliases name are exactly the ones candle's
+// wrappers hold internally. That bit-identity is what lets a future
+// caller pass a `RawComputePipelineState` straight to
+// `candle_metal_kernels::call_*` without a `From<>` shim — the wire
+// type that crosses the FFI is the same Retained handle either way.
+
+/// MSL compute-pipeline-state handle as a raw `objc2-metal` protocol
+/// object. The eventual substrate for `ComputePipeline`.
+///
+/// This is the same Retained handle that
+/// `candle_metal_kernels::metal::ComputePipeline` holds internally,
+/// just reached without the candle wrapper layer. Future kernel-helper
+/// migrations can pivot away from `pipeline.set_compute_pipeline_state(...)`
+/// (a candle wrapper method) onto direct
+/// `MTLComputeCommandEncoder::setComputePipelineState_` calls against
+/// the `Retained` handle.
+pub type RawComputePipelineState = objc2::rc::Retained<
+    objc2::runtime::ProtocolObject<dyn objc2_metal::MTLComputePipelineState>,
+>;
+
+/// MSL library handle as a raw `objc2-metal` protocol object. The
+/// eventual substrate for `Library`.
+pub type RawLibrary =
+    objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLLibrary>>;
+
+/// MTLBuffer handle as a raw `objc2-metal` protocol object. The
+/// eventual substrate the existing `candle_metal_kernels::metal::Buffer`
+/// wrapper flips to point at.
+///
+/// On Apple Silicon UMA this is the same Retained handle that backs
+/// every `MetalStorage::buffer()` accessor today — flipping the
+/// chokepoint here is a renaming, not a re-allocation.
+pub type RawBuffer =
+    objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>;
+
+/// MTLDevice handle as a raw `objc2-metal` protocol object. The
+/// eventual substrate for `MetalDevice` once the kernel-helper
+/// signatures retire the candle wrapper's `.command_buffer()` /
+/// `.kernels()` accessors in favor of direct
+/// `MTLCommandQueue::commandBuffer` + a kt-side `Kernels` cache.
+pub type RawDevice =
+    objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice>>;
+
+/// MTLCommandQueue handle as a raw `objc2-metal` protocol object.
+/// The eventual companion that lands on `MetalStorage` alongside
+/// `metal_handle: MetalRawDevice` so that the in-storage substrate
+/// ops in `metal_storage.rs` can build `MTLCommandBuffer`s without
+/// derivating a candle `MetalDevice` per call (the
+/// `primary_metal_device` shim retires once this lands).
+pub type RawCommandQueue =
+    objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandQueue>>;

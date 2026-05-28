@@ -1776,7 +1776,6 @@ dependencies = [
 name = "kiln-blas"
 version = "0.2.19"
 dependencies = [
- "candle-core",
  "cc",
  "cudarc 0.19.4",
  "half",
@@ -1847,6 +1846,7 @@ dependencies = [
  "anyhow",
  "candle-core",
  "candle-nn",
+ "kiln-autograd",
  "kiln-kt-bridge",
  "kiln-tensor",
  "tracing",
@@ -1856,9 +1856,6 @@ dependencies = [
 name = "kiln-gdn-kernel"
 version = "0.2.19"
 dependencies = [
- "anyhow",
- "candle-core",
- "candle-nn",
  "cc",
  "half",
  "kiln-kt-bridge",
@@ -1925,12 +1922,14 @@ name = "kiln-model"
 version = "0.2.19"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "candle-core",
- "candle-metal-kernels",
  "candle-nn",
  "console 0.16.3",
+ "cudarc 0.19.4",
  "half",
  "indicatif 0.18.4",
+ "kiln-autograd",
  "kiln-conv1d-kernel",
  "kiln-core",
  "kiln-flash-attn",
@@ -1959,7 +1958,6 @@ dependencies = [
 name = "kiln-mps"
 version = "0.2.19"
 dependencies = [
- "candle-core",
  "cc",
  "half",
  "kiln-blas",
@@ -1978,9 +1976,9 @@ version = "0.2.19"
 dependencies = [
  "anyhow",
  "candle-core",
- "candle-nn",
  "cc",
  "half",
+ "kiln-autograd",
  "kiln-kt-bridge",
  "kiln-tensor",
  "tracing",
@@ -2013,6 +2011,7 @@ dependencies = [
  "candle-core",
  "cc",
  "half",
+ "kiln-autograd",
  "kiln-kt-bridge",
  "kiln-tensor",
 ]
@@ -2085,6 +2084,8 @@ dependencies = [
  "kiln-tensor-id",
  "kiln-vulkan-kernel",
  "memmap2",
+ "objc2",
+ "objc2-metal",
  "safetensors 0.7.0",
  "thiserror 2.0.18",
 ]
@@ -2104,6 +2105,7 @@ dependencies = [
  "console 0.16.3",
  "flate2",
  "indicatif 0.18.4",
+ "kiln-autograd",
  "kiln-core",
  "kiln-eval",
  "kiln-flce-kernel",
