@@ -84,84 +84,19 @@
 
 #![cfg(feature = "cuda")]
 
-use std::cell::RefCell;
-use std::sync::OnceLock;
-
 use anyhow::{Context, Result};
 use candle_core::Tensor;
 use kiln_autograd::Tape;
 
-/// `KILN_USE_TAPE_FORWARD` env var — opt-in only. Cached after first read.
-///
-/// Returns `true` only if the env var is set and not one of the
-/// disable values (`0`, `false`, `no`, empty). Matches the convention
-/// used by `KILN_VULKAN_RMSNORM` and friends in `forward.rs`.
-pub fn tape_forward_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_USE_TAPE_FORWARD")
-            .map(|v| {
-                let v = v.trim().to_lowercase();
-                !(v.is_empty() || v == "0" || v == "false" || v == "no")
-            })
-            .unwrap_or(false)
-    })
-}
-
-thread_local! {
-    /// Thread-local active `Tape`. Wrapped in `RefCell` so the
-    /// `record(...)` paths can take a mutable borrow; we hand out a
-    /// `&mut Tape` only for the duration of a single
-    /// `with_active_tape` callback so concurrent recordings on the
-    /// same tape from a single forward call don't overlap.
-    ///
-    /// `None` outside a `with_thread_local_tape` scope. Tape-aware
-    /// primitives must check this and fall back to the
-    /// non-tape-tracking path when no scope is active. (Otherwise the
-    /// gradient would silently leak; the existing kt-forward-op shim
-    /// is the safe baseline.)
-    static ACTIVE_TAPE: RefCell<Option<Tape>> = const { RefCell::new(None) };
-}
-
-/// Run `f` with a freshly-allocated `Tape` installed as the active
-/// thread-local tape. Returns `(result_of_f, finalised_tape)` so the
-/// caller can subsequently drive `Tape::backward` against it.
-///
-/// Panics if a tape is already installed on this thread — nesting is
-/// not supported until the CP-4 work figures out gradient-accumulation
-/// semantics across nested scopes. The panic is preferable to silent
-/// shadowing because shadowing would route some ops onto a parent
-/// tape and others onto the child.
-pub fn with_thread_local_tape<R>(f: impl FnOnce() -> R) -> (R, Tape) {
-    ACTIVE_TAPE.with(|cell| {
-        assert!(
-            cell.borrow().is_none(),
-            "kiln-model::tape_forward: nested tape scopes are not supported \
-             (a Tape is already active on this thread)"
-        );
-        *cell.borrow_mut() = Some(Tape::new());
-    });
-
-    let result = f();
-
-    let tape = ACTIVE_TAPE.with(|cell| {
-        cell.borrow_mut()
-            .take()
-            .expect("kiln-model::tape_forward: active tape vanished mid-scope")
-    });
-    (result, tape)
-}
-
-/// Run `f` with mutable access to the active thread-local tape. If no
-/// tape is currently installed, returns `None` without invoking `f` —
-/// callers must treat that as "no tape recording requested" and use
-/// the non-tape path instead.
-pub fn with_active_tape<R>(f: impl FnOnce(&mut Tape) -> R) -> Option<R> {
-    ACTIVE_TAPE.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        borrow.as_mut().map(f)
-    })
-}
+// Phase 6a/CP-4 (#1082): the thread-local-tape scope machinery
+// (`with_thread_local_tape`, `with_active_tape`, `tape_forward_enabled`)
+// originally lived here. Wave-13 (#1082) promoted it into
+// `kiln-autograd::tape_scope` so the OPD and FLCE kernel crates (and
+// their `kiln-train` callers) can share the same thread-local handle
+// without taking a `kiln-model` dependency. We re-export from here for
+// back-compat — every existing call site (the parity test, the
+// `forward.rs:7178` adapter call) keeps compiling unchanged.
+pub use kiln_autograd::{tape_forward_enabled, with_active_tape, with_thread_local_tape};
 
 /// Attempt to run RMSNorm through the kt-tape pilot
 /// (`fused_rmsnorm_via_kt_tape`) instead of the kt-forward-op shim.
@@ -225,47 +160,9 @@ pub fn try_tape_rms_norm_cuda(x: &Tensor, weight: &Tensor, eps: f32) -> Result<O
     Ok(Some(out))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tape_forward_enabled_caches_first_read() {
-        // The cache is process-wide; we can't reliably toggle the env
-        // inside a single test process. This test just confirms the
-        // function returns a stable bool across calls.
-        let a = tape_forward_enabled();
-        let b = tape_forward_enabled();
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn with_thread_local_tape_round_trips() {
-        let (result, tape) = with_thread_local_tape(|| 42);
-        assert_eq!(result, 42);
-        // Newly-allocated tape with no records.
-        assert!(tape.is_empty());
-    }
-
-    #[test]
-    fn with_active_tape_returns_none_outside_scope() {
-        let out: Option<i32> = with_active_tape(|_| 7);
-        assert!(out.is_none());
-    }
-
-    #[test]
-    fn with_active_tape_returns_some_inside_scope() {
-        let ((), _tape) = with_thread_local_tape(|| {
-            let out = with_active_tape(|_tape| 7);
-            assert_eq!(out, Some(7));
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "nested tape scopes")]
-    fn nested_scopes_panic() {
-        let _ = with_thread_local_tape(|| {
-            let _ = with_thread_local_tape(|| 0);
-        });
-    }
-}
+// Tape-scope tests live in `kiln-autograd::tape_scope::tests` after
+// wave-13 (#1082) promoted the thread-local-tape machinery there. The
+// kt-tape adapter test (`try_tape_rms_norm_cuda` round-trip) lives in
+// the `kiln-model/tests/tape_forward_parity.rs` integration test
+// because it requires the `kiln_kt_bridge` + `kiln_rmsnorm_kernel`
+// cuda surface.
