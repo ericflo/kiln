@@ -2402,7 +2402,7 @@ mod tests {
 
     #[test]
     fn paged_attn_decode_batch_resident_matches_nonresident() {
-        use crate::kernels::dispatch_paged_attn_decode_batch_f32;
+        use crate::kernels::dispatch_paged_attn_decode_batch_f32_bytes;
         let Some(dev) = try_device() else { return };
         let batch = 2;
         let num_heads = 4;
@@ -2436,9 +2436,27 @@ mod tests {
         .unwrap();
         let seq_lens: Vec<u32> = vec![max_seqlen as u32; batch];
 
-        let baseline = dispatch_paged_attn_decode_batch_f32(&dev, &q, &k, &v, &seq_lens, softmax_scale)
-            .unwrap();
-        let expected = baseline.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let q_bytes = extract_tensor_bytes(&q).unwrap().0;
+        let k_bytes = extract_tensor_bytes(&k).unwrap().0;
+        let v_bytes = extract_tensor_bytes(&v).unwrap().0;
+        let baseline_bytes = dispatch_paged_attn_decode_batch_f32_bytes(
+            &dev,
+            &q_bytes,
+            &k_bytes,
+            &v_bytes,
+            batch,
+            num_heads,
+            head_dim,
+            max_seqlen,
+            num_kv_heads,
+            &seq_lens,
+            softmax_scale,
+        )
+        .unwrap();
+        let expected: Vec<f32> = baseline_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
 
         let q_buf = upload_tensor_f32_buffer(&dev, &q).unwrap();
         let k_buf = upload_tensor_f32_buffer(&dev, &k).unwrap();

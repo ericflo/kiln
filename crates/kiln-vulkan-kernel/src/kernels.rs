@@ -4259,9 +4259,9 @@ fn split_batched_qkv_output(
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_paged_attn_decode_batch_f32_bytes(
     vk_device: &VulkanDevice,
-    q_data: &[u8],
-    k_data: &[u8],
-    v_data: &[u8],
+    q_data_in: &[u8],
+    k_data_in: &[u8],
+    v_data_in: &[u8],
     batch: usize,
     num_heads: usize,
     head_dim: usize,
@@ -4270,42 +4270,32 @@ pub fn dispatch_paged_attn_decode_batch_f32_bytes(
     seq_lens: &[u32],
     softmax_scale: f32,
 ) -> Result<Vec<u8>> {
-    let q = build_cpu_f32_tensor_from_bytes(q_data, &[batch, 1, num_heads, head_dim])?;
-    let k = build_cpu_f32_tensor_from_bytes(k_data, &[batch, max_seqlen, num_kv_heads, head_dim])?;
-    let v = build_cpu_f32_tensor_from_bytes(v_data, &[batch, max_seqlen, num_kv_heads, head_dim])?;
-    let out = dispatch_paged_attn_decode_batch_f32(vk_device, &q, &k, &v, seq_lens, softmax_scale)?;
-    Ok(extract_tensor_bytes(&out)?.0)
-}
-
-pub fn dispatch_paged_attn_decode_batch_f32(
-    vk_device: &VulkanDevice,
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    seq_lens: &[u32],
-    softmax_scale: f32,
-) -> Result<Tensor> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    let (batch, q_len, num_heads, head_dim) = q.dims4()?;
-    let (k_batch, max_seqlen, num_kv_heads, k_head_dim) = k.dims4()?;
-    let v_dims = v.dims4()?;
     anyhow::ensure!(
-        q_len == 1,
-        "paged_attn_decode_batch requires q_len=1, got {q_len}"
+        q_data_in.len() == batch * 1 * num_heads * head_dim * 4,
+        "paged_attn_decode_batch: q bytes {} mismatch expected {}",
+        q_data_in.len(),
+        batch * num_heads * head_dim * 4,
     );
     anyhow::ensure!(
-        k_batch == batch && v_dims == (batch, max_seqlen, num_kv_heads, head_dim),
-        "paged_attn_decode_batch K/V shape mismatch: k={:?} v={:?} q_batch={batch}",
-        k.dims(),
-        v.dims()
+        k_data_in.len() == batch * max_seqlen * num_kv_heads * head_dim * 4,
+        "paged_attn_decode_batch: k bytes {} mismatch expected {}",
+        k_data_in.len(),
+        batch * max_seqlen * num_kv_heads * head_dim * 4,
     );
     anyhow::ensure!(
-        k_head_dim == head_dim && head_dim <= 256,
-        "paged_attn_decode_batch supports head_dim <= 256 with matching K dim"
+        v_data_in.len() == batch * max_seqlen * num_kv_heads * head_dim * 4,
+        "paged_attn_decode_batch: v bytes {} mismatch expected {}",
+        v_data_in.len(),
+        batch * max_seqlen * num_kv_heads * head_dim * 4,
+    );
+    anyhow::ensure!(
+        head_dim <= 256,
+        "paged_attn_decode_batch supports head_dim <= 256"
     );
     anyhow::ensure!(
         num_heads % num_kv_heads == 0,
@@ -4323,9 +4313,9 @@ pub fn dispatch_paged_attn_decode_batch_f32(
         );
     }
 
-    let q_data = extract_tensor_bytes(q)?.0;
-    let k_data = extract_tensor_bytes(k)?.0;
-    let v_data = extract_tensor_bytes(v)?.0;
+    let q_data: Vec<u8> = q_data_in.to_vec();
+    let k_data: Vec<u8> = k_data_in.to_vec();
+    let v_data: Vec<u8> = v_data_in.to_vec();
     let seq_data = bytemuck::cast_slice(seq_lens).to_vec();
 
     let make_input = |data: &[u8], label: &str| -> Result<VulkanBuffer> {
@@ -4434,7 +4424,8 @@ pub fn dispatch_paged_attn_decode_batch_f32(
         )
         .context("failed to read back paged_attn_decode_batch output")?
     };
-    create_tensor_from_data(&out_data, &[batch, 1usize, num_heads, head_dim], DType::F32)
+    let _ = (batch, num_heads, head_dim);
+    Ok(out_data)
 }
 
 /// Paged-pool variant of [`dispatch_paged_attn_decode_batch_f32`].
