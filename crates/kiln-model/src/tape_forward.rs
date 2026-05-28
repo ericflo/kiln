@@ -86,7 +86,7 @@
 
 use anyhow::{Context, Result};
 use candle_core::Tensor;
-use kiln_autograd::{MatmulBackward, SiluBackward, Tape};
+use kiln_autograd::{EmbeddingBackward, MatmulBackward, SiluBackward, Tape};
 
 // Phase 6a/CP-4 (#1082): the thread-local-tape scope machinery
 // (`with_thread_local_tape`, `with_active_tape`, `tape_forward_enabled`)
@@ -304,9 +304,117 @@ pub fn try_tape_silu_cuda(x: &Tensor) -> Result<Option<Tensor>> {
     Ok(Some(out))
 }
 
+/// Attempt to run an embedding lookup through the kt-typed op registry
+/// (`kiln_tensor::ops::embedding`) and record an `EmbeddingBackward`
+/// node on the active thread-local tape.
+///
+/// Returns:
+/// * `Ok(Some(out))` — the tape-forward path ran. The returned
+///   `Tensor` is a copy of the kt-typed output into a candle CUDA
+///   tensor; an `EmbeddingBackward { vocab_size, hidden, token_ids }`
+///   node was recorded on the active thread-local tape.
+/// * `Ok(None)` — the gate was off, no thread-local tape is active,
+///   the kt-bridge borrow failed (layout / dtype / device mismatch),
+///   or the kt op-registry rejected the inputs (e.g. I64 indices, the
+///   substrate cast kernel isn't extended for those yet — see
+///   `kiln_tensor::ops::embedding::EmbeddingOp::cuda_fwd`). The
+///   caller must fall through to the existing dispatch.
+/// * `Err(...)` — an unexpected forward failure or a kt -> candle
+///   copy-back failure. Propagated so callers see the failure cleanly
+///   instead of silently masking it.
+///
+/// Mirrors the [`try_tape_matmul_cuda`] adapter: zero-copy borrow,
+/// kt-native forward via the op registry (the CUDA path dispatches to
+/// `kiln_tensor::cuda_index_select_dim0` underneath, with a
+/// flatten -> gather -> reshape step for multi-dim `token_ids`),
+/// tape record, kt -> candle copy-back. The returned tensor has no
+/// candle `BackpropOp` lineage — backward is on the tape only.
+///
+/// # CP-4 (#1082) context
+///
+/// Embedding completes the matmul / silu / embedding adapter triplet
+/// sketched in `deed13a8`'s "Out of scope" section. The backward is
+/// `kiln_autograd::backwards::EmbeddingBackward` which produces
+/// `d_weights = scatter_add(grad_output, axis=0, indices=token_ids,
+/// target_dim=vocab_size)` and `d_token_ids = None` (indices are
+/// non-differentiable). Saving `token_ids.clone()` on the
+/// `EmbeddingBackward` struct is an `Arc` bump on the kt-tensor
+/// storage handle (no allocation), so the lifetime of the saved
+/// indices extends past the local borrow at zero compute cost.
+///
+/// # Envelope
+///
+/// Same as `kiln_tensor::ops::embedding`'s CUDA fast-path:
+/// * `weights`: rank-2 `[vocab_size, hidden]`, contiguous, F32 / BF16
+///   / F16 (packed dtypes return `Ok(None)`).
+/// * `token_ids`: rank ≥ 1, contiguous, U32 (I64 returns `Ok(None)`
+///   until the substrate cast kernel grows that path).
+///
+/// Inputs outside the envelope return `Ok(None)` so the caller falls
+/// through to the existing candle `index_select` path.
+pub fn try_tape_embedding_cuda(
+    weights: &Tensor,
+    token_ids: &Tensor,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+
+    // kt borrow: zero-copy view of the candle CUDA tensors as kt
+    // tensors. Returns `Err` (which we treat as "skip") on layout /
+    // dtype / device mismatch.
+    let w_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weights) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let ids_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(token_ids) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    // Forward envelope check up front so we can read vocab_size /
+    // hidden from `weights` before any tape recording. If the rank
+    // check fails we fall through to the existing dispatch (which
+    // will surface a clearer error if applicable).
+    if w_kt.shape().len() != 2 || ids_kt.shape().is_empty() {
+        return Ok(None);
+    }
+    let vocab_size = w_kt.shape()[0];
+    let hidden = w_kt.shape()[1];
+
+    // Record only when a tape scope is active. Outside a scope,
+    // `with_active_tape` returns `None` and we fall through — matching
+    // the matmul / silu / rmsnorm adapters' contract.
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_tensor::ops::embedding(&w_kt, &ids_kt)
+            .map_err(|e| anyhow::anyhow!("kt embedding: {e}"))?;
+        tape.record(
+            &y,
+            &[&w_kt, &ids_kt],
+            Box::new(EmbeddingBackward {
+                vocab_size,
+                hidden,
+                token_ids: ids_kt.clone(),
+            }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let out_kt =
+        out_kt.context("tape_forward::try_tape_embedding_cuda: kt-tape forward failed")?;
+
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape_forward::try_tape_embedding_cuda: kt -> candle copy failed")?;
+
+    Ok(Some(out))
+}
+
 // Tape-scope tests live in `kiln-autograd::tape_scope::tests` after
 // wave-13 (#1082) promoted the thread-local-tape machinery there. The
-// kt-tape adapter tests (`try_tape_{rms_norm,matmul,silu}_cuda`
+// kt-tape adapter tests (`try_tape_{rms_norm,matmul,silu,embedding}_cuda`
 // round-trips) live in the `kiln-model/tests/tape_forward_parity.rs`
 // integration test because they require the `kiln_kt_bridge` +
 // `kiln_rmsnorm_kernel` cuda surface.
