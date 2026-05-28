@@ -1163,14 +1163,15 @@ mod tests {
         let block_size = 4;
         let num_blocks = 4;
 
-        let mut cache = PagedKvCache::new(
+        // Migrated to `new_kt` (#1082).
+        let mut cache = PagedKvCache::new_kt(
             1,
             num_blocks,
             block_size,
             num_kv_heads,
             head_dim,
-            DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
         )?;
 
         // Set up a block table with 2 blocks (capacity = 8 tokens)
@@ -1233,7 +1234,15 @@ mod tests {
     #[test]
     fn test_write_token_major_native_then_read_roundtrip() -> Result<()> {
         let device = Device::Cpu;
-        let mut cache = PagedKvCache::new(1, 4, 4, 2, 3, DType::F32, &device)?;
+        let mut cache = PagedKvCache::new_kt(
+            1,
+            4,
+            4,
+            2,
+            3,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
 
         let mut bt = BlockTable::new();
         bt.push(1);
@@ -1273,7 +1282,15 @@ mod tests {
         let batch = 3usize;
         let heads = 2usize;
         let head_dim = 3usize;
-        let mut cache = PagedKvCache::new(1, 8, 4, heads, head_dim, DType::F32, &device)?;
+        let mut cache = PagedKvCache::new_kt(
+            1,
+            8,
+            4,
+            heads,
+            head_dim,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
 
         let mut bt0 = BlockTable::new();
         bt0.push(1);
@@ -1327,7 +1344,15 @@ mod tests {
         let batch = 3usize;
         let heads = 2usize;
         let head_dim = 4usize;
-        let mut cache = PagedKvCache::new(1, 8, 4, heads, head_dim, DType::BF16, &device)?;
+        let mut cache = PagedKvCache::new_kt(
+            1,
+            8,
+            4,
+            heads,
+            head_dim,
+            kiln_tensor::DType::BF16,
+            &kiln_tensor::Device::Cpu,
+        )?;
 
         let mut bt0 = BlockTable::new();
         bt0.push(1);
@@ -1382,7 +1407,15 @@ mod tests {
     #[test]
     fn test_uninit_write_then_read_roundtrip() -> Result<()> {
         let device = Device::Cpu;
-        let mut cache = PagedKvCache::new_uninit(1, 4, 4, 1, 2, DType::F32, &device)?;
+        let mut cache = PagedKvCache::new_uninit_kt(
+            1,
+            4,
+            4,
+            1,
+            2,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
 
         let mut bt = BlockTable::new();
         bt.push(2);
@@ -1432,14 +1465,15 @@ mod tests {
         let block_size = 4;
         let num_blocks = 4;
 
-        let mut cache = PagedKvCache::new(
+        // Migrated to `new_kt` (#1082).
+        let mut cache = PagedKvCache::new_kt(
             1,
             num_blocks,
             block_size,
             num_kv_heads,
             head_dim,
-            DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
         )?;
 
         // Sequence A uses blocks 0 and 2
@@ -1491,14 +1525,15 @@ mod tests {
         let block_size = 4;
         let num_blocks = 2;
 
-        let mut cache = PagedKvCache::new(
+        // Migrated to `new_kt` (#1082).
+        let mut cache = PagedKvCache::new_kt(
             1,
             num_blocks,
             block_size,
             num_kv_heads,
             head_dim,
-            DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
         )?;
 
         let mut bt = BlockTable::new();
@@ -1529,14 +1564,15 @@ mod tests {
         let block_size = 4;
         let num_blocks = 2;
 
-        let mut cache = PagedKvCache::new(
+        // Migrated to `new_kt` (#1082).
+        let mut cache = PagedKvCache::new_kt(
             1,
             num_blocks,
             block_size,
             num_kv_heads,
             head_dim,
-            DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
         )?;
 
         let mut bt = BlockTable::new();
@@ -1568,7 +1604,15 @@ mod tests {
     #[test]
     fn test_single_token_write_preserves_multihead_layout() -> Result<()> {
         let device = Device::Cpu;
-        let mut cache = PagedKvCache::new(1, 2, 4, 2, 3, DType::F32, &device)?;
+        let mut cache = PagedKvCache::new_kt(
+            1,
+            2,
+            4,
+            2,
+            3,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
         let mut bt = BlockTable::new();
         bt.push(1);
 
@@ -1599,17 +1643,23 @@ mod tests {
         let block_size = 4;
         let num_blocks = 4; // 4 blocks * 4 tokens = 16 slots
 
-        // Create both caches
-        let mut contiguous =
-            KvCache::new(1, num_kv_heads, head_dim, max_seq_len, DType::F32, &device)?;
-        let mut paged = PagedKvCache::new(
+        // Create both caches (migrated to `_kt` constructors; #1082).
+        let mut contiguous = KvCache::new_kt(
+            1,
+            num_kv_heads,
+            head_dim,
+            max_seq_len,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
+        let mut paged = PagedKvCache::new_kt(
             1,
             num_blocks,
             block_size,
             num_kv_heads,
             head_dim,
-            DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
         )?;
 
         // Block table with sequential blocks (0, 1, 2, 3) — same layout as contiguous
@@ -1684,7 +1734,15 @@ mod tests {
     #[test]
     fn test_multiple_layers() -> Result<()> {
         let device = Device::Cpu;
-        let mut cache = PagedKvCache::new(3, 2, 4, 1, 2, DType::F32, &device)?;
+        let mut cache = PagedKvCache::new_kt(
+            3,
+            2,
+            4,
+            1,
+            2,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
         assert_eq!(cache.num_layers(), 3);
 
         let mut bt = BlockTable::new();
@@ -1725,14 +1783,15 @@ mod tests {
         let block_size = 4;
         let num_blocks = 4;
 
-        let mut cache = PagedKvCache::new_with_fp8(
+        // Migrated to `new_with_fp8_kt` (#1082).
+        let mut cache = PagedKvCache::new_with_fp8_kt(
             1,
             num_blocks,
             block_size,
             num_kv_heads,
             head_dim,
-            DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
             true,
         )?;
         assert!(cache.is_fp8());
@@ -1795,7 +1854,16 @@ mod tests {
     #[test]
     fn test_fp8_single_token_write_roundtrip() -> Result<()> {
         let device = Device::Cpu;
-        let mut cache = PagedKvCache::new_with_fp8(1, 2, 4, 2, 3, DType::F32, &device, true)?;
+        let mut cache = PagedKvCache::new_with_fp8_kt(
+            1,
+            2,
+            4,
+            2,
+            3,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+            true,
+        )?;
         let mut bt = BlockTable::new();
         bt.push(0);
 
@@ -1832,11 +1900,29 @@ mod tests {
             );
             return Ok(());
         };
+        // kt parallel to `device` for `_kt` constructors (#1082).
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
         let heads = 2usize;
         let head_dim = 8usize;
         let slot = 2usize;
-        let cache = PagedKvCache::new(1, 4, 1, heads, head_dim, DType::BF16, &device)?;
-        let ref_cache = PagedKvCache::new(1, 4, 1, heads, head_dim, DType::BF16, &device)?;
+        let cache = PagedKvCache::new_kt(
+            1,
+            4,
+            1,
+            heads,
+            head_dim,
+            kiln_tensor::DType::BF16,
+            &device_kt,
+        )?;
+        let ref_cache = PagedKvCache::new_kt(
+            1,
+            4,
+            1,
+            heads,
+            head_dim,
+            kiln_tensor::DType::BF16,
+            &device_kt,
+        )?;
         let mut bt = BlockTable::new();
         bt.push(slot as u32);
 
@@ -1867,11 +1953,29 @@ mod tests {
             );
             return Ok(());
         };
+        // kt parallel to `device` for `_kt` constructors (#1082).
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
         let heads = 2usize;
         let head_dim = 8usize;
         let slot = 3usize;
-        let cache = PagedKvCache::new(1, 4, 1, heads, head_dim, DType::BF16, &device)?;
-        let ref_cache = PagedKvCache::new(1, 4, 1, heads, head_dim, DType::BF16, &device)?;
+        let cache = PagedKvCache::new_kt(
+            1,
+            4,
+            1,
+            heads,
+            head_dim,
+            kiln_tensor::DType::BF16,
+            &device_kt,
+        )?;
+        let ref_cache = PagedKvCache::new_kt(
+            1,
+            4,
+            1,
+            heads,
+            head_dim,
+            kiln_tensor::DType::BF16,
+            &device_kt,
+        )?;
 
         let elems = heads * head_dim;
         let k_data: Vec<f32> = (0..elems).map(|i| (i as f32 + 1.0) * 0.015625).collect();
@@ -1906,6 +2010,8 @@ mod tests {
             );
             return Ok(());
         };
+        // kt parallel to `device` for `_kt` constructors (#1082).
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
         let batch = 4usize;
         let heads = 2usize;
         let head_dim = 8usize;
@@ -1914,14 +2020,14 @@ mod tests {
         let slots: Vec<u32> = vec![1u32, 3, 5, 7];
         let total_slots = 8usize;
         let block_size = 1usize;
-        let cache = PagedKvCache::new(
+        let cache = PagedKvCache::new_kt(
             1,
             total_slots,
             block_size,
             heads,
             head_dim,
-            DType::BF16,
-            &device,
+            kiln_tensor::DType::BF16,
+            &device_kt,
         )?;
         // Build distinct K/V per row so any row-swap surfaces.
         let elems = batch * heads * head_dim;
@@ -1944,14 +2050,14 @@ mod tests {
         // Reference: direct per-row slice_set writes of the same K/V into a
         // fresh cache. This keeps the test anchored to candle's tensor write
         // semantics now that both production CUDA writer variants are kt-only.
-        let ref_cache = PagedKvCache::new(
+        let ref_cache = PagedKvCache::new_kt(
             1,
             total_slots,
             block_size,
             heads,
             head_dim,
-            DType::BF16,
-            &device,
+            kiln_tensor::DType::BF16,
+            &device_kt,
         )?;
         let (ref_k_pool, ref_v_pool) = ref_cache.pool_tensors(0).context("ref pool tensors")?;
         let k_flat = k.squeeze(1)?.contiguous()?;
@@ -1968,8 +2074,25 @@ mod tests {
     #[test]
     fn test_fp8_paged_memory_savings() -> Result<()> {
         let device = Device::Cpu;
-        let fp8_cache = PagedKvCache::new_with_fp8(1, 256, 16, 4, 256, DType::F32, &device, true)?;
-        let native_cache = PagedKvCache::new(1, 256, 16, 4, 256, DType::F32, &device)?;
+        let fp8_cache = PagedKvCache::new_with_fp8_kt(
+            1,
+            256,
+            16,
+            4,
+            256,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+            true,
+        )?;
+        let native_cache = PagedKvCache::new_kt(
+            1,
+            256,
+            16,
+            4,
+            256,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
 
         assert_eq!(fp8_cache.layers[0].0.dtype(), DType::U8);
         assert_eq!(native_cache.layers[0].0.dtype(), DType::F32);
