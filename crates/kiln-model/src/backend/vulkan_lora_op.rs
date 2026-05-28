@@ -1,11 +1,11 @@
-//! `CustomOp3` wrapper for Vulkan-dispatched LoRA delta application.
+//! `candle_core::CustomOp3` wrapper for Vulkan-dispatched LoRA delta application.
 //!
-//! Phase 4.1 of the residency plan. Implements `CustomOp3` so the
+//! Phase 4.1 of the residency plan. Implements `candle_core::CustomOp3` so the
 //! on-device LoRA delta dispatch carries an analytic backward that
 //! returns gradients for x, A, and B — making it safe for both
 //! training-time and inference-time forward passes. (An earlier
-//! version returned a candle-leaf Tensor with no autograd back-link
-//! and had to be gated to inference-only; this CustomOp3 wrapper
+//! version returned a candle-leaf candle_core::Tensor with no autograd back-link
+//! and had to be gated to inference-only; this candle_core::CustomOp3 wrapper
 //! removed that gate.)
 //!
 //! Forward:
@@ -33,7 +33,7 @@
 use std::sync::Arc;
 
 use candle_core::op::BackpropOp;
-use candle_core::{CpuStorage, CustomOp3, DType, Layout, Shape, Storage, Tensor};
+
 
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice, kernels};
 
@@ -49,7 +49,7 @@ pub struct VulkanLoraOp {
     pub out_features: usize,
     pub scale: f32,
     /// Output dtype — typically the input dtype (BF16 in production).
-    pub out_dtype: DType,
+    pub out_dtype: candle_core::DType,
 }
 
 impl std::fmt::Debug for VulkanLoraOp {
@@ -64,20 +64,20 @@ impl std::fmt::Debug for VulkanLoraOp {
     }
 }
 
-impl CustomOp3 for VulkanLoraOp {
+impl candle_core::CustomOp3 for VulkanLoraOp {
     fn name(&self) -> &'static str {
         "kiln-vulkan-lora-delta"
     }
 
     fn cpu_fwd(
         &self,
-        s_x: &CpuStorage,
-        l_x: &Layout,
-        _s_a: &CpuStorage,
-        _l_a: &Layout,
-        _s_b: &CpuStorage,
-        _l_b: &Layout,
-    ) -> candle_core::Result<(CpuStorage, Shape)> {
+        s_x: &candle_core::CpuStorage,
+        l_x: &candle_core::Layout,
+        _s_a: &candle_core::CpuStorage,
+        _l_a: &candle_core::Layout,
+        _s_b: &candle_core::CpuStorage,
+        _l_b: &candle_core::Layout,
+    ) -> candle_core::Result<(candle_core::CpuStorage, candle_core::Shape)> {
         // We dispatch from registry buffers (kept in sync with A/B
         // candle storage by `update_resident_activation` after each
         // SGD step). The s_a / s_b storages aren't read here; they're
@@ -101,7 +101,7 @@ impl CustomOp3 for VulkanLoraOp {
             // shape rather than dispatching.
             let mut out_dims: Vec<usize> = x_dims[..x_dims.len() - 1].to_vec();
             out_dims.push(self.out_features);
-            let zero = Tensor::zeros(
+            let zero = candle_core::Tensor::zeros(
                 out_dims.as_slice(),
                 self.out_dtype,
                 &candle_core::Device::Cpu,
@@ -115,33 +115,33 @@ impl CustomOp3 for VulkanLoraOp {
                     candle_core::Error::Msg(format!("VulkanLoraOp empty storage clone: {e:?}"))
                 })?;
             let cpu_storage = match storage {
-                Storage::Cpu(s) => s,
+                candle_core::Storage::Cpu(s) => s,
                 _ => {
                     return Err(candle_core::Error::Msg(
                         "VulkanLoraOp: expected CPU storage from empty zeros".into(),
                     ));
                 }
             };
-            return Ok((cpu_storage, Shape::from(out_dims.as_slice())));
+            return Ok((cpu_storage, candle_core::Shape::from(out_dims.as_slice())));
         }
 
-        // Wrap the x storage in a Tensor briefly so we can extract its
+        // Wrap the x storage in a candle_core::Tensor briefly so we can extract its
         // raw f32 bytes via `extract_tensor_bytes`. After this the two
         // matmul dispatches go through the candle-free `_bytes` entry
         // points, so the intermediate hidden activation never has to
         // round-trip through candle storage. (#1082)
-        let storage = Storage::Cpu(s_x.clone());
-        let x_tensor = Tensor::from_storage(
+        let storage = candle_core::Storage::Cpu(s_x.clone());
+        let x_tensor = candle_core::Tensor::from_storage(
             storage,
-            Shape::from(x_dims.to_vec()),
+            candle_core::Shape::from(x_dims.to_vec()),
             BackpropOp::none(),
             false,
         );
-        let x_f32 = if x_tensor.dtype() == DType::F32 {
+        let x_f32 = if x_tensor.dtype() == candle_core::DType::F32 {
             x_tensor
         } else {
             x_tensor
-                .to_dtype(DType::F32)
+                .to_dtype(candle_core::DType::F32)
                 .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp x→f32: {e:?}")))?
         };
         let x_2d = x_f32
@@ -184,13 +184,13 @@ impl CustomOp3 for VulkanLoraOp {
         .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp hidden@B.T: {e:?}")))?;
         let mut out_dims: Vec<usize> = x_dims[..x_dims.len() - 1].to_vec();
         out_dims.push(self.out_features);
-        // Materialize the final f32 result back into a candle Tensor so
+        // Materialize the final f32 result back into a candle candle_core::Tensor so
         // the rest of the op (scale, dtype cast, storage extraction)
         // can keep using candle ops unchanged.
         let delta_unscaled = kernels::create_tensor_from_data(
             &delta_bytes,
             out_dims.as_slice(),
-            DType::F32,
+            candle_core::DType::F32,
         )
         .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp build delta tensor: {e:?}")))?;
         let delta_scaled = (delta_unscaled * self.scale as f64)
@@ -211,24 +211,24 @@ impl CustomOp3 for VulkanLoraOp {
                 candle_core::Error::Msg(format!("VulkanLoraOp out storage clone: {e:?}"))
             })?;
         let cpu_storage = match storage {
-            Storage::Cpu(s) => s,
+            candle_core::Storage::Cpu(s) => s,
             _ => {
                 return Err(candle_core::Error::Msg(
                     "VulkanLoraOp: expected CPU storage from kernel result".into(),
                 ));
             }
         };
-        Ok((cpu_storage, Shape::from(out_dims.as_slice())))
+        Ok((cpu_storage, candle_core::Shape::from(out_dims.as_slice())))
     }
 
     fn bwd(
         &self,
-        x: &Tensor,
-        a: &Tensor,
-        b: &Tensor,
-        _res: &Tensor,
-        grad_y: &Tensor,
-    ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+        x: &candle_core::Tensor,
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
+        _res: &candle_core::Tensor,
+        grad_y: &candle_core::Tensor,
+    ) -> candle_core::Result<(Option<candle_core::Tensor>, Option<candle_core::Tensor>, Option<candle_core::Tensor>)> {
         // Read A and B values straight from the registry buffers (the
         // canonical source of truth post-Phase 4.x — the candle CPU
         // storage of these Vars is lazily synced and may be stale
@@ -236,10 +236,10 @@ impl CustomOp3 for VulkanLoraOp {
         // x is an upstream activation, not a LoRA Var, so we still
         // read it from candle CPU storage.
         let scale = self.scale as f64;
-        let x_f32 = if x.dtype() == DType::F32 {
+        let x_f32 = if x.dtype() == candle_core::DType::F32 {
             x.clone()
         } else {
-            x.to_dtype(DType::F32)?
+            x.to_dtype(candle_core::DType::F32)?
         };
         let a_f32 = kernels::buffer_to_tensor(
             self.vk_device.as_ref(),
@@ -250,7 +250,7 @@ impl CustomOp3 for VulkanLoraOp {
         .map_err(|e| {
             candle_core::Error::Msg(format!("VulkanLoraOp::bwd buffer_to_tensor A: {e:?}"))
         })?
-        .to_dtype(DType::F32)?;
+        .to_dtype(candle_core::DType::F32)?;
         let b_f32 = kernels::buffer_to_tensor(
             self.vk_device.as_ref(),
             self.b_buffer.as_ref(),
@@ -260,11 +260,11 @@ impl CustomOp3 for VulkanLoraOp {
         .map_err(|e| {
             candle_core::Error::Msg(format!("VulkanLoraOp::bwd buffer_to_tensor B: {e:?}"))
         })?
-        .to_dtype(DType::F32)?;
-        let grad_y_f32 = if grad_y.dtype() == DType::F32 {
+        .to_dtype(candle_core::DType::F32)?;
+        let grad_y_f32 = if grad_y.dtype() == candle_core::DType::F32 {
             grad_y.clone()
         } else {
-            grad_y.to_dtype(DType::F32)?
+            grad_y.to_dtype(candle_core::DType::F32)?
         };
 
         let grad_d = (grad_y_f32 * scale)?;
@@ -325,20 +325,20 @@ mod tests {
         let b_data: Vec<f32> = (0..out_features * rank)
             .map(|i| (i as f32) * 0.011)
             .collect();
-        let x = Tensor::from_vec(x_data, (1, t, in_features), &device)?.to_dtype(DType::BF16)?;
-        let a = Tensor::from_vec(a_data, (rank, in_features), &device)?.to_dtype(DType::BF16)?;
-        let b = Tensor::from_vec(b_data, (out_features, rank), &device)?.to_dtype(DType::BF16)?;
+        let x = candle_core::Tensor::from_vec(x_data, (1, t, in_features), &device)?.to_dtype(candle_core::DType::BF16)?;
+        let a = candle_core::Tensor::from_vec(a_data, (rank, in_features), &device)?.to_dtype(candle_core::DType::BF16)?;
+        let b = candle_core::Tensor::from_vec(b_data, (out_features, rank), &device)?.to_dtype(candle_core::DType::BF16)?;
 
         // CPU baseline (manual F32; candle CPU doesn't support BF16
         // matmul).
-        let x_f = x.to_dtype(DType::F32)?;
-        let a_f = a.to_dtype(DType::F32)?;
-        let b_f = b.to_dtype(DType::F32)?;
+        let x_f = x.to_dtype(candle_core::DType::F32)?;
+        let a_f = a.to_dtype(candle_core::DType::F32)?;
+        let b_f = b.to_dtype(candle_core::DType::F32)?;
         let cpu_delta = (x_f
             .broadcast_matmul(&a_f.t()?)?
             .broadcast_matmul(&b_f.t()?)?
             * scale as f64)?
-            .to_dtype(DType::BF16)?;
+            .to_dtype(candle_core::DType::BF16)?;
 
         // Vulkan path — upload A and B as registry-resident.
         let a_buf = Arc::new(kernels::upload_tensor_bf16_packed_buffer(
@@ -357,14 +357,14 @@ mod tests {
             in_features,
             out_features,
             scale,
-            out_dtype: DType::BF16,
+            out_dtype: candle_core::DType::BF16,
         };
         let vk_delta = x.apply_op3(&a, &b, op)?;
 
         assert_eq!(vk_delta.dims(), cpu_delta.dims());
         assert_eq!(vk_delta.dtype(), cpu_delta.dtype());
-        let cpu_v: Vec<f32> = cpu_delta.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
-        let vk_v: Vec<f32> = vk_delta.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+        let cpu_v: Vec<f32> = cpu_delta.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
+        let vk_v: Vec<f32> = vk_delta.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
         for (i, (c, v)) in cpu_v.iter().zip(vk_v.iter()).enumerate() {
             let abs = (c - v).abs();
             let rel = abs / c.abs().max(1e-3);
@@ -401,12 +401,12 @@ mod tests {
             .map(|i| (i as f32) * 0.017)
             .collect();
 
-        let x = Tensor::from_vec(x_data, (1, t, in_features), &device)?.to_dtype(DType::BF16)?;
+        let x = candle_core::Tensor::from_vec(x_data, (1, t, in_features), &device)?.to_dtype(candle_core::DType::BF16)?;
         let a_var = candle_core::Var::from_tensor(
-            &Tensor::from_vec(a_data, (rank, in_features), &device)?.to_dtype(DType::BF16)?,
+            &candle_core::Tensor::from_vec(a_data, (rank, in_features), &device)?.to_dtype(candle_core::DType::BF16)?,
         )?;
         let b_var = candle_core::Var::from_tensor(
-            &Tensor::from_vec(b_data, (out_features, rank), &device)?.to_dtype(DType::BF16)?,
+            &candle_core::Tensor::from_vec(b_data, (out_features, rank), &device)?.to_dtype(candle_core::DType::BF16)?,
         )?;
 
         // Synthetic upstream gradient — a tensor that we'll multiply
@@ -415,7 +415,7 @@ mod tests {
             .map(|i| ((i as i32 - 10) as f32) * 0.019)
             .collect();
         let grad_y =
-            Tensor::from_vec(grad_y_data, (1, t, out_features), &device)?.to_dtype(DType::F32)?;
+            candle_core::Tensor::from_vec(grad_y_data, (1, t, out_features), &device)?.to_dtype(candle_core::DType::F32)?;
 
         // ---- Vulkan path: construct VulkanLoraOp + apply_op3,
         // backward, extract grads.
@@ -435,10 +435,10 @@ mod tests {
             in_features,
             out_features,
             scale,
-            out_dtype: DType::BF16,
+            out_dtype: candle_core::DType::BF16,
         };
         let vk_out = x.apply_op3(a_var.as_tensor(), b_var.as_tensor(), op)?;
-        let vk_loss = (vk_out.to_dtype(DType::F32)? * &grad_y)?.sum_all()?;
+        let vk_loss = (vk_out.to_dtype(candle_core::DType::F32)? * &grad_y)?.sum_all()?;
         let vk_grads = vk_loss.backward()?;
         let vk_grad_a = vk_grads
             .get(a_var.as_tensor())
@@ -457,9 +457,9 @@ mod tests {
             b: b_var.as_tensor().clone(),
         };
         // Promote x to f32 for CPU matmul (BF16 not supported on CPU).
-        let x_for_cpu = x.to_dtype(DType::F32)?;
-        let a_cpu = a_var.as_tensor().to_dtype(DType::F32)?;
-        let b_cpu = b_var.as_tensor().to_dtype(DType::F32)?;
+        let x_for_cpu = x.to_dtype(candle_core::DType::F32)?;
+        let a_cpu = a_var.as_tensor().to_dtype(candle_core::DType::F32)?;
+        let b_cpu = b_var.as_tensor().to_dtype(candle_core::DType::F32)?;
         let cpu_out_unscaled = x_for_cpu
             .broadcast_matmul(&a_cpu.t()?)?
             .broadcast_matmul(&b_cpu.t()?)?;
@@ -480,8 +480,8 @@ mod tests {
 
         // Compare grad_A.
         assert_eq!(vk_grad_a.dims(), cpu_grad_a.dims());
-        let vk_a_v: Vec<f32> = vk_grad_a.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
-        let cpu_a_v: Vec<f32> = cpu_grad_a.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+        let vk_a_v: Vec<f32> = vk_grad_a.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
+        let cpu_a_v: Vec<f32> = cpu_grad_a.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
         for (i, (v, c)) in vk_a_v.iter().zip(cpu_a_v.iter()).enumerate() {
             let abs = (v - c).abs();
             let rel = abs / c.abs().max(1e-3);
@@ -492,8 +492,8 @@ mod tests {
         }
         // Compare grad_B.
         assert_eq!(vk_grad_b.dims(), cpu_grad_b.dims());
-        let vk_b_v: Vec<f32> = vk_grad_b.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
-        let cpu_b_v: Vec<f32> = cpu_grad_b.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+        let vk_b_v: Vec<f32> = vk_grad_b.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
+        let cpu_b_v: Vec<f32> = cpu_grad_b.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
         for (i, (v, c)) in vk_b_v.iter().zip(cpu_b_v.iter()).enumerate() {
             let abs = (v - c).abs();
             let rel = abs / c.abs().max(1e-3);
