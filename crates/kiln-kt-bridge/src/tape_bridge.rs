@@ -282,6 +282,83 @@ pub fn with_io_mapping_scope<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// Tape-authoritative backward bridge (#1082 CP-4 endgame, Step B).
+///
+/// Drives backprop through the kt `Tape` instead of candle's
+/// `loss.backward()`. Opens the IO-mapping scope + a thread-local `Tape`,
+/// runs `forward` (every `try_tape_*_cuda` adapter records onto the tape and,
+/// via Step-A kt-id reuse, threads its inputs to upstream outputs so the tape
+/// is CONNECTED), then seeds the tape at the returned loss (`dL/dL =
+/// ones_like(loss)`) and walks the connected graph. Returns a map
+/// `{ candle_input_id (raw) → kt grad }` built from the recorded input
+/// mappings, so the trainer can deposit each grad under the matching candle
+/// `TensorId`.
+///
+/// Unlike [`with_tape_scope_emit_to_grad_store`] (candle-authoritative: runs
+/// `loss.backward()` and seeds the tape per-output from candle's `GradStore`,
+/// which fails for detached adapter outputs), this needs NO candle backward
+/// and NO per-output candle grad — only that the loss is itself a tape
+/// adapter output (e.g. the `cross_entropy` adapter recorded it).
+///
+/// Errors if the returned loss was not produced by a tape adapter in this
+/// scope (i.e. the loss op is not yet tape-routed).
+pub fn with_tape_authoritative_scope<F>(
+    forward: F,
+) -> Result<HashMap<usize, kiln_tensor::Tensor>, BridgeError>
+where
+    F: FnOnce() -> Result<CandleTensor, BridgeError>,
+{
+    with_io_mapping_scope(|| {
+        // Run forward under a thread-local tape; the mapping scope stays live
+        // for the seed + extract below (with_io_mapping_scope closes it after
+        // this closure returns).
+        let (loss_res, tape) = with_thread_local_tape(forward);
+        let loss = loss_res?;
+
+        // The loss must be a tape adapter output — its kt tensor is retained
+        // in the mapping scope (via retain_output_for_chaining).
+        let loss_kt = BRIDGE_SCOPE
+            .with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|s| s.candle_output_kt.get(&loss.id().as_raw()).cloned())
+            })
+            .ok_or_else(|| {
+                BridgeError::new(
+                    "tape_bridge: with_tape_authoritative_scope: the returned loss was not \
+                     produced by a tape adapter in this scope. Route the loss op (e.g. the \
+                     cross_entropy adapter) so it records onto the tape.",
+                )
+            })?;
+
+        // Seed dL/dL = 1 and walk the connected tape (no candle backward).
+        let seed = kiln_tensor::ops::ones_like(&loss_kt)
+            .map_err(|e| BridgeError::new(format!("tape_bridge: ones_like(loss): {e}")))?;
+        let mut seeds: HashMap<KtTensorId, kiln_tensor::Tensor> = HashMap::new();
+        seeds.insert(loss_kt.id(), seed);
+        let kt_grads = tape
+            .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+            .map_err(|e| {
+                BridgeError::new(format!("tape_bridge: tape-authoritative backward walk: {e}"))
+            })?;
+
+        // Map each recorded kt input grad to its candle input id.
+        let input_map: Vec<(u64, usize)> = BRIDGE_SCOPE.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|s| s.kt_to_candle_input.iter().map(|(k, v)| (*k, *v)).collect())
+                .unwrap_or_default()
+        });
+        let mut out: HashMap<usize, kiln_tensor::Tensor> = HashMap::new();
+        for (kt_in_raw, candle_in_raw) in input_map {
+            if let Some(g) = kt_grads.get(KtTensorId::from_raw(kt_in_raw)) {
+                out.insert(candle_in_raw, g.clone());
+            }
+        }
+        Ok(out)
+    })
+}
+
 /// True iff a bridge scope is active on the current thread.
 ///
 /// Adapters can use this to know whether registering is worth the

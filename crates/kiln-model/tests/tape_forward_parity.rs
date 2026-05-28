@@ -2154,3 +2154,101 @@ fn tape_bridge_connected_three_op_adapter_chain() {
     );
     assert!(da_c.device().is_cuda(), "d_a stays on CUDA");
 }
+
+
+// ----------------------------------------------------------------------
+// with_tape_authoritative_scope end-to-end grad parity (#1082 CP-4 Step B).
+//
+// Drives the REAL matmul + add adapters through the new tape-authoritative
+// bridge fn: it opens the mapping scope + a tape, runs the forward (Step-A
+// kt-id reuse connects the tape), seeds the returned "loss" (here `s = a@b+c`,
+// dL/dL = ones — i.e. loss = sum(s)) and walks the connected tape with NO
+// candle backward, returning grads keyed by candle input id. We check d_a
+// against a pure-candle baseline `sum(a@b+c).backward()`.
+// ----------------------------------------------------------------------
+
+#[test]
+fn tape_authoritative_scope_matmul_add_grad_parity() {
+    use candle_core::Var;
+
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape-authoritative scope: no CUDA device — skipping");
+            return;
+        }
+    };
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    let (m, k, n) = (16usize, 32usize, 16usize);
+    let (a, b) = build_matmul_inputs(&device, m, k, n);
+    let c = Tensor::from_vec(
+        random_bf16_vec(m * n, 0x7A0_2468_ACE0_1357, 0.25),
+        (m, n),
+        &Device::Cpu,
+    )
+    .expect("c cpu")
+    .to_device(&device)
+    .expect("c -> cuda")
+    .contiguous()
+    .expect("c contig");
+
+    // Path B: tape-authoritative. "loss" = s = a@b + c (seed = ones).
+    let a1 = a.clone();
+    let b1 = b.clone();
+    let c1 = c.clone();
+    let grads = kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(move || {
+        let mm = kiln_model::tape_forward::try_tape_matmul_cuda(&a1, &b1)
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("matmul: {e}")))?
+            .ok_or_else(|| kiln_kt_bridge::BridgeError::new("matmul adapter returned None"))?;
+        let s = kiln_model::tape_forward::try_tape_add_cuda(&mm, &c1)
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("add: {e}")))?
+            .ok_or_else(|| kiln_kt_bridge::BridgeError::new("add adapter returned None"))?;
+        Ok(s)
+    })
+    .expect("tape-authoritative scope ok");
+
+    // `a.clone()` shares a's candle TensorId, so the grad is keyed by a.id().
+    let da_kt = grads
+        .get(&candle_core::Tensor::id(&a).as_raw())
+        .expect("d_a present in tape-authoritative grads");
+    let da = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(da_kt).expect("d_a -> candle");
+    assert_eq!(da.shape().dims(), &[m, k], "d_a shape");
+
+    // Path A: pure candle baseline — loss = sum(a@b + c).
+    let va = Var::from_tensor(&a).expect("var a");
+    let s_c = va
+        .as_tensor()
+        .matmul(&b)
+        .expect("matmul")
+        .add(&c)
+        .expect("add");
+    let loss_c = s_c.sum_all().expect("sum_all");
+    let da_ref = loss_c
+        .backward()
+        .expect("candle backward")
+        .get(va.as_tensor())
+        .expect("candle d_a")
+        .clone();
+
+    let diff = max_abs_diff(&da, &da_ref);
+    let vals = da_ref
+        .to_dtype(DType::F32)
+        .expect("f32")
+        .flatten_all()
+        .expect("flat")
+        .to_vec1::<f32>()
+        .expect("vec");
+    let mag = vals.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
+    let rel = diff / mag.max(1e-6);
+    assert!(
+        rel < 0.08,
+        "with_tape_authoritative_scope d_a diverges from candle baseline \
+         (relative {rel:.4}, max-abs-diff {diff}, max-mag {mag}). The fn seeds \
+         the loss (ones), walks the connected tape (no candle backward), and \
+         returns grads keyed by candle input id."
+    );
+}
