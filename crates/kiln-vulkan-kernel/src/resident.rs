@@ -108,7 +108,7 @@ pub fn dispatch_linear_decode_cached_bf16_weights_resident(
     )
 }
 
-/// Resident-form `dispatch_linear_decode_cached` (f32 weights).
+/// Resident-form `dispatch_linear_decode_cached_bytes` (f32 weights).
 ///
 /// Same shape contract as the bf16 variant; weight buffer is raw f32.
 pub fn dispatch_linear_decode_cached_resident(
@@ -1825,9 +1825,9 @@ pub fn dispatch_paged_kv_write_slot_resident(
 mod tests {
     use super::*;
     use crate::kernels::{
-        create_tensor_from_data, dispatch_linear_decode_cached,
-        dispatch_linear_decode_cached_bytes, dispatch_qwen_rmsnorm_forward_bytes,
-        extract_tensor_bytes, upload_tensor_bf16_packed_buffer, upload_tensor_f32_buffer,
+        create_tensor_from_data, dispatch_linear_decode_cached_bytes,
+        dispatch_qwen_rmsnorm_forward_bytes, extract_tensor_bytes, upload_tensor_bf16_packed_buffer,
+        upload_tensor_f32_buffer,
     };
     use candle_core::{Device, Tensor};
     use half::bf16;
@@ -1986,13 +1986,20 @@ mod tests {
         .unwrap();
         let w_buf = upload_tensor_f32_buffer(&dev, &w_f32).unwrap();
 
-        let baseline =
-            dispatch_linear_decode_cached(&dev, &x, &w_buf, batch, hidden, out_dim).unwrap();
-        let baseline = baseline
-            .flatten_all()
-            .unwrap()
-            .to_vec1::<f32>()
-            .unwrap();
+        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let baseline_bytes =
+            dispatch_linear_decode_cached_bytes(&dev, &x_bytes, &w_buf, batch, hidden, out_dim, false)
+                .unwrap();
+        let baseline = create_tensor_from_data(
+            &baseline_bytes,
+            &[batch, 1, out_dim],
+            candle_core::DType::F32,
+        )
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
 
         let x_buf = upload_x(&dev, &x);
         let out_buf = alloc_out(&dev, (batch * out_dim * 4) as u64);

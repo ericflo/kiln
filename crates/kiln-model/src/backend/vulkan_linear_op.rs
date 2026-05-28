@@ -321,50 +321,36 @@ impl CustomOp1 for VulkanLinearOp {
                 ))
             })?
         } else {
-            match self.weight_layout {
-                WeightLayout::F32 => kernels::dispatch_linear_decode_cached(
-                    self.vk_device.as_ref(),
-                    &dispatch_x,
-                    self.weight_buffer.as_ref(),
-                    row_count,
-                    self.hidden,
-                    self.out_dim,
-                )
+            let x_data = kernels::extract_tensor_bytes(&dispatch_x)
                 .map_err(|e| {
-                    candle_core::Error::Msg(format!("VulkanLinearOp dispatch: {e:?}"))
-                })?,
-                WeightLayout::Bf16Packed => {
-                    let x_data = kernels::extract_tensor_bytes(&dispatch_x)
-                        .map_err(|e| {
-                            candle_core::Error::Msg(format!(
-                                "VulkanLinearOp extract x bytes: {e:?}"
-                            ))
-                        })?
-                        .0;
-                    let out_bytes = kernels::dispatch_linear_decode_cached_bytes(
-                        self.vk_device.as_ref(),
-                        &x_data,
-                        self.weight_buffer.as_ref(),
-                        row_count,
-                        self.hidden,
-                        self.out_dim,
-                        true,
-                    )
-                    .map_err(|e| {
-                        candle_core::Error::Msg(format!("VulkanLinearOp dispatch: {e:?}"))
-                    })?;
-                    kernels::create_tensor_from_data(
-                        &out_bytes,
-                        &[row_count, 1, self.out_dim],
-                        DType::F32,
-                    )
-                    .map_err(|e| {
-                        candle_core::Error::Msg(format!(
-                            "VulkanLinearOp build out tensor: {e:?}"
-                        ))
-                    })?
-                }
-            }
+                    candle_core::Error::Msg(format!(
+                        "VulkanLinearOp extract x bytes: {e:?}"
+                    ))
+                })?
+                .0;
+            let packed_bf16_weights = matches!(self.weight_layout, WeightLayout::Bf16Packed);
+            let out_bytes = kernels::dispatch_linear_decode_cached_bytes(
+                self.vk_device.as_ref(),
+                &x_data,
+                self.weight_buffer.as_ref(),
+                row_count,
+                self.hidden,
+                self.out_dim,
+                packed_bf16_weights,
+            )
+            .map_err(|e| {
+                candle_core::Error::Msg(format!("VulkanLinearOp dispatch: {e:?}"))
+            })?;
+            kernels::create_tensor_from_data(
+                &out_bytes,
+                &[row_count, 1, self.out_dim],
+                DType::F32,
+            )
+            .map_err(|e| {
+                candle_core::Error::Msg(format!(
+                    "VulkanLinearOp build out tensor: {e:?}"
+                ))
+            })?
         };
 
         // Restore the original leading dims with `out_dim` swapped in for
@@ -629,34 +615,22 @@ pub fn dispatch_forward_only(
             .reshape((row_count, 1usize, hidden))
             .context("dispatch_forward_only: reshape x")?
     };
-    let out = match weight_layout {
-        WeightLayout::F32 => kernels::dispatch_linear_decode_cached(
-            vk_device,
-            &dispatch_x,
-            weight_buffer,
-            row_count,
-            hidden,
-            out_dim,
-        )
-        .context("dispatch_forward_only: kernel dispatch")?,
-        WeightLayout::Bf16Packed => {
-            let x_data = kernels::extract_tensor_bytes(&dispatch_x)
-                .context("dispatch_forward_only: extract x bytes")?
-                .0;
-            let out_bytes = kernels::dispatch_linear_decode_cached_bytes(
-                vk_device,
-                &x_data,
-                weight_buffer,
-                row_count,
-                hidden,
-                out_dim,
-                true,
-            )
-            .context("dispatch_forward_only: kernel dispatch")?;
-            kernels::create_tensor_from_data(&out_bytes, &[row_count, 1, out_dim], DType::F32)
-                .context("dispatch_forward_only: build out tensor")?
-        }
-    };
+    let x_data = kernels::extract_tensor_bytes(&dispatch_x)
+        .context("dispatch_forward_only: extract x bytes")?
+        .0;
+    let packed_bf16_weights = matches!(weight_layout, WeightLayout::Bf16Packed);
+    let out_bytes = kernels::dispatch_linear_decode_cached_bytes(
+        vk_device,
+        &x_data,
+        weight_buffer,
+        row_count,
+        hidden,
+        out_dim,
+        packed_bf16_weights,
+    )
+    .context("dispatch_forward_only: kernel dispatch")?;
+    let out = kernels::create_tensor_from_data(&out_bytes, &[row_count, 1, out_dim], DType::F32)
+        .context("dispatch_forward_only: build out tensor")?;
     let mut out_dims = dims;
     *out_dims.last_mut().unwrap() = out_dim;
     out.reshape(out_dims.as_slice())

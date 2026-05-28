@@ -1842,21 +1842,6 @@ fn create_gdn_in_proj_tensors_from_data(
     Ok((qkv, z, a, b))
 }
 
-/// Dispatch a cached single-token linear projection.
-///
-/// `x` is `[batch, 1, hidden]` and `weight_t` is `[hidden, out_dim]`. The
-/// returned tensor is an f32 CPU tensor shaped `[batch, 1, out_dim]`.
-pub fn dispatch_linear_decode_cached(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    weight_t: &VulkanBuffer,
-    batch: usize,
-    hidden: usize,
-    out_dim: usize,
-) -> Result<Tensor> {
-    dispatch_linear_decode_cached_impl(vk_device, x, weight_t, batch, hidden, out_dim, false)
-}
-
 pub fn dispatch_linear_decode_cached_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
@@ -2321,28 +2306,6 @@ fn dispatch_linear_decode_cached_bf16_weights_transposed_bytes_core(
         &out_buf,
     )
     .context("failed to read back linear_decode_transposed output")
-}
-
-fn dispatch_linear_decode_cached_impl(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    weight_t: &VulkanBuffer,
-    batch: usize,
-    hidden: usize,
-    out_dim: usize,
-    packed_bf16_weights: bool,
-) -> Result<Tensor> {
-    let x_data = extract_tensor_bytes(x)?.0;
-    let out_data = dispatch_linear_decode_cached_bytes_core(
-        vk_device,
-        &x_data,
-        weight_t,
-        batch,
-        hidden,
-        out_dim,
-        packed_bf16_weights,
-    )?;
-    create_tensor_from_data(&out_data, &[batch, 1, out_dim], DType::F32)
 }
 
 fn dispatch_linear_decode_cached_bytes_core(

@@ -127,15 +127,22 @@ fn linear_decode_matches_cpu_reference() -> Result<()> {
         (hidden, out_dim),
     )?;
     let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &weight)?;
-    let got = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached(
+    let x_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x)?.0;
+    let got_bytes = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bytes(
         &vk,
-        &x,
+        &x_bytes,
         &weight_buf,
         1,
         hidden,
         out_dim,
+        false,
     )
-    .context("dispatch_linear_decode_cached")?;
+    .context("dispatch_linear_decode_cached_bytes")?;
+    let got = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &got_bytes,
+        &[1, 1, out_dim],
+        candle_core::DType::F32,
+    )?;
     assert_close("linear decode", &got, &x.broadcast_matmul(&weight)?, 1e-5)?;
     Ok(())
 }
@@ -161,15 +168,22 @@ fn linear_decode_batched_matches_cpu_reference() -> Result<()> {
         (hidden, out_dim),
     )?;
     let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &weight)?;
-    let got = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached(
+    let x_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x)?.0;
+    let got_bytes = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bytes(
         &vk,
-        &x,
+        &x_bytes,
         &weight_buf,
         batch,
         hidden,
         out_dim,
+        false,
     )
-    .context("dispatch_linear_decode_cached batched")?;
+    .context("dispatch_linear_decode_cached_bytes batched")?;
+    let got = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &got_bytes,
+        &[batch, 1, out_dim],
+        candle_core::DType::F32,
+    )?;
     assert_close(
         "linear decode batched",
         &got,
