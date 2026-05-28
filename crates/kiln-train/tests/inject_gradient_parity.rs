@@ -92,7 +92,11 @@ impl CustomOp1 for InjectTensorGradientRef {
         storage: &candle_core::CudaStorage,
         _layout: &Layout,
     ) -> candle_core::Result<(candle_core::CudaStorage, Shape)> {
-        let device = storage.device();
+        // Match `kiln-train::trainer::InjectTensorGradient::cuda_fwd`'s
+        // pattern of reading `storage.device` directly (field access) so
+        // we don't need the `candle_core::backend::BackendStorage` trait
+        // in scope just to call its `device()` method. (#1082)
+        let device = &storage.device;
         let out_slice = device.clone_htod(&[0.0f32])?;
         Ok((
             candle_core::CudaStorage::wrap_cuda_slice(out_slice, device.clone()),

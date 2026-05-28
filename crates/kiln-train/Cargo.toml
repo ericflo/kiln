@@ -72,6 +72,13 @@ optional = true
 # synthetic-data convergence check. Production code is candle_nn-free
 # (log_softmax was inlined in 35ad29e6). (#1082)
 candle-nn = { workspace = true }
+# Test-only: `inject_gradient_parity` (cfg(test) + #[cfg(feature = "cuda")])
+# uses `half::bf16::from_f32` to build deterministic bf16 fixtures for
+# the candle ⟷ kt-tape parity assertion (substrate landed in 9b2eda8e;
+# the dev-dep wasn't added at the time and the cuda-gated test was
+# never exercised by a CUDA-less CI). Pinned to "2" to match the rest
+# of the workspace's `half` deps. (#1082)
+half = "2"
 
 [[bin]]
 name = "kiln-replay"
