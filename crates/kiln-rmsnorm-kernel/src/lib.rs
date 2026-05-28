@@ -93,6 +93,13 @@ mod kt_api;
 /// wrappers have been deleted; the kt-shim is the sole autograd path.
 mod kt_forward_op;
 pub use kt_forward_op::fused_rmsnorm_via_kt_forward_op;
+
+/// Phase 6a/CP-4 (#1082): parallel kt-tape entry that drops the candle
+/// CustomOp2 wrapper in favour of recording onto a `kiln_autograd::Tape`
+/// directly. Same FFI symbols, same envelope. See `kt_tape.rs` for the
+/// pilot port rationale.
+mod kt_tape;
+pub use kt_tape::{fused_rmsnorm_via_kt_tape, CudaFusedRmsNormBackward};
 pub use kt_api::{
     adamw_step_bf16_kt, adamw_step_f32_kt, attn_decode_qkv_split_qk_norm_rope_kt,
     causal_depthwise_conv1d_bwd_input_kt, causal_depthwise_conv1d_bwd_state_kt,

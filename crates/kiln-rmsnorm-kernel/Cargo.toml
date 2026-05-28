@@ -14,6 +14,8 @@ half = "2"
 # Phase 7 prep — kiln-tensor-typed surface alongside candle-typed.
 kiln-tensor = { workspace = true, features = ["cuda"] }
 kiln-kt-bridge = { workspace = true, features = ["cuda"] }
+# Phase 6a/CP-4 (#1082): kt-tape RMSNorm shim records onto kiln_autograd::Tape.
+kiln-autograd = { workspace = true }
 
 [build-dependencies]
 cc = "1"
