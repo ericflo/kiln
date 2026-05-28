@@ -457,7 +457,7 @@ impl BackendRuntime for MetalBackend {
         if !matches!(q.dtype(), DType::BF16 | DType::F16 | DType::F32) {
             return Ok(None);
         }
-        let head_dim = q.dim(candle_core::D::Minus1)?;
+        let head_dim = q.dim(kiln_tensor::metal_types::D::Minus1)?;
         if !metal_sdpa_supports_head_dim(head_dim) {
             return Ok(None);
         }
@@ -493,7 +493,7 @@ impl BackendRuntime for MetalBackend {
         if !matches!(q.dtype(), DType::BF16 | DType::F16 | DType::F32) {
             return Ok(None);
         }
-        let head_dim = q.dim(candle_core::D::Minus1)?;
+        let head_dim = q.dim(kiln_tensor::metal_types::D::Minus1)?;
         if !metal_sdpa_supports_head_dim(head_dim) {
             return Ok(None);
         }
@@ -528,7 +528,7 @@ impl BackendRuntime for MetalBackend {
         if !matches!(q.dtype(), DType::BF16 | DType::F16 | DType::F32) {
             return Ok(None);
         }
-        let head_dim = q.dim(candle_core::D::Minus1)?;
+        let head_dim = q.dim(kiln_tensor::metal_types::D::Minus1)?;
         if !metal_sdpa_supports_head_dim(head_dim) {
             return Ok(None);
         }
@@ -13971,7 +13971,7 @@ pub fn try_new_metal() -> Option<Device> {
 mod tests {
     use super::*;
     use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
-    use candle_core::D;
+    use kiln_tensor::metal_types::D;
     use std::time::Instant;
 
     const QWEN35_HIDDEN: usize = 2560;
