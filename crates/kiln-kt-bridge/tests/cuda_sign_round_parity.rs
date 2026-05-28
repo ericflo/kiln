@@ -490,8 +490,8 @@ fn cuda_trunc_toward_zero_parity() {
 
 #[test]
 fn cuda_activation_unary_trunc_direct_call() {
-    // Confirm the FFI bounds-check accepts kind 27 (new KIND_MAX)
-    // and rejects 28 (one past the current max).
+    // Confirm the FFI bounds-check accepts kind 27 (KIND_TRUNC) and
+    // rejects 29 (one past the current KIND_MAX=28, which is KIND_RSQRT).
     let Some(dev) = try_cuda() else {
         eprintln!("CUDA not available; skipping");
         return;
@@ -527,6 +527,50 @@ fn cuda_activation_unary_trunc_direct_call() {
         );
     }
 
-    // KIND_MAX+1 (=28) must still error.
-    assert!(cuda_activation_unary(&x_kt, 28).is_err());
+    // KIND_MAX+1 (=29) must still error (KIND_MAX is 28 = KIND_RSQRT).
+    assert!(cuda_activation_unary(&x_kt, 29).is_err());
+}
+
+#[test]
+fn cuda_activation_unary_rsqrt_direct_call() {
+    // KIND_RSQRT = 28 is the current KIND_MAX. Confirm the single-kernel
+    // `1/sqrt(x)` path matches the IEEE reference on positive inputs.
+    // `rsqrtf` lowers to RSQRT.APPROX on SM_8x+, so compare with a small
+    // relative tolerance rather than bit-exact.
+    let Some(dev) = try_cuda() else {
+        eprintln!("CUDA not available; skipping");
+        return;
+    };
+    // Strictly positive inputs in [0.1, 8.0]: rsqrt(x<0)=NaN and
+    // rsqrt(0)=+inf are out of scope for this correctness check.
+    let data: Vec<f32> = (0..64).map(|i| 0.1 + (i as f32) * 0.125).collect();
+    let n = data.len();
+    let x_cd = CandleTensor::from_vec(data.clone(), (n,), &dev)
+        .unwrap()
+        .to_dtype(CandleDType::F32)
+        .unwrap();
+    let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_cd).unwrap();
+
+    let out_kt = cuda_activation_unary(&x_kt, 28).expect("KIND_RSQRT");
+    let cuda_dev = match dev {
+        CandleDevice::Cuda(ref c) => c,
+        _ => unreachable!(),
+    };
+    cuda_dev.synchronize().unwrap();
+
+    let got: Vec<f32> = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .unwrap()
+        .reshape((n,))
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    for (i, &g) in got.iter().enumerate() {
+        let want = 1.0_f32 / data[i].sqrt();
+        let rel = (g - want).abs() / want.abs().max(1e-6);
+        assert!(
+            rel < 1e-3,
+            "i={i}: v={} got {g}, want {want} (rel {rel})",
+            data[i]
+        );
+    }
 }
