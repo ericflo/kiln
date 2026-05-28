@@ -27,7 +27,6 @@ kiln-tensor = { workspace = true }
 # under `vulkan` since only the vulkan path needs it today. (#1082)
 kiln-tensor-id = { workspace = true, optional = true }
 candle-core = { workspace = true }
-candle-nn = { workspace = true }
 safetensors = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -45,6 +44,15 @@ flate2 = { workspace = true }
 tar = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# (#1082) `candle-nn` is only referenced from the `#[cfg(test)]`-gated
+# `opd_train_synthetic_validation` helper in `src/opd.rs` (AdamW +
+# Optimizer trait for the synthetic-validation training loop). Wave 14
+# (commit 35ad29e6) inlined the last production `candle_nn::ops::log_softmax`
+# call, so the production build no longer needs `candle-nn`. See the
+# epic in #1082 for the full candle-core dependency removal plan.
+candle-nn = { workspace = true }
 
 [features]
 cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda", "kiln-opd-loss-kernel/cuda"]
