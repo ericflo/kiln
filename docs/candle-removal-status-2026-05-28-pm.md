@@ -53,17 +53,28 @@ Bridge primitives are in place:
   candle-typed adapter return values
 
 `KILN_USE_TAPE_FORWARD` adapters land kt-tape recording inside production
-forward (`rms_norm`, `matmul`, `silu`, `embedding` — 8/8 parity tests pass
-on A6000). MLP gate (`swiglu`) extension in flight.
+forward (`rms_norm`, `matmul`, `silu`, `embedding`, **`swiglu`** — all 5
+register IO mappings into the tape bridge via `cf138c9c` + `57f7b678`).
+
+`InjectGradientBackward` kt-tape substrate (`9b2eda8e`) provides the
+candle-free replacement for `kiln-train::trainer::InjectTensorGradient`:
+
+- `kiln_autograd::backwards::inject_gradient::InjectGradientBackward` —
+  BackwardOp that emits a precomputed `injected` tensor regardless of
+  `grad_output`; 6 unit tests cover the contract.
+- `kiln_kt_bridge::tape_bridge::inject_gradient_kt(arg, upstream)` —
+  candle-typed adapter that records the kt op + registers IO mapping +
+  returns a candle scalar zero (matches the existing `apply_op1`
+  callsite contract).
 
 What's left for CP-4 closeout (`docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`):
 
-1. Wrap `trainer::sft_train` step root in `with_tape_scope_emit_to_grad_store`.
-2. Re-point `InjectTensorGradient::apply_op1` sites at the bridge's kt-side
-   `Var<KtTensor>` seed plumbing instead of candle's `apply_op1`.
-3. Delete `InjectTensorGradient` from trainer.rs once no callers remain;
-   that drops kiln-train's lone production `candle_core::` ref.
-4. Repeat for the GRPO loop (`trainer.rs:13586`).
+1. ✅ Wrap `trainer::sft_train` step root in `with_tape_scope_emit_to_grad_store` — **landed in `675e0dea`** (gated on `KILN_USE_TAPE_FORWARD=1`).
+2. ⏳ Re-point the 2 `InjectTensorGradient::apply_op1` sites
+   (`trainer.rs:8068, 8220`) at `tape_bridge::inject_gradient_kt`. Substrate
+   is ready (`9b2eda8e`); this is a mechanical caller flip + parity test.
+3. ⏳ Delete `InjectTensorGradient` from trainer.rs once no callers remain.
+4. ⏳ Repeat for the GRPO loop (`trainer.rs:13586`).
 
 ## Two parallel architectural pieces (independent of CP-4)
 
@@ -75,6 +86,17 @@ parallel aliases land alongside them (`56bdaffd`), but production code
 still imports the candle-typed names. Swap is mechanical-but-large
 (`crates/kiln-model/src/backend/metal.rs` is the dominant consumer; 5→1
 consolidated import line as of `80235181`).
+
+Substrate-add commits since the swap plan shipped:
+
+- `buffer_o_kt` kt-typed sibling of `buffer_o` (`e82c3017`) — Step 1.
+- `metal_sdpa_last_axis` kt-native fused SDPA op (`0e50ee14`) — Step 2,
+  the single substrate gap the plan called out. Mirrors the existing
+  `metal_softmax_last_axis` pattern.
+
+After these two, every remaining step is a pure caller migration in
+`kiln-model::backend::metal` (232 `buffer_o` sites + 15 `sdpa` sites +
+the chokepoint re-export flips).
 
 **kiln-kt-bridge deletion (Tier-5 endgame)** — by-design candle user.
 Owns the `KtForwardOp{1,2,3}` candle `CustomOp1` shim that lets kt
