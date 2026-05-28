@@ -1942,3 +1942,121 @@ fn tape_connected_chain_backward_walk_parity() {
          (rel d_a {ra:.4}, d_b {rb:.4}, d_c {rc:.4})"
     );
 }
+
+
+// ----------------------------------------------------------------------
+// Connected ADAPTER-chain tape-authoritative walk (#1082 — CP-4 endgame).
+//
+// Unlike `tape_connected_chain_backward_walk_parity` (which builds the tape
+// by hand), this drives the REAL matmul + add adapters inside a bridge
+// mapping scope. The Step-A kt-id chaining (`tape_kt_input` reusing the
+// matmul adapter's retained kt output as the add adapter's input) makes the
+// recorded tape CONNECTED — the add node's mm-input id IS the matmul node's
+// output id. We then walk the tape TAPE-AUTHORITATIVELY (seed at the output,
+// no candle backward — sidestepping the detached-output seed gap) and check
+// d_a/d_b/d_c against candle's chain rule. This is the endgame mechanism
+// (Step A connectivity + Step B loss-seed walk) demonstrated end-to-end on
+// real adapters.
+// ----------------------------------------------------------------------
+
+#[test]
+fn tape_bridge_connected_adapter_chain_walk_parity() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("connected adapter chain: no CUDA device — skipping");
+            return;
+        }
+    };
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    let (m, k, n) = (16usize, 32usize, 16usize);
+    let (a, b) = build_matmul_inputs(&device, m, k, n);
+    let c = Tensor::from_vec(
+        random_bf16_vec(m * n, 0x0CAD_2468_ACE0_1357, 0.25),
+        (m, n),
+        &Device::Cpu,
+    )
+    .expect("c cpu")
+    .to_device(&device)
+    .expect("c -> cuda")
+    .contiguous()
+    .expect("c contig");
+
+    // matmul adapter -> add adapter, inside tape + mapping scopes.
+    let a1 = a.clone();
+    let b1 = b.clone();
+    let c1 = c.clone();
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_kt_bridge::tape_bridge::with_io_mapping_scope(|| -> anyhow::Result<Tensor> {
+            let mm = kiln_model::tape_forward::try_tape_matmul_cuda(&a1, &b1)?
+                .ok_or_else(|| anyhow::anyhow!("matmul adapter returned None"))?;
+            // add's first input is the matmul output `mm`: tape_kt_input
+            // reuses the retained matmul kt output, connecting the tape.
+            let s = kiln_model::tape_forward::try_tape_add_cuda(&mm, &c1)?
+                .ok_or_else(|| anyhow::anyhow!("add adapter returned None"))?;
+            Ok(s)
+        })
+    });
+    let _s = res.expect("connected forward ok");
+
+    assert_eq!(tape.len(), 2, "chain records two nodes (matmul, add)");
+    let mm_out_id = tape.nodes()[0].output_id;
+    let add_in0_id = tape.nodes()[1].input_ids[0];
+    assert_eq!(
+        add_in0_id, mm_out_id,
+        "CONNECTIVITY: add adapter's mm-input kt id must equal the matmul \
+         adapter's output kt id (Step-A reuse threaded the same kt tensor)"
+    );
+
+    // Tape-authoritative walk: seed at the add output, walk the connected
+    // chain. NO candle backward, NO per-output candle-grad seeding.
+    let s_id = tape.nodes()[1].output_id;
+    let a_id = tape.nodes()[0].input_ids[0];
+    let b_id = tape.nodes()[0].input_ids[1];
+    let c_id = tape.nodes()[1].input_ids[1];
+
+    let seed = build_seed_grad(&device, &[m, n], 0x0CAD_1111_2222_3333, 0.25);
+    let seed_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&seed).expect("seed kt copy");
+    let mut seeds = std::collections::HashMap::new();
+    seeds.insert(s_id, seed_kt);
+
+    let grads = tape
+        .backward_with_seeds(seeds, |x, y| kiln_tensor::ops::add(x, y))
+        .expect("connected adapter chain backward walk");
+
+    let to_candle = |id| {
+        let g = grads.get(id).expect("grad present");
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(g).expect("grad -> candle")
+    };
+    let da = to_candle(a_id);
+    let db = to_candle(b_id);
+    let dc = to_candle(c_id);
+
+    // Candle chain rule: d_a = seed @ b^T, d_b = a^T @ seed, d_c = seed.
+    let da_ref = seed.matmul(&b.t().expect("b^T")).expect("g @ b^T");
+    let db_ref = a.t().expect("a^T").matmul(&seed).expect("a^T @ g");
+    let dc_ref = seed.clone();
+
+    let rel = |got: &Tensor, want: &Tensor| -> f32 {
+        let d = max_abs_diff(got, want);
+        let vals = want
+            .to_dtype(DType::F32)
+            .expect("f32")
+            .flatten_all()
+            .expect("flat")
+            .to_vec1::<f32>()
+            .expect("vec");
+        let mag = vals.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
+        d / mag.max(1e-6)
+    };
+    let (ra, rb, rc) = (rel(&da, &da_ref), rel(&db, &db_ref), rel(&dc, &dc_ref));
+    assert!(
+        ra < 0.08 && rb < 0.08 && rc < 0.02,
+        "connected adapter-chain tape-authoritative walk diverges from candle \
+         chain rule (rel d_a {ra:.4}, d_b {rb:.4}, d_c {rc:.4})"
+    );
+}

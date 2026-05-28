@@ -120,6 +120,19 @@ use kiln_autograd::{
 // `forward.rs:7178` adapter call) keeps compiling unchanged.
 pub use kiln_autograd::{tape_forward_enabled, with_active_tape, with_thread_local_tape};
 
+/// Borrow a candle input as a kt tensor for the tape path, REUSING an
+/// upstream adapter's kt output when this candle tensor was produced by one
+/// in the active bridge scope (so the recorded kt `Tape` stays connected —
+/// the consumer's input id becomes the producer's output id). Falls back to
+/// a fresh zero-copy borrow otherwise (and outside any bridge scope, which
+/// is the common case + every per-op parity test). (#1082 CP-4 endgame.)
+fn tape_kt_input(x: &Tensor) -> Option<kiln_tensor::Tensor> {
+    if let Some(t) = kiln_kt_bridge::tape_bridge::kt_input_for_candle(x.id()) {
+        return Some(t);
+    }
+    kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x).ok()
+}
+
 /// Attempt to run RMSNorm through the kt-tape pilot
 /// (`fused_rmsnorm_via_kt_tape`) instead of the kt-forward-op shim.
 ///
@@ -187,6 +200,7 @@ pub fn try_tape_rms_norm_cuda(x: &Tensor, weight: &Tensor, eps: f32) -> Result<O
     kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
     kiln_kt_bridge::tape_bridge::register_input_mapping(w_kt.id(), weight.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
     Ok(Some(out))
 }
@@ -236,13 +250,13 @@ pub fn try_tape_matmul_cuda(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
     // kt borrow: zero-copy view of the candle CUDA tensors as kt
     // tensors. Returns `Err` (which we treat as "skip") on layout /
     // dtype / device mismatch.
-    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    let a_kt = match tape_kt_input(a) {
+        Some(t) => t,
+        None => return Ok(None),
     };
-    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    let b_kt = match tape_kt_input(b) {
+        Some(t) => t,
+        None => return Ok(None),
     };
 
     // Record only when a tape scope is active. Outside a scope,
@@ -278,6 +292,7 @@ pub fn try_tape_matmul_cuda(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
     kiln_kt_bridge::tape_bridge::register_input_mapping(a_kt.id(), a.id());
     kiln_kt_bridge::tape_bridge::register_input_mapping(b_kt.id(), b.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
     Ok(Some(out))
 }
@@ -348,6 +363,7 @@ pub fn try_tape_silu_cuda(x: &Tensor) -> Result<Option<Tensor>> {
     // bridge scope is active.
     kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
     Ok(Some(out))
 }
@@ -470,6 +486,7 @@ pub fn try_tape_embedding_cuda(
     // no gradient, and `EmbeddingBackward` returns `None` for that input.
     kiln_kt_bridge::tape_bridge::register_input_mapping(w_kt.id(), weights.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
     Ok(Some(out))
 }
@@ -576,6 +593,7 @@ pub fn try_tape_swiglu_cuda(gate: &Tensor, up: &Tensor) -> Result<Option<Tensor>
     kiln_kt_bridge::tape_bridge::register_input_mapping(gate_kt.id(), gate.id());
     kiln_kt_bridge::tape_bridge::register_input_mapping(up_kt.id(), up.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
     Ok(Some(out))
 }
@@ -672,6 +690,7 @@ pub fn try_tape_rope_cuda(
     // they carry no input mapping.
     kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
     Ok(Some(out))
 }
@@ -709,13 +728,13 @@ pub fn try_tape_add_cuda(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
         return Ok(None);
     }
 
-    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    let a_kt = match tape_kt_input(a) {
+        Some(t) => t,
+        None => return Ok(None),
     };
-    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    let b_kt = match tape_kt_input(b) {
+        Some(t) => t,
+        None => return Ok(None),
     };
 
     let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
@@ -737,6 +756,7 @@ pub fn try_tape_add_cuda(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
     kiln_kt_bridge::tape_bridge::register_input_mapping(a_kt.id(), a.id());
     kiln_kt_bridge::tape_bridge::register_input_mapping(b_kt.id(), b.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
     Ok(Some(out))
 }
@@ -829,6 +849,7 @@ pub fn try_tape_cross_entropy_cuda(
     // `targets` are non-differentiable class indices.
     kiln_kt_bridge::tape_bridge::register_input_mapping(logits_kt.id(), logits.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
     Ok(Some(out))
 }
