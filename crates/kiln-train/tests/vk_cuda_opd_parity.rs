@@ -16,12 +16,13 @@
 #![cfg(all(feature = "cuda", feature = "vulkan"))]
 
 use anyhow::Result;
-// TODO(#1082): drop this candle import once `opd_top_k_reverse_kl_phase_b_per_position`
-// (CUDA OPD kernel API) and `VkTensor::from_candle` (Vulkan upload boundary) accept
-// kt::Tensor instead of candle Tensor. Both APIs still take candle types as of this
-// commit. `DType` / `Device::Cpu` / `Device::new_cuda` are spelled fully-qualified at
-// call sites to keep this file at a single candle `use`.
-use candle_core::Tensor;
+// TODO(#1082): inline-qualify the remaining `candle_core::*` sites once
+// `opd_top_k_reverse_kl_phase_b_per_position` (CUDA OPD kernel API) and
+// `VkTensor::from_candle` (Vulkan upload boundary) accept kt::Tensor instead of candle
+// Tensor. Both APIs still take candle types as of this commit. Every candle reference
+// in this file is spelled `candle_core::*` inline so the file has no top-level
+// `use candle_*` import (mirrors the kiln-vulkan-kernel/kernels.rs pattern from
+// PR f476cb97).
 use kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_per_position;
 use kiln_vulkan_kernel::vk_ops::opd::vk_opd_top_k_reverse_kl_per_position;
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
@@ -104,8 +105,10 @@ fn run_cuda_per_position(
 ) -> Result<Vec<f32>> {
     // Upload as candle CUDA tensors. `head_t` is `[H, V]`; we have the
     // weight as `[V, H]`, transpose on the way in.
-    let hidden_t = Tensor::from_vec(hidden.to_vec(), (1, seq_len, hidden_size), cuda)?;
-    let head_vh_t = Tensor::from_vec(head_vh.to_vec(), (vocab_size, hidden_size), cuda)?;
+    let hidden_t =
+        candle_core::Tensor::from_vec(hidden.to_vec(), (1, seq_len, hidden_size), cuda)?;
+    let head_vh_t =
+        candle_core::Tensor::from_vec(head_vh.to_vec(), (vocab_size, hidden_size), cuda)?;
     let head_t = head_vh_t.transpose(0, 1)?.contiguous()?; // [H, V]
     let per_pos = opd_top_k_reverse_kl_phase_b_per_position(
         &hidden_t,
