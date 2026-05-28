@@ -2103,6 +2103,7 @@ dependencies = [
  "chrono",
  "console 0.16.3",
  "flate2",
+ "half",
  "indicatif 0.18.4",
  "kiln-autograd",
  "kiln-core",

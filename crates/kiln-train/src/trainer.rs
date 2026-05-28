@@ -4812,139 +4812,192 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 );
             }
         } else {
-            let lora_weights = params.as_lora_weights();
-            let mut linear_state = LinearAttentionState::new(model_config, device)?;
-            let policy_forward_started = Instant::now();
-            tracing::info!(
-                comp_idx,
-                seq_len = comp.input_ids.len(),
-                action_tokens = num_active,
-                env_tokens = comp_env_count,
-                checkpoint_segments,
-                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
-                streaming_tile_tokens,
-                "GRPO policy forward start"
-            );
-            let policy_logits = model_forward(
-                backend,
-                &comp.input_ids,
-                weights,
-                model_config,
-                None,
-                Some(&mut linear_state),
-                Some(&lora_weights),
-            )
-            .context("GRPO policy forward pass")?;
-            if let Some(t) = timings.as_deref_mut() {
-                t.add_policy_forward(policy_forward_started.elapsed());
-            }
-            tracing::info!(
-                comp_idx,
-                seq_len = comp.input_ids.len(),
-                action_tokens = num_active,
-                env_tokens = comp_env_count,
-                checkpoint_segments,
-                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
-                streaming_tile_tokens,
-                elapsed_ms = policy_forward_started.elapsed().as_millis() as u64,
-                "GRPO policy forward end"
-            );
-
-            let policy_log_probs =
-                token_log_probs(&policy_logits, &comp.input_ids, &comp.action_mask, device)?;
-
-            let grpo_loss_val = grpo_loss(&policy_log_probs, &ref_log_probs, loss_params, device)?;
-
-            // ECHO env-CE term. When config.loss.echo is None, when
-            // env_mask is all-false (legacy single-turn rollouts), or
-            // when total_obs_len is 0, this contributes exactly nothing.
-            //
-            // Verifier-free adaptation (paper §5.5) takes the
-            // `no_policy_loss = true` branch: the GRPO term is masked
-            // (multiplied by 0) and only the ECHO env-CE term drives
-            // gradients. This is what lets a strong-but-stable agent
-            // keep improving from environment interaction alone on
-            // tasks where no programmatic verifier is available.
-            //
-            // Implementation: reuse token_log_probs with env_mask as
-            // the position selector. Returns log p(x_t) at env
-            // positions; CE = -sum(log p) / |O| (paper §3.1, where |O|
-            // is total_obs_len). We rescale by env_count/|O| to convert
-            // from sum-over-active to paper-normalized mean.
-            let policy_loss_scale = if config.loss.no_policy_loss { 0.0 } else { 1.0 };
-            let scaled_grpo = if policy_loss_scale != 1.0 {
-                grpo_loss_val.affine(policy_loss_scale, 0.0)?
-            } else {
-                grpo_loss_val
-            };
-            let loss = if let Some(echo_cfg) = &config.loss.echo {
-                if config.loss.echo_enabled() && comp_env_count > 0 && comp.total_obs_len > 0 {
-                    let env_log_probs =
-                        token_log_probs(&policy_logits, &comp.input_ids, &comp.env_mask, device)?;
-                    // sum(log p) over env positions
-                    let env_log_prob_sum = env_log_probs.sum_all()?;
-                    // mean_ce = -sum / |O| (paper §3.1 normalization)
-                    let inv_obs_len = -(1.0 / comp.total_obs_len as f64);
-                    let echo_mean_ce = env_log_prob_sum.affine(inv_obs_len, 0.0)?;
-                    // Total loss = (policy_scale * L_grpo) + λ · L_envCE
-                    let echo_scaled = echo_mean_ce.affine(echo_cfg.lambda, 0.0)?;
-                    // Emit a per-completion debug so operators see ECHO
-                    // firing on the uncheckpointed path with concrete
-                    // env_count / total_obs_len / λ values — the
-                    // checkpointed path already emits this from
-                    // train_tokenized_grpo_group; this matches it for
-                    // the standard path.
-                    let mean_ce_val = echo_mean_ce.to_scalar::<f32>().ok().map(f64::from);
-                    comp_echo_env_ce = mean_ce_val;
-                    tracing::debug!(
+            // CP-4 (#1082): non-checkpointed GRPO+ECHO step. When
+            // `KILN_USE_TAPE_FORWARD` is set (and the build has the
+            // `cuda` feature), delegate the forward + loss-construction
+            // + `loss.backward()` to
+            // `grpo_non_checkpointed_forward_backward_via_tape_bridge`,
+            // which runs the same flow inside
+            // `kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store`.
+            // Default behaviour (env unset / build without cuda) leaves
+            // the inline forward + `loss.backward()` flow below
+            // unchanged.
+            #[cfg(feature = "cuda")]
+            let bridge_overrides: Option<(GradStore, f64, Option<f64>)> =
+                if kiln_autograd::tape_forward_enabled() {
+                    let (lv, g, ce) = grpo_non_checkpointed_forward_backward_via_tape_bridge(
+                        backend,
+                        &comp.input_ids,
+                        weights,
+                        model_config,
+                        params,
+                        &comp.action_mask,
+                        &comp.env_mask,
+                        comp.total_obs_len,
+                        comp_env_count,
+                        num_active,
+                        &ref_log_probs,
+                        loss_params,
+                        &config.loss,
+                        device,
                         comp_idx,
-                        env_tokens = comp_env_count,
-                        total_obs_len = comp.total_obs_len,
-                        echo_lambda = echo_cfg.lambda,
-                        echo_env_ce = mean_ce_val,
-                        "GRPO uncheckpointed path: ECHO env CE active"
-                    );
-                    scaled_grpo.add(&echo_scaled)?
+                        streaming_tile_tokens,
+                        checkpoint_segments,
+                        timings.as_deref_mut(),
+                    )?;
+                    Some((g, lv, ce))
+                } else {
+                    None
+                };
+            #[cfg(not(feature = "cuda"))]
+            let bridge_overrides: Option<(GradStore, f64, Option<f64>)> = None;
+
+            let grads = if let Some((g, lv, ce)) = bridge_overrides {
+                loss_val = lv;
+                comp_echo_env_ce = ce;
+                g
+            } else {
+                let lora_weights = params.as_lora_weights();
+                let mut linear_state = LinearAttentionState::new(model_config, device)?;
+                let policy_forward_started = Instant::now();
+                tracing::info!(
+                    comp_idx,
+                    seq_len = comp.input_ids.len(),
+                    action_tokens = num_active,
+                    env_tokens = comp_env_count,
+                    checkpoint_segments,
+                    streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                    streaming_tile_tokens,
+                    "GRPO policy forward start"
+                );
+                let policy_logits = model_forward(
+                    backend,
+                    &comp.input_ids,
+                    weights,
+                    model_config,
+                    None,
+                    Some(&mut linear_state),
+                    Some(&lora_weights),
+                )
+                .context("GRPO policy forward pass")?;
+                if let Some(t) = timings.as_deref_mut() {
+                    t.add_policy_forward(policy_forward_started.elapsed());
+                }
+                tracing::info!(
+                    comp_idx,
+                    seq_len = comp.input_ids.len(),
+                    action_tokens = num_active,
+                    env_tokens = comp_env_count,
+                    checkpoint_segments,
+                    streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                    streaming_tile_tokens,
+                    elapsed_ms = policy_forward_started.elapsed().as_millis() as u64,
+                    "GRPO policy forward end"
+                );
+
+                let policy_log_probs =
+                    token_log_probs(&policy_logits, &comp.input_ids, &comp.action_mask, device)?;
+
+                let grpo_loss_val =
+                    grpo_loss(&policy_log_probs, &ref_log_probs, loss_params, device)?;
+
+                // ECHO env-CE term. When config.loss.echo is None, when
+                // env_mask is all-false (legacy single-turn rollouts), or
+                // when total_obs_len is 0, this contributes exactly nothing.
+                //
+                // Verifier-free adaptation (paper §5.5) takes the
+                // `no_policy_loss = true` branch: the GRPO term is masked
+                // (multiplied by 0) and only the ECHO env-CE term drives
+                // gradients. This is what lets a strong-but-stable agent
+                // keep improving from environment interaction alone on
+                // tasks where no programmatic verifier is available.
+                //
+                // Implementation: reuse token_log_probs with env_mask as
+                // the position selector. Returns log p(x_t) at env
+                // positions; CE = -sum(log p) / |O| (paper §3.1, where |O|
+                // is total_obs_len). We rescale by env_count/|O| to convert
+                // from sum-over-active to paper-normalized mean.
+                let policy_loss_scale = if config.loss.no_policy_loss { 0.0 } else { 1.0 };
+                let scaled_grpo = if policy_loss_scale != 1.0 {
+                    grpo_loss_val.affine(policy_loss_scale, 0.0)?
+                } else {
+                    grpo_loss_val
+                };
+                let loss = if let Some(echo_cfg) = &config.loss.echo {
+                    if config.loss.echo_enabled() && comp_env_count > 0 && comp.total_obs_len > 0
+                    {
+                        let env_log_probs = token_log_probs(
+                            &policy_logits,
+                            &comp.input_ids,
+                            &comp.env_mask,
+                            device,
+                        )?;
+                        // sum(log p) over env positions
+                        let env_log_prob_sum = env_log_probs.sum_all()?;
+                        // mean_ce = -sum / |O| (paper §3.1 normalization)
+                        let inv_obs_len = -(1.0 / comp.total_obs_len as f64);
+                        let echo_mean_ce = env_log_prob_sum.affine(inv_obs_len, 0.0)?;
+                        // Total loss = (policy_scale * L_grpo) + λ · L_envCE
+                        let echo_scaled = echo_mean_ce.affine(echo_cfg.lambda, 0.0)?;
+                        // Emit a per-completion debug so operators see ECHO
+                        // firing on the uncheckpointed path with concrete
+                        // env_count / total_obs_len / λ values — the
+                        // checkpointed path already emits this from
+                        // train_tokenized_grpo_group; this matches it for
+                        // the standard path.
+                        let mean_ce_val = echo_mean_ce.to_scalar::<f32>().ok().map(f64::from);
+                        comp_echo_env_ce = mean_ce_val;
+                        tracing::debug!(
+                            comp_idx,
+                            env_tokens = comp_env_count,
+                            total_obs_len = comp.total_obs_len,
+                            echo_lambda = echo_cfg.lambda,
+                            echo_env_ce = mean_ce_val,
+                            "GRPO uncheckpointed path: ECHO env CE active"
+                        );
+                        scaled_grpo.add(&echo_scaled)?
+                    } else {
+                        scaled_grpo
+                    }
                 } else {
                     scaled_grpo
+                };
+                anyhow::ensure!(
+                    !config.loss.no_policy_loss || config.loss.echo.is_some(),
+                    "config.loss.no_policy_loss = true with no ECHO term defined produces \
+                     a constant-zero loss — set loss.echo = Some(...) to drive gradients."
+                );
+
+                loss_val = loss.to_scalar::<f32>()? as f64;
+
+                let backward_started = Instant::now();
+                tracing::info!(
+                    comp_idx,
+                    seq_len = comp.input_ids.len(),
+                    action_tokens = num_active,
+                    env_tokens = comp_env_count,
+                    checkpoint_segments = 0usize,
+                    streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                    streaming_tile_tokens,
+                    "GRPO backward start"
+                );
+                let grads = loss.backward().context("GRPO+ECHO backward pass")?;
+                if let Some(t) = timings.as_deref_mut() {
+                    t.add_backward(backward_started.elapsed());
                 }
-            } else {
-                scaled_grpo
+                tracing::info!(
+                    comp_idx,
+                    seq_len = comp.input_ids.len(),
+                    action_tokens = num_active,
+                    env_tokens = comp_env_count,
+                    checkpoint_segments = 0usize,
+                    streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                    streaming_tile_tokens,
+                    elapsed_ms = backward_started.elapsed().as_millis() as u64,
+                    "GRPO backward end"
+                );
+                grads
             };
-            anyhow::ensure!(
-                !config.loss.no_policy_loss || config.loss.echo.is_some(),
-                "config.loss.no_policy_loss = true with no ECHO term defined produces \
-                 a constant-zero loss — set loss.echo = Some(...) to drive gradients."
-            );
-
-            loss_val = loss.to_scalar::<f32>()? as f64;
-
-            let backward_started = Instant::now();
-            tracing::info!(
-                comp_idx,
-                seq_len = comp.input_ids.len(),
-                action_tokens = num_active,
-                env_tokens = comp_env_count,
-                checkpoint_segments = 0usize,
-                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
-                streaming_tile_tokens,
-                "GRPO backward start"
-            );
-            let grads = loss.backward().context("GRPO+ECHO backward pass")?;
-            if let Some(t) = timings.as_deref_mut() {
-                t.add_backward(backward_started.elapsed());
-            }
-            tracing::info!(
-                comp_idx,
-                seq_len = comp.input_ids.len(),
-                action_tokens = num_active,
-                env_tokens = comp_env_count,
-                checkpoint_segments = 0usize,
-                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
-                streaming_tile_tokens,
-                elapsed_ms = backward_started.elapsed().as_millis() as u64,
-                "GRPO backward end"
-            );
             if token_level {
                 let vars = params.all_vars();
                 accumulate_grads(&mut group_accum, &grads, &vars)?;
@@ -10693,6 +10746,194 @@ fn standard_forward_backward_via_tape_bridge(
         .map_err(|e| anyhow::anyhow!("tape_bridge backward: {e}"))?;
 
     Ok((loss_val, grads))
+}
+
+/// CP-4 (#1082): non-checkpointed GRPO+ECHO forward + loss-construction
+/// + `loss.backward()` for one completion, wrapped in
+/// `kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store`.
+///
+/// Identical semantics to the inline non-checkpointed branch in
+/// `train_tokenized_grpo_group_with_grad_norms` when no tape adapters
+/// fire (the bridge fast-paths an empty tape to a no-op); adds the
+/// kt-tape → candle-`GradStore` merge when one or more
+/// `try_tape_*_cuda` adapters in the forward record onto the active
+/// tape.
+///
+/// Returned `(loss_val, GradStore, comp_echo_env_ce)` are the exact
+/// values the caller used to bind locally inside the inline branch
+/// before continuing into the optimizer / token-level accumulation
+/// step. The optimizer downstream is oblivious to which path produced
+/// the grads.
+///
+/// **Gated** on `feature = "cuda"` because the bridge's
+/// `with_tape_scope_emit_to_grad_store` lives behind
+/// `#[cfg(feature = "cuda")]` in `kiln-kt-bridge` (it needs the
+/// candle-CUDA borrow/copy helpers to convert kt tensors back to candle
+/// for the `GradStore` insert).
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn grpo_non_checkpointed_forward_backward_via_tape_bridge(
+    backend: &dyn BackendRuntime,
+    input_ids: &[u32],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &TrainableLoraParams,
+    action_mask: &[bool],
+    env_mask: &[bool],
+    total_obs_len: usize,
+    comp_env_count: usize,
+    num_active: usize,
+    ref_log_probs: &Tensor,
+    loss_params: GrpoLossParams,
+    loss_config: &crate::LossConfig,
+    device: &CdDevice,
+    comp_idx: usize,
+    streaming_tile_tokens: usize,
+    checkpoint_segments: usize,
+    mut timings: Option<&mut GrpoBenchmarkTimings>,
+) -> Result<(f64, GradStore, Option<f64>)> {
+    let lora_weights = params.as_lora_weights();
+    let mut linear_state = LinearAttentionState::new(model_config, device)?;
+    let step_started = Instant::now();
+
+    // The bridge wrapper's `forward` closure must return
+    // `Result<(payload, candle Tensor), BridgeError>`. We pack
+    // `(loss_val, comp_echo_env_ce)` as the payload so the caller can
+    // recover both scalars after the bridge has consumed the candle
+    // Tensor for backward.
+    //
+    // The bridge owns the candle backward call internally, so per-phase
+    // (`add_policy_forward` / `add_backward`) timing isn't broken out
+    // here; the bridged step time is bucketed into `add_backward`.
+    let ((loss_val, comp_echo_env_ce), grads) =
+        kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store(|| {
+            let policy_logits = model_forward(
+                backend,
+                input_ids,
+                weights,
+                model_config,
+                None,
+                Some(&mut linear_state),
+                Some(&lora_weights),
+            )
+            .context("GRPO policy forward pass")
+            .map_err(|e| {
+                kiln_kt_bridge::BridgeError::new(format!(
+                    "tape_bridge grpo step: policy forward: {e:#}"
+                ))
+            })?;
+
+            let policy_log_probs = token_log_probs(&policy_logits, input_ids, action_mask, device)
+                .map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!(
+                        "tape_bridge grpo step: policy token_log_probs: {e:#}"
+                    ))
+                })?;
+
+            let grpo_loss_val = grpo_loss(&policy_log_probs, ref_log_probs, loss_params, device)
+                .map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!(
+                        "tape_bridge grpo step: grpo_loss: {e:#}"
+                    ))
+                })?;
+
+            let policy_loss_scale = if loss_config.no_policy_loss { 0.0 } else { 1.0 };
+            let scaled_grpo = if policy_loss_scale != 1.0 {
+                grpo_loss_val.affine(policy_loss_scale, 0.0).map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!(
+                        "tape_bridge grpo step: policy loss scale affine: {e}"
+                    ))
+                })?
+            } else {
+                grpo_loss_val
+            };
+            let mut comp_echo_env_ce: Option<f64> = None;
+            let loss = if let Some(echo_cfg) = &loss_config.echo {
+                if loss_config.echo_enabled() && comp_env_count > 0 && total_obs_len > 0 {
+                    let env_log_probs =
+                        token_log_probs(&policy_logits, input_ids, env_mask, device).map_err(
+                            |e| {
+                                kiln_kt_bridge::BridgeError::new(format!(
+                                    "tape_bridge grpo step: env token_log_probs: {e:#}"
+                                ))
+                            },
+                        )?;
+                    let env_log_prob_sum = env_log_probs.sum_all().map_err(|e| {
+                        kiln_kt_bridge::BridgeError::new(format!(
+                            "tape_bridge grpo step: env_log_prob_sum: {e}"
+                        ))
+                    })?;
+                    let inv_obs_len = -(1.0 / total_obs_len as f64);
+                    let echo_mean_ce = env_log_prob_sum.affine(inv_obs_len, 0.0).map_err(|e| {
+                        kiln_kt_bridge::BridgeError::new(format!(
+                            "tape_bridge grpo step: echo_mean_ce affine: {e}"
+                        ))
+                    })?;
+                    let echo_scaled = echo_mean_ce.affine(echo_cfg.lambda, 0.0).map_err(|e| {
+                        kiln_kt_bridge::BridgeError::new(format!(
+                            "tape_bridge grpo step: echo_scaled affine: {e}"
+                        ))
+                    })?;
+                    let mean_ce_val = echo_mean_ce.to_scalar::<f32>().ok().map(f64::from);
+                    comp_echo_env_ce = mean_ce_val;
+                    tracing::debug!(
+                        comp_idx,
+                        env_tokens = comp_env_count,
+                        total_obs_len,
+                        echo_lambda = echo_cfg.lambda,
+                        echo_env_ce = mean_ce_val,
+                        "GRPO uncheckpointed path: ECHO env CE active (tape_bridge)"
+                    );
+                    scaled_grpo.add(&echo_scaled).map_err(|e| {
+                        kiln_kt_bridge::BridgeError::new(format!(
+                            "tape_bridge grpo step: scaled_grpo + echo_scaled: {e}"
+                        ))
+                    })?
+                } else {
+                    scaled_grpo
+                }
+            } else {
+                scaled_grpo
+            };
+            if loss_config.no_policy_loss && loss_config.echo.is_none() {
+                return Err(kiln_kt_bridge::BridgeError::new(
+                    "tape_bridge grpo step: config.loss.no_policy_loss = true with no ECHO \
+                     term defined produces a constant-zero loss — set loss.echo = Some(...) \
+                     to drive gradients."
+                        .to_string(),
+                ));
+            }
+            let loss_val = loss.to_scalar::<f32>().map_err(|e| {
+                kiln_kt_bridge::BridgeError::new(format!(
+                    "tape_bridge grpo step: loss.to_scalar: {e}"
+                ))
+            })? as f64;
+            Ok(((loss_val, comp_echo_env_ce), loss))
+        })
+        .map_err(|e| anyhow::anyhow!("tape_bridge grpo backward: {e}"))?;
+
+    let step_elapsed = step_started.elapsed();
+    if let Some(t) = timings.as_deref_mut() {
+        // The bridge owns the candle backward call internally so we
+        // can't break the per-step time into policy_forward / backward
+        // here. Bucket the full wall-clock against the backward timer
+        // so the surrounding GRPO benchmark accounting still totals
+        // correctly when this path is exercised.
+        t.add_backward(step_elapsed);
+    }
+    tracing::info!(
+        comp_idx,
+        seq_len = input_ids.len(),
+        action_tokens = num_active,
+        env_tokens = comp_env_count,
+        checkpoint_segments,
+        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
+        streaming_tile_tokens,
+        elapsed_ms = step_elapsed.as_millis() as u64,
+        "GRPO step end (tape_bridge)"
+    );
+
+    Ok((loss_val, grads, comp_echo_env_ce))
 }
 
 /// Bundled parameters for the GRPO surrogate / KL loss.
