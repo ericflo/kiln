@@ -1156,43 +1156,8 @@ pub fn upload_tensor_bf16_packed_buffer(
     )
 }
 
-/// Dispatch the fused single-token GDN input projection kernel with cached weights.
-///
-/// `x` is `[batch, 1, hidden]` and each weight is already transposed as
-/// `[hidden, out_dim]`. The returned tensors are f32 CPU tensors with shapes
-/// `[batch, 1, qkv_dim]`, `[batch, 1, z_dim]`, `[batch, 1, a_dim]`, and
-/// `[batch, 1, b_dim]`.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_gdn_in_proj_decode_cached(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    qkv_weight_t: &VulkanBuffer,
-    z_weight_t: &VulkanBuffer,
-    a_weight_t: &VulkanBuffer,
-    b_weight_t: &VulkanBuffer,
-    hidden: usize,
-    qkv_dim: usize,
-    z_dim: usize,
-    a_dim: usize,
-    b_dim: usize,
-) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
-    dispatch_gdn_in_proj_decode_cached_impl(
-        vk_device,
-        x,
-        qkv_weight_t,
-        z_weight_t,
-        a_weight_t,
-        b_weight_t,
-        hidden,
-        qkv_dim,
-        z_dim,
-        a_dim,
-        b_dim,
-        false,
-    )
-}
-
-/// Candle-free f32 weights variant of [`dispatch_gdn_in_proj_decode_cached`].
+/// Candle-free f32 weights variant of the fused single-token GDN input
+/// projection kernel with cached weights.
 ///
 /// Same semantics as the bf16-packed _bytes variant but for f32 weights.
 /// (#1082)
