@@ -5,7 +5,7 @@ scanning 110 KB of issue #1082 body + 7 STOP docs. Companion to
 [`CANDLE_REMOVAL_PLAN.md`](./CANDLE_REMOVAL_PLAN.md) — the plan is the
 authoritative narrative; this doc is a one-screen snapshot.
 
-Last refresh: `014d1b52` (post wave-15 + opd-loss retry from wave-16).
+Last refresh: `de1e9d8f` (post wave-19 + wave-20 — metal_types Step 4 migrating 52/232 buffer_o sites across rotary/mlp/lm_head/rmsnorm families; cd_types pruning + KtTensorId substrate landed).
 
 ## Per-crate production candle-core state
 
@@ -92,9 +92,25 @@ Substrate-add commits since the swap plan shipped:
   the single substrate gap the plan called out. Mirrors the existing
   `metal_softmax_last_axis` pattern.
 
-After these two, every remaining step is a pure caller migration in
-`kiln-model::backend::metal` (232 `buffer_o` sites + 15 `sdpa` sites +
-the chokepoint re-export flips).
+**Step 4 — caller migration progress (PR-merged):**
+
+| Family | Sites | PR | Commit |
+|---|---|---|---|
+| rotary_embedding | 6 | #1393 | `5a9b4eb1` |
+| mlp | 7 | #1394 | `12efe7f9` |
+| lm_head | 13 | #1395 | `db3deed7` |
+| rmsnorm | 26 | #1396 | `85efd4a3` |
+| **subtotal** | **52** | | |
+
+**Step 4 — caller migration in flight (wave 21):** gdn (~50 sites),
+conv1d, paged_kv/paged_attn, gemv/matmul — remaining ~180 sites.
+
+After Step 4 closes, the remaining swap plan steps are:
+- Step 5: `sdpa` (15 sites) → `metal_sdpa_last_axis_kt`
+- Step 6: flip the `pub use candle_metal_kernels::*` chokepoint
+  re-exports to `pub use crate::Raw*` objc2-metal aliases
+- Step 7: drop `candle-core` and `candle-metal-kernels` from
+  `kiln-tensor [dependencies]`
 
 **kiln-kt-bridge deletion (Tier-5 endgame)** — by-design candle user.
 Owns the `KtForwardOp{1,2,3}` candle `CustomOp1` shim that lets kt
