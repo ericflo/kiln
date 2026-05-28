@@ -86,7 +86,9 @@
 
 use anyhow::{Context, Result};
 use candle_core::Tensor;
-use kiln_autograd::{EmbeddingBackward, MatmulBackward, SiluBackward, Tape};
+use kiln_autograd::{
+    EmbeddingBackward, MatmulBackward, MulSigmoidGateBackward, SiluBackward, Tape,
+};
 
 // Phase 6a/CP-4 (#1082): the thread-local-tape scope machinery
 // (`with_thread_local_tape`, `with_active_tape`, `tape_forward_enabled`)
@@ -412,9 +414,106 @@ pub fn try_tape_embedding_cuda(
     Ok(Some(out))
 }
 
+/// Attempt to run the SwiGLU MLP gate-fuse (`silu(gate) * up`) through
+/// the kt-typed op registry (`kiln_tensor::ops::mul_sigmoid_gate`) and
+/// record a `MulSigmoidGateBackward` node on the active thread-local
+/// tape.
+///
+/// Returns:
+/// * `Ok(Some(out))` — the tape-forward path ran. The returned
+///   `Tensor` is a copy of the kt-typed output into a candle CUDA
+///   tensor; a `MulSigmoidGateBackward { gate, up }` node was recorded
+///   on the active thread-local tape.
+/// * `Ok(None)` — the gate was off, no thread-local tape is active,
+///   the kt-bridge borrow failed (layout / dtype / device mismatch),
+///   or the kt op-registry rejected the inputs (shape / dtype /
+///   contiguity envelope). The caller must fall through to the
+///   existing dispatch.
+/// * `Err(...)` — an unexpected forward failure or a kt -> candle
+///   copy-back failure. Propagated so callers see the failure cleanly
+///   instead of silently masking it.
+///
+/// Mirrors the [`try_tape_silu_cuda`] adapter: zero-copy borrow of
+/// both inputs, kt-native forward via the op registry (the CUDA path
+/// composes `cuda_activation_unary(kind=0)` + `cuda_elementwise_binary
+/// (kind=2)` underneath — same kernels the production
+/// `fused_mlp_silu_mul_kt` shim drives), tape record, kt -> candle
+/// copy-back. The returned tensor has no candle `BackpropOp` lineage —
+/// backward is on the tape only.
+///
+/// # CP-4 (#1082) context
+///
+/// SwiGLU's `silu(gate) * up` is the MLP gate path (`:kiln/gdn/gates`
+/// in Phase 6 profiling — ~18% of decode time). The backward is
+/// `kiln_autograd::backwards::swiglu::MulSigmoidGateBackward`:
+///
+/// ```text
+/// d_gate = dy * up * (sigmoid(gate) + gate * sigmoid(gate) * (1 - sigmoid(gate)))
+/// d_up   = dy * gate * sigmoid(gate)
+/// ```
+///
+/// Saving `gate.clone()` + `up.clone()` is an `Arc` bump on the
+/// kt-tensor's storage handle (no allocation), so the lifetime of the
+/// saved tensors extends past the local borrow at zero compute cost.
+///
+/// # Envelope
+///
+/// Same as `kiln_tensor::ops::mul_sigmoid_gate`'s CUDA fast-path:
+/// * `gate`: contiguous, F32 / BF16 / F16, shape == `up`.
+/// * `up`: contiguous, F32 / BF16 / F16, shape == `gate`.
+///
+/// Inputs outside the envelope return `Ok(None)` so the caller falls
+/// through to the existing `fused_mlp_silu_mul_kt` /
+/// `cuda_silu(gate) * up` paths.
+pub fn try_tape_swiglu_cuda(gate: &Tensor, up: &Tensor) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+
+    // kt borrow: zero-copy view of the candle CUDA tensors as kt
+    // tensors. Returns `Err` (which we treat as "skip") on layout /
+    // dtype / device mismatch.
+    let gate_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(gate) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let up_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(up) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    // Record only when a tape scope is active. Outside a scope,
+    // `with_active_tape` returns `None` and we fall through to the
+    // existing dispatch — matching the matmul / silu / rmsnorm /
+    // embedding adapters' contract.
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_tensor::ops::mul_sigmoid_gate(&gate_kt, &up_kt)
+            .map_err(|e| anyhow::anyhow!("kt mul_sigmoid_gate: {e}"))?;
+        tape.record(
+            &y,
+            &[&gate_kt, &up_kt],
+            Box::new(MulSigmoidGateBackward {
+                gate: gate_kt.clone(),
+                up: up_kt.clone(),
+            }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let out_kt = out_kt.context("tape_forward::try_tape_swiglu_cuda: kt-tape forward failed")?;
+
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape_forward::try_tape_swiglu_cuda: kt -> candle copy failed")?;
+
+    Ok(Some(out))
+}
+
 // Tape-scope tests live in `kiln-autograd::tape_scope::tests` after
 // wave-13 (#1082) promoted the thread-local-tape machinery there. The
-// kt-tape adapter tests (`try_tape_{rms_norm,matmul,silu,embedding}_cuda`
+// kt-tape adapter tests (`try_tape_{rms_norm,matmul,silu,embedding,swiglu}_cuda`
 // round-trips) live in the `kiln-model/tests/tape_forward_parity.rs`
 // integration test because they require the `kiln_kt_bridge` +
 // `kiln_rmsnorm_kernel` cuda surface.

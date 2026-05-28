@@ -10388,6 +10388,22 @@ pub fn swiglu_ffn_gated_hidden(
             && !gate.track_op()
             && !up.track_op()
         {
+            // Phase 6a/CP-4 (#1082) — experimental tape-forward path.
+            // When `KILN_USE_TAPE_FORWARD` is set AND a thread-local
+            // `Tape` is active, route SwiGLU's `silu(gate) * up` through
+            // the kt op-registry with a `MulSigmoidGateBackward` node
+            // recorded onto the tape. The forward composes the same
+            // `cuda_activation_unary(kind=0)` + `cuda_elementwise_binary
+            // (kind=2)` kernels as `fused_mlp_silu_mul_kt`; the
+            // difference is the tape-recorded backward node. With the
+            // gate off (the default) this returns `Ok(None)` and we
+            // fall through to the existing `fused_mlp_silu_mul_kt`
+            // dispatch.
+            if let Some(out) = crate::tape_forward::try_tape_swiglu_cuda(&gate, &up)
+                .context("swiglu_ffn_gated_hidden try_tape_swiglu_cuda")?
+            {
+                return Ok(out);
+            }
             if let (Some(gate_kt), Some(up_kt)) =
                 (try_borrow_kt_cuda(&gate), try_borrow_kt_cuda(&up))
             {

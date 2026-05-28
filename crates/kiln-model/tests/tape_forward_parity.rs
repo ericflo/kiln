@@ -645,3 +645,148 @@ fn tape_forward_embedding_short_circuits_without_active_scope() {
          so the caller falls through to the existing kt dispatch"
     );
 }
+
+// ----------------------------------------------------------------------
+// SwiGLU (silu(gate) * up) tape-forward parity (#1082 — Phase 6a/CP-4
+// wave 14 extension).
+//
+// Same pattern as the matmul / silu / embedding parity tests: build
+// BF16 contiguous CUDA `gate` and `up` of identical shape (the
+// `kiln_tensor::ops::mul_sigmoid_gate` envelope), compare baseline
+// (`ops::mul_sigmoid_gate` direct) against the tape-forward path
+// (`try_tape_swiglu_cuda` -> `ops::mul_sigmoid_gate` underneath +
+// `MulSigmoidGateBackward` recorded on the tape). Both paths bottom
+// out in the same `cuda_activation_unary(kind=0)` +
+// `cuda_elementwise_binary(kind=2)` kernels, so the outputs must be
+// bit-exact. The difference is purely backward-graph machinery — the
+// tape path additionally records a `MulSigmoidGateBackward` node
+// visible to a subsequent `Tape::backward` walk.
+// ----------------------------------------------------------------------
+
+fn build_swiglu_inputs(device: &Device, rows: usize, cols: usize) -> (Tensor, Tensor) {
+    let gate_host = random_bf16_vec(rows * cols, 0x5A1E_C0FF_EE57_FACE, 0.35);
+    let up_host = random_bf16_vec(rows * cols, 0xABBA_B0BA_5EED_F00D, 0.35);
+    let gate = Tensor::from_vec(gate_host, (rows, cols), &Device::Cpu)
+        .expect("gate cpu")
+        .to_device(device)
+        .expect("gate -> cuda")
+        .contiguous()
+        .expect("gate contiguous");
+    let up = Tensor::from_vec(up_host, (rows, cols), &Device::Cpu)
+        .expect("up cpu")
+        .to_device(device)
+        .expect("up -> cuda")
+        .contiguous()
+        .expect("up contiguous");
+    (gate, up)
+}
+
+#[test]
+fn tape_forward_swiglu_bit_exact_parity_with_baseline() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_forward swiglu parity: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    // Modest 2D shape inside the kt mul_sigmoid_gate envelope.
+    // Use the Qwen3.5-4B MLP intermediate dim (rough proxy) so the
+    // shape is representative of the production MLP gate path.
+    let rows = 16usize;
+    let cols = 1024usize;
+    let (gate, up) = build_swiglu_inputs(&device, rows, cols);
+
+    // SAFETY: see RMSNorm test above — ENV_LOCK serialises mutators,
+    // value is stable "1" across the binary.
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    // Path A — baseline. The adapter short-circuits on no-active-scope.
+    let baseline_adapter = kiln_model::tape_forward::try_tape_swiglu_cuda(&gate, &up)
+        .expect("baseline try_tape_swiglu_cuda call ok");
+    assert!(
+        baseline_adapter.is_none(),
+        "baseline path (no tape scope) must short-circuit to Ok(None) \
+         so the caller falls through; got Some(...) which means the \
+         adapter recorded onto a tape that does not exist"
+    );
+
+    // Baseline forward via the kt op-registry directly (matches what
+    // `try_tape_swiglu_cuda` calls when a scope is open).
+    let gate_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&gate)
+        .expect("gate kt borrow");
+    let up_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&up)
+        .expect("up kt borrow");
+    let baseline_kt =
+        kiln_tensor::ops::mul_sigmoid_gate(&gate_kt, &up_kt).expect("kt mul_sigmoid_gate baseline");
+    let baseline_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&baseline_kt)
+        .expect("baseline kt -> candle");
+
+    // Path B — tape-forward inside an active scope.
+    let (tape_result, tape) =
+        kiln_model::tape_forward::with_thread_local_tape(|| {
+            kiln_model::tape_forward::try_tape_swiglu_cuda(&gate, &up)
+        });
+    let tape_out = tape_result
+        .expect("tape-forward try_tape_swiglu_cuda ok")
+        .expect("tape-forward returned Some(out)");
+
+    let diff = max_abs_diff(&baseline_out, &tape_out);
+    assert_eq!(
+        diff, 0.0,
+        "swiglu tape-forward path must be bit-exact with the baseline \
+         (max-abs-diff was {diff}). Both paths share the same \
+         cuda_activation_unary(kind=0) + cuda_elementwise_binary(kind=2) \
+         kernel composition so any nonzero diff is a wiring bug."
+    );
+
+    assert_eq!(
+        tape.len(),
+        1,
+        "tape-forward swiglu must record exactly one tape node \
+         (got {}). Empty tape means try_tape_swiglu_cuda fell through; \
+         >1 node means an over-record bug.",
+        tape.len()
+    );
+
+    assert_eq!(
+        tape_out.shape().dims(),
+        baseline_out.shape().dims(),
+        "tape-forward swiglu output shape diverges from baseline"
+    );
+    assert_eq!(
+        tape_out.dtype(),
+        baseline_out.dtype(),
+        "tape-forward swiglu output dtype diverges from baseline"
+    );
+}
+
+#[test]
+fn tape_forward_swiglu_short_circuits_without_active_scope() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_forward swiglu short-circuit: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    let (gate, up) = build_swiglu_inputs(&device, 4, 64);
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+    let out = kiln_model::tape_forward::try_tape_swiglu_cuda(&gate, &up)
+        .expect("try_tape_swiglu_cuda call ok");
+    assert!(
+        out.is_none(),
+        "no active tape scope must short-circuit to Ok(None) \
+         so the caller falls through to the existing kt dispatch"
+    );
+}
