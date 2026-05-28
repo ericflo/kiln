@@ -51,6 +51,8 @@ mod fp8;
 mod metal_allocator;
 #[cfg(feature = "metal")]
 mod metal_storage;
+#[cfg(feature = "metal")]
+pub mod metal_types;
 #[cfg(feature = "vulkan")]
 mod vulkan_allocator;
 #[cfg(feature = "vulkan")]
