@@ -23,24 +23,19 @@
 use anyhow::Context;
 use anyhow::Result;
 #[cfg(feature = "cuda")]
-use candle_core::DType;
-#[cfg(feature = "cuda")]
-use candle_core::Device;
-use candle_core::Tensor;
-#[cfg(feature = "cuda")]
 use half::f16;
 
 /// A q_proj / projection weight packed into Marlin's W4A16 layout.
 ///
 /// All tensors live on the same CUDA device as the source model weights. The
-/// struct is `Send + Sync` via the underlying `Tensor` handles.
+/// struct is `Send + Sync` via the underlying `candle_core::Tensor` handles.
 #[derive(Clone, Debug)]
 pub struct MarlinPackedProj {
     /// Packed 4-bit weights in Marlin's tiled/permuted layout.
     /// Shape: `[k / 16, n * 16 / 8]`, dtype `i32`.
-    pub b_packed: Tensor,
+    pub b_packed: candle_core::Tensor,
     /// Per-group scales, Marlin-permuted. Shape `[k / groupsize, n]`, dtype `f16`.
-    pub scales: Tensor,
+    pub scales: candle_core::Tensor,
     /// Marlin groupsize sentinel: `-1` (per-column) or `128`.
     pub groupsize: i32,
     /// Input feature dim (rows of the original `[k, n]` weight).
@@ -84,7 +79,7 @@ pub struct PackedHost {
 /// shape doesn't fit Marlin's tile constraints (same semantics as
 /// [`pack_from_bf16`]) or the tensor doesn't live on a CUDA device.
 #[cfg(feature = "cuda")]
-pub fn prepare_pack_job(weight_t: &Tensor, groupsize: i32) -> Result<Option<PackJobHost>> {
+pub fn prepare_pack_job(weight_t: &candle_core::Tensor, groupsize: i32) -> Result<Option<PackJobHost>> {
     let device = weight_t.device();
     if !device.is_cuda() {
         return Ok(None);
@@ -105,7 +100,7 @@ pub fn prepare_pack_job(weight_t: &Tensor, groupsize: i32) -> Result<Option<Pack
     // The Marlin packer needs f32 on host. Go through a cast on-device (to
     // avoid a bf16 CPU dependency) and then copy to CPU.
     let w_f32 = weight_t
-        .to_dtype(DType::F32)
+        .to_dtype(candle_core::DType::F32)
         .context("marlin_proj: cast weight_t to f32")?
         .contiguous()
         .context("marlin_proj: contiguous f32")?;
@@ -147,7 +142,7 @@ pub fn pack_host(job: &PackJobHost) -> PackedHost {
 /// permuted f16 scales to `device` and assemble the final
 /// [`MarlinPackedProj`].
 #[cfg(feature = "cuda")]
-pub fn upload_packed(packed: PackedHost, device: &Device) -> Result<MarlinPackedProj> {
+pub fn upload_packed(packed: PackedHost, device: &candle_core::Device) -> Result<MarlinPackedProj> {
     let PackedHost {
         b_packed_vec,
         scales_vec,
@@ -160,11 +155,11 @@ pub fn upload_packed(packed: PackedHost, device: &Device) -> Result<MarlinPacked
     } else {
         k / groupsize as usize
     };
-    let b_packed = Tensor::from_vec(b_packed_vec, (k / 16, n * 16 / 8), &Device::Cpu)
+    let b_packed = candle_core::Tensor::from_vec(b_packed_vec, (k / 16, n * 16 / 8), &candle_core::Device::Cpu)
         .context("marlin_proj: build host b_packed tensor")?
         .to_device(device)
         .context("marlin_proj: upload b_packed to device")?;
-    let scales = Tensor::from_vec(scales_vec, (num_groups, n), &Device::Cpu)
+    let scales = candle_core::Tensor::from_vec(scales_vec, (num_groups, n), &candle_core::Device::Cpu)
         .context("marlin_proj: build host scales tensor")?
         .to_device(device)
         .context("marlin_proj: upload scales to device")?;
@@ -191,7 +186,7 @@ pub fn upload_packed(packed: PackedHost, device: &Device) -> Result<MarlinPacked
 /// [`pack_from_bf16_batch`] which runs the CPU-bound pack step for every
 /// projection in parallel via rayon.
 #[cfg(feature = "cuda")]
-pub fn pack_from_bf16(weight_t: &Tensor, groupsize: i32) -> Result<Option<MarlinPackedProj>> {
+pub fn pack_from_bf16(weight_t: &candle_core::Tensor, groupsize: i32) -> Result<Option<MarlinPackedProj>> {
     let device = weight_t.device().clone();
     let job = match prepare_pack_job(weight_t, groupsize)? {
         Some(j) => j,
@@ -222,11 +217,11 @@ pub fn pack_from_bf16(weight_t: &Tensor, groupsize: i32) -> Result<Option<Marlin
 /// sequentially, reproducing the pre-change wall-clock (useful for A/B
 /// measurements or rollback).
 #[cfg(feature = "cuda")]
-pub fn pack_from_bf16_batch(inputs: &[(Tensor, i32)]) -> Result<Vec<Option<MarlinPackedProj>>> {
+pub fn pack_from_bf16_batch(inputs: &[(candle_core::Tensor, i32)]) -> Result<Vec<Option<MarlinPackedProj>>> {
     if inputs.is_empty() {
         return Ok(Vec::new());
     }
-    // Device must be consistent across inputs. The call sites in
+    // candle_core::Device must be consistent across inputs. The call sites in
     // `forward.rs` build every weight on the same `device`, so this is a
     // sanity check rather than a real runtime constraint.
     let device = inputs[0].0.device().clone();
@@ -261,14 +256,14 @@ pub fn pack_from_bf16_batch(inputs: &[(Tensor, i32)]) -> Result<Vec<Option<Marli
 /// `None`. Keeping this here means the call sites in the loader do not need
 /// their own `#[cfg]` arms.
 #[cfg(not(feature = "cuda"))]
-pub fn pack_from_bf16(_weight_t: &Tensor, _groupsize: i32) -> Result<Option<MarlinPackedProj>> {
+pub fn pack_from_bf16(_weight_t: &candle_core::Tensor, _groupsize: i32) -> Result<Option<MarlinPackedProj>> {
     Ok(None)
 }
 
 /// Non-CUDA stub for [`pack_from_bf16_batch`]: the kernel is CUDA-only, so
 /// every entry is skipped.
 #[cfg(not(feature = "cuda"))]
-pub fn pack_from_bf16_batch(inputs: &[(Tensor, i32)]) -> Result<Vec<Option<MarlinPackedProj>>> {
+pub fn pack_from_bf16_batch(inputs: &[(candle_core::Tensor, i32)]) -> Result<Vec<Option<MarlinPackedProj>>> {
     Ok((0..inputs.len()).map(|_| None).collect())
 }
 
@@ -287,14 +282,14 @@ pub fn pack_from_bf16_batch(inputs: &[(Tensor, i32)]) -> Result<Vec<Option<Marli
 /// the I32→U32 mapping in `candle_dtype_to_kt` lets the packed
 /// weights flow through without a copy or a U32 reinterpret tensor.
 #[cfg(feature = "cuda")]
-pub(crate) fn matmul_bf16_2d_kt(x_bf16: &Tensor, w: &MarlinPackedProj) -> Result<Tensor> {
+pub(crate) fn matmul_bf16_2d_kt(x_bf16: &candle_core::Tensor, w: &MarlinPackedProj) -> Result<candle_core::Tensor> {
     kiln_nvtx::range!(c"kiln/marlin_w4a16_gemm_kt");
     let device = x_bf16.device();
     // Kernel is F16-only; cast bf16 -> fp16 at the boundary and back
     // on the way out. Matches the candle-typed `marlin_w4a16_gemm`
     // shape contract.
     let x_fp16 = x_bf16
-        .to_dtype(DType::F16)
+        .to_dtype(candle_core::DType::F16)
         .context("marlin_proj kt: cast x bf16 -> fp16")?
         .contiguous()
         .context("marlin_proj kt: x_fp16 contiguous")?;
@@ -318,7 +313,7 @@ pub(crate) fn matmul_bf16_2d_kt(x_bf16: &Tensor, w: &MarlinPackedProj) -> Result
     let y_fp16 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&y_kt)
         .context("marlin_proj kt: copy kt result -> candle")?;
     let y_bf16 = y_fp16
-        .to_dtype(DType::BF16)
+        .to_dtype(candle_core::DType::BF16)
         .context("marlin_proj kt: cast y fp16 -> bf16")?;
     debug_assert!(y_bf16.device().same_device(device));
     Ok(y_bf16)
@@ -336,7 +331,7 @@ pub(crate) fn matmul_bf16_2d_kt(x_bf16: &Tensor, w: &MarlinPackedProj) -> Result
 /// the same kernel. Test parity coverage: `bf80b175`
 /// `test_marlin_w4a16_gemm_kt_api_parity`.
 #[cfg(feature = "cuda")]
-pub fn matmul_bf16(x: &Tensor, w: &MarlinPackedProj) -> Result<Tensor> {
+pub fn matmul_bf16(x: &candle_core::Tensor, w: &MarlinPackedProj) -> Result<candle_core::Tensor> {
     let rank = x.rank();
     let out = match rank {
         2 => {
@@ -372,7 +367,7 @@ pub fn matmul_bf16(x: &Tensor, w: &MarlinPackedProj) -> Result<Tensor> {
 }
 
 #[cfg(not(feature = "cuda"))]
-pub fn matmul_bf16(_x: &Tensor, _w: &MarlinPackedProj) -> Result<Tensor> {
+pub fn matmul_bf16(_x: &candle_core::Tensor, _w: &MarlinPackedProj) -> Result<candle_core::Tensor> {
     anyhow::bail!("marlin_proj::matmul_bf16 requires the `cuda` feature")
 }
 
