@@ -28029,8 +28029,18 @@ mod tests {
         let last_ref_vals = last_ref.flatten_all()?.to_vec1::<f32>()?;
 
         // With KV cache: prefill first 4 tokens, then decode the 5th
-        let mut kv_cache =
-            KvCache::new(num_layers, num_kv_heads, head_dim, 32, DType::F32, &device)?;
+        //
+        // Migrated to `_kt` constructor so this site no longer names
+        // `candle_core::DType` or `candle_core::Device` — the bridge
+        // happens inside `KvCache::new_kt`. (#1082)
+        let mut kv_cache = KvCache::new_kt(
+            num_layers,
+            num_kv_heads,
+            head_dim,
+            32,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
 
         // Prefill
         let _prefill_logits = model_forward(
@@ -28134,8 +28144,15 @@ mod tests {
             .flatten_all()?
             .to_vec1::<f32>()?;
 
-        // KV cache: process token by token
-        let mut kv_cache = KvCache::new(1, num_kv_heads, head_dim, 16, DType::F32, &device)?;
+        // KV cache: process token by token (migrated to `_kt`; #1082)
+        let mut kv_cache = KvCache::new_kt(
+            1,
+            num_kv_heads,
+            head_dim,
+            16,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
 
         // Token 0
         let _ = model_forward(
@@ -28644,7 +28661,15 @@ mod tests {
             partial_rotary_factor: 1.0,
         };
 
-        let mut kv_cache = KvCache::new(1, num_kv_heads, head_dim, 32, DType::F32, &device)?;
+        // Migrated to `_kt` constructor (#1082).
+        let mut kv_cache = KvCache::new_kt(
+            1,
+            num_kv_heads,
+            head_dim,
+            32,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
         let mut linear_state = LinearAttentionState::new(&config, &device)?;
         let backend = test_backend(&device);
 
