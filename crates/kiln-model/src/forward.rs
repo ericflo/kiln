@@ -2064,6 +2064,20 @@ fn cuda_silu(x: &Tensor) -> Result<Tensor> {
         && !x.track_op()
         && x.rank() > 0
     {
+        // Phase 6a/CP-4 (#1082) — experimental tape-forward path.
+        // When `KILN_USE_TAPE_FORWARD` is set AND a thread-local
+        // `Tape` is active, route SiLU through the kt op-registry
+        // with a `SiluBackward` recorded onto the tape. The forward
+        // bottoms out in the same `cuda_activation_unary(kind=0)`
+        // kernel as `try_kt_silu_composite`; the difference is the
+        // tape-recorded backward node. With the gate off (the
+        // default) this returns `Ok(None)` and we fall through to
+        // the existing `try_kt_silu_composite` dispatch.
+        if let Some(out) =
+            crate::tape_forward::try_tape_silu_cuda(x).context("cuda_silu try_tape_silu_cuda")?
+        {
+            return Ok(out);
+        }
         if let Some(out) = try_kt_silu_composite(x).context("cuda_silu try_kt_silu_composite")? {
             return Ok(out);
         }
@@ -6208,6 +6222,19 @@ fn matmul_no_broadcast_copy(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 #[cfg(feature = "cuda")]
 pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>> {
     kiln_nvtx::range!(c"kiln/matmul_kt");
+
+    // Phase 6a/CP-4 (#1082) — experimental tape-forward path.
+    // When `KILN_USE_TAPE_FORWARD` is set AND a thread-local `Tape`
+    // is active (via `crate::tape_forward::with_thread_local_tape`),
+    // route matmul through the kt op-registry with a `MatmulBackward`
+    // recorded onto the tape. The forward output is the same kt
+    // matmul kernel; the difference is that the backward node lives
+    // on `Tape` instead of leaving the result as a no-autograd
+    // candle Tensor. With the gate off (the default) this returns
+    // `Ok(None)` and we fall through to the existing dispatch.
+    if let Some(out) = crate::tape_forward::try_tape_matmul_cuda(lhs, rhs)? {
+        return Ok(Some(out));
+    }
 
     let lhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(lhs) {
         Ok(t) => t,
