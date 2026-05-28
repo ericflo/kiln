@@ -20,6 +20,13 @@ candle-core = { workspace = true }
 # through `kiln-kt-bridge` for storage downcast + device-pointer
 # extraction. CUDA-only on the backward; gated by the `cuda` feature.
 kiln-tensor = { workspace = true }
+# Phase 6a/CP-4 (#1082): kt-tape parallel surface (see `kt_tape`). The
+# kt-tape entry records the OPD Phase-B fused backward directly onto a
+# `kiln_autograd::Tape`, dropping the candle `CustomOp1` wrapper used by
+# `kt_forward_op`. Same FFI symbols as the candle path on the backward.
+# Always-on dep — the kt-tape module compiles on every build; the
+# `apply()` body is gated under the `cuda` feature.
+kiln-autograd = { workspace = true }
 # Optional: only used by the CUDA backward bridge path
 # (`opd_top_k_reverse_kl_phase_b_bwd_kt`) which itself is
 # `#[cfg(feature = "cuda")]`. Pulling it in unconditionally drags

@@ -114,6 +114,17 @@ pub use kt_forward_op::{
     kt_forward_op_disabled, opd_top_k_reverse_kl_per_position_via_kt_forward_op,
 };
 
+/// Phase 6a/CP-4 (#1082): parallel kt-tape entry that drops the candle
+/// CustomOp1 wrapper in favour of recording onto a `kiln_autograd::Tape`
+/// directly. Same FFI symbols on the backward, same envelope. See
+/// `kt_tape.rs` for the pilot port rationale (mirroring the rmsnorm
+/// sibling in commit `895162ca`).
+mod kt_tape;
+pub use kt_tape::{
+    opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape,
+    opd_top_k_reverse_kl_phase_b_via_kt_tape, CudaOpdTopKReverseKlPhaseBBackward,
+};
+
 /// Default chunk size when iterating along the active-token dimension. Used
 /// by Phase B to bound the temporary `[chunk_T, K]` intermediate. For
 /// typical OPD configs (T_active ≤ 8192, K = 32) the whole batch fits in
