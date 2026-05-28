@@ -8282,23 +8282,54 @@ fn metal_gdn_in_proj_decode_bf16(
             _ => anyhow::bail!("metal gdn in-proj b_out must be on Metal"),
         };
 
-        let x_buf = buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let qkv_buf =
-            buffer_o(qkv_metal.buffer(), &qkv_layout, qkv_t.dtype());
-        let z_buf = buffer_o(z_metal.buffer(), &z_layout, z_t.dtype());
-        let a_buf = buffer_o(a_metal.buffer(), &a_layout, a_t.dtype());
-        let b_buf = buffer_o(b_metal.buffer(), &b_layout, b_t.dtype());
-        let qkv_o_buf = buffer_o(
-            qkv_o_metal.buffer(),
-            &qkv_o_layout,
-            qkv_out.dtype(),
+        // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let x_buf = buffer_o_kt(
+            x_metal.buffer(),
+            &kt_layout_from_candle(x_layout),
+            kt_dtype_from_candle(x.dtype()),
         );
-        let z_o_buf =
-            buffer_o(z_o_metal.buffer(), &z_o_layout, z_out.dtype());
-        let a_o_buf =
-            buffer_o(a_o_metal.buffer(), &a_o_layout, a_out.dtype());
-        let b_o_buf =
-            buffer_o(b_o_metal.buffer(), &b_o_layout, b_out.dtype());
+        let qkv_buf = buffer_o_kt(
+            qkv_metal.buffer(),
+            &kt_layout_from_candle(qkv_layout),
+            kt_dtype_from_candle(qkv_t.dtype()),
+        );
+        let z_buf = buffer_o_kt(
+            z_metal.buffer(),
+            &kt_layout_from_candle(z_layout),
+            kt_dtype_from_candle(z_t.dtype()),
+        );
+        let a_buf = buffer_o_kt(
+            a_metal.buffer(),
+            &kt_layout_from_candle(a_layout),
+            kt_dtype_from_candle(a_t.dtype()),
+        );
+        let b_buf = buffer_o_kt(
+            b_metal.buffer(),
+            &kt_layout_from_candle(b_layout),
+            kt_dtype_from_candle(b_t.dtype()),
+        );
+        let qkv_o_buf = buffer_o_kt(
+            qkv_o_metal.buffer(),
+            &kt_layout_from_candle(qkv_o_layout),
+            kt_dtype_from_candle(qkv_out.dtype()),
+        );
+        let z_o_buf = buffer_o_kt(
+            z_o_metal.buffer(),
+            &kt_layout_from_candle(z_o_layout),
+            kt_dtype_from_candle(z_out.dtype()),
+        );
+        let a_o_buf = buffer_o_kt(
+            a_o_metal.buffer(),
+            &kt_layout_from_candle(a_o_layout),
+            kt_dtype_from_candle(a_out.dtype()),
+        );
+        let b_o_buf = buffer_o_kt(
+            b_o_metal.buffer(),
+            &kt_layout_from_candle(b_o_layout),
+            kt_dtype_from_candle(b_out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(qkv_buf.buffer), qkv_buf.offset_in_bytes);
@@ -13791,15 +13822,37 @@ pub(crate) fn metal_gdn_prefill_qkv_conv_split_bf16_f32_k4(
             _ => anyhow::bail!("metal gdn prefill qkv conv-split v output must be on Metal"),
         };
 
-        let x_buf =
-            buffer_o(x_metal.buffer(), &x_layout, mixed_qkv.dtype());
-        let w_buf =
-            buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
-        let s_buf =
-            buffer_o(s_metal.buffer(), &s_layout, conv_state.dtype());
-        let q_buf = buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let v_buf = buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
+        let x_buf = buffer_o_kt(
+            x_metal.buffer(),
+            &kt_layout_from_candle(x_layout),
+            kt_dtype_from_candle(mixed_qkv.dtype()),
+        );
+        let w_buf = buffer_o_kt(
+            w_metal.buffer(),
+            &kt_layout_from_candle(w_layout),
+            kt_dtype_from_candle(weight.dtype()),
+        );
+        let s_buf = buffer_o_kt(
+            s_metal.buffer(),
+            &kt_layout_from_candle(s_layout),
+            kt_dtype_from_candle(conv_state.dtype()),
+        );
+        let q_buf = buffer_o_kt(
+            q_metal.buffer(),
+            &kt_layout_from_candle(q_layout),
+            kt_dtype_from_candle(q.dtype()),
+        );
+        let k_buf = buffer_o_kt(
+            k_metal.buffer(),
+            &kt_layout_from_candle(k_layout),
+            kt_dtype_from_candle(k.dtype()),
+        );
+        let v_buf = buffer_o_kt(
+            v_metal.buffer(),
+            &kt_layout_from_candle(v_layout),
+            kt_dtype_from_candle(v.dtype()),
+        );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
