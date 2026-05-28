@@ -50,7 +50,13 @@ mod backward_op;
 pub mod backwards;
 mod grad_store;
 mod tape;
-mod tape_scope;
+// `tape_scope` is `pub` (not just re-exported as flat names at the
+// crate root) because `kiln-kt-bridge::tape_bridge` references
+// `kiln_autograd::tape_scope::with_thread_local_tape` directly to
+// open a thread-local Tape scope inside the bridge wrapper. Keeping
+// the re-exports at the crate root for downstream users that already
+// import the flat names. (#1082)
+pub mod tape_scope;
 
 pub use anomaly::{anomaly_detection_enabled, anomaly_panic, ENV_DETECT_ANOMALY};
 pub use backward_op::{BackwardOp, BoxedBackwardOp};
