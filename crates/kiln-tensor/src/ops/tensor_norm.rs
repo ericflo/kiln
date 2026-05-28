@@ -206,14 +206,13 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_l1_l2_linf_lp_parity() {
-        let cdev = match candle_core::Device::cuda_if_available(0) {
-            Ok(candle_core::Device::Cuda(c)) => c,
-            _ => return,
-        };
-        let cdev = std::sync::Arc::new(cdev);
+        // Skip if no CUDA device available at runtime.
+        if crate::primary_cuda_device(0).is_err() {
+            return;
+        }
 
         let cpu_x = Tensor::from_slice(&[1.0f32, -2.0, 3.0, -4.0], vec![4]).unwrap();
-        let cuda_x = cpu_x.to_device(crate::Device::Cuda(0), Some(cdev.clone())).unwrap();
+        let cuda_x = cpu_x.to_device(crate::Device::Cuda(0)).unwrap();
 
         let l1c = scalar(&l1_norm(&cpu_x).unwrap());
         let l1g = scalar(&l1_norm(&cuda_x).unwrap());

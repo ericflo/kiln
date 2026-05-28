@@ -207,16 +207,16 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_bool_reduce_parity() {
-        let cdev = match candle_core::Device::cuda_if_available(0) {
-            Ok(candle_core::Device::Cuda(c)) => c,
-            _ => return,
-        };
-        let cdev = std::sync::Arc::new(cdev);
+        // Skip if no CUDA device available at runtime (cfg-feature gate
+        // only confirms the build was compiled with --features cuda).
+        if crate::primary_cuda_device(0).is_err() {
+            return;
+        }
 
         // [[1, 1, 1], [1, 0, 1]] — same pattern as all_axis_simple.
         let mask_cpu = Tensor::from_slice(&[1u8, 1, 1, 1, 0, 1], vec![2, 3]).unwrap();
         let mask_cuda = mask_cpu
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
 
         // Per-axis reductions.

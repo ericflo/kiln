@@ -472,11 +472,10 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_index_select_axis_parity_f32() {
-        let cdev = match candle_core::Device::cuda_if_available(0) {
-            Ok(candle_core::Device::Cuda(c)) => c,
-            _ => return,
-        };
-        let cdev = std::sync::Arc::new(cdev);
+        // Skip if no CUDA device available at runtime.
+        if crate::primary_cuda_device(0).is_err() {
+            return;
+        }
 
         // rank-4 source `[A, B, C, D]` with distinct values so axis
         // confusion shows up as a mismatch instead of a coincidence.
@@ -488,7 +487,7 @@ mod tests {
         let values: Vec<f32> = (0..n).map(|i| (i as f32) * 0.5 - 7.0).collect();
         let cpu_x = Tensor::from_slice(&values, vec![a, b, c, d]).unwrap();
         let cuda_x = cpu_x
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
 
         let dims = [a, b, c, d];
@@ -504,7 +503,7 @@ mod tests {
         for (axis, idx_vec) in test_cases.iter() {
             let cpu_ids = Tensor::from_slice(idx_vec.as_slice(), vec![idx_vec.len()]).unwrap();
             let cuda_ids = cpu_ids
-                .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+                .to_device(crate::Device::Cuda(0))
                 .unwrap();
 
             let cpu_out = index_select(&cpu_x, *axis, &cpu_ids).unwrap();
@@ -530,7 +529,7 @@ mod tests {
 
             // Value parity: D2H-copy the CUDA output and compare bytes.
             let cuda_out_cpu = cuda_out
-                .to_device(crate::Device::Cpu, None)
+                .to_device(crate::Device::Cpu)
                 .unwrap();
             let cpu_vec = read_f32(&cpu_out);
             let cuda_vec = read_f32(&cuda_out_cpu);
@@ -555,27 +554,26 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_index_select_axis_n_multi_d_indices() {
-        let cdev = match candle_core::Device::cuda_if_available(0) {
-            Ok(candle_core::Device::Cuda(c)) => c,
-            _ => return,
-        };
-        let cdev = std::sync::Arc::new(cdev);
+        // Skip if no CUDA device available at runtime.
+        if crate::primary_cuda_device(0).is_err() {
+            return;
+        }
 
         // `[2, 3]` source, gather axis 1 with `[[0,2],[1,1]]` indices.
         // Expected output shape `[2, 2, 2]` (matches the CPU test
         // `multi_dim_indices_broadcast_into_axis`).
         let cpu_x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
         let cuda_x = cpu_x
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
         let cpu_ids = Tensor::from_slice(&[0u32, 2, 1, 1], vec![2, 2]).unwrap();
         let cuda_ids = cpu_ids
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
 
         let cuda_out = index_select(&cuda_x, 1, &cuda_ids).unwrap();
         let cuda_out_cpu = cuda_out
-            .to_device(crate::Device::Cpu, None)
+            .to_device(crate::Device::Cpu)
             .unwrap();
         assert_eq!(cuda_out.shape(), &[2, 2, 2]);
         // Row 0 (orig [1,2,3]) at indices [[0,2],[1,1]] -> [[1,3],[2,2]]
@@ -592,11 +590,10 @@ mod tests {
     #[test]
     fn cuda_index_select_axis_parity_bf16() {
         use half::bf16;
-        let cdev = match candle_core::Device::cuda_if_available(0) {
-            Ok(candle_core::Device::Cuda(c)) => c,
-            _ => return,
-        };
-        let cdev = std::sync::Arc::new(cdev);
+        // Skip if no CUDA device available at runtime.
+        if crate::primary_cuda_device(0).is_err() {
+            return;
+        }
 
         // rank-3 BF16 source `[B, H, K]` with distinct values.
         let bdim = 2usize;
@@ -606,14 +603,14 @@ mod tests {
         let values: Vec<bf16> = (0..n).map(|i| bf16::from_f32(i as f32 * 0.25 - 1.0)).collect();
         let cpu_x = Tensor::from_slice(&values, vec![bdim, h, k]).unwrap();
         let cuda_x = cpu_x
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
 
         // Gather along axis 1 (heads).
         let ids_vec = vec![3u32, 0, 2, 1];
         let cpu_ids = Tensor::from_slice(ids_vec.as_slice(), vec![ids_vec.len()]).unwrap();
         let cuda_ids = cpu_ids
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
 
         let cpu_out = index_select(&cpu_x, 1, &cpu_ids).unwrap();
@@ -623,7 +620,7 @@ mod tests {
         assert_eq!(cuda_out.shape(), &[bdim, ids_vec.len(), k]);
 
         let cuda_out_cpu = cuda_out
-            .to_device(crate::Device::Cpu, None)
+            .to_device(crate::Device::Cpu)
             .unwrap();
         let cpu_bytes = cpu_out
             .storage()

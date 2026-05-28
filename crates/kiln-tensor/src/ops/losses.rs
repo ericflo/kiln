@@ -548,19 +548,18 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_loss_parity_full_table() {
-        let cdev = match candle_core::Device::cuda_if_available(0) {
-            Ok(candle_core::Device::Cuda(c)) => c,
-            _ => return,
-        };
-        let cdev = std::sync::Arc::new(cdev);
+        // Skip if no CUDA device available at runtime.
+        if crate::primary_cuda_device(0).is_err() {
+            return;
+        }
 
         let pred_cpu = Tensor::from_slice(&[1.0f32, -2.0, 3.0, -4.0], vec![4]).unwrap();
         let tgt_cpu = Tensor::from_slice(&[0.5f32, -1.5, 2.5, -3.0], vec![4]).unwrap();
         let pred_cuda = pred_cpu
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
         let tgt_cuda = tgt_cpu
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
 
         let pairs: &[(&str, f32, f32)] = &[
@@ -584,10 +583,10 @@ mod tests {
         let logits_cpu = Tensor::from_slice(&[0.0f32, 0.0], vec![2]).unwrap();
         let bce_target_cpu = Tensor::from_slice(&[0.0f32, 1.0], vec![2]).unwrap();
         let logits_cuda = logits_cpu
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
         let bce_target_cuda = bce_target_cpu
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
         let bce_c = scalar_f32(&bce_with_logits(&logits_cpu, &bce_target_cpu).unwrap());
         let bce_g = scalar_f32(&bce_with_logits(&logits_cuda, &bce_target_cuda).unwrap());
@@ -598,11 +597,11 @@ mod tests {
         let lp_val = (1.0_f32 / 3.0).ln();
         let lp_cpu = Tensor::from_slice(&[lp_val; 6], vec![2, 3]).unwrap();
         let lp_cuda = lp_cpu
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
         let tg_cpu = Tensor::from_slice(&[0i64, 2], vec![2]).unwrap();
         let tg_cuda = tg_cpu
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
         let nll_c = scalar_f32(&nll_loss(&lp_cpu, &tg_cpu).unwrap());
         let nll_g = scalar_f32(&nll_loss(&lp_cuda, &tg_cuda).unwrap());
@@ -614,16 +613,15 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_loss_mixed_devices_errors() {
-        let cdev = match candle_core::Device::cuda_if_available(0) {
-            Ok(candle_core::Device::Cuda(c)) => c,
-            _ => return,
-        };
-        let cdev = std::sync::Arc::new(cdev);
+        // Skip if no CUDA device available at runtime.
+        if crate::primary_cuda_device(0).is_err() {
+            return;
+        }
 
         let a_cpu = Tensor::from_slice(&[1.0f32, 2.0], vec![2]).unwrap();
         let b_cuda = Tensor::from_slice(&[1.0f32, 2.0], vec![2])
             .unwrap()
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
 
         let e = mse_loss(&a_cpu, &b_cuda).unwrap_err();

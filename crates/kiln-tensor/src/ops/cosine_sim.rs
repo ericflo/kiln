@@ -208,20 +208,19 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_cosine_sim_parity() {
-        let cdev = match candle_core::Device::cuda_if_available(0) {
-            Ok(candle_core::Device::Cuda(c)) => c,
-            _ => return,
-        };
-        let cdev = std::sync::Arc::new(cdev);
+        // Skip if no CUDA device available at runtime.
+        if crate::primary_cuda_device(0).is_err() {
+            return;
+        }
 
         // Two rows: parallel + anti-parallel.
         let a_cpu = Tensor::from_slice(&[1.0f32, 2.0, 1.0, 2.0], vec![2, 2]).unwrap();
         let b_cpu = Tensor::from_slice(&[2.0f32, 4.0, -1.0, -2.0], vec![2, 2]).unwrap();
         let a_cuda = a_cpu
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
         let b_cuda = b_cpu
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
 
         let cpu_out = cosine_similarity(&a_cpu, &b_cpu, 1e-8).unwrap();
@@ -241,16 +240,15 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_cosine_sim_mixed_devices_errors() {
-        let cdev = match candle_core::Device::cuda_if_available(0) {
-            Ok(candle_core::Device::Cuda(c)) => c,
-            _ => return,
-        };
-        let cdev = std::sync::Arc::new(cdev);
+        // Skip if no CUDA device available at runtime.
+        if crate::primary_cuda_device(0).is_err() {
+            return;
+        }
 
         let a_cpu = Tensor::from_slice(&[1.0f32, 2.0], vec![1, 2]).unwrap();
         let b_cuda = Tensor::from_slice(&[1.0f32, 2.0], vec![1, 2])
             .unwrap()
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
 
         let e = cosine_similarity(&a_cpu, &b_cuda, 1e-8).unwrap_err();

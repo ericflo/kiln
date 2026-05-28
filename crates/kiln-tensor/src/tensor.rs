@@ -732,43 +732,25 @@ impl Tensor {
     // ------------------------------------------------------------------
 
     /// Transfer this tensor to `target` device, returning a fresh
-    /// tensor on the target. Wraps the existing `host_to_cuda_copy`
+    /// tensor on the target. Wraps the existing `host_to_cuda_copy_ctx`
     /// and `cuda_to_host_copy` helpers behind a uniform method API.
     ///
-    /// # Design choice: explicit candle device parameter
-    ///
-    /// CPU→CUDA needs a CUDA device handle (`Arc<CudaDevice>`) to
-    /// allocate the destination buffer. The kt-Tensor itself does
-    /// not carry a backend device handle when its storage is CPU, so
-    /// the caller must supply it via `candle_device`. This is the
-    /// same handle production code reaches through
-    /// `kiln_core::device::primary_cuda()` (or equivalent test helpers).
-    ///
-    /// The alternative — a thread-local default-device registry —
-    /// trades explicitness for a process-init ordering hazard and
-    /// hides the device dependency. Phase 7 of #1082 retires the
-    /// candle dep and this parameter becomes
-    /// `Arc<cudarc::driver::CudaContext>`; the method signature
-    /// stays the same shape.
+    /// **Candle-free as of #1082**: CPU→CUDA derives the cudarc
+    /// `CudaContext` internally via `host_to_cuda_copy_ctx`; callers no
+    /// longer pass an `Arc<CudaDevice>`. The previous `candle_device:
+    /// Option<Arc<CudaDevice>>` parameter has been dropped.
     ///
     /// # Supported transitions
     ///
-    /// | from → to         | behavior                                |
-    /// |-------------------|-----------------------------------------|
-    /// | same device       | `Ok(self.clone())` — cheap Arc bump     |
-    /// | CPU → CUDA(i)     | `host_to_cuda_copy` (`candle_device` reqd) |
-    /// | CUDA → CPU        | `cuda_to_host_copy`                     |
-    /// | CUDA(i)→CUDA(j)   | `Err` — cross-device GPU transfer NYI   |
-    /// | other cross-back  | `Err` — Metal/Vulkan paths NYI          |
-    ///
-    /// `candle_device` is required only for CPU→CUDA; pass `None`
-    /// for any other transition (it is ignored on the matching paths).
+    /// | from → to         | behavior                              |
+    /// |-------------------|---------------------------------------|
+    /// | same device       | `Ok(self.clone())` — cheap Arc bump   |
+    /// | CPU → CUDA(i)     | `host_to_cuda_copy_ctx`               |
+    /// | CUDA → CPU        | `cuda_to_host_copy`                   |
+    /// | CUDA(i)→CUDA(j)   | `Err` — cross-device GPU transfer NYI |
+    /// | other cross-back  | `Err` — Metal/Vulkan paths NYI        |
     #[cfg(feature = "cuda")]
-    pub fn to_device(
-        &self,
-        target: Device,
-        candle_device: Option<std::sync::Arc<candle_core::cuda_backend::CudaDevice>>,
-    ) -> Result<Self> {
+    pub fn to_device(&self, target: Device) -> Result<Self> {
         let src = self.device();
         if src == target {
             // Same-device move is a cheap Arc bump per anti-pattern 11
@@ -776,15 +758,7 @@ impl Tensor {
             return Ok(self.clone());
         }
         match (src, target) {
-            (Device::Cpu, Device::Cuda(i)) => {
-                let cdev = candle_device.ok_or_else(|| {
-                    Error::Msg(
-                        "Tensor::to_device: CPU→CUDA requires candle_device = Some(_)"
-                            .to_string(),
-                    )
-                })?;
-                crate::host_to_cuda_copy(self, cdev, i)
-            }
+            (Device::Cpu, Device::Cuda(i)) => crate::host_to_cuda_copy_ctx(self, i),
             (Device::Cuda(_), Device::Cpu) => crate::cuda_to_host_copy(self),
             (Device::Cuda(i), Device::Cuda(j)) => Err(Error::Msg(format!(
                 "Tensor::to_device: cross-GPU transfer Cuda({i})→Cuda({j}) is not yet implemented (issue #1082)"

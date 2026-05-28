@@ -370,11 +370,10 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_gumbel_parity() {
-        let cdev = match candle_core::Device::cuda_if_available(0) {
-            Ok(candle_core::Device::Cuda(c)) => c,
-            _ => return,
-        };
-        let cdev = std::sync::Arc::new(cdev);
+        // Skip if no CUDA device available at runtime.
+        if crate::primary_cuda_device(0).is_err() {
+            return;
+        }
 
         let logits_cpu = Tensor::from_slice(
             &[1.0f32, 2.0, 3.0, 4.0, 5.0, 1.5, 2.5, 3.5, 4.5, 5.5],
@@ -382,7 +381,7 @@ mod tests {
         )
         .unwrap();
         let logits_cuda = logits_cpu
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
 
         let s_cpu = GumbelSampler::with_seed(0xABCDEF);
@@ -401,11 +400,10 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_gumbel_respects_neg_inf_mask() {
-        let cdev = match candle_core::Device::cuda_if_available(0) {
-            Ok(candle_core::Device::Cuda(c)) => c,
-            _ => return,
-        };
-        let cdev = std::sync::Arc::new(cdev);
+        // Skip if no CUDA device available at runtime.
+        if crate::primary_cuda_device(0).is_err() {
+            return;
+        }
 
         let logits_cpu = Tensor::from_slice(
             &[f32::NEG_INFINITY, f32::NEG_INFINITY, 0.0, f32::NEG_INFINITY],
@@ -413,7 +411,7 @@ mod tests {
         )
         .unwrap();
         let logits_cuda = logits_cpu
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
 
         for seed in 1..10 {

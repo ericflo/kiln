@@ -219,11 +219,10 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_multinomial_parity() {
-        let cdev = match candle_core::Device::cuda_if_available(0) {
-            Ok(candle_core::Device::Cuda(c)) => c,
-            _ => return,
-        };
-        let cdev = std::sync::Arc::new(cdev);
+        // Skip if no CUDA device available at runtime.
+        if crate::primary_cuda_device(0).is_err() {
+            return;
+        }
 
         let probs_cpu = Tensor::from_slice(
             &[0.5f32, 0.3, 0.2, 0.1, 0.6, 0.3],
@@ -231,7 +230,7 @@ mod tests {
         )
         .unwrap();
         let probs_cuda = probs_cpu
-            .to_device(crate::Device::Cuda(0), Some(cdev.clone()))
+            .to_device(crate::Device::Cuda(0))
             .unwrap();
 
         // Same RNG seed → same draws on either device.
