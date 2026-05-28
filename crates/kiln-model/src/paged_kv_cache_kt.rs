@@ -39,8 +39,10 @@ use anyhow::{Context, Result};
 // Pattern lifted from kiln-tensor commit 4ee1b7f9 and kiln-blas commit
 // 0d201199. CudaDevice still comes from candle for now — it's a parameter
 // type on the public `PagedKvCacheKt::new*` surface and changing it
-// would ripple to every caller (see forward.rs:1539, etc.).
-use candle_core::cuda_backend::CudaDevice;
+// would ripple to every caller (see forward.rs:1539, etc.). The two
+// `Arc<candle_core::cuda_backend::CudaDevice>` parameter sites below are inline-qualified as
+// `candle_core::cuda_backend::CudaDevice` so this file drops its last
+// top-level `use candle_core::*` import.
 use cudarc::driver::result as cudarc_result;
 
 use kiln_core::block::BlockTable;
@@ -84,7 +86,7 @@ impl PagedKvCacheKt {
         num_kv_heads: usize,
         head_dim: usize,
         dtype: KtDType,
-        candle_device: Arc<CudaDevice>,
+        candle_device: Arc<candle_core::cuda_backend::CudaDevice>,
         device_index: usize,
     ) -> Result<Self> {
         Self::new_with_fp8(
@@ -111,7 +113,7 @@ impl PagedKvCacheKt {
         num_kv_heads: usize,
         head_dim: usize,
         dtype: KtDType,
-        candle_device: Arc<CudaDevice>,
+        candle_device: Arc<candle_core::cuda_backend::CudaDevice>,
         device_index: usize,
         fp8: bool,
     ) -> Result<Self> {
