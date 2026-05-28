@@ -465,25 +465,25 @@ type Layout = candle_core::Layout;
 // the full path.)
 
 /// Load a safetensors file into a HashMap<String, Tensor> on `device`.
-/// Consolidates the `safetensors_load_file(path, device)` call
-/// site (~4 sites in adapter I/O + tests).
+/// Consolidates the candle safetensors::load(path, device) call site
+/// (~4 sites in adapter I/O + tests).
 #[inline]
 fn safetensors_load_file(
     path: &Path,
     device: &CdDevice,
 ) -> CdResult<std::collections::HashMap<String, Tensor>> {
-    safetensors_load_file(path, device)
+    candle_core::safetensors::load(path, device)
 }
 
 /// Save a HashMap<String, Tensor> as a safetensors file at `path`.
-/// Consolidates the `safetensors_save_file(tensors, path)` call
-/// site (~1 site in adapter I/O).
+/// Consolidates the candle safetensors::save(tensors, path) call site
+/// (~1 site in adapter I/O).
 #[inline]
 fn safetensors_save_file(
     tensors: &std::collections::HashMap<String, Tensor>,
     path: &Path,
 ) -> CdResult<()> {
-    safetensors_save_file(tensors, path)
+    candle_core::safetensors::save(tensors, path)
 }
 
 /// Helper macro shim wrapping candle's bail. Lets call sites write
