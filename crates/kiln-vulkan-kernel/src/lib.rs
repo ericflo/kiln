@@ -13,6 +13,7 @@
 
 pub mod buffer;
 pub mod buffer_pool;
+pub mod candle_bridge;
 pub mod cmd_batch;
 pub mod decode_resident_pool;
 pub mod device;

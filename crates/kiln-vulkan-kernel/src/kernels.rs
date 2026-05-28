@@ -857,175 +857,46 @@ fn make_memory_barrier(
         .dst_access_mask(dst)
 }
 
-/// Extract raw f32 bytes from a candle-core Tensor.
-pub fn extract_tensor_bytes(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
-    let shape: Vec<usize> = tensor.shape().dims().to_vec();
-    let flat = tensor.flatten_all().context("failed to flatten tensor")?;
-    let f32_data = flat
-        .to_dtype(DType::F32)?
-        .to_vec1::<f32>()
-        .context("failed to extract f32 data")?;
-    Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
-}
+// ===========================================================================
+// Candle ↔ Vulkan tensor bridge
+// ===========================================================================
+//
+// The 6 candle pub fns this file used to expose
+// (`extract_tensor_bytes`, `extract_tensor_packed_bf16_bytes_pub`,
+// `create_tensor_from_data`, `buffer_to_tensor`,
+// `upload_tensor_f32_buffer`, `upload_tensor_bf16_packed_buffer`)
+// plus the private helpers
+// (`extract_tensor_packed_bf16_bytes`,
+// `build_cpu_f32_tensor_from_bytes`,
+// `build_cpu_bf16_tensor_from_bytes`,
+// `upload_bytes_to_device_buffer`)
+// have moved to `crate::candle_bridge`.
+//
+// `kernels.rs` is candle-free at the public-surface level — every
+// `pub fn` declared below this point either operates on raw `&[u8]` /
+// shape metadata or is a candle-free counterpart (e.g.
+// `upload_f32_buffer_from_slice`). The candle staging that the
+// `*_bytes` dispatch shims still need is reached through
+// `crate::candle_bridge::*` rather than redefined here.
+//
+// Public path back-compat: `kernels::extract_tensor_bytes` etc. still
+// resolve, because of the `pub use` re-export below. When the upstream
+// migration to candle-free APIs completes (#1082), the re-export and
+// the `candle_bridge` module both delete; this file already needs no
+// further changes at that point.
+// (#1082)
+pub use crate::candle_bridge::{
+    buffer_to_tensor, create_tensor_from_data, extract_tensor_bytes,
+    extract_tensor_packed_bf16_bytes_pub, upload_tensor_bf16_packed_buffer,
+    upload_tensor_f32_buffer,
+};
 
-/// Extract raw bf16 weights packed two values per u32 in row-major order.
-///
-/// Shaders expand each 16-bit lane with `uintBitsToFloat(bits << 16)`, which
-/// preserves the exact bf16 value without requiring native shader bf16 support.
-/// Public re-export for kiln-model's residency registry — same impl
-/// as the private `extract_tensor_packed_bf16_bytes`. Used by the
-/// `register_resident_activation` BF16 path to upload bytes in the
-/// layout every Vulkan kernel's `load_weight` helper expects.
-pub fn extract_tensor_packed_bf16_bytes_pub(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
-    extract_tensor_packed_bf16_bytes(tensor)
-}
-
-fn extract_tensor_packed_bf16_bytes(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
-    anyhow::ensure!(
-        tensor.dtype() == DType::BF16,
-        "packed bf16 upload requires BF16 tensor, got {:?}",
-        tensor.dtype()
-    );
-    let shape: Vec<usize> = tensor.shape().dims().to_vec();
-    let flat = tensor.flatten_all().context("failed to flatten tensor")?;
-    let bf16_data = flat
-        .to_vec1::<bf16>()
-        .context("failed to extract bf16 data")?;
-    let mut packed = Vec::with_capacity(bf16_data.len().div_ceil(2));
-    for pair in bf16_data.chunks(2) {
-        let lo = pair[0].to_bits() as u32;
-        let hi = pair.get(1).map(|v| v.to_bits() as u32).unwrap_or(0);
-        packed.push(lo | (hi << 16));
-    }
-    Ok((bytemuck::cast_slice(&packed).to_vec(), shape))
-}
-
-/// Create a candle-core Tensor from raw bytes.
-pub fn create_tensor_from_data(data: &[u8], shape: &[usize], dtype: DType) -> Result<Tensor> {
-    let f32_data: &[f32] = bytemuck::cast_slice(data);
-    let tensor =
-        Tensor::from_vec(f32_data.to_vec(), f32_data.len(), &Device::Cpu)?.reshape(shape)?;
-
-    if dtype == DType::BF16 {
-        Ok(tensor.to_dtype(DType::BF16)?)
-    } else {
-        Ok(tensor)
-    }
-}
-
-/// Build a CPU F32 candle Tensor from raw f32 bytes plus shape. Used
-/// internally by the `*_bytes` dispatch shims so callers can stay
-/// candle-free even when the underlying impl still needs a Tensor.
-/// (#1082)
-fn build_cpu_f32_tensor_from_bytes(data: &[u8], shape: &[usize]) -> Result<Tensor> {
-    create_tensor_from_data(data, shape, DType::F32)
-}
-
-fn build_cpu_bf16_tensor_from_bytes(data: &[u8], shape: &[usize]) -> Result<Tensor> {
-    let expected: usize = shape.iter().product::<usize>() * 2;
-    anyhow::ensure!(
-        data.len() == expected,
-        "build_cpu_bf16_tensor_from_bytes: expected {expected} bytes for shape {:?}, got {}",
-        shape,
-        data.len()
-    );
-    let half_slice: &[half::bf16] = bytemuck::cast_slice(data);
-    Tensor::from_slice(half_slice, shape, &Device::Cpu).context("build bf16 cpu tensor")
-}
-
-/// Decode a registry-resident `VulkanBuffer` back into a candle CPU
-/// Tensor of the requested `shape` and `dtype`.
-///
-/// Inverse of the encoding choices in
-/// `vulkan::register_resident_activation`: BF16 entries are stored as
-/// packed bf16 (two bf16 lanes per u32 word, `(hi << 16) | lo`), F32
-/// entries are stored as raw f32 bytes. The decoder bit-expands each
-/// bf16 lane back to f32 then casts to the target dtype via candle so
-/// we don't need a hard dependency on the `half` crate at this layer.
-///
-/// Used by `VulkanLoraOp::bwd` to read LoRA `A` and `B` weights
-/// straight from the registry instead of candle CPU storage —
-/// closes the candle-storage staleness gap that the lazy
-/// `sync_to_candle` flow opens.
-pub fn buffer_to_tensor(
-    vk_device: &VulkanDevice,
-    buffer: &VulkanBuffer,
-    shape: &[usize],
-    dtype: DType,
-) -> Result<Tensor> {
-    let bytes = VulkanBuffer::read_back(
-        vk_device.device(),
-        vk_device.host_visible_mem_type(),
-        vk_device.queue(),
-        vk_device.queue_family_index(),
-        buffer,
-    )
-    .context("buffer_to_tensor: VulkanBuffer::read_back")?;
-    if dtype == DType::BF16 {
-        anyhow::ensure!(
-            bytes.len() % 2 == 0,
-            "buffer_to_tensor BF16: buffer byte count {} is not a multiple of 2",
-            bytes.len()
-        );
-        let elem_count: usize = shape.iter().product();
-        let stored = bytes.len() / 2;
-        anyhow::ensure!(
-            stored >= elem_count,
-            "buffer_to_tensor BF16: buffer holds {} bf16 elements, expected at least {} \
-             for shape {:?}",
-            stored,
-            elem_count,
-            shape,
-        );
-        let mut f32_data = Vec::with_capacity(elem_count);
-        for i in 0..elem_count {
-            let lo = bytes[i * 2] as u32;
-            let hi = bytes[i * 2 + 1] as u32;
-            let bf16_bits = (hi << 8) | lo;
-            f32_data.push(f32::from_bits(bf16_bits << 16));
-        }
-        Ok(Tensor::from_vec(f32_data, shape, &Device::Cpu)?.to_dtype(DType::BF16)?)
-    } else {
-        create_tensor_from_data(&bytes, shape, dtype)
-    }
-}
-
-/// Upload raw bytes as immutable weights into a device-local Vulkan
-/// buffer using a transient command pool. Candle-free core shared by
-/// [`upload_tensor_f32_buffer`] and [`upload_tensor_bf16_packed_buffer`]
-/// and reusable from `#1082` migration call sites that already have
-/// host bytes in hand. (#1082)
-fn upload_bytes_to_device_buffer(
-    vk_device: &VulkanDevice,
-    bytes: &[u8],
-    create_ctx: &'static str,
-    upload_ctx: &'static str,
-) -> Result<VulkanBuffer> {
-    let device = vk_device.device();
-    let queue = vk_device.queue();
-    let device_local_mt = vk_device.device_local_mem_type();
-    let host_visible_mt = vk_device.host_visible_mem_type();
-
-    let buffer = VulkanBuffer::create_device_local(device, device_local_mt, bytes.len() as u64)
-        .context(create_ctx)?;
-    {
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &buffer,
-            bytes,
-        )
-        .context(upload_ctx)?;
-    }
-    Ok(buffer)
-}
+use crate::candle_bridge::{build_cpu_f32_tensor_from_bytes, upload_bytes_to_device_buffer};
 
 /// Upload an f32 slice as a contiguous immutable weight buffer.
-/// Candle-free counterpart to [`upload_tensor_f32_buffer`]: callers
-/// with host-side f32 data can skip the candle Tensor staging step
+/// Candle-free counterpart to
+/// [`crate::candle_bridge::upload_tensor_f32_buffer`]: callers with
+/// host-side f32 data can skip the candle Tensor staging step
 /// entirely. (#1082)
 pub fn upload_f32_buffer_from_slice(
     vk_device: &VulkanDevice,
@@ -1042,7 +913,8 @@ pub fn upload_f32_buffer_from_slice(
 /// Upload a bf16 slice as packed immutable weights into a Vulkan
 /// buffer. Two bf16 lanes are packed per u32 word (`(hi << 16) | lo`)
 /// to match the `*_bf16w.comp` shader variants. Candle-free
-/// counterpart to [`upload_tensor_bf16_packed_buffer`]. (#1082)
+/// counterpart to
+/// [`crate::candle_bridge::upload_tensor_bf16_packed_buffer`]. (#1082)
 pub fn upload_bf16_packed_buffer_from_slice(
     vk_device: &VulkanDevice,
     data: &[bf16],
@@ -1056,54 +928,6 @@ pub fn upload_bf16_packed_buffer_from_slice(
     upload_bytes_to_device_buffer(
         vk_device,
         bytemuck::cast_slice(&packed),
-        "failed to create cached packed bf16 tensor buffer",
-        "failed to upload cached packed bf16 tensor buffer",
-    )
-}
-
-/// Upload a Candle tensor as contiguous f32 values into a device-local Vulkan buffer.
-///
-/// This is used by model-level caches for immutable weights so repeated decode
-/// steps do not re-upload multi-megabyte projection matrices.
-///
-/// Candle-shim wrapper around [`upload_f32_buffer_from_slice`] —
-/// extracts the tensor's f32 bytes once, then delegates to the
-/// candle-free core. (#1082)
-pub fn upload_tensor_f32_buffer(vk_device: &VulkanDevice, tensor: &Tensor) -> Result<VulkanBuffer> {
-    let tensor_f32;
-    let tensor = if tensor.dtype() == DType::F32 {
-        tensor
-    } else {
-        tensor_f32 = tensor
-            .to_dtype(DType::F32)
-            .context("failed to convert cached tensor to f32 for Vulkan upload")?;
-        &tensor_f32
-    };
-    let data = extract_tensor_bytes(tensor)?.0;
-    upload_bytes_to_device_buffer(
-        vk_device,
-        &data,
-        "failed to create cached tensor buffer",
-        "failed to upload cached tensor buffer",
-    )
-}
-
-/// Upload a BF16 Candle tensor as packed immutable weights into a Vulkan buffer.
-///
-/// The resulting buffer stores two BF16 values per u32, matching the
-/// `*_bf16w.comp` shader variants.
-///
-/// Candle-shim wrapper around [`upload_bf16_packed_buffer_from_slice`].
-/// Extracts packed bf16 bytes from the tensor once, then delegates to
-/// the candle-free core. (#1082)
-pub fn upload_tensor_bf16_packed_buffer(
-    vk_device: &VulkanDevice,
-    tensor: &Tensor,
-) -> Result<VulkanBuffer> {
-    let data = extract_tensor_packed_bf16_bytes(tensor)?.0;
-    upload_bytes_to_device_buffer(
-        vk_device,
-        &data,
         "failed to create cached packed bf16 tensor buffer",
         "failed to upload cached packed bf16 tensor buffer",
     )
