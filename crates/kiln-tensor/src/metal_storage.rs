@@ -414,7 +414,7 @@ pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     let byte_len = element_count * dtype_size;
     let raw_device = candle_device_arc.metal_device();
     let out_buffer = raw_device
-        .new_buffer(byte_len.max(1) as u64, MTLResourceOptions::StorageModeShared)
+        .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .map_err(|e| {
             Error::Msg(format!(
                 "metal_softmax_last_axis: new_buffer({byte_len}) failed: {e:?}"
@@ -569,7 +569,7 @@ pub fn metal_rmsnorm_last_axis(
     let byte_len = element_count_x * dtype_size;
     let raw_device = candle_device_arc.metal_device();
     let out_buffer = raw_device
-        .new_buffer(byte_len.max(1) as u64, MTLResourceOptions::StorageModeShared)
+        .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .map_err(|e| {
             Error::Msg(format!(
                 "metal_rmsnorm_last_axis: new_buffer({byte_len}) failed: {e:?}"
@@ -735,7 +735,7 @@ pub fn metal_layernorm_last_axis(
     let byte_len = element_count_x * dtype_size;
     let raw_device = candle_device_arc.metal_device();
     let out_buffer = raw_device
-        .new_buffer(byte_len.max(1) as u64, MTLResourceOptions::StorageModeShared)
+        .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .map_err(|e| {
             Error::Msg(format!(
                 "metal_layernorm_last_axis: new_buffer({byte_len}) failed: {e:?}"
@@ -914,7 +914,7 @@ pub fn metal_index_select_dim0(
     let byte_len = out_element_count * dtype_size;
     let raw_device = candle_device_arc.metal_device();
     let out_buffer = raw_device
-        .new_buffer(byte_len.max(1) as u64, MTLResourceOptions::StorageModeShared)
+        .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .map_err(|e| {
             Error::Msg(format!(
                 "metal_index_select_dim0: new_buffer({byte_len}) failed: {e:?}"
@@ -1070,7 +1070,7 @@ pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
     let byte_len = element_count * to_dtype_size;
     let raw_device = candle_device_arc.metal_device();
     let out_buffer = raw_device
-        .new_buffer(byte_len.max(1) as u64, MTLResourceOptions::StorageModeShared)
+        .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .map_err(|e| {
             Error::Msg(format!(
                 "metal_cast: new_buffer({byte_len}) failed: {e:?}"
@@ -1239,7 +1239,7 @@ pub fn metal_elementwise_binary(
     let byte_len = element_count * dtype_size;
     let raw_device = candle_device_arc.metal_device();
     let out_buffer = raw_device
-        .new_buffer(byte_len.max(1) as u64, MTLResourceOptions::StorageModeShared)
+        .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .map_err(|e| {
             Error::Msg(format!(
                 "metal_elementwise_binary: new_buffer({byte_len}) failed: {e:?}"
@@ -1454,7 +1454,7 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
     let byte_len = element_count * dtype_size;
     let raw_device = candle_device_arc.metal_device();
     let out_buffer = raw_device
-        .new_buffer(byte_len.max(1) as u64, MTLResourceOptions::StorageModeShared)
+        .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
         .map_err(|e| {
             Error::Msg(format!(
                 "metal_activation_unary: new_buffer({byte_len}) failed: {e:?}"
