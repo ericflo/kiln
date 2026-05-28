@@ -139,55 +139,23 @@ pub use candle_core::Storage;
 /// fused SDPA op that takes `kiln_tensor::Tensor` arguments.
 pub use candle_nn::ops::sdpa;
 
-/// Build a `BufferOffset` from a candle `Buffer` + `Layout` + `DType`.
+/// Build a `BufferOffset` from a candle `Buffer` + `kiln_tensor::Layout`
+/// + `kiln_tensor::DType`.
 ///
-/// This is a mirror of `candle_core::metal_backend::buffer_o` — same
-/// formula, same wire types, but reachable through the `kiln_tensor`
-/// path so that callers in `kiln-model::backend::metal` no longer
-/// name `candle_core::metal_backend::*` in their bodies.
+/// This is the kt-typed chokepoint entry point for byte-offset
+/// computation: callers in `kiln-model::backend::metal` reach it
+/// through the `kiln_tensor` path so their bodies no longer name
+/// `candle_core::metal_backend::*`. The formula is the candle-bundled
+/// one (`l.start_offset() * dtype.size_in_bytes()`); inlining it here
+/// gives the same byte offset that `candle_metal_kernels::call_*`
+/// kernels expect, while keeping the chokepoint free to evolve (a
+/// `pub use` of `candle_core::metal_backend::buffer_o` would lock the
+/// chokepoint to candle-core's API surface forever).
 ///
-/// The formula is the candle-bundled one (`l.start_offset() *
-/// dtype.size_in_bytes()`); inlining it here gives the same byte
-/// offset that `candle_metal_kernels::call_*` kernels expect.
-///
-/// # Phase 7 follow-up
-///
-/// When the kernel crates retire the candle bridge, this helper
-/// gains a kt-native overload that takes a `kiln_tensor::Layout` +
-/// `kiln_tensor::DType` directly; the candle-typed signature stays
-/// as the legacy entry point until every caller migrates.
-///
-/// # Why we re-implement rather than re-export
-///
-/// `candle_core::metal_backend::buffer_o` lives behind candle-core's
-/// `metal` feature; re-exporting it through `pub use` would lock the
-/// chokepoint to candle-core's API surface forever. Re-implementing
-/// the trivial formula here keeps the chokepoint free to evolve.
-#[inline]
-pub fn buffer_o<'a>(
-    buffer: &'a candle_metal_kernels::metal::Buffer,
-    l: &candle_core::Layout,
-    dtype: candle_core::DType,
-) -> BufferOffset<'a> {
-    BufferOffset {
-        buffer,
-        offset_in_bytes: l.start_offset() * dtype.size_in_bytes(),
-    }
-}
-
-/// kt-typed sibling of [`buffer_o`]: takes `kiln_tensor::Layout` +
-/// `kiln_tensor::DType` instead of the candle-typed pair, with an
-/// identical formula and identical return type.
-///
-/// This is the first half of the metal_types chokepoint flip
-/// (see `docs/metal-types-objc2-swap-plan-2026-05-28.md` Step 1).
-/// Caller-migration commits switch each `buffer_o(.., l: &Layout,
-/// dtype)` site to `buffer_o_kt(.., l_kt: &kiln_tensor::Layout,
-/// dtype_kt: kiln_tensor::DType)` one helper-family at a time
-/// (Step 4 of the swap plan, 232 candidate sites). Once every caller
-/// has flipped, the candle-typed `buffer_o` retires; once the buffer
-/// argument flips off `candle_metal_kernels::metal::Buffer` to
-/// `RawBuffer`, the chokepoint surface is candle-free.
+/// As of the Step-4 caller migration (swap plan
+/// `docs/metal-types-objc2-swap-plan-2026-05-28.md`), all 232 metal.rs
+/// call sites name this kt-typed helper; the legacy candle-typed
+/// `buffer_o` has been retired.
 ///
 /// The `buffer` argument still names
 /// `candle_metal_kernels::metal::Buffer` because that's the type the
