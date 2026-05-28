@@ -8315,62 +8315,37 @@ pub fn split_gdn_recurrent_state_batch_rows(
     Ok(rows)
 }
 
-pub fn dispatch_gdn_recurrent_step_with_options(
+/// Bytes-only single-token GDN recurrent dispatch.
+///
+/// Inputs are expected to be in `[batch, heads, dk]` / `[batch, heads, dv]`
+/// row-major layout matching the regular GQA-expanded path. The caller
+/// passes the shape parameters directly. Output bytes are `[batch, heads, dv]`
+/// in the kernel's recurrent dtype; the optional state bytes match the
+/// caller-known state shape and dtype.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_recurrent_step_with_options_bytes(
     vk_device: &VulkanDevice,
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    g: &Tensor,
-    state: &Tensor,
+    q_data: &[u8],
+    k_data: &[u8],
+    v_data: &[u8],
+    beta_data: &[u8],
+    g_data: &[u8],
+    state_data: &[u8],
+    batch: usize,
+    heads: usize,
+    dk: usize,
+    dv: usize,
     skip_state_readback: bool,
-) -> Result<(Tensor, Option<Tensor>)> {
+) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    // Extract input data
     let profile_kernel_stages = profile_vulkan_gdn_recurrent_kernel_stages_enabled();
-    let stage_profile = profile_kernel_stages.then(Instant::now);
-    let q_data = extract_tensor_bytes(q)?.0;
-    let k_data = extract_tensor_bytes(k)?.0;
-    let v_data = extract_tensor_bytes(v)?.0;
-    let beta_data = extract_tensor_bytes(beta)?.0;
-    let g_data = extract_tensor_bytes(g)?.0;
-
-    // Parse shape [B, H, dk/dv].
-    let dims = q.dims();
-    let (batch, heads, dk) = (dims[0], dims[1], dims[2]);
-    let dims_v = v.dims();
-    let dv = dims_v[2];
 
     let single_submit = gdn_recurrent_single_submit_enabled();
     let parallel_reduce = single_submit && use_gdn_recurrent_parallel_reduce(dk, dv);
-    finish_vulkan_gdn_recurrent_kernel_stage_profile(
-        "extract_inputs",
-        batch,
-        heads,
-        dk,
-        dv,
-        parallel_reduce,
-        single_submit,
-        skip_state_readback,
-        stage_profile,
-    );
-    let stage_profile = profile_kernel_stages.then(Instant::now);
-    let state_data = extract_tensor_bytes(state)?.0;
-    finish_vulkan_gdn_recurrent_kernel_stage_profile(
-        "extract_state",
-        batch,
-        heads,
-        dk,
-        dv,
-        parallel_reduce,
-        single_submit,
-        skip_state_readback,
-        stage_profile,
-    );
     let stage_profile = profile_kernel_stages.then(Instant::now);
     let glsl_path = if parallel_reduce {
         concat!(
@@ -8397,14 +8372,14 @@ pub fn dispatch_gdn_recurrent_step_with_options(
     );
 
     if single_submit {
-        let (out_data, state_data_out) = dispatch_gdn_recurrent_step_single_submit_bytes(
+        return dispatch_gdn_recurrent_step_single_submit_bytes(
             vk_device,
-            &q_data,
-            &k_data,
-            &v_data,
-            &beta_data,
-            &g_data,
-            &state_data,
+            q_data,
+            k_data,
+            v_data,
+            beta_data,
+            g_data,
+            state_data,
             &spirv,
             batch,
             heads,
@@ -8415,14 +8390,7 @@ pub fn dispatch_gdn_recurrent_step_with_options(
             skip_state_readback,
             profile_kernel_stages,
             None,
-        )?;
-        let out_shape = vec![batch, heads, dv];
-        let out_tensor = create_tensor_from_data(&out_data, &out_shape, q.dtype())?;
-        let state_tensor = state_data_out
-            .as_ref()
-            .map(|sd| create_tensor_from_data(sd, state.dims(), state.dtype()))
-            .transpose()?;
-        return Ok((out_tensor, state_tensor));
+        );
     }
 
     // Create input buffers + upload.
@@ -8439,11 +8407,11 @@ pub fn dispatch_gdn_recurrent_step_with_options(
         )?;
         Ok(buf)
     };
-    let q_buf = make_input_buf(&q_data)?;
-    let k_buf = make_input_buf(&k_data)?;
-    let v_buf = make_input_buf(&v_data)?;
-    let beta_buf = make_input_buf(&beta_data)?;
-    let g_buf = make_input_buf(&g_data)?;
+    let q_buf = make_input_buf(q_data)?;
+    let k_buf = make_input_buf(k_data)?;
+    let v_buf = make_input_buf(v_data)?;
+    let beta_buf = make_input_buf(beta_data)?;
+    let g_buf = make_input_buf(g_data)?;
     // State is mutable — upload, dispatch, read back. On Strix Halo, direct
     // host-visible state is faster for batch 1, while batch >1 benefits from
     // device-local state plus explicit staging copies.
@@ -8454,7 +8422,7 @@ pub fn dispatch_gdn_recurrent_step_with_options(
         VulkanBuffer::create_device_local(device, device_local_mt, state_data.len() as u64)?
     };
     if host_visible_state {
-        VulkanBuffer::write_host_visible(device, &state_buf, &state_data)?;
+        VulkanBuffer::write_host_visible(device, &state_buf, state_data)?;
     } else {
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::upload_data_with_command_pool(
@@ -8463,7 +8431,7 @@ pub fn dispatch_gdn_recurrent_step_with_options(
             queue,
             *command_pool,
             &state_buf,
-            &state_data,
+            state_data,
         )?;
     }
 
@@ -8509,7 +8477,7 @@ pub fn dispatch_gdn_recurrent_step_with_options(
     )?;
 
     // Read back output and updated state
-    let (out_data, state_data) = {
+    let (out_data, state_data_out) = {
         let command_pool = vk_device.transient_command_pool()?;
         let out_data = VulkanBuffer::read_back_with_command_pool(
             device,
@@ -8518,7 +8486,7 @@ pub fn dispatch_gdn_recurrent_step_with_options(
             *command_pool,
             &out_buf,
         )?;
-        let state_data = if skip_state_readback {
+        let state_data_out = if skip_state_readback {
             None
         } else if host_visible_state {
             Some(VulkanBuffer::read_host_visible(device, &state_buf)?)
@@ -8531,7 +8499,7 @@ pub fn dispatch_gdn_recurrent_step_with_options(
                 &state_buf,
             )?)
         };
-        (out_data, state_data)
+        (out_data, state_data_out)
     };
 
     // Cleanup
@@ -8543,13 +8511,7 @@ pub fn dispatch_gdn_recurrent_step_with_options(
     drop(state_buf);
     drop(out_buf);
 
-    let out_shape = vec![batch, heads, dv];
-    let out_tensor = create_tensor_from_data(&out_data, &out_shape, q.dtype())?;
-    let state_tensor = state_data
-        .as_ref()
-        .map(|state_data| create_tensor_from_data(state_data, state.dims().as_ref(), state.dtype()))
-        .transpose()?;
-    Ok((out_tensor, state_tensor))
+    Ok((out_data, state_data_out))
 }
 
 /// Dispatch a single-token recurrent step while keeping `state` resident.

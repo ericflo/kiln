@@ -2627,7 +2627,10 @@ mod tests {
 
     #[test]
     fn gdn_recurrent_step_resident_matches_nonresident() {
-        use crate::kernels::dispatch_gdn_recurrent_step_with_options;
+        use crate::kernels::{
+            create_tensor_from_data, dispatch_gdn_recurrent_step_with_options_bytes,
+            extract_tensor_bytes,
+        };
         let Some(dev) = try_device() else { return };
         let batch = 2;
         let heads = 4;
@@ -2670,9 +2673,29 @@ mod tests {
         )
         .unwrap();
 
-        let (out_t, new_state_opt) =
-            dispatch_gdn_recurrent_step_with_options(&dev, &q, &k, &v, &beta, &g, &state, false).unwrap();
-        let _new_state_t = new_state_opt.expect("state present when skip_state_readback=false");
+        let q_bytes_ref = extract_tensor_bytes(&q).unwrap().0;
+        let k_bytes_ref = extract_tensor_bytes(&k).unwrap().0;
+        let v_bytes_ref = extract_tensor_bytes(&v).unwrap().0;
+        let beta_bytes_ref = extract_tensor_bytes(&beta).unwrap().0;
+        let g_bytes_ref = extract_tensor_bytes(&g).unwrap().0;
+        let state_bytes_ref = extract_tensor_bytes(&state).unwrap().0;
+        let (out_data, new_state_data) = dispatch_gdn_recurrent_step_with_options_bytes(
+            &dev,
+            &q_bytes_ref,
+            &k_bytes_ref,
+            &v_bytes_ref,
+            &beta_bytes_ref,
+            &g_bytes_ref,
+            &state_bytes_ref,
+            batch,
+            heads,
+            dk,
+            dv,
+            false,
+        )
+        .unwrap();
+        let out_t = create_tensor_from_data(&out_data, &[batch, heads, dv], q.dtype()).unwrap();
+        let _new_state_t = new_state_data.expect("state present when skip_state_readback=false");
         let expected = out_t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
 
         let q_buf = upload_tensor_f32_buffer(&dev, &q).unwrap();

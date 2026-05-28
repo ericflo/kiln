@@ -106,6 +106,61 @@ fn maybe_vulkan() -> Option<VulkanDevice> {
     VulkanDevice::new().ok()
 }
 
+/// Test-only candle wrapper for the bytes-only
+/// `dispatch_gdn_recurrent_step_with_options_bytes`. Keeps the candle-typed
+/// parity tests readable without re-exposing candle types in the kernel
+/// crate's public API.
+fn dispatch_gdn_recurrent_step_with_options_tensor(
+    vk: &VulkanDevice,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    state: &Tensor,
+    skip_state_readback: bool,
+) -> Result<(Tensor, Option<Tensor>)> {
+    let q_dims = q.dims();
+    let (batch, heads, dk) = (q_dims[0], q_dims[1], q_dims[2]);
+    let dv = v.dims()[2];
+    let q_dtype = q.dtype();
+    let state_dtype = state.dtype();
+    let state_dims = state.dims().to_vec();
+    let q_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(q)?.0;
+    let k_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(k)?.0;
+    let v_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(v)?.0;
+    let beta_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(beta)?.0;
+    let g_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(g)?.0;
+    let state_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(state)?.0;
+    let (out_data, new_state_data) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options_bytes(
+            vk,
+            &q_data,
+            &k_data,
+            &v_data,
+            &beta_data,
+            &g_data,
+            &state_data,
+            batch,
+            heads,
+            dk,
+            dv,
+            skip_state_readback,
+        )?;
+    let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &out_data,
+        &[batch, heads, dv],
+        q_dtype,
+    )?;
+    let new_state = new_state_data
+        .as_ref()
+        .map(|sd| {
+            kiln_vulkan_kernel::kernels::create_tensor_from_data(sd, &state_dims, state_dtype)
+        })
+        .transpose()?;
+    Ok((out, new_state))
+}
+
 /// Test-only candle wrapper for the `_bytes` recurrent dispatch — keeps the
 /// candle-typed parity tests readable without reintroducing a candle-typed
 /// pub fn on the kernel crate.
@@ -394,7 +449,7 @@ fn gdn_recurrent_step_matches_cpu_reference() -> Result<()> {
     )?;
 
     let (got_out, got_state) = {
-        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+        let (out, state) = dispatch_gdn_recurrent_step_with_options_tensor(
             &vk, &q, &k, &v, &beta, &g, &state, false,
         )
         .context("dispatch_gdn_recurrent_step")?;
@@ -463,7 +518,7 @@ fn gdn_recurrent_step_matches_f32_cpu_reference() -> Result<()> {
     )?;
 
     let (got_out, got_state) = {
-        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+        let (out, state) = dispatch_gdn_recurrent_step_with_options_tensor(
             &vk, &q, &k, &v, &beta, &g, &state, false,
         )
         .context("dispatch_gdn_recurrent_step f32")?;
@@ -555,7 +610,7 @@ fn gdn_recurrent_step_parallel_reduce_matches_f32_cpu_reference() -> Result<()> 
     )?;
 
     let (got_out, got_state) = {
-        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+        let (out, state) = dispatch_gdn_recurrent_step_with_options_tensor(
             &vk, &q, &k, &v, &beta, &g, &state, false,
         )
         .context("dispatch_gdn_recurrent_step parallel reduce f32")?;
@@ -674,7 +729,7 @@ fn gdn_recurrent_step_native_head_last_matches_expanded_reference() -> Result<()
     let g_expanded = g.squeeze(1)?.contiguous()?;
 
     let (expected_out, expected_state) = {
-        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+        let (out, state) = dispatch_gdn_recurrent_step_with_options_tensor(
             &vk,
         &q_expanded,
         &k_expanded,
@@ -1037,14 +1092,14 @@ fn gdn_recurrent_step_can_skip_state_readback() -> Result<()> {
     )?;
 
     let (expected_out, _expected_state) = {
-        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+        let (out, state) = dispatch_gdn_recurrent_step_with_options_tensor(
             &vk, &q, &k, &v, &beta, &g, &state, false,
         )
         .context("dispatch_gdn_recurrent_step reference")?;
         (out, state.context("dispatch_gdn_recurrent_step reference")?)
     };
     let (got_out, got_state) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+        dispatch_gdn_recurrent_step_with_options_tensor(
             &vk, &q, &k, &v, &beta, &g, &state, true,
         )
         .context("dispatch_gdn_recurrent_step skip state readback")?;
@@ -1084,7 +1139,7 @@ fn gdn_recurrent_resident_state_matches_two_step_reference() -> Result<()> {
 
     let (expected_out1, expected_state1) =
         {
-        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+        let (out, state) = dispatch_gdn_recurrent_step_with_options_tensor(
                 &vk, &q1, &k1, &v1, &beta1, &g1, &state, false,
         )
         .context("dispatch_gdn_recurrent_step reference step 1")?;
@@ -1092,7 +1147,7 @@ fn gdn_recurrent_resident_state_matches_two_step_reference() -> Result<()> {
     };
     let (expected_out2, _expected_state2) =
         {
-        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+        let (out, state) = dispatch_gdn_recurrent_step_with_options_tensor(
                 &vk,
             &q2,
             &k2,
@@ -1403,7 +1458,7 @@ fn gdn_recurrent_resident_state_parallel_reduce_matches_two_step_reference() -> 
 
     let (expected_out1, expected_state1) =
         {
-        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+        let (out, state) = dispatch_gdn_recurrent_step_with_options_tensor(
                 &vk, &q1, &k1, &v1, &beta1, &g1, &state, false,
         )
         .context("dispatch_gdn_recurrent_step parallel reference step 1")?;
@@ -1411,7 +1466,7 @@ fn gdn_recurrent_resident_state_parallel_reduce_matches_two_step_reference() -> 
     };
     let (expected_out2, _expected_state2) =
         {
-        let (out, state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+        let (out, state) = dispatch_gdn_recurrent_step_with_options_tensor(
                 &vk,
             &q2,
             &k2,
