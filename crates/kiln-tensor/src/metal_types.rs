@@ -105,14 +105,10 @@ pub use candle_core::metal_backend::DeviceId;
 /// path-naming bookkeeping step.
 pub use candle_core::Storage;
 
-/// Candle `D` axis-index enum re-export — `D::Minus1`, `D::Minus2`,
-/// `D::Minus(usize)` are candle's negative-index selectors consumed
-/// by `Tensor::dim(...)`, `Tensor::sum(...)`, etc. Same Phase-7
-/// chokepoint rationale as `MetalDevice` / `DeviceId` / `Storage`:
-/// keep the wire type identical, move the path through `kiln_tensor`
-/// so callers in `kiln-model::backend::metal` no longer name
-/// `candle_core::D::Minus1` directly.
-pub use candle_core::D;
+// `D` re-export retired (#1082): the production `kiln-model::backend::metal`
+// call sites now compute the last-axis index via kt-native `tensor.rank() - 1`
+// arithmetic, and the test helpers in that file import `candle_core::D`
+// directly since they operate on `candle_core::Tensor` already.
 
 /// Candle `sdpa` re-export — the MLX-style fused scaled-dot-product
 /// attention kernel shipped in `candle_nn::ops::sdpa`. Used in 9

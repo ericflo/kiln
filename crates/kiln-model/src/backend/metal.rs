@@ -456,7 +456,11 @@ impl BackendRuntime for MetalBackend {
         if !matches!(q.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32) {
             return Ok(None);
         }
-        let head_dim = q.dim(kiln_tensor::metal_types::D::Minus1)?;
+        // Last-axis index via kt-native `rank()` arithmetic so this site no
+        // longer names `kiln_tensor::metal_types::D::Minus1` (#1082 chokepoint).
+        // `q` here is always at least rank 3 (batch, seq, hidden); the
+        // subtraction matches the previous `D::Minus1` semantics.
+        let head_dim = q.dim(q.rank() - 1)?;
         if !metal_sdpa_supports_head_dim(head_dim) {
             return Ok(None);
         }
@@ -492,7 +496,8 @@ impl BackendRuntime for MetalBackend {
         if !matches!(q.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32) {
             return Ok(None);
         }
-        let head_dim = q.dim(kiln_tensor::metal_types::D::Minus1)?;
+        // Last-axis index via kt-native `rank()` arithmetic; see notes above (#1082 chokepoint).
+        let head_dim = q.dim(q.rank() - 1)?;
         if !metal_sdpa_supports_head_dim(head_dim) {
             return Ok(None);
         }
@@ -527,7 +532,8 @@ impl BackendRuntime for MetalBackend {
         if !matches!(q.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32) {
             return Ok(None);
         }
-        let head_dim = q.dim(kiln_tensor::metal_types::D::Minus1)?;
+        // Last-axis index via kt-native `rank()` arithmetic; see notes above (#1082 chokepoint).
+        let head_dim = q.dim(q.rank() - 1)?;
         if !metal_sdpa_supports_head_dim(head_dim) {
             return Ok(None);
         }
@@ -13970,7 +13976,11 @@ pub fn try_new_metal() -> Option<candle_core::Device> {
 mod tests {
     use super::*;
     use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
-    use kiln_tensor::metal_types::D;
+    // Tests operate on `candle_core::Tensor` directly (they exercise candle-metal
+    // interop), so the negative-axis selector imports straight from candle. The
+    // production code path no longer depends on `kiln_tensor::metal_types::D`
+    // (#1082 chokepoint reduction).
+    use candle_core::D;
     use std::time::Instant;
 
     const QWEN35_HIDDEN: usize = 2560;
