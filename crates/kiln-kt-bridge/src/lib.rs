@@ -574,7 +574,7 @@ pub fn kt_tensor_to_candle_cuda_copy(
     t: &KtTensor,
 ) -> Result<candle_core::Tensor, BridgeError> {
     use candle_core::{
-        backend::{BackendDevice, BackendStorage},
+        backend::BackendDevice,
         cuda_backend::cudarc::driver::{result as cudarc_result, DevicePtr},
         DType as C, DeviceLocation, Device as CDevice,
     };
