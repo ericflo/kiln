@@ -125,15 +125,49 @@ impl Tape {
         &self,
         loss_id: TensorId,
         seed_grad: Tensor,
+        accumulator: F,
+    ) -> Result<GradStore>
+    where
+        F: FnMut(&Tensor, &Tensor) -> Result<Tensor>,
+    {
+        // Delegate to the multi-seed walker with a singleton seed map.
+        // Keeps the public single-loss API stable while letting the
+        // bridge feed multiple downstream seed grads in one walk (Phase
+        // 6a/CP-4 #1082 — see `Tape::backward_with_seeds`).
+        let mut seeds: std::collections::HashMap<TensorId, Tensor> =
+            std::collections::HashMap::new();
+        seeds.insert(loss_id, seed_grad);
+        self.backward_with_seeds(seeds, accumulator)
+    }
+
+    /// Run the backward pass with a *map* of seed gradients.
+    ///
+    /// Same walker semantics as [`Tape::backward`] but the caller
+    /// supplies `(output_id → seed_grad)` for **any** tape-recorded
+    /// node's output (or for any `TensorId` that appears as an input to
+    /// a tape node, in which case it short-circuits into the per-input
+    /// accumulation directly). This is the entry point used by the
+    /// `kiln-kt-bridge::tape_emit` bridge (Phase 6a/CP-4 #1082):
+    /// `loss.backward()` produces candle grads for the candle Tensors
+    /// returned by each tape adapter; the bridge feeds them in as the
+    /// per-tape-output seeds, lets `Tape::backward` walk the tape, and
+    /// merges the resulting per-input kt grads back into candle's
+    /// `GradStore` under the matching candle `TensorId`s.
+    ///
+    /// `seeds` may contain entries for `TensorId`s that the tape
+    /// never recorded as an output — they're carried through to the
+    /// returned `GradStore` (so the caller can ask "what's the grad of
+    /// `x`?" without first proving x was a tape output).
+    pub fn backward_with_seeds<F>(
+        &self,
+        seeds: std::collections::HashMap<TensorId, Tensor>,
         mut accumulator: F,
     ) -> Result<GradStore>
     where
         F: FnMut(&Tensor, &Tensor) -> Result<Tensor>,
     {
         // Per-output-id accumulated gradient map.
-        let mut grads: std::collections::HashMap<TensorId, Tensor> =
-            std::collections::HashMap::new();
-        grads.insert(loss_id, seed_grad);
+        let mut grads: std::collections::HashMap<TensorId, Tensor> = seeds;
 
         // Read KILN_DETECT_ANOMALY once up-front so the per-node loop
         // doesn't pay the env-var lookup cost per iteration. When
@@ -662,5 +696,85 @@ mod tests {
             .backward(out.id(), cpu_tensor(), passthrough_accumulator)
             .unwrap_err();
         assert!(e.to_string().contains("returned"));
+    }
+
+    #[test]
+    fn backward_with_seeds_supports_multi_output_seeding() {
+        // CP-4 #1082 bridge precondition: when the kt-tape graph has
+        // multiple sub-roots (e.g. two production-caller adapters each
+        // record a node whose candle output flows independently into
+        // the loss), the bridge feeds *each* output's seed grad as a
+        // separate map entry. Confirm the walker honours both seeds
+        // and accumulates correctly per input.
+        //
+        // Graph:
+        //   a → op1 → out1   (seeded externally)
+        //   b → op2 → out2   (seeded externally)
+        //
+        // Backward must call op1 with the seed for out1 and op2 with
+        // the seed for out2; each input grad map must contain a, b.
+        let mut tape = Tape::new();
+        let a = cpu_tensor();
+        let b = cpu_tensor();
+        let out1 = cpu_tensor();
+        let out2 = cpu_tensor();
+
+        let calls1 = std::sync::Arc::new(AtomicUsize::new(0));
+        let calls2 = std::sync::Arc::new(AtomicUsize::new(0));
+        tape.record(
+            &out1,
+            &[&a],
+            Box::new(CountingOp {
+                name: "test/op1",
+                input_count: 1,
+                calls: calls1.clone(),
+            }),
+        );
+        tape.record(
+            &out2,
+            &[&b],
+            Box::new(CountingOp {
+                name: "test/op2",
+                input_count: 1,
+                calls: calls2.clone(),
+            }),
+        );
+
+        let mut seeds: std::collections::HashMap<TensorId, Tensor> =
+            std::collections::HashMap::new();
+        seeds.insert(out1.id(), cpu_tensor());
+        seeds.insert(out2.id(), cpu_tensor());
+
+        let store = tape
+            .backward_with_seeds(seeds, passthrough_accumulator)
+            .unwrap();
+
+        assert_eq!(calls1.load(Ordering::SeqCst), 1, "op1 must run once");
+        assert_eq!(calls2.load(Ordering::SeqCst), 1, "op2 must run once");
+        assert!(store.get(a.id()).is_some(), "a must have a grad");
+        assert!(store.get(b.id()).is_some(), "b must have a grad");
+    }
+
+    #[test]
+    fn backward_with_seeds_carries_unmatched_seeds_through() {
+        // Bridge contract: seeds for `TensorId`s that the tape never
+        // recorded as outputs are preserved in the returned GradStore.
+        // The bridge relies on this so it can ask "what's the grad of
+        // a candle parameter that fed *into* a tape op but had no
+        // tape op record itself" — i.e., the kt-side input ID grad
+        // accumulator behaviour at the leaf nodes.
+        let tape = Tape::new();
+        let leaf = cpu_tensor();
+        let mut seeds: std::collections::HashMap<TensorId, Tensor> =
+            std::collections::HashMap::new();
+        seeds.insert(leaf.id(), cpu_tensor());
+
+        let store = tape
+            .backward_with_seeds(seeds, passthrough_accumulator)
+            .unwrap();
+        assert!(
+            store.get(leaf.id()).is_some(),
+            "unmatched seed must survive an empty backward"
+        );
     }
 }
