@@ -349,7 +349,18 @@ mod tests {
 
     #[test]
     fn test_kv_cache_new() -> Result<()> {
-        let cache = KvCache::new(2, 4, 8, 128, DType::F32, &Device::Cpu)?;
+        // Migrated to `new_kt` (#1082); the `new`/`new_kt` pair are equivalent
+        // — `new_kt` bridges kiln_tensor::DType + &kiln_tensor::Device to
+        // candle and delegates to `new`, so the assertions on the candle
+        // storage internals (`layers.len()`, `is_fp8()`) still hold.
+        let cache = KvCache::new_kt(
+            2,
+            4,
+            8,
+            128,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
         assert_eq!(cache.seq_len(), 0);
         assert_eq!(cache.layers.len(), 2);
         assert!(!cache.is_fp8());
@@ -359,7 +370,15 @@ mod tests {
     #[test]
     fn test_kv_cache_update_and_advance() -> Result<()> {
         let device = Device::Cpu;
-        let mut cache = KvCache::new(1, 2, 4, 32, DType::F32, &device)?;
+        // Migrated to `new_kt` (#1082).
+        let mut cache = KvCache::new_kt(
+            1,
+            2,
+            4,
+            32,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
 
         // Simulate prefill with 3 tokens
         let k = Tensor::ones((1, 2, 3, 4), DType::F32, &device)?;
@@ -385,7 +404,15 @@ mod tests {
     #[test]
     fn test_kv_cache_overflow() -> Result<()> {
         let device = Device::Cpu;
-        let mut cache = KvCache::new(1, 1, 4, 4, DType::F32, &device)?;
+        // Migrated to `new_kt` (#1082).
+        let mut cache = KvCache::new_kt(
+            1,
+            1,
+            4,
+            4,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
 
         let k = Tensor::ones((1, 1, 3, 4), DType::F32, &device)?;
         let v = Tensor::ones((1, 1, 3, 4), DType::F32, &device)?;
@@ -404,7 +431,15 @@ mod tests {
     #[test]
     fn test_kv_cache_reset() -> Result<()> {
         let device = Device::Cpu;
-        let mut cache = KvCache::new(1, 1, 4, 16, DType::F32, &device)?;
+        // Migrated to `new_kt` (#1082).
+        let mut cache = KvCache::new_kt(
+            1,
+            1,
+            4,
+            16,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
 
         let k = Tensor::ones((1, 1, 5, 4), DType::F32, &device)?;
         let v = Tensor::ones((1, 1, 5, 4), DType::F32, &device)?;
@@ -421,7 +456,15 @@ mod tests {
     #[test]
     fn test_kv_cache_content_preserved() -> Result<()> {
         let device = Device::Cpu;
-        let mut cache = KvCache::new(1, 1, 2, 8, DType::F32, &device)?;
+        // Migrated to `new_kt` (#1082).
+        let mut cache = KvCache::new_kt(
+            1,
+            1,
+            2,
+            8,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
 
         // Write known values for first 2 positions
         let k1 = Tensor::new(&[[[[1.0_f32, 2.0], [3.0, 4.0]]]], &device)?; // [1,1,2,2]
@@ -449,7 +492,16 @@ mod tests {
     #[test]
     fn test_kv_cache_fp8_new() -> Result<()> {
         let device = Device::Cpu;
-        let cache = KvCache::new_with_fp8(2, 4, 8, 128, DType::F32, &device, true)?;
+        // Migrated to `new_with_fp8_kt` (#1082).
+        let cache = KvCache::new_with_fp8_kt(
+            2,
+            4,
+            8,
+            128,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+            true,
+        )?;
         assert_eq!(cache.seq_len(), 0);
         assert!(cache.is_fp8());
         // Storage should be U8
@@ -461,7 +513,16 @@ mod tests {
     #[test]
     fn test_kv_cache_fp8_update_and_advance() -> Result<()> {
         let device = Device::Cpu;
-        let mut cache = KvCache::new_with_fp8(1, 2, 4, 32, DType::F32, &device, true)?;
+        // Migrated to `new_with_fp8_kt` (#1082).
+        let mut cache = KvCache::new_with_fp8_kt(
+            1,
+            2,
+            4,
+            32,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+            true,
+        )?;
 
         let k = Tensor::ones((1, 2, 3, 4), DType::F32, &device)?;
         let v = Tensor::ones((1, 2, 3, 4), DType::F32, &device)?;
@@ -486,7 +547,16 @@ mod tests {
     #[test]
     fn test_kv_cache_fp8_approximate_values() -> Result<()> {
         let device = Device::Cpu;
-        let mut cache = KvCache::new_with_fp8(1, 1, 2, 8, DType::F32, &device, true)?;
+        // Migrated to `new_with_fp8_kt` (#1082).
+        let mut cache = KvCache::new_with_fp8_kt(
+            1,
+            1,
+            2,
+            8,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+            true,
+        )?;
 
         let k1 = Tensor::new(&[[[[1.0_f32, 2.0], [3.0, 4.0]]]], &device)?;
         let v1 = Tensor::new(&[[[[5.0_f32, 6.0], [7.0, 8.0]]]], &device)?;
@@ -526,8 +596,24 @@ mod tests {
     fn test_kv_cache_fp8_memory_savings() -> Result<()> {
         let device = Device::Cpu;
         // FP8 cache stores U8 (1 byte), native stores F32 (4 bytes) or BF16 (2 bytes)
-        let fp8_cache = KvCache::new_with_fp8(1, 4, 256, 1024, DType::F32, &device, true)?;
-        let native_cache = KvCache::new(1, 4, 256, 1024, DType::F32, &device)?;
+        // Migrated to `_kt` constructors (#1082).
+        let fp8_cache = KvCache::new_with_fp8_kt(
+            1,
+            4,
+            256,
+            1024,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+            true,
+        )?;
+        let native_cache = KvCache::new_kt(
+            1,
+            4,
+            256,
+            1024,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+        )?;
 
         // FP8 cache tensors are U8 (1 byte each)
         let fp8_elem = fp8_cache.layers[0].0.elem_count();
@@ -544,7 +630,16 @@ mod tests {
     #[test]
     fn test_kv_cache_fp8_reset() -> Result<()> {
         let device = Device::Cpu;
-        let mut cache = KvCache::new_with_fp8(1, 1, 4, 16, DType::F32, &device, true)?;
+        // Migrated to `new_with_fp8_kt` (#1082).
+        let mut cache = KvCache::new_with_fp8_kt(
+            1,
+            1,
+            4,
+            16,
+            kiln_tensor::DType::F32,
+            &kiln_tensor::Device::Cpu,
+            true,
+        )?;
 
         let k = Tensor::ones((1, 1, 5, 4), DType::F32, &device)?;
         let v = Tensor::ones((1, 1, 5, 4), DType::F32, &device)?;
